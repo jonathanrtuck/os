@@ -1,7 +1,7 @@
 //! Round-robin preemptive scheduler.
 
 use super::addr_space::AddressSpace;
-use super::handle::HandleTable;
+use super::handle::{HandleObject, HandleTable};
 use super::memory;
 use super::thread::{Thread, ThreadId, ThreadState};
 use super::Context;
@@ -74,8 +74,25 @@ pub fn exit_current() -> ! {
 }
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let s = state();
+    let thread = &mut s.threads[s.current];
 
-    s.threads[s.current].state = ThreadState::Exited;
+    // Close all handles and notify referenced objects.
+    for (_handle, object) in thread.handles.drain() {
+        match object {
+            HandleObject::Channel(id) => {
+                super::channel::close_endpoint(id);
+            }
+        }
+    }
+
+    // Free address space: TLB invalidation, page tables, user pages, ASID.
+    if let Some(mut addr_space) = thread.address_space.take() {
+        addr_space.invalidate_tlb();
+        addr_space.free_all();
+        super::asid::free(super::asid::Asid(addr_space.asid()));
+    }
+
+    thread.state = ThreadState::Exited;
 
     schedule(ctx)
 }

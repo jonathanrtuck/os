@@ -39,6 +39,17 @@ pub fn alloc_frame() -> Option<usize> {
 pub fn free_count() -> usize {
     unsafe { FREE_COUNT }
 }
+/// Return a frame to the free list.
+pub fn free_frame(pa: usize) {
+    unsafe {
+        let va = memory::phys_to_virt(pa);
+        let frame = va as *mut FreeFrame;
+
+        (*frame).next = HEAD;
+        HEAD = frame;
+        FREE_COUNT += 1;
+    }
+}
 /// Initialize the frame allocator with all pages in `[start_pa, end_pa)`.
 ///
 /// `start_pa` must be page-aligned and above the kernel heap.

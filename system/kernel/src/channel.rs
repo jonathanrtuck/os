@@ -17,9 +17,9 @@ use core::cell::SyncUnsafeCell;
 const CHANNEL_SHM_BASE: u64 = 0x0000_0000_4000_0000;
 
 struct Channel {
-    #[allow(dead_code)]
     shared_pa: usize,
     endpoints: [Endpoint; 2],
+    closed_count: u8,
 }
 struct Endpoint {
     thread_id: ThreadId,
@@ -58,6 +58,17 @@ pub fn check_pending(id: ChannelId, caller: ThreadId) -> bool {
         false
     }
 }
+/// Close one endpoint of a channel. Frees the shared page when both sides close.
+pub fn close_endpoint(id: ChannelId) {
+    let s = state();
+    let ch = &mut s.channels[id.0 as usize];
+
+    ch.closed_count += 1;
+
+    if ch.closed_count == 2 {
+        page_alloc::free_frame(ch.shared_pa);
+    }
+}
 /// Create a channel between two threads.
 ///
 /// Allocates a shared physical page, maps it at a fixed VA in both address
@@ -71,8 +82,9 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> ChannelId {
 
     scheduler::with_thread_mut(id_a, |thread| {
         if let Some(addr_space) = &mut thread.address_space {
-            addr_space.map_page(va, shared_pa as u64, &PageAttrs::user_rw());
+            addr_space.map_shared(va, shared_pa as u64, &PageAttrs::user_rw());
         }
+
         thread
             .handles
             .insert(HandleObject::Channel(channel_id), Rights::READ_WRITE)
@@ -80,8 +92,9 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> ChannelId {
     });
     scheduler::with_thread_mut(id_b, |thread| {
         if let Some(addr_space) = &mut thread.address_space {
-            addr_space.map_page(va, shared_pa as u64, &PageAttrs::user_rw());
+            addr_space.map_shared(va, shared_pa as u64, &PageAttrs::user_rw());
         }
+
         thread
             .handles
             .insert(HandleObject::Channel(channel_id), Rights::READ_WRITE)
@@ -100,6 +113,7 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> ChannelId {
                 pending_signal: false,
             },
         ],
+        closed_count: 0,
     });
 
     channel_id
