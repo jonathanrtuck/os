@@ -43,3 +43,7 @@ src/
   mmio.rs       — volatile MMIO helpers
 link.ld         — linker script
 ```
+
+## References
+
+- [bahree/rust-microkernel](https://github.com/bahree/rust-microkernel) — primary reference for the initial boot sequence and assembly. The boot.S structure, exception vectors, and context save/restore originated there, with modifications for W^X page table permissions, GICv2 interrupt handling, and the scheduler's context switch model.
