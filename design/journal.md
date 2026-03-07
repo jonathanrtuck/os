@@ -29,8 +29,8 @@ Active questions we've started exploring but haven't resolved. Each thread links
 ### Kernel architecture
 
 **Informs:** Decision #16 (Technical Foundation)
-**Status:** Active — research spike in progress, most sub-decisions settled
-**Context:** From-scratch kernel (tentative) with Rust (tentative) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process), OS-mediated handles for access control. Open: IPC mechanism, binary format. L4 cautionary tale still relevant. Need to hit real obstacles (scheduling, per-process address spaces, syscall interface, driver complexity) before evaluating alternatives (seL4, Zircon, Linux-as-runtime).
+**Status:** Research spike complete (all 7 steps). Most sub-decisions settled.
+**Context:** From-scratch kernel (tentative, spike favors tractability) with Rust (tentative) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process), OS-mediated handles for access control, ELF as binary format. Open: IPC mechanism. L4 cautionary tale still relevant. Spike completed without blocking obstacles — from-scratch is tractable for the implemented scope. Remaining unknowns: IPC complexity, driver model, multi-core.
 
 ### ~~Privilege model (EL1 / EL0 boundary)~~ — SETTLED
 
@@ -122,10 +122,10 @@ Active or planned coding explorations. These are learning exercises, not commitm
 
 ### Bare metal boot on arm64 (QEMU)
 
-**Status:** Active — steps 1–6 complete, step 7 (ELF loading) remaining
+**Status:** Complete — all 7 steps done
 **Goal:** Build a minimal kernel on aarch64/QEMU. Learn what's involved in boot, exception handling, context switching, memory management.
 **Informs:** Decision #16 (Technical Foundation) — whether writing our own kernel is tractable and worthwhile vs. building on existing.
-**What exists:** `system/kernel/` — ~1,930 lines across 16 source files. boot.S (boot trampoline, coarse 2MB page tables, EL2→EL1 drop, early exception vectors), exception.S (upper-VA vectors, context save/restore, SVC routing), main.rs (Context struct with compile-time layout assertions, kernel_main, irq/svc dispatch, user thread spawn), memory.rs (TTBR1 L3 refinement for W^X, PA/VA conversion, empty TTBR0 for kernel threads), heap.rs (bump allocator, 16 MiB), page_alloc.rs (free-list 4KB frame allocator), asid.rs (8-bit ASID allocator), addr_space.rs (per-process TTBR0 page tables, 4-level walk_or_create, W^X user page attrs with nG), scheduler.rs (round-robin preemptive, TTBR0 swap on context switch), thread.rs (kernel + user thread creation, separate kernel/user stacks), syscall.rs (exit/write/yield, user VA validation), user_test.rs (EL0 test stub in .user_code section), timer.rs (ARM generic timer at 10 Hz), gic.rs (GICv2 driver), uart.rs (PL011 TX), mmio.rs (volatile helpers). Builds with `cargo run --release` targeting `aarch64-unknown-none` on nightly Rust.
+**What exists:** `system/kernel/` + `system/user/init/` — ~2,150 lines across 18 source files. boot.S (boot trampoline, coarse 2MB page tables, EL2→EL1 drop, early exception vectors), exception.S (upper-VA vectors, context save/restore, SVC routing), main.rs (Context struct, kernel_main, irq/svc dispatch, ELF loader + user thread spawn), elf.rs (pure functional ELF64 parser), build.rs (compiles init.S → init.elf at build time), memory.rs (TTBR1 L3 refinement for W^X, PA/VA conversion, empty TTBR0 for kernel threads), heap.rs (bump allocator, 16 MiB), page_alloc.rs (free-list 4KB frame allocator), asid.rs (8-bit ASID allocator), addr_space.rs (per-process TTBR0 page tables, 4-level walk_or_create, W^X user page attrs with nG), scheduler.rs (round-robin preemptive, TTBR0 swap on context switch), thread.rs (kernel + user thread creation, separate kernel/user stacks), syscall.rs (exit/write/yield, user VA validation), timer.rs (ARM generic timer at 10 Hz), gic.rs (GICv2 driver), uart.rs (PL011 TX), mmio.rs (volatile helpers). User program: system/user/init/ (init.S + link.ld). Builds with `cargo run --release` targeting `aarch64-unknown-none` on nightly Rust.
 **Original success criteria:** ~~Something boots and prints to serial console.~~ Done.
 **Next steps (in order):**
 
@@ -135,10 +135,10 @@ Active or planned coding explorations. These are learning exercises, not commitm
 4. ~~**Kernel threads + scheduler**~~ — Done. Thread struct with Context at offset 0 (compile-time assertion). Round-robin in `irq_handler` on each timer tick. Boot thread becomes idle thread (`wfe`). Box<Thread> for pointer stability (TPIDR_EL1 holds raw pointers into contexts). IRQ masking around scheduler state mutations.
 5. ~~**Syscall interface**~~ — Done. SVC handler with ESR check, syscall table (exit/write/yield), user VA validation. EL0 test stub proves full EL0→SVC→EL1→eret path.
 6. ~~**Per-process address spaces**~~ — Done. Kernel at upper VA (TTBR1), per-process TTBR0 with 8-bit ASID, 4-level page tables (walk_or_create), W^X user pages with nG bit, frame allocator for dynamic page table allocation, scheduler swaps TTBR0 on context switch, empty TTBR0 for kernel threads.
-7. **First real userspace process** — Load an ELF binary (or similar) as a separate artifact, rather than embedding user code in the kernel image.
+7. ~~**First real userspace process**~~ — Done. Standalone init binary (system/user/init/) compiled to ELF64 by build.rs, embedded in kernel via `include_bytes!`. Pure functional ELF parser extracts PT_LOAD segments. Loader allocates frames, copies data, maps with W^X permissions. Entry point from ELF header. Replaces the old embedded .user_code hack.
 
 **Known simplifications (intentional, revisit later):** Single-core only (multi-core after userspace works). Bump allocator never frees (replace when threads are created/destroyed). No per-CPU IRQ stack (not needed — EL0→EL1 transitions use SP_EL1 automatically). 10 Hz timer (increase when scheduling granularity matters). No ASID recycling (255 max user address spaces). Coarse TTBR0 identity map from boot.S still loaded but unused after transition to upper VA.
 
-Dependencies: Steps 1–6 complete. Step 7 is where the spike reaches its end — loading a real binary validates the full stack and answers whether from-scratch is tractable.
+Dependencies: All 7 steps complete. The spike validated the full stack: boot → MMU → heap → threads → syscalls → per-process address spaces → ELF loading. From-scratch kernel in Rust on aarch64 is tractable. Binary format settled as ELF.
 
 **Risk:** If we decide to build on an existing kernel, this code is throwaway. That's fine — the knowledge isn't throwaway.

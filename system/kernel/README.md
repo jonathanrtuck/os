@@ -20,9 +20,9 @@ cargo run --release   # builds, then launches QEMU
 
 ## What to expect
 
-```shell
-booting...
-booted.
+```console
+🥾 booting…
+🥾 booted.
 hello from EL0
 ```
 
@@ -34,7 +34,8 @@ hello from EL0
 src/
   boot.S        — boot trampoline, coarse page tables, EL2→EL1 drop
   exception.S   — exception vectors, context save/restore (upper VA)
-  main.rs       — kernel entry, IRQ/SVC dispatch, user thread spawn
+  main.rs       — kernel entry, IRQ/SVC dispatch, ELF loader
+  elf.rs        — pure functional ELF64 parser (PT_LOAD segments)
   memory.rs     — TTBR1 L3 refinement, W^X, PA/VA conversion
   heap.rs       — bump allocator (16 MiB)
   page_alloc.rs — free-list 4 KiB frame allocator
@@ -43,12 +44,16 @@ src/
   scheduler.rs  — round-robin preemptive scheduler, TTBR0 swap
   thread.rs     — kernel + user thread creation
   syscall.rs    — syscall dispatcher (exit, write, yield)
-  user_test.rs  — EL0 test stub (hello world via syscalls)
   gic.rs        — GICv2 distributor + CPU interface
   timer.rs      — ARM generic timer (EL1 physical, 10 Hz)
   uart.rs       — PL011 UART driver (TX only)
   mmio.rs       — volatile MMIO helpers
-link.ld         — linker script
+build.rs        — compiles init process → ELF at build time
+link.ld         — kernel linker script
+
+../user/init/
+  init.S        — init process (hello world via syscalls)
+  link.ld       — userspace linker script (base VA 0x400000)
 ```
 
 ## References
