@@ -11,17 +11,16 @@ Currently boots on QEMU's `virt` machine, drops from EL2 to EL1, sets up the MMU
 
 ## Build & Run
 
-```sh
+```shell
 cd system/kernel
-./build.sh   # cargo build --release
-./run.sh     # launches QEMU, output on stdio
+cargo run --release   # builds, then launches QEMU
 ```
 
-Press `Ctrl-A X` to exit QEMU.
+`Ctrl-A X` to exit QEMU.
 
 ## What to expect
 
-```sh
+```shell
 🥾 booting…
 🥾 booted.
 ⏱️ ticking… 1
