@@ -138,7 +138,7 @@ pub fn spawn(entry: fn() -> !) {
 
     s.threads.push(thread);
 }
-pub fn spawn_user(addr_space: Box<AddressSpace>, entry_va: u64, user_stack_top: u64) {
+pub fn spawn_user(addr_space: Box<AddressSpace>, entry_va: u64, user_stack_top: u64) -> ThreadId {
     let s = state();
     let id = s.next_id;
 
@@ -147,4 +147,31 @@ pub fn spawn_user(addr_space: Box<AddressSpace>, entry_va: u64, user_stack_top: 
     let thread = Thread::new_user(id, addr_space, entry_va, user_stack_top);
 
     s.threads.push(thread);
+    ThreadId(id)
+}
+/// Wake a blocked thread (set Blocked → Ready). Returns true if it was blocked.
+pub fn try_wake(id: ThreadId) -> bool {
+    let s = state();
+
+    for thread in &mut s.threads {
+        if thread.id == id && thread.state == ThreadState::Blocked {
+            thread.state = ThreadState::Ready;
+
+            return true;
+        }
+    }
+
+    false
+}
+/// Access a thread by ID. Closure receives exclusive access to the thread.
+/// Must be called with no preemption (before timer starts, or from syscall context).
+pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {
+    let s = state();
+    let thread = s
+        .threads
+        .iter_mut()
+        .find(|t| t.id == id)
+        .expect("thread not found");
+
+    f(thread)
 }

@@ -25,6 +25,7 @@ struct HandleEntry {
     rights: Rights,
 }
 #[repr(i64)]
+#[derive(Debug)]
 pub enum HandleError {
     InvalidHandle = -10,
     WrongType = -11,

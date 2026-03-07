@@ -15,6 +15,7 @@ pub struct ThreadId(pub u64);
 pub enum ThreadState {
     Ready,
     Running,
+    Blocked,
     Exited,
 }
 /// A kernel thread.

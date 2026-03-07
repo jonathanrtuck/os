@@ -1,10 +1,13 @@
-//! Echo process — a second userspace program for testing multi-process.
+//! Echo process — IPC ping-pong responder.
 //!
-//! Prints a message, yields, and repeats. Proves two EL0 processes
-//! run concurrently under the preemptive scheduler with TTBR0 swap.
+//! Waits for init's signal, reads "ping" from shared memory,
+//! writes "pong" back, and signals init. Demonstrates the other
+//! side of shared-memory IPC.
 
 #![no_std]
 #![no_main]
+
+const SHM: *mut u8 = 0x4000_0000 as *mut u8;
 
 #[inline(always)]
 fn sys_exit() -> ! {
@@ -34,11 +37,24 @@ fn sys_write(buf: &[u8]) -> u64 {
     ret
 }
 #[inline(always)]
-fn sys_yield() {
+fn sys_channel_signal(handle: u64) {
     unsafe {
         core::arch::asm!(
             "svc #0",
-            in("x8") 2u64, // SYS_YIELD
+            in("x0") handle,
+            in("x8") 4u64, // SYS_CHANNEL_SIGNAL
+            lateout("x0") _,
+            options(nostack),
+        );
+    }
+}
+#[inline(always)]
+fn sys_channel_wait(handle: u64) {
+    unsafe {
+        core::arch::asm!(
+            "svc #0",
+            in("x0") handle,
+            in("x8") 5u64, // SYS_CHANNEL_WAIT
             lateout("x0") _,
             options(nostack),
         );
@@ -47,11 +63,24 @@ fn sys_yield() {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    for _ in 0..3 {
-        sys_write(b"hello from echo\n");
-        sys_yield();
+    // Wait for init's message.
+    sys_channel_wait(0);
+
+    // Read message from shared memory (incoming region: offset 0).
+    let msg = unsafe { core::slice::from_raw_parts(SHM, 4) };
+
+    sys_write(b"echo recv: ");
+    sys_write(msg);
+    sys_write(b"\n");
+
+    // Write "pong" to outgoing region (offset 128), then signal init.
+    let reply = b"pong";
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(reply.as_ptr(), SHM.add(128), reply.len());
     }
 
+    sys_channel_signal(0);
     sys_exit();
 }
 

@@ -11,6 +11,7 @@ core::arch::global_asm!(include_str!("exception.S"));
 
 mod addr_space;
 mod asid;
+mod channel;
 mod elf;
 mod gic;
 mod handle;
@@ -67,7 +68,7 @@ extern "C" {
     static __kernel_end: u8;
 }
 
-fn spawn_user_from_elf(elf_bytes: &[u8]) {
+fn spawn_user_from_elf(elf_bytes: &[u8]) -> thread::ThreadId {
     let header = elf::parse_header(elf_bytes).expect("bad ELF header");
     let asid = asid::alloc();
     let mut addr_space = alloc::boxed::Box::new(addr_space::AddressSpace::new(asid));
@@ -114,7 +115,7 @@ fn spawn_user_from_elf(elf_bytes: &[u8]) {
         &addr_space::PageAttrs::user_rw(),
     );
 
-    scheduler::spawn_user(addr_space, header.entry, USER_STACK_TOP);
+    scheduler::spawn_user(addr_space, header.entry, USER_STACK_TOP)
 }
 
 #[unsafe(no_mangle)]
@@ -133,9 +134,11 @@ pub extern "C" fn kernel_main() -> ! {
     gic::init();
     scheduler::init();
 
-    // Spawn user processes from embedded ELFs.
-    spawn_user_from_elf(INIT_ELF);
-    spawn_user_from_elf(ECHO_ELF);
+    // Spawn user processes and create an IPC channel between them.
+    let init_id = spawn_user_from_elf(INIT_ELF);
+    let echo_id = spawn_user_from_elf(ECHO_ELF);
+
+    channel::create(init_id, echo_id);
 
     timer::init();
 
