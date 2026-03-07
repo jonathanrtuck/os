@@ -4,8 +4,6 @@
 
 extern crate alloc;
 
-use core::cell::SyncUnsafeCell;
-use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 
 core::arch::global_asm!(include_str!("boot.S"));
@@ -14,6 +12,8 @@ mod gic;
 mod heap;
 mod memory;
 mod mmio;
+mod scheduler;
+mod thread;
 mod timer;
 mod uart;
 
@@ -48,45 +48,35 @@ const _: () = {
     assert!(core::mem::size_of::<Context>() == 0x330);
 };
 
-/// Boot thread context. The IRQ save path initializes the contents;
-/// we just need valid, writable memory at a known address.
-static BOOT_CTX: SyncUnsafeCell<MaybeUninit<Context>> = SyncUnsafeCell::new(MaybeUninit::uninit());
-
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
     uart::puts("🥾 booting…\n");
 
-    // Point TPIDR_EL1 at the boot context so exc_irq has somewhere to
-    // save registers when the first interrupt fires.
-    unsafe {
-        core::arch::asm!(
-            "msr tpidr_el1, {0}",
-            in(reg) BOOT_CTX.get() as usize,
-            options(nostack, nomem)
-        );
-    }
-
     memory::init();
     heap::init();
     gic::init();
-    timer::init();
+    scheduler::init();
+    timer::init(); // Unmasks IRQs — all data structures must be ready above this line.
 
     uart::puts("🥾 booted.\n");
 
+    // Boot thread becomes the idle thread.
     loop {
-        core::hint::spin_loop();
+        unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn irq_handler(current: *mut Context) -> *const Context {
-    let next: *const Context = current;
+    let mut next: *const Context = current;
 
     if let Some(iar) = gic::acknowledge() {
         let id = iar & 0x3FF;
 
         if id == timer::IRQ_ID {
             timer::handle_irq();
+
+            next = scheduler::schedule(current);
         }
 
         gic::end_of_interrupt(iar);
