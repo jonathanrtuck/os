@@ -1,58 +1,163 @@
-//! Bump allocator.
+//! Linked-list heap allocator with coalescing.
 //!
-//! Advances a pointer for each allocation, never frees. Simple and fast,
-//! suitable while the kernel has no deallocation scenarios. Upgrade to a
-//! linked-list or buddy allocator when threads/teardown need real freeing.
+//! Maintains a free list sorted by address. On alloc, walks the list for a
+//! first-fit block, splitting if needed. On dealloc, reinserts the block and
+//! merges with adjacent neighbors to prevent fragmentation.
+//!
+//! Mutual exclusion on single-core: IRQs are masked during alloc/dealloc so
+//! timer interrupts cannot re-enter the allocator.
 
 use super::memory;
 use core::alloc::{GlobalAlloc, Layout};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::cell::SyncUnsafeCell;
 
-struct BumpAllocator {
-    next: AtomicUsize,
-    end: AtomicUsize,
+/// Each free block stores its total size (including this header) and a pointer
+/// to the next free block. Minimum allocation granularity = 16 bytes on aarch64.
+struct FreeBlock {
+    size: usize,
+    next: *mut FreeBlock,
+}
+struct LinkedListAllocator {
+    head: SyncUnsafeCell<*mut FreeBlock>,
 }
 
-impl BumpAllocator {
+const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
+
+impl LinkedListAllocator {
     const fn new() -> Self {
         Self {
-            next: AtomicUsize::new(0),
-            end: AtomicUsize::new(0),
+            head: SyncUnsafeCell::new(core::ptr::null_mut()),
         }
     }
 }
 
-unsafe impl GlobalAlloc for BumpAllocator {
+fn align_up(addr: usize, align: usize) -> usize {
+    (addr + align - 1) & !(align - 1)
+}
+
+unsafe impl GlobalAlloc for LinkedListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        loop {
-            let current = self.next.load(Ordering::Relaxed);
-            let aligned = (current + layout.align() - 1) & !(layout.align() - 1);
-            let new_next = match aligned.checked_add(layout.size()) {
-                Some(n) => n,
-                None => return core::ptr::null_mut(),
-            };
+        let daif: u64;
 
-            if new_next > self.end.load(Ordering::Relaxed) {
-                return core::ptr::null_mut();
+        core::arch::asm!("mrs {}, daif", out(reg) daif, options(nostack, nomem));
+        core::arch::asm!("msr daifset, #2", options(nostack, nomem));
+
+        let head = &mut *self.head.get();
+        let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
+        let align = layout.align().max(MIN_BLOCK);
+        let mut prev = head as *mut *mut FreeBlock;
+        let mut result: *mut u8 = core::ptr::null_mut();
+
+        loop {
+            let current = *prev;
+
+            if current.is_null() {
+                break;
             }
 
-            if self
-                .next
-                .compare_exchange_weak(current, new_next, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                return aligned as *mut u8;
+            let block_addr = current as usize;
+            let block_size = (*current).size;
+            let alloc_start = align_up(block_addr, align);
+            let front_pad = alloc_start - block_addr;
+
+            // Front padding must fit a free block header, or be zero.
+            if front_pad > 0 && front_pad < MIN_BLOCK {
+                prev = &mut (*current).next;
+                continue;
+            }
+            if front_pad + size > block_size {
+                prev = &mut (*current).next;
+                continue;
+            }
+
+            let back_left = block_size - front_pad - size;
+
+            // Unlink this block from the free list.
+            *prev = (*current).next;
+
+            // Return front padding as a smaller free block.
+            if front_pad >= MIN_BLOCK {
+                let front = block_addr as *mut FreeBlock;
+
+                (*front).size = front_pad;
+                (*front).next = *prev;
+                *prev = front;
+                prev = &mut (*front).next;
+            }
+
+            // Return back leftover as a free block.
+            if back_left >= MIN_BLOCK {
+                let back = (alloc_start + size) as *mut FreeBlock;
+
+                (*back).size = back_left;
+                (*back).next = *prev;
+                *prev = back;
+            }
+
+            result = alloc_start as *mut u8;
+
+            break;
+        }
+
+        core::arch::asm!("msr daif, {}", in(reg) daif, options(nostack, nomem));
+
+        result
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        let daif: u64;
+
+        core::arch::asm!("mrs {}, daif", out(reg) daif, options(nostack, nomem));
+        core::arch::asm!("msr daifset, #2", options(nostack, nomem));
+
+        let head = &mut *self.head.get();
+        let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
+        let addr = ptr as usize;
+        // Walk to the sorted insertion point.
+        let mut prev_block: *mut FreeBlock = core::ptr::null_mut();
+        let mut current = *head;
+
+        while !current.is_null() && (current as usize) < addr {
+            prev_block = current;
+            current = (*current).next;
+        }
+
+        // Insert freed region.
+        let block = addr as *mut FreeBlock;
+
+        (*block).size = size;
+        (*block).next = current;
+
+        if prev_block.is_null() {
+            *head = block;
+        } else {
+            (*prev_block).next = block;
+        }
+
+        // Coalesce with next neighbor.
+        if !current.is_null() && addr + size == current as usize {
+            (*block).size += (*current).size;
+            (*block).next = (*current).next;
+        }
+
+        // Coalesce with previous neighbor.
+        if !prev_block.is_null() {
+            let prev_end = prev_block as usize + (*prev_block).size;
+
+            if prev_end == addr {
+                (*prev_block).size += (*block).size;
+                (*prev_block).next = (*block).next;
             }
         }
-    }
 
-    unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {
-        // Bump allocator: individual frees are a no-op.
+        core::arch::asm!("msr daif, {}", in(reg) daif, options(nostack, nomem));
     }
 }
+// Safety: single-core kernel with IRQs masked during alloc/dealloc.
+unsafe impl Sync for LinkedListAllocator {}
 
 #[global_allocator]
-static ALLOCATOR: BumpAllocator = BumpAllocator::new();
+static ALLOCATOR: LinkedListAllocator = LinkedListAllocator::new();
 
 /// Initialize the heap. Call after `memory::init()` (page tables must be live).
 pub fn init() {
@@ -60,10 +165,12 @@ pub fn init() {
         static __kernel_end: u8;
     }
 
-    let start = unsafe { &__kernel_end as *const u8 as usize };
+    let start = align_up(unsafe { &__kernel_end as *const u8 as usize }, MIN_BLOCK);
 
-    ALLOCATOR.next.store(start, Ordering::Relaxed);
-    ALLOCATOR
-        .end
-        .store(start + memory::HEAP_SIZE, Ordering::Relaxed);
+    unsafe {
+        let block = start as *mut FreeBlock;
+        (*block).size = memory::HEAP_SIZE;
+        (*block).next = core::ptr::null_mut();
+        *ALLOCATOR.head.get() = block;
+    }
 }

@@ -28,6 +28,7 @@ pub struct Thread {
     pub id: ThreadId,
     pub state: ThreadState,
     pub stack_bottom: *mut u8,
+    pub(crate) stack_size: usize,
     pub address_space: Option<Box<AddressSpace>>,
     pub handles: HandleTable,
 }
@@ -57,6 +58,7 @@ impl Thread {
             id: ThreadId(id),
             state: ThreadState::Ready,
             stack_bottom,
+            stack_size: STACK_SIZE,
             address_space: None,
             handles: HandleTable::new(),
         })
@@ -86,9 +88,22 @@ impl Thread {
             id: ThreadId(id),
             state: ThreadState::Ready,
             stack_bottom,
+            stack_size: KERNEL_STACK_SIZE,
             address_space: Some(addr_space),
             handles: HandleTable::new(),
         })
+    }
+}
+impl Drop for Thread {
+    fn drop(&mut self) {
+        if self.stack_size > 0 && !self.stack_bottom.is_null() {
+            unsafe {
+                alloc::alloc::dealloc(
+                    self.stack_bottom,
+                    Layout::from_size_align_unchecked(self.stack_size, 16),
+                );
+            }
+        }
     }
 }
 

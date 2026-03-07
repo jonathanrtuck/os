@@ -103,6 +103,7 @@ pub fn init() {
         id: ThreadId(0),
         state: ThreadState::Running,
         stack_bottom: core::ptr::null_mut(),
+        stack_size: 0,
         address_space: None,
         handles: HandleTable::new(),
     });
@@ -118,8 +119,33 @@ pub fn init() {
         );
     }
 }
+/// Remove exited threads and free their resources (Box<Thread> drop frees
+/// the kernel stack via Thread::drop). Safe because the current thread is
+/// never reaped — it's either Running (timer path) or Exited but still on
+/// its kernel stack (exit path). Exited-but-current threads get reaped on
+/// the *next* schedule() call, when a different thread is current.
+fn reap_exited(s: &mut State) {
+    let mut i = s.threads.len();
+
+    while i > 0 {
+        i -= 1;
+
+        if i != s.current && s.threads[i].state == ThreadState::Exited {
+            s.threads.swap_remove(i);
+
+            // swap_remove moves the last element to position i.
+            // If current was the last element, it's now at i.
+            if s.current == s.threads.len() {
+                s.current = i;
+            }
+        }
+    }
+}
 pub fn schedule(ctx: *mut Context) -> *const Context {
     let s = state();
+
+    reap_exited(s);
+
     let n = s.threads.len();
     let cur = &mut s.threads[s.current];
 
