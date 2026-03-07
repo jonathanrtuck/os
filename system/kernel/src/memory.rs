@@ -33,8 +33,6 @@ extern "C" {
     static __rodata_start: u8;
     static __rodata_end: u8;
     static __data_start: u8;
-    static __kernel_end: u8;
-    static __stack_top: u8;
 
     fn enable_mmu(ttbr0: u64);
 }
@@ -118,7 +116,6 @@ fn build_tables() -> u64 {
         let rodata_start = &__rodata_start as *const u8 as u64;
         let rodata_end = align_up(&__rodata_end as *const u8 as u64, PAGE_SIZE);
         let data_start = &__data_start as *const u8 as u64;
-        let kernel_end = align_up(&__kernel_end as *const u8 as u64, PAGE_SIZE);
         let normal = ATTRIDX0 | AF | SH_INNER;
 
         for i in 0..512u64 {
@@ -128,10 +125,8 @@ fn build_tables() -> u64 {
                 normal | AP_RO | UXN // .text: RX
             } else if pa >= rodata_start && pa < rodata_end {
                 normal | AP_RO | PXN | UXN // .rodata: RO, no execute
-            } else if pa >= data_start && pa < kernel_end {
-                normal | PXN | UXN // .data/.bss/stack: RW, no execute
-            } else if pa >= kernel_end {
-                normal | PXN | UXN // post-kernel: RW (heap)
+            } else if pa >= data_start {
+                normal | PXN | UXN // .data/.bss/stack/heap: RW, no execute
             } else {
                 continue; // unmapped (before kernel)
             };

@@ -61,7 +61,7 @@ pub extern "C" fn kernel_main() -> ! {
     unsafe {
         core::arch::asm!(
             "msr tpidr_el1, {0}",
-            in(reg) BOOT_CTX.get(),
+            in(reg) BOOT_CTX.get() as usize,
             options(nostack, nomem)
         );
     }
@@ -73,7 +73,9 @@ pub extern "C" fn kernel_main() -> ! {
 
     uart::puts("🥾 booted.\n");
 
-    loop {}
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -109,5 +111,7 @@ fn panic(info: &PanicInfo) -> ! {
         uart::puts("\n");
     }
 
-    loop {}
+    loop {
+        core::hint::spin_loop();
+    }
 }
