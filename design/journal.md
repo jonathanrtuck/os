@@ -122,10 +122,10 @@ Active or planned coding explorations. These are learning exercises, not commitm
 
 ### Bare metal boot on arm64 (QEMU)
 
-**Status:** Active — preemptive scheduler running, all EL1
+**Status:** Active — steps 1–6 complete, step 7 (ELF loading) remaining
 **Goal:** Build a minimal kernel on aarch64/QEMU. Learn what's involved in boot, exception handling, context switching, memory management.
 **Informs:** Decision #16 (Technical Foundation) — whether writing our own kernel is tractable and worthwhile vs. building on existing.
-**What exists:** `system/kernel/` — ~1,350 lines across 11 files. boot.S (boot sequence, EL2→EL1 drop, exception vectors, full context save/restore, UART helpers, fatal exception handler, MMU setup), main.rs (Context struct with compile-time layout assertions, kernel_main, irq_handler, panic handler), memory.rs (page tables with W^X), heap.rs (bump allocator, 16 MiB), scheduler.rs (round-robin preemptive), thread.rs (kernel thread struct + creation), timer.rs (ARM generic timer at 10 Hz), gic.rs (GICv2 driver), uart.rs (PL011 TX), mmio.rs (volatile helpers). Builds with `cargo build` targeting `aarch64-unknown-none` on nightly Rust.
+**What exists:** `system/kernel/` — ~1,930 lines across 16 source files. boot.S (boot trampoline, coarse 2MB page tables, EL2→EL1 drop, early exception vectors), exception.S (upper-VA vectors, context save/restore, SVC routing), main.rs (Context struct with compile-time layout assertions, kernel_main, irq/svc dispatch, user thread spawn), memory.rs (TTBR1 L3 refinement for W^X, PA/VA conversion, empty TTBR0 for kernel threads), heap.rs (bump allocator, 16 MiB), page_alloc.rs (free-list 4KB frame allocator), asid.rs (8-bit ASID allocator), addr_space.rs (per-process TTBR0 page tables, 4-level walk_or_create, W^X user page attrs with nG), scheduler.rs (round-robin preemptive, TTBR0 swap on context switch), thread.rs (kernel + user thread creation, separate kernel/user stacks), syscall.rs (exit/write/yield, user VA validation), user_test.rs (EL0 test stub in .user_code section), timer.rs (ARM generic timer at 10 Hz), gic.rs (GICv2 driver), uart.rs (PL011 TX), mmio.rs (volatile helpers). Builds with `cargo run --release` targeting `aarch64-unknown-none` on nightly Rust.
 **Original success criteria:** ~~Something boots and prints to serial console.~~ Done.
 **Next steps (in order):**
 
@@ -133,12 +133,12 @@ Active or planned coding explorations. These are learning exercises, not commitm
 2. ~~**Page tables + enable MMU**~~ — Done. Identity-mapped L0→L1→L2 hierarchy with 2MB blocks, L3 4KB pages for kernel region with W^X permissions (.text RX, .rodata RO, .data/.bss/.stack RW NX).
 3. ~~**Heap allocator**~~ — Done. Bump allocator (advance pointer, never free), 16 MiB starting at `__kernel_end`. Lock-free CAS loop. Unlocks `alloc` crate (Vec, Box, etc.).
 4. ~~**Kernel threads + scheduler**~~ — Done. Thread struct with Context at offset 0 (compile-time assertion). Round-robin in `irq_handler` on each timer tick. Boot thread becomes idle thread (`wfe`). Box<Thread> for pointer stability (TPIDR_EL1 holds raw pointers into contexts). IRQ masking around scheduler state mutations.
-5. **Syscall interface** — `svc` handler, syscall table, argument passing convention. Where the traditional privilege model gets real.
-6. **Per-process address spaces** — Migrate kernel to TTBR1 (upper VA), TTBR0 per-process, ASID management. Context switch swaps TTBR0.
-7. **First userspace process** — EL1→EL0 drop, runs a trivial program, traps back via syscall.
+5. ~~**Syscall interface**~~ — Done. SVC handler with ESR check, syscall table (exit/write/yield), user VA validation. EL0 test stub proves full EL0→SVC→EL1→eret path.
+6. ~~**Per-process address spaces**~~ — Done. Kernel at upper VA (TTBR1), per-process TTBR0 with 8-bit ASID, 4-level page tables (walk_or_create), W^X user pages with nG bit, frame allocator for dynamic page table allocation, scheduler swaps TTBR0 on context switch, empty TTBR0 for kernel threads.
+7. **First real userspace process** — Load an ELF binary (or similar) as a separate artifact, rather than embedding user code in the kernel image.
 
-**Known simplifications (intentional, revisit later):** Single-core only (multi-core after userspace works). Bump allocator never frees (replace when threads are created/destroyed). No per-CPU IRQ stack (not needed — EL0→EL1 transitions use SP_EL1 automatically). 10 Hz timer (increase when scheduling granularity matters).
+**Known simplifications (intentional, revisit later):** Single-core only (multi-core after userspace works). Bump allocator never frees (replace when threads are created/destroyed). No per-CPU IRQ stack (not needed — EL0→EL1 transitions use SP_EL1 automatically). 10 Hz timer (increase when scheduling granularity matters). No ASID recycling (255 max user address spaces). Coarse TTBR0 identity map from boot.S still loaded but unused after transition to upper VA.
 
-Dependencies: Steps 1–4 complete. Steps 5–7 are where the privilege model decision gets tested — this is where we find out if from-scratch is still tractable. Steps 5–7 are orthogonal to core count; multi-core is a post-step-7 concern.
+Dependencies: Steps 1–6 complete. Step 7 is where the spike reaches its end — loading a real binary validates the full stack and answers whether from-scratch is tractable.
 
 **Risk:** If we decide to build on an existing kernel, this code is throwaway. That's fine — the knowledge isn't throwaway.
