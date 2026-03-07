@@ -1,0 +1,8 @@
+.claude/
+.vscode/
+.factory/
+reference/
+.DS_Store
+*.swo
+*.swp
+*~
