@@ -27,7 +27,7 @@ Which decisions are stable enough to write code against? This guides when to cod
 | #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                  |
 | #14 Compound Documents | Settled   | **Behind interface** | Manifest + layout model is firm. Rendering depends on §11. Open sub-questions remain. |
 | #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                |
-| #16 Tech Foundation    | Partial   | **Partially safe**   | Sub-decisions settling incrementally. See §16 below for details.                      |
+| #16 Tech Foundation    | Partial   | **Partially safe**   | IPC, process architecture, binary format now settled. Remaining: driver model, filesystem, multi-core, scheduling. |
 | #17 Interaction Model  | Unsettled | **Not safe**         | Depends on §11, §2, §7.                                                               |
 
 **Readiness key:**
@@ -35,6 +35,24 @@ Which decisions are stable enough to write code against? This guides when to cod
 - **Safe** — This won't change. Code freely.
 - **Behind interface** — Concept is settled, but implementation details depend on unsettled decisions. Code against an abstraction; expect the concrete implementation to change.
 - **Not safe** — Unsettled or depends on unsettled decisions. Design only, or research spikes.
+
+## Reversibility & Risk
+
+How confident are we in each settled decision? What would trigger revisiting? What's the fallback? Only lists decisions where risk is meaningful — axioms and their direct consequences are omitted.
+
+| Decision | Confidence | Revisit trigger | Fallback | Blast radius |
+| --- | --- | --- | --- | --- |
+| Edit protocol (#9) | High | beginOp/endOp granularity wrong for real editors | Adjust boundary semantics | Undo model, IPC messages |
+| Compound docs (#14) | Medium-High | Five layout models miss a real use case | Add or merge models | Layout engine |
+| Undo: COW snapshots (#12) | High | Snapshots too expensive for fine-grained ops | Operation-log undo | Filesystem integration |
+| File org: queries (#7) | High | Query performance unacceptable | Path-based fallback | Metadata DB, shell |
+| Handles (#16) | High | Need sub-document access granularity | Extend rights model | Handle table, access control |
+| IPC: ring buffers (#16) | Medium-High | Complexity unmanageable or perf insufficient | Syscall-based message passing | IPC layer, editor-OS interface |
+| Process arch: one OS service (#16) | Medium | Crashes require component isolation | Split into multiple services | IPC topology |
+| From-scratch kernel (#16) | Medium | Driver/hardware blockers | Existing kernel (Zircon, Linux) | Large, but behind syscall API |
+| Rust (#16) | High | Bare-metal Rust impractical at scale | C kernel, Rust userspace | Kernel source only |
+
+**Key principle:** Decisions marked "Behind interface" in Implementation Readiness are inherently lower risk — the interface is stable even if the implementation changes. Decisions that _define_ interfaces are higher risk because changing them ripples outward.
 
 ---
 
@@ -400,9 +418,15 @@ This decision is being resolved incrementally through a bare-metal research spik
 
 **Privilege model: Traditional — all non-kernel code at EL0.** Hardware isolation via EL0/EL1 boundary. Editors, viewers, and all userspace code run at EL0 and interact with the kernel via syscalls. This is the arm64-standard approach, provides one simple programming model (no two-tier trust), and maximally tests the from-scratch kernel commitment (forces syscall interface, per-process address spaces, IPC — the hard parts). Syscall overhead on editor operations is acceptable because the edit protocol batches between beginOp/endOp boundaries (coarser-grained than per-keystroke).
 
-**Address space model: Split TTBR — TTBR1 for kernel, TTBR0 per-process.** Follows directly from the privilege model. Each process gets its own TTBR0 (lower VA range, userspace mappings); TTBR1 (upper VA range, kernel mappings) stays constant across all processes. Context switch swaps TTBR0 + ASID. On syscall entry (EL0→EL1), kernel pages are already mapped via TTBR1 — no page table switch needed. This is the architectural reason arm64 provides two translation table base registers. Current code uses TTBR0-only; migration to split TTBR is a future implementation step.
+**Address space model: Split TTBR — TTBR1 for kernel, TTBR0 per-process.** Follows directly from the privilege model. Each process gets its own TTBR0 (lower VA range, userspace mappings); TTBR1 (upper VA range, kernel mappings) stays constant across all processes. Context switch swaps TTBR0 + ASID. On syscall entry (EL0→EL1), kernel pages are already mapped via TTBR1 — no page table switch needed. This is the architectural reason arm64 provides two translation table base registers. Implemented in the research spike — kernel at upper VA (TTBR1), per-process TTBR0 with ASID tagging, scheduler swaps TTBR0 on context switch.
 
 **Access control: OS-mediated handles.** The kernel maintains a per-process handle table. When the OS opens a document for viewing, the viewer process receives a read handle (integer index into its table). When an editor is attached, it receives a write handle to that specific document. The kernel validates the handle and checks rights on every document operation. Revocation on editor detach is trivial — the kernel clears the table entry. This enforces view/edit (Decision #6) and the edit protocol (Decision #9) at the kernel level, not just as UI convention. Handles are simpler connective tissue than full capabilities (Decision #4) because the OS is architecturally centralized — it mediates all document access, so distributed authority mechanisms (delegation, fine-grained narrowing) aren't needed. Handles can extend to cover IPC endpoints and devices if needed, growing incrementally toward capabilities without committing to the full type system upfront.
+
+**IPC mechanism: Shared memory ring buffers with handle-based access control.** A "channel" is a shared memory region containing a bidirectional ring buffer, accessed via handles in each participant's handle table. The kernel creates channels, maps shared memory into both participants, issues handles, and validates message structure at trust boundaries (editor ↔ OS service). The kernel is in the control plane (setup, access control, validation), not the data plane — after setup, communication flows directly through shared memory. Notification uses a futex-like mechanism (check shared flag first, syscall only when actually needing to sleep). One mechanism for all IPC — no separate message-passing vs shared-memory paths. Documents are separately memory-mapped into both editor and OS service address spaces; file data does not flow through ring buffers. Ring buffers carry control messages only: edit protocol calls (beginOp/endOp), input events, overlay descriptions, metadata queries. Prior art: io_uring (shared ring buffers between kernel and userspace), Fuchsia channels (handle-based async messaging). See also Considered and rejected below for alternatives evaluated.
+
+**Process architecture: Three-layer (kernel, OS service, editors).** "The OS renders everything" means an OS service process renders, not the kernel. One OS service process at EL0 handles rendering, metadata DB, input routing, and compositing. Editors are separate EL0 processes, one per attached tool. The OS service is trusted (it IS the OS, running at EL0 for crash isolation from kernel); editors are untrusted. The trust boundary that matters is OS service ↔ editors, not between OS service components internally. The kernel (EL1) handles hardware, memory, scheduling, IPC channel creation, handle management, and message validation at the editor ↔ OS service boundary. The primary IPC relationship is editor ↔ OS service via shared memory ring buffers. The kernel creates and authorizes these channels but is not in the data path. Security is a side effect of good architecture: handles enforce access, EL0/EL1 provides crash isolation, per-process address spaces provide memory isolation, kernel message validation protects the OS service from malformed editor messages — all natural consequences of the design, not additional security machinery. Can split the OS service into multiple processes later if isolation needs arise (reversible decision).
+
+**Binary format: ELF64.** Industry-standard executable format for aarch64. Validated by the research spike (step 7) — the kernel loads standalone ELF binaries with a pure functional parser. Well-tooled (standard linkers, debuggers, objdump), well-documented, and the default output of every compiler targeting aarch64. No reason to deviate.
 
 ### Tentative sub-decisions (under active evaluation via research spike)
 
@@ -412,9 +436,13 @@ This decision is being resolved incrementally through a bare-metal research spik
 
 ### Open sub-decisions
 
-**IPC mechanism.** Critical for the edit protocol's concrete implementation. Shared memory? Message passing? Something else? Not yet explored.
+**Driver model.** Userspace drivers via IPC, kernel-resident drivers, or hybrid? Not yet explored. The ring buffer IPC mechanism would support userspace drivers well.
 
-**Binary format.** ELF (standard), WASM (if going deep on web tech), or custom. Not yet explored.
+**Filesystem.** COW filesystem required by undo model (Decision #12). ZFS? Custom? Not yet explored.
+
+**Scheduling algorithm.** Round-robin implemented in spike. Leaning stride scheduling (proportional-share, deterministic). Not yet committed.
+
+**Multi-core.** Single-core only in current spike. Multi-core adds per-CPU scheduling, IPC between cores, and cache coherence concerns. Deferred.
 
 ### Considered and rejected
 
@@ -426,6 +454,10 @@ This decision is being resolved incrementally through a bare-metal research spik
 - **Full capability-based access control (seL4/Fuchsia style):** Capabilities as the universal access mechanism for all resources. Over-engineers the connective tissue for a centralized-authority OS — query/discovery tension with metadata access (Decision #7), complex bootstrapping (initial capability distribution), capability type system sprawl across documents/IPC/devices/memory. Full capabilities solve distributed authority problems (delegation, confinement) that don't arise when the OS mediates all access. OS-mediated handles provide the same security guarantees (per-document, rights-specific, revocable) with far less machinery.
 - **Centralized permissions (Unix-style ACLs):** Permissions stored with resources, checked against process identity. Requires defining process identity (what is a "UID" in a single-user OS?). Ambient authority means editors can write outside beginOp/endOp boundaries — edit protocol becomes unenforceable convention. Doesn't naturally express "this editor can write to this specific document" without per-document ACLs naming specific processes.
 - **No access control beyond hardware:** EL0/EL1 provides crash isolation but not semantic protection. View/edit distinction unenforced. Edit protocol advisory only. Any process can corrupt any document. Too permissive even for a personal OS — buggy editors shouldn't have unlimited blast radius.
+- **Synchronous message passing (L4/seL4-style IPC):** Register-sized messages, sender blocks until receiver ready. Ultra-fast for tiny messages but can't deliver input events to a busy editor (requires receiver to be waiting in receive()). Size-limited (~120 bytes in registers); anything larger needs a second mechanism, violating one-mechanism principle. Total complexity displaced to userspace marshaling and buffering.
+- **Asynchronous queued messages (Mach-style IPC):** Kernel-managed message queues with out-of-line data and port rights. Powerful but copies data twice (sender→kernel→receiver), complex kernel involvement per message, historically slow. Kernel complexity disproportionate to this OS's needs.
+- **Star-only IPC topology (all data through kernel):** Every message flows process→kernel→process. Kernel becomes data-path bottleneck. Doesn't scale to editor↔OS service communication volume. Rejected in favor of kernel-mediated setup with direct shared memory communication.
+- **Multiple OS service processes (split renderer, metadata, input):** More isolation between OS components, but creates microkernel IPC explosion (L4 cautionary tale) without demonstrated need. The trust boundary is OS service↔editors, not between OS components. Reversible — can split later if stability requires it.
 
 ---
 

@@ -26,6 +26,7 @@ Read these before making any design suggestions:
 - `design/foundations.md` — Guiding beliefs, glossary, external boundaries, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `design/decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness table, dependency chains between decisions
 - `design/decision-map.mermaid` — Visual dependency graph of all decisions
+- `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
 - `design/journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document.
 - `design/concept.md` — The core idea: OS → Document → Tool, mimetype evolution, layered rendering, compound documents
 
@@ -72,15 +73,21 @@ Read these before making any design suggestions:
 
 **Kernel code exists:** `system/kernel/` + `system/user/init/` — ~2,150 lines across 18 source files. Boots on QEMU `virt`, drops EL2→EL1, builds coarse 2MB page tables in assembly (boot.S), enables MMU with both TTBR0 (identity) and TTBR1 (kernel) simultaneously, transitions to upper VA, then refines TTBR1 with 4KB pages for W^X (memory.rs). Timer (10 Hz), preemptive round-robin scheduler with TTBR0 swap on context switch. User threads run at EL0 in their own address spaces (ASID-tagged TTBR0, dynamically allocated page tables from free-list frame allocator). Init process is a standalone ELF compiled by build.rs, embedded via `include_bytes!`, parsed by a pure functional ELF64 loader (elf.rs). Modules: boot.S (boot trampoline, coarse page tables, early vectors), exception.S (vectors, context switch at upper VA), main.rs (entry/IRQ dispatch, ELF loader), memory.rs (TTBR1 L3 refinement, VA conversion), heap.rs (bump allocator, 16 MiB), page_alloc.rs (free-list 4KB frame allocator), asid.rs (8-bit ASID allocator), addr_space.rs (per-process TTBR0 page tables), elf.rs (ELF64 parser), build.rs (compiles init→ELF), scheduler.rs (round-robin + TTBR0 swap), thread.rs (kernel thread with optional AddressSpace), syscall.rs (user VA validation), timer.rs (ARM generic timer), gic.rs (GICv2 at kernel VA), uart.rs (PL011 at kernel VA), mmio.rs (volatile helpers). User program: system/user/init/ (init.S + link.ld). Single-core only.
 
-**Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process), OS-mediated handles for access control (per-process handle table, read/write rights, kernel-enforced), ELF as binary format.
+**Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process), OS-mediated handles for access control (per-process handle table, read/write rights, kernel-enforced), ELF as binary format, IPC via shared memory ring buffers with handle-based access control, three-layer process architecture (kernel EL1 + OS service EL0 trusted + editors EL0 untrusted).
 
 **Decision #16 sub-decisions tentative:** From-scratch kernel, Rust as kernel language. Spike completed without hitting blocking obstacles — evidence favors tractability, but final decision deferred.
 
-**Decision #16 sub-decisions open:** IPC mechanism.
+**Decision #16 sub-decisions open:** Driver model, filesystem (COW required), scheduling algorithm, multi-core.
+
+**IPC summary:** Channels are shared memory ring buffers accessed via handles. Kernel creates channels, maps shared memory, validates messages at trust boundaries (control plane). Data flows directly through shared memory (not through kernel). Documents are memory-mapped separately — ring buffers carry only control messages (edit protocol, input events, overlays, queries). One mechanism for all IPC.
+
+**Process architecture:** One OS service process (EL0, trusted) handles rendering, metadata, input routing, compositing. Editors are separate EL0 processes (untrusted). Kernel (EL1) handles hardware, memory, scheduling, IPC setup, handle management, message validation. Primary IPC is editor ↔ OS service. See `design/architecture.mermaid`.
 
 **Previous sessions:** Established working mode (thinking partner, not project manager), exploration journal, implementation readiness table. Settled decisions #9 (edit protocol) and #14 (compound documents). Formalized glossary, external boundaries, adaptation layer principle.
 
-**What to explore next:** Kernel spike is complete. Rendering technology (#11) is the highest-leverage unsettled _design_ decision. Follow the designer's interest.
+**Risk tracking:** Reversibility & Risk table added to decisions.md. Tracks confidence level, revisit triggers, fallbacks, and blast radius for every non-axiomatic settled decision.
+
+**What to explore next:** Rendering technology (#11) is the highest-leverage unsettled _design_ decision. Follow the designer's interest. On the kernel side, natural next implementation steps: multiple processes, handle table, process lifecycle, better allocator.
 
 ## Design Discussion Rules
 

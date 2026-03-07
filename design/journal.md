@@ -29,8 +29,8 @@ Active questions we've started exploring but haven't resolved. Each thread links
 ### Kernel architecture
 
 **Informs:** Decision #16 (Technical Foundation)
-**Status:** Research spike complete (all 7 steps). Most sub-decisions settled.
-**Context:** From-scratch kernel (tentative, spike favors tractability) with Rust (tentative) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process), OS-mediated handles for access control, ELF as binary format. Open: IPC mechanism. L4 cautionary tale still relevant. Spike completed without blocking obstacles — from-scratch is tractable for the implemented scope. Remaining unknowns: IPC complexity, driver model, multi-core.
+**Status:** Research spike complete (all 7 steps). IPC mechanism settled. Most sub-decisions settled.
+**Context:** From-scratch kernel (tentative, spike favors tractability) with Rust (tentative) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process), OS-mediated handles for access control, ELF as binary format, IPC via shared memory ring buffers with handle-based access control, three-layer process architecture (kernel + OS service + editors). Remaining unknowns: driver model, filesystem, multi-core, scheduling algorithm.
 
 ### ~~Privilege model (EL1 / EL0 boundary)~~ — SETTLED
 
@@ -50,7 +50,7 @@ Topics to explore, roughly prioritized by which unsettled decisions they'd infor
 
 1. **Rendering technology deep dive** (Decision #11) — The next most consequential unsettled decision. Constrains layout, tech foundation, and interaction model. Should explore: what does Servo look like embedded? What does "programs talk to engine through a protocol" actually mean in practice? What are the real costs of a web engine dependency?
 
-2. **What does the IPC look like?** (Decision #16) — The edit protocol describes beginOperation/endOperation, but what's the actual mechanism? Message passing, shared memory, something else? This is where the abstract design meets reality. Closely tied to rendering technology choice.
+2. ~~**What does the IPC look like?**~~ (Decision #16) — **SETTLED.** Shared memory ring buffers with handle-based access control. One mechanism for all IPC. Kernel creates channels and validates messages at trust boundaries, but is not in the data path. Documents are memory-mapped separately. Ring buffers carry control messages only (edit protocol, input events, overlays, queries). Three-layer process architecture: kernel (EL1) + OS service (EL0, trusted, one process for rendering + metadata + input + compositing) + editors (EL0, untrusted). See Decision #16 in decisions.md.
 
 3. **The interaction model** (Decision #17) — What does using this OS actually feel like? Mercury OS and Xerox Star are reference points. How do you find documents? What does "opening" something look like? How do queries surface in the GUI?
 
@@ -113,6 +113,18 @@ A hypervisor-based isolation model (editors in separate VMs) requires VM-exit/en
 ### Centralized authority simplifies access control (2026-03-06)
 
 Full capability systems (seL4, Fuchsia) solve distributed authority — many actors granting, delegating, and revoking access to each other. This OS is architecturally centralized: the OS mediates all document access, renders everything, manages editor attachment. In a centralized-authority model, OS-mediated handles (per-process table, integer index, rights check) provide the same security guarantees as capabilities with far less machinery. Handles enforce view/edit and the edit protocol at the kernel level. The query/discovery tension that plagues capabilities (how do you search for documents you don't have capabilities to?) doesn't arise because the query system is OS-internal. Handles can extend to IPC endpoints and devices incrementally — growing toward capabilities only if distributed authority is ever needed.
+
+### "OS renders everything" produces three-layer architecture (2026-03-07)
+
+"The OS renders everything" is a design principle. "Rendering code should not be in the kernel" is an engineering constraint. Together they force a three-layer architecture: kernel (EL1, hardware/memory/scheduling/IPC), OS service (EL0, rendering/metadata/input/compositing), editors (EL0, untrusted tools). The primary IPC relationship is editor ↔ OS service — not "everything through the kernel." The kernel's IPC role is control plane (setup, access control, message validation), not data plane (actual byte transfer).
+
+### Ring buffers only carry control messages because documents are memory-mapped (2026-03-07)
+
+The highest-bandwidth data in a typical OS (rendering surfaces, file contents) doesn't flow through IPC in this design. The OS service renders internally (no cross-process rendering surfaces). Documents are memory-mapped by the kernel into both OS service and editor address spaces (no file data in IPC). What remains for IPC is all small: edit protocol calls, input events, overlay descriptions, metadata queries. This is why one IPC mechanism (shared memory ring buffers) works for everything — the use cases that would break a simple mechanism are handled by memory mapping instead.
+
+### Security as a side effect of good architecture (2026-03-07)
+
+Handles enforce access (designed for edit protocol, not security). EL0/EL1 provides crash isolation (designed for clean programming model). Per-process address spaces provide memory isolation (designed for independent editors). Kernel message validation protects the OS service (designed for input correctness). Every security property falls out of design decisions made for other reasons. No security-specific machinery is needed because the architecture is naturally secure. This suggests a useful heuristic: if you're adding security features that don't serve the design, the architecture may be wrong.
 
 ---
 
