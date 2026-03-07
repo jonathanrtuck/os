@@ -42,3 +42,24 @@ pub fn put_u32(mut n: u32) {
         putc(byte);
     }
 }
+
+pub fn put_u64(mut n: u64) {
+    let mut buf = [0u8; 20];
+    let mut i = buf.len();
+
+    if n == 0 {
+        putc(b'0');
+
+        return;
+    }
+
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    for &byte in &buf[i..] {
+        putc(byte);
+    }
+}

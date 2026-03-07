@@ -1,6 +1,8 @@
 #![no_std]
 #![no_main]
+#![feature(sync_unsafe_cell)]
 
+use core::cell::SyncUnsafeCell;
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
 
@@ -44,7 +46,7 @@ const _: () = {
 
 /// Boot thread context. The IRQ save path initializes the contents;
 /// we just need valid, writable memory at a known address.
-static mut BOOT_CTX: MaybeUninit<Context> = MaybeUninit::uninit();
+static BOOT_CTX: SyncUnsafeCell<MaybeUninit<Context>> = SyncUnsafeCell::new(MaybeUninit::uninit());
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
@@ -53,7 +55,7 @@ pub extern "C" fn kernel_main() -> ! {
     unsafe {
         core::arch::asm!(
             "msr tpidr_el1, {0}",
-            in(reg) &raw mut BOOT_CTX,
+            in(reg) BOOT_CTX.get(),
             options(nostack, nomem)
         );
     }
@@ -75,7 +77,7 @@ pub extern "C" fn irq_handler(current: *mut Context) -> *const Context {
         if id == timer::IRQ_ID {
             timer::handle_irq();
             uart::puts("\rtick ");
-            uart::put_u32(timer::ticks() as u32);
+            uart::put_u64(timer::ticks());
         }
 
         gic::end_of_interrupt(iar);
@@ -86,7 +88,7 @@ pub extern "C" fn irq_handler(current: *mut Context) -> *const Context {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    uart::puts("\n!!! PANIC !!!\n");
+    uart::puts("\npanic.\n");
 
     if let Some(location) = info.location() {
         uart::puts(location.file());

@@ -20,20 +20,18 @@ pub const IRQ_ID: u32 = 30;
 /// Typical OS ticks: 100–1000 Hz. Tighten when scheduling matters.
 const TICKS_PER_SEC: u64 = 10;
 
-/// Program the timer to fire after one interval.
+/// Set CNTP_TVAL_EL0 so the timer fires after one interval.
 ///
 /// `freq` is CNTFRQ_EL0 (counter ticks per second), so `freq / TICKS_PER_SEC`
-/// gives the number of counter ticks per timer interval.
-fn program_timer(freq: u64) {
+/// gives the number of counter ticks per timer interval. Writing TVAL also
+/// clears the timer condition (de-asserts the interrupt).
+fn reprogram(freq: u64) {
     let tval = freq / TICKS_PER_SEC;
 
     unsafe {
         core::arch::asm!(
-            "msr cntp_tval_el0, {tval}",  // countdown value
-            "mov x0, #1",
-            "msr cntp_ctl_el0, x0",       // enable timer
+            "msr cntp_tval_el0, {tval}",
             tval = in(reg) tval,
-            out("x0") _,
             options(nostack, nomem)
         );
     }
@@ -52,8 +50,17 @@ pub fn init() {
 
     CNTFRQ.store(freq, Ordering::Relaxed);
 
-    program_timer(freq);
+    // Program first interval and enable the timer.
+    reprogram(freq);
 
+    unsafe {
+        core::arch::asm!(
+            "mov x0, #1",
+            "msr cntp_ctl_el0, x0",       // ENABLE=1, IMASK=0
+            out("x0") _,
+            options(nostack, nomem)
+        );
+    }
     // Clear DAIF.I to unmask IRQs at the CPU level.
     // GIC routing is already configured; this is the final gate.
     unsafe {
@@ -64,7 +71,7 @@ pub fn init() {
 /// Handle a timer interrupt: increment tick count and reprogram for next interval.
 pub fn handle_irq() {
     TICKS.fetch_add(1, Ordering::Relaxed);
-    program_timer(CNTFRQ.load(Ordering::Relaxed));
+    reprogram(CNTFRQ.load(Ordering::Relaxed));
 }
 
 /// Monotonic tick count since boot.
