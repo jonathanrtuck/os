@@ -109,5 +109,13 @@ Active or planned coding explorations. These are learning exercises, not commitm
 **Goal:** Build a minimal kernel on aarch64/QEMU. Learn what's involved in boot, exception handling, context switching, memory management.
 **Informs:** Decision #16 (Technical Foundation) — whether writing our own kernel is tractable and worthwhile vs. building on existing.
 **What exists:** `system/kernel/` directory — boot.S (boot sequence, EL2→EL1 drop, exception vectors, full context save/restore for IRQ, UART output helpers, fatal exception handler, MMU setup), main.rs (Context struct with compile-time layout assertions, kernel_main, irq_handler stub), uart.rs (PL011 MMIO driver). Builds with `cargo build` targeting `aarch64-unknown-none` on stable Rust.
-**Original success criteria:** ~~Something boots and prints to serial console.~~ Done. Next: encounter real scheduling/memory problems to test whether from-scratch is worthwhile.
+**Original success criteria:** ~~Something boots and prints to serial console.~~ Done.
+**Next steps (in order):**
+1. **Timer interrupt** — Set up ARM generic timer to fire periodically. Exercises the IRQ path end-to-end, prints tick count to UART. Prerequisite for scheduler. Quick win.
+2. **Page tables + enable MMU** — Build identity-mapped page tables, call `enable_mmu`. This is where bare-metal gets real and the spike starts answering its question (is from-scratch worth it?).
+3. **Heap allocator** — Carve out a region for dynamic allocation. Bump allocator (advance pointer, never free) is enough to start. Unlocks dynamic data structures.
+4. **Threads + scheduler** — Create thread contexts, implement round-robin in `irq_handler`, launch with `enter_first_thread`. The payoff: actual preemptive multitasking. Two threads printing alternating messages.
+
+Dependencies: Timer and page tables are independent. Scheduler needs both timer (for preemption) and heap (for thread contexts).
+
 **Risk:** If we decide to build on an existing kernel, this code is throwaway. That's fine — the knowledge isn't throwaway.

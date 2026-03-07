@@ -1,0 +1,73 @@
+//! ARM generic timer (EL1 physical).
+//!
+//! Uses a fixed-interval tick: the timer fires, we handle it, reprogram it for
+//! the same interval, repeat. Simple and predictable, but the CPU wakes on every
+//! tick even when idle. A tickless design (program the timer for "next event"
+//! instead of a fixed interval) would eliminate idle wakeups but adds complexity
+//! — we'd need a sorted event queue and careful reprogramming on insert/cancel.
+//! Fixed tick is the right starting point; tickless is an optimization for later.
+
+use super::gic;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+static TICKS: AtomicU64 = AtomicU64::new(0);
+static CNTFRQ: AtomicU64 = AtomicU64::new(0);
+
+/// Physical timer PPI interrupt ID.
+pub const IRQ_ID: u32 = 30;
+
+/// Timer fires 10 times/sec (100ms). Coarse, but easy to verify visually.
+/// Typical OS ticks: 100–1000 Hz. Tighten when scheduling matters.
+const TICKS_PER_SEC: u64 = 10;
+
+/// Program the timer to fire after one interval.
+///
+/// `freq` is CNTFRQ_EL0 (counter ticks per second), so `freq / TICKS_PER_SEC`
+/// gives the number of counter ticks per timer interval.
+fn program_timer(freq: u64) {
+    let tval = freq / TICKS_PER_SEC;
+
+    unsafe {
+        core::arch::asm!(
+            "msr cntp_tval_el0, {tval}",  // countdown value
+            "mov x0, #1",
+            "msr cntp_ctl_el0, x0",       // enable timer
+            tval = in(reg) tval,
+            out("x0") _,
+            options(nostack, nomem)
+        );
+    }
+}
+
+/// Initialize the timer. Call after `gic::init()`.
+pub fn init() {
+    gic::enable_irq(IRQ_ID);
+
+    // CNTFRQ_EL0: counter frequency in Hz, set by firmware (e.g. 62.5 MHz on QEMU)
+    let freq: u64;
+
+    unsafe {
+        core::arch::asm!("mrs {0}, cntfrq_el0", out(reg) freq, options(nostack, nomem));
+    }
+
+    CNTFRQ.store(freq, Ordering::Relaxed);
+
+    program_timer(freq);
+
+    // Clear DAIF.I to unmask IRQs at the CPU level.
+    // GIC routing is already configured; this is the final gate.
+    unsafe {
+        core::arch::asm!("msr daifclr, #2", options(nostack, nomem));
+    }
+}
+
+/// Handle a timer interrupt: increment tick count and reprogram for next interval.
+pub fn handle_irq() {
+    TICKS.fetch_add(1, Ordering::Relaxed);
+    program_timer(CNTFRQ.load(Ordering::Relaxed));
+}
+
+/// Monotonic tick count since boot.
+pub fn ticks() -> u64 {
+    TICKS.load(Ordering::Relaxed)
+}

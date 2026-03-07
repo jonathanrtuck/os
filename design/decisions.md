@@ -16,19 +16,19 @@ Which decisions are stable enough to write code against? This guides when to cod
 | #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                |
 | #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                |
 | #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                          |
-| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on #16.                  |
-| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on #11 (rendering) and #16 (tech foundation).   |
-| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on #16.     |
-| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on #11 and #16.                              |
-| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. IPC mechanism depends on #16.                                 |
+| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                  |
+| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).   |
+| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.     |
+| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                              |
+| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. IPC mechanism depends on §16.                                 |
 | #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                       |
 | #11 Rendering Tech     | Unsettled | **Not safe**         | High-leverage unsettled decision. Blocks layout, tech foundation, interaction.        |
-| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (#16). Concept is firm.                              |
+| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                              |
 | #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                  |
-| #14 Compound Documents | Settled   | **Behind interface** | Manifest + layout model is firm. Rendering depends on #11. Open sub-questions remain. |
-| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on #11 (rendering technology).                                                |
-| #16 Tech Foundation    | Partial   | **Partially safe**   | Sub-decisions settling incrementally. Tentative: from-scratch kernel, Rust. See #16.  |
-| #17 Interaction Model  | Unsettled | **Not safe**         | Depends on #11, #2, #7.                                                               |
+| #14 Compound Documents | Settled   | **Behind interface** | Manifest + layout model is firm. Rendering depends on §11. Open sub-questions remain. |
+| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                |
+| #16 Tech Foundation    | Partial   | **Partially safe**   | Sub-decisions settling incrementally. See §16 below for details.                      |
+| #17 Interaction Model  | Unsettled | **Not safe**         | Depends on §11, §2, §7.                                                               |
 
 **Readiness key:**
 
