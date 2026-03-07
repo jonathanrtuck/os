@@ -72,7 +72,7 @@ Read these before making any design suggestions:
 
 **Kernel code exists:** `system/kernel/` directory with bare-metal aarch64 boot sequence (boot.S), Rust entry points (main.rs), and PL011 UART driver (uart.rs). Builds for `aarch64-unknown-none` on nightly Rust (`rust-toolchain.toml` handles this automatically). Infrastructure: EL2→EL1 drop, exception vectors, full context save/restore (GPRs + FP/SIMD), IRQ-driven context switch, MMU setup, fatal exception handler. Prints "hello, world" to UART.
 
-**Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process).
+**Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process), OS-mediated handles for access control (per-process handle table, read/write rights, kernel-enforced).
 
 **Decision #16 sub-decisions tentative:** From-scratch kernel, Rust as kernel language. Both under evaluation via the research spike — need to hit real obstacles before comparing with existing kernel options.
 

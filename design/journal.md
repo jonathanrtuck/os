@@ -26,7 +26,7 @@ Active questions we've started exploring but haven't resolved. Each thread links
 ### Kernel architecture
 **Informs:** Decision #16 (Technical Foundation)
 **Status:** Active — research spike in progress, most sub-decisions settled
-**Context:** From-scratch kernel (tentative) with Rust (tentative) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process). Open: IPC mechanism, binary format. L4 cautionary tale still relevant. Need to hit real obstacles (scheduling, per-process address spaces, syscall interface, driver complexity) before evaluating alternatives (seL4, Zircon, Linux-as-runtime).
+**Context:** From-scratch kernel (tentative) with Rust (tentative) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process), OS-mediated handles for access control. Open: IPC mechanism, binary format. L4 cautionary tale still relevant. Need to hit real obstacles (scheduling, per-process address spaces, syscall interface, driver complexity) before evaluating alternatives (seL4, Zircon, Linux-as-runtime).
 
 ### ~~Privilege model (EL1 / EL0 boundary)~~ — SETTLED
 **Resolved:** Traditional — all non-kernel code at EL0. One simple boundary, one programming model. Consistent with Decision #4 (simple connective tissue) and Decision #3 (arm64-standard interface). Language-safety (B) rejected as unsolved research problem for extensibility. Hybrid (C) rejected as two-ways-to-do-the-same-thing. See Decision #16 in decisions.md.
@@ -59,6 +59,8 @@ Topics to explore, roughly prioritized by which unsettled decisions they'd infor
 ### Exploratory (interesting but less urgent)
 
 7. **Historical OS deep dives** — Plan 9's /proc and per-process namespaces. BeOS's BFS attributes in practice. OpenDoc's component model and why it failed. Xerox Star's property sheets. Each could inform current design.
+
+10. **Scheduling algorithm** — Leaning stride scheduling (deterministic proportional-share). Reference: [OSTEP Chapter on Lottery/Stride Scheduling](https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched-lottery.pdf) (Waldspurger & Weihl, 1994). Ticket transfer (editor donates tickets to OS during COW snapshot) is interesting for the edit model. Explore when implementing the scheduler (spike step 4).
 
 8. **The "no save" UX** — We committed to immediate writes + COW. What does this feel like for content that's expensive to re-render? What about "I was just experimenting, throw this away"? Is there a need for explicit "draft mode" or does undo cover it?
 
@@ -93,6 +95,9 @@ The edit protocol's beginOperation/endOperation boundaries are natural cooperati
 
 ### Hypervisor IPC works against "editors attach to content" (2026-03-06)
 A hypervisor-based isolation model (editors in separate VMs) requires VM-exit/enter for every cross-boundary call. This directly conflicts with the immediate-write editor model — every `beginOperation`/write/`endOperation` would cross a VM boundary. The thin edit protocol's value comes from low overhead; VM transitions are the opposite of low overhead. Hardware isolation at the EL1/EL0 boundary (syscalls) is a much lighter mechanism for the same goal.
+
+### Centralized authority simplifies access control (2026-03-06)
+Full capability systems (seL4, Fuchsia) solve distributed authority — many actors granting, delegating, and revoking access to each other. This OS is architecturally centralized: the OS mediates all document access, renders everything, manages editor attachment. In a centralized-authority model, OS-mediated handles (per-process table, integer index, rights check) provide the same security guarantees as capabilities with far less machinery. Handles enforce view/edit and the edit protocol at the kernel level. The query/discovery tension that plagues capabilities (how do you search for documents you don't have capabilities to?) doesn't arise because the query system is OS-internal. Handles can extend to IPC endpoints and devices incrementally — growing toward capabilities only if distributed authority is ever needed.
 
 ---
 
