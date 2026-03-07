@@ -63,9 +63,9 @@ pub extern "C" fn kernel_main() -> ! {
         );
     }
 
+    memory::init();
     gic::init();
     timer::init();
-    memory::init();
 
     uart::puts("booted.\n");
 
