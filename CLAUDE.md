@@ -68,9 +68,9 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-07:** Completed kernel spike steps 3 (heap allocator) and 4 (kernel threads + scheduler). Clippy cleanup across all modules.
+**Session 2026-03-07:** Completed kernel spike step 6 (per-process address spaces). Kernel migrated to TTBR1 upper VA, each user thread gets its own TTBR0 page tables with ASID tagging.
 
-**Kernel code exists:** `system/kernel/` — ~1,350 lines across 11 files. Boots on QEMU `virt`, drops EL2→EL1, sets up MMU with W^X, initializes GIC + timer (10 Hz), runs a preemptive round-robin scheduler. Modules: boot.S (boot/vectors/context switch), main.rs (entry/IRQ dispatch), memory.rs (page tables), heap.rs (bump allocator, 16 MiB), scheduler.rs (round-robin), thread.rs (kernel thread representation), timer.rs (ARM generic timer), gic.rs (GICv2), uart.rs (PL011), mmio.rs (volatile helpers). All kernel threads at EL1. Single-core only — documented as intentional simplification, to be revisited after userspace works.
+**Kernel code exists:** `system/kernel/` — ~2,100 lines across 15 files. Boots on QEMU `virt`, drops EL2→EL1, builds coarse 2MB page tables in assembly (boot.S), enables MMU with both TTBR0 (identity) and TTBR1 (kernel) simultaneously, transitions to upper VA, then refines TTBR1 with 4KB pages for W^X (memory.rs). Timer (10 Hz), preemptive round-robin scheduler with TTBR0 swap on context switch. User threads run at EL0 in their own address spaces (ASID-tagged TTBR0, dynamically allocated page tables from free-list frame allocator). Modules: boot.S (boot trampoline, MMU bring-up, coarse page tables, early vectors), exception.S (vectors, context switch, fatal handler at upper VA), main.rs (entry/IRQ dispatch), memory.rs (TTBR1 L3 refinement, VA conversion), heap.rs (bump allocator, 16 MiB), page_alloc.rs (free-list 4KB frame allocator), asid.rs (8-bit ASID allocator), addr_space.rs (per-process TTBR0 page tables), scheduler.rs (round-robin + TTBR0 swap), thread.rs (kernel thread with optional AddressSpace), syscall.rs (user VA validation), timer.rs (ARM generic timer), gic.rs (GICv2 at kernel VA), uart.rs (PL011 at kernel VA), mmio.rs (volatile helpers), user_test.rs (EL0 test stub). Single-core only.
 
 **Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process), OS-mediated handles for access control (per-process handle table, read/write rights, kernel-enforced).
 
@@ -80,7 +80,7 @@ Read these before making any design suggestions:
 
 **Previous sessions:** Established working mode (thinking partner, not project manager), exploration journal, implementation readiness table. Settled decisions #9 (edit protocol) and #14 (compound documents). Formalized glossary, external boundaries, adaptation layer principle.
 
-**What to explore next:** Kernel spike step 5: syscall interface (`svc` handler, syscall table, argument passing). This is where the privilege boundary gets real — steps 5–7 test whether from-scratch is tractable. Rendering technology (#11) remains highest-leverage unsettled _design_ decision. Follow the designer's interest.
+**What to explore next:** Kernel spike step 7: first real userspace process (ELF loading or similar). Steps 5–7 test whether from-scratch is tractable. Rendering technology (#11) remains highest-leverage unsettled _design_ decision. Follow the designer's interest.
 
 ## Design Discussion Rules
 

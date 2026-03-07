@@ -4,11 +4,9 @@
 //! suitable while the kernel has no deallocation scenarios. Upgrade to a
 //! linked-list or buddy allocator when threads/teardown need real freeing.
 
+use super::memory;
 use core::alloc::{GlobalAlloc, Layout};
 use core::sync::atomic::{AtomicUsize, Ordering};
-
-/// Heap size: 16 MiB. Well within the 256 MiB QEMU RAM.
-const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 struct BumpAllocator {
     next: AtomicUsize,
@@ -65,5 +63,7 @@ pub fn init() {
     let start = unsafe { &__kernel_end as *const u8 as usize };
 
     ALLOCATOR.next.store(start, Ordering::Relaxed);
-    ALLOCATOR.end.store(start + HEAP_SIZE, Ordering::Relaxed);
+    ALLOCATOR
+        .end
+        .store(start + memory::HEAP_SIZE, Ordering::Relaxed);
 }

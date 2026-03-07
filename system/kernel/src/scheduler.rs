@@ -1,5 +1,7 @@
 //! Round-robin preemptive scheduler.
 
+use super::addr_space::AddressSpace;
+use super::memory;
 use super::thread::{Thread, ThreadId, ThreadState};
 use super::Context;
 use alloc::{boxed::Box, vec::Vec};
@@ -7,7 +9,6 @@ use core::cell::SyncUnsafeCell;
 
 struct State {
     #[allow(clippy::vec_box)]
-    // Box required: TPIDR_EL1 holds raw pointers into Thread contexts, so Threads must not move on Vec realloc.
     threads: Vec<Box<Thread>>,
     current: usize,
     next_id: u64,
@@ -19,15 +20,37 @@ static STATE: SyncUnsafeCell<State> = SyncUnsafeCell::new(State {
     next_id: 1,
 });
 
-/// Safety: STATE is only accessed during init (single-threaded, IRQs masked)
-/// or inside the IRQ handler (interrupts disabled, single core).
 fn state() -> &'static mut State {
     unsafe { &mut *STATE.get() }
 }
+/// Swap TTBR0 when the address space changes between old and new threads.
+///
+/// No TLB invalidation needed: ASIDs are never recycled, so stale entries
+/// from a previous ASID can't alias the new one. Add TLBI if ASID recycling
+/// is ever introduced.
+fn swap_ttbr0(old_idx: usize, new_idx: usize, s: &State) {
+    let old_ttbr0 = ttbr0_for(&s.threads[old_idx]);
+    let new_ttbr0 = ttbr0_for(&s.threads[new_idx]);
 
-/// Mark the current thread as exited and spin until the next timer tick
-/// reschedules away from it. IRQs are masked first to avoid racing with
-/// `schedule()` on `State`.
+    if old_ttbr0 != new_ttbr0 {
+        unsafe {
+            core::arch::asm!(
+                "dsb ish",
+                "msr ttbr0_el1, {v}",
+                "isb",
+                v = in(reg) new_ttbr0,
+                options(nostack)
+            );
+        }
+    }
+}
+fn ttbr0_for(thread: &Thread) -> u64 {
+    match &thread.address_space {
+        Some(addr_space) => addr_space.ttbr0_value(),
+        None => memory::empty_ttbr0(),
+    }
+}
+
 pub fn exit_current() -> ! {
     unsafe { core::arch::asm!("msr daifset, #2", options(nostack, nomem)) };
 
@@ -35,18 +58,12 @@ pub fn exit_current() -> ! {
 
     s.threads[s.current].state = ThreadState::Exited;
 
-    // Re-enable IRQs so the timer can fire and schedule away from us.
     unsafe { core::arch::asm!("msr daifclr, #2", options(nostack, nomem)) };
 
     loop {
         core::hint::spin_loop();
     }
 }
-
-/// Exit the current thread from syscall context.
-///
-/// Unlike `exit_current()` (which spins for a timer tick), this returns
-/// the next thread's Context pointer directly to the SVC handler.
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let s = state();
 
@@ -54,25 +71,19 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
 
     schedule(ctx)
 }
-
-/// Initialize the scheduler. Call after `heap::init()`, before `timer::init()`.
-///
-/// Creates a Thread for the boot thread (already running) and updates
-/// TPIDR_EL1 to point at its embedded Context.
 pub fn init() {
     let s = state();
     let mut boot_thread = Box::new(Thread {
         context: unsafe { core::mem::zeroed() },
         id: ThreadId(0),
         state: ThreadState::Running,
-        stack_bottom: core::ptr::null_mut(), // boot stack is from the linker script
+        stack_bottom: core::ptr::null_mut(),
+        address_space: None,
     });
     let ctx_ptr = &mut boot_thread.context as *mut Context;
 
     s.threads.push(boot_thread);
 
-    // Point TPIDR_EL1 at the boot thread's Context so the IRQ handler
-    // saves into the right place from now on.
     unsafe {
         core::arch::asm!(
             "msr tpidr_el1, {0}",
@@ -81,22 +92,17 @@ pub fn init() {
         );
     }
 }
-
-/// Pick the next thread to run. Called from `irq_handler` on each timer tick.
-///
-/// Returns a pointer to the next thread's Context. If no other thread is
-/// ready, returns the current thread's context (no switch).
 pub fn schedule(ctx: *mut Context) -> *const Context {
     let s = state();
     let n = s.threads.len();
-    // Mark the current thread as Ready (unless it exited).
     let cur = &mut s.threads[s.current];
 
     if cur.state == ThreadState::Running {
         cur.state = ThreadState::Ready;
     }
 
-    // Scan forward (wrapping) for the next Ready thread.
+    let old_idx = s.current;
+
     for offset in 1..=n {
         let idx = (s.current + offset) % n;
 
@@ -104,16 +110,15 @@ pub fn schedule(ctx: *mut Context) -> *const Context {
             s.threads[idx].state = ThreadState::Running;
             s.current = idx;
 
+            // Swap TTBR0 if switching between different address spaces.
+            swap_ttbr0(old_idx, idx, s);
+
             return &s.threads[idx].context as *const Context;
         }
     }
 
-    // No Ready thread found (all exited). Shouldn't happen with the idle
-    // thread, but return current context as last resort.
     ctx as *const Context
 }
-
-/// Spawn a new kernel thread that begins executing at `entry`.
 pub fn spawn(entry: fn() -> !) {
     let s = state();
     let id = s.next_id;
@@ -124,15 +129,13 @@ pub fn spawn(entry: fn() -> !) {
 
     s.threads.push(thread);
 }
-
-/// Spawn a new EL0 thread.
-pub fn spawn_user(entry: usize, user_stack_top: u64) {
+pub fn spawn_user(addr_space: Box<AddressSpace>, entry_va: u64, user_stack_top: u64) {
     let s = state();
     let id = s.next_id;
 
     s.next_id += 1;
 
-    let thread = Thread::new_user(id, entry, user_stack_top);
+    let thread = Thread::new_user(id, addr_space, entry_va, user_stack_top);
 
     s.threads.push(thread);
 }

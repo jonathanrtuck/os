@@ -17,29 +17,28 @@ pub enum Error {
     BadLength = -3,
 }
 
-const RAM_START: u64 = 0x4000_0000;
-const RAM_END: u64 = 0x5000_0000;
+/// User VA range: 0 .. 2^48 (T0SZ=16).
+const USER_VA_END: u64 = 0x0001_0000_0000_0000;
 const MAX_WRITE_LEN: u64 = 4096;
 
 fn sys_exit(ctx: *mut Context) -> *const Context {
     scheduler::exit_current_from_syscall(ctx)
 }
-
 fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
     if len > MAX_WRITE_LEN {
         return Err(Error::BadLength);
     }
-
-    if !(RAM_START..RAM_END).contains(&buf_ptr) {
+    if buf_ptr >= USER_VA_END {
         return Err(Error::BadAddress);
     }
 
     let end = buf_ptr.checked_add(len).ok_or(Error::BadAddress)?;
 
-    if end > RAM_END {
+    if end > USER_VA_END {
         return Err(Error::BadAddress);
     }
 
+    // TTBR0 is still loaded during syscall, so kernel can read user pages.
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
 
     for &byte in slice {
@@ -52,15 +51,10 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
 
     Ok(len)
 }
-
 fn sys_yield(ctx: *mut Context) -> *const Context {
     scheduler::schedule(ctx)
 }
 
-/// Dispatch a syscall. Called from `svc_handler` with the current Context.
-///
-/// Returns a pointer to the next thread's Context (may differ from input
-/// if the syscall triggers a context switch).
 pub fn dispatch(ctx: *mut Context) -> *const Context {
     let c = unsafe { &mut *ctx };
     let syscall_nr = c.x[8];

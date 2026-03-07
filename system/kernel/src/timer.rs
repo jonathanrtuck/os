@@ -40,9 +40,9 @@ fn reprogram(freq: u64) {
 /// Handle a timer interrupt: increment tick count and reprogram for next interval.
 pub fn handle_irq() {
     TICKS.fetch_add(1, Ordering::Relaxed);
+
     reprogram(CNTFRQ.load(Ordering::Relaxed));
 }
-
 /// Initialize the timer. Call after `gic::init()`.
 pub fn init() {
     gic::enable_irq(IRQ_ID);
@@ -73,7 +73,6 @@ pub fn init() {
         core::arch::asm!("msr daifclr, #2", options(nostack, nomem));
     }
 }
-
 /// Monotonic tick count since boot.
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)

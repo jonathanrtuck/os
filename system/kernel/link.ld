@@ -1,22 +1,31 @@
 ENTRY(_start)
 
+KERNEL_VA_OFFSET = 0xFFFF000000000000;
+PHYS_BASE        = 0x40080000;
+
 SECTIONS
 {
   /*
-   * QEMU `virt` default RAM starts at 0x4000_0000.
-   * A common convention is to place the kernel at 0x4008_0000.
-   *
-   * Sections are 4KB-aligned so each group can have distinct page
-   * permissions in the L3 table: .text (RX), .rodata (RO), .data/.bss (RW).
+   * .text.boot runs at physical VA before TTBR1 is live.
+   * VMA = LMA = physical address.
    */
-  . = 0x40080000;
+  . = PHYS_BASE;
 
-  /* --- Executable, read-only (RX) --- */
-  __text_start = .;
+  __text_boot_start = .;
   .text.boot : {
     KEEP(*(.text.boot))
   }
-  .text : ALIGN(16) {
+  __text_boot_end = .;
+
+  /*
+   * Everything below runs at upper VA (TTBR1).
+   * VMA = PA + KERNEL_VA_OFFSET.  LMA = PA (via AT()).
+   */
+  . = ALIGN(4096) + KERNEL_VA_OFFSET;
+
+  /* --- Executable, read-only (RX) --- */
+  __text_start = .;
+  .text : AT(ADDR(.text) - KERNEL_VA_OFFSET) ALIGN(16) {
     *(.text .text.*)
   }
   __text_end = .;
@@ -24,7 +33,7 @@ SECTIONS
   /* --- Read-only, no execute (RO) --- */
   . = ALIGN(4096);
   __rodata_start = .;
-  .rodata : {
+  .rodata : AT(ADDR(.rodata) - KERNEL_VA_OFFSET) {
     *(.rodata .rodata.*)
   }
   __rodata_end = .;
@@ -32,24 +41,36 @@ SECTIONS
   /* --- Read-write, no execute (RW) --- */
   . = ALIGN(4096);
   __data_start = .;
-  .data : {
+  .data : AT(ADDR(.data) - KERNEL_VA_OFFSET) {
     *(.data .data.*)
   }
-  .bss : ALIGN(16) {
+  .bss : AT(ADDR(.bss) - KERNEL_VA_OFFSET) ALIGN(16) {
     __bss_start = .;
     *(.bss .bss.*)
     *(COMMON)
     __bss_end = .;
   }
   . = ALIGN(16);
-  .bss.stack (NOLOAD) : ALIGN(16) {
+  .bss.stack (NOLOAD) : AT(ADDR(.bss.stack) - KERNEL_VA_OFFSET) ALIGN(16) {
     __stack_bottom = .;
     . = . + 0x10000; /* 64 KiB stack */
     __stack_top = .;
   }
-  . = ALIGN(0x200000);     /* next 2MB boundary -> lands in bulk RAM block */
-  .user_code : {
-    *(.user_code)
+
+  /* Physical companions for boot code (which runs before TTBR1 is live). */
+  __bss_start_phys  = __bss_start  - KERNEL_VA_OFFSET;
+  __bss_end_phys    = __bss_end    - KERNEL_VA_OFFSET;
+  __stack_top_phys  = __stack_top  - KERNEL_VA_OFFSET;
+
+  /* User code is placed physically after the kernel BSS/stack.
+   * Not mapped by the linker — the kernel maps it into user address spaces. */
+  . = ALIGN(4096);
+  .user_code : AT(ADDR(.user_code) - KERNEL_VA_OFFSET) {
+    __user_code_start = .;
+    KEEP(*(.user_code))
+    __user_code_end = .;
   }
+
+  . = ALIGN(4096);
   __kernel_end = .;
 }
