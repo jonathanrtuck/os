@@ -72,15 +72,15 @@ Read these before making any design suggestions:
 
 **Kernel code exists:** `system/kernel/` directory with bare-metal aarch64 boot sequence (boot.S), Rust entry points (main.rs), and PL011 UART driver (uart.rs). Builds for `aarch64-unknown-none` on stable Rust. Infrastructure: EL2→EL1 drop, exception vectors, full context save/restore (GPRs + FP/SIMD), IRQ-driven context switch, MMU setup, fatal exception handler. Prints "hello, world" to UART.
 
-**Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking.
+**Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process).
 
 **Decision #16 sub-decisions tentative:** From-scratch kernel, Rust as kernel language. Both under evaluation via the research spike — need to hit real obstacles before comparing with existing kernel options.
 
-**Decision #16 sub-decisions open:** Privilege model (what runs at EL0?), address space model (single vs split TTBR), IPC mechanism, binary format.
+**Decision #16 sub-decisions open:** IPC mechanism, binary format.
 
 **Previous sessions:** Established working mode (thinking partner, not project manager), exploration journal, implementation readiness table. Settled decisions #9 (edit protocol) and #14 (compound documents). Formalized glossary, external boundaries, adaptation layer principle.
 
-**What to explore next:** See the exploration journal. New open threads: privilege model, address space model. Rendering technology (#11) remains highest-leverage unsettled decision overall. Follow the designer's interest.
+**What to explore next:** See the exploration journal. Kernel spike next step is heap allocator, then kernel threads + scheduler, then syscall interface + per-process address spaces (where the privilege model gets tested). Rendering technology (#11) remains highest-leverage unsettled decision overall. Follow the designer's interest.
 
 ## Design Discussion Rules
 

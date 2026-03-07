@@ -25,18 +25,14 @@ Active questions we've started exploring but haven't resolved. Each thread links
 
 ### Kernel architecture
 **Informs:** Decision #16 (Technical Foundation)
-**Status:** Active — research spike in progress, partial sub-decisions made
-**Context:** From-scratch kernel (tentative) with Rust (tentative) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield. Open: privilege model, address space model, IPC, binary format. L4 cautionary tale still relevant. Need to hit real obstacles (scheduling, memory management, driver complexity) before evaluating alternatives (seL4, Zircon, Linux-as-runtime).
+**Status:** Active — research spike in progress, most sub-decisions settled
+**Context:** From-scratch kernel (tentative) with Rust (tentative) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process). Open: IPC mechanism, binary format. L4 cautionary tale still relevant. Need to hit real obstacles (scheduling, per-process address spaces, syscall interface, driver complexity) before evaluating alternatives (seL4, Zircon, Linux-as-runtime).
 
-### Privilege model (EL1 / EL0 boundary)
-**Informs:** Decision #16 (Technical Foundation)
-**Status:** Three options identified, not yet decided
-**Context:** Kernel runs at EL1 (settled by ruling out hypervisor). What runs at EL0? Options: (A) traditional — all non-kernel code at EL0, (B) language-safety — everything at EL1, rely on Rust, (C) hybrid — kernel + viewers at EL1, editors at EL0. Key tension: editor immediate-writes want low overhead (favors B/C), but extensibility and third-party editors want hardware isolation (favors A/C). Connects to editor model (Decision #8) and complexity philosophy (Decision #4).
+### ~~Privilege model (EL1 / EL0 boundary)~~ — SETTLED
+**Resolved:** Traditional — all non-kernel code at EL0. One simple boundary, one programming model. Consistent with Decision #4 (simple connective tissue) and Decision #3 (arm64-standard interface). Language-safety (B) rejected as unsolved research problem for extensibility. Hybrid (C) rejected as two-ways-to-do-the-same-thing. See Decision #16 in decisions.md.
 
-### Address space model (TTBR0 / TTBR1)
-**Informs:** Decision #16 (Technical Foundation)
-**Status:** Leaning single (TTBR0 only), not committed
-**Context:** Current boot code uses only TTBR0 with EPD1=1 (TTBR1 walks disabled). Traditional split uses TTBR0 for user pages, TTBR1 for kernel pages. Single address space is simpler but relies on other isolation mechanisms. Decision depends on privilege model — if everything runs at EL1, split address space is less necessary.
+### ~~Address space model (TTBR0 / TTBR1)~~ — SETTLED
+**Resolved:** Split TTBR — TTBR1 for kernel (upper VA), TTBR0 per-process (lower VA). Follows directly from the traditional privilege model. See Decision #16 in decisions.md.
 
 ---
 
@@ -111,11 +107,14 @@ Active or planned coding explorations. These are learning exercises, not commitm
 **What exists:** `system/kernel/` directory — boot.S (boot sequence, EL2→EL1 drop, exception vectors, full context save/restore for IRQ, UART output helpers, fatal exception handler, MMU setup), main.rs (Context struct with compile-time layout assertions, kernel_main, irq_handler stub), uart.rs (PL011 MMIO driver). Builds with `cargo build` targeting `aarch64-unknown-none` on stable Rust.
 **Original success criteria:** ~~Something boots and prints to serial console.~~ Done.
 **Next steps (in order):**
-1. **Timer interrupt** — Set up ARM generic timer to fire periodically. Exercises the IRQ path end-to-end, prints tick count to UART. Prerequisite for scheduler. Quick win.
-2. **Page tables + enable MMU** — Build identity-mapped page tables, call `enable_mmu`. This is where bare-metal gets real and the spike starts answering its question (is from-scratch worth it?).
+1. ~~**Timer interrupt**~~ — Done. ARM generic timer fires at 10 Hz, IRQ path exercises full context save/restore, tick count prints to UART.
+2. ~~**Page tables + enable MMU**~~ — Done. Identity-mapped L0→L1→L2 hierarchy with 2MB blocks, L3 4KB pages for kernel region with W^X permissions (.text RX, .rodata RO, .data/.bss/.stack RW NX).
 3. **Heap allocator** — Carve out a region for dynamic allocation. Bump allocator (advance pointer, never free) is enough to start. Unlocks dynamic data structures.
-4. **Threads + scheduler** — Create thread contexts, implement round-robin in `irq_handler`, launch with `enter_first_thread`. The payoff: actual preemptive multitasking. Two threads printing alternating messages.
+4. **Kernel threads + scheduler** — Create thread contexts, implement round-robin in `irq_handler`. Two threads printing alternating messages. These are kernel threads (all EL1) — a useful stepping stone before userspace.
+5. **Syscall interface** — `svc` handler, syscall table, argument passing convention. Where the traditional privilege model gets real.
+6. **Per-process address spaces** — Migrate kernel to TTBR1 (upper VA), TTBR0 per-process, ASID management. Context switch swaps TTBR0.
+7. **First userspace process** — EL1→EL0 drop, runs a trivial program, traps back via syscall.
 
-Dependencies: Timer and page tables are independent. Scheduler needs both timer (for preemption) and heap (for thread contexts).
+Dependencies: Timer and page tables are independent (done). Scheduler needs timer (done) + heap. Steps 5-7 are where the privilege model decision gets tested — this is where we find out if from-scratch is still tractable.
 
 **Risk:** If we decide to build on an existing kernel, this code is throwaway. That's fine — the knowledge isn't throwaway.

@@ -404,14 +404,11 @@ This decision is being resolved incrementally through a bare-metal research spik
 
 **Rust as kernel language (tentative).** Chosen for: compile-time memory safety at hardware boundary, strong type system catches bugs in AI-generated code, built-in `aarch64-unknown-none` target on stable Rust. The designer reads more than writes; Rust's compiler guardrails are valuable for code review. Revisitable if Rust proves impractical for bare-metal work.
 
+**Privilege model (settled): Traditional — all non-kernel code at EL0.** Hardware isolation via EL0/EL1 boundary. Editors, viewers, and all userspace code run at EL0 and interact with the kernel via syscalls. This is the arm64-standard approach, provides one simple programming model (no two-tier trust), and maximally tests the from-scratch kernel commitment (forces syscall interface, per-process address spaces, IPC — the hard parts). Syscall overhead on editor operations is acceptable because the edit protocol batches between beginOp/endOp boundaries (coarser-grained than per-keystroke).
+
+**Address space model (settled): Split TTBR — TTBR1 for kernel, TTBR0 per-process.** Follows directly from the privilege model. Each process gets its own TTBR0 (lower VA range, userspace mappings); TTBR1 (upper VA range, kernel mappings) stays constant across all processes. Context switch swaps TTBR0 + ASID. On syscall entry (EL0→EL1), kernel pages are already mapped via TTBR1 — no page table switch needed. This is the architectural reason arm64 provides two translation table base registers. Current code uses TTBR0-only; migration to split TTBR is a future implementation step.
+
 ### Open sub-decisions
-
-**Privilege model.** EL1 kernel is settled (by ruling out hypervisor), but what runs at EL0? Three options:
-- *Traditional:* everything except kernel at EL0. Hardware isolation; syscall overhead for every editor write.
-- *Language-safety:* everything at EL1, rely on Rust type system. Fast; but `unsafe` breaks all guarantees and blocks non-Rust editors.
-- *Hybrid:* kernel + viewers at EL1, editors at EL0. Viewers are pure/read-only (safe at EL1); editors write (benefit from EL0 isolation).
-
-**Address space model.** Current code uses TTBR0 only (single page table hierarchy). Traditional kernel/user split uses TTBR0 (user) + TTBR1 (kernel). Not yet committed — current state is "not implemented yet" rather than deliberate. Depends on privilege model.
 
 **IPC mechanism.** Critical for the edit protocol's concrete implementation. Shared memory? Message passing? Something else? Not yet explored.
 
@@ -422,6 +419,8 @@ This decision is being resolved incrementally through a bare-metal research spik
 - **Hard realtime:** Throughput cost, task starvation, fights dynamic plugin loading, lock-free complexity in connective tissue, no perceptible benefit for desktop A/V. See insights log.
 - **Hypervisor-based (EL2):** VM-boundary IPC too expensive for immediate-write model, adds complexity layer, partitioning contradicts no-POSIX stance. See insights log.
 - **Cooperative-only multitasking:** Can't guarantee responsiveness — a buggy non-yielding editor freezes the system.
+- **Language-safety privilege (everything at EL1):** Requires all code to be in a verifiable language. `unsafe` breaks all guarantees. Blocks non-Rust editors. Unsolved research problem for extensibility (Singularity OS required Sing#). Displaces hardware isolation complexity into verification/sandbox complexity — total complexity conserved, but in a harder-to-reason-about form.
+- **Hybrid privilege (kernel+viewers at EL1, editors at EL0):** Creates two programming models — viewers and editors have different execution environments. Two ways to do the same thing (Decision #4). The trust boundary (view=safe, edit=unsafe) is a policy choice that can be expressed through capabilities within the traditional model, not an architectural split.
 
 ---
 
