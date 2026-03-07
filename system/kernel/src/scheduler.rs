@@ -43,6 +43,18 @@ pub fn exit_current() -> ! {
     }
 }
 
+/// Exit the current thread from syscall context.
+///
+/// Unlike `exit_current()` (which spins for a timer tick), this returns
+/// the next thread's Context pointer directly to the SVC handler.
+pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
+    let s = state();
+
+    s.threads[s.current].state = ThreadState::Exited;
+
+    schedule(ctx)
+}
+
 /// Initialize the scheduler. Call after `heap::init()`, before `timer::init()`.
 ///
 /// Creates a Thread for the boot thread (already running) and updates
@@ -109,6 +121,18 @@ pub fn spawn(entry: fn() -> !) {
     s.next_id += 1;
 
     let thread = Thread::new(id, entry);
+
+    s.threads.push(thread);
+}
+
+/// Spawn a new EL0 thread.
+pub fn spawn_user(entry: usize, user_stack_top: u64) {
+    let s = state();
+    let id = s.next_id;
+
+    s.next_id += 1;
+
+    let thread = Thread::new_user(id, entry, user_stack_top);
 
     s.threads.push(thread);
 }

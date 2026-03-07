@@ -8,6 +8,7 @@ const DESC_BLOCK: u64 = 0 << 1;
 const DESC_PAGE: u64 = 0b11; // valid page descriptor (L3)
 const DESC_TABLE: u64 = 1 << 1;
 const DESC_VALID: u64 = 1 << 0;
+const AP_EL0: u64 = 1 << 6; // AP[1]=1: EL0 read-write access
 const PXN: u64 = 1 << 53;
 const SH_INNER: u64 = 0b11 << 8;
 const UXN: u64 = 1 << 54;
@@ -99,6 +100,7 @@ fn build_tables() -> u64 {
                 continue;
             }
 
+            // SPIKE: AP_EL0 added, UXN removed for EL0 testing. Revert in step 6.
             l2_1.entries[idx] = (pa & 0xFFFF_FFFF_FFE0_0000)
                 | DESC_VALID
                 | DESC_BLOCK
@@ -106,7 +108,7 @@ fn build_tables() -> u64 {
                 | AF
                 | SH_INNER
                 | PXN
-                | UXN;
+                | AP_EL0;
         }
 
         // L3: 4KB pages for the kernel's 2MB block.

@@ -36,7 +36,9 @@ src/
   memory.rs     — MMU setup, page tables, W^X permissions
   heap.rs       — bump allocator (16 MiB)
   scheduler.rs  — round-robin preemptive scheduler
-  thread.rs     — kernel thread struct + creation
+  thread.rs     — kernel + user thread creation
+  syscall.rs    — syscall dispatcher (exit, write, yield)
+  user_test.rs  — EL0 test stub (hello world via syscalls)
   gic.rs        — GICv2 distributor + CPU interface
   timer.rs      — ARM generic timer (EL1 physical, 10 Hz)
   uart.rs       — PL011 UART driver (TX only)

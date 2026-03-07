@@ -47,6 +47,9 @@ SECTIONS
     . = . + 0x10000; /* 64 KiB stack */
     __stack_top = .;
   }
-  . = ALIGN(4096);
+  . = ALIGN(0x200000);     /* next 2MB boundary -> lands in bulk RAM block */
+  .user_code : {
+    *(.user_code)
+  }
   __kernel_end = .;
 }

@@ -5,6 +5,7 @@
 // Rust is .global. Rust entry points called from here:
 //   kernel_main()                           — kernel entry (never returns)
 //   irq_handler(*mut Context) -> *const Context — IRQ dispatch
+//   svc_handler(*mut Context) -> *const Context — SVC dispatch
 //
 // Exports to Rust:
 //   enter_first_thread(ctx: *const Context)      — launch first thread via eret
@@ -22,8 +23,8 @@
 .equ CTX_SP,        0x0F8   // sp: u64
 .equ CTX_ELR,       0x100   // elr: u64
 .equ CTX_SPSR,      0x108   // spsr: u64
-.equ CTX_SP_EL0,    0x110   // sp_el0: u64          (reserved for EL0)
-.equ CTX_TPIDR_EL0, 0x118   // tpidr_el0: u64       (reserved for EL0)
+.equ CTX_SP_EL0,    0x110   // sp_el0: u64          (EL0 user stack)
+.equ CTX_TPIDR_EL0, 0x118   // tpidr_el0: u64       (EL0 thread-local base)
 .equ CTX_Q,         0x120   // q: [u128; 32]        — FP/SIMD q0..q31
 .equ CTX_FPCR,      0x320   // fpcr: u64            (low 32 bits)
 .equ CTX_FPSR,      0x328   // fpsr: u64            (low 32 bits)
@@ -153,7 +154,7 @@ vectors:
   .space 0x80 - 4
 
   // 0x400: Lower EL (AArch64), Sync
-  b exc_sync
+  b exc_svc
   .space 0x80 - 4
   // 0x480: Lower EL (AArch64), IRQ
   b exc_irq
@@ -350,9 +351,83 @@ exc_fatal:
 // TPIDR_EL1 always holds a pointer to the running thread's Context.
 // Field offsets use the CTX_* constants defined at the top of this file.
 //
-// Macro: restore full context from [x19] and eret.
-// x19 is the base pointer and is restored last.
+// save_context: save full context into [TPIDR_EL1], set x0 = Context*.
+// restore_context_and_eret: restore full context from [x19] and eret.
 // --------------------------------------------------------------------------
+
+.macro save_context
+  // Scratch: push x9/x10 to read TPIDR_EL1 without losing interrupted state.
+  sub sp, sp, #0x10
+  str x9,  [sp, #0x00]
+  str x10, [sp, #0x08]
+
+  // x9 = current Context*
+  mrs x9, tpidr_el1
+
+  // GPRs: x0..x8.
+  stp x0,  x1,  [x9, #(CTX_X + 0*8)]
+  stp x2,  x3,  [x9, #(CTX_X + 2*8)]
+  stp x4,  x5,  [x9, #(CTX_X + 4*8)]
+  stp x6,  x7,  [x9, #(CTX_X + 6*8)]
+  str x8,        [x9, #(CTX_X + 8*8)]
+
+  // Original x9/x10 from scratch area.
+  ldr x0, [sp, #0x00]
+  str x0, [x9, #(CTX_X +  9*8)]
+  ldr x0, [sp, #0x08]
+  str x0, [x9, #(CTX_X + 10*8)]
+
+  // GPRs: x11..x30.
+  stp x11, x12, [x9, #(CTX_X + 11*8)]
+  stp x13, x14, [x9, #(CTX_X + 13*8)]
+  stp x15, x16, [x9, #(CTX_X + 15*8)]
+  stp x17, x18, [x9, #(CTX_X + 17*8)]
+  stp x19, x20, [x9, #(CTX_X + 19*8)]
+  stp x21, x22, [x9, #(CTX_X + 21*8)]
+  stp x23, x24, [x9, #(CTX_X + 23*8)]
+  stp x25, x26, [x9, #(CTX_X + 25*8)]
+  stp x27, x28, [x9, #(CTX_X + 27*8)]
+  stp x29, x30, [x9, #(CTX_X + 29*8)]
+
+  // SP (pre-scratch), ELR, SPSR.
+  add x0, sp, #0x10
+  str x0, [x9, #CTX_SP]
+  mrs x0, elr_el1
+  str x0, [x9, #CTX_ELR]
+  mrs x0, spsr_el1
+  str x0, [x9, #CTX_SPSR]
+
+  // SP_EL0, TPIDR_EL0 (needed for EL0 threads, harmless for EL1).
+  mrs x0, sp_el0
+  str x0, [x9, #CTX_SP_EL0]
+  mrs x0, tpidr_el0
+  str x0, [x9, #CTX_TPIDR_EL0]
+
+  // FP/SIMD: q0..q31, FPCR, FPSR.
+  stp q0,  q1,  [x9, #(CTX_Q +  0*16)]
+  stp q2,  q3,  [x9, #(CTX_Q +  2*16)]
+  stp q4,  q5,  [x9, #(CTX_Q +  4*16)]
+  stp q6,  q7,  [x9, #(CTX_Q +  6*16)]
+  stp q8,  q9,  [x9, #(CTX_Q +  8*16)]
+  stp q10, q11, [x9, #(CTX_Q + 10*16)]
+  stp q12, q13, [x9, #(CTX_Q + 12*16)]
+  stp q14, q15, [x9, #(CTX_Q + 14*16)]
+  stp q16, q17, [x9, #(CTX_Q + 16*16)]
+  stp q18, q19, [x9, #(CTX_Q + 18*16)]
+  stp q20, q21, [x9, #(CTX_Q + 20*16)]
+  stp q22, q23, [x9, #(CTX_Q + 22*16)]
+  stp q24, q25, [x9, #(CTX_Q + 24*16)]
+  stp q26, q27, [x9, #(CTX_Q + 26*16)]
+  stp q28, q29, [x9, #(CTX_Q + 28*16)]
+  stp q30, q31, [x9, #(CTX_Q + 30*16)]
+  mrs x0, fpcr
+  str x0, [x9, #CTX_FPCR]
+  mrs x0, fpsr
+  str x0, [x9, #CTX_FPSR]
+
+  // x0 = Context* for Rust handler.
+  mov x0, x9
+.endm
 
 .macro restore_context_and_eret
   // SP, ELR, SPSR.
@@ -362,6 +437,12 @@ exc_fatal:
   msr elr_el1, x1
   ldr x1, [x19, #CTX_SPSR]
   msr spsr_el1, x1
+
+  // SP_EL0, TPIDR_EL0 (needed for EL0 threads, harmless for EL1).
+  ldr x1, [x19, #CTX_SP_EL0]
+  msr sp_el0, x1
+  ldr x1, [x19, #CTX_TPIDR_EL0]
+  msr tpidr_el0, x1
 
   // FP/SIMD: q0..q31, FPCR, FPSR.
   ldp q0,  q1,  [x19, #(CTX_Q +  0*16)]
@@ -415,78 +496,40 @@ exc_fatal:
 // each thread's SP will be live here, meaning:
 //   - Every thread stack must have headroom for the deepest IRQ call chain.
 //   - A thread stack overflow could corrupt the IRQ handler.
+// For EL0 threads, SP is SP_EL1 (kernel stack) on IRQ entry — safe.
 // A dedicated per-CPU IRQ stack (swap SP on entry) is the standard fix.
 // --------------------------------------------------------------------------
 
 exc_irq:
-  // Scratch: save x9/x10 to read TPIDR_EL1 without losing interrupted state.
-  sub sp, sp, #0x10
-  str x9,  [sp, #0x00]
-  str x10, [sp, #0x08]
-
-  // x9 = current Context*
-  mrs x9, tpidr_el1
-
-  // GPRs: x0..x8.
-  stp x0,  x1,  [x9, #(CTX_X + 0*8)]
-  stp x2,  x3,  [x9, #(CTX_X + 2*8)]
-  stp x4,  x5,  [x9, #(CTX_X + 4*8)]
-  stp x6,  x7,  [x9, #(CTX_X + 6*8)]
-  str x8,        [x9, #(CTX_X + 8*8)]
-
-  // Original x9/x10 from scratch area.
-  ldr x0, [sp, #0x00]
-  str x0, [x9, #(CTX_X +  9*8)]
-  ldr x0, [sp, #0x08]
-  str x0, [x9, #(CTX_X + 10*8)]
-
-  // GPRs: x11..x30.
-  stp x11, x12, [x9, #(CTX_X + 11*8)]
-  stp x13, x14, [x9, #(CTX_X + 13*8)]
-  stp x15, x16, [x9, #(CTX_X + 15*8)]
-  stp x17, x18, [x9, #(CTX_X + 17*8)]
-  stp x19, x20, [x9, #(CTX_X + 19*8)]
-  stp x21, x22, [x9, #(CTX_X + 21*8)]
-  stp x23, x24, [x9, #(CTX_X + 23*8)]
-  stp x25, x26, [x9, #(CTX_X + 25*8)]
-  stp x27, x28, [x9, #(CTX_X + 27*8)]
-  stp x29, x30, [x9, #(CTX_X + 29*8)]
-
-  // SP (pre-scratch), ELR, SPSR.
-  add x0, sp, #0x10
-  str x0, [x9, #CTX_SP]
-  mrs x0, elr_el1
-  str x0, [x9, #CTX_ELR]
-  mrs x0, spsr_el1
-  str x0, [x9, #CTX_SPSR]
-
-  // FP/SIMD: q0..q31, FPCR, FPSR.
-  stp q0,  q1,  [x9, #(CTX_Q +  0*16)]
-  stp q2,  q3,  [x9, #(CTX_Q +  2*16)]
-  stp q4,  q5,  [x9, #(CTX_Q +  4*16)]
-  stp q6,  q7,  [x9, #(CTX_Q +  6*16)]
-  stp q8,  q9,  [x9, #(CTX_Q +  8*16)]
-  stp q10, q11, [x9, #(CTX_Q + 10*16)]
-  stp q12, q13, [x9, #(CTX_Q + 12*16)]
-  stp q14, q15, [x9, #(CTX_Q + 14*16)]
-  stp q16, q17, [x9, #(CTX_Q + 16*16)]
-  stp q18, q19, [x9, #(CTX_Q + 18*16)]
-  stp q20, q21, [x9, #(CTX_Q + 20*16)]
-  stp q22, q23, [x9, #(CTX_Q + 22*16)]
-  stp q24, q25, [x9, #(CTX_Q + 24*16)]
-  stp q26, q27, [x9, #(CTX_Q + 26*16)]
-  stp q28, q29, [x9, #(CTX_Q + 28*16)]
-  stp q30, q31, [x9, #(CTX_Q + 30*16)]
-  mrs x0, fpcr
-  str x0, [x9, #CTX_FPCR]
-  mrs x0, fpsr
-  str x0, [x9, #CTX_FPSR]
-
-  // Call Rust: x0 = current Context*, returns next Context*.
-  mov x0, x9
+  save_context
   bl irq_handler
+  msr tpidr_el1, x0
+  mov x19, x0
+  restore_context_and_eret
 
-  // Switch to returned context.
+// --------------------------------------------------------------------------
+// exc_svc: SVC handler for EL0 syscalls.
+//
+// Validates ESR.EC = 0x15 (SVC from AArch64). Non-SVC sync exceptions
+// from lower EL route to exc_sync (fatal).
+//
+// --------------------------------------------------------------------------
+
+exc_svc:
+  // Preserve x10 before ESR check (save_context expects user's x10 live).
+  sub sp, sp, #0x10
+  str x10, [sp]
+
+  mrs x10, esr_el1
+  lsr x10, x10, #26
+  cmp x10, #0x15            // EC=0x15 = SVC from AArch64
+
+  ldr x10, [sp]             // restore user x10
+  add sp, sp, #0x10
+
+  b.ne exc_sync
+  save_context
+  bl svc_handler
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret

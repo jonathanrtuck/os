@@ -13,9 +13,11 @@ mod heap;
 mod memory;
 mod mmio;
 mod scheduler;
+mod syscall;
 mod thread;
 mod timer;
 mod uart;
+mod user_test;
 
 /// Thread context saved/restored across exception boundaries.
 ///
@@ -27,8 +29,8 @@ pub struct Context {
     pub sp: u64,
     pub elr: u64,
     pub spsr: u64,
-    pub sp_el0: u64,    // reserved for EL0 support
-    pub tpidr_el0: u64, // reserved for EL0 support
+    pub sp_el0: u64,    // user stack pointer (EL0 threads)
+    pub tpidr_el0: u64, // user thread-local base (EL0 threads)
     pub q: [u128; 32],  // FP/SIMD q0..q31
     pub fpcr: u64,      // FP control register (low 32 bits)
     pub fpsr: u64,      // FP status register (low 32 bits)
@@ -56,6 +58,20 @@ pub extern "C" fn kernel_main() -> ! {
     heap::init();
     gic::init();
     scheduler::init();
+
+    // Spawn EL0 test thread.
+    let user_stack_layout = core::alloc::Layout::from_size_align(16 * 1024, 16).unwrap();
+    let user_stack_bottom = unsafe { alloc::alloc::alloc_zeroed(user_stack_layout) };
+
+    assert!(!user_stack_bottom.is_null());
+
+    let user_stack_top = unsafe { user_stack_bottom.add(16 * 1024) } as u64;
+
+    scheduler::spawn_user(
+        user_test::user_test_entry as *const () as usize,
+        user_stack_top,
+    );
+
     timer::init(); // Unmasks IRQs — all data structures must be ready above this line.
 
     uart::puts("🥾 booted.\n");
@@ -67,8 +83,8 @@ pub extern "C" fn kernel_main() -> ! {
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn irq_handler(current: *mut Context) -> *const Context {
-    let mut next: *const Context = current;
+pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
+    let mut next: *const Context = ctx;
 
     if let Some(iar) = gic::acknowledge() {
         let id = iar & 0x3FF;
@@ -76,13 +92,18 @@ pub extern "C" fn irq_handler(current: *mut Context) -> *const Context {
         if id == timer::IRQ_ID {
             timer::handle_irq();
 
-            next = scheduler::schedule(current);
+            next = scheduler::schedule(ctx);
         }
 
         gic::end_of_interrupt(iar);
     }
 
     next
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
+    syscall::dispatch(ctx)
 }
 
 #[panic_handler]
