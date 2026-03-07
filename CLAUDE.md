@@ -70,7 +70,7 @@ Read these before making any design suggestions:
 
 **Session 2026-03-06:** Major progress on Decision #16 (Technical Foundation) through bare-metal research spike and design discussion.
 
-**Kernel code exists:** `system/kernel/` directory with bare-metal aarch64 boot sequence (boot.S), Rust entry points (main.rs), and PL011 UART driver (uart.rs). Builds for `aarch64-unknown-none` on stable Rust. Infrastructure: EL2→EL1 drop, exception vectors, full context save/restore (GPRs + FP/SIMD), IRQ-driven context switch, MMU setup, fatal exception handler. Prints "hello, world" to UART.
+**Kernel code exists:** `system/kernel/` directory with bare-metal aarch64 boot sequence (boot.S), Rust entry points (main.rs), and PL011 UART driver (uart.rs). Builds for `aarch64-unknown-none` on nightly Rust (`rust-toolchain.toml` handles this automatically). Infrastructure: EL2→EL1 drop, exception vectors, full context save/restore (GPRs + FP/SIMD), IRQ-driven context switch, MMU setup, fatal exception handler. Prints "hello, world" to UART.
 
 **Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process).
 

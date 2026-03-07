@@ -51,7 +51,7 @@ static BOOT_CTX: SyncUnsafeCell<MaybeUninit<Context>> = SyncUnsafeCell::new(Mayb
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
-    uart::puts("booting…\n");
+    uart::puts("🥾 booting…\n");
 
     // Point TPIDR_EL1 at the boot context so exc_irq has somewhere to
     // save registers when the first interrupt fires.
@@ -67,7 +67,7 @@ pub extern "C" fn kernel_main() -> ! {
     gic::init();
     timer::init();
 
-    uart::puts("booted.\n");
+    uart::puts("🥾 booted.\n");
 
     loop {}
 }
@@ -81,7 +81,7 @@ pub extern "C" fn irq_handler(current: *mut Context) -> *const Context {
 
         if id == timer::IRQ_ID {
             timer::handle_irq();
-            uart::puts("\rtick ");
+            uart::puts("\r⏱️ ticking… ");
             uart::put_u64(timer::ticks());
         }
 
@@ -93,7 +93,7 @@ pub extern "C" fn irq_handler(current: *mut Context) -> *const Context {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    uart::puts("\npanic.\n");
+    uart::puts("\n😱 panicking…\n");
 
     if let Some(location) = info.location() {
         uart::puts(location.file());
