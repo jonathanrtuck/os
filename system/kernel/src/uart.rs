@@ -22,6 +22,27 @@ pub fn puts(s: &str) {
     }
 }
 
+pub fn put_hex(v: u64) {
+    let mut buf = [0u8; 16];
+    let mut i = 0;
+
+    while i < 16 {
+        let shift = 60 - (i * 4);
+        let nib = ((v >> shift) & 0xF) as u8;
+
+        buf[i] = match nib {
+            0..=9 => b'0' + nib,
+            _ => b'A' + (nib - 10),
+        };
+
+        i += 1;
+    }
+
+    for b in buf {
+        putc(b);
+    }
+}
+
 pub fn put_u32(mut n: u32) {
     let mut buf = [0u8; 10];
     let mut i = buf.len();

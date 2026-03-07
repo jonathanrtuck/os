@@ -9,6 +9,7 @@ use core::panic::PanicInfo;
 core::arch::global_asm!(include_str!("boot.S"));
 
 mod gic;
+mod memory;
 mod mmio;
 mod timer;
 mod uart;
@@ -50,6 +51,8 @@ static BOOT_CTX: SyncUnsafeCell<MaybeUninit<Context>> = SyncUnsafeCell::new(Mayb
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
+    uart::puts("booting…\n");
+
     // Point TPIDR_EL1 at the boot context so exc_irq has somewhere to
     // save registers when the first interrupt fires.
     unsafe {
@@ -62,7 +65,9 @@ pub extern "C" fn kernel_main() -> ! {
 
     gic::init();
     timer::init();
-    uart::puts("hello, world\n");
+    memory::init();
+
+    uart::puts("booted.\n");
 
     loop {}
 }
