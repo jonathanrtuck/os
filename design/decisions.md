@@ -10,25 +10,25 @@ This document tracks every design decision — settled, tentative, and abandoned
 
 Which decisions are stable enough to write code against? This guides when to code vs. when to keep designing.
 
-| Decision               | Status    | Readiness            | Notes                                                                                 |
-| ---------------------- | --------- | -------------------- | ------------------------------------------------------------------------------------- |
-| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                             |
-| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                |
-| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                |
-| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                          |
-| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                  |
-| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).   |
-| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.     |
-| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                              |
-| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. IPC mechanism depends on §16.                                 |
-| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                       |
-| #11 Rendering Tech     | Unsettled | **Not safe**         | High-leverage unsettled decision. Blocks layout, tech foundation, interaction.        |
-| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                              |
-| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                  |
-| #14 Compound Documents | Settled   | **Behind interface** | Manifest + layout model is firm. Rendering depends on §11. Open sub-questions remain. |
-| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                |
+| Decision               | Status    | Readiness            | Notes                                                                                                              |
+| ---------------------- | --------- | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                                                          |
+| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                                             |
+| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                                             |
+| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                                                       |
+| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                                               |
+| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).                                |
+| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.                                  |
+| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                                           |
+| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. IPC mechanism depends on §16.                                                              |
+| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                                    |
+| #11 Rendering Tech     | Unsettled | **Not safe**         | High-leverage unsettled decision. Blocks layout, tech foundation, interaction.                                     |
+| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                                           |
+| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                               |
+| #14 Compound Documents | Settled   | **Behind interface** | Manifest + layout model is firm. Rendering depends on §11. Open sub-questions remain.                              |
+| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                             |
 | #16 Tech Foundation    | Partial   | **Partially safe**   | IPC, process architecture, binary format now settled. Remaining: driver model, filesystem, multi-core, scheduling. |
-| #17 Interaction Model  | Unsettled | **Not safe**         | Depends on §11, §2, §7.                                                               |
+| #17 Interaction Model  | Unsettled | **Not safe**         | Depends on §11, §2, §7.                                                                                            |
 
 **Readiness key:**
 
@@ -40,17 +40,17 @@ Which decisions are stable enough to write code against? This guides when to cod
 
 How confident are we in each settled decision? What would trigger revisiting? What's the fallback? Only lists decisions where risk is meaningful — axioms and their direct consequences are omitted.
 
-| Decision | Confidence | Revisit trigger | Fallback | Blast radius |
-| --- | --- | --- | --- | --- |
-| Edit protocol (#9) | High | beginOp/endOp granularity wrong for real editors | Adjust boundary semantics | Undo model, IPC messages |
-| Compound docs (#14) | Medium-High | Five layout models miss a real use case | Add or merge models | Layout engine |
-| Undo: COW snapshots (#12) | High | Snapshots too expensive for fine-grained ops | Operation-log undo | Filesystem integration |
-| File org: queries (#7) | High | Query performance unacceptable | Path-based fallback | Metadata DB, shell |
-| Handles (#16) | High | Need sub-document access granularity | Extend rights model | Handle table, access control |
-| IPC: ring buffers (#16) | Medium-High | Complexity unmanageable or perf insufficient | Syscall-based message passing | IPC layer, editor-OS interface |
-| Process arch: one OS service (#16) | Medium | Crashes require component isolation | Split into multiple services | IPC topology |
-| From-scratch kernel (#16) | Medium | Driver/hardware blockers | Existing kernel (Zircon, Linux) | Large, but behind syscall API |
-| Rust (#16) | High | Bare-metal Rust impractical at scale | C kernel, Rust userspace | Kernel source only |
+| Decision                           | Confidence  | Revisit trigger                                  | Fallback                        | Blast radius                   |
+| ---------------------------------- | ----------- | ------------------------------------------------ | ------------------------------- | ------------------------------ |
+| Edit protocol (#9)                 | High        | beginOp/endOp granularity wrong for real editors | Adjust boundary semantics       | Undo model, IPC messages       |
+| Compound docs (#14)                | Medium-High | Five layout models miss a real use case          | Add or merge models             | Layout engine                  |
+| Undo: COW snapshots (#12)          | High        | Snapshots too expensive for fine-grained ops     | Operation-log undo              | Filesystem integration         |
+| File org: queries (#7)             | High        | Query performance unacceptable                   | Path-based fallback             | Metadata DB, shell             |
+| Handles (#16)                      | High        | Need sub-document access granularity             | Extend rights model             | Handle table, access control   |
+| IPC: ring buffers (#16)            | Medium-High | Complexity unmanageable or perf insufficient     | Syscall-based message passing   | IPC layer, editor-OS interface |
+| Process arch: one OS service (#16) | Medium      | Crashes require component isolation              | Split into multiple services    | IPC topology                   |
+| From-scratch kernel (#16)          | Medium      | Driver/hardware blockers                         | Existing kernel (Zircon, Linux) | Large, but behind syscall API  |
+| Rust (#16)                         | High        | Bare-metal Rust impractical at scale             | C kernel, Rust userspace        | Kernel source only             |
 
 **Key principle:** Decisions marked "Behind interface" in Implementation Readiness are inherently lower risk — the interface is stable even if the implementation changes. Decisions that _define_ interfaces are higher risk because changing them ripples outward.
 

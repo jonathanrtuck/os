@@ -18,22 +18,21 @@ This project explores inverting that: **OS → Document → Tool.** Documents ha
 
 ## Status
 
-**Design phase with research spikes.** 12 of 17 design decisions are settled. A bare-metal aarch64 kernel boots in QEMU as a research spike to inform the technical foundation decision.
-
 See the [decision register](design/decisions.md) for the full decision landscape and the [exploration journal](design/journal.md) for active threads and open questions.
 
 ## Project Structure
 
-```
+```txt
 os/
 ├── design/                      # Design documentation
 │   ├── concept.md               # The core idea: OS → Document → Tool
 │   ├── foundations.md           # Glossary, guiding beliefs, external boundaries
 │   ├── decisions.md             # 17 tiered design decisions with tradeoffs
 │   ├── decision-map.mermaid     # Visual dependency graph
-│   └── journal.md               # Open threads, insights, research spikes
+│   ├── journal.md               # Open threads, insights, research spikes
+│   └── architecture.mermaid     # System architecture diagram
 ├── system/                      # OS implementation
-│   └── kernel/                  # Bare-metal aarch64 research spike (Rust)
+│   └── kernel/                  # Bare-metal aarch64 Rust kernel
 ├── CLAUDE.md                    # AI collaboration context
 ├── README.md
 └── LICENSE
@@ -50,20 +49,17 @@ If you're curious about the design, read in this order:
 
 ## Building the Kernel
 
-The kernel is a research spike — a bare-metal aarch64 binary that boots in QEMU and prints to serial console.
+The kernel is a bare-metal aarch64 binary that boots in QEMU and prints to serial console.
 
 **Prerequisites:** Rust toolchain, QEMU
 
-```bash
+```shell
 # Install the cross-compilation target
 rustup target add aarch64-unknown-none
 
-# Build
+# Build and run
 cd system/kernel
-./build.sh
-
-# Run in QEMU (Ctrl-A X to quit)
-./run.sh
+cargo run --release   # builds, then launches QEMU
 ```
 
 ## Influences

@@ -12,7 +12,7 @@ This mirrors the physical desktop analogy. A paper on your desk exists independe
 
 **A document is a file. A file has a mimetype. That's the whole model.**
 
-- The OS can natively *view* all common mimetypes: text, images, audio, video, PDFs, etc.
+- The OS can natively _view_ all common mimetypes: text, images, audio, video, PDFs, etc.
 - Editing requires installing an editor that supports that mimetype.
 - Editors are tools you bring to documents, not containers that hold them.
 - The OS does not need a "project" concept. The filesystem already provides directories for user-level organization.

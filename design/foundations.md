@@ -51,18 +51,23 @@ These terms have specific meanings in this design. They are layered — each bui
 The OS does not exist in a vacuum. It builds on external standards that it adopts rather than reinvents. These are the constraints imposed by external reality.
 
 **Hardware (non-negotiable):**
+
 - arm64 (Apple Silicon). CPU, GPU (Metal), storage (NVMe), display, input (USB HID), networking (WiFi, Ethernet, Bluetooth), boot (UEFI).
 
 **Networking (non-negotiable for internet connectivity):**
+
 - TCP/IP, HTTP/HTTPS, DNS, TLS, WebSocket.
 
 **Text (adopted deeply):**
+
 - Unicode for character encoding. OpenType/TrueType for fonts.
 
 **Content identity (adopted deeply — foundational to the OS model):**
+
 - IANA mimetype registry. The OS's content type system is built on this. See the Decomposition Spectrum for why this is the chosen abstraction boundary.
 
 **Media and file formats (adopted at interop boundary):**
+
 - Image: PNG, JPEG, WebP, SVG, etc.
 - Audio: AAC, MP3, FLAC, WAV, etc.
 - Video: H.264/H.265, VP9, AV1, etc.
@@ -70,6 +75,7 @@ The OS does not exist in a vacuum. It builds on external standards that it adopt
 - Each format has a decoder/encoder as a leaf node. New format support = new leaf node; the OS doesn't change.
 
 **Other:**
+
 - Cryptography: standard primitives (AES, SHA-256, RSA/EC).
 - Time: UTC, IANA timezone database.
 - Color: sRGB, Display P3, ICC profiles.
@@ -118,7 +124,7 @@ This OS draws its line at the **mimetype level**, aligned with the IANA mimetype
 
 **Compound documents compose at the mimetype level.** Their parts are things that have mimetypes — a slideshow references `image/png` and `text/plain` files, not pixel rows or code point sequences. An atomic content type (a video file, an image, a text file) has internal structure, but that structure is the content type's own concern, not the OS's. A video file's temporal compression, frame dependencies, and codec metadata are properties of `video/mp4`, not a layout model the OS decomposes.
 
-**The `application/octet-stream` escape hatch.** The mimetype system has a bottom: `application/octet-stream` means "unknown bytes." This is the escape hatch back to Unix-level agnosticism. But it's self-penalizing — labeling something `application/octet-stream` opts out of everything the OS provides: no viewer, no editor binding, no content extraction, no meaningful composition in compound documents. You *can* bypass the type system, but you only hurt yourself. The escape hatch exists for genuinely unknown data (e.g., importing a file the OS has never seen), not as a useful alternative path.
+**The `application/octet-stream` escape hatch.** The mimetype system has a bottom: `application/octet-stream` means "unknown bytes." This is the escape hatch back to Unix-level agnosticism. But it's self-penalizing — labeling something `application/octet-stream` opts out of everything the OS provides: no viewer, no editor binding, no content extraction, no meaningful composition in compound documents. You _can_ bypass the type system, but you only hurt yourself. The escape hatch exists for genuinely unknown data (e.g., importing a file the OS has never seen), not as a useful alternative path.
 
 **The parallel:** Unix aligned its abstraction boundary with hardware (bytes). This OS aligns its abstraction boundary with an established content identity standard (mimetypes). Both lines are pragmatic but anchored to something external and stable. Both allow going deeper, but doing so stops serving the system's purposes.
 
@@ -151,6 +157,7 @@ The OS renderer is a **pure function of state**: file bytes + mimetype + view st
 **The desktop analogy:** A document is on your desk, open to a page. You pick up a pen — you can write where you're looking. Put it down, pick up a highlighter — you can highlight where you're looking. Put down all tools — you can still look and flip pages. Where you are in the document is independent of which tool you hold.
 
 **Input routing:**
+
 - Navigation (scroll, page, cursor movement) → always the OS, with or without an editor attached
 - Modification (keystrokes, brush strokes) → the active editor, which issues operations through the edit protocol
 - No editor attached → modification input ignored or handled as OS shortcuts
@@ -178,6 +185,7 @@ Editors don't own files directly. They issue **operations** through a protocol. 
 **Tools are modal.** Only one editor is active on a document at a time — the "pen on the desk" metaphor. You put one tool down before picking up another. This eliminates concurrent-editor composition as a protocol concern and makes the operation log a simple sequential list.
 
 **The protocol is thin:**
+
 - Editor calls `beginOperation(document, description)`.
 - Editor modifies the file through OS file APIs.
 - Editor calls `endOperation()`.
@@ -218,6 +226,7 @@ File history is provided by the COW filesystem's snapshot retention. "Show me th
 ### Collaboration-Ready Architecture
 
 The architecture supports future multi-user collaboration because:
+
 1. The operation log captures every change with attribution and ordering.
 2. Content-type handlers with rebase logic can resolve concurrent edits (the same machinery needed for selective undo).
 3. Cross-type conflicts are mediated by the layout engine, not the edit protocol.
@@ -245,6 +254,7 @@ If the rendering technology is a web engine, CSS already provides flow, fixed, a
 ### Structure
 
 A compound document is a **manifest** (metadata file) that references:
+
 - Content files (real, independent files — a PNG, a text file, an audio clip)
 - A layout model (one of the five above)
 - Arrangement rules (positions, sizes, flow constraints, track synchronization)
@@ -254,6 +264,7 @@ The content files are real files in the filesystem, queryable and usable indepen
 ### Layout as Cross-Type Mediator
 
 The OS's layout engine handles cross-content-type interactions:
+
 - Resize an image → text reflows around it (flow layout engine responds)
 - Remove a time range in a video → corresponding audio is trimmed (timeline layout enforces track synchronization)
 - Reorder slides → sequence updates (canvas layout adjusts)
@@ -263,6 +274,7 @@ This means cross-type operations are never the edit protocol's problem. The layo
 ### Interop
 
 At boundaries, **translators** convert between the OS's internal representation and external formats:
+
 - Import .pptx → extract content as individual files, generate manifest with fixed canvas layout
 - Export to .pptx → read manifest + referenced files, pack into pptx structure
 - Import .docx → extract content, generate manifest with flow layout
@@ -275,6 +287,7 @@ Each translator is a leaf node — complex inside (parsing docx is genuinely har
 ## Open Questions (To Be Resolved)
 
 ### Technical Stack
+
 The beliefs and content model above should guide these choices, but they haven't been made yet:
 
 - Kernel architecture (microkernel vs. monolithic)
@@ -285,6 +298,7 @@ The beliefs and content model above should guide these choices, but they haven't
 - IPC mechanism (especially important given the editor protocol)
 
 ### Interaction Model
+
 The GUI's look, feel, and navigation are not yet defined:
 
 - Windowed, fullscreen-per-workspace, tiling, or something else?
@@ -301,6 +315,7 @@ The GUI's look, feel, and navigation are not yet defined:
 **Primary artifact:** A coherent, complete OS design. Implementation is selective — build to validate uncertain assumptions, stub or use off-the-shelf for the rest.
 
 **Success criteria (in priority order):**
+
 1. **Coherent design** — the design documents are thorough and defensible; when you pull on one thread, the whole thing holds together
 2. **Working prototype** — the most uncertain or interesting parts of the design are proven out with real code
 3. **Deep learning** — the designer understands OS design deeply through the process
@@ -308,6 +323,7 @@ The GUI's look, feel, and navigation are not yet defined:
 **Non-goal:** A daily driver. This OS does not need to replace the designer's actual computing environment.
 
 **Target use cases:** Personal workstation. Everything a single person does at a desktop computer for creative and knowledge work:
+
 - Text documents (reading, writing, editing)
 - Images (viewing, editing)
 - Audio (listening, editing)
