@@ -11,6 +11,7 @@ core::arch::global_asm!(include_str!("exception.S"));
 
 mod addr_space;
 mod asid;
+mod elf;
 mod gic;
 mod heap;
 mod memory;
@@ -21,7 +22,6 @@ mod syscall;
 mod thread;
 mod timer;
 mod uart;
-mod user_test;
 
 /// Thread context saved/restored across exception boundaries.
 ///
@@ -53,31 +53,54 @@ const _: () = {
     assert!(core::mem::size_of::<Context>() == 0x330);
 };
 
-/// User VA layout.
-const USER_CODE_VA: u64 = 0x0000_0000_0040_0000; // 4 MB
+const PAGE_SIZE: u64 = 4096;
 const USER_STACK_TOP: u64 = 0x0000_0000_8000_0000; // 2 GB
-const USER_STACK_VA: u64 = USER_STACK_TOP - 4096; // one page below top
+const USER_STACK_VA: u64 = USER_STACK_TOP - PAGE_SIZE;
+
+/// The init process ELF binary, compiled by build.rs and embedded in .rodata.
+/// Avoids needing a filesystem or bootloader protocol for the first process.
+static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
 
 extern "C" {
-    static __user_code_start: u8;
-    static __user_code_end: u8;
     static __kernel_end: u8;
 }
 
-fn spawn_user_test() {
+fn spawn_init() {
+    let header = elf::parse_header(INIT_ELF).expect("bad ELF header");
     let asid = asid::alloc();
     let mut addr_space = alloc::boxed::Box::new(addr_space::AddressSpace::new(asid));
-    // Map user code pages.
-    let code_start_pa = memory::virt_to_phys(unsafe { &__user_code_start as *const u8 as usize });
-    let code_end_pa = memory::virt_to_phys(unsafe { &__user_code_end as *const u8 as usize });
-    let code_size = code_end_pa - code_start_pa;
-    let code_pages = (code_size + 4095) / 4096;
 
-    for i in 0..code_pages {
-        let pa = code_start_pa + i * 4096;
-        let va = USER_CODE_VA + (i as u64) * 4096;
+    // Map each PT_LOAD segment from the ELF into the new address space.
+    // Assumes page-aligned vaddr (enforced by init's linker script).
+    // A general-purpose loader would handle within-page offsets for unaligned segments.
+    for i in 0..header.ph_count {
+        let seg = match elf::load_segment(INIT_ELF, &header, i).expect("bad program header") {
+            Some(seg) => seg,
+            None => continue,
+        };
+        let file_data = elf::segment_data(INIT_ELF, &seg).expect("segment data out of bounds");
+        let attrs = elf::segment_attrs(seg.flags);
+        let page_count = (seg.mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
-        addr_space.map_page(va, pa as u64, &addr_space::PageAttrs::user_rx());
+        for page in 0..page_count {
+            let pa = page_alloc::alloc_frame().expect("out of frames for user segment");
+            let va = (seg.vaddr & !(PAGE_SIZE - 1)) + page * PAGE_SIZE;
+            // Copy file-backed data into this page. Pages beyond file_size are
+            // pure BSS — alloc_frame returns zeroed pages, so they're already correct.
+            let seg_offset = page * PAGE_SIZE;
+
+            if seg_offset < seg.file_size {
+                let src_start = seg_offset as usize;
+                let src_end =
+                    core::cmp::min((seg_offset + PAGE_SIZE) as usize, seg.file_size as usize);
+                let src = &file_data[src_start..src_end];
+                let dst = memory::phys_to_virt(pa) as *mut u8;
+
+                unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) };
+            }
+
+            addr_space.map_page(va, pa as u64, &attrs);
+        }
     }
 
     // Map one user stack page.
@@ -89,7 +112,7 @@ fn spawn_user_test() {
         &addr_space::PageAttrs::user_rw(),
     );
 
-    scheduler::spawn_user(addr_space, USER_CODE_VA, USER_STACK_TOP);
+    scheduler::spawn_user(addr_space, header.entry, USER_STACK_TOP);
 }
 
 #[unsafe(no_mangle)]
@@ -108,8 +131,8 @@ pub extern "C" fn kernel_main() -> ! {
     gic::init();
     scheduler::init();
 
-    // Spawn EL0 test thread with its own address space.
-    spawn_user_test();
+    // Spawn init process from embedded ELF.
+    spawn_init();
 
     timer::init();
 

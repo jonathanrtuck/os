@@ -36,7 +36,6 @@ impl AddressSpace {
     /// Map a single 4 KiB page at `va` backed by physical frame `pa`.
     pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
         let l0_va = memory::phys_to_virt(self.l0_pa) as *mut u64;
-
         let l1_va = walk_or_create(l0_va, Self::l0_idx(va));
         let l2_va = walk_or_create(l1_va, Self::l1_idx(va));
         let l3_va = walk_or_create(l2_va, Self::l2_idx(va));
@@ -72,6 +71,10 @@ impl PageAttrs {
     /// User code: readable + executable, not writable.
     pub fn user_rx() -> Self {
         Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN)
+    }
+    /// User read-only data: readable, not writable, not executable.
+    pub fn user_ro() -> Self {
+        Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN | UXN)
     }
     /// User data: readable + writable, not executable.
     pub fn user_rw() -> Self {

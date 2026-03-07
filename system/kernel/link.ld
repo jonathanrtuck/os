@@ -62,15 +62,6 @@ SECTIONS
   __bss_end_phys    = __bss_end    - KERNEL_VA_OFFSET;
   __stack_top_phys  = __stack_top  - KERNEL_VA_OFFSET;
 
-  /* User code is placed physically after the kernel BSS/stack.
-   * Not mapped by the linker — the kernel maps it into user address spaces. */
-  . = ALIGN(4096);
-  .user_code : AT(ADDR(.user_code) - KERNEL_VA_OFFSET) {
-    __user_code_start = .;
-    KEEP(*(.user_code))
-    __user_code_end = .;
-  }
-
   . = ALIGN(4096);
   __kernel_end = .;
 }
