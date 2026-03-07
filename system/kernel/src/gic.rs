@@ -16,11 +16,16 @@ const GICD_IPRIORITYR: usize = GICD_BASE + 0x400;
 /// Spurious interrupt ID returned by the GIC when no real interrupt is pending.
 const SPURIOUS: u32 = 1023;
 
-/// Enable the GIC distributor and CPU interface.
-pub fn init() {
-    mmio::write32(GICD_CTLR, 1);
-    mmio::write32(GICC_PMR, 0xFF); // accept all priorities
-    mmio::write32(GICC_CTLR, 1);
+/// Read IAR and return the interrupt ID, or None for spurious interrupts.
+pub fn acknowledge() -> Option<u32> {
+    let iar = mmio::read32(GICC_IAR);
+    let id = iar & 0x3FF;
+
+    if id == SPURIOUS {
+        None
+    } else {
+        Some(iar)
+    }
 }
 
 /// Enable a specific interrupt line (SGI/PPI, id < 32).
@@ -35,19 +40,14 @@ pub fn enable_irq(id: u32) {
     }
 }
 
-/// Read IAR and return the interrupt ID, or None for spurious interrupts.
-pub fn acknowledge() -> Option<u32> {
-    let iar = mmio::read32(GICC_IAR);
-    let id = iar & 0x3FF;
-
-    if id == SPURIOUS {
-        None
-    } else {
-        Some(iar)
-    }
-}
-
 /// Signal end-of-interrupt. Pass the value returned by `acknowledge`.
 pub fn end_of_interrupt(iar: u32) {
     mmio::write32(GICC_EOIR, iar);
+}
+
+/// Enable the GIC distributor and CPU interface.
+pub fn init() {
+    mmio::write32(GICD_CTLR, 1);
+    mmio::write32(GICC_PMR, 0xFF); // accept all priorities
+    mmio::write32(GICC_CTLR, 1);
 }
