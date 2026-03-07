@@ -2,6 +2,8 @@
 #![no_main]
 #![feature(sync_unsafe_cell)]
 
+extern crate alloc;
+
 use core::cell::SyncUnsafeCell;
 use core::mem::MaybeUninit;
 use core::panic::PanicInfo;
@@ -9,6 +11,7 @@ use core::panic::PanicInfo;
 core::arch::global_asm!(include_str!("boot.S"));
 
 mod gic;
+mod heap;
 mod memory;
 mod mmio;
 mod timer;
@@ -64,6 +67,7 @@ pub extern "C" fn kernel_main() -> ! {
     }
 
     memory::init();
+    heap::init();
     gic::init();
     timer::init();
 
@@ -81,8 +85,6 @@ pub extern "C" fn irq_handler(current: *mut Context) -> *const Context {
 
         if id == timer::IRQ_ID {
             timer::handle_irq();
-            uart::puts("\r⏱️ ticking… ");
-            uart::put_u64(timer::ticks());
         }
 
         gic::end_of_interrupt(iar);

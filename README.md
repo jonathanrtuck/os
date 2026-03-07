@@ -28,7 +28,7 @@ See the [decision register](design/decisions.md) for the full decision landscape
 os/
 ├── design/                      # Design documentation
 │   ├── concept.md               # The core idea: OS → Document → Tool
-│   ├── foundations.md            # Glossary, guiding beliefs, external boundaries
+│   ├── foundations.md           # Glossary, guiding beliefs, external boundaries
 │   ├── decisions.md             # 17 tiered design decisions with tradeoffs
 │   ├── decision-map.mermaid     # Visual dependency graph
 │   └── journal.md               # Open threads, insights, research spikes

@@ -47,5 +47,6 @@ SECTIONS
     . = . + 0x10000; /* 64 KiB stack */
     __stack_top = .;
   }
+  . = ALIGN(4096);
   __kernel_end = .;
 }

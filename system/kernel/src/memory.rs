@@ -15,7 +15,6 @@ const PAGE_SIZE: u64 = 4096;
 const BLOCK_2MB: u64 = 2 * 1024 * 1024;
 const RAM_START: u64 = 0x4000_0000;
 const RAM_SIZE: u64 = 256 * 1024 * 1024; // we force -m 256M in the run script
-const RAM_END: u64 = RAM_START + RAM_SIZE;
 
 static TT_L0: SyncUnsafeCell<PageTable> = SyncUnsafeCell::new(PageTable::new());
 static TT_L1: SyncUnsafeCell<PageTable> = SyncUnsafeCell::new(PageTable::new());
@@ -40,35 +39,10 @@ extern "C" {
     fn enable_mmu(ttbr0: u64);
 }
 
-struct FrameAlloc {
-    next: u64,
-    end: u64,
-}
-
 // AArch64 4k-page tables.
 #[repr(align(4096))]
 struct PageTable {
     entries: [u64; 512],
-}
-
-impl FrameAlloc {
-    const fn new(start: u64, end: u64) -> Self {
-        Self { next: start, end }
-    }
-
-    fn alloc(self) -> Option<(u64, Self)> {
-        if self.next + PAGE_SIZE > self.end {
-            return None;
-        }
-
-        Some((
-            self.next,
-            Self {
-                next: self.next + PAGE_SIZE,
-                end: self.end,
-            },
-        ))
-    }
 }
 
 impl PageTable {
@@ -127,8 +101,14 @@ fn build_tables() -> u64 {
                 continue;
             }
 
-            l2_1.entries[idx] =
-                (pa & 0xFFFF_FFFF_FFE0_0000) | DESC_VALID | DESC_BLOCK | ATTRIDX0 | AF | SH_INNER;
+            l2_1.entries[idx] = (pa & 0xFFFF_FFFF_FFE0_0000)
+                | DESC_VALID
+                | DESC_BLOCK
+                | ATTRIDX0
+                | AF
+                | SH_INNER
+                | PXN
+                | UXN;
         }
 
         // L3: 4KB pages for the kernel's 2MB block.
@@ -150,8 +130,10 @@ fn build_tables() -> u64 {
                 normal | AP_RO | PXN | UXN // .rodata: RO, no execute
             } else if pa >= data_start && pa < kernel_end {
                 normal | PXN | UXN // .data/.bss/stack: RW, no execute
+            } else if pa >= kernel_end {
+                normal | PXN | UXN // post-kernel: RW (heap)
             } else {
-                continue; // unmapped (before kernel or padding)
+                continue; // unmapped (before kernel)
             };
 
             l3_kern.entries[i as usize] = (pa & 0x0000_FFFF_FFFF_F000) | DESC_PAGE | attrs;

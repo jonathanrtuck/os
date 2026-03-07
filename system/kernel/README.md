@@ -23,7 +23,6 @@ cargo run --release   # builds, then launches QEMU
 ```shell
 🥾 booting…
 🥾 booted.
-⏱️ ticking… 1
 ```
 
 …not much yet 😬
