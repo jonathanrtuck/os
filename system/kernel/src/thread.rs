@@ -1,6 +1,7 @@
 //! Kernel thread representation.
 
 use super::addr_space::AddressSpace;
+use super::handle::HandleTable;
 use super::Context;
 use alloc::boxed::Box;
 use core::alloc::Layout;
@@ -27,6 +28,7 @@ pub struct Thread {
     pub state: ThreadState,
     pub stack_bottom: *mut u8,
     pub address_space: Option<Box<AddressSpace>>,
+    pub handles: HandleTable,
 }
 
 const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
@@ -55,6 +57,7 @@ impl Thread {
             state: ThreadState::Ready,
             stack_bottom,
             address_space: None,
+            handles: HandleTable::new(),
         })
     }
     /// Create a new EL0 (user) thread with its own address space.
@@ -83,6 +86,7 @@ impl Thread {
             state: ThreadState::Ready,
             stack_bottom,
             address_space: Some(addr_space),
+            handles: HandleTable::new(),
         })
     }
 }

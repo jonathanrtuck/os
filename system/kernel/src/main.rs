@@ -13,6 +13,7 @@ mod addr_space;
 mod asid;
 mod elf;
 mod gic;
+mod handle;
 mod heap;
 mod memory;
 mod mmio;
@@ -57,28 +58,29 @@ const PAGE_SIZE: u64 = 4096;
 const USER_STACK_TOP: u64 = 0x0000_0000_8000_0000; // 2 GB
 const USER_STACK_VA: u64 = USER_STACK_TOP - PAGE_SIZE;
 
-/// The init process ELF binary, compiled by build.rs and embedded in .rodata.
-/// Avoids needing a filesystem or bootloader protocol for the first process.
+/// User process ELF binaries, compiled by build.rs and embedded in .rodata.
+/// Avoids needing a filesystem or bootloader protocol for the first processes.
 static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
+static ECHO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.elf"));
 
 extern "C" {
     static __kernel_end: u8;
 }
 
-fn spawn_init() {
-    let header = elf::parse_header(INIT_ELF).expect("bad ELF header");
+fn spawn_user_from_elf(elf_bytes: &[u8]) {
+    let header = elf::parse_header(elf_bytes).expect("bad ELF header");
     let asid = asid::alloc();
     let mut addr_space = alloc::boxed::Box::new(addr_space::AddressSpace::new(asid));
 
     // Map each PT_LOAD segment from the ELF into the new address space.
-    // Assumes page-aligned vaddr (enforced by init's linker script).
+    // Assumes page-aligned vaddr (enforced by the user linker script).
     // A general-purpose loader would handle within-page offsets for unaligned segments.
     for i in 0..header.ph_count {
-        let seg = match elf::load_segment(INIT_ELF, &header, i).expect("bad program header") {
+        let seg = match elf::load_segment(elf_bytes, &header, i).expect("bad program header") {
             Some(seg) => seg,
             None => continue,
         };
-        let file_data = elf::segment_data(INIT_ELF, &seg).expect("segment data out of bounds");
+        let file_data = elf::segment_data(elf_bytes, &seg).expect("segment data out of bounds");
         let attrs = elf::segment_attrs(seg.flags);
         let page_count = (seg.mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
 
@@ -131,8 +133,9 @@ pub extern "C" fn kernel_main() -> ! {
     gic::init();
     scheduler::init();
 
-    // Spawn init process from embedded ELF.
-    spawn_init();
+    // Spawn user processes from embedded ELFs.
+    spawn_user_from_elf(INIT_ELF);
+    spawn_user_from_elf(ECHO_ELF);
 
     timer::init();
 

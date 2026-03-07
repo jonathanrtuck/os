@@ -1,6 +1,7 @@
 //! Round-robin preemptive scheduler.
 
 use super::addr_space::AddressSpace;
+use super::handle::HandleTable;
 use super::memory;
 use super::thread::{Thread, ThreadId, ThreadState};
 use super::Context;
@@ -51,6 +52,13 @@ fn ttbr0_for(thread: &Thread) -> u64 {
     }
 }
 
+/// Access the current thread mutably (for handle table operations in syscalls).
+/// Must be called with IRQs masked or from syscall context (which has IRQs masked).
+pub fn current_thread() -> &'static mut Thread {
+    let s = state();
+
+    &mut s.threads[s.current]
+}
 pub fn exit_current() -> ! {
     unsafe { core::arch::asm!("msr daifset, #2", options(nostack, nomem)) };
 
@@ -79,6 +87,7 @@ pub fn init() {
         state: ThreadState::Running,
         stack_bottom: core::ptr::null_mut(),
         address_space: None,
+        handles: HandleTable::new(),
     });
     let ctx_ptr = &mut boot_thread.context as *mut Context;
 
