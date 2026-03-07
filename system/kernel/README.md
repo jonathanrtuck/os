@@ -31,12 +31,15 @@ cargo run --release   # builds, then launches QEMU
 
 ```txt
 src/
-  boot.S     — EL2→EL1 drop, exception vectors, context save/restore
-  main.rs    — kernel entry, IRQ dispatch, panic handler
-  memory.rs  — MMU setup, page tables, W^X permissions
-  gic.rs     — GICv2 distributor + CPU interface
-  timer.rs   — ARM generic timer (EL1 physical)
-  uart.rs    — PL011 UART driver
-  mmio.rs    — volatile MMIO helpers
-link.ld      — linker script
+  boot.S        — EL2→EL1 drop, exception vectors, context save/restore
+  main.rs       — kernel entry, IRQ dispatch, panic handler
+  memory.rs     — MMU setup, page tables, W^X permissions
+  heap.rs       — bump allocator (16 MiB)
+  scheduler.rs  — round-robin preemptive scheduler
+  thread.rs     — kernel thread struct + creation
+  gic.rs        — GICv2 distributor + CPU interface
+  timer.rs      — ARM generic timer (EL1 physical, 10 Hz)
+  uart.rs       — PL011 UART driver (TX only)
+  mmio.rs       — volatile MMIO helpers
+link.ld         — linker script
 ```

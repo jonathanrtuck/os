@@ -26,11 +26,17 @@ fn state() -> &'static mut State {
 }
 
 /// Mark the current thread as exited and spin until the next timer tick
-/// reschedules away from it.
+/// reschedules away from it. IRQs are masked first to avoid racing with
+/// `schedule()` on `State`.
 pub fn exit_current() -> ! {
+    unsafe { core::arch::asm!("msr daifset, #2", options(nostack, nomem)) };
+
     let s = state();
 
     s.threads[s.current].state = ThreadState::Exited;
+
+    // Re-enable IRQs so the timer can fire and schedule away from us.
+    unsafe { core::arch::asm!("msr daifclr, #2", options(nostack, nomem)) };
 
     loop {
         core::hint::spin_loop();
@@ -68,7 +74,7 @@ pub fn init() {
 ///
 /// Returns a pointer to the next thread's Context. If no other thread is
 /// ready, returns the current thread's context (no switch).
-pub fn schedule(current_ctx: *mut Context) -> *const Context {
+pub fn schedule(ctx: *mut Context) -> *const Context {
     let s = state();
     let n = s.threads.len();
     // Mark the current thread as Ready (unless it exited).
@@ -90,14 +96,9 @@ pub fn schedule(current_ctx: *mut Context) -> *const Context {
         }
     }
 
-    // No other thread ready — continue running the current one.
-    let cur = &mut s.threads[s.current];
-
-    if cur.state == ThreadState::Ready {
-        cur.state = ThreadState::Running;
-    }
-
-    current_ctx as *const Context
+    // No Ready thread found (all exited). Shouldn't happen with the idle
+    // thread, but return current context as last resort.
+    ctx as *const Context
 }
 
 /// Spawn a new kernel thread that begins executing at `entry`.

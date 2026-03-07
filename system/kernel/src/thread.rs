@@ -28,6 +28,10 @@ pub struct Thread {
     pub stack_bottom: *mut u8,
 }
 
+// Verify Context is at offset 0 — boot.S relies on TPIDR_EL1 pointing at
+// the start of Thread and treating it as a Context pointer.
+const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
+
 // Safety: Thread is only accessed from a single core, either during init
 // (single-threaded) or inside the IRQ handler (interrupts disabled).
 unsafe impl Send for Thread {}
