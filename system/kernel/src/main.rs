@@ -187,7 +187,7 @@ pub extern "C" fn kernel_main() -> ! {
     let init_id = process::spawn_from_elf(INIT_ELF);
     let echo_id = process::spawn_from_elf(ECHO_ELF);
 
-    channel::create(init_id, echo_id);
+    channel::create(init_id, echo_id).expect("failed to create IPC channel");
     uart::puts("  🔀 processes: init + echo, IPC channel\n");
 
     boot_secondaries();

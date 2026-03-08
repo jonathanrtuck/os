@@ -24,6 +24,8 @@ struct FreeBlock {
 }
 struct LinkedListAllocator {
     head: UnsafeCell<*mut FreeBlock>,
+    region_start: UnsafeCell<usize>,
+    region_end: UnsafeCell<usize>,
 }
 
 /// Protects the allocator's free list from concurrent access.
@@ -36,6 +38,8 @@ impl LinkedListAllocator {
     const fn new() -> Self {
         Self {
             head: UnsafeCell::new(core::ptr::null_mut()),
+            region_start: UnsafeCell::new(0),
+            region_end: UnsafeCell::new(0),
         }
     }
 }
@@ -117,6 +121,17 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         let head = &mut *self.head.get();
         let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
         let addr = ptr as usize;
+
+        // Validate that the freed address is within the heap region.
+        // A bogus free would corrupt the free list, so catching it early
+        // is worth the branch cost in a production kernel.
+        let rs = *self.region_start.get();
+        let re = *self.region_end.get();
+
+        assert!(
+            addr >= rs && addr < re,
+            "dealloc: address outside heap region"
+        );
         // Walk to the sorted insertion point.
         let mut prev_block: *mut FreeBlock = core::ptr::null_mut();
         let mut current = *head;
@@ -176,5 +191,7 @@ pub fn init() {
         (*block).next = core::ptr::null_mut();
 
         *ALLOCATOR.head.get() = block;
+        *ALLOCATOR.region_start.get() = start;
+        *ALLOCATOR.region_end.get() = start + memory::HEAP_SIZE;
     }
 }

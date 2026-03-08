@@ -104,9 +104,18 @@ impl Virtqueue {
         self.desc_pa
     }
     /// Return a descriptor chain to the free list.
+    ///
+    /// Validates that each descriptor index is within bounds. If a
+    /// device-provided index is out of range, the chain is truncated
+    /// (descriptors may leak, but the kernel is not corrupted).
     fn free_descriptor_chain(&mut self, mut idx: u16) {
         loop {
-            // SAFETY: idx is a valid descriptor index (came from the used ring).
+            if idx as u32 >= self.size {
+                // Device provided an out-of-bounds descriptor ID. Truncate
+                // the chain to prevent kernel memory corruption.
+                return;
+            }
+
             let desc = unsafe { &mut *(self.desc_va as *mut Descriptor).add(idx as usize) };
             let has_next = desc.flags & DESC_F_NEXT != 0;
             let next = desc.next;
@@ -150,7 +159,12 @@ impl Virtqueue {
         };
 
         self.last_used_idx = self.last_used_idx.wrapping_add(1);
-        self.free_descriptor_chain(elem.id as u16);
+
+        if (elem.id as u32) < self.size {
+            self.free_descriptor_chain(elem.id as u16);
+        }
+        // If elem.id is out of bounds, we skip freeing (leak descriptors
+        // rather than corrupt kernel memory from a malicious device).
 
         Some(elem)
     }

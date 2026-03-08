@@ -47,6 +47,21 @@ impl AddressSpace {
         // walk_or_create). l3_idx is 0..511 (derived from VA bit extraction).
         unsafe {
             let entry = l3_va.add(l3_idx);
+            let old = core::ptr::read_volatile(entry);
+
+            if old & DESC_VALID != 0 {
+                // Break-before-make (ARMv8 ARM B2.2.1): writing a valid
+                // descriptor over an existing valid descriptor is
+                // CONSTRAINED UNPREDICTABLE. Must invalidate first.
+                core::ptr::write_volatile(entry, 0);
+                core::arch::asm!(
+                    "dsb ish",
+                    "tlbi vale1is, {va}",
+                    "dsb ish",
+                    va = in(reg) (va >> 12) | ((self.asid.0 as u64) << 48),
+                    options(nostack)
+                );
+            }
 
             *entry = (pa & PA_MASK) | DESC_PAGE | attrs.0;
         }
@@ -186,6 +201,20 @@ impl AddressSpace {
         };
 
         self.map_page(page_va, pa as u64, &attrs);
+
+        // Invalidate any cached fault entry for this VA+ASID. Some ARM
+        // implementations cache "translation fault" results ("negative
+        // caching"), which would prevent the new mapping from being used.
+        unsafe {
+            core::arch::asm!(
+                "dsb ishst",
+                "tlbi vale1is, {va}",
+                "dsb ish",
+                "isb",
+                va = in(reg) (page_va >> 12) | ((self.asid.0 as u64) << 48),
+                options(nostack)
+            );
+        }
 
         true
     }

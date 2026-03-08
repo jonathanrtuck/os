@@ -66,13 +66,14 @@ fn enqueue(queue: &mut RunQueue, thread: Box<Thread>) {
         Priority::Idle => {} // Idle threads are never enqueued.
     }
 }
-/// Reap exited threads from the run queues.
-fn reap_exited(queue: &mut RunQueue) {
+/// Reap exited threads from the run queues and blocked list.
+fn reap_exited(queue: &mut RunQueue, blocked: &mut Vec<Box<Thread>>) {
     queue.high.retain(|t| !t.is_exited());
     queue.normal.retain(|t| !t.is_exited());
+    blocked.retain(|t| !t.is_exited());
 }
 fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Context {
-    reap_exited(&mut s.queue);
+    reap_exited(&mut s.queue, &mut s.blocked);
 
     let mut old_thread = s.cores[core].current.take().expect("no current thread");
 

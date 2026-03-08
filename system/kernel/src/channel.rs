@@ -28,7 +28,7 @@
 //! (via try_wake / with_thread_mut). Never hold both.
 
 use super::addr_space::PageAttrs;
-use super::handle::{ChannelId, HandleObject, Rights};
+use super::handle::{ChannelId, HandleError, HandleObject, Rights};
 use super::page_alloc;
 use super::paging::{CHANNEL_SHM_BASE, PAGE_SIZE};
 use super::scheduler;
@@ -98,7 +98,9 @@ pub fn close_endpoint(id: ChannelId) {
 ///
 /// Allocates a shared physical page, maps it at a fixed VA in both address
 /// spaces, and inserts READ_WRITE handles into both handle tables.
-pub fn create(id_a: ThreadId, id_b: ThreadId) -> ChannelId {
+/// Returns `HandleError::TableFull` if either handle table is full
+/// (the shared page and channel are cleaned up on failure).
+pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> {
     // Allocate shared page (acquires page_alloc lock, released immediately).
     let shared_pa = page_alloc::alloc_frame().expect("out of frames for channel");
 
@@ -131,7 +133,7 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> ChannelId {
     let channel_id = ChannelId(idx);
 
     // Insert handles (acquires scheduler lock; channel lock already released).
-    scheduler::with_thread_mut(id_a, |thread| {
+    let handle_a = scheduler::with_thread_mut(id_a, |thread| {
         if let Some(addr_space) = &mut thread.address_space {
             addr_space.map_shared(va, shared_pa as u64, &PageAttrs::user_rw());
         }
@@ -139,9 +141,19 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> ChannelId {
         thread
             .handles
             .insert(HandleObject::Channel(channel_id), Rights::READ_WRITE)
-            .expect("handle table full");
     });
-    scheduler::with_thread_mut(id_b, |thread| {
+
+    let handle_a = match handle_a {
+        Ok(h) => h,
+        Err(e) => {
+            // Clean up: free the shared page.
+            page_alloc::free_frame(shared_pa);
+
+            return Err(e);
+        }
+    };
+
+    let result_b = scheduler::with_thread_mut(id_b, |thread| {
         if let Some(addr_space) = &mut thread.address_space {
             addr_space.map_shared(va, shared_pa as u64, &PageAttrs::user_rw());
         }
@@ -149,10 +161,19 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> ChannelId {
         thread
             .handles
             .insert(HandleObject::Channel(channel_id), Rights::READ_WRITE)
-            .expect("handle table full");
     });
 
-    channel_id
+    if let Err(e) = result_b {
+        // Clean up the handle we inserted into thread A.
+        scheduler::with_thread_mut(id_a, |thread| {
+            let _ = thread.handles.close(handle_a);
+        });
+        page_alloc::free_frame(shared_pa);
+
+        return Err(e);
+    }
+
+    Ok(channel_id)
 }
 /// Signal the other endpoint of a channel.
 ///

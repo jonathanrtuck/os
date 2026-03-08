@@ -144,7 +144,9 @@ pub fn segment_attrs(flags: u32) -> PageAttrs {
 }
 pub fn segment_data<'a>(data: &'a [u8], seg: &LoadSegment) -> Result<&'a [u8], Error> {
     let start = seg.file_offset as usize;
-    let end = start + seg.file_size as usize;
+    let end = start
+        .checked_add(seg.file_size as usize)
+        .ok_or(Error::SegmentOutOfBounds)?;
 
     if end > data.len() {
         return Err(Error::SegmentOutOfBounds);
