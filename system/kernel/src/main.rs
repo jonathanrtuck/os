@@ -1,6 +1,5 @@
 #![no_std]
 #![no_main]
-#![feature(sync_unsafe_cell)]
 
 extern crate alloc;
 
@@ -19,7 +18,9 @@ mod heap;
 mod memory;
 mod mmio;
 mod page_alloc;
+mod paging;
 mod scheduler;
+mod sync;
 mod syscall;
 mod thread;
 mod timer;
@@ -55,9 +56,7 @@ const _: () = {
     assert!(core::mem::size_of::<Context>() == 0x330);
 };
 
-const PAGE_SIZE: u64 = 4096;
-const USER_STACK_TOP: u64 = 0x0000_0000_8000_0000; // 2 GB
-const USER_STACK_VA: u64 = USER_STACK_TOP - PAGE_SIZE;
+use paging::{PAGE_SIZE, USER_STACK_TOP, USER_STACK_VA};
 
 /// User process ELF binaries, compiled by build.rs and embedded in .rodata.
 /// Avoids needing a filesystem or bootloader protocol for the first processes.
@@ -128,7 +127,9 @@ pub extern "C" fn kernel_main() -> ! {
     // Initialize page frame allocator with memory above kernel heap.
     let kernel_end_pa = memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize });
     let heap_end = kernel_end_pa + memory::HEAP_SIZE;
-    let ram_end = 0x4000_0000 + 256 * 1024 * 1024;
+    let ram_end = paging::RAM_END as usize;
+
+    assert!(heap_end < ram_end, "heap extends beyond physical RAM");
 
     page_alloc::init(heap_end, ram_end);
     gic::init();

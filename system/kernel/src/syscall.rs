@@ -2,8 +2,8 @@
 
 use super::channel;
 use super::handle::{Handle, HandleError, HandleObject, Rights};
+use super::paging::USER_VA_END;
 use super::scheduler;
-use super::thread::ThreadState;
 use super::uart;
 use super::Context;
 
@@ -29,8 +29,6 @@ impl From<HandleError> for u64 {
     }
 }
 
-/// User VA range: 0 .. 2^48 (T0SZ=16).
-const USER_VA_END: u64 = 0x0001_0000_0000_0000;
 const MAX_WRITE_LEN: u64 = 4096;
 
 fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
@@ -38,12 +36,15 @@ fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
         return Err(HandleError::InvalidHandle);
     }
 
-    let thread = scheduler::current_thread();
-    let channel_id = match thread.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
-        Ok(HandleObject::Channel(id)) => id,
-        Err(e) => return Err(e),
-    };
-    let caller_id = thread.id;
+    // Extract handle info under scheduler lock, then release before channel ops.
+    let (channel_id, caller_id) = scheduler::current_thread_do(|thread| {
+        let channel_id = match thread.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+            Ok(HandleObject::Channel(id)) => id,
+            Err(e) => return Err(e),
+        };
+
+        Ok((channel_id, thread.id))
+    })?;
 
     channel::signal(channel_id, caller_id);
 
@@ -55,19 +56,27 @@ fn sys_channel_wait(ctx: *mut Context) -> *const Context {
 
     if handle_nr > u8::MAX as u64 {
         c.x[0] = HandleError::InvalidHandle as i64 as u64;
+
         return ctx as *const Context;
     }
 
-    let thread = scheduler::current_thread();
-    let channel_id = match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
-        Ok(HandleObject::Channel(id)) => id,
+    // Extract handle info under scheduler lock, then release.
+    let result = scheduler::current_thread_do(|thread| {
+        let channel_id = match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
+            Ok(HandleObject::Channel(id)) => id,
+            Err(e) => return Err(e),
+        };
+
+        Ok((channel_id, thread.id))
+    });
+    let (channel_id, caller_id) = match result {
+        Ok(pair) => pair,
         Err(e) => {
             c.x[0] = e as i64 as u64;
 
             return ctx as *const Context;
         }
     };
-    let caller_id = thread.id;
 
     if channel::check_pending(channel_id, caller_id) {
         // Signal was pending — consumed. Return immediately.
@@ -77,9 +86,8 @@ fn sys_channel_wait(ctx: *mut Context) -> *const Context {
     } else {
         // No signal pending. Pre-set return value, block, reschedule.
         c.x[0] = 0;
-        thread.state = ThreadState::Blocked;
 
-        scheduler::schedule(ctx)
+        scheduler::block_current_and_schedule(ctx)
     }
 }
 fn sys_exit(ctx: *mut Context) -> *const Context {
@@ -90,9 +98,7 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
         return Err(HandleError::InvalidHandle);
     }
 
-    let thread = scheduler::current_thread();
-
-    thread.handles.close(Handle(handle_nr as u8))?;
+    scheduler::current_thread_do(|thread| thread.handles.close(Handle(handle_nr as u8)))?;
 
     Ok(0)
 }
@@ -110,7 +116,8 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
         return Err(Error::BadAddress);
     }
 
-    // TTBR0 is still loaded during syscall, so kernel can read user pages.
+    // SAFETY: TTBR0 is still loaded during syscall, so kernel can read user pages.
+    // The address range has been validated to be within the user VA space.
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
 
     for &byte in slice {

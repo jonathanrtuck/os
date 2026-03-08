@@ -164,9 +164,10 @@ el1_start:
 
   mrs x1, sctlr_el1
   orr x1, x1, #1              // M = 1 (enable MMU)
-  bic x1, x1, #(1 << 2)       // C = 0
-  bic x1, x1, #(1 << 12)      // I = 0
+  orr x1, x1, #(1 << 2)       // C = 1 (enable D-cache)
+  orr x1, x1, #(1 << 12)      // I = 1 (enable I-cache)
   msr sctlr_el1, x1
+  dsb ish
   isb
 
   // ------------------------------------------------------------------

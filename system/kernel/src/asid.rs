@@ -3,35 +3,46 @@
 //! Allocates ASIDs from 1..255. ASID 0 is reserved (kernel / idle TTBR0).
 //! Freed ASIDs are recycled via a small stack.
 
+use super::sync::IrqMutex;
+
 #[derive(Clone, Copy)]
 pub struct Asid(pub u8);
 
-static mut NEXT: u8 = 1;
-static mut FREED: [u8; 255] = [0; 255];
-static mut FREED_COUNT: usize = 0;
+struct State {
+    next: u8,
+    freed: [u8; 255],
+    freed_count: usize,
+}
+
+static STATE: IrqMutex<State> = IrqMutex::new(State {
+    next: 1,
+    freed: [0; 255],
+    freed_count: 0,
+});
 
 /// Allocate the next ASID. Reuses freed ASIDs first. Panics if all 255 are exhausted.
 pub fn alloc() -> Asid {
-    unsafe {
-        if FREED_COUNT > 0 {
-            FREED_COUNT -= 1;
+    let mut s = STATE.lock();
 
-            return Asid(FREED[FREED_COUNT]);
-        }
+    if s.freed_count > 0 {
+        s.freed_count -= 1;
 
-        let id = NEXT;
-
-        assert!(id != 0, "ASID pool exhausted");
-
-        NEXT = NEXT.wrapping_add(1);
-
-        Asid(id)
+        return Asid(s.freed[s.freed_count]);
     }
+
+    let id = s.next;
+
+    assert!(id != 0, "ASID pool exhausted");
+
+    s.next = s.next.wrapping_add(1);
+
+    Asid(id)
 }
 /// Return an ASID to the pool for reuse.
 pub fn free(asid: Asid) {
-    unsafe {
-        FREED[FREED_COUNT] = asid.0;
-        FREED_COUNT += 1;
-    }
+    let mut s = STATE.lock();
+    let idx = s.freed_count;
+
+    s.freed[idx] = asid.0;
+    s.freed_count += 1;
 }

@@ -7,20 +7,10 @@
 use super::asid::Asid;
 use super::memory;
 use super::page_alloc;
+use super::paging::{
+    AF, AP_EL0, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, NG, PA_MASK, PXN, SH_INNER, UXN,
+};
 use alloc::vec::Vec;
-
-const AF: u64 = 1 << 10;
-const AP_EL0: u64 = 1 << 6;
-const AP_RO: u64 = 1 << 7;
-const ATTRIDX0: u64 = 0 << 2; // normal memory
-const DESC_PAGE: u64 = 0b11;
-const DESC_TABLE: u64 = 1 << 1;
-const DESC_VALID: u64 = 1 << 0;
-const NG: u64 = 1 << 11; // ASID-tagged (required for EL0-accessible pages)
-const PA_MASK: u64 = 0x0000_FFFF_FFFF_F000;
-const PXN: u64 = 1 << 53;
-const SH_INNER: u64 = 0b11 << 8;
-const UXN: u64 = 1 << 54;
 
 pub struct AddressSpace {
     l0_pa: usize,
@@ -96,30 +86,6 @@ impl AddressSpace {
             );
         }
     }
-    /// Map a page and take ownership of the frame (freed on cleanup).
-    pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
-        self.map_inner(va, pa, attrs);
-        self.owned_frames.push(pa as usize);
-    }
-    /// Map a shared page (caller retains ownership of the frame).
-    pub fn map_shared(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
-        self.map_inner(va, pa, attrs);
-    }
-    /// Create a new empty address space with its own L0 table and ASID.
-    pub fn new(asid: Asid) -> Self {
-        let l0_pa = page_alloc::alloc_frame().expect("out of frames for L0 table");
-
-        Self {
-            l0_pa,
-            asid,
-            owned_frames: Vec::new(),
-        }
-    }
-    /// TTBR0 value: physical address of L0 table | (ASID << 48).
-    pub fn ttbr0_value(&self) -> u64 {
-        self.l0_pa as u64 | ((self.asid.0 as u64) << 48)
-    }
-
     fn l0_idx(va: u64) -> usize {
         ((va >> 39) & 0x1FF) as usize
     }
@@ -145,12 +111,31 @@ impl AddressSpace {
             *entry = (pa & PA_MASK) | DESC_PAGE | attrs.0;
         }
     }
+    /// Map a page and take ownership of the frame (freed on cleanup).
+    pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
+        self.map_inner(va, pa, attrs);
+        self.owned_frames.push(pa as usize);
+    }
+    /// Map a shared page (caller retains ownership of the frame).
+    pub fn map_shared(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
+        self.map_inner(va, pa, attrs);
+    }
+    /// Create a new empty address space with its own L0 table and ASID.
+    pub fn new(asid: Asid) -> Self {
+        let l0_pa = page_alloc::alloc_frame().expect("out of frames for L0 table");
+
+        Self {
+            l0_pa,
+            asid,
+            owned_frames: Vec::new(),
+        }
+    }
+    /// TTBR0 value: physical address of L0 table | (ASID << 48).
+    pub fn ttbr0_value(&self) -> u64 {
+        self.l0_pa as u64 | ((self.asid.0 as u64) << 48)
+    }
 }
 impl PageAttrs {
-    /// User code: readable + executable, not writable.
-    pub fn user_rx() -> Self {
-        Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN)
-    }
     /// User read-only data: readable, not writable, not executable.
     pub fn user_ro() -> Self {
         Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN | UXN)
@@ -158,6 +143,10 @@ impl PageAttrs {
     /// User data: readable + writable, not executable.
     pub fn user_rw() -> Self {
         Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | NG | PXN | UXN)
+    }
+    /// User code: readable + executable, not writable.
+    pub fn user_rx() -> Self {
+        Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN)
     }
 }
 

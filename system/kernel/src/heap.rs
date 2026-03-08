@@ -8,8 +8,9 @@
 //! timer interrupts cannot re-enter the allocator.
 
 use super::memory;
+use super::paging;
 use core::alloc::{GlobalAlloc, Layout};
-use core::cell::SyncUnsafeCell;
+use core::cell::UnsafeCell;
 
 /// Each free block stores its total size (including this header) and a pointer
 /// to the next free block. Minimum allocation granularity = 16 bytes on aarch64.
@@ -18,7 +19,7 @@ struct FreeBlock {
     next: *mut FreeBlock,
 }
 struct LinkedListAllocator {
-    head: SyncUnsafeCell<*mut FreeBlock>,
+    head: UnsafeCell<*mut FreeBlock>,
 }
 
 const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
@@ -26,13 +27,9 @@ const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
 impl LinkedListAllocator {
     const fn new() -> Self {
         Self {
-            head: SyncUnsafeCell::new(core::ptr::null_mut()),
+            head: UnsafeCell::new(core::ptr::null_mut()),
         }
     }
-}
-
-fn align_up(addr: usize, align: usize) -> usize {
-    (addr + align - 1) & !(align - 1)
 }
 
 unsafe impl GlobalAlloc for LinkedListAllocator {
@@ -84,7 +81,6 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
                 *prev = front;
                 prev = &mut (*front).next;
             }
-
             // Return back leftover as a free block.
             if back_left >= MIN_BLOCK {
                 let back = (alloc_start + size) as *mut FreeBlock;
@@ -133,13 +129,11 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         } else {
             (*prev_block).next = block;
         }
-
         // Coalesce with next neighbor.
         if !current.is_null() && addr + size == current as usize {
             (*block).size += (*current).size;
             (*block).next = (*current).next;
         }
-
         // Coalesce with previous neighbor.
         if !prev_block.is_null() {
             let prev_end = prev_block as usize + (*prev_block).size;
@@ -158,6 +152,10 @@ unsafe impl Sync for LinkedListAllocator {}
 
 #[global_allocator]
 static ALLOCATOR: LinkedListAllocator = LinkedListAllocator::new();
+
+fn align_up(addr: usize, align: usize) -> usize {
+    paging::align_up(addr, align)
+}
 
 /// Initialize the heap. Call after `memory::init()` (page tables must be live).
 pub fn init() {

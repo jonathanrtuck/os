@@ -1,29 +1,40 @@
-use core::cell::SyncUnsafeCell;
+//! Kernel page table refinement and address translation.
+//!
+//! Refines the coarse 2MB-block TTBR1 tables from boot.S with 4KB L3
+//! pages for per-section W^X enforcement.
+
+use super::paging::{
+    align_up_u64, AF, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, PAGE_SIZE, PXN, SH_INNER,
+    UXN,
+};
+use core::cell::UnsafeCell;
 
 pub const KERNEL_VA_OFFSET: usize = 0xFFFF_0000_0000_0000;
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
-const AF: u64 = 1 << 10;
-const AP_RO: u64 = 1 << 7;
-const ATTRIDX0: u64 = 0 << 2;
 const BLOCK_2MB: u64 = 2 * 1024 * 1024;
-const DESC_PAGE: u64 = 0b11;
-const DESC_TABLE: u64 = 1 << 1;
-const DESC_VALID: u64 = 1 << 0;
-const PAGE_SIZE: u64 = 4096;
-const PXN: u64 = 1 << 53;
-const SH_INNER: u64 = 0b11 << 8;
-const UXN: u64 = 1 << 54;
+
+/// Wrapper for page tables in statics. Written once during init, read-only after.
+struct SyncPageTable(UnsafeCell<PageTable>);
+
+impl SyncPageTable {
+    const fn new() -> Self {
+        Self(UnsafeCell::new(PageTable::new()))
+    }
+
+    fn get(&self) -> *mut PageTable {
+        self.0.get()
+    }
+}
+
+// SAFETY: Page tables are written once during init (before timer/IRQs) and
+// read-only after. No concurrent access is possible.
+unsafe impl Sync for SyncPageTable {}
 
 /// L3 page table for the kernel's 2MB block (4KB pages, W^X).
-static TT1_L3_KERN: SyncUnsafeCell<PageTable> = SyncUnsafeCell::new(PageTable::new());
+static TT1_L3_KERN: SyncPageTable = SyncPageTable::new();
 /// Empty L0 table for kernel threads' TTBR0 (no user mappings).
-static EMPTY_L0: SyncUnsafeCell<PageTable> = SyncUnsafeCell::new(PageTable::new());
-
-#[inline(always)]
-fn align_up(x: u64, align: u64) -> u64 {
-    (x + align - 1) & !(align - 1)
-}
+static EMPTY_L0: SyncPageTable = SyncPageTable::new();
 
 #[inline(always)]
 pub fn phys_to_virt(pa: usize) -> usize {
@@ -69,9 +80,9 @@ impl PageTable {
 pub fn init() {
     let l3_kern = unsafe { &mut *TT1_L3_KERN.get() };
     let text_start = unsafe { &__text_start as *const u8 as u64 };
-    let text_end = align_up(unsafe { &__text_end as *const u8 as u64 }, PAGE_SIZE);
+    let text_end = align_up_u64(unsafe { &__text_end as *const u8 as u64 }, PAGE_SIZE);
     let rodata_start = unsafe { &__rodata_start as *const u8 as u64 };
-    let rodata_end = align_up(unsafe { &__rodata_end as *const u8 as u64 }, PAGE_SIZE);
+    let rodata_end = align_up_u64(unsafe { &__rodata_end as *const u8 as u64 }, PAGE_SIZE);
     let data_start = unsafe { &__data_start as *const u8 as u64 };
     // All these are kernel VA. Compute PA of the kernel's 2MB-aligned block.
     let text_start_pa = virt_to_phys(text_start as usize) as u64;

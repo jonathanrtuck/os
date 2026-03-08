@@ -3,10 +3,10 @@
 use super::addr_space::AddressSpace;
 use super::handle::{HandleObject, HandleTable};
 use super::memory;
+use super::sync::IrqMutex;
 use super::thread::{Thread, ThreadId, ThreadState};
 use super::Context;
 use alloc::{boxed::Box, vec::Vec};
-use core::cell::SyncUnsafeCell;
 
 struct State {
     #[allow(clippy::vec_box)]
@@ -15,20 +15,19 @@ struct State {
     next_id: u64,
 }
 
-static STATE: SyncUnsafeCell<State> = SyncUnsafeCell::new(State {
+static STATE: IrqMutex<State> = IrqMutex::new(State {
     threads: Vec::new(),
     current: 0,
     next_id: 1,
 });
 
-fn state() -> &'static mut State {
-    unsafe { &mut *STATE.get() }
-}
 /// Swap TTBR0 when the address space changes between old and new threads.
 ///
-/// No TLB invalidation needed: ASIDs are never recycled, so stale entries
-/// from a previous ASID can't alias the new one. Add TLBI if ASID recycling
-/// is ever introduced.
+/// No per-switch TLB invalidation needed on single-core: ASIDs are recycled
+/// (asid::free / asid::alloc), but the exit path invalidates TLB entries for
+/// the ASID *before* returning it to the pool (see exit_current_from_syscall).
+/// On single-core, no new entries can be created between that TLBI and reuse.
+/// Multi-core would require TLBI on ASID reuse (stale entries on other cores).
 fn swap_ttbr0(old_idx: usize, new_idx: usize, s: &State) {
     let old_ttbr0 = ttbr0_for(&s.threads[old_idx]);
     let new_ttbr0 = ttbr0_for(&s.threads[new_idx]);
@@ -52,52 +51,68 @@ fn ttbr0_for(thread: &Thread) -> u64 {
     }
 }
 
-/// Access the current thread mutably (for handle table operations in syscalls).
-/// Must be called with IRQs masked or from syscall context (which has IRQs masked).
-pub fn current_thread() -> &'static mut Thread {
-    let s = state();
+/// Access the current thread via closure. Acquires the scheduler lock for the
+/// duration of the closure. Do not call scheduler functions from within `f`.
+pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
+    let mut s = STATE.lock();
+    let idx = s.current;
 
-    &mut s.threads[s.current]
+    f(&mut s.threads[idx])
 }
 pub fn exit_current() -> ! {
-    unsafe { core::arch::asm!("msr daifset, #2", options(nostack, nomem)) };
+    {
+        let mut s = STATE.lock();
+        let idx = s.current;
 
-    let s = state();
-
-    s.threads[s.current].state = ThreadState::Exited;
-
-    unsafe { core::arch::asm!("msr daifclr, #2", options(nostack, nomem)) };
+        s.threads[idx].state = ThreadState::Exited;
+    }
 
     loop {
         core::hint::spin_loop();
     }
 }
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
-    let s = state();
-    let thread = &mut s.threads[s.current];
+    use super::handle::ChannelId;
 
-    // Close all handles and notify referenced objects.
-    for (_handle, object) in thread.handles.drain() {
-        match object {
-            HandleObject::Channel(id) => {
-                super::channel::close_endpoint(id);
-            }
-        }
+    // Phase 1: collect resources to free (under scheduler lock).
+    let (channels_to_close, addr_space) = {
+        let mut s = STATE.lock();
+        let idx = s.current;
+        let thread = &mut s.threads[idx];
+        let channels: Vec<ChannelId> = thread
+            .handles
+            .drain()
+            .filter_map(|(_, obj)| match obj {
+                HandleObject::Channel(id) => Some(id),
+            })
+            .collect();
+        let addr_space = thread.address_space.take();
+
+        (channels, addr_space)
+    };
+
+    // Phase 2: close channel endpoints (acquires channel lock, not scheduler).
+    for id in channels_to_close {
+        super::channel::close_endpoint(id);
     }
 
-    // Free address space: TLB invalidation, page tables, user pages, ASID.
-    if let Some(mut addr_space) = thread.address_space.take() {
+    // Phase 3: free address space (acquires page_alloc and asid locks).
+    if let Some(mut addr_space) = addr_space {
         addr_space.invalidate_tlb();
         addr_space.free_all();
         super::asid::free(super::asid::Asid(addr_space.asid()));
     }
 
-    thread.state = ThreadState::Exited;
+    // Phase 4: mark exited and schedule (under scheduler lock).
+    let mut s = STATE.lock();
+    let idx = s.current;
 
-    schedule(ctx)
+    s.threads[idx].state = ThreadState::Exited;
+
+    schedule_inner(&mut s, ctx)
 }
 pub fn init() {
-    let s = state();
+    let mut s = STATE.lock();
     let mut boot_thread = Box::new(Thread {
         context: unsafe { core::mem::zeroed() },
         id: ThreadId(0),
@@ -141,9 +156,7 @@ fn reap_exited(s: &mut State) {
         }
     }
 }
-pub fn schedule(ctx: *mut Context) -> *const Context {
-    let s = state();
-
+fn schedule_inner(s: &mut State, ctx: *mut Context) -> *const Context {
     reap_exited(s);
 
     let n = s.threads.len();
@@ -171,8 +184,25 @@ pub fn schedule(ctx: *mut Context) -> *const Context {
 
     ctx as *const Context
 }
+
+/// Block the current thread and reschedule. Used by syscalls that need to
+/// release other locks before blocking (e.g., channel wait releases the
+/// channel lock, then calls this).
+pub fn block_current_and_schedule(ctx: *mut Context) -> *const Context {
+    let mut s = STATE.lock();
+    let idx = s.current;
+
+    s.threads[idx].state = ThreadState::Blocked;
+
+    schedule_inner(&mut s, ctx)
+}
+pub fn schedule(ctx: *mut Context) -> *const Context {
+    let mut s = STATE.lock();
+
+    schedule_inner(&mut s, ctx)
+}
 pub fn spawn(entry: fn() -> !) {
-    let s = state();
+    let mut s = STATE.lock();
     let id = s.next_id;
 
     s.next_id += 1;
@@ -182,7 +212,7 @@ pub fn spawn(entry: fn() -> !) {
     s.threads.push(thread);
 }
 pub fn spawn_user(addr_space: Box<AddressSpace>, entry_va: u64, user_stack_top: u64) -> ThreadId {
-    let s = state();
+    let mut s = STATE.lock();
     let id = s.next_id;
 
     s.next_id += 1;
@@ -190,11 +220,12 @@ pub fn spawn_user(addr_space: Box<AddressSpace>, entry_va: u64, user_stack_top: 
     let thread = Thread::new_user(id, addr_space, entry_va, user_stack_top);
 
     s.threads.push(thread);
+
     ThreadId(id)
 }
-/// Wake a blocked thread (set Blocked → Ready). Returns true if it was blocked.
+/// Wake a blocked thread (set Blocked -> Ready). Returns true if it was blocked.
 pub fn try_wake(id: ThreadId) -> bool {
-    let s = state();
+    let mut s = STATE.lock();
 
     for thread in &mut s.threads {
         if thread.id == id && thread.state == ThreadState::Blocked {
@@ -207,9 +238,8 @@ pub fn try_wake(id: ThreadId) -> bool {
     false
 }
 /// Access a thread by ID. Closure receives exclusive access to the thread.
-/// Must be called with no preemption (before timer starts, or from syscall context).
 pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {
-    let s = state();
+    let mut s = STATE.lock();
     let thread = s
         .threads
         .iter_mut()
