@@ -29,8 +29,8 @@ Active questions we've started exploring but haven't resolved. Each thread links
 ### Kernel architecture
 
 **Informs:** Decision #16 (Technical Foundation)
-**Status:** Research spike complete (all 7 steps). IPC mechanism settled. Most sub-decisions settled.
-**Context:** From-scratch kernel (tentative, spike favors tractability) with Rust (tentative) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process), OS-mediated handles for access control, ELF as binary format, IPC via shared memory ring buffers with handle-based access control, three-layer process architecture (kernel + OS service + editors). Remaining unknowns: driver model, filesystem, multi-core, scheduling algorithm.
+**Status:** Research spike complete (all 7 steps). IPC mechanism settled. Scheduling algorithm settled. Most sub-decisions settled.
+**Context:** From-scratch kernel (committed, promoted from tentative) with Rust (committed) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process), OS-mediated handles for access control, ELF as binary format, IPC via shared memory ring buffers with handle-based access control, three-layer process architecture (kernel + OS service + editors), SMP (4 cores), EEVDF + scheduling contexts (combined). Remaining unknowns: driver model, filesystem.
 
 ### ~~Privilege model (EL1 / EL0 boundary)~~ — SETTLED
 
@@ -66,7 +66,7 @@ Topics to explore, roughly prioritized by which unsettled decisions they'd infor
 
 7. **Historical OS deep dives** — Plan 9's /proc and per-process namespaces. BeOS's BFS attributes in practice. OpenDoc's component model and why it failed. Xerox Star's property sheets. Each could inform current design.
 
-8. **Scheduling algorithm** — Leaning stride scheduling (deterministic proportional-share). Reference: [OSTEP Chapter on Lottery/Stride Scheduling](https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-sched-lottery.pdf) (Waldspurger & Weihl, 1994). Ticket transfer (editor donates tickets to OS during COW snapshot) is interesting for the edit model. Explore when implementing the scheduler (spike step 4).
+8. ~~**Scheduling algorithm**~~ — **SETTLED.** EEVDF + scheduling contexts (combined model). EEVDF provides proportional fairness with latency differentiation (shorter time slice = earlier virtual deadline). Scheduling contexts are handle-based kernel objects (budget/period) providing temporal isolation between workloads. Context donation: OS service borrows editor's context when processing its messages (explicit syscall). Content-type-aware budgeting: OS service sets budgets based on document mimetype and state. Best-effort admission. Shared contexts across an editor's threads. See Decision #16 in decisions.md.
 
 9. **The "no save" UX** — We committed to immediate writes + COW. What does this feel like for content that's expensive to re-render? What about "I was just experimenting, throw this away"? Is there a need for explicit "draft mode" or does undo cover it?
 
@@ -134,6 +134,18 @@ Full capability systems (seL4, Fuchsia) solve distributed authority — many act
 ### "OS renders everything" produces three-layer architecture (2026-03-07)
 
 "The OS renders everything" is a design principle. "Rendering code should not be in the kernel" is an engineering constraint. Together they force a three-layer architecture: kernel (EL1, hardware/memory/scheduling/IPC), OS service (EL0, rendering/metadata/input/compositing), editors (EL0, untrusted tools). The primary IPC relationship is editor ↔ OS service — not "everything through the kernel." The kernel's IPC role is control plane (setup, access control, message validation), not data plane (actual byte transfer).
+
+### Top-down design explains why content-type awareness is load-bearing (2026-03-08)
+
+Most OSes are designed bottom-up: start from hardware, build abstractions upward. Unix asked "what does the PDP-11 give us?" → bytes → files → processes → pipes. The user-facing model is whatever the hardware abstractions naturally produce. This OS is designed top-down: start from the user experience ("what should working with documents feel like?") and work down toward hardware. Content-type awareness isn't an independent axiom — it's what you discover when user-level requirements (viewing is default, editors bind to content types, undo is global) flow down to the system level. It shows up in rendering, editing, undo, scheduling, file organization, and compound documents because every subsystem was designed to serve the user-level model, not the hardware-level model. Previous document-centric OSes (Xerox Star, OpenDoc) stopped at the UX — "documents first" but the kernel, scheduler, and filesystem remained content-agnostic. This OS takes document-centricity seriously at the system level, which is why content-type awareness permeates everywhere. The methodology (top-down) produced the principle (content-type awareness) as a natural consequence.
+
+### Content-type awareness is a scheduling advantage (2026-03-08)
+
+A traditional OS has no idea what a process is doing. Firefox playing video and Firefox rendering a spreadsheet look identical to the scheduler. Application developers manually request RT priority (and often get it wrong). This OS knows the mimetype of every open document. The OS service creates scheduling contexts for editors and sets budgets based on content type: tight period for `audio/*` playback, relaxed for `text/*` editing, trickle for background indexing. More importantly, the OS service knows document _state_ — video being played gets RT budget, video paused on a frame drops to background levels. The scheduling context isn't set once; the OS service adjusts it dynamically. This is the document-centric axiom paying dividends in an unexpected place: "OS understands content types" was a decision about file organization and viewer selection, but it turns out to be a scheduling decision too.
+
+### Handles all the way down: memory, IPC, time (2026-03-08)
+
+With scheduling contexts as handle-based kernel objects, three fundamental resources use the same access-control model: memory (address space), communication (channel), and time (scheduling context). This consistency makes the design feel inevitable rather than assembled. Each resource is created by the kernel, held via integer handle, rights-checked on use, and revocable. The pattern was adopted for IPC (forced by the access-control decision), then extended to scheduling because the domains were similar enough — the adoption heuristic in action.
 
 ### Ring buffers only carry control messages because documents are memory-mapped (2026-03-07)
 

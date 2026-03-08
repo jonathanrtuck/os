@@ -5,6 +5,8 @@
 
 #[path = "../../kernel/src/handle.rs"]
 mod handle;
+#[path = "../../kernel/src/scheduling_context.rs"]
+mod scheduling_context;
 
 use handle::*;
 
@@ -175,9 +177,18 @@ fn drain_returns_all_and_clears() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 3);
-    assert!(matches!(items[0], (Handle(0), HandleObject::Channel(ChannelId(10)))));
-    assert!(matches!(items[1], (Handle(1), HandleObject::Channel(ChannelId(20)))));
-    assert!(matches!(items[2], (Handle(2), HandleObject::Channel(ChannelId(30)))));
+    assert!(matches!(
+        items[0],
+        (Handle(0), HandleObject::Channel(ChannelId(10)))
+    ));
+    assert!(matches!(
+        items[1],
+        (Handle(1), HandleObject::Channel(ChannelId(20)))
+    ));
+    assert!(matches!(
+        items[2],
+        (Handle(2), HandleObject::Channel(ChannelId(30)))
+    ));
 
     // Table is now empty.
     assert!(t.get(Handle(0), Rights::READ).is_err());
@@ -196,8 +207,60 @@ fn drain_skips_closed_slots() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 2);
-    assert!(matches!(items[0], (Handle(0), HandleObject::Channel(ChannelId(1)))));
-    assert!(matches!(items[1], (Handle(2), HandleObject::Channel(ChannelId(3)))));
+    assert!(matches!(
+        items[0],
+        (Handle(0), HandleObject::Channel(ChannelId(1)))
+    ));
+    assert!(matches!(
+        items[1],
+        (Handle(2), HandleObject::Channel(ChannelId(3)))
+    ));
+}
+
+// --- SchedulingContext handles ---
+
+fn sc(id: u32) -> HandleObject {
+    HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(id))
+}
+
+#[test]
+fn insert_and_get_scheduling_context() {
+    let mut t = HandleTable::new();
+    let h = t.insert(sc(42), Rights::READ_WRITE).unwrap();
+    let obj = t.get(h, Rights::READ).unwrap();
+
+    assert!(matches!(
+        obj,
+        HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(42))
+    ));
+}
+
+#[test]
+fn drain_mixed_channel_and_scheduling_context() {
+    let mut t = HandleTable::new();
+
+    t.insert(ch(1), Rights::READ).unwrap();
+    t.insert(sc(2), Rights::WRITE).unwrap();
+    t.insert(ch(3), Rights::READ_WRITE).unwrap();
+
+    let items: Vec<_> = t.drain().collect();
+
+    assert_eq!(items.len(), 3);
+    assert!(matches!(
+        items[0],
+        (Handle(0), HandleObject::Channel(ChannelId(1)))
+    ));
+    assert!(matches!(
+        items[1],
+        (
+            Handle(1),
+            HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(2))
+        )
+    ));
+    assert!(matches!(
+        items[2],
+        (Handle(2), HandleObject::Channel(ChannelId(3)))
+    ));
 }
 
 // --- Rights ---

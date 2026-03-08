@@ -183,34 +183,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 ## 1.3 SMP-Aware Scheduler
 
-**Current:** Round-robin scan of `Vec<Box<Thread>>` behind `IrqMutex`. O(n) per decision. No priorities. Single run queue.
-
-**Target:** Priority support + SMP awareness. O(1) common case.
-
-**Approach (two stages):**
-
-**A. Global queue with per-core current-thread (start here):**
-
-- One global run queue with ticket spinlock.
-- Each core picks next ready thread on timer tick.
-- Fine for 2-8 cores.
-
-**B. Per-core run queues with work stealing (if needed):**
-
-- Per-queue lock or lock-free local access.
-- Empty queues steal from other cores.
-- Thread affinity for cache warmth.
-- Only implement if global queue bottlenecks.
-
-**Priority:** Three levels via priority bitmap + per-priority queue:
-
-- **Idle:** boot/WFE threads
-- **Normal:** user processes
-- **High:** OS service process (once it exists)
-
-`schedule()` picks highest-priority non-empty queue, round-robins within it.
-
-Public API unchanged: `schedule()`, `spawn()`, `block_current_and_schedule()`.
+**Superseded by section 6.1 (EEVDF + scheduling contexts).** The original priority-based FIFO scheduler (three levels: Idle/Normal/High, round-robin within each) has been replaced. The global queue + per-core current-thread structure (stage A) was retained; per-core queues with work stealing (stage B) remain a future option if the global lock bottlenecks.
 
 **Depends on:** 1.1, 1.2.
 
@@ -332,3 +305,68 @@ Public API unchanged: `schedule()`, `spawn()`, `block_current_and_schedule()`.
 **Why virtio:** Standard paravirtualized device interface. QEMU, KVM, Firecracker. Public spec. Same drivers work under real hypervisors.
 
 **Depends on:** 2.2 (buddy allocator for contiguous DMA buffers).
+
+---
+
+## 6.1 Scheduling Algorithm: EEVDF + Scheduling Contexts
+
+**Current:** Priority-based FIFO with three levels (High, Normal, Idle). Global run queue behind a single lock. No fairness guarantees — High threads starve Normal indefinitely. Functional for two demo processes but not for a real OS.
+
+**Target:** Two-layer scheduling. Scheduling contexts provide per-workload temporal isolation and server billing. EEVDF provides proportional-fair selection with latency differentiation among eligible threads.
+
+**Layer 1 — Scheduling Contexts (budget management):**
+
+A scheduling context is a kernel object: `{ budget, period, remaining, replenish_at }`. Accessed via handles in the per-process handle table — same mechanism as IPC channels. A thread can only run when its scheduling context has remaining budget. An editor's threads share one context (the document's budget pool). The kernel charges elapsed time to the running thread's context on every timer tick and on deschedule.
+
+Budget replenishment: periodic (every `period` ns, reset `remaining = budget`). Simpler than sporadic server initially; can upgrade later.
+
+Context donation: OS service explicitly borrows an editor's scheduling context via syscall when processing that editor's IPC messages. Returns to its own context when done. Bills the rendering/compositing work to the editor that requested it. Prevents noisy-neighbor — a greedy editor exhausts only its own budget.
+
+The OS service self-budgets from the total system allocation. It creates scheduling contexts for each editor process based on document mimetype and state (content-type-aware policy).
+
+Best-effort admission: all contexts admitted. Under overload, EEVDF handles fairness. No hard rejection of new documents.
+
+**Layer 2 — EEVDF (thread selection):**
+
+Among threads whose scheduling context has remaining budget:
+
+1. **Virtual runtime (vruntime):** Tracks accumulated CPU time, weighted by 1/weight. Higher weight = vruntime grows slower = more CPU share.
+2. **Eligibility:** A thread is eligible if its lag ≥ 0 (lag = entitled time − actual time). Threads that overconsumed are ineligible until the math catches up.
+3. **Virtual deadline:** For each eligible thread, deadline = became-eligible time + requested time slice. Thread with earliest deadline runs.
+4. **Latency differentiation:** Threads requesting shorter time slices get earlier deadlines — interactive work runs sooner without consuming more than its fair share. No heuristics.
+
+Data structure: replace the three `VecDeque`s (high/normal priority) with a single sorted structure (BinaryHeap or augmented tree) keyed by virtual deadline, filtered by eligibility and budget.
+
+**New kernel objects and syscalls:**
+
+- `SchedulingContext` kernel object: budget, period, remaining, replenish_at
+- `HandleObject::SchedulingContext(SchedulingContextId)` variant in handle table
+- Thread holds `Option<SchedulingContextId>` — its current scheduling context
+- New syscalls: `scheduling_context_create(budget, period)`, `scheduling_context_borrow(handle)`, `scheduling_context_return()`
+- Timer interrupt: charge runtime, check budget exhaustion, trigger replenishment
+
+**Content-type-aware policy (OS service, not kernel):**
+
+| Content type / state        | Example budget | Example period | Rationale                     |
+| --------------------------- | -------------- | -------------- | ----------------------------- |
+| `audio/*` (playing)         | 1–2 ms         | 5 ms           | Low-latency buffer fills      |
+| `video/*` (playing)         | 4 ms           | 16 ms          | 60fps frame delivery          |
+| `text/*` (actively editing) | 2 ms           | 16 ms          | Responsive keystrokes         |
+| `image/*` (editing)         | 6 ms           | 33 ms          | Heavier compute, 30fps OK     |
+| `video/*` (paused)          | 2 ms           | 16 ms          | Just showing a still, demoted |
+| Background indexing         | 2 ms           | 100 ms         | Trickle, stay out of the way  |
+
+The OS service adjusts contexts dynamically as document state changes. The kernel is policy-agnostic — it enforces budgets without understanding why they were chosen.
+
+**Alternatives considered:**
+
+- **CFS:** No latency differentiation without heuristics. EEVDF subsumes it.
+- **Stride scheduling:** No latency differentiation. Clean but EEVDF is strictly better.
+- **EEVDF alone:** No temporal isolation, no server billing. Noisy-neighbor problem.
+- **Contexts alone (priority selection):** No fairness within priority levels.
+- **SCHED_DEADLINE (EDF+CBS):** No proportional fairness for non-deadline tasks.
+- **Lottery scheduling:** High short-term variance. Deterministic preferred.
+
+**Prior art:** Linux EEVDF (kernel 6.6+, Stoica & Abdel-Wahab 1995 paper), seL4 MCS scheduling contexts (Lyons et al.), QNX adaptive partitioning (partition inheritance = context donation), Apple Clutch (thread groups = content-type grouping).
+
+**Depends on:** 1.1 (sync primitives), 1.3 (SMP scheduler infrastructure), 0.8 (handle table for scheduling context handles).

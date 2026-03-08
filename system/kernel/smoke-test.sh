@@ -13,7 +13,7 @@ EXPECTED=(
     "heap -"
     "frames -"
     "interrupts -"
-    "scheduler -"
+    "scheduler - eevdf"
     "virtio - blk"
     "sector 0 - HELLO"
     "processes -"

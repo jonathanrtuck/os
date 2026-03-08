@@ -38,6 +38,31 @@ fn reprogram(freq: u64) {
     }
 }
 
+/// Read the hardware counter (CNTPCT_EL0). Monotonic, sub-tick precision.
+pub fn counter() -> u64 {
+    let cnt: u64;
+
+    unsafe {
+        core::arch::asm!("mrs {0}, cntpct_el0", out(reg) cnt, options(nostack, nomem));
+    }
+
+    cnt
+}
+/// Counter frequency in Hz (cached from CNTFRQ_EL0).
+pub fn counter_freq() -> u64 {
+    CNTFRQ.load(Ordering::Relaxed)
+}
+/// Convert hardware counter ticks to nanoseconds.
+/// Uses u128 intermediate to avoid overflow (freq can be ~62.5 MHz).
+pub fn counter_to_ns(ticks: u64) -> u64 {
+    let freq = counter_freq();
+
+    if freq == 0 {
+        return 0;
+    }
+
+    (ticks as u128 * 1_000_000_000 / freq as u128) as u64
+}
 /// Handle a timer interrupt: increment tick count and reprogram for next interval.
 pub fn handle_irq() {
     TICKS.fetch_add(1, Ordering::Relaxed);

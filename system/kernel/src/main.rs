@@ -67,6 +67,8 @@ mod per_core;
 mod power;
 mod process;
 mod scheduler;
+mod scheduling_algorithm;
+mod scheduling_context;
 mod serial;
 mod slab;
 mod sync;
@@ -173,7 +175,7 @@ pub extern "C" fn kernel_main() -> ! {
     interrupt_controller::init();
     serial::puts("  ⚡ interrupts - gic v2\n");
     scheduler::init();
-    serial::puts("  📋 scheduler - priority queues (idle/normal/high)\n");
+    serial::puts("  📋 scheduler - eevdf + scheduling contexts\n");
     virtio::init();
 
     // Spawn user processes and create an IPC channel between them.

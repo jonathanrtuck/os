@@ -298,6 +298,7 @@ secondary_entry:
 // Rust reads this value to pass to PSCI CPU_ON.
 // --------------------------------------------------------------------------
 .section .rodata
+.align 3
 .global SECONDARY_ENTRY_PA
 SECONDARY_ENTRY_PA:
   .quad secondary_entry

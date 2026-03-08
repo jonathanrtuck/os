@@ -13,14 +13,17 @@
 //!
 //! # Syscalls
 //!
-//! | Nr | Name           | Args                          | Returns          |
-//! |----|----------------|-------------------------------|------------------|
-//! | 0  | exit           | —                             | does not return  |
-//! | 1  | write          | x0=buf_ptr, x1=len            | bytes written    |
-//! | 2  | yield          | —                             | 0                |
-//! | 3  | handle_close   | x0=handle                     | 0                |
-//! | 4  | channel_signal | x0=handle                     | 0                |
-//! | 5  | channel_wait   | x0=handle                     | 0 (may block)    |
+//! | Nr | Name                      | Args                          | Returns          |
+//! |----|---------------------------|-------------------------------|------------------|
+//! | 0  | exit                      | —                             | does not return  |
+//! | 1  | write                     | x0=buf_ptr, x1=len            | bytes written    |
+//! | 2  | yield                     | —                             | 0                |
+//! | 3  | handle_close              | x0=handle                     | 0                |
+//! | 4  | channel_signal            | x0=handle                     | 0                |
+//! | 5  | channel_wait              | x0=handle                     | 0 (may block)    |
+//! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns    | handle           |
+//! | 7  | scheduling_context_borrow | x0=handle                     | 0                |
+//! | 8  | scheduling_context_return | —                             | 0                |
 //!
 //! # Error codes
 //!
@@ -29,6 +32,9 @@
 //! | -1   | UnknownSyscall      | `Error`       |
 //! | -2   | BadAddress          | `Error`       |
 //! | -3   | BadLength           | `Error`       |
+//! | -4   | InvalidArgument     | `Error`       |
+//! | -5   | AlreadyBorrowing    | `Error`       |
+//! | -6   | NotBorrowing        | `Error`       |
 //! | -10  | InvalidHandle       | `HandleError` |
 //! | -12  | InsufficientRights  | `HandleError` |
 //! | -13  | TableFull           | `HandleError` |
@@ -48,6 +54,9 @@ pub mod nr {
     pub const HANDLE_CLOSE: u64 = 3;
     pub const CHANNEL_SIGNAL: u64 = 4;
     pub const CHANNEL_WAIT: u64 = 5;
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
 }
 
 #[repr(i64)]
@@ -55,6 +64,9 @@ pub enum Error {
     UnknownSyscall = -1,
     BadAddress = -2,
     BadLength = -3,
+    InvalidArgument = -4,
+    AlreadyBorrowing = -5,
+    NotBorrowing = -6,
 }
 
 impl From<HandleError> for u64 {
@@ -119,6 +131,7 @@ fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
     let (channel_id, caller_id) = scheduler::current_thread_do(|thread| {
         let channel_id = match thread.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
             Ok(HandleObject::Channel(id)) => id,
+            Ok(_) => return Err(HandleError::InvalidHandle),
             Err(e) => return Err(e),
         };
 
@@ -143,6 +156,7 @@ fn sys_channel_wait(ctx: *mut Context) -> *const Context {
     let result = scheduler::current_thread_do(|thread| {
         let channel_id = match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
             Ok(HandleObject::Channel(id)) => id,
+            Ok(_) => return Err(HandleError::InvalidHandle),
             Err(e) => return Err(e),
         };
 
@@ -180,6 +194,47 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
     scheduler::current_thread_do(|thread| thread.handles.close(Handle(handle_nr as u8)))?;
 
     Ok(0)
+}
+fn sys_scheduling_context_borrow(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u8::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let ctx_id = scheduler::current_thread_do(|thread| {
+        match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
+            Ok(HandleObject::SchedulingContext(id)) => Ok(id),
+            _ => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    if scheduler::borrow_scheduling_context(ctx_id) {
+        Ok(0)
+    } else {
+        Err(Error::AlreadyBorrowing)
+    }
+}
+fn sys_scheduling_context_create(budget: u64, period: u64) -> Result<u64, Error> {
+    let ctx_id =
+        scheduler::create_scheduling_context(budget, period).ok_or(Error::InvalidArgument)?;
+    // Insert handle into the calling thread's handle table.
+    let handle = scheduler::current_thread_do(|thread| {
+        thread
+            .handles
+            .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
+    })
+    .map_err(|_| Error::InvalidArgument)?;
+
+    // Bind the context to the calling thread.
+    scheduler::bind_scheduling_context(ctx_id);
+
+    Ok(handle.0 as u64)
+}
+fn sys_scheduling_context_return() -> Result<u64, Error> {
+    if scheduler::return_scheduling_context() {
+        Ok(0)
+    } else {
+        Err(Error::NotBorrowing)
+    }
 }
 fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
     if len > MAX_WRITE_LEN {
@@ -248,6 +303,30 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             ctx as *const Context
         }
         nr::CHANNEL_WAIT => sys_channel_wait(ctx),
+        nr::SCHEDULING_CONTEXT_CREATE => {
+            c.x[0] = match sys_scheduling_context_create(c.x[0], c.x[1]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::SCHEDULING_CONTEXT_BORROW => {
+            c.x[0] = match sys_scheduling_context_borrow(c.x[0]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::SCHEDULING_CONTEXT_RETURN => {
+            c.x[0] = match sys_scheduling_context_return() {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
         nr::YIELD => sys_yield(ctx),
         _ => {
             c.x[0] = Error::UnknownSyscall as i64 as u64;

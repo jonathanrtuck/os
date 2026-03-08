@@ -6,6 +6,8 @@
 //! rights bitfield (read, write). The kernel validates handles and rights
 //! on every operation.
 
+use super::scheduling_context::SchedulingContextId;
+
 const MAX_HANDLES: usize = 256;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +27,7 @@ pub struct Rights(u32);
 #[derive(Clone, Copy, Debug)]
 pub enum HandleObject {
     Channel(ChannelId),
+    SchedulingContext(SchedulingContextId),
 }
 #[derive(Clone, Copy)]
 struct HandleEntry {

@@ -10,25 +10,25 @@ This document tracks every design decision — settled, tentative, and abandoned
 
 Which decisions are stable enough to write code against? This guides when to code vs. when to keep designing.
 
-| Decision               | Status    | Readiness            | Notes                                                                                                              |
-| ---------------------- | --------- | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                                                          |
-| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                                             |
-| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                                             |
-| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                                                       |
-| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                                               |
-| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).                                |
-| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.                                  |
-| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                                           |
-| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. IPC mechanism depends on §16.                                                              |
-| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                                    |
-| #11 Rendering Tech     | Unsettled | **Not safe**         | High-leverage unsettled decision. Blocks layout, tech foundation, interaction.                                     |
-| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                                           |
-| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                               |
-| #14 Compound Documents | Settled   | **Behind interface** | Manifest + layout model is firm. Rendering depends on §11. Open sub-questions remain.                              |
-| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                             |
-| #16 Tech Foundation    | Partial   | **Partially safe**   | IPC, process architecture, binary format now settled. Remaining: driver model, filesystem, multi-core, scheduling. |
-| #17 Interaction Model  | Unsettled | **Not safe**         | Depends on §11, §2, §7.                                                                                            |
+| Decision               | Status    | Readiness            | Notes                                                                                                  |
+| ---------------------- | --------- | -------------------- | ------------------------------------------------------------------------------------------------------ |
+| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                                              |
+| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                                 |
+| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                                 |
+| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                                           |
+| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                                   |
+| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).                    |
+| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.                      |
+| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                               |
+| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. IPC mechanism depends on §16.                                                  |
+| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                        |
+| #11 Rendering Tech     | Unsettled | **Not safe**         | High-leverage unsettled decision. Blocks layout, tech foundation, interaction.                         |
+| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                               |
+| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                   |
+| #14 Compound Documents | Settled   | **Behind interface** | Manifest + layout model is firm. Rendering depends on §11. Open sub-questions remain.                  |
+| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                 |
+| #16 Tech Foundation    | Partial   | **Partially safe**   | IPC, process architecture, binary format, scheduling now settled. Remaining: driver model, filesystem. |
+| #17 Interaction Model  | Unsettled | **Not safe**         | Depends on §11, §2, §7.                                                                                |
 
 **Readiness key:**
 
@@ -51,6 +51,7 @@ How confident are we in each settled decision? What would trigger revisiting? Wh
 | Process arch: one OS service (#16) | Medium      | Crashes require component isolation              | Split into multiple services    | IPC topology                   |
 | From-scratch kernel (#16)          | Medium      | Driver/hardware blockers                         | Existing kernel (Zircon, Linux) | Large, but behind syscall API  |
 | Rust (#16)                         | High        | Bare-metal Rust impractical at scale             | C kernel, Rust userspace        | Kernel source only             |
+| Scheduling: EEVDF + contexts (#16) | Medium-High | EEVDF overhead excessive or contexts too complex | Priority scheduler + no billing | Scheduler, handle table        |
 
 **Key principle:** Decisions marked "Behind interface" in Implementation Readiness are inherently lower risk — the interface is stable even if the implementation changes. Decisions that _define_ interfaces are higher risk because changing them ripples outward.
 
@@ -434,15 +435,15 @@ This decision is being resolved incrementally through a bare-metal research spik
 
 **Rust as kernel language (tentative).** Chosen for: compile-time memory safety at hardware boundary, strong type system catches bugs in AI-generated code, built-in `aarch64-unknown-none` target on stable Rust. The designer reads more than writes; Rust's compiler guardrails are valuable for code review. Revisitable if Rust proves impractical for bare-metal work.
 
+**Scheduling: EEVDF selection + scheduling contexts (combined model).** Two-layer scheduling design. **Scheduling contexts** are kernel objects (budget, period, remaining budget, replenishment time) accessed via handles — time becomes a resource held through the same handle mechanism as IPC channels. Threads can only run when their scheduling context has remaining budget. **EEVDF** (Earliest Eligible Virtual Deadline First) is the selection algorithm among threads with budget: each thread has a virtual runtime, weight, and requested time slice; the eligible thread with the earliest virtual deadline runs next. Shorter time slice requests produce earlier deadlines, giving latency-sensitive work (foreground editor) lower latency without consuming more than its fair share. Together: contexts answer "may this thread run?" (budget check), EEVDF answers "which runnable thread runs next?" (fairness + latency). **Context donation:** When the OS service processes a message from editor X's IPC channel, it explicitly borrows X's scheduling context via syscall, billing that work to X's budget. Prevents noisy-neighbor: a greedy editor can only exhaust its own time. The OS service self-budgets from the total system allocation. **Content-type-aware scheduling:** The OS service knows each document's mimetype and state, so it sets appropriate budgets — tight period for audio playback, relaxed for text editing, trickle for background indexing. Budgets adjust dynamically as document state changes (video playing → paused demotes to background levels). A genuine advantage of the document-centric model: the OS can make informed scheduling decisions because it knows what each process is doing at a semantic level. **Best-effort admission:** No hard admission control. All scheduling contexts admitted. Under overload, everyone gets proportionally less — EEVDF handles fairness. Budgets are minimum guarantees under contention, not hard reservations. Strict admission can be added later (additive change) if needed. **Shared contexts:** An editor's threads share one scheduling context (the document's budget), regardless of internal thread organization. **Reversible aspects:** Context donation model (explicit syscall → automatic on channel_recv) and admission control (best-effort → strict) are painless to change — same kernel mechanism, different trigger point.
+
+**Multi-core: SMP with 4 cores.** Implemented. PSCI CPU_ON for secondary cores. Ticket spinlock for shared state. Per-core kernel stacks, idle threads, TPIDR_EL1. Global run queue (fine for ≤8 cores).
+
 ### Open sub-decisions
 
 **Driver model.** Userspace drivers via IPC, kernel-resident drivers, or hybrid? Not yet explored. The ring buffer IPC mechanism would support userspace drivers well.
 
 **Filesystem.** COW filesystem required by undo model (Decision #12). ZFS? Custom? Not yet explored.
-
-**Scheduling algorithm.** Round-robin implemented in spike. Leaning stride scheduling (proportional-share, deterministic). Not yet committed.
-
-**Multi-core.** Single-core only in current spike. Multi-core adds per-CPU scheduling, IPC between cores, and cache coherence concerns. Deferred.
 
 ### Considered and rejected
 
@@ -457,6 +458,16 @@ This decision is being resolved incrementally through a bare-metal research spik
 - **Synchronous message passing (L4/seL4-style IPC):** Register-sized messages, sender blocks until receiver ready. Ultra-fast for tiny messages but can't deliver input events to a busy editor (requires receiver to be waiting in receive()). Size-limited (~120 bytes in registers); anything larger needs a second mechanism, violating one-mechanism principle. Total complexity displaced to userspace marshaling and buffering.
 - **Asynchronous queued messages (Mach-style IPC):** Kernel-managed message queues with out-of-line data and port rights. Powerful but copies data twice (sender→kernel→receiver), complex kernel involvement per message, historically slow. Kernel complexity disproportionate to this OS's needs.
 - **Star-only IPC topology (all data through kernel):** Every message flows process→kernel→process. Kernel becomes data-path bottleneck. Doesn't scale to editor↔OS service communication volume. Rejected in favor of kernel-mediated setup with direct shared memory communication.
+- **CFS (Completely Fair Scheduler, Linux pre-6.6):** Picks smallest virtual runtime ("who got least CPU?"). Fair but no mechanism for latency differentiation without heuristics and tunables. EEVDF is strictly more informative (adds eligibility + deadline) and subsumes CFS.
+- **Strict priority scheduling (current kernel):** Simple but no fairness guarantees. High-priority threads starve everything below. No per-workload isolation. Replaced by EEVDF + scheduling contexts.
+- **Stride scheduling (Waldspurger '95):** Deterministic proportional-share. Clean and simple, but no inherent latency differentiation — same limitation as CFS. EEVDF's virtual deadline mechanism solves this.
+- **Lottery scheduling (Waldspurger '94):** Probabilistic proportional-share. Interesting ticket transfer concept (used in context donation instead) but high short-term variance. Deterministic algorithms preferred.
+- **EEVDF alone (no scheduling contexts):** Good fairness and latency, but no per-workload temporal isolation and no server billing. The OS service becomes a shared resource with no per-editor accounting — noisy neighbor problem. Scheduling contexts solve this.
+- **Scheduling contexts alone (no EEVDF):** Budget isolation works, but selection among threads with budget is just priority-based — no fairness or latency differentiation within a priority level. Two dimensions to manage (priority + budget) with no algorithmic help.
+- **SCHED_DEADLINE (EDF + CBS, Linux):** Tasks declare runtime/deadline/period. Clean for soft RT, but pure deadline scheduling doesn't provide proportional fairness among non-deadline tasks. The combined model uses EEVDF for fairness and contexts for isolation — covering both needs.
+- **Full seL4 scheduling contexts (time as pure capability):** Elegant but seL4's synchronous IPC makes context donation natural (server wakes on client's context). Our async ring buffers require explicit borrow/return, making the pure capability model less clean. Adopted the useful parts (budget/period, handle-based, passable) without requiring synchronous IPC.
+- **Apple Clutch thread groups:** Three-level hierarchy (QoS bucket → thread group → thread). Interesting but the three-level scheduling hierarchy is complex connective tissue (Decision #4). Content-type-aware budget setting achieves similar results (foreground = interactive, background = utility) without architectural complexity.
+- **Hard admission control:** Reject scheduling context creation when total committed budget exceeds CPU capacity. Guarantees are real but "you can't open another document" is bad UX for a personal OS. Best-effort with EEVDF fairness under overload is simpler and more aligned with Decision #4.
 - **Multiple OS service processes (split renderer, metadata, input):** More isolation between OS components, but creates microkernel IPC explosion (L4 cautionary tale) without demonstrated need. The trust boundary is OS service↔editors, not between OS components. Reversible — can split later if stability requires it.
 
 ---

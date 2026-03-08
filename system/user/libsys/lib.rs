@@ -24,6 +24,9 @@ mod nr {
     pub const HANDLE_CLOSE: u64 = 3;
     pub const CHANNEL_SIGNAL: u64 = 4;
     pub const CHANNEL_WAIT: u64 = 5;
+    pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
+    pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
+    pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,6 +108,25 @@ pub fn exit() -> ! {
 /// Returns 0 on success, or a negative error code.
 pub fn handle_close(handle: u8) -> i64 {
     unsafe { syscall1(nr::HANDLE_CLOSE, handle as u64) as i64 }
+}
+/// Borrow another scheduling context (context donation).
+///
+/// Saves the current context and switches to the one identified by `handle`.
+/// Returns 0 on success, or a negative error code.
+pub fn scheduling_context_borrow(handle: u8) -> i64 {
+    unsafe { syscall1(nr::SCHEDULING_CONTEXT_BORROW, handle as u64) as i64 }
+}
+/// Create a scheduling context with the given budget and period (both in ns).
+///
+/// Returns the handle index on success, or a negative error code.
+pub fn scheduling_context_create(budget: u64, period: u64) -> i64 {
+    unsafe { syscall2(nr::SCHEDULING_CONTEXT_CREATE, budget, period) as i64 }
+}
+/// Return a borrowed scheduling context, restoring the saved one.
+///
+/// Returns 0 on success, or a negative error code.
+pub fn scheduling_context_return() -> i64 {
+    unsafe { syscall0(nr::SCHEDULING_CONTEXT_RETURN) as i64 }
 }
 /// Write `buf` to the kernel console (UART).
 ///

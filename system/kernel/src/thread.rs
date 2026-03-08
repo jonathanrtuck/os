@@ -3,6 +3,8 @@
 use super::address_space::AddressSpace;
 use super::context::Context;
 use super::handle::HandleTable;
+use super::scheduling_algorithm::State;
+use super::scheduling_context::SchedulingContextId;
 use alloc::boxed::Box;
 use core::alloc::Layout;
 
@@ -18,26 +20,23 @@ pub struct Thread {
     pub(crate) context: Context,
     id: ThreadId,
     state: ThreadState,
-    priority: Priority,
     trust_level: TrustLevel,
     stack_bottom: *mut u8,
     stack_size: usize,
     pub(crate) address_space: Option<Box<AddressSpace>>,
     pub(crate) handles: HandleTable,
+    /// Scheduling context this thread is currently charged against.
+    /// None = unlimited budget (kernel/idle threads).
+    pub(crate) scheduling_context_id: Option<SchedulingContextId>,
+    /// Saved scheduling context during donation (borrow/return).
+    pub(crate) saved_context_id: Option<SchedulingContextId>,
+    /// Per-thread EEVDF state (vruntime, weight, slice, eligible_at).
+    pub(crate) scheduling_algorithm: State,
+    /// Hardware counter timestamp when this thread last started running.
+    pub(crate) last_started: u64,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
-
-/// Scheduler priority level. Higher priority runs first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Priority {
-    /// Runs only when nothing else is runnable (one per core).
-    Idle,
-    /// Default for user threads.
-    Normal,
-    /// Reserved for future OS service threads.
-    High,
-}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
     Ready,
@@ -72,11 +71,12 @@ impl Thread {
     pub(crate) fn is_exited(&self) -> bool {
         self.state == ThreadState::Exited
     }
+    /// Idle threads have distinguished IDs: 0xFF00 | core_id.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.id.0 & 0xFF00 == 0xFF00
+    }
     pub(crate) fn is_ready(&self) -> bool {
         self.state == ThreadState::Ready
-    }
-    pub(crate) fn priority(&self) -> Priority {
-        self.priority
     }
 }
 impl Drop for Thread {
@@ -162,12 +162,15 @@ impl Thread {
             context: ctx,
             id: ThreadId(id),
             state: ThreadState::Ready,
-            priority: Priority::Normal,
             trust_level: TrustLevel::Kernel,
             stack_bottom,
             stack_size: STACK_SIZE,
             address_space: None,
             handles: HandleTable::new(),
+            scheduling_context_id: None,
+            saved_context_id: None,
+            scheduling_algorithm: State::new(),
+            last_started: 0,
         })
     }
 
@@ -184,12 +187,15 @@ impl Thread {
             context: ctx,
             id: ThreadId(0),
             state: ThreadState::Running,
-            priority: Priority::Normal,
             trust_level: TrustLevel::Kernel,
             stack_bottom: core::ptr::null_mut(),
             stack_size: 0,
             address_space: None,
             handles: HandleTable::new(),
+            scheduling_context_id: None,
+            saved_context_id: None,
+            scheduling_algorithm: State::new(),
+            last_started: 0,
         })
     }
     /// Idle thread — runs at EL1, no stack (uses boot stack), never enqueued.
@@ -206,12 +212,15 @@ impl Thread {
             context: ctx,
             id: ThreadId(core_id | 0xFF00), // Distinguished idle thread IDs.
             state: ThreadState::Ready,
-            priority: Priority::Idle,
             trust_level: TrustLevel::Kernel,
             stack_bottom: core::ptr::null_mut(),
             stack_size: 0,
             address_space: None,
             handles: HandleTable::new(),
+            scheduling_context_id: None,
+            saved_context_id: None,
+            scheduling_algorithm: State::new(),
+            last_started: 0,
         })
     }
     /// User thread — runs at EL0 with its own address space.
@@ -241,12 +250,15 @@ impl Thread {
             context: ctx,
             id: ThreadId(id),
             state: ThreadState::Ready,
-            priority: Priority::Normal,
             trust_level: TrustLevel::Untrusted,
             stack_bottom,
             stack_size: KERNEL_STACK_SIZE,
             address_space: Some(addr_space),
             handles: HandleTable::new(),
+            scheduling_context_id: None,
+            saved_context_id: None,
+            scheduling_algorithm: State::new(),
+            last_started: 0,
         })
     }
 }

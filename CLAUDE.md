@@ -69,11 +69,13 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
+**Session 2026-03-08:** Scheduling algorithm settled: EEVDF + scheduling contexts (combined model). EEVDF provides proportional-fair selection with latency differentiation. Scheduling contexts are handle-based kernel objects (budget/period) providing temporal isolation and server billing via context donation. Content-type-aware budgeting — OS service sets budgets based on document mimetype and state. Best-effort admission. Design recorded in Decision #16, kernel DESIGN.md (section 6.1), and journal insights log.
+
 **Session 2026-03-07:** Kernel graduated from research spike to production. All roadmap phases complete (SMP, memory management, cleanup, VM, device I/O). 8-phase code review/remediation completed. Documentation and design-notes updated.
 
-**Kernel code:** `system/kernel/` + `system/user/{init,echo,libsys}/` + `system/host-tests/`. Boots on QEMU `virt` with 4 SMP cores, drops EL2→EL1, sets up MMU with split TTBR, preemptive priority scheduler, two user processes at EL0 with per-process address spaces communicating via shared-memory IPC channels. Three-tier memory management (buddy + slab + linked-list). Full process cleanup on exit. 28 kernel source files, 3 user-space crates, 77 host-side unit tests, QEMU smoke test.
+**Kernel code:** `system/kernel/` + `system/user/{init,echo,libsys}/` + `system/host-tests/`. Boots on QEMU `virt` with 4 SMP cores, drops EL2→EL1, sets up MMU with split TTBR, preemptive priority scheduler (to be replaced by EEVDF + scheduling contexts), two user processes at EL0 with per-process address spaces communicating via shared-memory IPC channels. Three-tier memory management (buddy + slab + linked-list). Full process cleanup on exit. 28 kernel source files, 3 user-space crates, 77 host-side unit tests, QEMU smoke test.
 
-**Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process), OS-mediated handles for access control (per-process handle table, read/write rights, kernel-enforced), ELF as binary format, IPC via shared memory ring buffers with handle-based access control, three-layer process architecture (kernel EL1 + OS service EL0 trusted + editors EL0 untrusted).
+**Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process), OS-mediated handles for access control (per-process handle table, read/write rights, kernel-enforced), ELF as binary format, IPC via shared memory ring buffers with handle-based access control, three-layer process architecture (kernel EL1 + OS service EL0 trusted + editors EL0 untrusted), EEVDF + scheduling contexts (proportional-fair selection with handle-based temporal isolation, context donation for server billing, content-type-aware budgeting), SMP (4 cores via PSCI).
 
 **Decision #16 sub-decisions settled (promoted from tentative):** From-scratch kernel, Rust as kernel language. Spike validated tractability; now committed as production kernel.
 
@@ -87,7 +89,7 @@ Read these before making any design suggestions:
 
 **Risk tracking:** Reversibility & Risk table added to decisions.md. Tracks confidence level, revisit triggers, fallbacks, and blast radius for every non-axiomatic settled decision.
 
-**What to explore next:** Rendering technology (#11) is the highest-leverage unsettled _design_ decision. Follow the designer's interest. On the kernel side, natural next steps: driver model, filesystem (COW required by undo design), interrupt-driven I/O, or production hardening of existing subsystems (virtio write support, bidirectional console, handle table growth).
+**What to explore next:** Rendering technology (#11) is the highest-leverage unsettled _design_ decision. Follow the designer's interest. On the kernel side, natural next steps: implement EEVDF + scheduling contexts (design settled, ready to code), driver model (open design decision), filesystem (COW, blocked on OS design), interrupt-driven I/O, or production hardening of existing subsystems (virtio write support, bidirectional console, handle table growth).
 
 ## Design Discussion Rules
 
