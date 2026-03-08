@@ -18,21 +18,21 @@ const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
 
 /// Each free block stores its total size (including this header) and a pointer
 /// to the next free block. Minimum allocation granularity = 16 bytes on aarch64.
-struct FreeBlock {
-    size: usize,
-    next: *mut FreeBlock,
+pub struct FreeBlock {
+    pub size: usize,
+    pub next: *mut FreeBlock,
 }
-struct LinkedListAllocator {
-    head: UnsafeCell<*mut FreeBlock>,
-    region_start: UnsafeCell<usize>,
-    region_end: UnsafeCell<usize>,
+pub struct LinkedListAllocator {
+    pub head: UnsafeCell<*mut FreeBlock>,
+    pub region_start: UnsafeCell<usize>,
+    pub region_end: UnsafeCell<usize>,
 }
 
 /// Protects the allocator's free list from concurrent access.
 /// Separate from the allocator struct because GlobalAlloc takes `&self`.
 static ALLOC_LOCK: IrqMutex<()> = IrqMutex::new(());
-#[global_allocator]
-static ALLOCATOR: LinkedListAllocator = LinkedListAllocator::new();
+#[cfg_attr(not(test), global_allocator)]
+pub static ALLOCATOR: LinkedListAllocator = LinkedListAllocator::new();
 
 impl LinkedListAllocator {
     const fn new() -> Self {
