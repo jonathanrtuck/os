@@ -255,10 +255,17 @@ impl PageAttrs {
 /// Walk a table entry; if invalid, allocate a new table and install it.
 /// Returns the VA of the next-level table.
 fn walk_or_create(table_va: *mut u64, idx: usize) -> *mut u64 {
-    // SAFETY: table_va points to a valid 4096-byte page table. idx is 0..511
-    // (derived from VA bit extraction). If the entry is valid, its PA was
-    // allocated by a prior call to alloc_frame. If invalid, we allocate a
-    // new zeroed frame and install a table descriptor.
+    // SAFETY: table_va was either:
+    //   (a) The L0 table PA converted via phys_to_virt (AddressSpace::new
+    //       allocates the L0 frame), or
+    //   (b) A next-level table VA returned by a prior call to this function.
+    // In both cases it points to a 4096-byte (512-entry) page table in
+    // kernel-mapped memory. idx is 0..511 (derived from VA bit extraction
+    // via `(va >> shift) & 0x1FF`), so `table_va.add(idx)` is in bounds.
+    // If the entry is valid, its PA came from alloc_frame + phys_to_virt,
+    // producing a valid kernel VA. If invalid, we allocate a new zeroed
+    // frame — alloc_frame returns page-aligned physical memory that
+    // phys_to_virt maps into the kernel's TTBR1 window.
     unsafe {
         let entry = table_va.add(idx);
         let val = *entry;

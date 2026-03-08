@@ -45,6 +45,14 @@ impl VmaList {
     /// (e.g., guard page).
     pub fn lookup(&self, va: u64) -> Option<&Vma> {
         // Binary search for the VMA whose range contains va.
+        //
+        // The comparator returns the Ordering from the VMA's perspective:
+        // - Greater means "I'm too high for this va" (va < my start)
+        // - Less means "I'm too low for this va" (va >= my end)
+        // - Equal means "va is within my range"
+        //
+        // This is inverted from the typical "compare va to vma" perspective
+        // because binary_search_by passes the *element* as the argument.
         let idx = self
             .vmas
             .binary_search_by(|vma| {

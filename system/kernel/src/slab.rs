@@ -61,8 +61,14 @@ impl SlabCache {
     }
     /// Return an object to this cache.
     ///
-    /// SAFETY: `ptr` must have been returned by a prior `alloc()` on this
-    /// cache, and must not have been freed already.
+    /// # Safety
+    ///
+    /// `ptr` must have been returned by a prior `alloc()` on this same
+    /// cache (same size class), and must not have been freed already.
+    /// The caller is responsible for ensuring no aliases to this memory
+    /// remain. Writing a FreeNode header is sound because the object is
+    /// at least 64 bytes (minimum size class ≥ size_of::<FreeNode>())
+    /// and was originally carved from a page-aligned slab.
     unsafe fn free(&mut self, ptr: *mut u8) {
         let node = ptr as *mut FreeNode;
 

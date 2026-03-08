@@ -15,9 +15,22 @@ const UART0_FR: usize = UART0_BASE + 0x18;
 
 static LOCK: IrqMutex<()> = IrqMutex::new(());
 
+/// Maximum iterations to wait for UART TXFF to clear. If the FIFO is
+/// stuck, we write anyway (lossy output > dead kernel).
+const TX_TIMEOUT: u32 = 1_000_000;
+
 /// Raw character output — no lock. For internal use and panic handler.
 fn raw_putc(c: u8) {
-    while mmio::read32(UART0_FR) & TXFF != 0 {}
+    let mut timeout = TX_TIMEOUT;
+
+    while mmio::read32(UART0_FR) & TXFF != 0 {
+        timeout -= 1;
+
+        if timeout == 0 {
+            break;
+        }
+    }
+
     mmio::write32(UART0_DR, c as u32);
 }
 fn raw_puts(s: &str) {

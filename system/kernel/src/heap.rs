@@ -45,6 +45,16 @@ impl LinkedListAllocator {
 }
 unsafe impl GlobalAlloc for LinkedListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: All pointer dereferences below are sound because:
+        // 1. ALLOC_LOCK ensures mutual exclusion (no concurrent list traversal).
+        // 2. The free list is initialized by init() with a single block
+        //    spanning [__kernel_end, __kernel_end + HEAP_SIZE) — all within
+        //    kernel-mapped memory (TTBR1 via phys_to_virt).
+        // 3. FreeBlock pointers in the list come from either init() or prior
+        //    dealloc() calls, both of which only insert addresses within the
+        //    heap region. The sorted-by-address invariant and coalescing
+        //    logic maintain list integrity.
+
         // Try slab allocator first for small allocations.
         let slab_ptr = slab::try_alloc(layout.size(), layout.align());
 
@@ -112,6 +122,14 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         result
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        // SAFETY: All pointer dereferences below are sound because:
+        // 1. ALLOC_LOCK ensures mutual exclusion.
+        // 2. The bounds check below ensures `ptr` is within the heap region.
+        // 3. The sorted insertion walk only follows `next` pointers that were
+        //    placed by init() or prior dealloc() calls (valid kernel VAs).
+        // 4. Coalescing only merges geometrically adjacent blocks, so the
+        //    merged block's size always stays within the heap region.
+
         // Try slab allocator first.
         if slab::try_free(ptr, layout.size(), layout.align()) {
             return;

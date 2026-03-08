@@ -184,8 +184,8 @@ pub extern "C" fn kernel_main() -> ! {
     virtio::init();
 
     // Spawn user processes and create an IPC channel between them.
-    let init_id = process::spawn_from_elf(INIT_ELF);
-    let echo_id = process::spawn_from_elf(ECHO_ELF);
+    let init_id = process::spawn_from_elf(INIT_ELF).expect("failed to spawn init");
+    let echo_id = process::spawn_from_elf(ECHO_ELF).expect("failed to spawn echo");
 
     channel::create(init_id, echo_id).expect("failed to create IPC channel");
     uart::puts("  🔀 processes: init + echo, IPC channel\n");
