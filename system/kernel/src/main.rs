@@ -1,3 +1,42 @@
+//! Bare-metal aarch64 kernel for QEMU `virt`.
+//!
+//! # Memory Map
+//!
+//! ## Physical (QEMU virt, 256 MiB RAM at 0x4000_0000)
+//!
+//! ```text
+//! 0x0800_0000  GICv2 (distributor + CPU interface)
+//! 0x0900_0000  PL011 UART
+//! 0x4000_0000  RAM_START ─── kernel image (.text/.rodata/.data/.bss)
+//!              __kernel_end ─ heap (16 MiB, linked-list allocator)
+//!              heap_end ───── page frame pool (rest of RAM, 4 KiB frames)
+//! 0x5000_0000  RAM_END
+//! ```
+//!
+//! ## Virtual — TTBR1 (kernel, shared by all threads)
+//!
+//! ```text
+//! 0xFFFF_0000_4000_0000   VA = PA + 0xFFFF_0000_0000_0000
+//!                         W^X enforced: .text RX, .rodata RO, .data/.bss RW
+//!                         Refined from 2 MiB blocks → 4 KiB L3 pages at boot
+//! ```
+//!
+//! ## Virtual — TTBR0 (per-process, swapped on context switch)
+//!
+//! ```text
+//! 0x0000_0000_0040_0000   User code (ELF segments, matches link.ld)
+//! 0x0000_0000_4000_0000   Channel shared memory (one 4 KiB page per channel)
+//! 0x0000_0000_7FFF_C000   User stack (4 pages = 16 KiB, guard page below)
+//! 0x0000_0000_8000_0000   USER_STACK_TOP
+//! ```
+//!
+//! ## Boot Sequence
+//!
+//! boot.S: coarse 2 MiB identity map (TTBR0) + kernel VA map (TTBR1),
+//! enable MMU, drop EL2→EL1 → `kernel_main` → refine TTBR1 (W^X) →
+//! init heap → init frame allocator → init GIC → init scheduler →
+//! spawn user processes + IPC channels → start timer (10 Hz) → WFE idle.
+
 #![no_std]
 #![no_main]
 

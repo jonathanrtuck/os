@@ -1,8 +1,9 @@
 .claude/
-.vscode/
-.factory/
-reference/
 .DS_Store
+.factory/
+.vscode/
 *.swo
 *.swp
 *~
+reference/
+target/

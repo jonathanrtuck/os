@@ -8,13 +8,13 @@
 
 const MAX_HANDLES: usize = 256;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChannelId(pub u32);
 pub struct DrainHandles<'a> {
     table: &'a mut HandleTable,
     index: usize,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handle(pub u8);
 pub struct HandleTable {
     entries: [Option<HandleEntry>; MAX_HANDLES],
@@ -22,7 +22,7 @@ pub struct HandleTable {
 #[derive(Clone, Copy)]
 pub struct Rights(u32);
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum HandleObject {
     Channel(ChannelId),
 }

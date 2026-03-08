@@ -18,6 +18,16 @@ cargo run --release   # builds, then launches QEMU
 
 `Ctrl-A X` to exit QEMU.
 
+## Testing
+
+```shell
+# Host-side unit tests (handle table, ELF parser):
+cd system/host-tests && cargo test
+
+# QEMU smoke test (builds, boots, checks output):
+cd system/kernel && ./smoke-test.sh
+```
+
 ## What to expect
 
 ```console
@@ -35,7 +45,9 @@ Two user processes exchange messages over shared-memory IPC, then exit cleanly.
 src/
   boot.S        — boot trampoline, coarse page tables, EL2→EL1 drop
   exception.S   — exception vectors, context save/restore (upper VA)
-  main.rs       — kernel entry, IRQ/SVC dispatch, ELF loader
+  main.rs       — kernel entry, IRQ/SVC dispatch, memory map
+  context.rs    — CPU register state struct (matches exception.S offsets)
+  process.rs    — process creation from ELF binaries
   elf.rs        — pure functional ELF64 parser (PT_LOAD segments)
   memory.rs     — TTBR1 L3 refinement, W^X, PA/VA conversion
   heap.rs       — linked-list allocator (first-fit, coalescing, 16 MiB)
@@ -44,8 +56,10 @@ src/
   addr_space.rs — per-process TTBR0 page tables (4-level), owned/shared pages
   channel.rs    — IPC channels (shared memory + signal/wait notification)
   handle.rs     — per-process handle table (256 slots, read/write rights)
+  paging.rs     — page table constants, memory layout, user VA map
+  sync.rs       — IrqMutex (IRQ-masking single-core mutex)
   scheduler.rs  — round-robin preemptive scheduler, TTBR0 swap, thread reaping
-  thread.rs     — kernel + user thread creation, resource cleanup on drop
+  thread.rs     — thread struct, state machine, trust levels, resource cleanup
   syscall.rs    — syscall dispatcher (exit, write, yield, handle_close, signal, wait)
   gic.rs        — GICv2 distributor + CPU interface
   timer.rs      — ARM generic timer (EL1 physical, 10 Hz)
@@ -54,13 +68,22 @@ src/
 build.rs        — compiles user processes → ELF at build time
 link.ld         — kernel linker script
 
+../user/libsys/
+  lib.rs        — userspace syscall wrappers + panic handler (compiled as rlib)
+
 ../user/init/
   main.rs       — init process (IPC ping initiator)
-  link.ld       — userspace linker script (base VA 0x400000)
 
 ../user/echo/
   main.rs       — echo process (IPC pong responder)
-  link.ld       — userspace linker script (base VA 0x400000)
+
+../user/link.ld — shared userspace linker script (base VA 0x400000)
+
+../host-tests/
+  tests/handle.rs — handle table unit tests (host-side)
+  tests/elf.rs    — ELF parser unit tests (host-side)
+
+smoke-test.sh     — QEMU boot + output verification
 ```
 
 ## References

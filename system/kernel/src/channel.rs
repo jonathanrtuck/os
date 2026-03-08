@@ -5,8 +5,27 @@
 //! primitives for synchronization; the shared memory protocol is
 //! entirely userspace.
 //!
-//! Lock ordering: channel lock is always released before acquiring the
-//! scheduler lock (via try_wake / with_thread_mut). Never hold both.
+//! # Protocol
+//!
+//! ```text
+//! create(A, B):
+//!   kernel allocates shared page, maps at CHANNEL_SHM_BASE in both
+//!   address spaces, inserts READ_WRITE handle in both handle tables.
+//!
+//! signal(handle):       sets peer's pending_signal flag, wakes peer if blocked
+//! wait(handle):         if pending_signal → consume + return immediately
+//!                       else → block until peer signals
+//! close_endpoint(id):   decrements closed_count; frees shared page when both close
+//! ```
+//!
+//! Lost-wakeup safe: `signal` sets a persistent flag before waking, and
+//! `wait` checks the flag before blocking. Even if `signal` arrives before
+//! `wait`, the flag is consumed on the next `wait` call.
+//!
+//! # Lock Ordering
+//!
+//! Channel lock is always released before acquiring the scheduler lock
+//! (via try_wake / with_thread_mut). Never hold both.
 
 use super::addr_space::PageAttrs;
 use super::handle::{ChannelId, HandleObject, Rights};
