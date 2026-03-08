@@ -1,8 +1,36 @@
 # Kernel
 
-Bare-metal aarch64 kernel, part of an [OS design exploration](../../design/concept.md). This is a research spike — validating technical foundation decisions by writing real code against the hardware.
+Bare-metal aarch64 kernel targeting QEMU's `virt` machine. Part of a [document-centric OS](../../design/concept.md).
 
-Boots on QEMU's `virt` machine with 4 SMP cores via PSCI, drops from EL2 to EL1, sets up the MMU with split TTBR (TTBR1 for kernel, TTBR0 per-process), enables the GIC + generic timer (250 Hz), and runs an SMP-aware priority scheduler. Memory is managed by a buddy allocator (4 KiB–4 MiB contiguous blocks) with slab caches for small objects. User pages are demand-paged via VMAs (allocated on fault, not at spawn time). Virtio-mmio transport provides block device I/O. Two user processes at EL0 (init + echo), each with its own address space, exchange messages over shared-memory IPC, then exit — the kernel fully reclaims all resources (page frames, page tables, ASIDs, handles, kernel stacks, heap allocations). Targets aarch64 only — the assembly, page table setup, and hardware drivers are all ARM-specific. QEMU emulates the hardware, so it runs on any host architecture.
+Boots with 4 SMP cores via PSCI, drops from EL2 to EL1, sets up the MMU with split TTBR (TTBR1 for kernel, TTBR0 per-process), and runs a preemptive priority scheduler. Two user processes at EL0 exchange messages over shared-memory IPC, then exit — the kernel fully reclaims all resources. Targets aarch64 only — the assembly, page table setup, and hardware drivers are all ARM-specific. QEMU emulates the hardware, so it runs on any host architecture.
+
+## Features
+
+- **SMP** — 4 cores via PSCI CPU_ON, per-core stacks/timers/GIC
+  - Ticket spinlock with IRQ masking for all shared state
+- **Preemptive scheduling** — priority-based (idle/normal/high), 250 Hz timer tick
+  - Global run queue, O(1) priority selection, round-robin within levels
+- **Virtual memory** — 4-level page tables, per-process address spaces
+  - Split TTBR: TTBR1 for kernel (shared), TTBR0 per-process (swapped on context switch)
+  - W^X enforcement — no page is both writable and executable
+  - Demand paging via VMAs (pages allocated on fault, not at spawn)
+  - 8-bit ASID with generation-based recycling
+- **Memory management** — layered allocator strategy
+  - Buddy allocator for contiguous page frames (4 KiB – 4 MiB)
+  - Slab caches for small kernel objects (64 – 2048 bytes, O(1))
+  - Linked-list heap with coalescing for variable-size allocations
+- **Processes** — ELF64 loading, per-process address spaces, full cleanup on exit
+  - User code at EL0, kernel at EL1
+  - 16 KiB user stack with guard page
+  - Per-process handle table (256 slots, read/write rights)
+- **IPC** — shared-memory channels with signal/wait notification
+  - Handle-based access control, kernel-mediated creation
+  - Lost-wakeup safe (persistent signal flag)
+- **Devices**
+  - GICv2 interrupt controller (distributor + per-core CPU interface)
+  - ARM generic timer (EL1 physical, per-core PPI)
+  - PL011 UART (TX, SMP-safe)
+  - Virtio-mmio v2: block device (read sectors) + console (TX)
 
 ## Prerequisites
 
@@ -32,19 +60,19 @@ cd system/kernel && ./smoke-test.sh
 
 ```console
 🥾 booting…
-  💾 memory: 256 MiB RAM, W^X page tables
-  📦 heap: 16 MiB (linked-list + slab)
-  🧩 frames: 60890 free (buddy allocator, 4K–4M)
-  ⚡ interrupts: GICv2
-  📋 scheduler: priority queues (idle/normal/high)
-  🔌 virtio: blk capacity=2048 sectors
-     sector 0: HELLO VIRTIO BLK
-  🔀 processes: init + echo, IPC channel
-  🧵 smp: booting secondaries via PSCI
+  💾 memory - 256mib ram, w^x page tables
+  📦 heap - 16mib (linked-list + slab)
+  🧩 frames - 60888 free (buddy allocator, 4k–4m)
+  ⚡ interrupts - gic v2
+  📋 scheduler - priority queues (idle/normal/high)
+  🔌 virtio - blk capacity=2048 sectors
+     sector 0 - HELLO VIRTIO BLK
+  🔀 processes - init + echo, ipc channel
+  🧵 smp - booting secondaries via psci
   ✓ core 1 online
   ✓ core 2 online
   ✓ core 3 online
-  ⏱️  timer: 250 Hz
+  ⏱️  timer - 250hz
 🥾 booted.
 echo recv: ping
 init recv: pong
@@ -88,7 +116,6 @@ src/
     blk.rs      — virtio block driver (read sectors via 3-descriptor chain)
     console.rs  — virtio console driver (TX only, demo)
 build.rs        — compiles user processes → ELF at build time
-link.ld         — kernel linker script
 
 ../user/libsys/
   lib.rs        — userspace syscall wrappers + panic handler (compiled as rlib)
@@ -111,9 +138,7 @@ link.ld         — kernel linker script
 smoke-test.sh     — QEMU boot + output verification (17 checks)
 ```
 
-## Scope & Assumptions
-
-This kernel is a research spike — it validates technical decisions, not a production OS.
+## Scope & Limitations
 
 **Hardware target:**
 
@@ -122,7 +147,7 @@ This kernel is a research spike — it validates technical decisions, not a prod
 - Virtio-mmio v2 transport (requires QEMU `-global virtio-mmio.force-legacy=false`)
 - 4 cores tested, up to 8 supported (via `MAX_CORES` constant)
 
-**Demo-scope features:**
+**Current limitations:**
 
 - Virtio block: read-only (no writes), polling (no interrupts)
 - Virtio console: TX only (no RX)
@@ -130,31 +155,14 @@ This kernel is a research spike — it validates technical decisions, not a prod
 - 256-slot handle table per process (fixed, no growth)
 - Linked-list heap for allocations >2 KiB (slab for ≤2 KiB)
 
-**Not planned:** x86_64, POSIX, network stack, hard realtime, device tree.
+**Not targeted:** x86_64, POSIX, network stack, hard realtime, device tree.
 
-**Out of scope** (blocked by OS design decisions): filesystem (COW), full syscall surface, OS service process.
+**Blocked on OS design decisions:** filesystem (COW required by undo architecture), full syscall surface, OS service process.
+
+## Architecture
+
+Design rationale for every kernel subsystem — alternatives considered, tradeoffs, and why each approach was chosen — is documented in [`DESIGN.md`](DESIGN.md).
 
 ## References
 
 - [bahree/rust-microkernel](https://github.com/bahree/rust-microkernel) — primary reference for the initial boot sequence and assembly. The boot.S structure, exception vectors, and context save/restore originated there, with modifications for W^X page table permissions, GICv2 interrupt handling, and the scheduler's context switch model.
-
----
-
-## Roadmap
-
-All items complete. The kernel's interface to userspace (syscalls, IPC channels, handle table) is stable. Phases were ordered by dependency; items within a phase were independent.
-
-| Phase          | Item                 | Status | Description                                         |
-| -------------- | -------------------- | ------ | --------------------------------------------------- |
-| **1. SMP**     | 1.1 Sync primitives  | ✅     | Ticket spinlock + IRQ masking (`sync.rs`)           |
-|                | 1.2 Multi-core boot  | ✅     | PSCI boot, per-CPU data, per-core stacks/timers     |
-|                | 1.3 SMP scheduler    | ✅     | Global queue w/ priorities (idle/normal/high), O(1) |
-| **2. Memory**  | 2.1 Slab allocator   | ✅     | Slab caches for fixed-size objects (64–2048B)       |
-|                | 2.2 Buddy allocator  | ✅     | Contiguous 2^n pages (orders 0–10, 4 KiB–4 MiB)     |
-|                | 2.3 ASID recycling   | ✅     | Generation-based, lazy re-acquire on context switch |
-| **3. Cleanup** | 3.1 Timer resolution | ✅     | 250 Hz (was 10 Hz)                                  |
-|                | 3.2 Boot map cleanup | ✅     | Reclaim 4 boot TTBR0 pages into frame allocator     |
-| **4. VM**      | 4.1 Demand paging    | ✅     | Fault-driven mapping via VMAs, ELF + anonymous      |
-| **5. I/O**     | 5.1 Virtio framework | ✅     | virtio-mmio v2 transport, block + console drivers   |
-
-Detailed design notes for each item are in [`docs/design-notes.md`](docs/design-notes.md).

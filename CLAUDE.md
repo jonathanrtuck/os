@@ -69,17 +69,15 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-07:** Completed all 7 kernel spike steps plus a 5-step post-spike plan, then an 8-phase code review/remediation. The spike's original question — is a from-scratch kernel tractable? — is answered. The kernel now has full resource lifecycle: processes are created, run, communicate via shared-memory IPC, exit, and all resources are properly reclaimed.
+**Session 2026-03-07:** Kernel graduated from research spike to production. All roadmap phases complete (SMP, memory management, cleanup, VM, device I/O). 8-phase code review/remediation completed. Documentation and design-notes updated.
 
-**Code review (8 phases, all complete):** (1) Critical bugs — boot.S cache bits, TOCTOU, stale comments. (2) Soundness — IrqMutex, lock ordering, phased locking. (3) Constants consolidation — paging.rs single source of truth. (4) User fault handling + exit cleanup. (5) Code structure — Context/process extraction, thread state machine, TrustLevel, SAFETY docs. (6) User-space infra — libsys syscall crate, 16 KiB stack with guard page, syscall ABI docs. (7) Testing — 34 host-side unit tests (handle table + ELF parser), QEMU smoke test. (8) Documentation — memory map, IPC protocol, README, CLAUDE.md.
-
-**Kernel code exists:** `system/kernel/` + `system/user/{init,echo,libsys}/` + `system/host-tests/`. Boots on QEMU `virt`, drops EL2→EL1, sets up MMU with split TTBR, preemptive round-robin scheduler, two user processes at EL0 with per-process address spaces communicating via IPC channels. Linked-list heap allocator with coalescing. Full process cleanup on exit. Modules: boot.S, exception.S, main.rs, context.rs, process.rs, memory.rs, heap.rs, page_alloc.rs, asid.rs, addr_space.rs, channel.rs, handle.rs, elf.rs, build.rs, scheduler.rs, thread.rs, syscall.rs, sync.rs, paging.rs, timer.rs, gic.rs, uart.rs, mmio.rs. User: libsys (shared syscall rlib), init, echo. Tests: host-tests (handle + ELF), smoke-test.sh. Single-core only.
+**Kernel code:** `system/kernel/` + `system/user/{init,echo,libsys}/` + `system/host-tests/`. Boots on QEMU `virt` with 4 SMP cores, drops EL2→EL1, sets up MMU with split TTBR, preemptive priority scheduler, two user processes at EL0 with per-process address spaces communicating via shared-memory IPC channels. Three-tier memory management (buddy + slab + linked-list). Full process cleanup on exit. 28 kernel source files, 3 user-space crates, 77 host-side unit tests, QEMU smoke test.
 
 **Decision #16 sub-decisions settled:** Soft RT (not hard), no hypervisor (EL1 not EL2), preemptive + cooperative multitasking, traditional privilege model (all non-kernel code at EL0), split TTBR (TTBR1 for kernel, TTBR0 per-process), OS-mediated handles for access control (per-process handle table, read/write rights, kernel-enforced), ELF as binary format, IPC via shared memory ring buffers with handle-based access control, three-layer process architecture (kernel EL1 + OS service EL0 trusted + editors EL0 untrusted).
 
-**Decision #16 sub-decisions tentative:** From-scratch kernel, Rust as kernel language. Spike completed without hitting blocking obstacles — evidence favors tractability, but final decision deferred.
+**Decision #16 sub-decisions settled (promoted from tentative):** From-scratch kernel, Rust as kernel language. Spike validated tractability; now committed as production kernel.
 
-**Decision #16 sub-decisions open:** Driver model, filesystem (COW required), scheduling algorithm, multi-core.
+**Decision #16 sub-decisions open:** Driver model, filesystem (COW required).
 
 **IPC summary:** Channels are shared memory ring buffers accessed via handles. Kernel creates channels, maps shared memory, validates messages at trust boundaries (control plane). Data flows directly through shared memory (not through kernel). Documents are memory-mapped separately — ring buffers carry only control messages (edit protocol, input events, overlays, queries). One mechanism for all IPC.
 
@@ -89,7 +87,7 @@ Read these before making any design suggestions:
 
 **Risk tracking:** Reversibility & Risk table added to decisions.md. Tracks confidence level, revisit triggers, fallbacks, and blast radius for every non-axiomatic settled decision.
 
-**What to explore next:** Rendering technology (#11) is the highest-leverage unsettled _design_ decision. Follow the designer's interest. On the kernel side, the spike + post-spike + code review are all complete. Natural next implementation steps if continuing: driver model, filesystem (COW required by undo design), multi-core support, or more sophisticated scheduling.
+**What to explore next:** Rendering technology (#11) is the highest-leverage unsettled _design_ decision. Follow the designer's interest. On the kernel side, natural next steps: driver model, filesystem (COW required by undo design), interrupt-driven I/O, or production hardening of existing subsystems (virtio write support, bidirectional console, handle table growth).
 
 ## Design Discussion Rules
 
