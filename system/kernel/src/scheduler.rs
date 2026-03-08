@@ -1,10 +1,10 @@
 //! Round-robin preemptive scheduler.
 
 use super::addr_space::AddressSpace;
-use super::handle::{HandleObject, HandleTable};
+use super::handle::HandleObject;
 use super::memory;
 use super::sync::IrqMutex;
-use super::thread::{Thread, ThreadId, ThreadState};
+use super::thread::{Thread, ThreadId};
 use super::Context;
 use alloc::{boxed::Box, vec::Vec};
 
@@ -33,6 +33,8 @@ fn swap_ttbr0(old_idx: usize, new_idx: usize, s: &State) {
     let new_ttbr0 = ttbr0_for(&s.threads[new_idx]);
 
     if old_ttbr0 != new_ttbr0 {
+        // SAFETY: new_ttbr0 is a valid TTBR0 value — physical address of an
+        // L0 table OR'd with a valid ASID. The barriers ensure ordering.
         unsafe {
             core::arch::asm!(
                 "dsb ish",
@@ -68,14 +70,13 @@ pub fn exit_current() -> ! {
     {
         let mut s = STATE.lock();
         let idx = s.current;
-        let thread = &s.threads[idx];
 
         debug_assert!(
-            thread.address_space.is_none(),
+            s.threads[idx].address_space.is_none(),
             "exit_current called on thread with address space — use exit_current_from_syscall"
         );
 
-        s.threads[idx].state = ThreadState::Exited;
+        s.threads[idx].mark_exited();
     }
 
     loop {
@@ -118,25 +119,20 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let mut s = STATE.lock();
     let idx = s.current;
 
-    s.threads[idx].state = ThreadState::Exited;
+    s.threads[idx].mark_exited();
 
     schedule_inner(&mut s, ctx)
 }
 pub fn init() {
     let mut s = STATE.lock();
-    let mut boot_thread = Box::new(Thread {
-        context: unsafe { core::mem::zeroed() },
-        id: ThreadId(0),
-        state: ThreadState::Running,
-        stack_bottom: core::ptr::null_mut(),
-        stack_size: 0,
-        address_space: None,
-        handles: HandleTable::new(),
-    });
+    let mut boot_thread = Thread::new_boot();
     let ctx_ptr = &mut boot_thread.context as *mut Context;
 
     s.threads.push(boot_thread);
 
+    // SAFETY: ctx_ptr points to the Context at offset 0 of the boot thread,
+    // which lives in a Box (stable address) stored in the scheduler Vec.
+    // TPIDR_EL1 is read by exception.S to locate the save area.
     unsafe {
         core::arch::asm!(
             "msr tpidr_el1, {0}",
@@ -156,7 +152,7 @@ fn reap_exited(s: &mut State) {
     while i > 0 {
         i -= 1;
 
-        if i != s.current && s.threads[i].state == ThreadState::Exited {
+        if i != s.current && s.threads[i].is_exited() {
             s.threads.swap_remove(i);
 
             // swap_remove moves the last element to position i.
@@ -171,19 +167,15 @@ fn schedule_inner(s: &mut State, ctx: *mut Context) -> *const Context {
     reap_exited(s);
 
     let n = s.threads.len();
-    let cur = &mut s.threads[s.current];
-
-    if cur.state == ThreadState::Running {
-        cur.state = ThreadState::Ready;
-    }
-
     let old_idx = s.current;
+
+    s.threads[old_idx].deschedule();
 
     for offset in 1..=n {
         let idx = (s.current + offset) % n;
 
-        if s.threads[idx].state == ThreadState::Ready {
-            s.threads[idx].state = ThreadState::Running;
+        if s.threads[idx].is_ready() {
+            s.threads[idx].activate();
             s.current = idx;
 
             // Swap TTBR0 if switching between different address spaces.
@@ -203,7 +195,7 @@ pub fn block_current_and_schedule(ctx: *mut Context) -> *const Context {
     let mut s = STATE.lock();
     let idx = s.current;
 
-    s.threads[idx].state = ThreadState::Blocked;
+    s.threads[idx].block();
 
     schedule_inner(&mut s, ctx)
 }
@@ -234,15 +226,13 @@ pub fn spawn_user(addr_space: Box<AddressSpace>, entry_va: u64, user_stack_top: 
 
     ThreadId(id)
 }
-/// Wake a blocked thread (set Blocked -> Ready). Returns true if it was blocked.
+/// Wake a blocked thread (Blocked → Ready). Returns true if it was blocked.
 pub fn try_wake(id: ThreadId) -> bool {
     let mut s = STATE.lock();
 
     for thread in &mut s.threads {
-        if thread.id == id && thread.state == ThreadState::Blocked {
-            thread.state = ThreadState::Ready;
-
-            return true;
+        if thread.id() == id {
+            return thread.wake();
         }
     }
 
@@ -254,7 +244,7 @@ pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {
     let thread = s
         .threads
         .iter_mut()
-        .find(|t| t.id == id)
+        .find(|t| t.id() == id)
         .expect("thread not found");
 
     f(thread)

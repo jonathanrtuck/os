@@ -7,9 +7,6 @@
 // Rust entry points:
 //   irq_handler(*mut Context) -> *const Context
 //   svc_handler(*mut Context) -> *const Context
-//
-// Exports to Rust:
-//   enter_first_thread(ctx: *const Context)
 // ==========================================================================
 
 // --------------------------------------------------------------------------
@@ -387,16 +384,6 @@ exc_lower_sync:
 exc_user_fault:
   save_context
   bl user_fault_handler
-  msr tpidr_el1, x0
-  mov x19, x0
-  restore_context_and_eret
-
-// --------------------------------------------------------------------------
-// enter_first_thread(ctx: *const Context)
-// --------------------------------------------------------------------------
-
-.global enter_first_thread
-enter_first_thread:
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret

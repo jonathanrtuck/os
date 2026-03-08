@@ -31,6 +31,11 @@ impl AddressSpace {
         }
 
         // Walk page table structure and free table frames (L1, L2, L3 tables).
+        // SAFETY: l0_pa was allocated by page_alloc::alloc_frame in new().
+        // phys_to_virt produces a valid kernel VA. Each table is 4096 bytes
+        // (512 entries * 8 bytes), and indices 0..512 stay within bounds.
+        // Entries with DESC_VALID set contain physical addresses of tables
+        // we allocated, so the derived pointers are valid.
         let l0_va = memory::phys_to_virt(self.l0_pa) as *const u64;
 
         for i0 in 0..512usize {
@@ -75,6 +80,9 @@ impl AddressSpace {
     }
     /// Invalidate all TLB entries for this address space's ASID.
     pub fn invalidate_tlb(&self) {
+        // SAFETY: TLBI aside1is invalidates all TLB entries tagged with this
+        // ASID. The ASID was allocated by the asid module and is valid.
+        // Barriers ensure the invalidation completes before we free pages.
         unsafe {
             core::arch::asm!(
                 "dsb ishst",
@@ -105,6 +113,8 @@ impl AddressSpace {
         let l3_va = walk_or_create(l2_va, Self::l2_idx(va));
         let l3_idx = Self::l3_idx(va);
 
+        // SAFETY: l3_va points to a valid L3 page table (allocated by
+        // walk_or_create). l3_idx is 0..511 (derived from VA bit extraction).
         unsafe {
             let entry = l3_va.add(l3_idx);
 
@@ -153,6 +163,10 @@ impl PageAttrs {
 /// Walk a table entry; if invalid, allocate a new table and install it.
 /// Returns the VA of the next-level table.
 fn walk_or_create(table_va: *mut u64, idx: usize) -> *mut u64 {
+    // SAFETY: table_va points to a valid 4096-byte page table. idx is 0..511
+    // (derived from VA bit extraction). If the entry is valid, its PA was
+    // allocated by a prior call to alloc_frame. If invalid, we allocate a
+    // new zeroed frame and install a table descriptor.
     unsafe {
         let entry = table_va.add(idx);
         let val = *entry;

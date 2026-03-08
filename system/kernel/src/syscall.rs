@@ -89,7 +89,7 @@ fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
             Err(e) => return Err(e),
         };
 
-        Ok((channel_id, thread.id))
+        Ok((channel_id, thread.id()))
     })?;
 
     channel::signal(channel_id, caller_id);
@@ -113,7 +113,7 @@ fn sys_channel_wait(ctx: *mut Context) -> *const Context {
             Err(e) => return Err(e),
         };
 
-        Ok((channel_id, thread.id))
+        Ok((channel_id, thread.id()))
     });
     let (channel_id, caller_id) = match result {
         Ok(pair) => pair,

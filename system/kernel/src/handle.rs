@@ -10,8 +10,15 @@ const MAX_HANDLES: usize = 256;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ChannelId(pub u32);
+pub struct DrainHandles<'a> {
+    table: &'a mut HandleTable,
+    index: usize,
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct Handle(pub u8);
+pub struct HandleTable {
+    entries: [Option<HandleEntry>; MAX_HANDLES],
+}
 #[derive(Clone, Copy)]
 pub struct Rights(u32);
 
@@ -28,17 +35,8 @@ struct HandleEntry {
 #[derive(Debug)]
 pub enum HandleError {
     InvalidHandle = -10,
-    WrongType = -11,
     InsufficientRights = -12,
     TableFull = -13,
-}
-
-pub struct DrainHandles<'a> {
-    table: &'a mut HandleTable,
-    index: usize,
-}
-pub struct HandleTable {
-    entries: [Option<HandleEntry>; MAX_HANDLES],
 }
 
 impl HandleTable {
