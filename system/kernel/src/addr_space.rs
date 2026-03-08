@@ -5,7 +5,7 @@
 //! from the page frame allocator.
 
 use super::asid::Asid;
-use super::memory;
+use super::memory::{self, Pa};
 use super::page_alloc;
 use super::paging::{
     AF, AP_EL0, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, NG, PAGE_SIZE, PA_MASK, PXN,
@@ -15,10 +15,10 @@ use super::vma::{Backing, Vma, VmaList};
 use alloc::vec::Vec;
 
 pub struct AddressSpace {
-    l0_pa: usize,
+    l0_pa: Pa,
     asid: Asid,
     generation: u64,
-    owned_frames: Vec<usize>,
+    owned_frames: Vec<Pa>,
     pub(crate) vmas: VmaList,
 }
 pub struct PageAttrs(u64);
@@ -105,7 +105,7 @@ impl AddressSpace {
                 continue;
             }
 
-            let l1_pa = (e0 & PA_MASK) as usize;
+            let l1_pa = Pa((e0 & PA_MASK) as usize);
             let l1_va = memory::phys_to_virt(l1_pa) as *const u64;
 
             for i1 in 0..512usize {
@@ -115,7 +115,7 @@ impl AddressSpace {
                     continue;
                 }
 
-                let l2_pa = (e1 & PA_MASK) as usize;
+                let l2_pa = Pa((e1 & PA_MASK) as usize);
                 let l2_va = memory::phys_to_virt(l2_pa) as *const u64;
 
                 for i2 in 0..512usize {
@@ -125,7 +125,7 @@ impl AddressSpace {
                         continue;
                     }
 
-                    let l3_pa = (e2 & PA_MASK) as usize;
+                    let l3_pa = Pa((e2 & PA_MASK) as usize);
 
                     page_alloc::free_frame(l3_pa);
                 }
@@ -200,7 +200,7 @@ impl AddressSpace {
             (true, _) => PageAttrs::user_rw(),
         };
 
-        self.map_page(page_va, pa as u64, &attrs);
+        self.map_page(page_va, pa.as_u64(), &attrs);
 
         // Invalidate any cached fault entry for this VA+ASID. Some ARM
         // implementations cache "translation fault" results ("negative
@@ -221,7 +221,7 @@ impl AddressSpace {
     /// Map a page and take ownership of the frame (freed on cleanup).
     pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
         self.map_inner(va, pa, attrs);
-        self.owned_frames.push(pa as usize);
+        self.owned_frames.push(Pa(pa as usize));
     }
     /// Map a shared page (caller retains ownership of the frame).
     pub fn map_shared(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
@@ -234,7 +234,7 @@ impl AddressSpace {
     }
     /// TTBR0 value: physical address of L0 table | (ASID << 48).
     pub fn ttbr0_value(&self) -> u64 {
-        self.l0_pa as u64 | ((self.asid.0 as u64) << 48)
+        self.l0_pa.as_u64() | ((self.asid.0 as u64) << 48)
     }
 }
 impl PageAttrs {
@@ -272,7 +272,7 @@ fn walk_or_create(table_va: *mut u64, idx: usize) -> *mut u64 {
 
         if val & DESC_VALID != 0 {
             // Existing table descriptor — extract PA, convert to VA.
-            let next_pa = (val & PA_MASK) as usize;
+            let next_pa = Pa((val & PA_MASK) as usize);
 
             return memory::phys_to_virt(next_pa) as *mut u64;
         }
@@ -280,7 +280,7 @@ fn walk_or_create(table_va: *mut u64, idx: usize) -> *mut u64 {
         // Allocate a new zeroed page for the next-level table.
         let next_pa = page_alloc::alloc_frame().expect("out of frames for page table");
 
-        *entry = (next_pa as u64) | DESC_VALID | DESC_TABLE;
+        *entry = next_pa.as_u64() | DESC_VALID | DESC_TABLE;
 
         memory::phys_to_virt(next_pa) as *mut u64
     }

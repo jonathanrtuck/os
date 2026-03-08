@@ -67,7 +67,7 @@ pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<ThreadId, &'static str
                 unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) };
             }
 
-            addr_space.map_page(va, pa as u64, &attrs);
+            addr_space.map_page(va, pa.as_u64(), &attrs);
         }
     }
 
@@ -85,7 +85,7 @@ pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<ThreadId, &'static str
     let top_stack_va = USER_STACK_TOP - PAGE_SIZE;
     let pa = page_alloc::alloc_frame().ok_or("out of frames for user stack")?;
 
-    addr_space.map_page(top_stack_va, pa as u64, &PageAttrs::user_rw());
+    addr_space.map_page(top_stack_va, pa.as_u64(), &PageAttrs::user_rw());
 
     // Map remaining stack pages lazily via demand paging.
     // Guard page = gap below USER_STACK_VA (no VMA → fault → kill).

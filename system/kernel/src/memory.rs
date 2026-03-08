@@ -12,6 +12,21 @@ use core::cell::UnsafeCell;
 pub const KERNEL_VA_OFFSET: usize = 0xFFFF_0000_0000_0000;
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 
+/// Physical address newtype. Prevents accidental PA/VA mixups at compile time.
+///
+/// Used at all API boundaries where physical addresses flow: page allocator,
+/// page table manipulation, DMA. The `pub` inner field allows extraction
+/// where raw arithmetic or pointer casts are needed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct Pa(pub usize);
+
+impl Pa {
+    pub const fn as_u64(self) -> u64 {
+        self.0 as u64
+    }
+}
+
 const BLOCK_2MB: u64 = 2 * 1024 * 1024;
 
 /// Wrapper for page tables in statics. Written once during init, read-only after.
@@ -37,17 +52,17 @@ static TT1_L3_KERN: SyncPageTable = SyncPageTable::new();
 static EMPTY_L0: SyncPageTable = SyncPageTable::new();
 
 #[inline(always)]
-pub fn phys_to_virt(pa: usize) -> usize {
-    pa.wrapping_add(KERNEL_VA_OFFSET)
+pub fn phys_to_virt(pa: Pa) -> usize {
+    pa.0.wrapping_add(KERNEL_VA_OFFSET)
 }
 #[inline(always)]
-pub fn virt_to_phys(va: usize) -> usize {
-    va.wrapping_sub(KERNEL_VA_OFFSET)
+pub fn virt_to_phys(va: usize) -> Pa {
+    Pa(va.wrapping_sub(KERNEL_VA_OFFSET))
 }
 
 /// Physical address of the empty L0 table (for kernel threads' TTBR0).
 pub fn empty_ttbr0() -> u64 {
-    virt_to_phys(EMPTY_L0.get() as usize) as u64
+    virt_to_phys(EMPTY_L0.get() as usize).as_u64()
 }
 
 extern "C" {
@@ -85,13 +100,13 @@ pub fn init() {
     let rodata_end = align_up_u64(unsafe { &__rodata_end as *const u8 as u64 }, PAGE_SIZE);
     let data_start = unsafe { &__data_start as *const u8 as u64 };
     // All these are kernel VA. Compute PA of the kernel's 2MB-aligned block.
-    let text_start_pa = virt_to_phys(text_start as usize) as u64;
+    let text_start_pa = virt_to_phys(text_start as usize).as_u64();
     let kernel_block_pa = text_start_pa & !(BLOCK_2MB - 1);
     let normal = ATTRIDX0 | AF | SH_INNER;
 
     for i in 0..512u64 {
         let pa = kernel_block_pa + i * PAGE_SIZE;
-        let va = phys_to_virt(pa as usize) as u64;
+        let va = phys_to_virt(Pa(pa as usize)) as u64;
         let attrs = if va >= text_start && va < text_end {
             normal | AP_RO | UXN // .text: RX (kernel only)
         } else if va >= rodata_start && va < rodata_end {
@@ -106,7 +121,7 @@ pub fn init() {
     }
 
     // Patch TTBR1 L2_1 to point at L3 instead of the 2MB block.
-    let l3_kern_pa = virt_to_phys(TT1_L3_KERN.get() as usize) as u64;
+    let l3_kern_pa = virt_to_phys(TT1_L3_KERN.get() as usize).as_u64();
     let kernel_l2_idx = ((kernel_block_pa >> 21) & 0x1FF) as usize;
     let l2_1 = unsafe { &boot_tt1_l2_1 as *const u8 as *mut u64 };
 

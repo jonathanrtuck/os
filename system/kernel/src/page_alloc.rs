@@ -7,7 +7,7 @@
 //! Existing single-page API (`alloc_frame`/`free_frame`) is preserved —
 //! callers are unaffected.
 
-use super::memory;
+use super::memory::{self, Pa};
 use super::paging;
 use super::sync::IrqMutex;
 
@@ -48,7 +48,7 @@ fn buddy_pa(pa: usize, order: usize) -> usize {
 /// Remove a specific block from a free list (by physical address).
 /// Returns true if found and removed.
 fn remove_from_list(head: &mut *mut FreeBlock, pa: usize) -> bool {
-    let target_va = memory::phys_to_virt(pa) as *mut FreeBlock;
+    let target_va = memory::phys_to_virt(Pa(pa)) as *mut FreeBlock;
     let mut prev: *mut *mut FreeBlock = head;
 
     // SAFETY: All pointers in the free list were placed there by init()
@@ -72,12 +72,12 @@ fn remove_from_list(head: &mut *mut FreeBlock, pa: usize) -> bool {
 }
 
 /// Allocate one 4 KiB frame. Returns the physical address, or `None`.
-pub fn alloc_frame() -> Option<usize> {
+pub fn alloc_frame() -> Option<Pa> {
     alloc_frames(0)
 }
 /// Allocate 2^order contiguous pages. Returns the physical address of the
 /// first page, or `None` if no contiguous block is available.
-pub fn alloc_frames(order: usize) -> Option<usize> {
+pub fn alloc_frames(order: usize) -> Option<Pa> {
     assert!(order <= MAX_ORDER, "order exceeds MAX_ORDER");
 
     let mut s = STATE.lock();
@@ -110,7 +110,7 @@ pub fn alloc_frames(order: usize) -> Option<usize> {
     s.free_count -= pages;
 
     let va = block as usize;
-    let pa = memory::virt_to_phys(va);
+    let pa = memory::virt_to_phys(va).0;
     // Split down to the requested order.
     let mut current_order = found_order;
 
@@ -118,7 +118,7 @@ pub fn alloc_frames(order: usize) -> Option<usize> {
         current_order -= 1;
 
         let buddy = pa + (PAGE_SIZE << current_order);
-        let buddy_va = memory::phys_to_virt(buddy) as *mut FreeBlock;
+        let buddy_va = memory::phys_to_virt(Pa(buddy)) as *mut FreeBlock;
 
         // SAFETY: buddy_va points to kernel-mapped memory within our
         // managed region. Writing a FreeBlock header is valid.
@@ -138,24 +138,24 @@ pub fn alloc_frames(order: usize) -> Option<usize> {
         core::ptr::write_bytes(va as *mut u8, 0, block_size);
     }
 
-    Some(pa)
+    Some(Pa(pa))
 }
 /// Total number of free pages (across all orders).
 pub fn free_count() -> usize {
     STATE.lock().free_count
 }
 /// Return a single 4 KiB frame to the allocator.
-pub fn free_frame(pa: usize) {
+pub fn free_frame(pa: Pa) {
     free_frames(pa, 0)
 }
 /// Free 2^order contiguous pages starting at physical address `pa`.
 ///
 /// Coalesces with buddy blocks up to MAX_ORDER.
-pub fn free_frames(pa: usize, order: usize) {
+pub fn free_frames(pa: Pa, order: usize) {
     assert!(order <= MAX_ORDER, "order exceeds MAX_ORDER");
 
     let mut s = STATE.lock();
-    let mut current_pa = pa;
+    let mut current_pa = pa.0;
     let mut current_order = order;
 
     // Try to coalesce with buddy at each level.
@@ -178,7 +178,7 @@ pub fn free_frames(pa: usize, order: usize) {
     }
 
     // Insert the (possibly coalesced) block into the appropriate list.
-    let va = memory::phys_to_virt(current_pa) as *mut FreeBlock;
+    let va = memory::phys_to_virt(Pa(current_pa)) as *mut FreeBlock;
 
     // SAFETY: va points to kernel-mapped memory within our managed region.
     unsafe {
@@ -222,7 +222,7 @@ pub fn init(start_pa: usize, end_pa: usize) {
             order = next_order;
         }
 
-        let va = memory::phys_to_virt(addr) as *mut FreeBlock;
+        let va = memory::phys_to_virt(Pa(addr)) as *mut FreeBlock;
 
         // SAFETY: va is a valid kernel VA for physical address addr.
         unsafe {

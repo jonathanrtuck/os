@@ -29,6 +29,7 @@
 
 use super::addr_space::PageAttrs;
 use super::handle::{ChannelId, HandleError, HandleObject, Rights};
+use super::memory;
 use super::page_alloc;
 use super::paging::{CHANNEL_SHM_BASE, PAGE_SIZE};
 use super::scheduler;
@@ -37,7 +38,7 @@ use super::thread::ThreadId;
 use alloc::vec::Vec;
 
 struct Channel {
-    shared_pa: usize,
+    shared_pa: memory::Pa,
     endpoints: [Endpoint; 2],
     closed_count: u8,
 }
@@ -135,7 +136,7 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
     // Insert handles (acquires scheduler lock; channel lock already released).
     let handle_a = scheduler::with_thread_mut(id_a, |thread| {
         if let Some(addr_space) = &mut thread.address_space {
-            addr_space.map_shared(va, shared_pa as u64, &PageAttrs::user_rw());
+            addr_space.map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
         }
 
         thread
@@ -155,7 +156,7 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
 
     let result_b = scheduler::with_thread_mut(id_b, |thread| {
         if let Some(addr_space) = &mut thread.address_space {
-            addr_space.map_shared(va, shared_pa as u64, &PageAttrs::user_rw());
+            addr_space.map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
         }
 
         thread

@@ -56,7 +56,7 @@ impl Console {
         // sees it. ARM caches are not coherent with DMA by default.
         mmio::cache_clean_invalidate_range(va as usize, len);
 
-        self.tx.push(pa as u64, len as u32, false);
+        self.tx.push(pa.as_u64(), len as u32, false);
         self.device.notify(VIRTQ_TX);
         self.tx.wait_used();
 

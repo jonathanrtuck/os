@@ -148,8 +148,7 @@ fn reclaim_boot_ttbr0() {
     };
 
     for &va in &pages {
-        let pa = memory::virt_to_phys(va);
-        page_alloc::free_frame(pa);
+        page_alloc::free_frame(memory::virt_to_phys(va));
     }
 }
 
@@ -165,7 +164,7 @@ pub extern "C" fn kernel_main() -> ! {
 
     // Initialize page frame allocator with memory above kernel heap.
     let kernel_end_pa = memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize });
-    let heap_end = kernel_end_pa + memory::HEAP_SIZE;
+    let heap_end = kernel_end_pa.0 + memory::HEAP_SIZE;
     let ram_end = paging::RAM_END as usize;
 
     assert!(heap_end < ram_end, "heap extends beyond physical RAM");

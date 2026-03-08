@@ -78,9 +78,9 @@ impl Block {
         //   [528]      status byte   (device-writable)
         let pa = page_alloc::alloc_frame().ok_or("out of frames")?;
         let va = memory::phys_to_virt(pa);
-        let header_pa = pa as u64;
-        let data_pa = pa as u64 + 16;
-        let status_pa = pa as u64 + 16 + SECTOR_SIZE as u64;
+        let header_pa = pa.as_u64();
+        let data_pa = pa.as_u64() + 16;
+        let status_pa = pa.as_u64() + 16 + SECTOR_SIZE as u64;
 
         // SAFETY: pa is a freshly allocated zeroed frame.
         unsafe {

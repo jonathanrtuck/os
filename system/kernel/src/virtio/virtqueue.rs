@@ -51,7 +51,7 @@ pub struct Virtqueue {
     /// Last seen used ring index (for polling).
     last_used_idx: u16,
     /// Physical address of the backing allocation (for cleanup).
-    backing_pa: usize,
+    backing_pa: super::super::memory::Pa,
     backing_order: usize,
 }
 
@@ -69,6 +69,7 @@ impl Virtqueue {
         let order = pages_needed.next_power_of_two().trailing_zeros() as usize;
         let pa = page_alloc::alloc_frames(order)?;
         let va = memory::phys_to_virt(pa);
+        let pa_u64 = pa.as_u64();
         // Initialize free descriptor chain: 0 → 1 → 2 → ... → (size-1).
         let desc_ptr = va as *mut Descriptor;
 
@@ -86,9 +87,9 @@ impl Virtqueue {
             desc_va: va,
             avail_va: va + avail_offset,
             used_va: va + used_offset,
-            desc_pa: pa as u64,
-            avail_pa: pa as u64 + avail_offset as u64,
-            used_pa: pa as u64 + used_offset as u64,
+            desc_pa: pa_u64,
+            avail_pa: pa_u64 + avail_offset as u64,
+            used_pa: pa_u64 + used_offset as u64,
             free_head: 0,
             num_free: size,
             last_used_idx: 0,

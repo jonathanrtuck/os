@@ -23,12 +23,22 @@ mod paging {
 }
 
 mod memory {
-    /// Identity mapping — on the host, VA == PA.
-    pub fn phys_to_virt(pa: usize) -> usize {
-        pa
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    #[repr(transparent)]
+    pub struct Pa(pub usize);
+
+    impl Pa {
+        pub const fn as_u64(self) -> u64 {
+            self.0 as u64
+        }
     }
-    pub fn virt_to_phys(va: usize) -> usize {
-        va
+
+    /// Identity mapping — on the host, VA == PA.
+    pub fn phys_to_virt(pa: Pa) -> usize {
+        pa.0
+    }
+    pub fn virt_to_phys(va: usize) -> Pa {
+        Pa(va)
     }
 }
 
@@ -121,8 +131,8 @@ fn buddy_allocator() {
 
     let pa1 = page_alloc::alloc_frame().expect("should allocate one frame");
 
-    assert!(pa1 >= start && pa1 < end, "allocated PA must be in region");
-    assert_eq!(pa1 % PAGE_SIZE, 0, "PA must be page-aligned");
+    assert!(pa1.0 >= start && pa1.0 < end, "allocated PA must be in region");
+    assert_eq!(pa1.0 % PAGE_SIZE, 0, "PA must be page-aligned");
     assert_eq!(
         page_alloc::free_count(),
         255,
@@ -130,7 +140,7 @@ fn buddy_allocator() {
     );
 
     // Allocated memory should be zeroed.
-    let slice = unsafe { core::slice::from_raw_parts(pa1 as *const u8, PAGE_SIZE) };
+    let slice = unsafe { core::slice::from_raw_parts(pa1.0 as *const u8, PAGE_SIZE) };
 
     assert!(
         slice.iter().all(|&b| b == 0),
@@ -148,7 +158,7 @@ fn buddy_allocator() {
     let pa_order2 = page_alloc::alloc_frames(2).expect("should allocate 4 pages");
 
     assert_eq!(
-        pa_order2 % (4 * PAGE_SIZE),
+        pa_order2.0 % (4 * PAGE_SIZE),
         0,
         "order-2 block must be naturally aligned"
     );
@@ -166,7 +176,7 @@ fn buddy_allocator() {
 
     let pa_big = page_alloc::alloc_frames(8).expect("should allocate 256 pages");
 
-    assert_eq!(pa_big, start, "full-region block starts at region base");
+    assert_eq!(pa_big.0, start, "full-region block starts at region base");
     assert_eq!(page_alloc::free_count(), 0, "all pages consumed");
 
     // --- Section 6: Exhaustion ---
@@ -195,8 +205,8 @@ fn buddy_allocator() {
     let mut frames = Vec::new();
 
     while let Some(pa) = page_alloc::alloc_frame() {
-        assert!(pa >= start && pa < end);
-        assert_eq!(pa % PAGE_SIZE, 0);
+        assert!(pa.0 >= start && pa.0 < end);
+        assert_eq!(pa.0 % PAGE_SIZE, 0);
         frames.push(pa);
     }
 
@@ -231,7 +241,7 @@ fn buddy_allocator() {
     let order1 = page_alloc::alloc_frames(1).expect("should coalesce into order-1");
 
     assert_eq!(
-        order1 % (2 * PAGE_SIZE),
+        order1.0 % (2 * PAGE_SIZE),
         0,
         "order-1 must be aligned to 8 KiB"
     );
