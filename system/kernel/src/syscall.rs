@@ -1,4 +1,37 @@
 //! Syscall dispatcher and handlers.
+//!
+//! # ABI (aarch64, EL0 → EL1)
+//!
+//! Invoke with `svc #0`. The kernel saves/restores the full register context
+//! across the call, so all registers except x0 are preserved.
+//!
+//! | Register | Direction | Role                                   |
+//! |----------|-----------|----------------------------------------|
+//! | x8       | in        | Syscall number (see `nr` module)       |
+//! | x0..x5   | in        | Arguments (syscall-specific)            |
+//! | x0       | out       | Return value: ≥0 success, <0 error     |
+//!
+//! # Syscalls
+//!
+//! | Nr | Name           | Args                          | Returns          |
+//! |----|----------------|-------------------------------|------------------|
+//! | 0  | exit           | —                             | does not return  |
+//! | 1  | write          | x0=buf_ptr, x1=len            | bytes written    |
+//! | 2  | yield          | —                             | 0                |
+//! | 3  | handle_close   | x0=handle                     | 0                |
+//! | 4  | channel_signal | x0=handle                     | 0                |
+//! | 5  | channel_wait   | x0=handle                     | 0 (may block)    |
+//!
+//! # Error codes
+//!
+//! | Code | Name                | Source        |
+//! |------|---------------------|---------------|
+//! | -1   | UnknownSyscall      | `Error`       |
+//! | -2   | BadAddress          | `Error`       |
+//! | -3   | BadLength           | `Error`       |
+//! | -10  | InvalidHandle       | `HandleError` |
+//! | -12  | InsufficientRights  | `HandleError` |
+//! | -13  | TableFull           | `HandleError` |
 
 use super::channel;
 use super::handle::{Handle, HandleError, HandleObject, Rights};

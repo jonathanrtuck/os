@@ -33,7 +33,10 @@ pub const RAM_END: u64 = RAM_START + RAM_SIZE;
 pub const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000; // 4 MiB (matches link.ld)
 pub const CHANNEL_SHM_BASE: u64 = 0x0000_0000_4000_0000; // 1 GiB
 pub const USER_STACK_TOP: u64 = 0x0000_0000_8000_0000; // 2 GiB
-pub const USER_STACK_VA: u64 = USER_STACK_TOP - PAGE_SIZE;
+pub const USER_STACK_PAGES: u64 = 4; // 16 KiB
+pub const USER_STACK_VA: u64 = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
+// Guard page: USER_STACK_VA - PAGE_SIZE is intentionally unmapped.
+// Stack overflow triggers a data abort → user_fault_handler terminates the process.
 pub const USER_VA_END: u64 = 0x0001_0000_0000_0000; // T0SZ=16
 
 /// Align `x` up to the next multiple of `align` (must be a power of two).

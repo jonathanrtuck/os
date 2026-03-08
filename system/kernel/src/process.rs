@@ -5,7 +5,7 @@ use super::asid;
 use super::elf;
 use super::memory;
 use super::page_alloc;
-use super::paging::{PAGE_SIZE, USER_STACK_TOP, USER_STACK_VA};
+use super::paging::{PAGE_SIZE, USER_STACK_PAGES, USER_STACK_TOP, USER_STACK_VA};
 use super::scheduler;
 use super::thread::ThreadId;
 use alloc::boxed::Box;
@@ -53,10 +53,14 @@ pub fn spawn_from_elf(elf_bytes: &[u8]) -> ThreadId {
         }
     }
 
-    // Map one user stack page.
-    let stack_pa = page_alloc::alloc_frame().expect("out of frames for user stack");
+    // Map user stack pages. The page below USER_STACK_VA is left unmapped
+    // as a guard page — stack overflow faults instead of silently corrupting.
+    for i in 0..USER_STACK_PAGES {
+        let va = USER_STACK_VA + i * PAGE_SIZE;
+        let pa = page_alloc::alloc_frame().expect("out of frames for user stack");
 
-    addr_space.map_page(USER_STACK_VA, stack_pa as u64, &PageAttrs::user_rw());
+        addr_space.map_page(va, pa as u64, &PageAttrs::user_rw());
+    }
 
     scheduler::spawn_user(addr_space, header.entry, USER_STACK_TOP)
 }
