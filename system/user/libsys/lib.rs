@@ -27,6 +27,7 @@ mod nr {
     pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
     pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
     pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 9;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +109,13 @@ pub fn exit() -> ! {
 /// Returns 0 on success, or a negative error code.
 pub fn handle_close(handle: u8) -> i64 {
     unsafe { syscall1(nr::HANDLE_CLOSE, handle as u64) as i64 }
+}
+/// Bind a scheduling context to the calling thread.
+///
+/// The thread must not already have a context bound. Returns 0 on success,
+/// or a negative error code.
+pub fn scheduling_context_bind(handle: u8) -> i64 {
+    unsafe { syscall1(nr::SCHEDULING_CONTEXT_BIND, handle as u64) as i64 }
 }
 /// Borrow another scheduling context (context donation).
 ///

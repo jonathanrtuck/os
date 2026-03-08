@@ -16,7 +16,6 @@ use super::address_space::AddressSpace;
 use super::handle::HandleObject;
 use super::memory;
 use super::per_core;
-use super::scheduling_algorithm;
 use super::scheduling_context::{self, SchedulingContext, SchedulingContextId};
 use super::sync::IrqMutex;
 use super::thread::{Thread, ThreadId};
@@ -32,6 +31,11 @@ struct PerCoreState {
 struct RunQueue {
     ready: Vec<Box<Thread>>,
 }
+/// Scheduling context with handle-based ownership tracking.
+struct SchedulingContextSlot {
+    context: SchedulingContext,
+    ref_count: u32,
+}
 struct State {
     queue: RunQueue,
     /// Threads waiting on a resource (Blocked state). Moved here from
@@ -40,8 +44,10 @@ struct State {
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
     /// All scheduling contexts. Index = SchedulingContextId.0.
-    scheduling_contexts: Vec<SchedulingContext>,
-    next_scheduling_context_id: u32,
+    /// None = freed slot (available via free_context_ids).
+    scheduling_contexts: Vec<Option<SchedulingContextSlot>>,
+    /// Freed scheduling context IDs available for reuse.
+    free_context_ids: Vec<u32>,
 }
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {
@@ -56,38 +62,39 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
     },
     next_id: 1,
     scheduling_contexts: Vec::new(),
-    next_scheduling_context_id: 0,
+    free_context_ids: Vec::new(),
 });
 
 /// Charge elapsed time to the old thread's EEVDF vruntime and scheduling context.
-fn charge_thread(thread: &mut Thread, contexts: &mut [SchedulingContext], now: u64) {
-    if thread.last_started == 0 {
-        return; // Never ran (boot thread before first tick).
+fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
+    if thread.is_idle() || thread.scheduling.last_started == 0 {
+        return;
     }
 
-    let elapsed = now.saturating_sub(thread.last_started);
+    let elapsed = now.saturating_sub(thread.scheduling.last_started);
 
     if elapsed == 0 {
         return;
     }
 
     // Charge EEVDF vruntime.
-    thread.scheduling_algorithm = thread.scheduling_algorithm.charge(elapsed);
+    thread.scheduling.eevdf = thread.scheduling.eevdf.charge(elapsed);
 
     // Charge scheduling context budget.
-    if let Some(id) = thread.scheduling_context_id {
-        if let Some(ctx) = contexts.get_mut(id.0 as usize) {
-            *ctx = ctx.charge(elapsed);
+    if let Some(id) = thread.scheduling.context_id {
+        if let Some(Some(slot)) = contexts.get_mut(id.0 as usize) {
+            slot.context = slot.context.charge(elapsed);
         }
     }
 }
 /// Check if a thread has budget (unlimited if no scheduling context).
-fn has_budget(thread: &Thread, contexts: &[SchedulingContext]) -> bool {
-    match thread.scheduling_context_id {
+fn has_budget(thread: &Thread, contexts: &[Option<SchedulingContextSlot>]) -> bool {
+    match thread.scheduling.context_id {
         None => true, // Kernel/idle threads: unlimited
         Some(id) => contexts
             .get(id.0 as usize)
-            .map_or(true, |ctx| ctx.has_budget()),
+            .and_then(|slot| slot.as_ref())
+            .map_or(true, |slot| slot.context.has_budget()),
     }
 }
 /// Read hardware counter and convert to nanoseconds.
@@ -99,10 +106,25 @@ fn reap_exited(queue: &mut RunQueue, blocked: &mut Vec<Box<Thread>>) {
     queue.ready.retain(|t| !t.is_exited());
     blocked.retain(|t| !t.is_exited());
 }
+/// Decrement ref count on a scheduling context. Frees it if count reaches zero.
+fn release_context_inner(s: &mut State, ctx_id: SchedulingContextId) {
+    if let Some(slot) = s.scheduling_contexts.get_mut(ctx_id.0 as usize) {
+        if let Some(entry) = slot {
+            entry.ref_count = entry.ref_count.saturating_sub(1);
+
+            if entry.ref_count == 0 {
+                *slot = None;
+                s.free_context_ids.push(ctx_id.0);
+            }
+        }
+    }
+}
 /// Replenish all scheduling contexts that are due.
-fn replenish_contexts(contexts: &mut [SchedulingContext], now: u64) {
-    for ctx in contexts.iter_mut() {
-        *ctx = ctx.maybe_replenish(now);
+fn replenish_contexts(contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
+    for slot in contexts.iter_mut() {
+        if let Some(entry) = slot {
+            entry.context = entry.context.maybe_replenish(now);
+        }
     }
 }
 fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Context {
@@ -124,7 +146,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     fn park_old(s: &mut State, mut old_thread: Box<Thread>) {
         if old_thread.is_ready() {
             // Update eligible_at before re-enqueuing.
-            old_thread.scheduling_algorithm = old_thread.scheduling_algorithm.mark_eligible();
+            old_thread.scheduling.eevdf = old_thread.scheduling.eevdf.mark_eligible();
 
             if !old_thread.is_idle() {
                 s.queue.ready.push(old_thread);
@@ -143,7 +165,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         let mut new_thread = s.queue.ready.swap_remove(idx);
 
         new_thread.activate();
-        new_thread.last_started = now;
+        new_thread.scheduling.last_started = now;
 
         swap_ttbr0(&old_thread, &new_thread);
 
@@ -157,7 +179,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     } else if old_thread.is_ready() {
         // No other runnable threads — continue with the old one.
         old_thread.activate();
-        old_thread.last_started = now;
+        old_thread.scheduling.last_started = now;
 
         let old_ctx = old_thread.context_ptr();
 
@@ -169,7 +191,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         let mut idle = s.cores[core].idle.take().expect("no idle thread");
 
         idle.activate();
-        idle.last_started = now;
+        idle.scheduling.last_started = now;
 
         let idle_ctx = idle.context_ptr();
 
@@ -182,23 +204,56 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     }
 }
 /// Select the best thread from the ready queue using EEVDF.
-/// Returns the index into `queue.ready`, or None.
-fn select_best(queue: &RunQueue, contexts: &[SchedulingContext]) -> Option<usize> {
+///
+/// Zero-allocation: computes avg vruntime (over threads with budget only)
+/// and selects in two passes over the ready queue. Returns the index into
+/// `queue.ready`, or None if no thread has budget.
+fn select_best(queue: &RunQueue, contexts: &[Option<SchedulingContextSlot>]) -> Option<usize> {
     if queue.ready.is_empty() {
         return None;
     }
 
-    // Build (State, has_budget) pairs for selection.
-    let candidates: Vec<(scheduling_algorithm::State, bool)> = queue
-        .ready
-        .iter()
-        .map(|t| (t.scheduling_algorithm, has_budget(t, contexts)))
-        .collect();
+    // Pass 1: avg vruntime of threads with budget only.
+    let mut sum: u128 = 0;
+    let mut count: u64 = 0;
 
-    let states: Vec<scheduling_algorithm::State> = candidates.iter().map(|(s, _)| *s).collect();
-    let avg = scheduling_algorithm::avg_vruntime(&states);
+    for t in &queue.ready {
+        if has_budget(t, contexts) {
+            sum += t.scheduling.eevdf.vruntime as u128;
+            count += 1;
+        }
+    }
 
-    scheduling_algorithm::select_next(&candidates, avg)
+    if count == 0 {
+        return None; // All threads exhausted — wait for replenishment.
+    }
+
+    let avg = (sum / count as u128) as u64;
+    // Pass 2: eligible + budget → earliest deadline; also track fallback.
+    let mut best: Option<(usize, u64)> = None;
+    let mut fallback: Option<(usize, u64)> = None;
+
+    for (i, t) in queue.ready.iter().enumerate() {
+        if !has_budget(t, contexts) {
+            continue;
+        }
+
+        let eevdf = &t.scheduling.eevdf;
+
+        if eevdf.is_eligible(avg) {
+            let deadline = eevdf.virtual_deadline();
+
+            if best.map_or(true, |(_, d)| deadline < d) {
+                best = Some((i, deadline));
+            }
+        }
+
+        if fallback.map_or(true, |(_, v)| eevdf.vruntime < v) {
+            fallback = Some((i, eevdf.vruntime));
+        }
+    }
+
+    best.or(fallback).map(|(idx, _)| idx)
 }
 /// Swap TTBR0 when the address space changes between old and new threads.
 fn swap_ttbr0(old: &Thread, new: &Thread) {
@@ -226,22 +281,28 @@ fn ttbr0_for(thread: &Thread) -> u64 {
     }
 }
 
-/// Bind a scheduling context to the current thread. The thread must not
-/// already have a context bound.
+/// Bind a scheduling context to the current thread.
+///
+/// The caller (syscall layer) validates that `ctx_id` refers to a valid,
+/// live context via handle lookup. Returns false if the thread already has
+/// a context bound.
 pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
     let mut s = STATE.lock();
-    let num_contexts = s.scheduling_contexts.len();
     let core = per_core::core_id() as usize;
+
+    // Verify context exists before borrowing thread (disjoint field access).
+    match s.scheduling_contexts.get(ctx_id.0 as usize) {
+        Some(Some(_)) => {}
+        _ => return false,
+    }
+
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-    if thread.scheduling_context_id.is_some() {
-        return false;
-    }
-    if ctx_id.0 as usize >= num_contexts {
+    if thread.scheduling.context_id.is_some() {
         return false;
     }
 
-    thread.scheduling_context_id = Some(ctx_id);
+    thread.scheduling.context_id = Some(ctx_id);
 
     true
 }
@@ -258,39 +319,65 @@ pub fn block_current_and_schedule(ctx: *mut Context) -> *const Context {
     schedule_inner(&mut s, ctx, core)
 }
 /// Borrow another thread's scheduling context (context donation).
-/// Saves the current context and switches to the borrowed one.
+///
+/// Saves the current context and switches to the borrowed one. The caller
+/// (syscall layer) validates that `ctx_id` refers to a valid, live context
+/// via handle lookup.
 pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
     let mut s = STATE.lock();
-    let num_contexts = s.scheduling_contexts.len();
     let core = per_core::core_id() as usize;
+
+    // Verify context exists before borrowing thread (disjoint field access).
+    match s.scheduling_contexts.get(ctx_id.0 as usize) {
+        Some(Some(_)) => {}
+        _ => return false,
+    }
+
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
     // Can't borrow if already borrowing.
-    if thread.saved_context_id.is_some() {
-        return false;
-    }
-    if ctx_id.0 as usize >= num_contexts {
+    if thread.scheduling.saved_context_id.is_some() {
         return false;
     }
 
-    thread.saved_context_id = thread.scheduling_context_id;
-    thread.scheduling_context_id = Some(ctx_id);
+    thread.scheduling.saved_context_id = thread.scheduling.context_id;
+    thread.scheduling.context_id = Some(ctx_id);
 
     true
 }
 /// Create a new scheduling context. Returns the SchedulingContextId.
+///
+/// The context starts with ref_count=1 (the handle inserted by the caller).
+/// Does not bind the context to any thread — use `bind_scheduling_context`
+/// separately.
 pub fn create_scheduling_context(budget: u64, period: u64) -> Option<SchedulingContextId> {
     if !scheduling_context::validate_params(budget, period) {
         return None;
     }
 
     let mut s = STATE.lock();
-    let id = SchedulingContextId(s.next_scheduling_context_id);
     let now = now_ns();
+    let context = SchedulingContext::new(budget, period, now);
+    let slot = SchedulingContextSlot {
+        context,
+        ref_count: 1,
+    };
+    // Reuse freed ID or allocate new one.
+    let id = if let Some(free_id) = s.free_context_ids.pop() {
+        s.scheduling_contexts[free_id as usize] = Some(slot);
 
-    s.scheduling_contexts
-        .push(SchedulingContext::new(budget, period, now));
-    s.next_scheduling_context_id += 1;
+        SchedulingContextId(free_id)
+    } else {
+        let len = s.scheduling_contexts.len();
+
+        if len > u32::MAX as usize {
+            return None; // ID space exhausted
+        }
+
+        s.scheduling_contexts.push(Some(slot));
+
+        SchedulingContextId(len as u32)
+    };
 
     Some(id)
 }
@@ -327,28 +414,39 @@ pub fn exit_current() -> ! {
     }
 }
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
-    use super::handle::ChannelId;
-
     let core = per_core::core_id() as usize;
     // Phase 1: collect resources to free (under scheduler lock).
     let (channels_to_close, addr_space) = {
         let mut s = STATE.lock();
-        let thread = s.cores[core].current.as_mut().expect("no current thread");
+        // Collect handle objects into an owned Vec so we can release the
+        // thread borrow and then access s.scheduling_contexts freely.
+        let handle_objects: Vec<HandleObject> = {
+            let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-        // Auto-return borrowed scheduling context on exit.
-        if let Some(saved) = thread.saved_context_id.take() {
-            thread.scheduling_context_id = Some(saved);
+            // Auto-return borrowed scheduling context on exit.
+            if let Some(saved) = thread.scheduling.saved_context_id.take() {
+                thread.scheduling.context_id = Some(saved);
+            }
+
+            thread.handles.drain().map(|(_, obj)| obj).collect()
+        };
+        let mut channels = Vec::new();
+
+        for obj in handle_objects {
+            match obj {
+                HandleObject::Channel(id) => channels.push(id),
+                HandleObject::SchedulingContext(id) => {
+                    release_context_inner(&mut s, id);
+                }
+            }
         }
 
-        let channels: Vec<ChannelId> = thread
-            .handles
-            .drain()
-            .filter_map(|(_, obj)| match obj {
-                HandleObject::Channel(id) => Some(id),
-                HandleObject::SchedulingContext(_) => None,
-            })
-            .collect();
-        let addr_space = thread.address_space.take();
+        let addr_space = s.cores[core]
+            .current
+            .as_mut()
+            .expect("no current thread")
+            .address_space
+            .take();
 
         (channels, addr_space)
     };
@@ -424,15 +522,21 @@ pub fn init_secondary(core_id: u32) {
     // Keep ctx_ptr used so idle isn't optimized away.
     let _ = ctx_ptr;
 }
+/// Release a scheduling context handle (decrement ref count, free if zero).
+pub fn release_scheduling_context(ctx_id: SchedulingContextId) {
+    let mut s = STATE.lock();
+
+    release_context_inner(&mut s, ctx_id);
+}
 /// Return a borrowed scheduling context, restoring the saved one.
 pub fn return_scheduling_context() -> bool {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-    match thread.saved_context_id.take() {
+    match thread.scheduling.saved_context_id.take() {
         Some(saved) => {
-            thread.scheduling_context_id = Some(saved);
+            thread.scheduling.context_id = Some(saved);
             true
         }
         None => false, // Not borrowing.
@@ -475,7 +579,7 @@ pub fn try_wake(id: ThreadId) -> bool {
         let mut thread = s.blocked.swap_remove(pos);
 
         if thread.wake() {
-            thread.scheduling_algorithm = thread.scheduling_algorithm.mark_eligible();
+            thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
 
             s.queue.ready.push(thread);
 

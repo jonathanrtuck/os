@@ -24,6 +24,7 @@
 //! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns    | handle           |
 //! | 7  | scheduling_context_borrow | x0=handle                     | 0                |
 //! | 8  | scheduling_context_return | —                             | 0                |
+//! | 9  | scheduling_context_bind   | x0=handle                     | 0                |
 //!
 //! # Error codes
 //!
@@ -35,6 +36,7 @@
 //! | -4   | InvalidArgument     | `Error`       |
 //! | -5   | AlreadyBorrowing    | `Error`       |
 //! | -6   | NotBorrowing        | `Error`       |
+//! | -7   | AlreadyBound        | `Error`       |
 //! | -10  | InvalidHandle       | `HandleError` |
 //! | -12  | InsufficientRights  | `HandleError` |
 //! | -13  | TableFull           | `HandleError` |
@@ -57,6 +59,7 @@ pub mod nr {
     pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
     pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
     pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
+    pub const SCHEDULING_CONTEXT_BIND: u64 = 9;
 }
 
 #[repr(i64)]
@@ -67,6 +70,7 @@ pub enum Error {
     InvalidArgument = -4,
     AlreadyBorrowing = -5,
     NotBorrowing = -6,
+    AlreadyBound = -7,
 }
 
 impl From<HandleError> for u64 {
@@ -191,7 +195,12 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
         return Err(HandleError::InvalidHandle);
     }
 
-    scheduler::current_thread_do(|thread| thread.handles.close(Handle(handle_nr as u8)))?;
+    let obj = scheduler::current_thread_do(|thread| thread.handles.close(Handle(handle_nr as u8)))?;
+
+    // Release kernel resources associated with the closed handle.
+    if let HandleObject::SchedulingContext(id) = obj {
+        scheduler::release_scheduling_context(id);
+    }
 
     Ok(0)
 }
@@ -213,19 +222,33 @@ fn sys_scheduling_context_borrow(handle_nr: u64) -> Result<u64, Error> {
         Err(Error::AlreadyBorrowing)
     }
 }
+fn sys_scheduling_context_bind(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u8::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let ctx_id = scheduler::current_thread_do(|thread| {
+        match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
+            Ok(HandleObject::SchedulingContext(id)) => Ok(id),
+            _ => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    if scheduler::bind_scheduling_context(ctx_id) {
+        Ok(0)
+    } else {
+        Err(Error::AlreadyBound)
+    }
+}
 fn sys_scheduling_context_create(budget: u64, period: u64) -> Result<u64, Error> {
     let ctx_id =
         scheduler::create_scheduling_context(budget, period).ok_or(Error::InvalidArgument)?;
-    // Insert handle into the calling thread's handle table.
     let handle = scheduler::current_thread_do(|thread| {
         thread
             .handles
             .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
     })
     .map_err(|_| Error::InvalidArgument)?;
-
-    // Bind the context to the calling thread.
-    scheduler::bind_scheduling_context(ctx_id);
 
     Ok(handle.0 as u64)
 }
@@ -321,6 +344,14 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::SCHEDULING_CONTEXT_RETURN => {
             c.x[0] = match sys_scheduling_context_return() {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::SCHEDULING_CONTEXT_BIND => {
+            c.x[0] = match sys_scheduling_context_bind(c.x[0]) {
                 Ok(n) => n,
                 Err(e) => e as i64 as u64,
             };

@@ -24,7 +24,7 @@ pub const DEFAULT_WEIGHT: u32 = 1024;
 
 /// Per-thread EEVDF scheduling state.
 #[derive(Clone, Copy, Debug)]
-pub struct State {
+pub struct SchedulingState {
     /// Accumulated weighted CPU time (ns * DEFAULT_WEIGHT / weight).
     pub vruntime: u64,
     /// Thread weight. Higher = more CPU share (vruntime grows slower).
@@ -35,7 +35,7 @@ pub struct State {
     pub eligible_at: u64,
 }
 
-impl State {
+impl SchedulingState {
     pub const fn new() -> Self {
         Self {
             vruntime: 0,
@@ -76,7 +76,7 @@ impl State {
 
 /// Compute the average vruntime across all threads.
 /// Returns 0 for an empty slice (everything is eligible).
-pub fn avg_vruntime(states: &[State]) -> u64 {
+pub fn avg_vruntime(states: &[SchedulingState]) -> u64 {
     if states.is_empty() {
         return 0;
     }
@@ -95,7 +95,7 @@ pub fn avg_vruntime(states: &[State]) -> u64 {
 /// 2. Among those, pick the one with the earliest virtual deadline.
 /// 3. Fallback: if no thread is eligible, pick the thread with the
 ///    smallest vruntime (it's the most behind — let it catch up).
-pub fn select_next(threads: &[(State, bool)], avg_vruntime: u64) -> Option<usize> {
+pub fn select_next(threads: &[(SchedulingState, bool)], avg_vruntime: u64) -> Option<usize> {
     if threads.is_empty() {
         return None;
     }

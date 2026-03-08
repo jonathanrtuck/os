@@ -3,13 +3,37 @@
 use super::address_space::AddressSpace;
 use super::context::Context;
 use super::handle::HandleTable;
-use super::scheduling_algorithm::State;
+use super::scheduling_algorithm::SchedulingState;
 use super::scheduling_context::SchedulingContextId;
 use alloc::boxed::Box;
 use core::alloc::Layout;
 
 pub const STACK_SIZE: usize = 64 * 1024;
 pub const KERNEL_STACK_SIZE: usize = 16 * 1024;
+
+/// Scheduling-related fields grouped together.
+pub(crate) struct Scheduling {
+    /// Per-thread EEVDF state (vruntime, weight, slice, eligible_at).
+    pub(crate) eevdf: SchedulingState,
+    /// Scheduling context this thread is currently charged against.
+    /// None = unlimited budget (kernel/idle threads).
+    pub(crate) context_id: Option<SchedulingContextId>,
+    /// Saved scheduling context during donation (borrow/return).
+    pub(crate) saved_context_id: Option<SchedulingContextId>,
+    /// Hardware counter timestamp when this thread last started running.
+    pub(crate) last_started: u64,
+}
+
+impl Scheduling {
+    pub(crate) const fn new() -> Self {
+        Self {
+            eevdf: SchedulingState::new(),
+            context_id: None,
+            saved_context_id: None,
+            last_started: 0,
+        }
+    }
+}
 
 /// A kernel thread.
 ///
@@ -25,15 +49,7 @@ pub struct Thread {
     stack_size: usize,
     pub(crate) address_space: Option<Box<AddressSpace>>,
     pub(crate) handles: HandleTable,
-    /// Scheduling context this thread is currently charged against.
-    /// None = unlimited budget (kernel/idle threads).
-    pub(crate) scheduling_context_id: Option<SchedulingContextId>,
-    /// Saved scheduling context during donation (borrow/return).
-    pub(crate) saved_context_id: Option<SchedulingContextId>,
-    /// Per-thread EEVDF state (vruntime, weight, slice, eligible_at).
-    pub(crate) scheduling_algorithm: State,
-    /// Hardware counter timestamp when this thread last started running.
-    pub(crate) last_started: u64,
+    pub(crate) scheduling: Scheduling,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
@@ -167,10 +183,7 @@ impl Thread {
             stack_size: STACK_SIZE,
             address_space: None,
             handles: HandleTable::new(),
-            scheduling_context_id: None,
-            saved_context_id: None,
-            scheduling_algorithm: State::new(),
-            last_started: 0,
+            scheduling: Scheduling::new(),
         })
     }
 
@@ -192,10 +205,7 @@ impl Thread {
             stack_size: 0,
             address_space: None,
             handles: HandleTable::new(),
-            scheduling_context_id: None,
-            saved_context_id: None,
-            scheduling_algorithm: State::new(),
-            last_started: 0,
+            scheduling: Scheduling::new(),
         })
     }
     /// Idle thread — runs at EL1, no stack (uses boot stack), never enqueued.
@@ -217,10 +227,7 @@ impl Thread {
             stack_size: 0,
             address_space: None,
             handles: HandleTable::new(),
-            scheduling_context_id: None,
-            saved_context_id: None,
-            scheduling_algorithm: State::new(),
-            last_started: 0,
+            scheduling: Scheduling::new(),
         })
     }
     /// User thread — runs at EL0 with its own address space.
@@ -255,10 +262,7 @@ impl Thread {
             stack_size: KERNEL_STACK_SIZE,
             address_space: Some(addr_space),
             handles: HandleTable::new(),
-            scheduling_context_id: None,
-            saved_context_id: None,
-            scheduling_algorithm: State::new(),
-            last_started: 0,
+            scheduling: Scheduling::new(),
         })
     }
 }

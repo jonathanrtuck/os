@@ -7,8 +7,8 @@ mod scheduling_algorithm;
 
 use scheduling_algorithm::*;
 
-fn state(vruntime: u64, weight: u32, slice: u64, eligible_at: u64) -> State {
-    State {
+fn state(vruntime: u64, weight: u32, slice: u64, eligible_at: u64) -> SchedulingState {
+    SchedulingState {
         vruntime,
         weight,
         requested_slice: slice,
@@ -16,11 +16,11 @@ fn state(vruntime: u64, weight: u32, slice: u64, eligible_at: u64) -> State {
     }
 }
 
-fn default_state() -> State {
-    State::new()
+fn default_state() -> SchedulingState {
+    SchedulingState::new()
 }
 
-// --- State ---
+// --- SchedulingState ---
 
 #[test]
 fn new_state_has_defaults() {

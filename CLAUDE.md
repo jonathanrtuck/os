@@ -69,7 +69,7 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-08:** Scheduling algorithm settled: EEVDF + scheduling contexts (combined model). EEVDF provides proportional-fair selection with latency differentiation. Scheduling contexts are handle-based kernel objects (budget/period) providing temporal isolation and server billing via context donation. Content-type-aware budgeting — OS service sets budgets based on document mimetype and state. Best-effort admission. Design recorded in Decision #16, kernel DESIGN.md (section 6.1), and journal insights log.
+**Session 2026-03-08:** Scheduling algorithm settled and implemented: EEVDF + scheduling contexts (combined model). EEVDF provides proportional-fair selection with latency differentiation. Scheduling contexts are handle-based kernel objects (budget/period) providing temporal isolation and server billing via context donation. Content-type-aware budgeting — OS service sets budgets based on document mimetype and state. Best-effort admission. Code review completed (10 issues addressed): zero-allocation hot path, ref-counted context slots with free list, separate create/bind syscalls, budget-aware avg vruntime, Scheduling sub-struct on Thread. Policy/mechanism separation clarified: kernel owns algorithm + enforcement, OS service owns policy (which threads get what budgets). 140 host tests passing. Design recorded in Decision #16, kernel DESIGN.md (section 6.1), and journal insights log.
 
 **Session 2026-03-07:** Kernel graduated from research spike to production. All roadmap phases complete (SMP, memory management, cleanup, VM, device I/O). 8-phase code review/remediation completed. Documentation and design-notes updated.
 

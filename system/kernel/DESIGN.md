@@ -340,10 +340,13 @@ Data structure: replace the three `VecDeque`s (high/normal priority) with a sing
 **New kernel objects and syscalls:**
 
 - `SchedulingContext` kernel object: budget, period, remaining, replenish_at
+- `SchedulingContextSlot` wrapper with reference counting (freed when last handle closed)
 - `HandleObject::SchedulingContext(SchedulingContextId)` variant in handle table
-- Thread holds `Option<SchedulingContextId>` — its current scheduling context
-- New syscalls: `scheduling_context_create(budget, period)`, `scheduling_context_borrow(handle)`, `scheduling_context_return()`
+- Thread holds `SchedulingInfo { eevdf, context_id, saved_context_id, last_started }`
+- Syscalls: `scheduling_context_create(budget, period)`, `scheduling_context_bind(handle)`, `scheduling_context_borrow(handle)`, `scheduling_context_return()`
+- Create and bind are separate operations — OS service creates contexts for editors, editors bind themselves
 - Timer interrupt: charge runtime, check budget exhaustion, trigger replenishment
+- Free list for scheduling context ID reuse
 
 **Content-type-aware policy (OS service, not kernel):**
 
