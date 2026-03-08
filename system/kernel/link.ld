@@ -53,8 +53,16 @@ SECTIONS
   . = ALIGN(16);
   .bss.stack (NOLOAD) : AT(ADDR(.bss.stack) - KERNEL_VA_OFFSET) ALIGN(16) {
     __stack_bottom = .;
-    . = . + 0x10000; /* 64 KiB stack */
+    . = . + 0x10000; /* 64 KiB primary kernel stack */
     __stack_top = .;
+  }
+
+  /* Secondary core kernel stacks: 7 cores × 16 KiB = 112 KiB.
+   * Core N (1..7) uses __secondary_stacks + N * 0x4000 as its stack top. */
+  .bss.stacks (NOLOAD) : AT(ADDR(.bss.stacks) - KERNEL_VA_OFFSET) ALIGN(16) {
+    __secondary_stacks = .;
+    . = . + (7 * 0x4000); /* 7 × 16 KiB */
+    __secondary_stacks_end = .;
   }
 
   /* Physical companions for boot code (which runs before TTBR1 is live). */

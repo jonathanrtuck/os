@@ -9,9 +9,14 @@ set -euo pipefail
 TIMEOUT_SECS=10
 EXPECTED=(
     "booting"
+    "core 1 online"
+    "core 2 online"
+    "core 3 online"
     "booted."
     "echo recv: ping"
     "init recv: pong"
+    "virtio: blk"
+    "blk: sector 0: HELLO"
 )
 
 echo "Building kernel…"
@@ -22,13 +27,23 @@ echo "Booting QEMU (${TIMEOUT_SECS}s timeout)…"
 
 KERNEL="target/aarch64-unknown-none/release/kernel"
 OUTPUT_FILE=$(mktemp)
+DISK_IMG=$(mktemp)
+
+# Create a 1 MiB test disk with known content at sector 0.
+dd if=/dev/zero of="$DISK_IMG" bs=1M count=1 2>/dev/null
+
+echo -n "HELLO VIRTIO BLK" | dd of="$DISK_IMG" bs=1 count=16 conv=notrunc 2>/dev/null
 
 qemu-system-aarch64 \
     -machine virt,gic-version=2 \
     -cpu cortex-a53 \
+    -smp 4 \
     -m 256M \
     -nographic \
     -serial mon:stdio \
+    -global virtio-mmio.force-legacy=false \
+    -drive file="$DISK_IMG",if=none,format=raw,id=hd0 \
+    -device virtio-blk-device,drive=hd0 \
     -kernel "$KERNEL" > "$OUTPUT_FILE" 2>&1 &
 QEMU_PID=$!
 
@@ -56,7 +71,7 @@ for pattern in "${EXPECTED[@]}"; do
     fi
 done
 
-rm -f "$OUTPUT_FILE"
+rm -f "$OUTPUT_FILE" "$DISK_IMG"
 
 if $PASS; then
     echo ""

@@ -1,94 +1,234 @@
-//! Physical page frame allocator (free-list, 4 KiB frames).
+//! Buddy allocator for physical page frames.
 //!
-//! Manages physical memory above the kernel heap. Each free frame stores a
-//! pointer to the next free frame (intrusive linked list). Frames are returned
-//! as physical addresses; callers convert to kernel VA when needed.
+//! Manages physical memory above the kernel heap. Supports single-page
+//! allocation (order 0, 4 KiB) and multi-page contiguous allocation (up to
+//! order MAX_ORDER = 4 MiB). Buddy coalescing on free keeps fragmentation low.
+//!
+//! Existing single-page API (`alloc_frame`/`free_frame`) is preserved —
+//! callers are unaffected.
 
 use super::memory;
 use super::paging;
 use super::sync::IrqMutex;
 
+/// Maximum order: 2^10 pages = 4 MiB.
+const MAX_ORDER: usize = 10;
 const PAGE_SIZE: usize = paging::PAGE_SIZE as usize;
 
-struct FreeFrame {
-    next: *mut FreeFrame,
+/// Intrusive free-list node stored at the start of each free block.
+struct FreeBlock {
+    next: *mut FreeBlock,
 }
 struct State {
-    head: *mut FreeFrame,
+    /// Per-order free lists. `free_lists[k]` chains free blocks of 2^k pages.
+    free_lists: [*mut FreeBlock; MAX_ORDER + 1],
+    /// Total number of free pages (across all orders).
     free_count: usize,
+    /// Physical address range managed by this allocator.
+    region_start: usize,
+    region_end: usize,
 }
+// SAFETY: FreeBlock pointers are only accessed under STATE lock.
+unsafe impl Send for State {}
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {
-    head: core::ptr::null_mut(),
+    free_lists: [core::ptr::null_mut(); MAX_ORDER + 1],
     free_count: 0,
+    region_start: 0,
+    region_end: 0,
 });
+
+/// Compute the buddy's physical address for a block at `pa` of order `order`.
+///
+/// Buddy PA = pa XOR (block_size). Two buddies always differ in exactly one
+/// bit position (the order bit), so XOR toggles between them.
+fn buddy_pa(pa: usize, order: usize) -> usize {
+    pa ^ (PAGE_SIZE << order)
+}
+/// Remove a specific block from a free list (by physical address).
+/// Returns true if found and removed.
+fn remove_from_list(head: &mut *mut FreeBlock, pa: usize) -> bool {
+    let target_va = memory::phys_to_virt(pa) as *mut FreeBlock;
+    let mut prev: *mut *mut FreeBlock = head;
+
+    // SAFETY: All pointers in the free list were placed there by init()
+    // or free_frames() and point to valid kernel-mapped memory.
+    unsafe {
+        loop {
+            let current = *prev;
+
+            if current.is_null() {
+                return false;
+            }
+            if current == target_va {
+                *prev = (*current).next;
+
+                return true;
+            }
+
+            prev = &mut (*current).next;
+        }
+    }
+}
 
 /// Allocate one 4 KiB frame. Returns the physical address, or `None`.
 pub fn alloc_frame() -> Option<usize> {
-    let mut s = STATE.lock();
+    alloc_frames(0)
+}
+/// Allocate 2^order contiguous pages. Returns the physical address of the
+/// first page, or `None` if no contiguous block is available.
+pub fn alloc_frames(order: usize) -> Option<usize> {
+    assert!(order <= MAX_ORDER, "order exceeds MAX_ORDER");
 
-    if s.head.is_null() {
+    let mut s = STATE.lock();
+    // Find the smallest order >= requested that has a free block.
+    let mut found_order = order;
+
+    while found_order <= MAX_ORDER {
+        if !s.free_lists[found_order].is_null() {
+            break;
+        }
+
+        found_order += 1;
+    }
+
+    if found_order > MAX_ORDER {
         return None;
     }
 
-    let frame = s.head;
+    // Pop a block from the found order.
+    let block = s.free_lists[found_order];
 
-    // SAFETY: `head` is non-null and was previously initialized by `init` or
-    // `free_frame`, both of which write a valid `FreeFrame` at that address.
+    // SAFETY: block is non-null (checked above) and was placed in the list
+    // by init() or free_frames(), pointing to valid kernel-mapped memory.
     unsafe {
-        s.head = (*frame).next;
+        s.free_lists[found_order] = (*block).next;
     }
 
-    s.free_count -= 1;
+    let pages = 1usize << found_order;
 
-    // Zero the frame before returning.
-    let va = frame as usize;
+    s.free_count -= pages;
 
-    // SAFETY: `va` points to a full page of kernel-mapped memory that we own.
-    unsafe {
-        core::ptr::write_bytes(va as *mut u8, 0, PAGE_SIZE);
+    let va = block as usize;
+    let pa = memory::virt_to_phys(va);
+    // Split down to the requested order.
+    let mut current_order = found_order;
+
+    while current_order > order {
+        current_order -= 1;
+
+        let buddy = pa + (PAGE_SIZE << current_order);
+        let buddy_va = memory::phys_to_virt(buddy) as *mut FreeBlock;
+
+        // SAFETY: buddy_va points to kernel-mapped memory within our
+        // managed region. Writing a FreeBlock header is valid.
+        unsafe {
+            (*buddy_va).next = s.free_lists[current_order];
+            s.free_lists[current_order] = buddy_va;
+        }
+
+        s.free_count += 1 << current_order;
     }
 
-    Some(memory::virt_to_phys(va))
+    // Zero the allocated block.
+    let block_size = PAGE_SIZE << order;
+
+    // SAFETY: va points to `block_size` bytes of kernel-mapped memory.
+    unsafe {
+        core::ptr::write_bytes(va as *mut u8, 0, block_size);
+    }
+
+    Some(pa)
 }
-/// Return a frame to the free list.
+/// Return a single 4 KiB frame to the allocator.
 pub fn free_frame(pa: usize) {
-    let mut s = STATE.lock();
-    let va = memory::phys_to_virt(pa);
-    let frame = va as *mut FreeFrame;
+    free_frames(pa, 0)
+}
+/// Free 2^order contiguous pages starting at physical address `pa`.
+///
+/// Coalesces with buddy blocks up to MAX_ORDER.
+pub fn free_frames(pa: usize, order: usize) {
+    assert!(order <= MAX_ORDER, "order exceeds MAX_ORDER");
 
-    // SAFETY: `va` points to a full page of kernel-mapped memory. Writing a
-    // FreeFrame header into the first 8 bytes is valid for any owned page.
-    unsafe {
-        (*frame).next = s.head;
+    let mut s = STATE.lock();
+    let mut current_pa = pa;
+    let mut current_order = order;
+
+    // Try to coalesce with buddy at each level.
+    while current_order < MAX_ORDER {
+        let buddy = buddy_pa(current_pa, current_order);
+
+        // Buddy must be within our managed region.
+        if buddy < s.region_start || buddy >= s.region_end {
+            break;
+        }
+        // Try to remove buddy from the free list at this order.
+        if !remove_from_list(&mut s.free_lists[current_order], buddy) {
+            break; // Buddy is allocated — can't coalesce.
+        }
+
+        // Coalesce: the combined block starts at the lower address.
+        s.free_count -= 1 << current_order;
+        current_pa = core::cmp::min(current_pa, buddy);
+        current_order += 1;
     }
 
-    s.head = frame;
-    s.free_count += 1;
+    // Insert the (possibly coalesced) block into the appropriate list.
+    let va = memory::phys_to_virt(current_pa) as *mut FreeBlock;
+
+    // SAFETY: va points to kernel-mapped memory within our managed region.
+    unsafe {
+        (*va).next = s.free_lists[current_order];
+        s.free_lists[current_order] = va;
+    }
+
+    s.free_count += 1 << current_order;
 }
 /// Initialize the frame allocator with all pages in `[start_pa, end_pa)`.
 ///
-/// `start_pa` must be page-aligned and above the kernel heap.
+/// Pages are inserted at the highest possible order for efficient coalescing.
 /// Called once during boot with IRQs masked.
 pub fn init(start_pa: usize, end_pa: usize) {
     let mut s = STATE.lock();
-    let start = (start_pa + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let mut count = 0usize;
+    let start = paging::align_up(start_pa, PAGE_SIZE);
+
+    s.region_start = start;
+    s.region_end = end_pa;
+
     let mut addr = start;
 
     while addr + PAGE_SIZE <= end_pa {
-        let va = memory::phys_to_virt(addr);
-        let frame = va as *mut FreeFrame;
+        // Find the highest order this block can be inserted at.
+        // Constraints: must be naturally aligned AND must fit within region.
+        let mut order = 0;
 
-        // SAFETY: `va` is a valid kernel VA for physical address `addr`.
-        unsafe {
-            (*frame).next = s.head;
-            s.head = frame;
+        while order < MAX_ORDER {
+            let next_order = order + 1;
+            let block_size = PAGE_SIZE << next_order;
+
+            // Natural alignment check: addr must be aligned to block_size.
+            if addr & (block_size - 1) != 0 {
+                break;
+            }
+            // Fit check: the block must not extend beyond end_pa.
+            if addr + block_size > end_pa {
+                break;
+            }
+
+            order = next_order;
         }
 
-        count += 1;
-        addr += PAGE_SIZE;
-    }
+        let va = memory::phys_to_virt(addr) as *mut FreeBlock;
 
-    s.free_count = count;
+        // SAFETY: va is a valid kernel VA for physical address addr.
+        unsafe {
+            (*va).next = s.free_lists[order];
+            s.free_lists[order] = va;
+        }
+
+        let pages = 1usize << order;
+
+        s.free_count += pages;
+        addr += PAGE_SIZE << order;
+    }
 }

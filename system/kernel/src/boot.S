@@ -32,6 +32,10 @@
 // --------------------------------------------------------------------------
 .section .bss
 .align 12
+.global boot_tt0_l0
+.global boot_tt0_l1
+.global boot_tt0_l2_0
+.global boot_tt0_l2_1
 boot_tt0_l0:    .space 4096    // TTBR0 L0
 boot_tt0_l1:    .space 4096    // TTBR0 L1
 boot_tt0_l2_0:  .space 4096    // TTBR0 L2 for 0..1GB (devices)
@@ -188,8 +192,111 @@ park:
   wfe
   b park
 
+// --------------------------------------------------------------------------
+// secondary_entry — Trampoline for secondary cores (called via PSCI CPU_ON).
+//
+// Entered at EL1 (PSCI drops from EL2). TTBR1 page tables are already live
+// from core 0's boot — we just need to configure this core's MMU, set up
+// its stack, and jump to Rust.
+//
+// Input: x0 = context_id (core_id, 1..7).
+// --------------------------------------------------------------------------
+
+.global secondary_entry
+secondary_entry:
+  // x0 = core_id (passed by PSCI CPU_ON as context_id). Save it.
+  mov x19, x0
+
+  // FP/ASIMD enable.
+  mrs x0, cpacr_el1
+  orr x0, x0, #(3 << 20)
+  msr cpacr_el1, x0
+  isb
+
+  // MAIR_EL1 — same as core 0.
+  mov x1, #0xFF
+  mov x2, #0x04
+  lsl x2, x2, #8
+  orr x1, x1, x2
+  msr mair_el1, x1
+
+  // TCR_EL1 — same as core 0.
+  mov x1, #16
+  orr x1, x1, #(0b11 << 12)
+  orr x1, x1, #(0b01 << 10)
+  orr x1, x1, #(0b01 << 8)
+  orr x1, x1, #(16 << 16)
+  orr x1, x1, #(0b01 << 24)
+  orr x1, x1, #(0b01 << 26)
+  orr x1, x1, #(0b11 << 28)
+  orr x1, x1, #(0b10 << 30)
+  mov x2, #(0b010)
+  lsl x2, x2, #32
+  orr x1, x1, x2
+  msr tcr_el1, x1
+
+  // TTBR0: empty (no user mappings). Use boot_tt0_l0 as a zeroed L0 table.
+  // (We only need TTBR1 for kernel VA; TTBR0 must be valid but can be empty.)
+  ldr x0, =boot_tt0_l0
+  and x0, x0, #0x0000FFFFFFFFFFFF   // VA → PA
+  msr ttbr0_el1, x0
+
+  // TTBR1: shared kernel page tables (same as core 0).
+  ldr x0, =boot_tt1_l0
+  and x0, x0, #0x0000FFFFFFFFFFFF   // VA → PA
+  msr ttbr1_el1, x0
+
+  dsb sy
+  isb
+  tlbi vmalle1
+  dsb ish
+  isb
+
+  // Enable MMU + caches.
+  mrs x1, sctlr_el1
+  orr x1, x1, #1              // M = 1
+  orr x1, x1, #(1 << 2)       // C = 1
+  orr x1, x1, #(1 << 12)      // I = 1
+  msr sctlr_el1, x1
+  dsb ish
+  isb
+
+  // --- MMU is live. Switch to upper VA. ---
+
+  // Install exception vectors (upper VA).
+  ldr x0, =vectors
+  msr vbar_el1, x0
+  isb
+
+  // Set per-core kernel stack.
+  // Stack top = __secondary_stacks + core_id * 0x4000 (16 KiB per core).
+  ldr x0, =__secondary_stacks
+  mov x1, #0x4000
+  mul x1, x19, x1
+  add x0, x0, x1
+  mov sp, x0
+
+  // Jump to Rust with core_id in x0.
+  mov x0, x19
+  ldr x1, =secondary_main
+  blr x1
+  b park
+
 // Force literal pool within .text.boot (physical VMA).
 .ltorg
+
+// --------------------------------------------------------------------------
+// Store secondary_entry's physical address in .rodata (upper VA, reachable
+// from Rust). .quad uses R_AARCH64_ABS64, which has no range limit.
+// Rust reads this value to pass to PSCI CPU_ON.
+// --------------------------------------------------------------------------
+.section .rodata
+.global SECONDARY_ENTRY_PA
+SECONDARY_ENTRY_PA:
+  .quad secondary_entry
+
+// Restore to .text.boot for the rest of boot-time code.
+.section .text.boot
 
 // --------------------------------------------------------------------------
 // Early exception vectors (physical VA, used during MMU bring-up).
@@ -336,6 +443,11 @@ fill_tables:
   mov x14, #0x09000000
   orr x15, x14, x16
   str x15, [x11, #(72 * 8)]
+
+  // Virtio MMIO: 0x0A00_0000, L2 index = 0x0A00_0000 >> 21 = 80
+  mov x14, #0x0A000000
+  orr x15, x14, x16
+  str x15, [x11, #(80 * 8)]
 
   // --- RAM blocks in L2_1 ---
   // RAM: 0x4000_0000..0x5000_0000 (128 * 2MB blocks). L2_1[0..127].

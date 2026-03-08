@@ -89,3 +89,28 @@ smoke-test.sh     — QEMU boot + output verification
 ## References
 
 - [bahree/rust-microkernel](https://github.com/bahree/rust-microkernel) — primary reference for the initial boot sequence and assembly. The boot.S structure, exception vectors, and context save/restore originated there, with modifications for W^X page table permissions, GICv2 interrupt handling, and the scheduler's context switch model.
+
+---
+
+## Roadmap
+
+The kernel's interface to userspace (syscalls, IPC channels, handle table) is stable. Everything below — allocators, scheduling, synchronization, core management — can be improved without breaking the contract. Phases are ordered by dependency; items within a phase are independent.
+
+| Phase          | Item                 | Current                            | Target                                              |
+| -------------- | -------------------- | ---------------------------------- | --------------------------------------------------- |
+| **1. SMP**     | 1.1 Sync primitives  | `IrqMutex` (IRQ mask, single-core) | Ticket spinlock + IRQ masking                       |
+|                | 1.2 Multi-core boot  | Core 0 only, others parked         | PSCI boot, per-CPU data, per-core stacks/timers     |
+|                | 1.3 SMP scheduler    | Round-robin, O(n), no priorities   | Global queue w/ priorities (idle/normal/high), O(1) |
+| **2. Memory**  | 2.1 Slab allocator   | Linked-list for all heap allocs    | Slab caches for fixed-size kernel objects           |
+|                | 2.2 Buddy allocator  | Free-list, single pages only       | Buddy system, contiguous 2^n page allocation        |
+|                | 2.3 ASID recycling   | 255 concurrent max, panics         | Generation-based, lazy re-acquire on context switch |
+| **3. Cleanup** | 3.1 Timer resolution | 10 Hz                              | 250 Hz                                              |
+|                | 3.2 Boot map cleanup | Identity map wastes memory         | Reclaim boot TTBR0 pages                            |
+| **4. VM**      | 4.1 Demand paging    | Eager alloc at process creation    | Fault-driven mapping, VMA tracking                  |
+| **5. I/O**     | 5.1 Virtio framework | Hardcoded GIC + UART               | virtio-mmio transport, console + block drivers      |
+
+**Out of scope** (blocked by OS design decisions): filesystem (COW), full syscall surface, OS service process.
+
+**Not planned:** x86_64, POSIX, network stack, hard realtime.
+
+Detailed design notes for each item are in [`docs/design-notes.md`](docs/design-notes.md).

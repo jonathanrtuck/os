@@ -59,13 +59,18 @@ mod memory;
 mod mmio;
 mod page_alloc;
 mod paging;
+mod percpu;
 mod process;
+mod psci;
 mod scheduler;
+mod slab;
 mod sync;
 mod syscall;
 mod thread;
 mod timer;
 mod uart;
+mod virtio;
+mod vma;
 
 use context::Context;
 
@@ -76,6 +81,72 @@ static ECHO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.elf"));
 
 extern "C" {
     static __kernel_end: u8;
+}
+
+/// Boot secondary cores via PSCI CPU_ON.
+///
+/// Called after all kernel data structures are initialized. Secondary cores
+/// jump to `secondary_entry` (boot.S), which enables MMU and calls
+/// `secondary_main` below.
+fn boot_secondaries() {
+    extern "C" {
+        // Physical address of secondary_entry, stored in .rodata by boot.S.
+        // Reading this avoids an ADRP relocation across VMA regions.
+        static SECONDARY_ENTRY_PA: u64;
+    }
+
+    // SAFETY: SECONDARY_ENTRY_PA is a .quad in .rodata set by boot.S.
+    let entry_pa = unsafe { core::ptr::read_volatile(&SECONDARY_ENTRY_PA) };
+
+    percpu::init_core(0);
+
+    // Ensure page tables and stacks are visible to secondary cores before
+    // they start executing.
+    unsafe {
+        core::arch::asm!("dsb ish", options(nostack));
+    }
+
+    let mut expected_online = 1u32; // Core 0 is already online.
+
+    for core_id in 1..percpu::MAX_CORES as u64 {
+        if psci::cpu_on(core_id, entry_pa, core_id).is_ok() {
+            expected_online += 1;
+        }
+    }
+
+    // Wait for all secondaries to finish their boot trampoline (MMU setup
+    // in secondary_entry). After this, the boot TTBR0 pages are safe to free.
+    while percpu::online_count() < expected_online {
+        core::hint::spin_loop();
+    }
+
+    // Reclaim the 4 boot TTBR0 page table pages. TTBR1 tables are still
+    // live (shared kernel mappings) — do NOT free those.
+    reclaim_boot_ttbr0();
+}
+/// Free the boot identity-map pages (TTBR0) now that all cores have
+/// transitioned to upper VA via TTBR1.
+fn reclaim_boot_ttbr0() {
+    extern "C" {
+        static boot_tt0_l0: u8;
+        static boot_tt0_l1: u8;
+        static boot_tt0_l2_0: u8;
+        static boot_tt0_l2_1: u8;
+    }
+
+    let pages = unsafe {
+        [
+            &boot_tt0_l0 as *const u8 as usize,
+            &boot_tt0_l1 as *const u8 as usize,
+            &boot_tt0_l2_0 as *const u8 as usize,
+            &boot_tt0_l2_1 as *const u8 as usize,
+        ]
+    };
+
+    for &va in &pages {
+        let pa = memory::virt_to_phys(va);
+        page_alloc::free_frame(pa);
+    }
 }
 
 #[unsafe(no_mangle)]
@@ -95,6 +166,7 @@ pub extern "C" fn kernel_main() -> ! {
     page_alloc::init(heap_end, ram_end);
     gic::init();
     scheduler::init();
+    virtio::init();
 
     // Spawn user processes and create an IPC channel between them.
     let init_id = process::spawn_from_elf(INIT_ELF);
@@ -102,9 +174,37 @@ pub extern "C" fn kernel_main() -> ! {
 
     channel::create(init_id, echo_id);
 
+    boot_secondaries();
+
     timer::init();
 
     uart::puts("🥾 booted.\n");
+
+    loop {
+        unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
+    }
+}
+/// Entry point for secondary cores (called from boot.S secondary_entry).
+///
+/// `core_id` is the MPIDR affinity (1..7), passed as context_id by PSCI.
+/// Initializes per-core GIC, scheduler state, and timer, then enters idle.
+#[unsafe(no_mangle)]
+pub extern "C" fn secondary_main(core_id: u64) -> ! {
+    gic::init_cpu_interface();
+    percpu::init_core(core_id as u32);
+    scheduler::init_secondary(core_id as u32);
+
+    // Format as a single string so it prints atomically (one lock acquire).
+    let digit = b'0' + core_id as u8;
+    let msg = [
+        b'c', b'o', b'r', b'e', b' ', digit, b' ', b'o', b'n', b'l', b'i', b'n', b'e', b'\n',
+    ];
+
+    // SAFETY: All bytes are ASCII, which is valid UTF-8.
+    uart::puts(unsafe { core::str::from_utf8_unchecked(&msg) });
+    // Enable timer last — once IRQs are unmasked, this core participates
+    // in scheduling and may immediately switch to a user thread.
+    timer::init();
 
     loop {
         unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
@@ -134,48 +234,75 @@ pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
 }
 /// Handle non-SVC synchronous exceptions from EL0 (user faults).
 ///
-/// Data aborts, instruction aborts, alignment faults, undefined instructions, etc.
-/// Logs the fault, then terminates the faulting process and reschedules.
+/// For data aborts (EC=0x24) and instruction aborts (EC=0x20) from EL0,
+/// attempts demand paging via the process's VMA map. If the fault address
+/// is covered by a VMA, a page is allocated and mapped, and we return to
+/// the faulting instruction. Otherwise (or for other exception classes),
+/// the process is terminated.
 #[unsafe(no_mangle)]
 pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     let esr: u64;
-    let elr: u64;
     let far: u64;
 
     // SAFETY: Reading system registers to diagnose the fault. These are
     // read-only queries with no side effects.
     unsafe {
         core::arch::asm!("mrs {}, esr_el1", out(reg) esr, options(nostack, nomem));
-        core::arch::asm!("mrs {}, elr_el1", out(reg) elr, options(nostack, nomem));
         core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nostack, nomem));
     }
 
     let ec = (esr >> 26) & 0x3F;
 
-    uart::puts("user fault: EC=0x");
-    uart::put_hex(ec);
-    uart::puts(" ELR=0x");
-    uart::put_hex(elr);
-    uart::puts(" FAR=0x");
-    uart::put_hex(far);
-    uart::puts("\n");
+    // EC 0x24 = Data Abort from EL0, EC 0x20 = Instruction Abort from EL0.
+    // These are the only exception classes that can be resolved by demand paging.
+    if ec == 0x24 || ec == 0x20 {
+        let handled = scheduler::current_thread_do(|thread| {
+            if let Some(ref mut addr_space) = thread.address_space {
+                addr_space.handle_fault(far)
+            } else {
+                false
+            }
+        });
+
+        if handled {
+            // Page mapped successfully — return to the faulting instruction.
+            // The CPU will re-execute it and find the page present.
+            return ctx;
+        }
+    }
+
+    // Unresolvable fault — log and terminate.
+    let elr: u64;
+
+    unsafe {
+        core::arch::asm!("mrs {}, elr_el1", out(reg) elr, options(nostack, nomem));
+    }
+
+    uart::panic_puts("user fault: EC=0x");
+    uart::panic_put_hex(ec);
+    uart::panic_puts(" ELR=0x");
+    uart::panic_put_hex(elr);
+    uart::panic_puts(" FAR=0x");
+    uart::panic_put_hex(far);
+    uart::panic_puts("\n");
 
     scheduler::exit_current_from_syscall(ctx)
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    uart::puts("\n😱 panicking…\n");
+    // Use panic_ variants to bypass the UART lock (may already be held).
+    uart::panic_puts("\n😱 panicking…\n");
 
     if let Some(location) = info.location() {
-        uart::puts(location.file());
-        uart::puts(":");
-        uart::put_u32(location.line());
-        uart::puts("\n");
+        uart::panic_puts(location.file());
+        uart::panic_puts(":");
+        uart::panic_put_u32(location.line());
+        uart::panic_puts("\n");
     }
     if let Some(msg) = info.message().as_str() {
-        uart::puts(msg);
-        uart::puts("\n");
+        uart::panic_puts(msg);
+        uart::panic_puts("\n");
     }
 
     loop {

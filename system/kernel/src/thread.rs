@@ -18,6 +18,7 @@ pub struct Thread {
     pub(crate) context: Context,
     id: ThreadId,
     state: ThreadState,
+    priority: Priority,
     trust_level: TrustLevel,
     stack_bottom: *mut u8,
     stack_size: usize,
@@ -27,6 +28,16 @@ pub struct Thread {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
 
+/// Scheduler priority level. Higher priority runs first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Priority {
+    /// Runs only when nothing else is runnable (one per core).
+    Idle,
+    /// Default for user threads.
+    Normal,
+    /// Reserved for future OS service threads.
+    High,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
     Ready,
@@ -50,16 +61,22 @@ const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
 // --- State queries ---
 
 impl Thread {
+    /// Return a raw pointer to this thread's Context (at offset 0).
+    /// Used by the scheduler to set TPIDR_EL1 and for context switch.
+    pub(crate) fn context_ptr(&self) -> *const Context {
+        &self.context as *const Context
+    }
     pub(crate) fn id(&self) -> ThreadId {
         self.id
     }
-
     pub(crate) fn is_exited(&self) -> bool {
         self.state == ThreadState::Exited
     }
-
     pub(crate) fn is_ready(&self) -> bool {
         self.state == ThreadState::Ready
+    }
+    pub(crate) fn priority(&self) -> Priority {
+        self.priority
     }
 }
 impl Drop for Thread {
@@ -145,6 +162,7 @@ impl Thread {
             context: ctx,
             id: ThreadId(id),
             state: ThreadState::Ready,
+            priority: Priority::Normal,
             trust_level: TrustLevel::Kernel,
             stack_bottom,
             stack_size: STACK_SIZE,
@@ -152,6 +170,7 @@ impl Thread {
             handles: HandleTable::new(),
         })
     }
+
     /// Boot thread — zeroed context, no stack, no address space.
     ///
     /// The boot thread represents the initial execution context (kernel_main).
@@ -165,6 +184,29 @@ impl Thread {
             context: ctx,
             id: ThreadId(0),
             state: ThreadState::Running,
+            priority: Priority::Normal,
+            trust_level: TrustLevel::Kernel,
+            stack_bottom: core::ptr::null_mut(),
+            stack_size: 0,
+            address_space: None,
+            handles: HandleTable::new(),
+        })
+    }
+    /// Idle thread — runs at EL1, no stack (uses boot stack), never enqueued.
+    ///
+    /// One per core. Falls through to WFE when nothing else is runnable.
+    /// The idle thread's Context is used as a save area when the core has
+    /// no user threads to run.
+    pub fn new_idle(core_id: u64) -> Box<Self> {
+        // SAFETY: Context is #[repr(C)] with integer and float fields;
+        // all-zeros is valid.
+        let ctx: Context = unsafe { core::mem::zeroed() };
+
+        Box::new(Thread {
+            context: ctx,
+            id: ThreadId(core_id | 0xFF00), // Distinguished idle thread IDs.
+            state: ThreadState::Ready,
+            priority: Priority::Idle,
             trust_level: TrustLevel::Kernel,
             stack_bottom: core::ptr::null_mut(),
             stack_size: 0,
@@ -199,6 +241,7 @@ impl Thread {
             context: ctx,
             id: ThreadId(id),
             state: ThreadState::Ready,
+            priority: Priority::Normal,
             trust_level: TrustLevel::Untrusted,
             stack_bottom,
             stack_size: KERNEL_STACK_SIZE,

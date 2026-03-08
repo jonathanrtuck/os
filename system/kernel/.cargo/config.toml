@@ -2,5 +2,5 @@
 target = "aarch64-unknown-none"
 
 [target.aarch64-unknown-none]
-runner = "qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a53 -m 256M -nographic -serial mon:stdio -kernel"
+runner = "qemu-system-aarch64 -machine virt,gic-version=2 -cpu cortex-a53 -smp 4 -m 256M -nographic -serial mon:stdio -global virtio-mmio.force-legacy=false -kernel"
 rustflags = ["-C", "link-arg=-Tlink.ld"]

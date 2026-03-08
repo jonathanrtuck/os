@@ -4,13 +4,17 @@
 //! first-fit block, splitting if needed. On dealloc, reinserts the block and
 //! merges with adjacent neighbors to prevent fragmentation.
 //!
-//! Mutual exclusion on single-core: IRQs are masked during alloc/dealloc so
-//! timer interrupts cannot re-enter the allocator.
+//! Mutual exclusion: all alloc/dealloc operations are protected by ALLOC_LOCK
+//! (IrqMutex), which masks IRQs and spins on multi-core.
 
 use super::memory;
 use super::paging;
+use super::slab;
+use super::sync::IrqMutex;
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
+
+const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
 
 /// Each free block stores its total size (including this header) and a pointer
 /// to the next free block. Minimum allocation granularity = 16 bytes on aarch64.
@@ -22,7 +26,11 @@ struct LinkedListAllocator {
     head: UnsafeCell<*mut FreeBlock>,
 }
 
-const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
+/// Protects the allocator's free list from concurrent access.
+/// Separate from the allocator struct because GlobalAlloc takes `&self`.
+static ALLOC_LOCK: IrqMutex<()> = IrqMutex::new(());
+#[global_allocator]
+static ALLOCATOR: LinkedListAllocator = LinkedListAllocator::new();
 
 impl LinkedListAllocator {
     const fn new() -> Self {
@@ -31,14 +39,16 @@ impl LinkedListAllocator {
         }
     }
 }
-
 unsafe impl GlobalAlloc for LinkedListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let daif: u64;
+        // Try slab allocator first for small allocations.
+        let slab_ptr = slab::try_alloc(layout.size(), layout.align());
 
-        core::arch::asm!("mrs {}, daif", out(reg) daif, options(nostack, nomem));
-        core::arch::asm!("msr daifset, #2", options(nostack, nomem));
+        if !slab_ptr.is_null() {
+            return slab_ptr;
+        }
 
+        let _guard = ALLOC_LOCK.lock();
         let head = &mut *self.head.get();
         let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
         let align = layout.align().max(MIN_BLOCK);
@@ -95,17 +105,15 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             break;
         }
 
-        core::arch::asm!("msr daif, {}", in(reg) daif, options(nostack, nomem));
-
         result
     }
-
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        let daif: u64;
+        // Try slab allocator first.
+        if slab::try_free(ptr, layout.size(), layout.align()) {
+            return;
+        }
 
-        core::arch::asm!("mrs {}, daif", out(reg) daif, options(nostack, nomem));
-        core::arch::asm!("msr daifset, #2", options(nostack, nomem));
-
+        let _guard = ALLOC_LOCK.lock();
         let head = &mut *self.head.get();
         let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
         let addr = ptr as usize;
@@ -143,15 +151,11 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
                 (*prev_block).next = (*block).next;
             }
         }
-
-        core::arch::asm!("msr daif, {}", in(reg) daif, options(nostack, nomem));
     }
 }
-// Safety: single-core kernel with IRQs masked during alloc/dealloc.
+// SAFETY: All access to the free list is protected by ALLOC_LOCK (IrqMutex
+// with ticket spinlock), ensuring mutual exclusion across cores and IRQs.
 unsafe impl Sync for LinkedListAllocator {}
-
-#[global_allocator]
-static ALLOCATOR: LinkedListAllocator = LinkedListAllocator::new();
 
 fn align_up(addr: usize, align: usize) -> usize {
     paging::align_up(addr, align)
@@ -167,8 +171,10 @@ pub fn init() {
 
     unsafe {
         let block = start as *mut FreeBlock;
+
         (*block).size = memory::HEAP_SIZE;
         (*block).next = core::ptr::null_mut();
+
         *ALLOCATOR.head.get() = block;
     }
 }

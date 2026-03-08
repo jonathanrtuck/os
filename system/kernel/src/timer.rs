@@ -16,9 +16,9 @@ static CNTFRQ: AtomicU64 = AtomicU64::new(0);
 /// Physical timer PPI interrupt ID.
 pub const IRQ_ID: u32 = 30;
 
-/// Timer fires 10 times/sec (100ms). Coarse, but easy to verify visually.
-/// Typical OS ticks: 100–1000 Hz. Tighten when scheduling matters.
-const TICKS_PER_SEC: u64 = 10;
+/// Timer fires 250 times/sec (4ms). Responsive enough for interactive use
+/// without excessive overhead. SMP-safe: each core has its own timer PPI.
+const TICKS_PER_SEC: u64 = 250;
 
 /// Set CNTP_TVAL_EL0 so the timer fires after one interval.
 ///

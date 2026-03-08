@@ -8,18 +8,63 @@ use super::asid::Asid;
 use super::memory;
 use super::page_alloc;
 use super::paging::{
-    AF, AP_EL0, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, NG, PA_MASK, PXN, SH_INNER, UXN,
+    AF, AP_EL0, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, NG, PAGE_SIZE, PA_MASK, PXN,
+    SH_INNER, UXN,
 };
+use super::vma::{Backing, Vma, VmaList};
 use alloc::vec::Vec;
 
 pub struct AddressSpace {
     l0_pa: usize,
     asid: Asid,
+    generation: u64,
     owned_frames: Vec<usize>,
+    pub(crate) vmas: VmaList,
 }
 pub struct PageAttrs(u64);
 
 impl AddressSpace {
+    fn l0_idx(va: u64) -> usize {
+        ((va >> 39) & 0x1FF) as usize
+    }
+    fn l1_idx(va: u64) -> usize {
+        ((va >> 30) & 0x1FF) as usize
+    }
+    fn l2_idx(va: u64) -> usize {
+        ((va >> 21) & 0x1FF) as usize
+    }
+    fn l3_idx(va: u64) -> usize {
+        ((va >> 12) & 0x1FF) as usize
+    }
+    fn map_inner(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
+        let l0_va = memory::phys_to_virt(self.l0_pa) as *mut u64;
+        let l1_va = walk_or_create(l0_va, Self::l0_idx(va));
+        let l2_va = walk_or_create(l1_va, Self::l1_idx(va));
+        let l3_va = walk_or_create(l2_va, Self::l2_idx(va));
+        let l3_idx = Self::l3_idx(va);
+
+        // SAFETY: l3_va points to a valid L3 page table (allocated by
+        // walk_or_create). l3_idx is 0..511 (derived from VA bit extraction).
+        unsafe {
+            let entry = l3_va.add(l3_idx);
+
+            *entry = (pa & PA_MASK) | DESC_PAGE | attrs.0;
+        }
+    }
+
+    /// Create a new empty address space with its own L0 table and ASID.
+    pub fn new(asid: Asid, generation: u64) -> Self {
+        let l0_pa = page_alloc::alloc_frame().expect("out of frames for L0 table");
+
+        Self {
+            l0_pa,
+            asid,
+            generation,
+            owned_frames: Vec::new(),
+            vmas: VmaList::new(),
+        }
+    }
+
     pub fn asid(&self) -> u8 {
         self.asid.0
     }
@@ -94,32 +139,55 @@ impl AddressSpace {
             );
         }
     }
-    fn l0_idx(va: u64) -> usize {
-        ((va >> 39) & 0x1FF) as usize
+    /// Get the ASID generation (for lazy revalidation on context switch).
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
-    fn l1_idx(va: u64) -> usize {
-        ((va >> 30) & 0x1FF) as usize
-    }
-    fn l2_idx(va: u64) -> usize {
-        ((va >> 21) & 0x1FF) as usize
-    }
-    fn l3_idx(va: u64) -> usize {
-        ((va >> 12) & 0x1FF) as usize
-    }
-    fn map_inner(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
-        let l0_va = memory::phys_to_virt(self.l0_pa) as *mut u64;
-        let l1_va = walk_or_create(l0_va, Self::l0_idx(va));
-        let l2_va = walk_or_create(l1_va, Self::l1_idx(va));
-        let l3_va = walk_or_create(l2_va, Self::l2_idx(va));
-        let l3_idx = Self::l3_idx(va);
+    /// Handle a page fault at `va`. Returns true if the fault was resolved
+    /// (page mapped), false if `va` is not covered by any VMA (kill process).
+    pub fn handle_fault(&mut self, va: u64) -> bool {
+        let page_va = va & !(PAGE_SIZE - 1);
+        let vma = match self.vmas.lookup(page_va) {
+            Some(v) => v.clone(),
+            None => return false,
+        };
+        // Allocate a physical frame (zeroed by alloc_frame).
+        let pa = match page_alloc::alloc_frame() {
+            Some(pa) => pa,
+            None => return false,
+        };
 
-        // SAFETY: l3_va points to a valid L3 page table (allocated by
-        // walk_or_create). l3_idx is 0..511 (derived from VA bit extraction).
-        unsafe {
-            let entry = l3_va.add(l3_idx);
+        // Fill from backing data if needed.
+        match &vma.backing {
+            Backing::Anonymous => {} // Already zeroed.
+            Backing::Elf { data, data_len } => {
+                let seg_offset = page_va - vma.start;
 
-            *entry = (pa & PA_MASK) | DESC_PAGE | attrs.0;
+                if seg_offset < *data_len {
+                    let src_start = seg_offset as usize;
+                    let src_end =
+                        core::cmp::min((seg_offset + PAGE_SIZE) as usize, *data_len as usize);
+                    let src = &data[src_start..src_end];
+                    let dst = memory::phys_to_virt(pa) as *mut u8;
+
+                    // SAFETY: `pa` was just allocated. `src` is bounded by ELF data.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
+                    }
+                }
+            }
         }
+
+        // Determine page attributes from VMA permissions.
+        let attrs = match (vma.writable, vma.executable) {
+            (false, true) => PageAttrs::user_rx(),
+            (false, false) => PageAttrs::user_ro(),
+            (true, _) => PageAttrs::user_rw(),
+        };
+
+        self.map_page(page_va, pa as u64, &attrs);
+
+        true
     }
     /// Map a page and take ownership of the frame (freed on cleanup).
     pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
@@ -130,15 +198,10 @@ impl AddressSpace {
     pub fn map_shared(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
         self.map_inner(va, pa, attrs);
     }
-    /// Create a new empty address space with its own L0 table and ASID.
-    pub fn new(asid: Asid) -> Self {
-        let l0_pa = page_alloc::alloc_frame().expect("out of frames for L0 table");
-
-        Self {
-            l0_pa,
-            asid,
-            owned_frames: Vec::new(),
-        }
+    /// Re-assign this address space's ASID (for generation rollover).
+    pub fn reassign_asid(&mut self, asid: Asid, generation: u64) {
+        self.asid = asid;
+        self.generation = generation;
     }
     /// TTBR0 value: physical address of L0 table | (ASID << 48).
     pub fn ttbr0_value(&self) -> u64 {

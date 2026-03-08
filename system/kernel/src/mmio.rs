@@ -4,6 +4,10 @@
 //! Every other module goes through these instead of raw pointer casts.
 
 #[inline(always)]
+pub fn read8(addr: usize) -> u8 {
+    unsafe { core::ptr::read_volatile(addr as *const u8) }
+}
+#[inline(always)]
 pub fn read32(addr: usize) -> u32 {
     unsafe { core::ptr::read_volatile(addr as *const u32) }
 }
