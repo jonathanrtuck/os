@@ -104,7 +104,6 @@ pub fn close_endpoint(id: ChannelId) {
 pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> {
     // Allocate shared page (acquires page_alloc lock, released immediately).
     let shared_pa = page_alloc::alloc_frame().expect("out of frames for channel");
-
     // Push channel BEFORE inserting handles so the channel exists in the Vec
     // before any thread can reference it. Prevents TOCTOU if preemption is
     // active (handle lookup would index into channels before the push).
@@ -130,9 +129,7 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
 
         (idx, va)
     };
-
     let channel_id = ChannelId(idx);
-
     // Insert handles (acquires scheduler lock; channel lock already released).
     let handle_a = scheduler::with_thread_mut(id_a, |thread| {
         if let Some(addr_space) = &mut thread.address_space {
@@ -143,7 +140,6 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
             .handles
             .insert(HandleObject::Channel(channel_id), Rights::READ_WRITE)
     });
-
     let handle_a = match handle_a {
         Ok(h) => h,
         Err(e) => {
@@ -153,7 +149,6 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
             return Err(e);
         }
     };
-
     let result_b = scheduler::with_thread_mut(id_b, |thread| {
         if let Some(addr_space) = &mut thread.address_space {
             addr_space.map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());

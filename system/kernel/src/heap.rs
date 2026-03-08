@@ -31,6 +31,7 @@ pub struct LinkedListAllocator {
 /// Protects the allocator's free list from concurrent access.
 /// Separate from the allocator struct because GlobalAlloc takes `&self`.
 static ALLOC_LOCK: IrqMutex<()> = IrqMutex::new(());
+
 #[cfg_attr(not(test), global_allocator)]
 pub static ALLOCATOR: LinkedListAllocator = LinkedListAllocator::new();
 
