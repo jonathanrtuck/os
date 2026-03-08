@@ -108,7 +108,7 @@ fn boot_secondaries() {
         core::arch::asm!("dsb ish", options(nostack));
     }
 
-    uart::puts("  🧵 smp: booting secondaries via PSCI\n");
+    uart::puts("  🧵 smp - booting secondaries via psci\n");
 
     let mut expected_online = 1u32; // Core 0 is already online.
 
@@ -157,28 +157,28 @@ pub extern "C" fn kernel_main() -> ! {
     uart::puts("🥾 booting…\n");
 
     memory::init();
-    uart::puts("  💾 memory: 256 MiB RAM, W^X page tables\n");
+    uart::puts("  💾 memory - 256mib ram, w^x page tables\n");
 
     heap::init();
-    uart::puts("  📦 heap: 16 MiB (linked-list + slab)\n");
+    uart::puts("  📦 heap - 16mib (linked-list + slab)\n");
 
     // Initialize page frame allocator with memory above kernel heap.
     let kernel_end_pa = memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize });
     let heap_end = kernel_end_pa.0 + memory::HEAP_SIZE;
     let ram_end = paging::RAM_END as usize;
 
-    assert!(heap_end < ram_end, "heap extends beyond physical RAM");
+    assert!(heap_end < ram_end, "heap extends beyond physical ram");
 
     page_alloc::init(heap_end, ram_end);
-    uart::puts("  🧩 frames: ");
+    uart::puts("  🧩 frames - ");
     uart::put_u32(page_alloc::free_count() as u32);
-    uart::puts(" free (buddy allocator, 4K–4M)\n");
+    uart::puts(" free (buddy allocator, 4k–4m)\n");
 
     gic::init();
-    uart::puts("  ⚡ interrupts: GICv2\n");
+    uart::puts("  ⚡ interrupts - gic v2\n");
 
     scheduler::init();
-    uart::puts("  📋 scheduler: priority queues (idle/normal/high)\n");
+    uart::puts("  📋 scheduler - priority queues (idle/normal/high)\n");
 
     virtio::init();
 
@@ -186,13 +186,13 @@ pub extern "C" fn kernel_main() -> ! {
     let init_id = process::spawn_from_elf(INIT_ELF).expect("failed to spawn init");
     let echo_id = process::spawn_from_elf(ECHO_ELF).expect("failed to spawn echo");
 
-    channel::create(init_id, echo_id).expect("failed to create IPC channel");
-    uart::puts("  🔀 processes: init + echo, IPC channel\n");
+    channel::create(init_id, echo_id).expect("failed to create ipc channel");
+    uart::puts("  🔀 processes - init + echo, ipc channel\n");
 
     boot_secondaries();
 
     timer::init();
-    uart::puts("  ⏱️  timer: 250 Hz\n");
+    uart::puts("  ⏱️  timer - 250hz\n");
 
     uart::puts("🥾 booted.\n");
 
