@@ -59,10 +59,21 @@ pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
 
     f(&mut s.threads[idx])
 }
+/// Exit the current kernel thread (no context pointer available).
+///
+/// Only safe for kernel threads that have no resources (no address space,
+/// no handles). User threads must exit via `exit_current_from_syscall` which
+/// performs full cleanup. The thread spins until the next timer tick reaps it.
 pub fn exit_current() -> ! {
     {
         let mut s = STATE.lock();
         let idx = s.current;
+        let thread = &s.threads[idx];
+
+        debug_assert!(
+            thread.address_space.is_none(),
+            "exit_current called on thread with address space — use exit_current_from_syscall"
+        );
 
         s.threads[idx].state = ThreadState::Exited;
     }

@@ -171,6 +171,34 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
 pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
     syscall::dispatch(ctx)
 }
+/// Handle non-SVC synchronous exceptions from EL0 (user faults).
+///
+/// Data aborts, instruction aborts, alignment faults, undefined instructions, etc.
+/// Logs the fault, then terminates the faulting process and reschedules.
+#[unsafe(no_mangle)]
+pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
+    let esr: u64;
+    let elr: u64;
+    let far: u64;
+
+    unsafe {
+        core::arch::asm!("mrs {}, esr_el1", out(reg) esr, options(nostack, nomem));
+        core::arch::asm!("mrs {}, elr_el1", out(reg) elr, options(nostack, nomem));
+        core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nostack, nomem));
+    }
+
+    let ec = (esr >> 26) & 0x3F;
+
+    uart::puts("user fault: EC=0x");
+    uart::put_hex(ec);
+    uart::puts(" ELR=0x");
+    uart::put_hex(elr);
+    uart::puts(" FAR=0x");
+    uart::put_hex(far);
+    uart::puts("\n");
+
+    scheduler::exit_current_from_syscall(ctx)
+}
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
@@ -182,7 +210,6 @@ fn panic(info: &PanicInfo) -> ! {
         uart::put_u32(location.line());
         uart::puts("\n");
     }
-
     if let Some(msg) = info.message().as_str() {
         uart::puts(msg);
         uart::puts("\n");

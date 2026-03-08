@@ -129,7 +129,7 @@ vectors:
   .space 0x80 - 4
 
   // 0x400: Lower EL (AArch64), Sync
-  b exc_svc
+  b exc_lower_sync
   .space 0x80 - 4
   // 0x480: Lower EL (AArch64), IRQ
   b exc_irq
@@ -358,20 +358,35 @@ exc_irq:
 // SVC handler (EL0 syscalls)
 // --------------------------------------------------------------------------
 
-exc_svc:
+exc_lower_sync:
   sub sp, sp, #0x10
   str x10, [sp]
 
   mrs x10, esr_el1
   lsr x10, x10, #26
-  cmp x10, #0x15
+  cmp x10, #0x15          // SVC from AArch64?
 
   ldr x10, [sp]
   add sp, sp, #0x10
 
-  b.ne exc_sync
+  b.ne exc_user_fault      // Non-SVC user fault: terminate process, not kernel.
   save_context
   bl svc_handler
+  msr tpidr_el1, x0
+  mov x19, x0
+  restore_context_and_eret
+
+// --------------------------------------------------------------------------
+// User fault handler (non-SVC synchronous exception from EL0)
+//
+// Data aborts, instruction aborts, alignment faults, undefined instructions,
+// etc. from user processes. Save context, call Rust handler to log + terminate
+// the faulting process, then restore the next thread's context.
+// --------------------------------------------------------------------------
+
+exc_user_fault:
+  save_context
+  bl user_fault_handler
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret
