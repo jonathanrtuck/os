@@ -140,6 +140,10 @@ pub fn alloc_frames(order: usize) -> Option<usize> {
 
     Some(pa)
 }
+/// Total number of free pages (across all orders).
+pub fn free_count() -> usize {
+    STATE.lock().free_count
+}
 /// Return a single 4 KiB frame to the allocator.
 pub fn free_frame(pa: usize) {
     free_frames(pa, 0)

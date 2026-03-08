@@ -3,6 +3,7 @@ name = "host-tests"
 version = "0.1.0"
 edition = "2021"
 
-# Host-side unit tests for pure kernel modules (handle table, ELF parser).
-# Lives outside system/kernel/ to avoid inheriting its aarch64-unknown-none
-# target config. Run with `cargo test` from this directory.
+# Host-side unit tests for pure kernel modules (handle table, ELF parser,
+# VMA, buddy allocator, slab). Lives outside system/kernel/ to avoid
+# inheriting its aarch64-unknown-none target config.
+# Run with `cargo test -- --test-threads=1` from this directory.

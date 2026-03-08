@@ -185,16 +185,10 @@ pub fn init() {
         found_any = true;
 
         match device.device_id {
-            DEVICE_BLK => {
-                uart::puts("virtio: blk\n");
-                blk::demo(device);
-            }
-            DEVICE_CONSOLE => {
-                uart::puts("virtio: console\n");
-                console::demo(device);
-            }
+            DEVICE_BLK => blk::demo(device),
+            DEVICE_CONSOLE => console::demo(device),
             id => {
-                uart::puts("virtio: unknown id=");
+                uart::puts("  🔌 virtio: unknown id=");
                 uart::put_u32(id);
                 uart::puts("\n");
             }
@@ -202,7 +196,7 @@ pub fn init() {
     });
 
     if !found_any {
-        uart::puts("virtio: no devices\n");
+        uart::puts("  🔌 virtio: no devices\n");
     }
 }
 /// Probe all 32 virtio-mmio slots. Calls `found` for each valid device.

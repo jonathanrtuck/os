@@ -7,9 +7,10 @@
 //! ```text
 //! 0x0800_0000  GICv2 (distributor + CPU interface)
 //! 0x0900_0000  PL011 UART
+//! 0x0A00_0000  Virtio MMIO (32 slots, 0x200 stride)
 //! 0x4000_0000  RAM_START ─── kernel image (.text/.rodata/.data/.bss)
-//!              __kernel_end ─ heap (16 MiB, linked-list allocator)
-//!              heap_end ───── page frame pool (rest of RAM, 4 KiB frames)
+//!              __kernel_end ─ heap (16 MiB, linked-list + slab allocator)
+//!              heap_end ───── page frame pool (buddy allocator, 4 KiB – 4 MiB)
 //! 0x5000_0000  RAM_END
 //! ```
 //!
@@ -24,7 +25,7 @@
 //! ## Virtual — TTBR0 (per-process, swapped on context switch)
 //!
 //! ```text
-//! 0x0000_0000_0040_0000   User code (ELF segments, matches link.ld)
+//! 0x0000_0000_0040_0000   User code (ELF segments, demand-paged via VMAs)
 //! 0x0000_0000_4000_0000   Channel shared memory (one 4 KiB page per channel)
 //! 0x0000_0000_7FFF_C000   User stack (4 pages = 16 KiB, guard page below)
 //! 0x0000_0000_8000_0000   USER_STACK_TOP
@@ -34,8 +35,9 @@
 //!
 //! boot.S: coarse 2 MiB identity map (TTBR0) + kernel VA map (TTBR1),
 //! enable MMU, drop EL2→EL1 → `kernel_main` → refine TTBR1 (W^X) →
-//! init heap → init frame allocator → init GIC → init scheduler →
-//! spawn user processes + IPC channels → start timer (10 Hz) → WFE idle.
+//! init heap → init buddy allocator → init GIC → init scheduler →
+//! probe virtio devices → spawn user processes + IPC channels →
+//! boot secondary cores via PSCI → start timer (250 Hz) → WFE idle.
 
 #![no_std]
 #![no_main]
@@ -106,6 +108,8 @@ fn boot_secondaries() {
         core::arch::asm!("dsb ish", options(nostack));
     }
 
+    uart::puts("  🧵 smp: booting secondaries via PSCI\n");
+
     let mut expected_online = 1u32; // Core 0 is already online.
 
     for core_id in 1..percpu::MAX_CORES as u64 {
@@ -154,7 +158,10 @@ pub extern "C" fn kernel_main() -> ! {
     uart::puts("🥾 booting…\n");
 
     memory::init();
+    uart::puts("  💾 memory: 256 MiB RAM, W^X page tables\n");
+
     heap::init();
+    uart::puts("  📦 heap: 16 MiB (linked-list + slab)\n");
 
     // Initialize page frame allocator with memory above kernel heap.
     let kernel_end_pa = memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize });
@@ -164,8 +171,16 @@ pub extern "C" fn kernel_main() -> ! {
     assert!(heap_end < ram_end, "heap extends beyond physical RAM");
 
     page_alloc::init(heap_end, ram_end);
+    uart::puts("  🧩 frames: ");
+    uart::put_u32(page_alloc::free_count() as u32);
+    uart::puts(" free (buddy allocator, 4K–4M)\n");
+
     gic::init();
+    uart::puts("  ⚡ interrupts: GICv2\n");
+
     scheduler::init();
+    uart::puts("  📋 scheduler: priority queues (idle/normal/high)\n");
+
     virtio::init();
 
     // Spawn user processes and create an IPC channel between them.
@@ -173,10 +188,12 @@ pub extern "C" fn kernel_main() -> ! {
     let echo_id = process::spawn_from_elf(ECHO_ELF);
 
     channel::create(init_id, echo_id);
+    uart::puts("  🔀 processes: init + echo, IPC channel\n");
 
     boot_secondaries();
 
     timer::init();
+    uart::puts("  ⏱️  timer: 250 Hz\n");
 
     uart::puts("🥾 booted.\n");
 
@@ -191,17 +208,21 @@ pub extern "C" fn kernel_main() -> ! {
 #[unsafe(no_mangle)]
 pub extern "C" fn secondary_main(core_id: u64) -> ! {
     gic::init_cpu_interface();
-    percpu::init_core(core_id as u32);
     scheduler::init_secondary(core_id as u32);
 
+    // Print before marking online — core 0 waits for online flags, so this
+    // guarantees all "core N online" messages appear before core 0 proceeds.
     // Format as a single string so it prints atomically (one lock acquire).
     let digit = b'0' + core_id as u8;
     let msg = [
-        b'c', b'o', b'r', b'e', b' ', digit, b' ', b'o', b'n', b'l', b'i', b'n', b'e', b'\n',
+        b' ', b' ', 0xE2, 0x9C, 0x93, // ✓ (U+2713)
+        b' ', b'c', b'o', b'r', b'e', b' ', digit, b' ', b'o', b'n', b'l', b'i', b'n', b'e', b'\n',
     ];
 
-    // SAFETY: All bytes are ASCII, which is valid UTF-8.
+    // SAFETY: All bytes are valid UTF-8 (ASCII + 3-byte U+2713).
     uart::puts(unsafe { core::str::from_utf8_unchecked(&msg) });
+
+    percpu::init_core(core_id as u32);
     // Enable timer last — once IRQs are unmasked, this core participates
     // in scheduling and may immediately switch to a user thread.
     timer::init();

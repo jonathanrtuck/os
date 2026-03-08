@@ -129,12 +129,13 @@ pub fn demo(device: Device) {
     let mut blk = match Block::new(device) {
         Some(b) => b,
         None => {
-            uart::puts("  blk: init failed\n");
+            uart::puts("  🔌 virtio: blk init failed\n");
+
             return;
         }
     };
 
-    uart::puts("  blk: capacity=");
+    uart::puts("  🔌 virtio: blk capacity=");
     uart::put_u64(blk.capacity());
     uart::puts(" sectors\n");
 
@@ -142,7 +143,7 @@ pub fn demo(device: Device) {
 
     match blk.read_sector(0, &mut buf) {
         Ok(()) => {
-            uart::puts("  blk: sector 0: ");
+            uart::puts("     sector 0: ");
 
             // Print first 16 bytes as ASCII where printable, '.' otherwise.
             for &b in &buf[..16] {
@@ -156,7 +157,7 @@ pub fn demo(device: Device) {
             uart::puts("\n");
         }
         Err(e) => {
-            uart::puts("  blk: read failed: ");
+            uart::puts("     read failed: ");
             uart::puts(e);
             uart::puts("\n");
         }

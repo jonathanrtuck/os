@@ -9,14 +9,22 @@ set -euo pipefail
 TIMEOUT_SECS=10
 EXPECTED=(
     "booting"
+    "memory:"
+    "heap:"
+    "frames:"
+    "interrupts:"
+    "scheduler:"
+    "virtio: blk"
+    "sector 0: HELLO"
+    "processes:"
+    "smp:"
     "core 1 online"
     "core 2 online"
     "core 3 online"
+    "timer:"
     "booted."
     "echo recv: ping"
     "init recv: pong"
-    "virtio: blk"
-    "blk: sector 0: HELLO"
 )
 
 echo "Building kernel…"

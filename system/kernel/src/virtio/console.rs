@@ -62,6 +62,8 @@ impl Console {
 /// Demonstrate console I/O by writing a test string.
 pub fn demo(device: Device) {
     if let Some(mut console) = Console::new(device) {
+        crate::uart::puts("  🔌 virtio: console\n");
+
         console.write(b"virtio console ok\n");
     }
 }
