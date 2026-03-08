@@ -7,6 +7,7 @@
 use super::virtqueue::{Virtqueue, DEFAULT_QUEUE_SIZE};
 use super::Device;
 use crate::memory;
+use crate::mmio;
 use crate::page_alloc;
 use crate::uart;
 
@@ -93,6 +94,10 @@ impl Block {
             *((va + 16 + SECTOR_SIZE) as *mut u8) = 0xFF;
         }
 
+        // Clean DMA buffers: flush dirty cache lines to RAM so the device
+        // sees our header. ARM caches are not coherent with DMA by default.
+        mmio::cache_clean_invalidate_range(va, 4096);
+
         // 3-descriptor chain: header (read) → data (write) → status (write).
         self.vq
             .push_chain(&[
@@ -103,6 +108,10 @@ impl Block {
             .ok_or("no free descriptors")?;
         self.device.notify(VIRTQ_REQUEST);
         self.vq.wait_used();
+
+        // Invalidate DMA buffers: discard stale cache lines so we read
+        // what the device wrote (data + status), not stale cached values.
+        mmio::cache_clean_invalidate_range(va, 4096);
 
         // Check status.
         let status = unsafe { *((va + 16 + SECTOR_SIZE) as *const u8) };

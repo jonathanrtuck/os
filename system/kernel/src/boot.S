@@ -26,6 +26,12 @@
 // KERNEL_VA_OFFSET = 0xFFFF_0000_0000_0000
 .equ KVA_OFFSET_HI, 0xFFFF0000         // upper 16 bits in [31:16] position
 
+// VA → PA: clear bits [63:48] (kernel VA offset). Used during early boot
+// when we need physical addresses from linker symbols (which are upper VA).
+.macro va_to_pa reg
+  and \reg, \reg, #0x0000FFFFFFFFFFFF
+.endm
+
 // --------------------------------------------------------------------------
 // Page table storage (in .bss, zeroed by BSS init).
 // 4KB-aligned, 6 tables = 24KB.
@@ -101,6 +107,7 @@ _start:
 
 el1_start:
   msr spsel, #1
+  isb
   ldr x0, =__stack_top_phys
   mov sp, x0
 
@@ -238,12 +245,12 @@ secondary_entry:
   // TTBR0: empty (no user mappings). Use boot_tt0_l0 as a zeroed L0 table.
   // (We only need TTBR1 for kernel VA; TTBR0 must be valid but can be empty.)
   ldr x0, =boot_tt0_l0
-  and x0, x0, #0x0000FFFFFFFFFFFF   // VA → PA
+  va_to_pa x0
   msr ttbr0_el1, x0
 
   // TTBR1: shared kernel page tables (same as core 0).
   ldr x0, =boot_tt1_l0
-  and x0, x0, #0x0000FFFFFFFFFFFF   // VA → PA
+  va_to_pa x0
   msr ttbr1_el1, x0
 
   dsb sy
@@ -377,10 +384,10 @@ build_boot_tables:
   // These are upper VA symbols; convert to PA.
   // PA = VA - 0xFFFF_0000_0000_0000
   // Since the offset only sets bits [63:48], clearing those bits gives PA.
-  and x9,  x9,  #0x0000FFFFFFFFFFFF
-  and x10, x10, #0x0000FFFFFFFFFFFF
-  and x11, x11, #0x0000FFFFFFFFFFFF
-  and x12, x12, #0x0000FFFFFFFFFFFF
+  va_to_pa x9
+  va_to_pa x10
+  va_to_pa x11
+  va_to_pa x12
 
   mov x20, x9                  // save TTBR0 L0 PA
   bl fill_tables
@@ -391,10 +398,10 @@ build_boot_tables:
   ldr x11, =boot_tt1_l2_0
   ldr x12, =boot_tt1_l2_1
 
-  and x9,  x9,  #0x0000FFFFFFFFFFFF
-  and x10, x10, #0x0000FFFFFFFFFFFF
-  and x11, x11, #0x0000FFFFFFFFFFFF
-  and x12, x12, #0x0000FFFFFFFFFFFF
+  va_to_pa x9
+  va_to_pa x10
+  va_to_pa x11
+  va_to_pa x12
 
   mov x21, x9                  // save TTBR1 L0 PA
   bl fill_tables

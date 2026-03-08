@@ -31,6 +31,7 @@ fn reprogram(freq: u64) {
     unsafe {
         core::arch::asm!(
             "msr cntp_tval_el0, {tval}",
+            "isb",
             tval = in(reg) tval,
             options(nostack, nomem)
         );

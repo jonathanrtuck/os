@@ -129,9 +129,6 @@ impl Virtqueue {
     /// Poll for a completed request. Returns `Some(UsedElem)` if the device
     /// has consumed a buffer, or `None` if no completions are pending.
     pub fn pop_used(&mut self) -> Option<UsedElem> {
-        // Barrier: read device's writes before checking idx.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-
         let used_idx = unsafe {
             let idx_ptr = (self.used_va + 2) as *const u16;
             core::ptr::read_volatile(idx_ptr)
@@ -140,6 +137,12 @@ impl Virtqueue {
         if self.last_used_idx == used_idx {
             return None;
         }
+
+        // Acquire fence AFTER reading used_idx, BEFORE reading the element.
+        // Ensures we see the device's descriptor/data writes that correspond
+        // to this index update. Placing it before the idx read (as before)
+        // would not order the idx read relative to the element read.
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 
         let ring_ptr = (self.used_va + 4) as *const UsedElem;
         let elem = unsafe {

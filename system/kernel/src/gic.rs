@@ -18,6 +18,11 @@ const GICD_IPRIORITYR: usize = GICD_BASE + 0x400;
 const SPURIOUS: u32 = 1023;
 
 pub fn acknowledge() -> Option<u32> {
+    // DSB SY before reading IAR: ensure all previous memory accesses
+    // (including device writes) complete before acknowledging the interrupt.
+    // GIC MMIO is outer-shareable device memory, requiring full system barrier.
+    unsafe { core::arch::asm!("dsb sy", options(nostack)) };
+
     let iar = mmio::read32(GICC_IAR);
     let id = iar & 0x3FF;
 
@@ -33,9 +38,18 @@ pub fn enable_irq(id: u32) {
 
     mmio::write32(GICD_ISENABLER + reg_offset, bit);
     mmio::write8(GICD_IPRIORITYR + id as usize, 0x80);
+
+    // DSB SY + ISB after distributor writes: ensure enable takes effect
+    // before any subsequent interrupt handling. Full system barrier because
+    // GIC MMIO is outer-shareable device memory.
+    unsafe { core::arch::asm!("dsb sy", "isb", options(nostack)) };
 }
 pub fn end_of_interrupt(iar: u32) {
     mmio::write32(GICC_EOIR, iar);
+
+    // DSB SY after EOIR write: ensure the end-of-interrupt is visible to
+    // the GIC before we return. Prevents a stale interrupt from re-firing.
+    unsafe { core::arch::asm!("dsb sy", options(nostack)) };
 }
 /// Initialize both distributor and CPU interface (convenience for core 0).
 pub fn init() {

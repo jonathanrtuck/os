@@ -7,6 +7,7 @@
 use super::virtqueue::{Virtqueue, DEFAULT_QUEUE_SIZE};
 use super::Device;
 use crate::memory;
+use crate::mmio;
 use crate::page_alloc;
 
 const VIRTQ_TX: u32 = 1;
@@ -50,6 +51,10 @@ impl Console {
         unsafe {
             core::ptr::copy_nonoverlapping(data.as_ptr(), va, len);
         }
+
+        // Clean DMA buffer: flush our data from cache to RAM so the device
+        // sees it. ARM caches are not coherent with DMA by default.
+        mmio::cache_clean_invalidate_range(va as usize, len);
 
         self.tx.push(pa as u64, len as u32, false);
         self.device.notify(VIRTQ_TX);
