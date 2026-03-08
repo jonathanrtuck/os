@@ -15,7 +15,7 @@ graph TD
 
     H --> I["<b>9. Edit Protocol ✓</b><br/>Thin boundary protocol,<br/>OS semantically ignorant,<br/>content-type rebase handlers"]
     H --> J["<b>10. View State</b><br/>Who owns it? How is it<br/>passed between tools?"]
-    H --> K["<b>11. Rendering Technology</b><br/>Web engine? Native toolkit?<br/>Custom? How deep?"]
+    H --> K["<b>11. Rendering Technology ✓</b><br/>Web engine as substrate,<br/>adaptation layer,<br/>prototype on macOS"]
 
     I --> L["<b>12. Undo & History ✓</b><br/>COW snapshots at op boundaries,<br/>global sequential undo,<br/>selective undo via handlers"]
     I --> M["<b>13. Collaboration ✓</b><br/>Designed for, build later.<br/>Same handlers as selective undo."]
@@ -27,7 +27,7 @@ graph TD
     N --> O["<b>15. Layout Engine</b><br/>CSS for spatial + custom timeline?<br/>Mediates cross-type interactions."]
     K --> O
 
-    C --> P["<b>16. Technical Foundation</b><br/>Soft RT · EL1 · Preemptive.<br/>Tentative: from-scratch, Rust.<br/>Open: privilege, addr space, IPC."]
+    C --> P["<b>16. Technical Foundation</b><br/>Soft RT · EL1 · Preemptive · EEVDF.<br/>Settled: kernel, Rust, IPC, scheduling.<br/>Open: driver model, filesystem."]
     K --> P
     D --> P
 
@@ -51,7 +51,7 @@ graph TD
 
     %% Unsettled decisions: original colors, dashed border
     style J fill:#276749,stroke:#38a169,color:#fff,stroke-dasharray:5 5
-    style K fill:#276749,stroke:#38a169,color:#fff,stroke-dasharray:5 5
+    style K fill:#1e5631,stroke:#48bb78,color:#fff,stroke-width:3px
     style O fill:#975a16,stroke:#d69e2e,color:#fff,stroke-dasharray:5 5
     style P fill:#9b2c2c,stroke:#e53e3e,color:#fff,stroke-dasharray:5 5
     style Q fill:#9b2c2c,stroke:#e53e3e,color:#fff,stroke-dasharray:5 5

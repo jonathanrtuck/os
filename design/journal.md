@@ -48,7 +48,7 @@ Topics to explore, roughly prioritized by which unsettled decisions they'd infor
 
 ### High leverage (unblocks multiple decisions)
 
-1. **Rendering technology deep dive** (Decision #11) — The next most consequential unsettled decision. Constrains layout, tech foundation, and interaction model. Should explore: what does Servo look like embedded? What does "programs talk to engine through a protocol" actually mean in practice? What are the real costs of a web engine dependency?
+1. ~~**Rendering technology deep dive** (Decision #11)~~ — **SETTLED.** Existing web engine integrated via adaptation layer. Key insight: a webpage IS a compound document (HTML=manifest, CSS=layout, media=referenced content) — can be handled through the same translator pattern as .docx. Rendering direction open (web engine renders everything vs. native renderer with web content translated inward). Engine complexity pushed into the blue adaptation layer. Prototype on macOS. See Decision #11 in decisions.md.
 
 2. ~~**What does the IPC look like?**~~ (Decision #16) — **SETTLED.** Shared memory ring buffers with handle-based access control. One mechanism for all IPC. Kernel creates channels and validates messages at trust boundaries, but is not in the data path. Documents are memory-mapped separately. Editor ↔ OS service ring buffers carry control messages only: edit protocol (beginOp/endOp), input events, overlay descriptions. Metadata queries use a separate interface (not the editor channel — different cadence, potentially large results). Three-layer process architecture: kernel (EL1) + OS service (EL0, trusted, one process for rendering + metadata + input + compositing) + editors (EL0, untrusted). See Decision #16 in decisions.md.
 
@@ -162,6 +162,22 @@ The editor ↔ OS service channel carries real-time control messages: input even
 ### Scheduling contexts are the policy/mechanism boundary (2026-03-08)
 
 Scheduling is both policy and mechanism, and the two are separable. Mechanism (context switching, timer interrupts, register save/restore) and algorithm (EEVDF selection, budget enforcement) must live in the kernel — they require EL1 privileges and run on the critical path (250Hz × 4 cores = 1,000 decisions/sec). Policy (which threads deserve what budgets, when to adjust) belongs in the OS service — it has the semantic knowledge (content types, document state, user focus). Scheduling contexts are the interface between the two layers: the kernel says "I enforce whatever budget you give me," the OS service says "this editor needs 1ms/5ms because it's playing audio." Moving the algorithm to userspace would require an IPC round-trip on every timer tick — untenable. This is the same separation Linux uses (kernel EEVDF + cgroup budgets), arrived at independently from first principles.
+
+### A webpage is a compound document (2026-03-08)
+
+The OS's compound document model (manifests + referenced content + layout model) maps structurally to web content. HTML is the manifest with layout rules. CSS provides layout (flow, grid, fixed positioning — covering 4 of 5 fundamental layouts natively). Images, video, and fonts are referenced content. This structural equivalence means web content could be handled through the same translator pattern as .docx or .pptx — translated into the internal compound document representation at the boundary. "Browsing" becomes "viewing HTML documents through the same rendering path as any other compound document." The rendering direction (web engine renders everything vs. native renderer with web-to-compound-doc translation) is an open sub-question, but the structural mapping holds regardless.
+
+### Rendering and drivers face opposite constraints (2026-03-08)
+
+The "rethink everything" stance (Decision #3) helps with drivers and hurts with rendering. Drivers need narrow scope (just your hardware), each is a bounded problem, and first-principles design is an advantage. Rendering needs broad scope (reasonable coverage of common web features — you'd notice gaps in normal browsing), can't be built from scratch (web engines are millions of lines of code), and must accommodate external reality. The adaptation layer (foundations.md) resolves this asymmetry: push engine complexity into the blue layer, keep the OS core clean. This is exactly the kind of external/internal tension the adaptation layer was designed for. The driver model can be explored through building a small set of real drivers; the rendering model must be explored through integration with an existing engine.
+
+### Native renderer preserves the direction of power (2026-03-08)
+
+With a web engine as renderer (Approach A), the OS can only do what the engine supports. Custom rendering behavior means patching the engine or hoping for extension points — the OS is downstream of someone else's architectural decisions. With a native renderer (Approach B), the OS defines what's possible. The renderer can express layout behaviors, compositing effects, and content-type-specific rendering that CSS can't describe. Web content is a lossy import (translated inward to compound doc format, same as .docx), not the rendering model itself. The Safari analogy: Apple controls WebKit *and* the platform, so they can add proprietary CSS extensions — but they're still constrained by the engine's architecture. A native renderer removes that constraint entirely. The compound document model is the internal truth; external formats (.docx, .pptx, .html) are all translations inward at the boundary. The OS doesn't think in HTML any more than it thinks in .docx.
+
+### Settling the approach, not the technology (2026-03-08)
+
+Decision #11 was settled by choosing the architectural approach (web engine as substrate, adaptation layer between engine and OS service) without committing to a specific engine. The interesting design work is in the interface between engine and OS service — the "blue layer" — not in the engine choice itself. The engine is a leaf node: complex inside, simple interface. Any engine that can be adapted to speak the OS's protocol works. This mirrors how Decision #16 settled IPC (shared memory ring buffers) without specifying message formats. The pattern: settle the architecture, defer the implementation.
 
 ### Security as a side effect of good architecture (2026-03-07)
 

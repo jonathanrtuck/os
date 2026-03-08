@@ -22,7 +22,7 @@ Which decisions are stable enough to write code against? This guides when to cod
 | #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                               |
 | #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. IPC mechanism depends on §16.                                                  |
 | #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                        |
-| #11 Rendering Tech     | Unsettled | **Not safe**         | High-leverage unsettled decision. Blocks layout, tech foundation, interaction.                         |
+| #11 Rendering Tech     | Settled   | **Behind interface** | Architecture firm (web engine as substrate, adaptation layer). Engine choice deferred to prototype.    |
 | #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                               |
 | #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                   |
 | #14 Compound Documents | Settled   | **Behind interface** | Manifest + layout model is firm. Rendering depends on §11. Open sub-questions remain.                  |
@@ -40,18 +40,19 @@ Which decisions are stable enough to write code against? This guides when to cod
 
 How confident are we in each settled decision? What would trigger revisiting? What's the fallback? Only lists decisions where risk is meaningful — axioms and their direct consequences are omitted.
 
-| Decision                           | Confidence  | Revisit trigger                                  | Fallback                        | Blast radius                   |
-| ---------------------------------- | ----------- | ------------------------------------------------ | ------------------------------- | ------------------------------ |
-| Edit protocol (#9)                 | High        | beginOp/endOp granularity wrong for real editors | Adjust boundary semantics       | Undo model, IPC messages       |
-| Compound docs (#14)                | Medium-High | Five layout models miss a real use case          | Add or merge models             | Layout engine                  |
-| Undo: COW snapshots (#12)          | High        | Snapshots too expensive for fine-grained ops     | Operation-log undo              | Filesystem integration         |
-| File org: queries (#7)             | High        | Query performance unacceptable                   | Path-based fallback             | Metadata DB, shell             |
-| Handles (#16)                      | High        | Need sub-document access granularity             | Extend rights model             | Handle table, access control   |
-| IPC: ring buffers (#16)            | Medium-High | Complexity unmanageable or perf insufficient     | Syscall-based message passing   | IPC layer, editor-OS interface |
-| Process arch: one OS service (#16) | Medium      | Crashes require component isolation              | Split into multiple services    | IPC topology                   |
-| From-scratch kernel (#16)          | Medium      | Driver/hardware blockers                         | Existing kernel (Zircon, Linux) | Large, but behind syscall API  |
-| Rust (#16)                         | High        | Bare-metal Rust impractical at scale             | C kernel, Rust userspace        | Kernel source only             |
-| Scheduling: EEVDF + contexts (#16) | Medium-High | EEVDF overhead excessive or contexts too complex | Priority scheduler + no billing | Scheduler, handle table        |
+| Decision                              | Confidence  | Revisit trigger                                  | Fallback                            | Blast radius                      |
+| ------------------------------------- | ----------- | ------------------------------------------------ | ----------------------------------- | --------------------------------- |
+| Edit protocol (#9)                    | High        | beginOp/endOp granularity wrong for real editors | Adjust boundary semantics           | Undo model, IPC messages          |
+| Compound docs (#14)                   | Medium-High | Five layout models miss a real use case          | Add or merge models                 | Layout engine                     |
+| Undo: COW snapshots (#12)             | High        | Snapshots too expensive for fine-grained ops     | Operation-log undo                  | Filesystem integration            |
+| File org: queries (#7)                | High        | Query performance unacceptable                   | Path-based fallback                 | Metadata DB, shell                |
+| Handles (#16)                         | High        | Need sub-document access granularity             | Extend rights model                 | Handle table, access control      |
+| IPC: ring buffers (#16)               | Medium-High | Complexity unmanageable or perf insufficient     | Syscall-based message passing       | IPC layer, editor-OS interface    |
+| Process arch: one OS service (#16)    | Medium      | Crashes require component isolation              | Split into multiple services        | IPC topology                      |
+| From-scratch kernel (#16)             | Medium      | Driver/hardware blockers                         | Existing kernel (Zircon, Linux)     | Large, but behind syscall API     |
+| Rust (#16)                            | High        | Bare-metal Rust impractical at scale             | C kernel, Rust userspace            | Kernel source only                |
+| Scheduling: EEVDF + contexts (#16)    | Medium-High | EEVDF overhead excessive or contexts too complex | Priority scheduler + no billing     | Scheduler, handle table           |
+| Rendering: web engine substrate (#11) | Medium-High | Engine integration proves impossible/impractical | Different engine or native renderer | Layout engine, prototype approach |
 
 **Key principle:** Decisions marked "Behind interface" in Implementation Readiness are inherently lower risk — the interface is stable even if the implementation changes. Decisions that _define_ interfaces are higher risk because changing them ripples outward.
 
@@ -295,19 +296,47 @@ _Tier 3. Depends on: Editor model. Feeds into: (relatively self-contained)._
 
 ## 11. Rendering Technology
 
-_Tier 3. Depends on: Editor model. Feeds into: Compound documents, layout engine, technical foundation, interaction model._
+_Tier 3. Depends on: Editor model. Feeds into: Compound documents, layout engine, technical foundation, interaction model._ **SETTLED.**
 
-| Option                                                                      | Tradeoffs                                                                                                                                                                                         |
-| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Embedded web engine (Blink, WebKit, Servo, etc.)**                        | Get layout, text rendering, CSS, accessibility, input handling for free. Enormous dependency. Heavy. But solves many problems at once — UI, viewers, compound doc layout.                         |
-| **Native toolkit (GTK, Qt, custom)**                                        | Lighter, more control, better performance. But you build text layout, rendering pipeline, accessibility, etc. yourself.                                                                           |
-| **Custom minimal engine**                                                   | Maximum control, minimum dependency. Years of work for basics like font shaping and text reflow.                                                                                                  |
-| **Web engine for rendering substrate, programs not constrained to JS/HTML** | Programs in any language talk to the engine through a protocol. Get web rendering without the web programming model. But the protocol between programs and engine is a significant design effort. |
+**Decision:** An existing web engine is part of the rendering architecture, integrated via an adaptation layer. The exact role of the engine — whether it's the rendering substrate (compound documents translate outward to HTML/CSS for display) or a parser/interpreter (web content translates inward to the compound document format, rendered natively) — is an open sub-question. Both directions are viable; both use the existing translator pattern (Decision #14). Prototype on macOS (where web engines and native rendering are both available); the bare-metal kernel needs correct interfaces, not a built-in engine.
 
-**Initial leaning:** Web engine as rendering substrate, programs not constrained to JS/HTML.
-**Why this matters:** This is a massive practical decision. A web engine gives you years of saved work but adds a huge dependency and constrains what's possible at the rendering level. Going native means building fundamentals yourself but with full control.
+**Key insight: a webpage is a compound document.** The compound document model (Decision #14) maps structurally to web content. HTML is the manifest with layout rules, CSS provides layout (flow, grid, fixed positioning — covering 4 of 5 fundamental layouts), and images/video/fonts are referenced content. This structural equivalence means web content can be handled through the same translator pattern as .docx or .pptx — translated into the internal compound document representation at the boundary. "Browsing" is viewing HTML documents through the same rendering path as any other compound document.
 
-**Open sub-question:** Which engine? Servo (Rust, embeddable, incomplete), Chromium (mature, enormous), WebKit (lighter, macOS-native), or something else?
+**The adaptation layer (red/blue/black):**
+
+- **Red (external reality):** The web platform — HTML, CSS, JavaScript. Reasonable coverage of common features is needed — enough that missing support would be noticeable in normal browsing.
+- **Blue (adaptation layer):** A web engine (Servo, WebKit, CEF, or future option) adapted to speak the OS's interfaces. This is where engine complexity lives. The blue layer is large, and that's acceptable: total complexity is conserved (Decision #4), and this is the adaptation layer earning its keep.
+- **Black (OS core):** The OS service, compound document model, layout engine, document-centric interfaces. Clean, simple, designed from first principles.
+
+**What this design uniquely enables:**
+
+- **Unified compositing** — One compositor (OS service) renders all content through one pipeline, regardless of origin content type.
+- **Content-type-aware rendering budgets** — Scheduling contexts (Decision #16) give the renderer content-type-informed time budgets. The OS knows a tab is playing video vs. sitting idle.
+- **Cross-content-type embedding** — A web page inside a document inside a presentation, with the OS mediating all rendering and layout.
+- **Metadata extraction from web** — The OS natively indexes content types (Decision #7). Web pages have rich metadata (OpenGraph, structured data) that becomes OS-level queryable content, not trapped in a browser's history database.
+
+**The renderer/driver asymmetry:** Rendering and drivers face opposite constraints under the "rethink everything" stance (Decision #3). Drivers need narrow scope (just my hardware), each is a bounded problem, and first-principles design is an advantage. Rendering needs broad scope (reasonable web feature coverage), can't feasibly be built from scratch, and must accommodate external reality. The adaptation layer resolves this: push engine complexity into the blue layer, keep the OS core clean.
+
+**Prototype strategy:** Design the architecture and interfaces on the bare-metal kernel. Prototype the rendering pipeline on macOS, where both web engines and native rendering frameworks (Quartz/Core Graphics) are available. Development on host OS is already the working mode (Decision #1). Self-hosting is not a goal. The bare-metal kernel validates the architecture (process model, IPC, scheduling); the macOS prototype validates the rendering integration.
+
+**Open sub-questions:**
+
+- **Rendering direction.** Two viable approaches, leaning toward B:
+  - **(A) Web engine as rendering substrate:** The OS uses a web engine to render everything. Compound documents translate outward to HTML/CSS for display. Gets CSS layout for free. But the web engine owns the rendering pipeline, creating tension with "OS renders everything." The OS can only do what the engine supports — custom rendering behavior means patching the engine or hoping for extension points. The OS is downstream of the engine's architectural decisions.
+  - **(B) Native renderer, web translated inward:** The OS has its own renderer (Quartz-like). HTML/CSS/JS is translated into the compound document format at the boundary, just like .docx or .pptx (Decision #14's translator pattern). "OS renders everything" holds cleanly. The OS defines what's possible — the native renderer can express layout behaviors, compositing effects, and content-type-specific rendering beyond what CSS describes. Web translation is a lossy import (maps what it can, same as any format translator). Requires building a native rendering pipeline.
+  - A hybrid is also possible (e.g., web engine for layout calculation, native renderer for compositing).
+  - **Why leaning B:** The compound document model (five layouts, manifests, referenced content) is the internal truth. External formats — .docx, .pptx, .html — are translations inward at the boundary. The OS doesn't think in HTML any more than it thinks in .docx. Approach B preserves this: the OS owns the rendering model, and the renderer can do things CSS can't express (analogous to how Safari adds proprietary CSS extensions, except here the OS isn't constrained by a web engine's architecture at all). Approach A inverts the power relationship — the OS must express everything through the engine's model, making the engine the de facto rendering authority.
+- **Which engine?** Servo (Rust, embeddable, incomplete), WebKit (lighter, macOS-native for prototyping), Chromium/CEF (mature, enormous), or something else. Engine choice is partially coupled with the rendering direction — Approach A needs a full rendering engine; Approach B may only need a parser/layout engine. Deferred to prototype phase.
+- **The protocol between engine and OS service.** Depends on rendering direction. Under Approach A, this is the rendering API. Under Approach B, this is the translation interface. Either way, significant design work. Related to the overlay protocol and editor plugin API (see journal).
+- **GPU acceleration.** How does rendering integrate with GPU hardware? On macOS this may be straightforward (Metal); on bare-metal this is a harder problem (needs GPU driver).
+
+**Considered and rejected:**
+
+- **Embedded web engine as full application ("browser" process):** Preserves the architecture on paper (separate process, IPC communication) but recreates the "app within an OS" problem. The browser would contain its own renderer, compositor, and process model — the OS service just frames its output. Defeats the purpose of unified rendering.
+- **Native toolkit (GTK, Qt, custom) without web engine:** Lighter and more controllable, but requires building text layout, rendering pipeline, accessibility, font shaping, and input handling from scratch. Years of work for basics. And still doesn't handle web content — you'd need a web engine anyway.
+- **Custom web engine from scratch:** Maximum control, minimum dependency. But even reasonable web feature coverage is astronomically complex (CSS layout alone is enormous). Not feasible for a personal project.
+- **Full web engine as "the OS" (Electron-style):** Gives up the document-centric architecture, scheduler control, IPC design, and everything that makes this OS interesting. The design is the goal, not the shortcut.
+- **No web engine at all:** Would mean no web browsing capability. Conflicts with target use cases (Decision #1 lists web browsing).
 
 ---
 
@@ -441,7 +470,7 @@ This decision is being resolved incrementally through a bare-metal research spik
 
 ### Open sub-decisions
 
-**Driver model.** Userspace drivers via IPC, kernel-resident drivers, or hybrid? Not yet explored. The ring buffer IPC mechanism would support userspace drivers well.
+**Driver model.** Userspace drivers via IPC, kernel-resident drivers, or hybrid? Not yet explored. The ring buffer IPC mechanism would support userspace drivers well. Unlike rendering (which requires reasonable web feature coverage and therefore an existing engine), drivers are a narrow-scope problem — only the hardware actually in use needs drivers. This means the driver model can be designed from first principles and validated by building a small set of real drivers (the "rethink everything" stance is an advantage here). Exploration through building.
 
 **Filesystem.** COW filesystem required by undo model (Decision #12). ZFS? Custom? Not yet explored.
 
