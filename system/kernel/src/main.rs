@@ -44,37 +44,36 @@
 
 extern crate alloc;
 
+use context::Context;
 use core::panic::PanicInfo;
 
 core::arch::global_asm!(include_str!("boot.S"));
 core::arch::global_asm!(include_str!("exception.S"));
 
-mod addr_space;
-mod asid;
+mod address_space;
+mod address_space_id;
 mod channel;
 mod context;
 mod elf;
-mod gic;
 mod handle;
 mod heap;
+mod interrupt_controller;
 mod memory;
-mod mmio;
-mod page_alloc;
+mod memory_mapped_io;
+mod memory_region;
+mod page_allocator;
 mod paging;
-mod percpu;
+mod per_core;
+mod power;
 mod process;
-mod psci;
 mod scheduler;
+mod serial;
 mod slab;
 mod sync;
 mod syscall;
 mod thread;
 mod timer;
-mod uart;
 mod virtio;
-mod vma;
-
-use context::Context;
 
 /// User process ELF binaries, compiled by build.rs and embedded in .rodata.
 /// Avoids needing a filesystem or bootloader protocol for the first processes.
@@ -100,7 +99,7 @@ fn boot_secondaries() {
     // SAFETY: SECONDARY_ENTRY_PA is a .quad in .rodata set by boot.S.
     let entry_pa = unsafe { core::ptr::read_volatile(&SECONDARY_ENTRY_PA) };
 
-    percpu::init_core(0);
+    per_core::init_core(0);
 
     // Ensure page tables and stacks are visible to secondary cores before
     // they start executing.
@@ -108,19 +107,19 @@ fn boot_secondaries() {
         core::arch::asm!("dsb ish", options(nostack));
     }
 
-    uart::puts("  🧵 smp - booting secondaries via psci\n");
+    serial::puts("  🧵 smp - booting secondaries via psci\n");
 
     let mut expected_online = 1u32; // Core 0 is already online.
 
-    for core_id in 1..percpu::MAX_CORES as u64 {
-        if psci::cpu_on(core_id, entry_pa, core_id).is_ok() {
+    for core_id in 1..per_core::MAX_CORES as u64 {
+        if power::cpu_on(core_id, entry_pa, core_id).is_ok() {
             expected_online += 1;
         }
     }
 
     // Wait for all secondaries to finish their boot trampoline (MMU setup
     // in secondary_entry). After this, the boot TTBR0 pages are safe to free.
-    while percpu::online_count() < expected_online {
+    while per_core::online_count() < expected_online {
         core::hint::spin_loop();
     }
 
@@ -148,19 +147,17 @@ fn reclaim_boot_ttbr0() {
     };
 
     for &va in &pages {
-        page_alloc::free_frame(memory::virt_to_phys(va));
+        page_allocator::free_frame(memory::virt_to_phys(va));
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main() -> ! {
-    uart::puts("🥾 booting…\n");
-
+    serial::puts("🥾 booting…\n");
     memory::init();
-    uart::puts("  💾 memory - 256mib ram, w^x page tables\n");
-
+    serial::puts("  💾 memory - 256mib ram, w^x page tables\n");
     heap::init();
-    uart::puts("  📦 heap - 16mib (linked-list + slab)\n");
+    serial::puts("  📦 heap - 16mib (linked-list + slab)\n");
 
     // Initialize page frame allocator with memory above kernel heap.
     let kernel_end_pa = memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize });
@@ -169,17 +166,14 @@ pub extern "C" fn kernel_main() -> ! {
 
     assert!(heap_end < ram_end, "heap extends beyond physical ram");
 
-    page_alloc::init(heap_end, ram_end);
-    uart::puts("  🧩 frames - ");
-    uart::put_u32(page_alloc::free_count() as u32);
-    uart::puts(" free (buddy allocator, 4k–4m)\n");
-
-    gic::init();
-    uart::puts("  ⚡ interrupts - gic v2\n");
-
+    page_allocator::init(heap_end, ram_end);
+    serial::puts("  🧩 frames - ");
+    serial::put_u32(page_allocator::free_count() as u32);
+    serial::puts(" free (buddy allocator, 4k–4m)\n");
+    interrupt_controller::init();
+    serial::puts("  ⚡ interrupts - gic v2\n");
     scheduler::init();
-    uart::puts("  📋 scheduler - priority queues (idle/normal/high)\n");
-
+    serial::puts("  📋 scheduler - priority queues (idle/normal/high)\n");
     virtio::init();
 
     // Spawn user processes and create an IPC channel between them.
@@ -187,14 +181,13 @@ pub extern "C" fn kernel_main() -> ! {
     let echo_id = process::spawn_from_elf(ECHO_ELF).expect("failed to spawn echo");
 
     channel::create(init_id, echo_id).expect("failed to create ipc channel");
-    uart::puts("  🔀 processes - init + echo, ipc channel\n");
+    serial::puts("  🔀 processes - init + echo, ipc channel\n");
 
     boot_secondaries();
 
     timer::init();
-    uart::puts("  ⏱️  timer - 250hz\n");
-
-    uart::puts("🥾 booted.\n");
+    serial::puts("  ⏱️  timer - 250hz\n");
+    serial::puts("🥾 booted.\n");
 
     loop {
         unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
@@ -206,7 +199,7 @@ pub extern "C" fn kernel_main() -> ! {
 /// Initializes per-core GIC, scheduler state, and timer, then enters idle.
 #[unsafe(no_mangle)]
 pub extern "C" fn secondary_main(core_id: u64) -> ! {
-    gic::init_cpu_interface();
+    interrupt_controller::init_cpu_interface();
     scheduler::init_secondary(core_id as u32);
 
     // Print before marking online — core 0 waits for online flags, so this
@@ -219,9 +212,8 @@ pub extern "C" fn secondary_main(core_id: u64) -> ! {
     ];
 
     // SAFETY: All bytes are valid UTF-8 (ASCII + 3-byte U+2713).
-    uart::puts(unsafe { core::str::from_utf8_unchecked(&msg) });
-
-    percpu::init_core(core_id as u32);
+    serial::puts(unsafe { core::str::from_utf8_unchecked(&msg) });
+    per_core::init_core(core_id as u32);
     // Enable timer last — once IRQs are unmasked, this core participates
     // in scheduling and may immediately switch to a user thread.
     timer::init();
@@ -234,7 +226,7 @@ pub extern "C" fn secondary_main(core_id: u64) -> ! {
 pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
     let mut next: *const Context = ctx;
 
-    if let Some(iar) = gic::acknowledge() {
+    if let Some(iar) = interrupt_controller::acknowledge() {
         let id = iar & 0x3FF;
 
         if id == timer::IRQ_ID {
@@ -243,7 +235,7 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
             next = scheduler::schedule(ctx);
         }
 
-        gic::end_of_interrupt(iar);
+        interrupt_controller::end_of_interrupt(iar);
     }
 
     next
@@ -298,31 +290,30 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
         core::arch::asm!("mrs {}, elr_el1", out(reg) elr, options(nostack, nomem));
     }
 
-    uart::panic_puts("user fault: EC=0x");
-    uart::panic_put_hex(ec);
-    uart::panic_puts(" ELR=0x");
-    uart::panic_put_hex(elr);
-    uart::panic_puts(" FAR=0x");
-    uart::panic_put_hex(far);
-    uart::panic_puts("\n");
-
+    serial::panic_puts("user fault: EC=0x");
+    serial::panic_put_hex(ec);
+    serial::panic_puts(" ELR=0x");
+    serial::panic_put_hex(elr);
+    serial::panic_puts(" FAR=0x");
+    serial::panic_put_hex(far);
+    serial::panic_puts("\n");
     scheduler::exit_current_from_syscall(ctx)
 }
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     // Use panic_ variants to bypass the UART lock (may already be held).
-    uart::panic_puts("\n😱 panicking…\n");
+    serial::panic_puts("\n😱 panicking…\n");
 
     if let Some(location) = info.location() {
-        uart::panic_puts(location.file());
-        uart::panic_puts(":");
-        uart::panic_put_u32(location.line());
-        uart::panic_puts("\n");
+        serial::panic_puts(location.file());
+        serial::panic_puts(":");
+        serial::panic_put_u32(location.line());
+        serial::panic_puts("\n");
     }
     if let Some(msg) = info.message().as_str() {
-        uart::panic_puts(msg);
-        uart::panic_puts("\n");
+        serial::panic_puts(msg);
+        serial::panic_puts("\n");
     }
 
     loop {

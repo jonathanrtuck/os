@@ -27,10 +27,10 @@
 //! Channel lock is always released before acquiring the scheduler lock
 //! (via try_wake / with_thread_mut). Never hold both.
 
-use super::addr_space::PageAttrs;
+use super::address_space::PageAttrs;
 use super::handle::{ChannelId, HandleError, HandleObject, Rights};
 use super::memory;
-use super::page_alloc;
+use super::page_allocator;
 use super::paging::{CHANNEL_SHM_BASE, PAGE_SIZE};
 use super::scheduler;
 use super::sync::IrqMutex;
@@ -92,7 +92,7 @@ pub fn close_endpoint(id: ChannelId) {
 
     // Free outside channel lock (acquires page_alloc lock).
     if let Some(pa) = shared_pa {
-        page_alloc::free_frame(pa);
+        page_allocator::free_frame(pa);
     }
 }
 /// Create a channel between two threads.
@@ -103,7 +103,7 @@ pub fn close_endpoint(id: ChannelId) {
 /// (the shared page and channel are cleaned up on failure).
 pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> {
     // Allocate shared page (acquires page_alloc lock, released immediately).
-    let shared_pa = page_alloc::alloc_frame().expect("out of frames for channel");
+    let shared_pa = page_allocator::alloc_frame().expect("out of frames for channel");
     // Push channel BEFORE inserting handles so the channel exists in the Vec
     // before any thread can reference it. Prevents TOCTOU if preemption is
     // active (handle lookup would index into channels before the push).
@@ -144,7 +144,7 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
         Ok(h) => h,
         Err(e) => {
             // Clean up: free the shared page.
-            page_alloc::free_frame(shared_pa);
+            page_allocator::free_frame(shared_pa);
 
             return Err(e);
         }
@@ -164,7 +164,7 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
         scheduler::with_thread_mut(id_a, |thread| {
             let _ = thread.handles.close(handle_a);
         });
-        page_alloc::free_frame(shared_pa);
+        page_allocator::free_frame(shared_pa);
 
         return Err(e);
     }

@@ -38,7 +38,7 @@ use super::handle::{Handle, HandleError, HandleObject, Rights};
 use super::paging;
 use super::paging::USER_VA_END;
 use super::scheduler;
-use super::uart;
+use super::serial;
 use super::Context;
 
 pub mod nr {
@@ -205,10 +205,10 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
 
     for &byte in slice {
         if byte == b'\n' {
-            uart::putc(b'\r');
+            serial::putc(b'\r');
         }
 
-        uart::putc(byte);
+        serial::putc(byte);
     }
 
     Ok(len)

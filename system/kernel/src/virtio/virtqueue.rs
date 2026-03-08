@@ -9,7 +9,7 @@
 //! allocator so the device can DMA to/from them.
 
 use super::super::memory;
-use super::super::page_alloc;
+use super::super::page_allocator;
 use super::super::paging::PAGE_SIZE;
 
 /// Default queue size. At 128 entries, all three regions fit in one 4 KiB page:
@@ -67,7 +67,7 @@ impl Virtqueue {
         let page_size = PAGE_SIZE as usize;
         let pages_needed = (total + page_size - 1) / page_size;
         let order = pages_needed.next_power_of_two().trailing_zeros() as usize;
-        let pa = page_alloc::alloc_frames(order)?;
+        let pa = page_allocator::alloc_frames(order)?;
         let va = memory::phys_to_virt(pa);
         let pa_u64 = pa.as_u64();
         // Initialize free descriptor chain: 0 → 1 → 2 → ... → (size-1).
@@ -243,6 +243,6 @@ impl Virtqueue {
 }
 impl Drop for Virtqueue {
     fn drop(&mut self) {
-        page_alloc::free_frames(self.backing_pa, self.backing_order);
+        page_allocator::free_frames(self.backing_pa, self.backing_order);
     }
 }

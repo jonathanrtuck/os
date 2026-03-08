@@ -9,13 +9,13 @@
 //! uses v2 registers. Pass `-global virtio-mmio.force-legacy=false` to QEMU
 //! to enable modern transport (QEMU defaults to legacy).
 
-pub mod blk;
+pub mod block;
 pub mod console;
 pub mod virtqueue;
 
 use super::memory::KERNEL_VA_OFFSET;
-use super::mmio;
-use super::uart;
+use super::memory_mapped_io;
+use super::serial;
 
 // MMIO register offsets (virtio 1.0 / MMIO version 2).
 const REG_MAGIC: usize = 0x000;
@@ -46,7 +46,6 @@ const STATUS_DRIVER: u32 = 2;
 const STATUS_DRIVER_OK: u32 = 4;
 const STATUS_FEATURES_OK: u32 = 8;
 const STATUS_FAILED: u32 = 128;
-
 // Magic value: "virt" in little-endian.
 const VIRTIO_MAGIC: u32 = 0x7472_6976;
 // QEMU virt virtio-mmio layout.
@@ -73,10 +72,10 @@ pub struct Device {
 
 impl Device {
     fn read(&self, offset: usize) -> u32 {
-        mmio::read32(self.base + offset)
+        memory_mapped_io::read32(self.base + offset)
     }
     fn write(&self, offset: usize, val: u32) {
-        mmio::write32(self.base + offset, val);
+        memory_mapped_io::write32(self.base + offset, val);
     }
 
     /// Acknowledge pending interrupts (for future interrupt-driven I/O).
@@ -89,11 +88,11 @@ impl Device {
     }
     /// Read a byte from device-specific config space.
     pub fn config_read8(&self, offset: usize) -> u8 {
-        mmio::read8(self.base + REG_CONFIG + offset)
+        memory_mapped_io::read8(self.base + REG_CONFIG + offset)
     }
     /// Read a 32-bit word from device-specific config space.
     pub fn config_read32(&self, offset: usize) -> u32 {
-        mmio::read32(self.base + REG_CONFIG + offset)
+        memory_mapped_io::read32(self.base + REG_CONFIG + offset)
     }
     /// Read a 64-bit word from device-specific config space (two 32-bit reads).
     pub fn config_read64(&self, offset: usize) -> u64 {
@@ -185,18 +184,18 @@ pub fn init() {
         found_any = true;
 
         match device.device_id {
-            DEVICE_BLK => blk::demo(device),
+            DEVICE_BLK => block::demo(device),
             DEVICE_CONSOLE => console::demo(device),
             id => {
-                uart::puts("  🔌 virtio - unknown id=");
-                uart::put_u32(id);
-                uart::puts("\n");
+                serial::puts("  🔌 virtio - unknown id=");
+                serial::put_u32(id);
+                serial::puts("\n");
             }
         }
     });
 
     if !found_any {
-        uart::puts("  🔌 virtio - no devices\n");
+        serial::puts("  🔌 virtio - no devices\n");
     }
 }
 /// Probe all 32 virtio-mmio slots. Calls `found` for each valid device.
@@ -207,17 +206,17 @@ pub fn probe(mut found: impl FnMut(Device)) {
     for i in 0..VIRTIO_MMIO_COUNT {
         let base = VIRTIO_MMIO_BASE + i * VIRTIO_MMIO_STRIDE;
 
-        if mmio::read32(base + REG_MAGIC) != VIRTIO_MAGIC {
+        if memory_mapped_io::read32(base + REG_MAGIC) != VIRTIO_MAGIC {
             continue;
         }
 
-        let version = mmio::read32(base + REG_VERSION);
+        let version = memory_mapped_io::read32(base + REG_VERSION);
 
         if version != 1 && version != 2 {
             continue;
         }
 
-        let device_id = mmio::read32(base + REG_DEVICE_ID);
+        let device_id = memory_mapped_io::read32(base + REG_DEVICE_ID);
 
         if device_id == 0 {
             continue; // No device in this slot.

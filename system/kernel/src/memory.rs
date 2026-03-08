@@ -11,8 +11,8 @@ use core::cell::UnsafeCell;
 
 const BLOCK_2MB: u64 = 2 * 1024 * 1024;
 
-pub const KERNEL_VA_OFFSET: usize = 0xFFFF_0000_0000_0000;
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
+pub const KERNEL_VA_OFFSET: usize = 0xFFFF_0000_0000_0000;
 
 /// Physical address newtype. Prevents accidental PA/VA mixups at compile time.
 ///
@@ -77,7 +77,6 @@ extern "C" {
     static __rodata_start: u8;
     static __rodata_end: u8;
     static __data_start: u8;
-
     // boot.S TTBR1 L2_1 table (need to patch one entry for L3).
     static boot_tt1_l2_1: u8;
 }

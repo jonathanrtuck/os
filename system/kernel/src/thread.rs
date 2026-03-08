@@ -1,6 +1,6 @@
 //! Kernel thread representation.
 
-use super::addr_space::AddressSpace;
+use super::address_space::AddressSpace;
 use super::context::Context;
 use super::handle::HandleTable;
 use alloc::boxed::Box;

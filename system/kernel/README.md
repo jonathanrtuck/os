@@ -84,58 +84,58 @@ Boot initializes each subsystem in dependency order and logs progress. The emoji
 
 ```txt
 src/
-  boot.S        — boot trampoline, coarse page tables, EL2→EL1 drop, secondary entry
-  exception.S   — exception vectors, context save/restore (upper VA)
-  main.rs       — kernel entry, IRQ/SVC dispatch, boot logging, memory map
-  context.rs    — CPU register state struct (matches exception.S offsets)
-  process.rs    — process creation from ELF binaries (demand-paged VMAs)
-  elf.rs        — pure functional ELF64 parser (PT_LOAD segments)
-  memory.rs     — TTBR1 L3 refinement, W^X, PA/VA conversion
-  heap.rs       — linked-list allocator (first-fit, coalescing, 16 MiB) + slab routing
-  slab.rs       — power-of-two slab caches (64–2048B) for small kernel objects
-  page_alloc.rs — buddy allocator for contiguous 2^n page frames (4 KiB–4 MiB)
-  asid.rs       — 8-bit ASID allocator (generation-based recycling, lazy revalidation)
-  addr_space.rs — per-process TTBR0 page tables (4-level), demand paging fault handler
-  vma.rs        — virtual memory area tracking (sorted list, binary search lookup)
-  channel.rs    — IPC channels (shared memory ring buffers + signal/wait notification)
-  handle.rs     — per-process handle table (256 slots, read/write rights)
-  paging.rs     — page table constants, memory layout, user VA map
-  sync.rs       — IrqMutex (ticket spinlock + IRQ masking, SMP-safe)
-  scheduler.rs  — SMP-aware priority scheduler (idle/normal/high), per-core state
-  thread.rs     — thread struct, state machine (Ready/Running/Blocked/Exited), priorities
-  syscall.rs    — syscall dispatcher (exit, write, yield, handle_close, signal, wait)
-  percpu.rs     — per-core data structures (online flag, core ID via MPIDR)
-  psci.rs       — PSCI CPU_ON wrapper (HVC #0) for secondary core boot
-  gic.rs        — GICv2 distributor + CPU interface (per-core init)
-  timer.rs      — ARM generic timer (EL1 physical, 250 Hz, SMP per-core PPI)
-  uart.rs       — PL011 UART driver (TX only, SMP-safe locking)
-  mmio.rs       — volatile MMIO helpers (read8/read32/write8/write32)
+  boot.S                   — boot trampoline, coarse page tables, EL2→EL1 drop, secondary entry
+  exception.S              — exception vectors, context save/restore (upper VA)
+  main.rs                  — kernel entry, IRQ/SVC dispatch, boot logging, memory map
+  context.rs               — CPU register state struct (matches exception.S offsets)
+  process.rs               — process creation from ELF binaries (demand-paged VMAs)
+  elf.rs                   — pure functional ELF64 parser (PT_LOAD segments)
+  memory.rs                — TTBR1 L3 refinement, W^X, PA/VA conversion
+  heap.rs                  — linked-list allocator (first-fit, coalescing, 16 MiB) + slab routing
+  slab.rs                  — power-of-two slab caches (64–2048B) for small kernel objects
+  page_allocator.rs        — buddy allocator for contiguous 2^n page frames (4 KiB–4 MiB)
+  address_space_id.rs      — 8-bit ASID allocator (generation-based recycling, lazy revalidation)
+  address_space.rs         — per-process TTBR0 page tables (4-level), demand paging fault handler
+  memory_region.rs         — virtual memory area tracking (sorted list, binary search lookup)
+  channel.rs               — IPC channels (shared memory ring buffers + signal/wait notification)
+  handle.rs                — per-process handle table (256 slots, read/write rights)
+  paging.rs                — page table constants, memory layout, user VA map
+  sync.rs                  — IrqMutex (ticket spinlock + IRQ masking, SMP-safe)
+  scheduler.rs             — SMP-aware priority scheduler (idle/normal/high), per-core state
+  thread.rs                — thread struct, state machine (Ready/Running/Blocked/Exited), priorities
+  syscall.rs               — syscall dispatcher (exit, write, yield, handle_close, signal, wait)
+  per_core.rs              — per-core data structures (online flag, core ID via MPIDR)
+  power.rs                 — PSCI CPU_ON wrapper (HVC #0) for secondary core boot
+  interrupt_controller.rs  — GICv2 distributor + CPU interface (per-core init)
+  timer.rs                 — ARM generic timer (EL1 physical, 250 Hz, SMP per-core PPI)
+  serial.rs                — PL011 UART driver (TX only, SMP-safe locking)
+  memory_mapped_io.rs      — volatile MMIO helpers (read8/read32/write8/write32)
   virtio/
-    mod.rs      — virtio-mmio v2 transport: probe, feature negotiation, device setup
-    virtqueue.rs — split virtqueue (descriptor table + available/used rings, DMA)
-    blk.rs      — virtio block driver (read sectors via 3-descriptor chain)
-    console.rs  — virtio console driver (TX only, demo)
-build.rs        — compiles user processes → ELF at build time
+    mod.rs                 — virtio-mmio v2 transport: probe, feature negotiation, device setup
+    virtqueue.rs           — split virtqueue (descriptor table + available/used rings, DMA)
+    block.rs               — virtio block driver (read sectors via 3-descriptor chain)
+    console.rs             — virtio console driver (TX only, demo)
+build.rs                   — compiles user processes → ELF at build time
 
 ../user/libsys/
-  lib.rs        — userspace syscall wrappers + panic handler (compiled as rlib)
+  lib.rs                   — userspace syscall wrappers + panic handler (compiled as rlib)
 
 ../user/init/
-  main.rs       — init process (IPC ping initiator)
+  main.rs                  — init process (IPC ping initiator)
 
 ../user/echo/
-  main.rs       — echo process (IPC pong responder)
+  main.rs                  — echo process (IPC pong responder)
 
-../user/link.ld — shared userspace linker script (base VA 0x400000)
+../user/link.ld            — shared userspace linker script (base VA 0x400000)
 
 ../host-tests/
-  tests/handle.rs — handle table unit tests (host-side)
-  tests/elf.rs    — ELF parser unit tests (host-side)
-  tests/vma.rs    — VMA lookup/insert unit tests (host-side)
-  tests/buddy.rs  — buddy allocator tests (host-side, mock IrqMutex)
-  tests/slab.rs   — slab size-class selection tests (host-side)
+  tests/handle.rs          — handle table unit tests (host-side)
+  tests/elf.rs             — ELF parser unit tests (host-side)
+  tests/vma.rs             — VMA lookup/insert unit tests (host-side, includes memory_region.rs)
+  tests/buddy.rs           — buddy allocator tests (host-side, mock IrqMutex)
+  tests/slab.rs            — slab size-class selection tests (host-side)
 
-smoke-test.sh     — QEMU boot + output verification (17 checks)
+smoke-test.sh              — QEMU boot + output verification (17 checks)
 ```
 
 ## Scope & Limitations

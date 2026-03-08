@@ -1,10 +1,10 @@
-//! Host-side tests for the kernel buddy allocator (page_alloc.rs).
+//! Host-side tests for the kernel buddy allocator (page_allocator.rs).
 //!
-//! Includes page_alloc.rs directly with stub dependencies (mock IrqMutex,
+//! Includes page_allocator.rs directly with stub dependencies (mock IrqMutex,
 //! identity PA/VA mapping). Tests use heap-allocated memory as the "physical"
 //! region, with phys_to_virt/virt_to_phys as identity functions.
 //!
-//! Because page_alloc uses a global static STATE, all tests in this file
+//! Because page_allocator uses a global static STATE, all tests in this file
 //! share state. Run with `cargo test -- --test-threads=1` or as a single
 //! sequential test to avoid interference.
 //!
@@ -86,8 +86,8 @@ mod sync {
     }
 }
 
-#[path = "../../kernel/src/page_alloc.rs"]
-mod page_alloc;
+#[path = "../../kernel/src/page_allocator.rs"]
+mod page_allocator;
 
 const PAGE_SIZE: usize = 4096;
 
@@ -117,24 +117,27 @@ fn buddy_allocator() {
     let start = ptr as usize;
     let end = start + 256 * PAGE_SIZE;
 
-    page_alloc::init(start, end);
+    page_allocator::init(start, end);
 
     // --- Section 1: Initial state ---
 
     assert_eq!(
-        page_alloc::free_count(),
+        page_allocator::free_count(),
         256,
         "init should mark all 256 pages free"
     );
 
     // --- Section 2: Single frame alloc ---
 
-    let pa1 = page_alloc::alloc_frame().expect("should allocate one frame");
+    let pa1 = page_allocator::alloc_frame().expect("should allocate one frame");
 
-    assert!(pa1.0 >= start && pa1.0 < end, "allocated PA must be in region");
+    assert!(
+        pa1.0 >= start && pa1.0 < end,
+        "allocated PA must be in region"
+    );
     assert_eq!(pa1.0 % PAGE_SIZE, 0, "PA must be page-aligned");
     assert_eq!(
-        page_alloc::free_count(),
+        page_allocator::free_count(),
         255,
         "free count should decrease by 1"
     );
@@ -149,53 +152,57 @@ fn buddy_allocator() {
 
     // --- Section 3: Free and re-alloc ---
 
-    page_alloc::free_frame(pa1);
+    page_allocator::free_frame(pa1);
 
-    assert_eq!(page_alloc::free_count(), 256, "free should restore count");
+    assert_eq!(
+        page_allocator::free_count(),
+        256,
+        "free should restore count"
+    );
 
     // --- Section 4: Multi-page allocation (order 2 = 4 pages) ---
 
-    let pa_order2 = page_alloc::alloc_frames(2).expect("should allocate 4 pages");
+    let pa_order2 = page_allocator::alloc_frames(2).expect("should allocate 4 pages");
 
     assert_eq!(
         pa_order2.0 % (4 * PAGE_SIZE),
         0,
         "order-2 block must be naturally aligned"
     );
-    assert_eq!(page_alloc::free_count(), 252, "4 pages consumed");
+    assert_eq!(page_allocator::free_count(), 252, "4 pages consumed");
 
-    page_alloc::free_frames(pa_order2, 2);
+    page_allocator::free_frames(pa_order2, 2);
 
     assert_eq!(
-        page_alloc::free_count(),
+        page_allocator::free_count(),
         256,
         "free should restore all 4 pages"
     );
 
     // --- Section 5: Large allocation (order 8 = 256 pages = entire region) ---
 
-    let pa_big = page_alloc::alloc_frames(8).expect("should allocate 256 pages");
+    let pa_big = page_allocator::alloc_frames(8).expect("should allocate 256 pages");
 
     assert_eq!(pa_big.0, start, "full-region block starts at region base");
-    assert_eq!(page_alloc::free_count(), 0, "all pages consumed");
+    assert_eq!(page_allocator::free_count(), 0, "all pages consumed");
 
     // --- Section 6: Exhaustion ---
 
     assert!(
-        page_alloc::alloc_frame().is_none(),
+        page_allocator::alloc_frame().is_none(),
         "should fail when empty"
     );
     assert!(
-        page_alloc::alloc_frames(0).is_none(),
+        page_allocator::alloc_frames(0).is_none(),
         "order-0 should also fail"
     );
 
     // --- Section 7: Free the big block and verify full coalesce ---
 
-    page_alloc::free_frames(pa_big, 8);
+    page_allocator::free_frames(pa_big, 8);
 
     assert_eq!(
-        page_alloc::free_count(),
+        page_allocator::free_count(),
         256,
         "full coalesce restores all pages"
     );
@@ -204,14 +211,14 @@ fn buddy_allocator() {
 
     let mut frames = Vec::new();
 
-    while let Some(pa) = page_alloc::alloc_frame() {
+    while let Some(pa) = page_allocator::alloc_frame() {
         assert!(pa.0 >= start && pa.0 < end);
         assert_eq!(pa.0 % PAGE_SIZE, 0);
         frames.push(pa);
     }
 
     assert_eq!(frames.len(), 256, "should get exactly 256 frames");
-    assert_eq!(page_alloc::free_count(), 0);
+    assert_eq!(page_allocator::free_count(), 0);
 
     // All addresses should be unique.
     let mut sorted = frames.clone();
@@ -222,23 +229,23 @@ fn buddy_allocator() {
 
     // Free all one-by-one.
     for pa in frames {
-        page_alloc::free_frame(pa);
+        page_allocator::free_frame(pa);
     }
 
-    assert_eq!(page_alloc::free_count(), 256, "free all restores count");
+    assert_eq!(page_allocator::free_count(), 256, "free all restores count");
 
     // --- Section 9: Buddy coalescing ---
     // Allocate two adjacent order-0 frames, free them, verify they coalesce
     // into an order-1 block (provable by allocating order-1 afterwards).
 
-    let a = page_alloc::alloc_frame().unwrap();
-    let b = page_alloc::alloc_frame().unwrap();
+    let a = page_allocator::alloc_frame().unwrap();
+    let b = page_allocator::alloc_frame().unwrap();
 
-    page_alloc::free_frame(a);
-    page_alloc::free_frame(b);
+    page_allocator::free_frame(a);
+    page_allocator::free_frame(b);
 
     // If coalescing works, we can now allocate a larger block than before.
-    let order1 = page_alloc::alloc_frames(1).expect("should coalesce into order-1");
+    let order1 = page_allocator::alloc_frames(1).expect("should coalesce into order-1");
 
     assert_eq!(
         order1.0 % (2 * PAGE_SIZE),
@@ -246,29 +253,29 @@ fn buddy_allocator() {
         "order-1 must be aligned to 8 KiB"
     );
 
-    page_alloc::free_frames(order1, 1);
+    page_allocator::free_frames(order1, 1);
 
     // --- Section 10: Split behavior ---
     // Free all and verify we can allocate max order, confirming full coalesce.
     // (State should already be clean from section 9.)
 
-    let full = page_alloc::alloc_frames(8).expect("full coalesce allows max order");
+    let full = page_allocator::alloc_frames(8).expect("full coalesce allows max order");
 
-    page_alloc::free_frames(full, 8);
+    page_allocator::free_frames(full, 8);
 
-    assert_eq!(page_alloc::free_count(), 256);
+    assert_eq!(page_allocator::free_count(), 256);
 
     // --- Section 11: Order bounds ---
 
     assert!(
-        page_alloc::alloc_frames(9).is_none(),
+        page_allocator::alloc_frames(9).is_none(),
         "order 9 > region size, should fail"
     );
 
     // Order 0 should still work.
-    let small = page_alloc::alloc_frame().unwrap();
+    let small = page_allocator::alloc_frame().unwrap();
 
-    page_alloc::free_frame(small);
+    page_allocator::free_frame(small);
 
     // --- Cleanup ---
 

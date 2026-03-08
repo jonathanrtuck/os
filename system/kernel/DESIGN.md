@@ -246,7 +246,7 @@ Public API unchanged: `schedule()`, `spawn()`, `block_current_and_schedule()`.
 - Free lists per order: 0 = 4 KiB, 1 = 8 KiB, ..., max order 10 = 4 MiB.
 - Alloc order-n: pop from order-n list, or split order-(n+1) block.
 - Free order-n: check buddy (`buddy_pa = block_pa XOR (PAGE_SIZE << order)`). If buddy free, merge and recurse upward. Otherwise add to order-n list.
-- Replace `page_alloc.rs`. New API: `alloc_frames(order) -> Option<usize>`, `free_frames(pa, order)`. Single page = `alloc_frames(0)`.
+- Replace `page_allocator.rs`. New API: `alloc_frames(order) -> Option<usize>`, `free_frames(pa, order)`. Single page = `alloc_frames(0)`.
 
 **Why buddy:** O(log n) contiguous allocation with automatic coalescing. Best tradeoff for single pages (address spaces) + multi-page (DMA, large maps). Bitmap allocators coalesce in O(n). XOR trick makes buddy ID trivial.
 

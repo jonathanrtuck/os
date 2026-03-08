@@ -2,7 +2,7 @@
 //!
 //! Single source of truth for ARMv8 page table bits used by both the
 //! kernel's TTBR1 refinement (memory.rs) and per-process TTBR0 tables
-//! (addr_space.rs).
+//! (address_space.rs).
 
 pub const PAGE_SIZE: u64 = 4096;
 

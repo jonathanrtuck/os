@@ -7,10 +7,10 @@
 //! Idle threads (one per core) are never enqueued. They run when all
 //! queues are empty, as fallback targets stored in PerCpu.
 
-use super::addr_space::AddressSpace;
+use super::address_space::AddressSpace;
 use super::handle::HandleObject;
 use super::memory;
-use super::percpu;
+use super::per_core;
 use super::sync::IrqMutex;
 use super::thread::{Priority, Thread, ThreadId};
 use super::Context;
@@ -30,7 +30,7 @@ struct State {
     /// Threads waiting on a resource (Blocked state). Moved here from
     /// cores[].current when a thread blocks; moved back to queue by wake().
     blocked: Vec<Box<Thread>>,
-    cores: [PerCoreState; percpu::MAX_CORES],
+    cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
 }
 
@@ -45,7 +45,7 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
             current: None,
             idle: None,
         };
-        [INIT; percpu::MAX_CORES]
+        [INIT; per_core::MAX_CORES]
     },
     next_id: 1,
 });
@@ -158,7 +158,7 @@ fn ttbr0_for(thread: &Thread) -> u64 {
 /// channel lock, then calls this).
 pub fn block_current_and_schedule(ctx: *mut Context) -> *const Context {
     let mut s = STATE.lock();
-    let core = percpu::core_id() as usize;
+    let core = per_core::core_id() as usize;
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
     thread.block();
@@ -169,7 +169,7 @@ pub fn block_current_and_schedule(ctx: *mut Context) -> *const Context {
 /// duration of the closure. Do not call scheduler functions from within `f`.
 pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
     let mut s = STATE.lock();
-    let core = percpu::core_id() as usize;
+    let core = per_core::core_id() as usize;
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
     f(thread)
@@ -182,7 +182,7 @@ pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
 pub fn exit_current() -> ! {
     {
         let mut s = STATE.lock();
-        let core = percpu::core_id() as usize;
+        let core = per_core::core_id() as usize;
         let thread = s.cores[core].current.as_mut().expect("no current thread");
 
         debug_assert!(
@@ -200,7 +200,7 @@ pub fn exit_current() -> ! {
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     use super::handle::ChannelId;
 
-    let core = percpu::core_id() as usize;
+    let core = per_core::core_id() as usize;
     // Phase 1: collect resources to free (under scheduler lock).
     let (channels_to_close, addr_space) = {
         let mut s = STATE.lock();
@@ -222,11 +222,11 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
         super::channel::close_endpoint(id);
     }
 
-    // Phase 3: free address space (acquires page_alloc and asid locks).
+    // Phase 3: free address space (acquires page_allocator and address_space_id locks).
     if let Some(mut addr_space) = addr_space {
         addr_space.invalidate_tlb();
         addr_space.free_all();
-        super::asid::free(super::asid::Asid(addr_space.asid()));
+        super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
     }
 
     // Phase 4: mark exited and schedule (under scheduler lock).
@@ -290,7 +290,7 @@ pub fn init_secondary(core_id: u32) {
 }
 pub fn schedule(ctx: *mut Context) -> *const Context {
     let mut s = STATE.lock();
-    let core = percpu::core_id() as usize;
+    let core = per_core::core_id() as usize;
 
     schedule_inner(&mut s, ctx, core)
 }

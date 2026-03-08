@@ -4,14 +4,14 @@
 //! `map_page()` walks/creates the 4-level page table (L0→L3) using frames
 //! from the page frame allocator.
 
-use super::asid::Asid;
+use super::address_space_id::Asid;
 use super::memory::{self, Pa};
-use super::page_alloc;
+use super::memory_region::{Backing, Vma, VmaList};
+use super::page_allocator;
 use super::paging::{
     AF, AP_EL0, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, NG, PAGE_SIZE, PA_MASK, PXN,
     SH_INNER, UXN,
 };
-use super::vma::{Backing, Vma, VmaList};
 use alloc::vec::Vec;
 
 pub struct AddressSpace {
@@ -69,7 +69,7 @@ impl AddressSpace {
 
     /// Create a new empty address space with its own L0 table and ASID.
     pub fn new(asid: Asid, generation: u64) -> Self {
-        let l0_pa = page_alloc::alloc_frame().expect("out of frames for L0 table");
+        let l0_pa = page_allocator::alloc_frame().expect("out of frames for L0 table");
 
         Self {
             l0_pa,
@@ -87,11 +87,11 @@ impl AddressSpace {
     pub fn free_all(&mut self) {
         // Free owned user pages (code, data, stack).
         for &pa in &self.owned_frames {
-            page_alloc::free_frame(pa);
+            page_allocator::free_frame(pa);
         }
 
         // Walk page table structure and free table frames (L1, L2, L3 tables).
-        // SAFETY: l0_pa was allocated by page_alloc::alloc_frame in new().
+        // SAFETY: l0_pa was allocated by page_allocator::alloc_frame in new().
         // phys_to_virt produces a valid kernel VA. Each table is 4096 bytes
         // (512 entries * 8 bytes), and indices 0..512 stay within bounds.
         // Entries with DESC_VALID set contain physical addresses of tables
@@ -127,21 +127,21 @@ impl AddressSpace {
 
                     let l3_pa = Pa((e2 & PA_MASK) as usize);
 
-                    page_alloc::free_frame(l3_pa);
+                    page_allocator::free_frame(l3_pa);
                 }
 
-                page_alloc::free_frame(l2_pa);
+                page_allocator::free_frame(l2_pa);
             }
 
-            page_alloc::free_frame(l1_pa);
+            page_allocator::free_frame(l1_pa);
         }
 
-        page_alloc::free_frame(self.l0_pa);
+        page_allocator::free_frame(self.l0_pa);
     }
     /// Invalidate all TLB entries for this address space's ASID.
     pub fn invalidate_tlb(&self) {
         // SAFETY: TLBI aside1is invalidates all TLB entries tagged with this
-        // ASID. The ASID was allocated by the asid module and is valid.
+        // ASID. The ASID was allocated by the address_space_id module and is valid.
         // Barriers ensure the invalidation completes before we free pages.
         unsafe {
             core::arch::asm!(
@@ -167,7 +167,7 @@ impl AddressSpace {
             None => return false,
         };
         // Allocate a physical frame (zeroed by alloc_frame).
-        let pa = match page_alloc::alloc_frame() {
+        let pa = match page_allocator::alloc_frame() {
             Some(pa) => pa,
             None => return false,
         };
@@ -278,7 +278,7 @@ fn walk_or_create(table_va: *mut u64, idx: usize) -> *mut u64 {
         }
 
         // Allocate a new zeroed page for the next-level table.
-        let next_pa = page_alloc::alloc_frame().expect("out of frames for page table");
+        let next_pa = page_allocator::alloc_frame().expect("out of frames for page table");
 
         *entry = next_pa.as_u64() | DESC_VALID | DESC_TABLE;
 

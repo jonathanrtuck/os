@@ -1,11 +1,11 @@
 //! Host-side tests for the kernel ELF64 parser.
 //!
-//! The elf.rs module depends on `super::addr_space::PageAttrs` for
+//! The elf.rs module depends on `super::address_space::PageAttrs` for
 //! `segment_attrs()`. We provide a minimal stub so the source compiles
 //! on the host.
 
-// Stub for elf.rs's `use super::addr_space::PageAttrs`.
-mod addr_space {
+// Stub for elf.rs's `use super::address_space::PageAttrs`.
+mod address_space {
     #[derive(Debug)]
     pub struct PageAttrs(pub u64);
 
@@ -91,7 +91,10 @@ fn parse_valid_header() {
 fn parse_too_small() {
     let data = vec![0u8; 32];
 
-    assert!(matches!(elf::parse_header(&data), Err(elf::Error::TooSmall)));
+    assert!(matches!(
+        elf::parse_header(&data),
+        Err(elf::Error::TooSmall)
+    ));
 }
 
 #[test]
@@ -100,7 +103,10 @@ fn parse_bad_magic() {
 
     data[0] = 0;
 
-    assert!(matches!(elf::parse_header(&data), Err(elf::Error::BadMagic)));
+    assert!(matches!(
+        elf::parse_header(&data),
+        Err(elf::Error::BadMagic)
+    ));
 }
 
 #[test]
@@ -109,7 +115,10 @@ fn parse_not_elf64() {
 
     data[4] = 1; // ELFCLASS32
 
-    assert!(matches!(elf::parse_header(&data), Err(elf::Error::NotElf64)));
+    assert!(matches!(
+        elf::parse_header(&data),
+        Err(elf::Error::NotElf64)
+    ));
 }
 
 #[test]
@@ -248,21 +257,21 @@ fn segment_data_out_of_bounds() {
 fn segment_attrs_executable() {
     let a = elf::segment_attrs(5); // PF_R | PF_X
 
-    assert!(matches!(a, addr_space::PageAttrs(2))); // user_rx
+    assert!(matches!(a, address_space::PageAttrs(2))); // user_rx
 }
 
 #[test]
 fn segment_attrs_writable() {
     let a = elf::segment_attrs(6); // PF_R | PF_W
 
-    assert!(matches!(a, addr_space::PageAttrs(1))); // user_rw
+    assert!(matches!(a, address_space::PageAttrs(1))); // user_rw
 }
 
 #[test]
 fn segment_attrs_readonly() {
     let a = elf::segment_attrs(4); // PF_R
 
-    assert!(matches!(a, addr_space::PageAttrs(0))); // user_ro
+    assert!(matches!(a, address_space::PageAttrs(0))); // user_ro
 }
 
 #[test]
@@ -270,5 +279,5 @@ fn segment_attrs_wx_prefers_x() {
     // W^X enforcement: both W and X → RX
     let a = elf::segment_attrs(7); // PF_R | PF_W | PF_X
 
-    assert!(matches!(a, addr_space::PageAttrs(2))); // user_rx
+    assert!(matches!(a, address_space::PageAttrs(2))); // user_rx
 }

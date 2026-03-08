@@ -9,7 +9,7 @@
 //! Trusts that the ELF comes from the build system (no adversarial input).
 //! A production loader would need overflow-checked arithmetic in segment_data.
 
-use super::addr_space::PageAttrs;
+use super::address_space::PageAttrs;
 
 #[derive(Debug)]
 pub enum Error {

@@ -1,6 +1,6 @@
 //! Host-side tests for the ASID allocation algorithm.
 //!
-//! Duplicates the bitmap allocation logic from kernel asid.rs (the
+//! Duplicates the bitmap allocation logic from kernel address_space_id.rs (the
 //! kernel version uses inline asm for TLB flushes, which can't run
 //! on the host). Tests verify: allocation range, uniqueness, exhaustion
 //! + rollover, generation monotonicity, and free-and-reuse.
@@ -129,7 +129,10 @@ fn generation_monotonic() {
     for _ in 0..600 {
         let (_, gen) = a.alloc();
 
-        assert!(gen >= last_gen, "generation must be monotonically non-decreasing");
+        assert!(
+            gen >= last_gen,
+            "generation must be monotonically non-decreasing"
+        );
 
         last_gen = gen;
     }

@@ -1,20 +1,20 @@
 //! Host-side tests for the kernel VMA (Virtual Memory Area) data structure.
 //!
 //! Tests VmaList insert, lookup (binary search), and page_offset.
-//! The vma module depends only on `paging::PAGE_SIZE` and `alloc::vec::Vec`,
+//! The memory_region module depends only on `paging::PAGE_SIZE` and `alloc::vec::Vec`,
 //! both trivially available on the host.
 
 extern crate alloc;
 
-// Stub for vma.rs's `use super::paging::PAGE_SIZE`.
+// Stub for memory_region.rs's `use super::paging::PAGE_SIZE`.
 mod paging {
     pub const PAGE_SIZE: u64 = 4096;
 }
 
-#[path = "../../kernel/src/vma.rs"]
-mod vma;
+#[path = "../../kernel/src/memory_region.rs"]
+mod memory_region;
 
-use vma::*;
+use memory_region::*;
 
 fn anon_vma(start: u64, end: u64) -> Vma {
     Vma {

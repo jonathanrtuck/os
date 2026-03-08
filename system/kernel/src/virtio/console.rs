@@ -7,8 +7,8 @@
 use super::virtqueue::{Virtqueue, DEFAULT_QUEUE_SIZE};
 use super::Device;
 use crate::memory;
-use crate::mmio;
-use crate::page_alloc;
+use crate::memory_mapped_io;
+use crate::page_allocator;
 
 const VIRTQ_TX: u32 = 1;
 
@@ -40,7 +40,7 @@ impl Console {
             return;
         }
 
-        let pa = match page_alloc::alloc_frame() {
+        let pa = match page_allocator::alloc_frame() {
             Some(pa) => pa,
             None => return,
         };
@@ -54,20 +54,20 @@ impl Console {
 
         // Clean DMA buffer: flush our data from cache to RAM so the device
         // sees it. ARM caches are not coherent with DMA by default.
-        mmio::cache_clean_invalidate_range(va as usize, len);
+        memory_mapped_io::cache_clean_invalidate_range(va as usize, len);
 
         self.tx.push(pa.as_u64(), len as u32, false);
         self.device.notify(VIRTQ_TX);
         self.tx.wait_used();
 
-        page_alloc::free_frame(pa);
+        page_allocator::free_frame(pa);
     }
 }
 
 /// Demonstrate console I/O by writing a test string.
 pub fn demo(device: Device) {
     if let Some(mut console) = Console::new(device) {
-        crate::uart::puts("  🔌 virtio - console\n");
+        crate::serial::puts("  🔌 virtio - console\n");
 
         console.write(b"virtio console ok\n");
     }

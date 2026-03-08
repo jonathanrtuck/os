@@ -5,7 +5,7 @@
 //! the panic handler (where the lock may already be held).
 
 use super::memory::KERNEL_VA_OFFSET;
-use super::mmio;
+use super::memory_mapped_io;
 use super::sync::IrqMutex;
 
 const TXFF: u32 = 1 << 5;
@@ -23,7 +23,7 @@ const TX_TIMEOUT: u32 = 1_000_000;
 fn raw_putc(c: u8) {
     let mut timeout = TX_TIMEOUT;
 
-    while mmio::read32(UART0_FR) & TXFF != 0 {
+    while memory_mapped_io::read32(UART0_FR) & TXFF != 0 {
         timeout -= 1;
 
         if timeout == 0 {
@@ -31,7 +31,7 @@ fn raw_putc(c: u8) {
         }
     }
 
-    mmio::write32(UART0_DR, c as u32);
+    memory_mapped_io::write32(UART0_DR, c as u32);
 }
 fn raw_puts(s: &str) {
     for byte in s.bytes() {

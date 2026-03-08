@@ -9,7 +9,7 @@
 //! allocations fall through to the linked-list allocator.
 
 use super::memory;
-use super::page_alloc;
+use super::page_allocator;
 use super::sync::IrqMutex;
 
 /// Number of size classes: 64, 128, 256, 512, 1024, 2048 bytes.
@@ -77,7 +77,7 @@ impl SlabCache {
     }
     /// Allocate a new 4 KiB slab page and carve it into objects.
     fn grow(&mut self) {
-        let pa = match page_alloc::alloc_frame() {
+        let pa = match page_allocator::alloc_frame() {
             Some(pa) => pa,
             None => return,
         };

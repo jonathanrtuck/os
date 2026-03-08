@@ -7,7 +7,7 @@
 //! — we'd need a sorted event queue and careful reprogramming on insert/cancel.
 //! Fixed tick is the right starting point; tickless is an optimization for later.
 
-use super::gic;
+use super::interrupt_controller;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
@@ -44,9 +44,9 @@ pub fn handle_irq() {
 
     reprogram(CNTFRQ.load(Ordering::Relaxed));
 }
-/// Initialize the timer. Call after `gic::init()`.
+/// Initialize the timer. Call after `interrupt_controller::init()`.
 pub fn init() {
-    gic::enable_irq(IRQ_ID);
+    interrupt_controller::enable_irq(IRQ_ID);
 
     // CNTFRQ_EL0: counter frequency in Hz, set by firmware (e.g. 62.5 MHz on QEMU)
     let freq: u64;

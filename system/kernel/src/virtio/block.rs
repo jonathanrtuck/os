@@ -7,9 +7,9 @@
 use super::virtqueue::{Virtqueue, DEFAULT_QUEUE_SIZE};
 use super::Device;
 use crate::memory;
-use crate::mmio;
-use crate::page_alloc;
-use crate::uart;
+use crate::memory_mapped_io;
+use crate::page_allocator;
+use crate::serial;
 
 const SECTOR_SIZE: usize = 512;
 // Block request types.
@@ -76,7 +76,7 @@ impl Block {
         //   [0..16)    BlkReqHeader  (device-readable)
         //   [16..528)  sector data   (device-writable)
         //   [528]      status byte   (device-writable)
-        let pa = page_alloc::alloc_frame().ok_or("out of frames")?;
+        let pa = page_allocator::alloc_frame().ok_or("out of frames")?;
         let va = memory::phys_to_virt(pa);
         let header_pa = pa.as_u64();
         let data_pa = pa.as_u64() + 16;
@@ -96,7 +96,7 @@ impl Block {
 
         // Clean DMA buffers: flush dirty cache lines to RAM so the device
         // sees our header. ARM caches are not coherent with DMA by default.
-        mmio::cache_clean_invalidate_range(va, 4096);
+        memory_mapped_io::cache_clean_invalidate_range(va, 4096);
 
         // 3-descriptor chain: header (read) → data (write) → status (write).
         self.vq
@@ -111,13 +111,13 @@ impl Block {
 
         // Invalidate DMA buffers: discard stale cache lines so we read
         // what the device wrote (data + status), not stale cached values.
-        mmio::cache_clean_invalidate_range(va, 4096);
+        memory_mapped_io::cache_clean_invalidate_range(va, 4096);
 
         // Check status.
         let status = unsafe { *((va + 16 + SECTOR_SIZE) as *const u8) };
 
         if status != 0 {
-            page_alloc::free_frame(pa);
+            page_allocator::free_frame(pa);
 
             return Err("device error");
         }
@@ -127,7 +127,7 @@ impl Block {
             core::ptr::copy_nonoverlapping((va + 16) as *const u8, buf.as_mut_ptr(), SECTOR_SIZE);
         }
 
-        page_alloc::free_frame(pa);
+        page_allocator::free_frame(pa);
 
         Ok(())
     }
@@ -138,37 +138,37 @@ pub fn demo(device: Device) {
     let mut blk = match Block::new(device) {
         Some(b) => b,
         None => {
-            uart::puts("  🔌 virtio - blk init failed\n");
+            serial::puts("  🔌 virtio - blk init failed\n");
 
             return;
         }
     };
 
-    uart::puts("  🔌 virtio - blk capacity=");
-    uart::put_u64(blk.capacity());
-    uart::puts(" sectors\n");
+    serial::puts("  🔌 virtio - blk capacity=");
+    serial::put_u64(blk.capacity());
+    serial::puts(" sectors\n");
 
     let mut buf = [0u8; SECTOR_SIZE];
 
     match blk.read_sector(0, &mut buf) {
         Ok(()) => {
-            uart::puts("     sector 0 - ");
+            serial::puts("     sector 0 - ");
 
             // Print first 16 bytes as ASCII where printable, '.' otherwise.
             for &b in &buf[..16] {
                 if b >= 0x20 && b < 0x7F {
-                    uart::putc(b);
+                    serial::putc(b);
                 } else {
-                    uart::putc(b'.');
+                    serial::putc(b'.');
                 }
             }
 
-            uart::puts("\n");
+            serial::puts("\n");
         }
         Err(e) => {
-            uart::puts("     read failed - ");
-            uart::puts(e);
-            uart::puts("\n");
+            serial::puts("     read failed - ");
+            serial::puts(e);
+            serial::puts("\n");
         }
     }
 }
