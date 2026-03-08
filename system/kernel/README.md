@@ -2,14 +2,17 @@
 
 Bare-metal aarch64 kernel targeting QEMU's `virt` machine. Part of a [document-centric OS](../../design/concept.md).
 
-Boots with 4 SMP cores via PSCI, drops from EL2 to EL1, sets up the MMU with split TTBR (TTBR1 for kernel, TTBR0 per-process), and runs a preemptive priority scheduler. Two user processes at EL0 exchange messages over shared-memory IPC, then exit — the kernel fully reclaims all resources. Targets aarch64 only — the assembly, page table setup, and hardware drivers are all ARM-specific. QEMU emulates the hardware, so it runs on any host architecture.
+Boots with 4 SMP cores via PSCI, drops from EL2 to EL1, sets up the MMU with split TTBR (TTBR1 for kernel, TTBR0 per-process), and runs a preemptive EEVDF scheduler with handle-based scheduling contexts. Two user processes at EL0 exchange messages over shared-memory IPC, then exit — the kernel fully reclaims all resources. Targets aarch64 only — the assembly, page table setup, and hardware drivers are all ARM-specific. QEMU emulates the hardware, so it runs on any host architecture.
 
 ## Features
 
 - **SMP** — 4 cores via PSCI CPU_ON, per-core stacks/timers/GIC
   - Ticket spinlock with IRQ masking for all shared state
-- **Preemptive scheduling** — priority-based (idle/normal/high), 250 Hz timer tick
-  - Global run queue, O(1) priority selection, round-robin within levels
+- **Preemptive scheduling** — EEVDF (Earliest Eligible Virtual Deadline First), 250 Hz timer tick
+  - Proportional-fair CPU sharing with latency differentiation (shorter slice = earlier deadline)
+  - Scheduling contexts: handle-based kernel objects (budget/period) for temporal isolation
+  - Context donation: OS service borrows editor's context to bill rendering work correctly
+  - Kernel enforces mechanism + algorithm; OS service owns policy (content-type-aware budgets)
 - **Virtual memory** — 4-level page tables, per-process address spaces
   - Split TTBR: TTBR1 for kernel (shared), TTBR0 per-process (swapped on context switch)
   - W^X enforcement — no page is both writable and executable
@@ -49,7 +52,7 @@ cargo run --release   # builds, then launches QEMU
 ## Testing
 
 ```shell
-# Host-side unit tests (handle table, ELF parser, VMA, buddy allocator, slab):
+# Host-side unit tests (EEVDF, scheduling contexts, handles, ELF, VMA, buddy, slab, heap, ASID, virtqueue):
 cd system/host-tests && cargo test -- --test-threads=1
 
 # QEMU smoke test (builds, boots, checks output):
@@ -64,7 +67,7 @@ cd system/kernel && ./smoke-test.sh
   📦 heap - 16mib (linked-list + slab)
   🧩 frames - 60888 free (buddy allocator, 4k–4m)
   ⚡ interrupts - gic v2
-  📋 scheduler - priority queues (idle/normal/high)
+  📋 scheduler - eevdf + scheduling contexts
   🔌 virtio - blk capacity=2048 sectors
      sector 0 - HELLO VIRTIO BLK
   🔀 processes - init + echo, ipc channel
@@ -101,9 +104,12 @@ src/
   handle.rs                — per-process handle table (256 slots, read/write rights)
   paging.rs                — page table constants, memory layout, user VA map
   sync.rs                  — IrqMutex (ticket spinlock + IRQ masking, SMP-safe)
-  scheduler.rs             — SMP-aware priority scheduler (idle/normal/high), per-core state
-  thread.rs                — thread struct, state machine (Ready/Running/Blocked/Exited), priorities
-  syscall.rs               — syscall dispatcher (exit, write, yield, handle_close, signal, wait)
+  scheduling_algorithm.rs  — pure EEVDF algorithm (vruntime, eligibility, virtual deadline)
+  scheduling_context.rs    — pure budget/period logic (charge, replenish)
+  scheduler.rs             — SMP-aware EEVDF scheduler, scheduling context management, per-core state
+  thread.rs                — thread struct, state machine (Ready/Running/Blocked/Exited), scheduling fields
+  syscall.rs               — syscall dispatcher (10 syscalls: exit, write, yield, handle_close,
+                              channel_signal, channel_wait, scheduling_context_{create,borrow,return,bind})
   per_core.rs              — per-core data structures (online flag, core ID via MPIDR)
   power.rs                 — PSCI CPU_ON wrapper (HVC #0) for secondary core boot
   interrupt_controller.rs  — GICv2 distributor + CPU interface (per-core init)
@@ -129,11 +135,16 @@ build.rs                   — compiles user processes → ELF at build time
 ../user/link.ld            — shared userspace linker script (base VA 0x400000)
 
 ../host-tests/
-  tests/handle.rs          — handle table unit tests (host-side)
-  tests/elf.rs             — ELF parser unit tests (host-side)
-  tests/vma.rs             — VMA lookup/insert unit tests (host-side, includes memory_region.rs)
-  tests/buddy.rs           — buddy allocator tests (host-side, mock IrqMutex)
-  tests/slab.rs            — slab size-class selection tests (host-side)
+  tests/eevdf.rs           — EEVDF algorithm tests (eligibility, selection, vruntime)
+  tests/sched_context.rs   — scheduling context tests (budget, replenishment, charge)
+  tests/handle.rs          — handle table unit tests (insert, close, rights, full table)
+  tests/elf.rs             — ELF parser unit tests (valid/invalid binaries)
+  tests/vma.rs             — VMA lookup/insert unit tests (includes memory_region.rs)
+  tests/buddy.rs           — buddy allocator tests (mock IrqMutex)
+  tests/slab.rs            — slab size-class selection tests
+  tests/heap.rs            — heap allocator tests (alloc, free, coalescing)
+  tests/asid.rs            — ASID allocator tests (generation rollover)
+  tests/virtqueue.rs       — virtqueue descriptor chain validation tests
 
 smoke-test.sh              — QEMU boot + output verification (17 checks)
 ```
