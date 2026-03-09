@@ -25,7 +25,7 @@ pub struct Process {
     pub(crate) thread_count: u32,
 }
 /// Unique process identifier. Index into the scheduler's process table.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessId(pub u32);
 
 impl Process {
@@ -43,6 +43,82 @@ impl Process {
     }
 }
 
+/// Create a process from a user-provided ELF buffer, with a suspended thread.
+///
+/// Unlike `spawn_from_elf`, this eagerly maps ALL segment pages (the ELF data
+/// is temporary and can't be stored for demand paging). VMAs use Anonymous
+/// backing since all data is pre-loaded into frames. The initial thread is
+/// suspended — call `scheduler::start_suspended_threads` to make it runnable.
+pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &'static str> {
+    let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
+    let (asid, generation) = address_space_id::alloc();
+    let mut addr_space = Box::new(AddressSpace::new(asid, generation));
+
+    for i in 0..header.ph_count {
+        let seg = match executable::load_segment(elf_bytes, &header, i)
+            .map_err(|_| "bad program header")?
+        {
+            Some(seg) => seg,
+            None => continue,
+        };
+        let file_data =
+            executable::segment_data(elf_bytes, &seg).map_err(|_| "segment data out of bounds")?;
+        let attrs = executable::segment_attrs(seg.flags);
+        let base_va = seg.vaddr & !(PAGE_SIZE - 1);
+        let page_count = (seg.mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let is_exec = seg.flags & 1 != 0;
+        let is_write = seg.flags & 2 != 0;
+
+        // Anonymous backing — all pages are eagerly mapped below.
+        addr_space.vmas.insert(Vma {
+            start: base_va,
+            end: base_va + page_count * PAGE_SIZE,
+            readable: true,
+            writable: is_write,
+            executable: is_exec,
+            backing: Backing::Anonymous,
+        });
+
+        // Eagerly map ALL pages (ELF data is temporary).
+        for page in 0..page_count {
+            let pa = page_allocator::alloc_frame().ok_or("out of frames for user segment")?;
+            let va = base_va + page * PAGE_SIZE;
+            let seg_offset = page * PAGE_SIZE;
+
+            if seg_offset < seg.file_size {
+                let src_start = seg_offset as usize;
+                let src_end =
+                    core::cmp::min((seg_offset + PAGE_SIZE) as usize, seg.file_size as usize);
+                let src = &file_data[src_start..src_end];
+                let dst = memory::phys_to_virt(pa) as *mut u8;
+
+                unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) };
+            }
+
+            addr_space.map_page(va, pa.as_u64(), &attrs);
+        }
+    }
+
+    // Stack VMA + eagerly map top page (same as spawn_from_elf).
+    addr_space.vmas.insert(Vma {
+        start: USER_STACK_VA,
+        end: USER_STACK_TOP,
+        readable: true,
+        writable: true,
+        executable: false,
+        backing: Backing::Anonymous,
+    });
+
+    let top_stack_va = USER_STACK_TOP - PAGE_SIZE;
+    let pa = page_allocator::alloc_frame().ok_or("out of frames for user stack")?;
+
+    addr_space.map_page(top_stack_va, pa.as_u64(), &PageAttrs::user_rw());
+
+    let process_id = scheduler::create_process(addr_space);
+    let thread_id = scheduler::spawn_user_suspended(process_id, header.entry, USER_STACK_TOP);
+
+    Ok((process_id, thread_id))
+}
 /// Parse an ELF binary and spawn a user process with one thread.
 ///
 /// Creates a Process (address space + handle table) and one initial Thread.

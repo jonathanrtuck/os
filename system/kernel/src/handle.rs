@@ -7,6 +7,7 @@
 //! on every operation.
 
 use super::interrupt::InterruptId;
+use super::process::ProcessId;
 use super::scheduling_context::SchedulingContextId;
 use super::thread::ThreadId;
 use super::timer::TimerId;
@@ -31,6 +32,7 @@ pub struct Rights(u32);
 pub enum HandleObject {
     Channel(ChannelId),
     Interrupt(InterruptId),
+    Process(ProcessId),
     SchedulingContext(SchedulingContextId),
     Thread(ThreadId),
     Timer(TimerId),

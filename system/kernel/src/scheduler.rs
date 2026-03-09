@@ -41,6 +41,9 @@ struct State {
     /// Threads waiting on a resource (Blocked state). Moved here from
     /// cores[].current when a thread blocks; moved back to queue by wake().
     blocked: Vec<Box<Thread>>,
+    /// Threads created but not yet started (two-phase process creation).
+    /// Moved to ready queue by `start_suspended_threads`.
+    suspended: Vec<Box<Thread>>,
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
     /// All processes. Index = ProcessId.0.
@@ -59,19 +62,25 @@ enum ExitInfo {
     /// Last thread in the process — full cleanup required.
     Last {
         thread_id: ThreadId,
+        process_id: ProcessId,
         channels: Vec<super::handle::ChannelId>,
         interrupts: Vec<super::interrupt::InterruptId>,
         timers: Vec<super::timer::TimerId>,
         thread_handles: Vec<ThreadId>,
+        process_handles: Vec<ProcessId>,
         process: Process,
     },
     /// Not the last thread — just clean up this thread.
-    NonLast { thread_id: ThreadId },
+    NonLast {
+        thread_id: ThreadId,
+        process_id: ProcessId,
+    },
 }
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {
     queue: RunQueue { ready: Vec::new() },
     blocked: Vec::new(),
+    suspended: Vec::new(),
     cores: {
         const INIT: PerCoreState = PerCoreState {
             current: None,
@@ -87,9 +96,14 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
 });
 
 impl ExitInfo {
+    fn process_id(&self) -> ProcessId {
+        match self {
+            ExitInfo::Last { process_id, .. } | ExitInfo::NonLast { process_id, .. } => *process_id,
+        }
+    }
     fn thread_id(&self) -> ThreadId {
         match self {
-            ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id } => *thread_id,
+            ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id, .. } => *thread_id,
         }
     }
 }
@@ -660,11 +674,13 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             let mut timers = Vec::new();
             let mut interrupts = Vec::new();
             let mut thread_handles = Vec::new();
+            let mut process_handles = Vec::new();
 
             for obj in handle_objects {
                 match obj {
                     HandleObject::Channel(id) => channels.push(id),
                     HandleObject::Interrupt(id) => interrupts.push(id),
+                    HandleObject::Process(id) => process_handles.push(id),
                     HandleObject::SchedulingContext(id) => {
                         release_context_inner(&mut s, id);
                     }
@@ -675,20 +691,32 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
 
             ExitInfo::Last {
                 thread_id: tid,
+                process_id: pid,
                 channels,
                 interrupts,
                 timers,
                 thread_handles,
+                process_handles,
                 process,
             }
         } else {
-            ExitInfo::NonLast { thread_id: tid }
+            ExitInfo::NonLast {
+                thread_id: tid,
+                process_id: pid,
+            }
         }
     };
     // Phase 2: notify thread exit (acquires thread_exit lock, then scheduler lock).
     let thread_id = exit_info.thread_id();
+    let process_id = exit_info.process_id();
+    let is_last = matches!(exit_info, ExitInfo::Last { .. });
 
     super::thread_exit::notify_exit(thread_id);
+
+    // Notify process exit if this was the last thread.
+    if is_last {
+        super::process_exit::notify_exit(process_id);
+    }
     // Phase 2a: remove from futex wait queues (acquires futex lock, not scheduler).
     super::futex::remove_thread(thread_id);
 
@@ -698,6 +726,7 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             interrupts,
             timers,
             thread_handles,
+            process_handles,
             process,
             ..
         } => {
@@ -713,6 +742,9 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             }
             for id in thread_handles {
                 super::thread_exit::destroy(id);
+            }
+            for id in process_handles {
+                super::process_exit::destroy(id);
             }
 
             // Phase 4: free address space.
@@ -891,6 +923,52 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
     s.queue.ready.push(thread);
 
     ThreadId(id)
+}
+/// Like `spawn_user`, but the thread is placed in the suspended list instead
+/// of the ready queue. Call `start_suspended_threads` to make it runnable.
+///
+/// Used by `process_create` (two-phase creation: create suspended, then start).
+pub fn spawn_user_suspended(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> ThreadId {
+    let mut s = STATE.lock();
+    let id = s.next_id;
+
+    s.next_id += 1;
+
+    let process = s.processes[process_id.0 as usize]
+        .as_mut()
+        .expect("process not found");
+    let ttbr0 = process.address_space.ttbr0_value();
+
+    process.thread_count += 1;
+
+    let thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top);
+
+    s.suspended.push(thread);
+
+    ThreadId(id)
+}
+/// Move all suspended threads belonging to `process_id` into the ready queue.
+///
+/// Returns true if any threads were started. Used by `process_start` syscall.
+pub fn start_suspended_threads(process_id: ProcessId) -> bool {
+    let mut s = STATE.lock();
+    let mut started = false;
+    let mut i = 0;
+
+    while i < s.suspended.len() {
+        if s.suspended[i].process_id == Some(process_id) {
+            let thread = s.suspended.swap_remove(i);
+
+            s.queue.ready.push(thread);
+
+            started = true;
+            // Don't increment i — swap_remove moved the last element here.
+        } else {
+            i += 1;
+        }
+    }
+
+    started
 }
 /// Store a wait set on the current thread. Must be called BEFORE checking
 /// handle readiness, so that signals arriving during the gap can find the

@@ -632,7 +632,7 @@ Creates a new thread in the calling process. Shares address space and handle tab
 
 ---
 
-### 9.4 Process Creation from Userspace (Phase 3)
+### 9.4 Process Creation from Userspace (Phase 3) — Done
 
 **Goal:** Allow the OS service to spawn new processes.
 
@@ -647,7 +647,9 @@ Creates a new thread in the calling process. Shares address space and handle tab
 
 **Two-phase create/start:** Gives the parent time to set up the child (transfer handles, bind scheduling context) before it runs.
 
-**Implementation:** Reuses `spawn_from_elf` internals. ELF data copied from user memory into kernel buffer (can't reference user pages across address spaces).
+**Implementation:** `process.rs` (`create_from_user_elf` — eagerly maps ALL segment pages with `Backing::Anonymous` since user ELF data is temporary). `process_exit.rs` — dedicated module for process exit notification (own `IrqMutex<State>`, same two-phase wake pattern as thread_exit/timer/interrupt). `HandleObject::Process(ProcessId)` variant. Scheduler gains `suspended: Vec<Box<Thread>>` to hold threads until `start_suspended_threads(pid)` moves them to the ready queue. Exit path extended: last-thread-exit calls `process_exit::notify_exit` and drains Process handles from the exiting process's handle table.
+
+**Key design choice — eager mapping:** User-provided ELF bytes live in the caller's address space and can't be referenced later (unlike `&'static [u8]` for embedded ELFs). Solution: copy ELF data to a kernel buffer, eagerly map all pages, use `Backing::Anonymous` on VMAs, drop the buffer. Max ELF size: 1 MiB.
 
 **Depends on:** Phase 2a (Process struct).
 
@@ -742,7 +744,7 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 | 17  | dma_alloc                 | Implemented |
 | 18  | dma_free                  | Implemented |
 | 19  | thread_create             | Implemented |
-| 20  | process_create            | Phase 3     |
-| 21  | process_start             | Phase 3     |
+| 20  | process_create            | Implemented |
+| 21  | process_start             | Implemented |
 | 22  | handle_send               | Phase 4     |
 | 23  | process_kill              | Phase 6     |

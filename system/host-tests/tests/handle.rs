@@ -9,6 +9,10 @@ mod interrupt {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct InterruptId(pub u8);
 }
+mod process {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ProcessId(pub u32);
+}
 mod thread {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct ThreadId(pub u64);
@@ -376,6 +380,41 @@ fn drain_includes_thread_handles() {
     assert!(matches!(
         items[1],
         (Handle(1), HandleObject::Thread(thread::ThreadId(2)))
+    ));
+}
+
+// --- Process handles ---
+
+fn pr(id: u32) -> HandleObject {
+    HandleObject::Process(process::ProcessId(id))
+}
+
+#[test]
+fn insert_and_get_process() {
+    let mut t = HandleTable::new();
+    let h = t.insert(pr(7), Rights::READ_WRITE).unwrap();
+    let obj = t.get(h, Rights::READ).unwrap();
+
+    assert!(matches!(obj, HandleObject::Process(process::ProcessId(7))));
+}
+
+#[test]
+fn drain_includes_process_handles() {
+    let mut t = HandleTable::new();
+
+    t.insert(ch(1), Rights::READ).unwrap();
+    t.insert(pr(2), Rights::READ_WRITE).unwrap();
+
+    let items: Vec<_> = t.drain().collect();
+
+    assert_eq!(items.len(), 2);
+    assert!(matches!(
+        items[0],
+        (Handle(0), HandleObject::Channel(ChannelId(1)))
+    ));
+    assert!(matches!(
+        items[1],
+        (Handle(1), HandleObject::Process(process::ProcessId(2)))
     ));
 }
 

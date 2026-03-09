@@ -37,6 +37,8 @@ mod nr {
     pub const DMA_ALLOC: u64 = 17;
     pub const DMA_FREE: u64 = 18;
     pub const THREAD_CREATE: u64 = 19;
+    pub const PROCESS_CREATE: u64 = 20;
+    pub const PROCESS_START: u64 = 21;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +181,21 @@ pub fn interrupt_ack(handle: u8) -> i64 {
 /// Returns the handle index on success, or a negative error code.
 pub fn interrupt_register(irq: u32) -> i64 {
     unsafe { syscall1(nr::INTERRUPT_REGISTER, irq as u64) as i64 }
+}
+/// Create a process from an ELF binary in memory. Returns a waitable handle.
+///
+/// The child process starts suspended — call `process_start` with the returned
+/// handle to make its thread runnable. The handle becomes ready when the child's
+/// last thread exits. Returns the handle index on success, or a negative error.
+pub fn process_create(elf_ptr: *const u8, elf_len: usize) -> i64 {
+    unsafe { syscall2(nr::PROCESS_CREATE, elf_ptr as u64, elf_len as u64) as i64 }
+}
+/// Start a suspended child process.
+///
+/// Makes all suspended threads in the process identified by `handle` runnable.
+/// Returns 0 on success, or a negative error code.
+pub fn process_start(handle: u8) -> i64 {
+    unsafe { syscall1(nr::PROCESS_START, handle as u64) as i64 }
 }
 /// Bind a scheduling context to the calling thread.
 ///

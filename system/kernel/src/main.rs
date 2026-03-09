@@ -69,6 +69,7 @@ mod paging;
 mod per_core;
 mod power;
 mod process;
+mod process_exit;
 mod scheduler;
 mod scheduling_algorithm;
 mod scheduling_context;

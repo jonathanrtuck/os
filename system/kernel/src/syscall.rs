@@ -34,6 +34,8 @@
 //! | 17 | dma_alloc                 | x0=order, x1=pa_out_ptr           | user VA          |
 //! | 18 | dma_free                  | x0=user_va, x1=order              | 0                |
 //! | 19 | thread_create             | x0=entry_va, x1=stack_top         | handle           |
+//! | 20 | process_create            | x0=elf_ptr, x1=elf_len            | handle           |
+//! | 21 | process_start             | x0=handle                         | 0                |
 //!
 //! # Error codes
 //!
@@ -60,6 +62,9 @@ use super::interrupt::InterruptId;
 use super::page_allocator;
 use super::paging;
 use super::paging::USER_VA_END;
+use super::process;
+use super::process::ProcessId;
+use super::process_exit;
 use super::scheduler;
 use super::serial;
 use super::thread::ThreadId;
@@ -90,6 +95,8 @@ pub mod nr {
     pub const DMA_ALLOC: u64 = 17;
     pub const DMA_FREE: u64 = 18;
     pub const THREAD_CREATE: u64 = 19;
+    pub const PROCESS_CREATE: u64 = 20;
+    pub const PROCESS_START: u64 = 21;
 }
 
 #[repr(i64)]
@@ -107,6 +114,8 @@ pub enum Error {
 
 /// Maximum DMA allocation order (2^4 pages = 64 KiB).
 const MAX_DMA_ORDER: u64 = 4;
+/// Maximum ELF size for process_create (1 MiB).
+const MAX_ELF_SIZE: u64 = 1024 * 1024;
 /// Maximum number of handles in a single `wait` call.
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -383,6 +392,7 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
     // Release kernel resources associated with the closed handle.
     match obj {
         HandleObject::Interrupt(id) => interrupt::destroy(id),
+        HandleObject::Process(id) => process_exit::destroy(id),
         HandleObject::SchedulingContext(id) => scheduler::release_scheduling_context(id),
         HandleObject::Thread(id) => thread_exit::destroy(id),
         HandleObject::Timer(id) => timer::destroy(id),
@@ -390,6 +400,75 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
     }
 
     Ok(0)
+}
+fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
+    // Validate length.
+    if elf_len == 0 || elf_len > MAX_ELF_SIZE {
+        return Err(Error::BadLength);
+    }
+    // Validate buffer range.
+    if elf_ptr >= USER_VA_END {
+        return Err(Error::BadAddress);
+    }
+
+    let end = elf_ptr.checked_add(elf_len).ok_or(Error::BadAddress)?;
+
+    if end > USER_VA_END {
+        return Err(Error::BadAddress);
+    }
+    if !is_user_range_readable(elf_ptr, elf_len) {
+        return Err(Error::BadAddress);
+    }
+
+    // Copy ELF data from user memory to a kernel buffer.
+    // SAFETY: TTBR0 is still loaded. Range validated above.
+    let elf_data = unsafe {
+        let src = core::slice::from_raw_parts(elf_ptr as *const u8, elf_len as usize);
+        let mut buf = Vec::with_capacity(elf_len as usize);
+
+        buf.extend_from_slice(src);
+
+        buf
+    };
+
+    // Create process with suspended initial thread.
+    let (process_id, _thread_id) =
+        process::create_from_user_elf(&elf_data).map_err(|_| Error::InvalidArgument)?;
+
+    // Create process exit notification state.
+    process_exit::create(process_id);
+
+    // Insert Process handle into the caller's handle table.
+    let handle = scheduler::current_process_do(|p| {
+        p.handles
+            .insert(HandleObject::Process(process_id), Rights::READ_WRITE)
+    })
+    .map_err(|_| {
+        process_exit::destroy(process_id);
+        Error::InvalidArgument
+    })?;
+
+    Ok(handle.0 as u64)
+}
+fn sys_process_start(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u8::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let process_id = scheduler::current_process_do(|p| {
+        match p.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+            Ok(HandleObject::Process(id)) => Ok(id),
+            Ok(_) => Err(Error::InvalidArgument),
+            Err(_) => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    if scheduler::start_suspended_threads(process_id) {
+        Ok(0)
+    } else {
+        // No suspended threads — already started or invalid.
+        Err(Error::InvalidArgument)
+    }
 }
 fn sys_scheduling_context_bind(handle_nr: u64) -> Result<u64, Error> {
     if handle_nr > u8::MAX as u64 {
@@ -547,6 +626,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             match obj {
                 HandleObject::Channel(_)
                 | HandleObject::Interrupt(_)
+                | HandleObject::Process(_)
                 | HandleObject::Thread(_)
                 | HandleObject::Timer(_) => {
                     entries.push(WaitEntry {
@@ -568,12 +648,14 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             return ctx as *const Context;
         }
     };
-    // Collect timer, interrupt, and thread IDs for waiter registration and cleanup.
+    // Collect IDs for waiter registration and cleanup.
     let mut timer_ids: [Option<TimerId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
     let mut interrupt_ids: [Option<InterruptId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
     let mut thread_ids: [Option<ThreadId>; MAX_WAIT_HANDLES as usize] =
+        [None; MAX_WAIT_HANDLES as usize];
+    let mut process_ids: [Option<ProcessId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
 
     for entry in &wait_entries {
@@ -581,6 +663,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             HandleObject::Timer(id) => timer_ids[entry.user_index as usize] = Some(id),
             HandleObject::Interrupt(id) => interrupt_ids[entry.user_index as usize] = Some(id),
             HandleObject::Thread(id) => thread_ids[entry.user_index as usize] = Some(id),
+            HandleObject::Process(id) => process_ids[entry.user_index as usize] = Some(id),
             _ => {}
         }
     }
@@ -596,6 +679,9 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     for &id in thread_ids.iter().flatten() {
         thread_exit::register_waiter(id, caller_id);
     }
+    for &id in process_ids.iter().flatten() {
+        process_exit::register_waiter(id, caller_id);
+    }
 
     // Store wait set BEFORE checking readiness. This ensures that if a signal
     // arrives during the readiness check, set_wake_pending_for_handle can find
@@ -609,6 +695,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         let ready = match entry.object {
             HandleObject::Channel(ch_id) => channel::check_pending(ch_id, caller_id),
             HandleObject::Interrupt(int_id) => interrupt::check_pending(int_id),
+            HandleObject::Process(p_id) => process_exit::check_exited(p_id),
             HandleObject::Thread(t_id) => thread_exit::check_exited(t_id),
             HandleObject::Timer(t_id) => timer::check_fired(t_id),
             _ => false,
@@ -621,6 +708,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             unregister_timers(&timer_ids);
             unregister_interrupts(&interrupt_ids);
             unregister_threads(&thread_ids);
+            unregister_processes(&process_ids);
 
             c.x[0] = entry.user_index as u64;
 
@@ -635,6 +723,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         unregister_timers(&timer_ids);
         unregister_interrupts(&interrupt_ids);
         unregister_threads(&thread_ids);
+        unregister_processes(&process_ids);
 
         c.x[0] = Error::WouldBlock as i64 as u64;
 
@@ -649,6 +738,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     unregister_timers(&timer_ids);
     unregister_interrupts(&interrupt_ids);
     unregister_threads(&thread_ids);
+    unregister_processes(&process_ids);
 
     result
 }
@@ -693,6 +783,14 @@ fn sys_yield(ctx: *mut Context) -> *const Context {
 fn unregister_interrupts(ids: &[Option<InterruptId>]) {
     for &id in ids.iter().flatten() {
         interrupt::unregister_waiter(id);
+    }
+}
+/// Unregister process exit waiters after `sys_wait` returns (any path).
+///
+/// Safe to call even if the waiter was already cleared by the exit path.
+fn unregister_processes(ids: &[Option<ProcessId>]) {
+    for &id in ids.iter().flatten() {
+        process_exit::unregister_waiter(id);
     }
 }
 /// Unregister thread exit waiters after `sys_wait` returns (any path).
@@ -866,6 +964,22 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::THREAD_CREATE => {
             c.x[0] = match sys_thread_create(c.x[0], c.x[1]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::PROCESS_CREATE => {
+            c.x[0] = match sys_process_create(c.x[0], c.x[1]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::PROCESS_START => {
+            c.x[0] = match sys_process_start(c.x[0]) {
                 Ok(n) => n,
                 Err(e) => e as i64 as u64,
             };
