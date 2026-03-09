@@ -454,7 +454,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **Planned approach:**
 
-- **Device discovery:** Parse DTB (device tree blob) at boot to enumerate devices. QEMU `virt` passes DTB in `x0` at entry (currently ignored by `boot.S`).
+- **Device discovery:** Parse DTB (device tree blob) at boot to enumerate devices. DTB is found by scanning RAM (QEMU/macOS doesn't pass DTB PA in x0). **Implemented:** DTB parser discovers 39 devices; GIC base addresses and virtio-mmio devices are now initialized from DTB data instead of hardcoded constants. Fallback to QEMU `virt` defaults if DTB is unavailable.
 - **MMIO mapping:** Syscall to map a device's MMIO region into the calling process's address space. Returns a device handle. The driver reads/writes registers as normal memory operations — zero overhead.
 - **Interrupt forwarding:** Driver registers for a device's interrupt via syscall. The kernel's IRQ handler masks the interrupt and signals the driver's handle. Driver calls `interrupt_ack` when done (unmasks). One context switch per interrupt.
 - **DMA buffers:** Syscall to allocate physically contiguous pages (buddy allocator) and map into driver's address space. Returns the physical address for programming device descriptors.
@@ -468,7 +468,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 | interrupt_ack      | handle                  | 0          |
 | dma_alloc          | order                   | handle, PA |
 
-**Depends on:** DTB parser (device discovery), `wait` (interrupt notification).
+**Depends on:** DTB parser (device discovery, **done**), `wait` (interrupt notification, **done**).
 
 ---
 

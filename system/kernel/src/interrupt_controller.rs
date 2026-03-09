@@ -1,21 +1,37 @@
-//! ARM GICv2 interrupt controller (QEMU `virt` memory map).
+//! ARM GICv2 interrupt controller.
+//!
+//! Base addresses are set at boot from the DTB (or hardcoded defaults for
+//! QEMU `virt`). Uses `AtomicUsize` for the bases — written once during init,
+//! read on every interrupt.
 //!
 //! `init_distributor()` configures the shared distributor (core 0 only).
 //! `init_cpu_interface()` configures the per-core CPU interface (every core).
 
 use super::memory::KERNEL_VA_OFFSET;
 use super::memory_mapped_io;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
-const GICC_BASE: usize = 0x0801_0000 + KERNEL_VA_OFFSET;
-const GICC_CTLR: usize = GICC_BASE;
-const GICC_PMR: usize = GICC_BASE + 0x0004;
-const GICC_IAR: usize = GICC_BASE + 0x000C;
-const GICC_EOIR: usize = GICC_BASE + 0x0010;
-const GICD_BASE: usize = 0x0800_0000 + KERNEL_VA_OFFSET;
-const GICD_CTLR: usize = GICD_BASE;
-const GICD_ISENABLER: usize = GICD_BASE + 0x100;
-const GICD_IPRIORITYR: usize = GICD_BASE + 0x400;
+/// GIC register offsets from distributor / CPU interface base.
+const CTLR: usize = 0x0000;
+const PMR: usize = 0x0004;
+const IAR: usize = 0x000C;
+const EOIR: usize = 0x0010;
+const ISENABLER: usize = 0x100;
+const IPRIORITYR: usize = 0x400;
 const SPURIOUS: u32 = 1023;
+/// Default QEMU `virt` addresses — used if DTB is unavailable.
+const DEFAULT_GICC_PA: usize = 0x0801_0000;
+const DEFAULT_GICD_PA: usize = 0x0800_0000;
+
+static GICC_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICC_PA + KERNEL_VA_OFFSET);
+static GICD_BASE: AtomicUsize = AtomicUsize::new(DEFAULT_GICD_PA + KERNEL_VA_OFFSET);
+
+fn gicc() -> usize {
+    GICC_BASE.load(Ordering::Relaxed)
+}
+fn gicd() -> usize {
+    GICD_BASE.load(Ordering::Relaxed)
+}
 
 pub fn acknowledge() -> Option<u32> {
     // DSB SY before reading IAR: ensure all previous memory accesses
@@ -23,7 +39,7 @@ pub fn acknowledge() -> Option<u32> {
     // GIC MMIO is outer-shareable device memory, requiring full system barrier.
     unsafe { core::arch::asm!("dsb sy", options(nostack)) };
 
-    let iar = memory_mapped_io::read32(GICC_IAR);
+    let iar = memory_mapped_io::read32(gicc() + IAR);
     let id = iar & 0x3FF;
 
     if id == SPURIOUS {
@@ -33,11 +49,12 @@ pub fn acknowledge() -> Option<u32> {
     }
 }
 pub fn enable_irq(id: u32) {
+    let base = gicd();
     let reg_offset = (id / 32) as usize * 4;
     let bit = 1u32 << (id % 32);
 
-    memory_mapped_io::write32(GICD_ISENABLER + reg_offset, bit);
-    memory_mapped_io::write8(GICD_IPRIORITYR + id as usize, 0x80);
+    memory_mapped_io::write32(base + ISENABLER + reg_offset, bit);
+    memory_mapped_io::write8(base + IPRIORITYR + id as usize, 0x80);
 
     // DSB SY + ISB after distributor writes: ensure enable takes effect
     // before any subsequent interrupt handling. Full system barrier because
@@ -45,7 +62,7 @@ pub fn enable_irq(id: u32) {
     unsafe { core::arch::asm!("dsb sy", "isb", options(nostack)) };
 }
 pub fn end_of_interrupt(iar: u32) {
-    memory_mapped_io::write32(GICC_EOIR, iar);
+    memory_mapped_io::write32(gicc() + EOIR, iar);
 
     // DSB SY after EOIR write: ensure the end-of-interrupt is visible to
     // the GIC before we return. Prevents a stale interrupt from re-firing.
@@ -58,10 +75,20 @@ pub fn init() {
 }
 /// Initialize the GIC CPU interface (per-core, call on every core).
 pub fn init_cpu_interface() {
-    memory_mapped_io::write32(GICC_PMR, 0xFF);
-    memory_mapped_io::write32(GICC_CTLR, 1);
+    let base = gicc();
+
+    memory_mapped_io::write32(base + PMR, 0xFF);
+    memory_mapped_io::write32(base + CTLR, 1);
 }
 /// Initialize the GIC distributor (global, core 0 only).
 pub fn init_distributor() {
-    memory_mapped_io::write32(GICD_CTLR, 1);
+    memory_mapped_io::write32(gicd() + CTLR, 1);
+}
+/// Override GIC base addresses from the DTB.
+///
+/// Must be called before `init()` and before booting secondary cores.
+/// Both arguments are physical addresses.
+pub fn set_base_addresses(gicd_pa: u64, gicc_pa: u64) {
+    GICD_BASE.store(gicd_pa as usize + KERNEL_VA_OFFSET, Ordering::Relaxed);
+    GICC_BASE.store(gicc_pa as usize + KERNEL_VA_OFFSET, Ordering::Relaxed);
 }

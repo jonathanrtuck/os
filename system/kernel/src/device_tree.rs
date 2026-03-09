@@ -145,10 +145,11 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
     let strings = blob.get(off_dt_strings..totalsize)?;
     let mut devices = Vec::new();
     let mut offset = 0usize;
-    // Per-node property accumulator.
+    // Per-node property accumulator. Saved/restored via stack for nesting.
     let mut node_compatible: Option<String> = None;
     let mut node_regs: Option<Vec<(u64, u64)>> = None;
     let mut node_irq: Option<u32> = None;
+    let mut stack: Vec<(Option<String>, Option<Vec<(u64, u64)>>, Option<u32>)> = Vec::new();
 
     loop {
         if offset + 4 > structs.len() {
@@ -171,10 +172,9 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
                 }
 
                 offset = align4(offset);
-                // Reset accumulator for new node.
-                node_compatible = None;
-                node_regs = None;
-                node_irq = None;
+
+                // Save parent's accumulator before starting this node.
+                stack.push((node_compatible.take(), node_regs.take(), node_irq.take()));
             }
             FDT_END_NODE => {
                 // Emit device if this node had a compatible string and reg.
@@ -189,6 +189,13 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
                 }
 
                 node_irq = None;
+
+                // Restore parent's accumulator.
+                if let Some((c, r, i)) = stack.pop() {
+                    node_compatible = c;
+                    node_regs = r;
+                    node_irq = i;
+                }
             }
             FDT_PROP => {
                 if offset + 8 > structs.len() {

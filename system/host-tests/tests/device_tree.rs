@@ -290,6 +290,43 @@ fn parse_multiple_reg_entries() {
     assert_eq!(dev.regs[1], (0x0801_0000, 0x10000));
 }
 #[test]
+fn parse_nested_node_preserves_parent() {
+    // GIC node with a v2m child — mirrors real QEMU virt DTB structure.
+    // The parent must be emitted even though a child node intervenes.
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node("");
+    builder.begin_node("intc@8000000");
+    builder.prop_str("compatible", "arm,cortex-a15-gic");
+    builder.prop_reg("reg", &[(0x0800_0000, 0x10000), (0x0801_0000, 0x10000)]);
+    // Child node.
+    builder.begin_node("v2m@8020000");
+    builder.prop_str("compatible", "arm,gic-v2m-frame");
+    builder.prop_reg("reg", &[(0x0802_0000, 0x1000)]);
+    builder.end_node(); // v2m
+    builder.end_node(); // intc
+    builder.end_node(); // root
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("should parse");
+
+    // Both parent and child should be discovered.
+    assert_eq!(dt.device_count(), 2);
+
+    let gic = dt
+        .find_first("arm,cortex-a15-gic")
+        .expect("should find GIC");
+
+    assert_eq!(gic.regs.len(), 2);
+    assert_eq!(gic.regs[0], (0x0800_0000, 0x10000));
+    assert_eq!(gic.regs[1], (0x0801_0000, 0x10000));
+
+    let v2m = dt.find_first("arm,gic-v2m-frame").expect("should find v2m");
+
+    assert_eq!(v2m.regs.len(), 1);
+    assert_eq!(v2m.regs[0], (0x0802_0000, 0x1000));
+}
+#[test]
 fn parse_ppi_interrupt() {
     let mut builder = FdtBuilder::new();
 

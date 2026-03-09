@@ -1,9 +1,7 @@
-//! Virtio MMIO transport layer (QEMU `virt`).
+//! Virtio MMIO transport layer.
 //!
-//! QEMU's `virt` machine exposes 32 virtio-mmio slots starting at PA
-//! 0x0a00_0000, each 0x200 bytes apart. SPI interrupts start at GIC IRQ 48
-//! (SPI 16). This module handles device probing, feature negotiation, and
-//! the MMIO register interface. Device drivers (console, blk) build on top.
+//! Probes virtio-mmio devices discovered from the DTB. Falls back to
+//! scanning 32 hardcoded QEMU `virt` slots if no DTB is available.
 //!
 //! Supports both legacy (v1) and modern (v2) transports, but queue setup
 //! uses v2 registers. Pass `-global virtio-mmio.force-legacy=false` to QEMU
@@ -13,6 +11,7 @@ pub mod block;
 pub mod console;
 pub mod virtqueue;
 
+use super::device_tree;
 use super::memory::KERNEL_VA_OFFSET;
 use super::memory_mapped_io;
 use super::serial;
@@ -173,36 +172,38 @@ impl Device {
     }
 }
 
-/// Probe virtio-mmio devices and initialize any found drivers.
-///
-/// Called once during boot. Logs discovered devices and demonstrates
-/// end-to-end virtqueue I/O when devices are present.
-pub fn init() {
-    let mut found_any = false;
+/// Probe virtio-mmio devices using DTB-provided addresses and IRQs.
+fn probe_from_dtb(dt: &device_tree::DeviceTable, found: &mut impl FnMut(Device)) {
+    for dtb_dev in dt.find_all("virtio,mmio") {
+        let pa = dtb_dev.base_address();
+        let base = pa as usize + KERNEL_VA_OFFSET;
 
-    probe(|device| {
-        found_any = true;
-
-        match device.device_id {
-            DEVICE_BLK => block::demo(device),
-            DEVICE_CONSOLE => console::demo(device),
-            id => {
-                serial::puts("  🔌 virtio - unknown id=");
-                serial::put_u32(id);
-                serial::puts("\n");
-            }
+        if memory_mapped_io::read32(base + REG_MAGIC) != VIRTIO_MAGIC {
+            continue;
         }
-    });
 
-    if !found_any {
-        serial::puts("  🔌 virtio - no devices\n");
+        let version = memory_mapped_io::read32(base + REG_VERSION);
+
+        if version != 1 && version != 2 {
+            continue;
+        }
+
+        let device_id = memory_mapped_io::read32(base + REG_DEVICE_ID);
+
+        if device_id == 0 {
+            continue; // No device in this slot.
+        }
+
+        found(Device {
+            base,
+            device_id,
+            irq: dtb_dev.irq.unwrap_or(0),
+            version,
+        });
     }
 }
-/// Probe all 32 virtio-mmio slots. Calls `found` for each valid device.
-///
-/// Supports both legacy (v1) and modern (v2) transports. QEMU `virt`
-/// defaults to v1 unless `-global virtio-mmio.force-legacy=false` is set.
-pub fn probe(mut found: impl FnMut(Device)) {
+/// Fallback: probe all 32 hardcoded QEMU `virt` virtio-mmio slots.
+fn probe_hardcoded(found: &mut impl FnMut(Device)) {
     for i in 0..VIRTIO_MMIO_COUNT {
         let base = VIRTIO_MMIO_BASE + i * VIRTIO_MMIO_STRIDE;
 
@@ -228,5 +229,40 @@ pub fn probe(mut found: impl FnMut(Device)) {
             irq: VIRTIO_IRQ_BASE + i as u32,
             version,
         });
+    }
+}
+
+/// Probe virtio-mmio devices and initialize any found drivers.
+///
+/// Uses DTB-provided device addresses when available, falls back to
+/// scanning 32 hardcoded QEMU `virt` slots.
+pub fn init(device_table: Option<&device_tree::DeviceTable>) {
+    let mut found_any = false;
+    let mut handle = |device: Device| {
+        found_any = true;
+
+        match device.device_id {
+            DEVICE_BLK => block::demo(device),
+            DEVICE_CONSOLE => console::demo(device),
+            id => {
+                serial::puts("  🔌 virtio - unknown id=");
+                serial::put_u32(id);
+                serial::puts("\n");
+            }
+        }
+    };
+
+    if let Some(dt) = device_table {
+        probe_from_dtb(dt, &mut handle);
+    } else {
+        probe_hardcoded(&mut handle);
+    }
+
+    if !found_any {
+        if device_table.is_some() {
+            serial::puts("  🔌 virtio - no devices (dtb)\n");
+        } else {
+            serial::puts("  🔌 virtio - no devices (hardcoded)\n");
+        }
     }
 }

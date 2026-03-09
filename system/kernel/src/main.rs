@@ -269,11 +269,37 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     serial::puts("  🧩 frames - ");
     serial::put_u32(page_allocator::free_count() as u32);
     serial::puts(" free (buddy allocator, 4k–4m)\n");
+
+    // Wire DTB into device initialization.
+    let gic_from_dtb = if let Some(ref dt) = device_table {
+        // GIC: look for "arm,cortex-a15-gic" (QEMU virt GICv2).
+        // The reg property has two entries: [distributor, CPU interface].
+        if let Some(gic) = dt.find_first("arm,cortex-a15-gic") {
+            if gic.regs.len() >= 2 {
+                interrupt_controller::set_base_addresses(gic.regs[0].0, gic.regs[1].0);
+
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
     interrupt_controller::init();
-    serial::puts("  ⚡ interrupts - gic v2\n");
+
+    if gic_from_dtb {
+        serial::puts("  ⚡ interrupts - gic v2 (dtb)\n");
+    } else {
+        serial::puts("  ⚡ interrupts - gic v2 (hardcoded)\n");
+    }
+
     scheduler::init();
     serial::puts("  📋 scheduler - eevdf + scheduling contexts\n");
-    virtio::init();
+    virtio::init(device_table.as_ref());
 
     // Spawn user processes and create an IPC channel between them.
     let init_id = process::spawn_from_elf(INIT_ELF).expect("failed to spawn init");

@@ -16,6 +16,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DTB_FILE="${SCRIPT_DIR}/virt.dtb"
 DISK_IMG="${SCRIPT_DIR}/test.img"
 
+# Kill any lingering QEMU that holds our disk image lock.
+pkill -f "qemu-system-aarch64.*${DISK_IMG}" 2>/dev/null && sleep 0.2
+
 # Create test disk if it doesn't exist.
 if [ ! -f "$DISK_IMG" ]; then
     dd if=/dev/zero of="$DISK_IMG" bs=1M count=1 2>/dev/null
