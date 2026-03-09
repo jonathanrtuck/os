@@ -7,6 +7,7 @@
 //! on every operation.
 
 use super::scheduling_context::SchedulingContextId;
+use super::timer::TimerId;
 
 const MAX_HANDLES: usize = 256;
 
@@ -28,6 +29,7 @@ pub struct Rights(u32);
 pub enum HandleObject {
     Channel(ChannelId),
     SchedulingContext(SchedulingContextId),
+    Timer(TimerId),
 }
 #[derive(Clone, Copy)]
 struct HandleEntry {

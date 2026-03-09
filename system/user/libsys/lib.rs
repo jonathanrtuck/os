@@ -30,6 +30,7 @@ mod nr {
     pub const FUTEX_WAIT: u64 = 10;
     pub const FUTEX_WAKE: u64 = 11;
     pub const WAIT: u64 = 12;
+    pub const TIMER_CREATE: u64 = 13;
 }
 
 // ---------------------------------------------------------------------------
@@ -160,6 +161,13 @@ pub fn scheduling_context_create(budget: u64, period: u64) -> i64 {
 /// Returns 0 on success, or a negative error code.
 pub fn scheduling_context_return() -> i64 {
     unsafe { syscall0(nr::SCHEDULING_CONTEXT_RETURN) as i64 }
+}
+/// Create a one-shot timer that fires after `timeout_ns` nanoseconds.
+///
+/// Returns the handle index on success, or a negative error code.
+/// Wait on the returned handle via `wait` to block until the deadline.
+pub fn timer_create(timeout_ns: u64) -> i64 {
+    unsafe { syscall1(nr::TIMER_CREATE, timeout_ns) as i64 }
 }
 /// Wait for an event on one or more handles.
 ///

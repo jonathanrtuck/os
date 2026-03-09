@@ -7,6 +7,10 @@
 mod handle;
 #[path = "../../kernel/src/scheduling_context.rs"]
 mod scheduling_context;
+mod timer {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct TimerId(pub u8);
+}
 
 use handle::*;
 
@@ -260,6 +264,49 @@ fn drain_mixed_channel_and_scheduling_context() {
     assert!(matches!(
         items[2],
         (Handle(2), HandleObject::Channel(ChannelId(3)))
+    ));
+}
+
+// --- Timer handles ---
+
+fn tm(id: u8) -> HandleObject {
+    HandleObject::Timer(timer::TimerId(id))
+}
+
+#[test]
+fn insert_and_get_timer() {
+    let mut t = HandleTable::new();
+    let h = t.insert(tm(5), Rights::READ).unwrap();
+    let obj = t.get(h, Rights::READ).unwrap();
+
+    assert!(matches!(obj, HandleObject::Timer(timer::TimerId(5))));
+}
+
+#[test]
+fn drain_mixed_all_handle_types() {
+    let mut t = HandleTable::new();
+
+    t.insert(ch(1), Rights::READ).unwrap();
+    t.insert(sc(2), Rights::WRITE).unwrap();
+    t.insert(tm(3), Rights::READ).unwrap();
+
+    let items: Vec<_> = t.drain().collect();
+
+    assert_eq!(items.len(), 3);
+    assert!(matches!(
+        items[0],
+        (Handle(0), HandleObject::Channel(ChannelId(1)))
+    ));
+    assert!(matches!(
+        items[1],
+        (
+            Handle(1),
+            HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(2))
+        )
+    ));
+    assert!(matches!(
+        items[2],
+        (Handle(2), HandleObject::Timer(timer::TimerId(3)))
     ));
 }
 

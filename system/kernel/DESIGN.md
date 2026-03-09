@@ -421,8 +421,8 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 | ----------------- | ----------- | ------------------------------------- |
 | Channel           | Implemented | Shared-memory IPC ring buffer         |
 | SchedulingContext | Implemented | Budget/period time allocation         |
+| Timer             | Implemented | One-shot deadline notification        |
 | Device (planned)  | —           | MMIO mapping + interrupt notification |
-| Timer (planned)   | —           | One-shot deadline notification        |
 
 **Guiding rule:** Every new kernel feature should be expressible as "a new handle type that can be waited on."
 
@@ -432,13 +432,13 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **Goal:** A single syscall for blocking on multiple event sources. The foundational primitive for event-driven userspace — without it, processes need one thread per event source.
 
-**Syscall:** `wait(handles_ptr, count, timeout_ns) → index`. Syscall #12. Block until any handle has a pending event or timeout expires. Returns the 0-based index of the first ready handle in x0. Timeout of `0` = poll (non-blocking check, returns `WouldBlock` if none ready). Timeout of `u64::MAX` = wait forever. Currently supports Channel handles; Timer and Device handles will be added when those handle types are implemented. Timeout support beyond poll/forever deferred until Timer handles exist.
+**Syscall:** `wait(handles_ptr, count, timeout_ns) → index`. Syscall #12. Block until any handle has a pending event or timeout expires. Returns the 0-based index of the first ready handle in x0. Timeout of `0` = poll (non-blocking check, returns `WouldBlock` if none ready). Timeout of `u64::MAX` = wait forever. Supports Channel and Timer handles; Device handles will be added when implemented. Timeout support beyond poll/forever deferred (userspace can create a timer handle for custom timeouts).
 
 **Replaced:** `channel_wait` (syscall #5, removed). `wait` with a single channel handle is equivalent but uses the general mechanism.
 
-**Unifies:** Channel notifications (now), interrupt delivery, timer expiry (planned) — all through one mechanism.
+**Unifies:** Channel notifications, timer expiry, interrupt delivery (planned) — all through one mechanism.
 
-**Lost-wakeup prevention:** The wait set is stored on the thread *before* checking handle readiness. If a signal arrives during the readiness scan, `channel::signal` calls `set_wake_pending_for_handle` which finds the wait set and sets `wake_pending` + `wake_result` on the thread. `block_current_unless_woken` checks the flag and returns immediately with the correct index. This is the same pattern used by futex — the `wake_pending` flag is now shared infrastructure for all blocking paths.
+**Lost-wakeup prevention:** The wait set is stored on the thread _before_ checking handle readiness. If a signal arrives during the readiness scan, `channel::signal` calls `set_wake_pending_for_handle` which finds the wait set and sets `wake_pending` + `wake_result` on the thread. `block_current_unless_woken` checks the flag and returns immediately with the correct index. This is the same pattern used by futex — the `wake_pending` flag is now shared infrastructure for all blocking paths.
 
 **Lock ordering:** Channel lock → scheduler lock (unchanged). The readiness check acquires the channel lock (one channel at a time). Blocking acquires the scheduler lock. The wait set stored on the thread (under scheduler lock) bridges the two: signalers under the scheduler lock can read the wait set to compute the return index without needing the channel lock.
 
@@ -472,15 +472,23 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 ---
 
-## 8.4 Timers (planned)
+## 8.4 Timers
 
 **Goal:** Userspace-visible timer kernel objects. Processes need timeouts for I/O, animation, network protocols.
 
-**Planned approach:** `timer_create(deadline_ns) → handle`. One-shot timer. The handle becomes "ready" when the deadline passes. Waited on via `wait_any` alongside channels, interrupts, etc. Fits "handles all the way down" — timers are kernel objects with the same lifecycle as channels and scheduling contexts.
+**Syscall:** `timer_create(timeout_ns) → handle`. Syscall #13. Creates a one-shot timer that fires after `timeout_ns` nanoseconds. The returned handle becomes permanently "ready" when the deadline passes (level-triggered — unlike channels which consume the signal). Waited on via `wait` alongside channels. Fits "handles all the way down" — timers are kernel objects with the same lifecycle as channels and scheduling contexts.
 
-**Implementation:** Sorted timer queue (or timer wheel) checked on each tick. When a timer fires, signal its handle (wake any process waiting on it via `wait_any`).
+**Deadline representation:** Internally stored as absolute counter ticks (not nanoseconds) to avoid repeated ns↔ticks conversion on every 250 Hz tick check. Computed at creation: `deadline = counter() + timeout_ns * freq / 1e9`.
 
-**Depends on:** `wait_any` (useless without event multiplexing).
+**Firing mechanism:** The hardware timer IRQ handler calls `check_expired()` on every tick. Two-phase design: scan all 32 timer slots under the timer lock, collect fired (timer_id, waiter_thread_id) pairs, release lock, then wake each waiter via `try_wake_for_handle` / `set_wake_pending_for_handle`. Maintains lock ordering: timer → scheduler.
+
+**Waiter tracking:** Each timer stores `waiter: Option<ThreadId>`. Set by `sys_wait` before checking readiness (same store-before-check pattern as the wait set). Cleared by the fire path (`.take()`) or by explicit unregister when `wait` returns for any other reason. Prevents stale registrations.
+
+**Level-triggered:** Once fired, `check_fired()` returns true on every call until the timer is destroyed. One-shot timers don't need signal consumption — the user should close the handle after use.
+
+**Implementation:** `timer.rs` (timer objects + hardware timer), `syscall.rs` (sys_timer_create, sys_wait timer integration), `handle.rs` (Timer variant). 32-slot table under `IrqMutex`. Process exit cleanup via handle drain.
+
+**Depends on:** `wait` (event multiplexing).
 
 ---
 

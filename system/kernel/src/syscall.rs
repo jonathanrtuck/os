@@ -27,6 +27,7 @@
 //! | 10 | futex_wait                | x0=addr, x1=expected              | 0 (may block)    |
 //! | 11 | futex_wake                | x0=addr, x1=count                 | threads woken    |
 //! | 12 | wait                      | x0=handles_ptr, x1=count, x2=timeout_ns | ready index (may block) |
+//! | 13 | timer_create              | x0=timeout_ns                     | handle           |
 //!
 //! # Error codes
 //!
@@ -52,6 +53,8 @@ use super::paging::USER_VA_END;
 use super::scheduler;
 use super::serial;
 use super::thread::WaitEntry;
+use super::timer;
+use super::timer::TimerId;
 use super::Context;
 use alloc::vec::Vec;
 
@@ -68,6 +71,7 @@ pub mod nr {
     pub const FUTEX_WAIT: u64 = 10;
     pub const FUTEX_WAKE: u64 = 11;
     pub const WAIT: u64 = 12;
+    pub const TIMER_CREATE: u64 = 13;
 }
 
 #[repr(i64)]
@@ -222,8 +226,10 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
     let obj = scheduler::current_thread_do(|thread| thread.handles.close(Handle(handle_nr as u8)))?;
 
     // Release kernel resources associated with the closed handle.
-    if let HandleObject::SchedulingContext(id) = obj {
-        scheduler::release_scheduling_context(id);
+    match obj {
+        HandleObject::SchedulingContext(id) => scheduler::release_scheduling_context(id),
+        HandleObject::Timer(id) => timer::destroy(id),
+        _ => {}
     }
 
     Ok(0)
@@ -283,6 +289,23 @@ fn sys_scheduling_context_return() -> Result<u64, Error> {
         Err(Error::NotBorrowing)
     }
 }
+fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
+    let timer_id = timer::create(timeout_ns).ok_or(HandleError::TableFull)?;
+
+    match scheduler::current_thread_do(|thread| {
+        thread
+            .handles
+            .insert(HandleObject::Timer(timer_id), Rights::READ)
+    }) {
+        Ok(handle) => Ok(handle.0 as u64),
+        Err(e) => {
+            // Handle table full — clean up the timer we just created.
+            timer::destroy(timer_id);
+
+            Err(e)
+        }
+    }
+}
 fn sys_wait(ctx: *mut Context) -> *const Context {
     let c = unsafe { &mut *ctx };
     let handles_ptr = c.x[0];
@@ -333,7 +356,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             let obj = thread.handles.get(Handle(h), Rights::READ)?;
 
             match obj {
-                HandleObject::Channel(_) => {
+                HandleObject::Channel(_) | HandleObject::Timer(_) => {
                     entries.push(WaitEntry {
                         object: obj,
                         user_index: i as u8,
@@ -353,6 +376,22 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             return ctx as *const Context;
         }
     };
+    // Collect timer IDs for waiter registration and cleanup.
+    let mut timer_ids: [Option<TimerId>; MAX_WAIT_HANDLES as usize] =
+        [None; MAX_WAIT_HANDLES as usize];
+
+    for entry in &wait_entries {
+        if let HandleObject::Timer(id) = entry.object {
+            timer_ids[entry.user_index as usize] = Some(id);
+        }
+    }
+    // Register as waiter on each timer BEFORE storing wait set and checking
+    // readiness. If a timer fires in the gap, set_wake_pending_for_handle
+    // can target this thread.
+    for &id in timer_ids.iter().flatten() {
+        timer::register_waiter(id, caller_id);
+    }
+
     // Store wait set BEFORE checking readiness. This ensures that if a signal
     // arrives during the readiness check, set_wake_pending_for_handle can find
     // the wait set and prevent a lost wakeup.
@@ -362,21 +401,29 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
 
     // Check each handle for readiness.
     for entry in &entries_for_check {
-        if let HandleObject::Channel(ch_id) = entry.object {
-            if channel::check_pending(ch_id, caller_id) {
-                // Ready — signal consumed. Clear wait state and return index.
-                scheduler::clear_wait_state();
+        let ready = match entry.object {
+            HandleObject::Channel(ch_id) => channel::check_pending(ch_id, caller_id),
+            HandleObject::Timer(t_id) => timer::check_fired(t_id),
+            _ => false,
+        };
 
-                c.x[0] = entry.user_index as u64;
+        if ready {
+            // Ready — clear wait state, unregister from timers, return index.
+            scheduler::clear_wait_state();
 
-                return ctx as *const Context;
-            }
+            unregister_timers(&timer_ids);
+
+            c.x[0] = entry.user_index as u64;
+
+            return ctx as *const Context;
         }
     }
 
     // None ready. Poll mode: return immediately.
     if timeout == 0 {
         scheduler::clear_wait_state();
+
+        unregister_timers(&timer_ids);
 
         c.x[0] = Error::WouldBlock as i64 as u64;
 
@@ -385,7 +432,12 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
 
     // Block until woken. wake_pending catches signals that arrived in the gap
     // between store_wait_set and here.
-    scheduler::block_current_unless_woken(ctx)
+    let result = scheduler::block_current_unless_woken(ctx);
+
+    // Woken — unregister from any timers that didn't fire.
+    unregister_timers(&timer_ids);
+
+    result
 }
 fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
     if len > MAX_WRITE_LEN {
@@ -421,6 +473,14 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
 }
 fn sys_yield(ctx: *mut Context) -> *const Context {
     scheduler::schedule(ctx)
+}
+/// Unregister timer waiters after `sys_wait` returns (any path).
+///
+/// Safe to call even if the timer's waiter was already cleared by the fire path.
+fn unregister_timers(ids: &[Option<TimerId>]) {
+    for &id in ids.iter().flatten() {
+        timer::unregister_waiter(id);
+    }
 }
 /// Translate a user virtual address to a physical address using hardware AT.
 ///
@@ -523,6 +583,14 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             c.x[0] = match sys_futex_wake(c.x[0], c.x[1]) {
                 Ok(n) => n,
                 Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::TIMER_CREATE => {
+            c.x[0] = match sys_timer_create(c.x[0]) {
+                Ok(n) => n,
+                Err(e) => e.into(),
             };
 
             ctx as *const Context
