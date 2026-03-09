@@ -373,3 +373,32 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 **Prior art:** Linux EEVDF (kernel 6.6+, Stoica & Abdel-Wahab 1995 paper), seL4 MCS scheduling contexts (Lyons et al.), QNX adaptive partitioning (partition inheritance = context donation), Apple Clutch (thread groups = content-type grouping).
 
 **Depends on:** 1.1 (sync primitives), 1.3 (SMP scheduler infrastructure), 0.8 (handle table for scheduling context handles).
+
+---
+
+## 7.1 Unsafe Minimization Discipline
+
+**Goal:** Formalize an invariant that all `unsafe` code is concentrated in low-level primitives, with safe interfaces exported to higher layers. Inspired by Asterinas's framekernel architecture (safe Rust services atop an unsafe framework layer) and Theseus's compiler-as-isolation approach.
+
+**Invariant:** `unsafe` blocks are permitted only for operations that cannot be expressed in safe Rust:
+
+1. **Inline assembly** — CPU register access, system instructions (`msr`, `mrs`, `dsb`, `tlbi`, `wfe`, `hvc`, `svc`, `dc`), memory barriers.
+2. **Volatile MMIO** — `read_volatile`/`write_volatile` for memory-mapped device registers and page table entries.
+3. **Linker symbol access** — Reading addresses of symbols defined in `boot.S` or the linker script (`__text_start`, `__kernel_end`, etc.).
+4. **Raw pointer arithmetic in page table walks** — Navigating hardware-defined 4-level page table structures where pointer offsets are derived from VA bit extraction.
+5. **`GlobalAlloc` trait implementation** — Required by the Rust allocator interface.
+6. **`Send`/`Sync` trait implementations** — Where the safety argument is documented and rests on specific synchronization guarantees (e.g., `IrqMutex` provides exclusive access, write-once statics are immutable after init).
+7. **Stack/context allocation** — `alloc_zeroed`, `dealloc`, `core::mem::zeroed()` for thread contexts and stacks where layout is known.
+
+**Prohibited patterns:**
+
+- No `static mut`. Use `AtomicU64`, `IrqMutex`, or write-once `UnsafeCell` with documented safety argument.
+- No `unsafe` in the OS service layer (EL0 trusted process). If the OS service needs `unsafe`, that's a design smell — the kernel API is missing an abstraction.
+- No `transmute` except for zero-cost conversions between repr-compatible types (none currently needed).
+- No raw pointer dereference outside the categories above. If you're dereferencing a raw pointer in business logic, extract a safe abstraction.
+
+**Audit baseline (2026-03-08):** ~99 `unsafe` blocks across kernel + userspace. All justified. Zero `static mut`. Categories: assembly/hardware (33), raw pointer walks (30+), system register reads (15), unsafe trait impls (4), static/global state (6), memory/stack ops (8), syscall wrappers (3). No vulnerabilities found.
+
+**Enforcement:** Code review discipline (no tooling enforcement yet). Every new `unsafe` block must include a `// SAFETY:` comment explaining which category it falls under and why the invariants hold. Existing blocks should be annotated incrementally.
+
+**Rationale:** The kernel already follows this discipline emergently. Formalizing it prevents drift as the codebase grows. The key insight from Asterinas: if you can draw a clear line between "unsafe foundation" and "safe services," the trusted computing base for memory safety is just the foundation — everything above it gets compiler-verified safety for free. Our line: kernel primitives (categories 1-7 above) are the foundation; everything else — scheduler logic, handle table operations, process management, IPC channel logic — is safe Rust built on those primitives.

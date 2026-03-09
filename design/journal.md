@@ -29,8 +29,14 @@ Active questions we've started exploring but haven't resolved. Each thread links
 ### Kernel architecture
 
 **Informs:** Decision #16 (Technical Foundation)
-**Status:** Research spike complete (all 7 steps). IPC mechanism settled. Scheduling algorithm settled. Most sub-decisions settled.
+**Status:** Research spike complete (all 7 steps). IPC mechanism settled. Scheduling algorithm settled. Most sub-decisions settled. Unsafe minimization discipline formalized (DESIGN.md §7.1).
 **Context:** From-scratch kernel (committed, promoted from tentative) with Rust (committed) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process), OS-mediated handles for access control, ELF as binary format, IPC via shared memory ring buffers with handle-based access control, three-layer process architecture (kernel + OS service + editors), SMP (4 cores), EEVDF + scheduling contexts (combined). Remaining unknowns: driver model, filesystem.
+
+### COW Filesystem
+
+**Informs:** Decision #16 (Technical Foundation — filesystem sub-decision), Decision #12 (Undo)
+**Status:** Research complete, design pending. See `design/research-cow-filesystems.md`.
+**Context:** Studied RedoxFS (Rust, COW but no snapshots), ZFS (birth time + dead lists = gold standard for snapshots), Btrfs (refcounted subvolumes), Bcachefs (key-level versioning). Key findings: (1) birth time in block pointers is non-negotiable for efficient snapshots, (2) ZFS dead lists make deletion tractable, (3) per-document scoping needed (datasets/subvolumes, not whole-FS snapshots), (4) `beginOp`/`endOp` maps naturally to COW transaction boundaries. TFS (Redox's predecessor) attempted per-file revision history but didn't ship it — cautionary data point. Open questions: snapshot naming, pruning policy, compound document atomicity, interaction with memory mapping.
 
 ### ~~Privilege model (EL1 / EL0 boundary)~~ — SETTLED
 
@@ -178,6 +184,34 @@ With a web engine as renderer (Approach A), the OS can only do what the engine s
 ### Settling the approach, not the technology (2026-03-08)
 
 Decision #11 was settled by choosing the architectural approach (web engine as substrate, adaptation layer between engine and OS service) without committing to a specific engine. The interesting design work is in the interface between engine and OS service — the "blue layer" — not in the engine choice itself. The engine is a leaf node: complex inside, simple interface. Any engine that can be adapted to speak the OS's protocol works. This mirrors how Decision #16 settled IPC (shared memory ring buffers) without specifying message formats. The pattern: settle the architecture, defer the implementation.
+
+### Files are a feature, not a limitation (2026-03-08)
+
+Phantom OS tried to eliminate files entirely via orthogonal persistence (memory IS storage). The problems it encountered — ratchet (bugs persist forever, no clean restart), schema evolution (code updates vs persistent object structures), blast radius (one corrupted object graph poisons everything), GC at scale (unsolved) — are all consequences of removing the boundaries that files provide. Files give you: isolation (corrupt one document, not the system), format boundaries (schema evolution via format versioning), natural undo points (COW snapshots per file), and interoperability (external formats). Our "no save" approach preserves the same UX ("I never lose work") by writing immediately to a COW filesystem — getting the benefit without the systemic fragility. The lesson: the boundary between "document" and "storage" is load-bearing, not incidental.
+
+### BeOS independently validated three of our decisions (2026-03-08)
+
+BeOS/Haiku has been running with: MIME as OS-managed filesystem metadata (our Decision #5), typed indexed queryable attributes replacing folder navigation (our Decision #7), and a system-level Translation Kit with interchange formats (our Decision #14) — for 25+ years. We arrived at the same designs from first principles. This is strong validation. The differences that matter: BeOS attributes are lost on non-BFS volumes (portability problem), BFS indexes aren't retroactive (our system should be), translators don't chain automatically (open question for us), and BeOS is still app-centric at runtime (our OS-owns-rendering model is more radical).
+
+### Typed IPC contracts formalize the edit protocol (2026-03-08)
+
+Singularity's channel contracts are state machines defining valid message sequences with typed payloads. Compiler proves endpoints agree on protocol state. Our edit protocol (beginOp/endOp) is already a state machine. Formalizing IPC messages as contracts — even without compiler enforcement — would prevent editors from deadlocking the OS service, document the editor plugin API precisely (since "IPC message types ARE the editor plugin API"), and enable runtime validation at the trust boundary. This should inform the IPC message format design when we get there.
+
+### Oberon's text-as-command eliminates the CLI/GUI distinction (2026-03-08)
+
+In Oberon, any text on screen is potentially a command. Middle-click on `Module.Procedure` in any document and it executes. "Tool texts" are editable documents containing commands — user-configurable menus that are just text files. The insight: there IS no CLI/GUI split. Text is both content and command. Every document is simultaneously a workspace. This directly addresses our open thread on CLI/GUI parity (Decision #17). Our content-type awareness could recognize "command references" within text — a tool text becomes a compound document where some content is executable.
+
+### Birth time is the key insight for efficient snapshots (2026-03-08)
+
+ZFS's single most important design choice for snapshots: store the birth transaction group (TXG) in every block pointer. When freeing a block, compare its birth time to the previous snapshot's TXG — if born after, free it; if born before, it belongs to the snapshot. This gives O(1) snapshot creation, O(delta) deletion, and unlimited snapshots. The alternative (per-snapshot bitmaps) is O(N) per snapshot and limits snapshot count. RedoxFS stores only a seahash checksum in block pointers — no temporal information. Adding birth generation to block pointers would be the minimum viable change to enable proper snapshots. Dead lists (ZFS's sub-listed approach) make deletion near-optimal: O(sublists + blocks to free). For our "no save" model where `endOperation` creates a snapshot, efficient deletion is critical.
+
+### Operation boundaries map naturally to COW transaction boundaries (2026-03-08)
+
+`beginOperation` opens a COW transaction, editor writes are COW'd, `endOperation` commits the transaction and creates a snapshot. No impedance mismatch. The edit protocol and the filesystem protocol are structurally the same thing — this is the kind of accidental alignment that suggests the design is coherent.
+
+### Unsafe minimization as stated invariant (2026-03-08)
+
+Audit of all ~99 `unsafe` blocks in the kernel found zero unnecessary uses. All fall into 7 categories: inline assembly, volatile MMIO, linker symbols, page table walks, GlobalAlloc, Send/Sync impls, stack/context allocation. The kernel already follows the Asterinas pattern (unsafe foundation + safe services) emergently. Formalized as section 7.1 in kernel DESIGN.md to prevent drift as the codebase grows. Key rule: if the OS service (EL0) ever needs `unsafe`, the kernel API is missing an abstraction.
 
 ### Security as a side effect of good architecture (2026-03-07)
 
