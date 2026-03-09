@@ -402,3 +402,107 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 **Enforcement:** Code review discipline (no tooling enforcement yet). Every new `unsafe` block must include a `// SAFETY:` comment explaining which category it falls under and why the invariants hold. Existing blocks should be annotated incrementally.
 
 **Rationale:** The kernel already follows this discipline emergently. Formalizing it prevents drift as the codebase grows. The key insight from Asterinas: if you can draw a clear line between "unsafe foundation" and "safe services," the trusted computing base for memory safety is just the foundation — everything above it gets compiler-verified safety for free. Our line: kernel primitives (categories 1-7 above) are the foundation; everything else — scheduler logic, handle table operations, process management, IPC channel logic — is safe Rust built on those primitives.
+
+---
+
+## 8.1 Kernel Identity: Microkernel by Convergence
+
+**Settled 2026-03-08.** The kernel is a microkernel. Not by ideology — each sub-decision independently pushed complexity outward (drivers, filesystem, rendering, editors all in userspace). What remains is the microkernel set: address spaces, threads, IPC (channels), scheduling (EEVDF + scheduling contexts), interrupt forwarding, and handle-based access control.
+
+**The kernel's job:** Multiplex hardware resources behind handles. Provide a single event-driven wait mechanism (`wait_any`). The kernel doesn't understand what any resource is *for* — it just manages access.
+
+**Handle types (current and planned):**
+
+| Handle type          | Status    | Resource                            |
+|----------------------|-----------|-------------------------------------|
+| Channel              | Implemented | Shared-memory IPC ring buffer    |
+| SchedulingContext    | Implemented | Budget/period time allocation    |
+| Device (planned)     | —         | MMIO mapping + interrupt notification |
+| Timer (planned)      | —         | One-shot deadline notification    |
+
+**Guiding rule:** Every new kernel feature should be expressible as "a new handle type that can be waited on."
+
+---
+
+## 8.2 Event Multiplexing: `wait_any` (planned)
+
+**Goal:** A single syscall for blocking on multiple event sources. The foundational primitive for event-driven userspace — without it, processes need one thread per event source.
+
+**Planned approach:** `wait_any(handles: &[Handle], timeout_ns: u64) → (index, status)`. Block until any handle has a pending event or timeout expires. Returns the index of the first ready handle. Timeout of 0 = poll (non-blocking check). Timeout of `u64::MAX` = wait forever.
+
+**Unifies:** Channel notifications, interrupt delivery, timer expiry, futex wakeups — all through one mechanism. Replaces the current `channel_wait` (which waits on exactly one handle) with a general multiplexer.
+
+**Why this matters:** Userspace drivers need to wait on "interrupt OR timeout." The OS service needs to wait on "any of N editor channels." A filesystem service needs "block completion OR shutdown signal." One primitive covers all cases.
+
+**Prior art:** Linux epoll, FreeBSD kqueue, Fuchsia `zx_object_wait_many`, seL4 notification objects.
+
+---
+
+## 8.3 Device Handles & Interrupt Forwarding (planned)
+
+**Goal:** Support userspace drivers. The kernel provides hardware access through handles; drivers run at EL0.
+
+**Planned approach:**
+
+- **Device discovery:** Parse DTB (device tree blob) at boot to enumerate devices. QEMU `virt` passes DTB in `x0` at entry (currently ignored by `boot.S`).
+- **MMIO mapping:** Syscall to map a device's MMIO region into the calling process's address space. Returns a device handle. The driver reads/writes registers as normal memory operations — zero overhead.
+- **Interrupt forwarding:** Driver registers for a device's interrupt via syscall. The kernel's IRQ handler masks the interrupt and signals the driver's handle. Driver calls `interrupt_ack` when done (unmasks). One context switch per interrupt.
+- **DMA buffers:** Syscall to allocate physically contiguous pages (buddy allocator) and map into driver's address space. Returns the physical address for programming device descriptors.
+
+**New syscalls (planned):**
+
+| Syscall               | Args                           | Returns       |
+|-----------------------|--------------------------------|---------------|
+| device_map            | device_id, offset, size        | handle        |
+| interrupt_register    | device_id, irq_nr              | handle        |
+| interrupt_ack         | handle                         | 0             |
+| dma_alloc             | order                          | handle, PA    |
+
+**Depends on:** DTB parser (device discovery), `wait_any` (interrupt notification).
+
+---
+
+## 8.4 Timers (planned)
+
+**Goal:** Userspace-visible timer kernel objects. Processes need timeouts for I/O, animation, network protocols.
+
+**Planned approach:** `timer_create(deadline_ns) → handle`. One-shot timer. The handle becomes "ready" when the deadline passes. Waited on via `wait_any` alongside channels, interrupts, etc. Fits "handles all the way down" — timers are kernel objects with the same lifecycle as channels and scheduling contexts.
+
+**Implementation:** Sorted timer queue (or timer wheel) checked on each tick. When a timer fires, signal its handle (wake any process waiting on it via `wait_any`).
+
+**Depends on:** `wait_any` (useless without event multiplexing).
+
+---
+
+## 8.5 Futex (planned)
+
+**Goal:** Fast userspace synchronization primitive. Building block for mutexes, condition variables, semaphores — all without creating kernel objects per lock.
+
+**Planned approach:** Two syscalls:
+
+- `futex_wait(addr, expected_value)` — If `*addr == expected_value`, put the calling thread to sleep on a wait queue keyed by the physical address. If `*addr != expected_value`, return immediately (avoids lost wakeup).
+- `futex_wake(addr, count)` — Wake up to `count` threads sleeping on the wait queue for this address.
+
+**Fast path:** Userspace does an atomic CAS to acquire a lock. No syscall. Slow path (contention): `futex_wait` to sleep, `futex_wake` to wake. Kernel involvement only on contention.
+
+**Implementation:** Hash table of wait queues keyed by physical address (translate user VA → PA to handle shared memory correctly).
+
+**Prior art:** Linux futex(2) — the standard answer. Every userspace mutex library (pthreads, parking_lot, std::sync::Mutex) is built on futex.
+
+---
+
+## 8.6 DTB Parser (planned)
+
+**Goal:** Replace hardcoded device addresses with device tree discovery. Makes the kernel portable across hardware configurations.
+
+**Planned approach:** Parse the Flattened Device Tree (FDT) blob passed by firmware in `x0` at boot. Extract: device types, MMIO base addresses, interrupt numbers, compatible strings. `boot.S` must preserve `x0` before calling `kernel_main`. Parser is `no_std`, `no_alloc` feasible (~200-300 lines). Build a simple in-memory device table that `device_map` and `interrupt_register` syscalls reference.
+
+**Currently hardcoded (to be replaced):**
+
+| Device    | Address        | Source       |
+|-----------|---------------|--------------|
+| GIC       | 0x0800_0000   | QEMU virt    |
+| UART      | 0x0900_0000   | QEMU virt    |
+| virtio    | 0x0A00_0000+  | QEMU virt    |
+
+**Depends on:** Nothing. Self-contained, no design dependencies. Good first implementation target.

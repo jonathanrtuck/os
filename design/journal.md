@@ -26,17 +26,17 @@ Active questions we've started exploring but haven't resolved. Each thread links
 **Status:** Briefly mentioned, not explored
 **Context:** The view/edit distinction is clear in GUI. How does it translate to CLI? Tools-as-subshells? Read-commands-always-safe? The CLI and GUI are equally fundamental interfaces (Belief #4), so the CLI can't be an afterthought.
 
-### Kernel architecture
+### ~~Kernel architecture~~ — SETTLED (microkernel)
 
 **Informs:** Decision #16 (Technical Foundation)
-**Status:** Research spike complete (all 7 steps). IPC mechanism settled. Scheduling algorithm settled. Most sub-decisions settled. Unsafe minimization discipline formalized (DESIGN.md §7.1).
-**Context:** From-scratch kernel (committed, promoted from tentative) with Rust (committed) on aarch64. Settled: soft RT, no hypervisor (EL1 not EL2), preemptive + cooperative yield, traditional privilege model (all userspace at EL0), split TTBR (TTBR1 kernel, TTBR0 per-process), OS-mediated handles for access control, ELF as binary format, IPC via shared memory ring buffers with handle-based access control, three-layer process architecture (kernel + OS service + editors), SMP (4 cores), EEVDF + scheduling contexts (combined). Remaining unknowns: driver model, filesystem.
+**Status:** All sub-decisions settled except filesystem COW on-disk design. Kernel is a microkernel by convergence.
+**Context:** From-scratch Rust kernel on aarch64. Microkernel: address spaces, threads, IPC, scheduling, interrupt forwarding, handles. All semantic code in userspace. Settled: soft RT, no hypervisor (EL1), preemptive + cooperative yield, traditional privilege (EL0), split TTBR, handles, ELF, ring buffer IPC, three-layer process arch, SMP (4 cores), EEVDF + scheduling contexts, userspace drivers (MMIO mapping + interrupt forwarding), userspace filesystem (kernel owns COW/VM, filesystem manages on-disk layout). Remaining: filesystem COW on-disk design.
 
 ### COW Filesystem
 
 **Informs:** Decision #16 (Technical Foundation — filesystem sub-decision), Decision #12 (Undo)
-**Status:** Research complete, design pending. See `design/research-cow-filesystems.md`.
-**Context:** Studied RedoxFS (Rust, COW but no snapshots), ZFS (birth time + dead lists = gold standard for snapshots), Btrfs (refcounted subvolumes), Bcachefs (key-level versioning). Key findings: (1) birth time in block pointers is non-negotiable for efficient snapshots, (2) ZFS dead lists make deletion tractable, (3) per-document scoping needed (datasets/subvolumes, not whole-FS snapshots), (4) `beginOp`/`endOp` maps naturally to COW transaction boundaries. TFS (Redox's predecessor) attempted per-file revision history but didn't ship it — cautionary data point. Open questions: snapshot naming, pruning policy, compound document atomicity, interaction with memory mapping.
+**Status:** Placement settled (userspace service), COW on-disk design pending. See `design/research-cow-filesystems.md`.
+**Context:** Studied RedoxFS (Rust, COW but no snapshots), ZFS (birth time + dead lists = gold standard for snapshots), Btrfs (refcounted subvolumes), Bcachefs (key-level versioning). Key findings: (1) birth time in block pointers is non-negotiable for efficient snapshots, (2) ZFS dead lists make deletion tractable, (3) per-document scoping needed (datasets/subvolumes, not whole-FS snapshots), (4) `beginOp`/`endOp` maps naturally to COW transaction boundaries. TFS (Redox's predecessor) attempted per-file revision history but didn't ship it — cautionary data point. Filesystem is a userspace service — kernel owns COW/VM mechanics (page fault handler), filesystem manages on-disk layout (B-trees, block allocation, snapshots). Open questions: on-disk format, snapshot naming, pruning policy, compound document atomicity, page cache placement, interaction with memory mapping.
 
 ### ~~Privilege model (EL1 / EL0 boundary)~~ — SETTLED
 
@@ -201,6 +201,10 @@ Singularity's channel contracts are state machines defining valid message sequen
 
 In Oberon, any text on screen is potentially a command. Middle-click on `Module.Procedure` in any document and it executes. "Tool texts" are editable documents containing commands — user-configurable menus that are just text files. The insight: there IS no CLI/GUI split. Text is both content and command. Every document is simultaneously a workspace. This directly addresses our open thread on CLI/GUI parity (Decision #17). Our content-type awareness could recognize "command references" within text — a tool text becomes a compound document where some content is executable.
 
+### The kernel is a handle multiplexer with one wait primitive (2026-03-08)
+
+A pattern emerged from settling drivers and filesystem: the kernel's job is multiplexing hardware resources behind handles + providing a single event-driven wait mechanism (`wait_any`). Memory (address spaces), communication (channels), time (scheduling contexts), devices (MMIO mappings + interrupt handles), timers — all accessed via handles, all waited on via one syscall. The kernel doesn't understand what any of these are *for*. It just manages them. This is a concrete identity statement for the kernel: it's the handle multiplexer. Everything semantic (content types, document state, filesystem layout, driver protocols, rendering) lives in userspace. The consequence: every new kernel feature should be expressible as "a new handle type that can be waited on."
+
 ### Birth time is the key insight for efficient snapshots (2026-03-08)
 
 ZFS's single most important design choice for snapshots: store the birth transaction group (TXG) in every block pointer. When freeing a block, compare its birth time to the previous snapshot's TXG — if born after, free it; if born before, it belongs to the snapshot. This gives O(1) snapshot creation, O(delta) deletion, and unlimited snapshots. The alternative (per-snapshot bitmaps) is O(N) per snapshot and limits snapshot count. RedoxFS stores only a seahash checksum in block pointers — no temporal information. Adding birth generation to block pointers would be the minimum viable change to enable proper snapshots. Dead lists (ZFS's sub-listed approach) make deletion near-optimal: O(sublists + blocks to free). For our "no save" model where `endOperation` creates a snapshot, efficient deletion is critical.
@@ -212,6 +216,10 @@ ZFS's single most important design choice for snapshots: store the birth transac
 ### Unsafe minimization as stated invariant (2026-03-08)
 
 Audit of all ~99 `unsafe` blocks in the kernel found zero unnecessary uses. All fall into 7 categories: inline assembly, volatile MMIO, linker symbols, page table walks, GlobalAlloc, Send/Sync impls, stack/context allocation. The kernel already follows the Asterinas pattern (unsafe foundation + safe services) emergently. Formalized as section 7.1 in kernel DESIGN.md to prevent drift as the codebase grows. Key rule: if the OS service (EL0) ever needs `unsafe`, the kernel API is missing an abstraction.
+
+### Microkernel by convergence, not ideology (2026-03-08)
+
+Each kernel sub-decision independently pushed complexity outward: drivers to userspace (fault isolation + unsafe minimization), filesystem to userspace (complex code outside TCB, hot path in kernel VM anyway), rendering to the OS service (not in-kernel), editors to separate processes (untrusted). What remains is exactly the microkernel set: address spaces, threads, IPC, scheduling, interrupt forwarding, handles. This wasn't a top-down decision to "build a microkernel" — it's what fell out of applying the project's principles (simple connective tissue, unsafe minimization, fault isolation, one model not two) to each sub-decision in turn. The kernel's identity emerged from its constraints: it multiplexes hardware resources behind handles and provides a single event-driven wait mechanism. Everything semantic lives in userspace. The L4 cautionary tale ("total complexity conserved") still applies — but the complexity displacement is justified at each boundary by specific architectural arguments, not by microkernel ideology.
 
 ### Security as a side effect of good architecture (2026-03-07)
 
