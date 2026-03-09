@@ -36,7 +36,7 @@
 //! boot.S: coarse 2 MiB identity map (TTBR0) + kernel VA map (TTBR1),
 //! enable MMU, drop EL2→EL1 → `kernel_main` → refine TTBR1 (W^X) →
 //! init heap → init buddy allocator → init GIC → init scheduler →
-//! probe virtio devices → spawn user processes + IPC channels →
+//! probe virtio → spawn userspace drivers → spawn user processes + IPC →
 //! boot secondary cores via PSCI → start timer (250 Hz) → WFE idle.
 
 #![no_std]
@@ -80,16 +80,33 @@ mod syscall;
 mod thread;
 mod thread_exit;
 mod timer;
-mod virtio;
+
+/// Virtio MMIO constants for device probe.
+const VIRTIO_MAGIC: u32 = 0x7472_6976;
+const VIRTIO_MMIO_BASE_PA: u64 = 0x0A00_0000;
+const VIRTIO_MMIO_STRIDE: u64 = 0x200;
+const VIRTIO_MMIO_COUNT: usize = 32;
+const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
+const VIRTIO_DEVICE_BLK: u32 = 2;
+const VIRTIO_DEVICE_CONSOLE: u32 = 3;
+
+/// Info discovered about a virtio-mmio device.
+struct VirtioDeviceInfo {
+    pa: u64,
+    irq: u32,
+    device_id: u32,
+}
+
+extern "C" {
+    static __kernel_end: u8;
+}
 
 /// User process ELF binaries, compiled by build.rs and embedded in .rodata.
 /// Avoids needing a filesystem or bootloader protocol for the first processes.
 static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
 static ECHO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.elf"));
-
-extern "C" {
-    static __kernel_end: u8;
-}
+static VIRTIO_BLK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-blk.elf"));
+static VIRTIO_CONSOLE_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-console.elf"));
 
 /// Boot secondary cores via PSCI CPU_ON.
 ///
@@ -183,6 +200,78 @@ fn find_and_parse_dtb(firmware_pa: u64) -> Option<device_tree::DeviceTable> {
 
     None
 }
+/// Probe virtio-mmio devices from the DTB.
+fn probe_from_dtb(
+    dt: &device_tree::DeviceTable,
+    out: &mut [Option<VirtioDeviceInfo>; 8],
+    count: &mut usize,
+) {
+    for dtb_dev in dt.find_all("virtio,mmio") {
+        if *count >= out.len() {
+            break;
+        }
+
+        let pa = dtb_dev.base_address();
+        let base = pa as usize + memory::KERNEL_VA_OFFSET;
+
+        if memory_mapped_io::read32(base) != VIRTIO_MAGIC {
+            continue;
+        }
+
+        let version = memory_mapped_io::read32(base + 4);
+
+        if version != 1 && version != 2 {
+            continue;
+        }
+
+        let device_id = memory_mapped_io::read32(base + 8);
+
+        if device_id == 0 {
+            continue;
+        }
+
+        out[*count] = Some(VirtioDeviceInfo {
+            pa,
+            irq: dtb_dev.irq.unwrap_or(0),
+            device_id,
+        });
+        *count += 1;
+    }
+}
+/// Fallback probe: scan all 32 hardcoded QEMU `virt` virtio-mmio slots.
+fn probe_hardcoded(out: &mut [Option<VirtioDeviceInfo>; 8], count: &mut usize) {
+    for i in 0..VIRTIO_MMIO_COUNT {
+        if *count >= out.len() {
+            break;
+        }
+
+        let pa = VIRTIO_MMIO_BASE_PA + i as u64 * VIRTIO_MMIO_STRIDE;
+        let base = pa as usize + memory::KERNEL_VA_OFFSET;
+
+        if memory_mapped_io::read32(base) != VIRTIO_MAGIC {
+            continue;
+        }
+
+        let version = memory_mapped_io::read32(base + 4);
+
+        if version != 1 && version != 2 {
+            continue;
+        }
+
+        let device_id = memory_mapped_io::read32(base + 8);
+
+        if device_id == 0 {
+            continue;
+        }
+
+        out[*count] = Some(VirtioDeviceInfo {
+            pa,
+            irq: VIRTIO_IRQ_BASE + i as u32,
+            device_id,
+        });
+        *count += 1;
+    }
+}
 /// Free the boot identity-map pages (TTBR0) now that all cores have
 /// transitioned to upper VA via TTBR1.
 fn reclaim_boot_ttbr0() {
@@ -204,6 +293,90 @@ fn reclaim_boot_ttbr0() {
 
     for &va in &pages {
         page_allocator::free_frame(memory::virt_to_phys(va));
+    }
+}
+/// Spawn a userspace virtio driver with device info passed via channel.
+///
+/// Creates a suspended process from the ELF, creates a channel, writes
+/// (mmio_pa, irq) to the channel's shared page, gives the driver one
+/// endpoint, and starts the process.
+///
+/// The shared page is always mapped at `CHANNEL_SHM_BASE` (0x4000_0000)
+/// in the driver's address space regardless of the global channel index,
+/// so the driver can read device info from a fixed address.
+fn spawn_virtio_driver(elf: &[u8], mmio_pa: u64, irq: u32) {
+    let (pid, _) = process::create_from_user_elf(elf).expect("failed to create virtio driver");
+    let (ch_a, _ch_b) = channel::create().expect("failed to create driver channel");
+    // Write device info to the channel shared page before the driver starts.
+    let (shared_pa, _) = channel::shared_info(ch_a);
+    let shared_va = memory::phys_to_virt(shared_pa) as *mut u8;
+
+    unsafe {
+        // offset 0: mmio_pa (u64)
+        core::ptr::write_volatile(shared_va as *mut u64, mmio_pa);
+        // offset 8: irq (u32)
+        core::ptr::write_volatile(shared_va.add(8) as *mut u32, irq);
+    }
+
+    // Map the shared page at CHANNEL_SHM_BASE in the driver's address space.
+    // We bypass channel::setup_endpoint because its VA is channel-index-derived,
+    // but the driver reads from a fixed address (CHANNEL_SHM_BASE = 0x4000_0000).
+    scheduler::with_process(pid, |proc| {
+        proc.address_space.map_shared(
+            paging::CHANNEL_SHM_BASE,
+            shared_pa.as_u64(),
+            &address_space::PageAttrs::user_rw(),
+        );
+        proc.handles
+            .insert(
+                handle::HandleObject::Channel(ch_a),
+                handle::Rights::READ_WRITE,
+            )
+            .expect("failed to insert driver channel handle");
+    });
+    // Start the driver.
+    scheduler::start_suspended_threads(pid);
+}
+/// Probe virtio-mmio slots and spawn a userspace driver for each found device.
+///
+/// Uses DTB-provided addresses when available, falls back to hardcoded QEMU
+/// `virt` slots. For each device, creates a suspended process, writes device
+/// info (MMIO PA, IRQ) to a channel shared page, and starts the driver.
+fn spawn_virtio_drivers(device_table: Option<&device_tree::DeviceTable>) {
+    let mut devices = [const { None }; 8];
+    let mut count = 0;
+
+    if let Some(dt) = device_table {
+        probe_from_dtb(dt, &mut devices, &mut count);
+    } else {
+        probe_hardcoded(&mut devices, &mut count);
+    }
+
+    if count == 0 {
+        if device_table.is_some() {
+            serial::puts("  🔌 virtio - no devices (dtb)\n");
+        } else {
+            serial::puts("  🔌 virtio - no devices (hardcoded)\n");
+        }
+        return;
+    }
+
+    for i in 0..count {
+        if let Some(ref dev) = devices[i] {
+            let elf = match dev.device_id {
+                VIRTIO_DEVICE_BLK => VIRTIO_BLK_ELF,
+                VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
+                id => {
+                    serial::puts("  🔌 virtio - unknown id=");
+                    serial::put_u32(id);
+                    serial::puts("\n");
+
+                    continue;
+                }
+            };
+
+            spawn_virtio_driver(elf, dev.pa, dev.irq);
+        }
     }
 }
 /// Try to parse a DTB at the given physical address. Returns None if the
@@ -306,9 +479,10 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
 
     scheduler::init();
     serial::puts("  📋 scheduler - eevdf + scheduling contexts\n");
-    virtio::init(device_table.as_ref());
 
     // Spawn user processes and create an IPC channel between them.
+    // Init/echo must be spawned before virtio drivers so they get channel 0
+    // (init and echo hardcode SHM at CHANNEL_SHM_BASE = channel index 0).
     let (init_pid, _) = process::spawn_from_elf(INIT_ELF).expect("failed to spawn init");
     let (echo_pid, _) = process::spawn_from_elf(ECHO_ELF).expect("failed to spawn echo");
     let (ch_a, ch_b) = channel::create().expect("failed to create ipc channel");
@@ -317,6 +491,8 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     channel::setup_endpoint(ch_b, echo_pid).expect("failed to setup channel endpoint");
     serial::puts("  🔀 processes - init + echo, ipc channel\n");
 
+    // Probe virtio-mmio devices and spawn userspace drivers.
+    spawn_virtio_drivers(device_table.as_ref());
     boot_secondaries();
 
     timer::init();

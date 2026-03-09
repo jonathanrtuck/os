@@ -701,13 +701,21 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 ---
 
-### 9.7 Userspace Virtio Migration (Phase 5)
+### 9.7 Userspace Virtio Migration (Phase 5) — DONE
 
 **Goal:** Move virtio-blk and virtio-console from in-kernel to userspace drivers. Validates the entire microkernel driver model.
 
-**Approach:** Each driver becomes a separate ELF binary (`system/user/virtio-blk/`, `system/user/virtio-console/`). At boot, kernel spawns drivers via `include_bytes!`, sets up IPC channels. Each driver: `device_map` for MMIO, `interrupt_register` for IRQ, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` removed.
+**Approach:** Each driver becomes a separate ELF binary (`system/user/virtio-blk/`, `system/user/virtio-console/`). At boot, kernel probes virtio-mmio slots (minimal MMIO reads for magic/version/device_id), spawns the appropriate driver process, writes device info (MMIO PA, IRQ) to a channel shared page, and starts the driver. Each driver: `device_map` for MMIO, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` module removed entirely. Shared `libvirtio` rlib provides userspace virtio transport and split virtqueue implementation.
 
-**Validation:** Read a block, print to console — same functionality as today, entirely through syscalls.
+**Implementation notes:**
+
+- Kernel retains minimal probe logic inline in `main.rs` (~80 lines) for device discovery. Drivers handle all device initialization (negotiate, queue setup, I/O).
+- Sub-page MMIO alignment: QEMU virt's virtio-mmio slots have 0x200 stride within 4K pages. Drivers page-align the PA for `device_map` and add the sub-page offset to the returned VA.
+- Channel shared page mapped at fixed `CHANNEL_SHM_BASE` in each driver's address space (bypasses channel-index-derived VA) so drivers read device info from a known address.
+- Console driver not exercised yet (QEMU virt doesn't add a virtio-console by default; only blk device present).
+- Drivers use polling (spin-loop) for completion, matching the previous in-kernel behavior. Interrupt-driven I/O is a straightforward enhancement via `interrupt_register` + `wait` + `interrupt_ack`.
+
+**Validation:** `cargo run --release` boots, virtio-blk driver reads sector 0 and prints "HELLO VIRTIO BLK" — same functionality as the former in-kernel driver, entirely through syscalls (`device_map`, `dma_alloc`, `dma_free`, `write`, `channel_signal`, `exit`). Init/echo IPC unaffected.
 
 **Depends on:** Phases 1 (DMA), 3 (process create), 4 (handle transfer).
 

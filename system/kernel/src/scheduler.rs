@@ -89,6 +89,20 @@ enum ExitInfo {
     },
 }
 
+/// Result of `block_current_unless_woken`.
+///
+/// Distinguishes the two return paths so callers know whether post-block
+/// cleanup is safe. After the `Blocked` path, code continues on behalf
+/// of a *different* thread — any cleanup targeting the blocked thread's
+/// registrations would corrupt its state.
+pub enum BlockResult {
+    /// wake_pending was consumed — same thread, safe to run cleanup.
+    WokePending(*const Context),
+    /// Thread blocked, `schedule_inner` selected another thread.
+    /// Caller must NOT run cleanup (wrong thread identity).
+    Blocked(*const Context),
+}
+
 static STATE: IrqMutex<State> = IrqMutex::new(State {
     queue: RunQueue { ready: Vec::new() },
     blocked: Vec::new(),
@@ -503,7 +517,7 @@ pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 /// This prevents the lost-wakeup race: a wake that arrives between
 /// steps 1 and 3 sets the pending flag instead of trying to unblock
 /// a thread that isn't blocked yet.
-pub fn block_current_unless_woken(ctx: *mut Context) -> *const Context {
+pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
     let thread = s.cores[core].current.as_mut().expect("no current thread");
@@ -518,12 +532,12 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> *const Context {
 
         thread.wait_set.clear();
 
-        return ctx as *const Context;
+        return BlockResult::WokePending(ctx as *const Context);
     }
 
     thread.block();
 
-    schedule_inner(&mut s, ctx, core)
+    BlockResult::Blocked(schedule_inner(&mut s, ctx, core))
 }
 /// Borrow another thread's scheduling context (context donation).
 ///
@@ -1210,7 +1224,6 @@ pub fn with_process_of_thread<R>(tid: ThreadId, f: impl FnOnce(&mut Process) -> 
 
     f(process)
 }
-
 /// Access a thread by ID. Closure receives exclusive access to the thread.
 pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {
     let mut s = STATE.lock();

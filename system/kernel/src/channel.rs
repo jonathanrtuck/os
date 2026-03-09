@@ -118,8 +118,9 @@ pub fn create() -> Option<(ChannelId, ChannelId)> {
 pub fn register_waiter(id: ChannelId, waiter: ThreadId) {
     let mut s = STATE.lock();
     let ch = &mut s.channels[channel_index(id)];
+    let ep = endpoint_index(id);
 
-    ch.waiter[endpoint_index(id)] = Some(waiter);
+    ch.waiter[ep] = Some(waiter);
 }
 /// Set up an endpoint for a process: map shared page + insert handle.
 ///
@@ -190,6 +191,7 @@ pub fn signal(id: ChannelId) {
 pub fn unregister_waiter(id: ChannelId) {
     let mut s = STATE.lock();
     let ch = &mut s.channels[channel_index(id)];
+    let ep = endpoint_index(id);
 
-    ch.waiter[endpoint_index(id)] = None;
+    ch.waiter[ep] = None;
 }

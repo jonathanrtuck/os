@@ -374,7 +374,10 @@ fn sys_futex_wait(ctx: *mut Context) -> *const Context {
     c.x[0] = 0;
 
     // Block (or return immediately if a wake arrived in the gap).
-    scheduler::block_current_unless_woken(ctx)
+    // Futex has no post-block cleanup, so both paths are equivalent.
+    match scheduler::block_current_unless_woken(ctx) {
+        scheduler::BlockResult::WokePending(p) | scheduler::BlockResult::Blocked(p) => p,
+    }
 }
 fn sys_futex_wake(addr: u64, count: u64) -> Result<u64, Error> {
     // Validate: must be in user VA space and word-aligned.
@@ -896,16 +899,25 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
 
     // Block until woken. wake_pending catches signals that arrived in the gap
     // between store_wait_set and here.
-    let result = scheduler::block_current_unless_woken(ctx);
+    match scheduler::block_current_unless_woken(ctx) {
+        scheduler::BlockResult::WokePending(p) => {
+            // Same thread — safe to unregister from waiters that didn't fire.
+            unregister_channels(&channel_ids);
+            unregister_timers(&timer_ids);
+            unregister_interrupts(&interrupt_ids);
+            unregister_threads(&thread_ids);
+            unregister_processes(&process_ids);
 
-    // Woken — unregister from any waiters that didn't fire.
-    unregister_channels(&channel_ids);
-    unregister_timers(&timer_ids);
-    unregister_interrupts(&interrupt_ids);
-    unregister_threads(&thread_ids);
-    unregister_processes(&process_ids);
-
-    result
+            p
+        }
+        scheduler::BlockResult::Blocked(p) => {
+            // Different thread scheduled — must not touch the blocked thread's
+            // waiter registrations. The wake path (try_wake_impl) clears the
+            // wait_set; stale registrations on unfired handles are harmlessly
+            // overwritten on the next wait call.
+            p
+        }
+    }
 }
 fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
     if len > MAX_WRITE_LEN {
