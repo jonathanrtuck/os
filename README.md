@@ -47,21 +47,6 @@ If you're curious about the design, read in this order:
 3. **[Decisions](design/decisions.md)** — All 17 design decisions: settled positions with reasoning, open questions with tradeoffs, considered-and-rejected alternatives
 4. **[Journal](design/journal.md)** — Where the design exploration is right now: open threads, discussion backlog, insights
 
-## Building the Kernel
-
-The kernel is a bare-metal aarch64 binary that boots in QEMU and prints to serial console.
-
-**Prerequisites:** Rust toolchain, QEMU
-
-```shell
-# Install the cross-compilation target
-rustup target add aarch64-unknown-none
-
-# Build and run
-cd system/kernel
-cargo run --release   # builds, then launches QEMU
-```
-
 ## Influences
 
 - [Mercury OS](https://uxdesign.cc/introducing-mercury-os-f4de45a04289) (Jason Yuan) — Intent-driven, no apps or folders, Modules/Flows/Spaces
