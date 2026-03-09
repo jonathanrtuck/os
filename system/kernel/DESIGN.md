@@ -457,7 +457,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 - **Device discovery:** Parse DTB (device tree blob) at boot to enumerate devices. **Done** (§8.6). DTB parser discovers ~40 devices; GIC and virtio-mmio addresses initialized from DTB data.
 - **MMIO mapping:** `device_map(pa, size)` syscall (#16) maps a device's MMIO region into the calling process's address space with Device-nGnRE memory attributes (MAIR index 1). Returns the user VA. VA is bump-allocated from a dedicated region (`DEVICE_MMIO_BASE` at 512 MiB, up to `DEVICE_MMIO_END` at 1 GiB). Validates that the PA is outside RAM (device space only). Zero overhead for register access — the driver reads/writes device memory directly.
 - **Interrupt forwarding:** `interrupt_register(irq)` syscall (#14) enables the IRQ in the GIC and returns a waitable handle (`HandleObject::Interrupt`). When the IRQ fires, the kernel's IRQ handler masks it at the GIC distributor, marks the handle pending, and wakes the driver thread. `interrupt_ack(handle)` syscall (#15) clears pending and re-enables the IRQ. One context switch per interrupt.
-- **DMA buffers:** `dma_alloc(order)` — deferred. Needed for virtio migration but not for the core interrupt forwarding mechanism.
+- **DMA buffers:** `dma_alloc(order, pa_out_ptr)` syscall (#17) allocates 2^order contiguous pages from the buddy allocator, maps them into the caller's DMA VA region (`DMA_BUFFER_BASE` at 256 MiB, up to `DMA_BUFFER_END` at 512 MiB), writes the PA to a user-provided pointer, and returns the user VA. `dma_free(va, order)` syscall (#18) unmaps and frees. Per-process DMA allocation tracking; all DMA buffers freed on process exit. Order 0–4 (4 KiB – 64 KiB).
 
 **Edge-triggered semantics:** Interrupt handles differ from timer handles (which are level-triggered/permanent). Each `pending` flag is set on IRQ fire and consumed by `interrupt_ack`. Missing an ack just means pending stays true on the next `wait` check.
 
@@ -542,4 +542,205 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 | UART   | 0x0900_0000  | QEMU virt |
 | virtio | 0x0A00_0000+ | QEMU virt |
 
-**Next:** Wire DTB-discovered addresses into device initialization (GIC, UART, virtio). Requires driver model to be settled.
+**Update (2026-03-09):** DTB now wired into device init. GIC bases from `"arm,cortex-a15-gic"`, virtio-mmio from `"virtio,mmio"` entries. Falls back to hardcoded QEMU `virt` defaults if no DTB.
+
+---
+
+## 9.0 Kernel Completion Roadmap
+
+Everything in sections 0.x–8.x is implemented. This section captures what remains to make the kernel fully usable by the OS service and userspace drivers.
+
+**Dependency graph:**
+
+```
+Phase 1 (DMA) ──────────────────────────┐
+                                        ├─→ Phase 5 (Virtio Migration)
+Phase 2a (Process struct) ──┬─→ Phase 2b (Thread create)
+                            ├─→ Phase 3 (Process create) ─┤
+                            ├─→ Phase 6 (Process kill)    │
+                            └─→ Phase 7 (Memory sharing)  │
+                                                          │
+Phase 4 (Handle transfer) ←───────────────────────────────┘
+
+Phase 7 (Memory sharing) ← partially blocked on filesystem design
+Phase 8 (COW mechanics) ← blocked on filesystem design
+```
+
+**Execution order:** 2a → 1 (parallel OK) → 2b → 3 → 4 → 6 → 5 → 7 → 8.
+
+---
+
+### 9.1 DMA Buffer Allocation (Phase 1) — Done
+
+**Goal:** Expose physically contiguous allocation to userspace. Virtio drivers need DMA-capable buffers for descriptor rings and data.
+
+**Syscalls:**
+
+| Nr  | Syscall   | Args                    | Returns |
+| --- | --------- | ----------------------- | ------- |
+| 17  | dma_alloc | x0=order, x1=pa_out_ptr | user VA |
+| 18  | dma_free  | x0=user_va, x1=order    | 0       |
+
+`dma_alloc` allocates 2^order contiguous pages (order 0–4, 4 KiB – 64 KiB), maps into the caller's address space with normal memory attributes, writes the PA to the user-provided pointer (for programming device DMA registers). Returns the user VA. `dma_free` unmaps and frees.
+
+**VA region:** `DMA_BUFFER_BASE` (256 MiB) to `DMA_BUFFER_END` (512 MiB). Bump-allocated per process.
+
+**Implementation:** `address_space.rs` (`DmaAllocation`, `next_dma_va`, `map_dma_buffer`, `unmap_dma_buffer`, `unmap_page_inner`), `paging.rs` (`DMA_BUFFER_BASE`, `DMA_BUFFER_END`), `syscall.rs` (`sys_dma_alloc`, `sys_dma_free`, `is_user_page_writable`, `OutOfMemory` error), `libsys` (`dma_alloc`, `dma_free`). `free_all()` drains DMA allocations on process exit.
+
+**Depends on:** Nothing. Buddy allocator already supports `alloc_frames(order)`.
+
+---
+
+### 9.2 Process Struct Extraction (Phase 2a) — Done
+
+**Goal:** Introduce a `Process` kernel object that owns the address space and handle table. Foundation for multi-threaded processes, process creation from userspace, and process handles.
+
+**Current state:** `Thread` owns `Option<Box<AddressSpace>>` and `HandleTable` directly. Single-threaded processes only. Process identity is implicit (a thread IS a process).
+
+**Target:** `Process { id, address_space, handles, threads }`. Threads hold `process_id: Option<ProcessId>`. Syscall handlers resolve process via thread's `process_id`. Global process table (fixed-size array under `IrqMutex`, same pattern as interrupt/timer tables).
+
+**Key design choices:**
+
+- Handle table is per-process (shared across threads). Matches the OS design where handles represent process-level resources.
+- Address space is per-process (shared TTBR0 across threads).
+- Kernel threads have `process_id: None` (no process association).
+- Process cleanup: last thread exit triggers full cleanup (handles, address space, ASID).
+
+**Refactoring scope:** `thread.rs` (remove address_space and handles), `process.rs` (new Process struct + table), `scheduler.rs` (process-level cleanup), `syscall.rs` (resolve process for handle/address_space access), `channel.rs` (process-level channels), `main.rs` (boot sequence).
+
+**Depends on:** Nothing. All existing behavior preserved.
+
+---
+
+### 9.3 Thread Creation (Phase 2b)
+
+**Goal:** Allow processes to create additional threads.
+
+**Syscall:**
+
+| Nr  | Syscall       | Args                      | Returns |
+| --- | ------------- | ------------------------- | ------- |
+| 19  | thread_create | x0=entry_va, x1=stack_top | handle  |
+
+Creates a new thread in the calling process. Shares address space and handle table. Returns a `HandleObject::Thread(ThreadId)` handle — waitable, becomes ready on thread exit. New thread starts unbound (no scheduling context); caller can bind one via existing `scheduling_context_bind`.
+
+**Process exit semantics:** Process is alive while any thread is alive. Last thread exit triggers full process cleanup.
+
+**Depends on:** Phase 2a (Process struct).
+
+---
+
+### 9.4 Process Creation from Userspace (Phase 3)
+
+**Goal:** Allow the OS service to spawn new processes.
+
+**Syscalls:**
+
+| Nr  | Syscall        | Args                   | Returns |
+| --- | -------------- | ---------------------- | ------- |
+| 20  | process_create | x0=elf_ptr, x1=elf_len | handle  |
+| 21  | process_start  | x0=handle              | 0       |
+
+`process_create` parses the ELF from the caller's memory, creates a new process with address space + handle table + one suspended thread. Returns `HandleObject::Process(ProcessId)`. Waitable — becomes ready when all threads exit. `process_start` moves the initial thread to Ready.
+
+**Two-phase create/start:** Gives the parent time to set up the child (transfer handles, bind scheduling context) before it runs.
+
+**Implementation:** Reuses `spawn_from_elf` internals. ELF data copied from user memory into kernel buffer (can't reference user pages across address spaces).
+
+**Depends on:** Phase 2a (Process struct).
+
+---
+
+### 9.5 Handle Transfer (Phase 4)
+
+**Goal:** Allow a parent to give handles to a child process before starting it.
+
+**Syscall:**
+
+| Nr  | Syscall     | Args                                     | Returns      |
+| --- | ----------- | ---------------------------------------- | ------------ |
+| 22  | handle_send | x0=target_proc_handle, x1=handle_to_send | target index |
+
+Copies a handle from the caller's table into the target process's table. Only works on suspended processes (prevents races). Caller retains its copy.
+
+**Channel refactoring:** Currently `channel::create(thread_a, thread_b)` ties channels to specific threads and maps shared memory eagerly into both. Needs generalization: `channel::create()` returns two endpoint handles. Shared memory mapped on first use or on handle transfer. Channels track process IDs, not thread IDs.
+
+**Depends on:** Phase 3 (process handles exist).
+
+---
+
+### 9.6 Process Kill (Phase 6)
+
+**Goal:** Allow the OS service to terminate misbehaving processes.
+
+**Syscall:**
+
+| Nr  | Syscall      | Args      | Returns |
+| --- | ------------ | --------- | ------- |
+| 23  | process_kill | x0=handle | 0       |
+
+Terminates all threads in the target process. Runs full cleanup. Process handle becomes ready (waitable notification).
+
+**Implementation:** Walk process thread list, mark Exited, wake any blocked threads with error, run cleanup.
+
+**Depends on:** Phase 2a (Process struct).
+
+---
+
+### 9.7 Userspace Virtio Migration (Phase 5)
+
+**Goal:** Move virtio-blk and virtio-console from in-kernel to userspace drivers. Validates the entire microkernel driver model.
+
+**Approach:** Each driver becomes a separate ELF binary (`system/user/virtio-blk/`, `system/user/virtio-console/`). At boot, kernel spawns drivers via `include_bytes!`, sets up IPC channels. Each driver: `device_map` for MMIO, `interrupt_register` for IRQ, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` removed.
+
+**Validation:** Read a block, print to console — same functionality as today, entirely through syscalls.
+
+**Depends on:** Phases 1 (DMA), 3 (process create), 4 (handle transfer).
+
+---
+
+### 9.8 Memory Sharing (Phase 7)
+
+**Goal:** Allow the OS service to map shared memory into editor processes. Foundation for the document memory model.
+
+**Partially blocked on filesystem design.** The kernel primitive is straightforward: "map a physical page into another process's address space." Policy (which pages, COW semantics) lives in the OS service. Can implement the primitive before the filesystem design settles.
+
+**Depends on:** Phase 2a. Full design depends on filesystem COW decisions.
+
+---
+
+### 9.9 Filesystem COW Kernel Mechanics (Phase 8)
+
+**Goal:** Kernel-level copy-on-write for memory-mapped documents. Editor writes trigger page faults, kernel allocates new pages, filesystem manages on-disk snapshots.
+
+**Blocked on filesystem on-disk design.** Research complete (`design/research-cow-filesystems.md`). Requires settling the last sub-decision of Decision #16.
+
+---
+
+### Syscall Number Map (complete)
+
+| Nr  | Syscall                   | Status      |
+| --- | ------------------------- | ----------- |
+| 0   | exit                      | Implemented |
+| 1   | write                     | Implemented |
+| 2   | yield                     | Implemented |
+| 3   | handle_close              | Implemented |
+| 4   | channel_signal            | Implemented |
+| 6   | scheduling_context_create | Implemented |
+| 7   | scheduling_context_borrow | Implemented |
+| 8   | scheduling_context_return | Implemented |
+| 9   | scheduling_context_bind   | Implemented |
+| 10  | futex_wait                | Implemented |
+| 11  | futex_wake                | Implemented |
+| 12  | wait                      | Implemented |
+| 13  | timer_create              | Implemented |
+| 14  | interrupt_register        | Implemented |
+| 15  | interrupt_ack             | Implemented |
+| 16  | device_map                | Implemented |
+| 17  | dma_alloc                 | Implemented |
+| 18  | dma_free                  | Implemented |
+| 19  | thread_create             | Phase 2b    |
+| 20  | process_create            | Phase 3     |
+| 21  | process_start             | Phase 3     |
+| 22  | handle_send               | Phase 4     |
+| 23  | process_kill              | Phase 6     |

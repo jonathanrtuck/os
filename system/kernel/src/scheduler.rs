@@ -12,10 +12,10 @@
 //! (one per core) are never enqueued; they run as fallback when no threads
 //! are runnable.
 
-use super::address_space::AddressSpace;
 use super::handle::HandleObject;
 use super::memory;
 use super::per_core;
+use super::process::{Process, ProcessId};
 use super::scheduling_context::{self, SchedulingContext, SchedulingContextId};
 use super::sync::IrqMutex;
 use super::thread::{Thread, ThreadId, WaitEntry};
@@ -43,6 +43,10 @@ struct State {
     blocked: Vec<Box<Thread>>,
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
+    /// All processes. Index = ProcessId.0.
+    /// None = freed slot (available via free_process_ids).
+    processes: Vec<Option<Process>>,
+    next_process_id: u32,
     /// All scheduling contexts. Index = SchedulingContextId.0.
     /// None = freed slot (available via free_context_ids).
     scheduling_contexts: Vec<Option<SchedulingContextSlot>>,
@@ -61,6 +65,8 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
         [INIT; per_core::MAX_CORES]
     },
     next_id: 1,
+    processes: Vec::new(),
+    next_process_id: 0,
     scheduling_contexts: Vec::new(),
     free_context_ids: Vec::new(),
 });
@@ -86,6 +92,27 @@ fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSl
             slot.context = slot.context.charge(elapsed);
         }
     }
+}
+fn find_thread_pid(s: &State, id: ThreadId) -> Option<ProcessId> {
+    for t in &s.queue.ready {
+        if t.id() == id {
+            return t.process_id;
+        }
+    }
+    for t in &s.blocked {
+        if t.id() == id {
+            return t.process_id;
+        }
+    }
+    for core_state in &s.cores {
+        if let Some(t) = &core_state.current {
+            if t.id() == id {
+                return t.process_id;
+            }
+        }
+    }
+
+    None
 }
 /// Check if a thread has budget (unlimited if no scheduling context).
 fn has_budget(thread: &Thread, contexts: &[Option<SchedulingContextSlot>]) -> bool {
@@ -340,8 +367,8 @@ fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> 
     false
 }
 fn ttbr0_for(thread: &Thread) -> u64 {
-    match &thread.address_space {
-        Some(addr_space) => addr_space.ttbr0_value(),
+    match thread.process_id {
+        Some(_) => thread.ttbr0,
         None => memory::empty_ttbr0(),
     }
 }
@@ -443,6 +470,39 @@ pub fn clear_wait_state() {
     thread.wait_set.clear();
     thread.wake_pending = false;
 }
+/// Create a new process with the given address space. Returns the ProcessId.
+///
+/// The process starts with an empty handle table. No threads yet — call
+/// `spawn_user` to add the initial thread.
+pub fn create_process(addr_space: Box<super::address_space::AddressSpace>) -> ProcessId {
+    let mut s = STATE.lock();
+    let id = s.next_process_id;
+
+    s.next_process_id += 1;
+
+    let process = Process::new(ProcessId(id), addr_space);
+
+    s.processes.push(Some(process));
+
+    ProcessId(id)
+}
+/// Access the current thread's process via closure. Acquires the scheduler
+/// lock for the duration. Panics if the current thread has no process
+/// (kernel threads).
+pub fn current_process_do<R>(f: impl FnOnce(&mut Process) -> R) -> R {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let pid = s.cores[core]
+        .current
+        .as_ref()
+        .expect("no current thread")
+        .process_id
+        .expect("kernel thread has no process")
+        .0 as usize;
+    let process = s.processes[pid].as_mut().expect("process not found");
+
+    f(process)
+}
 /// Create a new scheduling context. Returns the SchedulingContextId.
 ///
 /// The context starts with ref_count=1 (the handle inserted by the caller).
@@ -479,6 +539,31 @@ pub fn create_scheduling_context(budget: u64, period: u64) -> Option<SchedulingC
 
     Some(id)
 }
+/// Access both the current thread and its process via closure.
+///
+/// Uses struct destructuring to obtain disjoint mutable borrows of
+/// `State.cores` and `State.processes` simultaneously.
+pub fn current_thread_and_process_do<R>(f: impl FnOnce(&mut Thread, &mut Process) -> R) -> R {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let pid = s.cores[core]
+        .current
+        .as_ref()
+        .expect("no current thread")
+        .process_id
+        .expect("kernel thread has no process")
+        .0 as usize;
+    // Destructure State for disjoint field borrows (cores vs processes).
+    let State {
+        ref mut cores,
+        ref mut processes,
+        ..
+    } = *s;
+    let thread = cores[core].current.as_mut().expect("no current thread");
+    let process = processes[pid].as_mut().expect("process not found");
+
+    f(thread, process)
+}
 /// Access the current thread via closure. Acquires the scheduler lock for the
 /// duration of the closure. Do not call scheduler functions from within `f`.
 pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
@@ -500,8 +585,8 @@ pub fn exit_current() -> ! {
         let thread = s.cores[core].current.as_mut().expect("no current thread");
 
         debug_assert!(
-            thread.address_space.is_none(),
-            "exit_current called on thread with address space — use exit_current_from_syscall"
+            thread.process_id.is_none(),
+            "exit_current called on user thread — use exit_current_from_syscall"
         );
 
         thread.mark_exited();
@@ -514,22 +599,33 @@ pub fn exit_current() -> ! {
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let core = per_core::core_id() as usize;
     // Phase 1: collect resources to free (under scheduler lock).
-    let (channels_to_close, interrupts_to_close, timers_to_close, addr_space, thread_id) = {
+    let (channels_to_close, interrupts_to_close, timers_to_close, process, thread_id) = {
         let mut s = STATE.lock();
-        // Collect handle objects into an owned Vec so we can release the
-        // thread borrow and then access s.scheduling_contexts freely.
-        let (handle_objects, tid) = {
+
+        // Auto-return borrowed scheduling context on exit.
+        {
             let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-            // Auto-return borrowed scheduling context on exit.
             if let Some(saved) = thread.scheduling.saved_context_id.take() {
                 thread.scheduling.context_id = Some(saved);
             }
+        }
 
-            let objects: Vec<HandleObject> = thread.handles.drain().map(|(_, obj)| obj).collect();
-
-            (objects, thread.id())
-        };
+        let tid = s.cores[core].current.as_ref().unwrap().id();
+        let pid = s.cores[core]
+            .current
+            .as_ref()
+            .unwrap()
+            .process_id
+            .expect("not a user thread");
+        // Take the entire process from the table. This is the last thread
+        // (single-threaded processes for now), so the process is being destroyed.
+        let mut process = s.processes[pid.0 as usize]
+            .take()
+            .expect("process not found");
+        // Drain handles from the taken process (no longer in State).
+        let handle_objects: Vec<HandleObject> =
+            process.handles.drain().map(|(_, obj)| obj).collect();
         let mut channels = Vec::new();
         let mut timers = Vec::new();
         let mut interrupts = Vec::new();
@@ -545,14 +641,7 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             }
         }
 
-        let addr_space = s.cores[core]
-            .current
-            .as_mut()
-            .expect("no current thread")
-            .address_space
-            .take();
-
-        (channels, interrupts, timers, addr_space, tid)
+        (channels, interrupts, timers, process, tid)
     };
 
     // Phase 2: close channel endpoints (acquires channel lock, not scheduler).
@@ -572,11 +661,11 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     super::futex::remove_thread(thread_id);
 
     // Phase 3: free address space (acquires page_allocator and address_space_id locks).
-    if let Some(mut addr_space) = addr_space {
-        addr_space.invalidate_tlb();
-        addr_space.free_all();
-        super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
-    }
+    let mut addr_space = process.address_space;
+
+    addr_space.invalidate_tlb();
+    addr_space.free_all();
+    super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
 
     // Phase 4: mark exited and schedule (under scheduler lock).
     let mut s = STATE.lock();
@@ -717,13 +806,18 @@ pub fn spawn(entry: fn() -> !) {
 
     s.queue.ready.push(thread);
 }
-pub fn spawn_user(addr_space: Box<AddressSpace>, entry_va: u64, user_stack_top: u64) -> ThreadId {
+pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> ThreadId {
     let mut s = STATE.lock();
     let id = s.next_id;
 
     s.next_id += 1;
 
-    let thread = Thread::new_user(id, addr_space, entry_va, user_stack_top);
+    let ttbr0 = s.processes[process_id.0 as usize]
+        .as_ref()
+        .expect("process not found")
+        .address_space
+        .ttbr0_value();
+    let thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top);
 
     s.queue.ready.push(thread);
 
@@ -756,6 +850,21 @@ pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
 
     try_wake_impl(&mut s, id, Some(&reason))
 }
+/// Access a process by looking up its thread. Acquires the scheduler lock.
+///
+/// Searches all thread locations (run queue, blocked list, core-current) to
+/// find the thread, gets its process_id, and provides mutable access to the
+/// process. Used by `channel::create` which identifies endpoints by ThreadId.
+pub fn with_process_of_thread<R>(tid: ThreadId, f: impl FnOnce(&mut Process) -> R) -> R {
+    let mut s = STATE.lock();
+    let pid = find_thread_pid(&s, tid).expect("thread not found or has no process");
+    let process = s.processes[pid.0 as usize]
+        .as_mut()
+        .expect("process not found");
+
+    f(process)
+}
+
 /// Access a thread by ID. Closure receives exclusive access to the thread.
 pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {
     let mut s = STATE.lock();

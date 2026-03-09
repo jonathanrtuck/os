@@ -31,6 +31,8 @@
 //! | 14 | interrupt_register        | x0=irq_nr                         | handle           |
 //! | 15 | interrupt_ack             | x0=handle                         | 0                |
 //! | 16 | device_map                | x0=phys_addr, x1=size             | user VA          |
+//! | 17 | dma_alloc                 | x0=order, x1=pa_out_ptr           | user VA          |
+//! | 18 | dma_free                  | x0=user_va, x1=order              | 0                |
 //!
 //! # Error codes
 //!
@@ -44,6 +46,7 @@
 //! | -6   | NotBorrowing        | `Error`       |
 //! | -7   | AlreadyBound        | `Error`       |
 //! | -8   | WouldBlock          | `Error`       |
+//! | -9   | OutOfMemory         | `Error`       |
 //! | -10  | InvalidHandle       | `HandleError` |
 //! | -12  | InsufficientRights  | `HandleError` |
 //! | -13  | TableFull           | `HandleError` |
@@ -53,6 +56,7 @@ use super::futex;
 use super::handle::{Handle, HandleError, HandleObject, Rights};
 use super::interrupt;
 use super::interrupt::InterruptId;
+use super::page_allocator;
 use super::paging;
 use super::paging::USER_VA_END;
 use super::scheduler;
@@ -80,6 +84,8 @@ pub mod nr {
     pub const INTERRUPT_REGISTER: u64 = 14;
     pub const INTERRUPT_ACK: u64 = 15;
     pub const DEVICE_MAP: u64 = 16;
+    pub const DMA_ALLOC: u64 = 17;
+    pub const DMA_FREE: u64 = 18;
 }
 
 #[repr(i64)]
@@ -92,8 +98,11 @@ pub enum Error {
     NotBorrowing = -6,
     AlreadyBound = -7,
     WouldBlock = -8,
+    OutOfMemory = -9,
 }
 
+/// Maximum DMA allocation order (2^4 pages = 64 KiB).
+const MAX_DMA_ORDER: u64 = 4;
 /// Maximum number of handles in a single `wait` call.
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -149,6 +158,50 @@ fn is_user_range_readable(start: u64, len: u64) -> bool {
 
     true
 }
+/// Check if a user virtual address is writable by EL0 using the hardware
+/// address translation instruction. Returns false if the page is unmapped,
+/// read-only, or inaccessible.
+fn is_user_page_writable(va: u64) -> bool {
+    let par: u64;
+
+    unsafe {
+        // AT S1E0W: translate va as a Stage 1 EL0 Write.
+        core::arch::asm!(
+            "at s1e0w, {va}",
+            "isb",
+            va = in(reg) va,
+            options(nostack)
+        );
+        core::arch::asm!(
+            "mrs {par}, par_el1",
+            par = out(reg) par,
+            options(nostack, nomem)
+        );
+    }
+
+    // PAR_EL1 bit 0: 0 = translation succeeded, 1 = fault.
+    par & 1 == 0
+}
+fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
+    if handle_nr > u8::MAX as u64 {
+        return Err(HandleError::InvalidHandle);
+    }
+
+    // Extract handle info under scheduler lock, then release before channel ops.
+    let (channel_id, caller_id) = scheduler::current_thread_and_process_do(|thread, process| {
+        let channel_id = match process.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+            Ok(HandleObject::Channel(id)) => id,
+            Ok(_) => return Err(HandleError::InvalidHandle),
+            Err(e) => return Err(e),
+        };
+
+        Ok((channel_id, thread.id()))
+    })?;
+
+    channel::signal(channel_id, caller_id);
+
+    Ok(0)
+}
 fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
     if size == 0 {
         return Err(Error::InvalidArgument);
@@ -161,34 +214,62 @@ fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
         return Err(Error::InvalidArgument); // Overlaps RAM — not a device
     }
 
-    scheduler::current_thread_do(|thread| {
-        if let Some(ref mut addr_space) = thread.address_space {
-            addr_space
-                .map_device_mmio(pa, size)
-                .map(|va| va)
-                .ok_or(Error::InvalidArgument)
-        } else {
-            Err(Error::InvalidArgument) // Kernel threads have no address space
-        }
+    scheduler::current_process_do(|process| {
+        process
+            .address_space
+            .map_device_mmio(pa, size)
+            .ok_or(Error::InvalidArgument)
     })
 }
-fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
-    if handle_nr > u8::MAX as u64 {
-        return Err(HandleError::InvalidHandle);
+fn sys_dma_alloc(order: u64, pa_out_ptr: u64) -> Result<u64, Error> {
+    if order > MAX_DMA_ORDER {
+        return Err(Error::InvalidArgument);
+    }
+    // Validate pa_out_ptr: in user space, 8-byte aligned, writable.
+    if pa_out_ptr >= USER_VA_END || pa_out_ptr & 7 != 0 {
+        return Err(Error::BadAddress);
+    }
+    if !is_user_page_writable(pa_out_ptr) {
+        return Err(Error::BadAddress);
     }
 
-    // Extract handle info under scheduler lock, then release before channel ops.
-    let (channel_id, caller_id) = scheduler::current_thread_do(|thread| {
-        let channel_id = match thread.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
-            Ok(HandleObject::Channel(id)) => id,
-            Ok(_) => return Err(HandleError::InvalidHandle),
-            Err(e) => return Err(e),
-        };
+    // Allocate physically contiguous frames from the buddy allocator.
+    let pa = page_allocator::alloc_frames(order as usize).ok_or(Error::OutOfMemory)?;
+    // Map into the calling process's DMA VA region.
+    let va = scheduler::current_process_do(|process| {
+        process.address_space.map_dma_buffer(pa, order as usize)
+    });
+    let va = match va {
+        Some(va) => va,
+        None => {
+            // DMA VA space full — free the frames we just allocated.
+            page_allocator::free_frames(pa, order as usize);
 
-        Ok((channel_id, thread.id()))
-    })?;
+            return Err(Error::OutOfMemory);
+        }
+    };
 
-    channel::signal(channel_id, caller_id);
+    // Write the PA to user memory so the driver can program DMA registers.
+    // SAFETY: pa_out_ptr validated above (user VA, aligned, writable page).
+    unsafe {
+        core::ptr::write_volatile(pa_out_ptr as *mut u64, pa.as_u64());
+    }
+
+    Ok(va)
+}
+fn sys_dma_free(va: u64, _order: u64) -> Result<u64, Error> {
+    // Validate VA is in the DMA region.
+    if va < paging::DMA_BUFFER_BASE || va >= paging::DMA_BUFFER_END {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Unmap and retrieve the stored PA + order.
+    let (pa, order) =
+        scheduler::current_process_do(|process| process.address_space.unmap_dma_buffer(va))
+            .ok_or(Error::InvalidArgument)?;
+
+    // Free the physically contiguous frames.
+    page_allocator::free_frames(pa, order);
 
     Ok(0)
 }
@@ -254,8 +335,8 @@ fn sys_interrupt_ack(handle_nr: u64) -> Result<u64, HandleError> {
         return Err(HandleError::InvalidHandle);
     }
 
-    let int_id = scheduler::current_thread_do(|thread| {
-        match thread.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+    let int_id = scheduler::current_process_do(|process| {
+        match process.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
             Ok(HandleObject::Interrupt(id)) => Ok(id),
             Ok(_) => Err(HandleError::InvalidHandle),
             Err(e) => Err(e),
@@ -273,8 +354,8 @@ fn sys_interrupt_register(irq: u64) -> Result<u64, HandleError> {
 
     let int_id = interrupt::register(irq as u32).ok_or(HandleError::TableFull)?;
 
-    match scheduler::current_thread_do(|thread| {
-        thread
+    match scheduler::current_process_do(|process| {
+        process
             .handles
             .insert(HandleObject::Interrupt(int_id), Rights::READ_WRITE)
     }) {
@@ -292,7 +373,8 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
         return Err(HandleError::InvalidHandle);
     }
 
-    let obj = scheduler::current_thread_do(|thread| thread.handles.close(Handle(handle_nr as u8)))?;
+    let obj =
+        scheduler::current_process_do(|process| process.handles.close(Handle(handle_nr as u8)))?;
 
     // Release kernel resources associated with the closed handle.
     match obj {
@@ -309,8 +391,8 @@ fn sys_scheduling_context_bind(handle_nr: u64) -> Result<u64, Error> {
         return Err(Error::InvalidArgument);
     }
 
-    let ctx_id = scheduler::current_thread_do(|thread| {
-        match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
+    let ctx_id = scheduler::current_process_do(|process| {
+        match process.handles.get(Handle(handle_nr as u8), Rights::READ) {
             Ok(HandleObject::SchedulingContext(id)) => Ok(id),
             _ => Err(Error::InvalidArgument),
         }
@@ -327,8 +409,8 @@ fn sys_scheduling_context_borrow(handle_nr: u64) -> Result<u64, Error> {
         return Err(Error::InvalidArgument);
     }
 
-    let ctx_id = scheduler::current_thread_do(|thread| {
-        match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
+    let ctx_id = scheduler::current_process_do(|process| {
+        match process.handles.get(Handle(handle_nr as u8), Rights::READ) {
             Ok(HandleObject::SchedulingContext(id)) => Ok(id),
             _ => Err(Error::InvalidArgument),
         }
@@ -343,8 +425,8 @@ fn sys_scheduling_context_borrow(handle_nr: u64) -> Result<u64, Error> {
 fn sys_scheduling_context_create(budget: u64, period: u64) -> Result<u64, Error> {
     let ctx_id =
         scheduler::create_scheduling_context(budget, period).ok_or(Error::InvalidArgument)?;
-    let handle = scheduler::current_thread_do(|thread| {
-        thread
+    let handle = scheduler::current_process_do(|process| {
+        process
             .handles
             .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
     })
@@ -362,8 +444,8 @@ fn sys_scheduling_context_return() -> Result<u64, Error> {
 fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
     let timer_id = timer::create(timeout_ns).ok_or(HandleError::TableFull)?;
 
-    match scheduler::current_thread_do(|thread| {
-        thread
+    match scheduler::current_process_do(|process| {
+        process
             .handles
             .insert(HandleObject::Timer(timer_id), Rights::READ)
     }) {
@@ -419,11 +501,11 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     let handle_bytes =
         unsafe { core::slice::from_raw_parts(handles_ptr as *const u8, count as usize) };
     // Resolve all handles and validate they are waitable.
-    let resolve_result = scheduler::current_thread_do(|thread| {
+    let resolve_result = scheduler::current_thread_and_process_do(|thread, process| {
         let mut entries = Vec::new();
 
         for (i, &h) in handle_bytes.iter().enumerate() {
-            let obj = thread.handles.get(Handle(h), Rights::READ)?;
+            let obj = process.handles.get(Handle(h), Rights::READ)?;
 
             match obj {
                 HandleObject::Channel(_) | HandleObject::Interrupt(_) | HandleObject::Timer(_) => {
@@ -702,6 +784,22 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::DEVICE_MAP => {
             c.x[0] = match sys_device_map(c.x[0], c.x[1]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::DMA_ALLOC => {
+            c.x[0] = match sys_dma_alloc(c.x[0], c.x[1]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::DMA_FREE => {
+            c.x[0] = match sys_dma_free(c.x[0], c.x[1]) {
                 Ok(n) => n,
                 Err(e) => e as i64 as u64,
             };

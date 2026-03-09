@@ -1,8 +1,8 @@
 //! Kernel thread representation.
 
-use super::address_space::AddressSpace;
 use super::context::Context;
-use super::handle::{HandleObject, HandleTable};
+use super::handle::HandleObject;
+use super::process::ProcessId;
 use super::scheduling_algorithm::SchedulingState;
 use super::scheduling_context::SchedulingContextId;
 use alloc::boxed::Box;
@@ -55,8 +55,11 @@ pub struct Thread {
     trust_level: TrustLevel,
     stack_bottom: *mut u8,
     stack_size: usize,
-    pub(crate) address_space: Option<Box<AddressSpace>>,
-    pub(crate) handles: HandleTable,
+    pub(crate) process_id: Option<ProcessId>,
+    /// Cached TTBR0 value for context switch. Set from the process's address
+    /// space at thread creation. Zero for kernel threads (scheduler uses
+    /// empty_ttbr0 fallback).
+    pub(crate) ttbr0: u64,
     pub(crate) scheduling: Scheduling,
     /// Set when a wake arrives before the thread has blocked (lost-wakeup
     /// prevention). Consumed by `block_current_unless_woken`.
@@ -219,8 +222,8 @@ impl Thread {
             trust_level: TrustLevel::Kernel,
             stack_bottom,
             stack_size: STACK_SIZE,
-            address_space: None,
-            handles: HandleTable::new(),
+            process_id: None,
+            ttbr0: 0,
             scheduling: Scheduling::new(),
             wake_pending: false,
             wake_result: 0,
@@ -244,8 +247,8 @@ impl Thread {
             trust_level: TrustLevel::Kernel,
             stack_bottom: core::ptr::null_mut(),
             stack_size: 0,
-            address_space: None,
-            handles: HandleTable::new(),
+            process_id: None,
+            ttbr0: 0,
             scheduling: Scheduling::new(),
             wake_pending: false,
             wake_result: 0,
@@ -269,18 +272,19 @@ impl Thread {
             trust_level: TrustLevel::Kernel,
             stack_bottom: core::ptr::null_mut(),
             stack_size: 0,
-            address_space: None,
-            handles: HandleTable::new(),
+            process_id: None,
+            ttbr0: 0,
             scheduling: Scheduling::new(),
             wake_pending: false,
             wake_result: 0,
             wait_set: Vec::new(),
         })
     }
-    /// User thread — runs at EL0 with its own address space.
+    /// User thread — runs at EL0 in a process's address space.
     pub fn new_user(
         id: u64,
-        addr_space: Box<AddressSpace>,
+        process_id: ProcessId,
+        ttbr0: u64,
         entry_va: u64,
         user_stack_top: u64,
     ) -> Box<Self> {
@@ -307,8 +311,8 @@ impl Thread {
             trust_level: TrustLevel::Untrusted,
             stack_bottom,
             stack_size: KERNEL_STACK_SIZE,
-            address_space: Some(addr_space),
-            handles: HandleTable::new(),
+            process_id: Some(process_id),
+            ttbr0,
             scheduling: Scheduling::new(),
             wake_pending: false,
             wake_result: 0,

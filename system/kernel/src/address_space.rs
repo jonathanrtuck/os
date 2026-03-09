@@ -14,12 +14,22 @@ use super::paging::{
 };
 use alloc::vec::Vec;
 
+pub(crate) struct DmaAllocation {
+    va: u64,
+    pa: Pa,
+    order: u8,
+}
+
 pub struct AddressSpace {
     l0_pa: Pa,
     asid: Asid,
     generation: u64,
     owned_frames: Vec<Pa>,
     pub(crate) vmas: VmaList,
+    /// Next available VA in the DMA buffer region. Bump-allocated.
+    next_dma_va: u64,
+    /// Active DMA buffer allocations (freed on process exit or dma_free).
+    dma_allocations: Vec<DmaAllocation>,
     /// Next available VA in the device MMIO region. Bump-allocated.
     next_device_va: u64,
 }
@@ -79,6 +89,8 @@ impl AddressSpace {
             generation,
             owned_frames: Vec::new(),
             vmas: VmaList::new(),
+            next_dma_va: paging::DMA_BUFFER_BASE,
+            dma_allocations: Vec::new(),
             next_device_va: paging::DEVICE_MMIO_BASE,
         }
     }
@@ -86,8 +98,12 @@ impl AddressSpace {
     pub fn asid(&self) -> u8 {
         self.asid.0
     }
-    /// Free all resources: owned user pages, page table frames, and the L0 table.
+    /// Free all resources: DMA buffers, owned user pages, page table frames, and the L0 table.
     pub fn free_all(&mut self) {
+        // Free DMA buffer allocations (physically contiguous, multi-page).
+        for alloc in self.dma_allocations.drain(..) {
+            page_allocator::free_frames(alloc.pa, alloc.order as usize);
+        }
         // Free owned user pages (code, data, stack).
         for &pa in &self.owned_frames {
             page_allocator::free_frame(pa);
@@ -249,6 +265,37 @@ impl AddressSpace {
 
         Some(va)
     }
+    /// Map a DMA buffer (2^order contiguous pages) into the DMA VA region.
+    ///
+    /// Bump-allocates VA from `DMA_BUFFER_BASE..DMA_BUFFER_END`. The physical
+    /// frames are NOT added to `owned_frames` — they are tracked separately
+    /// in `dma_allocations` and freed via `unmap_dma_buffer` or `free_all`.
+    ///
+    /// Returns the user VA on success, or None if the DMA VA space is full.
+    pub fn map_dma_buffer(&mut self, pa: Pa, order: usize) -> Option<u64> {
+        let num_pages = 1u64 << order;
+        let size = num_pages * PAGE_SIZE;
+        let va = self.next_dma_va;
+
+        if va + size > paging::DMA_BUFFER_END {
+            return None;
+        }
+
+        let attrs = PageAttrs::user_rw();
+
+        for i in 0..num_pages {
+            self.map_inner(va + i * PAGE_SIZE, pa.as_u64() + i * PAGE_SIZE, &attrs);
+        }
+
+        self.next_dma_va = va + size;
+        self.dma_allocations.push(DmaAllocation {
+            va,
+            pa,
+            order: order as u8,
+        });
+
+        Some(va)
+    }
     /// Map a page and take ownership of the frame (freed on cleanup).
     pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
         self.map_inner(va, pa, attrs);
@@ -266,6 +313,61 @@ impl AddressSpace {
     /// TTBR0 value: physical address of L0 table | (ASID << 48).
     pub fn ttbr0_value(&self) -> u64 {
         self.l0_pa.as_u64() | ((self.asid.0 as u64) << 48)
+    }
+    /// Unmap a DMA buffer by its VA. Clears page table entries, invalidates
+    /// TLB, and removes the allocation record.
+    ///
+    /// Returns `(pa, order)` for the caller to free via `page_allocator::free_frames`.
+    /// Returns None if no DMA allocation starts at `va`.
+    pub fn unmap_dma_buffer(&mut self, va: u64) -> Option<(Pa, usize)> {
+        let idx = self.dma_allocations.iter().position(|a| a.va == va)?;
+        let alloc = self.dma_allocations.swap_remove(idx);
+        let num_pages = 1u64 << alloc.order;
+
+        // Clear L3 page table entries for each page in the allocation.
+        for i in 0..num_pages {
+            self.unmap_page_inner(va + i * PAGE_SIZE);
+        }
+
+        // Bulk TLB invalidate for this ASID.
+        self.invalidate_tlb();
+
+        Some((alloc.pa, alloc.order as usize))
+    }
+    /// Clear a single L3 page table entry (write 0). Does not invalidate TLB —
+    /// caller is responsible for a bulk invalidate after unmapping all pages.
+    fn unmap_page_inner(&self, va: u64) {
+        let l0_va = memory::phys_to_virt(self.l0_pa) as *const u64;
+
+        // SAFETY: Page table pointers are valid kernel-mapped memory allocated
+        // by walk_or_create during the original map. We only read L0-L2 entries
+        // and write-volatile the L3 entry to zero (invalidate).
+        unsafe {
+            let e0 = *l0_va.add(Self::l0_idx(va));
+
+            if e0 & DESC_VALID == 0 {
+                return;
+            }
+
+            let l1_va = memory::phys_to_virt(Pa((e0 & PA_MASK) as usize)) as *const u64;
+            let e1 = *l1_va.add(Self::l1_idx(va));
+
+            if e1 & DESC_VALID == 0 {
+                return;
+            }
+
+            let l2_va = memory::phys_to_virt(Pa((e1 & PA_MASK) as usize)) as *const u64;
+            let e2 = *l2_va.add(Self::l2_idx(va));
+
+            if e2 & DESC_VALID == 0 {
+                return;
+            }
+
+            let l3_va = memory::phys_to_virt(Pa((e2 & PA_MASK) as usize)) as *mut u64;
+            let entry = l3_va.add(Self::l3_idx(va));
+
+            core::ptr::write_volatile(entry, 0);
+        }
     }
 }
 impl PageAttrs {

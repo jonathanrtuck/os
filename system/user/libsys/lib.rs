@@ -34,6 +34,8 @@ mod nr {
     pub const INTERRUPT_REGISTER: u64 = 14;
     pub const INTERRUPT_ACK: u64 = 15;
     pub const DEVICE_MAP: u64 = 16;
+    pub const DMA_ALLOC: u64 = 17;
+    pub const DMA_FREE: u64 = 18;
 }
 
 // ---------------------------------------------------------------------------
@@ -116,6 +118,21 @@ pub fn channel_signal(handle: u8) -> i64 {
 /// negative error code. The PA must be in device MMIO space (not RAM).
 pub fn device_map(pa: u64, size: u64) -> i64 {
     unsafe { syscall2(nr::DEVICE_MAP, pa, size) as i64 }
+}
+/// Allocate a DMA-capable buffer (2^order contiguous physical pages).
+///
+/// Returns the user VA of the mapped buffer on success, or a negative error
+/// code. The physical address is written to `pa_out` for programming device
+/// DMA registers. Order 0–4 (4 KiB – 64 KiB).
+pub fn dma_alloc(order: u32, pa_out: &mut u64) -> i64 {
+    unsafe { syscall2(nr::DMA_ALLOC, order as u64, pa_out as *mut u64 as u64) as i64 }
+}
+/// Free a DMA buffer previously allocated with `dma_alloc`.
+///
+/// `va` must be the value returned by `dma_alloc`. `order` must match the
+/// original allocation. Returns 0 on success, or a negative error code.
+pub fn dma_free(va: u64, order: u32) -> i64 {
+    unsafe { syscall2(nr::DMA_FREE, va, order as u64) as i64 }
 }
 /// Terminate the calling process. Does not return.
 pub fn exit() -> ! {

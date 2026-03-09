@@ -307,10 +307,10 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     virtio::init(device_table.as_ref());
 
     // Spawn user processes and create an IPC channel between them.
-    let init_id = process::spawn_from_elf(INIT_ELF).expect("failed to spawn init");
-    let echo_id = process::spawn_from_elf(ECHO_ELF).expect("failed to spawn echo");
+    let (_, init_tid) = process::spawn_from_elf(INIT_ELF).expect("failed to spawn init");
+    let (_, echo_tid) = process::spawn_from_elf(ECHO_ELF).expect("failed to spawn echo");
 
-    channel::create(init_id, echo_id).expect("failed to create ipc channel");
+    channel::create(init_tid, echo_tid).expect("failed to create ipc channel");
     serial::puts("  🔀 processes - init + echo, ipc channel\n");
 
     boot_secondaries();
@@ -380,13 +380,8 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     // EC 0x24 = Data Abort from EL0, EC 0x20 = Instruction Abort from EL0.
     // These are the only exception classes that can be resolved by demand paging.
     if ec == 0x24 || ec == 0x20 {
-        let handled = scheduler::current_thread_do(|thread| {
-            if let Some(ref mut addr_space) = thread.address_space {
-                addr_space.handle_fault(far)
-            } else {
-                false
-            }
-        });
+        let handled =
+            scheduler::current_process_do(|process| process.address_space.handle_fault(far));
 
         if handled {
             // Page mapped successfully — return to the faulting instruction.

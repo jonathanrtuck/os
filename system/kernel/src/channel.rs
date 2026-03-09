@@ -131,12 +131,12 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
     };
     let channel_id = ChannelId(idx);
     // Insert handles (acquires scheduler lock; channel lock already released).
-    let handle_a = scheduler::with_thread_mut(id_a, |thread| {
-        if let Some(addr_space) = &mut thread.address_space {
-            addr_space.map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
-        }
+    let handle_a = scheduler::with_process_of_thread(id_a, |process| {
+        process
+            .address_space
+            .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
 
-        thread
+        process
             .handles
             .insert(HandleObject::Channel(channel_id), Rights::READ_WRITE)
     });
@@ -149,20 +149,20 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
             return Err(e);
         }
     };
-    let result_b = scheduler::with_thread_mut(id_b, |thread| {
-        if let Some(addr_space) = &mut thread.address_space {
-            addr_space.map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
-        }
+    let result_b = scheduler::with_process_of_thread(id_b, |process| {
+        process
+            .address_space
+            .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
 
-        thread
+        process
             .handles
             .insert(HandleObject::Channel(channel_id), Rights::READ_WRITE)
     });
 
     if let Err(e) = result_b {
-        // Clean up the handle we inserted into thread A.
-        scheduler::with_thread_mut(id_a, |thread| {
-            let _ = thread.handles.close(handle_a);
+        // Clean up the handle we inserted into process A.
+        scheduler::with_process_of_thread(id_a, |process| {
+            let _ = process.handles.close(handle_a);
         });
         page_allocator::free_frame(shared_pa);
 
