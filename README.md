@@ -35,7 +35,7 @@ os/
 │   └── kernel/                  # Bare-metal aarch64 Rust kernel
 ├── CLAUDE.md                    # AI collaboration context
 ├── README.md
-└── LICENSE
+└── UNLICENSE
 ```
 
 ## Design Documents
@@ -77,4 +77,4 @@ This project uses [Claude](https://claude.ai) as a thinking partner for design e
 
 ## License
 
-[Unlicense](LICENSE) — public domain.
+[Unlicense](UNLICENSE) — public domain.
