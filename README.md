@@ -2,11 +2,11 @@
 
 A personal exploration of a document-centric operating system — one where documents are first-class citizens and applications are interchangeable tools that attach to content.
 
-This is a design project, not a product. The primary artifact is a coherent OS design; code is written selectively to validate design decisions.
+This is a design project, not a product. The primary artifact is a coherent OS design. Code is written selectively — to prove out areas of the design, research potential solutions, and validate uncertain assumptions. Some of the implementation may be independently useful (the kernel, in particular, is a self-contained bare-metal aarch64 microkernel in Rust); other parts exist purely to serve the design exploration.
 
 ## The Idea
 
-Modern operating systems are app-centric: **OS → App → Document.** You open an app, create or find a document inside it, and work within that app's world.
+Modern operating systems are app-centric: **OS → App → File.** You open an app, create or find a file inside it, and work within that app's world.
 
 This project explores inverting that: **OS → Document → Tool.** Documents have independent identity. The OS understands what they are (via mimetypes) and can view any of them natively. Editing means attaching a tool to content — and tools are interchangeable.
 

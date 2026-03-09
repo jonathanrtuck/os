@@ -11,14 +11,20 @@ Active questions we've started exploring but haven't resolved. Each thread links
 ### Is "compound" intrinsic or contextual?
 
 **Informs:** Decision #14 (Compound Documents), Glossary
-**Status:** Identified, not yet explored in depth
-**Context:** A PDF has a single mimetype but contains text + images + vector graphics. Is it always compound (OS knows it has parts), or only compound when deliberately decomposed? Same question for ZIP, mp4. The answer must be consistent with the decomposition spectrum — we draw the line at mimetypes, so if something has one mimetype, is it by definition simple?
+**Status:** Partially resolved by uniform manifest model (2026-03-09)
+**Context:** With uniform manifests, every document has a manifest. A PDF becomes a document whose manifest references a single content file. "Compoundness" is a property of the manifest's structure (how many content references), not an intrinsic property of the content format. If the user decomposes a PDF for part-by-part editing, a new manifest with extracted parts could be created. Remaining question: is decomposition automatic, user-initiated, or editor-driven?
 
-### Referenced vs owned parts in compound documents
+### Referenced vs owned parts in documents
 
 **Informs:** Decision #14 (Compound Documents)
 **Status:** Identified, not yet explored
-**Context:** A slideshow referencing photos from your library (independent, survive deletion) vs. text blocks that only exist within the slideshow (owned, deleted with compound). Is this a property of the reference, a user choice, or two distinct relationship types?
+**Context:** A slideshow referencing photos from your library (shared, survive deletion) vs. text blocks that only exist within the slideshow (owned, deleted with document). Is this a property of the reference, a user choice, or two distinct relationship types? The uniform manifest model makes this more concrete — every reference in a manifest is either shared or owned.
+
+### OS service interface map
+
+**Informs:** Decisions #9, #7, #14, #15, #17
+**Status:** Preliminary mapping done (2026-03-09), no interfaces designed yet
+**Context:** Mapped all inter-component interfaces by boundary. The OS service is where interface design effort concentrates — edit protocol, metadata queries, interaction model, translator interface. The kernel surface (12 syscalls) is small and stable. Internal OS service interfaces (renderer, layout engine, compositor, scheduling policy) matter for implementation but can evolve freely. Key finding: scheduling policy needs no separate interface (falls out of edit protocol + kernel syscalls). Web engine adapter is not separate from translator interface. See insights log for full table.
 
 ### View/edit in the CLI
 
@@ -35,9 +41,15 @@ Active questions we've started exploring but haven't resolved. Each thread links
 
 ### COW Filesystem
 
-**Informs:** Decision #16 (Technical Foundation — filesystem sub-decision), Decision #12 (Undo)
+**Informs:** Decision #16 (Technical Foundation — filesystem sub-decision), Decision #12 (Undo), Decision #14 (virtual manifest rewind)
 **Status:** Placement settled (userspace service), COW on-disk design pending. See `design/research-cow-filesystems.md`.
-**Context:** Studied RedoxFS (Rust, COW but no snapshots), ZFS (birth time + dead lists = gold standard for snapshots), Btrfs (refcounted subvolumes), Bcachefs (key-level versioning). Key findings: (1) birth time in block pointers is non-negotiable for efficient snapshots, (2) ZFS dead lists make deletion tractable, (3) per-document scoping needed (datasets/subvolumes, not whole-FS snapshots), (4) `beginOp`/`endOp` maps naturally to COW transaction boundaries. TFS (Redox's predecessor) attempted per-file revision history but didn't ship it — cautionary data point. Filesystem is a userspace service — kernel owns COW/VM mechanics (page fault handler), filesystem manages on-disk layout (B-trees, block allocation, snapshots). Open questions: on-disk format, snapshot naming, pruning policy, compound document atomicity, page cache placement, interaction with memory mapping.
+**Context:** Studied RedoxFS (Rust, COW but no snapshots), ZFS (birth time + dead lists = gold standard for snapshots), Btrfs (refcounted subvolumes), Bcachefs (key-level versioning). Key findings: (1) birth time in block pointers is non-negotiable for efficient snapshots, (2) ZFS dead lists make deletion tractable, (3) per-document scoping needed (datasets/subvolumes, not whole-FS snapshots), (4) `beginOp`/`endOp` maps naturally to COW transaction boundaries. TFS (Redox's predecessor) attempted per-file revision history but didn't ship it — cautionary data point. Filesystem is a userspace service — kernel owns COW/VM mechanics (page fault handler), filesystem manages on-disk layout (B-trees, block allocation, snapshots). **New constraint (2026-03-09):** metadata DB must live on the COW filesystem so its historical state is preserved in snapshots — required for uniform rewind performance across static and virtual documents. Also favors time-correlated (global or epoch-based) snapshots over purely per-document snapshots, so historical world-state queries are cheap. Open questions: on-disk format, snapshot naming, pruning policy, compound document atomicity, page cache placement, interaction with memory mapping, snapshot scope (global vs per-document vs time-correlated).
+
+### Virtual manifests, retention, and the OS-as-document
+
+**Informs:** Decision #14 (Compound Documents), Decision #17 (Interaction Model), Decision #16 (COW filesystem)
+**Status:** Core concepts settled (2026-03-09): static/virtual manifests, retention policies replacing transient concept, streaming as virtual. OS-as-document not yet committed.
+**Context:** Manifests can be static (disk-backed, COW'd) or virtual (content generated on demand from internal state OR external sources). Virtual manifests enable: system-derived documents (inbox, search results, dashboard — internal state), streaming content (YouTube — external source). All documents are persistent — no "transient" concept. Retention policies handle cleanup (webpages 30 days, user content permanent). COW pruning system manages both edit history and document lifecycle. The OS itself could be presented as a document or query (shell/GUI as editors/viewers) — potentially informs Decision #17. Virtual documents inherit time-travel from underlying static documents' COW history. Design constraint: rewind performance must be uniform (metadata DB on COW filesystem). "Transient documents" concept explored and rejected — it's a retention policy, not a document type.
 
 ### ~~Privilege model (EL1 / EL0 boundary)~~ — SETTLED
 
@@ -68,6 +80,8 @@ Topics to explore, roughly prioritized by which unsettled decisions they'd infor
 5. **Content-type rebase handlers in practice** — We know the theory (git merge generalized). What would a text rebase handler actually look like as an API? What about images? This would validate the edit protocol's upgrade path.
 
 6. **The metadata query API** — Decision #7 settled on "simple query API backed by embedded DB." What does this API actually look like? What are the verbs? How does it feel to use from both GUI and CLI?
+
+6b. **IANA mimetype → OS document type mapping** — Systematic exercise: map common IANA mimetypes to OS document types, relationship axes, and editor bindings. Which mimetypes map to single-content documents (image/png → image document)? Which suggest compound documents (text/html → compound with flow layout)? What are the OS-native mimetypes for compound document types (presentation, project, album)? This would validate the three-axis model against real content types and surface edge cases. Connects to the mimetype-of-the-whole question (partially resolved) and content-type registration via editor metadata.
 
 ### Exploratory (interesting but less urgent)
 
@@ -180,7 +194,7 @@ The "rethink everything" stance (Decision #3) helps with drivers and hurts with 
 
 ### Native renderer preserves the direction of power (2026-03-08)
 
-With a web engine as renderer (Approach A), the OS can only do what the engine supports. Custom rendering behavior means patching the engine or hoping for extension points — the OS is downstream of someone else's architectural decisions. With a native renderer (Approach B), the OS defines what's possible. The renderer can express layout behaviors, compositing effects, and content-type-specific rendering that CSS can't describe. Web content is a lossy import (translated inward to compound doc format, same as .docx), not the rendering model itself. The Safari analogy: Apple controls WebKit *and* the platform, so they can add proprietary CSS extensions — but they're still constrained by the engine's architecture. A native renderer removes that constraint entirely. The compound document model is the internal truth; external formats (.docx, .pptx, .html) are all translations inward at the boundary. The OS doesn't think in HTML any more than it thinks in .docx.
+With a web engine as renderer (Approach A), the OS can only do what the engine supports. Custom rendering behavior means patching the engine or hoping for extension points — the OS is downstream of someone else's architectural decisions. With a native renderer (Approach B), the OS defines what's possible. The renderer can express layout behaviors, compositing effects, and content-type-specific rendering that CSS can't describe. Web content is a lossy import (translated inward to compound doc format, same as .docx), not the rendering model itself. The Safari analogy: Apple controls WebKit _and_ the platform, so they can add proprietary CSS extensions — but they're still constrained by the engine's architecture. A native renderer removes that constraint entirely. The compound document model is the internal truth; external formats (.docx, .pptx, .html) are all translations inward at the boundary. The OS doesn't think in HTML any more than it thinks in .docx.
 
 ### Settling the approach, not the technology (2026-03-08)
 
@@ -204,7 +218,7 @@ In Oberon, any text on screen is potentially a command. Middle-click on `Module.
 
 ### The kernel is a handle multiplexer with one wait primitive (2026-03-08)
 
-A pattern emerged from settling drivers and filesystem: the kernel's job is multiplexing hardware resources behind handles + providing a single event-driven wait mechanism (`wait`). Memory (address spaces), communication (channels), time (scheduling contexts), devices (MMIO mappings + interrupt handles), timers — all accessed via handles, all waited on via one syscall. The kernel doesn't understand what any of these are *for*. It just manages them. This is a concrete identity statement for the kernel: it's the handle multiplexer. Everything semantic (content types, document state, filesystem layout, driver protocols, rendering) lives in userspace. The consequence: every new kernel feature should be expressible as "a new handle type that can be waited on." See also "Syscall API: composable verbs on typed handles" for the full API shape.
+A pattern emerged from settling drivers and filesystem: the kernel's job is multiplexing hardware resources behind handles + providing a single event-driven wait mechanism (`wait`). Memory (address spaces), communication (channels), time (scheduling contexts), devices (MMIO mappings + interrupt handles), timers — all accessed via handles, all waited on via one syscall. The kernel doesn't understand what any of these are _for_. It just manages them. This is a concrete identity statement for the kernel: it's the handle multiplexer. Everything semantic (content types, document state, filesystem layout, driver protocols, rendering) lives in userspace. The consequence: every new kernel feature should be expressible as "a new handle type that can be waited on." See also "Syscall API: composable verbs on typed handles" for the full API shape.
 
 ### Syscall API: composable verbs on typed handles (2026-03-08)
 
@@ -219,6 +233,74 @@ The syscall surface should be a small set of composable verbs, not per-type spec
 Design principles: (1) handle type carries context — `signal(channel_handle)` not `channel_signal`; (2) `wait` takes multiple handles because multiplexing IS its purpose — other syscalls take single handles; (3) streams/reactive composition lives in the OS service (userspace), not the kernel — the kernel provides the event primitive (`wait`), the OS service composes it.
 
 The OS service architecture is naturally reactive/stream-based: merge input events, edit protocol events, and timer ticks → fold into document state → render. This maps cleanly to reactive stream combinators (most.js, RxJS pattern). The kernel doesn't need to understand streams — it just needs to be a good event source.
+
+### Virtual manifests: documents as interfaces, not necessarily files on disk (2026-03-09)
+
+A manifest can be static (stored on disk, COW-snapshotted) or virtual (content generated by the OS service on read, like Plan 9's `/proc`). Static manifests back user-created content. Virtual manifests back system-derived views: inbox (query over messages), search results, "recent documents," system dashboard. Both are files in the filesystem namespace. Both are documents to the user. The distinction is an implementation detail — same interface, different backing.
+
+Virtual documents don't need their own COW history. Their "state at time T" is recoverable by re-evaluating the query against the snapshot of the world at time T. The underlying static documents have COW history; virtual documents inherit time-travel for free. Same reason database views don't need their own transaction log.
+
+Key analogy: a video file is static on disk, but the user sees content that changes over time (temporal axis). An inbox is computed from live state, and the user sees content that changes as messages arrive. From the user's perspective, both are "things that show changing content." The mechanism differs; the experience doesn't. Virtual vs static is like table vs view in a database.
+
+### All documents are persistent — "transient" is a retention policy, not a concept (2026-03-09)
+
+Initially proposed "transient documents" (in-memory only, discarded on close) for things like viewed webpages. But this creates two persistence types the user must understand — a leaky abstraction. Instead: all documents are persistent by default. Webpages, imports, everything is written to the COW filesystem. Retention policies handle cleanup — viewed webpages might be kept for 30 days, user-created content kept permanently. The COW pruning system (needed anyway for edit history) handles document lifecycle too. One mechanism, not two.
+
+This gives significant benefits for free: rewindable browsing (COW history of page views), offline access (previously viewed pages are on disk), full-text search across browsed content. Browsers already cache page assets to disk — this model structures that same data as first-class documents instead of an opaque cache blob.
+
+Streaming content (YouTube video) is a virtual document: the manifest is persistent (metadata about what you're watching), but content is generated on demand from an external source. Same pattern as inbox (generated from internal state) — virtual manifests can derive content from internal OR external sources.
+
+### Document mimetype resolution: imports vs OS-native (2026-03-09)
+
+Imported documents retain their original external mimetype as manifest metadata (e.g., `application/vnd.openxmlformats-officedocument.presentationml.presentation` for .pptx). OS-native documents get custom mimetypes (e.g., `application/x-os-presentation`). The document-level mimetype drives editor binding. On export, the user selects a target format; the OS pre-selects the original mimetype where available (re-export imported .pptx defaults to .pptx). For OS-native documents, the user chooses from available export translators (like png vs jpg vs webp for images). Original mimetype is an optional metadata field — present for imports, absent for OS-native. This partially resolves the "mimetype of the whole" open question.
+
+### Uniform rewind performance is a design constraint (2026-03-09)
+
+If virtual document rewind is noticeably slower than static document rewind, users must know whether a document is static or virtual to set expectations — the abstraction leaks. This makes the metadata DB's placement a non-negotiable: it must live on the COW filesystem so its historical state is preserved in snapshots. Querying "inbox last Tuesday" then reads from the metadata DB at Tuesday's snapshot — same cost as a current query. This constraint flows from the virtual manifest model down into the filesystem COW design (Decision #16).
+
+### Three-axis layout model unifies compositional and organizational documents (2026-03-09)
+
+The original five layout types (flow, fixed canvas, timeline, grid, freeform canvas) were four spatial sub-types plus one temporal sub-type. They covered compositional documents (slides, articles, video projects) but not organizational ones (source code projects, albums, playlists). The missing piece: the **logical** axis (hierarchical, sequential, flat, graph). Adding it as a third composable axis alongside spatial and temporal unifies all compound documents under one model. Every document is a point in a three-dimensional space (spatial × temporal × logical). Most use one or two axes. The model was stress-tested against spreadsheets, chat threads, musical scores, comics, mind maps, calendars, and dashboards — everything fits. No convincing fourth axis was found. Spatial, temporal, and logical correspond to the fundamental ways humans organize anything: where, when, and how-related.
+
+### Uniform manifest model eliminates the simple/compound distinction (2026-03-09)
+
+Every document is backed by a manifest — even "simple" ones (single text file). The simple/compound distinction becomes an internal property (how many content references) rather than a user-facing concept. Users see documents, never files. Manifests are the only thing the metadata query system needs to index. Content files are the source of truth for content (indexed separately for full-text search). This makes concrete the principle already stated in CLAUDE.md: "Everything-is-files is architectural, not UX. Users see abstractions, not files."
+
+### Content-type registration via metadata eliminates a separate registry (2026-03-09)
+
+Editors are files too. If their metadata includes which content types they handle, then the metadata query system IS the content-type registry. One system for "find me things by their properties," whether those things are documents or tools. No separate mutable registry that can get out of sync.
+
+### Version history is orthogonal to the layout model (2026-03-09)
+
+COW snapshots are an OS-level mechanism, not a layout axis. An audio file has content temporality (the waveform) AND version history (the edits). Conflating them would mean "this audio track starts at 0:30" and "this file was edited yesterday" live on the same axis. They don't. Content temporality is part of what the document IS. Version history is how the document has CHANGED. The COW/undo system operates on a dimension outside the layout model entirely — which is why undo is an OS feature, not an editor feature.
+
+### Scheduling policy needs no separate interface (2026-03-09)
+
+The OS service already knows mimetype (fundamental metadata), editor lifecycle (manages it), and document state (renders it). When an editor sends "play" through the edit protocol, the OS service both starts rendering frames AND adjusts the scheduling context via existing kernel syscalls. Content-type-aware scheduling is internal policy logic driven by information already flowing through the edit protocol. No dedicated scheduling interface needed.
+
+### The kernel boundary has exactly two clients (2026-03-09)
+
+Editors don't talk to the kernel directly — they talk to the OS service via IPC (channels underneath, but the editor's interface is the edit protocol). Users don't touch the kernel. The syscall API serves exactly two kinds of clients: the OS service and userspace drivers.
+
+### Red/blue/black is a complexity principle, not an architecture diagram (2026-03-09)
+
+The red/blue/black model (external reality → adapters → core) serves as a complexity management principle: total complexity is conserved, blue absorbs external messiness, black stays clean. The architecture has additional structure within "black" — the kernel (clean through semantic ignorance, mechanism only) and the OS service (clean through design, policy through principled interfaces). These are two different kinds of cleanness. The architecture diagram (architecture.mermaid) captures this structural detail; the red/blue/black model stays as a principle.
+
+### OS service interfaces are where the personality lives (2026-03-09)
+
+Interface map by boundary:
+
+| Boundary                   | Interface                                                     | Clients             | Status             |
+| -------------------------- | ------------------------------------------------------------- | ------------------- | ------------------ |
+| Kernel ↔ userland          | Syscall API (12 syscalls, typed handles)                      | OS service, drivers | Mostly designed    |
+| OS service ↔ Editors       | Edit protocol (beginOp/endOp, state, input)                   | Editors             | Partially designed |
+| OS service ↔ Users         | Interaction model (CLI + GUI)                                 | Users               | Unsettled (#17)    |
+| OS service ↔ Editors/Users | Metadata query API (document discovery)                       | Editors, users      | Sketched (#7)      |
+| Blue ↔ Black               | Translator interface (format conversion, includes web engine) | All translators     | Blank              |
+| Blue ↔ Black               | Driver interface (device access)                              | Device drivers      | Sketched           |
+| OS service internal        | Renderer, layout engine, compositor, scheduling policy        | —                   | Blank              |
+
+The kernel surface is small and stable. The blue-layer interfaces are about pluggability. The OS service boundary — edit protocol, metadata queries, interaction model — defines what it feels like to use this OS. The web engine adapter is not a separate interface from the translator interface (a webpage IS a compound document, handled through the same translator pattern as .docx).
 
 ### Birth time is the key insight for efficient snapshots (2026-03-08)
 

@@ -10,25 +10,25 @@ This document tracks every design decision — settled, tentative, and abandoned
 
 Which decisions are stable enough to write code against? This guides when to code vs. when to keep designing.
 
-| Decision               | Status    | Readiness            | Notes                                                                                                  |
-| ---------------------- | --------- | -------------------- | ------------------------------------------------------------------------------------------------------ |
-| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                                              |
-| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                                 |
-| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                                 |
-| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                                           |
-| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                                   |
-| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).                    |
-| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.                      |
-| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                               |
-| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. IPC mechanism depends on §16.                                                  |
-| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                        |
-| #11 Rendering Tech     | Settled   | **Behind interface** | Architecture firm (web engine as substrate, adaptation layer). Engine choice deferred to prototype.    |
-| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                               |
-| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                   |
-| #14 Compound Documents | Settled   | **Behind interface** | Manifest + layout model is firm. Rendering depends on §11. Open sub-questions remain.                  |
-| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                 |
-| #16 Tech Foundation    | Partial   | **Partially safe**   | Most sub-decisions settled (incl. driver model, filesystem placement). Remaining: filesystem COW on-disk design. |
-| #17 Interaction Model  | Unsettled | **Not safe**         | Depends on §11, §2, §7.                                                                                |
+| Decision               | Status    | Readiness            | Notes                                                                                                                              |
+| ---------------------- | --------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                                                                          |
+| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                                                             |
+| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                                                             |
+| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                                                                       |
+| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                                                               |
+| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).                                                |
+| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.                                                  |
+| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                                                           |
+| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. IPC mechanism depends on §16.                                                                              |
+| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                                                    |
+| #11 Rendering Tech     | Settled   | **Behind interface** | Architecture firm (web engine as substrate, adaptation layer). Engine choice deferred to prototype.                                |
+| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                                                           |
+| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                                               |
+| #14 Compound Documents | Settled   | **Behind interface** | Uniform manifest model + three-axis relationships (spatial/temporal/logical). Rendering depends on §11. Open sub-questions remain. |
+| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                                             |
+| #16 Tech Foundation    | Partial   | **Partially safe**   | Most sub-decisions settled (incl. driver model, filesystem placement). Remaining: filesystem COW on-disk design.                   |
+| #17 Interaction Model  | Unsettled | **Not safe**         | Depends on §11, §2, §7.                                                                                                            |
 
 **Readiness key:**
 
@@ -379,39 +379,49 @@ _Tier 4. Depends on: Edit protocol._ **SETTLED.**
 
 _Tier 4. Depends on: File understanding, rendering technology, edit protocol. Feeds into: Layout engine._ **SETTLED.**
 
-**Decision:** Compound documents are manifests with references + a layout model. They are not special file types — they are a small number of layout models applied to simple content types.
+**Decision:** All documents are manifests with references. The manifest model is uniform — a document with one content reference (a text file) and a document with many (a slide deck) are structurally the same. What varies is how many content files the manifest references and which relationship axes describe the connections between parts. The "simple vs compound" distinction is an internal property, not a user-facing concept.
 
-**Structure:** A compound document manifest references:
+**Uniform manifest model:** Every document is backed by a manifest that references one or more content files plus metadata. Users see documents; files are implementation details. The metadata query system indexes only manifests — one kind of thing to index, one kind of thing to query. Content files are the source of truth for content; a separate full-text content index (maintained by the OS service, triggered by `endOperation`) enables searching within documents.
 
-- Content files (real, independent files in the filesystem)
-- A layout model (one of: flow, fixed canvas, timeline, grid, freeform canvas)
-- Arrangement rules (positions, sizes, flow constraints, track synchronization)
+**Static and virtual manifests.** Manifests can be static (real files on disk, COW-snapshotted) or virtual (filesystem entries whose content is generated on demand, like Plan 9's `/proc`). Static manifests back user-created content and persisted imports (text files, slide decks, projects, viewed webpages). Virtual manifests back system-derived views (inbox, search results, "recent documents," system dashboard) and externally-sourced streams (streaming video = manifest with remote reference, content fetched on demand). Both are files, both are documents, both participate in the metadata query system. The user doesn't know which kind backs a given document — virtual vs static is an implementation detail, not a user-facing concept. Virtual documents don't need their own COW history; their "state at time T" is recovered by re-evaluating the query against the COW snapshot of the world at time T. **Design constraint:** rewind performance must be uniform across static and virtual documents, or the abstraction leaks. This requires the metadata DB to live on the COW filesystem so historical queries read from past DB snapshots at the same cost as current queries (see Decision #16).
 
-**Layout models (five fundamental types):**
+**All documents are persistent.** There is no "transient" document concept. All documents — including viewed webpages — are written to the COW filesystem and subject to retention policies. Webpages get a shorter retention (e.g., 30 days); user-created content gets permanent retention. The COW pruning system handles cleanup. This eliminates a potential abstraction leak: if transient documents existed, the user would need to know a document's persistence type to predict behavior. With uniform persistence + retention policies, all documents are searchable, rewindable, and available offline. Browsers already cache page assets to disk — this model structures that same data as first-class documents instead of an opaque cache.
 
-- **Flow** — content reflows around embedded objects (documents, articles, emails, web pages)
-- **Fixed canvas** — objects at specific positions on fixed-size pages (presentations, posters, PDFs)
-- **Timeline** — content synchronized along a time axis (video/audio editing, animation)
-- **Grid** — rows and columns (spreadsheets, dashboards)
-- **Freeform canvas** — arbitrary positioning, unbounded (whiteboards, design tools)
+**Import creates a manifest.** When a file enters the system (airdrop, download, USB), the OS wraps it: creates a static manifest pointing to the raw file, extracts metadata, indexes it. A file comes in; a document emerges.
+
+**Content-type registration via metadata.** Editors are files too. Their metadata declares which content types they handle (e.g., `handles: [text/plain, text/markdown]`). The metadata query system IS the registry — no separate mechanism. Same system used to find documents is used to find editors.
+
+**Three-axis relationship model:** The relationships between parts are described along three orthogonal, composable axes (see foundations.md for full details):
+
+- **Spatial** — where parts are positioned (flow, fixed canvas, grid, freeform canvas, or none)
+- **Temporal** — when parts are active (simultaneous, sequential, timed, or none)
+- **Logical** — how parts are grouped (flat, sequential, hierarchical, graph, or none)
+
+Every document is a point in this three-dimensional space. A slide deck = spatial (fixed canvas) + temporal (sequential) + logical (flat). A source code project = logical (hierarchical tree). A video editing project = spatial (2D frame) + temporal (timed) + logical (grouped by track). The original five layout types (flow, fixed canvas, timeline, grid, freeform canvas) mapped to four spatial sub-types plus one temporal sub-type (timeline = timed). The three-axis model extends this to cover organizational documents (projects, albums, playlists) that use the logical axis without spatial layout.
+
+**Version history is orthogonal to layout.** COW snapshots are an OS-level mechanism that applies to all documents regardless of their layout axes. Content temporality (an audio waveform) and version history (edits to the audio) are fundamentally different — one is the document's structure, the other is the OS's undo system.
 
 **Key properties:**
 
-- Component files are real, independent files — queryable and usable on their own.
-- "Resize image in a slideshow" is a layout operation (manifest change), not an image operation.
-- The layout engine mediates cross-type interactions (image resize → text reflow).
+- Content files are real files in the filesystem, managed by the OS, not directly accessible to users.
+- "Resize image in a slideshow" is a spatial layout operation (manifest change), not an image operation.
+- The layout engine mediates cross-type interactions along whichever axes are active.
+- Axes can interact: spatial arrangement varying over time (animation), logical structure driving spatial visibility (collapsible sections). The layout model declares which axes are present; content-type-specific editors handle the coupling.
 
-**Compound documents vs atomic content types:** Any content can be decomposed further (video → frames, image → pixels, text → code points → bytes), but this is a spectrum — taken to its conclusion, it's just Unix. Compound documents compose at the **mimetype level**: their parts are things that have mimetypes. A video _editing project_ (timeline layout + video clips + audio clips) is a compound document. A video _file_ (`video/mp4`) is an atomic content type — its internal structure (temporal compression, frame dependencies, codec) is the content type's concern, not a layout model the OS decomposes. The line is pragmatic but anchored to the IANA mimetype registry, the same way Unix's byte boundary is pragmatic but anchored to hardware addressing.
+**Compound documents vs atomic content types:** Any content can be decomposed further (video → frames, image → pixels, text → code points → bytes), but this is a spectrum — taken to its conclusion, it's just Unix. Documents compose at the **mimetype level**: their parts are things that have mimetypes. A video _editing project_ (timed temporal layout + video clips + audio clips) is a document with multiple parts. A video _file_ (`video/mp4`) is an atomic content type — its internal structure (temporal compression, frame dependencies, codec) is the content type's concern, not a layout model the OS decomposes. The line is pragmatic but anchored to the IANA mimetype registry, the same way Unix's byte boundary is pragmatic but anchored to hardware addressing.
 
-**Interop:** Translators (leaf nodes) convert between internal representation and external formats at import/export boundaries. Import .pptx → extract content as files, generate manifest. Export to .pptx → pack manifest + files into pptx structure. Translation is inherently lossy. New format support = new translator; the OS doesn't change.
+**Interop:** Translators (leaf nodes) convert between internal representation and external formats at import/export boundaries. Import .pptx → extract content as files, generate manifest with spatial + temporal layout. Export to .pptx → pack manifest + files into pptx structure. Translation is inherently lossy. New format support = new translator; the OS doesn't change.
 
 **Remaining sub-decisions:**
 
-- What happens when a referenced file is moved or deleted?
-- How does the user create/author compound documents? (Interaction model question)
-- **Is "compound" intrinsic or contextual?** A PDF has a single mimetype but contains text + images + vector graphics in a fixed canvas layout. Is it always compound (the OS knows it has parts), or only compound when deliberately decomposed for editing? Same question for ZIP archives. This connects to the Decomposition Spectrum — the answer must be consistent with where we draw that line.
-- **Referenced vs owned parts.** A slideshow might reference independent photos (shared, survive deletion of the compound) or contain text blocks that only exist within it (owned, deleted with the compound). Is this a property of the reference, a user choice, or two distinct relationship types?
-- **Relationship between mimetypes and compound/simple.** Simple documents have a mimetype. Compound documents have a manifest + parts with their own mimetypes. Does the compound-as-a-whole present a mimetype to the user? How do top-level MIME types vs subtypes map?
+- What happens when a referenced content file is moved or deleted?
+- How does the user create/author multi-part documents? (Interaction model question)
+- **Referenced vs owned parts.** A slideshow might reference independent photos (shared, survive deletion of the document) or contain text blocks that only exist within it (owned, deleted with the document). Is this a property of the reference, a user choice, or two distinct relationship types?
+- **Mimetype of the whole (partially resolved).** Imported documents retain their original external mimetype as metadata. OS-native documents get custom OS mimetypes (e.g., `application/x-os-presentation`). The document-level mimetype drives editor binding. On export, user selects target format; OS pre-selects original mimetype where available. Remaining: systematic IANA mimetype → OS document type mapping; naming convention for OS-native mimetypes; how simple documents' mimetypes relate to their content file's mimetype.
+- **Manifest format.** Internal to the OS, no external interop requirement. Binary for performance or text for debuggability. Leaf-node decision — design the interface, choose format later.
+- **COW atomicity for multi-part documents.** An edit operation on a multi-part document might touch multiple content files. The `endOperation` snapshot needs document-level atomicity, not just file-level. The OS service coordinates this since it manages both the edit protocol and the filesystem interface.
+- **Filesystem organization of manifests and content files.** Users don't see paths. The OS is free to organize storage however it wants: content-addressable, flat with UUIDs, by mimetype, etc. Connects to filesystem COW design (Decision #16).
+- **Retention policies.** All documents are persistent, subject to retention policies for cleanup. Questions: what are the default retention tiers (permanent, 30-day, 7-day, etc.)? How does the user configure retention per document type? How does retention interact with COW snapshot pruning (same mechanism or layered)? What about storage pressure — does the OS aggressively prune low-retention documents when storage is low?
 
 ---
 
@@ -419,16 +429,22 @@ _Tier 4. Depends on: File understanding, rendering technology, edit protocol. Fe
 
 _Tier 4. Depends on: Compound documents, rendering technology._
 
-The layout engine is now more clearly scoped by Decision #14. It must support five layout models: flow, fixed canvas, timeline, grid, and freeform canvas. It also mediates cross-content-type interactions (image resize → text reflow, time range removal → synchronized track trimming).
+The layout engine is scoped by Decision #14's three-axis relationship model. It must handle relationships along three composable axes:
 
-| Option                                               | Tradeoffs                                                                                                                                                                                                                |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **CSS (via web engine)**                             | Already supports flow, grid, flex, absolute positioning — covers flow, fixed canvas, grid, and freeform canvas natively. Timeline would need custom work. No layout engineering for 4/5 models. But inherits CSS quirks. |
-| **Custom layout models**                             | Full control over all five models. Can design timeline layout natively. But enormous engineering effort for the non-timeline models that CSS handles well.                                                               |
-| **CSS for spatial layouts + custom timeline engine** | Best of both worlds. CSS handles flow/canvas/grid/freeform (4/5 models). Custom engine handles timeline (the one model CSS doesn't support). But two layout systems to maintain.                                         |
+- **Spatial axis:** flow, fixed canvas, grid, freeform canvas sub-types
+- **Temporal axis:** simultaneous, sequential, timed sub-types
+- **Logical axis:** flat, sequential, hierarchical, graph sub-types
 
-**Initial leaning:** CSS for spatial layouts + custom timeline engine.
-**Why this matters:** The layout engine is now a critical system component — it mediates cross-type interactions in compound documents (Decision #14). Closely tied to rendering technology choice (Decision #11). If using a web engine, CSS covers most models for free.
+It also mediates cross-content-type interactions along whichever axes are active (image resize → text reflow on spatial axis, time range removal → synchronized track trimming on temporal axis, section collapse → child visibility on logical axis).
+
+| Option                                                | Tradeoffs                                                                                                                                                                                                       |
+| ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **CSS (via web engine)**                              | Covers spatial axis well (flow, grid, flex, absolute positioning). No support for temporal or logical axes.                                                                                                     |
+| **Custom layout engine**                              | Full control over all three axes. Can design temporal and logical layouts natively. But enormous engineering effort for spatial layouts that CSS handles well.                                                  |
+| **CSS for spatial + custom temporal/logical engines** | CSS handles spatial axis (4 sub-types). Custom engines handle temporal (timed synchronization, sequential transitions) and logical (tree navigation, graph layout). Three systems but each focused on one axis. |
+
+**Initial leaning:** CSS for spatial + custom temporal/logical engines.
+**Why this matters:** The layout engine is a critical system component — it mediates cross-type interactions in compound documents (Decision #14). The three-axis model expands scope beyond the original five layout types. Closely tied to rendering technology choice (Decision #11). Logical axis support is what enables organizational documents (projects, albums) — without it, the compound document model only covers compositional use cases.
 
 ---
 
@@ -470,7 +486,7 @@ This decision is being resolved incrementally through a bare-metal research spik
 
 **Filesystem placement: Userspace service.** The filesystem runs as an EL0 process managing on-disk layout (B-tree structure, block allocation, snapshot metadata, space accounting, pruning). The kernel owns page-level COW mechanics: the page fault handler performs copy-on-write (allocate new page, copy, remap), demand paging manages physical frames, memory mapping places file pages in process address spaces. The hot path for "no save" (editor writes to a memory-mapped document page) is handled entirely by the kernel's VM layer — no filesystem involvement. The filesystem is only involved in: snapshot creation at `endOperation` (metadata update), background writeback (flushing dirty pages to disk), and file open/close — all infrequent relative to editor writes. Why userspace: filesystem code is complex (B-trees, journaling/logging, crash recovery, space accounting) — exactly the code you don't want in the trusted computing base. The performance-critical path (COW page faults) never crosses the process boundary.
 
-**Microkernel convergence.** The kernel is a microkernel — not by ideology, but by convergence. Each sub-decision independently pushed complexity outward: drivers to userspace (fault isolation + unsafe minimization), filesystem to userspace (complex code outside TCB, hot path in kernel VM), rendering to the OS service (not in-kernel), editors to separate processes (untrusted). What remains in the kernel is exactly the microkernel set: address spaces, threads, IPC, scheduling, interrupt forwarding, and handle-based access control. The kernel's role is multiplexing hardware resources behind handles and providing a single event-driven wait mechanism. Everything semantic (content types, document state, filesystem layout, driver protocols) lives in userspace. The kernel doesn't understand what any resource is *for* — it just manages access to it.
+**Microkernel convergence.** The kernel is a microkernel — not by ideology, but by convergence. Each sub-decision independently pushed complexity outward: drivers to userspace (fault isolation + unsafe minimization), filesystem to userspace (complex code outside TCB, hot path in kernel VM), rendering to the OS service (not in-kernel), editors to separate processes (untrusted). What remains in the kernel is exactly the microkernel set: address spaces, threads, IPC, scheduling, interrupt forwarding, and handle-based access control. The kernel's role is multiplexing hardware resources behind handles and providing a single event-driven wait mechanism. Everything semantic (content types, document state, filesystem layout, driver protocols) lives in userspace. The kernel doesn't understand what any resource is _for_ — it just manages access to it.
 
 ### Open sub-decisions
 
