@@ -81,7 +81,7 @@ Read these before making any design suggestions:
 
 **Kernel implementation next:** `wait` syscall (handle-based event multiplexer). Then: timer handles, interrupt forwarding, wire DTB into device init, migrate virtio drivers to userspace.
 
-**Kernel code:** `system/kernel/` (32 source files) + `system/user/{init,echo,libsys}/` + `system/host-tests/` (154 tests across 11 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC. Three-tier memory (buddy + slab + linked-list). Full process cleanup on exit.
+**Kernel code:** `system/kernel/` (34 source files) + `system/user/{init,echo,libsys}/` + `system/host-tests/` (156 tests across 12 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit.
 
 **Design side next:** Layout engine (#15, highest-leverage unsettled design decision). Interaction model (#17, also unblocked). Filesystem COW on-disk design (research complete, ready for design discussion).
 

@@ -66,6 +66,10 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 `GlobalAlloc` routes by size: ≤2 KiB → slab, else → linked-list. Page frames are requested separately via `page_alloc::alloc_frame()`.
 
+**Dealloc routing:** Address-based, not size-based. `dealloc()` checks whether the pointer falls within the linked-list heap region `[region_start, region_end)`. If so, it goes to the linked-list. Pointers outside that range (in slab pages allocated from the buddy allocator) go to slab. This prevents cross-allocator contamination: during early boot (before `page_allocator::init()`), slab can't grow, so the linked-list serves all allocations. If dealloc routed by size class, those frees would go to slab — corrupting its free list with linked-list addresses.
+
+**PA validation:** `free_frames()` validates that the PA is page-aligned and within the physical RAM range before writing to it. A corrupted PA would cause a data abort (writing to an unmapped address). This catches allocator bugs early instead of propagating silent corruption.
+
 **Alternatives considered:**
 
 - **Bump allocator:** Can't free individual allocations. A kernel needs to free thread stacks, page table nodes, etc. Ruled out.
@@ -129,7 +133,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 **Goal:** Controlled entry from EL0 to EL1 for kernel services.
 
-**Approach:** `SVC #0` from user code. Register ABI: `x8` = syscall number, `x0`–`x5` = arguments, `x0` = return value (≥0 success, <0 error). Six syscalls: `exit`, `write`, `yield`, `handle_close`, `channel_signal`, `channel_wait`.
+**Approach:** `SVC #0` from user code. Register ABI: `x8` = syscall number, `x0`–`x5` = arguments, `x0` = return value (≥0 success, <0 error). Twelve syscalls in three families: core (`exit`, `write`, `yield`), handle/IPC (`handle_close`, `channel_signal`, `channel_wait`), scheduling (`scheduling_context_create`, `scheduling_context_bind`, `scheduling_context_borrow`, `scheduling_context_return`), synchronization (`futex_wait`, `futex_wake`).
 
 **Why SVC:** Standard EL0→EL1 trap instruction on ARM. HVC is EL1→EL2 (hypervisor), SMC is for the secure monitor.
 

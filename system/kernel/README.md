@@ -52,7 +52,7 @@ cargo run --release   # builds, then launches QEMU
 ## Testing
 
 ```shell
-# Host-side unit tests (EEVDF, scheduling contexts, handles, ELF, VMA, buddy, slab, heap, ASID, virtqueue):
+# Host-side unit tests (EEVDF, scheduling contexts, handles, ELF, DTB, VMA, buddy, slab, heap, heap routing, ASID, virtqueue):
 cd system/host-tests && cargo test -- --test-threads=1
 
 # QEMU smoke test (builds, boots, checks output):
@@ -65,7 +65,8 @@ cd system/kernel && ./smoke-test.sh
 🥾 booting…
   💾 memory - 256mib ram, w^x page tables
   📦 heap - 16mib (linked-list + slab)
-  🧩 frames - 60888 free (buddy allocator, 4k–4m)
+  🌳 dtb - 39 devices discovered
+  🧩 frames - 60885 free (buddy allocator, 4k–4m)
   ⚡ interrupts - gic v2
   📋 scheduler - eevdf + scheduling contexts
   🔌 virtio - blk capacity=2048 sectors
@@ -147,10 +148,11 @@ build.rs                   — compiles user processes → ELF at build time
   tests/buddy.rs           — buddy allocator tests (mock IrqMutex)
   tests/slab.rs            — slab size-class selection tests
   tests/heap.rs            — heap allocator tests (alloc, free, coalescing)
+  tests/heap_routing.rs    — heap↔slab dealloc routing (cross-allocator contamination prevention)
   tests/asid.rs            — ASID allocator tests (generation rollover)
   tests/virtqueue.rs       — virtqueue descriptor chain validation tests
 
-smoke-test.sh              — QEMU boot + output verification (17 checks)
+smoke-test.sh              — QEMU boot + output verification (19 checks)
 ```
 
 ## Scope & Limitations
@@ -158,7 +160,7 @@ smoke-test.sh              — QEMU boot + output verification (17 checks)
 **Hardware target:**
 
 - QEMU `virt` machine (aarch64) with GICv2
-- Hardcoded device addresses (no device tree parsing)
+- DTB parser discovers hardware but addresses not yet wired to device init
 - Virtio-mmio v2 transport (requires QEMU `-global virtio-mmio.force-legacy=false`)
 - 4 cores tested, up to 8 supported (via `MAX_CORES` constant)
 
@@ -170,7 +172,7 @@ smoke-test.sh              — QEMU boot + output verification (17 checks)
 - 256-slot handle table per process (fixed, no growth)
 - Linked-list heap for allocations >2 KiB (slab for ≤2 KiB)
 
-**Not targeted:** x86_64, POSIX, network stack, hard realtime, device tree.
+**Not targeted:** x86_64, POSIX, network stack, hard realtime.
 
 **Blocked on OS design decisions:** filesystem (COW required by undo architecture), full syscall surface, OS service process.
 
