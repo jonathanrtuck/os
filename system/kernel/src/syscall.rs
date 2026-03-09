@@ -13,20 +13,20 @@
 //!
 //! # Syscalls
 //!
-//! | Nr | Name                      | Args                          | Returns          |
-//! |----|---------------------------|-------------------------------|------------------|
-//! | 0  | exit                      | —                             | does not return  |
-//! | 1  | write                     | x0=buf_ptr, x1=len            | bytes written    |
-//! | 2  | yield                     | —                             | 0                |
-//! | 3  | handle_close              | x0=handle                     | 0                |
-//! | 4  | channel_signal            | x0=handle                     | 0                |
-//! | 5  | channel_wait              | x0=handle                     | 0 (may block)    |
-//! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns    | handle           |
-//! | 7  | scheduling_context_borrow | x0=handle                     | 0                |
-//! | 8  | scheduling_context_return | —                             | 0                |
-//! | 9  | scheduling_context_bind   | x0=handle                     | 0                |
-//! | 10 | futex_wait                | x0=addr, x1=expected          | 0 (may block)    |
-//! | 11 | futex_wake                | x0=addr, x1=count             | threads woken    |
+//! | Nr | Name                      | Args                              | Returns          |
+//! |----|---------------------------|-----------------------------------|------------------|
+//! | 0  | exit                      | —                                 | does not return  |
+//! | 1  | write                     | x0=buf_ptr, x1=len                | bytes written    |
+//! | 2  | yield                     | —                                 | 0                |
+//! | 3  | handle_close              | x0=handle                         | 0                |
+//! | 4  | channel_signal            | x0=handle                         | 0                |
+//! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns        | handle           |
+//! | 7  | scheduling_context_borrow | x0=handle                         | 0                |
+//! | 8  | scheduling_context_return | —                                 | 0                |
+//! | 9  | scheduling_context_bind   | x0=handle                         | 0                |
+//! | 10 | futex_wait                | x0=addr, x1=expected              | 0 (may block)    |
+//! | 11 | futex_wake                | x0=addr, x1=count                 | threads woken    |
+//! | 12 | wait                      | x0=handles_ptr, x1=count, x2=timeout_ns | ready index (may block) |
 //!
 //! # Error codes
 //!
@@ -51,7 +51,9 @@ use super::paging;
 use super::paging::USER_VA_END;
 use super::scheduler;
 use super::serial;
+use super::thread::WaitEntry;
 use super::Context;
+use alloc::vec::Vec;
 
 pub mod nr {
     pub const EXIT: u64 = 0;
@@ -59,13 +61,13 @@ pub mod nr {
     pub const YIELD: u64 = 2;
     pub const HANDLE_CLOSE: u64 = 3;
     pub const CHANNEL_SIGNAL: u64 = 4;
-    pub const CHANNEL_WAIT: u64 = 5;
     pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
     pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
     pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
     pub const SCHEDULING_CONTEXT_BIND: u64 = 9;
     pub const FUTEX_WAIT: u64 = 10;
     pub const FUTEX_WAKE: u64 = 11;
+    pub const WAIT: u64 = 12;
 }
 
 #[repr(i64)]
@@ -80,13 +82,15 @@ pub enum Error {
     WouldBlock = -8,
 }
 
+/// Maximum number of handles in a single `wait` call.
+const MAX_WAIT_HANDLES: u64 = 16;
+const MAX_WRITE_LEN: u64 = 4096;
+
 impl From<HandleError> for u64 {
     fn from(e: HandleError) -> u64 {
         (e as i64) as u64
     }
 }
-
-const MAX_WRITE_LEN: u64 = 4096;
 
 /// Check if a user virtual address is readable by EL0 using the hardware
 /// address translation instruction. Returns false if the page is unmapped
@@ -152,47 +156,6 @@ fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
     channel::signal(channel_id, caller_id);
 
     Ok(0)
-}
-fn sys_channel_wait(ctx: *mut Context) -> *const Context {
-    let c = unsafe { &mut *ctx };
-    let handle_nr = c.x[0];
-
-    if handle_nr > u8::MAX as u64 {
-        c.x[0] = HandleError::InvalidHandle as i64 as u64;
-
-        return ctx as *const Context;
-    }
-
-    // Extract handle info under scheduler lock, then release.
-    let result = scheduler::current_thread_do(|thread| {
-        let channel_id = match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
-            Ok(HandleObject::Channel(id)) => id,
-            Ok(_) => return Err(HandleError::InvalidHandle),
-            Err(e) => return Err(e),
-        };
-
-        Ok((channel_id, thread.id()))
-    });
-    let (channel_id, caller_id) = match result {
-        Ok(pair) => pair,
-        Err(e) => {
-            c.x[0] = e as i64 as u64;
-
-            return ctx as *const Context;
-        }
-    };
-
-    if channel::check_pending(channel_id, caller_id) {
-        // Signal was pending — consumed. Return immediately.
-        c.x[0] = 0;
-
-        ctx as *const Context
-    } else {
-        // No signal pending. Pre-set return value, block, reschedule.
-        c.x[0] = 0;
-
-        scheduler::block_current_and_schedule(ctx)
-    }
 }
 fn sys_exit(ctx: *mut Context) -> *const Context {
     scheduler::exit_current_from_syscall(ctx)
@@ -265,24 +228,6 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
 
     Ok(0)
 }
-fn sys_scheduling_context_borrow(handle_nr: u64) -> Result<u64, Error> {
-    if handle_nr > u8::MAX as u64 {
-        return Err(Error::InvalidArgument);
-    }
-
-    let ctx_id = scheduler::current_thread_do(|thread| {
-        match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
-            Ok(HandleObject::SchedulingContext(id)) => Ok(id),
-            _ => Err(Error::InvalidArgument),
-        }
-    })?;
-
-    if scheduler::borrow_scheduling_context(ctx_id) {
-        Ok(0)
-    } else {
-        Err(Error::AlreadyBorrowing)
-    }
-}
 fn sys_scheduling_context_bind(handle_nr: u64) -> Result<u64, Error> {
     if handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
@@ -299,6 +244,24 @@ fn sys_scheduling_context_bind(handle_nr: u64) -> Result<u64, Error> {
         Ok(0)
     } else {
         Err(Error::AlreadyBound)
+    }
+}
+fn sys_scheduling_context_borrow(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u8::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let ctx_id = scheduler::current_thread_do(|thread| {
+        match thread.handles.get(Handle(handle_nr as u8), Rights::READ) {
+            Ok(HandleObject::SchedulingContext(id)) => Ok(id),
+            _ => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    if scheduler::borrow_scheduling_context(ctx_id) {
+        Ok(0)
+    } else {
+        Err(Error::AlreadyBorrowing)
     }
 }
 fn sys_scheduling_context_create(budget: u64, period: u64) -> Result<u64, Error> {
@@ -319,6 +282,110 @@ fn sys_scheduling_context_return() -> Result<u64, Error> {
     } else {
         Err(Error::NotBorrowing)
     }
+}
+fn sys_wait(ctx: *mut Context) -> *const Context {
+    let c = unsafe { &mut *ctx };
+    let handles_ptr = c.x[0];
+    let count = c.x[1];
+    let timeout = c.x[2];
+
+    // Validate count.
+    if count == 0 || count > MAX_WAIT_HANDLES {
+        c.x[0] = Error::InvalidArgument as i64 as u64;
+
+        return ctx as *const Context;
+    }
+
+    // Validate user buffer.
+    if handles_ptr >= USER_VA_END {
+        c.x[0] = Error::BadAddress as i64 as u64;
+
+        return ctx as *const Context;
+    }
+
+    if let Some(end) = handles_ptr.checked_add(count) {
+        if end > USER_VA_END {
+            c.x[0] = Error::BadAddress as i64 as u64;
+
+            return ctx as *const Context;
+        }
+    } else {
+        c.x[0] = Error::BadAddress as i64 as u64;
+
+        return ctx as *const Context;
+    }
+
+    if !is_user_range_readable(handles_ptr, count) {
+        c.x[0] = Error::BadAddress as i64 as u64;
+
+        return ctx as *const Context;
+    }
+
+    // Read handle indices from user memory.
+    // SAFETY: TTBR0 is still loaded. Address and length validated above.
+    let handle_bytes =
+        unsafe { core::slice::from_raw_parts(handles_ptr as *const u8, count as usize) };
+    // Resolve all handles and validate they are waitable.
+    let resolve_result = scheduler::current_thread_do(|thread| {
+        let mut entries = Vec::new();
+
+        for (i, &h) in handle_bytes.iter().enumerate() {
+            let obj = thread.handles.get(Handle(h), Rights::READ)?;
+
+            match obj {
+                HandleObject::Channel(_) => {
+                    entries.push(WaitEntry {
+                        object: obj,
+                        user_index: i as u8,
+                    });
+                }
+                _ => return Err(HandleError::InvalidHandle), // Not waitable
+            }
+        }
+
+        Ok((entries, thread.id()))
+    });
+    let (wait_entries, caller_id) = match resolve_result {
+        Ok(pair) => pair,
+        Err(e) => {
+            c.x[0] = e.into();
+
+            return ctx as *const Context;
+        }
+    };
+    // Store wait set BEFORE checking readiness. This ensures that if a signal
+    // arrives during the readiness check, set_wake_pending_for_handle can find
+    // the wait set and prevent a lost wakeup.
+    let entries_for_check = wait_entries.clone();
+
+    scheduler::store_wait_set(wait_entries);
+
+    // Check each handle for readiness.
+    for entry in &entries_for_check {
+        if let HandleObject::Channel(ch_id) = entry.object {
+            if channel::check_pending(ch_id, caller_id) {
+                // Ready — signal consumed. Clear wait state and return index.
+                scheduler::clear_wait_state();
+
+                c.x[0] = entry.user_index as u64;
+
+                return ctx as *const Context;
+            }
+        }
+    }
+
+    // None ready. Poll mode: return immediately.
+    if timeout == 0 {
+        scheduler::clear_wait_state();
+
+        c.x[0] = Error::WouldBlock as i64 as u64;
+
+        return ctx as *const Context;
+    }
+
+    // Block until woken. wake_pending catches signals that arrived in the gap
+    // between store_wait_set and here.
+    scheduler::block_current_unless_woken(ctx)
 }
 fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
     if len > MAX_WRITE_LEN {
@@ -418,7 +485,7 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
 
             ctx as *const Context
         }
-        nr::CHANNEL_WAIT => sys_channel_wait(ctx),
+        nr::WAIT => sys_wait(ctx),
         nr::SCHEDULING_CONTEXT_CREATE => {
             c.x[0] = match sys_scheduling_context_create(c.x[0], c.x[1]) {
                 Ok(n) => n,

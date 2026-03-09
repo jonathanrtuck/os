@@ -24,7 +24,7 @@ pub struct HandleTable {
 #[derive(Clone, Copy)]
 pub struct Rights(u32);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandleObject {
     Channel(ChannelId),
     SchedulingContext(SchedulingContextId),

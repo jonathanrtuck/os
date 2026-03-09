@@ -428,15 +428,21 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 ---
 
-## 8.2 Event Multiplexing: `wait_any` (planned)
+## 8.2 Event Multiplexing: `wait`
 
 **Goal:** A single syscall for blocking on multiple event sources. The foundational primitive for event-driven userspace — without it, processes need one thread per event source.
 
-**Planned approach:** `wait_any(handles: &[Handle], timeout_ns: u64) → (index, status)`. Block until any handle has a pending event or timeout expires. Returns the index of the first ready handle. Timeout of 0 = poll (non-blocking check). Timeout of `u64::MAX` = wait forever.
+**Syscall:** `wait(handles_ptr, count, timeout_ns) → index`. Syscall #12. Block until any handle has a pending event or timeout expires. Returns the 0-based index of the first ready handle in x0. Timeout of `0` = poll (non-blocking check, returns `WouldBlock` if none ready). Timeout of `u64::MAX` = wait forever. Currently supports Channel handles; Timer and Device handles will be added when those handle types are implemented. Timeout support beyond poll/forever deferred until Timer handles exist.
 
-**Unifies:** Channel notifications, interrupt delivery, timer expiry, futex wakeups — all through one mechanism. Replaces the current `channel_wait` (which waits on exactly one handle) with a general multiplexer.
+**Replaced:** `channel_wait` (syscall #5, removed). `wait` with a single channel handle is equivalent but uses the general mechanism.
 
-**Why this matters:** Userspace drivers need to wait on "interrupt OR timeout." The OS service needs to wait on "any of N editor channels." A filesystem service needs "block completion OR shutdown signal." One primitive covers all cases.
+**Unifies:** Channel notifications (now), interrupt delivery, timer expiry (planned) — all through one mechanism.
+
+**Lost-wakeup prevention:** The wait set is stored on the thread *before* checking handle readiness. If a signal arrives during the readiness scan, `channel::signal` calls `set_wake_pending_for_handle` which finds the wait set and sets `wake_pending` + `wake_result` on the thread. `block_current_unless_woken` checks the flag and returns immediately with the correct index. This is the same pattern used by futex — the `wake_pending` flag is now shared infrastructure for all blocking paths.
+
+**Lock ordering:** Channel lock → scheduler lock (unchanged). The readiness check acquires the channel lock (one channel at a time). Blocking acquires the scheduler lock. The wait set stored on the thread (under scheduler lock) bridges the two: signalers under the scheduler lock can read the wait set to compute the return index without needing the channel lock.
+
+**Implementation:** `syscall.rs` (sys_wait), `scheduler.rs` (try_wake_for_handle, set_wake_pending_for_handle, store_wait_set, clear_wait_state, updated block_current_unless_woken), `channel.rs` (signal uses try_wake_for_handle), `thread.rs` (WaitEntry, complete_wait_for, wake_pending/wake_result fields).
 
 **Prior art:** Linux epoll, FreeBSD kqueue, Fuchsia `zx_object_wait_many`, seL4 notification objects.
 
@@ -462,7 +468,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 | interrupt_ack      | handle                  | 0          |
 | dma_alloc          | order                   | handle, PA |
 
-**Depends on:** DTB parser (device discovery), `wait_any` (interrupt notification).
+**Depends on:** DTB parser (device discovery), `wait` (interrupt notification).
 
 ---
 

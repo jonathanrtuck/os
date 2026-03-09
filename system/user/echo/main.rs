@@ -12,7 +12,7 @@ const SHM: *mut u8 = 0x4000_0000 as *mut u8;
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Wait for init's message.
-    sys::channel_wait(0);
+    sys::wait(&[0], u64::MAX);
 
     // Read message from shared memory (incoming region: offset 0).
     let msg = unsafe { core::slice::from_raw_parts(SHM, 4) };

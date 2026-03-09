@@ -18,7 +18,7 @@ use super::memory;
 use super::per_core;
 use super::scheduling_context::{self, SchedulingContext, SchedulingContextId};
 use super::sync::IrqMutex;
-use super::thread::{Thread, ThreadId};
+use super::thread::{Thread, ThreadId, WaitEntry};
 use super::timer;
 use super::Context;
 use alloc::{boxed::Box, vec::Vec};
@@ -255,6 +255,27 @@ fn select_best(queue: &RunQueue, contexts: &[Option<SchedulingContextSlot>]) -> 
 
     best.or(fallback).map(|(idx, _)| idx)
 }
+fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
+    for core_state in s.cores.iter_mut() {
+        if let Some(t) = &mut core_state.current {
+            if t.id() == id {
+                t.wake_pending = true;
+                t.wake_result = 0;
+
+                return;
+            }
+        }
+    }
+
+    for t in s.queue.ready.iter_mut() {
+        if t.id() == id {
+            t.wake_pending = true;
+            t.wake_result = 0;
+
+            return;
+        }
+    }
+}
 /// Swap TTBR0 when the address space changes between old and new threads.
 fn swap_ttbr0(old: &Thread, new: &Thread) {
     let old_ttbr0 = ttbr0_for(old);
@@ -273,6 +294,50 @@ fn swap_ttbr0(old: &Thread, new: &Thread) {
             );
         }
     }
+}
+/// Shared wake implementation. If `reason` is Some, the thread's wait set
+/// is consulted to compute the return index and patch `context.x[0]`.
+fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> bool {
+    // Check blocked list — most common case for wake.
+    if let Some(pos) = s.blocked.iter().position(|t| t.id() == id) {
+        let mut thread = s.blocked.swap_remove(pos);
+
+        if thread.wake() {
+            if let Some(obj) = reason {
+                let result = thread.complete_wait_for(obj);
+
+                thread.context.x[0] = result;
+            }
+
+            thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
+
+            s.queue.ready.push(thread);
+
+            return true;
+        }
+
+        // Not actually blocked — put it back.
+        s.blocked.push(thread);
+
+        return false;
+    }
+
+    // Check current threads on all cores (thread might be Running).
+    for core_state in s.cores.iter_mut() {
+        if let Some(t) = &mut core_state.current {
+            if t.id() == id {
+                return t.wake();
+            }
+        }
+    }
+    // Check run queue (unlikely — blocked threads shouldn't be here).
+    for t in s.queue.ready.iter_mut() {
+        if t.id() == id {
+            return t.wake();
+        }
+    }
+
+    false
 }
 fn ttbr0_for(thread: &Thread) -> u64 {
     match &thread.address_space {
@@ -306,26 +371,14 @@ pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 
     true
 }
-/// Block the current thread and reschedule. Used by syscalls that need to
-/// release other locks before blocking (e.g., channel wait releases the
-/// channel lock, then calls this).
-pub fn block_current_and_schedule(ctx: *mut Context) -> *const Context {
-    let mut s = STATE.lock();
-    let core = per_core::core_id() as usize;
-    let thread = s.cores[core].current.as_mut().expect("no current thread");
-
-    thread.block();
-
-    schedule_inner(&mut s, ctx, core)
-}
 /// Block the current thread and reschedule, unless a wake is already pending.
 ///
-/// This is the futex companion to `set_wake_pending`. The sequence is:
-/// 1. Futex wait records the thread in the wait table (under futex lock).
-/// 2. Futex lock released.
-/// 3. This function checks `futex_wake_pending` — if set, clears it and
-///    returns immediately (the waker already ran during step 2).
-///    Otherwise, blocks and reschedules.
+/// Used by both `futex_wait` and `wait` syscalls. The sequence is:
+/// 1. Caller records intent (futex table entry or wait set on thread).
+/// 2. Caller releases its lock.
+/// 3. This function checks `wake_pending` — if set, clears it, patches
+///    x0 with `wake_result`, and returns immediately (the waker already
+///    ran during step 2). Otherwise, blocks and reschedules.
 ///
 /// This prevents the lost-wakeup race: a wake that arrives between
 /// steps 1 and 3 sets the pending flag instead of trying to unblock
@@ -335,9 +388,15 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> *const Context {
     let core = per_core::core_id() as usize;
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-    if thread.futex_wake_pending {
-        // Waker already ran — consume the flag, don't block.
-        thread.futex_wake_pending = false;
+    if thread.wake_pending {
+        // Waker already ran — consume the flag, patch return value, don't block.
+        thread.wake_pending = false;
+
+        let c = unsafe { &mut *ctx };
+
+        c.x[0] = thread.wake_result;
+
+        thread.wait_set.clear();
 
         return ctx as *const Context;
     }
@@ -372,6 +431,17 @@ pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
     thread.scheduling.context_id = Some(ctx_id);
 
     true
+}
+/// Clear the wait set and any pending wake on the current thread.
+/// Called when a handle is found ready during the initial scan (no need
+/// to block) or when returning early (poll mode, error).
+pub fn clear_wait_state() {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+    thread.wait_set.clear();
+    thread.wake_pending = false;
 }
 /// Create a new scheduling context. Returns the SchedulingContextId.
 ///
@@ -581,28 +651,45 @@ pub fn schedule(ctx: *mut Context) -> *const Context {
 
     schedule_inner(&mut s, ctx, core)
 }
-/// Set the wake-pending flag on a thread that is not yet blocked.
+/// Set the wake-pending flag on a thread that is not yet blocked (futex path).
 ///
 /// Called by `futex::wake` when `try_wake` returns false (thread is still
-/// Running, hasn't entered the scheduler yet). The flag is consumed by
-/// `block_current_unless_woken`.
+/// Running, hasn't entered the scheduler yet). Sets `wake_result = 0`.
+/// The flag is consumed by `block_current_unless_woken`.
 pub fn set_wake_pending(id: ThreadId) {
     let mut s = STATE.lock();
 
-    // Search current threads on all cores.
+    set_wake_pending_inner(&mut s, id);
+}
+/// Set the wake-pending flag for a handle-based event (channel signal, etc.).
+///
+/// Only sets the flag if the thread has an active wait set (is inside a `wait`
+/// syscall). Computes `wake_result` from the matching entry in the wait set.
+/// If `wake_pending` is already set, does nothing (first signal wins).
+pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
+    let mut s = STATE.lock();
+
+    // Helper: attempt to set wake pending on a thread reference.
+    fn apply(t: &mut Thread, reason: &HandleObject) {
+        if !t.wake_pending && !t.wait_set.is_empty() {
+            t.wake_result = t.complete_wait_for(reason);
+            t.wake_pending = true;
+        }
+    }
+
     for core_state in s.cores.iter_mut() {
         if let Some(t) = &mut core_state.current {
             if t.id() == id {
-                t.futex_wake_pending = true;
+                apply(t, &reason);
 
                 return;
             }
         }
     }
-    // Search run queue (thread might have been descheduled).
+
     for t in s.queue.ready.iter_mut() {
         if t.id() == id {
-            t.futex_wake_pending = true;
+            apply(t, &reason);
 
             return;
         }
@@ -630,44 +717,32 @@ pub fn spawn_user(addr_space: Box<AddressSpace>, entry_va: u64, user_stack_top: 
 
     ThreadId(id)
 }
+/// Store a wait set on the current thread. Must be called BEFORE checking
+/// handle readiness, so that signals arriving during the gap can find the
+/// wait set and set `wake_pending`.
+pub fn store_wait_set(entries: Vec<WaitEntry>) {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+    thread.wait_set = entries;
+}
 /// Wake a blocked thread (Blocked → Ready). Returns true if it was blocked.
+/// Does not interact with the thread's wait set — used by futex.
 pub fn try_wake(id: ThreadId) -> bool {
     let mut s = STATE.lock();
 
-    // Check blocked list — most common case for wake.
-    if let Some(pos) = s.blocked.iter().position(|t| t.id() == id) {
-        let mut thread = s.blocked.swap_remove(pos);
+    try_wake_impl(&mut s, id, None)
+}
+/// Wake a blocked thread and resolve its wait set against `reason`.
+///
+/// If the thread has an active wait set (from a `wait` syscall), computes the
+/// return index from the matching entry and patches `context.x[0]`. Used by
+/// channel signal (and future timer/device notification).
+pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
+    let mut s = STATE.lock();
 
-        if thread.wake() {
-            thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
-
-            s.queue.ready.push(thread);
-
-            return true;
-        }
-
-        // Not actually blocked — put it back.
-        s.blocked.push(thread);
-
-        return false;
-    }
-
-    // Check current threads on all cores (thread might be Running).
-    for core_state in s.cores.iter_mut() {
-        if let Some(t) = &mut core_state.current {
-            if t.id() == id {
-                return t.wake();
-            }
-        }
-    }
-    // Check run queue (unlikely — blocked threads shouldn't be here).
-    for t in s.queue.ready.iter_mut() {
-        if t.id() == id {
-            return t.wake();
-        }
-    }
-
-    false
+    try_wake_impl(&mut s, id, Some(&reason))
 }
 /// Access a thread by ID. Closure receives exclusive access to the thread.
 pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {

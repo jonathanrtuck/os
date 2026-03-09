@@ -19,7 +19,7 @@ pub extern "C" fn _start() -> ! {
 
     // Signal echo that data is ready, then wait for reply.
     sys::channel_signal(0);
-    sys::channel_wait(0);
+    sys::wait(&[0], u64::MAX);
 
     // Read reply from incoming region (offset 128).
     let reply = unsafe { core::slice::from_raw_parts(SHM.add(128), 4) };

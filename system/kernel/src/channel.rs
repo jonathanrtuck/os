@@ -173,8 +173,10 @@ pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> 
 }
 /// Signal the other endpoint of a channel.
 ///
-/// Sets the peer's pending_signal flag and wakes it if blocked.
-/// Lost-wakeup safe: the flag persists even if the peer isn't waiting yet.
+/// Sets the peer's pending_signal flag and wakes it if blocked. If the peer
+/// is not yet blocked (in the gap between checking readiness and calling
+/// `block_current_unless_woken`), sets `wake_pending` on the peer so the
+/// block is skipped.
 pub fn signal(id: ChannelId, caller: ThreadId) {
     let peer_id = {
         let mut s = STATE.lock();
@@ -191,5 +193,9 @@ pub fn signal(id: ChannelId, caller: ThreadId) {
     };
 
     // Wake outside channel lock (acquires scheduler lock).
-    scheduler::try_wake(peer_id);
+    // If the peer has a wait set, try_wake_for_handle resolves the return index.
+    if !scheduler::try_wake_for_handle(peer_id, HandleObject::Channel(id)) {
+        // Peer not blocked yet — set pending flag for lost-wakeup prevention.
+        scheduler::set_wake_pending_for_handle(peer_id, HandleObject::Channel(id));
+    }
 }

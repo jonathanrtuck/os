@@ -85,13 +85,11 @@ Also clarified: red/blue/black is a complexity principle (not an architecture di
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
 
-**Kernel implementation next (unchanged):** `wait` syscall (handle-based event multiplexer). Then: timer handles, interrupt forwarding, wire DTB into device init, migrate virtio drivers to userspace.
+**Kernel implementation (latest):** `wait` syscall implemented (2026-03-09). Handle-based event multiplexer that replaced single-handle `channel_wait`. Fixed latent lost-wakeup race in channel signaling. Unified `wake_pending` infrastructure shared by futex and wait. 12 syscalls total (`channel_wait` removed, `wait` added). DESIGN.md §8.2 updated. Next: timer handles, interrupt forwarding, wire DTB into device init, migrate virtio drivers to userspace.
 
 **Design side next:** Layout engine (#15, updated scope with three-axis model). Interaction model (#17, informed by OS-as-document and virtual manifests). Filesystem COW on-disk design (new constraint from virtual manifest rewind).
 
 **Kernel code:** `system/kernel/` (34 source files) + `system/user/{init,echo,libsys}/` + `system/host-tests/` (156 tests across 12 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit.
-
-**Design side next:** Layout engine (#15, highest-leverage unsettled design decision). Interaction model (#17, also unblocked). Filesystem COW on-disk design (research complete, ready for design discussion).
 
 ## Design Discussion Rules
 

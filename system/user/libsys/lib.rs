@@ -23,13 +23,13 @@ mod nr {
     pub const YIELD: u64 = 2;
     pub const HANDLE_CLOSE: u64 = 3;
     pub const CHANNEL_SIGNAL: u64 = 4;
-    pub const CHANNEL_WAIT: u64 = 5;
     pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
     pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
     pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
     pub const SCHEDULING_CONTEXT_BIND: u64 = 9;
     pub const FUTEX_WAIT: u64 = 10;
     pub const FUTEX_WAKE: u64 = 11;
+    pub const WAIT: u64 = 12;
 }
 
 // ---------------------------------------------------------------------------
@@ -78,6 +78,22 @@ unsafe fn syscall2(nr: u64, a0: u64, a1: u64) -> u64 {
 
     ret
 }
+#[inline(always)]
+unsafe fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> u64 {
+    let ret: u64;
+
+    core::arch::asm!(
+        "svc #0",
+        in("x0") a0,
+        in("x1") a1,
+        in("x2") a2,
+        in("x8") nr,
+        lateout("x0") ret,
+        options(nostack),
+    );
+
+    ret
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -88,13 +104,6 @@ unsafe fn syscall2(nr: u64, a0: u64, a1: u64) -> u64 {
 /// Returns 0 on success, or a negative error code.
 pub fn channel_signal(handle: u8) -> i64 {
     unsafe { syscall1(nr::CHANNEL_SIGNAL, handle as u64) as i64 }
-}
-/// Wait for a signal on a channel (read direction).
-///
-/// Blocks the calling thread until the peer signals. Returns 0 on success,
-/// or a negative error code.
-pub fn channel_wait(handle: u8) -> i64 {
-    unsafe { syscall1(nr::CHANNEL_WAIT, handle as u64) as i64 }
 }
 /// Terminate the calling process. Does not return.
 pub fn exit() -> ! {
@@ -151,6 +160,22 @@ pub fn scheduling_context_create(budget: u64, period: u64) -> i64 {
 /// Returns 0 on success, or a negative error code.
 pub fn scheduling_context_return() -> i64 {
     unsafe { syscall0(nr::SCHEDULING_CONTEXT_RETURN) as i64 }
+}
+/// Wait for an event on one or more handles.
+///
+/// Blocks until any handle in `handles` has a pending event or the timeout
+/// expires. Returns the index of the first ready handle (0-based) on success,
+/// or a negative error code. Timeout of `u64::MAX` waits forever; `0` polls
+/// without blocking.
+pub fn wait(handles: &[u8], timeout_ns: u64) -> i64 {
+    unsafe {
+        syscall3(
+            nr::WAIT,
+            handles.as_ptr() as u64,
+            handles.len() as u64,
+            timeout_ns,
+        ) as i64
+    }
 }
 /// Write `buf` to the kernel console (UART).
 ///

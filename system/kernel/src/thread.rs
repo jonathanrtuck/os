@@ -2,11 +2,19 @@
 
 use super::address_space::AddressSpace;
 use super::context::Context;
-use super::handle::HandleTable;
+use super::handle::{HandleObject, HandleTable};
 use super::scheduling_algorithm::SchedulingState;
 use super::scheduling_context::SchedulingContextId;
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::alloc::Layout;
+
+/// An entry in a thread's wait set — one handle being waited on.
+#[derive(Clone, Copy)]
+pub(crate) struct WaitEntry {
+    pub(crate) object: HandleObject,
+    pub(crate) user_index: u8,
+}
 
 pub const STACK_SIZE: usize = 64 * 1024;
 pub const KERNEL_STACK_SIZE: usize = 16 * 1024;
@@ -50,9 +58,15 @@ pub struct Thread {
     pub(crate) address_space: Option<Box<AddressSpace>>,
     pub(crate) handles: HandleTable,
     pub(crate) scheduling: Scheduling,
-    /// Set by futex wake when the thread is not yet blocked.
-    /// Checked by `block_current_unless_woken` to prevent lost wakeups.
-    pub(crate) futex_wake_pending: bool,
+    /// Set when a wake arrives before the thread has blocked (lost-wakeup
+    /// prevention). Consumed by `block_current_unless_woken`.
+    pub(crate) wake_pending: bool,
+    /// Return value to place in x0 when `wake_pending` is consumed.
+    /// Futex sets this to 0; wait sets this to the ready handle's index.
+    pub(crate) wake_result: u64,
+    /// Handles this thread is waiting on via the `wait` syscall.
+    /// Empty when not in a wait. Cleared on wake or early return.
+    pub(crate) wait_set: Vec<WaitEntry>,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
@@ -80,6 +94,27 @@ const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
 // --- State queries ---
 
 impl Thread {
+    /// Resolve a handle-based wake against this thread's wait set.
+    ///
+    /// Finds the matching entry, clears the wait set, and returns the
+    /// user_index to place in x0. Returns 0 if the wait set is empty
+    /// (thread was not in a `wait` syscall).
+    pub(crate) fn complete_wait_for(&mut self, reason: &HandleObject) -> u64 {
+        if self.wait_set.is_empty() {
+            return 0;
+        }
+
+        let result = self
+            .wait_set
+            .iter()
+            .find(|e| e.object == *reason)
+            .map(|e| e.user_index as u64)
+            .unwrap_or(0);
+
+        self.wait_set.clear();
+
+        result
+    }
     /// Return a raw pointer to this thread's Context (at offset 0).
     /// Used by the scheduler to set TPIDR_EL1 and for context switch.
     pub(crate) fn context_ptr(&self) -> *const Context {
@@ -158,7 +193,6 @@ impl Thread {
         }
     }
 }
-
 impl Thread {
     /// Kernel thread — runs at EL1, no address space.
     pub fn new(id: u64, entry: fn() -> !) -> Box<Self> {
@@ -188,7 +222,9 @@ impl Thread {
             address_space: None,
             handles: HandleTable::new(),
             scheduling: Scheduling::new(),
-            futex_wake_pending: false,
+            wake_pending: false,
+            wake_result: 0,
+            wait_set: Vec::new(),
         })
     }
 
@@ -211,7 +247,9 @@ impl Thread {
             address_space: None,
             handles: HandleTable::new(),
             scheduling: Scheduling::new(),
-            futex_wake_pending: false,
+            wake_pending: false,
+            wake_result: 0,
+            wait_set: Vec::new(),
         })
     }
     /// Idle thread — runs at EL1, no stack (uses boot stack), never enqueued.
@@ -234,7 +272,9 @@ impl Thread {
             address_space: None,
             handles: HandleTable::new(),
             scheduling: Scheduling::new(),
-            futex_wake_pending: false,
+            wake_pending: false,
+            wake_result: 0,
+            wait_set: Vec::new(),
         })
     }
     /// User thread — runs at EL0 with its own address space.
@@ -270,7 +310,9 @@ impl Thread {
             address_space: Some(addr_space),
             handles: HandleTable::new(),
             scheduling: Scheduling::new(),
-            futex_wake_pending: false,
+            wake_pending: false,
+            wake_result: 0,
+            wait_set: Vec::new(),
         })
     }
 }
