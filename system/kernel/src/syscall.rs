@@ -33,6 +33,7 @@
 //! | 16 | device_map                | x0=phys_addr, x1=size             | user VA          |
 //! | 17 | dma_alloc                 | x0=order, x1=pa_out_ptr           | user VA          |
 //! | 18 | dma_free                  | x0=user_va, x1=order              | 0                |
+//! | 19 | thread_create             | x0=entry_va, x1=stack_top         | handle           |
 //!
 //! # Error codes
 //!
@@ -61,7 +62,9 @@ use super::paging;
 use super::paging::USER_VA_END;
 use super::scheduler;
 use super::serial;
+use super::thread::ThreadId;
 use super::thread::WaitEntry;
+use super::thread_exit;
 use super::timer;
 use super::timer::TimerId;
 use super::Context;
@@ -86,6 +89,7 @@ pub mod nr {
     pub const DEVICE_MAP: u64 = 16;
     pub const DMA_ALLOC: u64 = 17;
     pub const DMA_FREE: u64 = 18;
+    pub const THREAD_CREATE: u64 = 19;
 }
 
 #[repr(i64)]
@@ -380,6 +384,7 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
     match obj {
         HandleObject::Interrupt(id) => interrupt::destroy(id),
         HandleObject::SchedulingContext(id) => scheduler::release_scheduling_context(id),
+        HandleObject::Thread(id) => thread_exit::destroy(id),
         HandleObject::Timer(id) => timer::destroy(id),
         _ => {}
     }
@@ -440,6 +445,38 @@ fn sys_scheduling_context_return() -> Result<u64, Error> {
     } else {
         Err(Error::NotBorrowing)
     }
+}
+fn sys_thread_create(entry_va: u64, stack_top: u64) -> Result<u64, Error> {
+    // Validate: entry_va must be in user space.
+    if entry_va >= USER_VA_END {
+        return Err(Error::BadAddress);
+    }
+    // Validate: stack_top must be in user space and 16-byte aligned (ABI).
+    if stack_top >= USER_VA_END || stack_top & 0xF != 0 {
+        return Err(Error::BadAddress);
+    }
+
+    let process_id =
+        scheduler::current_thread_do(|thread| thread.process_id.ok_or(Error::InvalidArgument))?;
+    let thread_id = scheduler::spawn_user(process_id, entry_va, stack_top);
+
+    // Create exit notification state for the new thread.
+    thread_exit::create(thread_id);
+
+    // Insert a Thread handle into the caller's handle table.
+    let handle = scheduler::current_process_do(|process| {
+        process
+            .handles
+            .insert(HandleObject::Thread(thread_id), Rights::READ)
+    })
+    .map_err(|_| {
+        // Handle table full — thread is already running, but the caller
+        // can't track it. Clean up the notification state.
+        thread_exit::destroy(thread_id);
+        Error::InvalidArgument
+    })?;
+
+    Ok(handle.0 as u64)
 }
 fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
     let timer_id = timer::create(timeout_ns).ok_or(HandleError::TableFull)?;
@@ -508,7 +545,10 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             let obj = process.handles.get(Handle(h), Rights::READ)?;
 
             match obj {
-                HandleObject::Channel(_) | HandleObject::Interrupt(_) | HandleObject::Timer(_) => {
+                HandleObject::Channel(_)
+                | HandleObject::Interrupt(_)
+                | HandleObject::Thread(_)
+                | HandleObject::Timer(_) => {
                     entries.push(WaitEntry {
                         object: obj,
                         user_index: i as u8,
@@ -528,16 +568,19 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             return ctx as *const Context;
         }
     };
-    // Collect timer and interrupt IDs for waiter registration and cleanup.
+    // Collect timer, interrupt, and thread IDs for waiter registration and cleanup.
     let mut timer_ids: [Option<TimerId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
     let mut interrupt_ids: [Option<InterruptId>; MAX_WAIT_HANDLES as usize] =
+        [None; MAX_WAIT_HANDLES as usize];
+    let mut thread_ids: [Option<ThreadId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
 
     for entry in &wait_entries {
         match entry.object {
             HandleObject::Timer(id) => timer_ids[entry.user_index as usize] = Some(id),
             HandleObject::Interrupt(id) => interrupt_ids[entry.user_index as usize] = Some(id),
+            HandleObject::Thread(id) => thread_ids[entry.user_index as usize] = Some(id),
             _ => {}
         }
     }
@@ -549,6 +592,9 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     }
     for &id in interrupt_ids.iter().flatten() {
         interrupt::register_waiter(id, caller_id);
+    }
+    for &id in thread_ids.iter().flatten() {
+        thread_exit::register_waiter(id, caller_id);
     }
 
     // Store wait set BEFORE checking readiness. This ensures that if a signal
@@ -563,16 +609,18 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         let ready = match entry.object {
             HandleObject::Channel(ch_id) => channel::check_pending(ch_id, caller_id),
             HandleObject::Interrupt(int_id) => interrupt::check_pending(int_id),
+            HandleObject::Thread(t_id) => thread_exit::check_exited(t_id),
             HandleObject::Timer(t_id) => timer::check_fired(t_id),
             _ => false,
         };
 
         if ready {
-            // Ready — clear wait state, unregister from timers/interrupts, return index.
+            // Ready — clear wait state, unregister from all waiters, return index.
             scheduler::clear_wait_state();
 
             unregister_timers(&timer_ids);
             unregister_interrupts(&interrupt_ids);
+            unregister_threads(&thread_ids);
 
             c.x[0] = entry.user_index as u64;
 
@@ -586,6 +634,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
 
         unregister_timers(&timer_ids);
         unregister_interrupts(&interrupt_ids);
+        unregister_threads(&thread_ids);
 
         c.x[0] = Error::WouldBlock as i64 as u64;
 
@@ -596,9 +645,10 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     // between store_wait_set and here.
     let result = scheduler::block_current_unless_woken(ctx);
 
-    // Woken — unregister from any timers/interrupts that didn't fire.
+    // Woken — unregister from any waiters that didn't fire.
     unregister_timers(&timer_ids);
     unregister_interrupts(&interrupt_ids);
+    unregister_threads(&thread_ids);
 
     result
 }
@@ -643,6 +693,14 @@ fn sys_yield(ctx: *mut Context) -> *const Context {
 fn unregister_interrupts(ids: &[Option<InterruptId>]) {
     for &id in ids.iter().flatten() {
         interrupt::unregister_waiter(id);
+    }
+}
+/// Unregister thread exit waiters after `sys_wait` returns (any path).
+///
+/// Safe to call even if the waiter was already cleared by the exit path.
+fn unregister_threads(ids: &[Option<ThreadId>]) {
+    for &id in ids.iter().flatten() {
+        thread_exit::unregister_waiter(id);
     }
 }
 /// Unregister timer waiters after `sys_wait` returns (any path).
@@ -800,6 +858,14 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::DMA_FREE => {
             c.x[0] = match sys_dma_free(c.x[0], c.x[1]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::THREAD_CREATE => {
+            c.x[0] = match sys_thread_create(c.x[0], c.x[1]) {
                 Ok(n) => n,
                 Err(e) => e as i64 as u64,
             };

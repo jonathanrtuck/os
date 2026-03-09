@@ -77,6 +77,7 @@ mod slab;
 mod sync;
 mod syscall;
 mod thread;
+mod thread_exit;
 mod timer;
 mod virtio;
 

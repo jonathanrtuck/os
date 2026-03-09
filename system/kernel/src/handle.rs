@@ -8,6 +8,7 @@
 
 use super::interrupt::InterruptId;
 use super::scheduling_context::SchedulingContextId;
+use super::thread::ThreadId;
 use super::timer::TimerId;
 
 const MAX_HANDLES: usize = 256;
@@ -31,6 +32,7 @@ pub enum HandleObject {
     Channel(ChannelId),
     Interrupt(InterruptId),
     SchedulingContext(SchedulingContextId),
+    Thread(ThreadId),
     Timer(TimerId),
 }
 #[derive(Clone, Copy)]

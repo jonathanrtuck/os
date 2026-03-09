@@ -54,6 +54,21 @@ struct State {
     free_context_ids: Vec<u32>,
 }
 
+/// Information collected under the scheduler lock for thread exit.
+enum ExitInfo {
+    /// Last thread in the process — full cleanup required.
+    Last {
+        thread_id: ThreadId,
+        channels: Vec<super::handle::ChannelId>,
+        interrupts: Vec<super::interrupt::InterruptId>,
+        timers: Vec<super::timer::TimerId>,
+        thread_handles: Vec<ThreadId>,
+        process: Process,
+    },
+    /// Not the last thread — just clean up this thread.
+    NonLast { thread_id: ThreadId },
+}
+
 static STATE: IrqMutex<State> = IrqMutex::new(State {
     queue: RunQueue { ready: Vec::new() },
     blocked: Vec::new(),
@@ -70,6 +85,14 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
     scheduling_contexts: Vec::new(),
     free_context_ids: Vec::new(),
 });
+
+impl ExitInfo {
+    fn thread_id(&self) -> ThreadId {
+        match self {
+            ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id } => *thread_id,
+        }
+    }
+}
 
 /// Charge elapsed time to the old thread's EEVDF vruntime and scheduling context.
 fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
@@ -598,8 +621,8 @@ pub fn exit_current() -> ! {
 }
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let core = per_core::core_id() as usize;
-    // Phase 1: collect resources to free (under scheduler lock).
-    let (channels_to_close, interrupts_to_close, timers_to_close, process, thread_id) = {
+    // Phase 1: determine if this is the last thread, collect resources.
+    let exit_info = {
         let mut s = STATE.lock();
 
         // Auto-return borrowed scheduling context on exit.
@@ -618,62 +641,106 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             .unwrap()
             .process_id
             .expect("not a user thread");
-        // Take the entire process from the table. This is the last thread
-        // (single-threaded processes for now), so the process is being destroyed.
-        let mut process = s.processes[pid.0 as usize]
-            .take()
+        let process = s.processes[pid.0 as usize]
+            .as_mut()
             .expect("process not found");
-        // Drain handles from the taken process (no longer in State).
-        let handle_objects: Vec<HandleObject> =
-            process.handles.drain().map(|(_, obj)| obj).collect();
-        let mut channels = Vec::new();
-        let mut timers = Vec::new();
-        let mut interrupts = Vec::new();
 
-        for obj in handle_objects {
-            match obj {
-                HandleObject::Channel(id) => channels.push(id),
-                HandleObject::Interrupt(id) => interrupts.push(id),
-                HandleObject::SchedulingContext(id) => {
-                    release_context_inner(&mut s, id);
+        process.thread_count = process.thread_count.saturating_sub(1);
+
+        let is_last = process.thread_count == 0;
+
+        if is_last {
+            // Take the entire process — we're destroying it.
+            let mut process = s.processes[pid.0 as usize]
+                .take()
+                .expect("process not found");
+            let handle_objects: Vec<HandleObject> =
+                process.handles.drain().map(|(_, obj)| obj).collect();
+            let mut channels = Vec::new();
+            let mut timers = Vec::new();
+            let mut interrupts = Vec::new();
+            let mut thread_handles = Vec::new();
+
+            for obj in handle_objects {
+                match obj {
+                    HandleObject::Channel(id) => channels.push(id),
+                    HandleObject::Interrupt(id) => interrupts.push(id),
+                    HandleObject::SchedulingContext(id) => {
+                        release_context_inner(&mut s, id);
+                    }
+                    HandleObject::Thread(id) => thread_handles.push(id),
+                    HandleObject::Timer(id) => timers.push(id),
                 }
-                HandleObject::Timer(id) => timers.push(id),
             }
+
+            ExitInfo::Last {
+                thread_id: tid,
+                channels,
+                interrupts,
+                timers,
+                thread_handles,
+                process,
+            }
+        } else {
+            ExitInfo::NonLast { thread_id: tid }
         }
-
-        (channels, interrupts, timers, process, tid)
     };
+    // Phase 2: notify thread exit (acquires thread_exit lock, then scheduler lock).
+    let thread_id = exit_info.thread_id();
 
-    // Phase 2: close channel endpoints (acquires channel lock, not scheduler).
-    for id in channels_to_close {
-        super::channel::close_endpoint(id);
-    }
-    // Phase 2a: destroy interrupt registrations (acquires interrupt lock, not scheduler).
-    for id in interrupts_to_close {
-        super::interrupt::destroy(id);
-    }
-    // Phase 2c: destroy timer objects (acquires timer lock, not scheduler).
-    for id in timers_to_close {
-        super::timer::destroy(id);
-    }
-
-    // Phase 2d: remove from futex wait queues (acquires futex lock, not scheduler).
+    super::thread_exit::notify_exit(thread_id);
+    // Phase 2a: remove from futex wait queues (acquires futex lock, not scheduler).
     super::futex::remove_thread(thread_id);
 
-    // Phase 3: free address space (acquires page_allocator and address_space_id locks).
-    let mut addr_space = process.address_space;
+    match exit_info {
+        ExitInfo::Last {
+            channels,
+            interrupts,
+            timers,
+            thread_handles,
+            process,
+            ..
+        } => {
+            // Phase 3: close resources outside scheduler lock.
+            for id in channels {
+                super::channel::close_endpoint(id);
+            }
+            for id in interrupts {
+                super::interrupt::destroy(id);
+            }
+            for id in timers {
+                super::timer::destroy(id);
+            }
+            for id in thread_handles {
+                super::thread_exit::destroy(id);
+            }
 
-    addr_space.invalidate_tlb();
-    addr_space.free_all();
-    super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
+            // Phase 4: free address space.
+            let mut addr_space = process.address_space;
 
-    // Phase 4: mark exited and schedule (under scheduler lock).
-    let mut s = STATE.lock();
-    let thread = s.cores[core].current.as_mut().expect("no current thread");
+            addr_space.invalidate_tlb();
+            addr_space.free_all();
+            super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
 
-    thread.mark_exited();
+            // Phase 5: mark exited and schedule.
+            let mut s = STATE.lock();
+            let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-    schedule_inner(&mut s, ctx, core)
+            thread.mark_exited();
+
+            schedule_inner(&mut s, ctx, core)
+        }
+        ExitInfo::NonLast { .. } => {
+            // Non-last thread: just mark exited and schedule. The thread's
+            // kernel stack is reclaimed when the Thread is reaped/dropped.
+            let mut s = STATE.lock();
+            let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+            thread.mark_exited();
+
+            schedule_inner(&mut s, ctx, core)
+        }
+    }
 }
 /// Initialize the scheduler with core 0's boot thread.
 pub fn init() {
@@ -812,11 +879,13 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
 
     s.next_id += 1;
 
-    let ttbr0 = s.processes[process_id.0 as usize]
-        .as_ref()
-        .expect("process not found")
-        .address_space
-        .ttbr0_value();
+    let process = s.processes[process_id.0 as usize]
+        .as_mut()
+        .expect("process not found");
+    let ttbr0 = process.address_space.ttbr0_value();
+
+    process.thread_count += 1;
+
     let thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top);
 
     s.queue.ready.push(thread);

@@ -36,6 +36,7 @@ mod nr {
     pub const DEVICE_MAP: u64 = 16;
     pub const DMA_ALLOC: u64 = 17;
     pub const DMA_FREE: u64 = 18;
+    pub const THREAD_CREATE: u64 = 19;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +205,14 @@ pub fn scheduling_context_create(budget: u64, period: u64) -> i64 {
 /// Returns 0 on success, or a negative error code.
 pub fn scheduling_context_return() -> i64 {
     unsafe { syscall0(nr::SCHEDULING_CONTEXT_RETURN) as i64 }
+}
+/// Create a new thread in the calling process.
+///
+/// The thread starts at `entry_va` with user stack pointer `stack_top`.
+/// Returns a waitable handle (becomes ready on thread exit), or a negative
+/// error code.
+pub fn thread_create(entry_va: u64, stack_top: u64) -> i64 {
+    unsafe { syscall2(nr::THREAD_CREATE, entry_va, stack_top) as i64 }
 }
 /// Create a one-shot timer that fires after `timeout_ns` nanoseconds.
 ///

@@ -71,7 +71,7 @@ pub struct Thread {
     /// Empty when not in a wait. Cleared on wake or early return.
     pub(crate) wait_set: Vec<WaitEntry>,
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

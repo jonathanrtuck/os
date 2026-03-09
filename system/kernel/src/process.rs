@@ -1,8 +1,8 @@
 //! Process management.
 //!
 //! A process owns an address space and handle table. Threads within a
-//! process share these resources. Currently each process has exactly one
-//! thread (multi-threading is planned for Phase 2b).
+//! process share these resources. A process is alive while any of its
+//! threads are alive. Last thread exit triggers full cleanup.
 
 use super::address_space::{AddressSpace, PageAttrs};
 use super::address_space_id;
@@ -21,6 +21,8 @@ pub struct Process {
     id: ProcessId,
     pub(crate) address_space: Box<AddressSpace>,
     pub(crate) handles: HandleTable,
+    /// Number of live threads in this process. Last thread exit triggers cleanup.
+    pub(crate) thread_count: u32,
 }
 /// Unique process identifier. Index into the scheduler's process table.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -32,6 +34,7 @@ impl Process {
             id,
             address_space,
             handles: HandleTable::new(),
+            thread_count: 0,
         }
     }
 

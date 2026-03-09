@@ -612,7 +612,7 @@ Phase 8 (COW mechanics) ← blocked on filesystem design
 
 ---
 
-### 9.3 Thread Creation (Phase 2b)
+### 9.3 Thread Creation (Phase 2b) — Done
 
 **Goal:** Allow processes to create additional threads.
 
@@ -624,7 +624,9 @@ Phase 8 (COW mechanics) ← blocked on filesystem design
 
 Creates a new thread in the calling process. Shares address space and handle table. Returns a `HandleObject::Thread(ThreadId)` handle — waitable, becomes ready on thread exit. New thread starts unbound (no scheduling context); caller can bind one via existing `scheduling_context_bind`.
 
-**Process exit semantics:** Process is alive while any thread is alive. Last thread exit triggers full process cleanup.
+**Process exit semantics:** Process is alive while any thread is alive. Last thread exit triggers full process cleanup. Non-last thread exit just marks the thread exited (kernel stack reclaimed on reap). Last thread exit does full cleanup: drain handles, close channels/timers/interrupts/thread handles, release scheduling contexts, free address space.
+
+**Implementation:** `thread_exit.rs` — dedicated module for thread exit notification (own `IrqMutex<State>`, same two-phase wake pattern as timer/interrupt). `HandleObject::Thread(ThreadId)` variant. `Process.thread_count` incremented in `spawn_user`, decremented on exit. `exit_current_from_syscall` restructured with `ExitInfo` enum (Last vs NonLast).
 
 **Depends on:** Phase 2a (Process struct).
 
@@ -739,7 +741,7 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 | 16  | device_map                | Implemented |
 | 17  | dma_alloc                 | Implemented |
 | 18  | dma_free                  | Implemented |
-| 19  | thread_create             | Phase 2b    |
+| 19  | thread_create             | Implemented |
 | 20  | process_create            | Phase 3     |
 | 21  | process_start             | Phase 3     |
 | 22  | handle_send               | Phase 4     |

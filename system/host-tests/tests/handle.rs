@@ -9,6 +9,10 @@ mod interrupt {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct InterruptId(pub u8);
 }
+mod thread {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ThreadId(pub u64);
+}
 #[path = "../../kernel/src/scheduling_context.rs"]
 mod scheduling_context;
 mod timer {
@@ -337,6 +341,41 @@ fn drain_mixed_all_handle_types() {
     assert!(matches!(
         items[3],
         (Handle(3), HandleObject::Timer(timer::TimerId(4)))
+    ));
+}
+
+// --- Thread handles ---
+
+fn th(id: u64) -> HandleObject {
+    HandleObject::Thread(thread::ThreadId(id))
+}
+
+#[test]
+fn insert_and_get_thread() {
+    let mut t = HandleTable::new();
+    let h = t.insert(th(42), Rights::READ).unwrap();
+    let obj = t.get(h, Rights::READ).unwrap();
+
+    assert!(matches!(obj, HandleObject::Thread(thread::ThreadId(42))));
+}
+
+#[test]
+fn drain_includes_thread_handles() {
+    let mut t = HandleTable::new();
+
+    t.insert(ch(1), Rights::READ).unwrap();
+    t.insert(th(2), Rights::READ).unwrap();
+
+    let items: Vec<_> = t.drain().collect();
+
+    assert_eq!(items.len(), 2);
+    assert!(matches!(
+        items[0],
+        (Handle(0), HandleObject::Channel(ChannelId(1)))
+    ));
+    assert!(matches!(
+        items[1],
+        (Handle(1), HandleObject::Thread(thread::ThreadId(2)))
     ));
 }
 
