@@ -309,10 +309,12 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     virtio::init(device_table.as_ref());
 
     // Spawn user processes and create an IPC channel between them.
-    let (_, init_tid) = process::spawn_from_elf(INIT_ELF).expect("failed to spawn init");
-    let (_, echo_tid) = process::spawn_from_elf(ECHO_ELF).expect("failed to spawn echo");
+    let (init_pid, _) = process::spawn_from_elf(INIT_ELF).expect("failed to spawn init");
+    let (echo_pid, _) = process::spawn_from_elf(ECHO_ELF).expect("failed to spawn echo");
+    let (ch_a, ch_b) = channel::create().expect("failed to create ipc channel");
 
-    channel::create(init_tid, echo_tid).expect("failed to create ipc channel");
+    channel::setup_endpoint(ch_a, init_pid).expect("failed to setup channel endpoint");
+    channel::setup_endpoint(ch_b, echo_pid).expect("failed to setup channel endpoint");
     serial::puts("  🔀 processes - init + echo, ipc channel\n");
 
     boot_secondaries();

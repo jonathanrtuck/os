@@ -20,6 +20,7 @@
 //! | 2  | yield                     | —                                 | 0                |
 //! | 3  | handle_close              | x0=handle                         | 0                |
 //! | 4  | channel_signal            | x0=handle                         | 0                |
+//! | 5  | channel_create            | —                                 | handle_a \| (handle_b << 8) |
 //! | 6  | scheduling_context_create | x0=budget_ns, x1=period_ns        | handle           |
 //! | 7  | scheduling_context_borrow | x0=handle                         | 0                |
 //! | 8  | scheduling_context_return | —                                 | 0                |
@@ -36,6 +37,7 @@
 //! | 19 | thread_create             | x0=entry_va, x1=stack_top         | handle           |
 //! | 20 | process_create            | x0=elf_ptr, x1=elf_len            | handle           |
 //! | 21 | process_start             | x0=handle                         | 0                |
+//! | 22 | handle_send               | x0=target_handle, x1=source_handle | 0               |
 //!
 //! # Error codes
 //!
@@ -54,9 +56,10 @@
 //! | -12  | InsufficientRights  | `HandleError` |
 //! | -13  | TableFull           | `HandleError` |
 
+use super::address_space::PageAttrs;
 use super::channel;
 use super::futex;
-use super::handle::{Handle, HandleError, HandleObject, Rights};
+use super::handle::{ChannelId, Handle, HandleError, HandleObject, Rights};
 use super::interrupt;
 use super::interrupt::InterruptId;
 use super::page_allocator;
@@ -96,7 +99,9 @@ pub mod nr {
     pub const DMA_FREE: u64 = 18;
     pub const THREAD_CREATE: u64 = 19;
     pub const PROCESS_CREATE: u64 = 20;
+    pub const CHANNEL_CREATE: u64 = 5;
     pub const PROCESS_START: u64 = 21;
+    pub const HANDLE_SEND: u64 = 22;
 }
 
 #[repr(i64)]
@@ -195,23 +200,60 @@ fn is_user_page_writable(va: u64) -> bool {
     // PAR_EL1 bit 0: 0 = translation succeeded, 1 = fault.
     par & 1 == 0
 }
+fn sys_channel_create() -> Result<u64, Error> {
+    // Allocate channel (shared page + two endpoint IDs).
+    let (ch_a, ch_b) = channel::create().ok_or(Error::OutOfMemory)?;
+    // Map shared page into caller's address space and insert both handles.
+    let result = scheduler::current_process_do(|process| {
+        let (shared_pa, va) = channel::shared_info(ch_a);
+
+        process
+            .address_space
+            .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
+
+        let handle_a = process
+            .handles
+            .insert(HandleObject::Channel(ch_a), Rights::READ_WRITE)?;
+
+        match process
+            .handles
+            .insert(HandleObject::Channel(ch_b), Rights::READ_WRITE)
+        {
+            Ok(handle_b) => Ok((handle_a, handle_b)),
+            Err(e) => {
+                // Second insert failed — close the first handle.
+                let _ = process.handles.close(handle_a);
+
+                Err(e)
+            }
+        }
+    });
+
+    match result {
+        Ok((handle_a, handle_b)) => Ok(handle_a.0 as u64 | (handle_b.0 as u64) << 8),
+        Err(_) => {
+            // Clean up both endpoints.
+            channel::close_endpoint(ch_a);
+            channel::close_endpoint(ch_b);
+
+            Err(Error::InvalidArgument)
+        }
+    }
+}
 fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
     if handle_nr > u8::MAX as u64 {
         return Err(HandleError::InvalidHandle);
     }
 
-    // Extract handle info under scheduler lock, then release before channel ops.
-    let (channel_id, caller_id) = scheduler::current_thread_and_process_do(|thread, process| {
-        let channel_id = match process.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
-            Ok(HandleObject::Channel(id)) => id,
-            Ok(_) => return Err(HandleError::InvalidHandle),
-            Err(e) => return Err(e),
-        };
-
-        Ok((channel_id, thread.id()))
+    let channel_id = scheduler::current_process_do(|process| {
+        match process.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+            Ok(HandleObject::Channel(id)) => Ok(id),
+            Ok(_) => Err(HandleError::InvalidHandle),
+            Err(e) => Err(e),
+        }
     })?;
 
-    channel::signal(channel_id, caller_id);
+    channel::signal(channel_id);
 
     Ok(0)
 }
@@ -391,13 +433,66 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
 
     // Release kernel resources associated with the closed handle.
     match obj {
+        HandleObject::Channel(id) => channel::close_endpoint(id),
         HandleObject::Interrupt(id) => interrupt::destroy(id),
         HandleObject::Process(id) => process_exit::destroy(id),
         HandleObject::SchedulingContext(id) => scheduler::release_scheduling_context(id),
         HandleObject::Thread(id) => thread_exit::destroy(id),
         HandleObject::Timer(id) => timer::destroy(id),
-        _ => {}
     }
+
+    Ok(0)
+}
+fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, Error> {
+    if target_handle_nr > u8::MAX as u64 || source_handle_nr > u8::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Phase 1: Read from caller's process — get target ProcessId and source
+    // handle's object + rights.
+    let (target_pid, source_obj, source_rights) = scheduler::current_process_do(|process| {
+        let target_pid = match process
+            .handles
+            .get(Handle(target_handle_nr as u8), Rights::WRITE)
+        {
+            Ok(HandleObject::Process(id)) => id,
+            Ok(_) => return Err(Error::InvalidArgument),
+            Err(_) => return Err(Error::InvalidArgument),
+        };
+        let (source_obj, source_rights) = process
+            .handles
+            .get_entry(Handle(source_handle_nr as u8), Rights::READ)
+            .map_err(|_| Error::InvalidArgument)?;
+
+        Ok((target_pid, source_obj, source_rights))
+    })?;
+    // Phase 1.5: If the source is a Channel, get shared page info (channel lock).
+    let channel_mapping = match source_obj {
+        HandleObject::Channel(ch_id) => Some(channel::shared_info(ch_id)),
+        _ => None,
+    };
+
+    // Phase 2: Insert into target process (scheduler lock via with_process).
+    scheduler::with_process(target_pid, |target| {
+        // Only allow sending handles to processes that haven't started yet.
+        if target.started {
+            return Err(Error::InvalidArgument);
+        }
+
+        // For Channel handles, map the shared page into the target's address space.
+        if let Some((shared_pa, va)) = channel_mapping {
+            target
+                .address_space
+                .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
+        }
+
+        target
+            .handles
+            .insert(source_obj, source_rights)
+            .map_err(|_| Error::InvalidArgument)?;
+
+        Ok(())
+    })?;
 
     Ok(0)
 }
@@ -649,6 +744,8 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         }
     };
     // Collect IDs for waiter registration and cleanup.
+    let mut channel_ids: [Option<ChannelId>; MAX_WAIT_HANDLES as usize] =
+        [None; MAX_WAIT_HANDLES as usize];
     let mut timer_ids: [Option<TimerId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
     let mut interrupt_ids: [Option<InterruptId>; MAX_WAIT_HANDLES as usize] =
@@ -660,16 +757,20 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
 
     for entry in &wait_entries {
         match entry.object {
+            HandleObject::Channel(id) => channel_ids[entry.user_index as usize] = Some(id),
             HandleObject::Timer(id) => timer_ids[entry.user_index as usize] = Some(id),
             HandleObject::Interrupt(id) => interrupt_ids[entry.user_index as usize] = Some(id),
             HandleObject::Thread(id) => thread_ids[entry.user_index as usize] = Some(id),
             HandleObject::Process(id) => process_ids[entry.user_index as usize] = Some(id),
-            _ => {}
+            HandleObject::SchedulingContext(_) => {} // Not waitable; filtered in resolve step.
         }
     }
-    // Register as waiter on each timer and interrupt BEFORE storing wait set
-    // and checking readiness. If an event fires in the gap,
-    // set_wake_pending_for_handle can target this thread.
+    // Register as waiter on each handle BEFORE storing wait set and checking
+    // readiness. If an event fires in the gap, set_wake_pending_for_handle
+    // can target this thread.
+    for &id in channel_ids.iter().flatten() {
+        channel::register_waiter(id, caller_id);
+    }
     for &id in timer_ids.iter().flatten() {
         timer::register_waiter(id, caller_id);
     }
@@ -693,7 +794,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     // Check each handle for readiness.
     for entry in &entries_for_check {
         let ready = match entry.object {
-            HandleObject::Channel(ch_id) => channel::check_pending(ch_id, caller_id),
+            HandleObject::Channel(ch_id) => channel::check_pending(ch_id),
             HandleObject::Interrupt(int_id) => interrupt::check_pending(int_id),
             HandleObject::Process(p_id) => process_exit::check_exited(p_id),
             HandleObject::Thread(t_id) => thread_exit::check_exited(t_id),
@@ -705,6 +806,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             // Ready — clear wait state, unregister from all waiters, return index.
             scheduler::clear_wait_state();
 
+            unregister_channels(&channel_ids);
             unregister_timers(&timer_ids);
             unregister_interrupts(&interrupt_ids);
             unregister_threads(&thread_ids);
@@ -720,6 +822,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     if timeout == 0 {
         scheduler::clear_wait_state();
 
+        unregister_channels(&channel_ids);
         unregister_timers(&timer_ids);
         unregister_interrupts(&interrupt_ids);
         unregister_threads(&thread_ids);
@@ -735,6 +838,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     let result = scheduler::block_current_unless_woken(ctx);
 
     // Woken — unregister from any waiters that didn't fire.
+    unregister_channels(&channel_ids);
     unregister_timers(&timer_ids);
     unregister_interrupts(&interrupt_ids);
     unregister_threads(&thread_ids);
@@ -776,6 +880,14 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
 }
 fn sys_yield(ctx: *mut Context) -> *const Context {
     scheduler::schedule(ctx)
+}
+/// Unregister channel waiters after `sys_wait` returns (any path).
+///
+/// Safe to call even if the waiter was already cleared by the signal path.
+fn unregister_channels(ids: &[Option<ChannelId>]) {
+    for &id in ids.iter().flatten() {
+        channel::unregister_waiter(id);
+    }
 }
 /// Unregister interrupt waiters after `sys_wait` returns (any path).
 ///
@@ -868,6 +980,14 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             c.x[0] = match sys_channel_signal(c.x[0]) {
                 Ok(n) => n,
                 Err(e) => e.into(),
+            };
+
+            ctx as *const Context
+        }
+        nr::CHANNEL_CREATE => {
+            c.x[0] = match sys_channel_create() {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
             };
 
             ctx as *const Context
@@ -980,6 +1100,14 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::PROCESS_START => {
             c.x[0] = match sys_process_start(c.x[0]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::HANDLE_SEND => {
+            c.x[0] = match sys_handle_send(c.x[0], c.x[1]) {
                 Ok(n) => n,
                 Err(e) => e as i64 as u64,
             };

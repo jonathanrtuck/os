@@ -23,6 +23,8 @@ pub struct Process {
     pub(crate) handles: HandleTable,
     /// Number of live threads in this process. Last thread exit triggers cleanup.
     pub(crate) thread_count: u32,
+    /// Set to true by `process_start`. Prevents `handle_send` to running processes.
+    pub(crate) started: bool,
 }
 /// Unique process identifier. Index into the scheduler's process table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -35,6 +37,7 @@ impl Process {
             address_space,
             handles: HandleTable::new(),
             thread_count: 0,
+            started: false,
         }
     }
 

@@ -85,6 +85,22 @@ impl HandleTable {
 
         Ok(entry.object)
     }
+    /// Look up a handle, verify rights, and return both the object and its rights.
+    pub fn get_entry(
+        &self,
+        handle: Handle,
+        required: Rights,
+    ) -> Result<(HandleObject, Rights), HandleError> {
+        let entry = self.entries[handle.0 as usize]
+            .as_ref()
+            .ok_or(HandleError::InvalidHandle)?;
+
+        if !entry.rights.contains(required) {
+            return Err(HandleError::InsufficientRights);
+        }
+
+        Ok((entry.object, entry.rights))
+    }
     /// Insert a new handle. Returns the handle index, or TableFull.
     pub fn insert(&mut self, object: HandleObject, rights: Rights) -> Result<Handle, HandleError> {
         for (i, slot) in self.entries.iter_mut().enumerate() {

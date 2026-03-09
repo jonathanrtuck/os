@@ -23,6 +23,7 @@ mod nr {
     pub const YIELD: u64 = 2;
     pub const HANDLE_CLOSE: u64 = 3;
     pub const CHANNEL_SIGNAL: u64 = 4;
+    pub const CHANNEL_CREATE: u64 = 5;
     pub const SCHEDULING_CONTEXT_CREATE: u64 = 6;
     pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
     pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
@@ -39,6 +40,7 @@ mod nr {
     pub const THREAD_CREATE: u64 = 19;
     pub const PROCESS_CREATE: u64 = 20;
     pub const PROCESS_START: u64 = 21;
+    pub const HANDLE_SEND: u64 = 22;
 }
 
 // ---------------------------------------------------------------------------
@@ -108,6 +110,15 @@ unsafe fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> u64 {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Create a channel with two endpoints.
+///
+/// Returns a packed value `handle_a | (handle_b << 8)` on success, where
+/// both handles refer to endpoints of the same shared-memory channel. The
+/// shared page is automatically mapped into the calling process. Returns a
+/// negative error code on failure.
+pub fn channel_create() -> i64 {
+    unsafe { syscall0(nr::CHANNEL_CREATE) as i64 }
+}
 /// Signal the peer on a channel (write direction).
 ///
 /// Returns 0 on success, or a negative error code.
@@ -166,6 +177,16 @@ pub fn futex_wake(addr: *const u32, count: u32) -> i64 {
 /// Returns 0 on success, or a negative error code.
 pub fn handle_close(handle: u8) -> i64 {
     unsafe { syscall1(nr::HANDLE_CLOSE, handle as u64) as i64 }
+}
+/// Send a handle to a suspended child process.
+///
+/// Copies the handle at `source_handle` (in the caller's table) into the
+/// target process identified by `target_handle` (which must be a Process
+/// handle). The target must not have been started yet. For channel handles,
+/// the shared page is also mapped into the target's address space. Returns
+/// 0 on success, or a negative error code.
+pub fn handle_send(target_handle: u8, source_handle: u8) -> i64 {
+    unsafe { syscall2(nr::HANDLE_SEND, target_handle as u64, source_handle as u64) as i64 }
 }
 /// Acknowledge an interrupt, allowing the device to fire again.
 ///

@@ -968,6 +968,12 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
         }
     }
 
+    if started {
+        if let Some(Some(process)) = s.processes.get_mut(process_id.0 as usize) {
+            process.started = true;
+        }
+    }
+
     started
 }
 /// Store a wait set on the current thread. Must be called BEFORE checking
@@ -996,6 +1002,17 @@ pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
     let mut s = STATE.lock();
 
     try_wake_impl(&mut s, id, Some(&reason))
+}
+/// Access a process by ProcessId. Acquires the scheduler lock.
+///
+/// Used by `channel::setup_endpoint` (boot), `handle_send` (syscall).
+pub fn with_process<R>(pid: ProcessId, f: impl FnOnce(&mut Process) -> R) -> R {
+    let mut s = STATE.lock();
+    let process = s.processes[pid.0 as usize]
+        .as_mut()
+        .expect("process not found");
+
+    f(process)
 }
 /// Access a process by looking up its thread. Acquires the scheduler lock.
 ///

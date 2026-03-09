@@ -655,19 +655,22 @@ Creates a new thread in the calling process. Shares address space and handle tab
 
 ---
 
-### 9.5 Handle Transfer (Phase 4)
+### 9.5 Handle Transfer (Phase 4) — DONE
 
 **Goal:** Allow a parent to give handles to a child process before starting it.
 
-**Syscall:**
+**Syscalls:**
 
-| Nr  | Syscall     | Args                                     | Returns      |
-| --- | ----------- | ---------------------------------------- | ------------ |
-| 22  | handle_send | x0=target_proc_handle, x1=handle_to_send | target index |
+| Nr  | Syscall        | Args                                     | Returns                     |
+| --- | -------------- | ---------------------------------------- | --------------------------- |
+| 5   | channel_create | —                                        | handle_a \| (handle_b << 8) |
+| 22  | handle_send    | x0=target_proc_handle, x1=handle_to_send | 0                           |
 
-Copies a handle from the caller's table into the target process's table. Only works on suspended processes (prevents races). Caller retains its copy.
+`handle_send` copies a handle from the caller's table into the target process's table. Only works on suspended processes (Process.started == false). Caller retains its copy. For Channel handles, also maps the shared page into the target's address space.
 
-**Channel refactoring:** Currently `channel::create(thread_a, thread_b)` ties channels to specific threads and maps shared memory eagerly into both. Needs generalization: `channel::create()` returns two endpoint handles. Shared memory mapped on first use or on handle transfer. Channels track process IDs, not thread IDs.
+`channel_create` allocates a new channel (shared page + two endpoints), maps the shared page into the caller, and inserts both endpoint handles. Returns packed `handle_a | (handle_b << 8)`.
+
+**Channel refactoring (complete):** Rewrote `channel.rs` from ThreadId-based to encoded ChannelId-based design. `ChannelId(channel_index * 2 + endpoint_index)` — endpoint identity embedded in the ID. Explicit `register_waiter`/`unregister_waiter` pattern (same as timer/interrupt/thread_exit/process_exit). Two-phase wake: channel lock → release → scheduler lock. `signal()` computes peer ChannelId from encoding, passes as wake reason.
 
 **Depends on:** Phase 3 (process handles exist).
 
@@ -730,6 +733,7 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 | 2   | yield                     | Implemented |
 | 3   | handle_close              | Implemented |
 | 4   | channel_signal            | Implemented |
+| 5   | channel_create            | Implemented |
 | 6   | scheduling_context_create | Implemented |
 | 7   | scheduling_context_borrow | Implemented |
 | 8   | scheduling_context_return | Implemented |
@@ -746,5 +750,5 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 | 19  | thread_create             | Implemented |
 | 20  | process_create            | Implemented |
 | 21  | process_start             | Implemented |
-| 22  | handle_send               | Phase 4     |
+| 22  | handle_send               | Implemented |
 | 23  | process_kill              | Phase 6     |

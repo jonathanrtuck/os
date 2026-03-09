@@ -1,37 +1,38 @@
 //! IPC channels — shared memory with signal/wait notification.
 //!
-//! A channel connects two thread endpoints via a shared physical page
-//! mapped into both address spaces. The kernel provides signal/wait
-//! primitives for synchronization; the shared memory protocol is
-//! entirely userspace.
+//! A channel has two endpoints, each identified by a unique ChannelId.
+//! Endpoint identity is encoded in the ChannelId: `channel_index * 2 +
+//! endpoint` (0 or 1). Both endpoints share a physical page mapped into
+//! each process's address space at the same VA.
 //!
 //! # Protocol
 //!
 //! ```text
-//! create(A, B):
-//!   kernel allocates shared page, maps at CHANNEL_SHM_BASE in both
-//!   address spaces, inserts READ_WRITE handle in both handle tables.
+//! create():
+//!   kernel allocates shared page, returns (ChannelId, ChannelId).
+//!   Mapping + handle insertion done separately (boot or syscall path).
 //!
-//! signal(handle):       sets peer's pending_signal flag, wakes peer if blocked
-//! wait(handle):         if pending_signal → consume + return immediately
-//!                       else → block until peer signals
-//! close_endpoint(id):   decrements closed_count; frees shared page when both close
+//! signal(my_id):       sets peer's pending_signal flag, wakes peer if blocked
+//! check_pending(id):   if pending_signal → consume + return true
+//!                      else → return false
+//! close_endpoint(id):  decrements closed_count; frees shared page when both close
 //! ```
 //!
 //! Lost-wakeup safe: `signal` sets a persistent flag before waking, and
-//! `wait` checks the flag before blocking. Even if `signal` arrives before
-//! `wait`, the flag is consumed on the next `wait` call.
+//! `check_pending` checks the flag before blocking. Even if `signal` arrives
+//! before `wait`, the flag is consumed on the next check.
 //!
 //! # Lock Ordering
 //!
 //! Channel lock is always released before acquiring the scheduler lock
-//! (via try_wake / with_thread_mut). Never hold both.
+//! (via try_wake / set_wake_pending). Never hold both.
 
 use super::address_space::PageAttrs;
-use super::handle::{ChannelId, HandleError, HandleObject, Rights};
+use super::handle::{ChannelId, Handle, HandleError, HandleObject, Rights};
 use super::memory;
 use super::page_allocator;
 use super::paging::{CHANNEL_SHM_BASE, PAGE_SIZE};
+use super::process::ProcessId;
 use super::scheduler;
 use super::sync::IrqMutex;
 use super::thread::ThreadId;
@@ -39,12 +40,9 @@ use alloc::vec::Vec;
 
 struct Channel {
     shared_pa: memory::Pa,
-    endpoints: [Endpoint; 2],
+    pending_signal: [bool; 2],
+    waiter: [Option<ThreadId>; 2],
     closed_count: u8,
-}
-struct Endpoint {
-    thread_id: ThreadId,
-    pending_signal: bool,
 }
 struct State {
     channels: Vec<Channel>,
@@ -54,22 +52,24 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
     channels: Vec::new(),
 });
 
-/// Check and consume a pending signal for the caller's endpoint.
+fn channel_index(id: ChannelId) -> usize {
+    id.0 as usize / 2
+}
+fn endpoint_index(id: ChannelId) -> usize {
+    id.0 as usize % 2
+}
+
+/// Check and consume a pending signal for this endpoint.
 ///
 /// Returns `true` if a signal was pending (now consumed), meaning the
-/// caller should NOT block. Returns `false` if no signal was pending,
-/// meaning the caller should block.
-pub fn check_pending(id: ChannelId, caller: ThreadId) -> bool {
+/// caller should NOT block. Returns `false` if no signal was pending.
+pub fn check_pending(id: ChannelId) -> bool {
     let mut s = STATE.lock();
-    let ch = &mut s.channels[id.0 as usize];
-    let self_idx = if ch.endpoints[0].thread_id == caller {
-        0
-    } else {
-        1
-    };
+    let ch = &mut s.channels[channel_index(id)];
+    let ep = endpoint_index(id);
 
-    if ch.endpoints[self_idx].pending_signal {
-        ch.endpoints[self_idx].pending_signal = false;
+    if ch.pending_signal[ep] {
+        ch.pending_signal[ep] = false;
         true
     } else {
         false
@@ -79,8 +79,10 @@ pub fn check_pending(id: ChannelId, caller: ThreadId) -> bool {
 pub fn close_endpoint(id: ChannelId) {
     let shared_pa = {
         let mut s = STATE.lock();
-        let ch = &mut s.channels[id.0 as usize];
+        let ch = &mut s.channels[channel_index(id)];
+        let ep = endpoint_index(id);
 
+        ch.waiter[ep] = None;
         ch.closed_count += 1;
 
         if ch.closed_count == 2 {
@@ -90,112 +92,104 @@ pub fn close_endpoint(id: ChannelId) {
         }
     };
 
-    // Free outside channel lock (acquires page_alloc lock).
     if let Some(pa) = shared_pa {
         page_allocator::free_frame(pa);
     }
 }
-/// Create a channel between two threads.
+/// Create a channel. Allocates a shared physical page and returns two endpoint IDs.
 ///
-/// Allocates a shared physical page, maps it at a fixed VA in both address
-/// spaces, and inserts READ_WRITE handles into both handle tables.
-/// Returns `HandleError::TableFull` if either handle table is full
-/// (the shared page and channel are cleaned up on failure).
-pub fn create(id_a: ThreadId, id_b: ThreadId) -> Result<ChannelId, HandleError> {
-    // Allocate shared page (acquires page_alloc lock, released immediately).
-    let shared_pa = page_allocator::alloc_frame().expect("out of frames for channel");
-    // Push channel BEFORE inserting handles so the channel exists in the Vec
-    // before any thread can reference it. Prevents TOCTOU if preemption is
-    // active (handle lookup would index into channels before the push).
-    let (idx, va) = {
-        let mut s = STATE.lock();
-        let idx = s.channels.len() as u32;
-        let va = CHANNEL_SHM_BASE + (idx as u64) * PAGE_SIZE;
+/// Both endpoints start unmapped — use `setup_endpoint` for boot-time setup
+/// or map the shared page via the syscall path.
+pub fn create() -> Option<(ChannelId, ChannelId)> {
+    let shared_pa = page_allocator::alloc_frame()?;
+    let mut s = STATE.lock();
+    let idx = s.channels.len() as u32;
 
-        s.channels.push(Channel {
-            shared_pa,
-            endpoints: [
-                Endpoint {
-                    thread_id: id_a,
-                    pending_signal: false,
-                },
-                Endpoint {
-                    thread_id: id_b,
-                    pending_signal: false,
-                },
-            ],
-            closed_count: 0,
-        });
-
-        (idx, va)
-    };
-    let channel_id = ChannelId(idx);
-    // Insert handles (acquires scheduler lock; channel lock already released).
-    let handle_a = scheduler::with_process_of_thread(id_a, |process| {
-        process
-            .address_space
-            .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
-
-        process
-            .handles
-            .insert(HandleObject::Channel(channel_id), Rights::READ_WRITE)
-    });
-    let handle_a = match handle_a {
-        Ok(h) => h,
-        Err(e) => {
-            // Clean up: free the shared page.
-            page_allocator::free_frame(shared_pa);
-
-            return Err(e);
-        }
-    };
-    let result_b = scheduler::with_process_of_thread(id_b, |process| {
-        process
-            .address_space
-            .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
-
-        process
-            .handles
-            .insert(HandleObject::Channel(channel_id), Rights::READ_WRITE)
+    s.channels.push(Channel {
+        shared_pa,
+        pending_signal: [false, false],
+        waiter: [None, None],
+        closed_count: 0,
     });
 
-    if let Err(e) = result_b {
-        // Clean up the handle we inserted into process A.
-        scheduler::with_process_of_thread(id_a, |process| {
-            let _ = process.handles.close(handle_a);
-        });
-        page_allocator::free_frame(shared_pa);
-
-        return Err(e);
-    }
-
-    Ok(channel_id)
+    Some((ChannelId(idx * 2), ChannelId(idx * 2 + 1)))
 }
-/// Signal the other endpoint of a channel.
+/// Register a thread as the waiter for a channel endpoint.
+pub fn register_waiter(id: ChannelId, waiter: ThreadId) {
+    let mut s = STATE.lock();
+    let ch = &mut s.channels[channel_index(id)];
+
+    ch.waiter[endpoint_index(id)] = Some(waiter);
+}
+/// Set up an endpoint for a process: map shared page + insert handle.
 ///
-/// Sets the peer's pending_signal flag and wakes it if blocked. If the peer
-/// is not yet blocked (in the gap between checking readiness and calling
-/// `block_current_unless_woken`), sets `wake_pending` on the peer so the
-/// block is skipped.
-pub fn signal(id: ChannelId, caller: ThreadId) {
-    let peer_id = {
-        let mut s = STATE.lock();
-        let ch = &mut s.channels[id.0 as usize];
-        let peer_idx = if ch.endpoints[0].thread_id == caller {
-            1
-        } else {
-            0
-        };
+/// Boot-time helper. Acquires channel lock (for PA), then scheduler lock
+/// (for process access). Returns the handle index.
+pub fn setup_endpoint(id: ChannelId, pid: ProcessId) -> Result<Handle, HandleError> {
+    let (shared_pa, va) = {
+        let s = STATE.lock();
+        let idx = channel_index(id);
 
-        ch.endpoints[peer_idx].pending_signal = true;
-
-        ch.endpoints[peer_idx].thread_id
+        (
+            s.channels[idx].shared_pa,
+            CHANNEL_SHM_BASE + (idx as u64) * PAGE_SIZE,
+        )
     };
 
-    // Wake outside channel lock (acquires scheduler lock).
-    // If the peer has a wait set, try_wake_for_handle resolves the return index.
-    if !scheduler::try_wake_for_handle(peer_id, HandleObject::Channel(id)) {
-        // Peer not blocked yet — set pending flag for lost-wakeup prevention.
-        scheduler::set_wake_pending_for_handle(peer_id, HandleObject::Channel(id));
+    scheduler::with_process(pid, |process| {
+        process
+            .address_space
+            .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
+
+        process
+            .handles
+            .insert(HandleObject::Channel(id), Rights::READ_WRITE)
+    })
+}
+/// Return the shared page PA and VA for a channel.
+///
+/// Both endpoints of the same channel share the same page.
+pub fn shared_info(id: ChannelId) -> (memory::Pa, u64) {
+    let s = STATE.lock();
+    let idx = channel_index(id);
+
+    (
+        s.channels[idx].shared_pa,
+        CHANNEL_SHM_BASE + (idx as u64) * PAGE_SIZE,
+    )
+}
+/// Signal the peer endpoint of a channel.
+///
+/// Sets the peer's pending_signal flag and wakes it if blocked. Two-phase
+/// wake: collect waiter under channel lock, wake under scheduler lock.
+pub fn signal(id: ChannelId) {
+    let (waiter, peer_id) = {
+        let mut s = STATE.lock();
+        let ch_idx = channel_index(id);
+        let ch = &mut s.channels[ch_idx];
+        let peer_ep = 1 - endpoint_index(id);
+
+        ch.pending_signal[peer_ep] = true;
+
+        let peer_channel_id = ChannelId(ch_idx as u32 * 2 + peer_ep as u32);
+
+        (ch.waiter[peer_ep].take(), peer_channel_id)
+    };
+
+    if let Some(waiter_id) = waiter {
+        // Reason is the peer's own ChannelId — matches the HandleObject stored
+        // in the peer's wait set.
+        let reason = HandleObject::Channel(peer_id);
+
+        if !scheduler::try_wake_for_handle(waiter_id, reason) {
+            scheduler::set_wake_pending_for_handle(waiter_id, reason);
+        }
     }
+}
+/// Unregister a waiter (cleanup when `wait` returns).
+pub fn unregister_waiter(id: ChannelId) {
+    let mut s = STATE.lock();
+    let ch = &mut s.channels[channel_index(id)];
+
+    ch.waiter[endpoint_index(id)] = None;
 }
