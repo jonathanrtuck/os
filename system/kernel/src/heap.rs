@@ -6,8 +6,16 @@
 //!
 //! Mutual exclusion: all alloc/dealloc operations are protected by ALLOC_LOCK
 //! (IrqMutex), which masks IRQs and spins on multi-core.
+//!
+//! ## Slab routing
+//!
+//! Small allocations (≤2048 bytes) are routed to the slab allocator for O(1)
+//! alloc/free. The slab gets backing pages from the buddy allocator. If the
+//! buddy allocator isn't initialized yet (early boot), slab grow fails and
+//! allocations fall through to the linked-list. Dealloc uses address-based
+//! routing: pointers within the linked-list heap region always go back to
+//! the linked-list, preventing cross-allocator contamination.
 
-use super::memory;
 use super::paging;
 use super::slab;
 use super::sync::IrqMutex;
@@ -42,6 +50,19 @@ impl LinkedListAllocator {
             region_start: UnsafeCell::new(0),
             region_end: UnsafeCell::new(0),
         }
+    }
+
+    /// Check if an address falls within the linked-list heap region.
+    ///
+    /// Used by dealloc to route frees to the correct allocator. Pointers
+    /// within this region were allocated by the linked-list; pointers outside
+    /// (in slab pages from the buddy allocator) were allocated by the slab.
+    unsafe fn is_in_heap_region(&self, ptr: *mut u8) -> bool {
+        let addr = ptr as usize;
+        let rs = *self.region_start.get();
+        let re = *self.region_end.get();
+
+        addr >= rs && addr < re
     }
 }
 unsafe impl GlobalAlloc for LinkedListAllocator {
@@ -131,16 +152,23 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         // 4. Coalescing only merges geometrically adjacent blocks, so the
         //    merged block's size always stays within the heap region.
 
-        // Try slab allocator first.
-        if slab::try_free(ptr, layout.size(), layout.align()) {
-            return;
+        // Route to the correct allocator based on pointer origin.
+        // Slab pages come from the buddy allocator (above the heap region).
+        // Linked-list allocations are within [region_start, region_end).
+        // During early boot (before buddy allocator init), slab grow fails
+        // and all allocations go to the linked-list. We must not route those
+        // frees through slab, or its free list gets contaminated with
+        // linked-list addresses.
+        if !self.is_in_heap_region(ptr) {
+            if slab::try_free(ptr, layout.size(), layout.align()) {
+                return;
+            }
         }
 
         let _guard = ALLOC_LOCK.lock();
         let head = &mut *self.head.get();
         let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
         let addr = ptr as usize;
-
         // Validate that the freed address is within the heap region.
         // A bogus free would corrupt the free list, so catching it early
         // is worth the branch cost in a production kernel.
@@ -151,6 +179,7 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             addr >= rs && addr < re,
             "dealloc: address outside heap region"
         );
+
         // Walk to the sorted insertion point.
         let mut prev_block: *mut FreeBlock = core::ptr::null_mut();
         let mut current = *head;
@@ -204,6 +233,7 @@ pub fn init() {
     let start = align_up(unsafe { &__kernel_end as *const u8 as usize }, MIN_BLOCK);
 
     unsafe {
+        use super::memory;
         let block = start as *mut FreeBlock;
 
         (*block).size = memory::HEAP_SIZE;

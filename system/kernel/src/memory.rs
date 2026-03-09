@@ -57,20 +57,6 @@ impl SyncPageTable {
 // read-only after. No concurrent access is possible.
 unsafe impl Sync for SyncPageTable {}
 
-/// Physical address of the empty L0 table (for kernel threads' TTBR0).
-pub fn empty_ttbr0() -> u64 {
-    virt_to_phys(EMPTY_L0.get() as usize).as_u64()
-}
-
-#[inline(always)]
-pub fn phys_to_virt(pa: Pa) -> usize {
-    pa.0.wrapping_add(KERNEL_VA_OFFSET)
-}
-#[inline(always)]
-pub fn virt_to_phys(va: usize) -> Pa {
-    Pa(va.wrapping_sub(KERNEL_VA_OFFSET))
-}
-
 extern "C" {
     static __text_start: u8;
     static __text_end: u8;
@@ -81,6 +67,10 @@ extern "C" {
     static boot_tt1_l2_1: u8;
 }
 
+/// Physical address of the empty L0 table (for kernel threads' TTBR0).
+pub fn empty_ttbr0() -> u64 {
+    virt_to_phys(EMPTY_L0.get() as usize).as_u64()
+}
 /// Refine TTBR1 with 4KB pages for the kernel's 2MB block.
 ///
 /// boot.S created coarse 2MB-block tables. This replaces the kernel's
@@ -105,10 +95,11 @@ pub fn init() {
             normal | AP_RO | UXN // .text: RX (kernel only)
         } else if va >= rodata_start && va < rodata_end {
             normal | AP_RO | PXN | UXN // .rodata: RO
-        } else if va >= data_start {
-            normal | PXN | UXN // .data/.bss/stack/heap: RW
         } else {
-            continue; // unmapped
+            // Everything else in this 2MB block: RW NX.
+            // Includes pre-kernel area (DTB, firmware stub), .data, .bss,
+            // stack, heap, and any trailing padding.
+            normal | PXN | UXN // RW (default for data)
         };
 
         l3_kern.entries[i as usize] = (pa & 0x0000_FFFF_FFFF_F000) | DESC_PAGE | attrs;
@@ -134,4 +125,12 @@ pub fn init() {
             options(nostack)
         );
     }
+}
+#[inline(always)]
+pub fn phys_to_virt(pa: Pa) -> usize {
+    pa.0.wrapping_add(KERNEL_VA_OFFSET)
+}
+#[inline(always)]
+pub fn virt_to_phys(va: usize) -> Pa {
+    Pa(va.wrapping_sub(KERNEL_VA_OFFSET))
 }

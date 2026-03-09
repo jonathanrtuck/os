@@ -11,6 +11,15 @@
 
 use super::address_space::PageAttrs;
 
+const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
+const ELFCLASS64: u8 = 2;
+const ELFDATA2LSB: u8 = 1;
+const EM_AARCH64: u16 = 183;
+const ET_EXEC: u16 = 2;
+const PF_W: u32 = 2;
+const PF_X: u32 = 1;
+const PT_LOAD: u32 = 1;
+
 #[derive(Debug)]
 pub enum Error {
     TooSmall,
@@ -36,15 +45,6 @@ pub struct LoadSegment {
     pub mem_size: u64,
     pub flags: u32,
 }
-
-const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
-const ELFCLASS64: u8 = 2;
-const ELFDATA2LSB: u8 = 1;
-const EM_AARCH64: u16 = 183;
-const ET_EXEC: u16 = 2;
-const PF_W: u32 = 2;
-const PF_X: u32 = 1;
-const PT_LOAD: u32 = 1;
 
 fn read_u16_le(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])

@@ -25,6 +25,8 @@
 //! | 7  | scheduling_context_borrow | x0=handle                     | 0                |
 //! | 8  | scheduling_context_return | —                             | 0                |
 //! | 9  | scheduling_context_bind   | x0=handle                     | 0                |
+//! | 10 | futex_wait                | x0=addr, x1=expected          | 0 (may block)    |
+//! | 11 | futex_wake                | x0=addr, x1=count             | threads woken    |
 //!
 //! # Error codes
 //!
@@ -37,11 +39,13 @@
 //! | -5   | AlreadyBorrowing    | `Error`       |
 //! | -6   | NotBorrowing        | `Error`       |
 //! | -7   | AlreadyBound        | `Error`       |
+//! | -8   | WouldBlock          | `Error`       |
 //! | -10  | InvalidHandle       | `HandleError` |
 //! | -12  | InsufficientRights  | `HandleError` |
 //! | -13  | TableFull           | `HandleError` |
 
 use super::channel;
+use super::futex;
 use super::handle::{Handle, HandleError, HandleObject, Rights};
 use super::paging;
 use super::paging::USER_VA_END;
@@ -60,6 +64,8 @@ pub mod nr {
     pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
     pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
     pub const SCHEDULING_CONTEXT_BIND: u64 = 9;
+    pub const FUTEX_WAIT: u64 = 10;
+    pub const FUTEX_WAKE: u64 = 11;
 }
 
 #[repr(i64)]
@@ -71,6 +77,7 @@ pub enum Error {
     AlreadyBorrowing = -5,
     NotBorrowing = -6,
     AlreadyBound = -7,
+    WouldBlock = -8,
 }
 
 impl From<HandleError> for u64 {
@@ -190,6 +197,60 @@ fn sys_channel_wait(ctx: *mut Context) -> *const Context {
 fn sys_exit(ctx: *mut Context) -> *const Context {
     scheduler::exit_current_from_syscall(ctx)
 }
+fn sys_futex_wait(ctx: *mut Context) -> *const Context {
+    let c = unsafe { &mut *ctx };
+    let addr = c.x[0];
+    let expected = c.x[1] as u32;
+
+    // Validate: must be in user VA space and word-aligned.
+    if addr >= USER_VA_END || addr & 3 != 0 {
+        c.x[0] = Error::BadAddress as i64 as u64;
+
+        return ctx as *const Context;
+    }
+
+    // Translate VA → PA for the futex key.
+    let pa = match user_va_to_pa(addr) {
+        Some(pa) => pa,
+        None => {
+            c.x[0] = Error::BadAddress as i64 as u64;
+
+            return ctx as *const Context;
+        }
+    };
+    // Read the current value at the user address.
+    // SAFETY: TTBR0 is still loaded, address validated via AT S1E0R.
+    let current_value = unsafe { core::ptr::read_volatile(addr as *const u32) };
+
+    if current_value != expected {
+        // Value changed — don't block (spurious, not a lost wakeup).
+        c.x[0] = Error::WouldBlock as i64 as u64;
+
+        return ctx as *const Context;
+    }
+
+    // Record this thread in the futex wait table.
+    let thread_id = scheduler::current_thread_do(|thread| thread.id());
+
+    futex::wait(pa, thread_id);
+
+    // Pre-set success return value before blocking.
+    c.x[0] = 0;
+
+    // Block (or return immediately if a wake arrived in the gap).
+    scheduler::block_current_unless_woken(ctx)
+}
+fn sys_futex_wake(addr: u64, count: u64) -> Result<u64, Error> {
+    // Validate: must be in user VA space and word-aligned.
+    if addr >= USER_VA_END || addr & 3 != 0 {
+        return Err(Error::BadAddress);
+    }
+
+    let pa = user_va_to_pa(addr).ok_or(Error::BadAddress)?;
+    let woken = futex::wake(pa, count as u32);
+
+    Ok(woken as u64)
+}
 fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
     if handle_nr > u8::MAX as u64 {
         return Err(HandleError::InvalidHandle);
@@ -294,6 +355,38 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
 fn sys_yield(ctx: *mut Context) -> *const Context {
     scheduler::schedule(ctx)
 }
+/// Translate a user virtual address to a physical address using hardware AT.
+///
+/// Returns None if the page is unmapped or inaccessible from EL0.
+fn user_va_to_pa(va: u64) -> Option<u64> {
+    let par: u64;
+
+    unsafe {
+        // AT S1E0R: translate va as a Stage 1 EL0 Read.
+        core::arch::asm!(
+            "at s1e0r, {va}",
+            "isb",
+            va = in(reg) va,
+            options(nostack)
+        );
+        core::arch::asm!(
+            "mrs {par}, par_el1",
+            par = out(reg) par,
+            options(nostack, nomem)
+        );
+    }
+
+    // PAR_EL1 bit 0: 0 = success, 1 = fault.
+    if par & 1 != 0 {
+        return None;
+    }
+
+    // PAR_EL1[47:12] = physical address of the page.
+    let page_pa = par & 0x0000_FFFF_FFFF_F000;
+    let offset = va & (paging::PAGE_SIZE - 1);
+
+    Some(page_pa | offset)
+}
 
 pub fn dispatch(ctx: *mut Context) -> *const Context {
     let c = unsafe { &mut *ctx };
@@ -352,6 +445,15 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::SCHEDULING_CONTEXT_BIND => {
             c.x[0] = match sys_scheduling_context_bind(c.x[0]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::FUTEX_WAIT => sys_futex_wait(ctx),
+        nr::FUTEX_WAKE => {
+            c.x[0] = match sys_futex_wake(c.x[0], c.x[1]) {
                 Ok(n) => n,
                 Err(e) => e as i64 as u64,
             };

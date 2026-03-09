@@ -92,7 +92,9 @@ src/
   main.rs                  — kernel entry, IRQ/SVC dispatch, boot logging, memory map
   context.rs               — CPU register state struct (matches exception.S offsets)
   process.rs               — process creation from ELF binaries (demand-paged VMAs)
-  elf.rs                   — pure functional ELF64 parser (PT_LOAD segments)
+  executable.rs            — pure functional ELF64 parser (PT_LOAD segments)
+  device_tree.rs           — FDT parser (discovers hardware from firmware device tree)
+  futex.rs                 — fast userspace mutex (PA-keyed wait table, lost-wakeup prevention)
   memory.rs                — TTBR1 L3 refinement, W^X, PA/VA conversion
   heap.rs                  — linked-list allocator (first-fit, coalescing, 16 MiB) + slab routing
   slab.rs                  — power-of-two slab caches (64–2048B) for small kernel objects
@@ -108,8 +110,9 @@ src/
   scheduling_context.rs    — pure budget/period logic (charge, replenish)
   scheduler.rs             — SMP-aware EEVDF scheduler, scheduling context management, per-core state
   thread.rs                — thread struct, state machine (Ready/Running/Blocked/Exited), scheduling fields
-  syscall.rs               — syscall dispatcher (10 syscalls: exit, write, yield, handle_close,
-                              channel_signal, channel_wait, scheduling_context_{create,borrow,return,bind})
+  syscall.rs               — syscall dispatcher (12 syscalls: exit, write, yield, handle_close,
+                              channel_signal, channel_wait, scheduling_context_{create,borrow,return,bind},
+                              futex_wait, futex_wake)
   per_core.rs              — per-core data structures (online flag, core ID via MPIDR)
   power.rs                 — PSCI CPU_ON wrapper (HVC #0) for secondary core boot
   interrupt_controller.rs  — GICv2 distributor + CPU interface (per-core init)
@@ -138,7 +141,8 @@ build.rs                   — compiles user processes → ELF at build time
   tests/eevdf.rs           — EEVDF algorithm tests (eligibility, selection, vruntime)
   tests/sched_context.rs   — scheduling context tests (budget, replenishment, charge)
   tests/handle.rs          — handle table unit tests (insert, close, rights, full table)
-  tests/elf.rs             — ELF parser unit tests (valid/invalid binaries)
+  tests/executable.rs      — ELF parser unit tests (valid/invalid binaries)
+  tests/device_tree.rs     — FDT parser unit tests (FdtBuilder constructs minimal blobs)
   tests/vma.rs             — VMA lookup/insert unit tests (includes memory_region.rs)
   tests/buddy.rs           — buddy allocator tests (mock IrqMutex)
   tests/slab.rs            — slab size-class selection tests

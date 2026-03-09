@@ -75,11 +75,13 @@ Read these before making any design suggestions:
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled).
 
-**Kernel implementation next:** DTB parser (no design dependency, self-contained), futex (simple synchronization primitive), timer handles, `wait_any` event multiplexing, interrupt forwarding to userspace. Then: migrate virtio drivers from in-kernel to userspace as validation of the driver model.
+**Kernel implementation done (this session):** DTB parser (`device_tree.rs`, 260 lines, 14 host tests, FDT magic scan for QEMU/macOS compatibility). Futex (`futex.rs`, 64-bucket PA-keyed wait table, two syscalls #10/#11, lost-wakeup prevention via pending flag). L3 page table fix (pre-kernel area now mapped for DTB access). 12 syscalls total. File naming convention: `dtb.rs` → `device_tree.rs`, `elf.rs` → `executable.rs`, `FutexTable` → `WaitTable`.
 
-**Previous session highlights:** Scheduling (EEVDF + scheduling contexts) implemented. Compared against ~22 Rust OS projects (no overlap). COW filesystem research (RedoxFS, ZFS, Btrfs, Bcachefs). Non-Rust OS research (Phantom, BeOS, Singularity, Oberon, Spring). Unsafe minimization discipline formalized. Rendering technology settled (#11). Kernel graduated from spike to production.
+**Syscall API leaning:** 12 syscalls in three families. Handle family: `wait(handles[])` (multiplexer, subsumes old `channel_wait`), `close(handle)`, `signal(handle)`. Synchronization: `futex_wait`, `futex_wake`. Scheduling: `sched_create/bind/borrow/return`. Plus `exit`, `yield`, `write` (debug). Generic verbs on typed handles. OS service uses reactive/stream composition on top of `wait`. File naming convention: purpose-driven names, not acronyms or format names.
 
-**Kernel code:** `system/kernel/` (30 source files) + `system/user/{init,echo,libsys}/` + `system/host-tests/` (140+ tests). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC. Three-tier memory (buddy + slab + linked-list). Full process cleanup on exit.
+**Kernel implementation next:** `wait` syscall (handle-based event multiplexer). Then: timer handles, interrupt forwarding, wire DTB into device init, migrate virtio drivers to userspace.
+
+**Kernel code:** `system/kernel/` (32 source files) + `system/user/{init,echo,libsys}/` + `system/host-tests/` (154 tests across 11 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC. Three-tier memory (buddy + slab + linked-list). Full process cleanup on exit.
 
 **Design side next:** Layout engine (#15, highest-leverage unsettled design decision). Interaction model (#17, also unblocked). Filesystem COW on-disk design (research complete, ready for design discussion).
 

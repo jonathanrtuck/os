@@ -318,6 +318,34 @@ pub fn block_current_and_schedule(ctx: *mut Context) -> *const Context {
 
     schedule_inner(&mut s, ctx, core)
 }
+/// Block the current thread and reschedule, unless a wake is already pending.
+///
+/// This is the futex companion to `set_wake_pending`. The sequence is:
+/// 1. Futex wait records the thread in the wait table (under futex lock).
+/// 2. Futex lock released.
+/// 3. This function checks `futex_wake_pending` — if set, clears it and
+///    returns immediately (the waker already ran during step 2).
+///    Otherwise, blocks and reschedules.
+///
+/// This prevents the lost-wakeup race: a wake that arrives between
+/// steps 1 and 3 sets the pending flag instead of trying to unblock
+/// a thread that isn't blocked yet.
+pub fn block_current_unless_woken(ctx: *mut Context) -> *const Context {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+    if thread.futex_wake_pending {
+        // Waker already ran — consume the flag, don't block.
+        thread.futex_wake_pending = false;
+
+        return ctx as *const Context;
+    }
+
+    thread.block();
+
+    schedule_inner(&mut s, ctx, core)
+}
 /// Borrow another thread's scheduling context (context donation).
 ///
 /// Saves the current context and switches to the borrowed one. The caller
@@ -416,11 +444,11 @@ pub fn exit_current() -> ! {
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let core = per_core::core_id() as usize;
     // Phase 1: collect resources to free (under scheduler lock).
-    let (channels_to_close, addr_space) = {
+    let (channels_to_close, addr_space, thread_id) = {
         let mut s = STATE.lock();
         // Collect handle objects into an owned Vec so we can release the
         // thread borrow and then access s.scheduling_contexts freely.
-        let handle_objects: Vec<HandleObject> = {
+        let (handle_objects, tid) = {
             let thread = s.cores[core].current.as_mut().expect("no current thread");
 
             // Auto-return borrowed scheduling context on exit.
@@ -428,7 +456,9 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
                 thread.scheduling.context_id = Some(saved);
             }
 
-            thread.handles.drain().map(|(_, obj)| obj).collect()
+            let objects: Vec<HandleObject> = thread.handles.drain().map(|(_, obj)| obj).collect();
+
+            (objects, thread.id())
         };
         let mut channels = Vec::new();
 
@@ -448,13 +478,16 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             .address_space
             .take();
 
-        (channels, addr_space)
+        (channels, addr_space, tid)
     };
 
     // Phase 2: close channel endpoints (acquires channel lock, not scheduler).
     for id in channels_to_close {
         super::channel::close_endpoint(id);
     }
+
+    // Phase 2b: remove from futex wait queues (acquires futex lock, not scheduler).
+    super::futex::remove_thread(thread_id);
 
     // Phase 3: free address space (acquires page_allocator and address_space_id locks).
     if let Some(mut addr_space) = addr_space {
@@ -547,6 +580,33 @@ pub fn schedule(ctx: *mut Context) -> *const Context {
     let core = per_core::core_id() as usize;
 
     schedule_inner(&mut s, ctx, core)
+}
+/// Set the wake-pending flag on a thread that is not yet blocked.
+///
+/// Called by `futex::wake` when `try_wake` returns false (thread is still
+/// Running, hasn't entered the scheduler yet). The flag is consumed by
+/// `block_current_unless_woken`.
+pub fn set_wake_pending(id: ThreadId) {
+    let mut s = STATE.lock();
+
+    // Search current threads on all cores.
+    for core_state in s.cores.iter_mut() {
+        if let Some(t) = &mut core_state.current {
+            if t.id() == id {
+                t.futex_wake_pending = true;
+
+                return;
+            }
+        }
+    }
+    // Search run queue (thread might have been descheduled).
+    for t in s.queue.ready.iter_mut() {
+        if t.id() == id {
+            t.futex_wake_pending = true;
+
+            return;
+        }
+    }
 }
 pub fn spawn(entry: fn() -> !) {
     let mut s = STATE.lock();

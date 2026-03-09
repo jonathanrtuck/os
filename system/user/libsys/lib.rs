@@ -28,6 +28,8 @@ mod nr {
     pub const SCHEDULING_CONTEXT_BORROW: u64 = 7;
     pub const SCHEDULING_CONTEXT_RETURN: u64 = 8;
     pub const SCHEDULING_CONTEXT_BIND: u64 = 9;
+    pub const FUTEX_WAIT: u64 = 10;
+    pub const FUTEX_WAKE: u64 = 11;
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +105,20 @@ pub fn exit() -> ! {
             options(noreturn, nostack),
         );
     }
+}
+/// Wait on a futex. Blocks if the 32-bit value at `addr` equals `expected`.
+///
+/// Returns 0 on success (was woken), or a negative error code:
+/// - `-2` (BadAddress): invalid or unaligned address.
+/// - `-8` (WouldBlock): value at `addr` != `expected` (no block occurred).
+pub fn futex_wait(addr: *const u32, expected: u32) -> i64 {
+    unsafe { syscall2(nr::FUTEX_WAIT, addr as u64, expected as u64) as i64 }
+}
+/// Wake up to `count` threads waiting on a futex at `addr`.
+///
+/// Returns the number of threads woken on success, or a negative error code.
+pub fn futex_wake(addr: *const u32, count: u32) -> i64 {
+    unsafe { syscall2(nr::FUTEX_WAKE, addr as u64, count as u64) as i64 }
 }
 /// Close a handle, releasing the associated kernel resource.
 ///

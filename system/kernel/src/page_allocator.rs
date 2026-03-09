@@ -9,6 +9,8 @@
 
 use super::memory::{self, Pa};
 use super::paging;
+#[cfg(not(test))]
+use super::serial;
 use super::sync::IrqMutex;
 
 /// Maximum order: 2^10 pages = 4 MiB.
@@ -153,6 +155,17 @@ pub fn free_frame(pa: Pa) {
 /// Coalesces with buddy blocks up to MAX_ORDER.
 pub fn free_frames(pa: Pa, order: usize) {
     assert!(order <= MAX_ORDER, "order exceeds MAX_ORDER");
+
+    // Validate PA before writing to it — a corrupted PA would cause a data abort.
+    // Gated on not(test) because host tests use heap addresses, not real RAM.
+    #[cfg(not(test))]
+    if pa.0 & 0xFFF != 0 || pa.0 < paging::RAM_START as usize || pa.0 >= paging::RAM_END as usize {
+        serial::panic_puts("free_frames: bad PA 0x");
+        serial::panic_put_hex(pa.0 as u64);
+        serial::panic_puts("\n");
+
+        panic!("free_frames: PA outside RAM or unaligned");
+    }
 
     let mut s = STATE.lock();
     let mut current_pa = pa.0;

@@ -31,6 +31,7 @@ Active questions we've started exploring but haven't resolved. Each thread links
 **Informs:** Decision #16 (Technical Foundation)
 **Status:** All sub-decisions settled except filesystem COW on-disk design. Kernel is a microkernel by convergence.
 **Context:** From-scratch Rust kernel on aarch64. Microkernel: address spaces, threads, IPC, scheduling, interrupt forwarding, handles. All semantic code in userspace. Settled: soft RT, no hypervisor (EL1), preemptive + cooperative yield, traditional privilege (EL0), split TTBR, handles, ELF, ring buffer IPC, three-layer process arch, SMP (4 cores), EEVDF + scheduling contexts, userspace drivers (MMIO mapping + interrupt forwarding), userspace filesystem (kernel owns COW/VM, filesystem manages on-disk layout). Remaining: filesystem COW on-disk design.
+**Leaning — syscall API:** 12 syscalls in three families. Handle family: `wait(handles[])`, `close(handle)`, `signal(handle)`. Synchronization: `futex_wait`, `futex_wake`. Scheduling: `sched_create/bind/borrow/return`. Plus lifecycle: `exit`, `yield`, `write` (debug, temporary). Generic verbs on typed handles — handle type carries context. `wait` subsumes old `channel_wait` and gains multiplexing. OS service uses reactive/stream composition on top of `wait`. See insights log for full rationale.
 
 ### COW Filesystem
 
@@ -203,7 +204,21 @@ In Oberon, any text on screen is potentially a command. Middle-click on `Module.
 
 ### The kernel is a handle multiplexer with one wait primitive (2026-03-08)
 
-A pattern emerged from settling drivers and filesystem: the kernel's job is multiplexing hardware resources behind handles + providing a single event-driven wait mechanism (`wait_any`). Memory (address spaces), communication (channels), time (scheduling contexts), devices (MMIO mappings + interrupt handles), timers — all accessed via handles, all waited on via one syscall. The kernel doesn't understand what any of these are *for*. It just manages them. This is a concrete identity statement for the kernel: it's the handle multiplexer. Everything semantic (content types, document state, filesystem layout, driver protocols, rendering) lives in userspace. The consequence: every new kernel feature should be expressible as "a new handle type that can be waited on."
+A pattern emerged from settling drivers and filesystem: the kernel's job is multiplexing hardware resources behind handles + providing a single event-driven wait mechanism (`wait`). Memory (address spaces), communication (channels), time (scheduling contexts), devices (MMIO mappings + interrupt handles), timers — all accessed via handles, all waited on via one syscall. The kernel doesn't understand what any of these are *for*. It just manages them. This is a concrete identity statement for the kernel: it's the handle multiplexer. Everything semantic (content types, document state, filesystem layout, driver protocols, rendering) lives in userspace. The consequence: every new kernel feature should be expressible as "a new handle type that can be waited on." See also "Syscall API: composable verbs on typed handles" for the full API shape.
+
+### Syscall API: composable verbs on typed handles (2026-03-08)
+
+The syscall surface should be a small set of composable verbs, not per-type specialized calls. Three families emerged from the design discussion:
+
+**Handle family (generic verbs, any handle type):** `wait(handles[])` blocks until any handle is ready (multiplexer — subsumes the old `channel_wait`). `close(handle)` releases any handle. `signal(handle)` notifies a channel peer. New handle types (timers, interrupts) get `wait` support for free — "every new kernel feature should be expressible as a new handle type that can be waited on."
+
+**Synchronization family (address-based, no handles):** `futex_wait(addr, expected)` and `futex_wake(addr, count)`. Separate from handles because futexes are synchronization primitives, not event sources — you never multiplex across locks. PA-keyed for cross-process shared memory.
+
+**Scheduling family (domain-specific verbs):** `sched_create`, `sched_bind`, `sched_borrow`, `sched_return`. Prefixed because `borrow`/`return` are too generic alone, and these operations are genuinely type-specific.
+
+Design principles: (1) handle type carries context — `signal(channel_handle)` not `channel_signal`; (2) `wait` takes multiple handles because multiplexing IS its purpose — other syscalls take single handles; (3) streams/reactive composition lives in the OS service (userspace), not the kernel — the kernel provides the event primitive (`wait`), the OS service composes it.
+
+The OS service architecture is naturally reactive/stream-based: merge input events, edit protocol events, and timer ticks → fold into document state → render. This maps cleanly to reactive stream combinators (most.js, RxJS pattern). The kernel doesn't need to understand streams — it just needs to be a good event source.
 
 ### Birth time is the key insight for efficient snapshots (2026-03-08)
 

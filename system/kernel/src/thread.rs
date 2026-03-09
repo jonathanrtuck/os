@@ -50,9 +50,13 @@ pub struct Thread {
     pub(crate) address_space: Option<Box<AddressSpace>>,
     pub(crate) handles: HandleTable,
     pub(crate) scheduling: Scheduling,
+    /// Set by futex wake when the thread is not yet blocked.
+    /// Checked by `block_current_unless_woken` to prevent lost wakeups.
+    pub(crate) futex_wake_pending: bool,
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
     Ready,
@@ -184,6 +188,7 @@ impl Thread {
             address_space: None,
             handles: HandleTable::new(),
             scheduling: Scheduling::new(),
+            futex_wake_pending: false,
         })
     }
 
@@ -206,6 +211,7 @@ impl Thread {
             address_space: None,
             handles: HandleTable::new(),
             scheduling: Scheduling::new(),
+            futex_wake_pending: false,
         })
     }
     /// Idle thread — runs at EL1, no stack (uses boot stack), never enqueued.
@@ -228,6 +234,7 @@ impl Thread {
             address_space: None,
             handles: HandleTable::new(),
             scheduling: Scheduling::new(),
+            futex_wake_pending: false,
         })
     }
     /// User thread — runs at EL0 with its own address space.
@@ -263,6 +270,7 @@ impl Thread {
             address_space: Some(addr_space),
             handles: HandleTable::new(),
             scheduling: Scheduling::new(),
+            futex_wake_pending: false,
         })
     }
 }

@@ -409,16 +409,16 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **Settled 2026-03-08.** The kernel is a microkernel. Not by ideology — each sub-decision independently pushed complexity outward (drivers, filesystem, rendering, editors all in userspace). What remains is the microkernel set: address spaces, threads, IPC (channels), scheduling (EEVDF + scheduling contexts), interrupt forwarding, and handle-based access control.
 
-**The kernel's job:** Multiplex hardware resources behind handles. Provide a single event-driven wait mechanism (`wait_any`). The kernel doesn't understand what any resource is *for* — it just manages access.
+**The kernel's job:** Multiplex hardware resources behind handles. Provide a single event-driven wait mechanism (`wait_any`). The kernel doesn't understand what any resource is _for_ — it just manages access.
 
 **Handle types (current and planned):**
 
-| Handle type          | Status    | Resource                            |
-|----------------------|-----------|-------------------------------------|
-| Channel              | Implemented | Shared-memory IPC ring buffer    |
-| SchedulingContext    | Implemented | Budget/period time allocation    |
-| Device (planned)     | —         | MMIO mapping + interrupt notification |
-| Timer (planned)      | —         | One-shot deadline notification    |
+| Handle type       | Status      | Resource                              |
+| ----------------- | ----------- | ------------------------------------- |
+| Channel           | Implemented | Shared-memory IPC ring buffer         |
+| SchedulingContext | Implemented | Budget/period time allocation         |
+| Device (planned)  | —           | MMIO mapping + interrupt notification |
+| Timer (planned)   | —           | One-shot deadline notification        |
 
 **Guiding rule:** Every new kernel feature should be expressible as "a new handle type that can be waited on."
 
@@ -451,12 +451,12 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **New syscalls (planned):**
 
-| Syscall               | Args                           | Returns       |
-|-----------------------|--------------------------------|---------------|
-| device_map            | device_id, offset, size        | handle        |
-| interrupt_register    | device_id, irq_nr              | handle        |
-| interrupt_ack         | handle                         | 0             |
-| dma_alloc             | order                          | handle, PA    |
+| Syscall            | Args                    | Returns    |
+| ------------------ | ----------------------- | ---------- |
+| device_map         | device_id, offset, size | handle     |
+| interrupt_register | device_id, irq_nr       | handle     |
+| interrupt_ack      | handle                  | 0          |
+| dma_alloc          | order                   | handle, PA |
 
 **Depends on:** DTB parser (device discovery), `wait_any` (interrupt notification).
 
@@ -474,35 +474,45 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 ---
 
-## 8.5 Futex (planned)
+## 8.5 Futex
 
 **Goal:** Fast userspace synchronization primitive. Building block for mutexes, condition variables, semaphores — all without creating kernel objects per lock.
 
-**Planned approach:** Two syscalls:
+**Approach:** Two syscalls (`futex_wait` #10, `futex_wake` #11):
 
-- `futex_wait(addr, expected_value)` — If `*addr == expected_value`, put the calling thread to sleep on a wait queue keyed by the physical address. If `*addr != expected_value`, return immediately (avoids lost wakeup).
-- `futex_wake(addr, count)` — Wake up to `count` threads sleeping on the wait queue for this address.
+- `futex_wait(addr, expected)` — Translate user VA → PA via `AT S1E0R`, check `*addr == expected`, record thread in hash table, block via `block_current_unless_woken`. Returns `WouldBlock (-8)` if value changed.
+- `futex_wake(addr, count)` — Translate VA → PA, collect matching waiters (under futex lock), wake them (under scheduler lock). Two-phase design maintains lock ordering (futex → scheduler, same direction as channel → scheduler).
 
 **Fast path:** Userspace does an atomic CAS to acquire a lock. No syscall. Slow path (contention): `futex_wait` to sleep, `futex_wake` to wake. Kernel involvement only on contention.
 
-**Implementation:** Hash table of wait queues keyed by physical address (translate user VA → PA to handle shared memory correctly).
+**Implementation:** 64-bucket hash table keyed by physical address (word-aligned, `(pa >> 2) % 64`). Physical address keying ensures processes sharing the same physical page (IPC shared memory) see the same futex.
+
+**Lost-wakeup prevention:** Race window between recording waiter in futex table and actually blocking in the scheduler. Solution: `set_wake_pending(tid)` flag on Thread. If a waker runs during this window, `try_wake` fails (thread still Running), so waker sets the pending flag. When the waiter enters `block_current_unless_woken`, it checks the flag and returns immediately instead of blocking.
+
+**Cleanup:** `remove_thread(id)` purges a thread from all futex wait queues. Called during `exit_current_from_syscall` (Phase 2b, acquires futex lock, not scheduler lock — safe ordering).
 
 **Prior art:** Linux futex(2) — the standard answer. Every userspace mutex library (pthreads, parking_lot, std::sync::Mutex) is built on futex.
 
 ---
 
-## 8.6 DTB Parser (planned)
+## 8.6 DTB Parser
 
 **Goal:** Replace hardcoded device addresses with device tree discovery. Makes the kernel portable across hardware configurations.
 
-**Planned approach:** Parse the Flattened Device Tree (FDT) blob passed by firmware in `x0` at boot. Extract: device types, MMIO base addresses, interrupt numbers, compatible strings. `boot.S` must preserve `x0` before calling `kernel_main`. Parser is `no_std`, `no_alloc` feasible (~200-300 lines). Build a simple in-memory device table that `device_map` and `interrupt_register` syscalls reference.
+**Approach:** Parse the Flattened Device Tree (FDT) blob passed by firmware. `boot.S` saves `x0` (DTB PA from firmware) in `x24` and passes it to `kernel_main`. Parsing happens between `heap::init()` (needs `Vec`) and `page_allocator::init()` (may reclaim DTB memory).
 
-**Currently hardcoded (to be replaced):**
+**Discovery strategy:** Try firmware-provided PA first; if that fails (QEMU on macOS doesn't set x0 for bare-metal ELF), scan the first 512KB of RAM (pre-kernel area) for the FDT magic. Graceful fallback to "not found" if DTB isn't available.
 
-| Device    | Address        | Source       |
-|-----------|---------------|--------------|
-| GIC       | 0x0800_0000   | QEMU virt    |
-| UART      | 0x0900_0000   | QEMU virt    |
-| virtio    | 0x0A00_0000+  | QEMU virt    |
+**Parser:** Pure function on `&[u8]`, ~260 lines. Extracts compatible strings, reg entries (#address-cells=2, #size-cells=2), and GIC interrupts (SPI offset +32, PPI offset +16). Returns a `DeviceTable` with `find_first()` and `find_all()` lookups. 14 host tests verify parsing.
 
-**Depends on:** Nothing. Self-contained, no design dependencies. Good first implementation target.
+**L3 mapping fix:** `memory::init()` replaces the kernel's 2MB block with L3 4KB pages. Originally, pre-kernel pages (0x40000000-0x40080000) had empty L3 entries. Fixed to map the entire 2MB block — pre-kernel pages are RW NX (data), kernel sections get W^X refinement.
+
+**Currently hardcoded (DTB not yet wired to device init):**
+
+| Device | Address      | Source    |
+| ------ | ------------ | --------- |
+| GIC    | 0x0800_0000  | QEMU virt |
+| UART   | 0x0900_0000  | QEMU virt |
+| virtio | 0x0A00_0000+ | QEMU virt |
+
+**Next:** Wire DTB-discovered addresses into device initialization (GIC, UART, virtio). Requires driver model to be settled.

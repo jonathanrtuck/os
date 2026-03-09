@@ -54,7 +54,9 @@ mod address_space;
 mod address_space_id;
 mod channel;
 mod context;
-mod elf;
+mod device_tree;
+mod executable;
+mod futex;
 mod handle;
 mod heap;
 mod interrupt_controller;
@@ -129,6 +131,55 @@ fn boot_secondaries() {
     // live (shared kernel mappings) — do NOT free those.
     reclaim_boot_ttbr0();
 }
+/// Find and parse the DTB blob.
+///
+/// Strategy: try the firmware-provided address first (x0 per aarch64 boot
+/// protocol). If that fails (address is 0 or outside RAM), scan RAM for
+/// the FDT magic. QEMU on macOS/Apple Silicon (HVF) doesn't pass the DTB
+/// address in x0 but does load it into RAM — typically right after the
+/// kernel image.
+fn find_and_parse_dtb(firmware_pa: u64) -> Option<device_tree::DeviceTable> {
+    const FDT_MAGIC: u32 = 0xD00D_FEED;
+
+    // Try firmware-provided address.
+    if let Some(dt) = try_parse_dtb_at(firmware_pa) {
+        return Some(dt);
+    }
+
+    // Scan RAM for FDT magic. Check two regions:
+    // 1. Pre-kernel area (0x40000000..0x40080000) — some platforms put DTB here.
+    // 2. Post-kernel area (__kernel_end..+2MB) — QEMU typically places DTB after the image.
+    // Skip the kernel image itself to avoid false positives.
+    let regions = [
+        (paging::RAM_START as u64, paging::RAM_START as u64 + 0x80000),
+        (
+            memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize }).as_u64(),
+            memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize }).as_u64()
+                + 2 * 1024 * 1024,
+        ),
+    ];
+
+    for (start, end) in regions {
+        let end = end.min(paging::RAM_END as u64);
+        let mut addr = start;
+
+        while addr + 4 <= end {
+            let va = memory::phys_to_virt(memory::Pa(addr as usize));
+            // SAFETY: Address is within mapped RAM range.
+            let magic = unsafe { core::ptr::read_volatile(va as *const u32) };
+
+            if u32::from_be(magic) == FDT_MAGIC {
+                if let Some(dt) = try_parse_dtb_at(addr) {
+                    return Some(dt);
+                }
+            }
+
+            addr += 4;
+        }
+    }
+
+    None
+}
 /// Free the boot identity-map pages (TTBR0) now that all cores have
 /// transitioned to upper VA via TTBR1.
 fn reclaim_boot_ttbr0() {
@@ -152,14 +203,60 @@ fn reclaim_boot_ttbr0() {
         page_allocator::free_frame(memory::virt_to_phys(va));
     }
 }
+/// Try to parse a DTB at the given physical address. Returns None if the
+/// address is outside RAM or the blob is invalid.
+fn try_parse_dtb_at(pa: u64) -> Option<device_tree::DeviceTable> {
+    if pa < paging::RAM_START as u64 || pa >= paging::RAM_END as u64 {
+        return None;
+    }
+
+    let va = memory::phys_to_virt(memory::Pa(pa as usize));
+    let max_len = (paging::RAM_END as u64 - pa) as usize;
+    let len = max_len.min(64 * 1024);
+    // SAFETY: Address validated within mapped RAM range.
+    let blob = unsafe { core::slice::from_raw_parts(va as *const u8, len) };
+
+    device_tree::parse(blob)
+}
 
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_main() -> ! {
+pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
+    let mut next: *const Context = ctx;
+
+    if let Some(iar) = interrupt_controller::acknowledge() {
+        let id = iar & 0x3FF;
+
+        if id == timer::IRQ_ID {
+            timer::handle_irq();
+
+            next = scheduler::schedule(ctx);
+        }
+
+        interrupt_controller::end_of_interrupt(iar);
+    }
+
+    next
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     serial::puts("🥾 booting…\n");
     memory::init();
     serial::puts("  💾 memory - 256mib ram, w^x page tables\n");
     heap::init();
     serial::puts("  📦 heap - 16mib (linked-list + slab)\n");
+
+    // Parse the device tree blob before the page allocator reclaims its memory.
+    // Try firmware-provided address first (x0 per aarch64 boot protocol), then
+    // scan RAM for the FDT magic if firmware didn't deliver it (e.g. QEMU/macOS).
+    let device_table = find_and_parse_dtb(dtb_pa);
+
+    if let Some(ref dt) = device_table {
+        serial::puts("  🌳 dtb - ");
+        serial::put_u32(dt.device_count() as u32);
+        serial::puts(" devices discovered\n");
+    } else {
+        serial::puts("  🌳 dtb - not found\n");
+    }
 
     // Initialize page frame allocator with memory above kernel heap.
     let kernel_end_pa = memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize });
@@ -223,24 +320,6 @@ pub extern "C" fn secondary_main(core_id: u64) -> ! {
     loop {
         unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
     }
-}
-#[unsafe(no_mangle)]
-pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
-    let mut next: *const Context = ctx;
-
-    if let Some(iar) = interrupt_controller::acknowledge() {
-        let id = iar & 0x3FF;
-
-        if id == timer::IRQ_ID {
-            timer::handle_irq();
-
-            next = scheduler::schedule(ctx);
-        }
-
-        interrupt_controller::end_of_interrupt(iar);
-    }
-
-    next
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {

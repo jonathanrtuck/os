@@ -1,4 +1,5 @@
 *.bin
+*.dtb
 *.img
 /target/
 rustc-ice-*.txt

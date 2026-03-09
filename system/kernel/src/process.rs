@@ -2,7 +2,7 @@
 
 use super::address_space::{AddressSpace, PageAttrs};
 use super::address_space_id;
-use super::elf;
+use super::executable;
 use super::memory;
 use super::memory_region::{Backing, Vma};
 use super::page_allocator;
@@ -17,20 +17,21 @@ use alloc::boxed::Box;
 /// and first stack page eagerly; remaining pages are demand-paged on fault.
 /// Returns an error string on failure (bad ELF, OOM); callers decide severity.
 pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<ThreadId, &'static str> {
-    let header = elf::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
+    let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
     let (asid, generation) = address_space_id::alloc();
     let mut addr_space = Box::new(AddressSpace::new(asid, generation));
 
     // Map each PT_LOAD segment from the ELF into the new address space.
     for i in 0..header.ph_count {
-        let seg =
-            match elf::load_segment(elf_bytes, &header, i).map_err(|_| "bad program header")? {
-                Some(seg) => seg,
-                None => continue,
-            };
+        let seg = match executable::load_segment(elf_bytes, &header, i)
+            .map_err(|_| "bad program header")?
+        {
+            Some(seg) => seg,
+            None => continue,
+        };
         let file_data =
-            elf::segment_data(elf_bytes, &seg).map_err(|_| "segment data out of bounds")?;
-        let attrs = elf::segment_attrs(seg.flags);
+            executable::segment_data(elf_bytes, &seg).map_err(|_| "segment data out of bounds")?;
+        let attrs = executable::segment_attrs(seg.flags);
         let base_va = seg.vaddr & !(PAGE_SIZE - 1);
         let page_count = (seg.mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
         // Create VMA for this segment.

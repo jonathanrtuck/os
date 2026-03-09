@@ -58,6 +58,10 @@ boot_tt1_l2_1:  .space 4096    // TTBR1 L2 for 1..2GB (RAM)
 .section .text.boot
 .global _start
 _start:
+  // Save DTB physical address (firmware passes in x0 per aarch64 boot protocol).
+  // x24 is callee-saved and not used by any boot-time routine.
+  mov x24, x0
+
   // Park secondary cores.
   mrs x0, mpidr_el1
   and x0, x0, #0xFF
@@ -192,8 +196,9 @@ el1_start:
   msr vbar_el1, x0
   isb
 
-  ldr x0, =kernel_main
-  blr x0
+  mov x0, x24              // DTB PA as first argument to kernel_main
+  ldr x1, =kernel_main
+  blr x1
 
 park:
   wfe
