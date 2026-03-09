@@ -25,6 +25,9 @@ pub struct Process {
     pub(crate) thread_count: u32,
     /// Set to true by `process_start`. Prevents `handle_send` to running processes.
     pub(crate) started: bool,
+    /// Set by `process_kill`. Triggers deferred address space cleanup when the
+    /// last running thread is rescheduled away.
+    pub(crate) killed: bool,
 }
 /// Unique process identifier. Index into the scheduler's process table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +41,7 @@ impl Process {
             handles: HandleTable::new(),
             thread_count: 0,
             started: false,
+            killed: false,
         }
     }
 

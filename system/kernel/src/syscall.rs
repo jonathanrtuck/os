@@ -38,6 +38,7 @@
 //! | 20 | process_create            | x0=elf_ptr, x1=elf_len            | handle           |
 //! | 21 | process_start             | x0=handle                         | 0                |
 //! | 22 | handle_send               | x0=target_handle, x1=source_handle | 0               |
+//! | 23 | process_kill              | x0=handle                          | 0               |
 //!
 //! # Error codes
 //!
@@ -102,6 +103,7 @@ pub mod nr {
     pub const CHANNEL_CREATE: u64 = 5;
     pub const PROCESS_START: u64 = 21;
     pub const HANDLE_SEND: u64 = 22;
+    pub const PROCESS_KILL: u64 = 23;
 }
 
 #[repr(i64)]
@@ -544,6 +546,65 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
     })?;
 
     Ok(handle.0 as u64)
+}
+fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
+    if handle_nr > u8::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let target_pid = scheduler::current_process_do(|process| {
+        match process.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+            Ok(HandleObject::Process(id)) => Ok(id),
+            Ok(_) => Err(Error::InvalidArgument),
+            Err(_) => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    // Prevent self-kill.
+    let caller_pid = scheduler::current_thread_do(|t| t.process_id);
+
+    if caller_pid == Some(target_pid) {
+        return Err(Error::InvalidArgument);
+    }
+
+    let kill_info = scheduler::kill_process(target_pid).ok_or(Error::InvalidArgument)?;
+
+    // Phase 2: notify exits (acquires thread_exit/process_exit locks, then scheduler).
+    for &tid in &kill_info.thread_ids {
+        super::thread_exit::notify_exit(tid);
+    }
+
+    super::process_exit::notify_exit(target_pid);
+
+    // Phase 2a: remove killed threads from futex wait queues.
+    for &tid in &kill_info.thread_ids {
+        super::futex::remove_thread(tid);
+    }
+    // Phase 3: close resources outside scheduler lock.
+    for id in kill_info.channels {
+        super::channel::close_endpoint(id);
+    }
+    for id in kill_info.interrupts {
+        super::interrupt::destroy(id);
+    }
+    for id in kill_info.timers {
+        super::timer::destroy(id);
+    }
+    for id in kill_info.thread_handles {
+        super::thread_exit::destroy(id);
+    }
+    for id in kill_info.process_handles {
+        super::process_exit::destroy(id);
+    }
+
+    // Phase 4: free address space (immediate path — no threads were running).
+    if let Some(mut addr_space) = kill_info.address_space {
+        addr_space.invalidate_tlb();
+        addr_space.free_all();
+        super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
+    }
+
+    Ok(0)
 }
 fn sys_process_start(handle_nr: u64) -> Result<u64, Error> {
     if handle_nr > u8::MAX as u64 {
@@ -1108,6 +1169,14 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::HANDLE_SEND => {
             c.x[0] = match sys_handle_send(c.x[0], c.x[1]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
+            };
+
+            ctx as *const Context
+        }
+        nr::PROCESS_KILL => {
+            c.x[0] = match sys_process_kill(c.x[0]) {
                 Ok(n) => n,
                 Err(e) => e as i64 as u64,
             };

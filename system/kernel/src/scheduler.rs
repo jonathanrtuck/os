@@ -57,6 +57,18 @@ struct State {
     free_context_ids: Vec<u32>,
 }
 
+/// Information collected by `kill_process` for cleanup outside the scheduler lock.
+pub struct KillInfo {
+    pub thread_ids: Vec<ThreadId>,
+    pub channels: Vec<super::handle::ChannelId>,
+    pub interrupts: Vec<super::interrupt::InterruptId>,
+    pub timers: Vec<super::timer::TimerId>,
+    pub thread_handles: Vec<ThreadId>,
+    pub process_handles: Vec<ProcessId>,
+    /// Address space for immediate cleanup (None if deferred due to running threads).
+    pub address_space: Option<Box<super::address_space::AddressSpace>>,
+}
+
 /// Information collected under the scheduler lock for thread exit.
 enum ExitInfo {
     /// Last thread in the process — full cleanup required.
@@ -161,6 +173,40 @@ fn has_budget(thread: &Thread, contexts: &[Option<SchedulingContextSlot>]) -> bo
             .map_or(true, |slot| slot.context.has_budget()),
     }
 }
+/// Deferred address space cleanup for killed processes.
+///
+/// When `kill_process` finds threads still running on other cores, it marks
+/// them Exited and sets `process.killed = true` with `thread_count` reflecting
+/// the number of still-running threads. Each time one of those threads is
+/// parked (reaped), `thread_count` is decremented. When it reaches zero, the
+/// address space is freed inline (under the scheduler lock — acceptable since
+/// this is a rare path and the process is typically small).
+fn maybe_cleanup_killed_process(s: &mut State, pid: Option<ProcessId>, was_exited: bool) {
+    if !was_exited {
+        return;
+    }
+
+    let pid = match pid {
+        Some(p) => p,
+        None => return,
+    };
+
+    if let Some(Some(process)) = s.processes.get_mut(pid.0 as usize) {
+        if process.killed {
+            process.thread_count = process.thread_count.saturating_sub(1);
+
+            if process.thread_count == 0 {
+                let process = s.processes[pid.0 as usize].take().unwrap();
+                let mut addr_space = process.address_space;
+
+                addr_space.invalidate_tlb();
+                addr_space.free_all();
+
+                super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
+            }
+        }
+    }
+}
 /// Read hardware counter and convert to nanoseconds.
 fn now_ns() -> u64 {
     timer::counter_to_ns(timer::counter())
@@ -206,6 +252,10 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 
     old_thread.deschedule();
 
+    // Capture for deferred kill cleanup (before park_old consumes the thread).
+    let old_pid = old_thread.process_id;
+    let old_exited = old_thread.is_exited();
+
     // Park the old thread in its appropriate location.
     fn park_old(s: &mut State, mut old_thread: Box<Thread>) {
         if old_thread.is_ready() {
@@ -225,7 +275,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     }
 
     // Try to select a runnable thread via EEVDF.
-    if let Some(idx) = select_best(&s.queue, &s.scheduling_contexts) {
+    let result = if let Some(idx) = select_best(&s.queue, &s.scheduling_contexts) {
         let mut new_thread = s.queue.ready.swap_remove(idx);
 
         new_thread.activate();
@@ -265,7 +315,13 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         s.cores[core].current = Some(idle);
 
         idle_ctx
-    }
+    };
+
+    // Deferred cleanup: if the old thread was from a killed process, decrement
+    // the running count and free the address space when it reaches zero.
+    maybe_cleanup_killed_process(s, old_pid, old_exited);
+
+    result
 }
 /// Select the best thread from the ready queue using EEVDF.
 ///
@@ -824,6 +880,132 @@ pub fn init_secondary(core_id: u32) {
 
     // Keep ctx_ptr used so idle isn't optimized away.
     let _ = ctx_ptr;
+}
+/// Kill all threads of a process and collect resources for cleanup.
+///
+/// Threads in the ready queue, blocked list, and suspended list are removed
+/// and dropped immediately. Threads running on other cores are marked Exited
+/// and will be reaped on their next schedule (deferred cleanup via
+/// `maybe_cleanup_killed_process` in `schedule_inner`).
+///
+/// Returns `None` if the process doesn't exist, is already killed, or has no
+/// threads. The caller must perform Phase 2 cleanup (notify exits, close
+/// resources, free address space if returned).
+pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
+    let mut s = STATE.lock();
+
+    // Validate process exists and is alive.
+    {
+        let process = s.processes.get(target_pid.0 as usize)?.as_ref()?;
+
+        if process.killed || process.thread_count == 0 {
+            return None;
+        }
+    }
+
+    let mut killed_threads = Vec::new();
+    let mut running_count: u32 = 0;
+    // Remove target threads from ready queue.
+    let mut i = 0;
+
+    while i < s.queue.ready.len() {
+        if s.queue.ready[i].process_id == Some(target_pid) {
+            let thread = s.queue.ready.swap_remove(i);
+
+            killed_threads.push(thread.id());
+        } else {
+            i += 1;
+        }
+    }
+
+    // Remove from blocked list.
+    i = 0;
+
+    while i < s.blocked.len() {
+        if s.blocked[i].process_id == Some(target_pid) {
+            let thread = s.blocked.swap_remove(i);
+
+            killed_threads.push(thread.id());
+        } else {
+            i += 1;
+        }
+    }
+
+    // Remove from suspended list.
+    i = 0;
+
+    while i < s.suspended.len() {
+        if s.suspended[i].process_id == Some(target_pid) {
+            let thread = s.suspended.swap_remove(i);
+
+            killed_threads.push(thread.id());
+        } else {
+            i += 1;
+        }
+    }
+
+    // Mark running threads on other cores as Exited.
+    for core_state in s.cores.iter_mut() {
+        if let Some(t) = &mut core_state.current {
+            if t.process_id == Some(target_pid) {
+                killed_threads.push(t.id());
+                t.mark_exited();
+
+                running_count += 1;
+            }
+        }
+    }
+
+    // Drain handle table and categorize resources for cleanup outside the lock.
+    let handle_objects: Vec<HandleObject> = {
+        let process = s.processes[target_pid.0 as usize].as_mut().unwrap();
+
+        process.handles.drain().map(|(_, obj)| obj).collect()
+    };
+    let mut channels = Vec::new();
+    let mut interrupts = Vec::new();
+    let mut timers = Vec::new();
+    let mut thread_handles = Vec::new();
+    let mut process_handles = Vec::new();
+
+    for obj in handle_objects {
+        match obj {
+            HandleObject::Channel(id) => channels.push(id),
+            HandleObject::Interrupt(id) => interrupts.push(id),
+            HandleObject::Process(id) => process_handles.push(id),
+            HandleObject::SchedulingContext(id) => release_context_inner(&mut s, id),
+            HandleObject::Thread(id) => thread_handles.push(id),
+            HandleObject::Timer(id) => timers.push(id),
+        }
+    }
+
+    // Take or defer the process based on whether threads are still running.
+    let address_space = if running_count == 0 {
+        // No threads running on any core — take the process for immediate cleanup.
+        let process = s.processes[target_pid.0 as usize].take().unwrap();
+
+        Some(process.address_space)
+    } else {
+        // Threads still running on other cores — defer address space cleanup.
+        // Set thread_count to the number of still-running threads so
+        // maybe_cleanup_killed_process can track when they're all reaped.
+        let process = s.processes[target_pid.0 as usize].as_mut().unwrap();
+
+        process.thread_count = running_count;
+        process.killed = true;
+
+        None
+    };
+
+    Some(KillInfo {
+        thread_ids: killed_threads,
+        channels,
+        interrupts,
+        timers,
+        thread_handles,
+        process_handles,
+        address_space,
+    })
 }
 /// Release a scheduling context handle (decrement ref count, free if zero).
 pub fn release_scheduling_context(ctx_id: SchedulingContextId) {

@@ -676,7 +676,7 @@ Creates a new thread in the calling process. Shares address space and handle tab
 
 ---
 
-### 9.6 Process Kill (Phase 6)
+### 9.6 Process Kill (Phase 6) — DONE
 
 **Goal:** Allow the OS service to terminate misbehaving processes.
 
@@ -686,9 +686,16 @@ Creates a new thread in the calling process. Shares address space and handle tab
 | --- | ------------ | --------- | ------- |
 | 23  | process_kill | x0=handle | 0       |
 
-Terminates all threads in the target process. Runs full cleanup. Process handle becomes ready (waitable notification).
+Terminates all threads in the target process. Runs full cleanup. Process handle becomes ready (waitable notification). Self-kill prevented (returns InvalidArgument).
 
-**Implementation:** Walk process thread list, mark Exited, wake any blocked threads with error, run cleanup.
+**Implementation:** Multi-phase cleanup, same pattern as `exit_current_from_syscall`:
+
+1. **Phase 1 (scheduler lock):** Remove target threads from ready/blocked/suspended lists. Mark threads running on other cores as Exited. Drain handle table and categorize resources. If no threads are running on other cores, take the process for immediate address space cleanup. If threads are still running, set `process.killed = true` and `thread_count = running_count` for deferred cleanup.
+2. **Phase 2 (outside lock):** Notify `thread_exit` and `process_exit` for all killed threads. Remove threads from futex wait queues.
+3. **Phase 3 (outside lock):** Close channels, destroy interrupts/timers/thread handles/process handles.
+4. **Phase 4 (outside lock):** Free address space (TLB invalidation + page deallocation + ASID release). Immediate if no running threads; deferred via `maybe_cleanup_killed_process` in `schedule_inner` otherwise.
+
+**Deferred cleanup:** When `schedule_inner` parks an exited thread from a killed process, it decrements `thread_count`. When it reaches zero, the address space is freed inline (rare path, acceptable under scheduler lock since the process is typically small).
 
 **Depends on:** Phase 2a (Process struct).
 
@@ -751,4 +758,4 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 | 20  | process_create            | Implemented |
 | 21  | process_start             | Implemented |
 | 22  | handle_send               | Implemented |
-| 23  | process_kill              | Phase 6     |
+| 23  | process_kill              | Implemented |

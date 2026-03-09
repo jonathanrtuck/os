@@ -41,6 +41,7 @@ mod nr {
     pub const PROCESS_CREATE: u64 = 20;
     pub const PROCESS_START: u64 = 21;
     pub const HANDLE_SEND: u64 = 22;
+    pub const PROCESS_KILL: u64 = 23;
 }
 
 // ---------------------------------------------------------------------------
@@ -210,6 +211,14 @@ pub fn interrupt_register(irq: u32) -> i64 {
 /// last thread exits. Returns the handle index on success, or a negative error.
 pub fn process_create(elf_ptr: *const u8, elf_len: usize) -> i64 {
     unsafe { syscall2(nr::PROCESS_CREATE, elf_ptr as u64, elf_len as u64) as i64 }
+}
+/// Kill a process, terminating all its threads.
+///
+/// The handle must be a Process handle with write rights. All threads in the
+/// target process are terminated and full cleanup runs. The Process handle
+/// becomes ready (waitable notification). Returns 0 on success.
+pub fn process_kill(handle: u8) -> i64 {
+    unsafe { syscall1(nr::PROCESS_KILL, handle as u64) as i64 }
 }
 /// Start a suspended child process.
 ///
