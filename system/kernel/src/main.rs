@@ -59,6 +59,7 @@ mod executable;
 mod futex;
 mod handle;
 mod heap;
+mod interrupt;
 mod interrupt_controller;
 mod memory;
 mod memory_mapped_io;
@@ -228,9 +229,13 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
 
         if id == timer::IRQ_ID {
             timer::handle_irq();
-
-            next = scheduler::schedule(ctx);
+        } else {
+            // Forward to registered userspace driver (if any).
+            interrupt::handle_irq(id);
         }
+
+        // Reschedule after any IRQ — timer tick or woken driver thread.
+        next = scheduler::schedule(ctx);
 
         interrupt_controller::end_of_interrupt(iar);
     }

@@ -6,6 +6,7 @@
 //! rights bitfield (read, write). The kernel validates handles and rights
 //! on every operation.
 
+use super::interrupt::InterruptId;
 use super::scheduling_context::SchedulingContextId;
 use super::timer::TimerId;
 
@@ -28,6 +29,7 @@ pub struct Rights(u32);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HandleObject {
     Channel(ChannelId),
+    Interrupt(InterruptId),
     SchedulingContext(SchedulingContextId),
     Timer(TimerId),
 }

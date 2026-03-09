@@ -5,6 +5,10 @@
 
 #[path = "../../kernel/src/handle.rs"]
 mod handle;
+mod interrupt {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct InterruptId(pub u8);
+}
 #[path = "../../kernel/src/scheduling_context.rs"]
 mod scheduling_context;
 mod timer {
@@ -267,6 +271,24 @@ fn drain_mixed_channel_and_scheduling_context() {
     ));
 }
 
+// --- Interrupt handles ---
+
+fn int(id: u8) -> HandleObject {
+    HandleObject::Interrupt(interrupt::InterruptId(id))
+}
+
+#[test]
+fn insert_and_get_interrupt() {
+    let mut t = HandleTable::new();
+    let h = t.insert(int(7), Rights::READ_WRITE).unwrap();
+    let obj = t.get(h, Rights::WRITE).unwrap();
+
+    assert!(matches!(
+        obj,
+        HandleObject::Interrupt(interrupt::InterruptId(7))
+    ));
+}
+
 // --- Timer handles ---
 
 fn tm(id: u8) -> HandleObject {
@@ -287,12 +309,13 @@ fn drain_mixed_all_handle_types() {
     let mut t = HandleTable::new();
 
     t.insert(ch(1), Rights::READ).unwrap();
-    t.insert(sc(2), Rights::WRITE).unwrap();
-    t.insert(tm(3), Rights::READ).unwrap();
+    t.insert(int(2), Rights::READ_WRITE).unwrap();
+    t.insert(sc(3), Rights::WRITE).unwrap();
+    t.insert(tm(4), Rights::READ).unwrap();
 
     let items: Vec<_> = t.drain().collect();
 
-    assert_eq!(items.len(), 3);
+    assert_eq!(items.len(), 4);
     assert!(matches!(
         items[0],
         (Handle(0), HandleObject::Channel(ChannelId(1)))
@@ -301,12 +324,19 @@ fn drain_mixed_all_handle_types() {
         items[1],
         (
             Handle(1),
-            HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(2))
+            HandleObject::Interrupt(interrupt::InterruptId(2))
         )
     ));
     assert!(matches!(
         items[2],
-        (Handle(2), HandleObject::Timer(timer::TimerId(3)))
+        (
+            Handle(2),
+            HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(3))
+        )
+    ));
+    assert!(matches!(
+        items[3],
+        (Handle(3), HandleObject::Timer(timer::TimerId(4)))
     ));
 }
 

@@ -514,7 +514,7 @@ pub fn exit_current() -> ! {
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let core = per_core::core_id() as usize;
     // Phase 1: collect resources to free (under scheduler lock).
-    let (channels_to_close, timers_to_close, addr_space, thread_id) = {
+    let (channels_to_close, interrupts_to_close, timers_to_close, addr_space, thread_id) = {
         let mut s = STATE.lock();
         // Collect handle objects into an owned Vec so we can release the
         // thread borrow and then access s.scheduling_contexts freely.
@@ -532,10 +532,12 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
         };
         let mut channels = Vec::new();
         let mut timers = Vec::new();
+        let mut interrupts = Vec::new();
 
         for obj in handle_objects {
             match obj {
                 HandleObject::Channel(id) => channels.push(id),
+                HandleObject::Interrupt(id) => interrupts.push(id),
                 HandleObject::SchedulingContext(id) => {
                     release_context_inner(&mut s, id);
                 }
@@ -550,19 +552,23 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             .address_space
             .take();
 
-        (channels, timers, addr_space, tid)
+        (channels, interrupts, timers, addr_space, tid)
     };
 
     // Phase 2: close channel endpoints (acquires channel lock, not scheduler).
     for id in channels_to_close {
         super::channel::close_endpoint(id);
     }
-    // Phase 2a: destroy timer objects (acquires timer lock, not scheduler).
+    // Phase 2a: destroy interrupt registrations (acquires interrupt lock, not scheduler).
+    for id in interrupts_to_close {
+        super::interrupt::destroy(id);
+    }
+    // Phase 2c: destroy timer objects (acquires timer lock, not scheduler).
     for id in timers_to_close {
         super::timer::destroy(id);
     }
 
-    // Phase 2b: remove from futex wait queues (acquires futex lock, not scheduler).
+    // Phase 2d: remove from futex wait queues (acquires futex lock, not scheduler).
     super::futex::remove_thread(thread_id);
 
     // Phase 3: free address space (acquires page_allocator and address_space_id locks).

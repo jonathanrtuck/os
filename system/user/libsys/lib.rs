@@ -31,6 +31,9 @@ mod nr {
     pub const FUTEX_WAKE: u64 = 11;
     pub const WAIT: u64 = 12;
     pub const TIMER_CREATE: u64 = 13;
+    pub const INTERRUPT_REGISTER: u64 = 14;
+    pub const INTERRUPT_ACK: u64 = 15;
+    pub const DEVICE_MAP: u64 = 16;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,6 +109,14 @@ unsafe fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> u64 {
 pub fn channel_signal(handle: u8) -> i64 {
     unsafe { syscall1(nr::CHANNEL_SIGNAL, handle as u64) as i64 }
 }
+/// Map a device's MMIO region into this process's address space.
+///
+/// The kernel maps `size` bytes starting at physical address `pa` with device
+/// memory attributes (non-cacheable). Returns the user VA on success, or a
+/// negative error code. The PA must be in device MMIO space (not RAM).
+pub fn device_map(pa: u64, size: u64) -> i64 {
+    unsafe { syscall2(nr::DEVICE_MAP, pa, size) as i64 }
+}
 /// Terminate the calling process. Does not return.
 pub fn exit() -> ! {
     unsafe {
@@ -135,6 +146,21 @@ pub fn futex_wake(addr: *const u32, count: u32) -> i64 {
 /// Returns 0 on success, or a negative error code.
 pub fn handle_close(handle: u8) -> i64 {
     unsafe { syscall1(nr::HANDLE_CLOSE, handle as u64) as i64 }
+}
+/// Acknowledge an interrupt, allowing the device to fire again.
+///
+/// Clears the pending flag and re-enables the IRQ in the GIC. Must be called
+/// after processing each interrupt. Returns 0 on success.
+pub fn interrupt_ack(handle: u8) -> i64 {
+    unsafe { syscall1(nr::INTERRUPT_ACK, handle as u64) as i64 }
+}
+/// Register for a hardware interrupt. Returns a waitable handle.
+///
+/// The handle becomes ready when the IRQ fires. Use `wait` to block until
+/// the interrupt occurs, then call `interrupt_ack` after processing.
+/// Returns the handle index on success, or a negative error code.
+pub fn interrupt_register(irq: u32) -> i64 {
+    unsafe { syscall1(nr::INTERRUPT_REGISTER, irq as u64) as i64 }
 }
 /// Bind a scheduling context to the calling thread.
 ///

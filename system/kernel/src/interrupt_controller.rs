@@ -16,6 +16,7 @@ const CTLR: usize = 0x0000;
 const PMR: usize = 0x0004;
 const IAR: usize = 0x000C;
 const EOIR: usize = 0x0010;
+const ICENABLER: usize = 0x180;
 const ISENABLER: usize = 0x100;
 const IPRIORITYR: usize = 0x400;
 const SPURIOUS: u32 = 1023;
@@ -47,6 +48,23 @@ pub fn acknowledge() -> Option<u32> {
     } else {
         Some(iar)
     }
+}
+/// Disable (mask) an IRQ at the distributor.
+///
+/// Writes to ICENABLER — clears the enable bit for a single IRQ without
+/// affecting others. Used by interrupt forwarding to prevent re-triggering
+/// until the userspace driver acknowledges.
+pub fn disable_irq(id: u32) {
+    let base = gicd();
+    let reg_offset = (id / 32) as usize * 4;
+    let bit = 1u32 << (id % 32);
+
+    memory_mapped_io::write32(base + ICENABLER + reg_offset, bit);
+
+    // DSB SY + ISB after distributor write: ensure the disable takes effect
+    // before returning. Prevents a race where the IRQ fires again while the
+    // kernel is still in the forwarding path.
+    unsafe { core::arch::asm!("dsb sy", "isb", options(nostack)) };
 }
 pub fn enable_irq(id: u32) {
     let base = gicd();

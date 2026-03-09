@@ -28,6 +28,9 @@
 //! | 11 | futex_wake                | x0=addr, x1=count                 | threads woken    |
 //! | 12 | wait                      | x0=handles_ptr, x1=count, x2=timeout_ns | ready index (may block) |
 //! | 13 | timer_create              | x0=timeout_ns                     | handle           |
+//! | 14 | interrupt_register        | x0=irq_nr                         | handle           |
+//! | 15 | interrupt_ack             | x0=handle                         | 0                |
+//! | 16 | device_map                | x0=phys_addr, x1=size             | user VA          |
 //!
 //! # Error codes
 //!
@@ -48,6 +51,8 @@
 use super::channel;
 use super::futex;
 use super::handle::{Handle, HandleError, HandleObject, Rights};
+use super::interrupt;
+use super::interrupt::InterruptId;
 use super::paging;
 use super::paging::USER_VA_END;
 use super::scheduler;
@@ -72,6 +77,9 @@ pub mod nr {
     pub const FUTEX_WAKE: u64 = 11;
     pub const WAIT: u64 = 12;
     pub const TIMER_CREATE: u64 = 13;
+    pub const INTERRUPT_REGISTER: u64 = 14;
+    pub const INTERRUPT_ACK: u64 = 15;
+    pub const DEVICE_MAP: u64 = 16;
 }
 
 #[repr(i64)]
@@ -140,6 +148,29 @@ fn is_user_range_readable(start: u64, len: u64) -> bool {
     }
 
     true
+}
+fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
+    if size == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    // Validate: PA must be outside RAM (device MMIO space only).
+    let end = pa.checked_add(size).ok_or(Error::InvalidArgument)?;
+
+    if !(end <= paging::RAM_START || pa >= paging::RAM_END) {
+        return Err(Error::InvalidArgument); // Overlaps RAM — not a device
+    }
+
+    scheduler::current_thread_do(|thread| {
+        if let Some(ref mut addr_space) = thread.address_space {
+            addr_space
+                .map_device_mmio(pa, size)
+                .map(|va| va)
+                .ok_or(Error::InvalidArgument)
+        } else {
+            Err(Error::InvalidArgument) // Kernel threads have no address space
+        }
+    })
 }
 fn sys_channel_signal(handle_nr: u64) -> Result<u64, HandleError> {
     if handle_nr > u8::MAX as u64 {
@@ -218,6 +249,44 @@ fn sys_futex_wake(addr: u64, count: u64) -> Result<u64, Error> {
 
     Ok(woken as u64)
 }
+fn sys_interrupt_ack(handle_nr: u64) -> Result<u64, HandleError> {
+    if handle_nr > u8::MAX as u64 {
+        return Err(HandleError::InvalidHandle);
+    }
+
+    let int_id = scheduler::current_thread_do(|thread| {
+        match thread.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+            Ok(HandleObject::Interrupt(id)) => Ok(id),
+            Ok(_) => Err(HandleError::InvalidHandle),
+            Err(e) => Err(e),
+        }
+    })?;
+
+    interrupt::acknowledge(int_id);
+
+    Ok(0)
+}
+fn sys_interrupt_register(irq: u64) -> Result<u64, HandleError> {
+    if irq > u32::MAX as u64 {
+        return Err(HandleError::InvalidHandle);
+    }
+
+    let int_id = interrupt::register(irq as u32).ok_or(HandleError::TableFull)?;
+
+    match scheduler::current_thread_do(|thread| {
+        thread
+            .handles
+            .insert(HandleObject::Interrupt(int_id), Rights::READ_WRITE)
+    }) {
+        Ok(handle) => Ok(handle.0 as u64),
+        Err(e) => {
+            // Handle table full — clean up the interrupt we just registered.
+            interrupt::destroy(int_id);
+
+            Err(e)
+        }
+    }
+}
 fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
     if handle_nr > u8::MAX as u64 {
         return Err(HandleError::InvalidHandle);
@@ -227,6 +296,7 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
 
     // Release kernel resources associated with the closed handle.
     match obj {
+        HandleObject::Interrupt(id) => interrupt::destroy(id),
         HandleObject::SchedulingContext(id) => scheduler::release_scheduling_context(id),
         HandleObject::Timer(id) => timer::destroy(id),
         _ => {}
@@ -356,7 +426,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             let obj = thread.handles.get(Handle(h), Rights::READ)?;
 
             match obj {
-                HandleObject::Channel(_) | HandleObject::Timer(_) => {
+                HandleObject::Channel(_) | HandleObject::Interrupt(_) | HandleObject::Timer(_) => {
                     entries.push(WaitEntry {
                         object: obj,
                         user_index: i as u8,
@@ -376,20 +446,27 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             return ctx as *const Context;
         }
     };
-    // Collect timer IDs for waiter registration and cleanup.
+    // Collect timer and interrupt IDs for waiter registration and cleanup.
     let mut timer_ids: [Option<TimerId>; MAX_WAIT_HANDLES as usize] =
+        [None; MAX_WAIT_HANDLES as usize];
+    let mut interrupt_ids: [Option<InterruptId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
 
     for entry in &wait_entries {
-        if let HandleObject::Timer(id) = entry.object {
-            timer_ids[entry.user_index as usize] = Some(id);
+        match entry.object {
+            HandleObject::Timer(id) => timer_ids[entry.user_index as usize] = Some(id),
+            HandleObject::Interrupt(id) => interrupt_ids[entry.user_index as usize] = Some(id),
+            _ => {}
         }
     }
-    // Register as waiter on each timer BEFORE storing wait set and checking
-    // readiness. If a timer fires in the gap, set_wake_pending_for_handle
-    // can target this thread.
+    // Register as waiter on each timer and interrupt BEFORE storing wait set
+    // and checking readiness. If an event fires in the gap,
+    // set_wake_pending_for_handle can target this thread.
     for &id in timer_ids.iter().flatten() {
         timer::register_waiter(id, caller_id);
+    }
+    for &id in interrupt_ids.iter().flatten() {
+        interrupt::register_waiter(id, caller_id);
     }
 
     // Store wait set BEFORE checking readiness. This ensures that if a signal
@@ -403,15 +480,17 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     for entry in &entries_for_check {
         let ready = match entry.object {
             HandleObject::Channel(ch_id) => channel::check_pending(ch_id, caller_id),
+            HandleObject::Interrupt(int_id) => interrupt::check_pending(int_id),
             HandleObject::Timer(t_id) => timer::check_fired(t_id),
             _ => false,
         };
 
         if ready {
-            // Ready — clear wait state, unregister from timers, return index.
+            // Ready — clear wait state, unregister from timers/interrupts, return index.
             scheduler::clear_wait_state();
 
             unregister_timers(&timer_ids);
+            unregister_interrupts(&interrupt_ids);
 
             c.x[0] = entry.user_index as u64;
 
@@ -424,6 +503,7 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         scheduler::clear_wait_state();
 
         unregister_timers(&timer_ids);
+        unregister_interrupts(&interrupt_ids);
 
         c.x[0] = Error::WouldBlock as i64 as u64;
 
@@ -434,8 +514,9 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     // between store_wait_set and here.
     let result = scheduler::block_current_unless_woken(ctx);
 
-    // Woken — unregister from any timers that didn't fire.
+    // Woken — unregister from any timers/interrupts that didn't fire.
     unregister_timers(&timer_ids);
+    unregister_interrupts(&interrupt_ids);
 
     result
 }
@@ -473,6 +554,14 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
 }
 fn sys_yield(ctx: *mut Context) -> *const Context {
     scheduler::schedule(ctx)
+}
+/// Unregister interrupt waiters after `sys_wait` returns (any path).
+///
+/// Safe to call even if the waiter was already cleared by the fire path.
+fn unregister_interrupts(ids: &[Option<InterruptId>]) {
+    for &id in ids.iter().flatten() {
+        interrupt::unregister_waiter(id);
+    }
 }
 /// Unregister timer waiters after `sys_wait` returns (any path).
 ///
@@ -591,6 +680,30 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
             c.x[0] = match sys_timer_create(c.x[0]) {
                 Ok(n) => n,
                 Err(e) => e.into(),
+            };
+
+            ctx as *const Context
+        }
+        nr::INTERRUPT_REGISTER => {
+            c.x[0] = match sys_interrupt_register(c.x[0]) {
+                Ok(n) => n,
+                Err(e) => e.into(),
+            };
+
+            ctx as *const Context
+        }
+        nr::INTERRUPT_ACK => {
+            c.x[0] = match sys_interrupt_ack(c.x[0]) {
+                Ok(n) => n,
+                Err(e) => e.into(),
+            };
+
+            ctx as *const Context
+        }
+        nr::DEVICE_MAP => {
+            c.x[0] = match sys_device_map(c.x[0], c.x[1]) {
+                Ok(n) => n,
+                Err(e) => e as i64 as u64,
             };
 
             ctx as *const Context

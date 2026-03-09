@@ -417,12 +417,12 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **Handle types (current and planned):**
 
-| Handle type       | Status      | Resource                              |
-| ----------------- | ----------- | ------------------------------------- |
-| Channel           | Implemented | Shared-memory IPC ring buffer         |
-| SchedulingContext | Implemented | Budget/period time allocation         |
-| Timer             | Implemented | One-shot deadline notification        |
-| Device (planned)  | —           | MMIO mapping + interrupt notification |
+| Handle type       | Status      | Resource                           |
+| ----------------- | ----------- | ---------------------------------- |
+| Channel           | Implemented | Shared-memory IPC ring buffer      |
+| Interrupt         | Implemented | IRQ forwarding to userspace driver |
+| SchedulingContext | Implemented | Budget/period time allocation      |
+| Timer             | Implemented | One-shot deadline notification     |
 
 **Guiding rule:** Every new kernel feature should be expressible as "a new handle type that can be waited on."
 
@@ -448,27 +448,36 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 ---
 
-## 8.3 Device Handles & Interrupt Forwarding (planned)
+## 8.3 Device Handles & Interrupt Forwarding
 
 **Goal:** Support userspace drivers. The kernel provides hardware access through handles; drivers run at EL0.
 
-**Planned approach:**
+**Approach:**
 
-- **Device discovery:** Parse DTB (device tree blob) at boot to enumerate devices. DTB is found by scanning RAM (QEMU/macOS doesn't pass DTB PA in x0). **Implemented:** DTB parser discovers 39 devices; GIC base addresses and virtio-mmio devices are now initialized from DTB data instead of hardcoded constants. Fallback to QEMU `virt` defaults if DTB is unavailable.
-- **MMIO mapping:** Syscall to map a device's MMIO region into the calling process's address space. Returns a device handle. The driver reads/writes registers as normal memory operations — zero overhead.
-- **Interrupt forwarding:** Driver registers for a device's interrupt via syscall. The kernel's IRQ handler masks the interrupt and signals the driver's handle. Driver calls `interrupt_ack` when done (unmasks). One context switch per interrupt.
-- **DMA buffers:** Syscall to allocate physically contiguous pages (buddy allocator) and map into driver's address space. Returns the physical address for programming device descriptors.
+- **Device discovery:** Parse DTB (device tree blob) at boot to enumerate devices. **Done** (§8.6). DTB parser discovers ~40 devices; GIC and virtio-mmio addresses initialized from DTB data.
+- **MMIO mapping:** `device_map(pa, size)` syscall (#16) maps a device's MMIO region into the calling process's address space with Device-nGnRE memory attributes (MAIR index 1). Returns the user VA. VA is bump-allocated from a dedicated region (`DEVICE_MMIO_BASE` at 512 MiB, up to `DEVICE_MMIO_END` at 1 GiB). Validates that the PA is outside RAM (device space only). Zero overhead for register access — the driver reads/writes device memory directly.
+- **Interrupt forwarding:** `interrupt_register(irq)` syscall (#14) enables the IRQ in the GIC and returns a waitable handle (`HandleObject::Interrupt`). When the IRQ fires, the kernel's IRQ handler masks it at the GIC distributor, marks the handle pending, and wakes the driver thread. `interrupt_ack(handle)` syscall (#15) clears pending and re-enables the IRQ. One context switch per interrupt.
+- **DMA buffers:** `dma_alloc(order)` — deferred. Needed for virtio migration but not for the core interrupt forwarding mechanism.
 
-**New syscalls (planned):**
+**Edge-triggered semantics:** Interrupt handles differ from timer handles (which are level-triggered/permanent). Each `pending` flag is set on IRQ fire and consumed by `interrupt_ack`. Missing an ack just means pending stays true on the next `wait` check.
 
-| Syscall            | Args                    | Returns    |
-| ------------------ | ----------------------- | ---------- |
-| device_map         | device_id, offset, size | handle     |
-| interrupt_register | device_id, irq_nr       | handle     |
-| interrupt_ack      | handle                  | 0          |
-| dma_alloc          | order                   | handle, PA |
+**IRQ handler flow:** Acknowledge → identify IRQ → if timer: `timer::handle_irq()`, else: `interrupt::handle_irq(id)` → reschedule → EOI. The reschedule runs after every IRQ (not just timer) so woken driver threads get scheduled promptly.
 
-**Depends on:** DTB parser (device discovery, **done**), `wait` (interrupt notification, **done**).
+**Two-phase wake:** Same pattern as timers. Collect (InterruptId, ThreadId) pairs under the interrupt table lock, then wake via `try_wake_for_handle` / `set_wake_pending_for_handle` after releasing it. Lock ordering: interrupt → scheduler.
+
+**Lost-wakeup prevention:** Same as `wait` syscall. `sys_wait` calls `register_waiter` on each interrupt handle BEFORE storing the wait set and checking readiness. If the IRQ fires in the gap, `set_wake_pending_for_handle` catches it.
+
+**New syscalls:**
+
+| Nr  | Syscall            | Args           | Returns |
+| --- | ------------------ | -------------- | ------- |
+| 14  | interrupt_register | x0=irq_nr      | handle  |
+| 15  | interrupt_ack      | x0=handle      | 0       |
+| 16  | device_map         | x0=pa, x1=size | user VA |
+
+**Implementation:** `interrupt.rs` (registration table, 32 slots under `IrqMutex`), `handle.rs` (`Interrupt(InterruptId)` variant), `interrupt_controller.rs` (`disable_irq` via ICENABLER), `address_space.rs` (`map_device_mmio` + `PageAttrs::user_device_rw`), `paging.rs` (`ATTRIDX1`, `DEVICE_MMIO_BASE/END`), `syscall.rs` (3 new syscalls + `wait` integration), `main.rs` (IRQ dispatch). Process exit cleanup via handle drain. libsys wrappers: `interrupt_register`, `interrupt_ack`, `device_map`.
+
+**Depends on:** DTB parser (§8.6, **done**), `wait` (§8.2, **done**), GIC (§0.3, **done**).
 
 ---
 

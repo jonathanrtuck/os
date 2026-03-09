@@ -9,8 +9,8 @@ use super::memory::{self, Pa};
 use super::memory_region::{Backing, Vma, VmaList};
 use super::page_allocator;
 use super::paging::{
-    AF, AP_EL0, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, NG, PAGE_SIZE, PA_MASK, PXN,
-    SH_INNER, UXN,
+    self, AF, AP_EL0, AP_RO, ATTRIDX0, ATTRIDX1, DESC_PAGE, DESC_TABLE, DESC_VALID, NG, PAGE_SIZE,
+    PA_MASK, PXN, SH_INNER, UXN,
 };
 use alloc::vec::Vec;
 
@@ -20,6 +20,8 @@ pub struct AddressSpace {
     generation: u64,
     owned_frames: Vec<Pa>,
     pub(crate) vmas: VmaList,
+    /// Next available VA in the device MMIO region. Bump-allocated.
+    next_device_va: u64,
 }
 pub struct PageAttrs(u64);
 
@@ -77,6 +79,7 @@ impl AddressSpace {
             generation,
             owned_frames: Vec::new(),
             vmas: VmaList::new(),
+            next_device_va: paging::DEVICE_MMIO_BASE,
         }
     }
 
@@ -218,6 +221,34 @@ impl AddressSpace {
 
         true
     }
+    /// Map a device MMIO region into this address space.
+    ///
+    /// Allocates VA from the device MMIO region (bump allocator), maps each
+    /// page with device memory attributes (ATTRIDX1 = Device-nGnRE). Does not
+    /// take ownership of the physical frames — device registers aren't RAM.
+    ///
+    /// Returns the user VA on success, or None if the device VA space is full.
+    pub fn map_device_mmio(&mut self, pa: u64, size: u64) -> Option<u64> {
+        let aligned_size = paging::align_up_u64(size, PAGE_SIZE);
+        let va = self.next_device_va;
+
+        if va + aligned_size > paging::DEVICE_MMIO_END {
+            return None;
+        }
+
+        let attrs = PageAttrs::user_device_rw();
+        let mut offset = 0;
+
+        while offset < aligned_size {
+            self.map_inner(va + offset, pa + offset, &attrs);
+
+            offset += PAGE_SIZE;
+        }
+
+        self.next_device_va = va + aligned_size;
+
+        Some(va)
+    }
     /// Map a page and take ownership of the frame (freed on cleanup).
     pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
         self.map_inner(va, pa, attrs);
@@ -238,6 +269,13 @@ impl AddressSpace {
     }
 }
 impl PageAttrs {
+    /// Device MMIO: Device-nGnRE (ATTRIDX1), RW, not executable.
+    ///
+    /// No SH_INNER — shareability for device memory is determined by MAIR,
+    /// not page table attributes (ARMv8 ARM D5.5).
+    pub fn user_device_rw() -> Self {
+        Self(ATTRIDX1 | AF | AP_EL0 | NG | PXN | UXN)
+    }
     /// User read-only data: readable, not writable, not executable.
     pub fn user_ro() -> Self {
         Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN | UXN)
