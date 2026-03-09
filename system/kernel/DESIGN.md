@@ -767,3 +767,250 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 | 21  | process_start             | Implemented |
 | 22  | handle_send               | Implemented |
 | 23  | process_kill              | Implemented |
+
+---
+
+## 10.0 Hardening & Code Quality
+
+Expert review of the post-roadmap codebase (Phases 1–6 + virtio migration) identified 11 issues: 4 correctness bugs, 4 code quality improvements, and 3 missing infrastructure items. This section documents each issue, the fix plan, and execution order.
+
+**Dependency graph:**
+
+```
+10.1 (handle_send) ─────────────────┐
+10.2 (sched ctx refcount) ──────────┼─→ 10.3 (interrupt-driven virtio)
+10.4 (channel leak) ────────────────┘         │
+                                              ↓
+10.5 (WaitableRegistry) ──→ 10.6 (O(1) lookup) ──→ 10.7 (dispatch macro)
+                                                          │
+10.8 (metrics) ─────────────────────────────────────┐     │
+10.9 (watchdog budgets) ────────────────────────────┼─→ done
+10.10 (kernel stack guards) ────────────────────────┘
+```
+
+**Execution order:** 10.1 → 10.2 → 10.4 → 10.3 → 10.5 → 10.6 → 10.7 → 10.8 → 10.9 → 10.10. First four are correctness fixes (do first). Next three are code quality (reduce surface area before adding new code). Last three are infrastructure.
+
+---
+
+### 10.1 Fix handle_send: Move Semantics
+
+**Bug:** `sys_handle_send` copies the source handle into the target process but does not remove it from the caller. For channel handles, this duplicates an endpoint — two processes hold handles to the same endpoint. Channel's `closed_count` expects exactly two endpoint closes (one per endpoint). A duplicated endpoint leads to three closes: the second triggers page free, the third accesses freed memory.
+
+**Current code (`syscall.rs:451–503`):** Phase 1 reads source via `get_entry` (non-destructive). Phase 2 inserts a copy into target. Source handle survives.
+
+**Fix:** Change `handle_send` to **move** the handle. Phase 1: `close` the source handle (removes from table, returns object + rights). Phase 2: insert into target. If Phase 2 fails, re-insert into source (rollback). This matches the intended use case: parent creates a channel (gets both endpoints), sends one to child, keeps the other.
+
+**Scope:** `syscall.rs` (sys_handle_send). ~15 lines changed. No new modules.
+
+**Depends on:** Nothing.
+
+---
+
+### 10.2 Fix Scheduling Context Ref Counting
+
+**Bug:** `bind_scheduling_context` stores `context_id` on the thread but does not increment the context's `ref_count`. If all handles to the context are closed, `release_context_inner` decrements ref_count to 0 and frees the slot. The thread's `context_id` now points to a freed slot. `has_budget` treats `None` slots as unlimited budget — the thread silently escapes its allocation.
+
+**Current code:** `scheduler.rs:488–506` (bind), `scheduler.rs:233–244` (release). ref_count tracks handle references only, not bind references.
+
+**Fix:** Increment `ref_count` on bind. Decrement on:
+
+- Thread exit (`exit_current_from_syscall`, after auto-returning borrowed context).
+- Process kill (`kill_process`, when draining threads that have bound contexts).
+
+Add `scheduling.context_id` cleanup to both exit paths: read the bound context_id (and saved_context_id if borrowing), call `release_context_inner` for each.
+
+**Scope:** `scheduler.rs` (bind, exit, kill paths). ~20 lines changed. No new modules.
+
+**Depends on:** Nothing.
+
+---
+
+### 10.3 Interrupt-Driven Virtio Drivers
+
+**Bug:** `libvirtio::Virtqueue::wait_used()` busy-waits in a `spin_loop()`. Drivers read the IRQ number from shared memory and ignore it. A spinning driver burns an entire core. This contradicts the kernel's event-driven design (handles, `wait`, interrupt forwarding — all the machinery exists and is unused).
+
+**Current code:** `libvirtio/lib.rs:340–348` (wait_used), `virtio-blk/main.rs` (ignores `_irq`), `virtio-console/main.rs` (same).
+
+**Fix:** Replace the polling loop with interrupt-driven completion:
+
+1. Driver calls `sys::interrupt_register(irq)` → gets interrupt handle.
+2. Submit request to virtqueue.
+3. `sys::wait(&[irq_handle], 1, u64::MAX)` → blocks until device signals completion.
+4. `vq.pop_used()` → process completed request.
+5. `sys::interrupt_ack(irq_handle)` → re-enable the IRQ for the next request.
+
+Remove `wait_used` from libvirtio (or mark it `#[cfg(test)]` only). Add `wait_for_used(&mut self, irq_handle: u8)` that does the wait+pop+ack cycle using libsys.
+
+**Scope:** `libvirtio/lib.rs` (~20 lines), `virtio-blk/main.rs` (~15 lines), `virtio-console/main.rs` (~10 lines). Interrupt handle must be transferred to driver via `handle_send` (requires 10.1 fix for correct move semantics, or sent as the first handle before start — which already works since `handle_send` operates on suspended processes).
+
+**Depends on:** 10.1 (handle_send move semantics for transferring interrupt handle). Can work around by having the kernel pre-insert the interrupt handle into the driver's handle table during `spawn_virtio_driver`, before starting the process — but that's a hack. Proper fix is 10.1 first.
+
+---
+
+### 10.4 Fix Channel Leak in spawn_virtio_driver
+
+**Bug:** `spawn_virtio_driver` creates a channel (`ch_a`, `_ch_b`) and gives only `ch_a` to the driver. `_ch_b` is never inserted into any handle table and never closed. The channel's `closed_count` never reaches 2. The shared page is never freed. One page leaked per virtio device.
+
+**Current code:** `main.rs:309` — `let (ch_a, _ch_b) = channel::create()`.
+
+**Fix:** Two options:
+
+- **(A) Close ch_b immediately.** The kernel doesn't need the peer endpoint for virtio drivers (it writes device info to the shared page before driver start, then never communicates). `channel::close_endpoint(ch_b)` after setup. Shared page freed when driver closes ch_a on exit. Simple, correct.
+- **(B) Give ch_b to the kernel "init" or OS service process.** More future-proof (OS service could signal the driver). But no kernel process exists to hold it yet.
+
+**Decision:** Option A for now. When the OS service process exists, virtio driver management moves to userspace entirely (kernel just probes and spawns, OS service does the rest).
+
+**Scope:** `main.rs` (spawn_virtio_driver). 1 line added.
+
+**Depends on:** Nothing.
+
+---
+
+### 10.5 Extract WaitableRegistry Generic
+
+**Problem:** Five modules implement the same waiter pattern — `thread_exit.rs`, `process_exit.rs`, `timer.rs`, `interrupt.rs`, `channel.rs`. Each has: `create`, `destroy`, `register_waiter`, `unregister_waiter`, `check_ready`, `notify` (two-phase wake). ~100 lines each, nearly identical. ~300 lines of pure duplication across the codebase.
+
+**Fix:** Create `waitable.rs` with a generic `WaitableRegistry<Id>`:
+
+```rust
+pub struct WaitableRegistry<Id: Copy + Eq> {
+    entries: Vec<Entry<Id>>,  // or indexed by Id
+}
+
+struct Entry<Id> {
+    id: Id,
+    ready: bool,
+    waiter: Option<ThreadId>,
+}
+
+impl<Id: Copy + Eq> WaitableRegistry<Id> {
+    pub fn create(&mut self, id: Id);
+    pub fn destroy(&mut self, id: Id);
+    pub fn register_waiter(&mut self, id: Id, waiter: ThreadId);
+    pub fn unregister_waiter(&mut self, id: Id);
+    pub fn check_ready(&mut self, id: Id) -> bool;
+    pub fn notify(&mut self, id: Id) -> Option<(ThreadId, Id)>;
+    // Returns waiter + id for two-phase wake (caller does scheduler wake).
+}
+```
+
+Channel is slightly different (two endpoints, signal vs exit), so it may keep its own implementation or use two `WaitableRegistry` instances. Timer has fire-once semantics (check_ready doesn't consume). Thread/process exit have level-triggered semantics (ready forever after exit). The generic handles all three: a `consume_on_check: bool` flag, or the check is non-consuming and callers decide.
+
+**Scope:** New `waitable.rs` module (~80 lines). Refactor `thread_exit.rs`, `process_exit.rs`, `timer.rs`, `interrupt.rs` to use it. Each shrinks from ~100 lines to ~20 lines (static STATE + typed wrappers). Net: ~300 lines removed, ~80 added.
+
+**Depends on:** Nothing, but doing 10.6 immediately after makes sense (the registry's internal data structure benefits from O(1) lookup).
+
+---
+
+### 10.6 O(1) Notification Lookup
+
+**Problem:** All notification modules use `Vec` + linear search by ID. `check_exited` is O(n), `register_waiter` is O(n), `notify_exit` is O(n). `sys_wait` checks every handle against every module — O(handles × entities). With 100 tracked entities, this is measurably slow under the scheduler lock.
+
+**Current code:** `thread_exit.rs:33–39` — `.iter().find(|n| n.thread_id == id)`. Same pattern in all five modules.
+
+**Fix:** Use the ID as a direct index. All IDs (ThreadId, ProcessId, TimerId, InterruptId, ChannelId) are already sequential integers. Replace `Vec<Entry>` with `Vec<Option<Entry>>` indexed by `id.0`. Lookup becomes `entries[id.0 as usize]` — O(1). Freed slots are `None`.
+
+If 10.5 is done first, this is a single change inside `WaitableRegistry`. If not, it's the same change in five places.
+
+**Scope:** If 10.5 done: ~10 lines in `waitable.rs`. If not: ~10 lines × 5 modules.
+
+**Depends on:** 10.5 (preferred, not required).
+
+---
+
+### 10.7 Syscall Dispatch Macro
+
+**Problem:** `syscall.rs:1030–1205` has 24 match arms, ~20 of which are identical boilerplate:
+
+```rust
+nr::FOO => {
+    c.x[0] = match sys_foo(c.x[0], c.x[1]) {
+        Ok(n) => n,
+        Err(e) => e as i64 as u64,
+    };
+    ctx as *const Context
+}
+```
+
+**Fix:** A `dispatch_syscall!` macro:
+
+```rust
+macro_rules! dispatch_syscall {
+    ($c:ident, $ctx:ident, $handler:expr) => {{
+        $c.x[0] = match $handler {
+            Ok(n) => n,
+            Err(e) => e as i64 as u64,
+        };
+        $ctx as *const Context
+    }};
+}
+```
+
+The four special cases that manipulate `ctx` directly (exit, yield, futex_wait, wait) remain hand-written.
+
+**Scope:** `syscall.rs`. ~80 lines reduced to ~30. No behavioral change.
+
+**Depends on:** Nothing. Low-risk cleanup.
+
+---
+
+### 10.8 Kernel Metrics
+
+**Problem:** Zero instrumentation. No context switch count, page fault count, syscall count, or lock contention measurement. When debugging gets hard (and it will — SMP timing issues are non-reproducible), there's no data.
+
+**Fix:** Per-core atomic counters for key events:
+
+```rust
+pub struct CoreMetrics {
+    pub context_switches: AtomicU64,
+    pub syscalls: AtomicU64,
+    pub page_faults: AtomicU64,
+    pub timer_ticks: AtomicU64,
+    pub lock_spins: AtomicU64,   // contention indicator
+}
+```
+
+Increment at the natural points: `schedule_inner` (context_switches), `dispatch` (syscalls), `user_fault_handler` (page_faults), `irq_handler` for timer (timer_ticks), `IrqMutex::lock` spin loop (lock_spins). Print summary on panic (already have `panic_puts`). Optionally expose via a syscall or debug channel.
+
+**Scope:** New `metrics.rs` (~40 lines). One-line increments at 5 call sites. Panic handler prints totals (~10 lines).
+
+**Depends on:** Nothing. Can be done at any time.
+
+---
+
+### 10.9 Watchdog via Scheduling Context Budgets
+
+**Problem:** If a userspace driver enters a spin loop (e.g., `wait_used` before 10.3 is done, or a bug), that core is permanently burned. No scheduling context means unlimited budget — the thread runs forever until the next timer tick yields, but it immediately wins the next selection too (EEVDF gives it low vruntime from not running during the brief yield).
+
+**Fix:** Two parts:
+
+1. **Require scheduling contexts for all user threads.** `spawn_user` and `spawn_user_suspended` should bind a default context if none is provided. The OS service (future) sets explicit budgets; kernel-spawned processes get a generous default (e.g., 10ms/50ms — 20% of one core).
+
+2. **Budget exhaustion → yield.** Currently, `has_budget` returns false for exhausted threads, and `select_best` skips them. This works — the thread isn't selected until replenishment. But the currently-running thread isn't preempted mid-slice when its budget runs out. Add a check in `schedule_inner`: if the current thread's context is exhausted, force preemption (don't re-run it even if no other thread is ready — run idle instead).
+
+**Scope:** `scheduler.rs` (spawn paths, schedule_inner). `main.rs` (spawn_virtio_driver creates a scheduling context for each driver). ~30 lines.
+
+**Depends on:** 10.2 (ref counting fix — budget contexts must survive handle close while bound).
+
+---
+
+### 10.10 Kernel Stack Guard Pages
+
+**Problem:** Kernel thread stacks are heap-allocated (`Box<[u8; KERNEL_STACK_SIZE]>` inside Thread). No guard page below the stack. A deep call chain in scheduler or IPC code silently corrupts the heap. User stacks have a guard page (gap below USER_STACK_VA), but kernel stacks don't.
+
+**Fix:** Allocate kernel stacks from the page allocator (not the heap) with one extra page at the bottom mapped as non-accessible (no read, no write, no execute). Stack overflow → data abort at EL1 → kernel panic with a clear message ("kernel stack overflow on core N").
+
+Implementation:
+
+1. Allocate stack as `alloc_frames(order)` for N+1 pages.
+2. Map the bottom page with no permissions (or simply don't map it — unmapped VA faults).
+3. Thread's stack pointer starts at the top of the N usable pages.
+4. On drop, free all N+1 pages.
+
+For kernel stacks allocated from the buddy allocator (physically contiguous), the guard page is the lowest frame. Mark it non-present in the kernel page tables (L3 entry = 0 or invalid).
+
+**Scope:** `thread.rs` (stack allocation), `memory.rs` or `paging.rs` (guard page mapping). ~40 lines. Exception handler (`user_fault_handler` currently only handles EL0 faults — add an EL1 fault path that prints diagnostic and panics).
+
+**Note:** This also requires handling EL1 synchronous exceptions. Currently, EL1 faults from `el1h_sync` in exception.S just branch to a generic handler. The handler should check if FAR is in a kernel stack guard region and produce a clear error message.
+
+**Depends on:** Nothing, but benefits from 10.8 (metrics) for debugging.
