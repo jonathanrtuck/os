@@ -784,7 +784,7 @@ Expert review of the post-roadmap codebase (Phases 1–6 + virtio migration) ide
 10.5 (WaitableRegistry) ──→ 10.6 (O(1) lookup) ──→ 10.7 (dispatch macro)
                                                           │
 10.8 (metrics) ─────────────────────────────────────┐     │
-10.9 (watchdog budgets) ────────────────────────────┼─→ done
+10.9 (watchdog budgets) ────────────────────────────┼─→ all done
 10.10 (kernel stack guards) ────────────────────────┘
 ```
 
@@ -939,23 +939,24 @@ Panic handler calls `metrics::panic_dump()` which prints per-core summaries usin
 
 ---
 
-### 10.10 Kernel Stack Guard Pages
+### 10.10 Kernel Stack Guard Pages — DONE
 
-**Problem:** Kernel thread stacks are heap-allocated (`Box<[u8; KERNEL_STACK_SIZE]>` inside Thread). No guard page below the stack. A deep call chain in scheduler or IPC code silently corrupts the heap. User stacks have a guard page (gap below USER_STACK_VA), but kernel stacks don't.
+**Problem:** Kernel thread stacks are heap-allocated (`alloc_zeroed` inside Thread). No guard page below the stack. A deep call chain in scheduler or IPC code silently corrupts the heap. User stacks have a guard page (gap below USER_STACK_VA), but kernel stacks don't.
 
-**Fix:** Allocate kernel stacks from the page allocator (not the heap) with one extra page at the bottom mapped as non-accessible (no read, no write, no execute). Stack overflow → data abort at EL1 → kernel panic with a clear message ("kernel stack overflow on core N").
+**Fix:** Allocate kernel stacks from the buddy allocator with a guard page at the bottom.
 
 Implementation:
 
-1. Allocate stack as `alloc_frames(order)` for N+1 pages.
-2. Map the bottom page with no permissions (or simply don't map it — unmapped VA faults).
-3. Thread's stack pointer starts at the top of the N usable pages.
-4. On drop, free all N+1 pages.
+1. `alloc_guarded_stack()` in `thread.rs` computes the order needed for `(stack_pages + 1)` pages, allocates from the buddy allocator, and calls `memory::set_kernel_guard_page()` on the bottom page.
+2. `set_kernel_guard_page()` in `memory.rs` handles the TTBR1 page table: if the containing 2MB block is still a coarse L2 block descriptor, it "breaks" it into an L3 page table (allocates a frame, populates 512 entries replicating the block, replaces the L2 entry with a table descriptor). Then clears the guard page's L3 entry to 0 (invalid). Protected by `KERNEL_PT_LOCK`.
+3. Thread's `stack_alloc_pa` and `stack_alloc_order` replace the old `stack_bottom`/`stack_size` fields.
+4. On drop, `clear_kernel_guard_page()` restores the L3 entry (reading attributes from a neighbor entry), then `free_frames()` returns all pages to the buddy allocator.
+5. EL1 faults (`exc_sync` in exception.S) now switch to per-core emergency stacks (4 KiB × 4 cores in `.bss`) before calling `kernel_fault_handler()` in Rust. EC=0x25 (data abort at EL1) identifies likely stack overflow.
+6. `boot_tt1_l2_1` symbol promoted to `.global` in boot.S (required for cross-CGU references).
 
-For kernel stacks allocated from the buddy allocator (physically contiguous), the guard page is the lowest frame. Mark it non-present in the kernel page tables (L3 entry = 0 or invalid).
+**Stack sizes after change:**
+- User kernel stacks: order 3 (8 pages), 1 guard + 7 usable = 28 KiB (was 16 KiB).
+- Kernel thread stacks: order 5 (32 pages), 1 guard + 31 usable = 124 KiB (was 64 KiB).
+- Boot/idle threads: unchanged (no allocation, use static boot stacks).
 
-**Scope:** `thread.rs` (stack allocation), `memory.rs` or `paging.rs` (guard page mapping). ~40 lines. Exception handler (`user_fault_handler` currently only handles EL0 faults — add an EL1 fault path that prints diagnostic and panics).
-
-**Note:** This also requires handling EL1 synchronous exceptions. Currently, EL1 faults from `el1h_sync` in exception.S just branch to a generic handler. The handler should check if FAR is in a kernel stack guard region and produce a clear error message.
-
-**Depends on:** Nothing, but benefits from 10.8 (metrics) for debugging.
+**Files modified:** `thread.rs`, `memory.rs`, `exception.S`, `main.rs`, `boot.S`.

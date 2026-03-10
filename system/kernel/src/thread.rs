@@ -2,19 +2,13 @@
 
 use super::context::Context;
 use super::handle::HandleObject;
+use super::memory::{self, Pa};
+use super::paging::PAGE_SIZE;
 use super::process::ProcessId;
 use super::scheduling_algorithm::SchedulingState;
 use super::scheduling_context::SchedulingContextId;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::alloc::Layout;
-
-/// An entry in a thread's wait set — one handle being waited on.
-#[derive(Clone, Copy)]
-pub(crate) struct WaitEntry {
-    pub(crate) object: HandleObject,
-    pub(crate) user_index: u8,
-}
 
 pub const STACK_SIZE: usize = 64 * 1024;
 pub const KERNEL_STACK_SIZE: usize = 16 * 1024;
@@ -31,18 +25,6 @@ pub(crate) struct Scheduling {
     /// Hardware counter timestamp when this thread last started running.
     pub(crate) last_started: u64,
 }
-
-impl Scheduling {
-    pub(crate) const fn new() -> Self {
-        Self {
-            eevdf: SchedulingState::new(),
-            context_id: None,
-            saved_context_id: None,
-            last_started: 0,
-        }
-    }
-}
-
 /// A kernel thread.
 ///
 /// `context` MUST be the first field — `TPIDR_EL1` points at the start of
@@ -53,8 +35,10 @@ pub struct Thread {
     id: ThreadId,
     state: ThreadState,
     trust_level: TrustLevel,
-    stack_bottom: *mut u8,
-    stack_size: usize,
+    /// PA of the buddy-allocated stack (including guard page). Zero = no stack.
+    stack_alloc_pa: u64,
+    /// Buddy allocator order for deallocation.
+    stack_alloc_order: usize,
     pub(crate) process_id: Option<ProcessId>,
     /// Cached TTBR0 value for context switch. Set from the process's address
     /// space at thread creation. Zero for kernel threads (scheduler uses
@@ -73,6 +57,12 @@ pub struct Thread {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
+/// An entry in a thread's wait set — one handle being waited on.
+#[derive(Clone, Copy)]
+pub(crate) struct WaitEntry {
+    pub(crate) object: HandleObject,
+    pub(crate) user_index: u8,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
@@ -97,6 +87,17 @@ const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
 impl super::waitable::WaitableId for ThreadId {
     fn index(self) -> usize {
         self.0 as usize
+    }
+}
+
+impl Scheduling {
+    pub(crate) const fn new() -> Self {
+        Self {
+            eevdf: SchedulingState::new(),
+            context_id: None,
+            saved_context_id: None,
+            last_started: 0,
+        }
     }
 }
 
@@ -143,15 +144,17 @@ impl Thread {
 }
 impl Drop for Thread {
     fn drop(&mut self) {
-        if self.stack_size > 0 && !self.stack_bottom.is_null() {
-            // SAFETY: Layout matches what was passed to alloc_zeroed during
-            // construction. stack_bottom was returned by that allocation.
-            unsafe {
-                alloc::alloc::dealloc(
-                    self.stack_bottom,
-                    Layout::from_size_align_unchecked(self.stack_size, 16),
-                );
-            }
+        if self.stack_alloc_pa != 0 {
+            // Remap the guard page before freeing — free_frames writes a
+            // FreeBlock header at the block's start (the guard page VA).
+            let guard_va = memory::phys_to_virt(Pa(self.stack_alloc_pa as usize));
+
+            memory::clear_kernel_guard_page(guard_va);
+
+            super::page_allocator::free_frames(
+                Pa(self.stack_alloc_pa as usize),
+                self.stack_alloc_order,
+            );
         }
     }
 }
@@ -203,14 +206,7 @@ impl Thread {
 impl Thread {
     /// Kernel thread — runs at EL1, no address space.
     pub fn new(id: u64, entry: fn() -> !) -> Box<Self> {
-        let stack_layout = Layout::from_size_align(STACK_SIZE, 16).unwrap();
-        // SAFETY: Layout is valid (non-zero size, power-of-two alignment).
-        let stack_bottom = unsafe { alloc::alloc::alloc_zeroed(stack_layout) };
-
-        assert!(!stack_bottom.is_null());
-
-        // SAFETY: stack_bottom is non-null, points to STACK_SIZE allocated bytes.
-        let stack_top = unsafe { stack_bottom.add(STACK_SIZE) } as u64;
+        let (stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(STACK_SIZE);
         // SAFETY: Context is #[repr(C)] with integer/float fields; zero is valid.
         let mut ctx: Context = unsafe { core::mem::zeroed() };
 
@@ -224,8 +220,8 @@ impl Thread {
             id: ThreadId(id),
             state: ThreadState::Ready,
             trust_level: TrustLevel::Kernel,
-            stack_bottom,
-            stack_size: STACK_SIZE,
+            stack_alloc_pa: alloc_pa,
+            stack_alloc_order: alloc_order,
             process_id: None,
             ttbr0: 0,
             scheduling: Scheduling::new(),
@@ -249,8 +245,8 @@ impl Thread {
             id: ThreadId(0),
             state: ThreadState::Running,
             trust_level: TrustLevel::Kernel,
-            stack_bottom: core::ptr::null_mut(),
-            stack_size: 0,
+            stack_alloc_pa: 0,
+            stack_alloc_order: 0,
             process_id: None,
             ttbr0: 0,
             scheduling: Scheduling::new(),
@@ -274,8 +270,8 @@ impl Thread {
             id: ThreadId(core_id | 0xFF00), // Distinguished idle thread IDs.
             state: ThreadState::Ready,
             trust_level: TrustLevel::Kernel,
-            stack_bottom: core::ptr::null_mut(),
-            stack_size: 0,
+            stack_alloc_pa: 0,
+            stack_alloc_order: 0,
             process_id: None,
             ttbr0: 0,
             scheduling: Scheduling::new(),
@@ -292,14 +288,7 @@ impl Thread {
         entry_va: u64,
         user_stack_top: u64,
     ) -> Box<Self> {
-        let stack_layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16).unwrap();
-        // SAFETY: Layout is valid (non-zero size, power-of-two alignment).
-        let stack_bottom = unsafe { alloc::alloc::alloc_zeroed(stack_layout) };
-
-        assert!(!stack_bottom.is_null());
-
-        // SAFETY: stack_bottom is non-null, points to KERNEL_STACK_SIZE allocated bytes.
-        let kernel_stack_top = unsafe { stack_bottom.add(KERNEL_STACK_SIZE) } as u64;
+        let (kernel_stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(KERNEL_STACK_SIZE);
         // SAFETY: Context is #[repr(C)] with integer/float fields; zero is valid.
         let mut ctx: Context = unsafe { core::mem::zeroed() };
 
@@ -313,8 +302,8 @@ impl Thread {
             id: ThreadId(id),
             state: ThreadState::Ready,
             trust_level: TrustLevel::Untrusted,
-            stack_bottom,
-            stack_size: KERNEL_STACK_SIZE,
+            stack_alloc_pa: alloc_pa,
+            stack_alloc_order: alloc_order,
             process_id: Some(process_id),
             ttbr0,
             scheduling: Scheduling::new(),
@@ -325,6 +314,37 @@ impl Thread {
     }
 }
 
+/// Allocate a stack from the page allocator with a guard page at the bottom.
+///
+/// The guard page is the lowest page of the allocation. It is unmapped from
+/// the kernel's TTBR1 page tables so any access faults immediately.
+///
+/// Returns `(stack_top_va, allocation_pa, allocation_order)`.
+fn alloc_guarded_stack(min_stack_bytes: usize) -> (u64, u64, usize) {
+    let stack_pages = (min_stack_bytes + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
+    let total_pages = stack_pages + 1; // +1 for guard page
+    let order = order_for_pages(total_pages);
+    let pa =
+        super::page_allocator::alloc_frames(order).expect("alloc_guarded_stack: out of memory");
+    let base_va = memory::phys_to_virt(pa);
+    let alloc_pages = 1usize << order;
+    let stack_top = (base_va + alloc_pages * PAGE_SIZE as usize) as u64;
+
+    // Guard page = bottom page of allocation (lowest VA).
+    memory::set_kernel_guard_page(base_va);
+
+    (stack_top, pa.as_u64(), order)
+}
+/// Smallest buddy allocator order that provides at least `pages` contiguous pages.
+fn order_for_pages(pages: usize) -> usize {
+    let mut order = 0;
+
+    while (1usize << order) < pages {
+        order += 1;
+    }
+
+    order
+}
 fn thread_exit() -> ! {
     super::scheduler::exit_current();
 }

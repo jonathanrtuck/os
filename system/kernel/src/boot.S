@@ -42,6 +42,7 @@
 .global boot_tt0_l1
 .global boot_tt0_l2_0
 .global boot_tt0_l2_1
+.global boot_tt1_l2_1
 boot_tt0_l0:    .space 4096    // TTBR0 L0
 boot_tt0_l1:    .space 4096    // TTBR0 L1
 boot_tt0_l2_0:  .space 4096    // TTBR0 L2 for 0..1GB (devices)

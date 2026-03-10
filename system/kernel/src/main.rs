@@ -63,8 +63,8 @@ mod interrupt;
 mod interrupt_controller;
 mod memory;
 mod memory_mapped_io;
-mod metrics;
 mod memory_region;
+mod metrics;
 mod page_allocator;
 mod paging;
 mod per_core;
@@ -423,6 +423,42 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
 
     next
 }
+/// Handle fatal exceptions from EL1 (kernel faults).
+///
+/// Called from exception.S on a per-core emergency stack (the original SP
+/// may be corrupted, e.g. by a kernel stack overflow hitting a guard page).
+/// Diagnoses the fault, prints diagnostic info, and panics.
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_fault_handler(esr: u64, elr: u64, far: u64, exc_type: u64) -> ! {
+    let ec = (esr >> 26) & 0x3F;
+    let type_name = match exc_type {
+        0 => "sync",
+        1 => "FIQ",
+        _ => "SError",
+    };
+
+    serial::panic_puts("\n💥 kernel ");
+    serial::panic_puts(type_name);
+    serial::panic_puts(": EC=0x");
+    serial::panic_put_hex(ec);
+    serial::panic_puts(" ESR=0x");
+    serial::panic_put_hex(esr);
+    serial::panic_puts(" ELR=0x");
+    serial::panic_put_hex(elr);
+    serial::panic_puts(" FAR=0x");
+    serial::panic_put_hex(far);
+
+    if ec == 0x25 {
+        // Data Abort from current EL — most likely a guard page hit.
+        serial::panic_puts("\ndata abort at EL1 — likely kernel stack overflow");
+    } else if ec == 0x21 {
+        serial::panic_puts("\ninstruction abort at EL1");
+    }
+
+    serial::panic_puts("\n");
+
+    panic!("unrecoverable kernel fault");
+}
 #[unsafe(no_mangle)]
 pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     serial::puts("🥾 booting…\n");
@@ -567,6 +603,7 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     // These are the only exception classes that can be resolved by demand paging.
     if ec == 0x24 || ec == 0x20 {
         metrics::inc_page_faults();
+
         let handled =
             scheduler::current_process_do(|process| process.address_space.handle_fault(far));
 

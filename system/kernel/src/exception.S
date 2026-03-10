@@ -152,70 +152,37 @@ vectors:
   .space 0x80 - 4
 
 // --------------------------------------------------------------------------
-// Fatal exception handler
+// Fatal exception handler (EL1 faults)
+//
+// Switches to a per-core emergency stack before calling Rust. The original
+// SP may be corrupted (e.g. kernel stack overflow hit the guard page).
 // --------------------------------------------------------------------------
 
 exc_sync:
-  mov w20, #83          // 'S'
+  mov w3, #0              // type = sync
   b exc_fatal
 exc_fiq:
-  mov w20, #70          // 'F'
+  mov w3, #1              // type = FIQ
   b exc_fatal
 exc_serr:
-  mov w20, #65          // 'A'
+  mov w3, #2              // type = SError
 
 exc_fatal:
-  ldr x2, =UART0_BASE_VA
+  // Switch to per-core emergency stack (4 KiB each, in .bss).
+  mrs x4, mpidr_el1
+  and x4, x4, #0xFF      // core_id
+  add x4, x4, #1         // (core_id + 1) → stack top
+  lsl x4, x4, #12        // × 4096
+  ldr x5, =__exc_stacks
+  add sp, x5, x4
 
-  mov w0, w20
-  bl uart_putc
-  mov w0, #32
-  bl uart_putc
-
-  mrs x5, CurrentEL
-  lsr x5, x5, #2
-  and x5, x5, #3
-  cmp x5, #2
-  b.ne 7f
-  mrs x4, esr_el2
-  mrs x6, elr_el2
-  mrs x7, far_el2
-  b 8f
-7:
-  mrs x4, esr_el1
-  mrs x6, elr_el1
-  mrs x7, far_el1
-8:
-  mov w0, #69           // 'E'
-  bl uart_putc
-  mov w0, #58           // ':'
-  bl uart_putc
-  mov w0, w4
-  bl uart_puthex32
-
-  mov w0, #32
-  bl uart_putc
-  mov w0, #76           // 'L'
-  bl uart_putc
-  mov w0, #58
-  bl uart_putc
-  mov x0, x6
-  bl uart_puthex64
-
-  mov w0, #32
-  bl uart_putc
-  mov w0, #70           // 'F'
-  bl uart_putc
-  mov w0, #58
-  bl uart_putc
-  mov x0, x7
-  bl uart_puthex64
-
-  mov w0, #13
-  bl uart_putc
-  mov w0, #10
-  bl uart_putc
-  b .
+  // Call Rust: kernel_fault_handler(esr, elr, far, type) -> !
+  mrs x0, esr_el1
+  mrs x1, elr_el1
+  mrs x2, far_el1
+  // x3 already set (exception type)
+  bl kernel_fault_handler
+  b .                     // Unreachable (handler panics)
 
 // --------------------------------------------------------------------------
 // Context save/restore macros
@@ -387,3 +354,18 @@ exc_user_fault:
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret
+
+// Force literal pool emission before switching sections.
+.ltorg
+
+// --------------------------------------------------------------------------
+// Per-core emergency exception stacks (4 KiB × 4 cores).
+//
+// Used by exc_fatal so the EL1 fault handler works even when the original
+// SP points into a guard page (kernel stack overflow).
+// --------------------------------------------------------------------------
+.section .bss
+.align 12
+.global __exc_stacks
+__exc_stacks:
+  .space 4096 * 4
