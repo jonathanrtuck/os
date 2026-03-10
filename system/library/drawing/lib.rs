@@ -21,6 +21,30 @@
 
 #![no_std]
 
+include!("font_data.rs");
+
+/// Built-in 8×16 VGA-style bitmap font covering printable ASCII (0x20–0x7E).
+pub const FONT_8X16: BitmapFont = BitmapFont {
+    glyph_width: 8,
+    glyph_height: 16,
+    data: &FONT_8X16_DATA,
+    first: 0x20,
+    last: 0x7E,
+};
+
+/// An embedded monospace bitmap font (1 bit per pixel).
+///
+/// Each glyph is `glyph_height` bytes — one byte per scanline row, MSB is the
+/// leftmost pixel. Covers a contiguous range of ASCII codepoints.
+pub struct BitmapFont {
+    /// Glyph cell width in pixels.
+    pub glyph_width: u32,
+    /// Glyph cell height in pixels.
+    pub glyph_height: u32,
+    data: &'static [u8],
+    first: u8,
+    last: u8,
+}
 /// A color in canonical RGBA order. Converted to the target pixel format
 /// at the point of writing — callers always work in RGBA regardless of the
 /// underlying buffer format.
@@ -53,10 +77,43 @@ pub enum PixelFormat {
     Bgra8888,
 }
 
+impl BitmapFont {
+    /// Return the bitmap rows for a character, or `None` if outside the font.
+    ///
+    /// The returned slice is `glyph_height` bytes. Each byte is one scanline
+    /// row (MSB = leftmost pixel).
+    pub fn glyph(&self, ch: char) -> Option<&[u8]> {
+        let c = ch as u32;
+
+        if c < self.first as u32 || c > self.last as u32 {
+            return None;
+        }
+
+        let idx = (c - self.first as u32) as usize;
+        let bpg = self.glyph_height as usize;
+        let start = idx * bpg;
+        let end = start + bpg;
+
+        if end <= self.data.len() {
+            Some(&self.data[start..end])
+        } else {
+            None
+        }
+    }
+}
 impl Color {
     pub const WHITE: Color = Color::rgb(255, 255, 255);
     pub const BLACK: Color = Color::rgb(0, 0, 0);
     pub const TRANSPARENT: Color = Color::rgba(0, 0, 0, 0);
+
+    /// Opaque color from RGB components.
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Color { r, g, b, a: 255 }
+    }
+    /// Color with explicit alpha.
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Color { r, g, b, a }
+    }
 
     /// Decode from pixel bytes in the given format.
     fn decode(bytes: &[u8], format: PixelFormat) -> Self {
@@ -74,15 +131,6 @@ impl Color {
         match format {
             PixelFormat::Bgra8888 => [self.b, self.g, self.r, self.a],
         }
-    }
-
-    /// Opaque color from RGB components.
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Color { r, g, b, a: 255 }
-    }
-    /// Color with explicit alpha.
-    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Color { r, g, b, a }
     }
 }
 impl PixelFormat {
@@ -117,6 +165,25 @@ impl<'a> Surface<'a> {
     /// Draw a horizontal line. Clips to surface bounds.
     pub fn draw_hline(&mut self, x: u32, y: u32, w: u32, color: Color) {
         self.fill_rect(x, y, w, 1, color);
+    }
+    /// Draw a single glyph at (x, y) in the given color.
+    ///
+    /// Only foreground pixels (bit = 1) are drawn; the background is left
+    /// unchanged. Out-of-bounds pixels clip silently.
+    pub fn draw_glyph(&mut self, x: u32, y: u32, ch: char, font: &BitmapFont, color: Color) {
+        if let Some(glyph) = font.glyph(ch) {
+            for row in 0..font.glyph_height {
+                let byte = glyph[row as usize];
+
+                for col in 0..font.glyph_width {
+                    if byte & (0x80 >> col) != 0 {
+                        if let (Some(px), Some(py)) = (x.checked_add(col), y.checked_add(row)) {
+                            self.set_pixel(px, py, color);
+                        }
+                    }
+                }
+            }
+        }
     }
     /// Draw a line using Bresenham's algorithm. Clips per-pixel.
     pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
@@ -172,6 +239,28 @@ impl<'a> Surface<'a> {
                 self.draw_vline(x + w - 1, y + 1, h - 2, color);
             }
         }
+    }
+    /// Draw a string starting at (x, y). Returns the x position after the
+    /// last glyph.
+    ///
+    /// Each character advances by `font.glyph_width` regardless of whether
+    /// the glyph exists. Characters outside the font's range render as blanks.
+    pub fn draw_text(
+        &mut self,
+        x: u32,
+        y: u32,
+        text: &str,
+        font: &BitmapFont,
+        color: Color,
+    ) -> u32 {
+        let mut cx = x;
+
+        for ch in text.chars() {
+            self.draw_glyph(cx, y, ch, font, color);
+            cx = cx.saturating_add(font.glyph_width);
+        }
+
+        cx
     }
     /// Draw a vertical line. Clips to surface bounds.
     pub fn draw_vline(&mut self, x: u32, y: u32, h: u32, color: Color) {
@@ -229,7 +318,6 @@ fn abs(x: i32) -> i32 {
         x
     }
 }
-
 fn min(a: u32, b: u32) -> u32 {
     if a < b {
         a

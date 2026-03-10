@@ -69,43 +69,32 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Sessions 2026-03-10/11 (latest):** Design discussion — trust model, blue-layer symmetry, shell placement, compound document editing. Two sessions of exploration, nothing settled yet. Key findings:
+**Session 2026-03-10 (latest):** Graphics pipeline build + compositor design discussion. Completed steps (a) and (b) of the display engine build plan. Deep-dived compositor architecture — established mental model, identified key constraints and opportunities.
 
-1. **Trust and complexity are orthogonal (solid).** Red/blue/black (complexity) and kernel/OS service/tools (trust) are independent axes. The core is both clean and trusted, adapters are both messy and untrusted, but for different reasons.
+1. **Drawing library complete (step b).** `system/library/drawing/` — pure no_std library with Surface abstraction, RGBA canonical format (encode/decode at pixel boundary), drawing primitives (fill_rect, draw_rect, draw_line, hline/vline, set/get_pixel), embedded 8×16 VGA bitmap font (draw_glyph, draw_text). 37 host-side tests, all passing.
 
-2. **Blue wraps black on all sides (solid).** Not just below (hardware drivers). The user is external reality — editors are "user drivers" adapting human intent into the edit protocol, just as display drivers adapt device registers into the surface trait.
+2. **Library rename.** `libsys` → `sys`, `libvirtio` → `virtio` (redundant prefix since they're in `/library/`). Build, tests, docs all updated.
 
-3. **Shell is blue-layer (leaning, not settled).** The shell (GUI/CLI) is an untrusted process (EL0), pluggable. But NOT purely modal with editors — the shell must intercept system gestures (switch document, invoke search) while an editor is active. Current thinking: system gestures in OS service (not pluggable), navigation UI in shell (pluggable). Boundary TBD.
+3. **Compositor design explored (not settled).** Key findings documented in journal.md:
+   - Compositor = React render pipeline (declarative tree → diff → minimal update). Structural identity, not loose analogy.
+   - Scene graph shaped by document structure (narrow/deep tree), not window management (wide/shallow).
+   - Only 3-4 z-layers ever (vs 30+ on traditional desktop). Structural constraints eliminate the overlap problem.
+   - Two surface behaviors needed: contained (clipped to parent) and floating (drag ghosts, popovers, tooltips).
+   - Compound documents ARE nested compositing — connects to unresolved compound editing tension.
+   - Compositor↔GPU driver needs shared memory (kernel Phase 7, not yet built). Temporary coupling OK for toy compositor.
+   - "Informed" compositor (knows content types, document state) vs traditional "blind" compositor (opaque rectangles).
 
-4. **One-document-at-a-time (leaning).** UI model closer to macOS fullscreen Spaces. View one document at a time, switch through shell.
+4. **Existing bitmap fonts.** Spleen 8×16 (PSF2, ~4KB, Latin-1 + box drawing) recommended over hand-rolled VGA font. GNU Unifont for full Unicode BMP (~1MB, userspace only). Swap is mechanical — same BitmapFont interface.
 
-5. **Compound document editing (unresolved tension).** "Editors bind to content types" conflicts with "one editor per document" for compound documents. Instinct: editor nesting (same text editor used within presentations). But nesting is complex. Needs dedicated exploration.
-
-**Session 2026-03-09:** Design discussion — display engine architecture for getting graphics on screen. Key conclusions:
-
-1. **Next milestone: pixels on screen.** Kernel is complete and reviewed. Next motivating target is graphical output — drawing to the screen, text rendering, basic compositor. Exercises the rendering pipeline (Decision #11) from the bottom up.
-
-2. **virtio-gpu is the right path.** QEMU `virt` offers virtio-gpu (paravirtual, 2D protocol, ~6 commands) or ramfb (raw framebuffer, too simple). virtio-gpu reuses existing virtio infrastructure (libvirtio, MMIO transport, split virtqueue, interrupt-driven). Add `-device virtio-gpu-device` to QEMU.
-
-3. **Surface-based DisplayEngine trait, not raw framebuffer.** A framebuffer (CPU-writable pixel buffer) is specific to software rendering. GPU acceleration means the CPU submits commands and the GPU writes pixels — `map() → &mut [u8]` doesn't apply. The universal abstraction is surfaces and operations: `create_surface`, `destroy_surface`, `fill_rect`, `blit`, `present`. The driver implements this trait — whether it uses CPU loops or GPU commands internally is the driver's business. The compositor doesn't know or care.
-
-4. **Display vs rendering are separate concerns.** Display = "take this buffer and put it on screen" (the last mile). Rendering = "fill this buffer with pixels" (compositing work). Both always happen sequentially. GPU acceleration changes WHO fills the buffer (GPU instead of CPU), not the display path. A modern GPU chip handles both in one device, one driver.
-
-5. **Three components, one interface.** Compositor (above) works with surfaces, calls trait methods. Driver (below, blue layer) translates trait methods to hardware operations. The trait is the boundary — a contract, not a component. Software rendering (CPU loops) is a strategy inside the driver, not a separate thing the OS selects. The virtio-gpu driver will use CPU loops for fill/blit internally; a real GPU driver would submit GPU commands. Same interface either way.
-
-6. **Build plan:** (a) virtio-gpu userspace driver implementing the surface trait (same pattern as virtio-blk), (b) drawing primitives + embedded bitmap font, (c) toy compositor (positioned rectangles with text). This is a research spike for the rendering pipeline, not throwaway work — everything above the driver is portable.
-
-**Session 2026-03-10 (implementation):** Built and validated the virtio-gpu 2D userspace driver — step (a) of the build plan. The driver (`system/platform/drivers/virtio-gpu/`) implements all 6 core 2D commands (GET_DISPLAY_INFO, RESOURCE_CREATE_2D, RESOURCE_ATTACH_BACKING, SET_SCANOUT, TRANSFER_TO_HOST_2D, RESOURCE_FLUSH). Draws a test pattern (colored rectangles with white border) at 1280x800 BGRA8888. Kernel changes: `MAX_DMA_ORDER` raised to 10 (4 MiB) for framebuffer allocation, per-process DMA page budget (32 MiB default). Three bugs fixed: PA/VA confusion in response reads, DMA order cap too small, wrong command type enum values (auto-incrementing C enum, not explicit). Directory restructured: drivers → `platform/drivers/`, libs → `library/`, tests → `tests/`. **Next:** step (b) — drawing primitives + embedded bitmap font, then (c) toy compositor.
-
-**Previous sessions:** Kernel complete — all DESIGN.md §11 review findings resolved (41 issues) + expert review plan completed (hardware correctness, security, type safety). Design sessions settled Decision #14 (Compound Documents) with three-axis model + uniform manifests + static/virtual manifests.
+**Still open from previous sessions:** Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved tension — now connected to compositor tree model).
 
 **Decision #14 sub-decisions open:** Referenced vs owned parts, mimetype of the whole document, manifest format, COW atomicity for multi-part documents, filesystem organization of manifests + content files.
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
 
-**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: display engine → drawing primitives → fonts → toy compositor. This naturally informs Decisions #15 (layout), #17 (interaction model), and #10 (view state). FS track: COW on-disk design (Decision #16, independent).
+**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: steps (a) ✅ and (b) ✅ done, step (c) toy compositor next — but blocked on compositor↔driver shared memory (kernel Phase 7) for the real architecture. Can build temporary toy within the GPU driver process. FS track: COW on-disk design (Decision #16, independent).
 
-**System code:** `system/kernel/` (35 source files), `system/platform/drivers/{virtio-blk,virtio-console,virtio-gpu}/`, `system/library/{libsys,libvirtio}/`, `system/user/{init,echo}/`, `system/test/` (216 tests across 15 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC, userspace virtio-blk + virtio-gpu drivers. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit. Both reviews (§11 + expert) completed.
+**System code:** `system/kernel/` (35 source files), `system/platform/drivers/{virtio-blk,virtio-console,virtio-gpu}/`, `system/library/{sys,virtio,drawing}/`, `system/user/{init,echo}/`, `system/test/` (37 drawing + 216 other = 253 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC, userspace virtio-blk + virtio-gpu drivers. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit.
 
 ## Design Discussion Rules
 

@@ -6,7 +6,7 @@
 #[path = "../../library/drawing/lib.rs"]
 mod drawing;
 
-use drawing::{Color, PixelFormat, Surface};
+use drawing::{Color, PixelFormat, Surface, FONT_8X16};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -395,4 +395,132 @@ fn fill_rect_saturating_add_no_overflow() {
     // Should fill from x=2 to x=3 (clipped to width).
     assert_eq!(s.get_pixel(2, 0), Some(Color::WHITE));
     assert_eq!(s.get_pixel(3, 0), Some(Color::WHITE));
+}
+
+// ---------------------------------------------------------------------------
+// BitmapFont tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn font_8x16_dimensions() {
+    assert_eq!(FONT_8X16.glyph_width, 8);
+    assert_eq!(FONT_8X16.glyph_height, 16);
+}
+
+#[test]
+fn font_glyph_returns_correct_length() {
+    let glyph = FONT_8X16.glyph('A').unwrap();
+    assert_eq!(glyph.len(), 16);
+}
+
+#[test]
+fn font_glyph_space_is_blank() {
+    let glyph = FONT_8X16.glyph(' ').unwrap();
+    assert!(glyph.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn font_glyph_printable_ascii_all_present() {
+    for c in 0x20u8..=0x7E {
+        assert!(
+            FONT_8X16.glyph(c as char).is_some(),
+            "missing glyph for 0x{c:02X} '{}'",
+            c as char
+        );
+    }
+}
+
+#[test]
+fn font_glyph_outside_range_returns_none() {
+    assert!(FONT_8X16.glyph('\0').is_none());
+    assert!(FONT_8X16.glyph('\x1F').is_none());
+    assert!(FONT_8X16.glyph('\x7F').is_none());
+    assert!(FONT_8X16.glyph('é').is_none());
+}
+
+#[test]
+fn font_glyph_a_has_nonzero_rows() {
+    let glyph = FONT_8X16.glyph('A').unwrap();
+    assert!(glyph.iter().any(|&b| b != 0));
+}
+
+// ---------------------------------------------------------------------------
+// Surface: draw_glyph
+// ---------------------------------------------------------------------------
+
+#[test]
+fn draw_glyph_exclamation_mark() {
+    // '!' row 2 = 0x18 (bits 3,4 set), row 9 = 0x00 (gap), row 10 = 0x18 (dot).
+    let mut buf = [0u8; 16 * 16 * 4];
+    let mut s = make_surface(&mut buf, 16, 16);
+
+    s.draw_glyph(0, 0, '!', &FONT_8X16, Color::WHITE);
+
+    assert_eq!(s.get_pixel(3, 2), Some(Color::WHITE));
+    assert_eq!(s.get_pixel(4, 2), Some(Color::WHITE));
+    assert_eq!(s.get_pixel(0, 2), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(s.get_pixel(3, 9), Some(Color::rgba(0, 0, 0, 0)));
+    assert_eq!(s.get_pixel(3, 10), Some(Color::WHITE));
+}
+
+#[test]
+fn draw_glyph_unknown_char_is_noop() {
+    let mut buf = [0u8; 16 * 16 * 4];
+    let mut s = make_surface(&mut buf, 16, 16);
+
+    s.draw_glyph(0, 0, '\x7F', &FONT_8X16, Color::WHITE);
+
+    assert!(buf.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn draw_glyph_clips_at_surface_edge() {
+    // Place an 8x16 glyph on a tiny 4x4 surface — no panic.
+    let mut buf = [0u8; 4 * 4 * 4];
+    let mut s = make_surface(&mut buf, 4, 4);
+
+    s.draw_glyph(0, 0, 'A', &FONT_8X16, Color::WHITE);
+
+    // 'A' row 2 = 0x10 → bit 4 → pixel column 3. Surface is 4 wide, so col 3 is visible.
+    assert_eq!(s.get_pixel(3, 2), Some(Color::WHITE));
+}
+
+// ---------------------------------------------------------------------------
+// Surface: draw_text
+// ---------------------------------------------------------------------------
+
+#[test]
+fn draw_text_returns_advanced_x() {
+    let mut buf = [0u8; 64 * 16 * 4];
+    let mut s = make_surface(&mut buf, 64, 16);
+
+    let end_x = s.draw_text(0, 0, "Hi", &FONT_8X16, Color::WHITE);
+
+    assert_eq!(end_x, 16);
+}
+
+#[test]
+fn draw_text_empty_string() {
+    let mut buf = [0u8; 16 * 16 * 4];
+    let mut s = make_surface(&mut buf, 16, 16);
+
+    let end_x = s.draw_text(5, 0, "", &FONT_8X16, Color::WHITE);
+
+    assert_eq!(end_x, 5);
+    assert!(buf.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn draw_text_two_glyphs_are_adjacent() {
+    let mut buf = [0u8; 32 * 16 * 4];
+    let mut s = make_surface(&mut buf, 32, 16);
+
+    s.draw_text(0, 0, "!!", &FONT_8X16, Color::WHITE);
+
+    // First '!' at x=0: pixel (3,2) set.
+    assert_eq!(s.get_pixel(3, 2), Some(Color::WHITE));
+    // Second '!' at x=8: pixel (11,2) set.
+    assert_eq!(s.get_pixel(11, 2), Some(Color::WHITE));
+    // Gap between glyphs: pixel (7,2) should be blank.
+    assert_eq!(s.get_pixel(7, 2), Some(Color::rgba(0, 0, 0, 0)));
 }

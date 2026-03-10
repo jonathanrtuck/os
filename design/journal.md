@@ -58,16 +58,45 @@ Open questions: system gesture vs shell input boundary, compound editor nesting 
 ### Display engine architecture
 
 **Informs:** Decision #11 (Rendering Technology), Decision #15 (Layout Engine), Decision #17 (Interaction Model)
-**Status:** Architecture sketched (2026-03-09), implementation not started
+**Status:** Architecture sketched (2026-03-09), GPU driver done (2026-03-10), drawing library done (2026-03-10), compositor design explored (2026-03-10)
 **Context:** Next milestone is graphical output on QEMU virt. virtio-gpu (paravirtual, 2D protocol) is the right device — reuses existing virtio infrastructure. Key architectural conclusions:
 
 - **Surface-based trait, not framebuffer.** A raw framebuffer (`map() → &mut [u8]`) is specific to software rendering — GPU acceleration means the CPU never touches pixels. The universal abstraction is surfaces and operations: `create_surface`, `destroy_surface`, `fill_rect`, `blit`, `present`. The driver implements this trait; whether it uses CPU loops or GPU commands internally is the driver's business.
 - **Display vs rendering are separate concerns in one device.** Display = get a buffer to the screen (last mile). Rendering = fill the buffer (compositing). Both always happen. GPU acceleration changes who fills the buffer (GPU vs CPU), not the display path. A GPU chip does both; one driver.
 - **Three components, one interface.** Compositor (above) works with surfaces, calls trait methods. Driver (below) translates trait methods to hardware operations. The trait is the boundary — a contract, not a component. The compositor doesn't know if the driver uses CPU loops, GPU commands, or anything else. Software rendering is a fallback strategy inside the driver, not a separate thing the OS selects.
 - **virtio-gpu overhead is inherent, not architectural.** Performance hit is the VM boundary (guest→host copy). With real hardware, the display controller reads directly from the buffer via DMA scanout — no copy. The abstraction doesn't add overhead; virtio does.
-- **Build plan:** (a) virtio-gpu userspace driver implementing the surface trait, (b) drawing primitives + bitmap font, (c) toy compositor. Everything above the driver is portable to real hardware.
+- **Build plan:** (a) virtio-gpu userspace driver ✅ DONE, (b) drawing primitives + bitmap font ✅ DONE, (c) toy compositor. Everything above the driver is portable to real hardware.
+- **Step (a) done (2026-03-10):** `system/platform/drivers/virtio-gpu/main.rs`. All 6 core 2D commands. Test pattern at 1280x800.
+- **Step (b) done (2026-03-10):** `system/library/drawing/` — pure no_std drawing library. Surface abstraction with RGBA canonical format (encode/decode at pixel boundary). Primitives: fill_rect, draw_rect, draw_line (Bresenham), draw_hline/vline, set/get_pixel. Embedded 8×16 VGA bitmap font with draw_glyph/draw_text. 37 host-side tests.
+- **Step (c) compositor design (2026-03-10):** Explored in depth. See compositor design thread below.
 
-Open questions: exact trait API (needs compositor to inform it), double buffering strategy, surface pixel format, font choice (embedded bitmap), how the display driver integrates with the OS service process model (separate driver process like virtio-blk, or part of OS service?), trait naming (just `Display`? `DisplaySurface`?).
+Open questions: exact trait API (needs compositor to inform it), double buffering strategy, compositor↔driver shared memory (requires kernel Phase 7), font choice for production (Spleen PSF2 over hand-rolled VGA font), trait naming.
+
+### Compositor design
+
+**Informs:** Decision #11 (Rendering Technology), Decision #14 (Compound Documents), Decision #15 (Layout Engine), Decision #17 (Interaction Model)
+**Status:** Mental model established (2026-03-10), key constraints identified, no code yet
+**Context:** Explored the compositor's role, architecture, and how it differs from traditional desktop compositors. Key findings:
+
+1. **Compositor = function from surface tree to pixel buffer.** Structurally identical to React's render pipeline: declarative tree (manifest = component tree) → damage calculation (= reconciliation/diff) → minimal pixel updates (= commit). The document manifest IS the scene graph.
+
+2. **Scene graph is a tree shaped by document structure.** Not a flat list of overlapping windows. Compound documents create nested surfaces (chart within a slide within a presentation). The compositor embodies the document's structure. Tree is narrow and deep (one document, nested content parts) vs traditional desktop which is wide and shallow (dozens of top-level windows).
+
+3. **Z-overlap is dramatically simpler.** Traditional desktops: 30+ arbitrary overlapping windows. Our OS: 1 document + maybe 1-2 floating elements + system UI = 3-4 z-layers total. No occlusion culling, no complex z-ordering. Structural constraints eliminate the problem rather than clever algorithms solving it.
+
+4. **Two surface behaviors: contained and floating.** Most content is contained (clipped to parent, positioned by layout engine). Some needs to float: drag ghosts, popovers, tooltips, editor overlays, transitions. Floating surfaces are rendered above the normal tree, not clipped. Similar to Wayland subsurfaces vs popups, or CSS normal flow vs position:fixed.
+
+5. **Compositor↔GPU driver data path matters.** Three options explored: (a) copy via IPC (too slow for framebuffer-sized data), (b) shared memory (correct — zero-copy, needs kernel Phase 7), (c) same process (simple but couples trust levels). Real systems use (b). For toy compositor, temporary coupling is OK with eyes open about what's scaffolding.
+
+6. **"Informed" vs "blind" compositor.** Traditional compositors are blind — each app is an opaque pixel rectangle. Ours is informed — knows document structure, content types, document state. Enables: damage prediction (text cursor = known small rectangle), update cadence optimization (video at 24fps, static text at 0fps), content-type-aware rendering priority.
+
+7. **Compound documents ARE nested windowing.** A presentation with an embedded chart is structurally identical to a window containing a sub-window. The differences: layout determines position (not user dragging), no chrome, nesting is content-driven. But the compositor's internal model needs the same tree structure. This connects directly to the unresolved compound document editing tension.
+
+8. **Dragging in absolute layouts = window dragging.** Canvas/freeform layouts (Decision #14 spatial axis) let users drag content. During drag: compositor moves surface in real time. On drop: editor commits via beginOp/endOp. Same pattern as traditional window management.
+
+9. **Pure containment is too rigid.** Pop-out editing (drag photo out to adjust), tooltips extending beyond parent, transitions between containers — all need floating surfaces. Don't commit to pure containment. Cost of floating support is low (extra render pass), UI cases are real.
+
+Open questions: exact scene graph API, how layout engine and compositor interface (does layout produce the tree that compositor renders?), shared memory timeline (blocked on kernel Phase 7), React-style damage diffing (how much complexity is justified for 3-4 z-layers?), whether compositor is part of OS service or separate.
 
 ### COW Filesystem
 
@@ -291,6 +320,18 @@ If virtual document rewind is noticeably slower than static document rewind, use
 ### Three-axis layout model unifies compositional and organizational documents (2026-03-09)
 
 The original five layout types (flow, fixed canvas, timeline, grid, freeform canvas) were four spatial sub-types plus one temporal sub-type. They covered compositional documents (slides, articles, video projects) but not organizational ones (source code projects, albums, playlists). The missing piece: the **logical** axis (hierarchical, sequential, flat, graph). Adding it as a third composable axis alongside spatial and temporal unifies all compound documents under one model. Every document is a point in a three-dimensional space (spatial × temporal × logical). Most use one or two axes. The model was stress-tested against spreadsheets, chat threads, musical scores, comics, mind maps, calendars, and dashboards — everything fits. No convincing fourth axis was found. Spatial, temporal, and logical correspond to the fundamental ways humans organize anything: where, when, and how-related.
+
+### Compositor is a React render pipeline (2026-03-10)
+
+The compositor maps 1:1 to React's architecture. Component tree = document manifest (surface tree). Virtual DOM = scene graph. Reconciliation/diff = damage calculation. Minimal DOM patches = minimal pixel updates. Render = pure function of state. Even "commit phase" is the same term. This isn't a loose analogy — it's structural identity. Both solve the same problem: given a tree of visual content that changes incrementally, efficiently update the output. The difference: React operates on semantic elements (DOM nodes), compositor operates on pixel buffers (opaque rectangles). But the orchestration pattern — declarative tree → diff → minimal update — is identical.
+
+### Structural constraints beat clever algorithms (2026-03-10)
+
+Traditional compositors need sophisticated occlusion culling and z-ordering because they manage 30+ arbitrary overlapping windows. Our compositor needs none of that — one-document-at-a-time + manifest-driven layout means 3-4 z-layers total. The compositor's simplicity comes from the document model (Decision #2) and interaction model (one-doc-at-a-time leaning), not from algorithmic cleverness. This is an instance of the "simple connective tissue" principle (Decision #4): structural constraints at the design level eliminate runtime complexity.
+
+### Compound documents are nested compositing (2026-03-10)
+
+A compound document with embedded content parts (chart in a slide, image in a text doc) creates a surface tree structurally identical to nested windows — minus chrome, minus user-driven positioning. The compositor must handle this tree. This means "no windows" doesn't mean "flat compositor" — it means "compositor shaped by document structure instead of user window management." The compositor is the mechanism that makes compound document rendering work. This connects the unresolved compound editing tension to a concrete architectural requirement.
 
 ### Uniform manifest model eliminates the simple/compound distinction (2026-03-09)
 
