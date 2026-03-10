@@ -552,28 +552,39 @@ pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
 }
 /// Handle non-SVC synchronous exceptions from EL0 (user faults).
 ///
-/// For data aborts (EC=0x24) and instruction aborts (EC=0x20) from EL0,
-/// attempts demand paging via the process's VMA map. If the fault address
-/// is covered by a VMA, a page is allocated and mapped, and we return to
-/// the faulting instruction. Otherwise (or for other exception classes),
-/// the process is terminated.
+/// For translation faults (missing pages) from data aborts (EC=0x24) and
+/// instruction aborts (EC=0x20), attempts demand paging via the process's
+/// VMA map. Only translation faults (DFSC/IFSC 0b0001xx, levels 0-3) are
+/// demand-paging candidates. All other fault types (permission, alignment,
+/// access flag, etc.) skip straight to diagnostic + terminate.
+///
+/// Without the DFSC check, a non-translation fault on a VMA-backed address
+/// would cause handle_fault to remap an already-present page, return true,
+/// and create an infinite fault loop with a one-page-per-iteration leak.
 #[unsafe(no_mangle)]
 pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     let esr: u64;
     let far: u64;
+    let elr: u64;
 
     // SAFETY: Reading system registers to diagnose the fault. These are
     // read-only queries with no side effects.
     unsafe {
         core::arch::asm!("mrs {}, esr_el1", out(reg) esr, options(nostack, nomem));
         core::arch::asm!("mrs {}, far_el1", out(reg) far, options(nostack, nomem));
+        core::arch::asm!("mrs {}, elr_el1", out(reg) elr, options(nostack, nomem));
     }
 
     let ec = (esr >> 26) & 0x3F;
+    let fsc = esr & 0x3F; // DFSC (data abort) or IFSC (instruction abort)
 
-    // EC 0x24 = Data Abort from EL0, EC 0x20 = Instruction Abort from EL0.
-    // These are the only exception classes that can be resolved by demand paging.
-    if ec == 0x24 || ec == 0x20 {
+    // Translation faults: DFSC/IFSC 0b0001xx (levels 0-3).
+    // Only these can be resolved by demand paging. Permission faults,
+    // alignment faults, access flag faults, etc. must NOT attempt paging —
+    // the page is already mapped; remapping would loop and leak memory.
+    let is_translation_fault = (fsc & 0b111100) == 0b000100;
+
+    if (ec == 0x24 || ec == 0x20) && is_translation_fault {
         metrics::inc_page_faults();
 
         let handled =
@@ -587,14 +598,10 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     }
 
     // Unresolvable fault — log and terminate.
-    let elr: u64;
-
-    unsafe {
-        core::arch::asm!("mrs {}, elr_el1", out(reg) elr, options(nostack, nomem));
-    }
-
     serial::panic_puts("user fault: EC=0x");
     serial::panic_put_hex(ec);
+    serial::panic_puts(" ISS=0x");
+    serial::panic_put_hex(esr & 0x1FFFFFF);
     serial::panic_puts(" ELR=0x");
     serial::panic_put_hex(elr);
     serial::panic_puts(" FAR=0x");

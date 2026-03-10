@@ -77,7 +77,7 @@ Read these before making any design suggestions:
 
 3. **Kernel Phase 7 (memory sharing) done.** Syscall #24 (`memory_share`) maps physical pages from caller into target process's shared memory region. Per-process channel SHM bump allocator for correct addressing. 25 syscalls total.
 
-4. **Alignment bug found and fixed.** Device manifest had u64 field at non-8-byte-aligned offset — undefined behavior in Rust's `read_volatile`. Silent process death (user fault handler diagnostic message never printed — known kernel bug to investigate).
+4. **Alignment bug found and fixed.** Device manifest had u64 field at non-8-byte-aligned offset — undefined behavior in Rust's `read_volatile`. Silent process death was caused by two issues: (a) SCTLR.A=0 means no hardware alignment fault — init read garbage and died via syscall error, not a fault, (b) `user_fault_handler` didn't check DFSC, so non-translation faults on VMA-backed addresses would infinite-loop. Both fixed: DFSC check added, ISS field added to diagnostic output.
 
 **Still open from previous sessions:** Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved tension — connected to compositor tree model).
 
