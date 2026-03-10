@@ -306,7 +306,7 @@ fn reclaim_boot_ttbr0() {
 /// so the driver can read device info from a fixed address.
 fn spawn_virtio_driver(elf: &[u8], mmio_pa: u64, irq: u32) {
     let (pid, _) = process::create_from_user_elf(elf).expect("failed to create virtio driver");
-    let (ch_a, _ch_b) = channel::create().expect("failed to create driver channel");
+    let (ch_a, ch_b) = channel::create().expect("failed to create driver channel");
     // Write device info to the channel shared page before the driver starts.
     let (shared_pa, _) = channel::shared_info(ch_a);
     let shared_va = memory::phys_to_virt(shared_pa) as *mut u8;
@@ -334,6 +334,9 @@ fn spawn_virtio_driver(elf: &[u8], mmio_pa: u64, irq: u32) {
             )
             .expect("failed to insert driver channel handle");
     });
+    // Close the kernel's endpoint — we don't need it (device info is already
+    // written to the shared page). The shared page frees when the driver closes ch_a.
+    channel::close_endpoint(ch_b);
     // Start the driver.
     scheduler::start_suspended_threads(pid);
 }
