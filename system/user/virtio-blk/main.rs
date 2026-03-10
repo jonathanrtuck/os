@@ -47,7 +47,12 @@ fn print_u64(mut n: u64) {
     sys::write(&buf[i..]);
 }
 /// Read a sector and print its first 16 bytes as ASCII.
-fn read_and_print_sector(device: &virtio::Device, vq: &mut virtio::Virtqueue, sector: u64) {
+fn read_and_print_sector(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    sector: u64,
+    irq_handle: u8,
+) {
     // Allocate a DMA page. Layout:
     //   [0..16)    BlkReqHeader  (device-readable)
     //   [16..528)  sector data   (device-writable)
@@ -88,7 +93,14 @@ fn read_and_print_sector(device: &virtio::Device, vq: &mut virtio::Virtqueue, se
         (status_pa, 1, true),
     ]);
     device.notify(VIRTQ_REQUEST);
-    vq.wait_used();
+
+    // Wait for completion interrupt (blocks instead of spinning).
+    sys::wait(&[irq_handle], u64::MAX);
+
+    device.ack_interrupt();
+    vq.pop_used();
+
+    sys::interrupt_ack(irq_handle);
 
     // Check status.
     let status = unsafe { *buf_ptr.add(16 + SECTOR_SIZE) };
@@ -119,7 +131,7 @@ fn read_and_print_sector(device: &virtio::Device, vq: &mut virtio::Virtqueue, se
 pub extern "C" fn _start() -> ! {
     // Read device info from shared memory.
     let mmio_pa = unsafe { core::ptr::read_volatile(SHM as *const u64) };
-    let _irq = unsafe { core::ptr::read_volatile(SHM.add(8) as *const u32) };
+    let irq = unsafe { core::ptr::read_volatile(SHM.add(8) as *const u32) };
     // Map the 4K page containing the MMIO region. Virtio-mmio slots have
     // 0x200 stride, so most sit at sub-page offsets within a 4K page.
     let page_offset = mmio_pa & 0xFFF;
@@ -139,6 +151,15 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
+    // Register for device interrupt before driver_ok.
+    let irq_handle = sys::interrupt_register(irq);
+
+    if irq_handle < 0 {
+        sys::write(b"virtio-blk: interrupt_register failed\n");
+        sys::exit();
+    }
+
+    let irq_handle = irq_handle as u8;
     // Read capacity from device config.
     let capacity = device.config_read64(0);
     // Allocate DMA for the request virtqueue.
@@ -180,7 +201,7 @@ pub extern "C" fn _start() -> ! {
 
     // Read sector 0 if the device has any capacity.
     if capacity > 0 {
-        read_and_print_sector(&device, &mut vq, 0);
+        read_and_print_sector(&device, &mut vq, 0, irq_handle);
     }
 
     // Signal the kernel channel to indicate we're done.

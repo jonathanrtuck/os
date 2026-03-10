@@ -19,6 +19,7 @@ const EOIR: usize = 0x0010;
 const ICENABLER: usize = 0x180;
 const ISENABLER: usize = 0x100;
 const IPRIORITYR: usize = 0x400;
+const ITARGETSR: usize = 0x800;
 const SPURIOUS: u32 = 1023;
 /// Default QEMU `virt` addresses — used if DTB is unavailable.
 const DEFAULT_GICC_PA: usize = 0x0801_0000;
@@ -70,6 +71,11 @@ pub fn enable_irq(id: u32) {
     let base = gicd();
     let reg_offset = (id / 32) as usize * 4;
     let bit = 1u32 << (id % 32);
+
+    // Route SPIs to CPU 0. PPIs (id < 32) have read-only ITARGETSR.
+    if id >= 32 {
+        memory_mapped_io::write8(base + ITARGETSR + id as usize, 0x01);
+    }
 
     memory_mapped_io::write32(base + ISENABLER + reg_offset, bit);
     memory_mapped_io::write8(base + IPRIORITYR + id as usize, 0x80);

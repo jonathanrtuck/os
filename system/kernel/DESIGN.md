@@ -792,7 +792,7 @@ Expert review of the post-roadmap codebase (Phases 1–6 + virtio migration) ide
 
 ---
 
-### 10.1 Fix handle_send: Move Semantics
+### 10.1 Fix handle_send: Move Semantics — DONE
 
 **Bug:** `sys_handle_send` copies the source handle into the target process but does not remove it from the caller. For channel handles, this duplicates an endpoint — two processes hold handles to the same endpoint. Channel's `closed_count` expects exactly two endpoint closes (one per endpoint). A duplicated endpoint leads to three closes: the second triggers page free, the third accesses freed memory.
 
@@ -806,7 +806,7 @@ Expert review of the post-roadmap codebase (Phases 1–6 + virtio migration) ide
 
 ---
 
-### 10.2 Fix Scheduling Context Ref Counting
+### 10.2 Fix Scheduling Context Ref Counting — DONE
 
 **Bug:** `bind_scheduling_context` stores `context_id` on the thread but does not increment the context's `ref_count`. If all handles to the context are closed, `release_context_inner` decrements ref_count to 0 and frees the slot. The thread's `context_id` now points to a freed slot. `has_budget` treats `None` slots as unlimited budget — the thread silently escapes its allocation.
 
@@ -825,29 +825,29 @@ Add `scheduling.context_id` cleanup to both exit paths: read the bound context_i
 
 ---
 
-### 10.3 Interrupt-Driven Virtio Drivers
+### 10.3 Interrupt-Driven Virtio Drivers — DONE
 
 **Bug:** `libvirtio::Virtqueue::wait_used()` busy-waits in a `spin_loop()`. Drivers read the IRQ number from shared memory and ignore it. A spinning driver burns an entire core. This contradicts the kernel's event-driven design (handles, `wait`, interrupt forwarding — all the machinery exists and is unused).
 
-**Current code:** `libvirtio/lib.rs:340–348` (wait_used), `virtio-blk/main.rs` (ignores `_irq`), `virtio-console/main.rs` (same).
+**Fix applied:** Drivers now register for their device interrupt and block via `wait` instead of polling:
 
-**Fix:** Replace the polling loop with interrupt-driven completion:
+1. Driver reads IRQ from channel shared memory.
+2. `sys::interrupt_register(irq)` → gets waitable interrupt handle.
+3. Submit request to virtqueue, `device.notify()`.
+4. `sys::wait(&[irq_handle], u64::MAX)` → blocks until device signals completion.
+5. `device.ack_interrupt()` → clear virtio interrupt status (must precede GIC unmask).
+6. `vq.pop_used()` → process completed request.
+7. `sys::interrupt_ack(irq_handle)` → re-enable the IRQ in the GIC.
 
-1. Driver calls `sys::interrupt_register(irq)` → gets interrupt handle.
-2. Submit request to virtqueue.
-3. `sys::wait(&[irq_handle], 1, u64::MAX)` → blocks until device signals completion.
-4. `vq.pop_used()` → process completed request.
-5. `sys::interrupt_ack(irq_handle)` → re-enable the IRQ for the next request.
+Removed `wait_used` from libvirtio. Kept libvirtio as a pure library (no syscall dependency) — the interrupt-driven flow lives in each driver (~5 lines).
 
-Remove `wait_used` from libvirtio (or mark it `#[cfg(test)]` only). Add `wait_for_used(&mut self, irq_handle: u8)` that does the wait+pop+ack cycle using libsys.
+**Additional fix:** `interrupt_controller::enable_irq` now sets `ITARGETSR` to route SPIs to CPU 0. Without this, SPIs were enabled but had no delivery target — the GIC silently dropped them. PPIs (like the timer) don't need ITARGETSR (per-CPU by definition), which is why this never surfaced before.
 
-**Scope:** `libvirtio/lib.rs` (~20 lines), `virtio-blk/main.rs` (~15 lines), `virtio-console/main.rs` (~10 lines). Interrupt handle must be transferred to driver via `handle_send` (requires 10.1 fix for correct move semantics, or sent as the first handle before start — which already works since `handle_send` operates on suspended processes).
-
-**Depends on:** 10.1 (handle_send move semantics for transferring interrupt handle). Can work around by having the kernel pre-insert the interrupt handle into the driver's handle table during `spawn_virtio_driver`, before starting the process — but that's a hack. Proper fix is 10.1 first.
+**Files changed:** `libvirtio/lib.rs` (removed `wait_used`), `virtio-blk/main.rs`, `virtio-console/main.rs`, `interrupt_controller.rs` (ITARGETSR fix).
 
 ---
 
-### 10.4 Fix Channel Leak in spawn_virtio_driver
+### 10.4 Fix Channel Leak in spawn_virtio_driver — DONE
 
 **Bug:** `spawn_virtio_driver` creates a channel (`ch_a`, `_ch_b`) and gives only `ch_a` to the driver. `_ch_b` is never inserted into any handle table and never closed. The channel's `closed_count` never reaches 2. The shared page is never freed. One page leaked per virtio device.
 

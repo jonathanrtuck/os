@@ -368,14 +368,4 @@ impl Virtqueue {
     pub fn used_pa(&self) -> u64 {
         self.used_pa
     }
-    /// Spin-wait for the next used element (polling).
-    pub fn wait_used(&mut self) -> UsedElem {
-        loop {
-            if let Some(elem) = self.pop_used() {
-                return elem;
-            }
-
-            core::hint::spin_loop();
-        }
-    }
 }

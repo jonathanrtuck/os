@@ -22,7 +22,7 @@ const VIRTQ_TX: u32 = 1;
 pub extern "C" fn _start() -> ! {
     // Read device info from shared memory.
     let mmio_pa = unsafe { core::ptr::read_volatile(SHM as *const u64) };
-    let _irq = unsafe { core::ptr::read_volatile(SHM.add(8) as *const u32) };
+    let irq = unsafe { core::ptr::read_volatile(SHM.add(8) as *const u32) };
     // Map the 4K page containing the MMIO region. Virtio-mmio slots have
     // 0x200 stride, so most sit at sub-page offsets within a 4K page.
     let page_offset = mmio_pa & 0xFFF;
@@ -42,6 +42,15 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
+    // Register for device interrupt before driver_ok.
+    let irq_handle = sys::interrupt_register(irq);
+
+    if irq_handle < 0 {
+        sys::write(b"virtio-console: interrupt_register failed\n");
+        sys::exit();
+    }
+
+    let irq_handle = irq_handle as u8;
     // Allocate DMA for the TX virtqueue.
     let queue_size = core::cmp::min(device.queue_max_size(VIRTQ_TX), virtio::DEFAULT_QUEUE_SIZE);
     let order = virtio::Virtqueue::allocation_order(queue_size);
@@ -87,8 +96,14 @@ pub extern "C" fn _start() -> ! {
 
     tx.push(buf_pa, msg.len() as u32, false);
     device.notify(VIRTQ_TX);
-    tx.wait_used();
 
+    // Wait for completion interrupt (blocks instead of spinning).
+    sys::wait(&[irq_handle], u64::MAX);
+
+    device.ack_interrupt();
+    tx.pop_used();
+
+    sys::interrupt_ack(irq_handle);
     sys::dma_free(buf_va as u64, 0);
     // Signal the kernel channel to indicate we're done.
     sys::channel_signal(0);
