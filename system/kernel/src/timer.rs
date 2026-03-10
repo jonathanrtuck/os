@@ -18,12 +18,8 @@ use super::interrupt_controller;
 use super::scheduler;
 use super::sync::IrqMutex;
 use super::thread::ThreadId;
-use super::waitable::WaitableRegistry;
+use super::waitable::{WaitableId, WaitableRegistry};
 use core::sync::atomic::{AtomicU64, Ordering};
-
-/// Opaque timer identifier. Index into the global timer table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TimerId(pub u8);
 
 /// Maximum concurrent timer objects across all processes.
 const MAX_TIMERS: usize = 32;
@@ -41,12 +37,22 @@ struct TimerTable {
     waiters: WaitableRegistry<TimerId>,
 }
 
+/// Opaque timer identifier. Index into the global timer table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TimerId(pub u8);
+
 static CNTFRQ: AtomicU64 = AtomicU64::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 static TIMERS: IrqMutex<TimerTable> = IrqMutex::new(TimerTable {
     slots: [const { None }; MAX_TIMERS],
     waiters: WaitableRegistry::new(),
 });
+
+impl WaitableId for TimerId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// Set CNTP_TVAL_EL0 so the timer fires after one interval.
 ///

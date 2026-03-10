@@ -885,19 +885,13 @@ Removed `wait_used` from libvirtio. Kept libvirtio as a pure library (no syscall
 
 ---
 
-### 10.6 O(1) Notification Lookup
+### 10.6 O(1) Notification Lookup — DONE
 
 **Problem:** All notification modules use `Vec` + linear search by ID. `check_exited` is O(n), `register_waiter` is O(n), `notify_exit` is O(n). `sys_wait` checks every handle against every module — O(handles × entities). With 100 tracked entities, this is measurably slow under the scheduler lock.
 
-**Current code:** `thread_exit.rs:33–39` — `.iter().find(|n| n.thread_id == id)`. Same pattern in all five modules.
+**Fix:** Added `WaitableId` trait with `fn index(self) -> usize`. All kernel ID types implement it (trivially — `self.0 as usize`). `WaitableRegistry` storage changed from `Vec<Entry<Id>>` with linear scan to `Vec<Option<Entry>>` indexed directly by ID. `Entry` no longer stores the ID (position is identity). Every operation — `check_ready`, `notify`, `register_waiter`, `clear_ready`, `destroy` — is now O(1) via `entries.get(id.index())`. `create` grows the Vec as needed with `resize_with`. Freed slots become `None`.
 
-**Fix:** Use the ID as a direct index. All IDs (ThreadId, ProcessId, TimerId, InterruptId, ChannelId) are already sequential integers. Replace `Vec<Entry>` with `Vec<Option<Entry>>` indexed by `id.0`. Lookup becomes `entries[id.0 as usize]` — O(1). Freed slots are `None`.
-
-If 10.5 is done first, this is a single change inside `WaitableRegistry`. If not, it's the same change in five places.
-
-**Scope:** If 10.5 done: ~10 lines in `waitable.rs`. If not: ~10 lines × 5 modules.
-
-**Depends on:** 10.5 (preferred, not required).
+**Scope:** `waitable.rs` (core change), `thread.rs`, `process.rs`, `timer.rs`, `interrupt.rs` (trait impls, 3 lines each). All 20 waitable host tests pass unchanged. Kernel boots and runs with all modules exercised.
 
 ---
 

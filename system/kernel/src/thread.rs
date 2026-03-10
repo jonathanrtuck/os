@@ -94,7 +94,11 @@ pub enum TrustLevel {
 
 const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
 
-// --- State queries ---
+impl super::waitable::WaitableId for ThreadId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 impl Thread {
     /// Resolve a handle-based wake against this thread's wait set.

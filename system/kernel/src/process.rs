@@ -50,6 +50,12 @@ impl Process {
     }
 }
 
+impl super::waitable::WaitableId for ProcessId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
 /// Create a process from a user-provided ELF buffer, with a suspended thread.
 ///
 /// Unlike `spawn_from_elf`, this eagerly maps ALL segment pages (the ELF data

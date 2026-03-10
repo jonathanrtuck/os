@@ -14,7 +14,7 @@ mod thread {
 mod waitable;
 
 use thread::ThreadId;
-use waitable::WaitableRegistry;
+use waitable::{WaitableId, WaitableRegistry};
 
 // --- Helpers ---
 
@@ -25,6 +25,12 @@ fn tid(n: u64) -> ThreadId {
 /// Trivial ID type for testing (not a real kernel type).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct TestId(u32);
+
+impl WaitableId for TestId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 // --- Tests ---
 

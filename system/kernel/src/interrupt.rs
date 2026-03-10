@@ -27,11 +27,7 @@ use super::interrupt_controller;
 use super::scheduler;
 use super::sync::IrqMutex;
 use super::thread::ThreadId;
-use super::waitable::WaitableRegistry;
-
-/// Opaque interrupt identifier. Index into the global interrupt table.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct InterruptId(pub u8);
+use super::waitable::{WaitableId, WaitableRegistry};
 
 /// Maximum concurrent registered interrupts across all processes.
 const MAX_INTERRUPTS: usize = 32;
@@ -43,10 +39,20 @@ struct InterruptTable {
     waiters: WaitableRegistry<InterruptId>,
 }
 
+/// Opaque interrupt identifier. Index into the global interrupt table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InterruptId(pub u8);
+
 static TABLE: IrqMutex<InterruptTable> = IrqMutex::new(InterruptTable {
     slots: [const { None }; MAX_INTERRUPTS],
     waiters: WaitableRegistry::new(),
 });
+
+impl WaitableId for InterruptId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// Acknowledge an interrupt (called from `interrupt_ack` syscall).
 ///
