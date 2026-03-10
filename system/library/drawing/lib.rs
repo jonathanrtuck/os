@@ -132,6 +132,41 @@ impl Color {
             PixelFormat::Bgra8888 => [self.b, self.g, self.r, self.a],
         }
     }
+
+    /// Porter-Duff source-over: composite `self` on top of `dst`.
+    ///
+    /// Straight (non-premultiplied) alpha, integer math only. Returns the
+    /// blended color. Fast-paths for fully opaque or fully transparent source.
+    pub fn blend_over(self, dst: Color) -> Color {
+        if self.a == 255 {
+            return self;
+        }
+        if self.a == 0 {
+            return dst;
+        }
+
+        let sa = self.a as u32;
+        let da = dst.a as u32;
+        let inv_sa = 255 - sa;
+        // out_a = src_a + dst_a * (1 - src_a / 255)
+        let out_a = sa + da * inv_sa / 255;
+
+        if out_a == 0 {
+            return Color::TRANSPARENT;
+        }
+
+        // out_c = (src_c * src_a + dst_c * dst_a * (1 - src_a / 255)) / out_a
+        let r = (self.r as u32 * sa + dst.r as u32 * da * inv_sa / 255) / out_a;
+        let g = (self.g as u32 * sa + dst.g as u32 * da * inv_sa / 255) / out_a;
+        let b = (self.b as u32 * sa + dst.b as u32 * da * inv_sa / 255) / out_a;
+
+        Color {
+            r: if r > 255 { 255 } else { r as u8 },
+            g: if g > 255 { 255 } else { g as u8 },
+            b: if b > 255 { 255 } else { b as u8 },
+            a: if out_a > 255 { 255 } else { out_a as u8 },
+        }
+    }
 }
 impl PixelFormat {
     /// Number of bytes per pixel.
@@ -158,6 +193,23 @@ impl<'a> Surface<'a> {
         }
     }
 
+    /// Blend a single pixel using source-over compositing.
+    ///
+    /// Reads the existing pixel, blends `color` on top, writes back. No-op
+    /// if out of bounds or if `color` is fully transparent.
+    pub fn blend_pixel(&mut self, x: u32, y: u32, color: Color) {
+        if color.a == 255 {
+            self.set_pixel(x, y, color);
+
+            return;
+        }
+        if color.a == 0 {
+            return;
+        }
+        if let Some(dst) = self.get_pixel(x, y) {
+            self.set_pixel(x, y, color.blend_over(dst));
+        }
+    }
     /// Copy pixels from a source buffer onto this surface at (dst_x, dst_y).
     ///
     /// Clips to both source and destination bounds. Assumes source uses the
@@ -189,6 +241,44 @@ impl<'a> Surface<'a> {
             if src_off + row_bytes <= src_data.len() && dst_off + row_bytes <= self.data.len() {
                 self.data[dst_off..dst_off + row_bytes]
                     .copy_from_slice(&src_data[src_off..src_off + row_bytes]);
+            }
+        }
+    }
+    /// Blit source pixels onto this surface with per-pixel alpha blending.
+    ///
+    /// Each source pixel is composited over the destination using source-over.
+    /// Fully transparent source pixels are skipped; fully opaque pixels
+    /// overwrite without reading the destination (fast path).
+    pub fn blit_blend(
+        &mut self,
+        src_data: &[u8],
+        src_width: u32,
+        src_height: u32,
+        src_stride: u32,
+        dst_x: u32,
+        dst_y: u32,
+    ) {
+        if dst_x >= self.width || dst_y >= self.height {
+            return;
+        }
+
+        let copy_w = min(src_width, self.width - dst_x);
+        let copy_h = min(src_height, self.height - dst_y);
+        let bpp = self.format.bytes_per_pixel() as usize;
+
+        for row in 0..copy_h {
+            for col in 0..copy_w {
+                let src_off = (row * src_stride + col * self.format.bytes_per_pixel()) as usize;
+
+                if src_off + bpp <= src_data.len() {
+                    let src_color = Color::decode(&src_data[src_off..src_off + bpp], self.format);
+
+                    if src_color.a == 255 {
+                        self.set_pixel(dst_x + col, dst_y + row, src_color);
+                    } else if src_color.a > 0 {
+                        self.blend_pixel(dst_x + col, dst_y + row, src_color);
+                    }
+                }
             }
         }
     }
@@ -321,6 +411,32 @@ impl<'a> Surface<'a> {
                 let offset = row_start + col as usize * bpp;
 
                 self.data[offset..offset + bpp].copy_from_slice(&encoded[..bpp]);
+            }
+        }
+    }
+    /// Fill a rectangle with alpha-blended color. Clips to surface bounds.
+    ///
+    /// Each destination pixel is blended with `color` using source-over.
+    /// Opaque colors fast-path to `fill_rect`.
+    pub fn fill_rect_blend(&mut self, x: u32, y: u32, w: u32, h: u32, color: Color) {
+        if color.a == 255 {
+            self.fill_rect(x, y, w, h, color);
+
+            return;
+        }
+        if color.a == 0 || w == 0 || h == 0 {
+            return;
+        }
+        if x >= self.width || y >= self.height {
+            return;
+        }
+
+        let x2 = min(x.saturating_add(w), self.width);
+        let y2 = min(y.saturating_add(h), self.height);
+
+        for row in y..y2 {
+            for col in x..x2 {
+                self.blend_pixel(col, row, color);
             }
         }
     }

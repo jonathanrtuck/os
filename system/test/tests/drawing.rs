@@ -608,3 +608,331 @@ fn blit_zero_size_source() {
     dst.blit(&[], 0, 0, 0, 0, 0);
     assert!(dst_buf.iter().all(|&b| b == 0));
 }
+
+// ---------------------------------------------------------------------------
+// Alpha blending: Color::blend_over
+// ---------------------------------------------------------------------------
+
+#[test]
+fn blend_over_opaque_src_returns_src() {
+    let src = Color::rgb(255, 0, 0);
+    let dst = Color::rgb(0, 0, 255);
+    assert_eq!(src.blend_over(dst), src);
+}
+
+#[test]
+fn blend_over_transparent_src_returns_dst() {
+    let src = Color::TRANSPARENT;
+    let dst = Color::rgb(0, 255, 0);
+    assert_eq!(src.blend_over(dst), dst);
+}
+
+#[test]
+fn blend_over_50_percent_red_on_opaque_blue() {
+    let src = Color::rgba(255, 0, 0, 128);
+    let dst = Color::rgb(0, 0, 255);
+    let result = src.blend_over(dst);
+
+    // out_a = 128 + 255*(255-128)/255 = 128 + 127 = 255
+    assert_eq!(result.a, 255);
+    // out_r = (255*128 + 0) / 255 = 128
+    assert_eq!(result.r, 128);
+    // out_b = (0 + 255*255*127/255) / 255 = (255*127)/255 = 127
+    assert_eq!(result.b, 127);
+    assert_eq!(result.g, 0);
+}
+
+#[test]
+fn blend_over_25_percent_white_on_black() {
+    let src = Color::rgba(255, 255, 255, 64);
+    let dst = Color::rgb(0, 0, 0);
+    let result = src.blend_over(dst);
+
+    assert_eq!(result.a, 255);
+    // out_r = (255*64 + 0) / 255 = 64
+    assert_eq!(result.r, 64);
+    assert_eq!(result.g, 64);
+    assert_eq!(result.b, 64);
+}
+
+#[test]
+fn blend_over_both_transparent() {
+    let src = Color::TRANSPARENT;
+    let dst = Color::TRANSPARENT;
+    assert_eq!(src.blend_over(dst), Color::TRANSPARENT);
+}
+
+#[test]
+fn blend_over_semi_on_semi() {
+    // 50% red on 50% blue — both semi-transparent.
+    let src = Color::rgba(255, 0, 0, 128);
+    let dst = Color::rgba(0, 0, 255, 128);
+    let result = src.blend_over(dst);
+
+    // out_a = 128 + 128*127/255 ≈ 191
+    assert!(result.a >= 190 && result.a <= 192, "a={}", result.a);
+    // Source (red) dominates since it's on top.
+    assert!(result.r > result.b, "r={} should > b={}", result.r, result.b);
+}
+
+#[test]
+fn blend_over_commutative_only_when_symmetric() {
+    // Blending is NOT commutative in general — order matters.
+    let a = Color::rgba(255, 0, 0, 128);
+    let b = Color::rgba(0, 255, 0, 128);
+
+    let ab = a.blend_over(b);
+    let ba = b.blend_over(a);
+
+    // Red-on-green: more red. Green-on-red: more green.
+    assert!(ab.r > ab.g);
+    assert!(ba.g > ba.r);
+}
+
+// ---------------------------------------------------------------------------
+// Alpha blending: Surface::blend_pixel
+// ---------------------------------------------------------------------------
+
+#[test]
+fn blend_pixel_on_opaque_background() {
+    let mut buf = [0u8; 4 * 4 * 4];
+    let mut s = make_surface(&mut buf, 4, 4);
+
+    s.set_pixel(1, 1, Color::rgb(0, 0, 255));
+    s.blend_pixel(1, 1, Color::rgba(255, 0, 0, 128));
+
+    let result = s.get_pixel(1, 1).unwrap();
+    assert_eq!(result.r, 128);
+    assert_eq!(result.b, 127);
+    assert_eq!(result.a, 255);
+}
+
+#[test]
+fn blend_pixel_transparent_is_noop() {
+    let mut buf = [0u8; 4 * 4 * 4];
+    let mut s = make_surface(&mut buf, 4, 4);
+
+    let blue = Color::rgb(0, 0, 255);
+    s.set_pixel(1, 1, blue);
+    s.blend_pixel(1, 1, Color::TRANSPARENT);
+
+    assert_eq!(s.get_pixel(1, 1), Some(blue));
+}
+
+#[test]
+fn blend_pixel_opaque_overwrites() {
+    let mut buf = [0u8; 4 * 4 * 4];
+    let mut s = make_surface(&mut buf, 4, 4);
+
+    s.set_pixel(1, 1, Color::rgb(0, 0, 255));
+    s.blend_pixel(1, 1, Color::rgb(255, 0, 0));
+
+    assert_eq!(s.get_pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+}
+
+#[test]
+fn blend_pixel_out_of_bounds_is_noop() {
+    let mut buf = [0u8; 4 * 4 * 4];
+    let mut s = make_surface(&mut buf, 4, 4);
+
+    s.blend_pixel(10, 10, Color::rgba(255, 0, 0, 128));
+
+    assert!(buf.iter().all(|&b| b == 0));
+}
+
+// ---------------------------------------------------------------------------
+// Alpha blending: Surface::fill_rect_blend
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fill_rect_blend_on_opaque_background() {
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut s = make_surface(&mut buf, 8, 8);
+
+    s.clear(Color::BLACK);
+    s.fill_rect_blend(2, 2, 4, 4, Color::rgba(255, 255, 255, 128));
+
+    // Inside: ~128 gray (50% white on black).
+    let inside = s.get_pixel(3, 3).unwrap();
+    assert_eq!(inside.r, 128);
+    assert_eq!(inside.g, 128);
+    assert_eq!(inside.b, 128);
+
+    // Outside: still black.
+    assert_eq!(s.get_pixel(0, 0), Some(Color::BLACK));
+}
+
+#[test]
+fn fill_rect_blend_opaque_fast_path() {
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut s = make_surface(&mut buf, 8, 8);
+
+    // Opaque fill_rect_blend should behave identically to fill_rect.
+    s.fill_rect_blend(1, 1, 3, 3, Color::rgb(200, 100, 50));
+
+    assert_eq!(s.get_pixel(2, 2), Some(Color::rgb(200, 100, 50)));
+}
+
+#[test]
+fn fill_rect_blend_transparent_is_noop() {
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut s = make_surface(&mut buf, 8, 8);
+
+    s.clear(Color::WHITE);
+    s.fill_rect_blend(0, 0, 8, 8, Color::TRANSPARENT);
+
+    assert_eq!(s.get_pixel(0, 0), Some(Color::WHITE));
+}
+
+#[test]
+fn fill_rect_blend_clips_to_bounds() {
+    let mut buf = [0u8; 4 * 4 * 4];
+    let mut s = make_surface(&mut buf, 4, 4);
+
+    s.clear(Color::BLACK);
+    s.fill_rect_blend(2, 2, 10, 10, Color::rgba(255, 0, 0, 128));
+
+    // Clipped region blended.
+    let px = s.get_pixel(3, 3).unwrap();
+    assert_eq!(px.r, 128);
+    // Outside clipped region unchanged.
+    assert_eq!(s.get_pixel(1, 1), Some(Color::BLACK));
+}
+
+// ---------------------------------------------------------------------------
+// Alpha blending: Surface::blit_blend
+// ---------------------------------------------------------------------------
+
+#[test]
+fn blit_blend_transparent_pixels_pass_through() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+
+    let blue = Color::rgb(0, 0, 255);
+    dst.clear(blue);
+
+    // Source is all transparent (zeroed).
+    let src_buf = [0u8; 4 * 4 * 4];
+    dst.blit_blend(&src_buf, 4, 4, 16, 2, 2);
+
+    // Destination unchanged.
+    assert_eq!(dst.get_pixel(3, 3), Some(blue));
+}
+
+#[test]
+fn blit_blend_opaque_pixels_overwrite() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::rgb(0, 0, 255));
+
+    let mut src_buf = [0u8; 4 * 4 * 4];
+    {
+        let mut src = Surface {
+            data: &mut src_buf,
+            width: 4,
+            height: 4,
+            stride: 16,
+            format: PixelFormat::Bgra8888,
+        };
+        src.clear(Color::rgb(255, 0, 0));
+    }
+
+    dst.blit_blend(&src_buf, 4, 4, 16, 2, 2);
+
+    assert_eq!(dst.get_pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn blit_blend_semi_transparent() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::rgb(0, 0, 255));
+
+    let mut src_buf = [0u8; 4 * 4 * 4];
+    {
+        let mut src = Surface {
+            data: &mut src_buf,
+            width: 4,
+            height: 4,
+            stride: 16,
+            format: PixelFormat::Bgra8888,
+        };
+        src.clear(Color::rgba(255, 0, 0, 128));
+    }
+
+    dst.blit_blend(&src_buf, 4, 4, 16, 2, 2);
+
+    let result = dst.get_pixel(3, 3).unwrap();
+    assert_eq!(result.r, 128);
+    assert_eq!(result.b, 127);
+    assert_eq!(result.a, 255);
+}
+
+#[test]
+fn blit_blend_clips_at_edges() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut src_buf = [0u8; 4 * 4 * 4];
+    {
+        let mut src = Surface {
+            data: &mut src_buf,
+            width: 4,
+            height: 4,
+            stride: 16,
+            format: PixelFormat::Bgra8888,
+        };
+        src.clear(Color::rgb(255, 0, 0));
+    }
+
+    // Place at (6, 6) — only 2x2 should fit.
+    dst.blit_blend(&src_buf, 4, 4, 16, 6, 6);
+
+    assert_eq!(dst.get_pixel(6, 6), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(dst.get_pixel(7, 7), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(dst.get_pixel(5, 6), Some(Color::BLACK));
+}
+
+#[test]
+fn blit_blend_entirely_outside_is_noop() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::WHITE);
+
+    let src_buf = [0xFFu8; 4 * 4 * 4];
+    dst.blit_blend(&src_buf, 4, 4, 16, 8, 8);
+
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::WHITE));
+}
+
+#[test]
+fn blit_blend_mixed_alpha_pixels() {
+    // Source has both transparent and semi-transparent pixels.
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::rgb(0, 0, 255));
+
+    let mut src_buf = [0u8; 4 * 2 * 4]; // 4x2, starts transparent
+    {
+        let mut src = Surface {
+            data: &mut src_buf,
+            width: 4,
+            height: 2,
+            stride: 16,
+            format: PixelFormat::Bgra8888,
+        };
+        // Left half: opaque red. Right half: stays transparent.
+        src.fill_rect(0, 0, 2, 2, Color::rgb(255, 0, 0));
+    }
+
+    dst.blit_blend(&src_buf, 4, 2, 16, 2, 2);
+
+    // Left half: overwritten with red.
+    assert_eq!(dst.get_pixel(2, 2), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(dst.get_pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    // Right half: blue shows through (transparent source).
+    assert_eq!(dst.get_pixel(4, 2), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(dst.get_pixel(5, 3), Some(Color::rgb(0, 0, 255)));
+}
