@@ -433,7 +433,7 @@ fn sys_handle_close(handle_nr: u64) -> Result<u64, HandleError> {
         return Err(HandleError::InvalidHandle);
     }
 
-    let obj =
+    let (obj, _rights) =
         scheduler::current_process_do(|process| process.handles.close(Handle(handle_nr as u8)))?;
 
     // Release kernel resources associated with the closed handle.
@@ -453,8 +453,10 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
         return Err(Error::InvalidArgument);
     }
 
-    // Phase 1: Read from caller's process — get target ProcessId and source
-    // handle's object + rights.
+    let source_handle = Handle(source_handle_nr as u8);
+    // Phase 1: Move the source handle out of the caller's table.
+    // We take (not just read) the handle — move semantics prevent duplicated
+    // endpoints, which would corrupt channel closed_count.
     let (target_pid, source_obj, source_rights) = scheduler::current_process_do(|process| {
         let target_pid = match process
             .handles
@@ -466,7 +468,7 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
         };
         let (source_obj, source_rights) = process
             .handles
-            .get_entry(Handle(source_handle_nr as u8), Rights::READ)
+            .close(source_handle)
             .map_err(|_| Error::InvalidArgument)?;
 
         Ok((target_pid, source_obj, source_rights))
@@ -476,9 +478,8 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
         HandleObject::Channel(ch_id) => Some(channel::shared_info(ch_id)),
         _ => None,
     };
-
     // Phase 2: Insert into target process (scheduler lock via with_process).
-    scheduler::with_process(target_pid, |target| {
+    let result = scheduler::with_process(target_pid, |target| {
         // Only allow sending handles to processes that haven't started yet.
         if target.started {
             return Err(Error::InvalidArgument);
@@ -497,7 +498,18 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
             .map_err(|_| Error::InvalidArgument)?;
 
         Ok(())
-    })?;
+    });
+
+    // Rollback: if Phase 2 failed, restore handle to source process.
+    if let Err(e) = result {
+        scheduler::current_process_do(|process| {
+            let _ = process
+                .handles
+                .insert_at(source_handle, source_obj, source_rights);
+        });
+
+        return Err(e);
+    }
 
     Ok(0)
 }

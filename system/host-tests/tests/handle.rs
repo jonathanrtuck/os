@@ -135,7 +135,7 @@ fn close_returns_object() {
 
     t.insert(ch(7), Rights::READ).unwrap();
 
-    let obj = t.close(Handle(0)).unwrap();
+    let (obj, _) = t.close(Handle(0)).unwrap();
 
     assert!(matches!(obj, HandleObject::Channel(ChannelId(7))));
 }
@@ -416,6 +416,115 @@ fn drain_includes_process_handles() {
         items[1],
         (Handle(1), HandleObject::Process(process::ProcessId(2)))
     ));
+}
+
+// --- close returns rights ---
+
+#[test]
+fn close_returns_object_and_rights() {
+    let mut t = HandleTable::new();
+
+    t.insert(ch(7), Rights::READ_WRITE).unwrap();
+
+    let (obj, rights) = t.close(Handle(0)).unwrap();
+
+    assert!(matches!(obj, HandleObject::Channel(ChannelId(7))));
+    assert!(rights.contains(Rights::READ));
+    assert!(rights.contains(Rights::WRITE));
+}
+
+// --- insert_at ---
+
+#[test]
+fn insert_at_specific_slot() {
+    let mut t = HandleTable::new();
+
+    // Fill slots 0 and 1.
+    t.insert(ch(0), Rights::READ).unwrap();
+    t.insert(ch(1), Rights::READ).unwrap();
+
+    // Close slot 1.
+    t.close(Handle(1)).unwrap();
+
+    // Insert at slot 1 specifically.
+    t.insert_at(Handle(1), ch(99), Rights::READ_WRITE).unwrap();
+
+    let (obj, rights) = t.get_entry(Handle(1), Rights::READ).unwrap();
+
+    assert!(matches!(obj, HandleObject::Channel(ChannelId(99))));
+    assert!(rights.contains(Rights::READ_WRITE));
+}
+
+#[test]
+fn insert_at_occupied_slot_fails() {
+    let mut t = HandleTable::new();
+
+    t.insert(ch(1), Rights::READ).unwrap();
+
+    let err = t.insert_at(Handle(0), ch(2), Rights::READ).unwrap_err();
+
+    assert!(matches!(err, HandleError::TableFull));
+}
+
+#[test]
+fn insert_at_then_close_roundtrip() {
+    let mut t = HandleTable::new();
+
+    t.insert_at(Handle(5), ch(42), Rights::READ_WRITE).unwrap();
+
+    let (obj, rights) = t.close(Handle(5)).unwrap();
+
+    assert!(matches!(obj, HandleObject::Channel(ChannelId(42))));
+    assert!(rights.contains(Rights::READ_WRITE));
+}
+
+// --- move semantics (take + rollback) ---
+
+#[test]
+fn move_handle_take_and_insert() {
+    let mut source = HandleTable::new();
+    let mut target = HandleTable::new();
+
+    source.insert(ch(10), Rights::READ_WRITE).unwrap();
+
+    // Take from source (move out).
+    let (obj, rights) = source.close(Handle(0)).unwrap();
+
+    assert!(source.get(Handle(0), Rights::READ).is_err());
+
+    // Insert into target.
+    target.insert(obj, rights).unwrap();
+
+    let (obj, _) = target.get_entry(Handle(0), Rights::READ).unwrap();
+
+    assert!(matches!(obj, HandleObject::Channel(ChannelId(10))));
+}
+
+#[test]
+fn move_handle_rollback_on_full_target() {
+    let mut source = HandleTable::new();
+    let mut target = HandleTable::new();
+
+    let source_handle = source.insert(ch(10), Rights::READ_WRITE).unwrap();
+
+    // Fill target table.
+    for i in 0..256u32 {
+        target.insert(ch(i + 100), Rights::READ).unwrap();
+    }
+
+    // Take from source.
+    let (obj, rights) = source.close(source_handle).unwrap();
+
+    // Target insert fails.
+    assert!(target.insert(obj, rights).is_err());
+
+    // Rollback: restore to original slot.
+    source.insert_at(source_handle, obj, rights).unwrap();
+
+    // Source handle is back where it was.
+    let (restored, _) = source.get_entry(source_handle, Rights::READ).unwrap();
+
+    assert!(matches!(restored, HandleObject::Channel(ChannelId(10))));
 }
 
 // --- Rights ---

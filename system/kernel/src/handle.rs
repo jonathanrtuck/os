@@ -25,7 +25,7 @@ pub struct Handle(pub u8);
 pub struct HandleTable {
     entries: [Option<HandleEntry>; MAX_HANDLES],
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct Rights(u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,15 +56,16 @@ impl HandleTable {
             entries: [None; MAX_HANDLES],
         }
     }
-    /// Close a handle (clear the slot). Returns the object that was there.
-    pub fn close(&mut self, handle: Handle) -> Result<HandleObject, HandleError> {
+
+    /// Close a handle (clear the slot). Returns the object and rights that were there.
+    pub fn close(&mut self, handle: Handle) -> Result<(HandleObject, Rights), HandleError> {
         let slot = &mut self.entries[handle.0 as usize];
         let entry = slot.ok_or(HandleError::InvalidHandle)?;
-        let object = entry.object;
+        let result = (entry.object, entry.rights);
 
         *slot = None;
 
-        Ok(object)
+        Ok(result)
     }
     /// Iterate over all occupied handles (for cleanup on process exit).
     pub fn drain(&mut self) -> DrainHandles<'_> {
@@ -112,6 +113,25 @@ impl HandleTable {
         }
 
         Err(HandleError::TableFull)
+    }
+    /// Insert at a specific slot. The slot must be empty. Used for rollback
+    /// when a handle move fails and the handle must be restored to its
+    /// original position.
+    pub fn insert_at(
+        &mut self,
+        handle: Handle,
+        object: HandleObject,
+        rights: Rights,
+    ) -> Result<(), HandleError> {
+        let slot = &mut self.entries[handle.0 as usize];
+
+        if slot.is_some() {
+            return Err(HandleError::TableFull);
+        }
+
+        *slot = Some(HandleEntry { object, rights });
+
+        Ok(())
     }
 }
 impl Iterator for DrainHandles<'_> {
