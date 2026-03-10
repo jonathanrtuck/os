@@ -69,32 +69,25 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-10 (latest):** Graphics pipeline build + compositor design discussion. Completed steps (a) and (b) of the display engine build plan. Deep-dived compositor architecture — established mental model, identified key constraints and opportunities.
+**Session 2026-03-10 (latest):** Display engine build plan complete — all three steps done. Init became a proto-OS-service. Full display pipeline working end-to-end on QEMU.
 
-1. **Drawing library complete (step b).** `system/library/drawing/` — pure no_std library with Surface abstraction, RGBA canonical format (encode/decode at pixel boundary), drawing primitives (fill_rect, draw_rect, draw_line, hline/vline, set/get_pixel), embedded 8×16 VGA bitmap font (draw_glyph, draw_text). 37 host-side tests, all passing.
+1. **Display pipeline complete (steps a→b→c all done).** Init allocates DMA framebuffer → shares with compositor via `memory_share` → compositor draws demo scene → signals init → GPU driver presents to display. Boots cleanly, all processes spawn, communicate, and exit.
 
-2. **Library rename.** `libsys` → `sys`, `libvirtio` → `virtio` (redundant prefix since they're in `/library/`). Build, tests, docs all updated.
+2. **Init is now a proto-OS-service** (`system/platform/init/`). Kernel spawns only init. Init reads a device manifest from kernel channel shared memory, spawns all other processes (drivers + compositor), orchestrates the display pipeline. Embeds all other ELFs via build.rs `include_bytes!`. Matches Fuchsia component_manager / seL4 root task / QNX procnto pattern.
 
-3. **Compositor design explored (not settled).** Key findings documented in journal.md:
-   - Compositor = React render pipeline (declarative tree → diff → minimal update). Structural identity, not loose analogy.
-   - Scene graph shaped by document structure (narrow/deep tree), not window management (wide/shallow).
-   - Only 3-4 z-layers ever (vs 30+ on traditional desktop). Structural constraints eliminate the overlap problem.
-   - Two surface behaviors needed: contained (clipped to parent) and floating (drag ghosts, popovers, tooltips).
-   - Compound documents ARE nested compositing — connects to unresolved compound editing tension.
-   - Compositor↔GPU driver needs shared memory (kernel Phase 7, not yet built). Temporary coupling OK for toy compositor.
-   - "Informed" compositor (knows content types, document state) vs traditional "blind" compositor (opaque rectangles).
+3. **Kernel Phase 7 (memory sharing) done.** Syscall #24 (`memory_share`) maps physical pages from caller into target process's shared memory region. Per-process channel SHM bump allocator for correct addressing. 25 syscalls total.
 
-4. **Existing bitmap fonts.** Spleen 8×16 (PSF2, ~4KB, Latin-1 + box drawing) recommended over hand-rolled VGA font. GNU Unifont for full Unicode BMP (~1MB, userspace only). Swap is mechanical — same BitmapFont interface.
+4. **Alignment bug found and fixed.** Device manifest had u64 field at non-8-byte-aligned offset — undefined behavior in Rust's `read_volatile`. Silent process death (user fault handler diagnostic message never printed — known kernel bug to investigate).
 
-**Still open from previous sessions:** Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved tension — now connected to compositor tree model).
+**Still open from previous sessions:** Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved tension — connected to compositor tree model).
 
 **Decision #14 sub-decisions open:** Referenced vs owned parts, mimetype of the whole document, manifest format, COW atomicity for multi-part documents, filesystem organization of manifests + content files.
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
 
-**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: steps (a) ✅ and (b) ✅ done, step (c) toy compositor next — but blocked on compositor↔driver shared memory (kernel Phase 7) for the real architecture. Can build temporary toy within the GPU driver process. FS track: COW on-disk design (Decision #16, independent).
+**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: display engine complete, next is design exploration — Decisions #15 (layout engine API), #17 (interaction model: shell/editor boundary, compound editing), #10 (view state). FS track: COW on-disk design (Decision #16, independent).
 
-**System code:** `system/kernel/` (35 source files), `system/platform/drivers/{virtio-blk,virtio-console,virtio-gpu}/`, `system/library/{sys,virtio,drawing}/`, `system/user/{init,echo}/`, `system/test/` (37 drawing + 216 other = 253 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC, userspace virtio-blk + virtio-gpu drivers. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit.
+**System code:** `system/kernel/` (35 source files), `system/platform/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/library/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (257 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline (init → drivers → compositor → GPU → pixels on screen). 25 syscalls. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit.
 
 ## Design Discussion Rules
 

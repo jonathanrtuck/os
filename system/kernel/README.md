@@ -2,7 +2,7 @@
 
 Bare-metal aarch64 kernel targeting QEMU's `virt` machine. Part of a [document-centric OS](../../design/concept.md).
 
-Boots with 4 SMP cores via PSCI, drops from EL2 to EL1, sets up the MMU with split TTBR (TTBR1 for kernel, TTBR0 per-process), and runs a preemptive EEVDF scheduler with handle-based scheduling contexts. Two user processes at EL0 exchange messages over shared-memory IPC, then exit — the kernel fully reclaims all resources. Targets aarch64 only — the assembly, page table setup, and hardware drivers are all ARM-specific. QEMU emulates the hardware, so it runs on any host architecture.
+Boots with 4 SMP cores via PSCI, drops from EL2 to EL1, sets up the MMU with split TTBR (TTBR1 for kernel, TTBR0 per-process), and runs a preemptive EEVDF scheduler with handle-based scheduling contexts. Spawns a single init process (proto-OS-service) which reads a device manifest, spawns virtio drivers and a compositor, allocates a shared framebuffer, and orchestrates a full display pipeline — compositor draws a demo scene, GPU driver presents it to the screen. Targets aarch64 only — the assembly, page table setup, and hardware drivers are all ARM-specific. QEMU emulates the hardware, so it runs on any host architecture.
 
 ## Features
 
@@ -33,7 +33,10 @@ Boots with 4 SMP cores via PSCI, drops from EL2 to EL1, sets up the MMU with spl
   - GICv2 interrupt controller (distributor + per-core CPU interface)
   - ARM generic timer (EL1 physical, per-core PPI)
   - PL011 UART (TX, SMP-safe)
-  - Virtio-mmio v2: block device (read sectors) + console (TX)
+  - Virtio-mmio v2: block (read sectors), console (TX), GPU (2D display)
+- **Display pipeline** — init → DMA framebuffer → shared memory → compositor → GPU driver → pixels on screen
+  - Compositor draws demo scene using drawing library (fill, rect, text, blit)
+  - GPU driver presents via virtio-gpu 2D protocol (6 commands)
 
 ## Prerequisites
 
@@ -52,7 +55,7 @@ cargo run --release   # builds, then launches QEMU
 ## Testing
 
 ```shell
-# Host-side unit tests (EEVDF, scheduling contexts, handles, ELF, DTB, VMA, buddy, slab, heap, heap routing, ASID, virtqueue):
+# Host-side unit tests (257 tests: EEVDF, scheduling contexts, handles, ELF, DTB, VMA, buddy, slab, heap, heap routing, ASID, virtqueue, drawing, waitable):
 cd system/test && cargo test -- --test-threads=1
 
 # QEMU smoke test (builds, boots, checks output):
@@ -65,24 +68,44 @@ cd system/kernel && ./smoke-test.sh
 🥾 booting…
   💾 memory - 256mib ram, w^x page tables
   📦 heap - 16mib (linked-list + slab)
-  🌳 dtb - 39 devices discovered
-  🧩 frames - 60885 free (buddy allocator, 4k–4m)
-  ⚡ interrupts - gic v2
+  🌳 dtb - 40 devices discovered
+  🧩 frames - 60309 free (buddy allocator, 4k–4m)
+  ⚡ interrupts - gic v2 (dtb)
   📋 scheduler - eevdf + scheduling contexts
-  🔌 virtio - blk capacity=2048 sectors
-     sector 0 - HELLO VIRTIO BLK
-  🔀 processes - init + echo, ipc channel
+  🔌 virtio - 2 devices found
+  🔀 processes - init started with device manifest
   🧵 smp - booting secondaries via psci
   ✓ core 1 online
   ✓ core 2 online
   ✓ core 3 online
   ⏱️  timer - 250hz
 🥾 booted.
-echo recv: ping
-init recv: pong
+  🔧 init - proto-os-service starting
+     2 devices in manifest
+     device 0: id=16
+     spawning driver (elf 744816 bytes)
+       ...
+     device 1: id=2
+     spawning driver (elf 743272 bytes)
+       ...
+     spawned driver: blk
+     setting up display pipeline
+  🔌 virtio - blk capacity=2048 sectors
+     sector 0 - HELLO VIRTIO BLK
+     framebuffer: 1024x768 (4096 KiB)
+       ...
+     compositor started, waiting
+  🎨 compositor - starting
+     scene drawn, signaling init
+     compositor done, starting gpu driver
+  🖥️  virtio-gpu ready
+     display 1280x800
+     presented to display
+     display pipeline complete
+  🔧 init - done
 ```
 
-Boot initializes each subsystem in dependency order and logs progress. The emoji prefix identifies the subsystem. Secondary cores report in asynchronously (order may vary). Two user processes exchange messages over shared-memory IPC, then exit cleanly.
+Boot initializes each subsystem in dependency order and logs progress. The emoji prefix identifies the subsystem. Secondary cores report in asynchronously (order may vary). The kernel spawns only init, which reads the device manifest and orchestrates everything: spawns virtio-blk (reads a sector), allocates a shared framebuffer, spawns a compositor (draws a demo scene), then starts the GPU driver to present it to the QEMU display.
 
 ## Source layout
 
@@ -111,9 +134,12 @@ src/
   scheduling_context.rs    — pure budget/period logic (charge, replenish)
   scheduler.rs             — SMP-aware EEVDF scheduler, scheduling context management, per-core state
   thread.rs                — thread struct, state machine (Ready/Running/Blocked/Exited), scheduling fields
-  syscall.rs               — syscall dispatcher (12 syscalls: exit, write, yield, handle_close,
-                              channel_signal, channel_wait, scheduling_context_{create,borrow,return,bind},
-                              futex_wait, futex_wake)
+  metrics.rs               — atomic counters (syscalls, page faults, context switches, lock contention)
+  process_exit.rs          — process exit notification (waitable handles)
+  thread_exit.rs           — thread exit notification (waitable handles)
+  waitable.rs              — generic WaitableRegistry<Id> (shared pattern for exit/timer/interrupt)
+  interrupt.rs             — interrupt registration table (IRQ forwarding to userspace handles)
+  syscall.rs               — syscall dispatcher (25 syscalls)
   per_core.rs              — per-core data structures (online flag, core ID via MPIDR)
   power.rs                 — PSCI CPU_ON wrapper (HVC #0) for secondary core boot
   interrupt_controller.rs  — GICv2 distributor + CPU interface (per-core init)
@@ -122,19 +148,22 @@ src/
   memory_mapped_io.rs      — volatile MMIO helpers (read8/read32/write8/write32)
 build.rs                   — compiles user + driver binaries → ELF at build time
 
-../platform/drivers/
-  virtio-blk/main.rs       — userspace virtio block driver (interrupt-driven, reads sectors)
-  virtio-console/main.rs   — userspace virtio console driver (TX, interrupt-driven)
-  virtio-gpu/main.rs       — userspace virtio-gpu 2D driver (6 core commands, test pattern)
+../platform/
+  init/main.rs             — proto-OS-service (embeds all ELFs, spawns drivers + compositor, display pipeline)
+  compositor/main.rs       — toy compositor (draws demo scene into shared framebuffer)
+  drivers/
+    virtio-blk/main.rs     — userspace virtio block driver (interrupt-driven, reads sectors)
+    virtio-console/main.rs — userspace virtio console driver (TX, interrupt-driven)
+    virtio-gpu/main.rs     — userspace virtio-gpu 2D driver (6 core commands, presents framebuffer)
 
 ../library/
   sys/lib.rs               — userspace syscall wrappers + panic handler (compiled as rlib)
   virtio/lib.rs            — virtio MMIO transport + split virtqueue (compiled as rlib)
+  drawing/lib.rs           — drawing primitives + 8×16 bitmap font (compiled as rlib)
   link.ld                  — shared userspace linker script (base VA 0x400000)
 
 ../user/
-  init/main.rs             — init process (IPC ping initiator)
-  echo/main.rs             — echo process (IPC pong responder)
+  echo/main.rs             — echo process (IPC pong responder, demo)
 
 ../test/
   tests/eevdf.rs           — EEVDF algorithm tests (eligibility, selection, vruntime)
@@ -149,9 +178,12 @@ build.rs                   — compiles user + driver binaries → ELF at build 
   tests/heap_routing.rs    — heap↔slab dealloc routing (cross-allocator contamination prevention)
   tests/asid.rs            — ASID allocator tests (generation rollover)
   tests/virtqueue.rs       — virtqueue descriptor chain validation tests
+  tests/channel.rs         — channel creation and shared page allocation tests
+  tests/futex.rs           — futex wait/wake tests (PA-keyed)
+  tests/drawing.rs         — drawing primitives + font rendering tests (41 tests)
   tests/waitable.rs        — WaitableRegistry tests (readiness, notify, destroy)
 
-smoke-test.sh              — QEMU boot + output verification (19 checks)
+smoke-test.sh              — QEMU boot + output verification
 ```
 
 ## Scope & Limitations
@@ -159,17 +191,18 @@ smoke-test.sh              — QEMU boot + output verification (19 checks)
 **Hardware target:**
 
 - QEMU `virt` machine (aarch64) with GICv2
-- DTB parser discovers hardware but addresses not yet wired to device init
+- DTB parser discovers hardware; GIC + virtio-mmio addresses wired to device init
 - Virtio-mmio v2 transport (requires QEMU `-global virtio-mmio.force-legacy=false`)
 - 4 cores tested, up to 8 supported (via `MAX_CORES` constant)
 
 **Current limitations:**
 
-- Virtio block: read-only (no writes), polling (no interrupts)
+- Virtio block: read-only (no writes)
 - Virtio console: TX only (no RX)
 - Global scheduler lock (fine for ≤8 cores)
 - 256-slot handle table per process (fixed, no growth)
 - Linked-list heap for allocations >2 KiB (slab for ≤2 KiB)
+- User fault handler doesn't reliably print diagnostics before killing processes
 
 **Not targeted:** x86_64, POSIX, network stack, hard realtime.
 

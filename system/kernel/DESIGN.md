@@ -721,13 +721,17 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 ---
 
-### 9.8 Memory Sharing (Phase 7)
+### 9.8 Memory Sharing (Phase 7) ✅
 
-**Goal:** Allow the OS service to map shared memory into editor processes. Foundation for the document memory model.
+**Goal:** Allow processes to share physical memory. Foundation for the display pipeline (framebuffer sharing) and future document memory model.
 
-**Partially blocked on filesystem design.** The kernel primitive is straightforward: "map a physical page into another process's address space." Policy (which pages, COW semantics) lives in the OS service. Can implement the primitive before the filesystem design settles.
+**Approach:** `memory_share(target_handle, pa, page_count)` syscall (#24) maps a contiguous physical range into a target process's shared memory region (`SHARED_MEMORY_BASE` at 3 GiB, up to 4 GiB). Target must be suspended (not yet started). Returns the VA in the target's address space. Used by init to share the DMA-allocated framebuffer with the compositor.
 
-**Depends on:** Phase 2a. Full design depends on filesystem COW decisions.
+**Per-process channel SHM bump allocator:** Each process tracks its own `next_channel_shm_va` (initialized to `CHANNEL_SHM_BASE`). When a channel endpoint is sent via `handle_send` or created via `channel_create`, the shared page is mapped at the next sequential VA. This ensures the first channel a process receives is always at `CHANNEL_SHM_BASE` (0x4000_0000), regardless of global channel indices.
+
+**Implementation:** `syscall.rs` (sys_memory_share), `address_space.rs` (map_channel_page bump allocator, map_shared_range for memory_share), `paging.rs` (SHARED_MEMORY_BASE/END, CHANNEL_SHM_END constants), `sys` library (memory_share wrapper).
+
+**Depends on:** Phase 2a.
 
 ---
 
@@ -767,6 +771,7 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 | 21  | process_start             | Implemented |
 | 22  | handle_send               | Implemented |
 | 23  | process_kill              | Implemented |
+| 24  | memory_share              | Implemented |
 
 ---
 

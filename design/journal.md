@@ -58,24 +58,25 @@ Open questions: system gesture vs shell input boundary, compound editor nesting 
 ### Display engine architecture
 
 **Informs:** Decision #11 (Rendering Technology), Decision #15 (Layout Engine), Decision #17 (Interaction Model)
-**Status:** Architecture sketched (2026-03-09), GPU driver done (2026-03-10), drawing library done (2026-03-10), compositor design explored (2026-03-10)
-**Context:** Next milestone is graphical output on QEMU virt. virtio-gpu (paravirtual, 2D protocol) is the right device — reuses existing virtio infrastructure. Key architectural conclusions:
+**Status:** Complete (2026-03-10). All three build steps done. Full display pipeline working end-to-end.
+**Context:** Graphical output on QEMU virt. virtio-gpu (paravirtual, 2D protocol) reuses existing virtio infrastructure. Key architectural conclusions:
 
 - **Surface-based trait, not framebuffer.** A raw framebuffer (`map() → &mut [u8]`) is specific to software rendering — GPU acceleration means the CPU never touches pixels. The universal abstraction is surfaces and operations: `create_surface`, `destroy_surface`, `fill_rect`, `blit`, `present`. The driver implements this trait; whether it uses CPU loops or GPU commands internally is the driver's business.
 - **Display vs rendering are separate concerns in one device.** Display = get a buffer to the screen (last mile). Rendering = fill the buffer (compositing). Both always happen. GPU acceleration changes who fills the buffer (GPU vs CPU), not the display path. A GPU chip does both; one driver.
 - **Three components, one interface.** Compositor (above) works with surfaces, calls trait methods. Driver (below) translates trait methods to hardware operations. The trait is the boundary — a contract, not a component. The compositor doesn't know if the driver uses CPU loops, GPU commands, or anything else. Software rendering is a fallback strategy inside the driver, not a separate thing the OS selects.
 - **virtio-gpu overhead is inherent, not architectural.** Performance hit is the VM boundary (guest→host copy). With real hardware, the display controller reads directly from the buffer via DMA scanout — no copy. The abstraction doesn't add overhead; virtio does.
-- **Build plan:** (a) virtio-gpu userspace driver ✅ DONE, (b) drawing primitives + bitmap font ✅ DONE, (c) toy compositor. Everything above the driver is portable to real hardware.
+- **Build plan:** (a) virtio-gpu userspace driver ✅, (b) drawing primitives + bitmap font ✅, (c) toy compositor ✅. All done. Everything above the driver is portable to real hardware.
 - **Step (a) done (2026-03-10):** `system/platform/drivers/virtio-gpu/main.rs`. All 6 core 2D commands. Test pattern at 1280x800.
-- **Step (b) done (2026-03-10):** `system/library/drawing/` — pure no_std drawing library. Surface abstraction with RGBA canonical format (encode/decode at pixel boundary). Primitives: fill_rect, draw_rect, draw_line (Bresenham), draw_hline/vline, set/get_pixel. Embedded 8×16 VGA bitmap font with draw_glyph/draw_text. 37 host-side tests.
-- **Step (c) compositor design (2026-03-10):** Explored in depth. See compositor design thread below.
+- **Step (b) done (2026-03-10):** `system/library/drawing/` — pure no_std drawing library. Surface abstraction with RGBA canonical format (encode/decode at pixel boundary). Primitives: fill_rect, draw_rect, draw_line (Bresenham), draw_hline/vline, set/get_pixel, blit. Embedded 8×16 VGA bitmap font with draw_glyph/draw_text. 41 host-side tests.
+- **Step (c) done (2026-03-10):** `system/platform/compositor/main.rs` — toy compositor draws demo scene (title bar, 3 colored panels with text, status bar) into shared framebuffer. `system/platform/init/main.rs` — proto-OS-service that embeds all ELFs, reads device manifest, spawns all processes, orchestrates display pipeline. Kernel `memory_share` syscall (#24) enables zero-copy framebuffer sharing. Full pipeline: init → DMA alloc → share with compositor → compositor draws → signal → GPU driver presents → pixels on screen.
+- **Alignment bug found (2026-03-10):** u64 `read_volatile` from 4-byte-aligned address is UB in Rust. Caused silent process death. Fixed by padding device manifest entries to 8-byte alignment. User fault handler didn't print diagnostic before killing process — known kernel bug.
 
-Open questions: exact trait API (needs compositor to inform it), double buffering strategy, compositor↔driver shared memory (requires kernel Phase 7), font choice for production (Spleen PSF2 over hand-rolled VGA font), trait naming.
+Open questions: exact surface trait API, double buffering strategy, font choice for production (Spleen PSF2 over hand-rolled VGA font), trait naming.
 
 ### Compositor design
 
 **Informs:** Decision #11 (Rendering Technology), Decision #14 (Compound Documents), Decision #15 (Layout Engine), Decision #17 (Interaction Model)
-**Status:** Mental model established (2026-03-10), key constraints identified, no code yet
+**Status:** Mental model established (2026-03-10), toy compositor implemented (2026-03-10)
 **Context:** Explored the compositor's role, architecture, and how it differs from traditional desktop compositors. Key findings:
 
 1. **Compositor = function from surface tree to pixel buffer.** Structurally identical to React's render pipeline: declarative tree (manifest = component tree) → damage calculation (= reconciliation/diff) → minimal pixel updates (= commit). The document manifest IS the scene graph.
@@ -96,7 +97,7 @@ Open questions: exact trait API (needs compositor to inform it), double bufferin
 
 9. **Pure containment is too rigid.** Pop-out editing (drag photo out to adjust), tooltips extending beyond parent, transitions between containers — all need floating surfaces. Don't commit to pure containment. Cost of floating support is low (extra render pass), UI cases are real.
 
-Open questions: exact scene graph API, how layout engine and compositor interface (does layout produce the tree that compositor renders?), shared memory timeline (blocked on kernel Phase 7), React-style damage diffing (how much complexity is justified for 3-4 z-layers?), whether compositor is part of OS service or separate.
+Open questions: exact scene graph API, how layout engine and compositor interface (does layout produce the tree that compositor renders?), React-style damage diffing (how much complexity is justified for 3-4 z-layers?), whether compositor is part of OS service or separate. Shared memory is no longer blocked — kernel Phase 7 (`memory_share` syscall #24) is done.
 
 ### COW Filesystem
 
