@@ -923,17 +923,17 @@ Panic handler calls `metrics::panic_dump()` which prints per-core summaries usin
 
 ---
 
-### 10.9 Watchdog via Scheduling Context Budgets
+### 10.9 Watchdog via Scheduling Context Budgets — DONE
 
 **Problem:** If a userspace driver enters a spin loop (e.g., `wait_used` before 10.3 is done, or a bug), that core is permanently burned. No scheduling context means unlimited budget — the thread runs forever until the next timer tick yields, but it immediately wins the next selection too (EEVDF gives it low vruntime from not running during the brief yield).
 
-**Fix:** Two parts:
+**Fix applied:** Two parts:
 
-1. **Require scheduling contexts for all user threads.** `spawn_user` and `spawn_user_suspended` should bind a default context if none is provided. The OS service (future) sets explicit budgets; kernel-spawned processes get a generous default (e.g., 10ms/50ms — 20% of one core).
+1. **Default scheduling context for all kernel-spawned user threads.** A shared default context (10ms/50ms — 20% of one core) is created during `scheduler::init()`. Both `spawn_user` and `spawn_user_suspended` bind it to new threads via `bind_default_context`, incrementing the ref_count. The OS service (future) can override with content-type-aware budgets via the existing `create_scheduling_context`/`bind_scheduling_context` syscalls.
 
-2. **Budget exhaustion → yield.** Currently, `has_budget` returns false for exhausted threads, and `select_best` skips them. This works — the thread isn't selected until replenishment. But the currently-running thread isn't preempted mid-slice when its budget runs out. Add a check in `schedule_inner`: if the current thread's context is exhausted, force preemption (don't re-run it even if no other thread is ready — run idle instead).
+2. **Budget exhaustion → idle.** `schedule_inner`'s "re-run old thread" branch now checks `has_budget`. If the current thread exhausted its budget and no other thread has budget either (`select_best` returns None), the scheduler runs idle instead of the exhausted thread. The thread resumes on the next replenishment.
 
-**Scope:** `scheduler.rs` (spawn paths, schedule_inner). `main.rs` (spawn_virtio_driver creates a scheduling context for each driver). ~30 lines.
+**Scope:** `scheduler.rs` only. ~25 lines added. Default context constants (`DEFAULT_BUDGET_NS`, `DEFAULT_PERIOD_NS`), `bind_default_context` helper, `default_context_id` field in State, budget check in `schedule_inner`'s re-run branch.
 
 **Depends on:** 10.2 (ref counting fix — budget contexts must survive handle close while bound).
 

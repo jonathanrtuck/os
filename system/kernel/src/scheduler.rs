@@ -56,6 +56,10 @@ struct State {
     scheduling_contexts: Vec<Option<SchedulingContextSlot>>,
     /// Freed scheduling context IDs available for reuse.
     free_context_ids: Vec<u32>,
+    /// Default scheduling context bound to all kernel-spawned user threads.
+    /// Prevents runaway threads from burning a core indefinitely.
+    /// Budget: 10ms per 50ms period (20% of one core).
+    default_context_id: Option<SchedulingContextId>,
 }
 
 /// Information collected by `kill_process` for cleanup outside the scheduler lock.
@@ -120,6 +124,7 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
     next_process_id: 0,
     scheduling_contexts: Vec::new(),
     free_context_ids: Vec::new(),
+    default_context_id: None,
 });
 
 impl ExitInfo {
@@ -135,6 +140,16 @@ impl ExitInfo {
     }
 }
 
+/// Bind the default scheduling context to a kernel-spawned user thread.
+/// Increments the context's ref_count so it survives handle closes.
+fn bind_default_context(s: &mut State, thread: &mut Thread) {
+    if let Some(ctx_id) = s.default_context_id {
+        if let Some(Some(slot)) = s.scheduling_contexts.get_mut(ctx_id.0 as usize) {
+            slot.ref_count += 1;
+            thread.scheduling.context_id = Some(ctx_id);
+        }
+    }
+}
 /// Charge elapsed time to the old thread's EEVDF vruntime and scheduling context.
 fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
     if thread.is_idle() || thread.scheduling.last_started == 0 {
@@ -307,8 +322,8 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         s.cores[core].current = Some(new_thread);
 
         new_ctx
-    } else if old_thread.is_ready() {
-        // No other runnable threads — continue with the old one.
+    } else if old_thread.is_ready() && has_budget(&old_thread, &s.scheduling_contexts) {
+        // No other runnable threads and old thread has budget — continue with it.
         old_thread.activate();
         old_thread.scheduling.last_started = now;
 
@@ -877,6 +892,10 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     }
 }
 /// Initialize the scheduler with core 0's boot thread.
+/// Default scheduling context: 10ms budget per 50ms period (20% of one core).
+const DEFAULT_BUDGET_NS: u64 = 10_000_000;
+const DEFAULT_PERIOD_NS: u64 = 50_000_000;
+
 pub fn init() {
     let mut s = STATE.lock();
     let boot_thread = Thread::new_boot();
@@ -885,6 +904,19 @@ pub fn init() {
     s.cores[0].current = Some(boot_thread);
     // Create idle thread for core 0 (used when no runnable threads exist).
     s.cores[0].idle = Some(Thread::new_idle(0));
+
+    // Create the default scheduling context for kernel-spawned user threads.
+    // ref_count starts at 1 (the State itself holds a logical reference).
+    let now = now_ns();
+    let context = SchedulingContext::new(DEFAULT_BUDGET_NS, DEFAULT_PERIOD_NS, now);
+    let slot = SchedulingContextSlot {
+        context,
+        ref_count: 1,
+    };
+
+    s.scheduling_contexts.push(Some(slot));
+
+    s.default_context_id = Some(SchedulingContextId(0));
 
     // SAFETY: ctx_ptr points to the Context at offset 0 of the boot thread,
     // which lives in a Box (stable address) stored in the scheduler state.
@@ -1187,7 +1219,9 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
 
     process.thread_count += 1;
 
-    let thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top);
+    let mut thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top);
+
+    bind_default_context(&mut s, &mut thread);
 
     s.queue.ready.push(thread);
 
@@ -1210,7 +1244,9 @@ pub fn spawn_user_suspended(process_id: ProcessId, entry_va: u64, user_stack_top
 
     process.thread_count += 1;
 
-    let thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top);
+    let mut thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top);
+
+    bind_default_context(&mut s, &mut thread);
 
     s.suspended.push(thread);
 
