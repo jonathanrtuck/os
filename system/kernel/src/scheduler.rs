@@ -485,19 +485,28 @@ fn ttbr0_for(thread: &Thread) -> u64 {
 /// The caller (syscall layer) validates that `ctx_id` refers to a valid,
 /// live context via handle lookup. Returns false if the thread already has
 /// a context bound.
+///
+/// Increments the context's ref_count so the slot stays alive as long as
+/// the thread holds a bind reference. Decremented on thread exit or
+/// process kill.
 pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
 
-    // Verify context exists before borrowing thread (disjoint field access).
-    match s.scheduling_contexts.get(ctx_id.0 as usize) {
-        Some(Some(_)) => {}
+    // Verify context exists and increment ref_count (disjoint field access).
+    match s.scheduling_contexts.get_mut(ctx_id.0 as usize) {
+        Some(Some(entry)) => entry.ref_count += 1,
         _ => return false,
     }
 
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
     if thread.scheduling.context_id.is_some() {
+        // Already bound — undo the ref_count increment.
+        s.scheduling_contexts[ctx_id.0 as usize]
+            .as_mut()
+            .unwrap()
+            .ref_count -= 1;
         return false;
     }
 
@@ -544,13 +553,16 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
 /// Saves the current context and switches to the borrowed one. The caller
 /// (syscall layer) validates that `ctx_id` refers to a valid, live context
 /// via handle lookup.
+///
+/// Increments the borrowed context's ref_count. Decremented on return
+/// (`return_scheduling_context`) or thread exit.
 pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
 
-    // Verify context exists before borrowing thread (disjoint field access).
-    match s.scheduling_contexts.get(ctx_id.0 as usize) {
-        Some(Some(_)) => {}
+    // Verify context exists and increment ref_count (disjoint field access).
+    match s.scheduling_contexts.get_mut(ctx_id.0 as usize) {
+        Some(Some(entry)) => entry.ref_count += 1,
         _ => return false,
     }
 
@@ -558,6 +570,12 @@ pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 
     // Can't borrow if already borrowing.
     if thread.scheduling.saved_context_id.is_some() {
+        // Undo the ref_count increment.
+        s.scheduling_contexts[ctx_id.0 as usize]
+            .as_mut()
+            .unwrap()
+            .ref_count -= 1;
+
         return false;
     }
 
@@ -709,12 +727,20 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let exit_info = {
         let mut s = STATE.lock();
 
-        // Auto-return borrowed scheduling context on exit.
+        // Release all scheduling context bind/borrow refs on exit.
         {
             let thread = s.cores[core].current.as_mut().expect("no current thread");
+            let ctx = thread.scheduling.context_id.take();
+            let saved = thread.scheduling.saved_context_id.take();
 
-            if let Some(saved) = thread.scheduling.saved_context_id.take() {
-                thread.scheduling.context_id = Some(saved);
+            // Release borrowed context ref (if borrowing).
+            if let Some(id) = ctx {
+                release_context_inner(&mut s, id);
+            }
+            // Release bound context ref (stashed in saved_context_id during borrow,
+            // or already released above if not borrowing).
+            if let Some(id) = saved {
+                release_context_inner(&mut s, id);
             }
         }
 
@@ -919,13 +945,25 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
     let mut killed_threads = Vec::new();
     let mut running_count: u32 = 0;
+
+    // Helper: release a thread's scheduling context bind/borrow refs.
+    fn release_thread_contexts(s: &mut State, thread: &mut Thread) {
+        if let Some(id) = thread.scheduling.context_id.take() {
+            release_context_inner(s, id);
+        }
+        if let Some(id) = thread.scheduling.saved_context_id.take() {
+            release_context_inner(s, id);
+        }
+    }
+
     // Remove target threads from ready queue.
     let mut i = 0;
 
     while i < s.queue.ready.len() {
         if s.queue.ready[i].process_id == Some(target_pid) {
-            let thread = s.queue.ready.swap_remove(i);
+            let mut thread = s.queue.ready.swap_remove(i);
 
+            release_thread_contexts(&mut s, &mut thread);
             killed_threads.push(thread.id());
         } else {
             i += 1;
@@ -937,8 +975,9 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
     while i < s.blocked.len() {
         if s.blocked[i].process_id == Some(target_pid) {
-            let thread = s.blocked.swap_remove(i);
+            let mut thread = s.blocked.swap_remove(i);
 
+            release_thread_contexts(&mut s, &mut thread);
             killed_threads.push(thread.id());
         } else {
             i += 1;
@@ -950,24 +989,41 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
     while i < s.suspended.len() {
         if s.suspended[i].process_id == Some(target_pid) {
-            let thread = s.suspended.swap_remove(i);
+            let mut thread = s.suspended.swap_remove(i);
 
+            release_thread_contexts(&mut s, &mut thread);
             killed_threads.push(thread.id());
         } else {
             i += 1;
         }
     }
 
-    // Mark running threads on other cores as Exited.
+    // Mark running threads on other cores as Exited. Collect context IDs to
+    // release after the loop (can't call release_context_inner while iterating
+    // s.cores due to borrow conflict).
+    let mut deferred_context_releases: Vec<SchedulingContextId> = Vec::new();
+
     for core_state in s.cores.iter_mut() {
         if let Some(t) = &mut core_state.current {
             if t.process_id == Some(target_pid) {
                 killed_threads.push(t.id());
+
+                if let Some(id) = t.scheduling.context_id.take() {
+                    deferred_context_releases.push(id);
+                }
+                if let Some(id) = t.scheduling.saved_context_id.take() {
+                    deferred_context_releases.push(id);
+                }
+
                 t.mark_exited();
 
                 running_count += 1;
             }
         }
+    }
+
+    for id in deferred_context_releases {
+        release_context_inner(&mut s, id);
     }
 
     // Drain handle table and categorize resources for cleanup outside the lock.
@@ -1028,6 +1084,9 @@ pub fn release_scheduling_context(ctx_id: SchedulingContextId) {
     release_context_inner(&mut s, ctx_id);
 }
 /// Return a borrowed scheduling context, restoring the saved one.
+///
+/// Decrements the borrowed context's ref_count (balances the increment
+/// in `borrow_scheduling_context`).
 pub fn return_scheduling_context() -> bool {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
@@ -1035,7 +1094,15 @@ pub fn return_scheduling_context() -> bool {
 
     match thread.scheduling.saved_context_id.take() {
         Some(saved) => {
+            let borrowed = thread.scheduling.context_id;
+
             thread.scheduling.context_id = Some(saved);
+
+            // Release the borrow ref.
+            if let Some(id) = borrowed {
+                release_context_inner(&mut s, id);
+            }
+
             true
         }
         None => false, // Not borrowing.
