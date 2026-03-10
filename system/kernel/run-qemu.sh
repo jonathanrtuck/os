@@ -33,6 +33,7 @@ QEMU_COMMON=(
     -global virtio-mmio.force-legacy=false
     -drive "file=$DISK_IMG,if=none,format=raw,id=hd0"
     -device virtio-blk-device,drive=hd0
+    -device virtio-gpu-device
 )
 
 # Generate DTB if missing. Uses minimal machine config (no disk needed —
@@ -48,10 +49,21 @@ if [ ! -f "$DTB_FILE" ]; then
     mv "${DTB_FILE}.trim" "$DTB_FILE"
 fi
 
-exec qemu-system-aarch64 \
-    -machine "$QEMU_MACHINE" \
-    "${QEMU_COMMON[@]}" \
-    -nographic \
-    -serial mon:stdio \
-    -device "loader,file=$DTB_FILE,addr=0x40000000,force-raw=on" \
-    -kernel "$KERNEL"
+# With virtio-gpu, we need a graphical display window. Use -nographic only
+# when GPU_DISPLAY=0 (headless mode, e.g. CI). Default: display enabled.
+if [ "${GPU_DISPLAY:-1}" = "0" ]; then
+    exec qemu-system-aarch64 \
+        -machine "$QEMU_MACHINE" \
+        "${QEMU_COMMON[@]}" \
+        -nographic \
+        -serial mon:stdio \
+        -device "loader,file=$DTB_FILE,addr=0x40000000,force-raw=on" \
+        -kernel "$KERNEL"
+else
+    exec qemu-system-aarch64 \
+        -machine "$QEMU_MACHINE" \
+        "${QEMU_COMMON[@]}" \
+        -serial mon:stdio \
+        -device "loader,file=$DTB_FILE,addr=0x40000000,force-raw=on" \
+        -kernel "$KERNEL"
+fi

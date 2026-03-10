@@ -26,6 +26,22 @@ Active questions we've started exploring but haven't resolved. Each thread links
 **Status:** Preliminary mapping done (2026-03-09), no interfaces designed yet
 **Context:** Mapped all inter-component interfaces by boundary. The OS service is where interface design effort concentrates — edit protocol, metadata queries, interaction model, translator interface. The kernel surface (12 syscalls) is small and stable. Internal OS service interfaces (renderer, layout engine, compositor, scheduling policy) matter for implementation but can evolve freely. Key finding: scheduling policy needs no separate interface (falls out of edit protocol + kernel syscalls). Web engine adapter is not separate from translator interface. See insights log for full table.
 
+### Shell architecture and system gestures
+
+**Informs:** Decision #17 (Interaction Model), OS service interface design
+**Status:** Under active exploration (2026-03-10/11)
+**Context:** The shell's architectural placement was explored across two sessions. Key findings:
+
+1. **Blue-layer symmetry:** Trust (kernel/OS service/tools) and complexity (red/blue/black) are orthogonal axes. The blue adaptation layer wraps the core on all sides — drivers below (adapt hardware), translators at sides (adapt formats), editors + shell above (adapt users). Editors are "user drivers."
+
+2. **Shell is blue-layer but not purely modal.** Initially proposed the shell as an untrusted tool identical to editors, active when no editor is (modal). But switching documents while in an editor requires the shell to intercept input — so the shell is ambient, not modal. Revised model: system gestures (switch, invoke search, close) baked into OS service input routing (always work, not pluggable); navigation UI (what search looks like, document list) provided by shell (pluggable, restartable).
+
+3. **One-document-at-a-time leaning.** UI model closer to macOS fullscreen Spaces than windowed desktop. View one document at a time, switch through the shell. Not settled.
+
+4. **Compound document editing tension.** "Editors bind to content types" + "one editor per document" conflict for compound documents. Initial instinct: editor nesting (same text editor used within presentations, standalone text docs, etc.). But nesting creates complexity. Unresolved — needs dedicated exploration.
+
+Open questions: system gesture vs shell input boundary, compound editor nesting model, whether content-type interaction primitives (cursor/selection/playhead from OS service) need to become richer editing primitives for compound documents to work.
+
 ### View/edit in the CLI
 
 **Informs:** Decision #17 (Interaction Model)
@@ -308,8 +324,8 @@ Interface map by boundary:
 | -------------------------- | ------------------------------------------------------------- | ------------------- | ------------------ |
 | Kernel ↔ userland          | Syscall API (24 syscalls, typed handles)                      | OS service, drivers | Mostly designed    |
 | OS service ↔ Editors       | Edit protocol (beginOp/endOp, state, input)                   | Editors             | Partially designed |
-| OS service ↔ Users         | Interaction model (CLI + GUI)                                 | Users               | Unsettled (#17)    |
-| OS service ↔ Editors/Users | Metadata query API (document discovery)                       | Editors, users      | Sketched (#7)      |
+| OS service ↔ Shell         | Shell interface (navigation, document lifecycle, queries)      | Shell               | Partially scoped   |
+| OS service ↔ Editors/Shell | Metadata query API (document discovery)                       | Editors, shell      | Sketched (#7)      |
 | Blue ↔ Black               | Translator interface (format conversion, includes web engine) | All translators     | Blank              |
 | Blue ↔ Black               | Driver interface (device access)                              | Device drivers      | Sketched           |
 | OS service internal        | Renderer, layout engine, compositor, scheduling policy        | —                   | Blank              |
@@ -341,6 +357,22 @@ Audit of all ~99 `unsafe` blocks in the kernel found zero unnecessary uses. All 
 ### Microkernel by convergence, not ideology (2026-03-08)
 
 Each kernel sub-decision independently pushed complexity outward: drivers to userspace (fault isolation + unsafe minimization), filesystem to userspace (complex code outside TCB, hot path in kernel VM anyway), rendering to the OS service (not in-kernel), editors to separate processes (untrusted). What remains is exactly the microkernel set: address spaces, threads, IPC, scheduling, interrupt forwarding, handles. This wasn't a top-down decision to "build a microkernel" — it's what fell out of applying the project's principles (simple connective tissue, unsafe minimization, fault isolation, one model not two) to each sub-decision in turn. The kernel's identity emerged from its constraints: it multiplexes hardware resources behind handles and provides a single event-driven wait mechanism. Everything semantic lives in userspace. The L4 cautionary tale ("total complexity conserved") still applies — but the complexity displacement is justified at each boundary by specific architectural arguments, not by microkernel ideology.
+
+### Trust and complexity are orthogonal axes (2026-03-10)
+
+Red/blue/black (complexity: where does messiness live?) and kernel/OS service/tools (trust: what happens if it crashes?) are independently useful models. Conflating them creates apparent paradoxes — "where do editors go?" — because editors are messy (blue) but untrusted (not black), and those seem to point in different directions. Separating the axes reveals the architecture's symmetry: the core is both clean and trusted, adapters are both messy and untrusted, but for different reasons. The kernel is clean through ignorance. The OS service is clean through design. Drivers are messy because hardware is messy. Editors are messy because users are unpredictable.
+
+### The blue layer wraps the core on all sides (2026-03-10)
+
+The adaptation layer isn't just below (hardware drivers). The user is external reality too — unpredictable, shaped by expectations from other systems. Editors are "user drivers": they adapt human intent into the structured edit protocol, just as display drivers adapt device registers into the surface trait. `beginOperation/endOperation` is to editors what `create_surface/fill_rect/present` is to drivers. The OS core sits in the middle, semantically ignorant in both directions. This completes a symmetry: below (drivers adapt hardware), sides (translators adapt formats), above (editors and shell adapt users).
+
+### The shell is a tool, not part of the OS (2026-03-10)
+
+The shell (GUI/CLI) is architecturally identical to editors — an untrusted EL0 process in the blue layer. It binds to "system state" the same way a text editor binds to `text/*`. It translates navigational intent (find, open, switch) into OS service operations (metadata queries, document lifecycle). The OS service doesn't know or care what the interaction *feels like* — the shell owns the UX, the OS owns the mechanism. If the shell crashes, the OS service provides a recovery fallback (same pattern as rendering a document with no editor attached). The shell is pluggable, though the OS will be tuned toward its primary shell's needs.
+
+### User input always goes to a tool (2026-03-10)
+
+There is always an active tool. The OS service routes input; it never interprets it. When an editor is active, it receives modification input. When no editor is active, the shell receives navigational input. This extends the editor model (one active per document) to the system level: one active tool, period. The OS service has no "bare" input handling mode. This makes the interaction model a shell design question, not an OS service design question — same separation as everywhere else (OS provides mechanism, tools bring semantics).
 
 ### Security as a side effect of good architecture (2026-03-07)
 

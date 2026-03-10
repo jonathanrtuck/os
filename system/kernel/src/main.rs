@@ -91,6 +91,7 @@ const VIRTIO_MMIO_COUNT: usize = 32;
 const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
 const VIRTIO_DEVICE_BLK: u32 = 2;
 const VIRTIO_DEVICE_CONSOLE: u32 = 3;
+const VIRTIO_DEVICE_GPU: u32 = 16;
 
 /// Info discovered about a virtio-mmio device.
 struct VirtioDeviceInfo {
@@ -109,6 +110,7 @@ static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
 static ECHO_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/echo.elf"));
 static VIRTIO_BLK_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-blk.elf"));
 static VIRTIO_CONSOLE_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-console.elf"));
+static VIRTIO_GPU_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/virtio-gpu.elf"));
 
 /// Boot secondary cores via PSCI CPU_ON.
 ///
@@ -371,6 +373,7 @@ fn spawn_virtio_drivers(device_table: Option<&device_tree::DeviceTable>) {
             let elf = match dev.device_id {
                 VIRTIO_DEVICE_BLK => VIRTIO_BLK_ELF,
                 VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
+                VIRTIO_DEVICE_GPU => VIRTIO_GPU_ELF,
                 id => {
                     serial::puts("  🔌 virtio - unknown id=");
                     serial::put_u32(id);

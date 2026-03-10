@@ -1,9 +1,9 @@
 [package]
-name = "host-tests"
+name = "test"
 version = "0.1.0"
 edition = "2021"
 
 # Host-side unit tests for pure kernel modules (handle table, ELF parser,
-# VMA, buddy allocator, slab). Lives outside system/kernel/ to avoid
-# inheriting its aarch64-unknown-none target config.
+# VMA, buddy allocator, slab). Separate crate because kernel/.cargo/config.toml
+# forces aarch64-unknown-none; tests must compile for the host target.
 # Run with `cargo test -- --test-threads=1` from this directory.

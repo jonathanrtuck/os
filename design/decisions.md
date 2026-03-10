@@ -28,7 +28,7 @@ Which decisions are stable enough to write code against? This guides when to cod
 | #14 Compound Documents | Settled   | **Behind interface** | Uniform manifest model + three-axis relationships (spatial/temporal/logical). Rendering depends on §11. Open sub-questions remain. |
 | #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                                             |
 | #16 Tech Foundation    | Partial   | **Partially safe**   | Most sub-decisions settled (incl. driver model, filesystem placement). Remaining: filesystem COW on-disk design.                   |
-| #17 Interaction Model  | Unsettled | **Not safe**         | Depends on §11, §2, §7.                                                                                                            |
+| #17 Interaction Model  | Exploring | **Not safe**         | Shell placement leaning (blue-layer, pluggable). Compound editing model unresolved. Nothing settled yet.                            |
 
 **Readiness key:**
 
@@ -526,7 +526,15 @@ This decision is being resolved incrementally through a bare-metal research spik
 
 _Tier 5. Depends on: Rendering technology, data model, file organization._
 
-Entirely unresolved. Key questions:
+### Leanings under discussion (2026-03-10/11)
+
+**Shell is blue-layer (leaning, not settled).** The shell (GUI/CLI) is an untrusted process (EL0) in the blue layer, like editors. It's pluggable — different shells can provide different interaction models on top of the same OS service interfaces. The interaction model is a shell design question, not an OS service design question. However, the shell requires *system gestures* (switch document, invoke search, close document) that must always work. Current thinking: system gestures are baked into the OS service's input routing (a handful of always-available actions), while the shell provides the visual UI for navigation (what search looks like, how documents are listed). This splits the shell into mechanism (OS service, not pluggable) and presentation (shell tool, pluggable). Needs more exploration.
+
+**One-document-at-a-time (leaning).** Strong initial inclination toward a non-windowed, non-tiled UI — you're looking at one document at a time, like macOS fullscreen Spaces but for documents. Switching documents goes through the shell. Not committed — raises questions about the shell's relationship to input routing.
+
+**Compound document editing (unresolved tension).** Three settled principles conflict for compound documents: "editors bind to content types" (one text editor for all text), "one editor per document" (modal, simple), and "OS provides content-type interaction primitives" (cursor, selection, playhead). For simple documents these coexist. For compound documents (presentation with text + images), either: (A) the compound editor handles everything including sub-content editing (violates content-type binding, re-implements text editing), (B) content-type editors nest within compound context (violates one-editor-per-document, creates nesting complexity), or (C) the OS provides rich editing primitives per content type (OS becomes much more complex). Initial instinct leans toward B (nesting) — one text editor used everywhere, including within compound documents. Needs dedicated design exploration.
+
+### Open questions
 
 - What does the "desktop" look like? Is there one?
 - How do you open a file if there's no file browser with folders?
@@ -534,7 +542,14 @@ Entirely unresolved. Key questions:
 - What does navigation between open documents look like?
 - Is it windowed, tiled, fullscreen-per-workspace, or something else?
 - What does "launching" look like without an app launcher?
-- How does the CLI integrate with the GUI?
+- How does the CLI integrate with the GUI? (Possibly one shell handles both, or separate shells for CLI and GUI)
+- Where exactly is the boundary between OS service input routing (system gestures) and shell input handling?
+- How does editor nesting work for compound documents? Who handles layout vs content? How does input routing work between levels?
+
+### Considered and rejected
+
+- **Shell as part of OS service (trusted, black):** Mixes adaptation logic (messy user-facing UI) into the clean core. The OS service becomes responsible for interaction model design, violating the principle that the OS is semantically ignorant of user intent. Blue-layer concerns contaminate black-layer code.
+- **Shell purely modal with editors (explored 2026-03-10):** Initially proposed that the shell and editors are in the same modal slot — either the shell is active or an editor is, never both. But switching documents requires the shell to intercept input while an editor is active (a gesture, shortcut, etc.). The shell must be ambient, not modal. The system gesture/shell UI split resolves this.
 
 ---
 

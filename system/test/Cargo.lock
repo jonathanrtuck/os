@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "host-tests"
+name = "test"
 version = "0.1.0"

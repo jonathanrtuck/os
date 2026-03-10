@@ -53,7 +53,7 @@ cargo run --release   # builds, then launches QEMU
 
 ```shell
 # Host-side unit tests (EEVDF, scheduling contexts, handles, ELF, DTB, VMA, buddy, slab, heap, heap routing, ASID, virtqueue):
-cd system/host-tests && cargo test -- --test-threads=1
+cd system/test && cargo test -- --test-threads=1
 
 # QEMU smoke test (builds, boots, checks output):
 cd system/kernel && ./smoke-test.sh
@@ -120,25 +120,23 @@ src/
   timer.rs                 — ARM generic timer (EL1 physical, 250 Hz, SMP per-core PPI)
   serial.rs                — PL011 UART driver (TX only, SMP-safe locking)
   memory_mapped_io.rs      — volatile MMIO helpers (read8/read32/write8/write32)
-  virtio/
-    mod.rs                 — virtio-mmio v2 transport: probe, feature negotiation, device setup
-    virtqueue.rs           — split virtqueue (descriptor table + available/used rings, DMA)
-    block.rs               — virtio block driver (read sectors via 3-descriptor chain)
-    console.rs             — virtio console driver (TX only, demo)
-build.rs                   — compiles user processes → ELF at build time
+build.rs                   — compiles user + driver binaries → ELF at build time
 
-../user/libsys/
-  lib.rs                   — userspace syscall wrappers + panic handler (compiled as rlib)
+../platform/drivers/
+  virtio-blk/main.rs       — userspace virtio block driver (interrupt-driven, reads sectors)
+  virtio-console/main.rs   — userspace virtio console driver (TX, interrupt-driven)
+  virtio-gpu/main.rs       — userspace virtio-gpu 2D driver (6 core commands, test pattern)
 
-../user/init/
-  main.rs                  — init process (IPC ping initiator)
+../library/
+  libsys/lib.rs            — userspace syscall wrappers + panic handler (compiled as rlib)
+  libvirtio/lib.rs         — virtio MMIO transport + split virtqueue (compiled as rlib)
+  link.ld                  — shared userspace linker script (base VA 0x400000)
 
-../user/echo/
-  main.rs                  — echo process (IPC pong responder)
+../user/
+  init/main.rs             — init process (IPC ping initiator)
+  echo/main.rs             — echo process (IPC pong responder)
 
-../user/link.ld            — shared userspace linker script (base VA 0x400000)
-
-../host-tests/
+../test/
   tests/eevdf.rs           — EEVDF algorithm tests (eligibility, selection, vruntime)
   tests/sched_context.rs   — scheduling context tests (budget, replenishment, charge)
   tests/handle.rs          — handle table unit tests (insert, close, rights, full table)
@@ -151,6 +149,7 @@ build.rs                   — compiles user processes → ELF at build time
   tests/heap_routing.rs    — heap↔slab dealloc routing (cross-allocator contamination prevention)
   tests/asid.rs            — ASID allocator tests (generation rollover)
   tests/virtqueue.rs       — virtqueue descriptor chain validation tests
+  tests/waitable.rs        — WaitableRegistry tests (readiness, notify, destroy)
 
 smoke-test.sh              — QEMU boot + output verification (19 checks)
 ```

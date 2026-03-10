@@ -15,18 +15,19 @@ use std::process::Command;
 const USER_PROGRAMS: &[(&str, &str, bool)] = &[
     ("init", "../user/init", false),
     ("echo", "../user/echo", false),
-    ("virtio-blk", "../user/virtio-blk", true),
-    ("virtio-console", "../user/virtio-console", true),
+    ("virtio-blk", "../platform/drivers/virtio-blk", true),
+    ("virtio-console", "../platform/drivers/virtio-console", true),
+    ("virtio-gpu", "../platform/drivers/virtio-gpu", true),
 ];
 
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let rustc = env::var("RUSTC").unwrap();
-    let link_ld = manifest_dir.join("../user/link.ld");
-    let libsys_src = manifest_dir.join("../user/libsys/lib.rs");
+    let link_ld = manifest_dir.join("../library/link.ld");
+    let libsys_src = manifest_dir.join("../library/libsys/lib.rs");
     let libsys_rlib = out_dir.join("libsys.rlib");
-    let libvirtio_src = manifest_dir.join("../user/libvirtio/lib.rs");
+    let libvirtio_src = manifest_dir.join("../library/libvirtio/lib.rs");
     let libvirtio_rlib = out_dir.join("libvirtio.rlib");
     // Step 1: compile libsys as a static library (rlib).
     let status = Command::new(&rustc)

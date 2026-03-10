@@ -14,11 +14,8 @@ use super::paging::{
 };
 use alloc::vec::Vec;
 
-pub(crate) struct DmaAllocation {
-    va: u64,
-    pa: Pa,
-    order: u8,
-}
+/// Default per-process DMA page budget (8192 pages = 32 MiB).
+const DEFAULT_DMA_PAGE_LIMIT: u64 = 8192;
 
 pub struct AddressSpace {
     l0_pa: Pa,
@@ -30,8 +27,17 @@ pub struct AddressSpace {
     next_dma_va: u64,
     /// Active DMA buffer allocations (freed on process exit or dma_free).
     dma_allocations: Vec<DmaAllocation>,
+    /// Number of DMA pages currently allocated by this process.
+    dma_pages_allocated: u64,
+    /// Maximum DMA pages this process may allocate.
+    dma_pages_limit: u64,
     /// Next available VA in the device MMIO region. Bump-allocated.
     next_device_va: u64,
+}
+pub(crate) struct DmaAllocation {
+    va: u64,
+    pa: Pa,
+    order: u8,
 }
 pub struct PageAttrs(u64);
 
@@ -91,6 +97,8 @@ impl AddressSpace {
             vmas: VmaList::new(),
             next_dma_va: paging::DMA_BUFFER_BASE,
             dma_allocations: Vec::new(),
+            dma_pages_allocated: 0,
+            dma_pages_limit: DEFAULT_DMA_PAGE_LIMIT,
             next_device_va: paging::DEVICE_MMIO_BASE,
         }
     }
@@ -109,6 +117,7 @@ impl AddressSpace {
         for alloc in self.dma_allocations.drain(..) {
             page_allocator::free_frames(alloc.pa, alloc.order as usize);
         }
+        self.dma_pages_allocated = 0;
         // Free owned user pages (code, data, stack).
         for &pa in &self.owned_frames {
             page_allocator::free_frame(pa);
@@ -285,6 +294,10 @@ impl AddressSpace {
         if va + size > paging::DMA_BUFFER_END {
             return None;
         }
+        // Enforce per-process DMA budget.
+        if self.dma_pages_allocated + num_pages > self.dma_pages_limit {
+            return None;
+        }
 
         let attrs = PageAttrs::user_rw();
 
@@ -293,6 +306,7 @@ impl AddressSpace {
         }
 
         self.next_dma_va = va + size;
+        self.dma_pages_allocated += num_pages;
         self.dma_allocations.push(DmaAllocation {
             va,
             pa,
@@ -337,6 +351,8 @@ impl AddressSpace {
         let idx = self.dma_allocations.iter().position(|a| a.va == va)?;
         let alloc = self.dma_allocations.swap_remove(idx);
         let num_pages = 1u64 << alloc.order;
+
+        self.dma_pages_allocated -= num_pages;
 
         // Clear L3 page table entries for each page in the allocation.
         for i in 0..num_pages {

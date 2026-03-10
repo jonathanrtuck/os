@@ -705,7 +705,7 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 **Goal:** Move virtio-blk and virtio-console from in-kernel to userspace drivers. Validates the entire microkernel driver model.
 
-**Approach:** Each driver becomes a separate ELF binary (`system/user/virtio-blk/`, `system/user/virtio-console/`). At boot, kernel probes virtio-mmio slots (minimal MMIO reads for magic/version/device_id), spawns the appropriate driver process, writes device info (MMIO PA, IRQ) to a channel shared page, and starts the driver. Each driver: `device_map` for MMIO, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` module removed entirely. Shared `libvirtio` rlib provides userspace virtio transport and split virtqueue implementation.
+**Approach:** Each driver becomes a separate ELF binary (now in `system/platform/drivers/`). At boot, kernel probes virtio-mmio slots (minimal MMIO reads for magic/version/device_id), spawns the appropriate driver process, writes device info (MMIO PA, IRQ) to a channel shared page, and starts the driver. Each driver: `device_map` for MMIO, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` module removed entirely. Shared `libvirtio` rlib (in `system/library/`) provides userspace virtio transport and split virtqueue implementation.
 
 **Implementation notes:**
 
@@ -880,7 +880,7 @@ Removed `wait_used` from libvirtio. Kept libvirtio as a pure library (no syscall
 - `interrupt.rs` — embedded `WaitableRegistry<InterruptId>` in `InterruptTable` alongside `slots: [Option<u32>; 32]` (IRQ number only). Domain-specific code (GIC, IRQ handling) untouched. 186 → 158 lines.
 - `channel.rs` — kept as-is (two endpoints per channel, consume-on-check semantics, shared pages — genuinely different pattern).
 
-**Result:** New `waitable.rs` (~97 lines). Net: ~100 lines removed. 20 host tests in `host-tests/tests/waitable.rs`.
+**Result:** New `waitable.rs` (~97 lines). Net: ~100 lines removed. 20 host tests in `test/tests/waitable.rs`.
 
 **Depends on:** Nothing, but doing 10.6 immediately after makes sense (the registry's internal data structure benefits from O(1) lookup).
 
@@ -1104,7 +1104,7 @@ if i + 1 < bufs.len() {
 
 **Bug:** The IPC backbone — encoded ChannelId scheme, two-phase wake, lost-wakeup prevention, endpoint close/refcount — has zero host-level testing. The channel encoding math and state machine are pure algorithms with no hardware dependencies.
 
-**Fix:** Create `host-tests/tests/channel.rs`. Test: encoding/decoding (`channel_index`, `endpoint_index`), signal/pending flag logic, close_endpoint refcounting, double-close behavior.
+**Fix:** Create `test/tests/channel.rs`. Test: encoding/decoding (`channel_index`, `endpoint_index`), signal/pending flag logic, close_endpoint refcounting, double-close behavior.
 
 **Scope:** New test file. ~100–150 lines.
 
@@ -1116,7 +1116,7 @@ if i + 1 < bufs.len() {
 
 **Bug:** The futex hash function, bucket lookup, and PA-keyed wait/wake logic are pure algorithms. The cross-process PA-keyed synchronization semantics are a subtle invariant not validated anywhere.
 
-**Fix:** Create `host-tests/tests/futex.rs`. Test: bucket index computation, hash distribution, registration/deregistration.
+**Fix:** Create `test/tests/futex.rs`. Test: bucket index computation, hash distribution, registration/deregistration.
 
 **Scope:** New test file. ~80–100 lines.
 
@@ -1130,7 +1130,7 @@ if i + 1 < bufs.len() {
 
 **Fix:** Refactor to `#[path = "..."] mod slab;` and `#[path = "..."] mod address_space_id;` with the same stubs used by other tests.
 
-**Scope:** `host-tests/tests/slab.rs`, `host-tests/tests/asid.rs`. ~40 lines each.
+**Scope:** `test/tests/slab.rs`, `test/tests/asid.rs`. ~40 lines each.
 
 ---
 

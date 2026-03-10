@@ -69,7 +69,19 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-09 (latest):** Design discussion — display engine architecture for getting graphics on screen. Key conclusions:
+**Sessions 2026-03-10/11 (latest):** Design discussion — trust model, blue-layer symmetry, shell placement, compound document editing. Two sessions of exploration, nothing settled yet. Key findings:
+
+1. **Trust and complexity are orthogonal (solid).** Red/blue/black (complexity) and kernel/OS service/tools (trust) are independent axes. The core is both clean and trusted, adapters are both messy and untrusted, but for different reasons.
+
+2. **Blue wraps black on all sides (solid).** Not just below (hardware drivers). The user is external reality — editors are "user drivers" adapting human intent into the edit protocol, just as display drivers adapt device registers into the surface trait.
+
+3. **Shell is blue-layer (leaning, not settled).** The shell (GUI/CLI) is an untrusted process (EL0), pluggable. But NOT purely modal with editors — the shell must intercept system gestures (switch document, invoke search) while an editor is active. Current thinking: system gestures in OS service (not pluggable), navigation UI in shell (pluggable). Boundary TBD.
+
+4. **One-document-at-a-time (leaning).** UI model closer to macOS fullscreen Spaces. View one document at a time, switch through shell.
+
+5. **Compound document editing (unresolved tension).** "Editors bind to content types" conflicts with "one editor per document" for compound documents. Instinct: editor nesting (same text editor used within presentations). But nesting is complex. Needs dedicated exploration.
+
+**Session 2026-03-09:** Design discussion — display engine architecture for getting graphics on screen. Key conclusions:
 
 1. **Next milestone: pixels on screen.** Kernel is complete and reviewed. Next motivating target is graphical output — drawing to the screen, text rendering, basic compositor. Exercises the rendering pipeline (Decision #11) from the bottom up.
 
@@ -83,6 +95,8 @@ Read these before making any design suggestions:
 
 6. **Build plan:** (a) virtio-gpu userspace driver implementing the surface trait (same pattern as virtio-blk), (b) drawing primitives + embedded bitmap font, (c) toy compositor (positioned rectangles with text). This is a research spike for the rendering pipeline, not throwaway work — everything above the driver is portable.
 
+**Session 2026-03-10 (implementation):** Built and validated the virtio-gpu 2D userspace driver — step (a) of the build plan. The driver (`system/platform/drivers/virtio-gpu/`) implements all 6 core 2D commands (GET_DISPLAY_INFO, RESOURCE_CREATE_2D, RESOURCE_ATTACH_BACKING, SET_SCANOUT, TRANSFER_TO_HOST_2D, RESOURCE_FLUSH). Draws a test pattern (colored rectangles with white border) at 1280x800 BGRA8888. Kernel changes: `MAX_DMA_ORDER` raised to 10 (4 MiB) for framebuffer allocation, per-process DMA page budget (32 MiB default). Three bugs fixed: PA/VA confusion in response reads, DMA order cap too small, wrong command type enum values (auto-incrementing C enum, not explicit). Directory restructured: drivers → `platform/drivers/`, libs → `library/`, tests → `tests/`. **Next:** step (b) — drawing primitives + embedded bitmap font, then (c) toy compositor.
+
 **Previous sessions:** Kernel complete — all DESIGN.md §11 review findings resolved (41 issues) + expert review plan completed (hardware correctness, security, type safety). Design sessions settled Decision #14 (Compound Documents) with three-axis model + uniform manifests + static/virtual manifests.
 
 **Decision #14 sub-decisions open:** Referenced vs owned parts, mimetype of the whole document, manifest format, COW atomicity for multi-part documents, filesystem organization of manifests + content files.
@@ -91,7 +105,7 @@ Read these before making any design suggestions:
 
 **Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: display engine → drawing primitives → fonts → toy compositor. This naturally informs Decisions #15 (layout), #17 (interaction model), and #10 (view state). FS track: COW on-disk design (Decision #16, independent).
 
-**Kernel code:** `system/kernel/` (35 source files) + `system/user/{init,echo,libsys,libvirtio,virtio-blk,virtio-console}/` + `system/host-tests/` (216 tests across 15 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC, userspace virtio-blk driver. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit. Both reviews (§11 + expert) completed.
+**System code:** `system/kernel/` (35 source files), `system/platform/drivers/{virtio-blk,virtio-console,virtio-gpu}/`, `system/library/{libsys,libvirtio}/`, `system/user/{init,echo}/`, `system/test/` (216 tests across 15 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC, userspace virtio-blk + virtio-gpu drivers. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit. Both reviews (§11 + expert) completed.
 
 ## Design Discussion Rules
 

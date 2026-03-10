@@ -104,6 +104,20 @@ The L4 microkernel illustrates the failure mode: a minimal kernel creates a beau
 
 **The design metric:** minimize total irregularity across both the core and its adaptation layer, jointly.
 
+### Symmetric adaptation
+
+The adaptation layer wraps the OS core on all sides, not just below:
+
+- **Below (hardware):** Drivers adapt device protocols into kernel trait interfaces. External reality: clocks, buses, interrupts, device registers.
+- **Sides (formats, network):** Translators adapt external formats into manifests + content files. Protocol handlers adapt network standards into internal representations. External reality: .docx, .pptx, HTML, HTTP, codec bitstreams.
+- **Above (users):** Editors adapt user creative intent into the edit protocol. The shell adapts user navigational intent into metadata queries + document lifecycle operations. External reality: unpredictable human input shaped by expectations from other systems.
+
+Drivers and editors are structural mirrors — blue-layer adapters facing opposite directions. A driver translates device registers into `create_surface`/`fill_rect`/`present`. An editor translates keypresses into `beginOperation`/`endOperation`. The OS core sits in the middle, semantically ignorant in both directions.
+
+### Trust and complexity are orthogonal
+
+The adaptation layer model (red/blue/black) describes where **complexity** lives. The kernel/OS service/tool distinction describes where **trust** lives. These correlate — the core is both clean and trusted, adapters are both messy and untrusted — but for different reasons. The kernel is clean because it's semantically ignorant. The OS service is clean because it's well-designed. Drivers are untrusted because hardware is messy. Editors are untrusted because users are unpredictable. Conflating the two axes creates apparent paradoxes; separating them reveals the architecture's symmetry.
+
 ---
 
 ## Content Model
@@ -175,6 +189,14 @@ The OS renderer is a **pure function of state**: file bytes + mimetype + view st
 **No pending changes — edits are immediately durable.** There is no separate "working state" and "persisted state." When an editor issues an operation, the OS applies it to the file immediately. The file on disk is always current. There is no "save" action — every edit is durable the moment it happens. The COW filesystem makes this cheap (only changed blocks are written) and reversible (previous versions are retained as snapshots). This eliminates "unsaved changes," "save before closing?" dialogs, and the entire class of data-loss bugs from crashes before saving.
 
 **Editor overlays:** Editors can draw temporary visual chrome — crop bounds, selection highlights, tool cursors — but these are tool UI, not document content. They never affect the file.
+
+### The Tool Model (under exploration)
+
+The shell (GUI/CLI navigation interface) is a blue-layer tool — an untrusted process (EL0) that translates navigational intent (find documents, open something, switch contexts) into OS service operations (metadata queries, document open/close). The shell is pluggable: a different shell can provide a different interaction model. The OS will be tuned toward its primary shell's needs, but the interface is available to any replacement. The interaction model is a shell design question, not an OS service design question.
+
+Unlike editors, the shell is ambient — it must respond to system gestures (switch document, invoke search) even while an editor is active. Current thinking splits this into: system gestures baked into OS service input routing (always work, not pluggable) and navigation UI provided by the shell (pluggable, restartable). The exact boundary between OS service and shell input handling is an open question.
+
+See Decision #17 in the decision register for full exploration status, including unresolved tension around compound document editing (editors bind to content types vs. one editor per document).
 
 ### Editor-to-Content Binding
 

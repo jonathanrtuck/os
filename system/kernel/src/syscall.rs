@@ -107,8 +107,9 @@ pub mod nr {
     pub const PROCESS_KILL: u64 = 23;
 }
 
-/// Maximum DMA allocation order (2^4 pages = 64 KiB).
-const MAX_DMA_ORDER: u64 = 4;
+/// Maximum DMA allocation order (2^10 pages = 4 MiB).
+/// Must match page_allocator::MAX_ORDER. Needed for GPU framebuffers.
+const MAX_DMA_ORDER: u64 = 10;
 /// Maximum ELF size for process_create (1 MiB).
 const MAX_ELF_SIZE: u64 = 1024 * 1024;
 /// Maximum number of handles in a single `wait` call.
