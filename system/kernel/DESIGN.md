@@ -1126,9 +1126,9 @@ if i + 1 < bufs.len() {
 
 **Severity:** High.
 
-**Bug:** Both test files reimplement the kernel algorithm instead of using `#[path = "..."] mod`. Changes to the real module won't be caught by tests. All 11 other test files use the include pattern.
+**Bug:** Both test files reimplement the kernel algorithm instead of using `#[path = "…"] mod`. Changes to the real module won't be caught by tests. All 11 other test files use the include pattern.
 
-**Fix:** Refactor to `#[path = "..."] mod slab;` and `#[path = "..."] mod address_space_id;` with the same stubs used by other tests.
+**Fix:** Refactor to `#[path = "…"] mod slab;` and `#[path = "…"] mod address_space_id;` with the same stubs used by other tests.
 
 **Scope:** `test/tests/slab.rs`, `test/tests/asid.rs`. ~40 lines each.
 

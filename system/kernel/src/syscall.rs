@@ -39,6 +39,7 @@
 //! | 21 | process_start             | x0=handle                         | 0                |
 //! | 22 | handle_send               | x0=target_handle, x1=source_handle | 0               |
 //! | 23 | process_kill              | x0=handle                          | 0               |
+//! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count | target VA   |
 //!
 //! # Error codes
 //!
@@ -57,12 +58,12 @@
 //! | -12  | InsufficientRights  | `HandleError` |
 //! | -13  | TableFull           | `HandleError` |
 
-use super::address_space::PageAttrs;
 use super::channel;
 use super::futex;
 use super::handle::{ChannelId, Handle, HandleError, HandleObject, Rights};
 use super::interrupt;
 use super::interrupt::InterruptId;
+use super::memory;
 use super::metrics;
 use super::page_allocator;
 use super::paging;
@@ -105,6 +106,7 @@ pub mod nr {
     pub const PROCESS_START: u64 = 21;
     pub const HANDLE_SEND: u64 = 22;
     pub const PROCESS_KILL: u64 = 23;
+    pub const MEMORY_SHARE: u64 = 24;
 }
 
 /// Maximum DMA allocation order (2^10 pages = 4 MiB).
@@ -141,27 +143,6 @@ impl From<HandleError> for u64 {
 fn is_user_page_readable(va: u64) -> bool {
     user_va_to_pa(va).is_some()
 }
-/// Verify that all pages in `[start, start+len)` are readable by EL0.
-fn is_user_range_readable(start: u64, len: u64) -> bool {
-    if len == 0 {
-        return true;
-    }
-
-    let page_mask = !(paging::PAGE_SIZE - 1);
-    let first_page = start & page_mask;
-    let last_page = (start + len - 1) & page_mask;
-    let mut page = first_page;
-
-    while page <= last_page {
-        if !is_user_page_readable(page) {
-            return false;
-        }
-
-        page += paging::PAGE_SIZE;
-    }
-
-    true
-}
 /// Check if a user virtual address is writable by EL0 using the hardware
 /// address translation instruction. Returns false if the page is unmapped,
 /// read-only, or inaccessible.
@@ -186,6 +167,27 @@ fn is_user_page_writable(va: u64) -> bool {
     // PAR_EL1 bit 0: 0 = translation succeeded, 1 = fault.
     par & 1 == 0
 }
+/// Verify that all pages in `[start, start+len)` are readable by EL0.
+fn is_user_range_readable(start: u64, len: u64) -> bool {
+    if len == 0 {
+        return true;
+    }
+
+    let page_mask = !(paging::PAGE_SIZE - 1);
+    let first_page = start & page_mask;
+    let last_page = (start + len - 1) & page_mask;
+    let mut page = first_page;
+
+    while page <= last_page {
+        if !is_user_page_readable(page) {
+            return false;
+        }
+
+        page += paging::PAGE_SIZE;
+    }
+
+    true
+}
 fn sys_channel_create() -> Result<u64, Error> {
     // Allocate channel (shared page + two endpoint IDs).
     let (ch_a, ch_b) = channel::create().ok_or(Error::OutOfMemory)?;
@@ -201,13 +203,15 @@ fn sys_channel_create() -> Result<u64, Error> {
             .insert(HandleObject::Channel(ch_b), Rights::READ_WRITE)
         {
             Ok(handle_b) => {
-                // Both handles inserted — now map the shared page.
-                let (shared_pa, va) =
+                // Both handles inserted — now map the shared page using the
+                // per-process channel SHM bump allocator.
+                let (shared_pa, _global_va) =
                     channel::shared_info(ch_a).ok_or(HandleError::InvalidHandle)?;
 
                 process
                     .address_space
-                    .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
+                    .map_channel_page(shared_pa.as_u64())
+                    .ok_or(HandleError::TableFull)?;
 
                 Ok((handle_a, handle_b))
             }
@@ -462,9 +466,9 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
 
         Ok((target_pid, source_obj, source_rights))
     })?;
-    // Phase 1.5: If the source is a Channel, get shared page info (channel lock).
-    let channel_mapping = match source_obj {
-        HandleObject::Channel(ch_id) => channel::shared_info(ch_id),
+    // Phase 1.5: If the source is a Channel, get shared page PA (channel lock).
+    let channel_pa = match source_obj {
+        HandleObject::Channel(ch_id) => channel::shared_info(ch_id).map(|(pa, _va)| pa),
         _ => None,
     };
     // Phase 2: Insert into target process (scheduler lock via with_process).
@@ -474,11 +478,15 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
             return Err(Error::InvalidArgument);
         }
 
-        // For Channel handles, map the shared page into the target's address space.
-        if let Some((shared_pa, va)) = channel_mapping {
+        // For Channel handles, map the shared page into the target's address space
+        // using the target's per-process channel SHM bump allocator. This ensures
+        // the first channel received maps at CHANNEL_SHM_BASE regardless of the
+        // global channel index.
+        if let Some(pa) = channel_pa {
             target
                 .address_space
-                .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
+                .map_channel_page(pa.as_u64())
+                .ok_or(Error::OutOfMemory)?;
         }
 
         target
@@ -502,6 +510,53 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
     }
 
     Ok(0)
+}
+/// Map physical pages from the caller into a target process's shared memory region.
+///
+/// The target process must not have been started yet. Pages are mapped without
+/// ownership transfer — the caller (or original allocator) retains responsibility
+/// for the physical frames. PA must be page-aligned and within RAM bounds.
+fn sys_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Result<u64, Error> {
+    if target_handle_nr > u8::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+    if page_count == 0 || page_count > 1024 {
+        return Err(Error::InvalidArgument);
+    }
+    if pa & (paging::PAGE_SIZE - 1) != 0 {
+        return Err(Error::BadAddress);
+    }
+
+    let end_pa = pa
+        .checked_add(page_count * paging::PAGE_SIZE)
+        .ok_or(Error::BadAddress)?;
+
+    if pa < paging::RAM_START || end_pa > paging::RAM_END {
+        return Err(Error::BadAddress);
+    }
+
+    let target_pid = scheduler::current_process_do(|process| {
+        match process
+            .handles
+            .get(Handle(target_handle_nr as u8), Rights::WRITE)
+        {
+            Ok(HandleObject::Process(id)) => Ok(id),
+            Ok(_) => Err(Error::InvalidArgument),
+            Err(_) => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    scheduler::with_process(target_pid, |target| {
+        if target.started {
+            return Err(Error::InvalidArgument);
+        }
+
+        target
+            .address_space
+            .map_shared_region(memory::Pa(pa as usize), page_count)
+            .ok_or(Error::OutOfMemory)
+    })
+    .unwrap_or(Err(Error::InvalidArgument))
 }
 fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
     // Validate length.
@@ -1118,6 +1173,9 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::PROCESS_START => dispatch_syscall!(c, ctx, sys_process_start(c.x[0])),
         nr::HANDLE_SEND => dispatch_syscall!(c, ctx, sys_handle_send(c.x[0], c.x[1])),
         nr::PROCESS_KILL => dispatch_syscall!(c, ctx, sys_process_kill(c.x[0])),
+        nr::MEMORY_SHARE => {
+            dispatch_syscall!(c, ctx, sys_memory_share(c.x[0], c.x[1], c.x[2]))
+        }
 
         _ => {
             c.x[0] = Error::UnknownSyscall as i64 as u64;

@@ -42,6 +42,7 @@ mod nr {
     pub const PROCESS_START: u64 = 21;
     pub const HANDLE_SEND: u64 = 22;
     pub const PROCESS_KILL: u64 = 23;
+    pub const MEMORY_SHARE: u64 = 24;
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +204,15 @@ pub fn interrupt_ack(handle: u8) -> i64 {
 /// Returns the handle index on success, or a negative error code.
 pub fn interrupt_register(irq: u32) -> i64 {
     unsafe { syscall1(nr::INTERRUPT_REGISTER, irq as u64) as i64 }
+}
+/// Map physical pages into a target process's shared memory region.
+///
+/// Maps `page_count` contiguous physical pages starting at `pa` into the
+/// target process (identified by `target_handle`, a Process handle). The
+/// target must not have been started yet. Returns the VA in the target's
+/// address space on success, or a negative error code.
+pub fn memory_share(target_handle: u8, pa: u64, page_count: u64) -> i64 {
+    unsafe { syscall3(nr::MEMORY_SHARE, target_handle as u64, pa, page_count) as i64 }
 }
 /// Create a process from an ELF binary in memory. Returns a waitable handle.
 ///

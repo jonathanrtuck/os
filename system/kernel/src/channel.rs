@@ -27,7 +27,6 @@
 //! Channel lock is always released before acquiring the scheduler lock
 //! (via try_wake / set_wake_pending). Never hold both.
 
-use super::address_space::PageAttrs;
 use super::handle::{ChannelId, Handle, HandleError, HandleObject, Rights};
 use super::memory;
 use super::page_allocator;
@@ -129,23 +128,19 @@ pub fn register_waiter(id: ChannelId, waiter: ThreadId) {
 /// Set up an endpoint for a process: map shared page + insert handle.
 ///
 /// Boot-time helper. Acquires channel lock (for PA), then scheduler lock
-/// (for process access). Returns the handle index.
+/// (for process access). Uses the target's per-process channel SHM bump
+/// allocator. Returns the handle index.
 pub fn setup_endpoint(id: ChannelId, pid: ProcessId) -> Result<Handle, HandleError> {
-    let (shared_pa, va) = {
+    let shared_pa = {
         let s = STATE.lock();
-        let idx = channel_index(id);
-
-        (
-            s.channels[idx].shared_pa,
-            CHANNEL_SHM_BASE + (idx as u64) * PAGE_SIZE,
-        )
+        s.channels[channel_index(id)].shared_pa
     };
 
     scheduler::with_process(pid, |process| {
         process
             .address_space
-            .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
-
+            .map_channel_page(shared_pa.as_u64())
+            .ok_or(HandleError::TableFull)?;
         process
             .handles
             .insert(HandleObject::Channel(id), Rights::READ_WRITE)

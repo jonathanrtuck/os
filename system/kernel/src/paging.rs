@@ -33,6 +33,7 @@ pub const RAM_END: u64 = RAM_START + RAM_SIZE;
 // All user VA constants in one place for visibility.
 pub const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000; // 4 MiB (matches link.ld)
 pub const CHANNEL_SHM_BASE: u64 = 0x0000_0000_4000_0000; // 1 GiB
+pub const CHANNEL_SHM_END: u64 = USER_STACK_VA; // up to stack region
 pub const USER_STACK_TOP: u64 = 0x0000_0000_8000_0000; // 2 GiB
 pub const USER_STACK_PAGES: u64 = 4; // 16 KiB
 pub const USER_STACK_VA: u64 = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
@@ -43,6 +44,8 @@ pub const DMA_BUFFER_BASE: u64 = 0x0000_0000_1000_0000; // 256 MiB
 pub const DMA_BUFFER_END: u64 = 0x0000_0000_2000_0000; // 512 MiB (abuts device MMIO)
 pub const DEVICE_MMIO_BASE: u64 = 0x0000_0000_2000_0000; // 512 MiB
 pub const DEVICE_MMIO_END: u64 = 0x0000_0000_4000_0000; // Up to channel SHM
+pub const SHARED_MEMORY_BASE: u64 = 0x0000_0000_C000_0000; // 3 GiB
+pub const SHARED_MEMORY_END: u64 = 0x0000_0001_0000_0000; // 4 GiB
 pub const USER_VA_END: u64 = 0x0001_0000_0000_0000; // T0SZ=16
 
 /// Align `addr` up to the next multiple of `align` (must be a power of two).

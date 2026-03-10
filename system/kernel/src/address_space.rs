@@ -33,6 +33,10 @@ pub struct AddressSpace {
     dma_pages_limit: u64,
     /// Next available VA in the device MMIO region. Bump-allocated.
     next_device_va: u64,
+    /// Next available VA in the channel shared memory region. Bump-allocated.
+    next_channel_shm_va: u64,
+    /// Next available VA in the shared memory region. Bump-allocated.
+    next_shared_va: u64,
 }
 pub(crate) struct DmaAllocation {
     va: u64,
@@ -57,6 +61,8 @@ impl AddressSpace {
             dma_pages_allocated: 0,
             dma_pages_limit: DEFAULT_DMA_PAGE_LIMIT,
             next_device_va: paging::DEVICE_MMIO_BASE,
+            next_channel_shm_va: paging::CHANNEL_SHM_BASE,
+            next_shared_va: paging::SHARED_MEMORY_BASE,
         }
     }
 
@@ -251,6 +257,25 @@ impl AddressSpace {
 
         true
     }
+    /// Map a channel shared page into this address space.
+    ///
+    /// Bump-allocates VA from `CHANNEL_SHM_BASE..CHANNEL_SHM_END`. Each
+    /// channel shared page is one 4 KiB page. The physical frame is NOT owned
+    /// by this address space — the channel module retains ownership.
+    ///
+    /// Returns the user VA on success, or None if the channel VA space is full.
+    pub fn map_channel_page(&mut self, pa: u64) -> Option<u64> {
+        let va = self.next_channel_shm_va;
+
+        if va + PAGE_SIZE > paging::CHANNEL_SHM_END {
+            return None;
+        }
+
+        self.map_inner(va, pa, &PageAttrs::user_rw());
+        self.next_channel_shm_va = va + PAGE_SIZE;
+
+        Some(va)
+    }
     /// Map a device MMIO region into this address space.
     ///
     /// Allocates VA from the device MMIO region (bump allocator), maps each
@@ -332,6 +357,31 @@ impl AddressSpace {
     /// Map a shared page (caller retains ownership of the frame).
     pub fn map_shared(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
         self.map_inner(va, pa, attrs);
+    }
+    /// Map physical pages into the shared memory region (no ownership transfer).
+    ///
+    /// Bump-allocates VA from `SHARED_MEMORY_BASE..SHARED_MEMORY_END`. The
+    /// physical frames are NOT owned by this address space — the caller (or
+    /// the allocating process) retains ownership.
+    ///
+    /// Returns the user VA on success, or None if the shared VA space is full.
+    pub fn map_shared_region(&mut self, pa: Pa, page_count: u64) -> Option<u64> {
+        let size = page_count * PAGE_SIZE;
+        let va = self.next_shared_va;
+
+        if va + size > paging::SHARED_MEMORY_END {
+            return None;
+        }
+
+        let attrs = PageAttrs::user_rw();
+
+        for i in 0..page_count {
+            self.map_inner(va + i * PAGE_SIZE, pa.as_u64() + i * PAGE_SIZE, &attrs);
+        }
+
+        self.next_shared_va = va + size;
+
+        Some(va)
     }
     /// Re-assign this address space's ASID (for generation rollover).
     pub fn reassign_asid(&mut self, asid: Asid, generation: u64) {

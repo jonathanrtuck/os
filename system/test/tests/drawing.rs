@@ -524,3 +524,87 @@ fn draw_text_two_glyphs_are_adjacent() {
     // Gap between glyphs: pixel (7,2) should be blank.
     assert_eq!(s.get_pixel(7, 2), Some(Color::rgba(0, 0, 0, 0)));
 }
+
+// ---------------------------------------------------------------------------
+// Blit tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn blit_basic() {
+    let mut dst_buf = [0u8; 16 * 16 * 4];
+    let mut dst = make_surface(&mut dst_buf, 16, 16);
+
+    // Create a 4x4 red source.
+    let bpp = PixelFormat::Bgra8888.bytes_per_pixel();
+    let src_stride = 4 * bpp;
+    let mut src_buf = [0u8; 4 * 4 * 4];
+    let red = Color::rgb(255, 0, 0);
+    {
+        let mut src = Surface {
+            data: &mut src_buf,
+            width: 4,
+            height: 4,
+            stride: src_stride,
+            format: PixelFormat::Bgra8888,
+        };
+        src.clear(red);
+    }
+
+    dst.blit(&src_buf, 4, 4, src_stride, 2, 3);
+
+    // Pixel inside blit region should be red.
+    assert_eq!(dst.get_pixel(2, 3), Some(red));
+    assert_eq!(dst.get_pixel(5, 6), Some(red));
+    // Pixel outside blit region should be black/zeroed.
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn blit_clips_at_edges() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+
+    let bpp = PixelFormat::Bgra8888.bytes_per_pixel();
+    let mut src_buf = [0u8; 4 * 4 * 4];
+    {
+        let mut src = Surface {
+            data: &mut src_buf,
+            width: 4,
+            height: 4,
+            stride: 4 * bpp,
+            format: PixelFormat::Bgra8888,
+        };
+        src.clear(Color::rgb(0, 255, 0));
+    }
+
+    // Place at (6, 6) — only 2x2 pixels should fit.
+    dst.blit(&src_buf, 4, 4, 4 * bpp, 6, 6);
+
+    assert_eq!(dst.get_pixel(6, 6), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(dst.get_pixel(7, 7), Some(Color::rgb(0, 255, 0)));
+    // (5, 6) is outside the blit region.
+    assert_eq!(dst.get_pixel(5, 6), Some(Color::rgba(0, 0, 0, 0)));
+}
+
+#[test]
+fn blit_entirely_outside() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    let src_buf = [0xFFu8; 4 * 4 * 4];
+
+    // Place entirely outside destination.
+    dst.blit(&src_buf, 4, 4, 16, 8, 8);
+
+    // Nothing should have changed.
+    assert!(dst_buf.iter().all(|&b| b == 0));
+}
+
+#[test]
+fn blit_zero_size_source() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+
+    // Zero-width source — should be a no-op.
+    dst.blit(&[], 0, 0, 0, 0, 0);
+    assert!(dst_buf.iter().all(|&b| b == 0));
+}

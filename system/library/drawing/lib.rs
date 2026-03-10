@@ -158,6 +158,40 @@ impl<'a> Surface<'a> {
         }
     }
 
+    /// Copy pixels from a source buffer onto this surface at (dst_x, dst_y).
+    ///
+    /// Clips to both source and destination bounds. Assumes source uses the
+    /// same pixel format as this surface. Rows are copied via `copy_from_slice`
+    /// for efficiency.
+    pub fn blit(
+        &mut self,
+        src_data: &[u8],
+        src_width: u32,
+        src_height: u32,
+        src_stride: u32,
+        dst_x: u32,
+        dst_y: u32,
+    ) {
+        if dst_x >= self.width || dst_y >= self.height {
+            return;
+        }
+
+        let copy_w = min(src_width, self.width - dst_x);
+        let copy_h = min(src_height, self.height - dst_y);
+        let bpp = self.format.bytes_per_pixel() as usize;
+        let row_bytes = copy_w as usize * bpp;
+
+        for row in 0..copy_h {
+            let src_off = (row * src_stride) as usize;
+            let dst_off =
+                ((dst_y + row) * self.stride + dst_x * self.format.bytes_per_pixel()) as usize;
+
+            if src_off + row_bytes <= src_data.len() && dst_off + row_bytes <= self.data.len() {
+                self.data[dst_off..dst_off + row_bytes]
+                    .copy_from_slice(&src_data[src_off..src_off + row_bytes]);
+            }
+        }
+    }
     /// Fill the entire surface with a solid color.
     pub fn clear(&mut self, color: Color) {
         self.fill_rect(0, 0, self.width, self.height, color);
