@@ -80,6 +80,7 @@ mod syscall;
 mod thread;
 mod thread_exit;
 mod timer;
+mod waitable;
 
 /// Virtio MMIO constants for device probe.
 const VIRTIO_MAGIC: u32 = 0x7472_6976;

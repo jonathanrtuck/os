@@ -10,31 +10,16 @@
 //!    `timer_create(timeout_ns)`, waited on via `wait`. The hardware tick checks
 //!    all active timers and wakes blocked threads when deadlines expire.
 //!    Level-triggered: once fired, the timer is permanently "ready" until closed.
+//!
+//! Waiter registration and readiness tracking are delegated to `WaitableRegistry`.
 
 use super::handle::HandleObject;
 use super::interrupt_controller;
 use super::scheduler;
 use super::sync::IrqMutex;
 use super::thread::ThreadId;
+use super::waitable::WaitableRegistry;
 use core::sync::atomic::{AtomicU64, Ordering};
-
-/// A one-shot timer kernel object.
-///
-/// Created with an absolute deadline (computed from relative timeout at
-/// creation time). Becomes permanently "ready" when the deadline passes.
-struct Timer {
-    /// Absolute deadline in counter ticks (not nanoseconds — avoids repeated
-    /// ns↔ticks conversion on every tick check).
-    deadline_ticks: u64,
-    /// True once the deadline has passed. Level-triggered: stays true forever.
-    fired: bool,
-    /// Thread currently waiting on this timer via `wait`. Set by
-    /// `register_waiter`, cleared on fire or explicit unregister.
-    waiter: Option<ThreadId>,
-}
-struct TimerTable {
-    slots: [Option<Timer>; MAX_TIMERS],
-}
 
 /// Opaque timer identifier. Index into the global timer table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,10 +34,18 @@ const TICKS_PER_SEC: u64 = 250;
 /// Physical timer PPI interrupt ID.
 pub const IRQ_ID: u32 = 30;
 
+struct TimerTable {
+    /// Deadline in counter ticks. Slot index = TimerId. `None` = free slot.
+    slots: [Option<u64>; MAX_TIMERS],
+    /// Readiness + waiter tracking for each timer.
+    waiters: WaitableRegistry<TimerId>,
+}
+
 static CNTFRQ: AtomicU64 = AtomicU64::new(0);
 static TICKS: AtomicU64 = AtomicU64::new(0);
 static TIMERS: IrqMutex<TimerTable> = IrqMutex::new(TimerTable {
     slots: [const { None }; MAX_TIMERS],
+    waiters: WaitableRegistry::new(),
 });
 
 /// Set CNTP_TVAL_EL0 so the timer fires after one interval.
@@ -86,13 +79,13 @@ pub fn check_expired() {
     {
         let mut table = TIMERS.lock();
 
-        for (i, slot) in table.slots.iter_mut().enumerate() {
-            if let Some(timer) = slot {
-                if !timer.fired && now >= timer.deadline_ticks {
-                    timer.fired = true;
+        for i in 0..MAX_TIMERS {
+            if let Some(&deadline_ticks) = table.slots[i].as_ref() {
+                if now >= deadline_ticks {
+                    let id = TimerId(i as u8);
 
-                    if let Some(waiter) = timer.waiter.take() {
-                        to_wake[wake_count] = (TimerId(i as u8), waiter);
+                    if let Some(waiter) = table.waiters.notify(id) {
+                        to_wake[wake_count] = (id, waiter);
                         wake_count += 1;
                     }
                 }
@@ -112,9 +105,7 @@ pub fn check_expired() {
 /// Level-triggered: returns `true` every time after the deadline passes.
 /// Does not consume the signal (unlike channels).
 pub fn check_fired(id: TimerId) -> bool {
-    let table = TIMERS.lock();
-
-    table.slots[id.0 as usize].as_ref().is_some_and(|t| t.fired)
+    TIMERS.lock().waiters.check_ready(id)
 }
 /// Read the hardware counter (CNTPCT_EL0). Monotonic, sub-tick precision.
 pub fn counter() -> u64 {
@@ -156,15 +147,14 @@ pub fn create(timeout_ns: u64) -> Option<TimerId> {
     };
     let mut table = TIMERS.lock();
 
-    for (i, slot) in table.slots.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(Timer {
-                deadline_ticks,
-                fired: false,
-                waiter: None,
-            });
+    for i in 0..MAX_TIMERS {
+        if table.slots[i].is_none() {
+            let id = TimerId(i as u8);
 
-            return Some(TimerId(i as u8));
+            table.slots[i] = Some(deadline_ticks);
+            table.waiters.create(id);
+
+            return Some(id);
         }
     }
 
@@ -175,6 +165,8 @@ pub fn destroy(id: TimerId) {
     let mut table = TIMERS.lock();
 
     table.slots[id.0 as usize] = None;
+
+    table.waiters.destroy(id);
 }
 /// Handle a timer interrupt: increment tick count, check timer objects, reprogram.
 pub fn handle_irq() {
@@ -218,11 +210,7 @@ pub fn init() {
 /// Called by `sys_wait` before checking readiness. If the timer fires
 /// between registration and blocking, the wake is delivered correctly.
 pub fn register_waiter(id: TimerId, thread: ThreadId) {
-    let mut table = TIMERS.lock();
-
-    if let Some(timer) = &mut table.slots[id.0 as usize] {
-        timer.waiter = Some(thread);
-    }
+    TIMERS.lock().waiters.register_waiter(id, thread);
 }
 /// Monotonic tick count since boot.
 pub fn ticks() -> u64 {
@@ -232,9 +220,5 @@ pub fn ticks() -> u64 {
 ///
 /// Safe to call even if the waiter was already cleared by the fire path.
 pub fn unregister_waiter(id: TimerId) {
-    let mut table = TIMERS.lock();
-
-    if let Some(timer) = &mut table.slots[id.0 as usize] {
-        timer.waiter = None;
-    }
+    TIMERS.lock().waiters.unregister_waiter(id);
 }

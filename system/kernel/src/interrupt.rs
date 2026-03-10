@@ -19,25 +19,15 @@
 //! The handle uses edge semantics: pending is set on each IRQ and consumed by
 //! `interrupt_ack`. This differs from timer handles (level-triggered, permanently
 //! ready). A driver that misses an ack will see pending=true on the next wait.
+//!
+//! Waiter registration and readiness tracking are delegated to `WaitableRegistry`.
 
 use super::handle::HandleObject;
 use super::interrupt_controller;
 use super::scheduler;
 use super::sync::IrqMutex;
 use super::thread::ThreadId;
-
-/// A registered interrupt.
-struct Interrupt {
-    /// GIC IRQ number.
-    irq: u32,
-    /// True when the IRQ has fired and hasn't been acknowledged.
-    pending: bool,
-    /// Thread currently waiting on this interrupt via `wait`.
-    waiter: Option<ThreadId>,
-}
-struct InterruptTable {
-    slots: [Option<Interrupt>; MAX_INTERRUPTS],
-}
+use super::waitable::WaitableRegistry;
 
 /// Opaque interrupt identifier. Index into the global interrupt table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,8 +36,16 @@ pub struct InterruptId(pub u8);
 /// Maximum concurrent registered interrupts across all processes.
 const MAX_INTERRUPTS: usize = 32;
 
+struct InterruptTable {
+    /// IRQ number for each slot. `None` = free slot.
+    slots: [Option<u32>; MAX_INTERRUPTS],
+    /// Readiness + waiter tracking for each interrupt.
+    waiters: WaitableRegistry<InterruptId>,
+}
+
 static TABLE: IrqMutex<InterruptTable> = IrqMutex::new(InterruptTable {
     slots: [const { None }; MAX_INTERRUPTS],
+    waiters: WaitableRegistry::new(),
 });
 
 /// Acknowledge an interrupt (called from `interrupt_ack` syscall).
@@ -57,21 +55,17 @@ static TABLE: IrqMutex<InterruptTable> = IrqMutex::new(InterruptTable {
 pub fn acknowledge(id: InterruptId) {
     let mut table = TABLE.lock();
 
-    if let Some(int) = &mut table.slots[id.0 as usize] {
-        int.pending = false;
+    table.waiters.clear_ready(id);
 
-        interrupt_controller::enable_irq(int.irq);
+    if let Some(&irq) = table.slots[id.0 as usize].as_ref() {
+        interrupt_controller::enable_irq(irq);
     }
 }
 /// Check whether an interrupt is pending (for `sys_wait` readiness check).
 ///
 /// Edge-triggered: returns true only between IRQ fire and `interrupt_ack`.
 pub fn check_pending(id: InterruptId) -> bool {
-    let table = TABLE.lock();
-
-    table.slots[id.0 as usize]
-        .as_ref()
-        .is_some_and(|int| int.pending)
+    TABLE.lock().waiters.check_ready(id)
 }
 /// Destroy an interrupt registration (called from `handle_close`).
 ///
@@ -79,8 +73,10 @@ pub fn check_pending(id: InterruptId) -> bool {
 pub fn destroy(id: InterruptId) {
     let mut table = TABLE.lock();
 
-    if let Some(int) = table.slots[id.0 as usize].take() {
-        interrupt_controller::disable_irq(int.irq);
+    if let Some(irq) = table.slots[id.0 as usize].take() {
+        table.waiters.destroy(id);
+
+        interrupt_controller::disable_irq(irq);
     }
 }
 /// Handle an IRQ from the hardware. Called from `irq_handler` in main.rs.
@@ -100,21 +96,20 @@ pub fn handle_irq(irq: u32) -> bool {
     {
         let mut table = TABLE.lock();
 
-        for (i, slot) in table.slots.iter_mut().enumerate() {
-            if let Some(int) = slot {
-                if int.irq == irq {
-                    found = true;
-                    int.pending = true;
+        for i in 0..MAX_INTERRUPTS {
+            if table.slots[i] == Some(irq) {
+                found = true;
 
-                    // Mask the IRQ until the driver acknowledges.
-                    interrupt_controller::disable_irq(irq);
+                let id = InterruptId(i as u8);
 
-                    if let Some(waiter) = int.waiter.take() {
-                        to_wake = Some((InterruptId(i as u8), waiter));
-                    }
+                // Mask the IRQ until the driver acknowledges.
+                interrupt_controller::disable_irq(irq);
 
-                    break; // Only one registration per IRQ.
+                if let Some(waiter) = table.waiters.notify(id) {
+                    to_wake = Some((id, waiter));
                 }
+
+                break; // Only one registration per IRQ.
             }
         }
     }
@@ -137,26 +132,23 @@ pub fn register(irq: u32) -> Option<InterruptId> {
 
     // Reject duplicate registration.
     for slot in table.slots.iter() {
-        if let Some(int) = slot {
-            if int.irq == irq {
-                return None;
-            }
+        if *slot == Some(irq) {
+            return None;
         }
     }
 
     // Find a free slot.
-    for (i, slot) in table.slots.iter_mut().enumerate() {
-        if slot.is_none() {
-            *slot = Some(Interrupt {
-                irq,
-                pending: false,
-                waiter: None,
-            });
+    for i in 0..MAX_INTERRUPTS {
+        if table.slots[i].is_none() {
+            let id = InterruptId(i as u8);
+
+            table.slots[i] = Some(irq);
+            table.waiters.create(id);
 
             // Enable the IRQ in the GIC so the hardware delivers it to us.
             interrupt_controller::enable_irq(irq);
 
-            return Some(InterruptId(i as u8));
+            return Some(id);
         }
     }
 
@@ -167,19 +159,11 @@ pub fn register(irq: u32) -> Option<InterruptId> {
 /// Called by `sys_wait` before checking readiness. If the IRQ fires between
 /// registration and blocking, the wake is delivered correctly.
 pub fn register_waiter(id: InterruptId, thread: ThreadId) {
-    let mut table = TABLE.lock();
-
-    if let Some(int) = &mut table.slots[id.0 as usize] {
-        int.waiter = Some(thread);
-    }
+    TABLE.lock().waiters.register_waiter(id, thread);
 }
 /// Unregister a thread from an interrupt (cleanup when `wait` returns).
 ///
 /// Safe to call even if the waiter was already cleared by the fire path.
 pub fn unregister_waiter(id: InterruptId) {
-    let mut table = TABLE.lock();
-
-    if let Some(int) = &mut table.slots[id.0 as usize] {
-        int.waiter = None;
-    }
+    TABLE.lock().waiters.unregister_waiter(id);
 }

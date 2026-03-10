@@ -866,37 +866,20 @@ Removed `wait_used` from libvirtio. Kept libvirtio as a pure library (no syscall
 
 ---
 
-### 10.5 Extract WaitableRegistry Generic
+### 10.5 Extract WaitableRegistry Generic — DONE
 
-**Problem:** Five modules implement the same waiter pattern — `thread_exit.rs`, `process_exit.rs`, `timer.rs`, `interrupt.rs`, `channel.rs`. Each has: `create`, `destroy`, `register_waiter`, `unregister_waiter`, `check_ready`, `notify` (two-phase wake). ~100 lines each, nearly identical. ~300 lines of pure duplication across the codebase.
+**Problem:** Four modules implemented the same waiter pattern — `thread_exit.rs`, `process_exit.rs`, `timer.rs`, `interrupt.rs`. Each had: `create`, `destroy`, `register_waiter`, `unregister_waiter`, `check_ready`, `notify` (two-phase wake). ~100 lines each, nearly identical. ~300 lines of pure duplication.
 
-**Fix:** Create `waitable.rs` with a generic `WaitableRegistry<Id>`:
+**Fix:** Created `waitable.rs` with a generic `WaitableRegistry<Id>` — a plain data structure (no lock) that callers embed inside their existing `IrqMutex`-protected state. API: `create`, `destroy`, `register_waiter`, `unregister_waiter`, `check_ready` (non-consuming), `notify` (set ready + return waiter for two-phase wake), `clear_ready` (for edge-triggered semantics like interrupts). Vec + linear search — adequate for small counts (≤32), 10.6 will upgrade to O(1).
 
-```rust
-pub struct WaitableRegistry<Id: Copy + Eq> {
-    entries: Vec<Entry<Id>>,  // or indexed by Id
-}
+**Refactored modules:**
+- `thread_exit.rs` — fully replaced: `IrqMutex<WaitableRegistry<ThreadId>>` + thin wrappers. 104 → 54 lines.
+- `process_exit.rs` — fully replaced: same pattern. 102 → 56 lines.
+- `timer.rs` — embedded `WaitableRegistry<TimerId>` in `TimerTable` alongside `slots: [Option<u64>; 32]` (deadline_ticks only). Domain-specific code (hardware timer, deadlines) untouched. 241 → 220 lines.
+- `interrupt.rs` — embedded `WaitableRegistry<InterruptId>` in `InterruptTable` alongside `slots: [Option<u32>; 32]` (IRQ number only). Domain-specific code (GIC, IRQ handling) untouched. 186 → 158 lines.
+- `channel.rs` — kept as-is (two endpoints per channel, consume-on-check semantics, shared pages — genuinely different pattern).
 
-struct Entry<Id> {
-    id: Id,
-    ready: bool,
-    waiter: Option<ThreadId>,
-}
-
-impl<Id: Copy + Eq> WaitableRegistry<Id> {
-    pub fn create(&mut self, id: Id);
-    pub fn destroy(&mut self, id: Id);
-    pub fn register_waiter(&mut self, id: Id, waiter: ThreadId);
-    pub fn unregister_waiter(&mut self, id: Id);
-    pub fn check_ready(&mut self, id: Id) -> bool;
-    pub fn notify(&mut self, id: Id) -> Option<(ThreadId, Id)>;
-    // Returns waiter + id for two-phase wake (caller does scheduler wake).
-}
-```
-
-Channel is slightly different (two endpoints, signal vs exit), so it may keep its own implementation or use two `WaitableRegistry` instances. Timer has fire-once semantics (check_ready doesn't consume). Thread/process exit have level-triggered semantics (ready forever after exit). The generic handles all three: a `consume_on_check: bool` flag, or the check is non-consuming and callers decide.
-
-**Scope:** New `waitable.rs` module (~80 lines). Refactor `thread_exit.rs`, `process_exit.rs`, `timer.rs`, `interrupt.rs` to use it. Each shrinks from ~100 lines to ~20 lines (static STATE + typed wrappers). Net: ~300 lines removed, ~80 added.
+**Result:** New `waitable.rs` (~97 lines). Net: ~100 lines removed. 20 host tests in `host-tests/tests/waitable.rs`.
 
 **Depends on:** Nothing, but doing 10.6 immediately after makes sense (the registry's internal data structure benefits from O(1) lookup).
 

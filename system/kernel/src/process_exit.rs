@@ -1,79 +1,34 @@
 //! Process exit notification.
 //!
-//! Each child process gets an exit notification when a parent holds a
-//! `HandleObject::Process(pid)` handle. The handle becomes "ready" when the
-//! process's last thread exits — same waitable pattern as thread/timer/interrupt.
-//!
-//! Level-triggered: once exited, the handle is permanently ready.
-//! Two-phase wake: collect waiter under own lock, wake under scheduler lock.
+//! Thin wrapper around `WaitableRegistry<ProcessId>`. Each child process with
+//! a handle gets an entry that becomes permanently ready when its last thread
+//! exits (level-triggered). Two-phase wake: collect waiter under own lock,
+//! wake under scheduler lock.
 
 use super::handle::HandleObject;
 use super::process::ProcessId;
 use super::scheduler;
 use super::sync::IrqMutex;
 use super::thread::ThreadId;
-use alloc::vec::Vec;
+use super::waitable::WaitableRegistry;
 
-/// Per-process exit notification state.
-struct Notification {
-    process_id: ProcessId,
-    exited: bool,
-    waiter: Option<ThreadId>,
-}
-struct State {
-    entries: Vec<Notification>,
-}
-
-static STATE: IrqMutex<State> = IrqMutex::new(State {
-    entries: Vec::new(),
-});
+static STATE: IrqMutex<WaitableRegistry<ProcessId>> = IrqMutex::new(WaitableRegistry::new());
 
 /// Check if a process has exited (for `sys_wait` readiness check).
-///
-/// Level-triggered: returns true forever after the last thread exits.
 pub fn check_exited(process_id: ProcessId) -> bool {
-    let s = STATE.lock();
-
-    s.entries
-        .iter()
-        .find(|n| n.process_id == process_id)
-        .is_some_and(|n| n.exited)
+    STATE.lock().check_ready(process_id)
 }
-/// Create exit notification state for a process. Called when a Process handle
-/// is inserted into a handle table (process_create syscall).
+/// Create exit notification state for a process (called from `process_create`).
 pub fn create(process_id: ProcessId) {
-    let mut s = STATE.lock();
-
-    if s.entries.iter().any(|n| n.process_id == process_id) {
-        return;
-    }
-
-    s.entries.push(Notification {
-        process_id,
-        exited: false,
-        waiter: None,
-    });
+    STATE.lock().create(process_id);
 }
 /// Destroy exit notification state (called from `handle_close`).
 pub fn destroy(process_id: ProcessId) {
-    let mut s = STATE.lock();
-
-    s.entries.retain(|n| n.process_id != process_id);
+    STATE.lock().destroy(process_id);
 }
 /// Notify that a process's last thread has exited. Two-phase wake.
-///
-/// Called from `exit_current_from_syscall` on the last-thread-exit path.
 pub fn notify_exit(process_id: ProcessId) {
-    let waiter = {
-        let mut s = STATE.lock();
-
-        if let Some(n) = s.entries.iter_mut().find(|n| n.process_id == process_id) {
-            n.exited = true;
-            n.waiter.take()
-        } else {
-            None
-        }
-    };
+    let waiter = STATE.lock().notify(process_id);
 
     if let Some(waiter_id) = waiter {
         let reason = HandleObject::Process(process_id);
@@ -85,17 +40,9 @@ pub fn notify_exit(process_id: ProcessId) {
 }
 /// Register a thread as the waiter for a process exit.
 pub fn register_waiter(process_id: ProcessId, waiter: ThreadId) {
-    let mut s = STATE.lock();
-
-    if let Some(n) = s.entries.iter_mut().find(|n| n.process_id == process_id) {
-        n.waiter = Some(waiter);
-    }
+    STATE.lock().register_waiter(process_id, waiter);
 }
 /// Unregister a waiter (cleanup when `wait` returns).
 pub fn unregister_waiter(process_id: ProcessId) {
-    let mut s = STATE.lock();
-
-    if let Some(n) = s.entries.iter_mut().find(|n| n.process_id == process_id) {
-        n.waiter = None;
-    }
+    STATE.lock().unregister_waiter(process_id);
 }
