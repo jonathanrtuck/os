@@ -873,6 +873,7 @@ Removed `wait_used` from libvirtio. Kept libvirtio as a pure library (no syscall
 **Fix:** Created `waitable.rs` with a generic `WaitableRegistry<Id>` — a plain data structure (no lock) that callers embed inside their existing `IrqMutex`-protected state. API: `create`, `destroy`, `register_waiter`, `unregister_waiter`, `check_ready` (non-consuming), `notify` (set ready + return waiter for two-phase wake), `clear_ready` (for edge-triggered semantics like interrupts). Vec + linear search — adequate for small counts (≤32), 10.6 will upgrade to O(1).
 
 **Refactored modules:**
+
 - `thread_exit.rs` — fully replaced: `IrqMutex<WaitableRegistry<ThreadId>>` + thin wrappers. 104 → 54 lines.
 - `process_exit.rs` — fully replaced: same pattern. 102 → 56 lines.
 - `timer.rs` — embedded `WaitableRegistry<TimerId>` in `TimerTable` alongside `slots: [Option<u64>; 32]` (deadline_ticks only). Domain-specific code (hardware timer, deadlines) untouched. 241 → 220 lines.
@@ -955,8 +956,470 @@ Implementation:
 6. `boot_tt1_l2_1` symbol promoted to `.global` in boot.S (required for cross-CGU references).
 
 **Stack sizes after change:**
+
 - User kernel stacks: order 3 (8 pages), 1 guard + 7 usable = 28 KiB (was 16 KiB).
 - Kernel thread stacks: order 5 (32 pages), 1 guard + 31 usable = 124 KiB (was 64 KiB).
 - Boot/idle threads: unchanged (no allocation, use static boot stacks).
 
 **Files modified:** `thread.rs`, `memory.rs`, `exception.S`, `main.rs`, `boot.S`.
+
+---
+
+## 11.0 Final Review Findings
+
+Full-codebase review (35 kernel source files, 2 assembly files, 2 linker scripts, 6 userspace programs, 13 test files) identified 3 critical, 12 high, 15 medium, and 11+ low issues across correctness, consistency, code quality, documentation, testing, and idiomatic Rust. This section documents every finding for tracking.
+
+**Priority tiers:**
+
+- **11.1–11.3** — Critical. Fix immediately. Assembly/linker/virtio correctness.
+- **11.4–11.15** — High. Fix before any real workload. Resource leaks, missing checks, test gaps.
+- **11.16–11.30** — Medium. Consistency, deduplication, documentation.
+- **11.31–11.41** — Low. Polish, naming, style.
+
+---
+
+### 11.1 Emergency stacks too small for MAX_CORES
+
+**Severity:** Critical.
+
+**Bug:** `exception.S:371` allocates `__exc_stacks` as `.space 4096 * 4` but `per_core::MAX_CORES` is 8. A kernel fault on core 4–7 computes SP past the allocation (`(core_id + 1) * 4096` for core 7 = 32 KiB, allocation is 16 KiB), clobbering adjacent `.bss` data. The fault handler then pushes a frame onto corrupted memory, producing a cascading fault with no diagnostic output.
+
+**Fix:** `.space 4096 * 8` to match MAX_CORES. Add a comment cross-referencing `per_core::MAX_CORES`.
+
+**Scope:** `exception.S`. 1 line.
+
+---
+
+### 11.2 Emergency stacks alignment not guaranteed by linker
+
+**Severity:** Critical.
+
+**Bug:** The `.align 12` in `exception.S` aligns the input section fragment, but `link.ld` has no explicit placement for `__exc_stacks`. The MPIDR-indexed SP arithmetic assumes 4096-byte base alignment. The linker may or may not honour the input section's alignment within the output `.bss`.
+
+**Fix:** Give the emergency stacks an explicit named section (`.bss.exc_stacks`) with `ALIGN(4096)` in `link.ld`, matching the treatment of `.bss.stack` and `.bss.stacks`.
+
+**Scope:** `exception.S` (section tag), `link.ld` (new section entry).
+
+---
+
+### 11.3 libvirtio `push_chain` doesn't write `desc.next` for intermediate descriptors
+
+**Severity:** Critical.
+
+**Bug:** `libvirtio/lib.rs:333–350` — intermediate descriptors get `DESC_F_NEXT` in flags but `desc.next` is never set to the next descriptor in the chain. It retains the free-list link. On a freshly initialized queue the free list happens to be `0 → 1 → 2 → ...`, so the first multi-buffer submission appears correct. After `free_descriptor_chain` rebuilds the free list in reverse order, the second request sends malformed chains — data corruption or device hang.
+
+Masked today because both drivers issue one request then exit.
+
+**Fix:** Add `desc.next = next_free;` on the intermediate path:
+
+```rust
+if i + 1 < bufs.len() {
+    desc.flags |= DESC_F_NEXT;
+    desc.next = next_free;   // ADD THIS
+    current = next_free;
+}
+```
+
+**Scope:** `libvirtio/lib.rs`. 1 line.
+
+---
+
+### 11.4 `sys_channel_create` leaks shared page on handle insert failure
+
+**Severity:** High.
+
+**Bug:** `syscall.rs` — if the second handle insert fails, the channel shared page is already mapped into the caller's address space but never unmapped. Also returns `InvalidArgument` instead of the appropriate error code.
+
+**Fix:** On insert failure, unmap the shared page and close the channel. Return correct error.
+
+**Scope:** `syscall.rs` (sys_channel_create). ~10 lines.
+
+---
+
+### 11.5 `channel::shared_info` returns stale PA after full close
+
+**Severity:** High.
+
+**Bug:** `channel.rs:153–161` — after `closed_count == 2` frees the shared page, the `Channel` struct remains in the Vec with the old `shared_pa`. A call to `shared_info` on a closed channel returns a PA that belongs to a different allocation (use-after-free of the PA field).
+
+**Fix:** Zero `shared_pa` on full close. Check for zero at read sites (or check `closed_count < 2`).
+
+**Scope:** `channel.rs`. ~5 lines.
+
+---
+
+### 11.6 Duplicate ELF loading logic in `process.rs`
+
+**Severity:** High.
+
+**Bug:** `create_from_user_elf` and `spawn_from_elf` are ~80% identical — segment loop, VMA creation, page mapping, stack setup. The `copy_nonoverlapping` in `create_from_user_elf` has no SAFETY comment while the identical call in `spawn_from_elf` does. The two paths will diverge silently.
+
+**Fix:** Extract a shared helper `load_elf_into_address_space(elf_bytes, addr_space, eager_all: bool)` that handles the segment-loading loop. Each public function becomes a thin wrapper.
+
+**Scope:** `process.rs`. ~80 lines refactored, net reduction ~60 lines.
+
+---
+
+### 11.7 `with_process` / `with_process_of_thread` panic on stale process
+
+**Severity:** High.
+
+**Bug:** `scheduler.rs:1314–1334` — both call `.expect("process not found")` and are called from syscall paths. A stale process handle (e.g., process killed between handle lookup and this call) causes a kernel panic rather than returning an error.
+
+**Fix:** Change return type to `Option<R>` or `Result<R, E>` and propagate to syscall layer.
+
+**Scope:** `scheduler.rs`, `syscall.rs`, `channel.rs`. ~20 lines across files.
+
+---
+
+### 11.8 ASID search formula diverges from host test
+
+**Severity:** High.
+
+**Bug:** `address_space_id.rs:44` uses `(start + offset) % 255 + 1` while the host test (`asid.rs:34`) uses `(start - 1 + offset) % 255 + 1`. With `start = 1`, the kernel formula yields ASID 2 on the first allocation, skipping ASID 1. The host test correctly starts at ASID 1.
+
+**Fix:** Align the kernel formula with the host test: `(start as u16 - 1 + offset) % 255 + 1`.
+
+**Scope:** `address_space_id.rs`. 1 line.
+
+---
+
+### 11.9 `sys_process_create` leaks process on handle insert failure
+
+**Severity:** High.
+
+**Bug:** `syscall.rs:548–559` — if `handles.insert` fails after `create_from_user_elf`, the rollback calls `process_exit::destroy` but never calls `scheduler::kill_process` to clean up the process and its suspended thread. Process and thread leak.
+
+**Fix:** Add `scheduler::kill_process(process_id)` to the rollback path, with full Phase 2 cleanup (same pattern as `sys_process_kill`).
+
+**Scope:** `syscall.rs` (sys_process_create). ~15 lines.
+
+---
+
+### 11.10 Test coverage gap: `channel.rs` has no host tests
+
+**Severity:** High.
+
+**Bug:** The IPC backbone — encoded ChannelId scheme, two-phase wake, lost-wakeup prevention, endpoint close/refcount — has zero host-level testing. The channel encoding math and state machine are pure algorithms with no hardware dependencies.
+
+**Fix:** Create `host-tests/tests/channel.rs`. Test: encoding/decoding (`channel_index`, `endpoint_index`), signal/pending flag logic, close_endpoint refcounting, double-close behavior.
+
+**Scope:** New test file. ~100–150 lines.
+
+---
+
+### 11.11 Test coverage gap: `futex.rs` has no host tests
+
+**Severity:** High.
+
+**Bug:** The futex hash function, bucket lookup, and PA-keyed wait/wake logic are pure algorithms. The cross-process PA-keyed synchronization semantics are a subtle invariant not validated anywhere.
+
+**Fix:** Create `host-tests/tests/futex.rs`. Test: bucket index computation, hash distribution, registration/deregistration.
+
+**Scope:** New test file. ~80–100 lines.
+
+---
+
+### 11.12 Test drift risk: `slab.rs` and `asid.rs` tests duplicate kernel logic
+
+**Severity:** High.
+
+**Bug:** Both test files reimplement the kernel algorithm instead of using `#[path = "..."] mod`. Changes to the real module won't be caught by tests. All 11 other test files use the include pattern.
+
+**Fix:** Refactor to `#[path = "..."] mod slab;` and `#[path = "..."] mod address_space_id;` with the same stubs used by other tests.
+
+**Scope:** `host-tests/tests/slab.rs`, `host-tests/tests/asid.rs`. ~40 lines each.
+
+---
+
+### 11.13 `device_tree.rs` parser aborts on unknown FDT token
+
+**Severity:** High.
+
+**Bug:** Line 263 returns `None` on unrecognized tokens. FDT spec reserves token values and the Linux parser skips them. Any DTB with firmware extension tokens silently fails to parse.
+
+**Fix:** Replace `_ => return None` with `_ => { /* skip unknown token */ }` and advance past it.
+
+**Scope:** `device_tree.rs`. ~3 lines.
+
+---
+
+### 11.14 `per_core.rs` dead `id` field
+
+**Severity:** High.
+
+**Bug:** `PerCpu.id` is `u32` (not atomic), initialized to 0, never written by `init_core`. `core_id()` reads MPIDR directly and is always authoritative. The field is dead weight that could mislead a reader.
+
+**Fix:** Remove `PerCpu.id` and the `INIT` that sets it. `core_id()` is the single source of truth.
+
+**Scope:** `per_core.rs`. ~5 lines.
+
+---
+
+### 11.15 `interrupt_controller::acknowledge()` doc misleading
+
+**Severity:** High.
+
+**Bug:** Doc says "returns the IRQ id" but actually returns the full IAR register (includes CPUID in bits [12:10]). Callers must pass it intact to `end_of_interrupt`. A caller extracting just bits [9:0] as an IRQ number would silently break EOI.
+
+**Fix:** Change doc to: "Returns the full IAR register value (not just the IRQ ID) — pass it intact to `end_of_interrupt`."
+
+**Scope:** `interrupt_controller.rs`. Doc comment only.
+
+---
+
+### 11.16 Scheduling context release duplicated between exit and kill paths
+
+**Severity:** Medium.
+
+**Problem:** `exit_current_from_syscall` (lines 754–768) releases `context_id` and `saved_context_id` inline. `kill_process` (lines 991–998) has a local closure `release_thread_contexts` that does the same thing. The two paths are structurally different for the same semantic operation.
+
+**Fix:** Extract a shared free function `release_thread_context_ids(s: &mut State, thread: &mut Thread)` and use it in both places.
+
+---
+
+### 11.17 bind/borrow scheduling context: increment-then-undo pattern
+
+**Severity:** Medium.
+
+**Problem:** `bind_scheduling_context` and `borrow_scheduling_context` optimistically increment `ref_count`, then check a condition, and undo on failure. Safe under the lock, but fragile — a future early-return that forgets to undo leaks a ref.
+
+**Fix:** Restructure to check-first, increment-only-on-success, using the split-borrow pattern already established in `current_thread_and_process_do`.
+
+---
+
+### 11.18 `find_thread_pid` and `with_thread_mut` don't search suspended list
+
+**Severity:** Medium.
+
+**Problem:** Both functions search ready, blocked, and cores but skip `suspended`. A caller looking up a suspended thread panics. Inconsistent with `kill_process` which handles suspended threads.
+
+**Fix:** Either add `suspended` to the search, or add a comment/debug_assert documenting the constraint.
+
+---
+
+### 11.19 Handle categorization duplicated in exit and kill paths
+
+**Severity:** Medium.
+
+**Problem:** The `for obj in handle_objects { match obj { ... } }` pattern that sorts handles into channel/interrupt/timer/thread/process buckets appears identically in `exit_current_from_syscall` and `kill_process`.
+
+**Fix:** Extract `categorize_handles(objects: Vec<HandleObject>, s: &mut State) -> HandleCategories`.
+
+---
+
+### 11.20 Thread constructors repeat all fields 4 times
+
+**Severity:** Medium.
+
+**Problem:** `Thread::new`, `new_boot`, `new_idle`, `new_user` all manually set every field. Adding a new field requires updating all four. ~100 lines of boilerplate.
+
+**Fix:** Extract `Thread::base_fields(id, state, trust_level)` that captures the common initialization. Each public constructor mutates only what differs.
+
+---
+
+### 11.21 `is_user_page_readable` duplicates `user_va_to_pa`
+
+**Severity:** Medium.
+
+**Problem:** Both functions perform the identical `AT S1E0R` + `MRS PAR_EL1` sequence. `user_va_to_pa` is the strict superset. Any future change to PAR parsing must be made in two places.
+
+**Fix:** `fn is_user_page_readable(va: u64) -> bool { user_va_to_pa(va).is_some() }`.
+
+---
+
+### 11.22 `set_kernel_guard_page` SAFETY comment misleading
+
+**Severity:** Medium.
+
+**Problem:** `memory.rs:228–230` comment says "single 64-bit write is atomic on AArch64. The L3 table maps identical pages, so any concurrent access resolves correctly regardless of TLB state." The truth is: it's the `tlb_invalidate_all()` call that makes the break-before-make safe, not write atomicity.
+
+**Fix:** Remove "regardless of TLB state" and note that the subsequent TLB flush is what provides safety.
+
+---
+
+### 11.23 `PAGE_SIZE` defined in three places
+
+**Severity:** Medium.
+
+**Problem:** `paging.rs:7` (canonical, `u64`), `page_allocator.rs:18` (imports and casts), `slab.rs:17` (hardcodes `4096` independently). If page size changes, `slab.rs` is silently missed.
+
+**Fix:** `slab.rs`: `use super::paging; const PAGE_SIZE: usize = paging::PAGE_SIZE as usize;`.
+
+---
+
+### 11.24 Serial formatting duplicated between locked and panic variants
+
+**Severity:** Medium.
+
+**Problem:** `serial.rs` has duplicated logic for `put_hex`/`panic_put_hex` and `put_u32`/`panic_put_u32`. Same decimal/hex formatting written twice.
+
+**Fix:** Extract a shared `format_hex`/`format_decimal` helper that takes a write function as parameter. Or have the locked variant call the panic variant after acquiring the lock.
+
+---
+
+### 11.25 `free_all` TLB precondition undocumented
+
+**Severity:** Medium.
+
+**Problem:** `address_space.rs:102` — `free_all` does not call `invalidate_tlb` itself. The caller must do it first. This is not documented. A future caller that skips TLB invalidation would free frames that are still reachable via stale TLB entries.
+
+**Fix:** Add to the doc comment: "Caller must call `invalidate_tlb()` before this."
+
+---
+
+### 11.26 `order_for_pages` reimplements stdlib
+
+**Severity:** Medium.
+
+**Problem:** `thread.rs:339–347` — manual loop equivalent to `pages.next_power_of_two().trailing_zeros() as usize`. The stdlib version handles edge cases and communicates intent more clearly.
+
+**Fix:** Replace with `pages.next_power_of_two().trailing_zeros() as usize`.
+
+---
+
+### 11.27 `set_wake_pending_inner` doesn't search blocked list — undocumented
+
+**Severity:** Medium.
+
+**Problem:** `scheduler.rs:413–433` searches `cores` and `ready` but not `blocked`. This is intentionally correct (called only when `try_wake` returned false, meaning the thread is not blocked), but the reasoning is non-obvious.
+
+**Fix:** Add comment: "Thread is guaranteed not blocked — `set_wake_pending` is only called when `try_wake` already returned false."
+
+---
+
+### 11.28 `init_secondary` dead code
+
+**Severity:** Medium.
+
+**Problem:** `scheduler.rs:959` — `let _ = ctx_ptr;` with comment "Keep ctx*ptr used so idle isn't optimized away." The idle thread is moved into `s.cores[idx].idle` — it won't be optimized away. The `let * =` is a no-op. Raw pointers don't extend lifetimes.
+
+**Fix:** Remove the dead line and misleading comment.
+
+---
+
+### 11.29 `sys_write` double `\n` → `\r\n` translation
+
+**Severity:** Medium.
+
+**Problem:** `sys_write` does `\n` → `\r\n` translation at the syscall layer. `serial::raw_puts` also does it. A userspace `\n` becomes `\r\n` → `\r\r\n`. A userspace `\r\n` becomes `\r\n` → `\r\r\n`.
+
+**Fix:** Remove the translation from one layer. Prefer keeping it in `serial.rs` (closest to hardware) and removing it from `syscall.rs`.
+
+---
+
+### 11.30 Userspace programs hardcode `SHM = 0x4000_0000`
+
+**Severity:** Medium.
+
+**Problem:** `init/main.rs`, `echo/main.rs`, `virtio-blk/main.rs`, `virtio-console/main.rs` all hardcode `0x4000_0000` with no cross-reference to `paging::CHANNEL_SHM_BASE`. If the kernel constant changes, four programs silently break.
+
+**Fix:** Add comment `// must match kernel paging::CHANNEL_SHM_BASE` to each. Long-term: expose as a shared constant via a header crate.
+
+---
+
+### 11.31 `address_space.rs` double-own risk on `map_page`
+
+**Severity:** Low.
+
+**Problem:** `map_page` unconditionally pushes PA into `owned_frames`. Calling it twice with the same PA (e.g., re-mapping) produces a double-free in `free_all`.
+
+**Fix:** Add `debug_assert!(!self.owned_frames.contains(&Pa(pa as usize)))`.
+
+---
+
+### 11.32 `Rights` lacks `PartialEq`/`Eq` derives
+
+**Severity:** Low.
+
+**Problem:** `handle.rs` — `Rights(u32)` has no equality derives. Other newtypes (`Pa`, `ChannelId`, etc.) do. Adding them costs nothing and enables `rights == Rights::READ` comparisons.
+
+**Fix:** `#[derive(Clone, Copy, Debug, PartialEq, Eq)]`.
+
+---
+
+### 11.33 `0xFF00` idle thread marker is a magic constant
+
+**Severity:** Low.
+
+**Problem:** `thread.rs:139,270` — `0xFF00` appears as a bare hex literal. Used in `is_idle()` check and `new_idle()` constructor.
+
+**Fix:** `const IDLE_THREAD_ID_MARKER: u64 = 0xFF00;`.
+
+---
+
+### 11.34 `page_offset` in `memory_region.rs` misnamed
+
+**Severity:** Low.
+
+**Problem:** `VmaList::page_offset(va)` computes the page-aligned _base_ address (`va & !0xFFF`), not the offset within a page. Name is misleading. Also appears to be dead code (handle_fault recomputes inline).
+
+**Fix:** Rename to `page_base` or `align_down_to_page`. Remove if unused.
+
+---
+
+### 11.35 `Vma.readable` field always true, never checked
+
+**Severity:** Low.
+
+**Problem:** `memory_region.rs` — `readable: bool` is set in ELF loading and tests but never read in production code. All pages are at least readable. Dead weight.
+
+**Fix:** Either add a `// TODO: enforce readable=false` comment for future no-access mappings, or remove the field.
+
+---
+
+### 11.36 `WaitableRegistry::create` silently ignores duplicates
+
+**Severity:** Low.
+
+**Problem:** `waitable.rs:66–81` — a duplicate `create` call for an existing ID is a no-op. If a thread ID were ever reused without destroying the old entry, the new thread would inherit the old `ready` flag.
+
+**Fix:** Add `debug_assert!(self.entries[idx].is_none(), "duplicate waitable ID")`.
+
+---
+
+### 11.37 `DrainHandles` inconsistent with `close` in return type ordering
+
+**Severity:** Low.
+
+**Problem:** `DrainHandles::next()` yields `(Handle, HandleObject)` while `close()` returns `(HandleObject, Rights)`. `drain` discards rights; `close` discards the handle index. The argument ordering conventions are reversed.
+
+**Fix:** Align to `(HandleObject, Rights)` everywhere, or document the intentional difference.
+
+---
+
+### 11.38 `insert_at` reuses `HandleError::TableFull` for "slot occupied"
+
+**Severity:** Low.
+
+**Problem:** `handle.rs:120–135` — `insert_at` returns `Err(HandleError::TableFull)` when the specific slot is occupied. Semantically different from "no free slots." Could add `HandleError::SlotOccupied`, or document the reuse.
+
+---
+
+### 11.39 `scheduling_context::maybe_replenish` overflow risk
+
+**Severity:** Low.
+
+**Problem:** `(periods_skipped + 1) * period` can overflow `u64` if a system runs long enough. `charge` uses `saturating_sub` but `maybe_replenish` uses bare arithmetic.
+
+**Fix:** Use `saturating_add` and `saturating_mul` in the replenish calculation.
+
+---
+
+### 11.40 `fill_tables` in boot.S clobber list incomplete
+
+**Severity:** Low.
+
+**Problem:** Comment says "Clobbers: x13, x14, x15" but the function also writes x16, x17. Not a bug today (callers don't use x16/x17) but documentation is wrong.
+
+**Fix:** Update comment: "Clobbers: x13–x17."
+
+---
+
+### 11.41 `KERNEL_VA_OFFSET` no cross-reference between link.ld and memory.rs
+
+**Severity:** Low.
+
+**Problem:** Appears in both `link.ld` (`0xFFFF000000000000`) and `memory.rs` (`0xFFFF_0000_0000_0000`). A mismatch produces a non-booting kernel with no diagnostic. No cross-reference comment.
+
+**Fix:** Add `/* must match memory::KERNEL_VA_OFFSET */` in `link.ld` and vice versa.
