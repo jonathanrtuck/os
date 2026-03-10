@@ -128,8 +128,8 @@ build.rs                   — compiles user + driver binaries → ELF at build 
   virtio-gpu/main.rs       — userspace virtio-gpu 2D driver (6 core commands, test pattern)
 
 ../library/
-  libsys/lib.rs            — userspace syscall wrappers + panic handler (compiled as rlib)
-  libvirtio/lib.rs         — virtio MMIO transport + split virtqueue (compiled as rlib)
+  sys/lib.rs               — userspace syscall wrappers + panic handler (compiled as rlib)
+  virtio/lib.rs            — virtio MMIO transport + split virtqueue (compiled as rlib)
   link.ld                  — shared userspace linker script (base VA 0x400000)
 
 ../user/

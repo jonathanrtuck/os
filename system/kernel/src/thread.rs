@@ -206,6 +206,21 @@ impl Thread {
     }
 }
 impl Thread {
+    /// Kernel thread — runs at EL1, no address space.
+    pub fn new(id: u64, entry: fn() -> !) -> Box<Self> {
+        let (stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(STACK_SIZE);
+        let mut thread = Self::base(ThreadId(id), ThreadState::Ready, TrustLevel::Kernel);
+
+        thread.context.elr = entry as *const () as u64;
+        thread.context.sp = stack_top;
+        thread.context.spsr = 0b0101; // EL1h, DAIF clear
+        thread.context.x[30] = thread_exit as *const () as u64;
+        thread.stack_alloc_pa = alloc_pa;
+        thread.stack_alloc_order = alloc_order;
+
+        Box::new(thread)
+    }
+
     /// Common field initialization for all thread constructors.
     fn base(id: ThreadId, state: ThreadState, trust_level: TrustLevel) -> Self {
         // SAFETY: Context is #[repr(C)] with integer/float fields; zero is valid.
@@ -225,21 +240,6 @@ impl Thread {
             wake_result: 0,
             wait_set: Vec::new(),
         }
-    }
-
-    /// Kernel thread — runs at EL1, no address space.
-    pub fn new(id: u64, entry: fn() -> !) -> Box<Self> {
-        let (stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(STACK_SIZE);
-        let mut thread = Self::base(ThreadId(id), ThreadState::Ready, TrustLevel::Kernel);
-
-        thread.context.elr = entry as *const () as u64;
-        thread.context.sp = stack_top;
-        thread.context.spsr = 0b0101; // EL1h, DAIF clear
-        thread.context.x[30] = thread_exit as *const () as u64;
-        thread.stack_alloc_pa = alloc_pa;
-        thread.stack_alloc_order = alloc_order;
-
-        Box::new(thread)
     }
 
     /// Boot thread — zeroed context, no stack, no address space.

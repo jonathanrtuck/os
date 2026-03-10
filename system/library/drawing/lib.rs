@@ -1,0 +1,239 @@
+//! Drawing primitives for pixel buffers.
+//!
+//! Pure library — no allocations, no syscalls, no hardware access. Operates on
+//! borrowed pixel buffers. All drawing operations clip to surface bounds; out-of-
+//! range coordinates are silently ignored (no panics).
+//!
+//! # Usage
+//!
+//! ```text
+//! let mut buf = [0u8; 320 * 240 * 4];
+//! let mut surface = Surface {
+//!     data: &mut buf,
+//!     width: 320,
+//!     height: 240,
+//!     stride: 320 * 4,
+//!     format: PixelFormat::Bgra8888,
+//! };
+//! surface.clear(Color::rgb(30, 30, 30));
+//! surface.fill_rect(10, 10, 100, 50, Color::rgb(220, 80, 80));
+//! ```
+
+#![no_std]
+
+/// A color in canonical RGBA order. Converted to the target pixel format
+/// at the point of writing — callers always work in RGBA regardless of the
+/// underlying buffer format.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Color {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+/// A mutable view into a pixel buffer.
+///
+/// Does not own the backing memory — the caller provides a mutable byte slice
+/// from whatever source (DMA buffer, stack allocation, heap). The surface
+/// borrows the slice for its lifetime.
+///
+/// Stride may exceed `width * bytes_per_pixel` if rows are padded.
+pub struct Surface<'a> {
+    pub data: &'a mut [u8],
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub format: PixelFormat,
+}
+
+/// Pixel byte ordering within each pixel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PixelFormat {
+    /// Blue, Green, Red, Alpha — 8 bits each. Used by virtio-gpu 2D.
+    Bgra8888,
+}
+
+impl Color {
+    pub const WHITE: Color = Color::rgb(255, 255, 255);
+    pub const BLACK: Color = Color::rgb(0, 0, 0);
+    pub const TRANSPARENT: Color = Color::rgba(0, 0, 0, 0);
+
+    /// Decode from pixel bytes in the given format.
+    fn decode(bytes: &[u8], format: PixelFormat) -> Self {
+        match format {
+            PixelFormat::Bgra8888 => Color {
+                r: bytes[2],
+                g: bytes[1],
+                b: bytes[0],
+                a: bytes[3],
+            },
+        }
+    }
+    /// Encode to pixel bytes in the given format.
+    fn encode(self, format: PixelFormat) -> [u8; 4] {
+        match format {
+            PixelFormat::Bgra8888 => [self.b, self.g, self.r, self.a],
+        }
+    }
+
+    /// Opaque color from RGB components.
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Color { r, g, b, a: 255 }
+    }
+    /// Color with explicit alpha.
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Color { r, g, b, a }
+    }
+}
+impl PixelFormat {
+    /// Number of bytes per pixel.
+    pub const fn bytes_per_pixel(self) -> u32 {
+        match self {
+            PixelFormat::Bgra8888 => 4,
+        }
+    }
+}
+impl<'a> Surface<'a> {
+    /// Byte offset for pixel (x, y), or `None` if out of bounds.
+    fn pixel_offset(&self, x: u32, y: u32) -> Option<usize> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+
+        let offset = (y * self.stride + x * self.format.bytes_per_pixel()) as usize;
+        let bpp = self.format.bytes_per_pixel() as usize;
+
+        if offset + bpp <= self.data.len() {
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
+    /// Fill the entire surface with a solid color.
+    pub fn clear(&mut self, color: Color) {
+        self.fill_rect(0, 0, self.width, self.height, color);
+    }
+    /// Draw a horizontal line. Clips to surface bounds.
+    pub fn draw_hline(&mut self, x: u32, y: u32, w: u32, color: Color) {
+        self.fill_rect(x, y, w, 1, color);
+    }
+    /// Draw a line using Bresenham's algorithm. Clips per-pixel.
+    pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+        let dx = abs(x1 - x0);
+        let dy = abs(y1 - y0);
+        let sx: i32 = if x0 < x1 { 1 } else { -1 };
+        let sy: i32 = if y0 < y1 { 1 } else { -1 };
+        let mut err = dx - dy;
+        let mut cx = x0;
+        let mut cy = y0;
+
+        loop {
+            // set_pixel clips negative/out-of-range via u32 conversion.
+            if cx >= 0 && cy >= 0 {
+                self.set_pixel(cx as u32, cy as u32, color);
+            }
+            if cx == x1 && cy == y1 {
+                break;
+            }
+
+            let e2 = 2 * err;
+
+            if e2 > -dy {
+                err -= dy;
+                cx += sx;
+            }
+            if e2 < dx {
+                err += dx;
+                cy += sy;
+            }
+        }
+    }
+    /// Draw a rectangle outline (1px border). Clips to surface bounds.
+    ///
+    /// The border is drawn inside the given bounds (the filled area is
+    /// x..x+w, y..y+h including the border pixels).
+    pub fn draw_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: Color) {
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        // Top and bottom edges.
+        self.draw_hline(x, y, w, color);
+
+        if h > 1 {
+            self.draw_hline(x, y + h - 1, w, color);
+        }
+        // Left and right edges (excluding corners already drawn).
+        if h > 2 {
+            self.draw_vline(x, y + 1, h - 2, color);
+
+            if w > 1 {
+                self.draw_vline(x + w - 1, y + 1, h - 2, color);
+            }
+        }
+    }
+    /// Draw a vertical line. Clips to surface bounds.
+    pub fn draw_vline(&mut self, x: u32, y: u32, h: u32, color: Color) {
+        self.fill_rect(x, y, 1, h, color);
+    }
+    /// Fill a rectangle with a solid color. Clips to surface bounds.
+    pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: Color) {
+        // Clip to surface bounds.
+        if x >= self.width || y >= self.height {
+            return;
+        }
+
+        let x1 = x;
+        let y1 = y;
+        let x2 = min(x.saturating_add(w), self.width);
+        let y2 = min(y.saturating_add(h), self.height);
+        let encoded = color.encode(self.format);
+        let bpp = self.format.bytes_per_pixel() as usize;
+
+        for row in y1..y2 {
+            let row_start = (row * self.stride + x1 * self.format.bytes_per_pixel()) as usize;
+
+            for col in 0..(x2 - x1) {
+                let offset = row_start + col as usize * bpp;
+
+                self.data[offset..offset + bpp].copy_from_slice(&encoded[..bpp]);
+            }
+        }
+    }
+    /// Read a single pixel. Returns `None` if out of bounds.
+    pub fn get_pixel(&self, x: u32, y: u32) -> Option<Color> {
+        if let Some(offset) = self.pixel_offset(x, y) {
+            let bpp = self.format.bytes_per_pixel() as usize;
+
+            Some(Color::decode(&self.data[offset..offset + bpp], self.format))
+        } else {
+            None
+        }
+    }
+    /// Write a single pixel. No-op if out of bounds.
+    pub fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
+        if let Some(offset) = self.pixel_offset(x, y) {
+            let encoded = color.encode(self.format);
+            let bpp = self.format.bytes_per_pixel() as usize;
+
+            self.data[offset..offset + bpp].copy_from_slice(&encoded[..bpp]);
+        }
+    }
+}
+
+fn abs(x: i32) -> i32 {
+    if x < 0 {
+        -x
+    } else {
+        x
+    }
+}
+
+fn min(a: u32, b: u32) -> u32 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}

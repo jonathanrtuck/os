@@ -42,6 +42,24 @@ pub(crate) struct DmaAllocation {
 pub struct PageAttrs(u64);
 
 impl AddressSpace {
+    /// Create a new empty address space with its own L0 table and ASID.
+    pub fn new(asid: Asid, generation: u64) -> Self {
+        let l0_pa = page_allocator::alloc_frame().expect("out of frames for L0 table");
+
+        Self {
+            l0_pa,
+            asid,
+            generation,
+            owned_frames: Vec::new(),
+            vmas: VmaList::new(),
+            next_dma_va: paging::DMA_BUFFER_BASE,
+            dma_allocations: Vec::new(),
+            dma_pages_allocated: 0,
+            dma_pages_limit: DEFAULT_DMA_PAGE_LIMIT,
+            next_device_va: paging::DEVICE_MMIO_BASE,
+        }
+    }
+
     fn l0_idx(va: u64) -> usize {
         ((va >> 39) & 0x1FF) as usize
     }
@@ -82,24 +100,6 @@ impl AddressSpace {
             }
 
             *entry = (pa & PA_MASK) | DESC_PAGE | attrs.0;
-        }
-    }
-
-    /// Create a new empty address space with its own L0 table and ASID.
-    pub fn new(asid: Asid, generation: u64) -> Self {
-        let l0_pa = page_allocator::alloc_frame().expect("out of frames for L0 table");
-
-        Self {
-            l0_pa,
-            asid,
-            generation,
-            owned_frames: Vec::new(),
-            vmas: VmaList::new(),
-            next_dma_va: paging::DMA_BUFFER_BASE,
-            dma_allocations: Vec::new(),
-            dma_pages_allocated: 0,
-            dma_pages_limit: DEFAULT_DMA_PAGE_LIMIT,
-            next_device_va: paging::DEVICE_MMIO_BASE,
         }
     }
 

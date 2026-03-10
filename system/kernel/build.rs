@@ -3,9 +3,9 @@
 //! needed to build and boot the entire system.
 //!
 //! Each user program is a single-file `#![no_std]` Rust binary linked with a
-//! shared userspace linker script. All programs link against `libsys` (the
+//! shared userspace linker script. All programs link against `sys` (the
 //! shared syscall wrapper crate). Virtio drivers additionally link against
-//! `libvirtio` (the shared virtio transport crate).
+//! `virtio` (the shared virtio transport crate).
 
 use std::env;
 use std::path::PathBuf;
@@ -25,11 +25,11 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let rustc = env::var("RUSTC").unwrap();
     let link_ld = manifest_dir.join("../library/link.ld");
-    let libsys_src = manifest_dir.join("../library/libsys/lib.rs");
-    let libsys_rlib = out_dir.join("libsys.rlib");
-    let libvirtio_src = manifest_dir.join("../library/libvirtio/lib.rs");
-    let libvirtio_rlib = out_dir.join("libvirtio.rlib");
-    // Step 1: compile libsys as a static library (rlib).
+    let sys_src = manifest_dir.join("../library/sys/lib.rs");
+    let sys_rlib = out_dir.join("libsys.rlib");
+    let virtio_src = manifest_dir.join("../library/virtio/lib.rs");
+    let virtio_rlib = out_dir.join("libvirtio.rlib");
+    // Step 1: compile sys as a static library (rlib).
     let status = Command::new(&rustc)
         .arg("--target=aarch64-unknown-none")
         .arg("--edition=2021")
@@ -37,28 +37,28 @@ fn main() {
         .arg("--crate-name=sys")
         .args(["-C", "panic=abort"])
         .arg("-o")
-        .arg(&libsys_rlib)
-        .arg(&libsys_src)
+        .arg(&sys_rlib)
+        .arg(&sys_src)
         .status()
-        .unwrap_or_else(|e| panic!("failed to invoke rustc for libsys: {e}"));
+        .unwrap_or_else(|e| panic!("failed to invoke rustc for sys: {e}"));
 
-    assert!(status.success(), "failed to build libsys.rlib");
+    assert!(status.success(), "failed to build sys.rlib");
 
-    // Step 2: compile libvirtio (depends on libsys for panic handler resolution).
+    // Step 2: compile virtio (depends on sys for panic handler resolution).
     let status = Command::new(&rustc)
         .arg("--target=aarch64-unknown-none")
         .arg("--edition=2021")
         .arg("--crate-type=rlib")
         .arg("--crate-name=virtio")
         .args(["-C", "panic=abort"])
-        .arg(format!("--extern=sys={}", libsys_rlib.display()))
+        .arg(format!("--extern=sys={}", sys_rlib.display()))
         .arg("-o")
-        .arg(&libvirtio_rlib)
-        .arg(&libvirtio_src)
+        .arg(&virtio_rlib)
+        .arg(&virtio_src)
         .status()
-        .unwrap_or_else(|e| panic!("failed to invoke rustc for libvirtio: {e}"));
+        .unwrap_or_else(|e| panic!("failed to invoke rustc for virtio: {e}"));
 
-    assert!(status.success(), "failed to build libvirtio.rlib");
+    assert!(status.success(), "failed to build virtio.rlib");
 
     // Step 3: compile each user program.
     for &(name, dir, needs_virtio) in USER_PROGRAMS {
@@ -72,10 +72,10 @@ fn main() {
             .arg("--crate-type=bin")
             .args(["-C", "panic=abort"])
             .arg(format!("-Clink-arg=-T{}", link_ld.display()))
-            .arg(format!("--extern=sys={}", libsys_rlib.display()));
+            .arg(format!("--extern=sys={}", sys_rlib.display()));
 
         if needs_virtio {
-            cmd.arg(format!("--extern=virtio={}", libvirtio_rlib.display()));
+            cmd.arg(format!("--extern=virtio={}", virtio_rlib.display()));
         }
 
         let status = cmd
@@ -90,6 +90,6 @@ fn main() {
     }
 
     println!("cargo:rerun-if-changed={}", link_ld.display());
-    println!("cargo:rerun-if-changed={}", libsys_src.display());
-    println!("cargo:rerun-if-changed={}", libvirtio_src.display());
+    println!("cargo:rerun-if-changed={}", sys_src.display());
+    println!("cargo:rerun-if-changed={}", virtio_src.display());
 }

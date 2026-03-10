@@ -1,7 +1,7 @@
 //! Userspace virtio MMIO transport and split virtqueue.
 //!
 //! Pure library — no syscalls. Drivers allocate DMA memory and map MMIO
-//! via `libsys` syscalls, then hand the addresses to this library.
+//! via `sys` syscalls, then hand the addresses to this library.
 //!
 //! # Usage
 //!
@@ -54,19 +54,6 @@ pub const DEFAULT_QUEUE_SIZE: u32 = 128;
 pub const DESC_F_NEXT: u16 = 1;
 /// Device writes to this buffer (vs. reads).
 pub const DESC_F_WRITE: u16 = 2;
-
-#[inline(always)]
-fn read8(addr: usize) -> u8 {
-    unsafe { core::ptr::read_volatile(addr as *const u8) }
-}
-#[inline(always)]
-fn read32(addr: usize) -> u32 {
-    unsafe { core::ptr::read_volatile(addr as *const u32) }
-}
-#[inline(always)]
-fn write32(addr: usize, val: u32) {
-    unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
-}
 
 /// A single virtqueue descriptor (16 bytes).
 #[repr(C)]
@@ -208,7 +195,6 @@ impl Device {
         self.write(REG_QUEUE_READY, 1);
     }
 }
-
 impl Virtqueue {
     /// Create a virtqueue over a pre-allocated DMA buffer.
     ///
@@ -246,24 +232,6 @@ impl Virtqueue {
         }
     }
 
-    /// Calculate the DMA allocation order needed for `size` descriptors.
-    pub fn allocation_order(size: u32) -> u32 {
-        let desc_bytes = size as usize * core::mem::size_of::<Descriptor>();
-        let avail_bytes = 6 + size as usize * 2;
-        let avail_offset = desc_bytes;
-        let used_offset = (avail_offset + avail_bytes + 3) & !3;
-        let used_bytes = 6 + size as usize * core::mem::size_of::<UsedElem>();
-        let total = used_offset + used_bytes;
-        let pages_needed = (total + 4095) / 4096;
-
-        pages_needed.next_power_of_two().trailing_zeros() as u32
-    }
-    pub fn avail_pa(&self) -> u64 {
-        self.avail_pa
-    }
-    pub fn desc_pa(&self) -> u64 {
-        self.desc_pa
-    }
     /// Return a descriptor chain to the free list.
     fn free_descriptor_chain(&mut self, mut idx: u16) {
         loop {
@@ -288,6 +256,25 @@ impl Virtqueue {
 
             idx = next;
         }
+    }
+
+    /// Calculate the DMA allocation order needed for `size` descriptors.
+    pub fn allocation_order(size: u32) -> u32 {
+        let desc_bytes = size as usize * core::mem::size_of::<Descriptor>();
+        let avail_bytes = 6 + size as usize * 2;
+        let avail_offset = desc_bytes;
+        let used_offset = (avail_offset + avail_bytes + 3) & !3;
+        let used_bytes = 6 + size as usize * core::mem::size_of::<UsedElem>();
+        let total = used_offset + used_bytes;
+        let pages_needed = (total + 4095) / 4096;
+
+        pages_needed.next_power_of_two().trailing_zeros() as u32
+    }
+    pub fn avail_pa(&self) -> u64 {
+        self.avail_pa
+    }
+    pub fn desc_pa(&self) -> u64 {
+        self.desc_pa
     }
     /// Poll for a completed request.
     pub fn pop_used(&mut self) -> Option<UsedElem> {
@@ -369,4 +356,17 @@ impl Virtqueue {
     pub fn used_pa(&self) -> u64 {
         self.used_pa
     }
+}
+
+#[inline(always)]
+fn read8(addr: usize) -> u8 {
+    unsafe { core::ptr::read_volatile(addr as *const u8) }
+}
+#[inline(always)]
+fn read32(addr: usize) -> u32 {
+    unsafe { core::ptr::read_volatile(addr as *const u32) }
+}
+#[inline(always)]
+fn write32(addr: usize, val: u32) {
+    unsafe { core::ptr::write_volatile(addr as *mut u32, val) }
 }

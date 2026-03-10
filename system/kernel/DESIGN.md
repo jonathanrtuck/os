@@ -475,7 +475,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 | 15  | interrupt_ack      | x0=handle      | 0       |
 | 16  | device_map         | x0=pa, x1=size | user VA |
 
-**Implementation:** `interrupt.rs` (registration table, 32 slots under `IrqMutex`), `handle.rs` (`Interrupt(InterruptId)` variant), `interrupt_controller.rs` (`disable_irq` via ICENABLER), `address_space.rs` (`map_device_mmio` + `PageAttrs::user_device_rw`), `paging.rs` (`ATTRIDX1`, `DEVICE_MMIO_BASE/END`), `syscall.rs` (3 new syscalls + `wait` integration), `main.rs` (IRQ dispatch). Process exit cleanup via handle drain. libsys wrappers: `interrupt_register`, `interrupt_ack`, `device_map`.
+**Implementation:** `interrupt.rs` (registration table, 32 slots under `IrqMutex`), `handle.rs` (`Interrupt(InterruptId)` variant), `interrupt_controller.rs` (`disable_irq` via ICENABLER), `address_space.rs` (`map_device_mmio` + `PageAttrs::user_device_rw`), `paging.rs` (`ATTRIDX1`, `DEVICE_MMIO_BASE/END`), `syscall.rs` (3 new syscalls + `wait` integration), `main.rs` (IRQ dispatch). Process exit cleanup via handle drain. `sys` wrappers: `interrupt_register`, `interrupt_ack`, `device_map`.
 
 **Depends on:** DTB parser (§8.6, **done**), `wait` (§8.2, **done**), GIC (§0.3, **done**).
 
@@ -585,7 +585,7 @@ Phase 8 (COW mechanics) ← blocked on filesystem design
 
 **VA region:** `DMA_BUFFER_BASE` (256 MiB) to `DMA_BUFFER_END` (512 MiB). Bump-allocated per process.
 
-**Implementation:** `address_space.rs` (`DmaAllocation`, `next_dma_va`, `map_dma_buffer`, `unmap_dma_buffer`, `unmap_page_inner`), `paging.rs` (`DMA_BUFFER_BASE`, `DMA_BUFFER_END`), `syscall.rs` (`sys_dma_alloc`, `sys_dma_free`, `is_user_page_writable`, `OutOfMemory` error), `libsys` (`dma_alloc`, `dma_free`). `free_all()` drains DMA allocations on process exit.
+**Implementation:** `address_space.rs` (`DmaAllocation`, `next_dma_va`, `map_dma_buffer`, `unmap_dma_buffer`, `unmap_page_inner`), `paging.rs` (`DMA_BUFFER_BASE`, `DMA_BUFFER_END`), `syscall.rs` (`sys_dma_alloc`, `sys_dma_free`, `is_user_page_writable`, `OutOfMemory` error), `sys` (`dma_alloc`, `dma_free`). `free_all()` drains DMA allocations on process exit.
 
 **Depends on:** Nothing. Buddy allocator already supports `alloc_frames(order)`.
 
@@ -705,7 +705,7 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 **Goal:** Move virtio-blk and virtio-console from in-kernel to userspace drivers. Validates the entire microkernel driver model.
 
-**Approach:** Each driver becomes a separate ELF binary (now in `system/platform/drivers/`). At boot, kernel probes virtio-mmio slots (minimal MMIO reads for magic/version/device_id), spawns the appropriate driver process, writes device info (MMIO PA, IRQ) to a channel shared page, and starts the driver. Each driver: `device_map` for MMIO, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` module removed entirely. Shared `libvirtio` rlib (in `system/library/`) provides userspace virtio transport and split virtqueue implementation.
+**Approach:** Each driver becomes a separate ELF binary (now in `system/platform/drivers/`). At boot, kernel probes virtio-mmio slots (minimal MMIO reads for magic/version/device_id), spawns the appropriate driver process, writes device info (MMIO PA, IRQ) to a channel shared page, and starts the driver. Each driver: `device_map` for MMIO, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` module removed entirely. Shared `virtio` rlib (in `system/library/`) provides userspace virtio transport and split virtqueue implementation.
 
 **Implementation notes:**
 
@@ -827,7 +827,7 @@ Add `scheduling.context_id` cleanup to both exit paths: read the bound context_i
 
 ### 10.3 Interrupt-Driven Virtio Drivers — DONE
 
-**Bug:** `libvirtio::Virtqueue::wait_used()` busy-waits in a `spin_loop()`. Drivers read the IRQ number from shared memory and ignore it. A spinning driver burns an entire core. This contradicts the kernel's event-driven design (handles, `wait`, interrupt forwarding — all the machinery exists and is unused).
+**Bug:** `virtio::Virtqueue::wait_used()` busy-waits in a `spin_loop()`. Drivers read the IRQ number from shared memory and ignore it. A spinning driver burns an entire core. This contradicts the kernel's event-driven design (handles, `wait`, interrupt forwarding — all the machinery exists and is unused).
 
 **Fix applied:** Drivers now register for their device interrupt and block via `wait` instead of polling:
 
@@ -839,11 +839,11 @@ Add `scheduling.context_id` cleanup to both exit paths: read the bound context_i
 6. `vq.pop_used()` → process completed request.
 7. `sys::interrupt_ack(irq_handle)` → re-enable the IRQ in the GIC.
 
-Removed `wait_used` from libvirtio. Kept libvirtio as a pure library (no syscall dependency) — the interrupt-driven flow lives in each driver (~5 lines).
+Removed `wait_used` from virtio library. Kept virtio as a pure library (no syscall dependency) — the interrupt-driven flow lives in each driver (~5 lines).
 
 **Additional fix:** `interrupt_controller::enable_irq` now sets `ITARGETSR` to route SPIs to CPU 0. Without this, SPIs were enabled but had no delivery target — the GIC silently dropped them. PPIs (like the timer) don't need ITARGETSR (per-CPU by definition), which is why this never surfaced before.
 
-**Files changed:** `libvirtio/lib.rs` (removed `wait_used`), `virtio-blk/main.rs`, `virtio-console/main.rs`, `interrupt_controller.rs` (ITARGETSR fix).
+**Files changed:** `virtio/lib.rs` (removed `wait_used`), `virtio-blk/main.rs`, `virtio-console/main.rs`, `interrupt_controller.rs` (ITARGETSR fix).
 
 ---
 
@@ -1004,11 +1004,11 @@ Full-codebase review (35 kernel source files, 2 assembly files, 2 linker scripts
 
 ---
 
-### 11.3 libvirtio `push_chain` doesn't write `desc.next` for intermediate descriptors
+### 11.3 virtio `push_chain` doesn't write `desc.next` for intermediate descriptors
 
 **Severity:** Critical.
 
-**Bug:** `libvirtio/lib.rs:333–350` — intermediate descriptors get `DESC_F_NEXT` in flags but `desc.next` is never set to the next descriptor in the chain. It retains the free-list link. On a freshly initialized queue the free list happens to be `0 → 1 → 2 → ...`, so the first multi-buffer submission appears correct. After `free_descriptor_chain` rebuilds the free list in reverse order, the second request sends malformed chains — data corruption or device hang.
+**Bug:** `virtio/lib.rs:333–350` — intermediate descriptors get `DESC_F_NEXT` in flags but `desc.next` is never set to the next descriptor in the chain. It retains the free-list link. On a freshly initialized queue the free list happens to be `0 → 1 → 2 → ...`, so the first multi-buffer submission appears correct. After `free_descriptor_chain` rebuilds the free list in reverse order, the second request sends malformed chains — data corruption or device hang.
 
 Masked today because both drivers issue one request then exit.
 
@@ -1022,7 +1022,7 @@ if i + 1 < bufs.len() {
 }
 ```
 
-**Scope:** `libvirtio/lib.rs`. 1 line.
+**Scope:** `virtio/lib.rs`. 1 line.
 
 ---
 
