@@ -7,6 +7,7 @@
 //! Lock ordering invariant: channel → scheduler (never reversed). No lock
 //! may be re-acquired while held (ticket spinlock would deadlock on self).
 
+use super::metrics;
 use core::cell::UnsafeCell;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -63,6 +64,7 @@ impl<T> IrqMutex<T> {
         let my_ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);
 
         while self.now_serving.load(Ordering::Acquire) != my_ticket {
+            metrics::inc_lock_spins();
             core::hint::spin_loop();
         }
 

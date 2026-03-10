@@ -905,27 +905,21 @@ Removed `wait_used` from libvirtio. Kept libvirtio as a pure library (no syscall
 
 ---
 
-### 10.8 Kernel Metrics
+### 10.8 Kernel Metrics — DONE
 
 **Problem:** Zero instrumentation. No context switch count, page fault count, syscall count, or lock contention measurement. When debugging gets hard (and it will — SMP timing issues are non-reproducible), there's no data.
 
-**Fix:** Per-core atomic counters for key events:
+**Fix:** Per-core `AtomicU64` counters (`Relaxed` ordering — monotonic diagnostics, not synchronization). New `metrics.rs` module with `CoreMetrics` struct (5 counters) indexed by `core_id()`. One-line `#[inline(always)]` increment functions at 5 call sites:
 
-```rust
-pub struct CoreMetrics {
-    pub context_switches: AtomicU64,
-    pub syscalls: AtomicU64,
-    pub page_faults: AtomicU64,
-    pub timer_ticks: AtomicU64,
-    pub lock_spins: AtomicU64,   // contention indicator
-}
-```
+- `schedule_inner` → `inc_context_switches()` at both `swap_ttbr0` calls (actual thread switches only, not re-runs)
+- `syscall::dispatch` → `inc_syscalls()` at entry (counts all syscalls including blocking ones)
+- `user_fault_handler` → `inc_page_faults()` on EL0 data/instruction aborts (demand paging attempts)
+- `irq_handler` → `inc_timer_ticks()` on timer PPI (250 Hz per core)
+- `IrqMutex::lock` spin loop → `inc_lock_spins()` per spin iteration (contention indicator)
 
-Increment at the natural points: `schedule_inner` (context_switches), `dispatch` (syscalls), `user_fault_handler` (page_faults), `irq_handler` for timer (timer_ticks), `IrqMutex::lock` spin loop (lock_spins). Print summary on panic (already have `panic_puts`). Optionally expose via a syscall or debug channel.
+Panic handler calls `metrics::panic_dump()` which prints per-core summaries using panic-safe serial output (no lock acquisition). Metrics are atomics, not behind `IrqMutex`, so no deadlock risk during panic.
 
-**Scope:** New `metrics.rs` (~40 lines). One-line increments at 5 call sites. Panic handler prints totals (~10 lines).
-
-**Depends on:** Nothing. Can be done at any time.
+**Scope:** `metrics.rs` (~100 lines), 5 one-line increments, 1 line in panic handler. 3 import additions (syscall.rs, scheduler.rs, sync.rs).
 
 ---
 

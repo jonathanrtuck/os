@@ -76,6 +76,7 @@ use super::thread::WaitEntry;
 use super::thread_exit;
 use super::timer;
 use super::timer::TimerId;
+use super::metrics;
 use super::Context;
 use alloc::vec::Vec;
 
@@ -1055,6 +1056,8 @@ macro_rules! dispatch_syscall {
 }
 
 pub fn dispatch(ctx: *mut Context) -> *const Context {
+    metrics::inc_syscalls();
+
     let c = unsafe { &mut *ctx };
     let syscall_nr = c.x[8];
 

@@ -14,6 +14,7 @@
 
 use super::handle::HandleObject;
 use super::memory;
+use super::metrics;
 use super::per_core;
 use super::process::{Process, ProcessId};
 use super::scheduling_context::{self, SchedulingContext, SchedulingContextId};
@@ -297,6 +298,8 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 
         swap_ttbr0(&old_thread, &new_thread);
 
+        metrics::inc_context_switches();
+
         let new_ctx = new_thread.context_ptr();
 
         park_old(s, old_thread);
@@ -324,6 +327,9 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         let idle_ctx = idle.context_ptr();
 
         swap_ttbr0(&old_thread, &idle);
+
+        metrics::inc_context_switches();
+
         park_old(s, old_thread);
 
         s.cores[core].current = Some(idle);

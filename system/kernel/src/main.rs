@@ -63,6 +63,7 @@ mod interrupt;
 mod interrupt_controller;
 mod memory;
 mod memory_mapped_io;
+mod metrics;
 mod memory_region;
 mod page_allocator;
 mod paging;
@@ -407,6 +408,7 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
         let id = iar & 0x3FF;
 
         if id == timer::IRQ_ID {
+            metrics::inc_timer_ticks();
             timer::handle_irq();
         } else {
             // Forward to registered userspace driver (if any).
@@ -564,6 +566,7 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     // EC 0x24 = Data Abort from EL0, EC 0x20 = Instruction Abort from EL0.
     // These are the only exception classes that can be resolved by demand paging.
     if ec == 0x24 || ec == 0x20 {
+        metrics::inc_page_faults();
         let handled =
             scheduler::current_process_do(|process| process.address_space.handle_fault(far));
 
@@ -606,6 +609,8 @@ fn panic(info: &PanicInfo) -> ! {
         serial::panic_puts(msg);
         serial::panic_puts("\n");
     }
+
+    metrics::panic_dump();
 
     loop {
         core::hint::spin_loop();
