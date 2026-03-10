@@ -895,39 +895,13 @@ Removed `wait_used` from libvirtio. Kept libvirtio as a pure library (no syscall
 
 ---
 
-### 10.7 Syscall Dispatch Macro
+### 10.7 Syscall Dispatch Macro — DONE
 
-**Problem:** `syscall.rs:1030–1205` has 24 match arms, ~20 of which are identical boilerplate:
+**Problem:** `dispatch()` had 24 match arms, ~20 of which were identical boilerplate: call handler returning `Result<u64, E>`, store Ok/Err in `c.x[0]`, return the same context pointer.
 
-```rust
-nr::FOO => {
-    c.x[0] = match sys_foo(c.x[0], c.x[1]) {
-        Ok(n) => n,
-        Err(e) => e as i64 as u64,
-    };
-    ctx as *const Context
-}
-```
+**Fix:** A `dispatch_syscall!` macro collapses each boilerplate arm into a single line. Works for both `Error` and `HandleError` (both `#[repr(i64)]`, so `e as i64 as u64` is uniform). The four special cases that manipulate `ctx` directly (exit, yield, futex_wait, wait) remain hand-written — they may block or switch threads, returning a different context pointer.
 
-**Fix:** A `dispatch_syscall!` macro:
-
-```rust
-macro_rules! dispatch_syscall {
-    ($c:ident, $ctx:ident, $handler:expr) => {{
-        $c.x[0] = match $handler {
-            Ok(n) => n,
-            Err(e) => e as i64 as u64,
-        };
-        $ctx as *const Context
-    }};
-}
-```
-
-The four special cases that manipulate `ctx` directly (exit, yield, futex_wait, wait) remain hand-written.
-
-**Scope:** `syscall.rs`. ~80 lines reduced to ~30. No behavioral change.
-
-**Depends on:** Nothing. Low-risk cleanup.
+**Scope:** `syscall.rs`. ~80 lines of match arms reduced to ~30. No behavioral change. All host tests pass, QEMU smoke test passes.
 
 ---
 

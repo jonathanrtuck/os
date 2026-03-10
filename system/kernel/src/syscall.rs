@@ -1039,175 +1039,61 @@ fn user_va_to_pa(va: u64) -> Option<u64> {
     Some(page_pa | offset)
 }
 
+/// Dispatch a standard syscall that returns `Result<u64, E>` where E is `#[repr(i64)]`.
+/// Stores the Ok value or the error code (cast via `as i64 as u64`) into `c.x[0]`
+/// and returns the same context pointer. The four syscalls that manipulate the
+/// context directly (exit, yield, futex_wait, wait) are hand-written instead.
+macro_rules! dispatch_syscall {
+    ($c:ident, $ctx:ident, $handler:expr) => {{
+        $c.x[0] = match $handler {
+            Ok(n) => n,
+            Err(e) => e as i64 as u64,
+        };
+
+        $ctx as *const Context
+    }};
+}
+
 pub fn dispatch(ctx: *mut Context) -> *const Context {
     let c = unsafe { &mut *ctx };
     let syscall_nr = c.x[8];
 
     match syscall_nr {
+        // Special cases: these manipulate ctx directly (may block/switch threads).
         nr::EXIT => sys_exit(ctx),
-        nr::WRITE => {
-            c.x[0] = match sys_write(c.x[0], c.x[1]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
-        nr::HANDLE_CLOSE => {
-            c.x[0] = match sys_handle_close(c.x[0]) {
-                Ok(n) => n,
-                Err(e) => e.into(),
-            };
-
-            ctx as *const Context
-        }
-        nr::CHANNEL_SIGNAL => {
-            c.x[0] = match sys_channel_signal(c.x[0]) {
-                Ok(n) => n,
-                Err(e) => e.into(),
-            };
-
-            ctx as *const Context
-        }
-        nr::CHANNEL_CREATE => {
-            c.x[0] = match sys_channel_create() {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
+        nr::YIELD => sys_yield(ctx),
+        nr::FUTEX_WAIT => sys_futex_wait(ctx),
         nr::WAIT => sys_wait(ctx),
+        // Standard syscalls: Result<u64, E> → x0, return same context.
+        nr::WRITE => dispatch_syscall!(c, ctx, sys_write(c.x[0], c.x[1])),
+        nr::HANDLE_CLOSE => dispatch_syscall!(c, ctx, sys_handle_close(c.x[0])),
+        nr::CHANNEL_SIGNAL => dispatch_syscall!(c, ctx, sys_channel_signal(c.x[0])),
+        nr::CHANNEL_CREATE => dispatch_syscall!(c, ctx, sys_channel_create()),
         nr::SCHEDULING_CONTEXT_CREATE => {
-            c.x[0] = match sys_scheduling_context_create(c.x[0], c.x[1]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
+            dispatch_syscall!(c, ctx, sys_scheduling_context_create(c.x[0], c.x[1]))
         }
         nr::SCHEDULING_CONTEXT_BORROW => {
-            c.x[0] = match sys_scheduling_context_borrow(c.x[0]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
+            dispatch_syscall!(c, ctx, sys_scheduling_context_borrow(c.x[0]))
         }
         nr::SCHEDULING_CONTEXT_RETURN => {
-            c.x[0] = match sys_scheduling_context_return() {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
+            dispatch_syscall!(c, ctx, sys_scheduling_context_return())
         }
         nr::SCHEDULING_CONTEXT_BIND => {
-            c.x[0] = match sys_scheduling_context_bind(c.x[0]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
+            dispatch_syscall!(c, ctx, sys_scheduling_context_bind(c.x[0]))
         }
-        nr::FUTEX_WAIT => sys_futex_wait(ctx),
-        nr::FUTEX_WAKE => {
-            c.x[0] = match sys_futex_wake(c.x[0], c.x[1]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
+        nr::FUTEX_WAKE => dispatch_syscall!(c, ctx, sys_futex_wake(c.x[0], c.x[1])),
+        nr::TIMER_CREATE => dispatch_syscall!(c, ctx, sys_timer_create(c.x[0])),
+        nr::INTERRUPT_REGISTER => dispatch_syscall!(c, ctx, sys_interrupt_register(c.x[0])),
+        nr::INTERRUPT_ACK => dispatch_syscall!(c, ctx, sys_interrupt_ack(c.x[0])),
+        nr::DEVICE_MAP => dispatch_syscall!(c, ctx, sys_device_map(c.x[0], c.x[1])),
+        nr::DMA_ALLOC => dispatch_syscall!(c, ctx, sys_dma_alloc(c.x[0], c.x[1])),
+        nr::DMA_FREE => dispatch_syscall!(c, ctx, sys_dma_free(c.x[0], c.x[1])),
+        nr::THREAD_CREATE => dispatch_syscall!(c, ctx, sys_thread_create(c.x[0], c.x[1])),
+        nr::PROCESS_CREATE => dispatch_syscall!(c, ctx, sys_process_create(c.x[0], c.x[1])),
+        nr::PROCESS_START => dispatch_syscall!(c, ctx, sys_process_start(c.x[0])),
+        nr::HANDLE_SEND => dispatch_syscall!(c, ctx, sys_handle_send(c.x[0], c.x[1])),
+        nr::PROCESS_KILL => dispatch_syscall!(c, ctx, sys_process_kill(c.x[0])),
 
-            ctx as *const Context
-        }
-        nr::TIMER_CREATE => {
-            c.x[0] = match sys_timer_create(c.x[0]) {
-                Ok(n) => n,
-                Err(e) => e.into(),
-            };
-
-            ctx as *const Context
-        }
-        nr::INTERRUPT_REGISTER => {
-            c.x[0] = match sys_interrupt_register(c.x[0]) {
-                Ok(n) => n,
-                Err(e) => e.into(),
-            };
-
-            ctx as *const Context
-        }
-        nr::INTERRUPT_ACK => {
-            c.x[0] = match sys_interrupt_ack(c.x[0]) {
-                Ok(n) => n,
-                Err(e) => e.into(),
-            };
-
-            ctx as *const Context
-        }
-        nr::DEVICE_MAP => {
-            c.x[0] = match sys_device_map(c.x[0], c.x[1]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
-        nr::DMA_ALLOC => {
-            c.x[0] = match sys_dma_alloc(c.x[0], c.x[1]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
-        nr::DMA_FREE => {
-            c.x[0] = match sys_dma_free(c.x[0], c.x[1]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
-        nr::THREAD_CREATE => {
-            c.x[0] = match sys_thread_create(c.x[0], c.x[1]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
-        nr::PROCESS_CREATE => {
-            c.x[0] = match sys_process_create(c.x[0], c.x[1]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
-        nr::PROCESS_START => {
-            c.x[0] = match sys_process_start(c.x[0]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
-        nr::HANDLE_SEND => {
-            c.x[0] = match sys_handle_send(c.x[0], c.x[1]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
-        nr::PROCESS_KILL => {
-            c.x[0] = match sys_process_kill(c.x[0]) {
-                Ok(n) => n,
-                Err(e) => e as i64 as u64,
-            };
-
-            ctx as *const Context
-        }
-        nr::YIELD => sys_yield(ctx),
         _ => {
             c.x[0] = Error::UnknownSyscall as i64 as u64;
 
