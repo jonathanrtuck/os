@@ -340,6 +340,7 @@ impl Virtqueue {
 
             if i + 1 < bufs.len() {
                 desc.flags |= DESC_F_NEXT;
+                desc.next = next_free;
                 current = next_free;
             } else {
                 desc.next = 0;

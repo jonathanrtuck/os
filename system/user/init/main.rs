@@ -6,7 +6,7 @@
 #![no_std]
 #![no_main]
 
-const SHM: *mut u8 = 0x4000_0000 as *mut u8;
+const SHM: *mut u8 = 0x4000_0000 as *mut u8; // must match kernel paging::CHANNEL_SHM_BASE
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {

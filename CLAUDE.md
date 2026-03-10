@@ -69,27 +69,27 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-09 (latest):** Design session — no code changes. Major design refinements to Decision #14 (Compound Documents):
+**Session 2026-03-10 (latest):** Resolved all 41 issues from DESIGN.md §11 (Final Review Findings). Used an agent team (4 parallel teammates partitioned by file ownership) to fix 3 critical, 12 high, 15 medium, and 11 low issues across correctness, resource leaks, code deduplication, documentation, and testing. Key changes:
 
-1. **Three-axis relationship model.** Replaced the five layout types with three composable orthogonal axes: spatial, temporal, and logical. The original five were four spatial sub-types + one temporal sub-type. Adding the logical axis (hierarchical, sequential, flat, graph) unifies compositional documents (slides, articles) and organizational documents (projects, albums, playlists) under one model. Stress-tested against spreadsheets, chat threads, comics, mind maps, calendars — everything fits. Version history is orthogonal (OS-level COW, not a layout axis).
+1. **Critical fixes:** Emergency stacks sized for MAX_CORES with linker-guaranteed alignment. libvirtio `push_chain` now sets `desc.next` for intermediate descriptors (was silently masked by sequential free-list ordering).
 
-2. **Uniform manifest model.** Every document is backed by a manifest — even "simple" ones. Simple/compound distinction becomes an internal property (how many content references), not a user-facing concept. Users see documents, never files. Manifests are what the metadata query system indexes. Content-type registration uses the same system (editors are files with metadata declaring what types they handle).
+2. **Resource leak fixes:** `sys_channel_create` and `sys_process_create` now clean up fully on handle insert failure. `channel::shared_info` returns `Option` to prevent stale PA access after close. `with_process`/`with_process_of_thread` return `Option` instead of panicking on stale handles.
 
-3. **Static and virtual manifests.** Manifests can be static (real files on disk, COW'd) or virtual (content generated on demand from internal state or external sources). Virtual manifests back system-derived views (inbox, search results) and streaming content (YouTube = virtual document with external content source). All documents are persistent — "transient" concept explored and rejected as a leaky abstraction. Retention policies handle cleanup instead (webpages ~30 days, user content permanent). COW pruning manages both edit history and document lifecycle. This gives rewindable browsing, offline access, and full-text search across web content for free. **Design constraint:** rewind performance must be uniform across document types → metadata DB on COW filesystem.
+3. **Code deduplication:** Extracted `load_elf_into_address_space` (process.rs), `release_thread_context_ids` (scheduler.rs), `categorize_handles`/`close_handle_categories` (scheduler.rs), `Thread::base()` constructor, serial formatting helpers. `is_user_page_readable` delegates to `user_va_to_pa`. `order_for_pages` replaced with stdlib.
 
-4. **OS service interface map.** Mapped all inter-component interfaces by boundary. Key findings: kernel boundary serves exactly two clients (OS service + drivers); scheduling policy needs no separate interface; web engine adapter = translator interface; the OS service boundary (edit protocol, metadata queries, interaction model) is where the OS's personality lives.
+4. **New tests:** Channel host tests (18 tests), futex host tests (11 tests). Slab and ASID tests refactored to `#[path]` include pattern.
 
-Also clarified: red/blue/black is a complexity principle (not an architecture diagram). The architecture has inner structure within "black" — kernel (mechanism, clean through ignorance) vs OS service (policy, clean through design). The OS itself could be presented as a document or query — shell and GUI as editors/viewers for system state — potentially informing Decision #17.
+5. **Polish:** IDLE_THREAD_ID_MARKER constant, Rights derives, HandleError::SlotOccupied, saturating arithmetic in replenish, debug_asserts for map_page double-own and waitable duplicate create, cross-reference comments for KERNEL_VA_OFFSET and CHANNEL_SHM_BASE.
+
+**Previous session (2026-03-09):** Design session — Decision #14 (Compound Documents) refinements: three-axis relationship model (spatial, temporal, logical), uniform manifest model, static/virtual manifests, OS service interface map. Decision #16 sub-decisions: metadata DB must be on COW filesystem for uniform rewind.
 
 **Decision #14 sub-decisions open:** Referenced vs owned parts, mimetype of the whole document, manifest format, COW atomicity for multi-part documents, filesystem organization of manifests + content files.
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
 
-**Kernel implementation (latest):** DTB wired into device init (2026-03-09). GIC base addresses and virtio-mmio devices now discovered from device tree instead of hardcoded. `interrupt_controller.rs` uses `AtomicUsize` bases set from DTB's `"arm,cortex-a15-gic"` node. `virtio/mod.rs` probes DTB's `"virtio,mmio"` entries. Falls back to QEMU `virt` defaults if no DTB. 13 syscalls total. Previous: timer handles (§8.4), wait (§8.2). Next: interrupt forwarding, migrate virtio drivers to userspace.
-
 **Design side next:** Layout engine (#15, updated scope with three-axis model). Interaction model (#17, informed by OS-as-document and virtual manifests). Filesystem COW on-disk design (new constraint from virtual manifest rewind).
 
-**Kernel code:** `system/kernel/` (34 source files) + `system/user/{init,echo,libsys}/` + `system/host-tests/` (156 tests across 12 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit.
+**Kernel code:** `system/kernel/` (35 source files) + `system/user/{init,echo,libsys,libvirtio,virtio-blk,virtio-console}/` + `system/host-tests/` (216 tests across 15 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC, userspace virtio-blk driver. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit. All DESIGN.md §11 review findings resolved.
 
 ## Design Discussion Rules
 

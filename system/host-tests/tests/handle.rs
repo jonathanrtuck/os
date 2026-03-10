@@ -195,15 +195,15 @@ fn drain_returns_all_and_clears() {
     assert_eq!(items.len(), 3);
     assert!(matches!(
         items[0],
-        (Handle(0), HandleObject::Channel(ChannelId(10)))
+        (HandleObject::Channel(ChannelId(10)), _)
     ));
     assert!(matches!(
         items[1],
-        (Handle(1), HandleObject::Channel(ChannelId(20)))
+        (HandleObject::Channel(ChannelId(20)), _)
     ));
     assert!(matches!(
         items[2],
-        (Handle(2), HandleObject::Channel(ChannelId(30)))
+        (HandleObject::Channel(ChannelId(30)), _)
     ));
 
     // Table is now empty.
@@ -223,14 +223,8 @@ fn drain_skips_closed_slots() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 2);
-    assert!(matches!(
-        items[0],
-        (Handle(0), HandleObject::Channel(ChannelId(1)))
-    ));
-    assert!(matches!(
-        items[1],
-        (Handle(2), HandleObject::Channel(ChannelId(3)))
-    ));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
+    assert!(matches!(items[1], (HandleObject::Channel(ChannelId(3)), _)));
 }
 
 // --- SchedulingContext handles ---
@@ -262,21 +256,15 @@ fn drain_mixed_channel_and_scheduling_context() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 3);
-    assert!(matches!(
-        items[0],
-        (Handle(0), HandleObject::Channel(ChannelId(1)))
-    ));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
     assert!(matches!(
         items[1],
         (
-            Handle(1),
-            HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(2))
+            HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(2)),
+            _
         )
     ));
-    assert!(matches!(
-        items[2],
-        (Handle(2), HandleObject::Channel(ChannelId(3)))
-    ));
+    assert!(matches!(items[2], (HandleObject::Channel(ChannelId(3)), _)));
 }
 
 // --- Interrupt handles ---
@@ -324,27 +312,21 @@ fn drain_mixed_all_handle_types() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 4);
-    assert!(matches!(
-        items[0],
-        (Handle(0), HandleObject::Channel(ChannelId(1)))
-    ));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
     assert!(matches!(
         items[1],
-        (
-            Handle(1),
-            HandleObject::Interrupt(interrupt::InterruptId(2))
-        )
+        (HandleObject::Interrupt(interrupt::InterruptId(2)), _)
     ));
     assert!(matches!(
         items[2],
         (
-            Handle(2),
-            HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(3))
+            HandleObject::SchedulingContext(scheduling_context::SchedulingContextId(3)),
+            _
         )
     ));
     assert!(matches!(
         items[3],
-        (Handle(3), HandleObject::Timer(timer::TimerId(4)))
+        (HandleObject::Timer(timer::TimerId(4)), _)
     ));
 }
 
@@ -373,13 +355,10 @@ fn drain_includes_thread_handles() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 2);
-    assert!(matches!(
-        items[0],
-        (Handle(0), HandleObject::Channel(ChannelId(1)))
-    ));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
     assert!(matches!(
         items[1],
-        (Handle(1), HandleObject::Thread(thread::ThreadId(2)))
+        (HandleObject::Thread(thread::ThreadId(2)), _)
     ));
 }
 
@@ -408,13 +387,10 @@ fn drain_includes_process_handles() {
     let items: Vec<_> = t.drain().collect();
 
     assert_eq!(items.len(), 2);
-    assert!(matches!(
-        items[0],
-        (Handle(0), HandleObject::Channel(ChannelId(1)))
-    ));
+    assert!(matches!(items[0], (HandleObject::Channel(ChannelId(1)), _)));
     assert!(matches!(
         items[1],
-        (Handle(1), HandleObject::Process(process::ProcessId(2)))
+        (HandleObject::Process(process::ProcessId(2)), _)
     ));
 }
 
@@ -463,7 +439,7 @@ fn insert_at_occupied_slot_fails() {
 
     let err = t.insert_at(Handle(0), ch(2), Rights::READ).unwrap_err();
 
-    assert!(matches!(err, HandleError::TableFull));
+    assert!(matches!(err, HandleError::SlotOccupied));
 }
 
 #[test]

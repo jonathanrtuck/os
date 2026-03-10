@@ -552,7 +552,7 @@ Everything in sections 0.x–8.x is implemented. This section captures what rema
 
 **Dependency graph:**
 
-```
+```text
 Phase 1 (DMA) ──────────────────────────┐
                                         ├─→ Phase 5 (Virtio Migration)
 Phase 2a (Process struct) ──┬─→ Phase 2b (Thread create)
@@ -776,7 +776,7 @@ Expert review of the post-roadmap codebase (Phases 1–6 + virtio migration) ide
 
 **Dependency graph:**
 
-```
+```text
 10.1 (handle_send) ─────────────────┐
 10.2 (sched ctx refcount) ──────────┼─→ 10.3 (interrupt-driven virtio)
 10.4 (channel leak) ────────────────┘         │
@@ -967,12 +967,14 @@ Implementation:
 
 ## 11.0 Final Review Findings
 
+**Status: All 41 issues resolved (2026-03-10).** Kernel builds cleanly, 216 host tests pass, QEMU smoke test boots with 4 SMP cores + IPC + virtio-blk.
+
 Full-codebase review (35 kernel source files, 2 assembly files, 2 linker scripts, 6 userspace programs, 13 test files) identified 3 critical, 12 high, 15 medium, and 11+ low issues across correctness, consistency, code quality, documentation, testing, and idiomatic Rust. This section documents every finding for tracking.
 
-**Priority tiers:**
+**Priority tiers (all resolved):**
 
-- **11.1–11.3** — Critical. Fix immediately. Assembly/linker/virtio correctness.
-- **11.4–11.15** — High. Fix before any real workload. Resource leaks, missing checks, test gaps.
+- **11.1–11.3** — Critical. Assembly/linker/virtio correctness.
+- **11.4–11.15** — High. Resource leaks, missing checks, test gaps.
 - **11.16–11.30** — Medium. Consistency, deduplication, documentation.
 - **11.31–11.41** — Low. Polish, naming, style.
 

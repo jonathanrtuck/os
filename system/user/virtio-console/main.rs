@@ -15,7 +15,7 @@
 #![no_main]
 
 /// Channel shared memory base (handle 0).
-const SHM: *const u8 = 0x4000_0000 as *const u8;
+const SHM: *const u8 = 0x4000_0000 as *const u8; // must match kernel paging::CHANNEL_SHM_BASE
 const VIRTQ_TX: u32 = 1;
 
 #[unsafe(no_mangle)]

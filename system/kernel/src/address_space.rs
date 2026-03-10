@@ -6,7 +6,7 @@
 
 use super::address_space_id::Asid;
 use super::memory::{self, Pa};
-use super::memory_region::{Backing, Vma, VmaList};
+use super::memory_region::{Backing, VmaList};
 use super::page_allocator;
 use super::paging::{
     self, AF, AP_EL0, AP_RO, ATTRIDX0, ATTRIDX1, DESC_PAGE, DESC_TABLE, DESC_VALID, NG, PAGE_SIZE,
@@ -99,6 +99,11 @@ impl AddressSpace {
         self.asid.0
     }
     /// Free all resources: DMA buffers, owned user pages, page table frames, and the L0 table.
+    ///
+    /// # Precondition
+    ///
+    /// Caller must call `invalidate_tlb()` before this. Freeing frames while
+    /// stale TLB entries reference them produces use-after-free.
     pub fn free_all(&mut self) {
         // Free DMA buffer allocations (physically contiguous, multi-page).
         for alloc in self.dma_allocations.drain(..) {
@@ -297,7 +302,16 @@ impl AddressSpace {
         Some(va)
     }
     /// Map a page and take ownership of the frame (freed on cleanup).
+    ///
+    /// Must not be called twice for the same PA — that would cause a double-free
+    /// in `free_all`.
     pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
+        debug_assert!(
+            !self.owned_frames.contains(&Pa(pa as usize)),
+            "map_page: double-own of PA {:#x}",
+            pa
+        );
+
         self.map_inner(va, pa, attrs);
         self.owned_frames.push(Pa(pa as usize));
     }

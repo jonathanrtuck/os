@@ -25,7 +25,7 @@ pub struct Handle(pub u8);
 pub struct HandleTable {
     entries: [Option<HandleEntry>; MAX_HANDLES],
 }
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rights(u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,6 +48,9 @@ pub enum HandleError {
     InvalidHandle = -10,
     InsufficientRights = -12,
     TableFull = -13,
+    /// Returned by `insert_at` when the specific slot is already occupied.
+    /// Semantically distinct from `TableFull` (no free slots anywhere).
+    SlotOccupied = -14,
 }
 
 impl HandleTable {
@@ -126,7 +129,7 @@ impl HandleTable {
         let slot = &mut self.entries[handle.0 as usize];
 
         if slot.is_some() {
-            return Err(HandleError::TableFull);
+            return Err(HandleError::SlotOccupied);
         }
 
         *slot = Some(HandleEntry { object, rights });
@@ -135,7 +138,7 @@ impl HandleTable {
     }
 }
 impl Iterator for DrainHandles<'_> {
-    type Item = (Handle, HandleObject);
+    type Item = (HandleObject, Rights);
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.index < MAX_HANDLES {
@@ -144,7 +147,7 @@ impl Iterator for DrainHandles<'_> {
             self.index += 1;
 
             if let Some(entry) = self.table.entries[i].take() {
-                return Some((Handle(i as u8), entry.object));
+                return Some((entry.object, entry.rights));
             }
         }
 

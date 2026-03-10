@@ -148,15 +148,12 @@ fn unregister_waiter_prevents_notify_return() {
 }
 
 #[test]
-fn create_is_idempotent() {
+#[should_panic(expected = "duplicate waitable ID")]
+fn create_duplicate_panics() {
     let mut reg = WaitableRegistry::new();
 
     reg.create(TestId(1));
-    reg.register_waiter(TestId(1), tid(10));
-    reg.create(TestId(1)); // Should not reset the entry.
-
-    // Waiter should still be registered (entry was not overwritten).
-    assert_eq!(reg.notify(TestId(1)), Some(tid(10)));
+    reg.create(TestId(1)); // Should panic — duplicate create is a bug.
 }
 
 #[test]

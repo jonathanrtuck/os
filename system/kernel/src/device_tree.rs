@@ -260,7 +260,7 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
             }
             FDT_NOP => {}
             FDT_END => break,
-            _ => return None, // Invalid token.
+            _ => {} // Skip unknown/reserved tokens (FDT spec allows extension tokens).
         }
     }
 

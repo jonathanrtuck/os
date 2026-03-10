@@ -10,11 +10,12 @@
 
 use super::memory;
 use super::page_allocator;
+use super::paging;
 use super::sync::IrqMutex;
 
 /// Number of size classes: 64, 128, 256, 512, 1024, 2048 bytes.
 const NUM_CLASSES: usize = 6;
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = paging::PAGE_SIZE as usize;
 const SIZE_CLASSES: [usize; NUM_CLASSES] = [64, 128, 256, 512, 1024, 2048];
 
 struct FreeNode {
@@ -106,7 +107,7 @@ impl SlabCache {
 
 /// Find the size class index for a given size and alignment.
 /// Returns `None` if the allocation is too large or has unusual alignment.
-fn size_class(size: usize, align: usize) -> Option<usize> {
+pub(crate) fn size_class(size: usize, align: usize) -> Option<usize> {
     // Slab objects are naturally aligned to their size class.
     // If the requested alignment exceeds the size class, we can't serve it.
     for (i, &class_size) in SIZE_CLASSES.iter().enumerate() {

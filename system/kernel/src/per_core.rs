@@ -10,15 +10,11 @@ use core::sync::atomic::{AtomicBool, Ordering};
 pub const MAX_CORES: usize = 8;
 
 pub struct PerCpu {
-    pub id: u32,
     pub online: AtomicBool,
 }
 
 static PERCPU: [PerCpu; MAX_CORES] = {
-    // const initializer: all cores offline, id=0.
-    // Actual core IDs are set during boot.
     const INIT: PerCpu = PerCpu {
-        id: 0,
         online: AtomicBool::new(false),
     };
     [INIT; MAX_CORES]
@@ -35,7 +31,7 @@ pub fn core_id() -> u32 {
 
     (mpidr & 0xFF) as u32
 }
-/// Mark a core as online and store its ID.
+/// Mark a core as online. Core identity comes from `core_id()` (MPIDR).
 pub fn init_core(id: u32) {
     assert!((id as usize) < MAX_CORES, "core_id exceeds MAX_CORES");
 

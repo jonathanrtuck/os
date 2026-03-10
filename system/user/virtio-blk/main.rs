@@ -15,7 +15,7 @@
 
 const SECTOR_SIZE: usize = 512;
 /// Channel shared memory base (handle 0).
-const SHM: *const u8 = 0x4000_0000 as *const u8;
+const SHM: *const u8 = 0x4000_0000 as *const u8; // must match kernel paging::CHANNEL_SHM_BASE
 const VIRTIO_BLK_T_IN: u32 = 0; // Read
 const VIRTQ_REQUEST: u32 = 0;
 

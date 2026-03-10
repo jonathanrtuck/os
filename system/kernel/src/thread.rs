@@ -12,6 +12,8 @@ use alloc::vec::Vec;
 
 pub const STACK_SIZE: usize = 64 * 1024;
 pub const KERNEL_STACK_SIZE: usize = 16 * 1024;
+/// Distinguished ID marker for idle threads: `core_id | IDLE_THREAD_ID_MARKER`.
+const IDLE_THREAD_ID_MARKER: u64 = 0xFF00;
 
 /// Scheduling-related fields grouped together.
 pub(crate) struct Scheduling {
@@ -134,9 +136,9 @@ impl Thread {
     pub(crate) fn is_exited(&self) -> bool {
         self.state == ThreadState::Exited
     }
-    /// Idle threads have distinguished IDs: 0xFF00 | core_id.
+    /// Idle threads have distinguished IDs: `core_id | IDLE_THREAD_ID_MARKER`.
     pub(crate) fn is_idle(&self) -> bool {
-        self.id.0 & 0xFF00 == 0xFF00
+        self.id.0 & IDLE_THREAD_ID_MARKER == IDLE_THREAD_ID_MARKER
     }
     pub(crate) fn is_ready(&self) -> bool {
         self.state == ThreadState::Ready
@@ -204,31 +206,40 @@ impl Thread {
     }
 }
 impl Thread {
-    /// Kernel thread — runs at EL1, no address space.
-    pub fn new(id: u64, entry: fn() -> !) -> Box<Self> {
-        let (stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(STACK_SIZE);
+    /// Common field initialization for all thread constructors.
+    fn base(id: ThreadId, state: ThreadState, trust_level: TrustLevel) -> Self {
         // SAFETY: Context is #[repr(C)] with integer/float fields; zero is valid.
-        let mut ctx: Context = unsafe { core::mem::zeroed() };
+        let ctx: Context = unsafe { core::mem::zeroed() };
 
-        ctx.elr = entry as *const () as u64;
-        ctx.sp = stack_top;
-        ctx.spsr = 0b0101; // EL1h, DAIF clear
-        ctx.x[30] = thread_exit as *const () as u64;
-
-        Box::new(Thread {
+        Thread {
             context: ctx,
-            id: ThreadId(id),
-            state: ThreadState::Ready,
-            trust_level: TrustLevel::Kernel,
-            stack_alloc_pa: alloc_pa,
-            stack_alloc_order: alloc_order,
+            id,
+            state,
+            trust_level,
+            stack_alloc_pa: 0,
+            stack_alloc_order: 0,
             process_id: None,
             ttbr0: 0,
             scheduling: Scheduling::new(),
             wake_pending: false,
             wake_result: 0,
             wait_set: Vec::new(),
-        })
+        }
+    }
+
+    /// Kernel thread — runs at EL1, no address space.
+    pub fn new(id: u64, entry: fn() -> !) -> Box<Self> {
+        let (stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(STACK_SIZE);
+        let mut thread = Self::base(ThreadId(id), ThreadState::Ready, TrustLevel::Kernel);
+
+        thread.context.elr = entry as *const () as u64;
+        thread.context.sp = stack_top;
+        thread.context.spsr = 0b0101; // EL1h, DAIF clear
+        thread.context.x[30] = thread_exit as *const () as u64;
+        thread.stack_alloc_pa = alloc_pa;
+        thread.stack_alloc_order = alloc_order;
+
+        Box::new(thread)
     }
 
     /// Boot thread — zeroed context, no stack, no address space.
@@ -236,24 +247,11 @@ impl Thread {
     /// The boot thread represents the initial execution context (kernel_main).
     /// Its context is populated by exception.S on the first exception entry.
     pub fn new_boot() -> Box<Self> {
-        // SAFETY: Context is #[repr(C)] with integer and float fields;
-        // all-zeros is valid (registers cleared, EL0t mode).
-        let ctx: Context = unsafe { core::mem::zeroed() };
-
-        Box::new(Thread {
-            context: ctx,
-            id: ThreadId(0),
-            state: ThreadState::Running,
-            trust_level: TrustLevel::Kernel,
-            stack_alloc_pa: 0,
-            stack_alloc_order: 0,
-            process_id: None,
-            ttbr0: 0,
-            scheduling: Scheduling::new(),
-            wake_pending: false,
-            wake_result: 0,
-            wait_set: Vec::new(),
-        })
+        Box::new(Self::base(
+            ThreadId(0),
+            ThreadState::Running,
+            TrustLevel::Kernel,
+        ))
     }
     /// Idle thread — runs at EL1, no stack (uses boot stack), never enqueued.
     ///
@@ -261,24 +259,11 @@ impl Thread {
     /// The idle thread's Context is used as a save area when the core has
     /// no user threads to run.
     pub fn new_idle(core_id: u64) -> Box<Self> {
-        // SAFETY: Context is #[repr(C)] with integer and float fields;
-        // all-zeros is valid.
-        let ctx: Context = unsafe { core::mem::zeroed() };
-
-        Box::new(Thread {
-            context: ctx,
-            id: ThreadId(core_id | 0xFF00), // Distinguished idle thread IDs.
-            state: ThreadState::Ready,
-            trust_level: TrustLevel::Kernel,
-            stack_alloc_pa: 0,
-            stack_alloc_order: 0,
-            process_id: None,
-            ttbr0: 0,
-            scheduling: Scheduling::new(),
-            wake_pending: false,
-            wake_result: 0,
-            wait_set: Vec::new(),
-        })
+        Box::new(Self::base(
+            ThreadId(core_id | IDLE_THREAD_ID_MARKER),
+            ThreadState::Ready,
+            TrustLevel::Kernel,
+        ))
     }
     /// User thread — runs at EL0 in a process's address space.
     pub fn new_user(
@@ -289,28 +274,18 @@ impl Thread {
         user_stack_top: u64,
     ) -> Box<Self> {
         let (kernel_stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(KERNEL_STACK_SIZE);
-        // SAFETY: Context is #[repr(C)] with integer/float fields; zero is valid.
-        let mut ctx: Context = unsafe { core::mem::zeroed() };
+        let mut thread = Self::base(ThreadId(id), ThreadState::Ready, TrustLevel::Untrusted);
 
-        ctx.elr = entry_va;
-        ctx.sp = kernel_stack_top;
-        ctx.sp_el0 = user_stack_top;
-        ctx.spsr = 0b0000; // EL0t, DAIF clear
+        thread.context.elr = entry_va;
+        thread.context.sp = kernel_stack_top;
+        thread.context.sp_el0 = user_stack_top;
+        thread.context.spsr = 0b0000; // EL0t, DAIF clear
+        thread.stack_alloc_pa = alloc_pa;
+        thread.stack_alloc_order = alloc_order;
+        thread.process_id = Some(process_id);
+        thread.ttbr0 = ttbr0;
 
-        Box::new(Thread {
-            context: ctx,
-            id: ThreadId(id),
-            state: ThreadState::Ready,
-            trust_level: TrustLevel::Untrusted,
-            stack_alloc_pa: alloc_pa,
-            stack_alloc_order: alloc_order,
-            process_id: Some(process_id),
-            ttbr0,
-            scheduling: Scheduling::new(),
-            wake_pending: false,
-            wake_result: 0,
-            wait_set: Vec::new(),
-        })
+        Box::new(thread)
     }
 }
 
@@ -337,13 +312,7 @@ fn alloc_guarded_stack(min_stack_bytes: usize) -> (u64, u64, usize) {
 }
 /// Smallest buddy allocator order that provides at least `pages` contiguous pages.
 fn order_for_pages(pages: usize) -> usize {
-    let mut order = 0;
-
-    while (1usize << order) < pages {
-        order += 1;
-    }
-
-    order
+    pages.next_power_of_two().trailing_zeros() as usize
 }
 fn thread_exit() -> ! {
     super::scheduler::exit_current();

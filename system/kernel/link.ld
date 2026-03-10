@@ -1,6 +1,6 @@
 ENTRY(_start)
 
-KERNEL_VA_OFFSET = 0xFFFF000000000000;
+KERNEL_VA_OFFSET = 0xFFFF000000000000; /* must match memory::KERNEL_VA_OFFSET */
 PHYS_BASE        = 0x40080000;
 
 SECTIONS
@@ -63,6 +63,12 @@ SECTIONS
     __secondary_stacks = .;
     . = . + (7 * 0x4000); /* 7 × 16 KiB */
     __secondary_stacks_end = .;
+  }
+
+  /* Per-core emergency exception stacks (4 KiB × MAX_CORES, page-aligned).
+   * Used by exc_fatal when the original SP is corrupted (guard page hit). */
+  .bss.exc_stacks (NOLOAD) : AT(ADDR(.bss.exc_stacks) - KERNEL_VA_OFFSET) ALIGN(4096) {
+    *(.bss.exc_stacks)
   }
 
   /* Physical companions for boot code (which runs before TTBR1 is live). */

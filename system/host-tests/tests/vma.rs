@@ -1,15 +1,10 @@
 //! Host-side tests for the kernel VMA (Virtual Memory Area) data structure.
 //!
-//! Tests VmaList insert, lookup (binary search), and page_offset.
-//! The memory_region module depends only on `paging::PAGE_SIZE` and `alloc::vec::Vec`,
-//! both trivially available on the host.
+//! Tests VmaList insert, lookup (binary search), and permissions.
+//! The memory_region module depends only on `alloc::vec::Vec`,
+//! trivially available on the host.
 
 extern crate alloc;
-
-// Stub for memory_region.rs's `use super::paging::PAGE_SIZE`.
-mod paging {
-    pub const PAGE_SIZE: u64 = 4096;
-}
 
 #[path = "../../kernel/src/memory_region.rs"]
 mod memory_region;
@@ -238,27 +233,6 @@ fn elf_backing_preserved() {
         }
         Backing::Anonymous => panic!("expected Elf backing"),
     }
-}
-
-// --- page_offset ---
-
-#[test]
-fn page_offset_page_aligned() {
-    assert_eq!(VmaList::page_offset(0x1000), 0x1000);
-    assert_eq!(VmaList::page_offset(0x2000), 0x2000);
-}
-
-#[test]
-fn page_offset_rounds_down() {
-    assert_eq!(VmaList::page_offset(0x1001), 0x1000);
-    assert_eq!(VmaList::page_offset(0x1FFF), 0x1000);
-    assert_eq!(VmaList::page_offset(0x2800), 0x2000);
-}
-
-#[test]
-fn page_offset_zero() {
-    assert_eq!(VmaList::page_offset(0), 0);
-    assert_eq!(VmaList::page_offset(0xFFF), 0);
 }
 
 // --- permissions ---

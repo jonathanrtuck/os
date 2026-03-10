@@ -41,7 +41,7 @@ pub fn alloc() -> (Asid, u64) {
     let start = s.next_hint;
 
     for offset in 0..255u16 {
-        let id = ((start as u16 + offset) % 255 + 1) as u8; // Range 1..=255
+        let id = ((start as u16 - 1 + offset) % 255 + 1) as u8; // Range 1..=255
         let word = (id / 64) as usize;
         let bit = id % 64;
 
@@ -62,6 +62,7 @@ pub fn alloc() -> (Asid, u64) {
     // SAFETY: TLBI vmalle1is invalidates all TLB entries across all cores.
     // This is safe because all threads will re-acquire ASIDs on next
     // context switch (generation mismatch triggers lazy revalidation).
+    #[cfg(target_os = "none")]
     unsafe {
         core::arch::asm!(
             "dsb ishst",

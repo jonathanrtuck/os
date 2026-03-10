@@ -63,6 +63,7 @@ use super::futex;
 use super::handle::{ChannelId, Handle, HandleError, HandleObject, Rights};
 use super::interrupt;
 use super::interrupt::InterruptId;
+use super::metrics;
 use super::page_allocator;
 use super::paging;
 use super::paging::USER_VA_END;
@@ -76,7 +77,6 @@ use super::thread::WaitEntry;
 use super::thread_exit;
 use super::timer;
 use super::timer::TimerId;
-use super::metrics;
 use super::Context;
 use alloc::vec::Vec;
 
@@ -107,6 +107,14 @@ pub mod nr {
     pub const PROCESS_KILL: u64 = 23;
 }
 
+/// Maximum DMA allocation order (2^4 pages = 64 KiB).
+const MAX_DMA_ORDER: u64 = 4;
+/// Maximum ELF size for process_create (1 MiB).
+const MAX_ELF_SIZE: u64 = 1024 * 1024;
+/// Maximum number of handles in a single `wait` call.
+const MAX_WAIT_HANDLES: u64 = 16;
+const MAX_WRITE_LEN: u64 = 4096;
+
 #[repr(i64)]
 pub enum Error {
     UnknownSyscall = -1,
@@ -120,14 +128,6 @@ pub enum Error {
     OutOfMemory = -9,
 }
 
-/// Maximum DMA allocation order (2^4 pages = 64 KiB).
-const MAX_DMA_ORDER: u64 = 4;
-/// Maximum ELF size for process_create (1 MiB).
-const MAX_ELF_SIZE: u64 = 1024 * 1024;
-/// Maximum number of handles in a single `wait` call.
-const MAX_WAIT_HANDLES: u64 = 16;
-const MAX_WRITE_LEN: u64 = 4096;
-
 impl From<HandleError> for u64 {
     fn from(e: HandleError) -> u64 {
         (e as i64) as u64
@@ -138,25 +138,7 @@ impl From<HandleError> for u64 {
 /// address translation instruction. Returns false if the page is unmapped
 /// or inaccessible.
 fn is_user_page_readable(va: u64) -> bool {
-    let par: u64;
-
-    unsafe {
-        // AT S1E0R: translate va as a Stage 1 EL0 Read.
-        core::arch::asm!(
-            "at s1e0r, {va}",
-            "isb",
-            va = in(reg) va,
-            options(nostack)
-        );
-        core::arch::asm!(
-            "mrs {par}, par_el1",
-            par = out(reg) par,
-            options(nostack, nomem)
-        );
-    }
-
-    // PAR_EL1 bit 0: 0 = translation succeeded, 1 = fault.
-    par & 1 == 0
+    user_va_to_pa(va).is_some()
 }
 /// Verify that all pages in `[start, start+len)` are readable by EL0.
 fn is_user_range_readable(start: u64, len: u64) -> bool {
@@ -206,14 +188,9 @@ fn is_user_page_writable(va: u64) -> bool {
 fn sys_channel_create() -> Result<u64, Error> {
     // Allocate channel (shared page + two endpoint IDs).
     let (ch_a, ch_b) = channel::create().ok_or(Error::OutOfMemory)?;
-    // Map shared page into caller's address space and insert both handles.
+    // Insert both handles first, map shared page only on success.
+    // This avoids leaking a mapped shared page if the second insert fails.
     let result = scheduler::current_process_do(|process| {
-        let (shared_pa, va) = channel::shared_info(ch_a);
-
-        process
-            .address_space
-            .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
-
         let handle_a = process
             .handles
             .insert(HandleObject::Channel(ch_a), Rights::READ_WRITE)?;
@@ -222,7 +199,17 @@ fn sys_channel_create() -> Result<u64, Error> {
             .handles
             .insert(HandleObject::Channel(ch_b), Rights::READ_WRITE)
         {
-            Ok(handle_b) => Ok((handle_a, handle_b)),
+            Ok(handle_b) => {
+                // Both handles inserted — now map the shared page.
+                let (shared_pa, va) =
+                    channel::shared_info(ch_a).ok_or(HandleError::InvalidHandle)?;
+
+                process
+                    .address_space
+                    .map_shared(va, shared_pa.as_u64(), &PageAttrs::user_rw());
+
+                Ok((handle_a, handle_b))
+            }
             Err(e) => {
                 // Second insert failed — close the first handle.
                 let _ = process.handles.close(handle_a);
@@ -239,7 +226,7 @@ fn sys_channel_create() -> Result<u64, Error> {
             channel::close_endpoint(ch_a);
             channel::close_endpoint(ch_b);
 
-            Err(Error::InvalidArgument)
+            Err(Error::OutOfMemory)
         }
     }
 }
@@ -476,7 +463,7 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
     })?;
     // Phase 1.5: If the source is a Channel, get shared page info (channel lock).
     let channel_mapping = match source_obj {
-        HandleObject::Channel(ch_id) => Some(channel::shared_info(ch_id)),
+        HandleObject::Channel(ch_id) => channel::shared_info(ch_id),
         _ => None,
     };
     // Phase 2: Insert into target process (scheduler lock via with_process).
@@ -499,7 +486,8 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
             .map_err(|_| Error::InvalidArgument)?;
 
         Ok(())
-    });
+    })
+    .unwrap_or(Err(Error::InvalidArgument));
 
     // Rollback: if Phase 2 failed, restore handle to source process.
     if let Err(e) = result {
@@ -557,8 +545,45 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
             .insert(HandleObject::Process(process_id), Rights::READ_WRITE)
     })
     .map_err(|_| {
+        // Full cleanup: kill the process + its suspended thread, then
+        // destroy notification state and free the address space.
+        if let Some(kill_info) = scheduler::kill_process(process_id) {
+            for &tid in &kill_info.thread_ids {
+                thread_exit::notify_exit(tid);
+            }
+
+            process_exit::notify_exit(process_id);
+
+            for &tid in &kill_info.thread_ids {
+                futex::remove_thread(tid);
+            }
+            for id in kill_info.handles.channels {
+                channel::close_endpoint(id);
+            }
+            for id in kill_info.handles.interrupts {
+                interrupt::destroy(id);
+            }
+            for id in kill_info.handles.timers {
+                timer::destroy(id);
+            }
+            for id in kill_info.handles.thread_handles {
+                thread_exit::destroy(id);
+            }
+            for id in kill_info.handles.process_handles {
+                process_exit::destroy(id);
+            }
+
+            if let Some(mut addr_space) = kill_info.address_space {
+                addr_space.invalidate_tlb();
+                addr_space.free_all();
+
+                super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
+            }
+        }
+
         process_exit::destroy(process_id);
-        Error::InvalidArgument
+
+        Error::OutOfMemory
     })?;
 
     Ok(handle.0 as u64)
@@ -597,19 +622,19 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
         super::futex::remove_thread(tid);
     }
     // Phase 3: close resources outside scheduler lock.
-    for id in kill_info.channels {
+    for id in kill_info.handles.channels {
         super::channel::close_endpoint(id);
     }
-    for id in kill_info.interrupts {
+    for id in kill_info.handles.interrupts {
         super::interrupt::destroy(id);
     }
-    for id in kill_info.timers {
+    for id in kill_info.handles.timers {
         super::timer::destroy(id);
     }
-    for id in kill_info.thread_handles {
+    for id in kill_info.handles.thread_handles {
         super::thread_exit::destroy(id);
     }
-    for id in kill_info.process_handles {
+    for id in kill_info.handles.process_handles {
         super::process_exit::destroy(id);
     }
 
@@ -955,10 +980,6 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
 
     for &byte in slice {
-        if byte == b'\n' {
-            serial::putc(b'\r');
-        }
-
         serial::putc(byte);
     }
 

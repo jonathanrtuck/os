@@ -66,7 +66,9 @@ impl SchedulingContext {
 
         Self {
             remaining: self.budget,
-            replenish_at: self.replenish_at + (periods_skipped + 1) * self.period,
+            replenish_at: self
+                .replenish_at
+                .saturating_add((periods_skipped.saturating_add(1)).saturating_mul(self.period)),
             ..*self
         }
     }

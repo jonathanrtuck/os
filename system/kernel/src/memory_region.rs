@@ -4,7 +4,6 @@
 //! permissions and backing. Used by the demand paging fault handler to
 //! determine what to map on a page fault.
 
-use super::paging::PAGE_SIZE;
 use alloc::vec::Vec;
 
 /// What backs a VMA's pages.
@@ -21,6 +20,7 @@ pub enum Backing {
 pub struct Vma {
     pub start: u64,
     pub end: u64, // exclusive
+    // TODO: enforce readable=false for future no-access guard mappings.
     pub readable: bool,
     pub writable: bool,
     pub executable: bool,
@@ -70,9 +70,5 @@ impl VmaList {
     }
     pub const fn new() -> Self {
         Self { vmas: Vec::new() }
-    }
-    /// Compute the offset of `va` within the VMA's backing data.
-    pub fn page_offset(va: u64) -> u64 {
-        va & !(PAGE_SIZE - 1)
     }
 }

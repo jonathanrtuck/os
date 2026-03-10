@@ -62,11 +62,14 @@ impl<Id: WaitableId> WaitableRegistry<Id> {
             entry.ready = false;
         }
     }
-    /// Add a trackable entry. No-op if `id` already exists.
+    /// Add a trackable entry. Panics in debug mode if `id` already exists
+    /// (would silently inherit the old entry's `ready` flag).
     pub fn create(&mut self, id: Id) {
         let idx = id.index();
 
         if idx < self.entries.len() {
+            debug_assert!(self.entries[idx].is_none(), "duplicate waitable ID");
+
             if self.entries[idx].is_some() {
                 return;
             }

@@ -35,6 +35,11 @@ fn gicd() -> usize {
     GICD_BASE.load(Ordering::Relaxed)
 }
 
+/// Acknowledge an interrupt. Returns the full IAR register value (not just
+/// the IRQ ID) — pass it intact to `end_of_interrupt`. The IAR includes
+/// the CPUID in bits [12:10]; extracting only bits [9:0] would break EOI.
+///
+/// Returns `None` for spurious interrupts (ID 1023).
 pub fn acknowledge() -> Option<u32> {
     // DSB SY before reading IAR: ensure all previous memory accesses
     // (including device writes) complete before acknowledging the interrupt.

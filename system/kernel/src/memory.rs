@@ -14,7 +14,7 @@ use core::cell::UnsafeCell;
 const BLOCK_2MB: u64 = 2 * 1024 * 1024;
 
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
-pub const KERNEL_VA_OFFSET: usize = 0xFFFF_0000_0000_0000;
+pub const KERNEL_VA_OFFSET: usize = 0xFFFF_0000_0000_0000; // must match link.ld KERNEL_VA_OFFSET
 
 /// Physical address newtype. Prevents accidental PA/VA mixups at compile time.
 ///
@@ -225,8 +225,9 @@ pub fn set_kernel_guard_page(va: usize) {
 
         // Replace L2 block with table descriptor pointing to the new L3.
         // SAFETY: l2_table is the live TTBR1 L2 — single 64-bit write is
-        // atomic on AArch64. The L3 table maps identical pages, so any
-        // concurrent access resolves correctly regardless of TLB state.
+        // atomic on AArch64. The L3 table maps identical pages. The
+        // subsequent tlb_invalidate_all() ensures all cores see the new
+        // table descriptor (break-before-make safety).
         unsafe {
             l2_table
                 .add(l2_idx)

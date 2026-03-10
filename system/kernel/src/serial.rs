@@ -42,6 +42,24 @@ fn raw_puts(s: &str) {
     }
 }
 
+/// Panic-safe put_hex — bypasses the lock.
+pub fn panic_put_hex(v: u64) {
+    let mut buf = [0u8; 16];
+
+    for i in 0..16 {
+        let shift = 60 - (i * 4);
+        let nib = ((v >> shift) & 0xF) as u8;
+
+        buf[i] = match nib {
+            0..=9 => b'0' + nib,
+            _ => b'A' + (nib - 10),
+        };
+    }
+
+    for b in buf {
+        raw_putc(b);
+    }
+}
 /// Panic-safe put_u32 — bypasses the lock.
 pub fn panic_put_u32(mut n: u32) {
     let mut buf = [0u8; 10];
@@ -62,71 +80,24 @@ pub fn panic_put_u32(mut n: u32) {
         raw_putc(byte);
     }
 }
-/// Panic-safe put_hex — bypasses the lock.
-pub fn panic_put_hex(v: u64) {
-    let mut buf = [0u8; 16];
-
-    for i in 0..16 {
-        let shift = 60 - (i * 4);
-        let nib = ((v >> shift) & 0xF) as u8;
-
-        buf[i] = match nib {
-            0..=9 => b'0' + nib,
-            _ => b'A' + (nib - 10),
-        };
-    }
-
-    for b in buf {
-        raw_putc(b);
-    }
+/// Panic-safe putc — bypasses the lock.
+pub fn panic_putc(c: u8) {
+    raw_putc(c);
 }
 /// Panic-safe puts — bypasses the lock. Only for the panic handler where
 /// the lock may already be held (deadlock avoidance).
 pub fn panic_puts(s: &str) {
     raw_puts(s);
 }
-/// Panic-safe putc — bypasses the lock.
-pub fn panic_putc(c: u8) {
-    raw_putc(c);
-}
-
 pub fn put_hex(v: u64) {
     let _guard = LOCK.lock();
-    let mut buf = [0u8; 16];
 
-    for i in 0..16 {
-        let shift = 60 - (i * 4);
-        let nib = ((v >> shift) & 0xF) as u8;
-
-        buf[i] = match nib {
-            0..=9 => b'0' + nib,
-            _ => b'A' + (nib - 10),
-        };
-    }
-
-    for b in buf {
-        raw_putc(b);
-    }
+    panic_put_hex(v);
 }
-pub fn put_u32(mut n: u32) {
+pub fn put_u32(n: u32) {
     let _guard = LOCK.lock();
-    let mut buf = [0u8; 10];
-    let mut i = buf.len();
 
-    if n == 0 {
-        raw_putc(b'0');
-        return;
-    }
-
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    for &byte in &buf[i..] {
-        raw_putc(byte);
-    }
+    panic_put_u32(n);
 }
 pub fn put_u64(mut n: u64) {
     let _guard = LOCK.lock();

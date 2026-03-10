@@ -359,13 +359,14 @@ exc_user_fault:
 .ltorg
 
 // --------------------------------------------------------------------------
-// Per-core emergency exception stacks (4 KiB × 4 cores).
+// Per-core emergency exception stacks (4 KiB × MAX_CORES).
 //
 // Used by exc_fatal so the EL1 fault handler works even when the original
 // SP points into a guard page (kernel stack overflow).
+// Must match per_core::MAX_CORES.
 // --------------------------------------------------------------------------
-.section .bss
+.section .bss.exc_stacks
 .align 12
 .global __exc_stacks
 __exc_stacks:
-  .space 4096 * 4
+  .space 4096 * 8

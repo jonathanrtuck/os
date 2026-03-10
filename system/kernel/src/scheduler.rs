@@ -24,6 +24,11 @@ use super::timer;
 use super::Context;
 use alloc::{boxed::Box, vec::Vec};
 
+/// Initialize the scheduler with core 0's boot thread.
+/// Default scheduling context: 10ms budget per 50ms period (20% of one core).
+const DEFAULT_BUDGET_NS: u64 = 10_000_000;
+const DEFAULT_PERIOD_NS: u64 = 50_000_000;
+
 struct PerCoreState {
     current: Option<Box<Thread>>,
     idle: Option<Box<Thread>>,
@@ -65,13 +70,18 @@ struct State {
 /// Information collected by `kill_process` for cleanup outside the scheduler lock.
 pub struct KillInfo {
     pub thread_ids: Vec<ThreadId>,
+    pub handles: HandleCategories,
+    /// Address space for immediate cleanup (None if deferred due to running threads).
+    pub address_space: Option<Box<super::address_space::AddressSpace>>,
+}
+
+/// Handles sorted by type for cleanup outside the scheduler lock.
+pub struct HandleCategories {
     pub channels: Vec<super::handle::ChannelId>,
     pub interrupts: Vec<super::interrupt::InterruptId>,
     pub timers: Vec<super::timer::TimerId>,
     pub thread_handles: Vec<ThreadId>,
     pub process_handles: Vec<ProcessId>,
-    /// Address space for immediate cleanup (None if deferred due to running threads).
-    pub address_space: Option<Box<super::address_space::AddressSpace>>,
 }
 
 /// Information collected under the scheduler lock for thread exit.
@@ -80,11 +90,7 @@ enum ExitInfo {
     Last {
         thread_id: ThreadId,
         process_id: ProcessId,
-        channels: Vec<super::handle::ChannelId>,
-        interrupts: Vec<super::interrupt::InterruptId>,
-        timers: Vec<super::timer::TimerId>,
-        thread_handles: Vec<ThreadId>,
-        process_handles: Vec<ProcessId>,
+        handles: HandleCategories,
         process: Process,
     },
     /// Not the last thread — just clean up this thread.
@@ -150,6 +156,31 @@ fn bind_default_context(s: &mut State, thread: &mut Thread) {
         }
     }
 }
+/// Sort handle objects into typed buckets for cleanup outside the lock.
+///
+/// SchedulingContext handles are released immediately (they only need `s`).
+fn categorize_handles(objects: Vec<HandleObject>, s: &mut State) -> HandleCategories {
+    let mut categories = HandleCategories {
+        channels: Vec::new(),
+        interrupts: Vec::new(),
+        timers: Vec::new(),
+        thread_handles: Vec::new(),
+        process_handles: Vec::new(),
+    };
+
+    for obj in objects {
+        match obj {
+            HandleObject::Channel(id) => categories.channels.push(id),
+            HandleObject::Interrupt(id) => categories.interrupts.push(id),
+            HandleObject::Process(id) => categories.process_handles.push(id),
+            HandleObject::SchedulingContext(id) => release_context_inner(s, id),
+            HandleObject::Thread(id) => categories.thread_handles.push(id),
+            HandleObject::Timer(id) => categories.timers.push(id),
+        }
+    }
+
+    categories
+}
 /// Charge elapsed time to the old thread's EEVDF vruntime and scheduling context.
 fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
     if thread.is_idle() || thread.scheduling.last_started == 0 {
@@ -179,6 +210,11 @@ fn find_thread_pid(s: &State, id: ThreadId) -> Option<ProcessId> {
         }
     }
     for t in &s.blocked {
+        if t.id() == id {
+            return t.process_id;
+        }
+    }
+    for t in &s.suspended {
         if t.id() == id {
             return t.process_id;
         }
@@ -257,6 +293,19 @@ fn release_context_inner(s: &mut State, ctx_id: SchedulingContextId) {
                 s.free_context_ids.push(ctx_id.0);
             }
         }
+    }
+}
+/// Release a thread's bound and borrowed scheduling context refs.
+///
+/// Takes both `context_id` and `saved_context_id` from the thread and
+/// decrements the corresponding ref counts. Used by both thread exit and
+/// process kill paths.
+fn release_thread_context_ids(s: &mut State, thread: &mut Thread) {
+    if let Some(id) = thread.scheduling.context_id.take() {
+        release_context_inner(s, id);
+    }
+    if let Some(id) = thread.scheduling.saved_context_id.take() {
+        release_context_inner(s, id);
     }
 }
 /// Replenish all scheduling contexts that are due.
@@ -410,6 +459,9 @@ fn select_best(queue: &RunQueue, contexts: &[Option<SchedulingContextSlot>]) -> 
 
     best.or(fallback).map(|(idx, _)| idx)
 }
+/// Blocked list is intentionally not searched: this is only called when
+/// `try_wake` already returned false, meaning the thread is Running or Ready
+/// (not yet blocked). A blocked thread would have been woken by `try_wake`.
 fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
     for core_state in s.cores.iter_mut() {
         if let Some(t) = &mut core_state.current {
@@ -421,7 +473,6 @@ fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
             }
         }
     }
-
     for t in s.queue.ready.iter_mut() {
         if t.id() == id {
             t.wake_pending = true;
@@ -513,23 +564,20 @@ fn ttbr0_for(thread: &Thread) -> u64 {
 pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-    // Verify context exists and increment ref_count (disjoint field access).
+    // Check preconditions before mutating ref_count.
+    if thread.scheduling.context_id.is_some() {
+        return false;
+    }
+
+    // Verify context exists and increment ref_count.
     match s.scheduling_contexts.get_mut(ctx_id.0 as usize) {
         Some(Some(entry)) => entry.ref_count += 1,
         _ => return false,
     }
 
     let thread = s.cores[core].current.as_mut().expect("no current thread");
-
-    if thread.scheduling.context_id.is_some() {
-        // Already bound — undo the ref_count increment.
-        s.scheduling_contexts[ctx_id.0 as usize]
-            .as_mut()
-            .unwrap()
-            .ref_count -= 1;
-        return false;
-    }
 
     thread.scheduling.context_id = Some(ctx_id);
 
@@ -580,8 +628,16 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
 pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-    // Verify context exists and increment ref_count (disjoint field access).
+    // Check preconditions before mutating ref_count.
+    if thread.scheduling.saved_context_id.is_some() {
+        return false;
+    }
+
+    let saved = thread.scheduling.context_id;
+
+    // Verify context exists and increment ref_count.
     match s.scheduling_contexts.get_mut(ctx_id.0 as usize) {
         Some(Some(entry)) => entry.ref_count += 1,
         _ => return false,
@@ -589,18 +645,7 @@ pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-    // Can't borrow if already borrowing.
-    if thread.scheduling.saved_context_id.is_some() {
-        // Undo the ref_count increment.
-        s.scheduling_contexts[ctx_id.0 as usize]
-            .as_mut()
-            .unwrap()
-            .ref_count -= 1;
-
-        return false;
-    }
-
-    thread.scheduling.saved_context_id = thread.scheduling.context_id;
+    thread.scheduling.saved_context_id = saved;
     thread.scheduling.context_id = Some(ctx_id);
 
     true
@@ -615,6 +660,25 @@ pub fn clear_wait_state() {
 
     thread.wait_set.clear();
     thread.wake_pending = false;
+}
+/// Close all resources in a `HandleCategories` set. Must be called outside the
+/// scheduler lock — the individual destroy functions acquire their own locks.
+pub fn close_handle_categories(h: HandleCategories) {
+    for id in h.channels {
+        super::channel::close_endpoint(id);
+    }
+    for id in h.interrupts {
+        super::interrupt::destroy(id);
+    }
+    for id in h.timers {
+        super::timer::destroy(id);
+    }
+    for id in h.thread_handles {
+        super::thread_exit::destroy(id);
+    }
+    for id in h.process_handles {
+        super::process_exit::destroy(id);
+    }
 }
 /// Create a new process with the given address space. Returns the ProcessId.
 ///
@@ -747,22 +811,21 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     // Phase 1: determine if this is the last thread, collect resources.
     let exit_info = {
         let mut s = STATE.lock();
-
         // Release all scheduling context bind/borrow refs on exit.
-        {
+        // Take IDs first to avoid overlapping borrows on `s`.
+        let (ctx_id, saved_ctx_id) = {
             let thread = s.cores[core].current.as_mut().expect("no current thread");
-            let ctx = thread.scheduling.context_id.take();
-            let saved = thread.scheduling.saved_context_id.take();
+            (
+                thread.scheduling.context_id.take(),
+                thread.scheduling.saved_context_id.take(),
+            )
+        };
 
-            // Release borrowed context ref (if borrowing).
-            if let Some(id) = ctx {
-                release_context_inner(&mut s, id);
-            }
-            // Release bound context ref (stashed in saved_context_id during borrow,
-            // or already released above if not borrowing).
-            if let Some(id) = saved {
-                release_context_inner(&mut s, id);
-            }
+        if let Some(id) = ctx_id {
+            release_context_inner(&mut s, id);
+        }
+        if let Some(id) = saved_ctx_id {
+            release_context_inner(&mut s, id);
         }
 
         let tid = s.cores[core].current.as_ref().unwrap().id();
@@ -786,34 +849,13 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
                 .take()
                 .expect("process not found");
             let handle_objects: Vec<HandleObject> =
-                process.handles.drain().map(|(_, obj)| obj).collect();
-            let mut channels = Vec::new();
-            let mut timers = Vec::new();
-            let mut interrupts = Vec::new();
-            let mut thread_handles = Vec::new();
-            let mut process_handles = Vec::new();
-
-            for obj in handle_objects {
-                match obj {
-                    HandleObject::Channel(id) => channels.push(id),
-                    HandleObject::Interrupt(id) => interrupts.push(id),
-                    HandleObject::Process(id) => process_handles.push(id),
-                    HandleObject::SchedulingContext(id) => {
-                        release_context_inner(&mut s, id);
-                    }
-                    HandleObject::Thread(id) => thread_handles.push(id),
-                    HandleObject::Timer(id) => timers.push(id),
-                }
-            }
+                process.handles.drain().map(|(obj, _)| obj).collect();
+            let handles = categorize_handles(handle_objects, &mut s);
 
             ExitInfo::Last {
                 thread_id: tid,
                 process_id: pid,
-                channels,
-                interrupts,
-                timers,
-                thread_handles,
-                process_handles,
+                handles,
                 process,
             }
         } else {
@@ -839,36 +881,17 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
 
     match exit_info {
         ExitInfo::Last {
-            channels,
-            interrupts,
-            timers,
-            thread_handles,
-            process_handles,
-            process,
-            ..
+            handles, process, ..
         } => {
             // Phase 3: close resources outside scheduler lock.
-            for id in channels {
-                super::channel::close_endpoint(id);
-            }
-            for id in interrupts {
-                super::interrupt::destroy(id);
-            }
-            for id in timers {
-                super::timer::destroy(id);
-            }
-            for id in thread_handles {
-                super::thread_exit::destroy(id);
-            }
-            for id in process_handles {
-                super::process_exit::destroy(id);
-            }
+            close_handle_categories(handles);
 
             // Phase 4: free address space.
             let mut addr_space = process.address_space;
 
             addr_space.invalidate_tlb();
             addr_space.free_all();
+
             super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
 
             // Phase 5: mark exited and schedule.
@@ -891,11 +914,6 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
         }
     }
 }
-/// Initialize the scheduler with core 0's boot thread.
-/// Default scheduling context: 10ms budget per 50ms period (20% of one core).
-const DEFAULT_BUDGET_NS: u64 = 10_000_000;
-const DEFAULT_PERIOD_NS: u64 = 50_000_000;
-
 pub fn init() {
     let mut s = STATE.lock();
     let boot_thread = Thread::new_boot();
@@ -936,10 +954,8 @@ pub fn init() {
 pub fn init_secondary(core_id: u32) {
     let mut s = STATE.lock();
     let idx = core_id as usize;
-    let idle = Thread::new_idle(core_id as u64);
-    let ctx_ptr = idle.context_ptr();
 
-    s.cores[idx].idle = Some(idle);
+    s.cores[idx].idle = Some(Thread::new_idle(core_id as u64));
 
     // Create a boot thread for this core as its current thread.
     let boot_thread = Thread::new_boot();
@@ -955,9 +971,6 @@ pub fn init_secondary(core_id: u32) {
             options(nostack, nomem)
         );
     }
-
-    // Keep ctx_ptr used so idle isn't optimized away.
-    let _ = ctx_ptr;
 }
 /// Kill all threads of a process and collect resources for cleanup.
 ///
@@ -983,17 +996,6 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
     let mut killed_threads = Vec::new();
     let mut running_count: u32 = 0;
-
-    // Helper: release a thread's scheduling context bind/borrow refs.
-    fn release_thread_contexts(s: &mut State, thread: &mut Thread) {
-        if let Some(id) = thread.scheduling.context_id.take() {
-            release_context_inner(s, id);
-        }
-        if let Some(id) = thread.scheduling.saved_context_id.take() {
-            release_context_inner(s, id);
-        }
-    }
-
     // Remove target threads from ready queue.
     let mut i = 0;
 
@@ -1001,7 +1003,8 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         if s.queue.ready[i].process_id == Some(target_pid) {
             let mut thread = s.queue.ready.swap_remove(i);
 
-            release_thread_contexts(&mut s, &mut thread);
+            release_thread_context_ids(&mut s, &mut thread);
+
             killed_threads.push(thread.id());
         } else {
             i += 1;
@@ -1015,7 +1018,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         if s.blocked[i].process_id == Some(target_pid) {
             let mut thread = s.blocked.swap_remove(i);
 
-            release_thread_contexts(&mut s, &mut thread);
+            release_thread_context_ids(&mut s, &mut thread);
             killed_threads.push(thread.id());
         } else {
             i += 1;
@@ -1029,7 +1032,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         if s.suspended[i].process_id == Some(target_pid) {
             let mut thread = s.suspended.swap_remove(i);
 
-            release_thread_contexts(&mut s, &mut thread);
+            release_thread_context_ids(&mut s, &mut thread);
             killed_threads.push(thread.id());
         } else {
             i += 1;
@@ -1068,25 +1071,9 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     let handle_objects: Vec<HandleObject> = {
         let process = s.processes[target_pid.0 as usize].as_mut().unwrap();
 
-        process.handles.drain().map(|(_, obj)| obj).collect()
+        process.handles.drain().map(|(obj, _)| obj).collect()
     };
-    let mut channels = Vec::new();
-    let mut interrupts = Vec::new();
-    let mut timers = Vec::new();
-    let mut thread_handles = Vec::new();
-    let mut process_handles = Vec::new();
-
-    for obj in handle_objects {
-        match obj {
-            HandleObject::Channel(id) => channels.push(id),
-            HandleObject::Interrupt(id) => interrupts.push(id),
-            HandleObject::Process(id) => process_handles.push(id),
-            HandleObject::SchedulingContext(id) => release_context_inner(&mut s, id),
-            HandleObject::Thread(id) => thread_handles.push(id),
-            HandleObject::Timer(id) => timers.push(id),
-        }
-    }
-
+    let handles = categorize_handles(handle_objects, &mut s);
     // Take or defer the process based on whether threads are still running.
     let address_space = if running_count == 0 {
         // No threads running on any core — take the process for immediate cleanup.
@@ -1107,11 +1094,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
     Some(KillInfo {
         thread_ids: killed_threads,
-        channels,
-        interrupts,
-        timers,
-        thread_handles,
-        process_handles,
+        handles,
         address_space,
     })
 }
@@ -1310,28 +1293,26 @@ pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
 }
 /// Access a process by ProcessId. Acquires the scheduler lock.
 ///
+/// Returns `None` if the process doesn't exist (e.g., already killed).
 /// Used by `channel::setup_endpoint` (boot), `handle_send` (syscall).
-pub fn with_process<R>(pid: ProcessId, f: impl FnOnce(&mut Process) -> R) -> R {
+pub fn with_process<R>(pid: ProcessId, f: impl FnOnce(&mut Process) -> R) -> Option<R> {
     let mut s = STATE.lock();
-    let process = s.processes[pid.0 as usize]
-        .as_mut()
-        .expect("process not found");
+    let process = s.processes.get_mut(pid.0 as usize)?.as_mut()?;
 
-    f(process)
+    Some(f(process))
 }
 /// Access a process by looking up its thread. Acquires the scheduler lock.
 ///
 /// Searches all thread locations (run queue, blocked list, core-current) to
 /// find the thread, gets its process_id, and provides mutable access to the
-/// process. Used by `channel::create` which identifies endpoints by ThreadId.
-pub fn with_process_of_thread<R>(tid: ThreadId, f: impl FnOnce(&mut Process) -> R) -> R {
+/// process. Returns `None` if the thread or process is not found.
+/// Used by `channel::create` which identifies endpoints by ThreadId.
+pub fn with_process_of_thread<R>(tid: ThreadId, f: impl FnOnce(&mut Process) -> R) -> Option<R> {
     let mut s = STATE.lock();
-    let pid = find_thread_pid(&s, tid).expect("thread not found or has no process");
-    let process = s.processes[pid.0 as usize]
-        .as_mut()
-        .expect("process not found");
+    let pid = find_thread_pid(&s, tid)?;
+    let process = s.processes.get_mut(pid.0 as usize)?.as_mut()?;
 
-    f(process)
+    Some(f(process))
 }
 /// Access a thread by ID. Closure receives exclusive access to the thread.
 pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {
@@ -1345,6 +1326,12 @@ pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {
     }
     // Search blocked list.
     for t in s.blocked.iter_mut() {
+        if t.id() == id {
+            return f(t);
+        }
+    }
+    // Search suspended list.
+    for t in s.suspended.iter_mut() {
         if t.id() == id {
             return f(t);
         }

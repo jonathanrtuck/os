@@ -310,7 +310,7 @@ fn spawn_virtio_driver(elf: &[u8], mmio_pa: u64, irq: u32) {
     let (pid, _) = process::create_from_user_elf(elf).expect("failed to create virtio driver");
     let (ch_a, ch_b) = channel::create().expect("failed to create driver channel");
     // Write device info to the channel shared page before the driver starts.
-    let (shared_pa, _) = channel::shared_info(ch_a);
+    let (shared_pa, _) = channel::shared_info(ch_a).expect("channel closed");
     let shared_va = memory::phys_to_virt(shared_pa) as *mut u8;
 
     unsafe {

@@ -292,7 +292,7 @@ Interface map by boundary:
 
 | Boundary                   | Interface                                                     | Clients             | Status             |
 | -------------------------- | ------------------------------------------------------------- | ------------------- | ------------------ |
-| Kernel ↔ userland          | Syscall API (12 syscalls, typed handles)                      | OS service, drivers | Mostly designed    |
+| Kernel ↔ userland          | Syscall API (24 syscalls, typed handles)                      | OS service, drivers | Mostly designed    |
 | OS service ↔ Editors       | Edit protocol (beginOp/endOp, state, input)                   | Editors             | Partially designed |
 | OS service ↔ Users         | Interaction model (CLI + GUI)                                 | Users               | Unsettled (#17)    |
 | OS service ↔ Editors/Users | Metadata query API (document discovery)                       | Editors, users      | Sketched (#7)      |
@@ -301,6 +301,10 @@ Interface map by boundary:
 | OS service internal        | Renderer, layout engine, compositor, scheduling policy        | —                   | Blank              |
 
 The kernel surface is small and stable. The blue-layer interfaces are about pluggability. The OS service boundary — edit protocol, metadata queries, interaction model — defines what it feels like to use this OS. The web engine adapter is not a separate interface from the translator interface (a webpage IS a compound document, handled through the same translator pattern as .docx).
+
+### Full-codebase review resolved: cross-team API changes are the coordination cost (2026-03-10)
+
+Resolved all 41 issues from DESIGN.md §11 using a 4-agent team partitioned by file ownership (assembly/linker/userspace, tests, scheduler/thread, remaining kernel src). The zero-overlap rule prevented all merge conflicts. The only coordination cost was cross-boundary API changes: when one agent changed a return type (`shared_info` → `Option`, `DrainHandles` tuple order, `KillInfo` → nested `HandleCategories`), callers in other agents' files broke. Three such ripples required lead intervention. Lesson for future multi-agent work: partition by API dependency boundary, not just file ownership. The borrow checker caught a real issue in the extracted `release_thread_context_ids` helper (split borrow needed for `s.cores[core].current` vs `s.scheduling_contexts`).
 
 ### Birth time is the key insight for efficient snapshots (2026-03-08)
 

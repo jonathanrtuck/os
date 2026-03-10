@@ -86,7 +86,11 @@ pub fn close_endpoint(id: ChannelId) {
         ch.closed_count += 1;
 
         if ch.closed_count == 2 {
-            Some(ch.shared_pa)
+            let pa = ch.shared_pa;
+
+            ch.shared_pa = memory::Pa(0);
+
+            Some(pa)
         } else {
             None
         }
@@ -146,18 +150,22 @@ pub fn setup_endpoint(id: ChannelId, pid: ProcessId) -> Result<Handle, HandleErr
             .handles
             .insert(HandleObject::Channel(id), Rights::READ_WRITE)
     })
+    .unwrap_or(Err(HandleError::InvalidHandle))
 }
 /// Return the shared page PA and VA for a channel.
 ///
 /// Both endpoints of the same channel share the same page.
-pub fn shared_info(id: ChannelId) -> (memory::Pa, u64) {
+/// Returns `None` if the channel is fully closed (both endpoints closed).
+pub fn shared_info(id: ChannelId) -> Option<(memory::Pa, u64)> {
     let s = STATE.lock();
     let idx = channel_index(id);
+    let ch = &s.channels[idx];
 
-    (
-        s.channels[idx].shared_pa,
-        CHANNEL_SHM_BASE + (idx as u64) * PAGE_SIZE,
-    )
+    if ch.closed_count >= 2 {
+        return None;
+    }
+
+    Some((ch.shared_pa, CHANNEL_SHM_BASE + (idx as u64) * PAGE_SIZE))
 }
 /// Signal the peer endpoint of a channel.
 ///
