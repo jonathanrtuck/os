@@ -69,27 +69,29 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-10 (latest):** Resolved all 41 issues from DESIGN.md §11 (Final Review Findings). Used an agent team (4 parallel teammates partitioned by file ownership) to fix 3 critical, 12 high, 15 medium, and 11 low issues across correctness, resource leaks, code deduplication, documentation, and testing. Key changes:
+**Session 2026-03-09 (latest):** Design discussion — display engine architecture for getting graphics on screen. Key conclusions:
 
-1. **Critical fixes:** Emergency stacks sized for MAX_CORES with linker-guaranteed alignment. libvirtio `push_chain` now sets `desc.next` for intermediate descriptors (was silently masked by sequential free-list ordering).
+1. **Next milestone: pixels on screen.** Kernel is complete and reviewed. Next motivating target is graphical output — drawing to the screen, text rendering, basic compositor. Exercises the rendering pipeline (Decision #11) from the bottom up.
 
-2. **Resource leak fixes:** `sys_channel_create` and `sys_process_create` now clean up fully on handle insert failure. `channel::shared_info` returns `Option` to prevent stale PA access after close. `with_process`/`with_process_of_thread` return `Option` instead of panicking on stale handles.
+2. **virtio-gpu is the right path.** QEMU `virt` offers virtio-gpu (paravirtual, 2D protocol, ~6 commands) or ramfb (raw framebuffer, too simple). virtio-gpu reuses existing virtio infrastructure (libvirtio, MMIO transport, split virtqueue, interrupt-driven). Add `-device virtio-gpu-device` to QEMU.
 
-3. **Code deduplication:** Extracted `load_elf_into_address_space` (process.rs), `release_thread_context_ids` (scheduler.rs), `categorize_handles`/`close_handle_categories` (scheduler.rs), `Thread::base()` constructor, serial formatting helpers. `is_user_page_readable` delegates to `user_va_to_pa`. `order_for_pages` replaced with stdlib.
+3. **Surface-based DisplayEngine trait, not raw framebuffer.** A framebuffer (CPU-writable pixel buffer) is specific to software rendering. GPU acceleration means the CPU submits commands and the GPU writes pixels — `map() → &mut [u8]` doesn't apply. The universal abstraction is surfaces and operations: `create_surface`, `destroy_surface`, `fill_rect`, `blit`, `present`. The driver implements this trait — whether it uses CPU loops or GPU commands internally is the driver's business. The compositor doesn't know or care.
 
-4. **New tests:** Channel host tests (18 tests), futex host tests (11 tests). Slab and ASID tests refactored to `#[path]` include pattern.
+4. **Display vs rendering are separate concerns.** Display = "take this buffer and put it on screen" (the last mile). Rendering = "fill this buffer with pixels" (compositing work). Both always happen sequentially. GPU acceleration changes WHO fills the buffer (GPU instead of CPU), not the display path. A modern GPU chip handles both in one device, one driver.
 
-5. **Polish:** IDLE_THREAD_ID_MARKER constant, Rights derives, HandleError::SlotOccupied, saturating arithmetic in replenish, debug_asserts for map_page double-own and waitable duplicate create, cross-reference comments for KERNEL_VA_OFFSET and CHANNEL_SHM_BASE.
+5. **Three components, one interface.** Compositor (above) works with surfaces, calls trait methods. Driver (below, blue layer) translates trait methods to hardware operations. The trait is the boundary — a contract, not a component. Software rendering (CPU loops) is a strategy inside the driver, not a separate thing the OS selects. The virtio-gpu driver will use CPU loops for fill/blit internally; a real GPU driver would submit GPU commands. Same interface either way.
 
-**Previous session (2026-03-09):** Design session — Decision #14 (Compound Documents) refinements: three-axis relationship model (spatial, temporal, logical), uniform manifest model, static/virtual manifests, OS service interface map. Decision #16 sub-decisions: metadata DB must be on COW filesystem for uniform rewind.
+6. **Build plan:** (a) virtio-gpu userspace driver implementing the surface trait (same pattern as virtio-blk), (b) drawing primitives + embedded bitmap font, (c) toy compositor (positioned rectangles with text). This is a research spike for the rendering pipeline, not throwaway work — everything above the driver is portable.
+
+**Previous sessions:** Kernel complete — all DESIGN.md §11 review findings resolved (41 issues) + expert review plan completed (hardware correctness, security, type safety). Design sessions settled Decision #14 (Compound Documents) with three-axis model + uniform manifests + static/virtual manifests.
 
 **Decision #14 sub-decisions open:** Referenced vs owned parts, mimetype of the whole document, manifest format, COW atomicity for multi-part documents, filesystem organization of manifests + content files.
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
 
-**Design side next:** Layout engine (#15, updated scope with three-axis model). Interaction model (#17, informed by OS-as-document and virtual manifests). Filesystem COW on-disk design (new constraint from virtual manifest rewind).
+**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: display engine → drawing primitives → fonts → toy compositor. This naturally informs Decisions #15 (layout), #17 (interaction model), and #10 (view state). FS track: COW on-disk design (Decision #16, independent).
 
-**Kernel code:** `system/kernel/` (35 source files) + `system/user/{init,echo,libsys,libvirtio,virtio-blk,virtio-console}/` + `system/host-tests/` (216 tests across 15 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC, userspace virtio-blk driver. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit. All DESIGN.md §11 review findings resolved.
+**Kernel code:** `system/kernel/` (35 source files) + `system/user/{init,echo,libsys,libvirtio,virtio-blk,virtio-console}/` + `system/host-tests/` (216 tests across 15 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler with scheduling contexts, two user processes with IPC, userspace virtio-blk driver. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit. Both reviews (§11 + expert) completed.
 
 ## Design Discussion Rules
 

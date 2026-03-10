@@ -39,6 +39,20 @@ Active questions we've started exploring but haven't resolved. Each thread links
 **Context:** From-scratch Rust kernel on aarch64. Microkernel: address spaces, threads, IPC, scheduling, interrupt forwarding, handles. All semantic code in userspace. Settled: soft RT, no hypervisor (EL1), preemptive + cooperative yield, traditional privilege (EL0), split TTBR, handles, ELF, ring buffer IPC, three-layer process arch, SMP (4 cores), EEVDF + scheduling contexts, userspace drivers (MMIO mapping + interrupt forwarding), userspace filesystem (kernel owns COW/VM, filesystem manages on-disk layout). Remaining: filesystem COW on-disk design.
 **Leaning — syscall API:** 12 syscalls in three families. Handle family: `wait(handles[])`, `close(handle)`, `signal(handle)`. Synchronization: `futex_wait`, `futex_wake`. Scheduling: `sched_create/bind/borrow/return`. Plus lifecycle: `exit`, `yield`, `write` (debug, temporary). Generic verbs on typed handles — handle type carries context. `wait` subsumes old `channel_wait` and gains multiplexing. OS service uses reactive/stream composition on top of `wait`. See insights log for full rationale.
 
+### Display engine architecture
+
+**Informs:** Decision #11 (Rendering Technology), Decision #15 (Layout Engine), Decision #17 (Interaction Model)
+**Status:** Architecture sketched (2026-03-09), implementation not started
+**Context:** Next milestone is graphical output on QEMU virt. virtio-gpu (paravirtual, 2D protocol) is the right device — reuses existing virtio infrastructure. Key architectural conclusions:
+
+- **Surface-based trait, not framebuffer.** A raw framebuffer (`map() → &mut [u8]`) is specific to software rendering — GPU acceleration means the CPU never touches pixels. The universal abstraction is surfaces and operations: `create_surface`, `destroy_surface`, `fill_rect`, `blit`, `present`. The driver implements this trait; whether it uses CPU loops or GPU commands internally is the driver's business.
+- **Display vs rendering are separate concerns in one device.** Display = get a buffer to the screen (last mile). Rendering = fill the buffer (compositing). Both always happen. GPU acceleration changes who fills the buffer (GPU vs CPU), not the display path. A GPU chip does both; one driver.
+- **Three components, one interface.** Compositor (above) works with surfaces, calls trait methods. Driver (below) translates trait methods to hardware operations. The trait is the boundary — a contract, not a component. The compositor doesn't know if the driver uses CPU loops, GPU commands, or anything else. Software rendering is a fallback strategy inside the driver, not a separate thing the OS selects.
+- **virtio-gpu overhead is inherent, not architectural.** Performance hit is the VM boundary (guest→host copy). With real hardware, the display controller reads directly from the buffer via DMA scanout — no copy. The abstraction doesn't add overhead; virtio does.
+- **Build plan:** (a) virtio-gpu userspace driver implementing the surface trait, (b) drawing primitives + bitmap font, (c) toy compositor. Everything above the driver is portable to real hardware.
+
+Open questions: exact trait API (needs compositor to inform it), double buffering strategy, surface pixel format, font choice (embedded bitmap), how the display driver integrates with the OS service process model (separate driver process like virtio-blk, or part of OS service?), trait naming (just `Display`? `DisplaySurface`?).
+
 ### COW Filesystem
 
 **Informs:** Decision #16 (Technical Foundation — filesystem sub-decision), Decision #12 (Undo), Decision #14 (virtual manifest rewind)
@@ -305,6 +319,12 @@ The kernel surface is small and stable. The blue-layer interfaces are about plug
 ### Full-codebase review resolved: cross-team API changes are the coordination cost (2026-03-10)
 
 Resolved all 41 issues from DESIGN.md §11 using a 4-agent team partitioned by file ownership (assembly/linker/userspace, tests, scheduler/thread, remaining kernel src). The zero-overlap rule prevented all merge conflicts. The only coordination cost was cross-boundary API changes: when one agent changed a return type (`shared_info` → `Option`, `DrainHandles` tuple order, `KillInfo` → nested `HandleCategories`), callers in other agents' files broke. Three such ripples required lead intervention. Lesson for future multi-agent work: partition by API dependency boundary, not just file ownership. The borrow checker caught a real issue in the extracted `release_thread_context_ids` helper (split borrow needed for `s.cores[core].current` vs `s.scheduling_contexts`).
+
+### Framebuffer is an implementation detail, surfaces are the abstraction (2026-03-09)
+
+A raw framebuffer (`map() → &mut [u8]`) is specific to software rendering. With GPU acceleration, the CPU never touches pixel data — it submits commands and the GPU writes to VRAM. `map()` doesn't even make sense when the buffer isn't in CPU-accessible memory. The real abstraction is surfaces and operations on them: create, destroy, fill, blit, present. Every real display stack converged here (Wayland's `wl_surface`, macOS's `CALayer`, Windows' `DirectComposition`). A software implementation (surfaces as RAM buffers, CPU loops for operations, virtio-gpu for present) and a GPU implementation (surfaces as VRAM textures, GPU commands for operations, page flip for present) implement the same interface — the compositor doesn't know which is behind it.
+
+Display (get pixels to screen) and rendering (fill the buffer) are separate concerns that always happen sequentially. GPU acceleration changes who does the rendering (GPU vs CPU), not the display path. Both live in the same device and same driver because modern GPU chips have a rendering engine and a display controller on one die. This parallels the Linux DRM/KMS split: KMS handles display (mode setting, scanout), OpenGL/Vulkan handle rendering (drawing commands). Two concerns, one driver.
 
 ### Birth time is the key insight for efficient snapshots (2026-03-08)
 
