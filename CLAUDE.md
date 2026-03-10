@@ -28,6 +28,7 @@ Read these before making any design suggestions:
 - `design/decision-map.mermaid` — Visual dependency graph of all decisions
 - `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
 - `design/journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document.
+- `system/DESIGN.md` — Userspace architecture: libraries, platform services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `system/kernel/DESIGN.md`.
 - `design/concept.md` — The core idea: OS → Document → Tool, mimetype evolution, layered rendering, compound documents
 
 ## Settled Decisions
@@ -69,15 +70,17 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-10 (latest):** Display engine build plan complete — all three steps done. Init became a proto-OS-service. Full display pipeline working end-to-end on QEMU.
+**Session 2026-03-10 (latest):** Alpha blending, overlapping surface compositing, userspace architecture audit.
 
-1. **Display pipeline complete (steps a→b→c all done).** Init allocates DMA framebuffer → shares with compositor via `memory_share` → compositor draws demo scene → signals init → GPU driver presents to display. Boots cleanly, all processes spawn, communicate, and exit.
+1. **Alpha blending in drawing library.** Porter-Duff source-over compositing: `Color::blend_over`, `Surface::blend_pixel`, `fill_rect_blend`, `blit_blend`. Integer-only math, fast paths for opaque/transparent. 21 new tests (62 total).
 
-2. **Init is now a proto-OS-service** (`system/platform/init/`). Kernel spawns only init. Init reads a device manifest from kernel channel shared memory, spawns all other processes (drivers + compositor), orchestrates the display pipeline. Embeds all other ELFs via build.rs `include_bytes!`. Matches Fuchsia component_manager / seL4 root task / QNX procnto pattern.
+2. **Compositor rewritten with real compositing.** Three panels drawn into separate BSS surface buffers (~416 KB each, demand-paged), composited back-to-front with per-pixel alpha onto the shared framebuffer. Semi-transparent backgrounds + opaque content. Background grid shows transparency. This is the model from the compositor design thread: surface tree → pixel buffer.
 
-3. **Kernel Phase 7 (memory sharing) done.** Syscall #24 (`memory_share`) maps physical pages from caller into target process's shared memory region. Per-process channel SHM bump allocator for correct addressing. 25 syscalls total.
+3. **Userspace architecture audit and `system/DESIGN.md` created.** Systematic classification of every component above the kernel: foundational (sys, virtio, drawing libraries), scaffolding (init implementation, channel SHM layout, embedded ELFs), demo (echo). Documented five critical constraints: no userspace heap allocator, no filesystem, no input, no event loop, no structured IPC. Dependency map and roadmap.
 
-4. **Alignment bug found and fixed.** Device manifest had u64 field at non-8-byte-aligned offset — undefined behavior in Rust's `read_volatile`. Silent process death was caused by two issues: (a) SCTLR.A=0 means no hardware alignment fault — init read garbage and died via syscall error, not a fault, (b) `user_fault_handler` didn't check DFSC, so non-translation faults on VMA-backed addresses would infinite-loop. Both fixed: DFSC check added, ISS field added to diagnostic output.
+4. **TrueType rasterizer is next.** Will be built in the drawing library (pure, no_std). Embed a TTF file, parse tables, rasterize bezier curves to coverage maps, produce anti-aliased glyphs using the alpha blending infrastructure. Decision: build incrementally as a real stack, not as a spike — learn what issues arise.
+
+**Previous session highlights (still relevant):** Display pipeline complete end-to-end. Init is proto-OS-service. Kernel Phase 7 (memory sharing) done. 25 syscalls. Alignment bug fixed (DFSC check + ISS diagnostics).
 
 **Still open from previous sessions:** Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved tension — connected to compositor tree model).
 
@@ -85,9 +88,9 @@ Read these before making any design suggestions:
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
 
-**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: display engine complete, next is design exploration — Decisions #15 (layout engine API), #17 (interaction model: shell/editor boundary, compound editing), #10 (view state). FS track: COW on-disk design (Decision #16, independent).
+**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: display engine complete, next is font rasterization → text layout → more compositor features. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: COW on-disk design (Decision #16, independent).
 
-**System code:** `system/kernel/` (35 source files), `system/platform/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/library/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (257 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline (init → drivers → compositor → GPU → pixels on screen). 25 syscalls. Three-tier memory (buddy + slab + linked-list) with address-based dealloc routing. Full process cleanup on exit.
+**System code:** `system/kernel/` (35 source files), `system/platform/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/library/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (62 drawing + 195 kernel = 257 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline with alpha compositing. 25 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 
