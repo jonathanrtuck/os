@@ -70,15 +70,15 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-10 (latest):** Alpha blending, overlapping surface compositing, userspace architecture audit.
+**Session 2026-03-10 (latest):** TrueType font rasterizer, alpha blending, overlapping surface compositing, userspace architecture audit.
 
-1. **Alpha blending in drawing library.** Porter-Duff source-over compositing: `Color::blend_over`, `Surface::blend_pixel`, `fill_rect_blend`, `blit_blend`. Integer-only math, fast paths for opaque/transparent. 21 new tests (62 total).
+1. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables: head, maxp, cmap format 4, hhea, hmtx, loca, glyf). Scanline rasterizer: quadratic bezier flattening via De Casteljau, non-zero winding rule, 4× vertical oversampling for anti-aliasing. Integer/fixed-point math only, no heap. Coverage maps feed into existing alpha blending pipeline. Simple interface: `TrueTypeFont::rasterize(codepoint, size, buffer, scratch) → GlyphMetrics`. ProggyClean.ttf (40 KiB, MIT) embedded. Compositor renders comparison: bitmap vs TTF at 16/24/32px. 21 new tests (83 total). Three new files: `truetype.rs` (652 lines), `rasterizer.rs` (448 lines), `ProggyClean.ttf`.
 
-2. **Compositor rewritten with real compositing.** Three panels drawn into separate BSS surface buffers (~416 KB each, demand-paged), composited back-to-front with per-pixel alpha onto the shared framebuffer. Semi-transparent backgrounds + opaque content. Background grid shows transparency. This is the model from the compositor design thread: surface tree → pixel buffer.
+2. **Alpha blending in drawing library.** Porter-Duff source-over compositing: `Color::blend_over`, `Surface::blend_pixel`, `fill_rect_blend`, `blit_blend`. Integer-only math, fast paths for opaque/transparent.
 
-3. **Userspace architecture audit and `system/DESIGN.md` created.** Systematic classification of every component above the kernel: foundational (sys, virtio, drawing libraries), scaffolding (init implementation, channel SHM layout, embedded ELFs), demo (echo). Documented five critical constraints: no userspace heap allocator, no filesystem, no input, no event loop, no structured IPC. Dependency map and roadmap.
+3. **Compositor rewritten with real compositing.** Three panels drawn into separate BSS surface buffers (~416 KB each, demand-paged), composited back-to-front with per-pixel alpha. Now also renders TrueType text demo in the lower section.
 
-4. **TrueType rasterizer is next.** Will be built in the drawing library (pure, no_std). Embed a TTF file, parse tables, rasterize bezier curves to coverage maps, produce anti-aliased glyphs using the alpha blending infrastructure. Decision: build incrementally as a real stack, not as a spike — learn what issues arise.
+4. **Userspace architecture audit and `system/DESIGN.md` created.** Systematic classification of every component above the kernel. Documented five critical constraints. Dependency map and roadmap (font rasterization now done, text layout next).
 
 **Previous session highlights (still relevant):** Display pipeline complete end-to-end. Init is proto-OS-service. Kernel Phase 7 (memory sharing) done. 25 syscalls. Alignment bug fixed (DFSC check + ISS diagnostics).
 
@@ -88,9 +88,9 @@ Read these before making any design suggestions:
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
 
-**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: display engine complete, next is font rasterization → text layout → more compositor features. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: COW on-disk design (Decision #16, independent).
+**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: font rasterization done → text layout next → more compositor features. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: COW on-disk design (Decision #16, independent).
 
-**System code:** `system/kernel/` (35 source files), `system/platform/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/library/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (62 drawing + 195 kernel = 257 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline with alpha compositing. 25 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (35 source files), `system/platform/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/library/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (83 drawing + 195 kernel = 278 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline with alpha compositing + TrueType rendering. 25 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 

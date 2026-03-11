@@ -31,6 +31,13 @@ static mut PANEL_A_BUF: [u8; PANEL_BUF_SIZE] = [0u8; PANEL_BUF_SIZE];
 static mut PANEL_B_BUF: [u8; PANEL_BUF_SIZE] = [0u8; PANEL_BUF_SIZE];
 static mut PANEL_C_BUF: [u8; PANEL_BUF_SIZE] = [0u8; PANEL_BUF_SIZE];
 
+// TrueType font rasterization scratch space (BSS, demand-paged).
+static mut TTF_SCRATCH: drawing::RasterScratch = drawing::RasterScratch::zeroed();
+static mut TTF_RASTER_BUF: [u8; 128 * 128] = [0u8; 128 * 128];
+
+// Embedded TrueType font.
+const PROGGY_TTF: &[u8] = include_bytes!("../../library/drawing/ProggyClean.ttf");
+
 fn panel_surface(buf: &mut [u8]) -> drawing::Surface<'_> {
     drawing::Surface {
         data: buf,
@@ -181,12 +188,11 @@ fn composite(fb: &mut drawing::Surface) {
     // Title bar.
     fb.fill_rect(0, 0, fb.width, 36, Color::rgb(32, 32, 48));
     fb.draw_text(12, 10, "Document OS", &F, Color::rgb(200, 200, 220));
-    let version = "Compositor v0.2 | Alpha Blending";
+    let version = "Compositor v0.3 | TrueType";
     let vx = fb.width.saturating_sub(12 + version.len() as u32 * 8);
     fb.draw_text(vx, 10, version, &F, Color::rgb(90, 90, 110));
 
     // Composite panels in z-order: A (back) → B (middle) → C (front).
-    // Panels overlap so you can see through the semi-transparent backgrounds.
     let a_buf = unsafe { &PANEL_A_BUF[..] };
     fb.blit_blend(a_buf, PANEL_W, PANEL_H, PANEL_STRIDE, 60, 56);
 
@@ -196,16 +202,89 @@ fn composite(fb: &mut drawing::Surface) {
     let c_buf = unsafe { &PANEL_C_BUF[..] };
     fb.blit_blend(c_buf, PANEL_W, PANEL_H, PANEL_STRIDE, 500, 90);
 
+    // TrueType demo text — rendered below the panels.
+    draw_truetype_demo(fb);
+
     // Status bar.
     let bar_y = fb.height.saturating_sub(28);
     fb.fill_rect(0, bar_y, fb.width, 28, Color::rgb(32, 32, 48));
     fb.draw_text(
         12,
         bar_y + 6,
-        "3 surfaces | alpha compositing | z-ordered | overlapping",
+        "3 surfaces | alpha compositing | TrueType rasterizer",
         &F,
         Color::rgb(130, 130, 150),
     );
+}
+
+/// Render TrueType text onto the framebuffer for visual comparison with bitmap.
+fn draw_truetype_demo(fb: &mut drawing::Surface) {
+    use drawing::{Color, RasterBuffer, TrueTypeFont, FONT_8X16 as F};
+
+    let font = match TrueTypeFont::new(PROGGY_TTF) {
+        Some(f) => f,
+        None => {
+            sys::write(b"compositor: failed to parse TTF\n");
+            return;
+        }
+    };
+
+    let scratch = unsafe { &mut TTF_SCRATCH };
+    let raster_buf = unsafe { &mut TTF_RASTER_BUF };
+
+    // Draw a comparison label with bitmap font.
+    let label_y = fb.height.saturating_sub(120);
+    fb.fill_rect(0, label_y, fb.width, 90, Color::rgb(24, 24, 36));
+    fb.draw_text(
+        12,
+        label_y + 4,
+        "Bitmap 8x16:",
+        &F,
+        Color::rgb(120, 120, 140),
+    );
+    fb.draw_text(
+        140,
+        label_y + 4,
+        "Hello, Document OS!",
+        &F,
+        Color::rgb(220, 220, 240),
+    );
+
+    // TrueType text at multiple sizes.
+    let sizes: [u32; 3] = [16, 24, 32];
+    let labels = ["TTF 16px:", "TTF 24px:", "TTF 32px:"];
+    let text = "Hello, Document OS!";
+
+    for (i, &size) in sizes.iter().enumerate() {
+        let row_y = label_y + 22 + i as u32 * 22;
+        fb.draw_text(12, row_y, labels[i], &F, Color::rgb(120, 120, 140));
+
+        // Render each character with the TrueType rasterizer.
+        let mut pen_x: i32 = 140;
+        let baseline_y = row_y as i32 + size as i32 - 4;
+
+        for ch in text.chars() {
+            let mut raster = RasterBuffer {
+                data: raster_buf,
+                width: 128,
+                height: 128,
+            };
+
+            if let Some(metrics) = font.rasterize(ch, size, &mut raster, scratch) {
+                if metrics.width > 0 && metrics.height > 0 {
+                    fb.draw_coverage(
+                        pen_x + metrics.bearing_x,
+                        baseline_y - metrics.bearing_y,
+                        &raster_buf[..(metrics.width * metrics.height) as usize],
+                        metrics.width,
+                        metrics.height,
+                        Color::rgb(220, 220, 240),
+                    );
+                }
+                pen_x += metrics.advance as i32;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

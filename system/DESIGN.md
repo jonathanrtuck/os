@@ -94,23 +94,28 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Pure drawing primitives for pixel buffers. No allocations, no syscalls, no hardware — fully testable on the host.
 
-**Status:** 482 lines, 62 tests. Surface abstraction, color with alpha, blending, blitting, bitmap font.
+**Status:** ~1600 lines (lib.rs + truetype.rs + rasterizer.rs + font_data.rs), 83 tests. Surface abstraction, color with alpha, blending, blitting, bitmap font, TrueType font rasterizer.
 
 **What's foundational:**
 - `Surface<'a>` borrows `&mut [u8]` — no allocation policy. Works with any memory source (DMA, BSS, stack, shared).
 - `Color` in canonical RGBA, encode/decode at the pixel boundary. Format-agnostic above the pixel level.
 - Porter-Duff source-over blending — correct, integer-only, with fast paths.
 - `blit_blend` — the core compositing operation (per-pixel alpha, clips to bounds).
+- `TrueTypeFont` — zero-copy parser for TTF files. Parses 7 required tables (head, maxp, cmap format 4, hhea, hmtx, loca, glyf). Extracts glyph outlines (quadratic bezier contours), maps codepoints via cmap, reads horizontal metrics.
+- Scanline rasterizer — flattens quadratic beziers via De Casteljau subdivision, sweeps with non-zero winding rule, 4× vertical oversampling for anti-aliasing. Integer/fixed-point math only. Produces coverage maps (0–255 per pixel) that feed into the existing alpha blending pipeline.
+- `draw_coverage` — composites a coverage map onto a surface with color modulation. The bridge between rasterizer output and the compositing pipeline.
 - All operations clip silently (no panics). Safe to call with any coordinates.
 
 **What's scaffolding:**
 - `PixelFormat` enum has only `Bgra8888`. Trivial to extend (add variant + match arms), but currently untested with other formats.
 - `BitmapFont` is an embedded 8×16 VGA font covering ASCII 0x20–0x7E. Fine as a fallback, not a real text solution.
+- ProggyClean.ttf (40 KiB, MIT license) is the embedded TrueType font. A vectorized bitmap font — exercises the full parser and rasterizer but glyphs are mostly straight lines. A font with real curves (variable-width, bezier-heavy) would test the rasterizer more thoroughly.
 
 **What's missing:**
-- **Text layout.** `draw_text` is left-to-right fixed-pitch ASCII. No variable-width glyphs, no word wrap, no line breaking, no Unicode. A font rasterizer produces glyphs; this library has no way to position them properly.
-- **Anti-aliased drawing.** Lines and rectangles are pixel-exact with no smoothing. Alpha blending is in place (the hard part), but no primitives produce sub-pixel coverage yet.
-- **Glyph rendering from vector fonts.** The bitmap font path works, but TrueType/OpenType rasterization (bezier curves → coverage maps → anti-aliased pixels) doesn't exist.
+- **Text layout.** `draw_text` is left-to-right fixed-pitch ASCII. No variable-width glyphs, no word wrap, no line breaking, no Unicode. The TrueType rasterizer returns per-glyph advance widths, enabling variable-pitch rendering, but there's no layout engine to position glyphs properly.
+- **Anti-aliased line/shape drawing.** Lines and rectangles are pixel-exact with no smoothing. The rasterizer's coverage map approach could be extended to arbitrary shapes.
+- **Compound glyph support.** TrueType compound glyphs (accented characters built from components) not yet handled. Only simple glyphs (positive contour count) are parsed.
+- **Glyph caching.** Each `rasterize()` call re-rasterizes from outlines. A fixed-size LRU cache (codepoint + size → pre-rasterized bitmap) would improve performance for repeated text.
 
 **No restrictions imposed.** Pure library — anything built on top can use it or replace it.
 
@@ -368,7 +373,7 @@ Ring buffer messages work for control messages (edit protocol, input events). La
 
 Ordered by what unblocks the most, building the happy path first:
 
-1. **Font rasterization** — TrueType in the drawing library. Simple interface: font data + codepoint + size → pixels + advance width. The rasterizer (bezier math, scanline fill, coverage maps) is a leaf node — complex implementation behind a simple boundary. No heap needed (parse in place, fixed-size scratch buffers).
+1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the drawing library. Zero-copy parser, scanline rasterizer with 4× oversampling, coverage map output. Simple interface: `TrueTypeFont::rasterize(codepoint, size, buffer, scratch) → GlyphMetrics`. 21 tests. Running on bare metal in the compositor.
 2. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an *interface* question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
 3. **Input driver** (§3.3) — unblocks interactive demos. virtio-input follows the same pattern as existing drivers.
 4. **Event loop** (§3.4) — convert compositor or init to loop on `wait`. Unblocks continuous rendering.

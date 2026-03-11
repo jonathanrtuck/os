@@ -936,3 +936,299 @@ fn blit_blend_mixed_alpha_pixels() {
     assert_eq!(dst.get_pixel(4, 2), Some(Color::rgb(0, 0, 255)));
     assert_eq!(dst.get_pixel(5, 3), Some(Color::rgb(0, 0, 255)));
 }
+
+// ---------------------------------------------------------------------------
+// TrueType font parser
+// ---------------------------------------------------------------------------
+
+use drawing::{TrueTypeFont, RasterBuffer, RasterScratch, GlyphOutline};
+
+const PROGGY_CLEAN: &[u8] = include_bytes!("../../library/drawing/ProggyClean.ttf");
+
+#[test]
+fn ttf_parse_valid_font() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN);
+    assert!(font.is_some(), "should parse ProggyClean.ttf");
+}
+
+#[test]
+fn ttf_parse_empty_data_returns_none() {
+    assert!(TrueTypeFont::new(&[]).is_none());
+}
+
+#[test]
+fn ttf_parse_truncated_data_returns_none() {
+    assert!(TrueTypeFont::new(&PROGGY_CLEAN[..10]).is_none());
+}
+
+#[test]
+fn ttf_parse_not_truetype_returns_none() {
+    // CFF/OpenType magic "OTTO".
+    let mut data = PROGGY_CLEAN.to_vec();
+    data[0] = b'O';
+    data[1] = b'T';
+    data[2] = b'T';
+    data[3] = b'O';
+    assert!(TrueTypeFont::new(&data).is_none());
+}
+
+#[test]
+fn ttf_glyph_index_ascii() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    // 'A' should have a valid glyph index.
+    let idx = font.glyph_index('A');
+    assert!(idx.is_some(), "'A' should have a glyph");
+    assert!(idx.unwrap() > 0, "glyph index for 'A' should be non-zero");
+}
+
+#[test]
+fn ttf_glyph_index_different_chars_different_indices() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let a = font.glyph_index('A').unwrap();
+    let b = font.glyph_index('B').unwrap();
+    assert_ne!(a, b, "'A' and 'B' should have different glyph indices");
+}
+
+#[test]
+fn ttf_glyph_index_all_printable_ascii() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    for c in 0x21u8..=0x7Eu8 {
+        let ch = c as char;
+        assert!(
+            font.glyph_index(ch).is_some(),
+            "printable ASCII '{}' (0x{:02x}) should have a glyph",
+            ch, c,
+        );
+    }
+}
+
+#[test]
+fn ttf_glyph_outline_a() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let glyph_idx = font.glyph_index('A').unwrap();
+    let mut outline = GlyphOutline::zeroed();
+    let ok = font.glyph_outline(glyph_idx, &mut outline);
+    assert!(ok, "'A' should have an outline");
+    assert!(outline.num_contours > 0, "'A' should have at least 1 contour");
+    assert!(outline.num_points > 2, "'A' should have more than 2 points");
+}
+
+#[test]
+fn ttf_glyph_outline_o_has_two_contours() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let glyph_idx = font.glyph_index('O').unwrap();
+    let mut outline = GlyphOutline::zeroed();
+    let ok = font.glyph_outline(glyph_idx, &mut outline);
+    assert!(ok, "'O' should have an outline");
+    // 'O' typically has 2 contours (outer + inner).
+    assert!(
+        outline.num_contours >= 1,
+        "'O' should have at least 1 contour, got {}",
+        outline.num_contours,
+    );
+}
+
+#[test]
+fn ttf_glyph_h_metrics() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let glyph_idx = font.glyph_index('A').unwrap();
+    let (advance, _lsb) = font.glyph_h_metrics(glyph_idx).unwrap();
+    assert!(advance > 0, "'A' should have positive advance width");
+}
+
+#[test]
+fn ttf_space_has_no_outline() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let glyph_idx = font.glyph_index(' ').unwrap();
+    let mut outline = GlyphOutline::zeroed();
+    // Space has no outline — glyph_outline returns false.
+    let ok = font.glyph_outline(glyph_idx, &mut outline);
+    assert!(!ok, "space should have no outline");
+}
+
+#[test]
+fn ttf_units_per_em() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let upem = font.units_per_em();
+    assert!(upem > 0, "units_per_em should be positive");
+    // Typical values: 1000, 2048, etc.
+    assert!(upem <= 16384, "units_per_em should be reasonable, got {}", upem);
+}
+
+// ---------------------------------------------------------------------------
+// TrueType rasterization
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ttf_rasterize_a() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = RasterBuffer {
+        data: &mut buf,
+        width: 128,
+        height: 128,
+    };
+
+    let metrics = font.rasterize('A', 32, &mut raster, &mut scratch);
+    assert!(metrics.is_some(), "should rasterize 'A' at 32px");
+    let m = metrics.unwrap();
+    assert!(m.width > 0, "bitmap should have non-zero width");
+    assert!(m.height > 0, "bitmap should have non-zero height");
+    assert!(m.advance > 0, "advance should be positive");
+
+    // Coverage map should have some non-zero pixels.
+    let total = (m.width * m.height) as usize;
+    let has_coverage = buf[..total].iter().any(|&b| b > 0);
+    assert!(has_coverage, "coverage map for 'A' should have non-zero pixels");
+}
+
+#[test]
+fn ttf_rasterize_multiple_sizes() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+
+    for size in [12, 16, 24, 32, 48] {
+        let mut raster = RasterBuffer {
+            data: &mut buf,
+            width: 128,
+            height: 128,
+        };
+        let metrics = font.rasterize('H', size, &mut raster, &mut scratch);
+        assert!(
+            metrics.is_some(),
+            "should rasterize 'H' at {}px",
+            size,
+        );
+        let m = metrics.unwrap();
+        assert!(m.width > 0 && m.height > 0, "bitmap should be non-empty at {}px", size);
+    }
+}
+
+#[test]
+fn ttf_rasterize_larger_is_bigger() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+
+    let mut raster16 = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+    let m16 = font.rasterize('A', 16, &mut raster16, &mut scratch).unwrap();
+
+    let mut buf2 = [0u8; 128 * 128];
+    let mut raster48 = RasterBuffer { data: &mut buf2, width: 128, height: 128 };
+    let m48 = font.rasterize('A', 48, &mut raster48, &mut scratch).unwrap();
+
+    assert!(
+        m48.width > m16.width && m48.height > m16.height,
+        "48px glyph ({},{}) should be larger than 16px ({},{})",
+        m48.width, m48.height, m16.width, m16.height,
+    );
+    assert!(
+        m48.advance > m16.advance,
+        "48px advance {} should be > 16px advance {}",
+        m48.advance, m16.advance,
+    );
+}
+
+#[test]
+fn ttf_rasterize_space_returns_metrics_only() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+
+    let metrics = font.rasterize(' ', 32, &mut raster, &mut scratch);
+    assert!(metrics.is_some(), "space should return metrics");
+    let m = metrics.unwrap();
+    assert_eq!(m.width, 0, "space bitmap should be empty");
+    assert_eq!(m.height, 0, "space bitmap should be empty");
+    assert!(m.advance > 0, "space should have positive advance");
+}
+
+#[test]
+fn ttf_rasterize_all_printable_ascii() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+
+    for c in 0x20u8..=0x7Eu8 {
+        let ch = c as char;
+        let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+        let metrics = font.rasterize(ch, 24, &mut raster, &mut scratch);
+        assert!(
+            metrics.is_some(),
+            "should rasterize '{}' (0x{:02x}) at 24px",
+            ch, c,
+        );
+    }
+}
+
+#[test]
+fn ttf_rasterize_buffer_too_small() {
+    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    // Tiny buffer — large glyph shouldn't fit.
+    let mut buf = [0u8; 4 * 4];
+    let mut raster = RasterBuffer { data: &mut buf, width: 4, height: 4 };
+
+    let metrics = font.rasterize('M', 64, &mut raster, &mut scratch);
+    assert!(metrics.is_none(), "64px 'M' should not fit in 4x4 buffer");
+}
+
+// ---------------------------------------------------------------------------
+// Coverage map compositing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn draw_coverage_basic() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    // 2x2 coverage map with varying coverage.
+    let coverage = [255u8, 128, 64, 0];
+    dst.draw_coverage(2, 2, &coverage, 2, 2, Color::WHITE);
+
+    // Full coverage → white.
+    let p0 = dst.get_pixel(2, 2).unwrap();
+    assert_eq!(p0.r, 255);
+    assert_eq!(p0.g, 255);
+
+    // Half coverage → blended.
+    let p1 = dst.get_pixel(3, 2).unwrap();
+    assert!(p1.r > 0 && p1.r < 255, "half coverage should blend, got {}", p1.r);
+
+    // Zero coverage → unchanged (black).
+    let p3 = dst.get_pixel(3, 3).unwrap();
+    assert_eq!(p3.r, 0);
+}
+
+#[test]
+fn draw_coverage_negative_coords_clip() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+
+    // Place at negative coords — should clip without panic.
+    let coverage = [255u8; 4];
+    dst.draw_coverage(-1, -1, &coverage, 2, 2, Color::WHITE);
+
+    // (0, 0) should be drawn (it's at local (1, 1) of the coverage map).
+    let p = dst.get_pixel(0, 0).unwrap();
+    assert_eq!(p.r, 255);
+}
+
+#[test]
+fn draw_coverage_colored() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let coverage = [255u8; 1];
+    dst.draw_coverage(0, 0, &coverage, 1, 1, Color::rgb(255, 0, 0));
+
+    let p = dst.get_pixel(0, 0).unwrap();
+    assert_eq!(p.r, 255);
+    assert_eq!(p.g, 0);
+    assert_eq!(p.b, 0);
+}

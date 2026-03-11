@@ -22,6 +22,8 @@
 #![no_std]
 
 include!("font_data.rs");
+include!("rasterizer.rs");
+include!("truetype.rs");
 
 /// Built-in 8×16 VGA-style bitmap font covering printable ASCII (0x20–0x7E).
 pub const FONT_8X16: BitmapFont = BitmapFont {
@@ -285,6 +287,48 @@ impl<'a> Surface<'a> {
     /// Fill the entire surface with a solid color.
     pub fn clear(&mut self, color: Color) {
         self.fill_rect(0, 0, self.width, self.height, color);
+    }
+    /// Draw a coverage map (anti-aliased glyph) at position (x, y) in the
+    /// given color. Each byte in the coverage map modulates the color's alpha.
+    ///
+    /// `x` and `y` can be negative (glyph bearings may position the bitmap
+    /// outside the pen origin). Clips to surface bounds.
+    pub fn draw_coverage(
+        &mut self,
+        x: i32,
+        y: i32,
+        coverage: &[u8],
+        cov_width: u32,
+        cov_height: u32,
+        color: Color,
+    ) {
+        for row in 0..cov_height {
+            for col in 0..cov_width {
+                let idx = (row * cov_width + col) as usize;
+
+                if idx >= coverage.len() {
+                    return;
+                }
+
+                let cov = coverage[idx];
+
+                if cov == 0 {
+                    continue;
+                }
+
+                let px = x + col as i32;
+                let py = y + row as i32;
+
+                if px < 0 || py < 0 {
+                    continue;
+                }
+
+                let alpha = (color.a as u32 * cov as u32 / 255) as u8;
+                let c = Color::rgba(color.r, color.g, color.b, alpha);
+
+                self.blend_pixel(px as u32, py as u32, c);
+            }
+        }
     }
     /// Draw a horizontal line. Clips to surface bounds.
     pub fn draw_hline(&mut self, x: u32, y: u32, w: u32, color: Color) {
