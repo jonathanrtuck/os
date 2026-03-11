@@ -258,3 +258,88 @@ fn destroy_unknown_id_is_noop() {
     // Should not panic.
     reg.destroy(TestId(99));
 }
+
+// ============================================================
+// Thread exit notification pattern tests (2026-03-11 audit)
+// Models the exact sequences used by thread_exit.rs.
+// ============================================================
+
+/// Models the normal thread exit path: create entry, thread exits, notify
+/// returns the waiter. The waiter should be woken with the thread's ID.
+#[test]
+fn thread_exit_notify_returns_waiter() {
+    let mut reg = WaitableRegistry::new();
+
+    // sys_thread_create calls thread_exit::create.
+    reg.create(TestId(5));
+
+    // sys_wait calls thread_exit::register_waiter.
+    reg.register_waiter(TestId(5), tid(10));
+
+    // Thread exits → thread_exit::notify_exit calls reg.notify.
+    let waiter = reg.notify(TestId(5));
+
+    assert_eq!(waiter, Some(tid(10)), "waiter must be returned on exit");
+    assert!(reg.check_ready(TestId(5)), "entry must be permanently ready after exit");
+}
+
+/// Models handle close before thread exit: destroy removes the entry,
+/// later notify on the destroyed entry returns None (no crash, no leak).
+#[test]
+fn handle_close_before_thread_exit() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(5));
+    reg.register_waiter(TestId(5), tid(10));
+
+    // handle_close calls thread_exit::destroy — returns waiter to wake.
+    let waiter = reg.destroy(TestId(5));
+    assert_eq!(waiter, Some(tid(10)), "destroy must wake the waiter");
+
+    // Later, thread exits — notify on destroyed entry.
+    let waiter2 = reg.notify(TestId(5));
+    assert_eq!(waiter2, None, "notify after destroy must return None");
+}
+
+/// Models the race: thread exits while waiter is being registered.
+/// The two-phase pattern handles this: notify sees the waiter if registered
+/// first, or returns None if not yet registered. The wake_pending flag in
+/// the scheduler handles the latter case.
+#[test]
+fn notify_without_registered_waiter() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(5));
+
+    // Thread exits before anyone registers as waiter.
+    let waiter = reg.notify(TestId(5));
+    assert_eq!(waiter, None, "no waiter registered yet");
+
+    // Entry is permanently ready — later check_ready returns true.
+    // In the real thread_exit flow, sys_wait checks check_ready FIRST.
+    // If already ready, it returns immediately without blocking — no
+    // register_waiter needed.
+    assert!(reg.check_ready(TestId(5)), "entry permanently ready after notify");
+}
+
+/// Models multiple threads sequentially waiting on the same thread exit.
+/// Only one waiter at a time — the last registered waiter wins.
+#[test]
+fn sequential_waiters_on_same_thread() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(5));
+
+    // First waiter registers.
+    reg.register_waiter(TestId(5), tid(10));
+
+    // First waiter unregisters (e.g., wait returns early).
+    reg.unregister_waiter(TestId(5));
+
+    // Second waiter registers.
+    reg.register_waiter(TestId(5), tid(20));
+
+    // Thread exits — second waiter should be returned.
+    let waiter = reg.notify(TestId(5));
+    assert_eq!(waiter, Some(tid(20)));
+}

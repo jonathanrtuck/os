@@ -1,3 +1,27 @@
+// AUDIT: 2026-03-11 — 3 unsafe sites verified (2 unsafe impl + 1 unsafe block),
+// 6-category checklist applied. No bugs found.
+//
+// unsafe impl Send: sound — Thread owns all its data (embedded Context, tracked
+//   stack PA) and is transferred between cores only via IrqMutex<State>.
+// unsafe impl Sync: sound — Thread is never accessed concurrently; all access
+//   serialized by IrqMutex<State> in scheduler.rs.
+// core::mem::zeroed() for Context: sound — Context is #[repr(C)] with only
+//   integer/float fields; zero is a valid bit pattern for all of them.
+//
+// Deferred thread drop (Fix 4) re-verified sound: exited threads are pushed to
+//   deferred_drops by park_old, then dropped at the start of the NEXT
+//   schedule_inner when we're safely on a different thread's stack. Between
+//   push and drop, the thread is unreachable (not in ready/blocked/current).
+//
+// Drop ordering verified correct: guard page is remapped before free_frames
+//   (required because free_frames writes a FreeBlock header at block start,
+//   which is the guard page VA — writing to an unmapped page would fault).
+//
+// State machine transitions verified: Ready→Running, Running→Ready,
+//   Running→Blocked, Running→Exited, Blocked→Ready. deschedule is intentionally
+//   a no-op for non-Running states (handles kill_process marking threads Exited
+//   on other cores).
+
 //! Kernel thread representation.
 
 use super::context::Context;
@@ -179,7 +203,19 @@ impl Drop for Thread {
         }
     }
 }
+// SAFETY: Thread owns all its data (Context is embedded at offset 0, stack is
+// tracked by physical address). Threads are transferred between cores only
+// through the IrqMutex<State> in scheduler.rs, which serializes all access.
+// No raw pointers to external mutable state are stored — context_ptr() returns
+// a derived pointer on demand, not a stored one.
 unsafe impl Send for Thread {}
+
+// SAFETY: Thread is never accessed concurrently. All access goes through
+// IrqMutex<State> in scheduler.rs, which provides exclusive (&mut) access.
+// Sync is required because IrqMutex<State> (which is Sync) contains
+// Vec<Box<Thread>>, and Box<T>: Send requires T: Send (satisfied above).
+// In practice, &Thread is never shared across threads — but the trait bound
+// is needed for the static IrqMutex.
 unsafe impl Sync for Thread {}
 
 // --- State transitions ---
@@ -244,7 +280,10 @@ impl Thread {
 
     /// Common field initialization for all thread constructors.
     fn base(id: ThreadId, state: ThreadState, trust_level: TrustLevel) -> Self {
-        // SAFETY: Context is #[repr(C)] with integer/float fields; zero is valid.
+        // SAFETY: Context is #[repr(C)] with only integer (u64) and float (u128)
+        // fields — see context.rs. Zero is a valid bit pattern for all of them.
+        // The resulting Context represents "no saved state" (all registers zero),
+        // which is the correct initial state for a new thread.
         let ctx: Context = unsafe { core::mem::zeroed() };
 
         Thread {

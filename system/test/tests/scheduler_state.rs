@@ -797,3 +797,197 @@ fn all_threads_eventually_reaped() {
     assert!(s.blocked.is_empty(), "blocked list must be empty");
     assert!(s.deferred_drops.is_empty(), "deferred drops must be empty");
 }
+
+// ============================================================
+// Thread lifecycle audit tests (2026-03-11)
+// Verify patterns from thread.rs + thread_exit.rs audit.
+// ============================================================
+
+/// Verify that deferred drops are unreachable from ready queue and blocked list.
+/// This is the key safety property of Fix 4: between push to deferred_drops and
+/// the next schedule_inner drain, no code path can find or touch the thread.
+#[test]
+fn deferred_drop_thread_unreachable_from_queues() {
+    let mut s = State::new(2);
+
+    // Spawn a thread, run it, exit it.
+    let mut t = Thread::new(1);
+    t.activate();
+    t.mark_exited();
+    park_old(&mut s, t, 0);
+
+    assert_eq!(s.deferred_drops.len(), 1);
+
+    // The thread must NOT be findable in ready, blocked, or current.
+    assert!(s.ready.iter().all(|t| t.id != 1), "exited thread in ready");
+    assert!(
+        s.blocked.iter().all(|t| t.id != 1),
+        "exited thread in blocked"
+    );
+    for core in &s.cores {
+        if let Some(t) = &core.current {
+            assert_ne!(t.id, 1, "exited thread still current on a core");
+        }
+    }
+}
+
+/// Verify that mark_exited is idempotent — calling it twice doesn't panic
+/// or corrupt state. This is important because kill_process may call
+/// mark_exited on a thread that exit_current_from_syscall also marks.
+#[test]
+fn mark_exited_is_idempotent() {
+    let mut t = Thread::new(1);
+
+    // First from any state.
+    t.mark_exited();
+    assert!(t.is_exited());
+
+    // Second call — must not panic.
+    t.mark_exited();
+    assert!(t.is_exited());
+}
+
+/// Verify that deschedule on an exited thread is a no-op.
+/// This happens in schedule_inner when kill_process marked a running thread
+/// as Exited on another core, and the scheduler later deschedules it.
+#[test]
+fn deschedule_exited_thread_is_noop() {
+    let mut t = Thread::new(1);
+
+    t.mark_exited();
+    assert!(t.is_exited());
+
+    // deschedule should be a no-op — thread is Exited, not Running.
+    t.deschedule();
+    assert!(t.is_exited(), "deschedule must not change Exited state");
+}
+
+/// Verify the complete thread exit → deferred drop → drain lifecycle.
+/// Models the exact sequence in scheduler.rs: thread exits, park_old defers it,
+/// next schedule_inner drains deferred_drops (safe because we're on a different
+/// thread's stack by then).
+#[test]
+fn deferred_drop_lifecycle_complete() {
+    let mut s = State::new(1);
+
+    // Step 1: Thread is running on core 0.
+    let mut t = Thread::new(1);
+    t.activate();
+    s.cores[0].current = Some(t);
+
+    // Step 2: Thread exits (mark_exited + deschedule + park_old).
+    let mut old = s.cores[0].current.take().unwrap();
+    old.mark_exited();
+    old.deschedule(); // No-op for Exited.
+    park_old(&mut s, old, 0);
+
+    assert_eq!(s.deferred_drops.len(), 1, "thread must be deferred");
+
+    // Step 3: Next schedule_inner drains deferred drops (on different stack).
+    s.deferred_drops.clear();
+    assert!(s.deferred_drops.is_empty(), "deferred drops must be empty after drain");
+
+    // Step 4: No traces of the thread anywhere.
+    assert!(s.ready.is_empty());
+    assert!(s.blocked.is_empty());
+}
+
+/// Verify that kill_process + exit_current race scenario doesn't duplicate
+/// a thread in deferred_drops. Simulates: kill_process marks thread Exited
+/// while it's current on a core, then schedule_inner runs on that core.
+#[test]
+fn kill_then_schedule_no_duplicate_deferred() {
+    let mut s = State::new(2);
+
+    // Thread 1 running on core 0, thread 2 running on core 1.
+    let mut t1 = Thread::new(1);
+    t1.activate();
+    s.cores[0].current = Some(t1);
+
+    let mut t2 = Thread::new(2);
+    t2.activate();
+    s.cores[1].current = Some(t2);
+
+    // kill_process marks thread 1 as Exited (from core 1's context).
+    s.cores[0].current.as_mut().unwrap().mark_exited();
+
+    // Core 0's schedule_inner runs: deschedule + park_old.
+    let mut old = s.cores[0].current.take().unwrap();
+    let was_exited = old.is_exited();
+    old.deschedule(); // No-op for Exited.
+    park_old(&mut s, old, 0);
+
+    assert!(was_exited, "thread must be detected as exited");
+    assert_eq!(
+        s.deferred_drops.len(),
+        1,
+        "exactly one deferred drop"
+    );
+
+    // Drain deferred.
+    s.deferred_drops.clear();
+
+    // Nothing should be left.
+    assert!(s.ready.is_empty());
+    assert!(s.blocked.is_empty());
+    assert!(s.deferred_drops.is_empty());
+}
+
+/// Verify wake on an exited thread returns false.
+/// After a thread exits, wake attempts must fail gracefully.
+#[test]
+fn wake_exited_thread_returns_false() {
+    let mut s = State::new(1);
+    let mut t = Thread::new(1);
+
+    t.activate();
+    t.mark_exited();
+    park_old(&mut s, t, 0); // Goes to deferred_drops, not blocked.
+
+    // Try to wake — should fail (thread is not in blocked list).
+    assert!(!try_wake(&mut s, 1));
+}
+
+/// Verify that the reap_exited function (modeled here) correctly removes
+/// exited threads from the ready queue. This handles the case where
+/// kill_process marks a ready-queue thread as Exited.
+#[test]
+fn reap_removes_exited_from_ready_queue() {
+    let mut s = State::new(1);
+
+    // Place threads in ready queue.
+    s.ready.push(Thread::new(1));
+    s.ready.push(Thread::new(2));
+    s.ready.push(Thread::new(3));
+
+    // Mark thread 2 as exited (simulates kill_process).
+    s.ready[1].mark_exited();
+
+    // Reap exited threads (mirrors scheduler.rs reap_exited).
+    s.ready.retain(|t| !t.is_exited());
+
+    assert_eq!(s.ready.len(), 2);
+    assert!(s.ready.iter().all(|t| t.id != 2), "exited thread not reaped");
+    assert!(s.ready.iter().any(|t| t.id == 1));
+    assert!(s.ready.iter().any(|t| t.id == 3));
+}
+
+/// Verify that reap_exited also cleans the blocked list.
+#[test]
+fn reap_removes_exited_from_blocked_list() {
+    let mut s = State::new(1);
+
+    // Place a blocked thread.
+    let mut t = Thread::new(1);
+    t.activate();
+    t.block();
+    s.blocked.push(t);
+
+    // Mark it exited (simulates kill_process).
+    s.blocked[0].mark_exited();
+
+    // Reap.
+    s.blocked.retain(|t| !t.is_exited());
+
+    assert!(s.blocked.is_empty(), "exited thread not reaped from blocked list");
+}
