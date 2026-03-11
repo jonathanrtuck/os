@@ -70,7 +70,7 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-11 (latest):** Input driver + event loop implementation. Keyboard input end-to-end. Wait timeout fix. **Kernel crash under rapid typing — FIXED.** Root causes: aliasing UB in syscall dispatch, `nomem` on DAIF/system register asm, deferred thread drop use-after-free, idle thread park bug. 11 fixes total (see `design/journal.md`). Headless stress test + property-based scheduler tests added. 20 scheduler tests pass. Pragmatic resolution: opt-level 1 (opt 2-3 have residual issue, deferred).
+**Session 2026-03-11 (latest):** Input driver + event loop implementation. Keyboard input end-to-end. Wait timeout fix. **Kernel crash under rapid typing — FIXED.** Root causes: aliasing UB in syscall dispatch, `nomem` on DAIF/system register asm, deferred thread drop use-after-free, idle thread park bug. 11 fixes total (see `design/journal.md`). Headless stress test + property-based scheduler tests added. 20 scheduler tests pass. Opt-level 3 verified crash-free (50M iterations, 137s headless stress test). Follow-up audit fixed break-before-make in guard page setup and added AddressSpace Drop for leak prevention.
 
 **Session 2026-03-10:** Structured IPC design, TrueType font rasterizer, alpha blending, overlapping surface compositing, userspace architecture audit.
 
