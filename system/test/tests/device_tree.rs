@@ -4,7 +4,7 @@
 
 extern crate alloc;
 
-#[path = "../../kernel/src/device_tree.rs"]
+#[path = "../../kernel/device_tree.rs"]
 mod device_tree;
 
 // --- FDT blob construction helpers ---

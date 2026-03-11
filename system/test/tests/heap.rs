@@ -78,7 +78,7 @@ mod sync {
     }
 }
 
-#[path = "../../kernel/src/heap.rs"]
+#[path = "../../kernel/heap.rs"]
 mod heap;
 
 const PAGE_SIZE: usize = 4096;

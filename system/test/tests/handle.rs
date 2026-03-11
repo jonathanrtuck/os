@@ -3,7 +3,7 @@
 //! Includes the kernel's handle.rs directly — it has zero external dependencies,
 //! making it fully testable on the host.
 
-#[path = "../../kernel/src/handle.rs"]
+#[path = "../../kernel/handle.rs"]
 mod handle;
 mod interrupt {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +17,7 @@ mod thread {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct ThreadId(pub u64);
 }
-#[path = "../../kernel/src/scheduling_context.rs"]
+#[path = "../../kernel/scheduling_context.rs"]
 mod scheduling_context;
 mod timer {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]

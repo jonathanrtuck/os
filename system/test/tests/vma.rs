@@ -6,7 +6,7 @@
 
 extern crate alloc;
 
-#[path = "../../kernel/src/memory_region.rs"]
+#[path = "../../kernel/memory_region.rs"]
 mod memory_region;
 
 use memory_region::*;

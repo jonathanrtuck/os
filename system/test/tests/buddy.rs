@@ -86,7 +86,7 @@ mod sync {
     }
 }
 
-#[path = "../../kernel/src/page_allocator.rs"]
+#[path = "../../kernel/page_allocator.rs"]
 mod page_allocator;
 
 const PAGE_SIZE: usize = 4096;

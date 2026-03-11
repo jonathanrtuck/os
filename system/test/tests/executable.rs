@@ -21,7 +21,7 @@ mod address_space {
         }
     }
 }
-#[path = "../../kernel/src/executable.rs"]
+#[path = "../../kernel/executable.rs"]
 mod executable;
 
 /// Build a minimal valid ELF64 aarch64 executable header (64 bytes).

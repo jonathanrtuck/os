@@ -60,7 +60,7 @@ mod sync {
     unsafe impl<T> Sync for IrqMutex<T> {}
 }
 
-#[path = "../../kernel/src/slab.rs"]
+#[path = "../../kernel/slab.rs"]
 mod slab;
 
 // --- Exact size matches ---

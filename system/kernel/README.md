@@ -110,7 +110,7 @@ Boot initializes each subsystem in dependency order and logs progress. The emoji
 ## Source layout
 
 ```txt
-src/
+kernel/
   boot.S                   — boot trampoline, coarse page tables, EL2→EL1 drop, secondary entry
   exception.S              — exception vectors, context save/restore (upper VA)
   main.rs                  — kernel entry, IRQ/SVC dispatch, boot logging, memory map

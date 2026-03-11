@@ -2,7 +2,7 @@
 //!
 //! Includes the kernel's scheduling_context.rs directly — pure logic, no hardware deps.
 
-#[path = "../../kernel/src/scheduling_context.rs"]
+#[path = "../../kernel/scheduling_context.rs"]
 mod scheduling_context;
 
 use scheduling_context::*;

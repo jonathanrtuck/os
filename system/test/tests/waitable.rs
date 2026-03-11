@@ -10,7 +10,7 @@ mod thread {
     pub struct ThreadId(pub u64);
 }
 
-#[path = "../../kernel/src/waitable.rs"]
+#[path = "../../kernel/waitable.rs"]
 mod waitable;
 
 use thread::ThreadId;

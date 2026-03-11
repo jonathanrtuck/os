@@ -40,7 +40,7 @@ mod sync {
     unsafe impl<T> Sync for IrqMutex<T> {}
 }
 
-#[path = "../../kernel/src/address_space_id.rs"]
+#[path = "../../kernel/address_space_id.rs"]
 mod address_space_id;
 
 use address_space_id::{alloc, current_generation, free, Asid};

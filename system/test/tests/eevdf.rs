@@ -2,7 +2,7 @@
 //!
 //! Includes the kernel's scheduling_algorithm.rs directly — pure logic, no hardware deps.
 
-#[path = "../../kernel/src/scheduling_algorithm.rs"]
+#[path = "../../kernel/scheduling_algorithm.rs"]
 mod scheduling_algorithm;
 
 use scheduling_algorithm::*;
