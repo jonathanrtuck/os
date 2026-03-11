@@ -4,7 +4,37 @@ Bare-metal aarch64 microkernel targeting QEMU's `virt` machine. Provides memory 
 
 Boots with 4 SMP cores via PSCI, drops from EL2 to EL1, sets up the MMU with split TTBR (TTBR1 for kernel, TTBR0 per-process), and runs a preemptive EEVDF scheduler with handle-based scheduling contexts. Spawns a single init process; init orchestrates the rest (microkernel pattern). Targets aarch64 only — the assembly, page table setup, and hardware interaction are all ARM-specific. QEMU emulates the hardware, so it runs on any host architecture.
 
-For build/run/test instructions, see the [system README](../README.md).
+For detailed design rationale, see [`DESIGN.md`](DESIGN.md).
+
+## Building
+
+```sh
+cd system && cargo build
+```
+
+## Testing
+
+```sh
+cd system/test && cargo test -- --test-threads=1
+```
+
+631 tests covering memory management, scheduling, IPC, processes, ELF loading, interrupt handling, syscalls, and adversarial stress/fuzz scenarios.
+
+### Stress testing
+
+```sh
+cd system && ./stress-test.sh 45
+```
+
+Boots the kernel under QEMU and runs a sustained workload for the given number of seconds.
+
+### Miri
+
+```sh
+cd system/test && cargo +nightly miri test -- --test-threads=1
+```
+
+555 tests pass under Miri. 25 tests are ignored (they use inline assembly, raw pointer arithmetic on mock hardware addresses, or other constructs outside Miri's execution model).
 
 ## Features
 
@@ -36,6 +66,24 @@ For build/run/test instructions, see the [system README](../README.md).
   - ARM generic timer (EL1 physical, per-core PPI)
   - PL011 UART (TX, SMP-safe)
   - Virtio-mmio v2 device discovery, MMIO mapping, interrupt forwarding to userspace
+
+## Audit
+
+Comprehensive bug audit of all 33 `.rs` files, 2 `.S` files, and `link.ld`. Every `unsafe` site (112 total) verified with a `SAFETY` comment explaining the soundness argument.
+
+**Bugs found and fixed:**
+
+- `align_up` integer overflow on near-`usize::MAX` addresses
+- ELF `page_count` overflow on large segments
+- Timer deadline arithmetic saturation (could wrap to the past)
+- GIC distributor init missing barrier ordering (DSB/ISB)
+- Channel `close_count` saturation (increment past maximum)
+- Process slot leak on spawn failure
+
+**Cross-file analyses produced:**
+
+- [`LOCK-ORDERING.md`](LOCK-ORDERING.md) — maps all 13 `IrqMutex` instances, verifies no circular dependencies
+- [`CROSS-MODULE-LIFETIMES.md`](CROSS-MODULE-LIFETIMES.md) — verifies 5 cross-module ownership invariants
 
 ## Source files
 
@@ -97,10 +145,6 @@ link.ld                  — kernel linker script (upper VA via TTBR1, split phy
 **Not targeted:** x86_64, POSIX, network stack, hard realtime.
 
 **Blocked on OS design decisions:** filesystem (COW required by undo architecture), full syscall surface, OS service process.
-
-## Architecture
-
-Design rationale for every kernel subsystem — alternatives considered, tradeoffs, and why each approach was chosen — is documented in [`DESIGN.md`](DESIGN.md).
 
 ## References
 
