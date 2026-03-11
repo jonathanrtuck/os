@@ -18,12 +18,12 @@ cd system && cargo build
 cd system/test && cargo test -- --test-threads=1
 ```
 
-631 tests covering memory management, scheduling, IPC, processes, ELF loading, interrupt handling, syscalls, and adversarial stress/fuzz scenarios.
+632 tests covering memory management, scheduling, IPC, processes, ELF loading, interrupt handling, syscalls, OOM fault injection, and adversarial stress/fuzz scenarios.
 
 ### Stress testing
 
 ```sh
-cd system && ./stress-test.sh 45
+cd system/test && ./stress.sh 45
 ```
 
 Boots the kernel under QEMU and runs a sustained workload for the given number of seconds.

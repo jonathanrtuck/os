@@ -5,7 +5,7 @@
 # IMPORTANT: QEMU monitor `sendkey` does NOT route to virtio-keyboard.
 # We must send real keystrokes to the QEMU window via the OS input system.
 #
-# Usage: ./crash-test.sh [duration_seconds]
+# Usage: ./crash.sh [duration_seconds]
 #   Default duration: 30 seconds of rapid typing.
 #   Exit 0 = no crash (pass), exit 1 = crash detected.
 

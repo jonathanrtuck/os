@@ -7,7 +7,7 @@
 #
 # Exit 0 = PASS (stress test completed), exit 1 = CRASH or timeout.
 #
-# Usage: ./stress-test.sh [timeout_seconds]
+# Usage: ./stress.sh [timeout_seconds]
 #   Default timeout: 120 seconds.
 
 set -euo pipefail

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # QEMU smoke test — builds the kernel and checks for expected boot output.
 #
-# Usage: ./smoke-test.sh
+# Usage: ./smoke.sh
 # Returns: 0 on success, 1 on failure.
 
 set -euo pipefail

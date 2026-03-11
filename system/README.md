@@ -23,11 +23,11 @@ A single `cargo build --release` compiles the full system: shared libraries (sys
 ## Testing
 
 ```shell
-# Host-side unit tests (304 tests across 16 files):
+# Host-side unit tests (632 tests across 30 files):
 cd system/test && cargo test -- --test-threads=1
 
 # QEMU smoke test (builds, boots, checks expected output):
-cd system && ./smoke-test.sh
+cd system/test && ./smoke.sh
 ```
 
 ## What to expect
@@ -82,7 +82,7 @@ system/
   Cargo.toml                 — build root (builds the entire system)
   build.rs                   — compiles libraries → programs → init → kernel
   run-qemu.sh                — QEMU launcher (DTB injection, device config)
-  smoke-test.sh              — builds, boots QEMU, checks expected output
+  test/smoke.sh              — builds, boots QEMU, checks expected output
   rust-toolchain.toml        — pins Rust nightly + aarch64-unknown-none target
   DESIGN.md                  — userspace architecture record
 

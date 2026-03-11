@@ -8,7 +8,7 @@
 # QEMU display is suppressed (-display none) so this runs in CI/headless.
 # The keyboard driver starts but receives no input — compositor idles.
 #
-# Usage: ./integration-test.sh [timeout_seconds]
+# Usage: ./integration.sh [timeout_seconds]
 #   Default timeout: 15 seconds.
 #   Exit 0 = PASS, exit 1 = FAIL (missing output or crash).
 
