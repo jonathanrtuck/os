@@ -1,8 +1,9 @@
 // AUDIT: 2026-03-11 — 1 unsafe block verified (copy_segment_page), 6-category
 // checklist applied. Bugs found and fixed: (1) integer overflow in page_count
 // and VMA end computation for adversarial ELF mem_size — replaced with checked
-// arithmetic. (2) Documented pre-existing process slot leak on thread allocation
-// failure (mitigated by caller cleanup in sys_process_create).
+// arithmetic. (2) Process slot leak on thread allocation failure — both
+// create_from_user_elf and spawn_from_elf now call remove_empty_process on the
+// error path to clean up orphaned process slots when spawn fails (OOM).
 
 //! Process management.
 //!
@@ -176,8 +177,17 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
     setup_stack(&mut addr_space)?;
 
     let process_id = scheduler::create_process(addr_space);
-    let thread_id = scheduler::spawn_user_suspended(process_id, header.entry, USER_STACK_TOP)
-        .ok_or("out of memory for initial thread stack")?;
+    let thread_id = match scheduler::spawn_user_suspended(process_id, header.entry, USER_STACK_TOP)
+    {
+        Some(tid) => tid,
+        None => {
+            // Clean up the orphaned process slot. The process has no threads
+            // (spawn failed), so remove_empty_process drops the Box<AddressSpace>
+            // which triggers AddressSpace::Drop (free all frames + ASID).
+            scheduler::remove_empty_process(process_id);
+            return Err("out of memory for initial thread stack");
+        }
+    };
 
     Ok((process_id, thread_id))
 }
@@ -241,8 +251,14 @@ pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<(ProcessId, ThreadId),
     setup_stack(&mut addr_space)?;
 
     let process_id = scheduler::create_process(addr_space);
-    let thread_id = scheduler::spawn_user(process_id, header.entry, USER_STACK_TOP)
-        .ok_or("out of memory for initial thread stack")?;
+    let thread_id = match scheduler::spawn_user(process_id, header.entry, USER_STACK_TOP) {
+        Some(tid) => tid,
+        None => {
+            // Same cleanup as create_from_user_elf: remove the orphaned process.
+            scheduler::remove_empty_process(process_id);
+            return Err("out of memory for initial thread stack");
+        }
+    };
 
     Ok((process_id, thread_id))
 }

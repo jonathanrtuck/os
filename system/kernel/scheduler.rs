@@ -274,6 +274,7 @@ fn maybe_cleanup_killed_process(s: &mut State, pid: Option<ProcessId>, was_exite
             process.thread_count = process.thread_count.saturating_sub(1);
 
             if process.thread_count == 0 {
+                // Unwrap justified: we just accessed this slot via get_mut() above.
                 let process = s.processes[pid.0 as usize].take().unwrap();
                 let mut addr_space = process.address_space;
 
@@ -758,6 +759,31 @@ pub fn create_process(addr_space: Box<super::address_space::AddressSpace>) -> Pr
 
     ProcessId(id)
 }
+/// Remove an orphaned process that has no threads.
+///
+/// Called on error paths where `create_process` succeeded but thread
+/// creation failed. The process's `Box<AddressSpace>` is dropped, which
+/// triggers its `Drop` impl (invalidate TLB + free all frames + free ASID).
+///
+/// # Panics
+///
+/// Debug-asserts that the process has zero threads. Removing a process
+/// with live threads would leak those threads.
+#[inline(never)]
+pub fn remove_empty_process(pid: ProcessId) {
+    let mut s = STATE.lock();
+
+    if let Some(slot) = s.processes.get_mut(pid.0 as usize) {
+        if let Some(process) = slot.as_ref() {
+            debug_assert_eq!(
+                process.thread_count, 0,
+                "remove_empty_process: process has live threads"
+            );
+        }
+        // Take and drop the process — AddressSpace::drop handles cleanup.
+        *slot = None;
+    }
+}
 /// Access the current thread's process via closure. Acquires the scheduler
 /// lock for the duration. Panics if the current thread has no process
 /// (kernel threads).
@@ -896,15 +922,18 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             release_context_inner(&mut s, id);
         }
 
+        // Unwrap justified: cores[core].current always set after scheduler::init.
         let tid = s.cores[core].current.as_ref().unwrap().id();
         let pid = s.cores[core]
             .current
             .as_ref()
             .unwrap()
             .process_id
+            // Expect justified: only user threads call exit_current_from_syscall.
             .expect("not a user thread");
         let process = s.processes[pid.0 as usize]
             .as_mut()
+            // Expect justified: process slot confirmed via thread's process_id.
             .expect("process not found");
 
         process.thread_count = process.thread_count.saturating_sub(1);
@@ -913,6 +942,7 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
 
         if is_last {
             // Take the entire process — we're destroying it.
+            // Expect justified: process slot confirmed present (is_last path).
             let mut process = s.processes[pid.0 as usize]
                 .take()
                 .expect("process not found");
@@ -1139,6 +1169,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     }
 
     // Drain handle table and categorize resources for cleanup outside the lock.
+    // Unwrap justified: process validated at top of kill_process (early-return on None).
     let handle_objects: Vec<HandleObject> = {
         let process = s.processes[target_pid.0 as usize].as_mut().unwrap();
 
@@ -1148,6 +1179,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     // Take or defer the process based on whether threads are still running.
     let address_space = if running_count == 0 {
         // No threads running on any core — take the process for immediate cleanup.
+        // Unwrap justified: process validated at top of kill_process.
         let process = s.processes[target_pid.0 as usize].take().unwrap();
 
         Some(process.address_space)
@@ -1155,6 +1187,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         // Threads still running on other cores — defer address space cleanup.
         // Set thread_count to the number of still-running threads so
         // maybe_cleanup_killed_process can track when they're all reaped.
+        // Unwrap justified: process validated at top of kill_process.
         let process = s.processes[target_pid.0 as usize].as_mut().unwrap();
 
         process.thread_count = running_count;
