@@ -1,3 +1,19 @@
+// AUDIT: 2026-03-11 — All 19 unsafe blocks enumerated and verified.
+// Each has a // SAFETY: comment explaining the invariant. Categories:
+//   - Linker symbol address (4): __kernel_end, boot_tt0_l0..l2_1
+//   - System register read (3): mrs esr_el1/far_el1/elr_el1
+//   - Inline asm barrier (1): dsb ish (no nomem — intentional, Fix 6/9)
+//   - Inline asm hint (2): wfe idle loops (nomem correct)
+//   - Volatile read (7): SECONDARY_ENTRY_PA, FDT magic scan, Context
+//     diagnostics, stack walk
+//   - Volatile write (1): write_device_manifest
+//   - from_raw_parts (1): DTB blob slice
+//   - from_utf8_unchecked (1): secondary_main message
+// Fix 6/Fix 9 (nomem removal from DAIF/system register asm) re-verified:
+//   DSB at line 132 correctly omits nomem. WFE and MRS correctly use nomem.
+// Doc comment fix: write_device_manifest offset 4→8 (matches init reader).
+// No code bugs found.
+//!
 //! Bare-metal aarch64 kernel for QEMU `virt`.
 //!
 //! # Memory Map
@@ -124,6 +140,11 @@ fn boot_secondaries() {
 
     // Ensure page tables and stacks are visible to secondary cores before
     // they start executing.
+    // SAFETY: DSB ISH is a data synchronization barrier ensuring all prior
+    // stores (page tables, stacks) are visible to the inner-shareable domain
+    // before secondary cores begin executing. No stack usage; nomem omitted
+    // intentionally so the compiler cannot reorder memory accesses past
+    // this barrier (Fix 6/Fix 9 re-verified).
     unsafe {
         core::arch::asm!("dsb ish", options(nostack));
     }
@@ -170,7 +191,11 @@ fn find_and_parse_dtb(firmware_pa: u64) -> Option<device_tree::DeviceTable> {
     let regions = [
         (paging::RAM_START as u64, paging::RAM_START as u64 + 0x80000),
         (
+            // SAFETY: __kernel_end is a linker-defined symbol marking the end
+            // of the kernel image. Taking its address yields a valid VA within
+            // the kernel's mapped region.
             memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize }).as_u64(),
+            // SAFETY: Same linker symbol as above — valid kernel VA.
             memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize }).as_u64()
                 + 2 * 1024 * 1024,
         ),
@@ -294,6 +319,10 @@ fn reclaim_boot_ttbr0() {
         static boot_tt0_l2_1: u8;
     }
 
+    // SAFETY: boot_tt0_l0..l2_1 are page-aligned .bss symbols defined in
+    // boot.S. Taking their addresses yields valid kernel VAs for the boot
+    // identity-map page tables that are no longer needed after all cores
+    // have transitioned to upper VA via TTBR1.
     let pages = unsafe {
         [
             &boot_tt0_l0 as *const u8 as usize,
@@ -329,8 +358,9 @@ fn try_parse_dtb_at(pa: u64) -> Option<device_tree::DeviceTable> {
 ///
 /// ```text
 /// offset 0:  device_count (u32)
-/// offset 4:  device[0]: { pa: u64, irq: u32, device_id: u32 }  (16 bytes)
-/// offset 20: device[1]: ...
+/// offset 4:  (padding for u64 alignment)
+/// offset 8:  device[0]: { pa: u64, irq: u32, device_id: u32 }  (16 bytes)
+/// offset 24: device[1]: ...
 /// ```
 fn write_device_manifest(
     shared_pa: memory::Pa,
@@ -339,6 +369,12 @@ fn write_device_manifest(
 ) {
     let shared_va = memory::phys_to_virt(shared_pa) as *mut u8;
 
+    // SAFETY: shared_pa is a page-aligned physical address obtained from
+    // channel::shared_pages(), mapped into kernel VA via phys_to_virt.
+    // The page is 4 KiB; maximum write extent is 8 + 8*16 = 136 bytes.
+    // All writes are naturally aligned (u32 at 4-byte, u64 at 8-byte offsets).
+    // Volatile writes ensure the compiler doesn't elide stores that will be
+    // read by the init process from the same physical page.
     unsafe {
         // Write device count at offset 0 (u32). Offset 4 is padding.
         core::ptr::write_volatile(shared_va as *mut u32, count as u32);
@@ -422,10 +458,17 @@ pub extern "C" fn kernel_fault_handler(
     // came from restoring a zeroed context (eret path) or from kernel code
     // (ret/blr to null — TPIDR context would have valid elr).
     if tpidr >= 0xFFFF_0000_0000_0000 {
+        // SAFETY: TPIDR_EL1 is validated above as a kernel VA (>= 0xFFFF...).
+        // It points to a Thread's Context struct. Reading at documented
+        // offsets (matching context.rs compile-time assertions) for diagnostics.
         let ctx_elr = unsafe { core::ptr::read_volatile((tpidr + 0x100) as *const u64) };
+        // SAFETY: Same TPIDR validation — reading SPSR from Context.
         let ctx_spsr = unsafe { core::ptr::read_volatile((tpidr + 0x108) as *const u64) };
+        // SAFETY: Same TPIDR validation — reading SP from Context.
         let ctx_sp = unsafe { core::ptr::read_volatile((tpidr + 0x0F8) as *const u64) };
+        // SAFETY: Same TPIDR validation — reading x30 from Context.
         let ctx_x30 = unsafe { core::ptr::read_volatile((tpidr + 0x0F0) as *const u64) };
+        // SAFETY: Same TPIDR validation — reading thread ID past Context end.
         let thread_id = unsafe { core::ptr::read_volatile((tpidr + 0x330) as *const u64) };
 
         serial::panic_puts("\n  thread id=0x");
@@ -446,6 +489,8 @@ pub extern "C" fn kernel_fault_handler(
         let sp_ptr = sp as *const u64;
 
         for i in 0..8u64 {
+            // SAFETY: SP validated above within kernel VA range. Reading up
+            // to 8 words (64 bytes) for best-effort backtrace diagnostics.
             let val = unsafe { core::ptr::read_volatile(sp_ptr.add(i as usize)) };
 
             if i < 4 || (val >= 0xFFFF_0000_4000_0000 && val < 0xFFFF_0000_5000_0000) {
@@ -489,6 +534,8 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     }
 
     // Initialize page frame allocator with memory above kernel heap.
+    // SAFETY: __kernel_end is a linker-defined symbol; taking its address
+    // yields a valid kernel VA marking the end of the kernel image.
     let kernel_end_pa = memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize });
     let heap_end = kernel_end_pa.0 + memory::HEAP_SIZE;
     let ram_end = paging::RAM_END as usize;
@@ -566,6 +613,9 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     serial::puts("🥾 booted.\n");
 
     loop {
+        // SAFETY: WFE is a hint instruction that puts the core into a
+        // low-power wait state until an event (SEV/interrupt). Does not
+        // access memory or use the stack. nomem is correct.
         unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
     }
 }
@@ -595,6 +645,8 @@ pub extern "C" fn secondary_main(core_id: u64) -> ! {
     timer::init();
 
     loop {
+        // SAFETY: WFE is a hint instruction — low-power wait for event.
+        // No memory access, no stack usage. nomem is correct.
         unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
     }
 }

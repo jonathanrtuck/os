@@ -1,3 +1,19 @@
+/*
+ * AUDIT: 2026-03-11 — Linker script review.
+ *   Section alignment: .text.boot at PHYS_BASE, upper-VA sections start
+ *   after ALIGN(4096) + KERNEL_VA_OFFSET. .rodata and .data each start
+ *   on 4 KiB boundaries (enabling distinct W^X permissions). .bss.exc_stacks
+ *   is page-aligned (ALIGN(4096)). __kernel_end is page-aligned. ✓
+ *   KEEP directives: KEEP(*(.text.boot)) preserves the entry point. Other
+ *   sections are referenced by code and do not need KEEP. ✓
+ *   No section overlap: location counter advances monotonically. AT()
+ *   directives correctly subtract KERNEL_VA_OFFSET for LMA. ✓
+ *   Physical companions: __bss_start_phys, __bss_end_phys, __stack_top_phys
+ *   correctly computed as VA - KERNEL_VA_OFFSET. ✓
+ *   Stack sizes: primary 64 KiB, secondary 7×16 KiB, emergency 8×4 KiB. ✓
+ *   No bugs found.
+ */
+
 ENTRY(_start)
 
 KERNEL_VA_OFFSET = 0xFFFF000000000000; /* must match memory::KERNEL_VA_OFFSET */

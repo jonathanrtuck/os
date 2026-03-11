@@ -7,6 +7,25 @@
 // Rust entry points:
 //   irq_handler(*mut Context) -> *const Context
 //   svc_handler(*mut Context) -> *const Context
+//
+// AUDIT: 2026-03-11 — Comprehensive review of exception handling.
+//   Vector table: .align 11 (2 KiB, correct for VBAR_EL1). 16 entries ×
+//   0x80 bytes. All entry types covered (Sync/IRQ/FIQ/SError × 4 groups). ✓
+//   save_context: x9/x10 spilled to stack before use as temps. All 31 GPRs
+//   saved. SP restored via add sp, #0x10 (compensates for temp spill).
+//   ELR, SPSR, SP_EL0, TPIDR_EL0 saved. All 32 NEON q-regs + FPCR/FPSR
+//   saved. Context pointer returned in x0. ✓
+//   restore_context_and_eret: SP, system regs, NEON, GPRs restored. x19
+//   loaded last (self-referential — base register). x16 loaded separately
+//   (not paired) — valid, no alignment issue. ERET at end. ✓
+//   SVC handler: ESR_EL1 EC field extracted correctly (>> 26, cmp 0x15).
+//   x10 spill/restore around check prevents register corruption. ✓
+//   Fatal handler: Emergency stack switch with per-core calculation
+//   ((core_id+1) * 4096). Diagnostic state (SP, LR, TPIDR) captured
+//   before stack switch. ✓
+//   exc_stacks: .bss.exc_stacks section, .align 12 (4 KiB), 8 cores. ✓
+//   Context offsets: compile-time assertions in context.rs enforce match. ✓
+//   No bugs found.
 // ==========================================================================
 
 // --------------------------------------------------------------------------

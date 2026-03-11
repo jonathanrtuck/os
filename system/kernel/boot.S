@@ -7,6 +7,21 @@
 //
 // After kernel_main starts (at upper VA via TTBR1), Rust code refines
 // TTBR1 with 4KB pages for W^X enforcement.
+//
+// AUDIT: 2026-03-11 — Comprehensive review of AArch64 correctness.
+//   EL2→EL1 transition: HCR_EL2.RW, cnthctl, cntvoff, cptr_el2, spsr/elr
+//   set correctly. ISB before ERET. ✓
+//   Barrier ordering: DSB SY before TLBI, DSB ISH + ISB after TLBI, DSB
+//   ISH + ISB after SCTLR_EL1 write. Both primary and secondary paths. ✓
+//   Register clobbers: build_boot_tables saves x29/x30, uses x20-x21
+//   (callee-saved) for return values, fill_tables documents x13-x17 as
+//   clobbers. All consistent. ✓
+//   Page table descriptors: Device = ATTRIDX1|PXN|UXN|AF, RAM =
+//   ATTRIDX0|SH_INNER|AF|UXN. Block format correct for L2. ✓
+//   Secondary boot: Same MAIR/TCR/barrier sequence as primary. Shares
+//   TTBR1. Per-core stack calculation correct (core_id * 0x4000). ✓
+//   early_vectors alignment: .align 11 (2 KiB), correct for VBAR_EL1. ✓
+//   No bugs found.
 // ==========================================================================
 
 // Physical memory layout (QEMU virt, 256MB RAM).
