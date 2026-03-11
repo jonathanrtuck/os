@@ -1,0 +1,26 @@
+{
+  "milestone": "boot-memory",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 9,
+    "passed": 9,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-MEM-001",
+    "VAL-MEM-002",
+    "VAL-MEM-003",
+    "VAL-MEM-004",
+    "VAL-MEM-005",
+    "VAL-MEM-006",
+    "VAL-MEM-007",
+    "VAL-MEM-008",
+    "VAL-MEM-009"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}

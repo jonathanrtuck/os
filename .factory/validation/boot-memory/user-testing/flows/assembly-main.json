@@ -1,0 +1,18 @@
+{
+  "flowId": "assembly-main",
+  "testedAt": "2026-03-11T00:00:00Z",
+  "assertions": {
+    "VAL-MEM-001": {
+      "status": "pass",
+      "evidence": "git log --oneline origin/main..HEAD -- system/kernel/boot.S system/kernel/exception.S system/kernel/link.ld\nOutput: 60a1690 audit(boot): review boot.S, exception.S, link.ld, main.rs\nExit code: 0\nAll three files (boot.S, exception.S, link.ld) each have at least one commit (60a1690) touching them."
+    },
+    "VAL-MEM-002": {
+      "status": "pass",
+      "evidence": "grep -c 'SAFETY' system/kernel/main.rs\nOutput: 20\nExit code: 0\nSAFETY comment count (20) >= required minimum (19)."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": ["terminal"],
+  "summary": "Tested 2 assertions: 2 passed, 0 failed. VAL-MEM-001 confirmed all 3 assembly/linker files touched by audit commit 60a1690. VAL-MEM-002 confirmed 20 SAFETY comments in main.rs (>= 19 required)."
+}
