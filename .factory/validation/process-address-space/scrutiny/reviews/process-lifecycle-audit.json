@@ -1,0 +1,45 @@
+{
+  "featureId": "process-lifecycle-audit",
+  "reviewedAt": "2026-03-11T19:05:00.000Z",
+  "commitId": "dcdcc43",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid audit of process.rs and process_exit.rs. Worker found and fixed a real integer overflow bug in page_count/VMA end computation affecting both create_from_user_elf and spawn_from_elf — adversarial ELF mem_size values could silently wrap. Fix uses checked_add/checked_mul with proper error propagation. SAFETY comment on copy_segment_page enhanced with complete justification. process_exit.rs correctly assessed as pure safe Rust with sound two-phase wake pattern. 11 well-designed boundary-value tests cover overflow detection and normal arithmetic. Pre-existing process slot leak documented as non-blocking (known issue per DESIGN.md §11.11). Worker read scheduler.rs, syscall.rs, handle.rs, address_space.rs, and waitable.rs to trace the full lifecycle — thorough cross-reference analysis despite narrow file scope.",
+    "issues": [
+      {
+        "file": "system/kernel/process.rs",
+        "line": 169,
+        "severity": "non_blocking",
+        "description": "Inner loop arithmetic `page * PAGE_SIZE` and `base_va + page * PAGE_SIZE` (lines 169-175 in create_from_user_elf, and similar in spawn_from_elf) is unchecked. This is provably safe because checked_vma_end already verified base_va + page_count * PAGE_SIZE fits in u64, so all intermediate values for page < page_count are bounded. However, the safety argument is not documented in a comment. A brief inline comment (e.g., '// Safe: checked_vma_end verified the full range') would strengthen the audit trail and prevent future reviewers from flagging this as a gap."
+      },
+      {
+        "file": "system/test/tests/process.rs",
+        "line": 11,
+        "severity": "non_blocking",
+        "description": "Test helper functions return Option<u64> while the kernel versions return Result<u64, &'static str>. The core arithmetic is identical and the divergence is functionally immaterial (None ≡ Err for testing purposes), but the type difference means a future kernel-side change from .ok_or() to a different error mapping wouldn't be caught by these tests. Acceptable given the host-side test architecture constraints."
+      },
+      {
+        "file": "system/kernel/process.rs",
+        "line": 1,
+        "severity": "non_blocking",
+        "description": "The feature description asked to check for 'unsafe impl Send/Sync (if any) justified.' The audit confirmed 0 Send/Sync impls exist (verified via grep), but the AUDIT comment at the top doesn't explicitly state 'no Send/Sync impls' — it only mentions '1 unsafe block verified.' Minor documentation gap; the finding is implicit but could be made explicit for completeness."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker noted that the TDD step ('write a test that FAILS before the fix') doesn't cleanly apply to arithmetic/logic bugs where the test verifies the checked version works correctly rather than demonstrating a crash from the unchecked version. The kernel-auditor skill could clarify: for pure-arithmetic bugs, writing a test that shows the checked function rejects bad input (returns Err/None) is sufficient TDD evidence, since the 'before' state would produce incorrect results (silent wrapping) rather than a test failure.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The TDD step says write a test that FAILS before the fix. For arithmetic bugs, the pure-logic tests demonstrate the overflow behavior but don't fail in a traditional sense — they verify the checked version works correctly. This could be clarified in the skill for arithmetic/logic bugs.'"
+    },
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md says 'Prefer .checked_*() arithmetic over unchecked operations in kernel code' — the worker followed this convention. However, the convention could be strengthened to: 'When checked arithmetic guards a loop that uses unchecked arithmetic on bounded values, add a comment explaining why the loop arithmetic is safe.' This would prevent reviewers from flagging provably-safe unchecked arithmetic inside bounds-checked loops.",
+      "evidence": "process.rs lines 167-175 and 225-233: inner loops use `page * PAGE_SIZE` and `base_va + page * PAGE_SIZE` unchecked, relying on the preceding checked_vma_end call. No comment documents this safety argument."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The audit is thorough and the overflow fix is correct. Worker systematically applied the 6-category bug checklist to both process.rs (1 unsafe block, 2 overflow bugs fixed) and process_exit.rs (0 unsafe blocks, no bugs). The checked_page_count and checked_vma_end helper functions properly use checked arithmetic and propagate errors. 11 boundary-value tests cover all overflow edge cases. The pre-existing process slot leak was correctly identified and documented as a known issue (DESIGN.md §11.11) without unnecessary scope expansion. Three non-blocking observations: undocumented safety argument for inner loop arithmetic, Option-vs-Result divergence in test helpers, and implicit (not explicit) Send/Sync non-finding. None affect correctness."
+}
