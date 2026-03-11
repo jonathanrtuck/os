@@ -1,0 +1,34 @@
+{
+  "featureId": "sync-primitives-audit",
+  "reviewedAt": "2026-03-11T19:30:00.000Z",
+  "commitId": "cc9e8fb",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Thorough audit of sync.rs, futex.rs, and waitable.rs. All 5 unsafe blocks in sync.rs verified with SAFETY comments. Ticket spinlock uses correct Relaxed/Acquire/Release ordering. DAIF asm correctly omits nomem (Fix 6 re-verified sound). Futex two-phase lock ordering correct, swap_remove wake loop handles index correctly, lost-wakeup prevention via wake_pending is sound. Waitable registry O(1) indexed lookup correct, create/destroy/notify lifecycle sound. 22 new tests added covering boundary conditions, concurrency, and lifecycle patterns. No bugs found — valid outcome given code quality.",
+    "issues": [
+      {
+        "file": "system/test/tests/sync.rs",
+        "line": null,
+        "severity": "non_blocking",
+        "description": "The duplicated TicketLock in the test file faithfully mirrors the kernel's IrqMutex counter logic and atomic orderings (Relaxed/Acquire/Release), but it omits the UnsafeCell<T> data wrapper and the DAIF IRQ masking. This means the tests validate spinlock fairness and counter correctness but cannot test the IRQ masking invariant or the UnsafeCell safety. This is an inherent limitation of host-side testing for aarch64 code and is correctly documented in the test file header, but worth noting for completeness."
+      },
+      {
+        "file": "system/kernel/futex.rs",
+        "line": null,
+        "severity": "non_blocking",
+        "description": "The feature description specifies 'verify spurious wakeup handling, timeout paths return correct errors' but the futex implementation has no timeout support — wait syscall timeout is documented as not yet implemented (AGENTS.md). The worker correctly found no bugs but did not explicitly note this gap between the feature description and the actual code. Not a worker failure — a feature description mismatch."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "target": "skills",
+      "description": "Worker noted that the kernel-auditor skill Step 5 says 'Write Failing Tests First (TDD) for EVERY code bug finding' but doesn't explicitly state that verification tests (proving correctness, not demonstrating bugs) are still expected when no bugs are found. The 'Special Cases' section mentions adding SAFETY comments when no bugs found but says nothing about adding verification tests. Worker added 22 verification tests anyway, which is the right behavior — the skill should codify this expectation.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'Step 5 says Write Failing Tests First (TDD) for every code bug. When no bugs are found, the procedure should more explicitly state that new tests verifying correctness (not bug demonstrations) are still valuable and expected.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. All 5 unsafe blocks in sync.rs have SAFETY comments. AUDIT markers on all 3 files. Ticket spinlock ordering verified correct (Relaxed/Acquire/Release). DAIF nomem removal (Fix 6) re-verified sound. Futex two-phase lock ordering, swap_remove wake loop, and lost-wakeup prevention all verified correct. Waitable O(1 indexed registry, create/destroy/notify lifecycle, and edge/level-triggered patterns all verified correct. 22 new tests (7 sync, 7 futex, 8 waitable) covering boundary conditions, concurrency, and lifecycle patterns. 435 total tests pass, kernel builds. No bugs found. Two non-blocking observations: (1) host-side sync tests inherently cannot test DAIF IRQ masking, (2) feature description mentions futex timeout paths that don't exist yet."
+}
