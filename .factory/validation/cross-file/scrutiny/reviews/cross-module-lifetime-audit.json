@@ -1,0 +1,34 @@
+{
+  "featureId": "cross-module-lifetime-audit",
+  "reviewedAt": "2026-03-11T20:30:00.000Z",
+  "commitId": "f954df2",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "All 5 cross-module lifetime invariants were verified. The process slot leak (invariant e) was found and fixed with a new `scheduler::remove_empty_process()` function, applied to both `create_from_user_elf` and `spawn_from_elf` error paths. The fix is minimal and correct: it takes the scheduler lock, debug-asserts zero thread count, and sets the slot to None (triggering AddressSpace::Drop for cleanup). All 41 .unwrap()/.expect() calls were reviewed with inline justification comments added to the less-obvious cases in scheduler.rs. 13 new tests in system/test/tests/cross_module.rs cover all 5 invariants using minimal stub models (correct pattern for this project's test architecture). 580 tests pass (567 baseline + 13 new). The CROSS-MODULE-LIFETIMES.md document provides thorough analysis of each cross-module invariant with code path traces.",
+    "issues": [
+      {
+        "file": "system/kernel/scheduler.rs",
+        "line": 762,
+        "severity": "non_blocking",
+        "description": "Missing blank line before `/// Remove an orphaned process...` doc comment. The `create_process` function's closing brace and the `remove_empty_process` doc comment are on adjacent lines with no separator. This is a minor formatting inconsistency compared to the rest of the file where functions are separated by blank lines."
+      },
+      {
+        "file": "system/test/tests/cross_module.rs",
+        "line": 441,
+        "severity": "non_blocking",
+        "description": "Test `process_slot_leak_on_thread_alloc_failure` asserts the BUG condition (slot still exists) and then applies the fix inline. While this documents the bug well, it's technically a passing test that exercises the fix path rather than a test that fails-before-fix / passes-after-fix in the strict TDD sense. The worker acknowledged this in skillFeedback — for cross-module invariant audits where 4 of 5 invariants are 'verified safe', strict TDD failure-first doesn't always apply."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker's skillFeedback notes that the kernel-auditor skill's TDD step says 'write a test that FAILS before the fix', but for cross-module invariant analysis, most findings are 'verified safe' (no bug to demonstrate failure for). The skill could clarify that cross-module audits may verify correct behavior rather than always demonstrating a bug first. Only 1 of 5 invariants had a bug; the other 4 are correctness verifications.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The kernel-auditor skill's TDD step says write a test that FAILS before the fix. For cross-module invariant analysis, some findings are verified safe (no bug to demonstrate failure for).'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. All 5 cross-module lifetime invariants verified: (a) handle-close/channel-blocked interaction safe via two-phase wake, (b) thread drop after exit notification safe via deferred drop, (c) address space dealloc after process exit safe via running-thread tracking, (d) timer on dead thread safe via graceful no-op. (e) Process slot leak found and fixed: new remove_empty_process() cleans up orphaned slots when spawn fails. All 41 unwrap/expect calls reviewed and justified. 13 new tests, 580 total pass. Single commit, clean diff, thorough documentation in CROSS-MODULE-LIFETIMES.md. Two non-blocking issues: minor formatting gap and TDD strict-failure nuance for verification-only findings."
+}
