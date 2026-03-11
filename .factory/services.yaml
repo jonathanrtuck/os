@@ -6,3 +6,4 @@ commands:
   crash: cd system && ./crash-test.sh 120
   clippy: cd system && cargo clippy -- -W clippy::all
   miri: cd system/test && cargo +nightly miri test -- --test-threads=1
+  miri_single: cd system/test && cargo +nightly miri test --test ${TEST_NAME} -- --test-threads=1
