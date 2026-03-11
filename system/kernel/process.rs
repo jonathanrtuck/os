@@ -1,3 +1,9 @@
+// AUDIT: 2026-03-11 — 1 unsafe block verified (copy_segment_page), 6-category
+// checklist applied. Bugs found and fixed: (1) integer overflow in page_count
+// and VMA end computation for adversarial ELF mem_size — replaced with checked
+// arithmetic. (2) Documented pre-existing process slot leak on thread allocation
+// failure (mitigated by caller cleanup in sys_process_create).
+
 //! Process management.
 //!
 //! A process owns an address space and handle table. Threads within a
@@ -66,7 +72,11 @@ fn copy_segment_page(file_data: &[u8], file_size: u64, seg_offset: u64, pa: memo
         let src = &file_data[src_start..src_end];
         let dst = memory::phys_to_virt(pa) as *mut u8;
 
-        // SAFETY: `pa` was just allocated (zeroed). `src` is bounded by ELF data.
+        // SAFETY: `pa` was just allocated (zeroed by the page allocator). `dst`
+        // is the kernel VA for that frame, valid for PAGE_SIZE bytes. `src` is
+        // a subslice of `file_data`, bounded by min(seg_offset + PAGE_SIZE,
+        // file_size), so `src.len() <= PAGE_SIZE`. The source and destination
+        // do not overlap (kernel heap vs page frame regions are disjoint).
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) };
     }
 }
@@ -92,6 +102,26 @@ fn setup_stack(addr_space: &mut AddressSpace) -> Result<(), &'static str> {
     Ok(())
 }
 
+/// Compute the number of pages needed for a segment of `mem_size` bytes.
+///
+/// Returns `Err` if the arithmetic overflows (adversarial ELF `mem_size`).
+fn checked_page_count(mem_size: u64) -> Result<u64, &'static str> {
+    mem_size
+        .checked_add(PAGE_SIZE - 1)
+        .map(|n| n / PAGE_SIZE)
+        .ok_or("segment mem_size overflow")
+}
+
+/// Compute the VMA end address from a base VA and page count.
+///
+/// Returns `Err` if the result overflows the 64-bit address space.
+fn checked_vma_end(base_va: u64, page_count: u64) -> Result<u64, &'static str> {
+    page_count
+        .checked_mul(PAGE_SIZE)
+        .and_then(|size| base_va.checked_add(size))
+        .ok_or("segment VMA end overflow")
+}
+
 /// Create a process from a user-provided ELF buffer, with a suspended thread.
 ///
 /// Eagerly maps ALL segment pages (the ELF data is temporary and can't be
@@ -115,14 +145,15 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
             executable::segment_data(elf_bytes, &seg).map_err(|_| "segment data out of bounds")?;
         let attrs = executable::segment_attrs(seg.flags);
         let base_va = seg.vaddr & !(PAGE_SIZE - 1);
-        let page_count = (seg.mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let page_count = checked_page_count(seg.mem_size)?;
+        let vma_end = checked_vma_end(base_va, page_count)?;
         let is_exec = seg.flags & 1 != 0;
         let is_write = seg.flags & 2 != 0;
 
         // Anonymous backing — all pages are eagerly mapped below.
         addr_space.vmas.insert(Vma {
             start: base_va,
-            end: base_va + page_count * PAGE_SIZE,
+            end: vma_end,
             readable: true,
             writable: is_write,
             executable: is_exec,
@@ -174,13 +205,14 @@ pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<(ProcessId, ThreadId),
             executable::segment_data(elf_bytes, &seg).map_err(|_| "segment data out of bounds")?;
         let attrs = executable::segment_attrs(seg.flags);
         let base_va = seg.vaddr & !(PAGE_SIZE - 1);
-        let page_count = (seg.mem_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let page_count = checked_page_count(seg.mem_size)?;
+        let vma_end = checked_vma_end(base_va, page_count)?;
         let is_exec = seg.flags & 1 != 0;
         let is_write = seg.flags & 2 != 0;
 
         addr_space.vmas.insert(Vma {
             start: base_va,
-            end: base_va + page_count * PAGE_SIZE,
+            end: vma_end,
             readable: true,
             writable: is_write,
             executable: is_exec,

@@ -1,3 +1,9 @@
+// AUDIT: 2026-03-11 — 0 unsafe blocks (pure safe Rust). 6-category checklist
+// applied. No bugs found. Two-phase wake pattern (own lock → release →
+// scheduler lock) correctly prevents lock ordering violations. Destroy path
+// properly wakes any blocked waiter. All functions delegate to WaitableRegistry
+// which handles missing entries gracefully.
+
 //! Process exit notification.
 //!
 //! Thin wrapper around `WaitableRegistry<ProcessId>`. Each child process with
