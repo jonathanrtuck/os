@@ -1,0 +1,22 @@
+{
+  "milestone": "infra",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": ["VAL-INFRA-001", "VAL-INFRA-002", "VAL-INFRA-003"],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added Flow Validator Guidance: Terminal section with isolation rules, boundaries, and Miri notes",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null
+}

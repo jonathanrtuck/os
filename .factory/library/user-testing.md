@@ -43,3 +43,22 @@ cd system/test && cargo +nightly miri test -- --test-threads=1
 - Tests duplicate/stub kernel logic rather than importing it directly
 - 31 compiler warnings (dead code) are pre-existing and expected
 - Miri is not installed by default; needs `rustup component add miri`
+
+## Flow Validator Guidance: Terminal
+
+**Surface:** All assertions for this mission are verified via terminal commands (cargo test, cargo build, cargo miri test, shell scripts).
+
+**Isolation:** Terminal commands are inherently isolated — no shared user accounts, sessions, or mutable state between runs. Multiple flow validators can run in parallel since they only read build artifacts and run tests.
+
+**Boundaries:**
+- Do NOT modify any source files — validators only verify current state
+- Run commands from the repo root at `/Users/user/Sites/os`
+- Always use `--test-threads=1` for cargo test
+- Report exact exit codes and output excerpts as evidence
+
+**Miri notes:**
+- Miri has been assessed during infra verification
+- 330/348 tests pass clean under Miri
+- buddy test fails due to Miri provenance limitation (not real UB)
+- ipc test finds UB in library code (out of kernel scope)
+- scheduler_state takes ~1400s under Miri — may need reduced iterations
