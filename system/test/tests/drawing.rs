@@ -3,7 +3,7 @@
 //! Includes the library directly — it has zero external dependencies (no_std,
 //! no syscalls, no hardware), making it fully testable on the host.
 
-#[path = "../../library/drawing/lib.rs"]
+#[path = "../../libraries/drawing/lib.rs"]
 mod drawing;
 
 use drawing::{Color, PixelFormat, Surface, FONT_8X16};
@@ -943,7 +943,7 @@ fn blit_blend_mixed_alpha_pixels() {
 
 use drawing::{TrueTypeFont, RasterBuffer, RasterScratch, GlyphOutline};
 
-const PROGGY_CLEAN: &[u8] = include_bytes!("../../library/drawing/ProggyClean.ttf");
+const PROGGY_CLEAN: &[u8] = include_bytes!("../../libraries/drawing/ProggyClean.ttf");
 
 #[test]
 fn ttf_parse_valid_font() {

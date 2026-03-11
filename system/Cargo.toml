@@ -5,7 +5,7 @@ edition = "2021"
 
 [[bin]]
 name = "kernel"
-path = "src/main.rs"
+path = "kernel/src/main.rs"
 test = false
 
 [dependencies]

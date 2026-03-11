@@ -38,7 +38,7 @@ static mut TTF_SCRATCH: drawing::RasterScratch = drawing::RasterScratch::zeroed(
 static mut TTF_RASTER_BUF: [u8; 128 * 128] = [0u8; 128 * 128];
 
 // Embedded TrueType font.
-const PROGGY_TTF: &[u8] = include_bytes!("../../library/drawing/ProggyClean.ttf");
+const PROGGY_TTF: &[u8] = include_bytes!("../../libraries/drawing/ProggyClean.ttf");
 
 fn panel_surface(buf: &mut [u8]) -> drawing::Surface<'_> {
     drawing::Surface {

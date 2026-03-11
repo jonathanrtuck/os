@@ -54,7 +54,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ## 1. Libraries
 
-### 1.1 Syscall Library (`library/sys/`) 🟢
+### 1.1 Syscall Library (`libraries/sys/`) 🟢
 
 **Goal:** Safe Rust wrappers for all kernel syscalls.
 
@@ -76,7 +76,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 1.2 Virtio Library (`library/virtio/`) 🟢
+### 1.2 Virtio Library (`libraries/virtio/`) 🟢
 
 **Goal:** Reusable virtio MMIO transport and split virtqueue, shared across all virtio drivers.
 
@@ -97,7 +97,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 1.3 Drawing Library (`library/drawing/`) 🟢
+### 1.3 Drawing Library (`libraries/drawing/`) 🟢
 
 **Goal:** Pure drawing primitives for pixel buffers. No allocations, no syscalls, no hardware — fully testable on the host.
 
@@ -131,7 +131,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 1.4 Linker Script (`library/link.ld`) 🟢
+### 1.4 Linker Script (`libraries/link.ld`) 🟢
 
 **Goal:** Shared ELF layout for all userspace binaries.
 
@@ -143,11 +143,11 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ## 2. Platform Services
 
-### 2.1 Init / Proto-OS-Service (`platform/init/`) 🟡
+### 2.1 Init / Proto-OS-Service (`services/init/`) 🟡
 
 **Goal:** Bootstrap userspace. The only process the kernel spawns directly.
 
-**Status:** 326 lines + build.rs. Reads device manifest, spawns drivers, orchestrates display pipeline.
+**Status:** 326 lines (build.rs is at the system/ level). Reads device manifest, spawns drivers, orchestrates display pipeline.
 
 **What's foundational (the pattern):**
 
@@ -167,7 +167,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 2.2 Compositor (`platform/compositor/`) 🟡
+### 2.2 Compositor (`services/compositor/`) 🟡
 
 **Goal:** Composite multiple surfaces into a final framebuffer.
 
@@ -195,7 +195,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 2.3 Virtio GPU Driver (`platform/drivers/virtio-gpu/`) 🟢
+### 2.3 Virtio GPU Driver (`services/drivers/virtio-gpu/`) 🟢
 
 **Goal:** Present pixel buffers to the QEMU virtual display.
 
@@ -218,7 +218,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 2.4 Virtio Block Driver (`platform/drivers/virtio-blk/`) 🟢
+### 2.4 Virtio Block Driver (`services/drivers/virtio-blk/`) 🟢
 
 **Goal:** Read sectors from a virtual block device.
 
@@ -236,7 +236,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 2.5 Virtio Console Driver (`platform/drivers/virtio-console/`) 🟡
+### 2.5 Virtio Console Driver (`services/drivers/virtio-console/`) 🟡
 
 **Status:** 112 lines. TX-only, writes one test string. Not exercised (no QEMU device configured).
 

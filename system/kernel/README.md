@@ -46,7 +46,7 @@ Boots with 4 SMP cores via PSCI, drops from EL2 to EL1, sets up the MMU with spl
 ## Build & Run
 
 ```shell
-cd system/kernel
+cd system
 cargo run --release   # builds, then launches QEMU
 ```
 
@@ -59,7 +59,7 @@ cargo run --release   # builds, then launches QEMU
 cd system/test && cargo test -- --test-threads=1
 
 # QEMU smoke test (builds, boots, checks output):
-cd system/kernel && ./smoke-test.sh
+cd system && ./smoke-test.sh
 ```
 
 ## What to expect
@@ -146,9 +146,10 @@ src/
   timer.rs                 — ARM generic timer (EL1 physical, 250 Hz, SMP per-core PPI)
   serial.rs                — PL011 UART driver (TX only, SMP-safe locking)
   memory_mapped_io.rs      — volatile MMIO helpers (read8/read32/write8/write32)
-build.rs                   — compiles user + driver binaries → ELF at build time
 
-../platform/
+(build infrastructure — Cargo.toml, build.rs, smoke-test.sh — is at the system/ level, not in kernel/)
+
+../services/
   init/main.rs             — proto-OS-service (embeds all ELFs, spawns drivers + compositor, display pipeline)
   compositor/main.rs       — toy compositor (draws demo scene into shared framebuffer)
   drivers/
@@ -156,7 +157,7 @@ build.rs                   — compiles user + driver binaries → ELF at build 
     virtio-console/main.rs — userspace virtio console driver (TX, interrupt-driven)
     virtio-gpu/main.rs     — userspace virtio-gpu 2D driver (6 core commands, presents framebuffer)
 
-../library/
+../libraries/
   sys/lib.rs               — userspace syscall wrappers + panic handler (compiled as rlib)
   virtio/lib.rs            — virtio MMIO transport + split virtqueue (compiled as rlib)
   drawing/lib.rs           — drawing primitives + 8×16 bitmap font (compiled as rlib)
@@ -183,7 +184,6 @@ build.rs                   — compiles user + driver binaries → ELF at build 
   tests/drawing.rs         — drawing primitives + font rendering tests (41 tests)
   tests/waitable.rs        — WaitableRegistry tests (readiness, notify, destroy)
 
-smoke-test.sh              — QEMU boot + output verification
 ```
 
 ## Scope & Limitations

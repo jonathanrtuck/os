@@ -1,0 +1,3 @@
+[build]
+# Override parent config — tests compile for the host, not aarch64-unknown-none.
+target = "aarch64-apple-darwin"

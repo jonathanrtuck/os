@@ -89,7 +89,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 **Why demand paging:** Avoids allocating all pages upfront. Process startup is fast (2 pages mapped vs. potentially dozens). Foundation for future memory-mapped files.
 
-**Why `include_bytes!` (no filesystem):** No filesystem exists yet. `build.rs` compiles user programs and embeds the ELF binaries in `.rodata`. Bootstrap solution — will be replaced when the filesystem is implemented.
+**Why `include_bytes!` (no filesystem):** No filesystem exists yet. `build.rs` (at the `system/` level) compiles user programs and embeds the ELF binaries in `.rodata`. Bootstrap solution — will be replaced when the filesystem is implemented.
 
 **Cleanup:** On process exit, the kernel drains all handles (closing channel endpoints), invalidates TLB entries for the ASID, frees all owned page frames + page table frames, and releases the ASID. Full resource reclamation — no leaks.
 
@@ -705,7 +705,7 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 **Goal:** Move virtio-blk and virtio-console from in-kernel to userspace drivers. Validates the entire microkernel driver model.
 
-**Approach:** Each driver becomes a separate ELF binary (now in `system/platform/drivers/`). At boot, kernel probes virtio-mmio slots (minimal MMIO reads for magic/version/device_id), spawns the appropriate driver process, writes device info (MMIO PA, IRQ) to a channel shared page, and starts the driver. Each driver: `device_map` for MMIO, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` module removed entirely. Shared `virtio` rlib (in `system/library/`) provides userspace virtio transport and split virtqueue implementation.
+**Approach:** Each driver becomes a separate ELF binary (now in `system/services/drivers/`). At boot, kernel probes virtio-mmio slots (minimal MMIO reads for magic/version/device_id), spawns the appropriate driver process, writes device info (MMIO PA, IRQ) to a channel shared page, and starts the driver. Each driver: `device_map` for MMIO, `dma_alloc` for virtqueue buffers. In-kernel `virtio/` module removed entirely. Shared `virtio` rlib (in `system/libraries/`) provides userspace virtio transport and split virtqueue implementation.
 
 **Implementation notes:**
 

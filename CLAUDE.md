@@ -28,7 +28,7 @@ Read these before making any design suggestions:
 - `design/decision-map.mermaid` — Visual dependency graph of all decisions
 - `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
 - `design/journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document.
-- `system/DESIGN.md` — Userspace architecture: libraries, platform services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `system/kernel/DESIGN.md`.
+- `system/DESIGN.md` — Userspace architecture: libraries, services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `system/kernel/DESIGN.md`.
 - `design/concept.md` — The core idea: OS → Document → Tool, mimetype evolution, layered rendering, compound documents
 
 ## Settled Decisions
@@ -90,7 +90,7 @@ Read these before making any design suggestions:
 
 **Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: font rasterization done → text layout next → more compositor features. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: COW on-disk design (Decision #16, independent).
 
-**System code:** `system/kernel/` (35 source files), `system/platform/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/library/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (83 drawing + 195 kernel = 278 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline with alpha compositing + TrueType rendering. 25 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (35 source files), `system/services/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/libraries/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (83 drawing + 195 kernel = 278 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline with alpha compositing + TrueType rendering. 25 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 

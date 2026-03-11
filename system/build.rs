@@ -27,30 +27,30 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
 /// Programs compiled BEFORE init (init embeds their ELFs).
 /// Each entry is (name, source directory, needs_virtio, needs_drawing).
 const PROGRAMS: &[(&str, &str, bool, bool)] = &[
-    ("echo", "../user/echo", false, false),
-    ("virtio-blk", "../platform/drivers/virtio-blk", true, false),
+    ("echo", "user/echo", false, false),
+    ("virtio-blk", "services/drivers/virtio-blk", true, false),
     (
         "virtio-console",
-        "../platform/drivers/virtio-console",
+        "services/drivers/virtio-console",
         true,
         false,
     ),
-    ("virtio-gpu", "../platform/drivers/virtio-gpu", true, false),
-    ("compositor", "../platform/compositor", false, true),
+    ("virtio-gpu", "services/drivers/virtio-gpu", true, false),
+    ("compositor", "services/compositor", false, true),
 ];
 
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let rustc = env::var("RUSTC").unwrap();
-    let link_ld = manifest_dir.join("../library/link.ld");
+    let link_ld = manifest_dir.join("libraries/link.ld");
     // Step 1: Compile shared libraries.
-    let sys_src = manifest_dir.join("../library/sys/lib.rs");
+    let sys_src = manifest_dir.join("libraries/sys/lib.rs");
     let sys_rlib = out_dir.join("libsys.rlib");
 
     rustc_rlib(&rustc, &sys_src, &sys_rlib, "sys", &[]);
 
-    let virtio_src = manifest_dir.join("../library/virtio/lib.rs");
+    let virtio_src = manifest_dir.join("libraries/virtio/lib.rs");
     let virtio_rlib = out_dir.join("libvirtio.rlib");
 
     rustc_rlib(
@@ -61,7 +61,7 @@ fn main() {
         &[("sys", &sys_rlib)],
     );
 
-    let drawing_src = manifest_dir.join("../library/drawing/lib.rs");
+    let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
     let drawing_rlib = out_dir.join("libdrawing.rlib");
 
     rustc_rlib(&rustc, &drawing_src, &drawing_rlib, "drawing", &[]);
@@ -102,7 +102,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("failed to write init_embedded.rs: {e}"));
 
     // Step 4: Compile init last (it embeds all other ELFs).
-    let init_src = manifest_dir.join("../platform/init/main.rs");
+    let init_src = manifest_dir.join("services/init/main.rs");
     let init_elf = out_dir.join("init.elf");
     let init_env = [(
         "INIT_EMBEDDED_RS",

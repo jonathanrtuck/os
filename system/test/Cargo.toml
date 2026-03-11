@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 # Host-side unit tests for pure kernel modules (handle table, ELF parser,
-# VMA, buddy allocator, slab). Separate crate because kernel/.cargo/config.toml
+# VMA, buddy allocator, slab). Separate crate because ../.cargo/config.toml
 # forces aarch64-unknown-none; tests must compile for the host target.
 # Run with `cargo test -- --test-threads=1` from this directory.
