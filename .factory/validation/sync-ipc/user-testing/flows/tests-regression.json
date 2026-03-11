@@ -1,0 +1,22 @@
+{
+  "flowId": "tests-regression",
+  "testedAt": "2026-03-11T00:00:00Z",
+  "credentials": {
+    "account": "n/a",
+    "namespace": "terminal-only"
+  },
+  "toolsUsed": ["terminal"],
+  "assertions": {
+    "VAL-SYNC-004": {
+      "status": "pass",
+      "evidence": "git diff origin/main --stat -- system/test/tests/ shows changes in sync/IPC-related files: channel.rs (+212 lines), handle.rs (+149 lines), futex.rs (+105 lines), waitable.rs (+204 lines), sync.rs (+216 lines). Total 12 files changed, 1706 insertions(+), 1 deletion(-). Exit code 0."
+    },
+    "VAL-SYNC-005": {
+      "status": "pass",
+      "evidence": "cargo test -- --test-threads=1 exited 0. 456 tests passed across 22 test files (>= 348 threshold). Breakdown: asid 7, buddy 2, channel 29, device_tree 15, drawing 83, eevdf 36, executable 22, futex 18, handle 42, heap 1, heap_routing 2, ipc 24, mmio 8, paging 15, process 11, sched_context 23, scheduler_state 28, slab 22, sync 7, virtqueue 8, vma 21, waitable 32. cargo build exited 0 (31 pre-existing dead_code warnings only)."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 2 assertions: 2 passed. VAL-SYNC-004 confirmed new tests in channel.rs, handle.rs, futex.rs, waitable.rs, sync.rs. VAL-SYNC-005 confirmed 456 tests passing (108 above 348 baseline) and clean kernel build."
+}

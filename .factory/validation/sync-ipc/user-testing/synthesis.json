@@ -1,0 +1,22 @@
+{
+  "milestone": "sync-ipc",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-SYNC-001",
+    "VAL-SYNC-002",
+    "VAL-SYNC-003",
+    "VAL-SYNC-004",
+    "VAL-SYNC-005"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}
