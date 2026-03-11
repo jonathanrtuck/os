@@ -88,8 +88,8 @@ while true; do
     # QEMU still alive?
     if ! kill -0 "$QEMU_PID" 2>/dev/null; then
         # QEMU exited — check what happened.
-        if grep -q "PASS" "$SERIAL_LOG" 2>/dev/null; then
-            echo "PASS (QEMU exited after stress test completed)"
+        if grep -q "stress test PASS" "$SERIAL_LOG" 2>/dev/null; then
+            echo "ALL PASS (QEMU exited after tests completed)"
             exit 0
         fi
         echo "QEMU exited unexpectedly"
@@ -106,12 +106,20 @@ while true; do
         exit 1
     fi
 
-    # Check for PASS.
-    if grep -q "PASS" "$SERIAL_LOG" 2>/dev/null; then
-        echo "PASS after ${ELAPSED}s"
+    # Check for FAIL (fuzz test failure).
+    if grep -q "FAIL fuzz" "$SERIAL_LOG" 2>/dev/null; then
+        echo "FUZZ TEST FAILED after ${ELAPSED}s"
+        echo "--- output ---"
+        cat "$SERIAL_LOG" 2>/dev/null || true
+        exit 1
+    fi
+
+    # Check for stress test PASS (runs after fuzz test).
+    if grep -q "stress test PASS" "$SERIAL_LOG" 2>/dev/null; then
+        echo "ALL PASS after ${ELAPSED}s"
         echo "--- summary ---"
-        grep -E "(stress|PASS|metrics)" "$SERIAL_LOG" 2>/dev/null || tail -10 "$SERIAL_LOG"
-        # Kill QEMU (stress test passed but init is still idle-looping).
+        grep -E "(fuzz|stress|PASS|FAIL)" "$SERIAL_LOG" 2>/dev/null || tail -20 "$SERIAL_LOG"
+        # Kill QEMU (tests passed but init is still idle-looping).
         kill "$QEMU_PID" 2>/dev/null || true
         exit 0
     fi

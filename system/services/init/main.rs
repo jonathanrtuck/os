@@ -444,14 +444,25 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"     no gpu found\n");
     }
 
-    // If no GPU device was found, run the stress test (headless mode).
+    // If no GPU device was found, run headless tests.
     if gpu.is_none() {
-        sys::print(b"     no gpu found, running stress test\n");
+        sys::print(b"     no gpu found, running headless tests\n");
 
+        // Fuzz test — adversarial syscall testing.
+        match sys::process_create(FUZZ_ELF.as_ptr(), FUZZ_ELF.len()) {
+            Ok(proc_h) => {
+                let _ = sys::process_start(proc_h);
+                let _ = sys::wait(&[proc_h], u64::MAX);
+            }
+            Err(_) => {
+                sys::print(b"     fuzz test spawn failed\n");
+            }
+        }
+
+        // Stress test — IPC/scheduler/timer saturation.
         match sys::process_create(STRESS_ELF.as_ptr(), STRESS_ELF.len()) {
             Ok(proc_h) => {
                 let _ = sys::process_start(proc_h);
-                // Wait for stress test to complete.
                 let _ = sys::wait(&[proc_h], u64::MAX);
             }
             Err(_) => {
