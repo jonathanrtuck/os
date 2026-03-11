@@ -1,0 +1,26 @@
+{
+  "flowId": "hw-regression",
+  "testedAt": "2026-03-11T00:00:00Z",
+  "assertions": {
+    "VAL-HW-005": {
+      "status": "pass",
+      "evidence": "cargo test: 567 tests passed (test result: ok), exit code 0. cargo build: Finished dev profile, exit code 0. 31 pre-existing dead_code warnings (documented as known, not in audit scope). Test count 567 >= 348 threshold.",
+      "steps": [
+        {
+          "action": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1",
+          "expected": "Exit 0, >= 348 tests passing, test result: ok",
+          "observed": "Exit 0, 567 tests passing across 24 test binaries, test result: ok for all"
+        },
+        {
+          "action": "cd /Users/user/Sites/os/system && cargo build",
+          "expected": "Exit 0, Finished without errors",
+          "observed": "Exit 0, Finished dev profile. 31 dead_code warnings (pre-existing, documented in AGENTS.md)"
+        }
+      ]
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": ["terminal"],
+  "summary": "Tested 1 assertion: 1 passed. Full test suite (567 tests) green, kernel build clean."
+}

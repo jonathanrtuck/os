@@ -1,0 +1,26 @@
+{
+  "flowId": "hw-audit-evidence",
+  "testedAt": "2026-03-11T00:00:00Z",
+  "assertions": {
+    "VAL-HW-001": {
+      "status": "pass",
+      "evidence": "grep -c 'SAFETY' system/kernel/interrupt_controller.rs = 7 (>= 4 required). grep -c 'SAFETY' system/kernel/timer.rs = 6 (>= 5 required). Both thresholds met."
+    },
+    "VAL-HW-002": {
+      "status": "pass",
+      "evidence": "git diff origin/main shows AUDIT comments added to all 4 files: device_tree.rs (6-line audit header with edge case review), serial.rs (5-line audit header confirming MMIO safety and SMP locking), power.rs (6-line audit header verifying PSCI/HVC calling convention), metrics.rs (6-line audit header confirming overflow analysis and per-core isolation)."
+    },
+    "VAL-HW-003": {
+      "status": "pass",
+      "evidence": "grep -c 'SAFETY' system/kernel/syscall.rs = 13 (>= 13 required). Threshold met exactly."
+    },
+    "VAL-HW-004": {
+      "status": "pass",
+      "evidence": "git diff origin/main --stat -- system/test/tests/ shows 15 new/modified test files with 3323 insertions. Hw/syscall-specific additions: interrupt_timer.rs (+417 lines, new file), syscall.rs (+896 lines, new file), device_tree.rs (+304 lines, new file)."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": ["terminal"],
+  "summary": "Tested 4 assertions: all 4 passed. VAL-HW-001: SAFETY comment counts exceed thresholds (7>=4 for interrupt_controller, 6>=5 for timer). VAL-HW-002: All 4 device/serial/power/metrics files have detailed AUDIT headers. VAL-HW-003: syscall.rs has exactly 13 SAFETY comments meeting the threshold. VAL-HW-004: 3 new test files totaling 1617 lines cover hw/syscall areas."
+}
