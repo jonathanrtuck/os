@@ -1,0 +1,65 @@
+{
+  "featureId": "allocator-mmio-audit",
+  "milestone": "boot-memory",
+  "reviewedAt": "2026-03-11T18:30:00.000Z",
+  "commitId": "004e2f1",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid audit of 17 unsafe sites across heap.rs (7), slab.rs (4), memory_mapped_io.rs (6). All SAFETY comments are accurate and thorough—they identify the specific invariant each unsafe block relies on and explain why it holds. The debug_assert alignment guards on read32/write32 are a good defense-in-depth addition. The memory_region.rs TODO was properly resolved with a clear NOTE explaining the guard-page-via-VMA-gaps design. 8 new MMIO tests are well-structured and cover the important cases (aligned success, unaligned panic, roundtrip semantics, u8 any-alignment). No bugs introduced by the audit changes.",
+    "issues": [
+      {
+        "severity": "non_blocking",
+        "file": "system/kernel/heap.rs",
+        "description": "Missing // AUDIT: comment. AGENTS.md convention requires '// AUDIT: comments confirming file review (one per audited file, at the top or near the relevant code)'. None of the 4 audited files have this marker. The commit message serves as the audit record, but the in-code marker convention was not followed."
+      },
+      {
+        "severity": "non_blocking",
+        "file": "system/kernel/slab.rs",
+        "description": "Missing // AUDIT: comment (same convention gap as heap.rs)."
+      },
+      {
+        "severity": "non_blocking",
+        "file": "system/kernel/memory_region.rs",
+        "description": "Missing // AUDIT: comment (same convention gap as heap.rs)."
+      },
+      {
+        "severity": "non_blocking",
+        "file": "system/kernel/memory_mapped_io.rs",
+        "description": "Missing // AUDIT: comment (same convention gap as heap.rs)."
+      },
+      {
+        "severity": "suggestion",
+        "file": "system/test/tests/mmio.rs",
+        "description": "Tests for read32_aligned_succeeds and write32_aligned_succeeds use raw core::ptr::read_volatile/write_volatile directly rather than the mmio_read32/mmio_write32 stubs (which include the debug_assert). This means the happy-path tests don't exercise the debug_assert guard. The unaligned-panic tests correctly use the stubs. Consider updating the aligned tests to use stubs too for consistency and to verify the assert doesn't false-positive on aligned addresses."
+      }
+    ]
+  },
+  "codeReviewIssues": [
+    {
+      "severity": "non_blocking",
+      "file": "system/kernel/heap.rs, slab.rs, memory_region.rs, memory_mapped_io.rs",
+      "description": "Missing // AUDIT: comments on all 4 audited files. AGENTS.md convention requires these markers but none were added. The commit message documents the audit, but the in-code markers are absent."
+    },
+    {
+      "severity": "suggestion",
+      "file": "system/test/tests/mmio.rs",
+      "description": "Happy-path aligned tests (read32_aligned_succeeds, write32_aligned_succeeds) bypass the mmio_read32/mmio_write32 stubs and call core::ptr directly, so they don't exercise the debug_assert on the success path. Minor consistency gap."
+    }
+  ],
+  "sharedStateObservations": [
+    {
+      "target": "skills",
+      "description": "Worker correctly noted in skillFeedback that TDD failing-first is not applicable for documentation-only changes (SAFETY comments) and defense-in-depth additions (debug_assert with stub tests). The kernel-auditor skill should clarify that for no-behavior-change audit additions, verifying the pattern in tests is sufficient rather than requiring a fail-before-fix cycle.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The kernel-auditor skill mentions writing tests that FAIL before the fix, but for SAFETY comment additions (no behavior change) and debug_assert additions (tests use local stubs that already include the assert), TDD failing-first isn't always applicable.'"
+    },
+    {
+      "target": "AGENTS.md",
+      "description": "The AGENTS.md convention for '// AUDIT: comments confirming file review' was not followed by the worker. Either the convention needs stronger enforcement (blocking review criteria) or it should be reconsidered—the commit message already serves as the audit record, making in-code markers redundant.",
+      "evidence": "grep 'AUDIT' system/kernel/{heap,slab,memory_region,memory_mapped_io}.rs returns no matches. AGENTS.md Coding Conventions section specifies: '// AUDIT: comments confirming file review (one per audited file, at the top or near the relevant code)'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. All 17 unsafe blocks across 4 files have accurate SAFETY comments (heap.rs=7, slab.rs=4, memory_mapped_io.rs=6). memory_region.rs TODO resolved with clear NOTE comment. debug_assert alignment guards added to read32/write32. 8 new MMIO tests covering aligned/unaligned access, volatile roundtrips, and u8 operations. 371 tests pass, kernel builds. Two non-blocking gaps: (1) missing // AUDIT: marker comments per AGENTS.md convention, (2) happy-path MMIO tests bypass the debug_assert stubs. No bugs introduced, no blocking issues."
+}
