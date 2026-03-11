@@ -112,6 +112,7 @@ unsafe fn free_region(ptr: *mut u8, layout: std::alloc::Layout) {
 // All buddy allocator tests run in a single function to avoid global state
 // interference. Each section is clearly labeled.
 #[test]
+#[cfg_attr(miri, ignore)] // Miri strict provenance rejects integer-to-pointer casts in phys_to_virt (bare-metal identity mapping pattern, not real UB)
 fn buddy_allocator() {
     let (ptr, layout) = alloc_region(256); // 256 pages = 1 MiB
     let start = ptr as usize;

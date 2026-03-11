@@ -590,14 +590,24 @@ enum Action {
 #[test]
 fn randomized_scheduler_state_machine() {
     // Run multiple seeds to explore different interleavings.
-    for seed in 1..=50 {
+    // Under Miri, reduce iteration counts for practical runtime (~30s vs ~1400s).
+    #[cfg(miri)]
+    const SEEDS: u64 = 5;
+    #[cfg(not(miri))]
+    const SEEDS: u64 = 50;
+    #[cfg(miri)]
+    const STEPS: usize = 50;
+    #[cfg(not(miri))]
+    const STEPS: usize = 500;
+
+    for seed in 1..=SEEDS {
         let mut rng = Rng::new(seed);
         let num_cores = 4;
         let mut s = State::new(num_cores);
         let mut next_id: u64 = 1;
         let mut live_ids: Vec<u64> = Vec::new();
 
-        for step in 0..500 {
+        for step in 0..STEPS {
             let label = format!("seed={seed} step={step}");
 
             // Pick a random action.
@@ -710,10 +720,14 @@ fn rapid_block_wake_never_duplicates() {
         s.cores[core].current = Some(t);
     }
 
-    // Rapid block/wake cycles (1000 iterations).
+    // Rapid block/wake cycles. Reduced under Miri for practical runtime.
+    #[cfg(miri)]
+    const ITERS: usize = 100;
+    #[cfg(not(miri))]
+    const ITERS: usize = 1000;
     let mut rng = Rng::new(42);
 
-    for step in 0..1000 {
+    for step in 0..ITERS {
         let label = format!("step={step}");
         let core = rng.range(4);
 
