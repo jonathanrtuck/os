@@ -1,0 +1,13 @@
+{
+  "flowId": "regression",
+  "assertions": {
+    "VAL-SCHED-005": {
+      "status": "pass",
+      "evidence": "cargo test: test result: ok. 413 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out (exit code 0). cargo build: Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.03s (exit code 0, 31 pre-existing dead_code warnings).",
+      "notes": "413 tests passing (>= 348 threshold). Full test suite green across 18 test files. Kernel build succeeds. 31 warnings are pre-existing dead_code warnings documented as expected."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": ["terminal"]
+}

@@ -1,0 +1,22 @@
+{
+  "milestone": "scheduling-threads",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-SCHED-001",
+    "VAL-SCHED-002",
+    "VAL-SCHED-003",
+    "VAL-SCHED-004",
+    "VAL-SCHED-005"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}

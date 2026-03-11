@@ -1,0 +1,28 @@
+{
+  "flowId": "scheduling-audit",
+  "assertions": {
+    "VAL-SCHED-001": {
+      "status": "pass",
+      "evidence": "grep -c 'SAFETY' system/kernel/scheduler.rs => 5 (>= 4 required). Lines: 2 (audit note), 526 (swap_ttbr0 TLB invalidation), 658 (raw pointer write to avoid aliasing UB), 1008 (boot thread Context pointer), 1036 (boot_ctx_ptr stable Context).",
+      "notes": "5 SAFETY comments found across 4 unsafe sites plus 1 audit-level note. All unsafe blocks in scheduler.rs have verified SAFETY comments. Idle thread park fix (Fix 1) is part of the audited scheduler logic."
+    },
+    "VAL-SCHED-002": {
+      "status": "pass",
+      "evidence": "git diff origin/main -- system/kernel/thread.rs system/kernel/thread_exit.rs shows: thread.rs gains 27-line AUDIT header (unsafe impl Send/Sync justified, deferred thread drop re-verified, drop ordering verified, state machine transitions verified) plus expanded SAFETY comments on Send, Sync, and core::mem::zeroed(). thread_exit.rs gains 29-line AUDIT header (exit notification completeness, resource cleanup sequencing, race analysis between thread exit and scheduler ops). Both files have // AUDIT: 2026-03-11 markers.",
+      "notes": "Deferred thread drop (Fix 4) explicitly re-verified sound in thread.rs audit comment. Drop ordering (guard page remapped before free_frames) verified correct. thread_exit.rs is pure safe Rust (0 unsafe blocks) with thorough race analysis."
+    },
+    "VAL-SCHED-003": {
+      "status": "pass",
+      "evidence": "git diff origin/main shows: scheduling_algorithm.rs — AUDIT comment added, charge() and virtual_deadline() fixed to use u128 intermediate arithmetic and saturating_add to prevent overflow near u64::MAX. per_core.rs — AUDIT comment added, SMP isolation verified (AtomicBool with Release/Acquire ordering), SAFETY comment on MPIDR_EL1 read added. scheduling_context.rs — AUDIT comment added, all arithmetic uses saturating operations, validate_params prevents division-by-zero.",
+      "notes": "scheduling_algorithm.rs had a real bug found and fixed: u64 multiplication overflow in charge() and virtual_deadline(). Now uses u128 intermediate. All three files have // AUDIT: 2026-03-11 markers."
+    },
+    "VAL-SCHED-004": {
+      "status": "pass",
+      "evidence": "git diff origin/main --stat -- system/test/tests/ shows 8 files changed, 906 insertions. Scheduling-relevant files: eevdf.rs (+103 lines), scheduler_state.rs (+194 lines), sched_context.rs (+69 lines). Total 366 new lines of scheduling/thread tests across 3 test files.",
+      "notes": "All three expected test files (eevdf, scheduler_state, sched_context) have new test cases. Additional test files also added (executable, mmio, paging, process, waitable) covering broader audit findings."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": ["terminal"]
+}
