@@ -11,6 +11,12 @@
 //!
 //! Storage is `Vec<Option<Entry>>` indexed directly by ID. All kernel ID types
 //! are sequential integers, so lookup is O(1). Freed slots become `None`.
+//!
+// AUDIT: 2026-03-11 — 0 unsafe blocks. 6-category checklist applied. O(1)
+// indexed registry verified correct. create/destroy/notify lifecycle sound.
+// Level-triggered (exit) and edge-triggered (interrupt) patterns both work.
+// register_waiter overwrites silently — acceptable given kernel usage (one
+// waiter per handle, same thread always registers itself). No bugs found.
 
 use super::thread::ThreadId;
 use alloc::vec::Vec;

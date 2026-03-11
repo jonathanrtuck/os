@@ -343,3 +343,122 @@ fn sequential_waiters_on_same_thread() {
     let waiter = reg.notify(TestId(5));
     assert_eq!(waiter, Some(tid(20)));
 }
+
+// ============================================================
+// Additional tests from sync-primitives audit (2026-03-11)
+// ============================================================
+
+/// Destroy returns waiter even if entry is already ready.
+#[test]
+fn destroy_ready_entry_returns_waiter() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(1));
+    reg.register_waiter(TestId(1), tid(10));
+    reg.notify(TestId(1)); // Marks ready, takes waiter.
+
+    // Re-register after notify consumed it.
+    reg.register_waiter(TestId(1), tid(20));
+
+    let waiter = reg.destroy(TestId(1));
+    assert_eq!(waiter, Some(tid(20)), "destroy must return waiter even on ready entry");
+}
+
+/// Destroy on empty entry returns None.
+#[test]
+fn destroy_fresh_entry_returns_none() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(1));
+    let waiter = reg.destroy(TestId(1));
+
+    assert_eq!(waiter, None);
+}
+
+/// Large sparse IDs don't panic — registry grows the Vec as needed.
+#[test]
+fn large_sparse_ids_no_panic() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(1000));
+    assert!(!reg.check_ready(TestId(1000)));
+
+    reg.notify(TestId(1000));
+    assert!(reg.check_ready(TestId(1000)));
+}
+
+/// Create at index 0, verify it works (boundary condition).
+#[test]
+fn create_at_index_zero() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(0));
+    reg.register_waiter(TestId(0), tid(1));
+
+    let waiter = reg.notify(TestId(0));
+    assert_eq!(waiter, Some(tid(1)));
+    assert!(reg.check_ready(TestId(0)));
+}
+
+/// Notify after destroy + re-create: fresh entry, not leftover state.
+#[test]
+fn create_after_destroy_is_fresh() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(1));
+    reg.notify(TestId(1));
+    assert!(reg.check_ready(TestId(1)));
+
+    reg.destroy(TestId(1));
+    reg.create(TestId(1));
+
+    // Must be fresh — not ready, no leftover waiter.
+    assert!(!reg.check_ready(TestId(1)));
+    assert_eq!(reg.notify(TestId(1)), None);
+}
+
+/// Destroy with waiter, then create at same ID — waiter is gone.
+#[test]
+fn destroy_then_create_clears_waiter() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(1));
+    reg.register_waiter(TestId(1), tid(10));
+
+    let waiter = reg.destroy(TestId(1));
+    assert_eq!(waiter, Some(tid(10)));
+
+    reg.create(TestId(1));
+    // No waiter after re-create.
+    assert_eq!(reg.notify(TestId(1)), None);
+}
+
+/// register_waiter replaces old waiter silently (design choice).
+#[test]
+fn register_waiter_replaces_silently() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(1));
+    reg.register_waiter(TestId(1), tid(10));
+    reg.register_waiter(TestId(1), tid(20)); // Overwrites.
+
+    let waiter = reg.notify(TestId(1));
+    assert_eq!(waiter, Some(tid(20)), "last registered waiter wins");
+}
+
+/// Interleave notify and clear_ready — edge-triggered stress.
+#[test]
+fn edge_triggered_rapid_cycle() {
+    let mut reg = WaitableRegistry::new();
+
+    reg.create(TestId(1));
+
+    for i in 0..10u64 {
+        reg.register_waiter(TestId(1), tid(i));
+        let w = reg.notify(TestId(1));
+        assert_eq!(w, Some(tid(i)));
+        assert!(reg.check_ready(TestId(1)));
+        reg.clear_ready(TestId(1));
+        assert!(!reg.check_ready(TestId(1)));
+    }
+}

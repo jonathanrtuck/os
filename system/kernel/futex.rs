@@ -24,6 +24,11 @@
 //! - Waker calls `scheduler::set_wake_pending(tid)` to set a flag on the thread.
 //! - When the waiter enters `scheduler::block_current_unless_woken()`, it checks
 //!   the flag and returns immediately instead of blocking.
+//!
+// AUDIT: 2026-03-11 — 0 unsafe blocks. 6-category checklist applied. Two-phase
+// lock ordering (futex → scheduler) verified correct. Lost-wakeup prevention via
+// wake_pending flag is sound. swap_remove in wake loop correctly handles index
+// management. Thread cleanup (remove_thread) scans all 64 buckets. No bugs found.
 
 use super::sync::IrqMutex;
 use super::thread::ThreadId;

@@ -211,3 +211,108 @@ fn remove_nonexistent_thread_is_noop() {
 
     assert_eq!(table.bucket_len(0x1000), 1);
 }
+
+// ============================================================
+// Additional tests from sync-primitives audit (2026-03-11)
+// ============================================================
+
+/// Wake with count=0 should wake nobody, even if waiters exist.
+#[test]
+fn wake_count_zero_wakes_nobody() {
+    let mut table = WaitTable::new();
+
+    table.wait(0x1000, ThreadId(1));
+    table.wait(0x1000, ThreadId(2));
+
+    let woken = table.wake(0x1000, 0);
+
+    assert!(woken.is_empty());
+    assert_eq!(table.bucket_len(0x1000), 2);
+}
+
+/// Wake with count=u32::MAX should wake all waiters.
+#[test]
+fn wake_count_max_wakes_all() {
+    let mut table = WaitTable::new();
+
+    table.wait(0x1000, ThreadId(1));
+    table.wait(0x1000, ThreadId(2));
+    table.wait(0x1000, ThreadId(3));
+
+    let woken = table.wake(0x1000, u32::MAX);
+
+    assert_eq!(woken.len(), 3);
+    assert_eq!(table.bucket_len(0x1000), 0);
+}
+
+/// Same thread waiting on multiple PAs — remove_thread cleans all.
+#[test]
+fn same_thread_multiple_pas_cleaned() {
+    let mut table = WaitTable::new();
+
+    // ThreadId(1) waits on 3 different PAs.
+    table.wait(0x1000, ThreadId(1));
+    table.wait(0x2000, ThreadId(1));
+    table.wait(0x3000, ThreadId(1));
+
+    table.remove_thread(ThreadId(1));
+
+    assert!(table.wake(0x1000, 10).is_empty());
+    assert!(table.wake(0x2000, 10).is_empty());
+    assert!(table.wake(0x3000, 10).is_empty());
+}
+
+/// Same thread waiting twice on same PA (two futex_wait calls) — both removed.
+#[test]
+fn duplicate_wait_same_thread_same_pa() {
+    let mut table = WaitTable::new();
+
+    table.wait(0x1000, ThreadId(1));
+    table.wait(0x1000, ThreadId(1)); // Duplicate.
+
+    let woken = table.wake(0x1000, 10);
+
+    assert_eq!(woken.len(), 2);
+    assert_eq!(woken[0], ThreadId(1));
+    assert_eq!(woken[1], ThreadId(1));
+}
+
+/// Large PA value near u64::MAX — no panic, correct bucketing.
+#[test]
+fn large_pa_no_panic() {
+    let mut table = WaitTable::new();
+
+    let pa = u64::MAX & !3; // Largest word-aligned PA.
+
+    table.wait(pa, ThreadId(1));
+
+    let woken = table.wake(pa, 1);
+    assert_eq!(woken, vec![ThreadId(1)]);
+}
+
+/// Bucket index of PA=0 is 0.
+#[test]
+fn bucket_index_zero_pa() {
+    assert_eq!(bucket_index(0), 0);
+}
+
+/// Interleaved wait/wake/wait/wake — table stays consistent.
+#[test]
+fn interleaved_operations() {
+    let mut table = WaitTable::new();
+
+    table.wait(0x1000, ThreadId(1));
+    let w1 = table.wake(0x1000, 1);
+    assert_eq!(w1, vec![ThreadId(1)]);
+
+    table.wait(0x1000, ThreadId(2));
+    table.wait(0x1000, ThreadId(3));
+    let w2 = table.wake(0x1000, 1);
+    assert_eq!(w2.len(), 1);
+
+    let w3 = table.wake(0x1000, 10);
+    assert_eq!(w3.len(), 1);
+
+    // Table should be empty now.
+    assert_eq!(table.bucket_len(0x1000), 0);
+}

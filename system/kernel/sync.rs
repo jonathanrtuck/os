@@ -6,6 +6,12 @@
 //!
 //! Lock ordering invariant: channel → scheduler (never reversed). No lock
 //! may be re-acquired while held (ticket spinlock would deadlock on self).
+//!
+// AUDIT: 2026-03-11 — 5 unsafe sites verified (2 asm in lock/drop, 2
+// UnsafeCell derefs in Deref/DerefMut, 1 unsafe impl Sync). 6-category
+// checklist applied. Ticket spinlock uses correct Relaxed/Acquire/Release
+// ordering. DAIF asm correctly omits `nomem` (Fix 6 re-verified). No bugs
+// found.
 
 use super::metrics;
 use core::cell::UnsafeCell;
@@ -27,6 +33,10 @@ impl<T> Drop for IrqGuard<'_, T> {
         // Release the spinlock, then restore IRQ state.
         self.lock.now_serving.fetch_add(1, Ordering::Release);
 
+        // SAFETY: Restoring DAIF to a value previously read from this register
+        // is always valid at EL1. `nostack` is correct (no stack manipulation).
+        // No `nomem` — the compiler must not reorder memory accesses past this
+        // IRQ state restoration (Fix 6).
         unsafe {
             core::arch::asm!("msr daif, {}", in(reg) self.saved_daif, options(nostack));
         }
@@ -60,6 +70,10 @@ impl<T> IrqMutex<T> {
         // With `nomem`, LLVM can reorder memory operations past the DAIF
         // masking, allowing lock-protected accesses to execute with interrupts
         // enabled (race condition that manifests at opt-level 3).
+        //
+        // SAFETY: Reading and writing DAIF is valid at EL1. `nostack` is
+        // correct (no stack manipulation). No `nomem` — intentional, see above
+        // and Fix 6 analysis.
         unsafe {
             core::arch::asm!("mrs {}, daif", out(reg) saved_daif, options(nostack));
             core::arch::asm!("msr daifset, #2", options(nostack));
