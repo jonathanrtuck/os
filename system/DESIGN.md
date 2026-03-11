@@ -25,18 +25,19 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ```text
 ┌────────────────────────────────────────────────┐
-│  User Programs         (echo, future editors)  │  🔴 demos
+│  User Programs     (text-editor, echo)         │  🟡/🔴
 ├────────────────────────────────────────────────┤
 │  Platform Services                             │
 │  ┌──────────┐  ┌────────────┐  ┌────────────┐  │
 │  │   Init   │  │ Compositor │  │  Drivers   │  │  🟡/🟢 mixed
-│  │  (proto  │  │  (event    │  │ (virtio-   │  │
-│  │   OS     │  │   loop,    │  │  blk/gpu/  │  │
-│  │ service) │  │ interactive│  │  input/    │  │
-│  │          │  │   text)    │  │  console)  │  │
+│  │  (proto  │  │  (sole     │  │ (virtio-   │  │
+│  │   OS     │  │   writer,  │  │  blk/gpu/  │  │
+│  │ service) │  │   event    │  │  input/    │  │
+│  │          │  │   loop)    │  │  console)  │  │
 │  └──────────┘  └──────┬─────┘  └─────┬──────┘  │
-│                 input→comp      comp→gpu       │
-│                  (IPC)           (IPC)         │
+│           input→comp  │  comp→gpu              │
+│            (IPC)      │   (IPC)                │
+│                comp↔editor (IPC)               │
 ├────────────────────────────────────────────────┤
 │  Libraries                                     │
 │  ┌─────┐ ┌────────┐ ┌─────────┐ ┌─────┐ ┌───┐  │  🟢 foundational
@@ -249,7 +250,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - **Device manifest format.** Ad hoc packed struct (u32 count + 8-byte-aligned entries with device_id, mmio_pa, mmio_size, irq). No versioning, no extensibility. Works for 2 devices.
 - **Channel shared memory layout.** Raw bytes at magic offsets. Init writes `fb_va` at offset 0, `fb_width` at offset 8, etc. Each process pair has its own undocumented layout. No schema, no validation.
 
-**Key change (2026-03-11):** Init no longer exits. After setting up all processes and cross-process channels, it idles via `yield_now()`. It creates three kinds of channels: config (init↔child), input (input driver→compositor), and present (compositor→GPU driver). The display pipeline starts all three event-loop processes (GPU, input, compositor) and lets them run autonomously.
+**Key change (2026-03-11):** Init no longer exits. After setting up all processes and cross-process channels, it idles via `yield_now()`. It creates four kinds of channels: config (init↔child), input (input driver→compositor), present (compositor→GPU driver), and editor (compositor↔text editor). The display pipeline starts four event-loop processes (GPU, input, text editor, compositor) and lets them run autonomously. Start order: GPU driver first (device setup), input driver (IRQ wait), text editor (input wait), compositor last (renders initial frame then enters event loop).
 
 **Key constraint:** Init is still not a real OS service. It sets up the process topology but doesn't mediate runtime communication. The real OS service (renderer + metadata DB + input router + compositor) doesn't exist — init is a stand-in.
 
@@ -257,27 +258,28 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ### 2.2 Compositor (`services/compositor/`) 🟡
 
-**Goal:** Composite multiple surfaces into a final framebuffer. Respond to input events.
+**Goal:** Proto-OS-service: sole writer to document state, input router, renderer.
 
-**Status:** ~260 lines. Interactive text demo with event loop. Receives keyboard events from the input driver via IPC, renders typed text to the framebuffer, signals the GPU driver to present.
+**Status:** ~300 lines. Demonstrates the settled editor separation architecture. Three IPC channels: receives keyboard events from input driver (handle 1), sends present commands to GPU driver (handle 2), bidirectional with text editor (handle 3). Routes input to editor, applies editor write requests to document (sole writer), renders result.
 
 **What's foundational (the approach):**
 
-- **Event loop.** Waits on input channel, processes events, re-renders, signals GPU. This is the correct reactive pattern — event-driven, not polling.
-- **Cross-process IPC.** Receives events via ring buffer channel from input driver. Sends present commands to GPU driver via another channel. Demonstrates the multi-process IPC topology.
-- **Full framebuffer re-render.** Each frame is a pure function of text state → framebuffer. No retained state except the text buffer.
+- **Sole writer to document state.** The compositor owns `TEXT_BUF` — the editor never touches it. Write requests (MSG_WRITE_INSERT, MSG_WRITE_DELETE) arrive via IPC and are applied sequentially. This demonstrates Decision #9: "editors are read-only consumers, OS service is sole writer."
+- **Input routing.** Keyboard events from the input driver are forwarded to the editor via the compositor↔editor channel. The compositor doesn't interpret input — it routes it.
+- **Event loop on multiple handles.** `wait(&[INPUT_HANDLE, EDITOR_HANDLE])` multiplexes input from two sources. Processes all pending messages from both channels before rendering.
+- **Incremental rendering.** Character inserts and deletes update only the affected region + cursor, avoiding full re-render on every keystroke. Full render only on initial frame.
 
 **What's scaffolding (the implementation):**
 
-- **Combined OS service + editor role.** In the real OS, the compositor is part of the OS service (renderer only). Input would be routed to a separate editor process which modifies document state via the edit protocol. The compositor currently plays both roles.
-- **Static text buffer in BSS.** Real compositor renders from document state in shared memory.
-- **Full re-render every frame.** No damage tracking. Fine for a text demo, not for complex documents.
-- **Bitmap font only.** TrueType rendering removed from compositor (still available in drawing library for future use).
+- **Static text buffer in BSS.** Real OS service reads document content from a FileStore-backed memory mapping.
+- **No operation boundary detection.** Every write is applied immediately without snapshot/undo tracking. In the real OS, the service groups writes into operations (idle-gap detection or editor hints) and takes COW snapshots at boundaries.
+- **Bitmap font only.** TrueType rendering available in drawing library but not used.
+- **No read-only document mapping to editor.** Editor currently works without reading document content (it just sends write requests). Next step: share a read-only mapping so the editor can read the document for cursor positioning, selection, etc.
 
 **What's missing:**
 
 - **Dynamic surface management.** Register/unregister surfaces, resize, reorder.
-- **Damage tracking.** Only redraw pixels that changed.
+- **Damage tracking.** Incremental character rendering is a first step; general damage tracking not yet implemented.
 - **Connection to layout engine.** Layout produces the surface tree; compositor renders it.
 
 ---
@@ -358,7 +360,33 @@ Minimal and not yet useful. Would need RX queue, proper character device interfa
 
 ---
 
-### 2.7 Echo (`user/echo/`) 🔴
+### 2.7 Text Editor (`user/text-editor/`) 🟡
+
+**Goal:** First editor process demonstrating the settled edit protocol: editors are read-only consumers, all writes go through the OS service.
+
+**Status:** ~90 lines. Receives MSG_KEY_EVENT from compositor via IPC (handle 1, SHM slot 1, endpoint 1). Translates keypresses into write requests: printable characters → MSG_WRITE_INSERT, backspace → MSG_WRITE_DELETE. Sends write requests back to the compositor (OS service). Never touches document state directly.
+
+**What's foundational (the pattern):**
+
+- **Editor as read-only consumer.** The editor has no access to the document buffer. It receives input, decides what the input means ("'a' key = insert 'a'"), and sends a write request. The OS service (compositor) applies the write. This is Decision #9 in action.
+- **IPC write protocol.** MSG_WRITE_INSERT carries a `WriteInsert { byte: u8 }` payload. MSG_WRITE_DELETE has no payload (delete before cursor). Simple, typed, fits in 60-byte ring buffer payload.
+- **Input → intent translation.** The editor's only job is deciding what input means in editing context. This is the "user driver" pattern — editors adapt human intent into structured operations.
+
+**What's scaffolding (the implementation):**
+
+- **Single-byte inserts only.** No Unicode, no multi-byte operations, no cursor positioning.
+- **No document read access.** The editor doesn't read document content — it operates blindly. Next step: read-only memory mapping of the document so the editor can implement cursor movement, selection, word-level operations.
+- **Shared message type constants.** MSG_KEY_EVENT, MSG_WRITE_INSERT, MSG_WRITE_DELETE are duplicated between editor and compositor. Should move to a shared protocol crate.
+
+**What's missing:**
+
+- **Read-only document mapping.** Zero-copy read access to document content for cursor positioning, selection, and context-aware editing.
+- **Operation boundary hints.** `beginOperation`/`endOperation` messages for better undo granularity.
+- **Richer edit operations.** Insert at position, delete range, replace. Currently append-only inserts and delete-last.
+
+---
+
+### 2.8 Echo (`user/echo/`) 🔴
 
 **Status:** 34 lines. IPC ping-pong demo. Not integrated into current boot sequence.
 
@@ -442,12 +470,14 @@ Init no longer exits — it sets up all cross-process channels, starts all proce
 ## 4. Component Dependency Map
 
 ```text
-User Programs
-  └── sys (syscalls)
+User Programs (text-editor)
+  ├── sys (wait, channel_signal, exit, print)
+  └── ipc (Channel, Message — ring buffer messaging)
 
 Compositor
-  ├── sys (channel_signal, exit)
-  └── drawing (Surface, Color, blit_blend, fonts)
+  ├── sys (wait, channel_signal, exit)
+  ├── drawing (Surface, Color, blit_blend, fonts)
+  └── ipc (Channel, Message — ring buffer messaging)
 
 Init
   └── sys (process_create, channel_create, handle_send, memory_share, dma_alloc, wait, ...)
@@ -470,7 +500,7 @@ Virtio Library
   └── (none — pure, no dependencies)
 ```
 
-**Observation:** The libraries are clean leaves with no dependencies. The platform services depend on libraries + syscalls. The coupling between platform services (init knows about compositor, GPU driver, etc.) is all scaffolding — a real OS service would mediate these relationships.
+**Observation:** The libraries are clean leaves with no dependencies. The platform services depend on libraries + syscalls. User programs (text-editor) depend only on `sys` + `ipc` — they don't touch `drawing` or `virtio`. This is architecturally correct: editors don't render, the OS service does. The coupling between platform services (init knows about compositor, GPU driver, editor, etc.) is all scaffolding — a real OS service would mediate these relationships.
 
 ---
 
@@ -520,6 +550,8 @@ Ordered by what unblocks the most, building the happy path first:
 4. ~~**Structured IPC**~~ (§3.5) — **Done.** Ring buffer library implemented (`libraries/ipc/`). Kernel allocates two pages per channel. All services migrated to ring buffer messages.
 5. ~~**Input driver**~~ (§3.3) — **Done.** virtio-input keyboard driver with IPC forwarding to compositor. Cross-process channels for direct driver↔compositor communication.
 6. ~~**Event loop**~~ (§3.4) — **Done.** Compositor, GPU driver, and input driver all run continuous event loops. Init stays alive.
-7. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
-8. **Filesystem service** (§3.2) — blocked on Decision #16. Unblocks runtime resource loading, documents, everything the OS is about.
-9. ~~**Wait timeout**~~ — **Done.** For finite timeouts (0 < timeout < u64::MAX), `sys_wait` creates an internal timer, adds it to the wait set with a sentinel index. If the timer fires first, returns `WouldBlock`. Timer cleanup: immediate on non-blocked paths; deferred to next `wait` call for the blocked→woken path (stored on thread struct).
+7. ~~**Editor process separation**~~ — **Done.** Text editor process (`user/text-editor/`) receives input events from compositor, sends write requests back. Compositor is sole writer to document state. Demonstrates Decision #9 (editors as read-only consumers). Four processes in the display pipeline: GPU driver, input driver, text editor, compositor.
+8. **Read-only document mapping** — Give the text editor a read-only shared memory mapping of the document buffer so it can read content for cursor positioning, selection, and context-aware editing. Complement to the write-through-IPC path.
+9. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
+10. **Filesystem service** (§3.2) — blocked on Decision #16. FileStore interface designed (12 operations), macOS prototype validated at `prototype/filestore/` with 21 passing tests. Unblocks runtime resource loading, documents, everything the OS is about.
+11. ~~**Wait timeout**~~ — **Done.** For finite timeouts (0 < timeout < u64::MAX), `sys_wait` creates an internal timer, adds it to the wait set with a sentinel index. If the timer fires first, returns `WouldBlock`. Timer cleanup: immediate on non-blocked paths; deferred to next `wait` call for the blocked→woken path (stored on thread struct).

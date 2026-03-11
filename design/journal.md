@@ -201,6 +201,8 @@ Open questions: exact surface trait API, double buffering strategy, font choice 
 
 9. **Pure containment is too rigid.** Pop-out editing (drag photo out to adjust), tooltips extending beyond parent, transitions between containers — all need floating surfaces. Don't commit to pure containment. Cost of floating support is low (extra render pass), UI cases are real.
 
+**Implementation note (2026-03-11, commit 827bcc8):** The compositor now demonstrates the settled editor separation architecture. It receives input from the input driver, routes it to the text editor via IPC, receives write requests back, and applies them as sole writer to the document buffer. Four processes in the display pipeline (GPU driver, input driver, text editor, compositor). The compositor↔editor channel is bidirectional: input events out, write requests in. This validates the "OS service is sole writer" design in running code.
+
 Open questions: exact scene graph API, how layout engine and compositor interface (does layout produce the tree that compositor renders?), React-style damage diffing (how much complexity is justified for 3-4 z-layers?), whether compositor is part of OS service or separate. Shared memory is no longer blocked — kernel Phase 7 (`memory_share` syscall #24) is done.
 
 ### COW Filesystem
@@ -212,6 +214,8 @@ Open questions: exact scene graph API, how layout engine and compositor interfac
 **FileStore interface settled (2026-03-11).** 12 operations: create, clone, delete, size, resize, map_read, map_write, snapshot, restore, map_snapshot, snapshots (list), delete_snapshot, flush. Deliberately absent: paths/directories (files addressed by ID), permissions (OS service is sole consumer), extended attributes (metadata lives in DB), file locking (OS service serializes writes via event loop), links (copy semantics via clone), rename (metadata DB concern), batch operations (OS service sequences), file type info (metadata DB concern). The interface is a dumb file store — it knows nothing about documents, undo ordering, or compound structures. See journal insights for full design rationale.
 
 **Prototype-on-host strategy (2026-03-11).** Implement the FileStore interface against macOS (regular files + file copies for snapshots + mmap). Build the real COW filesystem later once the interface is proven through actual editor/undo/document pipeline usage. The filesystem's on-disk format is a leaf node — complex inside, simple interface. Same pattern as the rendering engine decision (settle the architecture, defer the implementation).
+
+**Prototype validated (2026-03-11).** `prototype/filestore/` — HostFileStore implementation backed by macOS filesystem, 21 tests covering all 12 operations (create, clone, delete, size, resize, map_read, map_write, snapshot, restore, map_snapshot, snapshots, delete_snapshot, flush). Tests include: basic CRUD, snapshot chains, restore, clone independence, write-at-offset, resize, error cases, undo workflow simulation. Interface is proven through concrete implementation; ready for integration when the OS service pipeline reaches persistent document storage.
 
 Open questions: on-disk format (deferred), snapshot naming, pruning policy, page cache placement, snapshot scope (global vs per-document vs time-correlated — punted, doesn't block interface).
 
