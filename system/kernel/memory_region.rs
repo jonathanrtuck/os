@@ -11,8 +11,6 @@ use alloc::vec::Vec;
 pub struct Vma {
     pub start: u64,
     pub end: u64, // exclusive
-    #[allow(dead_code)]
-    pub readable: bool,
     pub writable: bool,
     pub executable: bool,
     pub backing: Backing,
@@ -27,9 +25,6 @@ pub struct VmaList {
 pub enum Backing {
     /// Anonymous zero-filled pages (stack, BSS).
     Anonymous,
-    /// ELF segment data: first `data_len` bytes come from `data`, rest zeroed.
-    #[allow(dead_code)]
-    Elf { data: &'static [u8], data_len: u64 },
 }
 
 impl VmaList {

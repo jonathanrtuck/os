@@ -15,7 +15,6 @@ fn anon_vma(start: u64, end: u64) -> Vma {
     Vma {
         start,
         end,
-        readable: true,
         writable: true,
         executable: false,
         backing: Backing::Anonymous,
@@ -26,13 +25,9 @@ fn code_vma(start: u64, end: u64) -> Vma {
     Vma {
         start,
         end,
-        readable: true,
         writable: false,
         executable: true,
-        backing: Backing::Elf {
-            data: b"hello",
-            data_len: 5,
-        },
+        backing: Backing::Anonymous,
     }
 }
 
@@ -211,28 +206,22 @@ fn adjacent_vmas_no_gap() {
 // --- backing types ---
 
 #[test]
-fn elf_backing_preserved() {
+fn anonymous_backing_preserved() {
     let mut list = VmaList::new();
-    let data: &'static [u8] = b"ELF data here";
 
     list.insert(Vma {
         start: 0x400000,
         end: 0x401000,
-        readable: true,
         writable: false,
         executable: true,
-        backing: Backing::Elf { data, data_len: 13 },
+        backing: Backing::Anonymous,
     });
 
     let vma = list.lookup(0x400000).unwrap();
 
-    match &vma.backing {
-        Backing::Elf { data, data_len } => {
-            assert_eq!(*data_len, 13);
-            assert_eq!(*data, b"ELF data here");
-        }
-        Backing::Anonymous => panic!("expected Elf backing"),
-    }
+    assert!(matches!(vma.backing, Backing::Anonymous));
+    assert!(vma.executable);
+    assert!(!vma.writable);
 }
 
 // --- remove ---
@@ -306,7 +295,6 @@ fn permissions_preserved() {
     list.insert(Vma {
         start: 0x1000,
         end: 0x2000,
-        readable: true,
         writable: false,
         executable: true,
         backing: Backing::Anonymous,
@@ -314,7 +302,6 @@ fn permissions_preserved() {
 
     let vma = list.lookup(0x1500).unwrap();
 
-    assert!(vma.readable);
     assert!(!vma.writable);
     assert!(vma.executable);
 }

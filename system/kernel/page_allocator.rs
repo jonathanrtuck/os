@@ -22,6 +22,7 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
     free_count: 0,
     region_start: 0,
     region_end: 0,
+    fail_after: None,
 });
 
 /// Intrusive free-list node stored at the start of each free block.
@@ -36,6 +37,8 @@ struct State {
     /// Physical address range managed by this allocator.
     region_start: usize,
     region_end: usize,
+    /// OOM fault injection: if Some(n), alloc returns None after n successes.
+    fail_after: Option<usize>,
 }
 // SAFETY: FreeBlock pointers are only accessed under STATE lock.
 unsafe impl Send for State {}
@@ -83,6 +86,15 @@ pub fn alloc_frames(order: usize) -> Option<Pa> {
     assert!(order <= MAX_ORDER, "order exceeds MAX_ORDER");
 
     let mut s = STATE.lock();
+
+    if let Some(ref mut remaining) = s.fail_after {
+        if *remaining == 0 {
+            return None;
+        }
+
+        *remaining -= 1;
+    }
+
     // Find the smallest order >= requested that has a free block.
     let mut found_order = order;
 
@@ -248,4 +260,10 @@ pub fn init(start_pa: usize, end_pa: usize) {
         s.free_count += pages;
         addr += PAGE_SIZE << order;
     }
+}
+/// Set OOM fault injection: alloc returns None after `n` successful allocations.
+/// Pass `None` to disable (used by test crate).
+#[allow(dead_code)]
+pub fn set_fail_after(n: Option<usize>) {
+    STATE.lock().fail_after = n;
 }

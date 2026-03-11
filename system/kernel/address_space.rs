@@ -345,22 +345,6 @@ impl AddressSpace {
         // Fill from backing data if needed.
         match &vma.backing {
             Backing::Anonymous => {} // Already zeroed.
-            Backing::Elf { data, data_len } => {
-                let seg_offset = page_va - vma.start;
-
-                if seg_offset < *data_len {
-                    let src_start = seg_offset as usize;
-                    let src_end =
-                        core::cmp::min((seg_offset + PAGE_SIZE) as usize, *data_len as usize);
-                    let src = &data[src_start..src_end];
-                    let dst = memory::phys_to_virt(pa) as *mut u8;
-
-                    // SAFETY: `pa` was just allocated. `src` is bounded by ELF data.
-                    unsafe {
-                        core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len());
-                    }
-                }
-            }
         }
 
         // Determine page attributes from VMA permissions.
@@ -506,7 +490,6 @@ impl AddressSpace {
         self.vmas.insert(super::memory_region::Vma {
             start: va,
             end: va + size,
-            readable: true,
             writable: true,
             executable: false,
             backing: super::memory_region::Backing::Anonymous,

@@ -100,8 +100,13 @@ fn copy_segment_page(file_data: &[u8], file_size: u64, seg_offset: u64, pa: memo
 pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &'static str> {
     let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
     let (asid, _generation) = address_space_id::alloc();
-    let mut addr_space =
-        Box::new(AddressSpace::new(asid).ok_or("out of frames for L0 page table")?);
+    let mut addr_space = match AddressSpace::new(asid) {
+        Some(a) => Box::new(a),
+        None => {
+            address_space_id::free(asid);
+            return Err("out of frames for L0 page table");
+        }
+    };
 
     for i in 0..header.ph_count {
         let seg = match executable::load_segment(elf_bytes, &header, i)
@@ -123,7 +128,6 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
         addr_space.vmas.insert(Vma {
             start: base_va,
             end: vma_end,
-            readable: true,
             writable: is_write,
             executable: is_exec,
             backing: Backing::Anonymous,
@@ -165,7 +169,6 @@ fn setup_stack(addr_space: &mut AddressSpace) -> Result<(), &'static str> {
     addr_space.vmas.insert(Vma {
         start: USER_STACK_VA,
         end: USER_STACK_TOP,
-        readable: true,
         writable: true,
         executable: false,
         backing: Backing::Anonymous,
