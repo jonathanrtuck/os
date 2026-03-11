@@ -24,6 +24,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("virtio-gpu", "VIRTIO_GPU_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
     ("compositor", "COMPOSITOR_ELF"),
+    ("text-editor", "TEXT_EDITOR_ELF"),
     ("stress", "STRESS_ELF"),
     ("fuzz", "FUZZ_ELF"),
 ];
@@ -42,6 +43,7 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("virtio-gpu", "services/drivers/virtio-gpu", true, false),
     ("virtio-input", "services/drivers/virtio-input", true, false),
     ("compositor", "services/compositor", false, true),
+    ("text-editor", "user/text-editor", false, false),
     ("stress", "user/stress", false, false),
     ("fuzz-helper", "user/fuzz-helper", false, false),
     ("fuzz", "user/fuzz", false, false),

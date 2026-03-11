@@ -268,9 +268,43 @@ fn setup_display_pipeline(
     });
 
     // -----------------------------------------------------------------------
+    // Compositor ↔ Editor channel.
+    // The compositor (OS service) routes input to the editor and receives
+    // write requests back. The editor never writes to the document directly.
+    // -----------------------------------------------------------------------
+    sys::print(b"     spawning text editor\n");
+
+    let (editor_proc, _editor_ch, _editor_ch_idx) =
+        match spawn_with_channel(TEXT_EDITOR_ELF, next_channel) {
+            Some(v) => v,
+            None => {
+                sys::print(b"init: failed to spawn text editor\n");
+                sys::exit();
+            }
+        };
+
+    sys::print(b"     creating compositor\xE2\x86\x94editor channel\n");
+
+    let (ce_a, ce_b) = sys::channel_create().unwrap_or_else(|_| {
+        sys::print(b"init: channel_create (comp-editor) failed\n");
+        sys::exit();
+    });
+
+    // Endpoint A (send/recv) → compositor (handle 3 in compositor's table).
+    sys::handle_send(comp_proc, ce_a).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (comp-editor A) failed\n");
+        sys::exit();
+    });
+    // Endpoint B (send/recv) → editor (handle 1 in editor's table).
+    sys::handle_send(editor_proc, ce_b).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (comp-editor B) failed\n");
+        sys::exit();
+    });
+
+    // -----------------------------------------------------------------------
     // Start all processes. Order: GPU first (does device setup then waits),
-    // input driver (does setup then waits for IRQs), compositor last (draws
-    // initial frame then enters event loop).
+    // input driver (does setup then waits for IRQs), editor (waits for
+    // input), compositor last (draws initial frame then enters event loop).
     // -----------------------------------------------------------------------
     sys::print(b"     starting gpu driver\n");
 
@@ -282,11 +316,15 @@ fn setup_display_pipeline(
         let _ = sys::process_start(input_proc_handle);
     }
 
+    sys::print(b"     starting text editor\n");
+
+    let _ = sys::process_start(editor_proc);
+
     sys::print(b"     starting compositor\n");
 
     let _ = sys::process_start(comp_proc);
 
-    sys::print(b"     display pipeline running\n");
+    sys::print(b"     display pipeline running (with editor separation)\n");
 }
 /// Spawn a suspended process, create a channel to it, and send one endpoint.
 ///
