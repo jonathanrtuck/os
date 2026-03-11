@@ -70,17 +70,17 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-10 (latest):** TrueType font rasterizer, alpha blending, overlapping surface compositing, userspace architecture audit.
+**Session 2026-03-10 (latest):** Structured IPC design, TrueType font rasterizer, alpha blending, overlapping surface compositing, userspace architecture audit.
 
-1. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables: head, maxp, cmap format 4, hhea, hmtx, loca, glyf). Scanline rasterizer: quadratic bezier flattening via De Casteljau, non-zero winding rule, 4× vertical oversampling for anti-aliasing. Integer/fixed-point math only, no heap. Coverage maps feed into existing alpha blending pipeline. Simple interface: `TrueTypeFont::rasterize(codepoint, size, buffer, scratch) → GlyphMetrics`. ProggyClean.ttf (40 KiB, MIT) embedded. Compositor renders comparison: bitmap vs TTF at 16/24/32px. 21 new tests (83 total). Three new files: `truetype.rs` (652 lines), `rasterizer.rs` (448 lines), `ProggyClean.ttf`.
+1. **Structured IPC designed.** Four sub-decisions settled: (a) one mechanism — ring buffers for everything, config = first message (Singularity pattern), no separate config path; (b) separate pages per direction — each channel has two 4 KiB pages, each a SPSC ring buffer; (c) fixed 64-byte messages — one AArch64 cache line, 4-byte type + 60-byte payload, 62 slots per ring; (d) split architecture — shared `ipc` library for ring mechanics, per-protocol payload definitions. Ring buffer layout designed in `system/DESIGN.md` §1.5. Kernel change: `channel::create()` allocates 2 pages. Pressure point documented: messages >60 bytes use shared-memory reference pattern. Prior art: io_uring, LMAX Disruptor, Singularity contracts. Implementation next.
 
-2. **Alpha blending in drawing library.** Porter-Duff source-over compositing: `Color::blend_over`, `Surface::blend_pixel`, `fill_rect_blend`, `blit_blend`. Integer-only math, fast paths for opaque/transparent.
+2. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables). Scanline rasterizer with 4× oversampling. ProggyClean.ttf embedded. 21 new tests (83 total).
 
-3. **Compositor rewritten with real compositing.** Three panels drawn into separate BSS surface buffers (~416 KB each, demand-paged), composited back-to-front with per-pixel alpha. Now also renders TrueType text demo in the lower section.
+3. **Alpha blending + compositor rewrite.** Porter-Duff source-over compositing. Three panels with per-pixel alpha, composited back-to-front. TrueType text demo.
 
-4. **Userspace architecture audit and `system/DESIGN.md` created.** Systematic classification of every component above the kernel. Documented five critical constraints. Dependency map and roadmap (font rasterization now done, text layout next).
+4. **Userspace architecture audit and `system/DESIGN.md` created.** Systematic classification of every component. Five constraints documented, dependency map and roadmap.
 
-**Previous session highlights (still relevant):** Display pipeline complete end-to-end. Init is proto-OS-service. Kernel Phase 7 (memory sharing) done. 25 syscalls. Alignment bug fixed (DFSC check + ISS diagnostics).
+**Previous session highlights (still relevant):** Display pipeline complete end-to-end. Init is proto-OS-service. Kernel Phase 7 (memory sharing) done. 27 syscalls. Alignment bug fixed (DFSC check + ISS diagnostics).
 
 **Still open from previous sessions:** Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved tension — connected to compositor tree model).
 
@@ -88,9 +88,9 @@ Read these before making any design suggestions:
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
 
-**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: font rasterization done → text layout next → more compositor features. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: COW on-disk design (Decision #16, independent).
+**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: font rasterization done → text layout next → more compositor features. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: COW on-disk design (Decision #16, independent). **Infrastructure track:** Structured IPC implementation (ipc library → kernel 2-page channels → migrate services).
 
-**System code:** `system/kernel/` (35 source files), `system/services/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/libraries/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (83 drawing + 195 kernel = 278 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline with alpha compositing + TrueType rendering. 25 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (35 source files), `system/services/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/libraries/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (83 drawing + 221 kernel = 304 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline with alpha compositing + TrueType rendering. 27 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 

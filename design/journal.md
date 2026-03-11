@@ -366,7 +366,7 @@ Interface map by boundary:
 | -------------------------- | ------------------------------------------------------------- | ------------------- | ------------------ |
 | Kernel ↔ userland          | Syscall API (24 syscalls, typed handles)                      | OS service, drivers | Mostly designed    |
 | OS service ↔ Editors       | Edit protocol (beginOp/endOp, state, input)                   | Editors             | Partially designed |
-| OS service ↔ Shell         | Shell interface (navigation, document lifecycle, queries)      | Shell               | Partially scoped   |
+| OS service ↔ Shell         | Shell interface (navigation, document lifecycle, queries)     | Shell               | Partially scoped   |
 | OS service ↔ Editors/Shell | Metadata query API (document discovery)                       | Editors, shell      | Sketched (#7)      |
 | Blue ↔ Black               | Translator interface (format conversion, includes web engine) | All translators     | Blank              |
 | Blue ↔ Black               | Driver interface (device access)                              | Device drivers      | Sketched           |
@@ -410,11 +410,19 @@ The adaptation layer isn't just below (hardware drivers). The user is external r
 
 ### The shell is a tool, not part of the OS (2026-03-10)
 
-The shell (GUI/CLI) is architecturally identical to editors — an untrusted EL0 process in the blue layer. It binds to "system state" the same way a text editor binds to `text/*`. It translates navigational intent (find, open, switch) into OS service operations (metadata queries, document lifecycle). The OS service doesn't know or care what the interaction *feels like* — the shell owns the UX, the OS owns the mechanism. If the shell crashes, the OS service provides a recovery fallback (same pattern as rendering a document with no editor attached). The shell is pluggable, though the OS will be tuned toward its primary shell's needs.
+The shell (GUI/CLI) is architecturally identical to editors — an untrusted EL0 process in the blue layer. It binds to "system state" the same way a text editor binds to `text/*`. It translates navigational intent (find, open, switch) into OS service operations (metadata queries, document lifecycle). The OS service doesn't know or care what the interaction _feels like_ — the shell owns the UX, the OS owns the mechanism. If the shell crashes, the OS service provides a recovery fallback (same pattern as rendering a document with no editor attached). The shell is pluggable, though the OS will be tuned toward its primary shell's needs.
 
 ### User input always goes to a tool (2026-03-10)
 
 There is always an active tool. The OS service routes input; it never interprets it. When an editor is active, it receives modification input. When no editor is active, the shell receives navigational input. This extends the editor model (one active per document) to the system level: one active tool, period. The OS service has no "bare" input handling mode. This makes the interaction model a shell design question, not an OS service design question — same separation as everywhere else (OS provides mechanism, tools bring semantics).
+
+### Configuration is a protocol's opening sequence (2026-03-10)
+
+Init passes device addresses and framebuffer info to drivers before starting them — fundamentally different from ongoing conversation. Initially leaned toward two mechanisms (config structs vs ring buffers). But Singularity showed the cleaner model: configuration is the opening messages in the channel's protocol. A GPU driver's "contract" starts with `state Init { receive ConfigMsg → Running }`. One mechanism, config is just the first message(s). Avoids the blurry boundary problem — what happens when a "config" channel later needs runtime updates? With one mechanism, it just sends more messages. No mechanism switch. Prior art: Singularity (contracts), QNX (MsgSend for everything). Counter-examples: Fuchsia (separate processargs), Unix (argv vs pipes). The temporal asymmetry (config is pre-start) is real but doesn't require a separate mechanism — the ring buffer is initialized before the child starts, just like the raw byte layout was.
+
+### Fixed-size ring entries are the high-performance consensus (2026-03-10)
+
+io_uring (64-byte SQE), LMAX Disruptor, L4 message registers, virtio descriptors (16 bytes) — all chose fixed-size entries in the ring, with variable-size data elsewhere. The arguments compound: no fragmentation, no wraparound complexity, predictable prefetching, one-cache-line-per-message on AArch64 (64 bytes = cache line). When you need large data, it goes in shared memory with a reference through the ring. This matches the OS design's existing principle (documents are memory-mapped, ring buffers carry control only) and makes it a design rule rather than a pressure point.
 
 ### Security as a side effect of good architecture (2026-03-07)
 

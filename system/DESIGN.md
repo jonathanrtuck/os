@@ -46,7 +46,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Process model:** Kernel spawns only init. Init embeds all other ELF binaries and spawns everything else. Microkernel pattern (Fuchsia component_manager, seL4 root task). This pattern is foundational; init's implementation is scaffolding.
 
-**IPC:** Kernel creates channels (shared memory page + signal). Processes communicate by reading/writing raw bytes at agreed offsets. No structured message format yet. The mechanism (channels, shared memory, wait) is foundational; the ad hoc byte layouts are scaffolding.
+**IPC:** Kernel creates channels (two shared memory pages per channel + signal). Each page is a SPSC ring buffer of 64-byte messages (one direction). The `ipc` library provides lock-free ring buffer mechanics; per-protocol crates define message types. Configuration uses the same mechanism (first message on the ring). The mechanism (channels, shared memory, wait, ring buffers) is foundational; current services still use ad hoc byte layouts (migration to ring buffers pending).
 
 **Memory model for userspace:** Stack (16 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` in `sys` library (linked-list first-fit with coalescing, grows via `memory_alloc`). Programs opt in with `extern crate alloc;` to get `Vec`/`String`/`Box`.
 
@@ -138,6 +138,89 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **Status:** 16 lines. Base VA 0x400000, page-aligned sections.
 
 **Foundational.** Standard layout, matches kernel's ELF loader expectations. No changes needed unless the VA layout changes.
+
+---
+
+### 1.5 IPC Library (`libraries/ipc/`) 🟢 — designed, not yet implemented
+
+**Goal:** Lock-free SPSC ring buffer on shared memory pages. The structured message transport for all inter-process communication.
+
+**Ring buffer page layout (one direction, one 4 KiB page):**
+
+```text
+┌─────────────────────────────────────────────────────────┐
+│ Bytes 0–63: Producer header (one cache line)            │
+│   [0..3]   head: u32 (monotonic write counter)          │
+│   [4..7]   _reserved                                    │
+│   [8..63]  _padding (cache line isolation)              │
+├─────────────────────────────────────────────────────────┤
+│ Bytes 64–127: Consumer header (one cache line)          │
+│   [64..67] tail: u32 (monotonic read counter)           │
+│   [68..71] _reserved                                    │
+│   [72..127] _padding (cache line isolation)             │
+├─────────────────────────────────────────────────────────┤
+│ Bytes 128–4095: 62 message slots × 64 bytes             │
+│   slot[0]:  bytes 128–191                               │
+│   slot[1]:  bytes 192–255                               │
+│   ...                                                   │
+│   slot[61]: bytes 4032–4095                             │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Why head and tail on separate cache lines:** On AArch64, a cache line is 64 bytes. The producer writes head, the consumer writes tail. If they share a cache line, every write by either side bounces the line between cores (false sharing). Separate cache lines eliminate this. Same design choice as io_uring.
+
+**Message slot (64 bytes = one cache line):**
+
+```text
+┌─────────────────────────────────────┐
+│ [0..3]  msg_type: u32               │
+│ [4..63] payload: [u8; 60]           │
+└─────────────────────────────────────┘
+```
+
+`msg_type` determines how to interpret the payload. Each protocol defines its own type constants and payload structs.
+
+**SPSC protocol (lock-free, no CAS):**
+
+- Empty: `head == tail`
+- Full: `head - tail >= 62`
+- Produce: write payload to `slots[head % 62]`, then `head += 1` with release store
+- Consume: read from `slots[tail % 62]`, then `tail += 1` with release store
+- Memory ordering: producer writes payload (relaxed), increments head (release). Consumer reads head (acquire), reads payload, increments tail (release).
+- Notification: after producing, call `channel_signal` (the kernel doorbell).
+
+**Channel structure (two pages per channel):**
+
+- Page 0: endpoint A → endpoint B ring (A produces, B consumes)
+- Page 1: endpoint B → endpoint A ring (B produces, A consumes)
+- Both pages mapped into both processes at `CHANNEL_SHM_BASE + ch_idx * 2 * PAGE_SIZE`
+- Endpoint A: page 0 = send ring, page 1 = recv ring
+- Endpoint B: page 0 = recv ring, page 1 = send ring
+- The `ipc` library knows its endpoint index (0 or 1) and interprets accordingly
+
+**What the ipc library provides:**
+
+- `RingBuf` — typed wrapper around a shared page. Init (zero head/tail), produce, consume, is_empty, is_full.
+- `Channel` — pair of `RingBuf` (send + recv). Constructed from base VA + endpoint index.
+- `Message` — the 64-byte slot struct. Helpers for reading typed payloads from the 60-byte payload region.
+- Memory barriers — acquire/release on head/tail via `core::sync::atomic`.
+
+**What it does NOT provide:**
+
+- Message type definitions — per-protocol, not in the ipc library.
+- Protocol state validation — deferred until the edit protocol exists.
+- Serialization framework — payloads are `#[repr(C)]` structs cast from `[u8; 60]`.
+- Error handling for malformed messages — consumer trusts producer (same-OS processes). Kernel validates at trust boundaries.
+
+**Kernel changes needed:**
+
+- `channel::create()` allocates 2 pages instead of 1. Stores both PAs.
+- `channel::setup_endpoint()` maps both pages into the target process.
+- `channel::shared_info()` returns both PAs and VAs.
+- Signal/wait mechanism unchanged — orthogonal to ring buffer format.
+- The kernel remains ignorant of message content. It provides shared pages and doorbells.
+
+**No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the shared memory page address. Fully testable on the host.
 
 ---
 
@@ -294,13 +377,18 @@ These are the things that limit what can be built above the kernel today, ordere
 
 ---
 
-### 3.5 No Structured IPC Messages
+### 3.5 ~~No Structured IPC Messages~~ ✅ Designed (implementation pending)
 
-**The problem:** Processes communicate by reading/writing raw bytes at magic offsets in shared memory. Each process pair has its own undocumented layout. No serialization format, no versioning, no validation.
+**Resolved (design):** Ring buffer IPC with fixed 64-byte messages. See §1.5 for the `ipc` library design. Implementation next.
 
-**Why it matters:** Adding a new field or changing a layout requires synchronized changes in both processes. The design settled on ring buffer IPC carrying control messages — the channels exist, but the message format doesn't.
+**Decisions made (2026-03-10):**
 
-**What it would take:** Define a minimal message envelope (type tag + length + payload). Could be as simple as a fixed header struct. Doesn't need to be a general serialization framework.
+- **One mechanism** — ring buffers for everything, including configuration (first message pattern, no separate config struct path). Prior art: Singularity contracts (config = opening protocol sequence).
+- **Separate pages per direction** — each channel allocates two 4 KiB pages, one per direction. Each page is a textbook SPSC queue. Prior art: io_uring (separate SQ/CQ regions), LMAX Disruptor.
+- **Fixed 64-byte messages** — one AArch64 cache line. 4-byte type tag + 60-byte payload. 62 slots per ring (4 KiB page − 128-byte header). Prior art: io_uring (64-byte SQE).
+- **Split architecture** — shared `ipc` library for ring buffer mechanics, per-protocol payload definitions elsewhere.
+
+**Pressure point:** Messages >60 bytes. If genuinely needed, use shared memory + ring buffer reference. Documented tension, not pre-built escape hatch.
 
 ---
 
@@ -333,6 +421,9 @@ Drivers (virtio-blk, virtio-gpu, virtio-console)
 
 Drawing Library
   └── (none — pure, no dependencies)
+
+IPC Library (planned)
+  └── (none — pure, no dependencies. Uses core::sync::atomic only)
 
 Sys Library
   └── (none — inline asm only)
@@ -373,11 +464,11 @@ virtio-gpu copies the framebuffer from guest to host memory on every present —
 
 **Escape hatch:** None needed. The abstraction already accommodates this. Listed to document why virtio-gpu performance isn't representative of real hardware.
 
-### 5.5 IPC: Zero-copy for large payloads
+### 5.5 IPC: Messages that exceed 60 bytes
 
-Ring buffer messages work for control messages (edit protocol, input events). Large data (images, document content) should never flow through the ring buffer — it should be memory-mapped. The current architecture already does this (documents are memory-mapped, ring buffers carry control only), but the boundary isn't enforced by any interface.
+Ring buffer messages are fixed at 64 bytes (4-byte type + 60-byte payload). All current control message types fit comfortably (edit protocol, input events, device configuration — all <40 bytes). But some future messages may not: metadata query results with variable-length strings, error diagnostics, path references.
 
-**Escape hatch:** If a message type needs large payloads, the answer is always "put it in shared memory, send a reference through the ring buffer." This should probably become an explicit design rule rather than a pressure point.
+**Design rule (not an escape hatch):** Large data never flows through the ring buffer. It goes in shared memory; the ring carries a reference (VA + length). Documents are already memory-mapped this way. If a message type regularly needs >60 bytes, that's a signal it should use the shared-memory-reference pattern — not a signal to make messages bigger.
 
 ---
 
@@ -388,7 +479,7 @@ Ordered by what unblocks the most, building the happy path first:
 1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the drawing library. Zero-copy parser, scanline rasterizer with 4× oversampling, coverage map output. Simple interface: `TrueTypeFont::rasterize(codepoint, size, buffer, scratch) → GlyphMetrics`. 21 tests. Running on bare metal in the compositor.
 2. ~~**Syscall error types**~~ — **Done.** `SyscallError` enum (13 variants) + `SyscallResult<T>` on all 25 syscalls + `print()` convenience. All 6 userspace binaries migrated. Eliminated raw `i64` returns and ad-hoc `< 0` checks.
 3. ~~**Userspace memory allocation**~~ (§3.1) — **Done.** `memory_alloc`/`memory_free` (#25/#26) + `GlobalAlloc` in `sys` library. `Vec`/`String`/`Box` available to all userspace programs.
-4. **Structured IPC** (§3.5) — replace ad hoc byte offsets with typed messages. Unblocks adding new message types without cross-process breakage.
+4. **Structured IPC** (§3.5) — **Designed.** Ring buffer layout, message format, and library architecture settled. Next: implement the `ipc` library, update kernel `channel::create()` to allocate two pages, migrate init/compositor/drivers from raw byte offsets to ring buffer messages.
 5. **Input driver** (§3.3) — unblocks interactive demos. virtio-input follows the same pattern as existing drivers.
 6. **Event loop** (§3.4) — convert compositor or init to loop on `wait`. Unblocks continuous rendering.
 7. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
