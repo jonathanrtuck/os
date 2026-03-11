@@ -11,11 +11,7 @@ use alloc::vec::Vec;
 pub struct Vma {
     pub start: u64,
     pub end: u64, // exclusive
-    // NOTE: Guard pages are implemented via gaps in the VMA list (no VMA covers
-    // the guard address → fault → kill), not via readable=false. This field
-    // exists for future use if fine-grained no-access regions are needed within
-    // an otherwise mapped range (e.g., PROT_NONE pages for ASan red-zones).
-    // Currently, readable is always true for all VMAs.
+    #[allow(dead_code)]
     pub readable: bool,
     pub writable: bool,
     pub executable: bool,
@@ -32,6 +28,7 @@ pub enum Backing {
     /// Anonymous zero-filled pages (stack, BSS).
     Anonymous,
     /// ELF segment data: first `data_len` bytes come from `data`, rest zeroed.
+    #[allow(dead_code)]
     Elf { data: &'static [u8], data_len: u64 },
 }
 

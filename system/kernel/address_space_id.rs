@@ -89,7 +89,8 @@ pub fn alloc() -> (Asid, u64) {
 
     (Asid(1), s.generation)
 }
-/// Get the current generation.
+/// Get the current generation (used by test crate).
+#[allow(dead_code)]
 pub fn current_generation() -> u64 {
     STATE.lock().generation
 }

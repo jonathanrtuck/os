@@ -31,6 +31,7 @@ pub const RAM_END: u64 = RAM_START + RAM_SIZE;
 
 // User virtual address layout.
 // All user VA constants in one place for visibility.
+#[allow(dead_code)]
 pub const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000; // 4 MiB (matches link.ld)
 pub const CHANNEL_SHM_BASE: u64 = 0x0000_0000_4000_0000; // 1 GiB
 pub const CHANNEL_SHM_END: u64 = USER_STACK_VA; // up to stack region

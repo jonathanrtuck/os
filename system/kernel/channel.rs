@@ -43,7 +43,6 @@
 use super::handle::{ChannelId, Handle, HandleError, HandleObject, Rights};
 use super::memory;
 use super::page_allocator;
-use super::paging::{CHANNEL_SHM_BASE, PAGE_SIZE};
 use super::process::ProcessId;
 use super::scheduler;
 use super::sync::IrqMutex;

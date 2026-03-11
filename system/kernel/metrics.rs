@@ -18,6 +18,7 @@ use super::serial;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 static METRICS: [CoreMetrics; MAX_CORES] = {
+    #[allow(clippy::declare_interior_mutable_const)]
     const INIT: CoreMetrics = CoreMetrics {
         context_switches: AtomicU64::new(0),
         syscalls: AtomicU64::new(0),
@@ -49,12 +50,10 @@ pub fn inc_timer_ticks() {
 pub fn panic_dump() {
     serial::panic_puts("📊 kernel metrics\n");
 
-    for core in 0..MAX_CORES {
+    for (core, m) in METRICS.iter().enumerate() {
         if !per_core::is_online(core as u32) {
             continue;
         }
-
-        let m = &METRICS[core];
 
         serial::panic_puts("  core ");
         serial::panic_put_u32(core as u32);

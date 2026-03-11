@@ -54,7 +54,8 @@ impl Device {
     pub fn base_address(&self) -> u64 {
         self.regs.first().map_or(0, |&(addr, _)| addr)
     }
-    /// Size of the first region (convenience).
+    /// Size of the first region (used by test crate).
+    #[allow(dead_code)]
     pub fn size(&self) -> u64 {
         self.regs.first().map_or(0, |&(_, size)| size)
     }
@@ -100,7 +101,7 @@ fn read_be_u64(data: &[u8], offset: usize) -> u64 {
     ])
 }
 /// Read a null-terminated string from a byte slice at the given offset.
-fn read_cstr<'a>(data: &'a [u8], offset: usize) -> &'a str {
+fn read_cstr(data: &[u8], offset: usize) -> &str {
     if offset >= data.len() {
         return "";
     }
@@ -155,7 +156,8 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
     let mut node_compatible: Option<String> = None;
     let mut node_regs: Option<Vec<(u64, u64)>> = None;
     let mut node_irq: Option<u32> = None;
-    let mut stack: Vec<(Option<String>, Option<Vec<(u64, u64)>>, Option<u32>)> = Vec::new();
+    type DtbStackEntry = (Option<String>, Option<Vec<(u64, u64)>>, Option<u32>);
+    let mut stack: Vec<DtbStackEntry> = Vec::new();
 
     loop {
         if offset + 4 > structs.len() {
@@ -244,20 +246,18 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
 
                         node_regs = Some(regs);
                     }
-                    "interrupts" => {
+                    "interrupts" if prop_data.len() >= 12 => {
                         // GIC: 3 cells per interrupt (type, number, flags).
                         // SPI (type=0): hardware IRQ = number + 32.
                         // PPI (type=1): hardware IRQ = number + 16.
-                        if prop_data.len() >= 12 {
-                            let irq_type = read_be_u32(prop_data, 0);
-                            let irq_num = read_be_u32(prop_data, 4);
+                        let irq_type = read_be_u32(prop_data, 0);
+                        let irq_num = read_be_u32(prop_data, 4);
 
-                            node_irq = Some(if irq_type == 0 {
-                                irq_num + 32
-                            } else {
-                                irq_num + 16
-                            });
-                        }
+                        node_irq = Some(if irq_type == 0 {
+                            irq_num + 32
+                        } else {
+                            irq_num + 16
+                        });
                     }
                     _ => {} // Ignore other properties.
                 }

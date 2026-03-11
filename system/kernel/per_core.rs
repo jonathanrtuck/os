@@ -14,6 +14,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 pub const MAX_CORES: usize = 8;
 
 static PERCPU: [PerCpu; MAX_CORES] = {
+    #[allow(clippy::declare_interior_mutable_const)]
     const INIT: PerCpu = PerCpu {
         online: AtomicBool::new(false),
     };
@@ -57,8 +58,8 @@ pub fn is_online(id: u32) -> bool {
 pub fn online_count() -> u32 {
     let mut count = 0;
 
-    for i in 0..MAX_CORES {
-        if PERCPU[i].online.load(Ordering::Acquire) {
+    for percpu in &PERCPU {
+        if percpu.online.load(Ordering::Acquire) {
             count += 1;
         }
     }

@@ -51,11 +51,11 @@ fn raw_puts(s: &str) {
 pub fn panic_put_hex(v: u64) {
     let mut buf = [0u8; 16];
 
-    for i in 0..16 {
+    for (i, byte) in buf.iter_mut().enumerate() {
         let shift = 60 - (i * 4);
         let nib = ((v >> shift) & 0xF) as u8;
 
-        buf[i] = match nib {
+        *byte = match nib {
             0..=9 => b'0' + nib,
             _ => b'A' + (nib - 10),
         };
@@ -95,36 +95,10 @@ pub fn panic_putc(c: u8) {
 pub fn panic_puts(s: &str) {
     raw_puts(s);
 }
-pub fn put_hex(v: u64) {
-    let _guard = LOCK.lock();
-
-    panic_put_hex(v);
-}
 pub fn put_u32(n: u32) {
     let _guard = LOCK.lock();
 
     panic_put_u32(n);
-}
-pub fn put_u64(mut n: u64) {
-    let _guard = LOCK.lock();
-    let mut buf = [0u8; 20];
-    let mut i = buf.len();
-
-    if n == 0 {
-        raw_putc(b'0');
-
-        return;
-    }
-
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    for &byte in &buf[i..] {
-        raw_putc(byte);
-    }
 }
 pub fn putc(c: u8) {
     let _guard = LOCK.lock();

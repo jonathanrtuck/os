@@ -87,8 +87,8 @@ impl SchedulingState {
     }
 }
 
-/// Compute the average vruntime across all threads.
-/// Returns 0 for an empty slice (everything is eligible).
+/// Compute the average vruntime across all threads (used by test crate).
+#[allow(dead_code)]
 pub fn avg_vruntime(states: &[SchedulingState]) -> u64 {
     if states.is_empty() {
         return 0;
@@ -98,22 +98,17 @@ pub fn avg_vruntime(states: &[SchedulingState]) -> u64 {
 
     (sum / states.len() as u128) as u64
 }
-/// Select the next thread to run.
+
+/// Select the next thread to run (used by test crate).
 ///
 /// `threads` is a slice of `(State, has_budget)` pairs. Returns the
 /// index of the best candidate, or None if the slice is empty.
-///
-/// Algorithm:
-/// 1. Filter to threads with budget AND eligible (vruntime ≤ avg).
-/// 2. Among those, pick the one with the earliest virtual deadline.
-/// 3. Fallback: if no thread is eligible, pick the thread with the
-///    smallest vruntime (it's the most behind — let it catch up).
+#[allow(dead_code)]
 pub fn select_next(threads: &[(SchedulingState, bool)], avg_vruntime: u64) -> Option<usize> {
     if threads.is_empty() {
         return None;
     }
 
-    // Primary: eligible + has budget → earliest deadline.
     let mut best: Option<(usize, u64)> = None;
 
     for (i, (state, has_budget)) in threads.iter().enumerate() {
@@ -126,7 +121,7 @@ pub fn select_next(threads: &[(SchedulingState, bool)], avg_vruntime: u64) -> Op
 
         let deadline = state.virtual_deadline();
 
-        if best.map_or(true, |(_, d)| deadline < d) {
+        if best.is_none_or(|(_, d)| deadline < d) {
             best = Some((i, deadline));
         }
     }
@@ -135,7 +130,6 @@ pub fn select_next(threads: &[(SchedulingState, bool)], avg_vruntime: u64) -> Op
         return Some(idx);
     }
 
-    // Fallback: no eligible thread. Pick smallest vruntime with budget.
     let mut fallback: Option<(usize, u64)> = None;
 
     for (i, (state, has_budget)) in threads.iter().enumerate() {
@@ -143,7 +137,7 @@ pub fn select_next(threads: &[(SchedulingState, bool)], avg_vruntime: u64) -> Op
             continue;
         }
 
-        if fallback.map_or(true, |(_, v)| state.vruntime < v) {
+        if fallback.is_none_or(|(_, v)| state.vruntime < v) {
             fallback = Some((i, state.vruntime));
         }
     }

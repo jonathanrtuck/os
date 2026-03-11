@@ -189,7 +189,7 @@ fn find_and_parse_dtb(firmware_pa: u64) -> Option<device_tree::DeviceTable> {
     // 2. Post-kernel area (__kernel_end..+2MB) — QEMU typically places DTB after the image.
     // Skip the kernel image itself to avoid false positives.
     let regions = [
-        (paging::RAM_START as u64, paging::RAM_START as u64 + 0x80000),
+        (paging::RAM_START, paging::RAM_START + 0x80000),
         (
             // SAFETY: __kernel_end is a linker-defined symbol marking the end
             // of the kernel image. Taking its address yields a valid VA within
@@ -202,7 +202,7 @@ fn find_and_parse_dtb(firmware_pa: u64) -> Option<device_tree::DeviceTable> {
     ];
 
     for (start, end) in regions {
-        let end = end.min(paging::RAM_END as u64);
+        let end = end.min(paging::RAM_END);
         let mut addr = start;
 
         while addr + 4 <= end {
@@ -339,12 +339,12 @@ fn reclaim_boot_ttbr0() {
 /// Try to parse a DTB at the given physical address. Returns None if the
 /// address is outside RAM or the blob is invalid.
 fn try_parse_dtb_at(pa: u64) -> Option<device_tree::DeviceTable> {
-    if pa < paging::RAM_START as u64 || pa >= paging::RAM_END as u64 {
+    if !(paging::RAM_START..paging::RAM_END).contains(&pa) {
         return None;
     }
 
     let va = memory::phys_to_virt(memory::Pa(pa as usize));
-    let max_len = (paging::RAM_END as u64 - pa) as usize;
+    let max_len = (paging::RAM_END - pa) as usize;
     let len = max_len.min(64 * 1024);
     // SAFETY: Address validated within mapped RAM range.
     let blob = unsafe { core::slice::from_raw_parts(va as *const u8, len) };
@@ -380,8 +380,8 @@ fn write_device_manifest(
         core::ptr::write_volatile(shared_va as *mut u32, count as u32);
 
         // Write each 16-byte device entry starting at offset 8 (8-byte aligned).
-        for i in 0..count {
-            if let Some(ref dev) = devices[i] {
+        for (i, dev) in devices.iter().enumerate().take(count) {
+            if let Some(ref dev) = dev {
                 let base = shared_va.add(8 + i * 16);
 
                 core::ptr::write_volatile(base as *mut u64, dev.pa);
@@ -484,7 +484,7 @@ pub extern "C" fn kernel_fault_handler(
     }
 
     // Walk the stack for return addresses (best-effort backtrace).
-    if sp >= 0xFFFF_0000_0000_0000 && sp < 0xFFFF_0000_5000_0000 {
+    if (0xFFFF_0000_0000_0000..0xFFFF_0000_5000_0000).contains(&sp) {
         serial::panic_puts("\n  stack:");
 
         let sp_ptr = sp as *const u64;
@@ -494,7 +494,7 @@ pub extern "C" fn kernel_fault_handler(
             // to 8 words (64 bytes) for best-effort backtrace diagnostics.
             let val = unsafe { core::ptr::read_volatile(sp_ptr.add(i as usize)) };
 
-            if i < 4 || (val >= 0xFFFF_0000_4000_0000 && val < 0xFFFF_0000_5000_0000) {
+            if i < 4 || (0xFFFF_0000_4000_0000..0xFFFF_0000_5000_0000).contains(&val) {
                 serial::panic_puts(" [");
                 serial::panic_put_hex(i * 8);
                 serial::panic_puts("]=0x");

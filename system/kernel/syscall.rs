@@ -368,7 +368,7 @@ fn sys_dma_alloc(order: u64, pa_out_ptr: u64) -> Result<u64, Error> {
 }
 fn sys_dma_free(va: u64, _order: u64) -> Result<u64, Error> {
     // Validate VA is in the DMA region.
-    if va < paging::DMA_BUFFER_BASE || va >= paging::DMA_BUFFER_END {
+    if !(paging::DMA_BUFFER_BASE..paging::DMA_BUFFER_END).contains(&va) {
         return Err(Error::InvalidArgument);
     }
 
@@ -592,7 +592,7 @@ fn sys_memory_alloc(page_count: u64) -> Result<u64, Error> {
     })
 }
 fn sys_memory_free(va: u64, _page_count: u64) -> Result<u64, Error> {
-    if va < paging::HEAP_BASE || va >= paging::HEAP_END {
+    if !(paging::HEAP_BASE..paging::HEAP_END).contains(&va) {
         return Err(Error::InvalidArgument);
     }
     if va & (paging::PAGE_SIZE - 1) != 0 {

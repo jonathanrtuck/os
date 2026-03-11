@@ -270,10 +270,6 @@ pub fn init() {
 pub fn register_waiter(id: TimerId, thread: ThreadId) {
     TIMERS.lock().waiters.register_waiter(id, thread);
 }
-/// Monotonic tick count since boot.
-pub fn ticks() -> u64 {
-    TICKS.load(Ordering::Relaxed)
-}
 /// Unregister a thread from a timer (cleanup when `wait` returns).
 ///
 /// Safe to call even if the waiter was already cleared by the fire path.

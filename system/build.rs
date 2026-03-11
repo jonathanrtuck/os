@@ -14,7 +14,7 @@
 //! them at runtime. The kernel spawns only init (microkernel pattern).
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// ELFs that init embeds (must be a subset of PROGRAMS names).
@@ -162,7 +162,7 @@ fn rustc_bin(
     rustc: &str,
     src: &PathBuf,
     output: &PathBuf,
-    link_ld: &PathBuf,
+    link_ld: &Path,
     externs: &[(&str, PathBuf)],
     env_vars: &[(&str, String)],
 ) {

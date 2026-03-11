@@ -176,10 +176,8 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         // and all allocations go to the linked-list. We must not route those
         // frees through slab, or its free list gets contaminated with
         // linked-list addresses.
-        if !self.is_in_heap_region(ptr) {
-            if slab::try_free(ptr, layout.size(), layout.align()) {
-                return;
-            }
+        if !self.is_in_heap_region(ptr) && slab::try_free(ptr, layout.size(), layout.align()) {
+            return;
         }
 
         let _guard = ALLOC_LOCK.lock();

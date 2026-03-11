@@ -81,8 +81,5 @@ impl SchedulingContext {
 
 /// Validate budget and period parameters for context creation.
 pub fn validate_params(budget: u64, period: u64) -> bool {
-    budget >= MIN_BUDGET_NS
-        && period >= MIN_PERIOD_NS
-        && period <= MAX_PERIOD_NS
-        && budget <= period
+    budget >= MIN_BUDGET_NS && (MIN_PERIOD_NS..=MAX_PERIOD_NS).contains(&period) && budget <= period
 }

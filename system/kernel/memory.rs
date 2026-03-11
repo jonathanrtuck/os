@@ -156,8 +156,6 @@ pub fn init() {
     let rodata_start = unsafe { &__rodata_start as *const u8 as u64 };
     // SAFETY: Linker-defined symbol — VA of .rodata section end.
     let rodata_end = align_up_u64(unsafe { &__rodata_end as *const u8 as u64 }, PAGE_SIZE);
-    // SAFETY: Linker-defined symbol — VA of .data section start.
-    let data_start = unsafe { &__data_start as *const u8 as u64 };
     // All these are kernel VA. Compute PA of the kernel's 2MB-aligned block.
     let text_start_pa = virt_to_phys(text_start as usize).as_u64();
     let kernel_block_pa = text_start_pa & !(BLOCK_2MB - 1);
@@ -300,13 +298,6 @@ pub fn try_set_kernel_guard_page(va: usize) -> bool {
     tlb_invalidate_all();
 
     true
-}
-/// Panicking wrapper for boot-time guard page setup.
-pub fn set_kernel_guard_page(va: usize) {
-    assert!(
-        try_set_kernel_guard_page(va),
-        "set_kernel_guard_page: out of memory"
-    );
 }
 #[inline(always)]
 pub fn virt_to_phys(va: usize) -> Pa {

@@ -33,7 +33,6 @@ const DEFAULT_HEAP_PAGE_LIMIT: u64 = 8192;
 pub struct AddressSpace {
     l0_pa: Pa,
     asid: Asid,
-    generation: u64,
     owned_frames: Vec<Pa>,
     pub(crate) vmas: VmaList,
     /// Next available VA in the DMA buffer region. Bump-allocated.
@@ -76,13 +75,12 @@ impl AddressSpace {
     /// Create a new empty address space with its own L0 table and ASID.
     ///
     /// Returns `None` if the L0 page table cannot be allocated (OOM).
-    pub fn new(asid: Asid, generation: u64) -> Option<Self> {
+    pub fn new(asid: Asid) -> Option<Self> {
         let l0_pa = page_allocator::alloc_frame()?;
 
         Some(Self {
             l0_pa,
             asid,
-            generation,
             owned_frames: Vec::new(),
             vmas: VmaList::new(),
             next_dma_va: paging::DMA_BUFFER_BASE,
@@ -330,10 +328,6 @@ impl AddressSpace {
             );
         }
     }
-    /// Get the ASID generation (for lazy revalidation on context switch).
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
     /// Handle a page fault at `va`. Returns true if the fault was resolved
     /// (page mapped), false if `va` is not covered by any VMA (kill process).
     pub fn handle_fault(&mut self, va: u64) -> bool {
@@ -545,10 +539,6 @@ impl AddressSpace {
 
         true
     }
-    /// Map a shared page (caller retains ownership of the frame).
-    pub fn map_shared(&mut self, va: u64, pa: u64, attrs: &PageAttrs) -> bool {
-        self.map_inner(va, pa, attrs)
-    }
     /// Map physical pages into the shared memory region (no ownership transfer).
     ///
     /// Bump-allocates VA from `SHARED_MEMORY_BASE..SHARED_MEMORY_END`. The
@@ -575,11 +565,6 @@ impl AddressSpace {
         self.next_shared_va = va + size;
 
         Some(va)
-    }
-    /// Re-assign this address space's ASID (for generation rollover).
-    pub fn reassign_asid(&mut self, asid: Asid, generation: u64) {
-        self.asid = asid;
-        self.generation = generation;
     }
     /// TTBR0 value: physical address of L0 table | (ASID << 48).
     pub fn ttbr0_value(&self) -> u64 {

@@ -97,7 +97,8 @@ impl HandleTable {
 
         Ok(entry.object)
     }
-    /// Look up a handle, verify rights, and return both the object and its rights.
+    /// Look up a handle, verify rights, and return both the object and its rights (used by test crate).
+    #[allow(dead_code)]
     pub fn get_entry(
         &self,
         handle: Handle,

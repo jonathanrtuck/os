@@ -38,7 +38,6 @@ use alloc::vec::Vec;
 const IDLE_THREAD_ID_MARKER: u64 = 0xFF00;
 
 pub const KERNEL_STACK_SIZE: usize = 16 * 1024;
-pub const STACK_SIZE: usize = 64 * 1024;
 /// Sentinel user_index for internal timeout timer entries in the wait set.
 /// Not a valid user handle index (max handles = 16, index fits in 0..15).
 pub(crate) const TIMEOUT_SENTINEL: u8 = 0xFF;
@@ -112,7 +111,6 @@ pub enum ThreadState {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TrustLevel {
     Kernel,
-    Trusted,
     Untrusted,
 }
 
@@ -224,23 +222,6 @@ impl Thread {
     }
 }
 impl Thread {
-    /// Kernel thread — runs at EL1, no address space.
-    /// Panics on OOM (boot-time only — acceptable).
-    pub fn new(id: u64, entry: fn() -> !) -> Box<Self> {
-        let (stack_top, alloc_pa, alloc_order) =
-            alloc_guarded_stack(STACK_SIZE).expect("kernel thread stack: out of memory");
-        let mut thread = Self::base(ThreadId(id), ThreadState::Ready, TrustLevel::Kernel);
-
-        thread.context.elr = entry as *const () as u64;
-        thread.context.sp = stack_top;
-        thread.context.spsr = 0b0101; // EL1h, DAIF clear
-        thread.context.x[30] = thread_exit as *const () as u64;
-        thread.stack_alloc_pa = alloc_pa;
-        thread.stack_alloc_order = alloc_order;
-
-        Box::new(thread)
-    }
-
     /// Common field initialization for all thread constructors.
     fn base(id: ThreadId, state: ThreadState, trust_level: TrustLevel) -> Self {
         // SAFETY: Context is #[repr(C)] with only integer (u64) and float (u128)
@@ -357,7 +338,7 @@ impl super::waitable::WaitableId for ThreadId {
 ///
 /// Returns `None` on OOM (cannot allocate frames or guard page table).
 fn alloc_guarded_stack(min_stack_bytes: usize) -> Option<(u64, u64, usize)> {
-    let stack_pages = (min_stack_bytes + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
+    let stack_pages = min_stack_bytes.div_ceil(PAGE_SIZE as usize);
     let total_pages = stack_pages + 1; // +1 for guard page
     let order = order_for_pages(total_pages);
     let pa = super::page_allocator::alloc_frames(order)?;
@@ -376,7 +357,4 @@ fn alloc_guarded_stack(min_stack_bytes: usize) -> Option<(u64, u64, usize)> {
 /// Smallest buddy allocator order that provides at least `pages` contiguous pages.
 fn order_for_pages(pages: usize) -> usize {
     pages.next_power_of_two().trailing_zeros() as usize
-}
-fn thread_exit() -> ! {
-    super::scheduler::exit_current();
 }

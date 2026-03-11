@@ -57,6 +57,7 @@ struct PerCoreState {
     idle: Option<Box<Thread>>,
 }
 /// Single run queue — linear scan for EEVDF selection.
+#[allow(clippy::vec_box)]
 struct RunQueue {
     ready: Vec<Box<Thread>>,
 }
@@ -65,20 +66,13 @@ struct SchedulingContextSlot {
     context: SchedulingContext,
     ref_count: u32,
 }
+// Box<Thread> is intentional: threads must have stable addresses because
+// TPIDR_EL1 holds a raw pointer to the current thread's Context.
+#[allow(clippy::vec_box)]
 struct State {
     queue: RunQueue,
-    /// Threads waiting on a resource (Blocked state). Moved here from
-    /// cores[].current when a thread blocks; moved back to queue by wake().
     blocked: Vec<Box<Thread>>,
-    /// Threads created but not yet started (two-phase process creation).
-    /// Moved to ready queue by `start_suspended_threads`.
     suspended: Vec<Box<Thread>>,
-    /// Exited threads awaiting deferred drop. We can't drop threads in
-    /// `park_old` because `schedule_inner` is still running on the old
-    /// thread's kernel stack at that point. Freeing the stack while still
-    /// executing on it is a use-after-free. Instead, exited threads are
-    /// collected here and dropped at the start of the NEXT `schedule_inner`
-    /// call, when we're safely on a different thread's stack.
     deferred_drops: Vec<Box<Thread>>,
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
@@ -114,6 +108,7 @@ pub struct HandleCategories {
 }
 
 /// Information collected under the scheduler lock for thread exit.
+#[allow(clippy::large_enum_variant)]
 enum ExitInfo {
     /// Last thread in the process — full cleanup required.
     Last {
@@ -214,32 +209,6 @@ fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSl
         }
     }
 }
-fn find_thread_pid(s: &State, id: ThreadId) -> Option<ProcessId> {
-    for t in &s.queue.ready {
-        if t.id() == id {
-            return t.process_id;
-        }
-    }
-    for t in &s.blocked {
-        if t.id() == id {
-            return t.process_id;
-        }
-    }
-    for t in &s.suspended {
-        if t.id() == id {
-            return t.process_id;
-        }
-    }
-    for core_state in &s.cores {
-        if let Some(t) = &core_state.current {
-            if t.id() == id {
-                return t.process_id;
-            }
-        }
-    }
-
-    None
-}
 /// Check if a thread has budget (unlimited if no scheduling context).
 fn has_budget(thread: &Thread, contexts: &[Option<SchedulingContextSlot>]) -> bool {
     match thread.scheduling.context_id {
@@ -247,7 +216,7 @@ fn has_budget(thread: &Thread, contexts: &[Option<SchedulingContextSlot>]) -> bo
         Some(id) => contexts
             .get(id.0 as usize)
             .and_then(|slot| slot.as_ref())
-            .map_or(true, |slot| slot.context.has_budget()),
+            .is_none_or(|slot| slot.context.has_budget()),
     }
 }
 /// Deferred address space cleanup for killed processes.
@@ -291,6 +260,7 @@ fn now_ns() -> u64 {
 }
 /// Reap exited threads from the run queue and blocked list.
 #[inline(never)]
+#[allow(clippy::vec_box)]
 fn reap_exited(queue: &mut RunQueue, blocked: &mut Vec<Box<Thread>>) {
     queue.ready.retain(|t| !t.is_exited());
     blocked.retain(|t| !t.is_exited());
@@ -325,10 +295,8 @@ fn release_thread_context_ids(s: &mut State, thread: &mut Thread) {
 /// Replenish all scheduling contexts that are due.
 #[inline(never)]
 fn replenish_contexts(contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
-    for slot in contexts.iter_mut() {
-        if let Some(entry) = slot {
-            entry.context = entry.context.maybe_replenish(now);
-        }
+    for entry in contexts.iter_mut().flatten() {
+        entry.context = entry.context.maybe_replenish(now);
     }
 }
 #[inline(never)]
@@ -476,12 +444,12 @@ fn select_best(queue: &RunQueue, contexts: &[Option<SchedulingContextSlot>]) -> 
         if eevdf.is_eligible(avg) {
             let deadline = eevdf.virtual_deadline();
 
-            if best.map_or(true, |(_, d)| deadline < d) {
+            if best.is_none_or(|(_, d)| deadline < d) {
                 best = Some((i, deadline));
             }
         }
 
-        if fallback.map_or(true, |(_, v)| eevdf.vruntime < v) {
+        if fallback.is_none_or(|(_, v)| eevdf.vruntime < v) {
             fallback = Some((i, eevdf.vruntime));
         }
     }
@@ -753,7 +721,7 @@ pub fn create_process(addr_space: Box<super::address_space::AddressSpace>) -> Pr
 
     s.next_process_id += 1;
 
-    let process = Process::new(ProcessId(id), addr_space);
+    let process = Process::new(addr_space);
 
     s.processes.push(Some(process));
 
@@ -874,30 +842,6 @@ pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
     f(thread)
-}
-/// Exit the current kernel thread (no context pointer available).
-///
-/// Only safe for kernel threads that have no resources (no address space,
-/// no handles). User threads must exit via `exit_current_from_syscall` which
-/// performs full cleanup. The thread spins until the next timer tick reaps it.
-#[inline(never)]
-pub fn exit_current() -> ! {
-    {
-        let mut s = STATE.lock();
-        let core = per_core::core_id() as usize;
-        let thread = s.cores[core].current.as_mut().expect("no current thread");
-
-        debug_assert!(
-            thread.process_id.is_none(),
-            "exit_current called on user thread — use exit_current_from_syscall"
-        );
-
-        thread.mark_exited();
-    }
-
-    loop {
-        core::hint::spin_loop();
-    }
 }
 #[inline(never)]
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
@@ -1310,17 +1254,6 @@ pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
     }
 }
 #[inline(never)]
-pub fn spawn(entry: fn() -> !) {
-    let mut s = STATE.lock();
-    let id = s.next_id;
-
-    s.next_id += 1;
-
-    let thread = Thread::new(id, entry);
-
-    s.queue.ready.push(thread);
-}
-#[inline(never)]
 pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> Option<ThreadId> {
     let mut s = STATE.lock();
     let id = s.next_id;
@@ -1331,10 +1264,7 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
         .as_mut()
         .expect("process not found");
     let ttbr0 = process.address_space.ttbr0_value();
-    let mut thread = match Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top) {
-        Some(t) => t,
-        None => return None,
-    };
+    let mut thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top)?;
 
     process.thread_count += 1;
 
@@ -1363,10 +1293,7 @@ pub fn spawn_user_suspended(
         .as_mut()
         .expect("process not found");
     let ttbr0 = process.address_space.ttbr0_value();
-    let mut thread = match Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top) {
-        Some(t) => t,
-        None => return None,
-    };
+    let mut thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top)?;
 
     process.thread_count += 1;
 
@@ -1457,52 +1384,4 @@ pub fn with_process<R>(pid: ProcessId, f: impl FnOnce(&mut Process) -> R) -> Opt
     let process = s.processes.get_mut(pid.0 as usize)?.as_mut()?;
 
     Some(f(process))
-}
-/// Access a process by looking up its thread. Acquires the scheduler lock.
-///
-/// Searches all thread locations (run queue, blocked list, core-current) to
-/// find the thread, gets its process_id, and provides mutable access to the
-/// process. Returns `None` if the thread or process is not found.
-/// Used by `channel::create` which identifies endpoints by ThreadId.
-#[inline(never)]
-pub fn with_process_of_thread<R>(tid: ThreadId, f: impl FnOnce(&mut Process) -> R) -> Option<R> {
-    let mut s = STATE.lock();
-    let pid = find_thread_pid(&s, tid)?;
-    let process = s.processes.get_mut(pid.0 as usize)?.as_mut()?;
-
-    Some(f(process))
-}
-/// Access a thread by ID. Closure receives exclusive access to the thread.
-#[inline(never)]
-pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {
-    let mut s = STATE.lock();
-
-    // Search run queue.
-    for t in s.queue.ready.iter_mut() {
-        if t.id() == id {
-            return f(t);
-        }
-    }
-    // Search blocked list.
-    for t in s.blocked.iter_mut() {
-        if t.id() == id {
-            return f(t);
-        }
-    }
-    // Search suspended list.
-    for t in s.suspended.iter_mut() {
-        if t.id() == id {
-            return f(t);
-        }
-    }
-    // Search current threads on all cores.
-    for core_state in s.cores.iter_mut() {
-        if let Some(t) = &mut core_state.current {
-            if t.id() == id {
-                return f(t);
-            }
-        }
-    }
-
-    panic!("thread not found");
 }

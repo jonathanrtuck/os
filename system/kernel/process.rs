@@ -25,7 +25,6 @@ use alloc::boxed::Box;
 
 /// A process — owns an address space and handle table shared by all its threads.
 pub struct Process {
-    id: ProcessId,
     pub(crate) address_space: Box<AddressSpace>,
     pub(crate) handles: HandleTable,
     /// Number of live threads in this process. Last thread exit triggers cleanup.
@@ -41,19 +40,14 @@ pub struct Process {
 pub struct ProcessId(pub u32);
 
 impl Process {
-    pub fn new(id: ProcessId, address_space: Box<AddressSpace>) -> Self {
+    pub fn new(address_space: Box<AddressSpace>) -> Self {
         Self {
-            id,
             address_space,
             handles: HandleTable::new(),
             thread_count: 0,
             started: false,
             killed: false,
         }
-    }
-
-    pub fn id(&self) -> ProcessId {
-        self.id
     }
 }
 impl super::waitable::WaitableId for ProcessId {
@@ -105,9 +99,9 @@ fn copy_segment_page(file_data: &[u8], file_size: u64, seg_offset: u64, pa: memo
 /// `scheduler::start_suspended_threads` to make it runnable.
 pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &'static str> {
     let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
-    let (asid, generation) = address_space_id::alloc();
+    let (asid, _generation) = address_space_id::alloc();
     let mut addr_space =
-        Box::new(AddressSpace::new(asid, generation).ok_or("out of frames for L0 page table")?);
+        Box::new(AddressSpace::new(asid).ok_or("out of frames for L0 page table")?);
 
     for i in 0..header.ph_count {
         let seg = match executable::load_segment(elf_bytes, &header, i)
@@ -187,74 +181,4 @@ fn setup_stack(addr_space: &mut AddressSpace) -> Result<(), &'static str> {
     }
 
     Ok(())
-}
-/// Parse an ELF binary and spawn a user process with one thread.
-///
-/// Creates a Process (address space + handle table) and one initial Thread.
-/// Returns both IDs. The thread starts in Ready state. Segments use ELF-backed
-/// VMAs for demand paging.
-pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<(ProcessId, ThreadId), &'static str> {
-    let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
-    let (asid, generation) = address_space_id::alloc();
-    let mut addr_space =
-        Box::new(AddressSpace::new(asid, generation).ok_or("out of frames for L0 page table")?);
-
-    for i in 0..header.ph_count {
-        let seg = match executable::load_segment(elf_bytes, &header, i)
-            .map_err(|_| "bad program header")?
-        {
-            Some(seg) => seg,
-            None => continue,
-        };
-        let file_data =
-            executable::segment_data(elf_bytes, &seg).map_err(|_| "segment data out of bounds")?;
-        let attrs = executable::segment_attrs(seg.flags);
-        let base_va = seg.vaddr & !(PAGE_SIZE - 1);
-        let page_count = checked_page_count(seg.mem_size)?;
-        let vma_end = checked_vma_end(base_va, page_count)?;
-        let is_exec = seg.flags & 1 != 0;
-        let is_write = seg.flags & 2 != 0;
-
-        addr_space.vmas.insert(Vma {
-            start: base_va,
-            end: vma_end,
-            readable: true,
-            writable: is_write,
-            executable: is_exec,
-            backing: Backing::Elf {
-                data: file_data,
-                data_len: seg.file_size,
-            },
-        });
-
-        // Eagerly map the first page of code segments (avoids faulting on
-        // first instruction) and all pages of small segments.
-        let eager_pages = if page_count <= 2 { page_count } else { 1 };
-
-        for page in 0..eager_pages {
-            let pa = page_allocator::alloc_frame().ok_or("out of frames for user segment")?;
-
-            copy_segment_page(file_data, seg.file_size, page * PAGE_SIZE, pa);
-
-            if !addr_space.map_page(base_va + page * PAGE_SIZE, pa.as_u64(), &attrs) {
-                page_allocator::free_frame(pa);
-
-                return Err("out of page table frames for ELF segment");
-            }
-        }
-    }
-
-    setup_stack(&mut addr_space)?;
-
-    let process_id = scheduler::create_process(addr_space);
-    let thread_id = match scheduler::spawn_user(process_id, header.entry, USER_STACK_TOP) {
-        Some(tid) => tid,
-        None => {
-            // Same cleanup as create_from_user_elf: remove the orphaned process.
-            scheduler::remove_empty_process(process_id);
-            return Err("out of memory for initial thread stack");
-        }
-    };
-
-    Ok((process_id, thread_id))
 }
