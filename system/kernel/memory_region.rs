@@ -20,7 +20,11 @@ pub enum Backing {
 pub struct Vma {
     pub start: u64,
     pub end: u64, // exclusive
-    // TODO: enforce readable=false for future no-access guard mappings.
+    // NOTE: Guard pages are implemented via gaps in the VMA list (no VMA covers
+    // the guard address → fault → kill), not via readable=false. This field
+    // exists for future use if fine-grained no-access regions are needed within
+    // an otherwise mapped range (e.g., PROT_NONE pages for ASan red-zones).
+    // Currently, readable is always true for all VMAs.
     pub readable: bool,
     pub writable: bool,
     pub executable: bool,

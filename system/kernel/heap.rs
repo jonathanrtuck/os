@@ -57,7 +57,16 @@ impl LinkedListAllocator {
     /// Used by dealloc to route frees to the correct allocator. Pointers
     /// within this region were allocated by the linked-list; pointers outside
     /// (in slab pages from the buddy allocator) were allocated by the slab.
+    ///
+    /// # Safety
+    ///
+    /// Reads `region_start` and `region_end` through `UnsafeCell::get()`.
+    /// Sound without holding ALLOC_LOCK because these fields are write-once:
+    /// set by `init()` during single-threaded boot and never modified after.
+    /// All subsequent reads see the initialized values.
     unsafe fn is_in_heap_region(&self, ptr: *mut u8) -> bool {
+        // SAFETY: region_start and region_end are write-once fields set by
+        // init() during single-threaded boot. No concurrent mutation possible.
         let addr = ptr as usize;
         let rs = *self.region_start.get();
         let re = *self.region_end.get();
@@ -65,6 +74,12 @@ impl LinkedListAllocator {
         addr >= rs && addr < re
     }
 }
+// SAFETY: The GlobalAlloc contract requires that alloc returns a valid pointer
+// or null, and dealloc receives a pointer previously returned by alloc with a
+// compatible layout. Our implementation satisfies this: alloc walks a sorted
+// free list for a first-fit block (returning null on exhaustion), and dealloc
+// validates the pointer is within the heap region before reinserting. All
+// internal state is protected by ALLOC_LOCK (IrqMutex with ticket spinlock).
 unsafe impl GlobalAlloc for LinkedListAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: All pointer dereferences below are sound because:
@@ -230,8 +245,16 @@ pub fn init() {
         static __kernel_end: u8;
     }
 
+    // SAFETY: `__kernel_end` is a linker symbol marking the end of the kernel's
+    // BSS section. Taking its address yields a valid pointer into kernel memory.
+    // We only need the numeric address, not the value at that address.
     let start = align_up(unsafe { &__kernel_end as *const u8 as usize }, MIN_BLOCK);
 
+    // SAFETY: Called once during single-threaded boot (before SMP or interrupts).
+    // `start` points to kernel-mapped memory (TTBR1 via phys_to_virt) after
+    // `__kernel_end`, sized to `HEAP_SIZE`. Writing the FreeBlock header and
+    // UnsafeCell fields is sound because no other code accesses the allocator
+    // until init() returns and ALLOC_LOCK guards all subsequent access.
     unsafe {
         use super::memory;
         let block = start as *mut FreeBlock;

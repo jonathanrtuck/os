@@ -71,6 +71,12 @@ impl SlabCache {
     /// at least 64 bytes (minimum size class ≥ size_of::<FreeNode>())
     /// and was originally carved from a page-aligned slab.
     unsafe fn free(&mut self, ptr: *mut u8) {
+        // SAFETY: Caller guarantees `ptr` was returned by a prior `alloc()`
+        // on this same cache and has not been freed already. The pointer is
+        // at least 64-byte aligned (minimum size class) and points to an
+        // object within a slab page. Writing a FreeNode header (8 bytes) is
+        // within bounds because the minimum object size (64) exceeds
+        // size_of::<FreeNode>() (16 on 64-bit, 8 on 32-bit).
         let node = ptr as *mut FreeNode;
 
         (*node).next = self.free_head;
