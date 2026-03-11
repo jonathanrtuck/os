@@ -1,0 +1,8 @@
+commands:
+  build: cd system && cargo build
+  test: cd system/test && cargo test -- --test-threads=1
+  test_single: cd system/test && cargo test ${TEST_NAME} -- --test-threads=1
+  stress: cd system && ./stress-test.sh 30
+  crash: cd system && ./crash-test.sh 120
+  clippy: cd system && cargo clippy -- -W clippy::all
+  miri: cd system/test && cargo +nightly miri test -- --test-threads=1
