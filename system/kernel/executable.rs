@@ -1,3 +1,10 @@
+// AUDIT: 2026-03-11 — No unsafe blocks (pure safe Rust). 6-category checklist
+// applied. Bug found and fixed: load_segment did not reject file_size > mem_size,
+// which could cause the demand pager to copy excess file data instead of
+// zero-filling. Added bounds check. Stale comment about missing overflow checks
+// removed (segment_data already uses checked_add). Edge cases verified: truncated
+// headers, near-max ph_offset, zero mem_size, overflow in segment_data.
+
 //! Pure functional ELF64 parser for loading userspace binaries.
 //!
 //! Parses the minimum needed to load statically-linked executables: the ELF
@@ -6,8 +13,8 @@
 //! section headers, dynamic linking, and relocations.
 //!
 //! All functions take `&[u8]` and return `Result`. No allocation, no mutation.
-//! Trusts that the ELF comes from the build system (no adversarial input).
-//! A production loader would need overflow-checked arithmetic in segment_data.
+//! Validates ELF structure: magic, class, endianness, machine, type, program
+//! header size, file_size ≤ mem_size per segment, and overflow-checked bounds.
 
 use super::address_space::PageAttrs;
 
@@ -89,12 +96,22 @@ pub fn load_segment(
         return Ok(None);
     }
 
+    let file_size = read_u64_le(data, offset + 32);
+    let mem_size = read_u64_le(data, offset + 40);
+
+    // ELF spec: file_size must not exceed mem_size. A malformed segment
+    // with file_size > mem_size would cause the demand pager to copy
+    // excess file data instead of zero-filling the tail of the segment.
+    if file_size > mem_size {
+        return Err(Error::SegmentOutOfBounds);
+    }
+
     Ok(Some(LoadSegment {
         flags: read_u32_le(data, offset + 4),
         file_offset: read_u64_le(data, offset + 8),
         vaddr: read_u64_le(data, offset + 16),
-        file_size: read_u64_le(data, offset + 32),
-        mem_size: read_u64_le(data, offset + 40),
+        file_size,
+        mem_size,
     }))
 }
 pub fn parse_header(data: &[u8]) -> Result<Header, Error> {

@@ -221,6 +221,86 @@ fn segment_attrs_wx_prefers_x() {
     assert!(matches!(a, address_space::PageAttrs(2))); // user_rx
 }
 #[test]
+fn load_segment_file_size_exceeds_mem_size() {
+    // ELF spec: file_size <= mem_size. A malformed segment with file_size > mem_size
+    // would cause the demand pager to copy excess file data instead of zero-filling.
+    let mut data = minimal_elf_header(0x400000, 64, 1);
+    data.extend(pt_load_phdr(
+        0x400000,
+        120,
+        0x2000, // file_size = 8192
+        0x1000, // mem_size = 4096 (smaller!)
+        5,
+    ));
+    data.extend(vec![0u8; 0x2000]); // padding
+
+    let h = executable::parse_header(&data).unwrap();
+    let result = executable::load_segment(&data, &h, 0);
+
+    assert!(
+        matches!(result, Err(executable::Error::SegmentOutOfBounds)),
+        "file_size > mem_size should be rejected"
+    );
+}
+
+#[test]
+fn load_segment_zero_mem_size() {
+    // A segment with mem_size = 0 should be accepted (no pages needed) or
+    // treated as a no-op. It should NOT panic.
+    let mut data = minimal_elf_header(0x400000, 64, 1);
+    data.extend(pt_load_phdr(0x400000, 120, 0, 0, 5));
+    data.extend(vec![0u8; 64]);
+
+    let h = executable::parse_header(&data).unwrap();
+    let seg = executable::load_segment(&data, &h, 0).unwrap().unwrap();
+
+    assert_eq!(seg.mem_size, 0);
+    assert_eq!(seg.file_size, 0);
+}
+
+#[test]
+fn parse_header_truncated_at_phentsize() {
+    // A file that is exactly 54 bytes (just before ph_ent_size field) should
+    // fail gracefully, not panic on out-of-bounds array access.
+    let data = vec![0u8; 54];
+    // Even though TooSmall catches < 64, let's verify the boundary.
+    assert!(matches!(
+        executable::parse_header(&data),
+        Err(executable::Error::TooSmall)
+    ));
+}
+
+#[test]
+fn segment_data_overflow_file_offset() {
+    // file_offset near u64::MAX should not panic.
+    let data = vec![0u8; 128];
+    let seg = executable::LoadSegment {
+        vaddr: 0,
+        file_offset: u64::MAX - 10,
+        file_size: 20,
+        mem_size: 20,
+        flags: 0,
+    };
+    // The checked_add in segment_data should catch this overflow.
+    assert!(matches!(
+        executable::segment_data(&data, &seg),
+        Err(executable::Error::SegmentOutOfBounds)
+    ));
+}
+
+#[test]
+fn load_segment_ph_offset_near_max() {
+    // ph_offset pointing near the end of data should be caught by bounds check.
+    let data = minimal_elf_header(0, u64::MAX - 100, 1);
+    let h = executable::parse_header(&data).unwrap();
+
+    // index 0 with huge ph_offset → offset computation overflows usize on 64-bit.
+    // The end > data.len() check should catch it.
+    let result = executable::load_segment(&data, &h, 0);
+    assert!(matches!(result, Err(executable::Error::SegmentOutOfBounds)));
+}
+
+#[test]
 fn segment_data_out_of_bounds() {
     let data = vec![0u8; 64];
     let seg = executable::LoadSegment {

@@ -1,3 +1,14 @@
+// AUDIT: 2026-03-11 — 10 unsafe blocks verified, 6-category checklist applied.
+// All unsafe blocks have // SAFETY: comments. Break-before-make (Fix 10)
+// re-verified sound: map_inner zeros entry, DSB, TLBI, DSB before writing new
+// valid descriptor. AddressSpace Drop (Fix 11) re-verified: catches error paths
+// where free_all() was never called, frees TLB + all frames + ASID. VMA edge
+// cases verified: overlapping regions prevented by VmaList sorted insert,
+// zero-size pages handled by page_count computation, max address bounded by
+// region limits. Code quality: upgraded walk_or_create and map_inner to use
+// read_volatile/write_volatile for page table entries (hardware may read
+// concurrently via MMU).
+
 //! Per-process address space (TTBR0 page tables + ASID).
 //!
 //! Each user thread owns an `AddressSpace` with its own L0 table and ASID.
@@ -137,7 +148,7 @@ impl AddressSpace {
                 );
             }
 
-            *entry = (pa & PA_MASK) | DESC_PAGE | attrs.0;
+            core::ptr::write_volatile(entry, (pa & PA_MASK) | DESC_PAGE | attrs.0);
         }
 
         true
@@ -259,6 +270,7 @@ impl AddressSpace {
         let l0_va = memory::phys_to_virt(self.l0_pa) as *const u64;
 
         for i0 in 0..512usize {
+            // SAFETY: See block comment above — l0_va valid, i0 in 0..512.
             let e0 = unsafe { *l0_va.add(i0) };
 
             if e0 & DESC_VALID == 0 {
@@ -269,6 +281,7 @@ impl AddressSpace {
             let l1_va = memory::phys_to_virt(l1_pa) as *const u64;
 
             for i1 in 0..512usize {
+                // SAFETY: l1_va derived from valid L0 entry, i1 in 0..512.
                 let e1 = unsafe { *l1_va.add(i1) };
 
                 if e1 & DESC_VALID == 0 {
@@ -279,6 +292,7 @@ impl AddressSpace {
                 let l2_va = memory::phys_to_virt(l2_pa) as *const u64;
 
                 for i2 in 0..512usize {
+                    // SAFETY: l2_va derived from valid L1 entry, i2 in 0..512.
                     let e2 = unsafe { *l2_va.add(i2) };
 
                     if e2 & DESC_VALID == 0 {
@@ -367,9 +381,12 @@ impl AddressSpace {
             return false;
         }
 
-        // Invalidate any cached fault entry for this VA+ASID. Some ARM
-        // implementations cache "translation fault" results ("negative
+        // SAFETY: Invalidate any cached fault entry for this VA+ASID. Some
+        // ARM implementations cache "translation fault" results ("negative
         // caching"), which would prevent the new mapping from being used.
+        // The ASID is valid (allocated by address_space_id::alloc). The
+        // barrier sequence (DSB ISHST → TLBI → DSB ISH → ISB) ensures
+        // completion across all cores before returning to user code.
         unsafe {
             core::arch::asm!(
                 "dsb ishst",
@@ -660,9 +677,17 @@ impl Drop for AddressSpace {
 /// Walk a table entry; if invalid, allocate a new table and install it.
 /// Returns the VA of the next-level table, or `None` on OOM.
 fn walk_or_create(table_va: *mut u64, idx: usize) -> Option<*mut u64> {
+    // SAFETY: `table_va` points to a valid page table (either the L0 table
+    // allocated in `AddressSpace::new` or a table allocated by a previous
+    // `walk_or_create` call). `idx` is 0..511 (derived from VA bit extraction
+    // in the caller), so `table_va.add(idx)` stays within the 4096-byte table.
+    // We use read_volatile/write_volatile because these are hardware page table
+    // entries that the MMU may read concurrently (if this address space is
+    // active in TTBR0). The new table frame is zeroed by alloc_frame, so all
+    // 512 entries start as invalid (DESC_VALID clear).
     unsafe {
         let entry = table_va.add(idx);
-        let val = *entry;
+        let val = core::ptr::read_volatile(entry);
 
         if val & DESC_VALID != 0 {
             let next_pa = Pa((val & PA_MASK) as usize);
@@ -670,7 +695,7 @@ fn walk_or_create(table_va: *mut u64, idx: usize) -> Option<*mut u64> {
         }
 
         let next_pa = page_allocator::alloc_frame()?;
-        *entry = next_pa.as_u64() | DESC_VALID | DESC_TABLE;
+        core::ptr::write_volatile(entry, next_pa.as_u64() | DESC_VALID | DESC_TABLE);
         Some(memory::phys_to_virt(next_pa) as *mut u64)
     }
 }

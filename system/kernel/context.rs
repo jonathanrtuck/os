@@ -1,3 +1,11 @@
+// AUDIT: 2026-03-11 — No unsafe blocks (pure data struct + const assertions).
+// Register save/restore completeness verified against exception.S:
+// x0-x30 (31 GPRs), SP (EL1), ELR_EL1, SPSR_EL1 (includes PSTATE/DAIF/flags),
+// SP_EL0 (user stack), TPIDR_EL0 (user TLS), q0-q31 (32 NEON/FP regs), FPCR,
+// FPSR. Total 0x330 bytes. All offsets match exception.S CTX_* equates (enforced
+// by compile-time assertions). TPIDR_EL1 not in Context — it points TO the
+// Context/Thread, set on context switch. No bugs found.
+
 //! CPU context saved/restored across exception boundaries.
 //!
 //! Layout must match the CTX_* offsets in exception.S exactly.

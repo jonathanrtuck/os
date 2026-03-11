@@ -1,3 +1,10 @@
+// AUDIT: 2026-03-11 — 1 unsafe block verified (TLB flush on generation
+// rollover, cfg-gated to target_os=none), 6-category checklist applied.
+// ASID wrapping/exhaustion: bitmap search covers 1..=255, exhaustion triggers
+// TLB flush + generation increment + fresh bitmap. Generation is u64 (no
+// practical overflow). Free of ASID 0 is a no-op (guard). Double-free is
+// harmless (clears already-clear bit). No bugs found.
+
 //! ASID allocator with generation-based recycling.
 //!
 //! Allocates ASIDs from 1..255. ASID 0 is reserved (kernel / idle TTBR0).
