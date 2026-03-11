@@ -40,6 +40,8 @@
 //! | 22 | handle_send               | x0=target_handle, x1=source_handle | 0               |
 //! | 23 | process_kill              | x0=handle                          | 0               |
 //! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count | target VA   |
+//! | 25 | memory_alloc              | x0=page_count                           | user VA     |
+//! | 26 | memory_free               | x0=va, x1=page_count                   | 0           |
 //!
 //! # Error codes
 //!
@@ -107,6 +109,8 @@ pub mod nr {
     pub const HANDLE_SEND: u64 = 22;
     pub const PROCESS_KILL: u64 = 23;
     pub const MEMORY_SHARE: u64 = 24;
+    pub const MEMORY_ALLOC: u64 = 25;
+    pub const MEMORY_FREE: u64 = 26;
 }
 
 /// Maximum DMA allocation order (2^10 pages = 4 MiB).
@@ -508,6 +512,35 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
 
         return Err(e);
     }
+
+    Ok(0)
+}
+fn sys_memory_alloc(page_count: u64) -> Result<u64, Error> {
+    if page_count == 0 {
+        return Err(Error::InvalidArgument);
+    }
+
+    scheduler::current_process_do(|process| {
+        process
+            .address_space
+            .map_heap(page_count)
+            .ok_or(Error::OutOfMemory)
+    })
+}
+fn sys_memory_free(va: u64, _page_count: u64) -> Result<u64, Error> {
+    if va < paging::HEAP_BASE || va >= paging::HEAP_END {
+        return Err(Error::InvalidArgument);
+    }
+    if va & (paging::PAGE_SIZE - 1) != 0 {
+        return Err(Error::BadAddress);
+    }
+
+    scheduler::current_process_do(|process| {
+        process
+            .address_space
+            .unmap_heap(va)
+            .ok_or(Error::InvalidArgument)
+    })?;
 
     Ok(0)
 }
@@ -1176,6 +1209,8 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::MEMORY_SHARE => {
             dispatch_syscall!(c, ctx, sys_memory_share(c.x[0], c.x[1], c.x[2]))
         }
+        nr::MEMORY_ALLOC => dispatch_syscall!(c, ctx, sys_memory_alloc(c.x[0])),
+        nr::MEMORY_FREE => dispatch_syscall!(c, ctx, sys_memory_free(c.x[0], c.x[1])),
 
         _ => {
             c.x[0] = Error::UnknownSyscall as i64 as u64;

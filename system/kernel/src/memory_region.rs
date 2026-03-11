@@ -32,6 +32,10 @@ pub struct VmaList {
 }
 
 impl VmaList {
+    pub const fn new() -> Self {
+        Self { vmas: Vec::new() }
+    }
+
     /// Insert a VMA, maintaining sorted order by start address.
     pub fn insert(&mut self, vma: Vma) {
         let pos = self
@@ -68,7 +72,12 @@ impl VmaList {
 
         Some(&self.vmas[idx])
     }
-    pub const fn new() -> Self {
-        Self { vmas: Vec::new() }
+    /// Remove the VMA whose start address matches `start`.
+    ///
+    /// Returns the removed VMA, or None if no VMA starts at that address.
+    pub fn remove(&mut self, start: u64) -> Option<Vma> {
+        let idx = self.vmas.binary_search_by_key(&start, |v| v.start).ok()?;
+
+        Some(self.vmas.remove(idx))
     }
 }

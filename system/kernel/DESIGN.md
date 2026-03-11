@@ -735,6 +735,33 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 ---
 
+### 9.8.1 Userspace Heap Allocation ✅
+
+**Goal:** Allow userspace processes to dynamically allocate anonymous memory. Foundation for `GlobalAlloc` (unlocks `Vec`, `String`, `Box`) and any non-trivial data structure.
+
+**Syscalls:**
+
+| Nr  | Syscall      | Args                 | Returns |
+| --- | ------------ | -------------------- | ------- |
+| 25  | memory_alloc | x0=page_count        | user VA |
+| 26  | memory_free  | x0=va, x1=page_count | 0       |
+
+`memory_alloc` creates an anonymous VMA and bump-allocates VA from the heap region. Pages are NOT eagerly mapped — they are demand-paged on first touch via the existing fault handler (anonymous backing, zero-filled). `memory_free` removes the VMA, walks the page table to find and free any demand-paged physical frames, and invalidates TLB.
+
+**VA region:** `HEAP_BASE` (16 MiB) to `HEAP_END` (256 MiB). Bump-allocated per process (no VA reclamation on free). 240 MiB of heap VA space.
+
+**Per-process budget:** `DEFAULT_HEAP_PAGE_LIMIT` = 8192 pages (32 MiB physical). Prevents a single process from exhausting RAM.
+
+**Why demand paging (not eager):** Unlike DMA buffers (which need PAs for device programming), heap pages have no reason to be physically allocated before use. Demand paging means a process that allocates a 1 MiB buffer but only touches the first page only costs one physical frame. Reuses the existing `handle_fault` → anonymous VMA → zero-fill path.
+
+**Process exit cleanup:** Demand-paged heap frames are tracked in `owned_frames` (via `map_page` in the fault handler). `free_all()` frees all of them. `heap_allocations` Vec is cleared separately.
+
+**Implementation:** `paging.rs` (HEAP_BASE/END), `memory_region.rs` (VmaList::remove), `address_space.rs` (HeapAllocation, next_heap_va, map_heap, unmap_heap, read_and_unmap_page), `syscall.rs` (sys_memory_alloc #25, sys_memory_free #26), `sys` library (memory_alloc, memory_free wrappers).
+
+**Depends on:** Nothing. Builds on existing demand paging infrastructure.
+
+---
+
 ### 9.9 Filesystem COW Kernel Mechanics (Phase 8)
 
 **Goal:** Kernel-level copy-on-write for memory-mapped documents. Editor writes trigger page faults, kernel allocates new pages, filesystem manages on-disk snapshots.
@@ -772,6 +799,8 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 | 22  | handle_send               | Implemented |
 | 23  | process_kill              | Implemented |
 | 24  | memory_share              | Implemented |
+| 25  | memory_alloc              | Implemented |
+| 26  | memory_free               | Implemented |
 
 ---
 

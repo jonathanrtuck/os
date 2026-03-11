@@ -48,7 +48,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **IPC:** Kernel creates channels (shared memory page + signal). Processes communicate by reading/writing raw bytes at agreed offsets. No structured message format yet. The mechanism (channels, shared memory, wait) is foundational; the ad hoc byte layouts are scaffolding.
 
-**Memory model for userspace:** Stack (16 KiB) + static BSS + DMA buffers + shared memory from init. No heap allocator. No `mmap` equivalent. This is the most significant constraint on what can be built above the kernel today.
+**Memory model for userspace:** Stack (16 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` not yet implemented (next step to unlock `Vec`/`String`/`Box`).
 
 ---
 
@@ -255,19 +255,11 @@ Pure throwaway. Demonstrates channel IPC works, nothing more.
 
 These are the things that limit what can be built above the kernel today, ordered by how much they constrain.
 
-### 3.1 No Userspace Heap Allocator ⚠️ Critical
+### 3.1 ~~No Userspace Heap Allocator~~ ✅ Resolved
 
-**The problem:** Userspace has no dynamic allocation. No `Vec`, `String`, `Box`. Memory sources are stack (16 KiB), static BSS (sized at compile time), DMA (for devices), and shared memory (provided by init). There's no `mmap`/`brk` syscall to request more pages.
+**Resolved:** `memory_alloc(page_count)` syscall #25 and `memory_free(va, page_count)` syscall #26 implemented. Demand-paged anonymous pages in the heap VA region (16–256 MiB). Per-process budget: 32 MiB. Wrappers in `sys` library.
 
-**Why it matters:** Any non-trivial data structure needs dynamic memory. A font rasterizer needs variable-size glyph outlines and a glyph cache. A real compositor needs dynamic surface lists. A filesystem service needs buffers.
-
-**Options:**
-
-1. **Bump allocator over static BSS.** Embedded-systems approach — pre-size a large `static mut [u8; N]`, hand out slices from it. No free, no reuse. Works for demos, not sustainable.
-2. **`memory_alloc(pages)` syscall.** Kernel maps anonymous zero-pages into the process at a bump-allocated VA. Pairs with `memory_free`. More foundational — unlocks a proper `GlobalAlloc` implementation in userspace. Moderate kernel work (new syscall + VMA management for anonymous mappings).
-3. **Arena per task.** Allocate a region at process creation, userspace manages it internally. Middle ground.
-
-**Recommendation:** Option 2 is the right long-term investment. Option 1 is acceptable as a stopgap for a specific spike (e.g., TTF rasterizer).
+**Remaining:** Userspace `GlobalAlloc` implementation (a linked-list or bump allocator over `memory_alloc` pages). Once implemented, `Vec`, `String`, `Box` are available to all userspace programs.
 
 ---
 
@@ -394,7 +386,7 @@ Ordered by what unblocks the most, building the happy path first:
 
 1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the drawing library. Zero-copy parser, scanline rasterizer with 4× oversampling, coverage map output. Simple interface: `TrueTypeFont::rasterize(codepoint, size, buffer, scratch) → GlyphMetrics`. 21 tests. Running on bare metal in the compositor.
 2. ~~**Syscall error types**~~ — **Done.** `SyscallError` enum (13 variants) + `SyscallResult<T>` on all 25 syscalls + `print()` convenience. All 6 userspace binaries migrated. Eliminated raw `i64` returns and ad-hoc `< 0` checks.
-3. **Userspace memory allocation** (§3.1) — `memory_alloc`/`memory_free` syscalls + userspace `GlobalAlloc`. Unlocks `Vec`, `String`, real Rust crates. Critical constraint.
+3. ~~**Userspace memory allocation**~~ (§3.1) — **Syscalls done.** `memory_alloc`/`memory_free` (#25/#26) implemented. Remaining: userspace `GlobalAlloc` over the new syscalls.
 4. **Structured IPC** (§3.5) — replace ad hoc byte offsets with typed messages. Unblocks adding new message types without cross-process breakage.
 5. **Input driver** (§3.3) — unblocks interactive demos. virtio-input follows the same pattern as existing drivers.
 6. **Event loop** (§3.4) — convert compositor or init to loop on `wait`. Unblocks continuous rendering.

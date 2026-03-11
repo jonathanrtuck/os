@@ -235,6 +235,68 @@ fn elf_backing_preserved() {
     }
 }
 
+// --- remove ---
+
+#[test]
+fn remove_existing_vma() {
+    let mut list = VmaList::new();
+
+    list.insert(anon_vma(0x1000, 0x2000));
+
+    let removed = list.remove(0x1000);
+
+    assert!(removed.is_some());
+    assert_eq!(removed.unwrap().start, 0x1000);
+    assert!(list.lookup(0x1000).is_none());
+}
+
+#[test]
+fn remove_nonexistent_returns_none() {
+    let mut list = VmaList::new();
+
+    list.insert(anon_vma(0x1000, 0x2000));
+
+    assert!(list.remove(0x3000).is_none());
+    // Original VMA still present.
+    assert!(list.lookup(0x1000).is_some());
+}
+
+#[test]
+fn remove_middle_vma_preserves_others() {
+    let mut list = VmaList::new();
+
+    list.insert(anon_vma(0x1000, 0x2000));
+    list.insert(anon_vma(0x3000, 0x4000));
+    list.insert(anon_vma(0x5000, 0x6000));
+
+    let removed = list.remove(0x3000).unwrap();
+
+    assert_eq!(removed.start, 0x3000);
+    // Others still present.
+    assert!(list.lookup(0x1000).is_some());
+    assert!(list.lookup(0x5000).is_some());
+    // Removed range is now a gap.
+    assert!(list.lookup(0x3000).is_none());
+}
+
+#[test]
+fn remove_from_empty_list() {
+    let mut list = VmaList::new();
+
+    assert!(list.remove(0x1000).is_none());
+}
+
+#[test]
+fn remove_by_start_not_middle() {
+    let mut list = VmaList::new();
+
+    list.insert(anon_vma(0x1000, 0x3000));
+
+    // Can only remove by exact start address, not mid-range.
+    assert!(list.remove(0x2000).is_none());
+    assert!(list.lookup(0x1000).is_some());
+}
+
 // --- permissions ---
 
 #[test]

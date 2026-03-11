@@ -16,6 +16,8 @@ use alloc::vec::Vec;
 
 /// Default per-process DMA page budget (8192 pages = 32 MiB).
 const DEFAULT_DMA_PAGE_LIMIT: u64 = 8192;
+/// Default per-process heap page budget (8192 pages = 32 MiB).
+const DEFAULT_HEAP_PAGE_LIMIT: u64 = 8192;
 
 pub struct AddressSpace {
     l0_pa: Pa,
@@ -37,11 +39,23 @@ pub struct AddressSpace {
     next_channel_shm_va: u64,
     /// Next available VA in the shared memory region. Bump-allocated.
     next_shared_va: u64,
+    /// Next available VA in the heap region. Bump-allocated.
+    next_heap_va: u64,
+    /// Active heap allocations (for memory_free and process exit cleanup).
+    heap_allocations: Vec<HeapAllocation>,
+    /// Number of heap pages currently allocated by this process.
+    heap_pages_allocated: u64,
+    /// Maximum heap pages this process may allocate.
+    heap_pages_limit: u64,
 }
 pub(crate) struct DmaAllocation {
     va: u64,
     pa: Pa,
     order: u8,
+}
+pub(crate) struct HeapAllocation {
+    va: u64,
+    page_count: u64,
 }
 pub struct PageAttrs(u64);
 
@@ -63,6 +77,10 @@ impl AddressSpace {
             next_device_va: paging::DEVICE_MMIO_BASE,
             next_channel_shm_va: paging::CHANNEL_SHM_BASE,
             next_shared_va: paging::SHARED_MEMORY_BASE,
+            next_heap_va: paging::HEAP_BASE,
+            heap_allocations: Vec::new(),
+            heap_pages_allocated: 0,
+            heap_pages_limit: DEFAULT_HEAP_PAGE_LIMIT,
         }
     }
 
@@ -108,6 +126,86 @@ impl AddressSpace {
             *entry = (pa & PA_MASK) | DESC_PAGE | attrs.0;
         }
     }
+    /// Read the PA from an L3 entry and clear it. Returns None if unmapped.
+    ///
+    /// Does NOT invalidate TLB — caller must do a bulk invalidate after
+    /// unmapping all pages in a region.
+    fn read_and_unmap_page(&self, va: u64) -> Option<Pa> {
+        let l0_va = memory::phys_to_virt(self.l0_pa) as *const u64;
+
+        // SAFETY: Same page table walk as unmap_page_inner. We read L0-L2
+        // entries and read+write-volatile the L3 entry.
+        unsafe {
+            let e0 = *l0_va.add(Self::l0_idx(va));
+
+            if e0 & DESC_VALID == 0 {
+                return None;
+            }
+
+            let l1_va = memory::phys_to_virt(Pa((e0 & PA_MASK) as usize)) as *const u64;
+            let e1 = *l1_va.add(Self::l1_idx(va));
+
+            if e1 & DESC_VALID == 0 {
+                return None;
+            }
+
+            let l2_va = memory::phys_to_virt(Pa((e1 & PA_MASK) as usize)) as *const u64;
+            let e2 = *l2_va.add(Self::l2_idx(va));
+
+            if e2 & DESC_VALID == 0 {
+                return None;
+            }
+
+            let l3_va = memory::phys_to_virt(Pa((e2 & PA_MASK) as usize)) as *mut u64;
+            let entry = l3_va.add(Self::l3_idx(va));
+            let e3 = core::ptr::read_volatile(entry);
+
+            if e3 & DESC_VALID == 0 {
+                return None;
+            }
+
+            let pa = Pa((e3 & PA_MASK) as usize);
+
+            core::ptr::write_volatile(entry, 0);
+
+            Some(pa)
+        }
+    }
+    /// Clear a single L3 page table entry (write 0). Does not invalidate TLB —
+    /// caller is responsible for a bulk invalidate after unmapping all pages.
+    fn unmap_page_inner(&self, va: u64) {
+        let l0_va = memory::phys_to_virt(self.l0_pa) as *const u64;
+
+        // SAFETY: Page table pointers are valid kernel-mapped memory allocated
+        // by walk_or_create during the original map. We only read L0-L2 entries
+        // and write-volatile the L3 entry to zero (invalidate).
+        unsafe {
+            let e0 = *l0_va.add(Self::l0_idx(va));
+
+            if e0 & DESC_VALID == 0 {
+                return;
+            }
+
+            let l1_va = memory::phys_to_virt(Pa((e0 & PA_MASK) as usize)) as *const u64;
+            let e1 = *l1_va.add(Self::l1_idx(va));
+
+            if e1 & DESC_VALID == 0 {
+                return;
+            }
+
+            let l2_va = memory::phys_to_virt(Pa((e1 & PA_MASK) as usize)) as *const u64;
+            let e2 = *l2_va.add(Self::l2_idx(va));
+
+            if e2 & DESC_VALID == 0 {
+                return;
+            }
+
+            let l3_va = memory::phys_to_virt(Pa((e2 & PA_MASK) as usize)) as *mut u64;
+            let entry = l3_va.add(Self::l3_idx(va));
+
+            core::ptr::write_volatile(entry, 0);
+        }
+    }
 
     pub fn asid(&self) -> u8 {
         self.asid.0
@@ -119,11 +217,18 @@ impl AddressSpace {
     /// Caller must call `invalidate_tlb()` before this. Freeing frames while
     /// stale TLB entries reference them produces use-after-free.
     pub fn free_all(&mut self) {
+        // Clear heap allocations (physical frames are in owned_frames, freed below).
+        self.heap_allocations.clear();
+
+        self.heap_pages_allocated = 0;
+
         // Free DMA buffer allocations (physically contiguous, multi-page).
         for alloc in self.dma_allocations.drain(..) {
             page_allocator::free_frames(alloc.pa, alloc.order as usize);
         }
+
         self.dma_pages_allocated = 0;
+
         // Free owned user pages (code, data, stack).
         for &pa in &self.owned_frames {
             page_allocator::free_frame(pa);
@@ -340,6 +445,42 @@ impl AddressSpace {
 
         Some(va)
     }
+    /// Allocate anonymous heap pages (demand-paged on first touch).
+    ///
+    /// Creates an anonymous VMA in the heap VA region. Pages are NOT eagerly
+    /// mapped — the fault handler allocates and maps them on first access.
+    /// Returns the user VA on success, or None if the heap VA space or budget
+    /// is exhausted.
+    pub fn map_heap(&mut self, page_count: u64) -> Option<u64> {
+        let size = page_count * PAGE_SIZE;
+        let va = self.next_heap_va;
+
+        if va + size > paging::HEAP_END {
+            return None;
+        }
+        if self.heap_pages_allocated + page_count > self.heap_pages_limit {
+            return None;
+        }
+
+        // Create an anonymous VMA so the demand paging fault handler knows
+        // this range is valid and should be zero-filled on first touch.
+        self.vmas.insert(super::memory_region::Vma {
+            start: va,
+            end: va + size,
+            readable: true,
+            writable: true,
+            executable: false,
+            backing: super::memory_region::Backing::Anonymous,
+        });
+
+        self.next_heap_va = va + size;
+        self.heap_pages_allocated += page_count;
+
+        self.heap_allocations
+            .push(HeapAllocation { va, page_count });
+
+        Some(va)
+    }
     /// Map a page and take ownership of the frame (freed on cleanup).
     ///
     /// Must not be called twice for the same PA — that would cause a double-free
@@ -414,40 +555,36 @@ impl AddressSpace {
 
         Some((alloc.pa, alloc.order as usize))
     }
-    /// Clear a single L3 page table entry (write 0). Does not invalidate TLB —
-    /// caller is responsible for a bulk invalidate after unmapping all pages.
-    fn unmap_page_inner(&self, va: u64) {
-        let l0_va = memory::phys_to_virt(self.l0_pa) as *const u64;
+    /// Free a heap allocation by its start VA.
+    ///
+    /// Removes the VMA, unmaps any demand-paged pages (freeing physical frames),
+    /// and invalidates TLB entries. Returns the page count on success.
+    pub fn unmap_heap(&mut self, va: u64) -> Option<u64> {
+        let idx = self.heap_allocations.iter().position(|a| a.va == va)?;
+        let alloc = self.heap_allocations.swap_remove(idx);
 
-        // SAFETY: Page table pointers are valid kernel-mapped memory allocated
-        // by walk_or_create during the original map. We only read L0-L2 entries
-        // and write-volatile the L3 entry to zero (invalidate).
-        unsafe {
-            let e0 = *l0_va.add(Self::l0_idx(va));
+        self.heap_pages_allocated -= alloc.page_count;
 
-            if e0 & DESC_VALID == 0 {
-                return;
+        // Remove the VMA so future accesses to this range fault-to-kill.
+        self.vmas.remove(va);
+
+        // Walk page tables and free any pages that were demand-paged.
+        for i in 0..alloc.page_count {
+            let page_va = va + i * PAGE_SIZE;
+
+            if let Some(pa) = self.read_and_unmap_page(page_va) {
+                // Remove from owned_frames and free.
+                if let Some(idx) = self.owned_frames.iter().position(|&p| p == pa) {
+                    self.owned_frames.swap_remove(idx);
+                }
+
+                page_allocator::free_frame(pa);
             }
-
-            let l1_va = memory::phys_to_virt(Pa((e0 & PA_MASK) as usize)) as *const u64;
-            let e1 = *l1_va.add(Self::l1_idx(va));
-
-            if e1 & DESC_VALID == 0 {
-                return;
-            }
-
-            let l2_va = memory::phys_to_virt(Pa((e1 & PA_MASK) as usize)) as *const u64;
-            let e2 = *l2_va.add(Self::l2_idx(va));
-
-            if e2 & DESC_VALID == 0 {
-                return;
-            }
-
-            let l3_va = memory::phys_to_virt(Pa((e2 & PA_MASK) as usize)) as *mut u64;
-            let entry = l3_va.add(Self::l3_idx(va));
-
-            core::ptr::write_volatile(entry, 0);
         }
+
+        self.invalidate_tlb();
+
+        Some(alloc.page_count)
     }
 }
 impl PageAttrs {

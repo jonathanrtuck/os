@@ -38,6 +38,10 @@ pub const USER_STACK_TOP: u64 = 0x0000_0000_8000_0000; // 2 GiB
 pub const USER_STACK_PAGES: u64 = 4; // 16 KiB
 pub const USER_STACK_VA: u64 = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
 
+// Heap region: anonymous memory for userspace allocators.
+pub const HEAP_BASE: u64 = 0x0000_0000_0100_0000; // 16 MiB
+pub const HEAP_END: u64 = 0x0000_0000_1000_0000; // 256 MiB (abuts DMA region)
+
 // Guard page: USER_STACK_VA - PAGE_SIZE is intentionally unmapped.
 // Stack overflow triggers a data abort → user_fault_handler terminates the process.
 pub const DMA_BUFFER_BASE: u64 = 0x0000_0000_1000_0000; // 256 MiB

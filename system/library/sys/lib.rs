@@ -114,6 +114,8 @@ mod nr {
     pub const HANDLE_SEND: u64 = 22;
     pub const PROCESS_KILL: u64 = 23;
     pub const MEMORY_SHARE: u64 = 24;
+    pub const MEMORY_ALLOC: u64 = 25;
+    pub const MEMORY_FREE: u64 = 26;
 }
 
 // ---------------------------------------------------------------------------
@@ -301,6 +303,27 @@ pub fn interrupt_register(irq: u32) -> SyscallResult<u8> {
     let raw = unsafe { syscall1(nr::INTERRUPT_REGISTER, irq as u64) as i64 };
 
     result(raw).map(|v| v as u8)
+}
+/// Allocate anonymous heap memory (demand-paged, zero-filled on first touch).
+///
+/// Returns the user VA of the start of the allocated region. The region is
+/// `page_count * 4096` bytes. Pages are not physically allocated until touched.
+pub fn memory_alloc(page_count: u64) -> SyscallResult<usize> {
+    let raw = unsafe { syscall1(nr::MEMORY_ALLOC, page_count) as i64 };
+
+    result(raw).map(|v| v as usize)
+}
+/// Free a heap allocation previously obtained from `memory_alloc`.
+///
+/// `va` must be the value returned by `memory_alloc`. Frees all physical
+/// pages that were demand-paged in the region and reclaims the virtual
+/// address range.
+pub fn memory_free(va: usize, page_count: u64) -> SyscallResult<()> {
+    let raw = unsafe { syscall2(nr::MEMORY_FREE, va as u64, page_count) as i64 };
+
+    result(raw)?;
+
+    Ok(())
 }
 /// Map physical pages into a target process's shared memory region.
 ///
