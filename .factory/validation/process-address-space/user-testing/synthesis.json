@@ -1,0 +1,22 @@
+{
+  "milestone": "process-address-space",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-PROC-001",
+    "VAL-PROC-002",
+    "VAL-PROC-003",
+    "VAL-PROC-004",
+    "VAL-PROC-005"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}
