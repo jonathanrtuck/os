@@ -514,3 +514,152 @@ fn rights_contains() {
     assert!(!Rights::WRITE.contains(Rights::READ));
     assert!(Rights::READ.contains(Rights::READ));
 }
+
+// --- Audit: handle lifecycle (channel-handle-audit) ---
+
+#[test]
+fn use_after_close_returns_invalid() {
+    // Closing a handle and then getting it returns InvalidHandle.
+    // Verifies the handle lifecycle: create → use → close → use-after-close.
+    let mut t = HandleTable::new();
+    let h = t.insert(ch(42), Rights::READ_WRITE).unwrap();
+
+    // Use the handle.
+    assert!(t.get(h, Rights::READ).is_ok());
+
+    // Close the handle.
+    t.close(h).unwrap();
+
+    // Use after close — must return InvalidHandle.
+    let err = t.get(h, Rights::READ).unwrap_err();
+
+    assert!(matches!(err, HandleError::InvalidHandle));
+}
+
+#[test]
+fn close_and_reinsert_at_same_slot() {
+    // Close a handle and reinsert at the same slot via insert_at.
+    // Verifies clean slot reuse.
+    let mut t = HandleTable::new();
+
+    t.insert(ch(1), Rights::READ).unwrap();
+
+    t.close(Handle(0)).unwrap();
+    t.insert_at(Handle(0), ch(2), Rights::READ_WRITE).unwrap();
+
+    let obj = t.get(Handle(0), Rights::READ).unwrap();
+
+    assert!(matches!(obj, HandleObject::Channel(ChannelId(2))));
+}
+
+#[test]
+fn insert_at_max_slot() {
+    // Insert at the highest possible slot (255).
+    let mut t = HandleTable::new();
+
+    t.insert_at(Handle(255), ch(99), Rights::READ_WRITE)
+        .unwrap();
+
+    let obj = t.get(Handle(255), Rights::READ).unwrap();
+
+    assert!(matches!(obj, HandleObject::Channel(ChannelId(99))));
+}
+
+#[test]
+fn get_entry_returns_correct_rights() {
+    // get_entry should return both the object and its rights.
+    let mut t = HandleTable::new();
+
+    t.insert(ch(5), Rights::READ).unwrap();
+
+    let (obj, rights) = t.get_entry(Handle(0), Rights::READ).unwrap();
+
+    assert!(matches!(obj, HandleObject::Channel(ChannelId(5))));
+    assert!(rights.contains(Rights::READ));
+    assert!(!rights.contains(Rights::WRITE));
+}
+
+#[test]
+fn get_entry_insufficient_rights() {
+    let mut t = HandleTable::new();
+
+    t.insert(ch(5), Rights::READ).unwrap();
+
+    let err = t.get_entry(Handle(0), Rights::WRITE).unwrap_err();
+
+    assert!(matches!(err, HandleError::InsufficientRights));
+}
+
+#[test]
+fn drain_after_close_all() {
+    // Close all handles then drain — should yield nothing.
+    let mut t = HandleTable::new();
+
+    t.insert(ch(1), Rights::READ).unwrap();
+    t.insert(ch(2), Rights::READ).unwrap();
+
+    t.close(Handle(0)).unwrap();
+    t.close(Handle(1)).unwrap();
+
+    let items: Vec<_> = t.drain().collect();
+
+    assert!(items.is_empty());
+}
+
+#[test]
+fn insert_fills_gaps_from_close() {
+    // After closing a middle slot, insert should reuse the lowest free slot.
+    let mut t = HandleTable::new();
+
+    t.insert(ch(0), Rights::READ).unwrap(); // slot 0
+    t.insert(ch(1), Rights::READ).unwrap(); // slot 1
+    t.insert(ch(2), Rights::READ).unwrap(); // slot 2
+
+    t.close(Handle(1)).unwrap(); // free slot 1
+
+    let h = t.insert(ch(99), Rights::READ).unwrap();
+
+    assert_eq!(h.0, 1, "should reuse slot 1");
+}
+
+#[test]
+fn full_table_drain_and_refill() {
+    // Fill table to capacity, drain all, then refill. Verifies complete
+    // lifecycle: fill → drain → refill.
+    let mut t = HandleTable::new();
+
+    for i in 0..256u32 {
+        t.insert(ch(i), Rights::READ).unwrap();
+    }
+
+    let items: Vec<_> = t.drain().collect();
+
+    assert_eq!(items.len(), 256);
+
+    // Table is now empty — can insert again.
+    for i in 0..256u32 {
+        t.insert(ch(i + 1000), Rights::WRITE).unwrap();
+    }
+
+    // Verify first and last.
+    assert!(matches!(
+        t.get(Handle(0), Rights::WRITE).unwrap(),
+        HandleObject::Channel(ChannelId(1000))
+    ));
+    assert!(matches!(
+        t.get(Handle(255), Rights::WRITE).unwrap(),
+        HandleObject::Channel(ChannelId(1255))
+    ));
+}
+
+#[test]
+fn read_does_not_satisfy_read_write() {
+    // READ alone does not satisfy READ_WRITE requirement.
+    assert!(!Rights::READ.contains(Rights::READ_WRITE));
+}
+
+#[test]
+fn write_does_not_satisfy_read_write() {
+    // WRITE alone does not satisfy READ_WRITE requirement.
+    assert!(!Rights::WRITE.contains(Rights::READ_WRITE));
+}

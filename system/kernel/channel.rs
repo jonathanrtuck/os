@@ -1,3 +1,10 @@
+// AUDIT: 2026-03-11 — 0 unsafe blocks (all safe Rust under IrqMutex). 6-category
+// checklist applied. Found: closed_count could exceed 2 on redundant close_endpoint
+// calls, risking double-free of shared pages. Fixed with early-return guard when
+// closed_count >= 2. Close-while-blocked-reader race verified correct (two-phase wake
+// pattern). Signal on half-closed channel is harmless. Shared memory pages freed
+// exactly once when both endpoints close. Lock ordering (channel → scheduler) verified.
+
 //! IPC channels — shared memory with signal/wait notification.
 //!
 //! A channel has two endpoints, each identified by a unique ChannelId.
@@ -90,6 +97,12 @@ pub fn close_endpoint(id: ChannelId) {
         let mut s = STATE.lock();
         let ch_idx = channel_index(id);
         let ch = &mut s.channels[ch_idx];
+
+        // Already fully closed — prevent double-free of shared pages.
+        if ch.closed_count >= 2 {
+            return;
+        }
+
         let ep = endpoint_index(id);
         let peer_ep = 1 - ep;
 

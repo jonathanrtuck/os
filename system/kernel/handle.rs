@@ -1,3 +1,12 @@
+// AUDIT: 2026-03-11 — 0 unsafe blocks (pure safe Rust). 6-category checklist applied.
+// Handle lifecycle verified: create returns first free slot, close clears slot and
+// returns (object, rights), use-after-close returns InvalidHandle, double-close returns
+// InvalidHandle. Table growth: fixed 256 slots, insert returns TableFull when exhausted.
+// Concurrent access: table is per-process, accessed only under scheduler lock — no
+// data race possible. insert_at for rollback semantics verified correct (SlotOccupied
+// on conflict). drain iterator correctly yields all occupied slots and clears table.
+// No bugs found.
+
 //! Per-process handle table.
 //!
 //! Each user process owns a handle table — a fixed-size array of slots.
