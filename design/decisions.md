@@ -250,22 +250,24 @@ _Tier 2. Depends on: File understanding, view/edit distinction, complexity philo
 
 _Tier 3. Depends on: Editor model. Feeds into: Undo/history, collaboration, compound documents._ **SETTLED.**
 
-**Decision:** Modal tools with immediate writes. The OS provides a thin operation-boundary protocol; the filesystem (COW) handles versioning and undo.
+**Decision:** Modal tools with immediate writes. The OS provides a thin operation-boundary protocol; the filesystem (COW) handles versioning and undo. Editors have read-only access to documents; all writes go through the OS service.
 
 **The protocol:**
 
-- Editor calls `beginOperation(document, description)`.
-- Editor modifies the file through OS file APIs.
-- Editor calls `endOperation()`.
-- The OS snapshots at operation boundaries (COW makes this cheap).
+- Editor sends write requests to the OS service via IPC.
+- The OS service applies writes to the document file (it is the sole writer).
+- The OS service takes a snapshot at operation boundaries (COW makes this cheap).
 - The operation log records: which editor, when, which document, description.
+- Operation boundaries are determined automatically by the OS service (e.g., idle-gap detection between writes). Editors may optionally send `beginOperation`/`endOperation` hints to improve undo granularity (group related writes, attach descriptions), but this is an upgrade, not a requirement.
 
 **Key commitments:**
 
 - **Tools are modal.** One active editor per document at a time. The "pen on desk" metaphor — put one down, pick up another. This eliminates concurrent-editor composition as a protocol concern.
-- **No pending changes.** Operations write to the file immediately. There is no working state vs persisted state. No "save." Every edit is durable the moment it happens.
+- **Editors are read-only consumers.** Editors receive a read-only memory mapping of the document for fast zero-copy reads. All modifications go through the OS service via IPC write requests. This makes undo automatic and non-circumventable — the OS service controls every write and decides when to snapshot. "Never make the wrong path the happy path": a lazy editor that just sends write requests without operation hints still gets correct undo behavior.
+- **No pending changes.** The OS service writes immediately. There is no working state vs persisted state. No "save." Every edit is durable the moment it happens.
 - **Undo is global and sequential.** The OS walks the operation log backward regardless of which editor produced each operation. COW filesystem restores the previous version. The originating editor doesn't need to be active.
 - **The OS is semantically ignorant.** It doesn't understand what operations mean — just tracks boundaries, ordering, and attribution. Simple connective tissue.
+- **No file locking.** Multiple data sources (editors, network services) may send writes for the same document, but the OS service event loop serializes them. One writer, sequential processing.
 
 **Upgrade path for selective undo and collaboration:** Content-type handlers (leaf nodes) can optionally provide rebase logic — adjusting later operations when earlier ones are removed or concurrent operations arrive. This is the same machinery needed for both selective undo and multi-user collaboration. Text rebasing is a solved problem (OT/CRDTs). Audio/video (1D time-axis) are structurally similar. Images (2D regions) are less proven but tractable. Without a handler, a content type gracefully degrades to sequential-only undo.
 
@@ -415,15 +417,17 @@ Every document is a point in this three-dimensional space. A slide deck = spatia
 
 **Interop:** Translators (leaf nodes) convert between internal representation and external formats at import/export boundaries. Import .pptx → extract content as files, generate manifest with spatial + temporal layout. Export to .pptx → pack manifest + files into pptx structure. Translation is inherently lossy. New format support = new translator; the OS doesn't change.
 
+**Settled sub-decisions (2026-03-11):**
+
+- **Referenced vs owned parts: copy semantics.** Embedding content in a compound document creates an independent copy. No reference tracking, no broken links, no cascading deletes. COW at the filesystem level means copies share physical blocks until they diverge — logical independence with physical efficiency. The original document's ID is stored as provenance metadata, enabling an explicit "update to latest" action (user-initiated pull, not automatic push). One-directional: compound knows about original, original doesn't know about compound.
+- **COW atomicity for multi-part documents: solved by sole-writer architecture.** The OS service is the sole writer to all document files. An edit on a compound document that touches multiple files (manifest + content) is simply sequential writes by the OS service, followed by a snapshot. No multi-file transaction mechanism needed in the filesystem.
+
 **Remaining sub-decisions:**
 
-- What happens when a referenced content file is moved or deleted?
 - How does the user create/author multi-part documents? (Interaction model question)
-- **Referenced vs owned parts.** A slideshow might reference independent photos (shared, survive deletion of the document) or contain text blocks that only exist within it (owned, deleted with the document). Is this a property of the reference, a user choice, or two distinct relationship types?
 - **Mimetype of the whole (partially resolved).** Imported documents retain their original external mimetype as metadata. OS-native documents get custom OS mimetypes (e.g., `application/x-os-presentation`). The document-level mimetype drives editor binding. On export, user selects target format; OS pre-selects original mimetype where available. Remaining: systematic IANA mimetype → OS document type mapping; naming convention for OS-native mimetypes; how simple documents' mimetypes relate to their content file's mimetype.
 - **Manifest format.** Internal to the OS, no external interop requirement. Binary for performance or text for debuggability. Leaf-node decision — design the interface, choose format later.
-- **COW atomicity for multi-part documents.** An edit operation on a multi-part document might touch multiple content files. The `endOperation` snapshot needs document-level atomicity, not just file-level. The OS service coordinates this since it manages both the edit protocol and the filesystem interface.
-- **Filesystem organization of manifests and content files.** Users don't see paths. The OS is free to organize storage however it wants: content-addressable, flat with UUIDs, by mimetype, etc. Connects to filesystem COW design (Decision #16).
+- **Filesystem organization of manifests and content files.** Users don't see paths. The OS is free to organize storage however it wants: content-addressable, flat with UUIDs, by mimetype, etc. Connects to filesystem COW design (Decision #16). Internal namespace is a pure implementation detail — nobody outside the OS service sees it.
 - **Retention policies.** All documents are persistent, subject to retention policies for cleanup. Questions: what are the default retention tiers (permanent, 30-day, 7-day, etc.)? How does the user configure retention per document type? How does retention interact with COW snapshot pruning (same mechanism or layered)? What about storage pressure — does the OS aggressively prune low-retention documents when storage is low?
 
 ---
@@ -495,7 +499,7 @@ This decision is being resolved incrementally through a bare-metal research spik
 
 ### Open sub-decisions
 
-**Filesystem COW design.** Research complete (see `design/research-cow-filesystems.md`). Placement decided (userspace service). On-disk format not yet designed. Key requirements: birth time in block pointers (non-negotiable for efficient snapshots), per-document snapshot scoping, `beginOp`/`endOp` map to COW transaction boundaries, efficient pruning (ZFS-style dead lists). Open sub-questions: snapshot naming/addressing, pruning policy, compound document atomicity, page cache placement (kernel-managed vs. filesystem-managed), interaction with memory-mapped I/O.
+**Filesystem COW design.** Research complete (see `design/research-cow-filesystems.md`). Placement decided (userspace service). FileStore interface designed (2026-03-11) — 12 operations, files addressed by opaque IDs, no paths/permissions/locking/links. On-disk format deferred via prototype-on-host strategy: implement the FileStore interface against macOS during prototyping (regular files + file copies for snapshots + mmap), build the real COW filesystem later once the interface is proven. Key requirements for eventual real implementation: birth time in block pointers (non-negotiable for efficient snapshots), per-document snapshot scoping, efficient pruning (ZFS-style dead lists). Compound document atomicity resolved by sole-writer architecture (OS service sequences writes, no multi-file FS transactions needed). Open sub-questions: snapshot naming/addressing, pruning policy, page cache placement (kernel-managed vs. filesystem-managed), snapshot scope (per-document vs global vs time-correlated — punted, doesn't block interface).
 
 ### Considered and rejected
 

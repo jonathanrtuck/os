@@ -24,11 +24,14 @@ Read `system/kernel/DESIGN.md` sections relevant to the files being audited. Und
 ### Step 3: Read Each File Thoroughly
 
 For each file in scope:
+
 - Read the entire file
 - Enumerate every `unsafe` block and `unsafe fn`
 - For each unsafe block, identify the safety invariant it relies on
 - Check if the invariant is documented in a `// SAFETY:` comment
 - Determine if the invariant actually holds
+
+**IMPORTANT:** After reading each file, add an `// AUDIT:` comment at the top of the file (or near the first `unsafe` block) confirming the audit was performed. Example: `// AUDIT: 2026-03-11 — 21 unsafe blocks verified, 6-category checklist applied. No bugs found.`
 
 ### Step 4: Apply the Bug Category Checklist
 
@@ -43,9 +46,12 @@ For each file, systematically check all 6 categories:
 
 ### Step 5: Write Failing Tests First (TDD)
 
-For EVERY finding:
+For EVERY **code bug** finding:
+
 1. Write a test that demonstrates the bug (the test must FAIL before the fix)
 2. Add the test to the appropriate file in `system/test/tests/`
+
+**Note:** TDD does not apply to documentation-only changes (adding `// SAFETY:` comments, `// AUDIT:` markers). Just add them directly.
 
 **CRITICAL: Test architecture.** Tests in `system/test/` cannot import kernel modules directly (the kernel targets `aarch64-unknown-none`, tests target the host). Tests must duplicate/stub the pure logic they need. Follow existing patterns — read similar test files first.
 
@@ -54,6 +60,7 @@ Run the test to confirm it fails: `cd system/test && cargo test <test_name> -- -
 ### Step 6: Fix the Bug
 
 Apply the minimal correct fix. Prefer fixes that:
+
 - Preserve the existing API/behavior
 - Add safety comments explaining the invariant
 - Handle errors explicitly rather than panicking
@@ -67,6 +74,7 @@ Apply the minimal correct fix. Prefer fixes that:
 ### Step 8: Commit
 
 Commit each logical fix with a descriptive message:
+
 ```
 fix(<subsystem>): <what was wrong>
 
@@ -115,9 +123,18 @@ fix(<subsystem>): <what was wrong>
       {
         "file": "system/test/tests/vma.rs",
         "cases": [
-          {"name": "test_frame_range_overflow", "verifies": "frame_range handles u64 overflow without panic"},
-          {"name": "test_remap_requires_barrier", "verifies": "remap issues DSB after TLB invalidation"},
-          {"name": "test_page_count_overflow", "verifies": "page_count * PAGE_SIZE checked for overflow"}
+          {
+            "name": "test_frame_range_overflow",
+            "verifies": "frame_range handles u64 overflow without panic"
+          },
+          {
+            "name": "test_remap_requires_barrier",
+            "verifies": "remap issues DSB after TLB invalidation"
+          },
+          {
+            "name": "test_page_count_overflow",
+            "verifies": "page_count * PAGE_SIZE checked for overflow"
+          }
         ]
       }
     ]

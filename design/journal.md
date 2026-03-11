@@ -12,7 +12,7 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ### Crash Signature
 
-```
+```console
 💥 kernel sync: EC=0x21 ESR=0x86000006 ELR=0x0 FAR=0x0
 instruction abort at EL1
 ```
@@ -24,11 +24,13 @@ instruction abort at EL1
 ### What's Happening
 
 Three userspace processes run continuous event loops:
+
 1. **Input driver**: `wait(IRQ)` → read event → `channel_signal(compositor)` → loop
 2. **Compositor**: `wait(input_channel)` → render char → `channel_signal(GPU)` → loop
 3. **GPU driver**: `wait(compositor_channel)` → transfer+flush (2 virtio cmds) → loop
 
 Each keystroke triggers: IRQ → input wake → channel signal → compositor wake → render → channel signal → GPU wake → 2 GPU commands → loop. Under rapid typing, this produces ~50+ full cycles/sec, each involving:
+
 - Vec alloc/free for `wait_set` (one per `sys_wait` call)
 - 3+ lock acquisitions (scheduler, channel, timer)
 - Thread state transitions (Ready → Running → Blocked → Ready)
@@ -38,17 +40,17 @@ Each keystroke triggers: IRQ → input wake → channel signal → compositor wa
 **Suspect 1: Kernel heap allocator stress (MOST LIKELY)**
 Each `sys_wait` call allocates a `Vec<WaitEntry>` via `store_wait_set`, and the wake path frees it via `wait_set.clear()` + drop. At ~370 syscalls/sec, the kernel heap allocator (linked-list first-fit with coalescing) handles hundreds of small alloc/free cycles per second. A coalescing bug under rapid free/alloc patterns could corrupt the free list, leading to a subsequent allocation returning corrupted memory. The null function pointer (ELR=0x0) is consistent with using a corrupted Box<Thread> where a vtable or function pointer has been zeroed.
 
-*Test:* Pre-allocate the wait_set Vec and reuse it across `sys_wait` calls (eliminate the alloc/free hotpath). If the crash disappears, it's the allocator.
+_Test:_ Pre-allocate the wait_set Vec and reuse it across `sys_wait` calls (eliminate the alloc/free hotpath). If the crash disappears, it's the allocator.
 
 **Suspect 2: Scheduler two-phase wake race**
-`channel::signal()` collects the waiter ThreadId under the channel lock, releases it, then calls `try_wake_for_handle` under the scheduler lock. Between releasing the channel lock and acquiring the scheduler lock, another signal could arrive for the same thread. Both callers try to wake the same thread. `try_wake_impl` searches `blocked` by ThreadId and uses `swap_remove`. The second caller wouldn't find it (returns false) and falls through to `set_wake_pending_for_handle`. This *should* be safe, but the swap_remove changes the order of the blocked list, which could interact badly with concurrent operations on other cores.
+`channel::signal()` collects the waiter ThreadId under the channel lock, releases it, then calls `try_wake_for_handle` under the scheduler lock. Between releasing the channel lock and acquiring the scheduler lock, another signal could arrive for the same thread. Both callers try to wake the same thread. `try_wake_impl` searches `blocked` by ThreadId and uses `swap_remove`. The second caller wouldn't find it (returns false) and falls through to `set_wake_pending_for_handle`. This _should_ be safe, but the swap_remove changes the order of the blocked list, which could interact badly with concurrent operations on other cores.
 
-*Test:* Add a serial print in `try_wake_impl` when a thread isn't found in blocked/running/ready (the fall-through case). If this fires frequently, it's the wake race.
+_Test:_ Add a serial print in `try_wake_impl` when a thread isn't found in blocked/running/ready (the fall-through case). If this fires frequently, it's the wake race.
 
 **Suspect 3: Slab/heap interaction**
 The kernel heap routes allocs by size: ≤2 KiB → slab, else → linked-list. The `Vec<WaitEntry>` starts small (8 bytes per entry × 1-2 entries = 16-32 bytes) and goes through slab. Rapid alloc/free of slab objects could expose a slab bug (double-free or free-list corruption).
 
-*Test:* Force Vec<WaitEntry> to allocate from the linked-list allocator by reserving a minimum capacity (e.g., `Vec::with_capacity(256)`). If the crash disappears, it's the slab.
+_Test:_ Force Vec<WaitEntry> to allocate from the linked-list allocator by reserving a minimum capacity (e.g., `Vec::with_capacity(256)`). If the crash disappears, it's the slab.
 
 ### Fixes Applied (2026-03-11)
 
@@ -79,6 +81,7 @@ The kernel heap routes allocs by size: ≤2 KiB → slab, else → linked-list. 
 ### Additional Hardening (2026-03-11, continued)
 
 **Fix 9: `nomem` removal across all inline asm.** Systematic audit of all 99 `unsafe` blocks. Removed `nomem` from:
+
 - `timer.rs`: `msr cntp_tval_el0` (timer reprogram), `mrs cntpct_el0` (counter read), `msr cntp_ctl_el0` (timer enable), `msr daifclr` (IRQ unmask)
 - `power.rs`: `hvc #0` (PSCI CPU_ON — boots secondary cores)
 - `syscall.rs`: merged split AT+MRS asm blocks into single blocks (address translation + PAR_EL1 read must not be reordered)
@@ -86,6 +89,7 @@ The kernel heap routes allocs by size: ≤2 KiB → slab, else → linked-list. 
 **Fix 10: Headless stress test (`stress-test.sh` + `user/stress/main.rs`).** Userspace stress program exercises IPC ping-pong, timer churn, and allocator pressure without needing a display or keyboard. Integrated into build system (`build.rs`, `init/main.rs`). Usage: `./stress-test.sh [seconds]`.
 
 **Fix 11: Property-based scheduler tests (`test/tests/scheduler_state.rs`).** 3 new tests added to existing 17:
+
 - `randomized_scheduler_state_machine`: 500 random actions × 50 seeds, checks invariants after every action
 - `rapid_block_wake_never_duplicates`: rapid block/wake cycles never create duplicate thread entries
 - `all_threads_eventually_reaped`: exited threads are always cleaned up via deferred drops
@@ -114,11 +118,11 @@ Active questions we've started exploring but haven't resolved. Each thread links
 **Status:** Partially resolved by uniform manifest model (2026-03-09)
 **Context:** With uniform manifests, every document has a manifest. A PDF becomes a document whose manifest references a single content file. "Compoundness" is a property of the manifest's structure (how many content references), not an intrinsic property of the content format. If the user decomposes a PDF for part-by-part editing, a new manifest with extracted parts could be created. Remaining question: is decomposition automatic, user-initiated, or editor-driven?
 
-### Referenced vs owned parts in documents
+### ~~Referenced vs owned parts in documents~~ — SETTLED (copy semantics)
 
 **Informs:** Decision #14 (Compound Documents)
-**Status:** Identified, not yet explored
-**Context:** A slideshow referencing photos from your library (shared, survive deletion) vs. text blocks that only exist within the slideshow (owned, deleted with document). Is this a property of the reference, a user choice, or two distinct relationship types? The uniform manifest model makes this more concrete — every reference in a manifest is either shared or owned.
+**Status:** Settled (2026-03-11). Copy semantics with provenance metadata.
+**Context:** Explored three approaches: reference (shared, changes propagate), copy (independent, self-contained), and copy-on-reference hybrid (start shared, diverge on first edit). References require tracking a global reference graph (delete checks, broken links, spooky action at a distance). The hybrid creates invisible state — whether editing affects the original depends on whether you've previously edited it in this context, which the user can't predict. Copy semantics won: each compound document gets its own copy of embedded content. Self-contained, no reference tracking, no broken links, no surprising behavior. COW at the filesystem level means "copies" share physical blocks until they diverge — logical independence with physical efficiency. The original document's ID is stored as provenance metadata, enabling an explicit "update to latest" action (pull, not push). One-directional: the compound knows about the original, the original doesn't know about the compound. Same parent→child / child-doesn't-know-parent isolation as the compound document model generally.
 
 ### OS service interface map
 
@@ -202,8 +206,14 @@ Open questions: exact scene graph API, how layout engine and compositor interfac
 ### COW Filesystem
 
 **Informs:** Decision #16 (Technical Foundation — filesystem sub-decision), Decision #12 (Undo), Decision #14 (virtual manifest rewind)
-**Status:** Placement settled (userspace service), COW on-disk design pending. See `design/research-cow-filesystems.md`.
-**Context:** Studied RedoxFS (Rust, COW but no snapshots), ZFS (birth time + dead lists = gold standard for snapshots), Btrfs (refcounted subvolumes), Bcachefs (key-level versioning). Key findings: (1) birth time in block pointers is non-negotiable for efficient snapshots, (2) ZFS dead lists make deletion tractable, (3) per-document scoping needed (datasets/subvolumes, not whole-FS snapshots), (4) `beginOp`/`endOp` maps naturally to COW transaction boundaries. TFS (Redox's predecessor) attempted per-file revision history but didn't ship it — cautionary data point. Filesystem is a userspace service — kernel owns COW/VM mechanics (page fault handler), filesystem manages on-disk layout (B-trees, block allocation, snapshots). **New constraint (2026-03-09):** metadata DB must live on the COW filesystem so its historical state is preserved in snapshots — required for uniform rewind performance across static and virtual documents. Also favors time-correlated (global or epoch-based) snapshots over purely per-document snapshots, so historical world-state queries are cheap. Open questions: on-disk format, snapshot naming, pruning policy, compound document atomicity, page cache placement, interaction with memory mapping, snapshot scope (global vs per-document vs time-correlated).
+**Status:** Interface designed (2026-03-11). Placement settled (userspace service). On-disk format deferred — prototype-on-host strategy adopted. See `design/research-cow-filesystems.md`.
+**Context:** Studied RedoxFS (Rust, COW but no snapshots), ZFS (birth time + dead lists = gold standard for snapshots), Btrfs (refcounted subvolumes), Bcachefs (key-level versioning). Key findings: (1) birth time in block pointers is non-negotiable for efficient snapshots, (2) ZFS dead lists make deletion tractable, (3) per-document scoping needed (datasets/subvolumes, not whole-FS snapshots), (4) `beginOp`/`endOp` maps naturally to COW transaction boundaries. TFS (Redox's predecessor) attempted per-file revision history but didn't ship it — cautionary data point. Filesystem is a userspace service — kernel owns COW/VM mechanics (page fault handler), filesystem manages on-disk layout (B-trees, block allocation, snapshots). **New constraint (2026-03-09):** metadata DB must live on the COW filesystem so its historical state is preserved in snapshots — required for uniform rewind performance across static and virtual documents. Time-correlated vs per-document snapshots still open — per-document snapshots + a COW'd metadata DB might be sufficient for world-state queries without coordinated global snapshots. Needs further exploration.
+
+**FileStore interface settled (2026-03-11).** 12 operations: create, clone, delete, size, resize, map_read, map_write, snapshot, restore, map_snapshot, snapshots (list), delete_snapshot, flush. Deliberately absent: paths/directories (files addressed by ID), permissions (OS service is sole consumer), extended attributes (metadata lives in DB), file locking (OS service serializes writes via event loop), links (copy semantics via clone), rename (metadata DB concern), batch operations (OS service sequences), file type info (metadata DB concern). The interface is a dumb file store — it knows nothing about documents, undo ordering, or compound structures. See journal insights for full design rationale.
+
+**Prototype-on-host strategy (2026-03-11).** Implement the FileStore interface against macOS (regular files + file copies for snapshots + mmap). Build the real COW filesystem later once the interface is proven through actual editor/undo/document pipeline usage. The filesystem's on-disk format is a leaf node — complex inside, simple interface. Same pattern as the rendering engine decision (settle the architecture, defer the implementation).
+
+Open questions: on-disk format (deferred), snapshot naming, pruning policy, page cache placement, snapshot scope (global vs per-document vs time-correlated — punted, doesn't block interface).
 
 ### Virtual manifests, retention, and the OS-as-document
 
@@ -527,6 +537,26 @@ io_uring (64-byte SQE), LMAX Disruptor, L4 message registers, virtio descriptors
 ### Security as a side effect of good architecture (2026-03-07)
 
 Handles enforce access (designed for edit protocol, not security). EL0/EL1 provides crash isolation (designed for clean programming model). Per-process address spaces provide memory isolation (designed for independent editors). Kernel message validation protects the OS service (designed for input correctness). Every security property falls out of design decisions made for other reasons. No security-specific machinery is needed because the architecture is naturally secure. This suggests a useful heuristic: if you're adding security features that don't serve the design, the architecture may be wrong.
+
+### Editors as read-only consumers: "never make the wrong path the happy path" (2026-03-11)
+
+The original edit protocol had editors calling beginOp/endOp around direct memory-mapped writes. This makes undo opt-in — a lazy editor that just writes without calling begin/end gets no undo points. The wrong path (skip the protocol) is the easy path. Inverted: editors get read-only mappings of documents. All writes go through the OS service via IPC. The OS service is the sole writer to document files, giving it full control over snapshots and undo with zero cooperation required from editors. Undo is automatic and non-circumventable. The lazy editor path (just send write requests) produces correct undo behavior. The diligent editor path (grouping writes into named operations) produces better undo granularity. The symmetry with the kernel is preserved: the kernel doesn't let processes write to other processes' memory (it goes through IPC). The OS doesn't let editors write to the OS's documents (it goes through IPC). Documents are shared resources — the OS renders them, versions them, indexes them — so mediated access follows the same principle as any shared resource. Performance is not a concern: the hot-path workloads (text editing, image adjustments) are low-bandwidth IPC; bulk data operations (rendering, audio capture) don't write to the document at those rates.
+
+### OS service event loop eliminates file locking (2026-03-11)
+
+Multiple data sources (editors, network services, audio drivers) may want to write to the same document concurrently (e.g., chat where user types and remote messages arrive). But all writes arrive at the OS service's event loop as IPC messages and are processed sequentially. Multiple sources of data arriving concurrently is not the same as multiple writers to a file. The serialization happens at the event loop, which already exists. No file locking needed because there's only one writer. This is the web server pattern: multiple clients, one server, sequential processing per resource.
+
+### Copy semantics + COW = logical independence with physical efficiency (2026-03-11)
+
+Compound documents use copy semantics — embedding a photo in a slide deck creates an independent copy. No reference tracking, no broken links, no cascading deletes. COW at the filesystem level means the "copy" shares physical blocks with the original until one diverges. The user gets clean mental model (each document is self-contained), the disk gets efficient storage (shared blocks). Original file ID stored as provenance metadata enables explicit "update to latest" (pull, not push). One-directional knowledge: compound knows about original, original doesn't know about compound.
+
+### The filesystem is a dumb file store (2026-03-11)
+
+By settling "OS service is the sole writer" and "compound documents use copy semantics," the filesystem's job became radically simple: store files by ID, provide memory-mapped access, take snapshots, restore snapshots. 12 operations. No paths, no permissions, no locking, no links, no file types, no extended attributes, no batch operations. Everything "interesting" (documents, undo ordering, metadata, queries, compound structures) lives above the filesystem in the OS service and metadata DB layers. Three-layer translation: user intent → metadata DB → document IDs → OS service → file IDs → filesystem. Each layer ignorant of the one above. The filesystem is the simplest possible foundation — its only job is correctness about COW, snapshots, and crash consistency.
+
+### Compound document atomicity solved by sole-writer architecture (2026-03-11)
+
+An edit on a compound document might touch multiple files (manifest + content files). With the OS service as sole writer, it simply does both writes sequentially and then takes a snapshot. No multi-file transaction mechanism needed in the filesystem. The atomicity problem that seemed to require filesystem support was actually solved by an architectural decision at a different layer. This is a recurring pattern: structural constraints at one level eliminate complexity at another.
 
 ---
 

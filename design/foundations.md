@@ -48,7 +48,7 @@ The traditional distinction (simple = one file, compound = many) becomes an inte
 
 ### Open terminology questions
 
-- **Referenced vs owned parts.** In a document with multiple content files, are referenced files independent (deleting the document leaves them intact) or owned (deleting the document deletes its parts)? Both cases seem real — a slideshow referencing photos from your library (shared) vs. text blocks that exist only within the slideshow (owned). Is this a property of the reference, a user choice, or two distinct relationship types?
+- ~~**Referenced vs owned parts.**~~ **SETTLED: Copy semantics.** Embedding content in a compound document creates an independent copy. No reference tracking, no broken links, no cascading deletes. COW at the filesystem level shares physical blocks until copies diverge. The original document's ID is stored as provenance metadata, enabling explicit "update to latest" (user-initiated pull). One-directional knowledge: compound knows about original, original doesn't know about compound.
 - **Mimetype of the whole (partially resolved).** Imported documents retain their original external mimetype as metadata (e.g., `application/vnd.openxmlformats-officedocument.presentationml.presentation` for .pptx). OS-native documents get a custom OS mimetype (e.g., `application/x-os-presentation`, `application/x-os-project`). The document-level mimetype drives editor binding: `application/x-os-presentation` → presentation editor, `application/x-os-project` → project editor. On export, the user selects a target format; the OS pre-selects the original mimetype where available. Original mimetype is an optional metadata field (present for imports, absent for OS-native). **Remaining:** systematic mapping of IANA mimetypes to OS document types; naming convention for OS-native mimetypes; how simple documents' mimetypes relate to their content file's mimetype (is a document wrapping a single `image/png` still typed as `image/png`, or does it get an OS wrapper type?).
 - **Is "compound" intrinsic or contextual?** A PDF has a single mimetype but contains text + images + vector graphics. As a document, its manifest references one content file (the PDF). If the user decomposes it for part-by-part editing, a new manifest with extracted parts could be created. The "compoundness" is a property of the manifest's structure, not an intrinsic property of the content format. But is this decomposition automatic, user-initiated, or editor-driven?
 
@@ -186,7 +186,9 @@ The OS renderer is a **pure function of state**: file bytes + mimetype + view st
 
 **OS-provided interaction primitives** shared across all editors of a content type: cursor positioning and text selection (text), selection regions (images), playhead (audio/video). These are part of the OS's content-type understanding, not editor-specific.
 
-**No pending changes — edits are immediately durable.** There is no separate "working state" and "persisted state." When an editor issues an operation, the OS applies it to the file immediately. The file on disk is always current. There is no "save" action — every edit is durable the moment it happens. The COW filesystem makes this cheap (only changed blocks are written) and reversible (previous versions are retained as snapshots). This eliminates "unsaved changes," "save before closing?" dialogs, and the entire class of data-loss bugs from crashes before saving.
+**Editors get read-only access; all writes go through the OS service.** Editors receive a read-only memory mapping of the document for fast zero-copy reads. Modifications go through the OS service via IPC write requests. The OS service is the sole writer to document files — it applies writes immediately and controls when snapshots are taken. This ensures undo is automatic and non-circumventable: "never make the wrong path the happy path." A lazy editor that ignores operation hints still gets correct undo. Documents are shared resources (the OS renders, versions, and indexes them), so mediated write access follows the same principle as the kernel mediating access to shared hardware.
+
+**No pending changes — edits are immediately durable.** There is no separate "working state" and "persisted state." When the OS service applies an editor's write request, the file on disk is updated immediately. The file on disk is always current. There is no "save" action — every edit is durable the moment it happens. The COW filesystem makes this cheap (only changed blocks are written) and reversible (previous versions are retained as snapshots). This eliminates "unsaved changes," "save before closing?" dialogs, and the entire class of data-loss bugs from crashes before saving.
 
 **Editor overlays:** Editors can draw temporary visual chrome — crop bounds, selection highlights, tool cursors — but these are tool UI, not document content. They never affect the file.
 
@@ -216,11 +218,13 @@ Editors don't own files directly. They issue **operations** through a protocol. 
 
 **The protocol is thin:**
 
-- Editor calls `beginOperation(document, description)`.
-- Editor modifies the file through OS file APIs.
-- Editor calls `endOperation()`.
-- The OS snapshots at operation boundaries (COW filesystem makes this cheap).
+- Editor sends write requests to the OS service via IPC.
+- The OS service applies writes to the document (it is the sole writer).
+- The OS service takes snapshots at operation boundaries (COW makes this cheap).
 - The operation log records: which editor, when, which document, human-readable description.
+- Operation boundaries are determined automatically (e.g., idle-gap detection). Editors may optionally send `beginOperation`/`endOperation` hints to group writes and attach descriptions — this improves undo granularity but is not required.
+
+**Editors are read-only consumers.** Editors receive a read-only memory mapping of the document for fast zero-copy reads. All modifications go through the OS service via IPC. This makes undo automatic and non-circumventable. A lazy editor that just sends writes gets correct undo. A diligent editor that groups writes into named operations gets better undo. The wrong path is never the easy path.
 
 The OS is logistics — it doesn't understand what operations mean, it just tracks boundaries, ordering, and attribution. This keeps the protocol as simple connective tissue.
 

@@ -70,7 +70,11 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-11 (latest):** Input driver + event loop implementation. Keyboard input end-to-end. Wait timeout fix. **Kernel crash under rapid typing — FIXED.** Root causes: aliasing UB in syscall dispatch, `nomem` on DAIF/system register asm, deferred thread drop use-after-free, idle thread park bug. 11 fixes total (see `design/journal.md`). Headless stress test + property-based scheduler tests added. 20 scheduler tests pass. Opt-level 3 verified crash-free (50M iterations, 137s headless stress test). Follow-up audit fixed break-before-make in guard page setup and added AddressSpace Drop for leak prevention.
+**Session 2026-03-11 (latest):** Filesystem design session. Major edit protocol revision + FileStore interface designed. Kernel bug audit mission running in parallel.
+
+**Filesystem design (2026-03-11):** Comprehensive filesystem discussion settling several open questions. Key decisions: (1) **Editors are read-only consumers** — all writes go through the OS service via IPC. "Never make the wrong path the happy path": undo is automatic and non-circumventable, no editor cooperation required. (2) **Compound documents use copy semantics** — embedding creates an independent copy, COW shares physical blocks, provenance metadata enables "update to latest." (3) **FileStore interface designed** — 12 operations, files by opaque ID, no paths/permissions/locking/links. A dumb file store; all semantics live above. (4) **Prototype-on-host strategy** — implement FileStore against macOS during prototyping, build real COW FS later. (5) **Compound atomicity solved** — OS service as sole writer sequences multi-file writes, no FS transactions needed. (6) **Snapshot scope punted** — per-document vs global vs time-correlated still open, doesn't block interface.
+
+**Earlier in session 2026-03-11:** Input driver + event loop implementation. Keyboard input end-to-end. Wait timeout fix. **Kernel crash under rapid typing — FIXED.** Root causes: aliasing UB in syscall dispatch, `nomem` on DAIF/system register asm, deferred thread drop use-after-free, idle thread park bug. 11 fixes total (see `design/journal.md`). Headless stress test + property-based scheduler tests added. 20 scheduler tests pass. Opt-level 3 verified crash-free (50M iterations, 137s headless stress test). Follow-up audit fixed break-before-make in guard page setup and added AddressSpace Drop for leak prevention.
 
 **Session 2026-03-10:** Structured IPC design, TrueType font rasterizer, alpha blending, overlapping surface compositing, userspace architecture audit.
 
@@ -88,11 +92,11 @@ Read these before making any design suggestions:
 
 **Still open from previous sessions:** Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved tension — connected to compositor tree model).
 
-**Decision #14 sub-decisions open:** Referenced vs owned parts, mimetype of the whole document, manifest format, COW atomicity for multi-part documents, filesystem organization of manifests + content files.
+**Decision #14 sub-decisions open:** Mimetype of the whole document, manifest format, filesystem organization of manifests + content files. **Settled this session:** referenced vs owned (copy semantics), COW atomicity (sole-writer solves it).
 
-**Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
+**Decision #16 sub-decisions open:** Filesystem COW on-disk design (deferred via prototype-on-host). FileStore interface designed (12 operations). Snapshot scope (per-document vs global vs time-correlated) punted. New constraint: metadata DB must be on COW filesystem for uniform rewind.
 
-**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: input + event loops done → text layout next → editor process separation. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: COW on-disk design (Decision #16, independent).
+**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, unblocked by prototype-on-host strategy). GUI track: input + event loops done → text layout next → editor process separation. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: implement FileStore prototype on macOS (independent, can proceed in parallel with GUI).
 
 **System code:** `system/kernel/` (35 source files), `system/services/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu,virtio-input}}/`, `system/libraries/{sys,virtio,drawing,ipc}/`, `system/user/echo/`, `system/test/` (83 drawing + 221 kernel = 304 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with keyboard input + event loops. 27 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
