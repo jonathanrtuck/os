@@ -99,7 +99,11 @@ pub fn clear_kernel_guard_page(va: usize) {
     let _lock = KERNEL_PT_LOCK.lock();
     let pa = virt_to_phys(va).0 as u64;
     let l2_idx = ((pa >> 21) & 0x1FF) as usize;
+    // SAFETY: boot_tt1_l2_1 is a page-aligned L2 table defined in boot.S.
+    // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
+    // KERNEL_PT_LOCK is held, ensuring exclusive access.
     let l2_table = unsafe { &boot_tt1_l2_1 as *const u8 as *mut u64 };
+    // SAFETY: l2_idx is masked to 0..511, within the 512-entry L2 table.
     let l2_entry = unsafe { l2_table.add(l2_idx).read_volatile() };
 
     // Must already be broken into L3 (set_kernel_guard_page did that).
@@ -113,7 +117,12 @@ pub fn clear_kernel_guard_page(va: usize) {
     let l3_idx = ((pa >> 12) & 0x1FF) as usize;
     // Read attributes from a neighbor entry to match the original block's
     // mapping. This preserves boot.S attributes regardless of what they are.
+    // The neighbor is guaranteed to be a valid mapped entry: guard pages are
+    // only set on stack bases, and the adjacent page is always a usable
+    // stack page.
     let neighbor_idx = if l3_idx > 0 { l3_idx - 1 } else { l3_idx + 1 };
+    // SAFETY: neighbor_idx is in 0..511 (l3_idx is in 0..511, and the
+    // adjustment stays in range). l3_table is a valid L3 page table.
     let neighbor = unsafe { l3_table.add(neighbor_idx).read_volatile() };
     let attrs = neighbor & !PA_MASK;
 
@@ -135,11 +144,20 @@ pub fn empty_ttbr0() -> u64 {
 /// 2MB block with an L3 table providing per-section W^X permissions.
 /// Called from kernel_main (running at upper VA, TTBR1 is live).
 pub fn init() {
+    // SAFETY: Called once during boot before any concurrent access.
+    // TT1_L3_KERN is a static SyncPageTable; this is the single write
+    // point referenced by the `unsafe impl Sync` invariant.
     let l3_kern = unsafe { &mut *TT1_L3_KERN.get() };
+    // SAFETY: Linker-defined symbol from link.ld — taking its address
+    // yields the VA of the .text section start. Valid kernel VA.
     let text_start = unsafe { &__text_start as *const u8 as u64 };
+    // SAFETY: Linker-defined symbol — VA of .text section end.
     let text_end = align_up_u64(unsafe { &__text_end as *const u8 as u64 }, PAGE_SIZE);
+    // SAFETY: Linker-defined symbol — VA of .rodata section start.
     let rodata_start = unsafe { &__rodata_start as *const u8 as u64 };
+    // SAFETY: Linker-defined symbol — VA of .rodata section end.
     let rodata_end = align_up_u64(unsafe { &__rodata_end as *const u8 as u64 }, PAGE_SIZE);
+    // SAFETY: Linker-defined symbol — VA of .data section start.
     let data_start = unsafe { &__data_start as *const u8 as u64 };
     // All these are kernel VA. Compute PA of the kernel's 2MB-aligned block.
     let text_start_pa = virt_to_phys(text_start as usize).as_u64();
@@ -166,14 +184,24 @@ pub fn init() {
     // Patch TTBR1 L2_1 to point at L3 instead of the 2MB block.
     let l3_kern_pa = virt_to_phys(TT1_L3_KERN.get() as usize).as_u64();
     let kernel_l2_idx = ((kernel_block_pa >> 21) & 0x1FF) as usize;
+    // SAFETY: boot_tt1_l2_1 is a page-aligned L2 table defined in boot.S.
+    // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
+    // Called during single-core boot — no concurrent access.
     let l2_1 = unsafe { &boot_tt1_l2_1 as *const u8 as *mut u64 };
 
+    // SAFETY: kernel_l2_idx is masked to 0..511, within the 512-entry
+    // L2 table. Writing a table descriptor pointing to our L3 replaces
+    // the boot.S 2MB block with fine-grained 4KB pages.
     unsafe {
         l2_1.add(kernel_l2_idx)
             .write_volatile(l3_kern_pa | DESC_VALID | DESC_TABLE);
     }
 
-    // TLB invalidate + barrier so new mappings take effect.
+    // SAFETY: TLB invalidation after replacing the L2 block descriptor
+    // with an L3 table descriptor. Uses vmalle1 (not vmalle1is) because
+    // this runs during boot before secondary cores are started. DSB
+    // ensures the table write is visible before TLB invalidation; ISB
+    // ensures the pipeline sees the updated TLB state.
     unsafe {
         core::arch::asm!(
             "dsb ishst",
@@ -202,7 +230,11 @@ pub fn try_set_kernel_guard_page(va: usize) -> bool {
     let _lock = KERNEL_PT_LOCK.lock();
     let pa = virt_to_phys(va).0 as u64;
     let l2_idx = ((pa >> 21) & 0x1FF) as usize;
+    // SAFETY: boot_tt1_l2_1 is a page-aligned L2 table defined in boot.S.
+    // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
+    // KERNEL_PT_LOCK is held, ensuring exclusive access.
     let l2_table = unsafe { &boot_tt1_l2_1 as *const u8 as *mut u64 };
+    // SAFETY: l2_idx is masked to 0..511, within the 512-entry L2 table.
     let l2_entry = unsafe { l2_table.add(l2_idx).read_volatile() };
     let l3_table = if l2_entry & 0b11 == 0b01 {
         let block_pa = l2_entry & 0x0000_FFFF_FFE0_0000;
@@ -229,6 +261,8 @@ pub fn try_set_kernel_guard_page(va: usize) -> bool {
         // descriptor with a valid table descriptor requires an intermediate
         // invalid step. Without this, other cores walking the TLB could see
         // an inconsistent descriptor (CONSTRAINED UNPREDICTABLE).
+        // SAFETY: l2_idx is in 0..511. Writing an invalid (0) entry is
+        // step 1 of break-before-make. KERNEL_PT_LOCK is held.
         unsafe {
             // Step 1: Write invalid entry (break).
             l2_table.add(l2_idx).write_volatile(0);
@@ -236,7 +270,10 @@ pub fn try_set_kernel_guard_page(va: usize) -> bool {
 
         tlb_invalidate_all();
 
-        // Step 2: Write the new table descriptor (make).
+        // SAFETY: l2_idx is in 0..511. Writing the new table descriptor
+        // is step 2 of break-before-make. The TLB was invalidated above
+        // to ensure no stale block descriptor remains cached.
+        // KERNEL_PT_LOCK is held.
         unsafe {
             l2_table
                 .add(l2_idx)

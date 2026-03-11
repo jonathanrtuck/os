@@ -53,10 +53,18 @@ pub const SHARED_MEMORY_END: u64 = 0x0000_0001_0000_0000; // 4 GiB
 pub const USER_VA_END: u64 = 0x0001_0000_0000_0000; // T0SZ=16
 
 /// Align `addr` up to the next multiple of `align` (must be a power of two).
+///
+/// Uses wrapping arithmetic to avoid panicking on overflow in debug builds.
+/// Callers must ensure `addr` is not so large that wrapping produces a
+/// nonsensical result (all kernel callers pass valid addresses well within
+/// the address space).
 pub const fn align_up(addr: usize, align: usize) -> usize {
-    (addr + align - 1) & !(align - 1)
+    addr.wrapping_add(align - 1) & !(align - 1)
 }
 /// Align `x` up to the next multiple of `align` (must be a power of two).
+///
+/// Uses wrapping arithmetic to avoid panicking on overflow in debug builds.
+/// See [`align_up`] for details.
 pub const fn align_up_u64(x: u64, align: u64) -> u64 {
-    (x + align - 1) & !(align - 1)
+    x.wrapping_add(align - 1) & !(align - 1)
 }
