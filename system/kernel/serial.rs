@@ -1,3 +1,9 @@
+// AUDIT: 2026-03-11 — 0 unsafe blocks (MMIO via memory_mapped_io module).
+// 6-category checklist applied. No bugs found. SMP safety: IrqMutex guards
+// all non-panic output. Panic variants deliberately bypass lock (deadlock
+// avoidance, documented). MMIO addresses use KERNEL_VA_OFFSET. TX timeout
+// prevents infinite spin on stuck FIFO.
+
 //! PL011 UART driver (TX only) with SMP-safe locking.
 //!
 //! All public output functions acquire `LOCK` to prevent interleaved output

@@ -1,3 +1,10 @@
+// AUDIT: 2026-03-11 — 0 unsafe blocks. 6-category checklist applied. No bugs
+// found. Counter overflow: AtomicU64::fetch_add wraps at u64::MAX (per Rust
+// spec). At 1 billion increments/sec, wraps in ~584 years — not a practical
+// concern for diagnostic counters. Per-core isolation: each core writes to
+// METRICS[core_id()], no cross-core contention. Relaxed ordering appropriate
+// for monotonic diagnostics. panic_dump bypasses UART lock (safe for panic).
+
 //! Per-core kernel event counters.
 //!
 //! Lightweight instrumentation for debugging SMP timing issues. Each core

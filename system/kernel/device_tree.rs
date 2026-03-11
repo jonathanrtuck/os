@@ -1,3 +1,9 @@
+// AUDIT: 2026-03-11 — 0 unsafe blocks. 6-category checklist applied. No bugs
+// found. FDT parsing edge cases verified: malformed trees, truncated data,
+// integer overflow in property sizes (safe on 64-bit: u32→usize promotion
+// cannot overflow), missing nodes, zero-length properties, partial reg
+// entries, deeply nested nodes. 10 new edge case tests added.
+
 //! Minimal Flattened Device Tree (FDT/DTB) parser.
 //!
 //! Parses the device tree blob passed by firmware at boot to discover

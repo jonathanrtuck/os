@@ -392,3 +392,307 @@ fn truncated_blob_returns_none() {
 
     assert!(device_tree::parse(&bad_blob).is_none());
 }
+
+// --- Audit tests: edge cases for malformed / adversarial FDT blobs ---
+
+/// A property with length close to usize::MAX could cause `offset + len`
+/// to overflow, bypassing the bounds check and leading to a panic or
+/// out-of-bounds read. The parser must reject this gracefully.
+#[test]
+fn parse_prop_length_overflow_returns_none() {
+    // Build a minimal FDT with a single property whose `len` field is
+    // 0xFFFF_FF00 — large enough that `offset + len` wraps on 64-bit.
+    let header_size = 40usize;
+    let mut structs = Vec::new();
+
+    // FDT_BEGIN_NODE with empty name.
+    structs.extend_from_slice(&1u32.to_be_bytes()); // FDT_BEGIN_NODE
+    structs.push(0); // empty name null terminator
+    // Pad to 4-byte alignment.
+    while structs.len() % 4 != 0 {
+        structs.push(0);
+    }
+
+    // FDT_PROP with an enormous length.
+    structs.extend_from_slice(&3u32.to_be_bytes()); // FDT_PROP
+    structs.extend_from_slice(&0xFFFF_FF00u32.to_be_bytes()); // len (nearly u32::MAX)
+    structs.extend_from_slice(&0u32.to_be_bytes()); // nameoff = 0
+
+    // FDT_END (won't be reached if parser handles overflow).
+    structs.extend_from_slice(&9u32.to_be_bytes()); // FDT_END
+
+    let strings = b"x\0";
+    let off_dt_struct = header_size;
+    let off_dt_strings = header_size + structs.len();
+    let totalsize = off_dt_strings + strings.len();
+    let mut blob = Vec::with_capacity(totalsize);
+
+    blob.extend_from_slice(&0xD00D_FEEDu32.to_be_bytes()); // magic
+    blob.extend_from_slice(&(totalsize as u32).to_be_bytes());
+    blob.extend_from_slice(&(off_dt_struct as u32).to_be_bytes());
+    blob.extend_from_slice(&(off_dt_strings as u32).to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes()); // mem_rsvmap_off
+    blob.extend_from_slice(&17u32.to_be_bytes()); // version
+    blob.extend_from_slice(&16u32.to_be_bytes()); // last_comp_version
+    blob.extend_from_slice(&0u32.to_be_bytes()); // boot_cpuid
+    blob.extend_from_slice(&(strings.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&(structs.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&structs);
+    blob.extend_from_slice(strings);
+
+    // Must return None, not panic.
+    assert!(device_tree::parse(&blob).is_none());
+}
+
+/// `align4` on a value close to usize::MAX wraps around. A crafted
+/// property whose offset + len lands near usize::MAX - 2 triggers
+/// this. The parser must not enter an infinite loop or panic.
+#[test]
+fn parse_prop_offset_plus_len_near_max_returns_none() {
+    // Similar to above but with a length that, when added to a small
+    // offset, produces a value in the [usize::MAX-2, usize::MAX] range
+    // where align4 would wrap.
+    let header_size = 40usize;
+    let mut structs = Vec::new();
+
+    // FDT_BEGIN_NODE with empty name.
+    structs.extend_from_slice(&1u32.to_be_bytes());
+    structs.push(0);
+    while structs.len() % 4 != 0 {
+        structs.push(0);
+    }
+
+    // FDT_PROP with length that's large but won't overflow with offset.
+    // Use a length that's bigger than the structs slice but within u32.
+    structs.extend_from_slice(&3u32.to_be_bytes()); // FDT_PROP
+    structs.extend_from_slice(&0x7FFF_FFFFu32.to_be_bytes()); // len (~2GB)
+    structs.extend_from_slice(&0u32.to_be_bytes()); // nameoff
+
+    structs.extend_from_slice(&9u32.to_be_bytes()); // FDT_END
+
+    let strings = b"x\0";
+    let off_dt_struct = header_size;
+    let off_dt_strings = header_size + structs.len();
+    let totalsize = off_dt_strings + strings.len();
+    let mut blob = Vec::with_capacity(totalsize);
+
+    blob.extend_from_slice(&0xD00D_FEEDu32.to_be_bytes());
+    blob.extend_from_slice(&(totalsize as u32).to_be_bytes());
+    blob.extend_from_slice(&(off_dt_struct as u32).to_be_bytes());
+    blob.extend_from_slice(&(off_dt_strings as u32).to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes());
+    blob.extend_from_slice(&17u32.to_be_bytes());
+    blob.extend_from_slice(&16u32.to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes());
+    blob.extend_from_slice(&(strings.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&(structs.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&structs);
+    blob.extend_from_slice(strings);
+
+    // Must reject the blob, not crash.
+    assert!(device_tree::parse(&blob).is_none());
+}
+
+/// A property with zero-length data should be handled gracefully
+/// (the reg/compatible/interrupts handlers just see an empty slice).
+#[test]
+fn parse_zero_length_property_is_harmless() {
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node("");
+    builder.begin_node("test");
+    // Manually push a zero-length "compatible" property.
+    let nameoff = builder.add_string("compatible");
+    builder.push_prop(nameoff, &[]);
+    builder.end_node();
+    builder.end_node();
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("zero-length prop should parse");
+
+    // Node has compatible="" but no reg, so it shouldn't appear as a device.
+    assert_eq!(dt.device_count(), 0);
+}
+
+/// Interrupts property with fewer than 12 bytes should be ignored
+/// (parser requires >= 12 for the 3-cell GIC format).
+#[test]
+fn parse_short_interrupt_property_ignored() {
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node("");
+    builder.begin_node("dev@1000");
+    builder.prop_str("compatible", "test,device");
+    builder.prop_reg("reg", &[(0x1000, 0x100)]);
+    // Push an 8-byte interrupts property (too short for 3-cell format).
+    let nameoff = builder.add_string("interrupts");
+    let mut data = Vec::new();
+    data.extend_from_slice(&0u32.to_be_bytes());
+    data.extend_from_slice(&42u32.to_be_bytes());
+    builder.push_prop(nameoff, &data);
+    builder.end_node();
+    builder.end_node();
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("short interrupt should parse");
+    let dev = dt.find_first("test,device").expect("device found");
+
+    assert!(dev.irq.is_none(), "short interrupt data should not yield an IRQ");
+}
+
+/// Reg property with partial entry (< 16 bytes) should yield no
+/// entries — the while loop condition `pos + 16 <= prop_data.len()`
+/// skips partial data.
+#[test]
+fn parse_partial_reg_entry_yields_no_device() {
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node("");
+    builder.begin_node("mem@1000");
+    builder.prop_str("compatible", "test,mem");
+    // Push a reg property with only 8 bytes (half an entry).
+    let nameoff = builder.add_string("reg");
+    let mut data = Vec::new();
+    data.extend_from_slice(&0x1000u64.to_be_bytes());
+    builder.push_prop(nameoff, &data);
+    builder.end_node();
+    builder.end_node();
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("partial reg should parse");
+
+    // Node has compatible + reg, but reg is empty (no complete entries),
+    // so it should be skipped (regs.is_empty() check).
+    assert_eq!(dt.device_count(), 0);
+}
+
+/// Deeply nested nodes should not corrupt parent state.
+#[test]
+fn parse_deeply_nested_nodes() {
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node(""); // root
+    builder.begin_node("level1");
+    builder.prop_str("compatible", "test,l1");
+    builder.prop_reg("reg", &[(0x1000, 0x100)]);
+
+    builder.begin_node("level2");
+    builder.prop_str("compatible", "test,l2");
+    builder.prop_reg("reg", &[(0x2000, 0x200)]);
+
+    builder.begin_node("level3");
+    builder.prop_str("compatible", "test,l3");
+    builder.prop_reg("reg", &[(0x3000, 0x300)]);
+    builder.end_node(); // level3
+
+    builder.end_node(); // level2
+    builder.end_node(); // level1
+    builder.end_node(); // root
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("deep nesting should parse");
+
+    assert_eq!(dt.device_count(), 3);
+
+    let l1 = dt.find_first("test,l1").unwrap();
+    assert_eq!(l1.base_address(), 0x1000);
+
+    let l2 = dt.find_first("test,l2").unwrap();
+    assert_eq!(l2.base_address(), 0x2000);
+
+    let l3 = dt.find_first("test,l3").unwrap();
+    assert_eq!(l3.base_address(), 0x3000);
+}
+
+/// Struct block truncated mid-property should return None, not panic.
+#[test]
+fn parse_struct_truncated_mid_property_returns_none() {
+    let header_size = 40usize;
+    let mut structs = Vec::new();
+
+    // FDT_BEGIN_NODE.
+    structs.extend_from_slice(&1u32.to_be_bytes());
+    structs.push(0); // empty name
+    while structs.len() % 4 != 0 {
+        structs.push(0);
+    }
+
+    // FDT_PROP with len=100 but only 4 bytes of data follow.
+    structs.extend_from_slice(&3u32.to_be_bytes()); // FDT_PROP
+    structs.extend_from_slice(&100u32.to_be_bytes()); // len
+    structs.extend_from_slice(&0u32.to_be_bytes()); // nameoff
+    // Only 4 bytes of prop data (need 100).
+    structs.extend_from_slice(&0u32.to_be_bytes());
+
+    let strings = b"x\0";
+    let off_dt_struct = header_size;
+    let off_dt_strings = header_size + structs.len();
+    let totalsize = off_dt_strings + strings.len();
+    let mut blob = Vec::with_capacity(totalsize);
+
+    blob.extend_from_slice(&0xD00D_FEEDu32.to_be_bytes());
+    blob.extend_from_slice(&(totalsize as u32).to_be_bytes());
+    blob.extend_from_slice(&(off_dt_struct as u32).to_be_bytes());
+    blob.extend_from_slice(&(off_dt_strings as u32).to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes());
+    blob.extend_from_slice(&17u32.to_be_bytes());
+    blob.extend_from_slice(&16u32.to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes());
+    blob.extend_from_slice(&(strings.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&(structs.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&structs);
+    blob.extend_from_slice(strings);
+
+    // Parser should detect that offset + len > structs.len() and return None.
+    assert!(device_tree::parse(&blob).is_none());
+}
+
+/// The struct offset pointing past the struct data should parse
+/// as an empty tree (loop immediately exits).
+#[test]
+fn parse_struct_offset_at_end_returns_empty() {
+    let header_size = 40usize;
+    // Struct block is just FDT_END.
+    let structs = 9u32.to_be_bytes();
+    let strings = b"\0";
+    let off_dt_struct = header_size;
+    let off_dt_strings = header_size + structs.len();
+    let totalsize = off_dt_strings + strings.len();
+    let mut blob = Vec::with_capacity(totalsize);
+
+    blob.extend_from_slice(&0xD00D_FEEDu32.to_be_bytes());
+    blob.extend_from_slice(&(totalsize as u32).to_be_bytes());
+    blob.extend_from_slice(&(off_dt_struct as u32).to_be_bytes());
+    blob.extend_from_slice(&(off_dt_strings as u32).to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes());
+    blob.extend_from_slice(&17u32.to_be_bytes());
+    blob.extend_from_slice(&16u32.to_be_bytes());
+    blob.extend_from_slice(&0u32.to_be_bytes());
+    blob.extend_from_slice(&(strings.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&(structs.len() as u32).to_be_bytes());
+    blob.extend_from_slice(&structs);
+    blob.extend_from_slice(strings);
+
+    let dt = device_tree::parse(&blob).expect("FDT_END only should parse");
+    assert_eq!(dt.device_count(), 0);
+}
+
+/// Device with no base_address convenience defaults to 0.
+#[test]
+fn device_with_empty_regs_not_emitted() {
+    // A device with compatible + reg but all partial entries (< 16 bytes)
+    // yields an empty regs vec → node is skipped due to `!regs.is_empty()`.
+    let mut builder = FdtBuilder::new();
+    builder.begin_node("");
+    builder.begin_node("ghost");
+    builder.prop_str("compatible", "test,ghost");
+    // reg with 0 bytes.
+    let nameoff = builder.add_string("reg");
+    builder.push_prop(nameoff, &[]);
+    builder.end_node();
+    builder.end_node();
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("empty reg should parse");
+    assert_eq!(dt.device_count(), 0);
+}

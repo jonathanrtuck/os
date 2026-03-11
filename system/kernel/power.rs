@@ -1,3 +1,10 @@
+// AUDIT: 2026-03-11 — 1 unsafe block verified. 6-category checklist applied.
+// No bugs found. HVC #0 with PSCI CPU_ON follows SMCCC calling convention
+// (x0=func_id, x1=target, x2=entry, x3=context). options(nostack) correct —
+// HVC traps to hypervisor, no caller stack usage. No nomem — HVC has massive
+// side effects (boots a secondary core). Return codes properly handled
+// (SUCCESS + ALREADY_ON = Ok, else Err). SAFETY comment present and accurate.
+
 //! PSCI (Power State Coordination Interface) wrapper.
 //!
 //! Uses HVC as the conduit (QEMU virt default). PSCI function IDs follow
