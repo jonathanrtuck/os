@@ -70,15 +70,19 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-10 (latest):** Structured IPC design, TrueType font rasterizer, alpha blending, overlapping surface compositing, userspace architecture audit.
+**Session 2026-03-11 (latest):** Input driver + event loop implementation. Keyboard input end-to-end.
 
-1. **Structured IPC designed.** Four sub-decisions settled: (a) one mechanism — ring buffers for everything, config = first message (Singularity pattern), no separate config path; (b) separate pages per direction — each channel has two 4 KiB pages, each a SPSC ring buffer; (c) fixed 64-byte messages — one AArch64 cache line, 4-byte type + 60-byte payload, 62 slots per ring; (d) split architecture — shared `ipc` library for ring mechanics, per-protocol payload definitions. Ring buffer layout designed in `system/DESIGN.md` §1.5. Kernel change: `channel::create()` allocates 2 pages. Pressure point documented: messages >60 bytes use shared-memory reference pattern. Prior art: io_uring, LMAX Disruptor, Singularity contracts. Implementation next.
+**Session 2026-03-10:** Structured IPC design, TrueType font rasterizer, alpha blending, overlapping surface compositing, userspace architecture audit.
 
-2. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables). Scanline rasterizer with 4× oversampling. ProggyClean.ttf embedded. 21 new tests (83 total).
+1. **Input driver + event loops implemented (2026-03-11).** virtio-input keyboard driver reading evdev events, forwarding to compositor via cross-process IPC channel. Compositor runs event loop: wait for input → update text buffer → re-render → signal GPU. GPU driver runs present loop: wait for compositor → transfer+flush. Init creates cross-process channels (input→compositor, compositor→GPU), starts all processes, idles. Interactive text demo: typed characters appear on screen. QEMU `-device virtio-keyboard-device` added. **Known:** QMP `input-send-event` doesn't route to virtio-keyboard (QEMU limitation) — must type into display window. **Known:** kernel `wait` syscall doesn't implement finite timeouts (only poll or infinite block).
 
-3. **Alpha blending + compositor rewrite.** Porter-Duff source-over compositing. Three panels with per-pixel alpha, composited back-to-front. TrueType text demo.
+2. **Structured IPC designed.** Four sub-decisions settled: (a) one mechanism — ring buffers for everything, config = first message (Singularity pattern), no separate config path; (b) separate pages per direction — each channel has two 4 KiB pages, each a SPSC ring buffer; (c) fixed 64-byte messages — one AArch64 cache line, 4-byte type + 60-byte payload, 62 slots per ring; (d) split architecture — shared `ipc` library for ring mechanics, per-protocol payload definitions. Ring buffer layout designed in `system/DESIGN.md` §1.5. Kernel change: `channel::create()` allocates 2 pages. Pressure point documented: messages >60 bytes use shared-memory reference pattern. Prior art: io_uring, LMAX Disruptor, Singularity contracts. Implementation next.
 
-4. **Userspace architecture audit and `system/DESIGN.md` created.** Systematic classification of every component. Five constraints documented, dependency map and roadmap.
+3. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables). Scanline rasterizer with 4× oversampling. ProggyClean.ttf embedded. 21 new tests (83 total).
+
+4. **Alpha blending + compositor rewrite.** Porter-Duff source-over compositing. Three panels with per-pixel alpha, composited back-to-front. TrueType text demo.
+
+5. **Userspace architecture audit and `system/DESIGN.md` created.** Systematic classification of every component. Five constraints documented, dependency map and roadmap.
 
 **Previous session highlights (still relevant):** Display pipeline complete end-to-end. Init is proto-OS-service. Kernel Phase 7 (memory sharing) done. 27 syscalls. Alignment bug fixed (DFSC check + ISS diagnostics).
 
@@ -88,9 +92,9 @@ Read these before making any design suggestions:
 
 **Decision #16 sub-decisions open:** Filesystem COW on-disk design (research complete, placement settled). New constraint: metadata DB must be on COW filesystem for uniform rewind. Favors time-correlated snapshots.
 
-**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: font rasterization done → text layout next → more compositor features. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: COW on-disk design (Decision #16, independent). **Infrastructure track:** Structured IPC implementation (ipc library → kernel 2-page channels → migrate services).
+**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, but doesn't feel like anything without a visual layer). GUI track: input + event loops done → text layout next → editor process separation. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: COW on-disk design (Decision #16, independent).
 
-**System code:** `system/kernel/` (35 source files), `system/services/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu}}/`, `system/libraries/{sys,virtio,drawing}/`, `system/user/echo/`, `system/test/` (83 drawing + 221 kernel = 304 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, full display pipeline with alpha compositing + TrueType rendering. 27 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (35 source files), `system/services/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu,virtio-input}}/`, `system/libraries/{sys,virtio,drawing,ipc}/`, `system/user/echo/`, `system/test/` (83 drawing + 221 kernel = 304 tests across 16 files). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with keyboard input + event loops. 27 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 

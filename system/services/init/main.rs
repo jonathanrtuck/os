@@ -7,6 +7,20 @@
 //! This is the microkernel pattern: kernel provides mechanism, init provides
 //! policy. Matches Fuchsia's component_manager, seL4's root task, QNX's procnto.
 //!
+//! # IPC topology
+//!
+//! Init creates three kinds of channels:
+//!
+//! 1. **Config channels** (init ↔ child) — one per child process. Init sends
+//!    configuration as the first ring buffer message before starting the child.
+//!
+//! 2. **Input channel** (input driver → compositor) — carries keyboard events.
+//!    Init creates the channel, sends endpoint A to the input driver and
+//!    endpoint B to the compositor. The driver produces, compositor consumes.
+//!
+//! 3. **Present channel** (compositor → GPU driver) — carries frame present
+//!    commands. Compositor produces, GPU driver consumes.
+//!
 //! # Kernel channel (raw bytes, not ring buffer)
 //!
 //! The kernel writes the device manifest as raw bytes before starting init.
@@ -19,12 +33,6 @@
 //! offset 8:  device[0]: { pa: u64, irq: u32, device_id: u32 }  (16 bytes)
 //! offset 24: device[1]: ...
 //! ```
-//!
-//! # Init-created channels (ring buffer messages)
-//!
-//! All channels that init creates to drivers and compositor use structured
-//! IPC via the `ipc` library. Configuration is sent as the first message
-//! on the channel before the child process starts.
 
 #![no_std]
 #![no_main]
@@ -46,18 +54,12 @@ const FB_SIZE: u32 = FB_STRIDE * FB_HEIGHT;
 const VIRTIO_DEVICE_BLK: u32 = 2;
 const VIRTIO_DEVICE_CONSOLE: u32 = 3;
 const VIRTIO_DEVICE_GPU: u32 = 16;
+const VIRTIO_DEVICE_INPUT: u32 = 18;
 // --- Protocol message types (shared with receivers) ---
 const MSG_DEVICE_CONFIG: u32 = 1;
 const MSG_GPU_CONFIG: u32 = 2;
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DeviceConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-}
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CompositorConfig {
@@ -66,6 +68,13 @@ struct CompositorConfig {
     fb_height: u32,
     fb_stride: u32,
     fb_size: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DeviceConfig {
+    mmio_pa: u64,
+    irq: u32,
+    _pad: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -110,13 +119,19 @@ fn print_u32(mut n: u32) {
 
     sys::print(&buf[i..]);
 }
-/// Set up the display pipeline: allocate framebuffer, spawn compositor,
-/// wait for it to draw, then start the GPU driver to present.
+/// Set up the interactive display pipeline with input.
+///
+/// Creates cross-process channels:
+/// - input driver → compositor (keyboard events)
+/// - compositor → GPU driver (present commands)
+///
+/// Then starts all three processes. They run their own event loops.
 fn setup_display_pipeline(
     gpu_proc: u8,
     gpu_channel_idx: usize,
     gpu_pa: u64,
     gpu_irq: u32,
+    input_proc: Option<(u8, usize, u64, u32)>, // (proc, ch_idx, pa, irq)
     next_channel: &mut usize,
 ) {
     sys::print(b"     setting up display pipeline\n");
@@ -149,7 +164,9 @@ fn setup_display_pipeline(
 
     sys::print(b" KiB)\n");
 
-    // Send GPU config via ring buffer.
+    // -----------------------------------------------------------------------
+    // Send GPU config via ring buffer (on init↔GPU channel).
+    // -----------------------------------------------------------------------
     let gpu_ch = init_channel(gpu_channel_idx);
     let gpu_config = GpuConfig {
         mmio_pa: gpu_pa,
@@ -163,8 +180,10 @@ fn setup_display_pipeline(
 
     gpu_ch.send(&msg);
 
+    // -----------------------------------------------------------------------
     // Spawn compositor.
-    let (comp_proc, comp_ch_handle, comp_channel_idx) =
+    // -----------------------------------------------------------------------
+    let (comp_proc, _comp_ch_handle, comp_channel_idx) =
         match spawn_with_channel(COMPOSITOR_ELF, next_channel) {
             Some(v) => v,
             None => {
@@ -191,21 +210,83 @@ fn setup_display_pipeline(
 
     comp_ch.send(&msg);
 
-    // Start compositor and wait for it to draw.
+    // -----------------------------------------------------------------------
+    // Create cross-process channels.
+    // -----------------------------------------------------------------------
+
+    // Input → Compositor channel (keyboard events).
+    // Endpoint A (send) → input driver, Endpoint B (recv) → compositor.
+    if let Some((input_proc_handle, input_ch_idx, input_pa, input_irq)) = input_proc {
+        sys::print(b"     creating input\xE2\x86\x92compositor channel\n");
+
+        let (ic_a, ic_b) = sys::channel_create().unwrap_or_else(|_| {
+            sys::print(b"init: channel_create (input-comp) failed\n");
+            sys::exit();
+        });
+
+        // Send endpoint A to input driver (handle 1 in input's table).
+        sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
+            sys::print(b"init: handle_send (input-comp A) failed\n");
+            sys::exit();
+        });
+        // Send endpoint B to compositor (handle 1 in compositor's table).
+        sys::handle_send(comp_proc, ic_b).unwrap_or_else(|_| {
+            sys::print(b"init: handle_send (input-comp B) failed\n");
+            sys::exit();
+        });
+
+        // Send input driver config via ring buffer.
+        let input_ch = init_channel(input_ch_idx);
+        let input_config = DeviceConfig {
+            mmio_pa: input_pa,
+            irq: input_irq,
+            _pad: 0,
+        };
+        let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
+
+        input_ch.send(&msg);
+    }
+
+    // Compositor → GPU channel (present commands).
+    // Endpoint A (send) → compositor, Endpoint B (recv) → GPU driver.
+    sys::print(b"     creating compositor\xE2\x86\x92gpu channel\n");
+
+    let (cg_a, cg_b) = sys::channel_create().unwrap_or_else(|_| {
+        sys::print(b"init: channel_create (comp-gpu) failed\n");
+        sys::exit();
+    });
+
+    // Send endpoint A to compositor (handle 2 in compositor's table, or 1 if no input).
+    sys::handle_send(comp_proc, cg_a).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (comp-gpu A) failed\n");
+        sys::exit();
+    });
+    // Send endpoint B to GPU driver (handle 1 in GPU's table).
+    sys::handle_send(gpu_proc, cg_b).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (comp-gpu B) failed\n");
+        sys::exit();
+    });
+
+    // -----------------------------------------------------------------------
+    // Start all processes. Order: GPU first (does device setup then waits),
+    // input driver (does setup then waits for IRQs), compositor last (draws
+    // initial frame then enters event loop).
+    // -----------------------------------------------------------------------
+    sys::print(b"     starting gpu driver\n");
+
+    let _ = sys::process_start(gpu_proc);
+
+    if let Some((input_proc_handle, _, _, _)) = input_proc {
+        sys::print(b"     starting input driver\n");
+
+        let _ = sys::process_start(input_proc_handle);
+    }
+
+    sys::print(b"     starting compositor\n");
+
     let _ = sys::process_start(comp_proc);
 
-    sys::print(b"     compositor started, waiting\n");
-
-    let _ = sys::wait(&[comp_ch_handle], u64::MAX);
-
-    sys::print(b"     compositor done, starting gpu driver\n");
-
-    // Start GPU driver to present the framebuffer.
-    let _ = sys::process_start(gpu_proc);
-    // Wait for GPU driver's process to exit.
-    let _ = sys::wait(&[gpu_proc], u64::MAX);
-
-    sys::print(b"     display pipeline complete\n");
+    sys::print(b"     display pipeline running\n");
 }
 /// Spawn a suspended process, create a channel to it, and send one endpoint.
 ///
@@ -224,7 +305,6 @@ fn spawn_with_channel(elf: &[u8], next_channel: &mut usize) -> Option<(u8, u8, u
     };
 
     sys::print(b" ok\n");
-
     sys::print(b"       channel_create\xE2\x80\xA6");
 
     let (ch_a, ch_b) = match sys::channel_create() {
@@ -240,6 +320,7 @@ fn spawn_with_channel(elf: &[u8], next_channel: &mut usize) -> Option<(u8, u8, u
 
     if let Err(_) = sys::handle_send(proc_handle, ch_b) {
         sys::print(b" FAILED\n");
+
         return None;
     }
 
@@ -268,10 +349,10 @@ pub extern "C" fn _start() -> ! {
 
     // Track channel allocation (0 = kernel, 1+ = ours).
     let mut next_channel: usize = 1;
-    // Saved GPU state for Phase 2.
-    // (proc, ch_handle, channel_idx, pa, irq)
-    let mut gpu: Option<(u8, u8, usize, u64, u32)> = None;
-    // Phase 1: Spawn a driver for each device in the manifest.
+    // Saved device state for Phase 2 (display pipeline).
+    let mut gpu: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
+    let mut input: Option<(u8, usize, u64, u32)> = None; // (proc, ch_idx, pa, irq)
+                                                         // Phase 1: Spawn a driver for each device in the manifest.
     let actual = if device_count > 8 { 8 } else { device_count };
 
     for i in 0..actual as usize {
@@ -294,6 +375,7 @@ pub extern "C" fn _start() -> ! {
             VIRTIO_DEVICE_BLK => VIRTIO_BLK_ELF,
             VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
             VIRTIO_DEVICE_GPU => VIRTIO_GPU_ELF,
+            VIRTIO_DEVICE_INPUT => VIRTIO_INPUT_ELF,
             _ => {
                 sys::print(b"     skipping unknown device id=");
                 print_u32(dev_id);
@@ -313,47 +395,61 @@ pub extern "C" fn _start() -> ! {
             None => continue,
         };
 
-        if dev_id == VIRTIO_DEVICE_GPU {
-            // Defer GPU startup — need framebuffer first.
-            gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq));
-        } else {
-            // Send device config via ring buffer.
-            let ch = init_channel(channel_idx);
-            let config = DeviceConfig {
-                mmio_pa: dev_pa,
-                irq: dev_irq,
-                _pad: 0,
-            };
-            let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &config) };
+        match dev_id {
+            VIRTIO_DEVICE_GPU => {
+                // Defer GPU startup — needs framebuffer and cross-process channels.
+                gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq));
+            }
+            VIRTIO_DEVICE_INPUT => {
+                // Defer input startup — needs cross-process channel to compositor.
+                input = Some((proc_h, channel_idx, dev_pa, dev_irq));
+            }
+            _ => {
+                // Start simple drivers (blk, console) immediately.
+                let ch = init_channel(channel_idx);
+                let config = DeviceConfig {
+                    mmio_pa: dev_pa,
+                    irq: dev_irq,
+                    _pad: 0,
+                };
+                let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &config) };
 
-            ch.send(&msg);
+                ch.send(&msg);
 
-            let _ = sys::process_start(proc_h);
-            let name = match dev_id {
-                VIRTIO_DEVICE_BLK => "blk",
-                VIRTIO_DEVICE_CONSOLE => "console",
-                _ => "?",
-            };
+                let _ = sys::process_start(proc_h);
+                let name = match dev_id {
+                    VIRTIO_DEVICE_BLK => "blk",
+                    VIRTIO_DEVICE_CONSOLE => "console",
+                    _ => "?",
+                };
 
-            sys::print(b"     spawned driver: ");
-            sys::print(name.as_bytes());
-            sys::print(b"\n");
+                sys::print(b"     spawned driver: ");
+                sys::print(name.as_bytes());
+                sys::print(b"\n");
+            }
         }
     }
 
-    // Phase 2: Display pipeline (compositor → GPU driver).
+    // Phase 2: Display pipeline (input driver + compositor + GPU driver).
     if let Some((gpu_proc, _gpu_ch, gpu_channel_idx, gpu_pa, gpu_irq)) = gpu {
         setup_display_pipeline(
             gpu_proc,
             gpu_channel_idx,
             gpu_pa,
             gpu_irq,
+            input,
             &mut next_channel,
         );
     } else {
         sys::print(b"     no gpu found\n");
     }
 
-    sys::print(b"  \xF0\x9F\x94\xA7 init - done\n");
-    sys::exit();
+    sys::print(b"  \xF0\x9F\x94\xA7 init - running (idle)\n");
+
+    // Don't exit — child processes are still running their event loops.
+    // Idle forever via yield. In the real OS, init would become the OS
+    // service process (renderer, metadata DB, input router, compositor).
+    loop {
+        sys::yield_now();
+    }
 }

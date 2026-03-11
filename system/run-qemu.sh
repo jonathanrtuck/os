@@ -34,6 +34,7 @@ QEMU_COMMON=(
     -drive "file=$DISK_IMG,if=none,format=raw,id=hd0"
     -device virtio-blk-device,drive=hd0
     -device virtio-gpu-device
+    -device virtio-keyboard-device
 )
 
 # Generate DTB if missing. Uses minimal machine config (no disk needed —

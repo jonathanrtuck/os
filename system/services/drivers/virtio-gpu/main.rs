@@ -4,6 +4,12 @@
 //! from init via channel shared memory. Initializes the GPU device, binds
 //! the framebuffer as a 2D resource, and presents it to the display.
 //!
+//! # Present loop
+//!
+//! After initial device setup, enters an event loop: waits for MSG_PRESENT
+//! messages from the compositor on channel 1, then transfers the framebuffer
+//! to the host and flushes.
+//!
 //! # virtio-gpu 2D protocol
 //!
 //! All commands go through the control virtqueue (queue 0) as request/response
@@ -24,8 +30,9 @@
 
 /// Channel shared memory base (first channel in our address space).
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
-// Protocol message type (must match init's definition).
+// Protocol message types (must match init/compositor definitions).
 const MSG_GPU_CONFIG: u32 = 2;
+const MSG_PRESENT: u32 = 20;
 /// Control virtqueue index.
 const VIRTQ_CONTROL: u32 = 0;
 /// Resource ID for our framebuffer (arbitrary nonzero).
@@ -46,6 +53,11 @@ const RESP_OK_NODATA: u32 = 0x1100;
 const RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 // virtio-gpu pixel format (B8G8R8A8_UNORM).
 const FORMAT_B8G8R8A8_UNORM: u32 = 1;
+// Handle indices:
+// Handle 0: init config channel
+// Handle 1: compositor present channel
+// Handle 2: IRQ handle (allocated by interrupt_register)
+const PRESENT_HANDLE: u8 = 1;
 
 #[repr(C)]
 struct AttachBacking {
@@ -71,6 +83,11 @@ struct DisplayInfo {
     rect_height: u32,
     enabled: u32,
     flags: u32,
+}
+struct DmaBuf {
+    va: usize,
+    pa: u64,
+    order: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -127,12 +144,6 @@ struct TransferToHost2d {
     offset: u64,
     resource_id: u32,
     _padding: u32,
-}
-
-struct DmaBuf {
-    va: usize,
-    pa: u64,
-    order: u32,
 }
 
 impl DmaBuf {
@@ -214,6 +225,10 @@ fn ctrl_header(cmd_type: u32) -> CtrlHeader {
         ctx_id: 0,
         _padding: 0,
     }
+}
+/// Compute the base VA of channel N's shared pages.
+fn channel_shm_va(idx: usize) -> usize {
+    CHANNEL_SHM_BASE + idx * 2 * 4096
 }
 fn get_display_info(
     device: &virtio::Device,
@@ -383,6 +398,45 @@ fn resource_flush(
 
     ok
 }
+/// Flush resource to display using a pre-allocated DMA buffer.
+fn resource_flush_reuse(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    cmd: &DmaBuf,
+    resource_id: u32,
+    width: u32,
+    height: u32,
+) {
+    let ptr = cmd.va as *mut u8;
+
+    unsafe {
+        core::ptr::write_bytes(ptr, 0, 512);
+        core::ptr::write(
+            ptr as *mut ResourceFlush,
+            ResourceFlush {
+                header: ctrl_header(CMD_RESOURCE_FLUSH),
+                rect_x: 0,
+                rect_y: 0,
+                rect_width: width,
+                rect_height: height,
+                resource_id,
+                _padding: 0,
+            },
+        );
+    }
+
+    gpu_command(
+        device,
+        vq,
+        irq_handle,
+        cmd.pa,
+        core::mem::size_of::<ResourceFlush>() as u32,
+        cmd.pa + 512,
+        cmd.va + 512,
+        core::mem::size_of::<CtrlHeader>() as u32,
+    );
+}
 fn set_scanout(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
@@ -473,11 +527,51 @@ fn transfer_to_host(
 
     ok
 }
+/// Transfer framebuffer to host using a pre-allocated DMA buffer.
+fn transfer_to_host_reuse(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    cmd: &DmaBuf,
+    resource_id: u32,
+    width: u32,
+    height: u32,
+) {
+    let ptr = cmd.va as *mut u8;
+
+    unsafe {
+        core::ptr::write_bytes(ptr, 0, 512);
+        core::ptr::write(
+            ptr as *mut TransferToHost2d,
+            TransferToHost2d {
+                header: ctrl_header(CMD_TRANSFER_TO_HOST_2D),
+                rect_x: 0,
+                rect_y: 0,
+                rect_width: width,
+                rect_height: height,
+                offset: 0,
+                resource_id,
+                _padding: 0,
+            },
+        );
+    }
+
+    gpu_command(
+        device,
+        vq,
+        irq_handle,
+        cmd.pa,
+        core::mem::size_of::<TransferToHost2d>() as u32,
+        cmd.pa + 512,
+        cmd.va + 512,
+        core::mem::size_of::<CtrlHeader>() as u32,
+    );
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Read GPU config from ring buffer (first message, sent by init).
-    let ch = unsafe { ipc::Channel::from_base(CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    let ch = unsafe { ipc::Channel::from_base(channel_shm_va(0), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
     if !ch.try_recv(&mut msg) || msg.msg_type != MSG_GPU_CONFIG {
@@ -506,6 +600,7 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
+    // IRQ handle goes into slot 2 (after init channel=0, present channel=1).
     let irq_handle = sys::interrupt_register(irq).unwrap_or_else(|_| {
         sys::print(b"virtio-gpu: interrupt_register failed\n");
         sys::exit();
@@ -555,17 +650,17 @@ pub extern "C" fn _start() -> ! {
     let width = fb_width;
     let height = fb_height;
 
-    // Create a 2D resource.
+    // -----------------------------------------------------------------------
+    // One-time device setup: create resource, attach backing, set scanout.
+    // -----------------------------------------------------------------------
     if !resource_create_2d(&device, &mut vq, irq_handle, FB_RESOURCE_ID, width, height) {
         sys::print(b"virtio-gpu: resource_create_2d failed\n");
         sys::exit();
     }
-    // Attach the external framebuffer (allocated by init, PA passed via channel).
     if !attach_backing(&device, &mut vq, irq_handle, FB_RESOURCE_ID, fb_pa, fb_size) {
         sys::print(b"virtio-gpu: attach_backing failed\n");
         sys::exit();
     }
-    // Bind resource to scanout 0.
     if !set_scanout(
         &device,
         &mut vq,
@@ -578,16 +673,47 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"virtio-gpu: set_scanout failed\n");
         sys::exit();
     }
-    // Transfer the framebuffer (already drawn by compositor) to host and flush.
-    if !transfer_to_host(&device, &mut vq, irq_handle, FB_RESOURCE_ID, width, height) {
-        sys::print(b"virtio-gpu: transfer_to_host failed\n");
-        sys::exit();
-    }
-    if !resource_flush(&device, &mut vq, irq_handle, FB_RESOURCE_ID, width, height) {
-        sys::print(b"virtio-gpu: resource_flush failed\n");
-        sys::exit();
-    }
 
-    sys::print(b"     presented to display\n");
-    sys::exit();
+    // Pre-allocate a DMA page for the present loop commands. Reusing one
+    // page eliminates 4 syscalls (2 alloc + 2 free) per frame.
+    let present_cmd = DmaBuf::alloc(0);
+
+    sys::print(b"     device setup complete, entering present loop\n");
+
+    // Channel 1: compositor present commands (endpoint 1 = receive side).
+    let present_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
+
+    // -----------------------------------------------------------------------
+    // Present loop: wait for compositor → transfer → flush → repeat
+    // -----------------------------------------------------------------------
+    loop {
+        // Wait for a present command from the compositor.
+        let _ = sys::wait(&[PRESENT_HANDLE], u64::MAX);
+
+        // Drain all pending present messages (coalesce multiple into one
+        // transfer+flush — the framebuffer already has the latest contents).
+        while present_ch.try_recv(&mut msg) {
+            // Consume but don't need to inspect — MSG_PRESENT has no payload.
+        }
+
+        // Transfer and flush using pre-allocated command buffer.
+        transfer_to_host_reuse(
+            &device,
+            &mut vq,
+            irq_handle,
+            &present_cmd,
+            FB_RESOURCE_ID,
+            width,
+            height,
+        );
+        resource_flush_reuse(
+            &device,
+            &mut vq,
+            irq_handle,
+            &present_cmd,
+            FB_RESOURCE_ID,
+            width,
+            height,
+        );
+    }
 }

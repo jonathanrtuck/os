@@ -22,6 +22,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("virtio-blk", "VIRTIO_BLK_ELF"),
     ("virtio-console", "VIRTIO_CONSOLE_ELF"),
     ("virtio-gpu", "VIRTIO_GPU_ELF"),
+    ("virtio-input", "VIRTIO_INPUT_ELF"),
     ("compositor", "COMPOSITOR_ELF"),
 ];
 /// Programs compiled BEFORE init (init embeds their ELFs).
@@ -36,6 +37,7 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
         false,
     ),
     ("virtio-gpu", "services/drivers/virtio-gpu", true, false),
+    ("virtio-input", "services/drivers/virtio-input", true, false),
     ("compositor", "services/compositor", false, true),
 ];
 
@@ -76,10 +78,7 @@ fn main() {
         let src_dir = manifest_dir.join(dir);
         let main_rs = src_dir.join("main.rs");
         let elf_path = out_dir.join(format!("{name}.elf"));
-        let mut externs = vec![
-            ("sys", sys_rlib.clone()),
-            ("ipc", ipc_rlib.clone()),
-        ];
+        let mut externs = vec![("sys", sys_rlib.clone()), ("ipc", ipc_rlib.clone())];
 
         if needs_virtio {
             externs.push(("virtio", virtio_rlib.clone()));

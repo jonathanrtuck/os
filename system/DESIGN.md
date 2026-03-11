@@ -30,15 +30,18 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  Platform Services                             │
 │  ┌──────────┐  ┌────────────┐  ┌────────────┐  │
 │  │   Init   │  │ Compositor │  │  Drivers   │  │  🟡/🟢 mixed
-│  │  (proto  │  │   (toy,    │  │ (virtio-   │  │
-│  │   OS     │  │   real     │  │  blk/gpu/  │  │
-│  │ service) │  │ compositing│  │  console)  │  │
-│  └──────────┘  └────────────┘  └────────────┘  │
+│  │  (proto  │  │  (event    │  │ (virtio-   │  │
+│  │   OS     │  │   loop,    │  │  blk/gpu/  │  │
+│  │ service) │  │ interactive│  │  input/    │  │
+│  │          │  │   text)    │  │  console)  │  │
+│  └──────────┘  └──────┬─────┘  └─────┬──────┘  │
+│                 input→comp      comp→gpu       │
+│                  (IPC)           (IPC)         │
 ├────────────────────────────────────────────────┤
 │  Libraries                                     │
-│  ┌─────┐  ┌────────┐  ┌─────────┐  ┌────────┐  │  🟢 foundational
-│  │ sys │  │ virtio │  │ drawing │  │link.ld │  │
-│  └─────┘  └────────┘  └─────────┘  └────────┘  │
+│  ┌─────┐ ┌────────┐ ┌─────────┐ ┌─────┐ ┌───┐  │  🟢 foundational
+│  │ sys │ │ virtio │ │ drawing │ │ ipc │ │l.d│  │
+│  └─────┘ └────────┘ └─────────┘ └─────┘ └───┘  │
 ├────────────────────────────────────────────────┤
 │  Kernel (27 syscalls, see kernel/DESIGN.md)    │  🟢 production
 └────────────────────────────────────────────────┘
@@ -246,35 +249,36 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - **Device manifest format.** Ad hoc packed struct (u32 count + 8-byte-aligned entries with device_id, mmio_pa, mmio_size, irq). No versioning, no extensibility. Works for 2 devices.
 - **Channel shared memory layout.** Raw bytes at magic offsets. Init writes `fb_va` at offset 0, `fb_width` at offset 8, etc. Each process pair has its own undocumented layout. No schema, no validation.
 
-**Key constraint:** Init does everything synchronously and then exits. There's no long-running OS service process yet. The real OS service (renderer + metadata DB + input router + compositor) doesn't exist — init is a stand-in.
+**Key change (2026-03-11):** Init no longer exits. After setting up all processes and cross-process channels, it idles via `yield_now()`. It creates three kinds of channels: config (init↔child), input (input driver→compositor), and present (compositor→GPU driver). The display pipeline starts all three event-loop processes (GPU, input, compositor) and lets them run autonomously.
+
+**Key constraint:** Init is still not a real OS service. It sets up the process topology but doesn't mediate runtime communication. The real OS service (renderer + metadata DB + input router + compositor) doesn't exist — init is a stand-in.
 
 ---
 
 ### 2.2 Compositor (`services/compositor/`) 🟡
 
-**Goal:** Composite multiple surfaces into a final framebuffer.
+**Goal:** Composite multiple surfaces into a final framebuffer. Respond to input events.
 
-**Status:** 254 lines. Draws three demo panels into separate BSS buffers, composites them with alpha blending in z-order.
+**Status:** ~260 lines. Interactive text demo with event loop. Receives keyboard events from the input driver via IPC, renders typed text to the framebuffer, signals the GPU driver to present.
 
 **What's foundational (the approach):**
 
-- **Separate surface buffers, composited back-to-front.** This is how a real compositor works. Each surface has its own pixel data; the compositor blits them in z-order with per-pixel alpha.
-- **Surface tree → pixel buffer.** The compositor is a pure function of its inputs (surface buffers + positions + z-order) → output (framebuffer). Matches the design thread's model.
-- **Alpha blending demonstrates the compositing model.** Semi-transparent backgrounds + opaque content pixels. The blending math is reusable.
+- **Event loop.** Waits on input channel, processes events, re-renders, signals GPU. This is the correct reactive pattern — event-driven, not polling.
+- **Cross-process IPC.** Receives events via ring buffer channel from input driver. Sends present commands to GPU driver via another channel. Demonstrates the multi-process IPC topology.
+- **Full framebuffer re-render.** Each frame is a pure function of text state → framebuffer. No retained state except the text buffer.
 
 **What's scaffolding (the implementation):**
 
-- **Static BSS buffers.** Three 400×260 panels allocated at compile time. Real compositor receives surfaces from editor processes via shared memory — surface count and dimensions are dynamic.
-- **Hardcoded scene.** Panel content, positions, z-order all baked in. Real compositor reads from a surface tree (layout engine output).
-- **Fire-once.** Draws one frame and exits. No damage tracking, no incremental updates, no display loop.
-- **No input.** Can't respond to mouse/keyboard events.
+- **Combined OS service + editor role.** In the real OS, the compositor is part of the OS service (renderer only). Input would be routed to a separate editor process which modifies document state via the edit protocol. The compositor currently plays both roles.
+- **Static text buffer in BSS.** Real compositor renders from document state in shared memory.
+- **Full re-render every frame.** No damage tracking. Fine for a text demo, not for complex documents.
+- **Bitmap font only.** TrueType rendering removed from compositor (still available in drawing library for future use).
 
 **What's missing:**
 
 - **Dynamic surface management.** Register/unregister surfaces, resize, reorder.
-- **Damage tracking.** Only redraw pixels that changed. The design thread identified this as "React-style reconciliation" — diff the surface tree, commit minimal updates.
-- **Display loop.** Continuous rendering, vsync, buffer swapping.
-- **Connection to layout engine.** Layout produces the surface tree; compositor renders it. That interface doesn't exist.
+- **Damage tracking.** Only redraw pixels that changed.
+- **Connection to layout engine.** Layout produces the surface tree; compositor renders it.
 
 ---
 
@@ -282,18 +286,18 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Present pixel buffers to the QEMU virtual display.
 
-**Status:** 603 lines. All six core virtio-gpu 2D commands. Interrupt-driven.
+**Status:** ~600 lines. All six core virtio-gpu 2D commands. Event loop — waits for present commands from compositor.
 
 **What's foundational:**
 
 - Complete 2D command implementation (create resource, attach backing, set scanout, transfer, flush, get display info).
 - Interrupt-driven I/O (register IRQ → wait → ack). Correct async pattern.
+- **Present loop.** After one-time device setup (create resource, attach backing, set scanout), enters an event loop: wait for `MSG_PRESENT` on compositor channel → transfer to host → flush → loop. Coalesces multiple pending presents into a single transfer+flush.
 - Page-aligned MMIO mapping with sub-page offset handling.
 - Reuses virtio library for transport + virtqueue.
 
 **What's scaffolding:**
 
-- **Fire-once.** Presents one framebuffer and exits. Real GPU driver is long-running — continuously presents new frames.
 - **No surface trait.** The design thread identified `create_surface`/`present` as the right GPU abstraction, but the driver uses raw virtio-gpu commands. There's no abstract display interface that the compositor could program against.
 - **Framebuffer owned by init.** Init allocates the DMA buffer and shares it. The driver just attaches it as backing. Real ownership: compositor or GPU driver owns display buffers.
 
@@ -319,7 +323,34 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 2.5 Virtio Console Driver (`services/drivers/virtio-console/`) 🟡
+### 2.5 Virtio Input Driver (`services/drivers/virtio-input/`) 🟢
+
+**Goal:** Read keyboard events from the QEMU virtual keyboard and forward to the compositor.
+
+**Status:** ~190 lines. Interrupt-driven event loop. Translates Linux evdev keycodes to ASCII.
+
+**What's foundational:**
+
+- Same interrupt-driven pattern as virtio-blk/gpu (register IRQ → wait → ack → loop).
+- Uses the standard virtio-input protocol: posts device-writable 8-byte event buffers on queue 0, device fills them with `{type, code, value}` evdev events.
+- Cross-process IPC: sends `MSG_KEY_EVENT` messages to the compositor via a direct channel (not routed through init).
+- Keycode-to-ASCII translation table (US layout, 58 keycodes including letters, digits, punctuation, space, enter, backspace).
+
+**What's scaffolding:**
+
+- **Single event buffer.** Posts one 8-byte buffer at a time. Sufficient for keyboard (human typing speed), but mouse/touch input at 100+ events/sec would need multiple pre-posted buffers.
+- **Lowercase only.** No shift/ctrl/alt modifier state tracking. The keymap returns lowercase letters only.
+- **Direct-to-compositor routing.** In the real OS, input goes to the OS service (input router), which routes to the active editor. See architecture note in source.
+
+**What's missing:**
+
+- **Mouse/touch input.** virtio-input supports EV_REL (relative mouse), EV_ABS (touch/tablet). Not handled.
+- **Modifier keys.** Shift, ctrl, alt, meta. Requires state tracking (which modifiers are currently held).
+- **Key repeat.** EV_KEY value=2 (repeat) is filtered out. OS-level key repeat with configurable delay/rate.
+
+---
+
+### 2.6 Virtio Console Driver (`services/drivers/virtio-console/`) 🟡
 
 **Status:** 112 lines. TX-only, writes one test string. Not exercised (no QEMU device configured).
 
@@ -327,7 +358,7 @@ Minimal and not yet useful. Would need RX queue, proper character device interfa
 
 ---
 
-### 2.6 Echo (`user/echo/`) 🔴
+### 2.7 Echo (`user/echo/`) 🔴
 
 **Status:** 34 lines. IPC ping-pong demo. Not integrated into current boot sequence.
 
@@ -357,23 +388,29 @@ These are the things that limit what can be built above the kernel today, ordere
 
 ---
 
-### 3.3 No Input
+### 3.3 ~~No Input~~ ✅ Resolved
 
-**The problem:** No keyboard, mouse, or touch drivers. QEMU provides PS/2 or virtio-input, but nothing reads them. The display pipeline is output-only.
+**Resolved:** virtio-input keyboard driver (`services/drivers/virtio-input/`). Same interrupt-driven pattern as virtio-blk/gpu: post device-writable event buffers on the event virtqueue, wait for IRQ, read 8-byte Linux evdev events, translate keycodes to ASCII, forward to compositor via IPC ring buffer.
 
-**Why it matters:** Can draw to the screen but can't respond to the user. Blocks interactive demos, editor prototypes, shell exploration (Decision #17).
+**IPC topology:** Init creates a cross-process channel (input driver → compositor). Input driver sends `MSG_KEY_EVENT` messages; compositor receives and re-renders. This is scaffolding — in the real OS, input routes through the OS service to the active editor process.
 
-**What it would take:** A virtio-input driver (same pattern as virtio-blk/gpu — MMIO + interrupt-driven) plus input event routing from init/OS service to the active process.
+**QEMU note:** `-device virtio-keyboard-device` added to run-qemu.sh. QEMU's QMP `input-send-event` does NOT route to virtio-keyboard (QEMU limitation) — must type into the display window directly.
 
 ---
 
-### 3.4 No Event Loop / Display Loop
+### 3.4 ~~No Event Loop / Display Loop~~ ✅ Resolved
 
-**The problem:** Every process runs once and exits. Init orchestrates a linear boot sequence, compositor draws one frame, GPU driver presents once. No process runs continuously.
+**Resolved:** Three processes now run continuous event loops:
 
-**Why it matters:** Interactive anything (text cursor blinking, scroll, window resize) requires a process that loops on events. The kernel's `wait` syscall supports this (multiplexed wait on channels + timers), but no userspace code uses the pattern.
+1. **Input driver** — `wait(IRQ)` → read event → send to compositor → repost buffer → loop
+2. **Compositor** — `wait(input_channel)` → receive key → update text buffer → re-render → signal GPU → loop
+3. **GPU driver** — `wait(compositor_channel)` → transfer framebuffer → flush → loop
 
-**What it would take:** Any one process converted to an event loop. The compositor is the natural candidate — wait for input events or surface updates, recomposite, present, repeat.
+Init no longer exits — it sets up all cross-process channels, starts all processes, then idles via `yield_now()`.
+
+**Cross-process IPC channels:** Init creates direct channels between processes (input→compositor, compositor→GPU) in addition to its own config channels. Each child gets handle 0 = init channel, handle 1+ = cross-process channels.
+
+**Known limitation:** The kernel's `wait` syscall doesn't implement finite timeouts — only poll (`timeout=0`) or infinite block. Timer handles (`timer_create`) can be mixed into `wait` calls as a workaround.
 
 ---
 
@@ -415,14 +452,15 @@ Compositor
 Init
   └── sys (process_create, channel_create, handle_send, memory_share, dma_alloc, wait, ...)
 
-Drivers (virtio-blk, virtio-gpu, virtio-console)
+Drivers (virtio-blk, virtio-gpu, virtio-input, virtio-console)
   ├── sys (device_map, interrupt_register, dma_alloc, wait, ...)
-  └── virtio (MMIO transport, split virtqueue)
+  ├── virtio (MMIO transport, split virtqueue)
+  └── ipc (ring buffer messaging — for cross-process channels)
 
 Drawing Library
   └── (none — pure, no dependencies)
 
-IPC Library (planned)
+IPC Library
   └── (none — pure, no dependencies. Uses core::sync::atomic only)
 
 Sys Library
@@ -479,8 +517,9 @@ Ordered by what unblocks the most, building the happy path first:
 1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the drawing library. Zero-copy parser, scanline rasterizer with 4× oversampling, coverage map output. Simple interface: `TrueTypeFont::rasterize(codepoint, size, buffer, scratch) → GlyphMetrics`. 21 tests. Running on bare metal in the compositor.
 2. ~~**Syscall error types**~~ — **Done.** `SyscallError` enum (13 variants) + `SyscallResult<T>` on all 25 syscalls + `print()` convenience. All 6 userspace binaries migrated. Eliminated raw `i64` returns and ad-hoc `< 0` checks.
 3. ~~**Userspace memory allocation**~~ (§3.1) — **Done.** `memory_alloc`/`memory_free` (#25/#26) + `GlobalAlloc` in `sys` library. `Vec`/`String`/`Box` available to all userspace programs.
-4. **Structured IPC** (§3.5) — **Designed.** Ring buffer layout, message format, and library architecture settled. Next: implement the `ipc` library, update kernel `channel::create()` to allocate two pages, migrate init/compositor/drivers from raw byte offsets to ring buffer messages.
-5. **Input driver** (§3.3) — unblocks interactive demos. virtio-input follows the same pattern as existing drivers.
-6. **Event loop** (§3.4) — convert compositor or init to loop on `wait`. Unblocks continuous rendering.
+4. ~~**Structured IPC**~~ (§3.5) — **Done.** Ring buffer library implemented (`libraries/ipc/`). Kernel allocates two pages per channel. All services migrated to ring buffer messages.
+5. ~~**Input driver**~~ (§3.3) — **Done.** virtio-input keyboard driver with IPC forwarding to compositor. Cross-process channels for direct driver↔compositor communication.
+6. ~~**Event loop**~~ (§3.4) — **Done.** Compositor, GPU driver, and input driver all run continuous event loops. Init stays alive.
 7. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
 8. **Filesystem service** (§3.2) — blocked on Decision #16. Unblocks runtime resource loading, documents, everything the OS is about.
+9. **Wait timeout** — kernel `wait` syscall only supports poll (timeout=0) or infinite block. Finite timeouts need a timer handle mixed into the wait set. Should implement internal timer creation for non-zero non-MAX timeouts.

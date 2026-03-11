@@ -168,8 +168,17 @@ impl Device {
         true
     }
     /// Notify the device that virtqueue `index` has new buffers.
+    ///
+    /// Uses DSB SY (full system barrier) before the MMIO write to ensure
+    /// all prior writes to the virtqueue (descriptors, available ring) are
+    /// visible to the device. On AArch64 with a hypervisor (HVF/KVM), a
+    /// Release fence (DMB ISH) only synchronizes within the inner-shareable
+    /// domain — the host process reading guest memory may be in a different
+    /// domain. DSB SY ensures visibility to all observers.
     pub fn notify(&self, index: u32) {
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+        // DSB SY: drain store buffer, ensure all prior writes are visible
+        // to all observers (including the hypervisor/host reading guest RAM).
+        unsafe { core::arch::asm!("dsb sy", options(nostack)) };
 
         self.write(REG_QUEUE_NOTIFY, index);
     }
