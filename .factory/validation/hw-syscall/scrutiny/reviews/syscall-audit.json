@@ -1,0 +1,21 @@
+{
+  "featureId": "syscall-audit",
+  "reviewedAt": "2026-03-11T20:15:00.000Z",
+  "commitId": "7aee1cf8fac2796615dd7d806122c823b4e51770",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Thorough audit of syscall.rs. All 13 unsafe blocks now have accurate SAFETY comments. Fix 5 (aliasing UB with addr_of!/addr_of_mut! pattern) re-verified sound across dispatch, sys_futex_wait, sys_wait, and dispatch_ok — no references created that would alias the scheduler lock. User pointer validation verified for all 27 syscall handlers: every user-provided pointer is bounds-checked (< USER_VA_END), overflow-checked (checked_add), alignment-checked where required (u64 alignment for DMA pa_out_ptr, u32 alignment for futex, u16 alignment for stack), and page-accessibility-verified via AT S1E0R/S1E0W hardware translation before dereference. No privilege escalation vectors: device_map correctly rejects RAM overlap, memory_share correctly rejects non-RAM PAs, DMA order capped at 10, ELF size capped at 2 MiB. No TOCTOU: validation and dereference occur within the same syscall context with TTBR0 stable and no intervening lock release. Error codes correctly propagated via result_to_u64! macro using repr(i64) → i64 → u64 cast chain. AUDIT marker at file top is comprehensive and accurate. 76 new tests cover error code representation, result_to_u64 macro, buffer validation patterns for all syscall handlers, page iteration logic, syscall number completeness, handle range validation, and privilege escalation boundaries. Tests correctly use the established pattern of duplicating pure validation logic for host-side testing (kernel targets aarch64-unknown-none). No code bugs found by the worker, and this review concurs — no bugs found.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker's skillFeedback suggests the kernel-auditor skill should note that for files heavily coupled to hardware/scheduler (like syscall.rs), TDD must use duplicated validation logic patterns rather than direct module inclusion. This is a valid and actionable observation — the skill's TDD section says 'Write a test that demonstrates the bug' but doesn't explain the architectural constraint that prevents direct kernel module imports in tests.",
+      "evidence": "handoff.skillFeedback.suggestedChanges: 'The skill could note that for files heavily coupled to hardware/scheduler (like syscall.rs), TDD must use duplicated validation logic patterns rather than direct module inclusion'. AGENTS.md already documents this constraint ('Test location: All new tests go in system/test/tests/. Never try to import kernel modules directly'), but the skill file itself only says 'Tests in system/test/ cannot import kernel modules directly' without explaining the duplication strategy for validation logic."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. Comprehensive audit of syscall.rs with 13 unsafe blocks verified, Fix 5 re-confirmed sound, all 27 syscall handlers' user pointer validation verified correct, no privilege escalation vectors, and 76 well-designed tests added. No code changes beyond SAFETY/AUDIT documentation comments. Worker followed the kernel-auditor skill procedure correctly. The audit finding of 'no bugs' is credible — the syscall validation logic is sound and well-structured."
+}
