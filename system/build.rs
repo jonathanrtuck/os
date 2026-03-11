@@ -29,6 +29,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
 ];
 /// Programs compiled BEFORE init (init embeds their ELFs).
 /// Each entry is (name, source directory, needs_virtio, needs_drawing).
+/// ORDER MATTERS: fuzz-helper must be before fuzz (fuzz embeds it).
 const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("echo", "user/echo", false, false),
     ("virtio-blk", "services/drivers/virtio-blk", true, false),
@@ -42,6 +43,7 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("virtio-input", "services/drivers/virtio-input", true, false),
     ("compositor", "services/compositor", false, true),
     ("stress", "user/stress", false, false),
+    ("fuzz-helper", "user/fuzz-helper", false, false),
     ("fuzz", "user/fuzz", false, false),
 ];
 
@@ -78,6 +80,7 @@ fn main() {
     rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[]);
 
     // Step 2: Compile all non-init programs.
+    // fuzz-helper must be compiled before fuzz (fuzz embeds it).
     for &(name, dir, needs_virtio, needs_drawing) in PROGRAMS {
         let src_dir = manifest_dir.join(dir);
         let main_rs = src_dir.join("main.rs");
@@ -91,7 +94,21 @@ fn main() {
             externs.push(("drawing", drawing_rlib.clone()));
         }
 
-        rustc_bin(&rustc, &main_rs, &elf_path, &link_ld, &externs, &[]);
+        // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
+        let mut env_vars = Vec::new();
+        if name == "fuzz" {
+            let helper_elf = out_dir.join("fuzz-helper.elf");
+            let fuzz_embedded = format!(
+                "static HELPER_ELF: &[u8] = include_bytes!(\"{}\");\n",
+                helper_elf.display()
+            );
+            let fuzz_embedded_rs = out_dir.join("fuzz_embedded.rs");
+            std::fs::write(&fuzz_embedded_rs, &fuzz_embedded)
+                .unwrap_or_else(|e| panic!("failed to write fuzz_embedded.rs: {e}"));
+            env_vars.push(("FUZZ_EMBEDDED_RS", fuzz_embedded_rs.to_str().unwrap().to_string()));
+        }
+
+        rustc_bin(&rustc, &main_rs, &elf_path, &link_ld, &externs, &env_vars);
         println!("cargo:rerun-if-changed={}", main_rs.display());
     }
 

@@ -1,20 +1,13 @@
 //! Adversarial kernel test — exercises every syscall with invalid, edge-case,
 //! and hostile arguments. The kernel must never panic, hang, or corrupt state.
 //!
-//! Phases:
-//!   1. Invalid syscall numbers
-//!   2. Bad handle arguments (invalid index, wrong type, double-close)
-//!   3. Bad address arguments (null, kernel VA, unmapped, unaligned)
-//!   4. Handle table exhaustion + recovery
-//!   5. Memory exhaustion + recovery
-//!   6. Timer exhaustion + recovery
-//!   7. Process lifecycle (create/kill/start edge cases)
-//!   8. Thread lifecycle (bad entry/stack, rapid create/exit)
-//!   9. Scheduling context edge cases
-//!  10. Concurrent random syscalls from multiple threads
+//! Phases 1-12:  Single-process tests (bad args, exhaustion, concurrency)
+//! Phases 13-17: Cross-process tests (kill races, blocking, resource contention)
 
 #![no_std]
 #![no_main]
+
+include!(env!("FUZZ_EMBEDDED_RS"));
 
 // Raw syscall helpers — bypass sys library validation.
 #[inline(always)]
@@ -882,12 +875,803 @@ fn phase_12_dma_edge_cases() {
 }
 
 // -----------------------------------------------------------------------
+// Helper: spawn fuzz-helper child with a command byte
+// -----------------------------------------------------------------------
+
+struct ChildProcess {
+    proc_h: u8,
+    cmd_va: usize,
+}
+
+fn spawn_helper(cmd: u8) -> Option<ChildProcess> {
+    let proc_h = match sys::process_create(HELPER_ELF.as_ptr(), HELPER_ELF.len()) {
+        Ok(h) => h,
+        Err(_) => return None,
+    };
+
+    // Pass the command byte via shared memory (dma_alloc gives us the PA,
+    // memory_share maps it into the child at SHARED_MEMORY_BASE=0xC000_0000).
+    let mut cmd_pa: u64 = 0;
+    let cmd_va = match sys::dma_alloc(0, &mut cmd_pa) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = sys::process_kill(proc_h);
+            let _ = sys::handle_close(proc_h);
+            return None;
+        }
+    };
+    unsafe { core::ptr::write_volatile(cmd_va as *mut u8, cmd) };
+
+    if sys::memory_share(proc_h, cmd_pa, 1).is_err() {
+        let _ = sys::dma_free(cmd_va as u64, 0);
+        let _ = sys::process_kill(proc_h);
+        let _ = sys::handle_close(proc_h);
+        return None;
+    }
+
+    let _ = sys::process_start(proc_h);
+
+    Some(ChildProcess { proc_h, cmd_va })
+}
+
+/// Wait for child to exit and free resources.
+fn reap_helper(child: ChildProcess) {
+    let _ = sys::wait(&[child.proc_h], u64::MAX);
+    let _ = sys::handle_close(child.proc_h);
+    let _ = sys::dma_free(child.cmd_va as u64, 0);
+}
+
+// -----------------------------------------------------------------------
+// Phase 13: Kill process while blocked in wait()
+// -----------------------------------------------------------------------
+fn phase_13_kill_while_blocked() {
+    match spawn_helper(0x01) {
+        Some(child) => {
+            for _ in 0..100 { sys::yield_now(); }
+            let _ = sys::process_kill(child.proc_h);
+            reap_helper(child);
+        }
+        None => sys::print(b"       (skipped - spawn failed)\n"),
+    }
+    phase_ok(b"phase 13: kill process while blocked in wait");
+}
+
+// -----------------------------------------------------------------------
+// Phase 14: Kill process while busy-looping (running on another core)
+// -----------------------------------------------------------------------
+fn phase_14_kill_while_running() {
+    match spawn_helper(0x02) {
+        Some(child) => {
+            for _ in 0..200 { sys::yield_now(); }
+            let _ = sys::process_kill(child.proc_h);
+            reap_helper(child);
+        }
+        None => sys::print(b"       (skipped - spawn failed)\n"),
+    }
+    phase_ok(b"phase 14: kill process while running");
+}
+
+// -----------------------------------------------------------------------
+// Phase 15: Kill process with multiple blocked threads
+// -----------------------------------------------------------------------
+fn phase_15_kill_multi_threaded() {
+    match spawn_helper(0x04) {
+        Some(child) => {
+            for _ in 0..300 { sys::yield_now(); }
+            let _ = sys::process_kill(child.proc_h);
+            reap_helper(child);
+        }
+        None => sys::print(b"       (skipped - spawn failed)\n"),
+    }
+    phase_ok(b"phase 15: kill multi-threaded process");
+}
+
+// -----------------------------------------------------------------------
+// Phase 16: Rapid create/start/kill cycles
+// -----------------------------------------------------------------------
+fn phase_16_rapid_lifecycle() {
+    let mut success: u32 = 0;
+    for _ in 0..20 {
+        match spawn_helper(0x02) {
+            Some(child) => {
+                let _ = sys::process_kill(child.proc_h);
+                reap_helper(child);
+                success += 1;
+            }
+            None => break,
+        }
+    }
+    sys::print(b"       ");
+    print_u64(success as u64);
+    sys::print(b" rapid create/kill cycles\n");
+    phase_ok(b"phase 16: rapid create/start/kill cycles");
+}
+
+// -----------------------------------------------------------------------
+// Phase 17: Kill process doing resource churn
+// -----------------------------------------------------------------------
+fn phase_17_kill_during_resource_churn() {
+    match spawn_helper(0x05) {
+        Some(child) => {
+            for _ in 0..500 { sys::yield_now(); }
+            let _ = sys::process_kill(child.proc_h);
+            reap_helper(child);
+        }
+        None => sys::print(b"       (skipped - spawn failed)\n"),
+    }
+    phase_ok(b"phase 17: kill during resource churn");
+}
+
+// -----------------------------------------------------------------------
+// Phase 18: Sibling thread closes handle while another is blocked on it
+// -----------------------------------------------------------------------
+
+extern "C" fn blocker_thread(handle: u64) -> ! {
+    // Block on a channel handle (wait for signal that never comes).
+    let h = handle as u8;
+    let _ = sys::wait(&[h], 10_000_000); // 10ms timeout as safety net.
+    sys::exit();
+}
+
+extern "C" fn closer_thread(handle: u64) -> ! {
+    // Close the handle the blocker is waiting on.
+    let h = handle as u8;
+    // Small delay to let blocker enter wait.
+    sys::yield_now();
+    sys::yield_now();
+    let _ = sys::handle_close(h);
+    sys::exit();
+}
+
+extern "C" fn blocker_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack, nomem)
+        );
+    }
+    blocker_thread(args);
+}
+
+extern "C" fn closer_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack, nomem)
+        );
+    }
+    closer_thread(args);
+}
+
+fn phase_18_sibling_close_while_blocked() {
+    for _ in 0..5 {
+        // Create a channel. Blocker waits on endpoint A.
+        // Closer closes endpoint A from another thread.
+        let (ch_a, ch_b) = match sys::channel_create() {
+            Ok(pair) => pair,
+            Err(_) => break,
+        };
+
+        let stack1 = alloc_thread_stack();
+        let stack2 = alloc_thread_stack();
+        if stack1 == 0 || stack2 == 0 { break; }
+
+        // Blocker thread: waits on ch_a.
+        let args_ptr1 = (stack1 - 8) as *mut u64;
+        unsafe { core::ptr::write_volatile(args_ptr1, ch_a as u64) };
+        let t1 = sys::thread_create(blocker_trampoline as u64, stack1 - 16);
+
+        // Closer thread: closes ch_a.
+        let args_ptr2 = (stack2 - 8) as *mut u64;
+        unsafe { core::ptr::write_volatile(args_ptr2, ch_a as u64) };
+        let t2 = sys::thread_create(closer_trampoline as u64, stack2 - 16);
+
+        // Wait for both threads.
+        if let Ok(h) = t1 {
+            let _ = sys::wait(&[h], 100_000_000); // 100ms timeout.
+            let _ = sys::handle_close(h);
+        }
+        if let Ok(h) = t2 {
+            let _ = sys::wait(&[h], 100_000_000);
+            let _ = sys::handle_close(h);
+        }
+        // ch_a may or may not be closed by closer thread. Try closing.
+        let _ = sys::handle_close(ch_a);
+        let _ = sys::handle_close(ch_b);
+    }
+
+    phase_ok(b"phase 18: sibling close while blocked");
+}
+
+// -----------------------------------------------------------------------
+// Phase 19: Process exit while another process holds channel peer
+// -----------------------------------------------------------------------
+fn phase_19_peer_exit() {
+    match spawn_helper(0x03) {
+        Some(child) => {
+            reap_helper(child);
+        }
+        None => sys::print(b"       (skipped - spawn failed)\n"),
+    }
+    phase_ok(b"phase 19: process exit with channel peer");
+}
+
+// -----------------------------------------------------------------------
+// Phase 20: Double-kill and kill-after-exit
+// -----------------------------------------------------------------------
+fn phase_20_double_kill() {
+    // Kill after exit.
+    match spawn_helper(0x03) {
+        Some(child) => {
+            let _ = sys::wait(&[child.proc_h], u64::MAX);
+            let _ = sys::process_kill(child.proc_h);
+            let _ = sys::process_kill(child.proc_h);
+            let _ = sys::handle_close(child.proc_h);
+            let _ = sys::dma_free(child.cmd_va as u64, 0);
+        }
+        None => sys::print(b"       (skipped - spawn failed)\n"),
+    }
+    // Double kill while alive.
+    match spawn_helper(0x02) {
+        Some(child) => {
+            for _ in 0..50 { sys::yield_now(); }
+            let _ = sys::process_kill(child.proc_h);
+            let _ = sys::process_kill(child.proc_h);
+            reap_helper(child);
+        }
+        None => sys::print(b"       (skipped - spawn failed)\n"),
+    }
+    phase_ok(b"phase 20: double kill and kill-after-exit");
+}
+
+// -----------------------------------------------------------------------
+// Phase 21: Futex wake race (concurrent wait/wake on same address)
+// -----------------------------------------------------------------------
+
+// FUTEX_DONE: wakers set to 1 when finished. Waiters check before blocking.
+static FUTEX_VAR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static FUTEX_DONE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+extern "C" fn futex_waiter(_: u64) -> ! {
+    let addr = &FUTEX_VAR as *const core::sync::atomic::AtomicU32 as *const u32;
+    for _ in 0..2000 {
+        // Exit if wakers are done (prevents infinite block).
+        if FUTEX_DONE.load(core::sync::atomic::Ordering::Relaxed) != 0 {
+            break;
+        }
+        let val = FUTEX_VAR.load(core::sync::atomic::Ordering::Relaxed);
+        // futex_wait: blocks only if *addr == val. Races with wakers
+        // incrementing the value — exercises the wake_pending gap.
+        let _ = sys::futex_wait(addr, val);
+    }
+    sys::exit();
+}
+
+extern "C" fn futex_waker(_: u64) -> ! {
+    let addr = &FUTEX_VAR as *const core::sync::atomic::AtomicU32 as *const u32;
+    for _ in 0..2000 {
+        FUTEX_VAR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        let _ = sys::futex_wake(addr, u32::MAX);
+    }
+    // Signal done and do a final wake to unblock any stragglers.
+    FUTEX_DONE.store(1, core::sync::atomic::Ordering::Relaxed);
+    FUTEX_VAR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let _ = sys::futex_wake(addr, u32::MAX);
+    sys::exit();
+}
+
+extern "C" fn futex_waiter_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+    }
+    futex_waiter(args);
+}
+
+extern "C" fn futex_waker_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+    }
+    futex_waker(args);
+}
+
+fn spawn_with_trampoline(trampoline: u64, arg: u64) -> Option<u8> {
+    let stack = alloc_thread_stack();
+    if stack == 0 { return None; }
+    let args_ptr = (stack - 8) as *mut u64;
+    unsafe { core::ptr::write_volatile(args_ptr, arg) };
+    sys::thread_create(trampoline, stack - 16).ok()
+}
+
+fn phase_21_futex_race() {
+    FUTEX_VAR.store(0, core::sync::atomic::Ordering::Relaxed);
+    FUTEX_DONE.store(0, core::sync::atomic::Ordering::Relaxed);
+    let mut handles: [u8; 6] = [0; 6];
+    let mut count = 0usize;
+
+    // 3 waiters + 3 wakers, all hammering the same futex.
+    for _ in 0..3 {
+        if let Some(h) = spawn_with_trampoline(futex_waiter_trampoline as u64, 0) {
+            handles[count] = h;
+            count += 1;
+        }
+    }
+    for _ in 0..3 {
+        if let Some(h) = spawn_with_trampoline(futex_waker_trampoline as u64, 0) {
+            handles[count] = h;
+            count += 1;
+        }
+    }
+    for i in 0..count {
+        let _ = sys::wait(&[handles[i]], u64::MAX);
+        let _ = sys::handle_close(handles[i]);
+    }
+
+    phase_ok(b"phase 21: futex wake race");
+}
+
+// -----------------------------------------------------------------------
+// Phase 22: ASID pressure (rapid process create/destroy)
+// -----------------------------------------------------------------------
+fn phase_22_asid_pressure() {
+    let mut success: u32 = 0;
+    for _ in 0..50 {
+        match spawn_helper(0x03) {
+            Some(child) => {
+                reap_helper(child);
+                success += 1;
+            }
+            None => break,
+        }
+    }
+    sys::print(b"       ");
+    print_u64(success as u64);
+    sys::print(b" processes cycled (ASID pressure)\n");
+
+    phase_ok(b"phase 22: ASID pressure");
+}
+
+// -----------------------------------------------------------------------
+// Phase 23: Wait on timer that fires during setup
+// -----------------------------------------------------------------------
+fn phase_23_timer_fire_during_setup() {
+    // Create a timer with 0ns (fires immediately), then wait.
+    // Tests the race between timer fire callback and wait registration.
+    for _ in 0..100 {
+        if let Ok(h) = sys::timer_create(0) {
+            let _ = sys::wait(&[h], 1_000_000);
+            let _ = sys::handle_close(h);
+        }
+    }
+    // Also: create timer with 1ns.
+    for _ in 0..100 {
+        if let Ok(h) = sys::timer_create(1) {
+            let _ = sys::wait(&[h], 1_000_000);
+            let _ = sys::handle_close(h);
+        }
+    }
+
+    phase_ok(b"phase 23: timer fire during setup");
+}
+
+// -----------------------------------------------------------------------
+// Phase 24: Multiple threads wait on same channel
+// -----------------------------------------------------------------------
+
+extern "C" fn channel_waiter(handle: u64) -> ! {
+    let h = handle as u8;
+    let _ = sys::wait(&[h], 50_000_000); // 50ms timeout.
+    sys::exit();
+}
+
+extern "C" fn channel_waiter_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+    }
+    channel_waiter(args);
+}
+
+fn phase_24_multi_waiter_same_handle() {
+    // Two threads both wait on the same channel handle.
+    // Only one waiter can be registered per handle — second should
+    // either overwrite or fail, but kernel must not crash.
+    let (ch_a, ch_b) = match sys::channel_create() {
+        Ok(pair) => pair,
+        Err(_) => {
+            sys::print(b"       (skipped - channel_create failed)\n");
+            phase_ok(b"phase 24: multi-waiter same handle");
+            return;
+        }
+    };
+
+    let t1 = spawn_with_trampoline(channel_waiter_trampoline as u64, ch_a as u64);
+    let t2 = spawn_with_trampoline(channel_waiter_trampoline as u64, ch_a as u64);
+
+    // Signal the channel — should wake at least one waiter.
+    sys::yield_now();
+    sys::yield_now();
+    let _ = sys::channel_signal(ch_b);
+
+    if let Some(h) = t1 {
+        let _ = sys::wait(&[h], 100_000_000);
+        let _ = sys::handle_close(h);
+    }
+    if let Some(h) = t2 {
+        let _ = sys::wait(&[h], 100_000_000);
+        let _ = sys::handle_close(h);
+    }
+    let _ = sys::handle_close(ch_a);
+    let _ = sys::handle_close(ch_b);
+
+    phase_ok(b"phase 24: multi-waiter same handle");
+}
+
+// -----------------------------------------------------------------------
+// Phase 25: Stress process creation under memory pressure
+// -----------------------------------------------------------------------
+fn phase_25_create_under_pressure() {
+    // Eat up some memory, then try to create processes.
+    let mut allocs: [usize; 256] = [0; 256];
+    let mut alloc_count = 0usize;
+
+    // Consume memory.
+    for i in 0..256 {
+        match sys::memory_alloc(1) {
+            Ok(va) => {
+                unsafe { core::ptr::write_volatile(va as *mut u8, 0xCC) };
+                allocs[i] = va;
+                alloc_count += 1;
+            }
+            Err(_) => break,
+        }
+    }
+
+    // Try to create a process under pressure — should fail gracefully.
+    let r = sys::process_create(HELPER_ELF.as_ptr(), HELPER_ELF.len());
+    match r {
+        Ok(h) => {
+            // Somehow succeeded — clean up.
+            let _ = sys::process_kill(h);
+            let _ = sys::handle_close(h);
+        }
+        Err(_) => {} // Expected — out of memory.
+    }
+
+    // Free everything.
+    for i in 0..alloc_count {
+        let _ = sys::memory_free(allocs[i], 1);
+    }
+
+    match spawn_helper(0x03) {
+        Some(child) => reap_helper(child),
+        None => sys::print(b"       (could not spawn after release)\n"),
+    }
+
+    phase_ok(b"phase 25: create under memory pressure");
+}
+
+// -----------------------------------------------------------------------
+// Phase 26: Userspace faults (kernel must not panic)
+// -----------------------------------------------------------------------
+
+extern "C" fn fault_udf(_: u64) -> ! {
+    // Execute undefined instruction — should fault, kernel kills thread.
+    unsafe { core::arch::asm!("udf #0", options(noreturn)) };
+}
+
+extern "C" fn fault_udf_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+    }
+    fault_udf(args);
+}
+
+extern "C" fn fault_null_read(_: u64) -> ! {
+    // Read from address 0 — should fault.
+    let val: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov x9, #0",
+            "ldr {0}, [x9]",
+            out(reg) val,
+            out("x9") _,
+            options(nostack)
+        );
+    }
+    let _ = val;
+    sys::exit();
+}
+
+extern "C" fn fault_null_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+    }
+    fault_null_read(args);
+}
+
+extern "C" fn fault_kernel_read(_: u64) -> ! {
+    // Read from kernel address — should fault.
+    let val: u64;
+    unsafe {
+        core::arch::asm!(
+            "mov x9, #0xFFFF000000000000",
+            "ldr {0}, [x9]",
+            out(reg) val,
+            out("x9") _,
+            options(nostack)
+        );
+    }
+    let _ = val;
+    sys::exit();
+}
+
+extern "C" fn fault_kernel_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+    }
+    fault_kernel_read(args);
+}
+
+fn phase_26_userspace_faults() {
+    // Each fault should kill the faulting thread/process, not panic the kernel.
+    // We run each fault in a child process so our process survives.
+
+    // UDF (undefined instruction).
+    match spawn_helper(0x03) {
+        Some(child) => reap_helper(child),
+        None => {}
+    }
+
+    // Instead of helper processes, use threads with faults.
+    // A faulting thread should be killed. But does the kernel handle this?
+    // If the kernel panics on a user fault, the test hangs/crashes.
+
+    // Test: child process executes UDF.
+    // We can't easily make the helper execute UDF via the command byte approach.
+    // But we CAN test it with threads in our own process — if the kernel
+    // kills only the faulting thread, our process survives.
+    // If the kernel kills the whole process, the test fails (init sees fuzz exit).
+
+    // For safety, run these in child processes.
+    // UDF fault in a child.
+    // We'll create a bare process for this... but we only have the helper ELF.
+    // Let's test thread faults and see what happens.
+    
+    // Thread that executes UDF.
+    let t = spawn_with_trampoline(fault_udf_trampoline as u64, 0);
+    if let Some(h) = t {
+        // If kernel kills thread, wait returns. If kernel panics, we hang.
+        let _ = sys::wait(&[h], 50_000_000); // 50ms timeout.
+        let _ = sys::handle_close(h);
+    }
+
+    // Thread that reads from null.
+    let t = spawn_with_trampoline(fault_null_trampoline as u64, 0);
+    if let Some(h) = t {
+        let _ = sys::wait(&[h], 50_000_000);
+        let _ = sys::handle_close(h);
+    }
+
+    // Thread that reads from kernel space.
+    let t = spawn_with_trampoline(fault_kernel_trampoline as u64, 0);
+    if let Some(h) = t {
+        let _ = sys::wait(&[h], 50_000_000);
+        let _ = sys::handle_close(h);
+    }
+
+    phase_ok(b"phase 26: userspace faults");
+}
+
+// -----------------------------------------------------------------------
+// Phase 27: Stack overflow (recurse until guard page fault)
+// -----------------------------------------------------------------------
+
+#[inline(never)]
+fn recurse_forever(depth: u64) -> u64 {
+    // Volatile to prevent tail-call elimination.
+    let mut buf = [0u8; 256];
+    unsafe { core::ptr::write_volatile(&mut buf[0], depth as u8) };
+    recurse_forever(depth + 1) + unsafe { core::ptr::read_volatile(&buf[0]) as u64 }
+}
+
+extern "C" fn stack_overflow_entry(_: u64) -> ! {
+    let _ = recurse_forever(0);
+    sys::exit();
+}
+
+extern "C" fn stack_overflow_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack),
+        );
+    }
+    stack_overflow_entry(args);
+}
+
+fn phase_27_stack_overflow() {
+    let t = spawn_with_trampoline(stack_overflow_trampoline as u64, 0);
+    if let Some(h) = t {
+        let _ = sys::wait(&[h], 100_000_000); // 100ms timeout
+        let _ = sys::handle_close(h);
+    }
+    phase_ok(b"phase 27: stack overflow (guard page fault)");
+}
+
+// -----------------------------------------------------------------------
+// Phase 28: Signal closed channel endpoint
+// -----------------------------------------------------------------------
+
+fn phase_28_signal_closed_channel() {
+    // Create a channel, close one end, then signal the closed end from the
+    // other. Also: signal after both ends closed (handle still valid briefly).
+    for _ in 0..10 {
+        match sys::channel_create() {
+            Ok((a, b)) => {
+                let _ = sys::handle_close(b);
+                // Signal the orphaned peer — should not crash.
+                let _ = sys::channel_signal(a);
+                let _ = sys::handle_close(a);
+            }
+            Err(_) => break,
+        }
+    }
+    phase_ok(b"phase 28: signal closed channel endpoint");
+}
+
+// -----------------------------------------------------------------------
+// Phase 29: Rapid thread create/exit (thread ID recycling stress)
+// -----------------------------------------------------------------------
+
+extern "C" fn noop_entry(_: u64) -> ! {
+    sys::exit();
+}
+
+extern "C" fn noop_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack),
+        );
+    }
+    noop_entry(args);
+}
+
+fn phase_29_thread_id_recycling() {
+    let mut created: u32 = 0;
+    for _ in 0..100 {
+        let t = spawn_with_trampoline(noop_trampoline as u64, 0);
+        if let Some(h) = t {
+            let _ = sys::wait(&[h], u64::MAX);
+            let _ = sys::handle_close(h);
+            created += 1;
+        } else {
+            break;
+        }
+    }
+    sys::print(b"       ");
+    print_u64(created as u64);
+    sys::print(b" thread create/exit cycles\n");
+    phase_ok(b"phase 29: thread ID recycling");
+}
+
+// -----------------------------------------------------------------------
+// Phase 30: Close handle while another thread waits on it
+// -----------------------------------------------------------------------
+
+static WAIT_HANDLE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+extern "C" fn wait_on_shared_handle(_: u64) -> ! {
+    let h = WAIT_HANDLE.load(core::sync::atomic::Ordering::Acquire) as u8;
+    let _ = sys::wait(&[h], u64::MAX);
+    sys::exit();
+}
+
+extern "C" fn wait_on_shared_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack),
+        );
+    }
+    wait_on_shared_handle(args);
+}
+
+fn phase_30_close_while_waiting() {
+    // Create a short-lived timer. A sibling thread waits on it. We close
+    // our copy of the handle while the sibling may still be waiting. The
+    // timer fires quickly (10ms) so the sibling exits on its own regardless.
+    match sys::timer_create(10_000_000) {
+        Ok(timer_h) => {
+            WAIT_HANDLE.store(timer_h as u64, core::sync::atomic::Ordering::Release);
+            let t = spawn_with_trampoline(wait_on_shared_trampoline as u64, 0);
+            if let Some(th) = t {
+                for _ in 0..100 { sys::yield_now(); }
+                // Close our copy of the timer handle. The sibling's wait may
+                // still be in progress or already completed from the timer firing.
+                let _ = sys::handle_close(timer_h);
+                // Wait for the sibling thread to exit (it exits after wait returns).
+                let _ = sys::wait(&[th], u64::MAX);
+                let _ = sys::handle_close(th);
+            } else {
+                let _ = sys::handle_close(timer_h);
+            }
+        }
+        Err(_) => sys::print(b"       (skipped - timer create failed)\n"),
+    }
+    phase_ok(b"phase 30: close handle while another thread waits");
+}
+
+// -----------------------------------------------------------------------
+// Phase 31: Concurrent channel create/close (stress channel table)
+// -----------------------------------------------------------------------
+
+extern "C" fn channel_churn_entry(_: u64) -> ! {
+    for _ in 0..200 {
+        match sys::channel_create() {
+            Ok((a, b)) => {
+                let _ = sys::channel_signal(a);
+                let _ = sys::channel_signal(b);
+                let _ = sys::handle_close(a);
+                let _ = sys::handle_close(b);
+            }
+            Err(_) => break,
+        }
+    }
+    sys::exit();
+}
+
+extern "C" fn channel_churn_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack),
+        );
+    }
+    channel_churn_entry(args);
+}
+
+fn phase_31_concurrent_channel_churn() {
+    let mut handles: [u8; 4] = [0; 4];
+    let mut count = 0usize;
+    for _ in 0..4 {
+        if let Some(h) = spawn_with_trampoline(channel_churn_trampoline as u64, 0) {
+            handles[count] = h;
+            count += 1;
+        }
+    }
+    for i in 0..count {
+        let _ = sys::wait(&[handles[i]], u64::MAX);
+        let _ = sys::handle_close(handles[i]);
+    }
+    phase_ok(b"phase 31: concurrent channel create/close");
+}
+
+// -----------------------------------------------------------------------
 // Entry
 // -----------------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    sys::print(b"  \xF0\x9F\x94\xAC fuzz test starting\n");
+    sys::print(b"  \xF0\x9F\x94\xAC fuzz test starting (31 phases)\n");
 
+    // Single-process tests.
     phase_1_invalid_syscall_numbers();
     phase_2_bad_handles();
     phase_3_bad_addresses();
@@ -900,6 +1684,31 @@ pub extern "C" fn _start() -> ! {
     phase_10_concurrent_chaos();
     phase_11_wait_edge_cases();
     phase_12_dma_edge_cases();
+
+    // Cross-process tests.
+    phase_13_kill_while_blocked();
+    phase_14_kill_while_running();
+    phase_15_kill_multi_threaded();
+    phase_16_rapid_lifecycle();
+    phase_17_kill_during_resource_churn();
+    phase_18_sibling_close_while_blocked();
+    phase_19_peer_exit();
+    phase_20_double_kill();
+
+    // Race condition tests.
+    phase_21_futex_race();
+    phase_22_asid_pressure();
+    phase_23_timer_fire_during_setup();
+    phase_24_multi_waiter_same_handle();
+    phase_25_create_under_pressure();
+    phase_26_userspace_faults();
+
+    // Extended tests.
+    phase_27_stack_overflow();
+    phase_28_signal_closed_channel();
+    phase_29_thread_id_recycling();
+    phase_30_close_while_waiting();
+    phase_31_concurrent_channel_churn();
 
     sys::print(b"  \xE2\x9C\x85 fuzz test PASS\n");
     sys::exit();

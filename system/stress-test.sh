@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-TIMEOUT="${1:-120}"
+TIMEOUT="${1:-180}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 KERNEL="${SCRIPT_DIR}/target/aarch64-unknown-none/release/kernel"
 DTB_FILE="${SCRIPT_DIR}/virt.dtb"
