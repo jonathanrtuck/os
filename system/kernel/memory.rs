@@ -193,7 +193,9 @@ pub fn phys_to_virt(pa: Pa) -> usize {
 /// If the containing 2MB block hasn't been refined to L3 pages yet,
 /// allocates an L3 page table and replaces the L2 block descriptor.
 /// The target page's L3 entry is set to 0 (invalid), so any access faults.
-pub fn set_kernel_guard_page(va: usize) {
+///
+/// Returns `false` if the L3 table allocation fails (OOM).
+pub fn try_set_kernel_guard_page(va: usize) -> bool {
     assert!(va >= KERNEL_VA_OFFSET, "not a kernel VA");
     assert!(va & 0xFFF == 0, "VA not page-aligned");
 
@@ -203,12 +205,12 @@ pub fn set_kernel_guard_page(va: usize) {
     let l2_table = unsafe { &boot_tt1_l2_1 as *const u8 as *mut u64 };
     let l2_entry = unsafe { l2_table.add(l2_idx).read_volatile() };
     let l3_table = if l2_entry & 0b11 == 0b01 {
-        // L2 block descriptor — break into an L3 page table.
-        // Extract the block's base PA and attribute bits.
         let block_pa = l2_entry & 0x0000_FFFF_FFE0_0000;
         let block_attrs = l2_entry & !(0x0000_FFFF_FFE0_0003u64);
-        let l3_frame = super::page_allocator::alloc_frame()
-            .expect("set_kernel_guard_page: out of memory for L3 table");
+        let l3_frame = match super::page_allocator::alloc_frame() {
+            Some(f) => f,
+            None => return false,
+        };
         let l3_va = phys_to_virt(l3_frame) as *mut u64;
 
         // Populate 512 L3 entries replicating the block mapping.
@@ -260,6 +262,16 @@ pub fn set_kernel_guard_page(va: usize) {
     }
 
     tlb_invalidate_all();
+
+    true
+}
+
+/// Panicking wrapper for boot-time guard page setup.
+pub fn set_kernel_guard_page(va: usize) {
+    assert!(
+        try_set_kernel_guard_page(va),
+        "set_kernel_guard_page: out of memory"
+    );
 }
 #[inline(always)]
 pub fn virt_to_phys(va: usize) -> Pa {

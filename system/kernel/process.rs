@@ -84,7 +84,10 @@ fn setup_stack(addr_space: &mut AddressSpace) -> Result<(), &'static str> {
     let top_stack_va = USER_STACK_TOP - PAGE_SIZE;
     let pa = page_allocator::alloc_frame().ok_or("out of frames for user stack")?;
 
-    addr_space.map_page(top_stack_va, pa.as_u64(), &PageAttrs::user_rw());
+    if !addr_space.map_page(top_stack_va, pa.as_u64(), &PageAttrs::user_rw()) {
+        page_allocator::free_frame(pa);
+        return Err("out of page table frames for user stack");
+    }
 
     Ok(())
 }
@@ -97,7 +100,9 @@ fn setup_stack(addr_space: &mut AddressSpace) -> Result<(), &'static str> {
 pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &'static str> {
     let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
     let (asid, generation) = address_space_id::alloc();
-    let mut addr_space = Box::new(AddressSpace::new(asid, generation));
+    let mut addr_space = Box::new(
+        AddressSpace::new(asid, generation).ok_or("out of frames for L0 page table")?,
+    );
 
     for i in 0..header.ph_count {
         let seg = match executable::load_segment(elf_bytes, &header, i)
@@ -130,14 +135,18 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
 
             copy_segment_page(file_data, seg.file_size, page * PAGE_SIZE, pa);
 
-            addr_space.map_page(base_va + page * PAGE_SIZE, pa.as_u64(), &attrs);
+            if !addr_space.map_page(base_va + page * PAGE_SIZE, pa.as_u64(), &attrs) {
+                page_allocator::free_frame(pa);
+                return Err("out of page table frames for ELF segment");
+            }
         }
     }
 
     setup_stack(&mut addr_space)?;
 
     let process_id = scheduler::create_process(addr_space);
-    let thread_id = scheduler::spawn_user_suspended(process_id, header.entry, USER_STACK_TOP);
+    let thread_id = scheduler::spawn_user_suspended(process_id, header.entry, USER_STACK_TOP)
+        .ok_or("out of memory for initial thread stack")?;
 
     Ok((process_id, thread_id))
 }
@@ -150,7 +159,9 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
 pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<(ProcessId, ThreadId), &'static str> {
     let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
     let (asid, generation) = address_space_id::alloc();
-    let mut addr_space = Box::new(AddressSpace::new(asid, generation));
+    let mut addr_space = Box::new(
+        AddressSpace::new(asid, generation).ok_or("out of frames for L0 page table")?,
+    );
 
     for i in 0..header.ph_count {
         let seg = match executable::load_segment(elf_bytes, &header, i)
@@ -188,14 +199,18 @@ pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<(ProcessId, ThreadId),
 
             copy_segment_page(file_data, seg.file_size, page * PAGE_SIZE, pa);
 
-            addr_space.map_page(base_va + page * PAGE_SIZE, pa.as_u64(), &attrs);
+            if !addr_space.map_page(base_va + page * PAGE_SIZE, pa.as_u64(), &attrs) {
+                page_allocator::free_frame(pa);
+                return Err("out of page table frames for ELF segment");
+            }
         }
     }
 
     setup_stack(&mut addr_space)?;
 
     let process_id = scheduler::create_process(addr_space);
-    let thread_id = scheduler::spawn_user(process_id, header.entry, USER_STACK_TOP);
+    let thread_id = scheduler::spawn_user(process_id, header.entry, USER_STACK_TOP)
+        .ok_or("out of memory for initial thread stack")?;
 
     Ok((process_id, thread_id))
 }

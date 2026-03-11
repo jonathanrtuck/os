@@ -1593,19 +1593,18 @@ extern "C" fn wait_on_shared_trampoline() -> ! {
 }
 
 fn phase_30_close_while_waiting() {
-    // Create a short-lived timer. A sibling thread waits on it. We close
-    // our copy of the handle while the sibling may still be waiting. The
-    // timer fires quickly (10ms) so the sibling exits on its own regardless.
-    match sys::timer_create(10_000_000) {
+    // Create a timer that won't fire (u64::MAX ns). A sibling thread blocks
+    // on sys_wait for it. Then the main thread closes the timer handle.
+    // The kernel must wake the blocked sibling — otherwise it hangs forever.
+    match sys::timer_create(u64::MAX) {
         Ok(timer_h) => {
             WAIT_HANDLE.store(timer_h as u64, core::sync::atomic::Ordering::Release);
             let t = spawn_with_trampoline(wait_on_shared_trampoline as u64, 0);
             if let Some(th) = t {
-                for _ in 0..100 { sys::yield_now(); }
-                // Close our copy of the timer handle. The sibling's wait may
-                // still be in progress or already completed from the timer firing.
+                for _ in 0..200 { sys::yield_now(); }
+                // Close the timer handle — kernel must wake the blocked sibling.
                 let _ = sys::handle_close(timer_h);
-                // Wait for the sibling thread to exit (it exits after wait returns).
+                // Sibling should wake and exit promptly.
                 let _ = sys::wait(&[th], u64::MAX);
                 let _ = sys::handle_close(th);
             } else {

@@ -1270,7 +1270,7 @@ pub fn spawn(entry: fn() -> !) {
     s.queue.ready.push(thread);
 }
 #[inline(never)]
-pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> ThreadId {
+pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> Option<ThreadId> {
     let mut s = STATE.lock();
     let id = s.next_id;
 
@@ -1281,22 +1281,25 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
         .expect("process not found");
     let ttbr0 = process.address_space.ttbr0_value();
 
-    process.thread_count += 1;
+    let mut thread = match Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top) {
+        Some(t) => t,
+        None => return None,
+    };
 
-    let mut thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top);
+    process.thread_count += 1;
 
     bind_default_context(&mut s, &mut thread);
 
     s.queue.ready.push(thread);
 
-    ThreadId(id)
+    Some(ThreadId(id))
 }
 /// Like `spawn_user`, but the thread is placed in the suspended list instead
 /// of the ready queue. Call `start_suspended_threads` to make it runnable.
 ///
 /// Used by `process_create` (two-phase creation: create suspended, then start).
 #[inline(never)]
-pub fn spawn_user_suspended(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> ThreadId {
+pub fn spawn_user_suspended(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> Option<ThreadId> {
     let mut s = STATE.lock();
     let id = s.next_id;
 
@@ -1307,15 +1310,18 @@ pub fn spawn_user_suspended(process_id: ProcessId, entry_va: u64, user_stack_top
         .expect("process not found");
     let ttbr0 = process.address_space.ttbr0_value();
 
-    process.thread_count += 1;
+    let mut thread = match Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top) {
+        Some(t) => t,
+        None => return None,
+    };
 
-    let mut thread = Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top);
+    process.thread_count += 1;
 
     bind_default_context(&mut s, &mut thread);
 
     s.suspended.push(thread);
 
-    ThreadId(id)
+    Some(ThreadId(id))
 }
 /// Move all suspended threads belonging to `process_id` into the ready queue.
 ///

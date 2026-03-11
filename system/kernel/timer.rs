@@ -172,12 +172,22 @@ pub fn create(timeout_ns: u64) -> Option<TimerId> {
     None
 }
 /// Destroy a timer object (called from `handle_close`).
+///
+/// Wakes any thread blocked in `sys_wait` on this timer — closing a handle
+/// must not leave threads stuck forever.
 pub fn destroy(id: TimerId) {
-    let mut table = TIMERS.lock();
+    let waiter = {
+        let mut table = TIMERS.lock();
+        table.slots[id.0 as usize] = None;
+        table.waiters.destroy(id)
+    };
 
-    table.slots[id.0 as usize] = None;
-
-    table.waiters.destroy(id);
+    if let Some(waiter_id) = waiter {
+        let reason = HandleObject::Timer(id);
+        if !scheduler::try_wake_for_handle(waiter_id, reason) {
+            scheduler::set_wake_pending_for_handle(waiter_id, reason);
+        }
+    }
 }
 /// Handle a timer interrupt: increment tick count, check timer objects, reprogram.
 pub fn handle_irq() {

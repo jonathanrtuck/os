@@ -226,8 +226,10 @@ impl Thread {
 }
 impl Thread {
     /// Kernel thread — runs at EL1, no address space.
+    /// Panics on OOM (boot-time only — acceptable).
     pub fn new(id: u64, entry: fn() -> !) -> Box<Self> {
-        let (stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(STACK_SIZE);
+        let (stack_top, alloc_pa, alloc_order) =
+            alloc_guarded_stack(STACK_SIZE).expect("kernel thread stack: out of memory");
         let mut thread = Self::base(ThreadId(id), ThreadState::Ready, TrustLevel::Kernel);
 
         thread.context.elr = entry as *const () as u64;
@@ -286,14 +288,16 @@ impl Thread {
         ))
     }
     /// User thread — runs at EL0 in a process's address space.
+    ///
+    /// Returns `None` if the kernel stack cannot be allocated (OOM).
     pub fn new_user(
         id: u64,
         process_id: ProcessId,
         ttbr0: u64,
         entry_va: u64,
         user_stack_top: u64,
-    ) -> Box<Self> {
-        let (kernel_stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(KERNEL_STACK_SIZE);
+    ) -> Option<Box<Self>> {
+        let (kernel_stack_top, alloc_pa, alloc_order) = alloc_guarded_stack(KERNEL_STACK_SIZE)?;
         let mut thread = Self::base(ThreadId(id), ThreadState::Ready, TrustLevel::Untrusted);
 
         thread.context.elr = entry_va;
@@ -305,7 +309,7 @@ impl Thread {
         thread.process_id = Some(process_id);
         thread.ttbr0 = ttbr0;
 
-        Box::new(thread)
+        Some(Box::new(thread))
     }
 }
 
@@ -314,21 +318,22 @@ impl Thread {
 /// The guard page is the lowest page of the allocation. It is unmapped from
 /// the kernel's TTBR1 page tables so any access faults immediately.
 ///
-/// Returns `(stack_top_va, allocation_pa, allocation_order)`.
-fn alloc_guarded_stack(min_stack_bytes: usize) -> (u64, u64, usize) {
+/// Returns `None` on OOM (cannot allocate frames or guard page table).
+fn alloc_guarded_stack(min_stack_bytes: usize) -> Option<(u64, u64, usize)> {
     let stack_pages = (min_stack_bytes + PAGE_SIZE as usize - 1) / PAGE_SIZE as usize;
     let total_pages = stack_pages + 1; // +1 for guard page
     let order = order_for_pages(total_pages);
-    let pa =
-        super::page_allocator::alloc_frames(order).expect("alloc_guarded_stack: out of memory");
+    let pa = super::page_allocator::alloc_frames(order)?;
     let base_va = memory::phys_to_virt(pa);
     let alloc_pages = 1usize << order;
     let stack_top = (base_va + alloc_pages * PAGE_SIZE as usize) as u64;
 
-    // Guard page = bottom page of allocation (lowest VA).
-    memory::set_kernel_guard_page(base_va);
+    if !memory::try_set_kernel_guard_page(base_va) {
+        super::page_allocator::free_frames(pa, order);
+        return None;
+    }
 
-    (stack_top, pa.as_u64(), order)
+    Some((stack_top, pa.as_u64(), order))
 }
 /// Smallest buddy allocator order that provides at least `pages` contiguous pages.
 fn order_for_pages(pages: usize) -> usize {

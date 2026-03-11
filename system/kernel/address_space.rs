@@ -63,10 +63,12 @@ pub struct PageAttrs(u64);
 
 impl AddressSpace {
     /// Create a new empty address space with its own L0 table and ASID.
-    pub fn new(asid: Asid, generation: u64) -> Self {
-        let l0_pa = page_allocator::alloc_frame().expect("out of frames for L0 table");
+    ///
+    /// Returns `None` if the L0 page table cannot be allocated (OOM).
+    pub fn new(asid: Asid, generation: u64) -> Option<Self> {
+        let l0_pa = page_allocator::alloc_frame()?;
 
-        Self {
+        Some(Self {
             l0_pa,
             asid,
             generation,
@@ -84,7 +86,7 @@ impl AddressSpace {
             heap_pages_allocated: 0,
             heap_pages_limit: DEFAULT_HEAP_PAGE_LIMIT,
             freed: false,
-        }
+        })
     }
 
     fn l0_idx(va: u64) -> usize {
@@ -99,11 +101,20 @@ impl AddressSpace {
     fn l3_idx(va: u64) -> usize {
         ((va >> 12) & 0x1FF) as usize
     }
-    fn map_inner(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
+    fn map_inner(&mut self, va: u64, pa: u64, attrs: &PageAttrs) -> bool {
         let l0_va = memory::phys_to_virt(self.l0_pa) as *mut u64;
-        let l1_va = walk_or_create(l0_va, Self::l0_idx(va));
-        let l2_va = walk_or_create(l1_va, Self::l1_idx(va));
-        let l3_va = walk_or_create(l2_va, Self::l2_idx(va));
+        let l1_va = match walk_or_create(l0_va, Self::l0_idx(va)) {
+            Some(v) => v,
+            None => return false,
+        };
+        let l2_va = match walk_or_create(l1_va, Self::l1_idx(va)) {
+            Some(v) => v,
+            None => return false,
+        };
+        let l3_va = match walk_or_create(l2_va, Self::l2_idx(va)) {
+            Some(v) => v,
+            None => return false,
+        };
         let l3_idx = Self::l3_idx(va);
 
         // SAFETY: l3_va points to a valid L3 page table (allocated by
@@ -128,6 +139,8 @@ impl AddressSpace {
 
             *entry = (pa & PA_MASK) | DESC_PAGE | attrs.0;
         }
+
+        true
     }
     /// Read the PA from an L3 entry and clear it. Returns None if unmapped.
     ///
@@ -349,7 +362,10 @@ impl AddressSpace {
             (true, _) => PageAttrs::user_rw(),
         };
 
-        self.map_page(page_va, pa.as_u64(), &attrs);
+        if !self.map_page(page_va, pa.as_u64(), &attrs) {
+            page_allocator::free_frame(Pa(pa.0));
+            return false;
+        }
 
         // Invalidate any cached fault entry for this VA+ASID. Some ARM
         // implementations cache "translation fault" results ("negative
@@ -381,7 +397,9 @@ impl AddressSpace {
             return None;
         }
 
-        self.map_inner(va, pa, &PageAttrs::user_rw());
+        if !self.map_inner(va, pa, &PageAttrs::user_rw()) {
+            return None;
+        }
         self.next_channel_shm_va = va + PAGE_SIZE;
 
         Some(va)
@@ -405,8 +423,9 @@ impl AddressSpace {
         let mut offset = 0;
 
         while offset < aligned_size {
-            self.map_inner(va + offset, pa + offset, &attrs);
-
+            if !self.map_inner(va + offset, pa + offset, &attrs) {
+                return None;
+            }
             offset += PAGE_SIZE;
         }
 
@@ -437,7 +456,9 @@ impl AddressSpace {
         let attrs = PageAttrs::user_rw();
 
         for i in 0..num_pages {
-            self.map_inner(va + i * PAGE_SIZE, pa.as_u64() + i * PAGE_SIZE, &attrs);
+            if !self.map_inner(va + i * PAGE_SIZE, pa.as_u64() + i * PAGE_SIZE, &attrs) {
+                return None;
+            }
         }
 
         self.next_dma_va = va + size;
@@ -490,19 +511,22 @@ impl AddressSpace {
     ///
     /// Must not be called twice for the same PA — that would cause a double-free
     /// in `free_all`.
-    pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
+    pub fn map_page(&mut self, va: u64, pa: u64, attrs: &PageAttrs) -> bool {
         debug_assert!(
             !self.owned_frames.contains(&Pa(pa as usize)),
             "map_page: double-own of PA {:#x}",
             pa
         );
 
-        self.map_inner(va, pa, attrs);
+        if !self.map_inner(va, pa, attrs) {
+            return false;
+        }
         self.owned_frames.push(Pa(pa as usize));
+        true
     }
     /// Map a shared page (caller retains ownership of the frame).
-    pub fn map_shared(&mut self, va: u64, pa: u64, attrs: &PageAttrs) {
-        self.map_inner(va, pa, attrs);
+    pub fn map_shared(&mut self, va: u64, pa: u64, attrs: &PageAttrs) -> bool {
+        self.map_inner(va, pa, attrs)
     }
     /// Map physical pages into the shared memory region (no ownership transfer).
     ///
@@ -522,7 +546,9 @@ impl AddressSpace {
         let attrs = PageAttrs::user_rw();
 
         for i in 0..page_count {
-            self.map_inner(va + i * PAGE_SIZE, pa.as_u64() + i * PAGE_SIZE, &attrs);
+            if !self.map_inner(va + i * PAGE_SIZE, pa.as_u64() + i * PAGE_SIZE, &attrs) {
+                return None;
+            }
         }
 
         self.next_shared_va = va + size;
@@ -632,35 +658,19 @@ impl Drop for AddressSpace {
 }
 
 /// Walk a table entry; if invalid, allocate a new table and install it.
-/// Returns the VA of the next-level table.
-fn walk_or_create(table_va: *mut u64, idx: usize) -> *mut u64 {
-    // SAFETY: table_va was either:
-    //   (a) The L0 table PA converted via phys_to_virt (AddressSpace::new
-    //       allocates the L0 frame), or
-    //   (b) A next-level table VA returned by a prior call to this function.
-    // In both cases it points to a 4096-byte (512-entry) page table in
-    // kernel-mapped memory. idx is 0..511 (derived from VA bit extraction
-    // via `(va >> shift) & 0x1FF`), so `table_va.add(idx)` is in bounds.
-    // If the entry is valid, its PA came from alloc_frame + phys_to_virt,
-    // producing a valid kernel VA. If invalid, we allocate a new zeroed
-    // frame — alloc_frame returns page-aligned physical memory that
-    // phys_to_virt maps into the kernel's TTBR1 window.
+/// Returns the VA of the next-level table, or `None` on OOM.
+fn walk_or_create(table_va: *mut u64, idx: usize) -> Option<*mut u64> {
     unsafe {
         let entry = table_va.add(idx);
         let val = *entry;
 
         if val & DESC_VALID != 0 {
-            // Existing table descriptor — extract PA, convert to VA.
             let next_pa = Pa((val & PA_MASK) as usize);
-
-            return memory::phys_to_virt(next_pa) as *mut u64;
+            return Some(memory::phys_to_virt(next_pa) as *mut u64);
         }
 
-        // Allocate a new zeroed page for the next-level table.
-        let next_pa = page_allocator::alloc_frame().expect("out of frames for page table");
-
+        let next_pa = page_allocator::alloc_frame()?;
         *entry = next_pa.as_u64() | DESC_VALID | DESC_TABLE;
-
-        memory::phys_to_virt(next_pa) as *mut u64
+        Some(memory::phys_to_virt(next_pa) as *mut u64)
     }
 }

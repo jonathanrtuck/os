@@ -82,10 +82,17 @@ impl<Id: WaitableId> WaitableRegistry<Id> {
             waiter: None,
         });
     }
-    /// Remove an entry.
-    pub fn destroy(&mut self, id: Id) {
+    /// Remove an entry, returning the registered waiter (if any).
+    ///
+    /// The caller must wake the returned waiter — it may be blocked in
+    /// `sys_wait` on this object. Failing to wake it leaks a blocked thread.
+    pub fn destroy(&mut self, id: Id) -> Option<ThreadId> {
         if let Some(slot) = self.entries.get_mut(id.index()) {
+            let waiter = slot.as_mut().and_then(|e| e.waiter.take());
             *slot = None;
+            waiter
+        } else {
+            None
         }
     }
     /// Mark `id` as ready and return the registered waiter (if any).

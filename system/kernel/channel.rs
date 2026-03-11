@@ -82,25 +82,42 @@ pub fn check_pending(id: ChannelId) -> bool {
     }
 }
 /// Close one endpoint of a channel. Frees both shared pages when both sides close.
+///
+/// Wakes the peer's waiter if one is registered — the peer should not remain
+/// blocked on a half-closed channel.
 pub fn close_endpoint(id: ChannelId) {
-    let pages_to_free = {
+    let (pages_to_free, peer_wake) = {
         let mut s = STATE.lock();
-        let ch = &mut s.channels[channel_index(id)];
+        let ch_idx = channel_index(id);
+        let ch = &mut s.channels[ch_idx];
         let ep = endpoint_index(id);
+        let peer_ep = 1 - ep;
 
         ch.waiter[ep] = None;
+
+        // Wake the peer's waiter — they're waiting on a now-dead channel.
+        let peer_waiter = ch.waiter[peer_ep].take();
+        let peer_channel_id = ChannelId(ch_idx as u32 * 2 + peer_ep as u32);
+
         ch.closed_count += 1;
 
-        if ch.closed_count == 2 {
+        let pages = if ch.closed_count == 2 {
             let pages = ch.pages;
-
             ch.pages = [memory::Pa(0), memory::Pa(0)];
-
             Some(pages)
         } else {
             None
-        }
+        };
+
+        (pages, peer_waiter.map(|w| (w, peer_channel_id)))
     };
+
+    if let Some((waiter_id, peer_id)) = peer_wake {
+        let reason = HandleObject::Channel(peer_id);
+        if !scheduler::try_wake_for_handle(waiter_id, reason) {
+            scheduler::set_wake_pending_for_handle(waiter_id, reason);
+        }
+    }
 
     if let Some(pages) = pages_to_free {
         page_allocator::free_frame(pages[0]);

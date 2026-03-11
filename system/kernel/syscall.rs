@@ -834,7 +834,8 @@ fn sys_thread_create(entry_va: u64, stack_top: u64) -> Result<u64, Error> {
 
     let process_id =
         scheduler::current_thread_do(|thread| thread.process_id.ok_or(Error::InvalidArgument))?;
-    let thread_id = scheduler::spawn_user(process_id, entry_va, stack_top);
+    let thread_id =
+        scheduler::spawn_user(process_id, entry_va, stack_top).ok_or(Error::OutOfMemory)?;
 
     // Create exit notification state for the new thread.
     thread_exit::create(thread_id);

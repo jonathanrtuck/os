@@ -75,14 +75,24 @@ pub fn check_pending(id: InterruptId) -> bool {
 }
 /// Destroy an interrupt registration (called from `handle_close`).
 ///
-/// Disables the IRQ in the GIC — no handler will process it after this.
+/// Disables the IRQ in the GIC and wakes any thread blocked on this handle.
 pub fn destroy(id: InterruptId) {
-    let mut table = TABLE.lock();
+    let (irq, waiter) = {
+        let mut table = TABLE.lock();
+        let irq = table.slots[id.0 as usize].take();
+        let waiter = table.waiters.destroy(id);
+        (irq, waiter)
+    };
 
-    if let Some(irq) = table.slots[id.0 as usize].take() {
-        table.waiters.destroy(id);
-
+    if let Some(irq) = irq {
         interrupt_controller::disable_irq(irq);
+    }
+
+    if let Some(waiter_id) = waiter {
+        let reason = HandleObject::Interrupt(id);
+        if !scheduler::try_wake_for_handle(waiter_id, reason) {
+            scheduler::set_wake_pending_for_handle(waiter_id, reason);
+        }
     }
 }
 /// Handle an IRQ from the hardware. Called from `irq_handler` in main.rs.

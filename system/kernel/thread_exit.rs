@@ -21,8 +21,17 @@ pub fn create(thread_id: ThreadId) {
     STATE.lock().create(thread_id);
 }
 /// Destroy exit notification state (called from `handle_close`).
+///
+/// Wakes any thread blocked waiting for this thread's exit.
 pub fn destroy(thread_id: ThreadId) {
-    STATE.lock().destroy(thread_id);
+    let waiter = STATE.lock().destroy(thread_id);
+
+    if let Some(waiter_id) = waiter {
+        let reason = HandleObject::Thread(thread_id);
+        if !scheduler::try_wake_for_handle(waiter_id, reason) {
+            scheduler::set_wake_pending_for_handle(waiter_id, reason);
+        }
+    }
 }
 /// Notify that a thread has exited. Two-phase wake.
 pub fn notify_exit(thread_id: ThreadId) {
