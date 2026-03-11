@@ -23,25 +23,25 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **How it fits together:**
 
-```
-┌─────────────────────────────────────────────────┐
-│  User Programs         (echo, future editors)   │  🔴 demos
-├─────────────────────────────────────────────────┤
-│  Platform Services                              │
+```text
+┌────────────────────────────────────────────────┐
+│  User Programs         (echo, future editors)  │  🔴 demos
+├────────────────────────────────────────────────┤
+│  Platform Services                             │
 │  ┌──────────┐  ┌────────────┐  ┌────────────┐  │
 │  │   Init   │  │ Compositor │  │  Drivers   │  │  🟡/🟢 mixed
 │  │  (proto  │  │   (toy,    │  │ (virtio-   │  │
 │  │   OS     │  │   real     │  │  blk/gpu/  │  │
 │  │ service) │  │ compositing│  │  console)  │  │
 │  └──────────┘  └────────────┘  └────────────┘  │
-├─────────────────────────────────────────────────┤
-│  Libraries                                      │
+├────────────────────────────────────────────────┤
+│  Libraries                                     │
 │  ┌─────┐  ┌────────┐  ┌─────────┐  ┌────────┐  │  🟢 foundational
 │  │ sys │  │ virtio │  │ drawing │  │link.ld │  │
 │  └─────┘  └────────┘  └─────────┘  └────────┘  │
-├─────────────────────────────────────────────────┤
-│  Kernel (25 syscalls, see kernel/DESIGN.md)     │  🟢 production
-└─────────────────────────────────────────────────┘
+├────────────────────────────────────────────────┤
+│  Kernel (25 syscalls, see kernel/DESIGN.md)    │  🟢 production
+└────────────────────────────────────────────────┘
 ```
 
 **Process model:** Kernel spawns only init. Init embeds all other ELF binaries and spawns everything else. Microkernel pattern (Fuchsia component_manager, seL4 root task). This pattern is foundational; init's implementation is scaffolding.
@@ -58,15 +58,19 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Safe Rust wrappers for all kernel syscalls.
 
-**Status:** 318 lines, covers all 25 syscalls. Every userspace binary links against this.
+**Status:** ~380 lines, covers all 25 syscalls with typed errors. Every userspace binary links against this.
 
 **What's foundational:**
+
 - The syscall ABI (x0–x5 args, x8 number, `svc #0`). Standard, stable.
 - The function signatures mirror the kernel's syscall interface 1:1.
+- `SyscallError` enum — unified error type covering both `syscall::Error` and `handle::HandleError` from the kernel (13 variants, matching kernel's `repr(i64)` codes). Defensive: unknown codes map to `UnknownSyscall`.
+- `SyscallResult<T>` — typed returns on all fallible syscalls. Return types encode meaning: `process_create → SyscallResult<u8>` (handle), `channel_create → SyscallResult<(u8, u8)>` (pair of handles), `dma_alloc → SyscallResult<usize>` (VA).
+- `print()` — fire-and-forget console output (wraps `write`, discards Result). Mirrors Rust's `print!` vs `write!` pattern.
 - Panic handler that calls `exit()` — correct behavior for userspace panics.
 
 **What's missing:**
-- **Error types.** Every function returns raw `i64`. Callers check `< 0` ad hoc, often with no error handling at all. Needs a `SyscallError` enum and `Result` return types. This is the most impactful small change for userspace code quality.
+
 - **Higher-level wrappers.** Raw syscalls are the right foundation, but common patterns (create channel + send handle + start process) should be composable.
 
 ---
@@ -78,12 +82,14 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **Status:** 373 lines. Pure library — no syscalls, no allocations. Callers provide DMA buffers.
 
 **What's foundational:**
+
 - MMIO register abstraction with volatile reads/writes.
 - Split virtqueue implementation (descriptor table, available ring, used ring).
 - Device negotiation flow (reset → acknowledge → driver → features → driver_ok).
 - Clean separation: library handles the protocol, caller handles memory and I/O.
 
 **What's temporary:**
+
 - QEMU-specific. Real hardware uses different transports (PCI, platform bus). But the split virtqueue protocol is the same — the transport layer would be swapped, not the queue logic.
 
 **No restrictions imposed.** Pure library with no opinions about allocation or control flow.
@@ -97,6 +103,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **Status:** ~1600 lines (lib.rs + truetype.rs + rasterizer.rs + font_data.rs), 83 tests. Surface abstraction, color with alpha, blending, blitting, bitmap font, TrueType font rasterizer.
 
 **What's foundational:**
+
 - `Surface<'a>` borrows `&mut [u8]` — no allocation policy. Works with any memory source (DMA, BSS, stack, shared).
 - `Color` in canonical RGBA, encode/decode at the pixel boundary. Format-agnostic above the pixel level.
 - Porter-Duff source-over blending — correct, integer-only, with fast paths.
@@ -107,11 +114,13 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - All operations clip silently (no panics). Safe to call with any coordinates.
 
 **What's scaffolding:**
+
 - `PixelFormat` enum has only `Bgra8888`. Trivial to extend (add variant + match arms), but currently untested with other formats.
 - `BitmapFont` is an embedded 8×16 VGA font covering ASCII 0x20–0x7E. Fine as a fallback, not a real text solution.
 - ProggyClean.ttf (40 KiB, MIT license) is the embedded TrueType font. A vectorized bitmap font — exercises the full parser and rasterizer but glyphs are mostly straight lines. A font with real curves (variable-width, bezier-heavy) would test the rasterizer more thoroughly.
 
 **What's missing:**
+
 - **Text layout.** `draw_text` is left-to-right fixed-pitch ASCII. No variable-width glyphs, no word wrap, no line breaking, no Unicode. The TrueType rasterizer returns per-glyph advance widths, enabling variable-pitch rendering, but there's no layout engine to position glyphs properly.
 - **Anti-aliased line/shape drawing.** Lines and rectangles are pixel-exact with no smoothing. The rasterizer's coverage map approach could be extended to arbitrary shapes.
 - **Compound glyph support.** TrueType compound glyphs (accented characters built from components) not yet handled. Only simple glyphs (positive contour count) are parsed.
@@ -140,11 +149,13 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **Status:** 326 lines + build.rs. Reads device manifest, spawns drivers, orchestrates display pipeline.
 
 **What's foundational (the pattern):**
+
 - Kernel spawns only init → init spawns everything else. Microkernel root task.
 - Init reads a device manifest from the kernel channel to discover hardware.
 - Init sends handles (channels, shared memory) to child processes before starting them.
 
 **What's scaffolding (the implementation):**
+
 - **Embedded ELFs via `include_bytes!`.** All binaries baked into init at compile time. Requires full rebuild to change any component. Real OS loads from a filesystem.
 - **Hardcoded framebuffer dimensions** (1024×768). Should come from GPU driver, not init.
 - **Synchronous linear orchestration.** Spawn compositor, wait for it to finish, then start GPU driver. No event loop, no dynamic process management, no error recovery.
@@ -162,17 +173,20 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **Status:** 254 lines. Draws three demo panels into separate BSS buffers, composites them with alpha blending in z-order.
 
 **What's foundational (the approach):**
+
 - **Separate surface buffers, composited back-to-front.** This is how a real compositor works. Each surface has its own pixel data; the compositor blits them in z-order with per-pixel alpha.
 - **Surface tree → pixel buffer.** The compositor is a pure function of its inputs (surface buffers + positions + z-order) → output (framebuffer). Matches the design thread's model.
 - **Alpha blending demonstrates the compositing model.** Semi-transparent backgrounds + opaque content pixels. The blending math is reusable.
 
 **What's scaffolding (the implementation):**
+
 - **Static BSS buffers.** Three 400×260 panels allocated at compile time. Real compositor receives surfaces from editor processes via shared memory — surface count and dimensions are dynamic.
 - **Hardcoded scene.** Panel content, positions, z-order all baked in. Real compositor reads from a surface tree (layout engine output).
 - **Fire-once.** Draws one frame and exits. No damage tracking, no incremental updates, no display loop.
 - **No input.** Can't respond to mouse/keyboard events.
 
 **What's missing:**
+
 - **Dynamic surface management.** Register/unregister surfaces, resize, reorder.
 - **Damage tracking.** Only redraw pixels that changed. The design thread identified this as "React-style reconciliation" — diff the surface tree, commit minimal updates.
 - **Display loop.** Continuous rendering, vsync, buffer swapping.
@@ -187,12 +201,14 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **Status:** 603 lines. All six core virtio-gpu 2D commands. Interrupt-driven.
 
 **What's foundational:**
+
 - Complete 2D command implementation (create resource, attach backing, set scanout, transfer, flush, get display info).
 - Interrupt-driven I/O (register IRQ → wait → ack). Correct async pattern.
 - Page-aligned MMIO mapping with sub-page offset handling.
 - Reuses virtio library for transport + virtqueue.
 
 **What's scaffolding:**
+
 - **Fire-once.** Presents one framebuffer and exits. Real GPU driver is long-running — continuously presents new frames.
 - **No surface trait.** The design thread identified `create_surface`/`present` as the right GPU abstraction, but the driver uses raw virtio-gpu commands. There's no abstract display interface that the compositor could program against.
 - **Framebuffer owned by init.** Init allocates the DMA buffer and shares it. The driver just attaches it as backing. Real ownership: compositor or GPU driver owns display buffers.
@@ -208,10 +224,12 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **Status:** 211 lines. Reads sector 0, prints first 16 bytes. Interrupt-driven.
 
 **What's foundational:**
+
 - 3-descriptor chain pattern (header → data → status). Correct virtio-blk protocol.
 - Same interrupt-driven pattern as GPU driver (wait → ack).
 
 **What's scaffolding:**
+
 - Reads one sector and exits. No block device abstraction (read/write at arbitrary LBAs).
 - No filesystem uses it yet.
 
@@ -244,6 +262,7 @@ These are the things that limit what can be built above the kernel today, ordere
 **Why it matters:** Any non-trivial data structure needs dynamic memory. A font rasterizer needs variable-size glyph outlines and a glyph cache. A real compositor needs dynamic surface lists. A filesystem service needs buffers.
 
 **Options:**
+
 1. **Bump allocator over static BSS.** Embedded-systems approach — pre-size a large `static mut [u8; N]`, hand out slices from it. No free, no reuse. Works for demos, not sustainable.
 2. **`memory_alloc(pages)` syscall.** Kernel maps anonymous zero-pages into the process at a bump-allocated VA. Pairs with `memory_free`. More foundational — unlocks a proper `GlobalAlloc` implementation in userspace. Moderate kernel work (new syscall + VMA management for anonymous mappings).
 3. **Arena per task.** Allocate a region at process creation, userspace manages it internally. Middle ground.
@@ -304,7 +323,7 @@ These are the things that limit what can be built above the kernel today, ordere
 
 ## 4. Component Dependency Map
 
-```
+```text
 User Programs
   └── sys (syscalls)
 
@@ -374,9 +393,10 @@ Ring buffer messages work for control messages (edit protocol, input events). La
 Ordered by what unblocks the most, building the happy path first:
 
 1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the drawing library. Zero-copy parser, scanline rasterizer with 4× oversampling, coverage map output. Simple interface: `TrueTypeFont::rasterize(codepoint, size, buffer, scratch) → GlyphMetrics`. 21 tests. Running on bare metal in the compositor.
-2. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an *interface* question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
-3. **Input driver** (§3.3) — unblocks interactive demos. virtio-input follows the same pattern as existing drivers.
-4. **Event loop** (§3.4) — convert compositor or init to loop on `wait`. Unblocks continuous rendering.
-5. **Structured IPC** (§3.5) — replace ad hoc byte offsets with typed messages. Unblocks adding new message types without cross-process breakage.
-6. **Userspace memory allocation** (§3.1) — when a component actually needs it. Not speculative. The no-heap constraint is useful discipline until it blocks real work.
-7. **Filesystem service** (§3.2) — blocked on Decision #16. Unblocks runtime resource loading, documents, everything the OS is about.
+2. ~~**Syscall error types**~~ — **Done.** `SyscallError` enum (13 variants) + `SyscallResult<T>` on all 25 syscalls + `print()` convenience. All 6 userspace binaries migrated. Eliminated raw `i64` returns and ad-hoc `< 0` checks.
+3. **Userspace memory allocation** (§3.1) — `memory_alloc`/`memory_free` syscalls + userspace `GlobalAlloc`. Unlocks `Vec`, `String`, real Rust crates. Critical constraint.
+4. **Structured IPC** (§3.5) — replace ad hoc byte offsets with typed messages. Unblocks adding new message types without cross-process breakage.
+5. **Input driver** (§3.3) — unblocks interactive demos. virtio-input follows the same pattern as existing drivers.
+6. **Event loop** (§3.4) — convert compositor or init to loop on `wait`. Unblocks continuous rendering.
+7. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
+8. **Filesystem service** (§3.2) — blocked on Decision #16. Unblocks runtime resource loading, documents, everything the OS is about.

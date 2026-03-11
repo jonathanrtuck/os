@@ -27,47 +27,37 @@ pub extern "C" fn _start() -> ! {
     // 0x200 stride, so most sit at sub-page offsets within a 4K page.
     let page_offset = mmio_pa & 0xFFF;
     let page_pa = mmio_pa & !0xFFF;
-    let page_va = sys::device_map(page_pa, 0x1000);
-
-    if page_va < 0 {
-        sys::write(b"virtio-console: device_map failed\n");
+    let page_va = sys::device_map(page_pa, 0x1000).unwrap_or_else(|_| {
+        sys::print(b"virtio-console: device_map failed\n");
         sys::exit();
-    }
-
-    let device = virtio::Device::new(page_va as usize + page_offset as usize);
+    });
+    let device = virtio::Device::new(page_va + page_offset as usize);
 
     // Negotiate features.
     if !device.negotiate() {
-        sys::write(b"virtio-console: negotiate failed\n");
+        sys::print(b"virtio-console: negotiate failed\n");
         sys::exit();
     }
 
     // Register for device interrupt before driver_ok.
-    let irq_handle = sys::interrupt_register(irq);
-
-    if irq_handle < 0 {
-        sys::write(b"virtio-console: interrupt_register failed\n");
+    let irq_handle = sys::interrupt_register(irq).unwrap_or_else(|_| {
+        sys::print(b"virtio-console: interrupt_register failed\n");
         sys::exit();
-    }
-
-    let irq_handle = irq_handle as u8;
+    });
     // Allocate DMA for the TX virtqueue.
     let queue_size = core::cmp::min(device.queue_max_size(VIRTQ_TX), virtio::DEFAULT_QUEUE_SIZE);
     let order = virtio::Virtqueue::allocation_order(queue_size);
     let mut vq_pa: u64 = 0;
-    let vq_va = sys::dma_alloc(order, &mut vq_pa);
-
-    if vq_va < 0 {
-        sys::write(b"virtio-console: dma_alloc (vq) failed\n");
+    let vq_va = sys::dma_alloc(order, &mut vq_pa).unwrap_or_else(|_| {
+        sys::print(b"virtio-console: dma_alloc (vq) failed\n");
         sys::exit();
-    }
-
+    });
     // Zero the virtqueue memory.
     let vq_bytes = (1usize << order) * 4096;
 
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_bytes) };
 
-    let mut tx = virtio::Virtqueue::new(queue_size, vq_va as usize, vq_pa);
+    let mut tx = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
 
     device.setup_queue(
         VIRTQ_TX,
@@ -80,13 +70,10 @@ pub extern "C" fn _start() -> ! {
 
     // Allocate a DMA buffer for the data payload.
     let mut buf_pa: u64 = 0;
-    let buf_va = sys::dma_alloc(0, &mut buf_pa);
-
-    if buf_va < 0 {
-        sys::write(b"virtio-console: dma_alloc (buf) failed\n");
+    let buf_va = sys::dma_alloc(0, &mut buf_pa).unwrap_or_else(|_| {
+        sys::print(b"virtio-console: dma_alloc (buf) failed\n");
         sys::exit();
-    }
-
+    });
     // Copy message into DMA buffer and submit.
     let msg = b"virtio console ok\n";
 
@@ -98,14 +85,15 @@ pub extern "C" fn _start() -> ! {
     device.notify(VIRTQ_TX);
 
     // Wait for completion interrupt (blocks instead of spinning).
-    sys::wait(&[irq_handle], u64::MAX);
+    let _ = sys::wait(&[irq_handle], u64::MAX);
 
     device.ack_interrupt();
     tx.pop_used();
 
-    sys::interrupt_ack(irq_handle);
-    sys::dma_free(buf_va as u64, 0);
+    let _ = sys::interrupt_ack(irq_handle);
+    let _ = sys::dma_free(buf_va as u64, 0);
     // Signal the kernel channel to indicate we're done.
-    sys::channel_signal(0);
+    let _ = sys::channel_signal(0);
+
     sys::exit();
 }

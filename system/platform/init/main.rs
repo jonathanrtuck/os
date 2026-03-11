@@ -64,7 +64,7 @@ fn channel_shm_va(page_index: usize) -> usize {
 }
 fn print_u32(mut n: u32) {
     if n == 0 {
-        sys::write(b"0");
+        sys::print(b"0");
 
         return;
     }
@@ -78,7 +78,7 @@ fn print_u32(mut n: u32) {
         n /= 10;
     }
 
-    sys::write(&buf[i..]);
+    sys::print(&buf[i..]);
 }
 /// Set up the display pipeline: allocate framebuffer, spawn compositor,
 /// wait for it to draw, then start the GPU driver to present.
@@ -89,38 +89,35 @@ fn setup_display_pipeline(
     gpu_irq: u32,
     next_page: &mut usize,
 ) {
-    sys::write(b"     setting up display pipeline\n");
+    sys::print(b"     setting up display pipeline\n");
 
     // Allocate framebuffer via DMA.
     let fb_bytes = FB_SIZE as usize;
     let fb_pages = (fb_bytes + 4095) / 4096;
     let fb_order = (fb_pages.next_power_of_two().trailing_zeros()) as u32;
     let mut fb_pa_out: u64 = 0;
-    let fb_va = sys::dma_alloc(fb_order, &mut fb_pa_out);
-
-    if fb_va < 0 {
-        sys::write(b"init: dma_alloc (framebuffer) failed\n");
+    let fb_va = sys::dma_alloc(fb_order, &mut fb_pa_out).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (framebuffer) failed\n");
         sys::exit();
-    }
-
+    });
     // Zero the framebuffer.
     let fb_alloc_bytes = (1usize << fb_order) * 4096;
 
     unsafe { core::ptr::write_bytes(fb_va as *mut u8, 0, fb_alloc_bytes) };
 
-    sys::write(b"     framebuffer: ");
+    sys::print(b"     framebuffer: ");
 
     print_u32(FB_WIDTH);
 
-    sys::write(b"x");
+    sys::print(b"x");
 
     print_u32(FB_HEIGHT);
 
-    sys::write(b" (");
+    sys::print(b" (");
 
     print_u32(fb_alloc_bytes as u32 / 1024);
 
-    sys::write(b" KiB)\n");
+    sys::print(b" KiB)\n");
 
     // Write GPU device info + framebuffer PA to GPU driver's channel page.
     let gpu_shm = channel_shm_va(gpu_page) as *mut u8;
@@ -137,19 +134,16 @@ fn setup_display_pipeline(
     let (comp_proc, comp_ch, comp_page) = match spawn_with_channel(COMPOSITOR_ELF, next_page) {
         Some(v) => v,
         None => {
-            sys::write(b"init: failed to spawn compositor\n");
+            sys::print(b"init: failed to spawn compositor\n");
             sys::exit();
         }
     };
     // Share framebuffer memory with compositor.
     let fb_page_count = fb_alloc_bytes as u64 / 4096;
-    let comp_fb_va = sys::memory_share(comp_proc, fb_pa_out, fb_page_count);
-
-    if comp_fb_va < 0 {
-        sys::write(b"init: memory_share (compositor) failed\n");
+    let comp_fb_va = sys::memory_share(comp_proc, fb_pa_out, fb_page_count).unwrap_or_else(|_| {
+        sys::print(b"init: memory_share (compositor) failed\n");
         sys::exit();
-    }
-
+    });
     // Write compositor info to its channel shared page.
     let comp_shm = channel_shm_va(comp_page) as *mut u8;
 
@@ -162,15 +156,20 @@ fn setup_display_pipeline(
     }
 
     // Start compositor and wait for it to draw.
-    sys::process_start(comp_proc);
-    sys::write(b"     compositor started, waiting\n");
-    sys::wait(&[comp_ch], u64::MAX);
-    sys::write(b"     compositor done, starting gpu driver\n");
+    let _ = sys::process_start(comp_proc);
+
+    sys::print(b"     compositor started, waiting\n");
+
+    let _ = sys::wait(&[comp_ch], u64::MAX);
+
+    sys::print(b"     compositor done, starting gpu driver\n");
+
     // Start GPU driver to present the framebuffer.
-    sys::process_start(gpu_proc);
+    let _ = sys::process_start(gpu_proc);
     // Wait for GPU driver's process to exit.
-    sys::wait(&[gpu_proc], u64::MAX);
-    sys::write(b"     display pipeline complete\n");
+    let _ = sys::wait(&[gpu_proc], u64::MAX);
+
+    sys::print(b"     display pipeline complete\n");
 }
 /// Spawn a suspended process, create a channel to it, and send one endpoint.
 ///
@@ -178,46 +177,37 @@ fn setup_display_pipeline(
 /// The child receives endpoint B at CHANNEL_SHM_BASE in its address space.
 /// Init retains endpoint A; the shared page is at channel_shm_va(page_index).
 fn spawn_with_channel(elf: &[u8], next_page: &mut usize) -> Option<(u8, u8, usize)> {
-    sys::write(b"       process_create\xE2\x80\xA6");
+    sys::print(b"       process_create\xE2\x80\xA6");
 
-    let proc_handle = sys::process_create(elf.as_ptr(), elf.len());
+    let proc_handle = match sys::process_create(elf.as_ptr(), elf.len()) {
+        Ok(h) => h,
+        Err(_) => {
+            sys::print(b" FAILED\n");
+            return None;
+        }
+    };
 
-    if proc_handle < 0 {
-        sys::write(b" FAILED\n");
+    sys::print(b" ok\n");
 
+    sys::print(b"       channel_create\xE2\x80\xA6");
+
+    let (ch_a, ch_b) = match sys::channel_create() {
+        Ok(pair) => pair,
+        Err(_) => {
+            sys::print(b" FAILED\n");
+            return None;
+        }
+    };
+
+    sys::print(b" ok\n");
+    sys::print(b"       handle_send\xE2\x80\xA6");
+
+    if let Err(_) = sys::handle_send(proc_handle, ch_b) {
+        sys::print(b" FAILED\n");
         return None;
     }
 
-    sys::write(b" ok\n");
-
-    let proc_handle = proc_handle as u8;
-
-    sys::write(b"       channel_create\xE2\x80\xA6");
-
-    let ch = sys::channel_create();
-
-    if ch < 0 {
-        sys::write(b" FAILED\n");
-
-        return None;
-    }
-
-    sys::write(b" ok\n");
-
-    let ch_a = (ch & 0xFF) as u8;
-    let ch_b = ((ch >> 8) & 0xFF) as u8;
-
-    sys::write(b"       handle_send\xE2\x80\xA6");
-
-    let ret = sys::handle_send(proc_handle, ch_b);
-
-    if ret < 0 {
-        sys::write(b" FAILED\n");
-
-        return None;
-    }
-
-    sys::write(b" ok\n");
+    sys::print(b" ok\n");
 
     let page_idx = *next_page;
 
@@ -228,17 +218,17 @@ fn spawn_with_channel(elf: &[u8], next_page: &mut usize) -> Option<(u8, u8, usiz
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    sys::write(b"  \xF0\x9F\x94\xA7 init - proto-os-service starting\n");
+    sys::print(b"  \xF0\x9F\x94\xA7 init - proto-os-service starting\n");
 
     // Page 0 in channel SHM = kernel's channel (device manifest).
     let kernel_shm = CHANNEL_SHM_BASE as *const u8;
     let device_count = unsafe { core::ptr::read_volatile(kernel_shm as *const u32) };
 
-    sys::write(b"     ");
+    sys::print(b"     ");
 
     print_u32(device_count);
 
-    sys::write(b" devices in manifest\n");
+    sys::print(b" devices in manifest\n");
 
     // Track channel SHM page allocation (0 = kernel, 1+ = ours).
     let mut next_page: usize = 1;
@@ -254,33 +244,33 @@ pub extern "C" fn _start() -> ! {
         let dev_irq = unsafe { core::ptr::read_volatile(base.add(8) as *const u32) };
         let dev_id = unsafe { core::ptr::read_volatile(base.add(12) as *const u32) };
 
-        sys::write(b"     device ");
+        sys::print(b"     device ");
 
         print_u32(i as u32);
 
-        sys::write(b": id=");
+        sys::print(b": id=");
 
         print_u32(dev_id);
 
-        sys::write(b"\n");
+        sys::print(b"\n");
 
         let elf: &[u8] = match dev_id {
             VIRTIO_DEVICE_BLK => VIRTIO_BLK_ELF,
             VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
             VIRTIO_DEVICE_GPU => VIRTIO_GPU_ELF,
             _ => {
-                sys::write(b"     skipping unknown device id=");
+                sys::print(b"     skipping unknown device id=");
                 print_u32(dev_id);
-                sys::write(b"\n");
+                sys::print(b"\n");
                 continue;
             }
         };
 
-        sys::write(b"     spawning driver (elf ");
+        sys::print(b"     spawning driver (elf ");
 
         print_u32(elf.len() as u32);
 
-        sys::write(b" bytes)\n");
+        sys::print(b" bytes)\n");
 
         let (proc_h, ch_h, page_idx) = match spawn_with_channel(elf, &mut next_page) {
             Some(v) => v,
@@ -299,17 +289,16 @@ pub extern "C" fn _start() -> ! {
                 core::ptr::write_volatile(shm.add(8) as *mut u32, dev_irq);
             }
 
-            sys::process_start(proc_h);
-
+            let _ = sys::process_start(proc_h);
             let name = match dev_id {
                 VIRTIO_DEVICE_BLK => "blk",
                 VIRTIO_DEVICE_CONSOLE => "console",
                 _ => "?",
             };
 
-            sys::write(b"     spawned driver: ");
-            sys::write(name.as_bytes());
-            sys::write(b"\n");
+            sys::print(b"     spawned driver: ");
+            sys::print(name.as_bytes());
+            sys::print(b"\n");
         }
     }
 
@@ -317,9 +306,9 @@ pub extern "C" fn _start() -> ! {
     if let Some((gpu_proc, _gpu_ch, gpu_page, gpu_pa, gpu_irq)) = gpu {
         setup_display_pipeline(gpu_proc, gpu_page, gpu_pa, gpu_irq, &mut next_page);
     } else {
-        sys::write(b"     no gpu found\n");
+        sys::print(b"     no gpu found\n");
     }
 
-    sys::write(b"  \xF0\x9F\x94\xA7 init - done\n");
+    sys::print(b"  \xF0\x9F\x94\xA7 init - done\n");
     sys::exit();
 }

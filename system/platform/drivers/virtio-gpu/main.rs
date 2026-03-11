@@ -141,21 +141,17 @@ struct DmaBuf {
 impl DmaBuf {
     fn alloc(order: u32) -> DmaBuf {
         let mut pa: u64 = 0;
-        let va = sys::dma_alloc(order, &mut pa);
-
-        if va < 0 {
-            sys::write(b"virtio-gpu: dma_alloc failed\n");
+        let va = sys::dma_alloc(order, &mut pa).unwrap_or_else(|_| {
+            sys::print(b"virtio-gpu: dma_alloc failed\n");
             sys::exit();
-        }
-
-        let va = va as usize;
+        });
 
         unsafe { core::ptr::write_bytes(va as *mut u8, 0, (1usize << order) * 4096) };
 
         DmaBuf { va, pa, order }
     }
     fn free(self) {
-        sys::dma_free(self.va as u64, self.order);
+        let _ = sys::dma_free(self.va as u64, self.order);
     }
 }
 
@@ -276,20 +272,19 @@ fn gpu_command(
     vq.push_chain(&[(cmd_pa, cmd_len, false), (resp_pa, resp_len, true)]);
     device.notify(VIRTQ_CONTROL);
 
-    sys::wait(&[irq_handle], u64::MAX);
+    let _ = sys::wait(&[irq_handle], u64::MAX);
 
     device.ack_interrupt();
     vq.pop_used();
 
-    sys::interrupt_ack(irq_handle);
-
+    let _ = sys::interrupt_ack(irq_handle);
     let resp_header = resp_va as *const CtrlHeader;
 
     unsafe { core::ptr::read_volatile(&(*resp_header).cmd_type as *const u32) }
 }
 fn print_u32(mut n: u32) {
     if n == 0 {
-        sys::write(b"0");
+        sys::print(b"0");
         return;
     }
 
@@ -302,7 +297,7 @@ fn print_u32(mut n: u32) {
         n /= 10;
     }
 
-    sys::write(&buf[i..]);
+    sys::print(&buf[i..]);
 }
 fn resource_create_2d(
     device: &virtio::Device,
@@ -494,28 +489,21 @@ pub extern "C" fn _start() -> ! {
     // Map the MMIO region (sub-page alignment for virtio-mmio).
     let page_offset = mmio_pa & 0xFFF;
     let page_pa = mmio_pa & !0xFFF;
-    let page_va = sys::device_map(page_pa, 0x1000);
-
-    if page_va < 0 {
-        sys::write(b"virtio-gpu: device_map failed\n");
+    let page_va = sys::device_map(page_pa, 0x1000).unwrap_or_else(|_| {
+        sys::print(b"virtio-gpu: device_map failed\n");
         sys::exit();
-    }
-
-    let device = virtio::Device::new(page_va as usize + page_offset as usize);
+    });
+    let device = virtio::Device::new(page_va + page_offset as usize);
 
     if !device.negotiate() {
-        sys::write(b"virtio-gpu: negotiate failed\n");
+        sys::print(b"virtio-gpu: negotiate failed\n");
         sys::exit();
     }
 
-    let irq_handle = sys::interrupt_register(irq);
-
-    if irq_handle < 0 {
-        sys::write(b"virtio-gpu: interrupt_register failed\n");
+    let irq_handle = sys::interrupt_register(irq).unwrap_or_else(|_| {
+        sys::print(b"virtio-gpu: interrupt_register failed\n");
         sys::exit();
-    }
-
-    let irq_handle = irq_handle as u8;
+    });
     // Setup the control virtqueue.
     let queue_size = core::cmp::min(
         device.queue_max_size(VIRTQ_CONTROL),
@@ -523,18 +511,15 @@ pub extern "C" fn _start() -> ! {
     );
     let vq_order = virtio::Virtqueue::allocation_order(queue_size);
     let mut vq_pa: u64 = 0;
-    let vq_va = sys::dma_alloc(vq_order, &mut vq_pa);
-
-    if vq_va < 0 {
-        sys::write(b"virtio-gpu: dma_alloc (vq) failed\n");
+    let vq_va = sys::dma_alloc(vq_order, &mut vq_pa).unwrap_or_else(|_| {
+        sys::print(b"virtio-gpu: dma_alloc (vq) failed\n");
         sys::exit();
-    }
-
+    });
     let vq_bytes = (1usize << vq_order) * 4096;
 
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_bytes) };
 
-    let mut vq = virtio::Virtqueue::new(queue_size, vq_va as usize, vq_pa);
+    let mut vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
 
     device.setup_queue(
         VIRTQ_CONTROL,
@@ -545,20 +530,20 @@ pub extern "C" fn _start() -> ! {
     );
     device.driver_ok();
 
-    sys::write(b"  \xF0\x9F\x96\xA5\xEF\xB8\x8F  virtio-gpu ready\n");
+    sys::print(b"  \xF0\x9F\x96\xA5\xEF\xB8\x8F  virtio-gpu ready\n");
 
     // Query actual display dimensions (informational).
     let (disp_w, disp_h) = get_display_info(&device, &mut vq, irq_handle);
 
-    sys::write(b"     display ");
+    sys::print(b"     display ");
 
     print_u32(if disp_w > 0 { disp_w } else { fb_width });
 
-    sys::write(b"x");
+    sys::print(b"x");
 
     print_u32(if disp_h > 0 { disp_h } else { fb_height });
 
-    sys::write(b"\n");
+    sys::print(b"\n");
 
     // Use init-provided dimensions for the resource (matches framebuffer).
     let width = fb_width;
@@ -566,12 +551,12 @@ pub extern "C" fn _start() -> ! {
 
     // Create a 2D resource.
     if !resource_create_2d(&device, &mut vq, irq_handle, FB_RESOURCE_ID, width, height) {
-        sys::write(b"virtio-gpu: resource_create_2d failed\n");
+        sys::print(b"virtio-gpu: resource_create_2d failed\n");
         sys::exit();
     }
     // Attach the external framebuffer (allocated by init, PA passed via channel).
     if !attach_backing(&device, &mut vq, irq_handle, FB_RESOURCE_ID, fb_pa, fb_size) {
-        sys::write(b"virtio-gpu: attach_backing failed\n");
+        sys::print(b"virtio-gpu: attach_backing failed\n");
         sys::exit();
     }
     // Bind resource to scanout 0.
@@ -584,19 +569,19 @@ pub extern "C" fn _start() -> ! {
         width,
         height,
     ) {
-        sys::write(b"virtio-gpu: set_scanout failed\n");
+        sys::print(b"virtio-gpu: set_scanout failed\n");
         sys::exit();
     }
     // Transfer the framebuffer (already drawn by compositor) to host and flush.
     if !transfer_to_host(&device, &mut vq, irq_handle, FB_RESOURCE_ID, width, height) {
-        sys::write(b"virtio-gpu: transfer_to_host failed\n");
+        sys::print(b"virtio-gpu: transfer_to_host failed\n");
         sys::exit();
     }
     if !resource_flush(&device, &mut vq, irq_handle, FB_RESOURCE_ID, width, height) {
-        sys::write(b"virtio-gpu: resource_flush failed\n");
+        sys::print(b"virtio-gpu: resource_flush failed\n");
         sys::exit();
     }
 
-    sys::write(b"     presented to display\n");
+    sys::print(b"     presented to display\n");
     sys::exit();
 }

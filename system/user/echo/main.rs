@@ -12,14 +12,13 @@ const SHM: *mut u8 = 0x4000_0000 as *mut u8; // must match kernel paging::CHANNE
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Wait for init's message.
-    sys::wait(&[0], u64::MAX);
-
+    let _ = sys::wait(&[0], u64::MAX);
     // Read message from shared memory (incoming region: offset 0).
     let msg = unsafe { core::slice::from_raw_parts(SHM, 4) };
 
-    sys::write(b"echo recv: ");
-    sys::write(msg);
-    sys::write(b"\n");
+    sys::print(b"echo recv: ");
+    sys::print(msg);
+    sys::print(b"\n");
 
     // Write "pong" to outgoing region (offset 128), then signal init.
     let reply = b"pong";
@@ -28,6 +27,7 @@ pub extern "C" fn _start() -> ! {
         core::ptr::copy_nonoverlapping(reply.as_ptr(), SHM.add(128), reply.len());
     }
 
-    sys::channel_signal(0);
+    let _ = sys::channel_signal(0);
+
     sys::exit();
 }

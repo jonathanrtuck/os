@@ -224,7 +224,7 @@ fn draw_truetype_demo(fb: &mut drawing::Surface) {
     let font = match TrueTypeFont::new(PROGGY_TTF) {
         Some(f) => f,
         None => {
-            sys::write(b"compositor: failed to parse TTF\n");
+            sys::print(b"compositor: failed to parse TTF\n");
             return;
         }
     };
@@ -293,7 +293,7 @@ fn draw_truetype_demo(fb: &mut drawing::Surface) {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    sys::write(b"  \xF0\x9F\x8E\xA8 compositor - starting\n");
+    sys::print(b"  \xF0\x9F\x8E\xA8 compositor - starting\n");
 
     // Read framebuffer info from channel shared page.
     let fb_va = unsafe { core::ptr::read_volatile(SHM as *const u64) } as usize;
@@ -303,7 +303,7 @@ pub extern "C" fn _start() -> ! {
     let fb_size = unsafe { core::ptr::read_volatile(SHM.add(20) as *const u32) };
 
     if fb_va == 0 || fb_width == 0 || fb_height == 0 {
-        sys::write(b"compositor: bad framebuffer info\n");
+        sys::print(b"compositor: bad framebuffer info\n");
         sys::exit();
     }
 
@@ -326,7 +326,7 @@ pub extern "C" fn _start() -> ! {
 
     composite(&mut fb);
 
-    sys::write(b"     scene composited, signaling init\n");
-    sys::channel_signal(0);
+    sys::print(b"     scene composited, signaling init\n");
+    let _ = sys::channel_signal(0);
     sys::exit();
 }

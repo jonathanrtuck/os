@@ -30,7 +30,7 @@ struct BlkReqHeader {
 /// Print a u64 in decimal (simple, no alloc).
 fn print_u64(mut n: u64) {
     if n == 0 {
-        sys::write(b"0");
+        sys::print(b"0");
 
         return;
     }
@@ -44,7 +44,7 @@ fn print_u64(mut n: u64) {
         n /= 10;
     }
 
-    sys::write(&buf[i..]);
+    sys::print(&buf[i..]);
 }
 /// Read a sector and print its first 16 bytes as ASCII.
 fn read_and_print_sector(
@@ -58,14 +58,13 @@ fn read_and_print_sector(
     //   [16..528)  sector data   (device-writable)
     //   [528]      status byte   (device-writable)
     let mut buf_pa: u64 = 0;
-    let buf_va = sys::dma_alloc(0, &mut buf_pa);
-
-    if buf_va < 0 {
-        sys::write(b"virtio-blk: dma_alloc (buf) failed\n");
-
-        return;
-    }
-
+    let buf_va = match sys::dma_alloc(0, &mut buf_pa) {
+        Ok(va) => va,
+        Err(_) => {
+            sys::print(b"virtio-blk: dma_alloc (buf) failed\n");
+            return;
+        }
+    };
     let buf_ptr = buf_va as *mut u8;
 
     // Zero the buffer.
@@ -95,20 +94,19 @@ fn read_and_print_sector(
     device.notify(VIRTQ_REQUEST);
 
     // Wait for completion interrupt (blocks instead of spinning).
-    sys::wait(&[irq_handle], u64::MAX);
+    let _ = sys::wait(&[irq_handle], u64::MAX);
 
     device.ack_interrupt();
     vq.pop_used();
 
-    sys::interrupt_ack(irq_handle);
-
+    let _ = sys::interrupt_ack(irq_handle);
     // Check status.
     let status = unsafe { *buf_ptr.add(16 + SECTOR_SIZE) };
 
     if status != 0 {
-        sys::write(b"     sector 0 - read failed\n");
+        sys::print(b"     sector 0 - read failed\n");
     } else {
-        sys::write(b"     sector 0 - ");
+        sys::print(b"     sector 0 - ");
 
         // Print first 16 bytes as ASCII where printable, '.' otherwise.
         let data = unsafe { core::slice::from_raw_parts(buf_ptr.add(16), 16) };
@@ -120,11 +118,11 @@ fn read_and_print_sector(
             }
         }
 
-        sys::write(&ascii);
-        sys::write(b"\n");
+        sys::print(&ascii);
+        sys::print(b"\n");
     }
 
-    sys::dma_free(buf_va as u64, 0);
+    let _ = sys::dma_free(buf_va as u64, 0);
 }
 
 #[unsafe(no_mangle)]
@@ -136,30 +134,23 @@ pub extern "C" fn _start() -> ! {
     // 0x200 stride, so most sit at sub-page offsets within a 4K page.
     let page_offset = mmio_pa & 0xFFF;
     let page_pa = mmio_pa & !0xFFF;
-    let page_va = sys::device_map(page_pa, 0x1000);
-
-    if page_va < 0 {
-        sys::write(b"virtio-blk: device_map failed\n");
+    let page_va = sys::device_map(page_pa, 0x1000).unwrap_or_else(|_| {
+        sys::print(b"virtio-blk: device_map failed\n");
         sys::exit();
-    }
-
-    let device = virtio::Device::new(page_va as usize + page_offset as usize);
+    });
+    let device = virtio::Device::new(page_va + page_offset as usize);
 
     // Negotiate features.
     if !device.negotiate() {
-        sys::write(b"virtio-blk: negotiate failed\n");
+        sys::print(b"virtio-blk: negotiate failed\n");
         sys::exit();
     }
 
     // Register for device interrupt before driver_ok.
-    let irq_handle = sys::interrupt_register(irq);
-
-    if irq_handle < 0 {
-        sys::write(b"virtio-blk: interrupt_register failed\n");
+    let irq_handle = sys::interrupt_register(irq).unwrap_or_else(|_| {
+        sys::print(b"virtio-blk: interrupt_register failed\n");
         sys::exit();
-    }
-
-    let irq_handle = irq_handle as u8;
+    });
     // Read capacity from device config.
     let capacity = device.config_read64(0);
     // Allocate DMA for the request virtqueue.
@@ -169,19 +160,16 @@ pub extern "C" fn _start() -> ! {
     );
     let order = virtio::Virtqueue::allocation_order(queue_size);
     let mut vq_pa: u64 = 0;
-    let vq_va = sys::dma_alloc(order, &mut vq_pa);
-
-    if vq_va < 0 {
-        sys::write(b"virtio-blk: dma_alloc (vq) failed\n");
+    let vq_va = sys::dma_alloc(order, &mut vq_pa).unwrap_or_else(|_| {
+        sys::print(b"virtio-blk: dma_alloc (vq) failed\n");
         sys::exit();
-    }
-
+    });
     // Zero the virtqueue memory.
     let vq_bytes = (1usize << order) * 4096;
 
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_bytes) };
 
-    let mut vq = virtio::Virtqueue::new(queue_size, vq_va as usize, vq_pa);
+    let mut vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
 
     device.setup_queue(
         VIRTQ_REQUEST,
@@ -193,11 +181,11 @@ pub extern "C" fn _start() -> ! {
     device.driver_ok();
 
     // Print capacity.
-    sys::write(b"  \xF0\x9F\x94\x8C virtio - blk capacity=");
+    sys::print(b"  \xF0\x9F\x94\x8C virtio - blk capacity=");
 
     print_u64(capacity);
 
-    sys::write(b" sectors\n");
+    sys::print(b" sectors\n");
 
     // Read sector 0 if the device has any capacity.
     if capacity > 0 {
@@ -205,6 +193,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Signal the kernel channel to indicate we're done.
-    sys::channel_signal(0);
+    let _ = sys::channel_signal(0);
+
     sys::exit();
 }
