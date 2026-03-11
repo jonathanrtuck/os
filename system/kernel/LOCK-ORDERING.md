@@ -15,25 +15,26 @@ that acquires multiple locks (directly or transitively).
 All locks are `IrqMutex<T>` — ticket spinlock with IRQ masking (DAIF.I set on
 acquire, restored on release). There are no bare `Mutex` or other lock types.
 
-| # | Lock Name | File | Type | Purpose |
-|---|-----------|------|------|---------|
-| 1 | `scheduler::STATE` | scheduler.rs:127 | `IrqMutex<State>` | Global run queue, per-core state, process table, scheduling contexts, blocked/suspended lists |
-| 2 | `channel::STATE` | channel.rs:64 | `IrqMutex<State>` | Channel table (endpoints, shared pages, pending signals, waiters) |
-| 3 | `timer::TIMERS` | timer.rs:56 | `IrqMutex<TimerTable>` | Timer objects (deadlines, waiter registry) |
-| 4 | `interrupt::TABLE` | interrupt.rs:55 | `IrqMutex<InterruptTable>` | Interrupt registrations (IRQ→slot mapping, waiter registry) |
-| 5 | `futex::WAIT_TABLE` | futex.rs:47 | `IrqMutex<WaitTable>` | Futex wait queues (64 hash buckets, PA-keyed) |
-| 6 | `thread_exit::STATE` | thread_exit.rs:42 | `IrqMutex<WaitableRegistry<ThreadId>>` | Thread exit notification (readiness + waiters) |
-| 7 | `process_exit::STATE` | process_exit.rs:21 | `IrqMutex<WaitableRegistry<ProcessId>>` | Process exit notification (readiness + waiters) |
-| 8 | `page_allocator::STATE` | page_allocator.rs:36 | `IrqMutex<State>` | Buddy allocator free lists (physical page frames) |
-| 9 | `slab::SLAB` | slab.rs:32 | `IrqMutex<SlabState>` | Slab allocator caches (6 size classes) |
-| 10 | `heap::ALLOC_LOCK` | heap.rs:41 | `IrqMutex<()>` | Linked-list allocator free list |
-| 11 | `memory::KERNEL_PT_LOCK` | memory.rs:39 | `IrqMutex<()>` | Kernel TTBR1 page table modifications (break-block, guard pages) |
-| 12 | `serial::LOCK` | serial.rs:22 | `IrqMutex<()>` | UART output serialization (prevents interleaved multi-core output) |
-| 13 | `address_space_id::STATE` | address_space_id.rs:32 | `IrqMutex<State>` | ASID bitmap and generation counter |
+| #   | Lock Name                 | File                   | Type                                    | Purpose                                                                                       |
+| --- | ------------------------- | ---------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 1   | `scheduler::STATE`        | scheduler.rs:127       | `IrqMutex<State>`                       | Global run queue, per-core state, process table, scheduling contexts, blocked/suspended lists |
+| 2   | `channel::STATE`          | channel.rs:64          | `IrqMutex<State>`                       | Channel table (endpoints, shared pages, pending signals, waiters)                             |
+| 3   | `timer::TIMERS`           | timer.rs:56            | `IrqMutex<TimerTable>`                  | Timer objects (deadlines, waiter registry)                                                    |
+| 4   | `interrupt::TABLE`        | interrupt.rs:55        | `IrqMutex<InterruptTable>`              | Interrupt registrations (IRQ→slot mapping, waiter registry)                                   |
+| 5   | `futex::WAIT_TABLE`       | futex.rs:47            | `IrqMutex<WaitTable>`                   | Futex wait queues (64 hash buckets, PA-keyed)                                                 |
+| 6   | `thread_exit::STATE`      | thread_exit.rs:42      | `IrqMutex<WaitableRegistry<ThreadId>>`  | Thread exit notification (readiness + waiters)                                                |
+| 7   | `process_exit::STATE`     | process_exit.rs:21     | `IrqMutex<WaitableRegistry<ProcessId>>` | Process exit notification (readiness + waiters)                                               |
+| 8   | `page_allocator::STATE`   | page_allocator.rs:36   | `IrqMutex<State>`                       | Buddy allocator free lists (physical page frames)                                             |
+| 9   | `slab::SLAB`              | slab.rs:32             | `IrqMutex<SlabState>`                   | Slab allocator caches (6 size classes)                                                        |
+| 10  | `heap::ALLOC_LOCK`        | heap.rs:41             | `IrqMutex<()>`                          | Linked-list allocator free list                                                               |
+| 11  | `memory::KERNEL_PT_LOCK`  | memory.rs:39           | `IrqMutex<()>`                          | Kernel TTBR1 page table modifications (break-block, guard pages)                              |
+| 12  | `serial::LOCK`            | serial.rs:22           | `IrqMutex<()>`                          | UART output serialization (prevents interleaved multi-core output)                            |
+| 13  | `address_space_id::STATE` | address_space_id.rs:32 | `IrqMutex<State>`                       | ASID bitmap and generation counter                                                            |
 
 **Total: 13 distinct IrqMutex instances across 13 files.**
 
 Additionally, these modules use atomics (no lock):
+
 - `metrics.rs` — per-core `AtomicU64` counters (Relaxed ordering, no lock needed)
 - `timer.rs` — `CNTFRQ: AtomicU64`, `TICKS: AtomicU64` (read-only after init / monotonic)
 
@@ -74,14 +75,14 @@ Assign each lock a numeric level. A lock at level N may only acquire locks
 at level N+1 or higher. Self-acquisition is forbidden (ticket spinlock
 deadlocks).
 
-| Level | Lock(s) | Rationale |
-|-------|---------|-----------|
-| 0 | channel, timer, interrupt, thread_exit, process_exit, futex | "Event source" locks — acquire scheduler to wake |
-| 1 | scheduler | Central coordinator — calls page_allocator, ASID |
-| 2 | page_allocator, address_space_id, slab | Resource management — leaf or near-leaf |
-| 3 | memory (KERNEL_PT_LOCK) | Kernel page table — acquires page_allocator |
-| 3 | heap (ALLOC_LOCK) | Heap allocator — leaf (slab runs outside this lock) |
-| ∞ | serial | Output-only leaf — never nests with any lock |
+| Level | Lock(s)                                                     | Rationale                                           |
+| ----- | ----------------------------------------------------------- | --------------------------------------------------- |
+| 0     | channel, timer, interrupt, thread_exit, process_exit, futex | "Event source" locks — acquire scheduler to wake    |
+| 1     | scheduler                                                   | Central coordinator — calls page_allocator, ASID    |
+| 2     | page_allocator, address_space_id, slab                      | Resource management — leaf or near-leaf             |
+| 3     | memory (KERNEL_PT_LOCK)                                     | Kernel page table — acquires page_allocator         |
+| 3     | heap (ALLOC_LOCK)                                           | Heap allocator — leaf (slab runs outside this lock) |
+| ∞     | serial                                                      | Output-only leaf — never nests with any lock        |
 
 Note: KERNEL_PT_LOCK and ALLOC_LOCK are at the same level but never
 interact (no code path acquires both).
@@ -118,7 +119,7 @@ scheduler lock.
 
 ### 3.2 channel::setup_endpoint() (Level 0 → Level 1, sequential)
 
-```
+```text
 channel::STATE.lock()  → read shared page PAs → release
 scheduler::with_process()  → map pages + insert handle → release
 ```
@@ -127,7 +128,7 @@ Sequential, not nested. Correct.
 
 ### 3.3 channel::create() (page_allocator → Level 0)
 
-```
+```text
 page_allocator::alloc_frame()  → allocate page → release
 page_allocator::alloc_frame()  → allocate page → release
 channel::STATE.lock()  → insert channel → release
@@ -139,7 +140,7 @@ Page allocator is acquired and released **before** the channel lock. No nesting.
 
 Inside `schedule_inner()` → `maybe_cleanup_killed_process()`:
 
-```
+```text
 scheduler::STATE held (level 1)
   → addr_space.free_all()
     → page_allocator::free_frame() (acquires level 2) — repeated
@@ -162,7 +163,7 @@ Same as 3.4 — `address_space_id::free()` called under scheduler lock in
 
 Inside `slab::try_alloc()`:
 
-```
+```text
 slab::SLAB.lock() (level 2)
   → SlabCache::alloc()
     → SlabCache::grow()
@@ -177,7 +178,7 @@ the slab lock). The ordering is strictly slab → page_allocator, never reversed
 
 Inside `memory::alloc_kernel_stack_guarded()`:
 
-```
+```text
 KERNEL_PT_LOCK.lock() (level 3)
   → page_allocator::alloc_frame() (level 2)
 ```
@@ -193,7 +194,7 @@ KERNEL_PT_LOCK. These two locks form a simple DAG edge with no reverse.
 
 Inside `GlobalAlloc::alloc()`:
 
-```
+```text
 slab::try_alloc() → acquires SLAB lock, releases it
 ALLOC_LOCK.lock() → linked-list alloc
 ```
@@ -204,7 +205,7 @@ Sequential, not nested. The slab lock is released before ALLOC_LOCK is acquired.
 
 This is the most complex multi-lock path in the kernel:
 
-```
+```text
 Phase 1: scheduler::STATE.lock() → collect ExitInfo → release
 Phase 2: thread_exit::notify_exit() → thread_exit lock → release → scheduler lock → release
          process_exit::notify_exit() → process_exit lock → release → scheduler lock → release
@@ -220,7 +221,7 @@ the scheduler lock, which is valid because all prior locks have been released.
 
 ### 3.10 sys_process_kill (multiple phases)
 
-```
+```text
 Phase 1: scheduler::kill_process() → scheduler lock → release
 Phase 2: thread_exit::notify_exit() → thread_exit lock → release → scheduler lock → release
          process_exit::notify_exit() → process_exit lock → release → scheduler lock → release
@@ -235,7 +236,7 @@ All sequential. Correct.
 
 ### 3.11 sys_wait (multiple subsystem locks)
 
-```
+```text
 scheduler lock → resolve handles, populate wait_set → release
 channel::register_waiter() → channel lock → release  (×N)
 timer::register_waiter() → timer lock → release  (×N)
@@ -251,7 +252,7 @@ All sequential. No two subsystem locks are held simultaneously.
 
 ### 3.12 IRQ handler path (timer → scheduler)
 
-```
+```text
 irq_handler():
   interrupt_controller::acknowledge() → no lock (MMIO)
   timer::handle_irq():
@@ -306,18 +307,18 @@ No code path acquires the same lock twice (verified by inspection).
 For each lock pair where a directed edge exists in the DAG (§2), verify that
 no reverse edge exists anywhere in the codebase.
 
-| Forward Edge | Reverse Edge Exists? | Evidence |
-|---|---|---|
-| channel → scheduler | No | `scheduler` never calls `channel::STATE.lock()` |
-| timer → scheduler | No | `scheduler` reads `timer::counter()` (atomic, no lock) |
-| interrupt → scheduler | No | `scheduler` never calls `interrupt::TABLE.lock()` |
-| thread_exit → scheduler | No | `scheduler` never calls `thread_exit::STATE.lock()` |
-| process_exit → scheduler | No | `scheduler` never calls `process_exit::STATE.lock()` |
-| futex → scheduler | No | `scheduler` never calls `futex::WAIT_TABLE.lock()` |
-| scheduler → page_allocator | No | `page_allocator` never calls `scheduler::STATE.lock()` |
-| scheduler → address_space_id | No | `address_space_id` never calls `scheduler::STATE.lock()` |
-| slab → page_allocator | No | `page_allocator` never calls `slab::SLAB.lock()` |
-| KERNEL_PT_LOCK → page_allocator | No | `page_allocator` never calls `KERNEL_PT_LOCK.lock()` |
+| Forward Edge                    | Reverse Edge Exists? | Evidence                                                 |
+| ------------------------------- | -------------------- | -------------------------------------------------------- |
+| channel → scheduler             | No                   | `scheduler` never calls `channel::STATE.lock()`          |
+| timer → scheduler               | No                   | `scheduler` reads `timer::counter()` (atomic, no lock)   |
+| interrupt → scheduler           | No                   | `scheduler` never calls `interrupt::TABLE.lock()`        |
+| thread_exit → scheduler         | No                   | `scheduler` never calls `thread_exit::STATE.lock()`      |
+| process_exit → scheduler        | No                   | `scheduler` never calls `process_exit::STATE.lock()`     |
+| futex → scheduler               | No                   | `scheduler` never calls `futex::WAIT_TABLE.lock()`       |
+| scheduler → page_allocator      | No                   | `page_allocator` never calls `scheduler::STATE.lock()`   |
+| scheduler → address_space_id    | No                   | `address_space_id` never calls `scheduler::STATE.lock()` |
+| slab → page_allocator           | No                   | `page_allocator` never calls `slab::SLAB.lock()`         |
+| KERNEL_PT_LOCK → page_allocator | No                   | `page_allocator` never calls `KERNEL_PT_LOCK.lock()`     |
 
 **Result: No circular dependencies found.** The lock ordering forms a strict DAG.
 
@@ -336,14 +337,14 @@ and no reverse path exists.
 
 ## 6. Summary
 
-| Property | Status |
-|----------|--------|
-| Total locks | 13 IrqMutex instances |
-| Circular dependencies | **None found** |
-| Lock ordering violations | **None found** |
-| Self-deadlock risk | Prevented by IRQ masking (no reentry) |
-| Interrupt safety | All locks mask IRQs; IRQ handler follows same ordering |
-| Panic safety | Serial and metrics bypass locks in panic handler |
+| Property                 | Status                                                 |
+| ------------------------ | ------------------------------------------------------ |
+| Total locks              | 13 IrqMutex instances                                  |
+| Circular dependencies    | **None found**                                         |
+| Lock ordering violations | **None found**                                         |
+| Self-deadlock risk       | Prevented by IRQ masking (no reentry)                  |
+| Interrupt safety         | All locks mask IRQs; IRQ handler follows same ordering |
+| Panic safety             | Serial and metrics bypass locks in panic handler       |
 
 The kernel's lock ordering is sound. All multi-lock code paths either use
 sequential lock-release-lock patterns (two-phase wake) or follow the strict

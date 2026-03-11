@@ -32,6 +32,26 @@ use alloc::{boxed::Box, vec::Vec};
 const DEFAULT_BUDGET_NS: u64 = 10_000_000;
 const DEFAULT_PERIOD_NS: u64 = 50_000_000;
 
+static STATE: IrqMutex<State> = IrqMutex::new(State {
+    queue: RunQueue { ready: Vec::new() },
+    blocked: Vec::new(),
+    suspended: Vec::new(),
+    deferred_drops: Vec::new(),
+    cores: {
+        const INIT: PerCoreState = PerCoreState {
+            current: None,
+            idle: None,
+        };
+        [INIT; per_core::MAX_CORES]
+    },
+    next_id: 1,
+    processes: Vec::new(),
+    next_process_id: 0,
+    scheduling_contexts: Vec::new(),
+    free_context_ids: Vec::new(),
+    default_context_id: None,
+});
+
 struct PerCoreState {
     current: Option<Box<Thread>>,
     idle: Option<Box<Thread>>,
@@ -84,7 +104,6 @@ pub struct KillInfo {
     /// Address space for immediate cleanup (None if deferred due to running threads).
     pub address_space: Option<Box<super::address_space::AddressSpace>>,
 }
-
 /// Handles sorted by type for cleanup outside the scheduler lock.
 pub struct HandleCategories {
     pub channels: Vec<super::handle::ChannelId>,
@@ -123,26 +142,6 @@ pub enum BlockResult {
     /// Caller must NOT run cleanup (wrong thread identity).
     Blocked(*const Context),
 }
-
-static STATE: IrqMutex<State> = IrqMutex::new(State {
-    queue: RunQueue { ready: Vec::new() },
-    blocked: Vec::new(),
-    suspended: Vec::new(),
-    deferred_drops: Vec::new(),
-    cores: {
-        const INIT: PerCoreState = PerCoreState {
-            current: None,
-            idle: None,
-        };
-        [INIT; per_core::MAX_CORES]
-    },
-    next_id: 1,
-    processes: Vec::new(),
-    next_process_id: 0,
-    scheduling_contexts: Vec::new(),
-    free_context_ids: Vec::new(),
-    default_context_id: None,
-});
 
 impl ExitInfo {
     fn process_id(&self) -> ProcessId {
@@ -304,6 +303,7 @@ fn release_context_inner(s: &mut State, ctx_id: SchedulingContextId) {
 
             if entry.ref_count == 0 {
                 *slot = None;
+
                 s.free_context_ids.push(ctx_id.0);
             }
         }
@@ -974,6 +974,7 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     if is_last {
         super::process_exit::notify_exit(process_id);
     }
+
     // Phase 2a: remove from futex wait queues (acquires futex lock, not scheduler).
     super::futex::remove_thread(thread_id);
 
@@ -1120,6 +1121,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
             let mut thread = s.blocked.swap_remove(i);
 
             release_thread_context_ids(&mut s, &mut thread);
+
             killed_threads.push(thread.id());
         } else {
             i += 1;
@@ -1134,6 +1136,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
             let mut thread = s.suspended.swap_remove(i);
 
             release_thread_context_ids(&mut s, &mut thread);
+
             killed_threads.push(thread.id());
         } else {
             i += 1;
@@ -1328,7 +1331,6 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
         .as_mut()
         .expect("process not found");
     let ttbr0 = process.address_space.ttbr0_value();
-
     let mut thread = match Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top) {
         Some(t) => t,
         None => return None,
@@ -1347,7 +1349,11 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
 ///
 /// Used by `process_create` (two-phase creation: create suspended, then start).
 #[inline(never)]
-pub fn spawn_user_suspended(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> Option<ThreadId> {
+pub fn spawn_user_suspended(
+    process_id: ProcessId,
+    entry_va: u64,
+    user_stack_top: u64,
+) -> Option<ThreadId> {
     let mut s = STATE.lock();
     let id = s.next_id;
 
@@ -1357,7 +1363,6 @@ pub fn spawn_user_suspended(process_id: ProcessId, entry_va: u64, user_stack_top
         .as_mut()
         .expect("process not found");
     let ttbr0 = process.address_space.ttbr0_value();
-
     let mut thread = match Thread::new_user(id, process_id, ttbr0, entry_va, user_stack_top) {
         Some(t) => t,
         None => return None,

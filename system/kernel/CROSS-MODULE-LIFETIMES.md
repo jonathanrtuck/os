@@ -57,6 +57,7 @@ In `scheduler::exit_current_from_syscall()`:
 
 The thread is only dropped at the start of the NEXT `schedule_inner` call
 (`s.deferred_drops.clear()`), by which time:
+
 - We're running on a different thread's kernel stack.
 - All notifications have been delivered (Phase 2 completed).
 - The thread is unreachable from any queue (not in ready, blocked, suspended,
@@ -79,6 +80,7 @@ Two paths:
 
 **Normal exit (last thread):** `exit_current_from_syscall` Phase 4 frees the
 address space. At this point:
+
 - The thread is still Running on its core, but using the kernel stack (EL1).
 - `swap_ttbr0` in `schedule_inner` (Phase 5) switches TTBR0 before the old
   thread is parked. After the switch, no core references the old TTBR0.
@@ -111,6 +113,7 @@ When `timer::check_expired()` runs (from the timer IRQ handler):
 3. For each fired timer: calls `scheduler::try_wake_for_handle(thread_id, ...)`.
 
 If the thread has already exited:
+
 - `try_wake_impl` searches blocked list, cores, ready queue. An Exited thread
   may be in `deferred_drops` (unreachable) or already dropped.
 - If found in blocked/ready: `thread.wake()` returns false (only Blocked → Ready).
@@ -137,6 +140,7 @@ attempt fails gracefully.
 ### Bug Description
 
 In `create_from_user_elf()` (and `spawn_from_elf()`):
+
 ```rust
 let process_id = scheduler::create_process(addr_space);  // Adds to table
 let thread_id = scheduler::spawn_user_suspended(...)       // May fail (OOM)
@@ -145,10 +149,12 @@ let thread_id = scheduler::spawn_user_suspended(...)       // May fail (OOM)
 
 If `spawn_user_suspended` returns `None` (OOM for kernel stack), the `?` operator
 returns `Err`, but `create_process()` has already:
+
 1. Assigned a ProcessId
 2. Pushed `Some(Process { address_space, ... })` into `State.processes`
 
 The orphaned process slot remains in `State.processes` forever:
+
 - The caller (`sys_process_create`) receives `Err` and doesn't know the ProcessId.
 - The Process (containing Box<AddressSpace>) is never dropped.
 - The address space's frames, page tables, and ASID are permanently leaked.
@@ -171,14 +177,14 @@ when thread creation fails.
 
 All 41 calls reviewed. Categories:
 
-| Category | Count | Justification |
-|----------|-------|---------------|
-| Boot-time initialization | 5 | main.rs (4) + thread.rs (1). Failure = unrecoverable. |
-| Kernel invariant: current thread exists | 18 | `cores[core].current.as_mut().expect(...)`. A core always has a current thread after init(). Violation = corrupted scheduler state. |
-| Kernel invariant: idle thread exists | 1 | `cores[core].idle.take().expect(...)`. Set during init. |
-| Post-validation access | 10 | Process/thread confirmed to exist by prior guard. |
-| User thread assertion | 3 | `.expect("not a user thread")` — only user threads call these syscall paths. |
-| Process existence | 4 | `.expect("process not found")` — process_id comes from a live thread. |
+| Category                                | Count | Justification                                                                                                                       |
+| --------------------------------------- | ----- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Boot-time initialization                | 5     | main.rs (4) + thread.rs (1). Failure = unrecoverable.                                                                               |
+| Kernel invariant: current thread exists | 18    | `cores[core].current.as_mut().expect(...)`. A core always has a current thread after init(). Violation = corrupted scheduler state. |
+| Kernel invariant: idle thread exists    | 1     | `cores[core].idle.take().expect(...)`. Set during init.                                                                             |
+| Post-validation access                  | 10    | Process/thread confirmed to exist by prior guard.                                                                                   |
+| User thread assertion                   | 3     | `.expect("not a user thread")` — only user threads call these syscall paths.                                                        |
+| Process existence                       | 4     | `.expect("process not found")` — process_id comes from a live thread.                                                               |
 
 **Inline justification comments added** to the less-obvious cases (kill_process
 unwraps, exit path unwraps).
@@ -190,11 +196,11 @@ a boot-time panic or a kernel invariant assertion. The count remains at 41.
 
 ## Summary
 
-| Cross-Module Invariant | Status |
-|------------------------|--------|
-| Handle close wakes blocked channel peer | ✅ Safe |
-| Thread drop after exit notification | ✅ Safe |
-| Address space freed after all threads exit | ✅ Safe |
-| Timer callback on dead thread | ✅ Safe |
-| Process slot leak on spawn failure | 🐛 Fixed |
-| All .unwrap()/.expect() justified | ✅ 41/41 reviewed |
+| Cross-Module Invariant                     | Status            |
+| ------------------------------------------ | ----------------- |
+| Handle close wakes blocked channel peer    | ✅ Safe           |
+| Thread drop after exit notification        | ✅ Safe           |
+| Address space freed after all threads exit | ✅ Safe           |
+| Timer callback on dead thread              | ✅ Safe           |
+| Process slot leak on spawn failure         | 🐛 Fixed          |
+| All .unwrap()/.expect() justified          | ✅ 41/41 reviewed |

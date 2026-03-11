@@ -142,6 +142,7 @@ pub fn select_next(threads: &[(SchedulingState, bool)], avg_vruntime: u64) -> Op
         if !has_budget {
             continue;
         }
+
         if fallback.map_or(true, |(_, v)| state.vruntime < v) {
             fallback = Some((i, state.vruntime));
         }

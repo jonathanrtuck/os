@@ -6,15 +6,6 @@
 
 use alloc::vec::Vec;
 
-/// What backs a VMA's pages.
-#[derive(Clone)]
-pub enum Backing {
-    /// Anonymous zero-filled pages (stack, BSS).
-    Anonymous,
-    /// ELF segment data: first `data_len` bytes come from `data`, rest zeroed.
-    Elf { data: &'static [u8], data_len: u64 },
-}
-
 /// Describes a contiguous region of virtual address space.
 #[derive(Clone)]
 pub struct Vma {
@@ -33,6 +24,15 @@ pub struct Vma {
 /// Sorted list of VMAs. No overlaps allowed.
 pub struct VmaList {
     vmas: Vec<Vma>,
+}
+
+/// What backs a VMA's pages.
+#[derive(Clone)]
+pub enum Backing {
+    /// Anonymous zero-filled pages (stack, BSS).
+    Anonymous,
+    /// ELF segment data: first `data_len` bytes come from `data`, rest zeroed.
+    Elf { data: &'static [u8], data_len: u64 },
 }
 
 impl VmaList {

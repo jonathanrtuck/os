@@ -18,12 +18,11 @@ const TXFF: u32 = 1 << 5;
 const UART0_BASE: usize = 0x0900_0000 + KERNEL_VA_OFFSET;
 const UART0_DR: usize = UART0_BASE;
 const UART0_FR: usize = UART0_BASE + 0x18;
-
-static LOCK: IrqMutex<()> = IrqMutex::new(());
-
 /// Maximum iterations to wait for UART TXFF to clear. If the FIFO is
 /// stuck, we write anyway (lossy output > dead kernel).
 const TX_TIMEOUT: u32 = 1_000_000;
+
+static LOCK: IrqMutex<()> = IrqMutex::new(());
 
 /// Raw character output — no lock. For internal use and panic handler.
 fn raw_putc(c: u8) {
@@ -73,6 +72,7 @@ pub fn panic_put_u32(mut n: u32) {
 
     if n == 0 {
         raw_putc(b'0');
+
         return;
     }
 
@@ -112,6 +112,7 @@ pub fn put_u64(mut n: u64) {
 
     if n == 0 {
         raw_putc(b'0');
+
         return;
     }
 

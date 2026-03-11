@@ -116,7 +116,9 @@ pub fn close_endpoint(id: ChannelId) {
 
         let pages = if ch.closed_count == 2 {
             let pages = ch.pages;
+
             ch.pages = [memory::Pa(0), memory::Pa(0)];
+
             Some(pages)
         } else {
             None
@@ -127,6 +129,7 @@ pub fn close_endpoint(id: ChannelId) {
 
     if let Some((waiter_id, peer_id)) = peer_wake {
         let reason = HandleObject::Channel(peer_id);
+
         if !scheduler::try_wake_for_handle(waiter_id, reason) {
             scheduler::set_wake_pending_for_handle(waiter_id, reason);
         }
@@ -152,7 +155,6 @@ pub fn create() -> Option<(ChannelId, ChannelId)> {
             return None;
         }
     };
-
     let mut s = STATE.lock();
     let idx = s.channels.len() as u32;
 

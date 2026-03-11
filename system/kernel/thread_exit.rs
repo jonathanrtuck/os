@@ -57,6 +57,7 @@ pub fn destroy(thread_id: ThreadId) {
 
     if let Some(waiter_id) = waiter {
         let reason = HandleObject::Thread(thread_id);
+
         if !scheduler::try_wake_for_handle(waiter_id, reason) {
             scheduler::set_wake_pending_for_handle(waiter_id, reason);
         }

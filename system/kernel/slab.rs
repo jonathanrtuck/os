@@ -18,17 +18,6 @@ const NUM_CLASSES: usize = 6;
 const PAGE_SIZE: usize = paging::PAGE_SIZE as usize;
 const SIZE_CLASSES: [usize; NUM_CLASSES] = [64, 128, 256, 512, 1024, 2048];
 
-struct FreeNode {
-    next: *mut FreeNode,
-}
-struct SlabCache {
-    free_head: *mut FreeNode,
-    obj_size: usize,
-}
-struct SlabState {
-    caches: [SlabCache; NUM_CLASSES],
-}
-
 static SLAB: IrqMutex<SlabState> = IrqMutex::new(SlabState {
     caches: [
         SlabCache::new(64),
@@ -40,12 +29,24 @@ static SLAB: IrqMutex<SlabState> = IrqMutex::new(SlabState {
     ],
 });
 
+struct FreeNode {
+    next: *mut FreeNode,
+}
+struct SlabCache {
+    free_head: *mut FreeNode,
+    obj_size: usize,
+}
+struct SlabState {
+    caches: [SlabCache; NUM_CLASSES],
+}
+
 impl SlabCache {
     /// Allocate one object from this cache.
     fn alloc(&mut self) -> *mut u8 {
         if self.free_head.is_null() {
             self.grow();
         }
+
         if self.free_head.is_null() {
             return core::ptr::null_mut();
         }
@@ -124,7 +125,6 @@ pub(crate) fn size_class(size: usize, align: usize) -> Option<usize> {
 
     None
 }
-
 /// Try to allocate from the slab allocator. Returns null if the size/alignment
 /// doesn't fit a slab class.
 pub fn try_alloc(size: usize, align: usize) -> *mut u8 {

@@ -106,20 +106,20 @@ const VIRTIO_MMIO_STRIDE: u64 = 0x200;
 const VIRTIO_MMIO_COUNT: usize = 32;
 const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
 
+/// Init ELF — the only process the kernel spawns directly.
+/// Init is the proto-OS-service that spawns all other processes.
+static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
+
+extern "C" {
+    static __kernel_end: u8;
+}
+
 /// Info discovered about a virtio-mmio device.
 struct VirtioDeviceInfo {
     pa: u64,
     irq: u32,
     device_id: u32,
 }
-
-extern "C" {
-    static __kernel_end: u8;
-}
-
-/// Init ELF — the only process the kernel spawns directly.
-/// Init is the proto-OS-service that spawns all other processes.
-static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
 
 /// Boot secondary cores via PSCI CPU_ON.
 ///
@@ -486,6 +486,7 @@ pub extern "C" fn kernel_fault_handler(
     // Walk the stack for return addresses (best-effort backtrace).
     if sp >= 0xFFFF_0000_0000_0000 && sp < 0xFFFF_0000_5000_0000 {
         serial::panic_puts("\n  stack:");
+
         let sp_ptr = sp as *const u64;
 
         for i in 0..8u64 {

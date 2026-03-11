@@ -95,7 +95,9 @@ impl<Id: WaitableId> WaitableRegistry<Id> {
     pub fn destroy(&mut self, id: Id) -> Option<ThreadId> {
         if let Some(slot) = self.entries.get_mut(id.index()) {
             let waiter = slot.as_mut().and_then(|e| e.waiter.take());
+
             *slot = None;
+
             waiter
         } else {
             None

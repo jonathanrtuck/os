@@ -40,6 +40,13 @@ const TICKS_PER_SEC: u64 = 250;
 /// Physical timer PPI interrupt ID.
 pub const IRQ_ID: u32 = 30;
 
+static CNTFRQ: AtomicU64 = AtomicU64::new(0);
+static TICKS: AtomicU64 = AtomicU64::new(0);
+static TIMERS: IrqMutex<TimerTable> = IrqMutex::new(TimerTable {
+    slots: [const { None }; MAX_TIMERS],
+    waiters: WaitableRegistry::new(),
+});
+
 struct TimerTable {
     /// Deadline in counter ticks. Slot index = TimerId. `None` = free slot.
     slots: [Option<u64>; MAX_TIMERS],
@@ -50,13 +57,6 @@ struct TimerTable {
 /// Opaque timer identifier. Index into the global timer table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TimerId(pub u8);
-
-static CNTFRQ: AtomicU64 = AtomicU64::new(0);
-static TICKS: AtomicU64 = AtomicU64::new(0);
-static TIMERS: IrqMutex<TimerTable> = IrqMutex::new(TimerTable {
-    slots: [const { None }; MAX_TIMERS],
-    waiters: WaitableRegistry::new(),
-});
 
 impl WaitableId for TimerId {
     fn index(self) -> usize {
@@ -205,6 +205,7 @@ pub fn destroy(id: TimerId) {
 
     if let Some(waiter_id) = waiter {
         let reason = HandleObject::Timer(id);
+
         if !scheduler::try_wake_for_handle(waiter_id, reason) {
             scheduler::set_wake_pending_for_handle(waiter_id, reason);
         }

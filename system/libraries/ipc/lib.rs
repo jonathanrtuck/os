@@ -192,7 +192,6 @@ impl Message {
         unsafe { core::ptr::read_unaligned(self.payload.as_ptr() as *const T) }
     }
 }
-
 impl RingBuf {
     fn head_atomic(&self) -> &AtomicU32 {
         unsafe { &*(self.base.add(HEAD_OFFSET) as *const AtomicU32) }

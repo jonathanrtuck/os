@@ -13,10 +13,10 @@
 
 ### Ignored Tests (25 total)
 
-| File | Count | Reason | Real UB? |
-|------|-------|--------|----------|
-| buddy | 1 | Miri provenance limitation with mmap-based memory simulation. `phys_to_virt` integer-to-pointer casts are expected for bare-metal but incompatible with Miri strict provenance. | No |
-| ipc | 24 | Unaligned AtomicU32 reference at `libraries/ipc/lib.rs:198`. Real UB but in `system/libraries/` (out of kernel scope). | Yes (not kernel) |
+| File  | Count | Reason                                                                                                                                                                          | Real UB?         |
+| ----- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| buddy | 1     | Miri provenance limitation with mmap-based memory simulation. `phys_to_virt` integer-to-pointer casts are expected for bare-metal but incompatible with Miri strict provenance. | No               |
+| ipc   | 24    | Unaligned AtomicU32 reference at `libraries/ipc/lib.rs:198`. Real UB but in `system/libraries/` (out of kernel scope).                                                          | Yes (not kernel) |
 
 ### Performance Characteristics
 
@@ -26,6 +26,7 @@
 ### Practical Usage
 
 The blanket `cargo +nightly miri test` command exits on first UB per test binary. Run per-file for complete results across the full suite:
+
 ```
 cd system/test && cargo +nightly miri test --test <name> -- --test-threads=1
 ```

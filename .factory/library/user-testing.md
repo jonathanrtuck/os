@@ -51,12 +51,14 @@ cd system/test && cargo +nightly miri test -- --test-threads=1
 **Isolation:** Terminal commands are inherently isolated — no shared user accounts, sessions, or mutable state between runs. Multiple flow validators can run in parallel since they only read build artifacts and run tests.
 
 **Boundaries:**
+
 - Do NOT modify any source files — validators only verify current state
 - Run commands from the repo root at `/Users/user/Sites/os`
 - Always use `--test-threads=1` for cargo test
 - Report exact exit codes and output excerpts as evidence
 
 **Miri notes:**
+
 - Miri has been assessed during infra verification
 - 330/348 tests pass clean under Miri
 - buddy test fails due to Miri provenance limitation (not real UB)

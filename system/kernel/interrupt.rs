@@ -41,6 +41,11 @@ use super::waitable::{WaitableId, WaitableRegistry};
 /// Maximum concurrent registered interrupts across all processes.
 const MAX_INTERRUPTS: usize = 32;
 
+static TABLE: IrqMutex<InterruptTable> = IrqMutex::new(InterruptTable {
+    slots: [const { None }; MAX_INTERRUPTS],
+    waiters: WaitableRegistry::new(),
+});
+
 struct InterruptTable {
     /// IRQ number for each slot. `None` = free slot.
     slots: [Option<u32>; MAX_INTERRUPTS],
@@ -51,11 +56,6 @@ struct InterruptTable {
 /// Opaque interrupt identifier. Index into the global interrupt table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InterruptId(pub u8);
-
-static TABLE: IrqMutex<InterruptTable> = IrqMutex::new(InterruptTable {
-    slots: [const { None }; MAX_INTERRUPTS],
-    waiters: WaitableRegistry::new(),
-});
 
 impl WaitableId for InterruptId {
     fn index(self) -> usize {

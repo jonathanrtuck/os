@@ -17,6 +17,13 @@ use super::sync::IrqMutex;
 const MAX_ORDER: usize = 10;
 const PAGE_SIZE: usize = paging::PAGE_SIZE as usize;
 
+static STATE: IrqMutex<State> = IrqMutex::new(State {
+    free_lists: [core::ptr::null_mut(); MAX_ORDER + 1],
+    free_count: 0,
+    region_start: 0,
+    region_end: 0,
+});
+
 /// Intrusive free-list node stored at the start of each free block.
 struct FreeBlock {
     next: *mut FreeBlock,
@@ -32,13 +39,6 @@ struct State {
 }
 // SAFETY: FreeBlock pointers are only accessed under STATE lock.
 unsafe impl Send for State {}
-
-static STATE: IrqMutex<State> = IrqMutex::new(State {
-    free_lists: [core::ptr::null_mut(); MAX_ORDER + 1],
-    free_count: 0,
-    region_start: 0,
-    region_end: 0,
-});
 
 /// Compute the buddy's physical address for a block at `pa` of order `order`.
 ///

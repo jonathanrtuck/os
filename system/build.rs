@@ -96,6 +96,7 @@ fn main() {
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
         let mut env_vars = Vec::new();
+
         if name == "fuzz" {
             let helper_elf = out_dir.join("fuzz-helper.elf");
             let fuzz_embedded = format!(
@@ -105,7 +106,11 @@ fn main() {
             let fuzz_embedded_rs = out_dir.join("fuzz_embedded.rs");
             std::fs::write(&fuzz_embedded_rs, &fuzz_embedded)
                 .unwrap_or_else(|e| panic!("failed to write fuzz_embedded.rs: {e}"));
-            env_vars.push(("FUZZ_EMBEDDED_RS", fuzz_embedded_rs.to_str().unwrap().to_string()));
+
+            env_vars.push((
+                "FUZZ_EMBEDDED_RS",
+                fuzz_embedded_rs.to_str().unwrap().to_string(),
+            ));
         }
 
         rustc_bin(&rustc, &main_rs, &elf_path, &link_ld, &externs, &env_vars);

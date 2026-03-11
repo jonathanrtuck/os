@@ -17,9 +17,6 @@
 
 use super::sync::IrqMutex;
 
-#[derive(Clone, Copy)]
-pub struct Asid(pub u8);
-
 struct State {
     /// Bitmap of in-use ASIDs. Bit N = ASID N is allocated.
     bitmap: [u64; 4], // 256 bits, covers ASIDs 0..255
@@ -28,6 +25,9 @@ struct State {
     /// Next ASID to try allocating.
     next_hint: u8,
 }
+
+#[derive(Clone, Copy)]
+pub struct Asid(pub u8);
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {
     bitmap: [0; 4],

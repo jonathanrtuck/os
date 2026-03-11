@@ -32,6 +32,7 @@ Tests in `system/test/` CANNOT import kernel modules directly. The kernel compil
 ## Recent Bug History (2026-03-11)
 
 11 bugs fixed in crash debugging session. Key fixes:
+
 - Fix 5: Aliasing UB in syscall dispatch (noalias mutable references)
 - Fix 6: `nomem` on DAIF asm (primary fix for SMP race)
 - Fix 4: Deferred thread drop (use-after-free)

@@ -13,16 +13,16 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// Maximum number of CPU cores supported.
 pub const MAX_CORES: usize = 8;
 
-pub struct PerCpu {
-    pub online: AtomicBool,
-}
-
 static PERCPU: [PerCpu; MAX_CORES] = {
     const INIT: PerCpu = PerCpu {
         online: AtomicBool::new(false),
     };
     [INIT; MAX_CORES]
 };
+
+pub struct PerCpu {
+    pub online: AtomicBool,
+}
 
 /// Read the current core's MPIDR affinity (bits [7:0]).
 #[inline(always)]

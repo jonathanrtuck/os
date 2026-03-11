@@ -65,14 +65,14 @@ The COW machinery is a foundation for snapshots, but the gap is substantial.
 
 ### Assessment for Our Needs
 
-| Requirement | RedoxFS | Gap |
-|-------------|---------|-----|
-| O(1) snapshots | No snapshots | Critical gap |
-| Efficient pruning | N/A | Critical gap |
-| Per-document scope | No (whole-FS only) | Design gap |
+| Requirement           | RedoxFS                       | Gap                       |
+| --------------------- | ----------------------------- | ------------------------- |
+| O(1) snapshots        | No snapshots                  | Critical gap              |
+| Efficient pruning     | N/A                           | Critical gap              |
+| Per-document scope    | No (whole-FS only)            | Design gap                |
 | Content-type metadata | Standard Unix mode/times only | Minor (add field to node) |
-| COW immediate writes | Yes, solid | Met |
-| Memory-mapped files | 4 KiB aligned blocks | Compatible |
+| COW immediate writes  | Yes, solid                    | Met                       |
+| Memory-mapped files   | 4 KiB aligned blocks          | Compatible                |
 
 **Verdict:** RedoxFS is a clean, small COW filesystem, but it's a starting point for our needs, not a solution. The COW transaction machinery is solid. Everything above that (snapshots, pruning, per-document scoping) would need to be designed and built.
 
@@ -93,22 +93,26 @@ The COW machinery is a foundation for snapshots, but the gap is substantial.
 **Creation: O(1).** Save the current root block pointer. COW ensures old blocks are preserved — the saved pointer remains a valid, consistent view forever. No copying, no traversal.
 
 **The birth-time insight:** Each block pointer records its child's birth TXG. When freeing a block, compare birth time to the previous snapshot's TXG:
+
 - Birth > prevsnap: block was born after the snapshot, safe to free.
 - Birth <= prevsnap: block is referenced by the snapshot, do NOT free. Add to dead list instead.
 
 This gives: O(1) space per snapshot, O(1) create, O(delta) delete, **unlimited snapshots**.
 
 Alternative approaches and why ZFS rejected them:
+
 - **Per-snapshot bitmaps:** O(N) space per snapshot, O(N) create/delete. Limits snapshot count. Doesn't scale.
 - **Reference counting (Btrfs approach):** Works but makes snapshot deletion expensive (must decrement refcounts through entire tree).
 
 ### Dead Lists (snapshot deletion optimization)
 
 When a block can't be freed (snapshot references it), it goes on a **dead list**:
+
 - Each dataset maintains a dead list.
 - Dead lists organized into **sub-lists by birth time range** (one per earlier snapshot).
 
 Three deletion algorithms, progressively faster:
+
 1. **Turtle (naive):** Traverse block tree. Birth <= prevsnap? Skip subtree. Otherwise check next snap. O(blocks written since prevsnap). Slow — random reads.
 2. **Rabbit (dead lists):** Traverse next snap's dead list. Free blocks with birth > prevsnap. Merge dead lists. O(deadlist size). Up to 2048x faster — sequential reads.
 3. **Cheetah (sub-lists):** Iterate sub-lists by birth range. If min TXG > prevsnap, free ALL blocks in sub-list without examining them. O(sublists + blocks to free). Near-optimal.
@@ -206,12 +210,12 @@ The fact that TFS attempted per-file revision history and didn't ship it is a ca
 
 ### The Core Tradeoff
 
-| Approach | Snapshot scope | Create | Delete | Space tracking | Complexity |
-|----------|---------------|--------|--------|----------------|------------|
-| ZFS-style (birth time + dead lists) | Whole filesystem | O(1) | O(delta) | Excellent | Medium |
-| Btrfs-style (refcounted subvolumes) | Per-subvolume | O(1) | O(tree walk) | Good | Medium |
-| Bcachefs-style (key versioning) | Per-key | O(1) | O(B-tree walk) | Poor | High |
-| Per-file revision log | Per-file | O(1) | O(1) | Direct | Low (but limited) |
+| Approach                            | Snapshot scope   | Create | Delete         | Space tracking | Complexity        |
+| ----------------------------------- | ---------------- | ------ | -------------- | -------------- | ----------------- |
+| ZFS-style (birth time + dead lists) | Whole filesystem | O(1)   | O(delta)       | Excellent      | Medium            |
+| Btrfs-style (refcounted subvolumes) | Per-subvolume    | O(1)   | O(tree walk)   | Good           | Medium            |
+| Bcachefs-style (key versioning)     | Per-key          | O(1)   | O(B-tree walk) | Poor           | High              |
+| Per-file revision log               | Per-file         | O(1)   | O(1)           | Direct         | Low (but limited) |
 
 ### Recommendations
 
@@ -248,10 +252,10 @@ Even with proper snapshots, a rotating ring of superblocks provides an independe
 
 ### Prior Art Summary
 
-| System | Key Innovation for Us | Limitation |
-|--------|----------------------|------------|
-| ZFS | Birth time + dead lists = efficient snapshots | Whole-FS scope, massive codebase |
-| Btrfs | Subvolumes as snapshot namespaces | Refcount cascading under load |
-| Bcachefs | Key-level versioning (per-extent snapshots) | Deletion cost, space accounting |
-| RedoxFS | Clean Rust COW machinery, small codebase | No snapshots implemented |
-| TFS | Attempted per-file revision history | Didn't ship (complexity?) |
+| System   | Key Innovation for Us                         | Limitation                       |
+| -------- | --------------------------------------------- | -------------------------------- |
+| ZFS      | Birth time + dead lists = efficient snapshots | Whole-FS scope, massive codebase |
+| Btrfs    | Subvolumes as snapshot namespaces             | Refcount cascading under load    |
+| Bcachefs | Key-level versioning (per-extent snapshots)   | Deletion cost, space accounting  |
+| RedoxFS  | Clean Rust COW machinery, small codebase      | No snapshots implemented         |
+| TFS      | Attempted per-file revision history           | Didn't ship (complexity?)        |

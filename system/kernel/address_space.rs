@@ -378,6 +378,7 @@ impl AddressSpace {
 
         if !self.map_page(page_va, pa.as_u64(), &attrs) {
             page_allocator::free_frame(Pa(pa.0));
+
             return false;
         }
 
@@ -413,10 +414,10 @@ impl AddressSpace {
         if va + PAGE_SIZE > paging::CHANNEL_SHM_END {
             return None;
         }
-
         if !self.map_inner(va, pa, &PageAttrs::user_rw()) {
             return None;
         }
+
         self.next_channel_shm_va = va + PAGE_SIZE;
 
         Some(va)
@@ -443,6 +444,7 @@ impl AddressSpace {
             if !self.map_inner(va + offset, pa + offset, &attrs) {
                 return None;
             }
+
             offset += PAGE_SIZE;
         }
 
@@ -538,7 +540,9 @@ impl AddressSpace {
         if !self.map_inner(va, pa, attrs) {
             return false;
         }
+
         self.owned_frames.push(Pa(pa as usize));
+
         true
     }
     /// Map a shared page (caller retains ownership of the frame).
@@ -635,6 +639,23 @@ impl AddressSpace {
         Some(alloc.page_count)
     }
 }
+impl Drop for AddressSpace {
+    fn drop(&mut self) {
+        // Safety net: free all owned resources if not already cleaned up.
+        // The normal process cleanup path calls invalidate_tlb() + free_all()
+        // + address_space_id::free() explicitly and sets freed = true. This
+        // catches error paths (e.g. partial allocation failure in
+        // create_from_user_elf) where the address space was never loaded
+        // into TTBR0 and cleanup would otherwise leak frames.
+        if !self.freed {
+            self.invalidate_tlb();
+            self.free_all();
+
+            super::address_space_id::free(self.asid);
+        }
+    }
+}
+
 impl PageAttrs {
     /// Device MMIO: Device-nGnRE (ATTRIDX1), RW, not executable.
     ///
@@ -657,23 +678,6 @@ impl PageAttrs {
     }
 }
 
-impl Drop for AddressSpace {
-    fn drop(&mut self) {
-        // Safety net: free all owned resources if not already cleaned up.
-        // The normal process cleanup path calls invalidate_tlb() + free_all()
-        // + address_space_id::free() explicitly and sets freed = true. This
-        // catches error paths (e.g. partial allocation failure in
-        // create_from_user_elf) where the address space was never loaded
-        // into TTBR0 and cleanup would otherwise leak frames.
-        if !self.freed {
-            self.invalidate_tlb();
-            self.free_all();
-
-            super::address_space_id::free(self.asid);
-        }
-    }
-}
-
 /// Walk a table entry; if invalid, allocate a new table and install it.
 /// Returns the VA of the next-level table, or `None` on OOM.
 fn walk_or_create(table_va: *mut u64, idx: usize) -> Option<*mut u64> {
@@ -691,11 +695,14 @@ fn walk_or_create(table_va: *mut u64, idx: usize) -> Option<*mut u64> {
 
         if val & DESC_VALID != 0 {
             let next_pa = Pa((val & PA_MASK) as usize);
+
             return Some(memory::phys_to_virt(next_pa) as *mut u64);
         }
 
         let next_pa = page_allocator::alloc_frame()?;
+
         core::ptr::write_volatile(entry, next_pa.as_u64() | DESC_VALID | DESC_TABLE);
+
         Some(memory::phys_to_virt(next_pa) as *mut u64)
     }
 }

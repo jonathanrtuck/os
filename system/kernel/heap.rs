@@ -24,6 +24,13 @@ use core::cell::UnsafeCell;
 
 const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
 
+/// Protects the allocator's free list from concurrent access.
+/// Separate from the allocator struct because GlobalAlloc takes `&self`.
+static ALLOC_LOCK: IrqMutex<()> = IrqMutex::new(());
+
+#[cfg_attr(not(test), global_allocator)]
+pub static ALLOCATOR: LinkedListAllocator = LinkedListAllocator::new();
+
 /// Each free block stores its total size (including this header) and a pointer
 /// to the next free block. Minimum allocation granularity = 16 bytes on aarch64.
 pub struct FreeBlock {
@@ -35,13 +42,6 @@ pub struct LinkedListAllocator {
     pub region_start: UnsafeCell<usize>,
     pub region_end: UnsafeCell<usize>,
 }
-
-/// Protects the allocator's free list from concurrent access.
-/// Separate from the allocator struct because GlobalAlloc takes `&self`.
-static ALLOC_LOCK: IrqMutex<()> = IrqMutex::new(());
-
-#[cfg_attr(not(test), global_allocator)]
-pub static ALLOCATOR: LinkedListAllocator = LinkedListAllocator::new();
 
 impl LinkedListAllocator {
     const fn new() -> Self {
@@ -121,10 +121,12 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
             // Front padding must fit a free block header, or be zero.
             if front_pad > 0 && front_pad < MIN_BLOCK {
                 prev = &mut (*current).next;
+
                 continue;
             }
             if front_pad + size > block_size {
                 prev = &mut (*current).next;
+
                 continue;
             }
 
@@ -215,11 +217,13 @@ unsafe impl GlobalAlloc for LinkedListAllocator {
         } else {
             (*prev_block).next = block;
         }
+
         // Coalesce with next neighbor.
         if !current.is_null() && addr + size == current as usize {
             (*block).size += (*current).size;
             (*block).next = (*current).next;
         }
+
         // Coalesce with previous neighbor.
         if !prev_block.is_null() {
             let prev_end = prev_block as usize + (*prev_block).size;

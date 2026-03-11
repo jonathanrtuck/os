@@ -46,16 +46,16 @@ impl SchedulingContext {
         }
     }
 
-    /// Does this context have remaining budget?
-    pub fn has_budget(&self) -> bool {
-        self.remaining > 0
-    }
     /// Charge `elapsed_ns` of CPU time. Returns updated context.
     pub fn charge(&self, elapsed_ns: u64) -> Self {
         Self {
             remaining: self.remaining.saturating_sub(elapsed_ns),
             ..*self
         }
+    }
+    /// Does this context have remaining budget?
+    pub fn has_budget(&self) -> bool {
+        self.remaining > 0
     }
     /// Replenish budget if the current period has elapsed. Returns updated context.
     /// If multiple periods have been skipped, advances to the next period boundary

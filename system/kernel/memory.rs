@@ -16,21 +16,6 @@ const BLOCK_2MB: u64 = 2 * 1024 * 1024;
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 pub const KERNEL_VA_OFFSET: usize = 0xFFFF_0000_0000_0000; // must match link.ld KERNEL_VA_OFFSET
 
-/// Physical address newtype. Prevents accidental PA/VA mixups at compile time.
-///
-/// Used at all API boundaries where physical addresses flow: page allocator,
-/// page table manipulation, DMA. The `pub` inner field allows extraction
-/// where raw arithmetic or pointer casts are needed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-#[repr(transparent)]
-pub struct Pa(pub usize);
-#[repr(align(4096))]
-struct PageTable {
-    entries: [u64; 512],
-}
-/// Wrapper for page tables in statics. Written once during init, read-only after.
-struct SyncPageTable(UnsafeCell<PageTable>);
-
 /// Empty L0 table for kernel threads' TTBR0 (no user mappings).
 static EMPTY_L0: SyncPageTable = SyncPageTable::new();
 /// Lock for kernel TTBR1 page table modifications (break-block, guard pages).
@@ -49,6 +34,21 @@ extern "C" {
     // boot.S TTBR1 L2_1 table (need to patch one entry for L3).
     static boot_tt1_l2_1: u8;
 }
+
+/// Physical address newtype. Prevents accidental PA/VA mixups at compile time.
+///
+/// Used at all API boundaries where physical addresses flow: page allocator,
+/// page table manipulation, DMA. The `pub` inner field allows extraction
+/// where raw arithmetic or pointer casts are needed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(transparent)]
+pub struct Pa(pub usize);
+#[repr(align(4096))]
+struct PageTable {
+    entries: [u64; 512],
+}
+/// Wrapper for page tables in statics. Written once during init, read-only after.
+struct SyncPageTable(UnsafeCell<PageTable>);
 
 impl Pa {
     pub const fn as_u64(self) -> u64 {
@@ -133,7 +133,6 @@ pub fn clear_kernel_guard_page(va: usize) {
 
     tlb_invalidate_all();
 }
-
 /// Physical address of the empty L0 table (for kernel threads' TTBR0).
 pub fn empty_ttbr0() -> u64 {
     virt_to_phys(EMPTY_L0.get() as usize).as_u64()
@@ -302,7 +301,6 @@ pub fn try_set_kernel_guard_page(va: usize) -> bool {
 
     true
 }
-
 /// Panicking wrapper for boot-time guard page setup.
 pub fn set_kernel_guard_page(va: usize) {
     assert!(

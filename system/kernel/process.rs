@@ -40,12 +40,6 @@ pub struct Process {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProcessId(pub u32);
 
-impl super::waitable::WaitableId for ProcessId {
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
-
 impl Process {
     pub fn new(id: ProcessId, address_space: Box<AddressSpace>) -> Self {
         Self {
@@ -62,7 +56,30 @@ impl Process {
         self.id
     }
 }
+impl super::waitable::WaitableId for ProcessId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
+/// Compute the number of pages needed for a segment of `mem_size` bytes.
+///
+/// Returns `Err` if the arithmetic overflows (adversarial ELF `mem_size`).
+fn checked_page_count(mem_size: u64) -> Result<u64, &'static str> {
+    mem_size
+        .checked_add(PAGE_SIZE - 1)
+        .map(|n| n / PAGE_SIZE)
+        .ok_or("segment mem_size overflow")
+}
+/// Compute the VMA end address from a base VA and page count.
+///
+/// Returns `Err` if the result overflows the 64-bit address space.
+fn checked_vma_end(base_va: u64, page_count: u64) -> Result<u64, &'static str> {
+    page_count
+        .checked_mul(PAGE_SIZE)
+        .and_then(|size| base_va.checked_add(size))
+        .ok_or("segment VMA end overflow")
+}
 /// Copy pages from an ELF segment into a freshly allocated frame.
 ///
 /// Shared helper used by both eager and demand-paged loading paths.
@@ -81,48 +98,6 @@ fn copy_segment_page(file_data: &[u8], file_size: u64, seg_offset: u64, pa: memo
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), dst, src.len()) };
     }
 }
-/// Set up the user stack VMA and eagerly map the top page.
-fn setup_stack(addr_space: &mut AddressSpace) -> Result<(), &'static str> {
-    addr_space.vmas.insert(Vma {
-        start: USER_STACK_VA,
-        end: USER_STACK_TOP,
-        readable: true,
-        writable: true,
-        executable: false,
-        backing: Backing::Anonymous,
-    });
-
-    let top_stack_va = USER_STACK_TOP - PAGE_SIZE;
-    let pa = page_allocator::alloc_frame().ok_or("out of frames for user stack")?;
-
-    if !addr_space.map_page(top_stack_va, pa.as_u64(), &PageAttrs::user_rw()) {
-        page_allocator::free_frame(pa);
-        return Err("out of page table frames for user stack");
-    }
-
-    Ok(())
-}
-
-/// Compute the number of pages needed for a segment of `mem_size` bytes.
-///
-/// Returns `Err` if the arithmetic overflows (adversarial ELF `mem_size`).
-fn checked_page_count(mem_size: u64) -> Result<u64, &'static str> {
-    mem_size
-        .checked_add(PAGE_SIZE - 1)
-        .map(|n| n / PAGE_SIZE)
-        .ok_or("segment mem_size overflow")
-}
-
-/// Compute the VMA end address from a base VA and page count.
-///
-/// Returns `Err` if the result overflows the 64-bit address space.
-fn checked_vma_end(base_va: u64, page_count: u64) -> Result<u64, &'static str> {
-    page_count
-        .checked_mul(PAGE_SIZE)
-        .and_then(|size| base_va.checked_add(size))
-        .ok_or("segment VMA end overflow")
-}
-
 /// Create a process from a user-provided ELF buffer, with a suspended thread.
 ///
 /// Eagerly maps ALL segment pages (the ELF data is temporary and can't be
@@ -131,9 +106,8 @@ fn checked_vma_end(base_va: u64, page_count: u64) -> Result<u64, &'static str> {
 pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &'static str> {
     let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
     let (asid, generation) = address_space_id::alloc();
-    let mut addr_space = Box::new(
-        AddressSpace::new(asid, generation).ok_or("out of frames for L0 page table")?,
-    );
+    let mut addr_space =
+        Box::new(AddressSpace::new(asid, generation).ok_or("out of frames for L0 page table")?);
 
     for i in 0..header.ph_count {
         let seg = match executable::load_segment(elf_bytes, &header, i)
@@ -185,13 +159,35 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
             // (spawn failed), so remove_empty_process drops the Box<AddressSpace>
             // which triggers AddressSpace::Drop (free all frames + ASID).
             scheduler::remove_empty_process(process_id);
+
             return Err("out of memory for initial thread stack");
         }
     };
 
     Ok((process_id, thread_id))
 }
+/// Set up the user stack VMA and eagerly map the top page.
+fn setup_stack(addr_space: &mut AddressSpace) -> Result<(), &'static str> {
+    addr_space.vmas.insert(Vma {
+        start: USER_STACK_VA,
+        end: USER_STACK_TOP,
+        readable: true,
+        writable: true,
+        executable: false,
+        backing: Backing::Anonymous,
+    });
 
+    let top_stack_va = USER_STACK_TOP - PAGE_SIZE;
+    let pa = page_allocator::alloc_frame().ok_or("out of frames for user stack")?;
+
+    if !addr_space.map_page(top_stack_va, pa.as_u64(), &PageAttrs::user_rw()) {
+        page_allocator::free_frame(pa);
+
+        return Err("out of page table frames for user stack");
+    }
+
+    Ok(())
+}
 /// Parse an ELF binary and spawn a user process with one thread.
 ///
 /// Creates a Process (address space + handle table) and one initial Thread.
@@ -200,9 +196,8 @@ pub fn create_from_user_elf(elf_bytes: &[u8]) -> Result<(ProcessId, ThreadId), &
 pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<(ProcessId, ThreadId), &'static str> {
     let header = executable::parse_header(elf_bytes).map_err(|_| "bad ELF header")?;
     let (asid, generation) = address_space_id::alloc();
-    let mut addr_space = Box::new(
-        AddressSpace::new(asid, generation).ok_or("out of frames for L0 page table")?,
-    );
+    let mut addr_space =
+        Box::new(AddressSpace::new(asid, generation).ok_or("out of frames for L0 page table")?);
 
     for i in 0..header.ph_count {
         let seg = match executable::load_segment(elf_bytes, &header, i)
@@ -243,6 +238,7 @@ pub fn spawn_from_elf(elf_bytes: &'static [u8]) -> Result<(ProcessId, ThreadId),
 
             if !addr_space.map_page(base_va + page * PAGE_SIZE, pa.as_u64(), &attrs) {
                 page_allocator::free_frame(pa);
+
                 return Err("out of page table frames for ELF segment");
             }
         }

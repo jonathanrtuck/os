@@ -31,21 +31,6 @@ pub struct DrainHandles<'a> {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Handle(pub u8);
-pub struct HandleTable {
-    entries: [Option<HandleEntry>; MAX_HANDLES],
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Rights(u32);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum HandleObject {
-    Channel(ChannelId),
-    Interrupt(InterruptId),
-    Process(ProcessId),
-    SchedulingContext(SchedulingContextId),
-    Thread(ThreadId),
-    Timer(TimerId),
-}
 #[derive(Clone, Copy)]
 struct HandleEntry {
     object: HandleObject,
@@ -61,6 +46,20 @@ pub enum HandleError {
     /// Semantically distinct from `TableFull` (no free slots anywhere).
     SlotOccupied = -14,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HandleObject {
+    Channel(ChannelId),
+    Interrupt(InterruptId),
+    Process(ProcessId),
+    SchedulingContext(SchedulingContextId),
+    Thread(ThreadId),
+    Timer(TimerId),
+}
+pub struct HandleTable {
+    entries: [Option<HandleEntry>; MAX_HANDLES],
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rights(u32);
 
 impl HandleTable {
     pub const fn new() -> Self {

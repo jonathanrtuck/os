@@ -34,10 +34,14 @@ use super::scheduling_context::SchedulingContextId;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 
-pub const STACK_SIZE: usize = 64 * 1024;
-pub const KERNEL_STACK_SIZE: usize = 16 * 1024;
 /// Distinguished ID marker for idle threads: `core_id | IDLE_THREAD_ID_MARKER`.
 const IDLE_THREAD_ID_MARKER: u64 = 0xFF00;
+
+pub const KERNEL_STACK_SIZE: usize = 16 * 1024;
+pub const STACK_SIZE: usize = 64 * 1024;
+/// Sentinel user_index for internal timeout timer entries in the wait set.
+/// Not a valid user handle index (max handles = 16, index fits in 0..15).
+pub(crate) const TIMEOUT_SENTINEL: u8 = 0xFF;
 
 /// Scheduling-related fields grouped together.
 pub(crate) struct Scheduling {
@@ -94,10 +98,6 @@ pub(crate) struct WaitEntry {
     pub(crate) user_index: u8,
 }
 
-/// Sentinel user_index for internal timeout timer entries in the wait set.
-/// Not a valid user handle index (max handles = 16, index fits in 0..15).
-pub(crate) const TIMEOUT_SENTINEL: u8 = 0xFF;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
     Ready,
@@ -117,12 +117,6 @@ pub enum TrustLevel {
 }
 
 const _: () = assert!(core::mem::offset_of!(Thread, context) == 0);
-
-impl super::waitable::WaitableId for ThreadId {
-    fn index(self) -> usize {
-        self.0 as usize
-    }
-}
 
 impl Scheduling {
     pub(crate) const fn new() -> Self {
@@ -187,36 +181,6 @@ impl Thread {
         self.state == ThreadState::Ready
     }
 }
-impl Drop for Thread {
-    fn drop(&mut self) {
-        if self.stack_alloc_pa != 0 {
-            // Remap the guard page before freeing — free_frames writes a
-            // FreeBlock header at the block's start (the guard page VA).
-            let guard_va = memory::phys_to_virt(Pa(self.stack_alloc_pa as usize));
-
-            memory::clear_kernel_guard_page(guard_va);
-
-            super::page_allocator::free_frames(
-                Pa(self.stack_alloc_pa as usize),
-                self.stack_alloc_order,
-            );
-        }
-    }
-}
-// SAFETY: Thread owns all its data (Context is embedded at offset 0, stack is
-// tracked by physical address). Threads are transferred between cores only
-// through the IrqMutex<State> in scheduler.rs, which serializes all access.
-// No raw pointers to external mutable state are stored — context_ptr() returns
-// a derived pointer on demand, not a stored one.
-unsafe impl Send for Thread {}
-
-// SAFETY: Thread is never accessed concurrently. All access goes through
-// IrqMutex<State> in scheduler.rs, which provides exclusive (&mut) access.
-// Sync is required because IrqMutex<State> (which is Sync) contains
-// Vec<Box<Thread>>, and Box<T>: Send requires T: Send (satisfied above).
-// In practice, &Thread is never shared across threads — but the trait bound
-// is needed for the static IrqMutex.
-unsafe impl Sync for Thread {}
 
 // --- State transitions ---
 //
@@ -226,7 +190,6 @@ unsafe impl Sync for Thread {}
 //   Running → Blocked  (block)
 //   Running → Exited   (mark_exited)
 //   Blocked → Ready    (wake)
-
 impl Thread {
     /// Ready → Running (picked by scheduler).
     pub(crate) fn activate(&mut self) {
@@ -351,6 +314,41 @@ impl Thread {
         Some(Box::new(thread))
     }
 }
+impl Drop for Thread {
+    fn drop(&mut self) {
+        if self.stack_alloc_pa != 0 {
+            // Remap the guard page before freeing — free_frames writes a
+            // FreeBlock header at the block's start (the guard page VA).
+            let guard_va = memory::phys_to_virt(Pa(self.stack_alloc_pa as usize));
+
+            memory::clear_kernel_guard_page(guard_va);
+
+            super::page_allocator::free_frames(
+                Pa(self.stack_alloc_pa as usize),
+                self.stack_alloc_order,
+            );
+        }
+    }
+}
+// SAFETY: Thread owns all its data (Context is embedded at offset 0, stack is
+// tracked by physical address). Threads are transferred between cores only
+// through the IrqMutex<State> in scheduler.rs, which serializes all access.
+// No raw pointers to external mutable state are stored — context_ptr() returns
+// a derived pointer on demand, not a stored one.
+unsafe impl Send for Thread {}
+// SAFETY: Thread is never accessed concurrently. All access goes through
+// IrqMutex<State> in scheduler.rs, which provides exclusive (&mut) access.
+// Sync is required because IrqMutex<State> (which is Sync) contains
+// Vec<Box<Thread>>, and Box<T>: Send requires T: Send (satisfied above).
+// In practice, &Thread is never shared across threads — but the trait bound
+// is needed for the static IrqMutex.
+unsafe impl Sync for Thread {}
+
+impl super::waitable::WaitableId for ThreadId {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+}
 
 /// Allocate a stack from the page allocator with a guard page at the bottom.
 ///
@@ -369,6 +367,7 @@ fn alloc_guarded_stack(min_stack_bytes: usize) -> Option<(u64, u64, usize)> {
 
     if !memory::try_set_kernel_guard_page(base_va) {
         super::page_allocator::free_frames(pa, order);
+
         return None;
     }
 

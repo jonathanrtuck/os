@@ -139,6 +139,17 @@ const MAX_WRITE_LEN: u64 = 4096;
 /// Raw WouldBlock error code as u64 (for direct x[0] patching in wake path).
 pub const WOULD_BLOCK_RAW: u64 = Error::WouldBlock as i64 as u64;
 
+/// Convert a syscall Result to the ABI return value.
+/// Both Error and HandleError are #[repr(i64)], so `as i64 as u64` is uniform.
+macro_rules! result_to_u64 {
+    ($result:expr) => {
+        match $result {
+            Ok(n) => n,
+            Err(e) => e as i64 as u64,
+        }
+    };
+}
+
 #[repr(i64)]
 pub enum Error {
     UnknownSyscall = -1,
@@ -156,6 +167,25 @@ impl From<HandleError> for u64 {
     fn from(e: HandleError) -> u64 {
         (e as i64) as u64
     }
+}
+
+/// Write a syscall result to ctx.x[0] via raw pointer (no reference creation).
+///
+/// Accepts a pre-converted u64 value (Ok value or error code). Avoids creating
+/// `&mut *ctx` which would alias with the scheduler lock's `&mut State`.
+#[inline(never)]
+fn dispatch_ok(ctx: *mut Context, val: u64) -> *const Context {
+    // SAFETY: ctx is a valid pointer to the current thread's Context (set by
+    // exception.S from TPIDR_EL1). addr_of_mut! avoids creating &mut *ctx
+    // which would alias with the scheduler lock's &mut State. Writing to x[0]
+    // (the first element) is within the [u64; 31] array bounds.
+    unsafe {
+        let x0_ptr = core::ptr::addr_of_mut!((*ctx).x) as *mut u64;
+
+        x0_ptr.write(val);
+    }
+
+    ctx as *const Context
 }
 
 /// Check if a user virtual address is readable by EL0 using the hardware
@@ -723,7 +753,6 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
             Err(_) => Err(Error::InvalidArgument),
         }
     })?;
-
     // Prevent self-kill.
     let caller_pid = scheduler::current_thread_do(|t| t.process_id);
 
@@ -765,6 +794,7 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
     if let Some(mut addr_space) = kill_info.address_space {
         addr_space.invalidate_tlb();
         addr_space.free_all();
+
         super::address_space_id::free(super::address_space_id::Asid(addr_space.asid()));
     }
 
@@ -920,12 +950,10 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     if count == 0 || count > MAX_WAIT_HANDLES {
         return dispatch_ok(ctx, Error::InvalidArgument as i64 as u64);
     }
-
     // Validate user buffer.
     if handles_ptr >= USER_VA_END {
         return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
-
     if let Some(end) = handles_ptr.checked_add(count) {
         if end > USER_VA_END {
             return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
@@ -933,7 +961,6 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     } else {
         return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
-
     if !is_user_range_readable(handles_ptr, count) {
         return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
@@ -993,9 +1020,12 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
                 };
 
                 scheduler::push_wait_entry(entry);
+
                 entries[entry_count] = Some(entry);
                 entry_count += 1;
+
                 scheduler::set_timeout_timer(id);
+
                 Some(id)
             }
             None => None, // Timer table full — proceed without timeout.
@@ -1250,17 +1280,6 @@ fn user_va_to_pa(va: u64) -> Option<u64> {
     Some(page_pa | offset)
 }
 
-/// Convert a syscall Result to the ABI return value.
-/// Both Error and HandleError are #[repr(i64)], so `as i64 as u64` is uniform.
-macro_rules! result_to_u64 {
-    ($result:expr) => {
-        match $result {
-            Ok(n) => n,
-            Err(e) => e as i64 as u64,
-        }
-    };
-}
-
 #[inline(never)]
 pub fn dispatch(ctx: *mut Context) -> *const Context {
     metrics::inc_syscalls();
@@ -1290,10 +1309,18 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::HANDLE_CLOSE => dispatch_ok(ctx, result_to_u64!(sys_handle_close(x0))),
         nr::CHANNEL_SIGNAL => dispatch_ok(ctx, result_to_u64!(sys_channel_signal(x0))),
         nr::CHANNEL_CREATE => dispatch_ok(ctx, result_to_u64!(sys_channel_create())),
-        nr::SCHEDULING_CONTEXT_CREATE => dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_create(x0, x1))),
-        nr::SCHEDULING_CONTEXT_BORROW => dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_borrow(x0))),
-        nr::SCHEDULING_CONTEXT_RETURN => dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_return())),
-        nr::SCHEDULING_CONTEXT_BIND => dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_bind(x0))),
+        nr::SCHEDULING_CONTEXT_CREATE => {
+            dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_create(x0, x1)))
+        }
+        nr::SCHEDULING_CONTEXT_BORROW => {
+            dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_borrow(x0)))
+        }
+        nr::SCHEDULING_CONTEXT_RETURN => {
+            dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_return()))
+        }
+        nr::SCHEDULING_CONTEXT_BIND => {
+            dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_bind(x0)))
+        }
         nr::FUTEX_WAKE => dispatch_ok(ctx, result_to_u64!(sys_futex_wake(x0, x1))),
         nr::TIMER_CREATE => dispatch_ok(ctx, result_to_u64!(sys_timer_create(x0))),
         nr::INTERRUPT_REGISTER => dispatch_ok(ctx, result_to_u64!(sys_interrupt_register(x0))),
@@ -1316,25 +1343,9 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::MEMORY_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_memory_alloc(x0))),
         nr::MEMORY_FREE => dispatch_ok(ctx, result_to_u64!(sys_memory_free(x0, x1))),
 
-        _ => dispatch_ok(ctx, result_to_u64!(Err::<u64, Error>(Error::UnknownSyscall))),
+        _ => dispatch_ok(
+            ctx,
+            result_to_u64!(Err::<u64, Error>(Error::UnknownSyscall)),
+        ),
     }
-}
-
-/// Write a syscall result to ctx.x[0] via raw pointer (no reference creation).
-///
-/// Accepts a pre-converted u64 value (Ok value or error code). Avoids creating
-/// `&mut *ctx` which would alias with the scheduler lock's `&mut State`.
-#[inline(never)]
-fn dispatch_ok(ctx: *mut Context, val: u64) -> *const Context {
-    // SAFETY: ctx is a valid pointer to the current thread's Context (set by
-    // exception.S from TPIDR_EL1). addr_of_mut! avoids creating &mut *ctx
-    // which would alias with the scheduler lock's &mut State. Writing to x[0]
-    // (the first element) is within the [u64; 31] array bounds.
-    unsafe {
-        let x0_ptr = core::ptr::addr_of_mut!((*ctx).x) as *mut u64;
-
-        x0_ptr.write(val);
-    }
-
-    ctx as *const Context
 }

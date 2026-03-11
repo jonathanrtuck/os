@@ -6,14 +6,14 @@ Research into non-Rust operating systems with ideas relevant to our document-cen
 
 ## Systems Studied
 
-| System | Era | Core Relevance |
-|--------|-----|----------------|
-| Phantom OS | 2009– | Orthogonal persistence — alternative "no save" approach |
-| BeOS/Haiku | 1996– | Typed file attributes, query navigation, translators, MIME, media scheduling |
-| Singularity | 2003–2015 | Software-isolated processes, typed IPC channel contracts |
-| Midori | 2008–2015 | Async-everything, capability security, error model, three safeties |
-| Oberon | 1986 | Text-as-command, radical minimalism, CLI/GUI unity |
-| Spring | 1993 | Doors (synchronous IPC), VM/IPC unification, subcontracts, naming |
+| System      | Era       | Core Relevance                                                               |
+| ----------- | --------- | ---------------------------------------------------------------------------- |
+| Phantom OS  | 2009–     | Orthogonal persistence — alternative "no save" approach                      |
+| BeOS/Haiku  | 1996–     | Typed file attributes, query navigation, translators, MIME, media scheduling |
+| Singularity | 2003–2015 | Software-isolated processes, typed IPC channel contracts                     |
+| Midori      | 2008–2015 | Async-everything, capability security, error model, three safeties           |
+| Oberon      | 1986      | Text-as-command, radical minimalism, CLI/GUI unity                           |
+| Spring      | 1993      | Doors (synchronous IPC), VM/IPC unification, subcontracts, naming            |
 
 ---
 
@@ -33,7 +33,7 @@ Research into non-Rust operating systems with ideas relevant to our document-cen
 6. **Persistent Malware.** Corrupted/malicious state survives reboots.
 7. **Status:** PoC quality, IA-32 only, ~6 contributors.
 
-**Key takeaway:** Phantom validates the *desire* for "no save" but reveals persistent objects are the wrong mechanism. Our approach (immediate writes to COW filesystem) gets the same UX without the systemic fragility. Files provide isolation (corrupt one doc, not the system), format boundaries (schema evolution via format versioning), and natural undo points (COW snapshots). **Files are a feature, not a limitation.**
+**Key takeaway:** Phantom validates the _desire_ for "no save" but reveals persistent objects are the wrong mechanism. Our approach (immediate writes to COW filesystem) gets the same UX without the systemic fragility. Files provide isolation (corrupt one doc, not the system), format boundaries (schema evolution via format versioning), and natural undo points (COW snapshots). **Files are a feature, not a limitation.**
 
 ---
 
@@ -82,15 +82,15 @@ Dataflow graph of processing nodes connected via shared memory buffers. 120 prio
 
 ### Relevance Summary
 
-| BeOS Feature | Our Equivalent | Status |
-|-------------|---------------|--------|
-| BFS typed attributes | Decision #7 (queryable metadata) | Converged independently |
-| B+ tree indexes | Embedded DB | Same concept, different mechanism |
-| Live queries | Not yet designed | **Should adopt** |
-| Translation Kit | Decision #14 (translators) | Converged independently |
-| MIME as filesystem metadata | Decision #5 (file understanding) | Converged independently |
-| Per-type attribute definitions | Not yet designed | **Worth adopting** |
-| Media priority scheduling | EEVDF + scheduling contexts | Our design is stronger |
+| BeOS Feature                   | Our Equivalent                   | Status                            |
+| ------------------------------ | -------------------------------- | --------------------------------- |
+| BFS typed attributes           | Decision #7 (queryable metadata) | Converged independently           |
+| B+ tree indexes                | Embedded DB                      | Same concept, different mechanism |
+| Live queries                   | Not yet designed                 | **Should adopt**                  |
+| Translation Kit                | Decision #14 (translators)       | Converged independently           |
+| MIME as filesystem metadata    | Decision #5 (file understanding) | Converged independently           |
+| Per-type attribute definitions | Not yet designed                 | **Worth adopting**                |
+| Media priority scheduling      | EEVDF + scheduling contexts      | Our design is stronger            |
 
 ---
 
@@ -105,11 +105,12 @@ All processes run in ring 0, single address space, paging off. Isolation enforce
 ### Contract-Based Channels (HIGH RELEVANCE)
 
 Bidirectional typed message channels with exactly two endpoints. Contracts are state machines defining:
+
 - Valid messages (with typed payloads)
 - Direction (`in` = client→server, `out` = server→client)
 - Valid ordering as a finite state machine
 
-```
+```rust
 contract KeyboardDeviceContract {
     in message GetKey();
     out message AckKey(char key);
@@ -145,10 +146,12 @@ Objects as unforgeable capability tokens. If you don't have a reference, you can
 ### Error Model (RELEVANT FOR OS SERVICE DESIGN)
 
 Two mechanisms:
+
 1. **Abandonment (bugs):** Null deref, bounds violation, contract failure → kill process immediately. No recovery. State is corrupt.
 2. **Statically checked exceptions (recoverable errors):** Network failure, parse error → part of method signature, compiler enforces handling.
 
 Maps to our three layers:
+
 - **Kernel:** Panic on invariant violation (Rust's default)
 - **OS service:** Abandonment for bugs (restart), typed errors for recoverable failures
 - **Editors:** Crash freely (untrusted, isolated, restartable)
@@ -187,7 +190,7 @@ Rob Pike carried this into Plan 9's Acme editor. Robert Griesemer (Go co-designe
 
 Achieved via: single user, single address space, cooperative multitasking, no overlapping windows, language-enforced safety. "A single person can know and implement the whole system."
 
-**Not for us** in specifics (no hardware isolation, no preemption, no multi-user). But the *principle* — radical simplicity in connective tissue, complexity only in leaf nodes — aligns with our Decision #4.
+**Not for us** in specifics (no hardware isolation, no preemption, no multi-user). But the _principle_ — radical simplicity in connective tissue, complexity only in leaf nodes — aligns with our Decision #4.
 
 ### Viewer/Frame Model
 
@@ -209,7 +212,7 @@ Capability-based endpoints for synchronous cross-domain procedure calls. A door 
 
 ### Subcontracts
 
-Programmable layer between client stubs and transport. Controls marshaling, invocation, and management. Different subcontracts for: simple local door call, table-based grouping, replicated objects, cached objects. Decouple *what* (interface) from *how* (protocol).
+Programmable layer between client stubs and transport. Controls marshaling, invocation, and management. Different subcontracts for: simple local door call, table-based grouping, replicated objects, cached objects. Decouple _what_ (interface) from _how_ (protocol).
 
 **Relevance:** Our content-type rebase handlers serve a similar role — customize behavior (text rebase, image rebase, audio rebase) behind the stable edit protocol interface.
 
