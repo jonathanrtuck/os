@@ -1,3 +1,12 @@
+// AUDIT: 2026-03-11 — 0 unsafe blocks (pure safe Rust). 6-category checklist
+// applied. Findings: none — module is sound. Two-phase wake pattern in
+// handle_irq correctly collects wakeups under interrupt table lock, then wakes
+// via scheduler after release. Lock ordering (interrupt → scheduler) maintained.
+// Edge-triggered semantics correctly implemented: pending set on IRQ fire,
+// cleared by interrupt_ack. Registration rejects duplicates. Destruction masks
+// IRQ and wakes blocked driver. MAX_INTERRUPTS=32 matches GIC SPI range for
+// typical QEMU virt configurations.
+//
 //! Interrupt forwarding to userspace.
 //!
 //! Enables the microkernel driver model: device drivers run at EL0, accessing

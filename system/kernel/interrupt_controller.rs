@@ -1,3 +1,12 @@
+// AUDIT: 2026-03-11 — 6 unsafe blocks verified (4 original + 2 added), 6-category
+// checklist applied. Findings: (1) init_distributor and init_cpu_interface were
+// missing DSB SY + ISB barriers after CTLR/PMR writes — fixed. (2) All barrier
+// patterns (DSB before IAR, DSB+ISB after ICENABLER/ISENABLER, DSB after EOIR)
+// confirmed correct per ARM GIC specification. (3) MMIO access ordering correct
+// for device-nGnRE memory (ordered within same peripheral). (4) Relaxed ordering
+// on AtomicUsize bases is sound — written once during init, read on every IRQ;
+// init happens-before first interrupt. (5) SAFETY comments added to all blocks.
+//
 //! ARM GICv2 interrupt controller.
 //!
 //! Base addresses are set at boot from the DTB (or hardcoded defaults for
@@ -41,9 +50,10 @@ fn gicd() -> usize {
 ///
 /// Returns `None` for spurious interrupts (ID 1023).
 pub fn acknowledge() -> Option<u32> {
-    // DSB SY before reading IAR: ensure all previous memory accesses
+    // SAFETY: DSB SY before reading IAR ensures all previous memory accesses
     // (including device writes) complete before acknowledging the interrupt.
     // GIC MMIO is outer-shareable device memory, requiring full system barrier.
+    // DSB has no memory operands — `nostack` is correct.
     unsafe { core::arch::asm!("dsb sy", options(nostack)) };
 
     let iar = memory_mapped_io::read32(gicc() + IAR);
@@ -67,9 +77,10 @@ pub fn disable_irq(id: u32) {
 
     memory_mapped_io::write32(base + ICENABLER + reg_offset, bit);
 
-    // DSB SY + ISB after distributor write: ensure the disable takes effect
-    // before returning. Prevents a race where the IRQ fires again while the
-    // kernel is still in the forwarding path.
+    // SAFETY: DSB SY + ISB after distributor write ensures the disable takes
+    // effect before returning. Prevents a race where the IRQ fires again while
+    // the kernel is still in the forwarding path. Both instructions have no
+    // memory operands — `nostack` is correct.
     unsafe { core::arch::asm!("dsb sy", "isb", options(nostack)) };
 }
 pub fn enable_irq(id: u32) {
@@ -85,16 +96,18 @@ pub fn enable_irq(id: u32) {
     memory_mapped_io::write32(base + ISENABLER + reg_offset, bit);
     memory_mapped_io::write8(base + IPRIORITYR + id as usize, 0x80);
 
-    // DSB SY + ISB after distributor writes: ensure enable takes effect
-    // before any subsequent interrupt handling. Full system barrier because
-    // GIC MMIO is outer-shareable device memory.
+    // SAFETY: DSB SY + ISB after distributor writes ensures enable takes
+    // effect before any subsequent interrupt handling. Full system barrier
+    // because GIC MMIO is outer-shareable device memory. Both instructions
+    // have no memory operands — `nostack` is correct.
     unsafe { core::arch::asm!("dsb sy", "isb", options(nostack)) };
 }
 pub fn end_of_interrupt(iar: u32) {
     memory_mapped_io::write32(gicc() + EOIR, iar);
 
-    // DSB SY after EOIR write: ensure the end-of-interrupt is visible to
-    // the GIC before we return. Prevents a stale interrupt from re-firing.
+    // SAFETY: DSB SY after EOIR write ensures the end-of-interrupt is visible
+    // to the GIC before we return. Prevents a stale interrupt from re-firing.
+    // DSB has no memory operands — `nostack` is correct.
     unsafe { core::arch::asm!("dsb sy", options(nostack)) };
 }
 /// Initialize both distributor and CPU interface (convenience for core 0).
@@ -108,10 +121,27 @@ pub fn init_cpu_interface() {
 
     memory_mapped_io::write32(base + PMR, 0xFF);
     memory_mapped_io::write32(base + CTLR, 1);
+
+    // SAFETY: DSB SY + ISB after CPU interface configuration writes. DSB
+    // ensures PMR and CTLR writes are visible to the GIC before any
+    // subsequent interrupt handling. ISB flushes the pipeline so the CPU
+    // sees the updated interrupt masking. Without this barrier, an IRQ
+    // could arrive before CTLR=1 takes effect, or the PMR threshold could
+    // be stale. Both instructions have no memory operands — `nostack` is
+    // correct.
+    unsafe { core::arch::asm!("dsb sy", "isb", options(nostack)) };
 }
 /// Initialize the GIC distributor (global, core 0 only).
 pub fn init_distributor() {
     memory_mapped_io::write32(gicd() + CTLR, 1);
+
+    // SAFETY: DSB SY + ISB after enabling the distributor. DSB ensures the
+    // CTLR write is visible to the GIC before any IRQ configuration (e.g.
+    // enable_irq, set priority/routing). ISB flushes the pipeline. Without
+    // this barrier, subsequent ISENABLER writes could race with the
+    // distributor enable. Both instructions have no memory operands —
+    // `nostack` is correct.
+    unsafe { core::arch::asm!("dsb sy", "isb", options(nostack)) };
 }
 /// Override GIC base addresses from the DTB.
 ///
