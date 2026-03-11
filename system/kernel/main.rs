@@ -385,7 +385,15 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
 /// may be corrupted, e.g. by a kernel stack overflow hitting a guard page).
 /// Diagnoses the fault, prints diagnostic info, and panics.
 #[unsafe(no_mangle)]
-pub extern "C" fn kernel_fault_handler(esr: u64, elr: u64, far: u64, exc_type: u64) -> ! {
+pub extern "C" fn kernel_fault_handler(
+    esr: u64,
+    elr: u64,
+    far: u64,
+    exc_type: u64,
+    sp: u64,
+    lr: u64,
+    tpidr: u64,
+) -> ! {
     let ec = (esr >> 26) & 0x3F;
     let type_name = match exc_type {
         0 => "sync",
@@ -403,9 +411,53 @@ pub extern "C" fn kernel_fault_handler(esr: u64, elr: u64, far: u64, exc_type: u
     serial::panic_put_hex(elr);
     serial::panic_puts(" FAR=0x");
     serial::panic_put_hex(far);
+    serial::panic_puts("\n  SP=0x");
+    serial::panic_put_hex(sp);
+    serial::panic_puts(" LR=0x");
+    serial::panic_put_hex(lr);
+    serial::panic_puts(" TPIDR=0x");
+    serial::panic_put_hex(tpidr);
+
+    // Read the thread's saved Context from TPIDR to check if the crash
+    // came from restoring a zeroed context (eret path) or from kernel code
+    // (ret/blr to null — TPIDR context would have valid elr).
+    if tpidr >= 0xFFFF_0000_0000_0000 {
+        let ctx_elr = unsafe { core::ptr::read_volatile((tpidr + 0x100) as *const u64) };
+        let ctx_spsr = unsafe { core::ptr::read_volatile((tpidr + 0x108) as *const u64) };
+        let ctx_sp = unsafe { core::ptr::read_volatile((tpidr + 0x0F8) as *const u64) };
+        let ctx_x30 = unsafe { core::ptr::read_volatile((tpidr + 0x0F0) as *const u64) };
+        let thread_id = unsafe { core::ptr::read_volatile((tpidr + 0x330) as *const u64) };
+
+        serial::panic_puts("\n  thread id=0x");
+        serial::panic_put_hex(thread_id);
+        serial::panic_puts(" ctx.elr=0x");
+        serial::panic_put_hex(ctx_elr);
+        serial::panic_puts(" ctx.spsr=0x");
+        serial::panic_put_hex(ctx_spsr);
+        serial::panic_puts(" ctx.sp=0x");
+        serial::panic_put_hex(ctx_sp);
+        serial::panic_puts(" ctx.x30=0x");
+        serial::panic_put_hex(ctx_x30);
+    }
+
+    // Walk the stack for return addresses (best-effort backtrace).
+    if sp >= 0xFFFF_0000_0000_0000 && sp < 0xFFFF_0000_5000_0000 {
+        serial::panic_puts("\n  stack:");
+        let sp_ptr = sp as *const u64;
+
+        for i in 0..8u64 {
+            let val = unsafe { core::ptr::read_volatile(sp_ptr.add(i as usize)) };
+
+            if i < 4 || (val >= 0xFFFF_0000_4000_0000 && val < 0xFFFF_0000_5000_0000) {
+                serial::panic_puts(" [");
+                serial::panic_put_hex(i * 8);
+                serial::panic_puts("]=0x");
+                serial::panic_put_hex(val);
+            }
+        }
+    }
 
     if ec == 0x25 {
-        // Data Abort from current EL — most likely a guard page hit.
         serial::panic_puts("\ndata abort at EL1 — likely kernel stack overflow");
     } else if ec == 0x21 {
         serial::panic_puts("\ninstruction abort at EL1");

@@ -4,6 +4,106 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Bug Report: Kernel Crash Under Rapid Keyboard Input (2026-03-11)
+
+**Severity:** High — kernel panic (instruction abort at EL1)
+**Reproducible:** Yes — type rapidly into the QEMU window for ~10 seconds
+**Introduced:** Not by new code (all new code is userspace). Exposed by the first sustained high-frequency event processing workload.
+
+### Crash Signature
+
+```
+💥 kernel sync: EC=0x21 ESR=0x86000006 ELR=0x0 FAR=0x0
+instruction abort at EL1
+```
+
+- **EC=0x21**: Instruction abort from current EL (EL1 = kernel)
+- **ELR=0x0**: Kernel tried to execute at address 0 — null function pointer
+- **Metrics at crash:** ~440 ctx_sw/sec, ~370 syscalls/sec, 2595 ticks (~10.4s uptime)
+
+### What's Happening
+
+Three userspace processes run continuous event loops:
+1. **Input driver**: `wait(IRQ)` → read event → `channel_signal(compositor)` → loop
+2. **Compositor**: `wait(input_channel)` → render char → `channel_signal(GPU)` → loop
+3. **GPU driver**: `wait(compositor_channel)` → transfer+flush (2 virtio cmds) → loop
+
+Each keystroke triggers: IRQ → input wake → channel signal → compositor wake → render → channel signal → GPU wake → 2 GPU commands → loop. Under rapid typing, this produces ~50+ full cycles/sec, each involving:
+- Vec alloc/free for `wait_set` (one per `sys_wait` call)
+- 3+ lock acquisitions (scheduler, channel, timer)
+- Thread state transitions (Ready → Running → Blocked → Ready)
+
+### Suspect Analysis
+
+**Suspect 1: Kernel heap allocator stress (MOST LIKELY)**
+Each `sys_wait` call allocates a `Vec<WaitEntry>` via `store_wait_set`, and the wake path frees it via `wait_set.clear()` + drop. At ~370 syscalls/sec, the kernel heap allocator (linked-list first-fit with coalescing) handles hundreds of small alloc/free cycles per second. A coalescing bug under rapid free/alloc patterns could corrupt the free list, leading to a subsequent allocation returning corrupted memory. The null function pointer (ELR=0x0) is consistent with using a corrupted Box<Thread> where a vtable or function pointer has been zeroed.
+
+*Test:* Pre-allocate the wait_set Vec and reuse it across `sys_wait` calls (eliminate the alloc/free hotpath). If the crash disappears, it's the allocator.
+
+**Suspect 2: Scheduler two-phase wake race**
+`channel::signal()` collects the waiter ThreadId under the channel lock, releases it, then calls `try_wake_for_handle` under the scheduler lock. Between releasing the channel lock and acquiring the scheduler lock, another signal could arrive for the same thread. Both callers try to wake the same thread. `try_wake_impl` searches `blocked` by ThreadId and uses `swap_remove`. The second caller wouldn't find it (returns false) and falls through to `set_wake_pending_for_handle`. This *should* be safe, but the swap_remove changes the order of the blocked list, which could interact badly with concurrent operations on other cores.
+
+*Test:* Add a serial print in `try_wake_impl` when a thread isn't found in blocked/running/ready (the fall-through case). If this fires frequently, it's the wake race.
+
+**Suspect 3: Slab/heap interaction**
+The kernel heap routes allocs by size: ≤2 KiB → slab, else → linked-list. The `Vec<WaitEntry>` starts small (8 bytes per entry × 1-2 entries = 16-32 bytes) and goes through slab. Rapid alloc/free of slab objects could expose a slab bug (double-free or free-list corruption).
+
+*Test:* Force Vec<WaitEntry> to allocate from the linked-list allocator by reserving a minimum capacity (e.g., `Vec::with_capacity(256)`). If the crash disappears, it's the slab.
+
+### Fixes Applied (2026-03-11)
+
+**Crash signature:** `ELR=0x0`, instruction abort at EL1. `ret` to address 0 on a valid kernel stack. Under rapid typing, crashed in ~15 seconds at opt-level 3.
+
+**Root causes found (multiple):**
+
+**Fix 1: Idle thread park (category b — intent not implemented).** `park_old()` comment said idle threads "go back to `cores[].idle`" but the code didn't do it. Fix: `park_old()` takes `core` parameter, restores idle threads. 17 scheduler state machine tests (`test/tests/scheduler_state.rs`).
+
+**Fix 2: wait_set Vec reuse (category a — hot path allocation).** Each `sys_wait` allocated a fresh `Vec<WaitEntry>` + clone (~740 slab ops/sec). Fix: clear and repopulate `thread.wait_set` in-place, stack-allocated `[Option<WaitEntry>; 17]`. `push_wait_entry()` replaces `store_wait_set()`.
+
+**Fix 3: Enhanced fault handler (permanent).** `kernel_fault_handler` now receives SP, LR (x30), TPIDR_EL1, thread ID, and saved Context fields from the assembly. Dumps stack words.
+
+**Fix 4: Deferred thread drop (category a — use-after-free).** `park_old` dropped exited threads immediately, freeing kernel stack pages while `schedule_inner` was still executing on them. Fix: `State::deferred_drops` list, drained at start of next `schedule_inner`.
+
+**Fix 5: Aliasing UB in syscall dispatch (category a — `&mut *ctx` vs `&mut State`).** `dispatch()`, `sys_wait()`, `sys_futex_wait()`, and `block_current_unless_woken()` created `&mut *ctx` references that aliased with the scheduler lock's `&mut State` (both cover the same Thread Context). With inlining at opt-level 3, LLVM saw two `noalias` mutable references to overlapping memory → miscompilation. Fix: all Context access through `ctx` now uses `core::ptr::addr_of!` + raw pointer reads/writes. New `dispatch_ok()` + `result_to_u64!` replace the old `dispatch_syscall!` macro.
+
+**Fix 6: `nomem` on IrqMutex DAIF asm (PRIMARY FIX — category a).** `options(nostack, nomem)` on `mrs daif` / `msr daifset` / `msr daif` in `sync.rs` told LLVM these instructions don't access memory. This allowed LLVM to reorder lock-protected memory operations past the interrupt masking boundary, creating a race where accesses occurred with interrupts enabled on SMP. Fix: removed `nomem` from all DAIF manipulation and system register writes (`msr tpidr_el1`, `msr daifclr`). **This was the main fix — crash time went from ~15s to ~100-188s.**
+
+**Fix 7: `#[inline(never)]` on all scheduler public functions.** Prevents LLVM from inlining scheduler internals into syscall/IRQ handlers, reducing the optimization surface for aliasing exploitation. Cheap (one `bl` instruction per scheduler call, dominated by IrqMutex lock cost).
+
+**Fix 8: Automated crash test (`crash-test.sh`).** Launches QEMU headless, sends rapid keyboard input via monitor socket (Python + Unix socket), monitors serial output for crash. Usage: `./crash-test.sh [seconds]`.
+
+**Remaining issue:** At opt-level 2-3, a residual crash persists after ~100+ seconds of sustained rapid typing. Different pattern from the original (boot thread or different user thread, deeper stack). Likely more `nomem`-style issues in other inline assembly or a QEMU TCG interaction. Does not manifest at opt-level 1. **Pragmatic resolution: use opt-level 1.** Opt-level 2 still crashes under manual typing (~10s — QEMU monitor `sendkey` produces a different event pattern than actual keyboard input, making automated tests misleading). Opt-level 1 has never crashed in any test. Performance impact is negligible for a design-phase project. Full investigation of the remaining UB deferred.
+
+**Diagnostic investigation trail:** (1) schedule_inner elr=0 check → never fired. (2) SP capture → valid kernel stack. (3) LR=0 → confirmed `ret` to null. (4) x30=0 check → false positive for EL0 threads. (5) Thread Context dump → saved Context always valid. (6) ELR verification in assembly → didn't trigger (crash is NOT from eret). (7) opt-level bisection → opt-level 1 passes, 2-3 crash. (8) `#[inline(never)]` bisection → scheduler inlining contributes. (9) `nomem` removal → main fix.
+
+### Additional Hardening (2026-03-11, continued)
+
+**Fix 9: `nomem` removal across all inline asm.** Systematic audit of all 99 `unsafe` blocks. Removed `nomem` from:
+- `timer.rs`: `msr cntp_tval_el0` (timer reprogram), `mrs cntpct_el0` (counter read), `msr cntp_ctl_el0` (timer enable), `msr daifclr` (IRQ unmask)
+- `power.rs`: `hvc #0` (PSCI CPU_ON — boots secondary cores)
+- `syscall.rs`: merged split AT+MRS asm blocks into single blocks (address translation + PAR_EL1 read must not be reordered)
+
+**Fix 10: Headless stress test (`stress-test.sh` + `user/stress/main.rs`).** Userspace stress program exercises IPC ping-pong, timer churn, and allocator pressure without needing a display or keyboard. Integrated into build system (`build.rs`, `init/main.rs`). Usage: `./stress-test.sh [seconds]`.
+
+**Fix 11: Property-based scheduler tests (`test/tests/scheduler_state.rs`).** 3 new tests added to existing 17:
+- `randomized_scheduler_state_machine`: 500 random actions × 50 seeds, checks invariants after every action
+- `rapid_block_wake_never_duplicates`: rapid block/wake cycles never create duplicate thread entries
+- `all_threads_eventually_reaped`: exited threads are always cleaned up via deferred drops
+
+Total: 20 scheduler state machine tests, all passing.
+
+### How to Test
+
+```bash
+cd system
+./crash-test.sh 120   # Automated: 120 seconds of rapid keyboard input
+./stress-test.sh 30   # Headless stress test (no display needed)
+cargo run --release    # Manual: type rapidly in QEMU window
+cd test && cargo test scheduler_state  # Property-based scheduler tests
+```
+
+---
+
 ## Open Threads
 
 Active questions we've started exploring but haven't resolved. Each thread links to the decisions it would inform.

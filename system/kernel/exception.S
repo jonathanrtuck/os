@@ -168,6 +168,11 @@ exc_serr:
   mov w3, #2              // type = SError
 
 exc_fatal:
+  // Capture diagnostic state before switching stacks.
+  mov x6, sp
+  mov x7, x30            // LR at fault point (who called address 0?)
+  mrs x8, tpidr_el1      // current thread Context pointer
+
   // Switch to per-core emergency stack (4 KiB each, in .bss).
   mrs x4, mpidr_el1
   and x4, x4, #0xFF      // core_id
@@ -176,11 +181,14 @@ exc_fatal:
   ldr x5, =__exc_stacks
   add sp, x5, x4
 
-  // Call Rust: kernel_fault_handler(esr, elr, far, type) -> !
+  // Call Rust: kernel_fault_handler(esr, elr, far, type, sp, lr, tpidr) -> !
   mrs x0, esr_el1
   mrs x1, elr_el1
   mrs x2, far_el1
   // x3 already set (exception type)
+  mov x4, x6             // original SP
+  mov x5, x7             // original LR (x30)
+  mov x6, x8             // TPIDR_EL1 (current thread)
   bl kernel_fault_handler
   b .                     // Unreachable (handler panics)
 
@@ -314,6 +322,7 @@ exc_fatal:
 exc_irq:
   save_context
   bl irq_handler
+  cbz x0, handler_returned_null
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret
@@ -336,6 +345,7 @@ exc_lower_sync:
   b.ne exc_user_fault      // Non-SVC user fault: terminate process, not kernel.
   save_context
   bl svc_handler
+  cbz x0, handler_returned_null
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret
@@ -351,9 +361,51 @@ exc_lower_sync:
 exc_user_fault:
   save_context
   bl user_fault_handler
+  cbz x0, handler_returned_null
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret
+
+// --------------------------------------------------------------------------
+// Handler returned null context pointer — fatal bug.
+// x30 = return address (which handler bl'd to), SP = save_context level.
+// --------------------------------------------------------------------------
+
+handler_returned_null:
+  mov x6, sp
+  mov x7, x30             // which handler returned null
+  mrs x8, tpidr_el1
+
+  mrs x4, mpidr_el1
+  and x4, x4, #0xFF
+  add x4, x4, #1
+  lsl x4, x4, #12
+  ldr x5, =__exc_stacks
+  add sp, x5, x4
+
+  // Print diagnostic.
+  ldr x2, =UART0_BASE_VA
+  adr x0, .Lnull_msg
+  bl uart_puts
+  mov x0, x7
+  bl uart_puthex64
+  adr x0, .Lsp_msg
+  bl uart_puts
+  mov x0, x6
+  bl uart_puthex64
+  adr x0, .Ltpidr_msg
+  bl uart_puts
+  mov x0, x8
+  bl uart_puthex64
+  adr x0, .Lnl
+  bl uart_puts
+  b .
+
+.Lnull_msg:   .asciz "\nBUG: handler returned null! caller=0x"
+.Lsp_msg:     .asciz " SP=0x"
+.Ltpidr_msg:  .asciz " TPIDR=0x"
+.Lnl:         .asciz "\n"
+.align 2
 
 // Force literal pool emission before switching sections.
 .ltorg

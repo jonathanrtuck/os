@@ -28,7 +28,7 @@ impl<T> Drop for IrqGuard<'_, T> {
         self.lock.now_serving.fetch_add(1, Ordering::Release);
 
         unsafe {
-            core::arch::asm!("msr daif, {}", in(reg) self.saved_daif, options(nostack, nomem));
+            core::arch::asm!("msr daif, {}", in(reg) self.saved_daif, options(nostack));
         }
     }
 }
@@ -56,9 +56,13 @@ impl<T> IrqMutex<T> {
         // Save and mask IRQs before taking a ticket. Prevents timer
         // interrupts from re-entering the locked region on this core,
         // and avoids spinning with IRQs enabled (priority inversion).
+        // IMPORTANT: no `nomem` — LLVM must treat these as memory barriers.
+        // With `nomem`, LLVM can reorder memory operations past the DAIF
+        // masking, allowing lock-protected accesses to execute with interrupts
+        // enabled (race condition that manifests at opt-level 3).
         unsafe {
-            core::arch::asm!("mrs {}, daif", out(reg) saved_daif, options(nostack, nomem));
-            core::arch::asm!("msr daifset, #2", options(nostack, nomem));
+            core::arch::asm!("mrs {}, daif", out(reg) saved_daif, options(nostack));
+            core::arch::asm!("msr daifset, #2", options(nostack));
         }
 
         let my_ticket = self.next_ticket.fetch_add(1, Ordering::Relaxed);

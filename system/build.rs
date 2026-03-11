@@ -24,6 +24,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("virtio-gpu", "VIRTIO_GPU_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
     ("compositor", "COMPOSITOR_ELF"),
+    ("stress", "STRESS_ELF"),
 ];
 /// Programs compiled BEFORE init (init embeds their ELFs).
 /// Each entry is (name, source directory, needs_virtio, needs_drawing).
@@ -39,6 +40,7 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("virtio-gpu", "services/drivers/virtio-gpu", true, false),
     ("virtio-input", "services/drivers/virtio-input", true, false),
     ("compositor", "services/compositor", false, true),
+    ("stress", "user/stress", false, false),
 ];
 
 fn main() {

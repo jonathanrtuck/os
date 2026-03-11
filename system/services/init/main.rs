@@ -444,6 +444,22 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"     no gpu found\n");
     }
 
+    // If no GPU device was found, run the stress test (headless mode).
+    if gpu.is_none() {
+        sys::print(b"     no gpu found, running stress test\n");
+
+        match sys::process_create(STRESS_ELF.as_ptr(), STRESS_ELF.len()) {
+            Ok(proc_h) => {
+                let _ = sys::process_start(proc_h);
+                // Wait for stress test to complete.
+                let _ = sys::wait(&[proc_h], u64::MAX);
+            }
+            Err(_) => {
+                sys::print(b"     stress test spawn failed\n");
+            }
+        }
+    }
+
     sys::print(b"  \xF0\x9F\x94\xA7 init - running (idle)\n");
 
     // Don't exit — child processes are still running their event loops.

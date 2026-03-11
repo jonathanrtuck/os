@@ -23,13 +23,15 @@ pub fn cpu_on(target_cpu: u64, entry_point: u64, context_id: u64) -> Result<(), 
     // secondary cores. The entry_point must be a valid physical address
     // with MMU setup code. x0-x3 are the SMCCC argument registers.
     unsafe {
+        // No nomem: HVC traps to the hypervisor and boots a secondary core.
+        // Massive side effects — LLVM must treat this as a full barrier.
         core::arch::asm!(
             "hvc #0",
             inout("x0") PSCI_CPU_ON => ret,
             in("x1") target_cpu,
             in("x2") entry_point,
             in("x3") context_id,
-            options(nomem, nostack)
+            options(nostack)
         );
     }
 

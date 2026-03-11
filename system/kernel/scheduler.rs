@@ -50,6 +50,13 @@ struct State {
     /// Threads created but not yet started (two-phase process creation).
     /// Moved to ready queue by `start_suspended_threads`.
     suspended: Vec<Box<Thread>>,
+    /// Exited threads awaiting deferred drop. We can't drop threads in
+    /// `park_old` because `schedule_inner` is still running on the old
+    /// thread's kernel stack at that point. Freeing the stack while still
+    /// executing on it is a use-after-free. Instead, exited threads are
+    /// collected here and dropped at the start of the NEXT `schedule_inner`
+    /// call, when we're safely on a different thread's stack.
+    deferred_drops: Vec<Box<Thread>>,
     cores: [PerCoreState; per_core::MAX_CORES],
     next_id: u64,
     /// All processes. Index = ProcessId.0.
@@ -118,6 +125,7 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
     queue: RunQueue { ready: Vec::new() },
     blocked: Vec::new(),
     suspended: Vec::new(),
+    deferred_drops: Vec::new(),
     cores: {
         const INIT: PerCoreState = PerCoreState {
             current: None,
@@ -182,6 +190,7 @@ fn categorize_handles(objects: Vec<HandleObject>, s: &mut State) -> HandleCatego
     categories
 }
 /// Charge elapsed time to the old thread's EEVDF vruntime and scheduling context.
+#[inline(never)]
 fn charge_thread(thread: &mut Thread, contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
     if thread.is_idle() || thread.scheduling.last_started == 0 {
         return;
@@ -278,6 +287,7 @@ fn now_ns() -> u64 {
     timer::counter_to_ns(timer::counter())
 }
 /// Reap exited threads from the run queue and blocked list.
+#[inline(never)]
 fn reap_exited(queue: &mut RunQueue, blocked: &mut Vec<Box<Thread>>) {
     queue.ready.retain(|t| !t.is_exited());
     blocked.retain(|t| !t.is_exited());
@@ -309,6 +319,7 @@ fn release_thread_context_ids(s: &mut State, thread: &mut Thread) {
     }
 }
 /// Replenish all scheduling contexts that are due.
+#[inline(never)]
 fn replenish_contexts(contexts: &mut [Option<SchedulingContextSlot>], now: u64) {
     for slot in contexts.iter_mut() {
         if let Some(entry) = slot {
@@ -316,7 +327,12 @@ fn replenish_contexts(contexts: &mut [Option<SchedulingContextSlot>], now: u64) 
         }
     }
 }
+#[inline(never)]
 fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Context {
+    // Drop threads deferred from the previous schedule_inner. Safe now because
+    // we're on the current (live) thread's kernel stack, not the exited one's.
+    s.deferred_drops.clear();
+
     reap_exited(&mut s.queue, &mut s.blocked);
 
     let now = now_ns();
@@ -336,17 +352,25 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     let old_exited = old_thread.is_exited();
 
     // Park the old thread in its appropriate location.
-    fn park_old(s: &mut State, mut old_thread: Box<Thread>) {
+    #[inline(never)]
+    fn park_old(s: &mut State, mut old_thread: Box<Thread>, core: usize) {
         if old_thread.is_ready() {
             // Update eligible_at before re-enqueuing.
             old_thread.scheduling.eevdf = old_thread.scheduling.eevdf.mark_eligible();
 
-            if !old_thread.is_idle() {
+            if old_thread.is_idle() {
+                // Idle threads are never enqueued — restore to this core's idle slot.
+                s.cores[core].idle = Some(old_thread);
+            } else {
                 s.queue.ready.push(old_thread);
             }
-            // Idle threads are never enqueued — they go back to cores[].idle.
         } else if old_thread.is_exited() {
-            drop(old_thread);
+            // Defer drop — we're still running on this thread's kernel stack.
+            // Dropping now would free the stack pages while schedule_inner is
+            // still executing on them (use-after-free). The deferred_drops list
+            // is drained at the start of the next schedule_inner call, when
+            // we're safely on a different thread's stack.
+            s.deferred_drops.push(old_thread);
         } else {
             // Blocked — park until wake() re-enqueues it.
             s.blocked.push(old_thread);
@@ -366,7 +390,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 
         let new_ctx = new_thread.context_ptr();
 
-        park_old(s, old_thread);
+        park_old(s, old_thread, core);
 
         s.cores[core].current = Some(new_thread);
 
@@ -394,7 +418,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 
         metrics::inc_context_switches();
 
-        park_old(s, old_thread);
+        park_old(s, old_thread, core);
 
         s.cores[core].current = Some(idle);
 
@@ -412,6 +436,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
 /// Zero-allocation: computes avg vruntime (over threads with budget only)
 /// and selects in two passes over the ready queue. Returns the index into
 /// `queue.ready`, or None if no thread has budget.
+#[inline(never)]
 fn select_best(queue: &RunQueue, contexts: &[Option<SchedulingContextSlot>]) -> Option<usize> {
     if queue.ready.is_empty() {
         return None;
@@ -462,6 +487,7 @@ fn select_best(queue: &RunQueue, contexts: &[Option<SchedulingContextSlot>]) -> 
 /// Blocked list is intentionally not searched: this is only called when
 /// `try_wake` already returned false, meaning the thread is Running or Ready
 /// (not yet blocked). A blocked thread would have been woken by `try_wake`.
+#[inline(never)]
 fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
     for core_state in s.cores.iter_mut() {
         if let Some(t) = &mut core_state.current {
@@ -483,19 +509,27 @@ fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
     }
 }
 /// Swap TTBR0 when the address space changes between old and new threads.
+///
+/// Invalidates the old ASID's TLB entries after switching. Without this,
+/// stale TLB entries from the old process remain cached — if a physical
+/// page is freed and reused (e.g., as a kernel stack), the stale entry
+/// creates a memory alias that corrupts the new allocation.
+#[inline(never)]
 fn swap_ttbr0(old: &Thread, new: &Thread) {
     let old_ttbr0 = ttbr0_for(old);
     let new_ttbr0 = ttbr0_for(new);
 
     if old_ttbr0 != new_ttbr0 {
-        // SAFETY: new_ttbr0 is a valid TTBR0 value — physical address of an
-        // L0 table OR'd with a valid ASID. The barriers ensure ordering.
         unsafe {
             core::arch::asm!(
+                // Full TLB invalidation on context switch. Flush ALL entries
+                // (both ASIDs and global) before switching TTBR0.
+                "dsb ishst",
+                "tlbi vmalle1is",
                 "dsb ish",
-                "msr ttbr0_el1, {v}",
+                "msr ttbr0_el1, {new}",
                 "isb",
-                v = in(reg) new_ttbr0,
+                new = in(reg) new_ttbr0,
                 options(nostack)
             );
         }
@@ -503,6 +537,7 @@ fn swap_ttbr0(old: &Thread, new: &Thread) {
 }
 /// Shared wake implementation. If `reason` is Some, the thread's wait set
 /// is consulted to compute the return index and patch `context.x[0]`.
+#[inline(never)]
 fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> bool {
     // Check blocked list — most common case for wake.
     if let Some(pos) = s.blocked.iter().position(|t| t.id() == id) {
@@ -561,6 +596,7 @@ fn ttbr0_for(thread: &Thread) -> u64 {
 /// Increments the context's ref_count so the slot stays alive as long as
 /// the thread holds a bind reference. Decremented on thread exit or
 /// process kill.
+#[inline(never)]
 pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
@@ -595,6 +631,7 @@ pub fn bind_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 /// This prevents the lost-wakeup race: a wake that arrives between
 /// steps 1 and 3 sets the pending flag instead of trying to unblock
 /// a thread that isn't blocked yet.
+#[inline(never)]
 pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
@@ -604,11 +641,17 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
         // Waker already ran — consume the flag, patch return value, don't block.
         thread.wake_pending = false;
 
-        let c = unsafe { &mut *ctx };
-
-        c.x[0] = thread.wake_result;
+        let wake_result = thread.wake_result;
 
         thread.wait_set.clear();
+
+        // Write return value via raw pointer — no `&mut *ctx` which would alias
+        // with `s: &mut State` (both cover the same Context memory).
+        unsafe {
+            let x0_ptr = core::ptr::addr_of_mut!((*ctx).x) as *mut u64;
+
+            x0_ptr.write(wake_result);
+        }
 
         return BlockResult::WokePending(ctx as *const Context);
     }
@@ -625,6 +668,7 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
 ///
 /// Increments the borrowed context's ref_count. Decremented on return
 /// (`return_scheduling_context`) or thread exit.
+#[inline(never)]
 pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
@@ -653,6 +697,7 @@ pub fn borrow_scheduling_context(ctx_id: SchedulingContextId) -> bool {
 /// Clear the wait set and any pending wake on the current thread.
 /// Called when a handle is found ready during the initial scan (no need
 /// to block) or when returning early (poll mode, error).
+#[inline(never)]
 pub fn clear_wait_state() {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
@@ -663,6 +708,7 @@ pub fn clear_wait_state() {
 }
 /// Close all resources in a `HandleCategories` set. Must be called outside the
 /// scheduler lock — the individual destroy functions acquire their own locks.
+#[inline(never)]
 pub fn close_handle_categories(h: HandleCategories) {
     for id in h.channels {
         super::channel::close_endpoint(id);
@@ -684,6 +730,7 @@ pub fn close_handle_categories(h: HandleCategories) {
 ///
 /// The process starts with an empty handle table. No threads yet — call
 /// `spawn_user` to add the initial thread.
+#[inline(never)]
 pub fn create_process(addr_space: Box<super::address_space::AddressSpace>) -> ProcessId {
     let mut s = STATE.lock();
     let id = s.next_process_id;
@@ -699,6 +746,7 @@ pub fn create_process(addr_space: Box<super::address_space::AddressSpace>) -> Pr
 /// Access the current thread's process via closure. Acquires the scheduler
 /// lock for the duration. Panics if the current thread has no process
 /// (kernel threads).
+#[inline(never)]
 pub fn current_process_do<R>(f: impl FnOnce(&mut Process) -> R) -> R {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
@@ -718,6 +766,7 @@ pub fn current_process_do<R>(f: impl FnOnce(&mut Process) -> R) -> R {
 /// The context starts with ref_count=1 (the handle inserted by the caller).
 /// Does not bind the context to any thread — use `bind_scheduling_context`
 /// separately.
+#[inline(never)]
 pub fn create_scheduling_context(budget: u64, period: u64) -> Option<SchedulingContextId> {
     if !scheduling_context::validate_params(budget, period) {
         return None;
@@ -753,6 +802,7 @@ pub fn create_scheduling_context(budget: u64, period: u64) -> Option<SchedulingC
 ///
 /// Uses struct destructuring to obtain disjoint mutable borrows of
 /// `State.cores` and `State.processes` simultaneously.
+#[inline(never)]
 pub fn current_thread_and_process_do<R>(f: impl FnOnce(&mut Thread, &mut Process) -> R) -> R {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
@@ -776,6 +826,7 @@ pub fn current_thread_and_process_do<R>(f: impl FnOnce(&mut Thread, &mut Process
 }
 /// Access the current thread via closure. Acquires the scheduler lock for the
 /// duration of the closure. Do not call scheduler functions from within `f`.
+#[inline(never)]
 pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
@@ -788,6 +839,7 @@ pub fn current_thread_do<R>(f: impl FnOnce(&mut Thread) -> R) -> R {
 /// Only safe for kernel threads that have no resources (no address space,
 /// no handles). User threads must exit via `exit_current_from_syscall` which
 /// performs full cleanup. The thread spins until the next timer tick reaps it.
+#[inline(never)]
 pub fn exit_current() -> ! {
     {
         let mut s = STATE.lock();
@@ -806,6 +858,7 @@ pub fn exit_current() -> ! {
         core::hint::spin_loop();
     }
 }
+#[inline(never)]
 pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
     let core = per_core::core_id() as usize;
     // Phase 1: determine if this is the last thread, collect resources.
@@ -914,6 +967,7 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
         }
     }
 }
+#[inline(never)]
 pub fn init() {
     let mut s = STATE.lock();
     let boot_thread = Thread::new_boot();
@@ -943,7 +997,7 @@ pub fn init() {
         core::arch::asm!(
             "msr tpidr_el1, {0}",
             in(reg) ctx_ptr as usize,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
 }
@@ -951,6 +1005,7 @@ pub fn init() {
 ///
 /// Called from `secondary_main` on each secondary core. Creates the idle
 /// thread, sets TPIDR_EL1, and makes the idle thread the current thread.
+#[inline(never)]
 pub fn init_secondary(core_id: u32) {
     let mut s = STATE.lock();
     let idx = core_id as usize;
@@ -968,7 +1023,7 @@ pub fn init_secondary(core_id: u32) {
         core::arch::asm!(
             "msr tpidr_el1, {0}",
             in(reg) boot_ctx_ptr as usize,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
 }
@@ -982,6 +1037,7 @@ pub fn init_secondary(core_id: u32) {
 /// Returns `None` if the process doesn't exist, is already killed, or has no
 /// threads. The caller must perform Phase 2 cleanup (notify exits, close
 /// resources, free address space if returned).
+#[inline(never)]
 pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     let mut s = STATE.lock();
 
@@ -1099,6 +1155,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     })
 }
 /// Release a scheduling context handle (decrement ref count, free if zero).
+#[inline(never)]
 pub fn release_scheduling_context(ctx_id: SchedulingContextId) {
     let mut s = STATE.lock();
 
@@ -1108,6 +1165,7 @@ pub fn release_scheduling_context(ctx_id: SchedulingContextId) {
 ///
 /// Decrements the borrowed context's ref_count (balances the increment
 /// in `borrow_scheduling_context`).
+#[inline(never)]
 pub fn return_scheduling_context() -> bool {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
@@ -1129,17 +1187,37 @@ pub fn return_scheduling_context() -> bool {
         None => false, // Not borrowing.
     }
 }
+#[inline(never)]
 pub fn schedule(ctx: *mut Context) -> *const Context {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
 
     schedule_inner(&mut s, ctx, core)
 }
+/// Store a timeout timer ID on the current thread for deferred cleanup.
+#[inline(never)]
+pub fn set_timeout_timer(timer_id: timer::TimerId) {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+    thread.timeout_timer = Some(timer_id);
+}
+/// Clear the timeout timer field on the current thread (timer already destroyed).
+#[inline(never)]
+pub fn set_timeout_timer_none() {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+    thread.timeout_timer = None;
+}
 /// Set the wake-pending flag on a thread that is not yet blocked (futex path).
 ///
 /// Called by `futex::wake` when `try_wake` returns false (thread is still
 /// Running, hasn't entered the scheduler yet). Sets `wake_result = 0`.
 /// The flag is consumed by `block_current_unless_woken`.
+#[inline(never)]
 pub fn set_wake_pending(id: ThreadId) {
     let mut s = STATE.lock();
 
@@ -1150,6 +1228,7 @@ pub fn set_wake_pending(id: ThreadId) {
 /// Only sets the flag if the thread has an active wait set (is inside a `wait`
 /// syscall). Computes `wake_result` from the matching entry in the wait set.
 /// If `wake_pending` is already set, does nothing (first signal wins).
+#[inline(never)]
 pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
     let mut s = STATE.lock();
 
@@ -1179,6 +1258,7 @@ pub fn set_wake_pending_for_handle(id: ThreadId, reason: HandleObject) {
         }
     }
 }
+#[inline(never)]
 pub fn spawn(entry: fn() -> !) {
     let mut s = STATE.lock();
     let id = s.next_id;
@@ -1189,6 +1269,7 @@ pub fn spawn(entry: fn() -> !) {
 
     s.queue.ready.push(thread);
 }
+#[inline(never)]
 pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> ThreadId {
     let mut s = STATE.lock();
     let id = s.next_id;
@@ -1214,6 +1295,7 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
 /// of the ready queue. Call `start_suspended_threads` to make it runnable.
 ///
 /// Used by `process_create` (two-phase creation: create suspended, then start).
+#[inline(never)]
 pub fn spawn_user_suspended(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> ThreadId {
     let mut s = STATE.lock();
     let id = s.next_id;
@@ -1238,6 +1320,7 @@ pub fn spawn_user_suspended(process_id: ProcessId, entry_va: u64, user_stack_top
 /// Move all suspended threads belonging to `process_id` into the ready queue.
 ///
 /// Returns true if any threads were started. Used by `process_start` syscall.
+#[inline(never)]
 pub fn start_suspended_threads(process_id: ProcessId) -> bool {
     let mut s = STATE.lock();
     let mut started = false;
@@ -1264,18 +1347,31 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
 
     started
 }
-/// Store a wait set on the current thread. Must be called BEFORE checking
-/// handle readiness, so that signals arriving during the gap can find the
-/// wait set and set `wake_pending`.
-pub fn store_wait_set(entries: Vec<WaitEntry>) {
+/// Push a single entry to the current thread's wait set.
+///
+/// Used by `sys_wait` to add the internal timeout timer entry after the
+/// main wait set is populated in-place.
+#[inline(never)]
+pub fn push_wait_entry(entry: WaitEntry) {
     let mut s = STATE.lock();
     let core = per_core::core_id() as usize;
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
-    thread.wait_set = entries;
+    thread.wait_set.push(entry);
+}
+/// Take and return any stale timeout timer from the current thread.
+/// Called at the start of `sys_wait` to clean up from a previous blocked wait.
+#[inline(never)]
+pub fn take_timeout_timer() -> Option<timer::TimerId> {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+    thread.timeout_timer.take()
 }
 /// Wake a blocked thread (Blocked → Ready). Returns true if it was blocked.
 /// Does not interact with the thread's wait set — used by futex.
+#[inline(never)]
 pub fn try_wake(id: ThreadId) -> bool {
     let mut s = STATE.lock();
 
@@ -1286,6 +1382,7 @@ pub fn try_wake(id: ThreadId) -> bool {
 /// If the thread has an active wait set (from a `wait` syscall), computes the
 /// return index from the matching entry and patches `context.x[0]`. Used by
 /// channel signal (and future timer/device notification).
+#[inline(never)]
 pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
     let mut s = STATE.lock();
 
@@ -1295,6 +1392,7 @@ pub fn try_wake_for_handle(id: ThreadId, reason: HandleObject) -> bool {
 ///
 /// Returns `None` if the process doesn't exist (e.g., already killed).
 /// Used by `channel::setup_endpoint` (boot), `handle_send` (syscall).
+#[inline(never)]
 pub fn with_process<R>(pid: ProcessId, f: impl FnOnce(&mut Process) -> R) -> Option<R> {
     let mut s = STATE.lock();
     let process = s.processes.get_mut(pid.0 as usize)?.as_mut()?;
@@ -1307,6 +1405,7 @@ pub fn with_process<R>(pid: ProcessId, f: impl FnOnce(&mut Process) -> R) -> Opt
 /// find the thread, gets its process_id, and provides mutable access to the
 /// process. Returns `None` if the thread or process is not found.
 /// Used by `channel::create` which identifies endpoints by ThreadId.
+#[inline(never)]
 pub fn with_process_of_thread<R>(tid: ThreadId, f: impl FnOnce(&mut Process) -> R) -> Option<R> {
     let mut s = STATE.lock();
     let pid = find_thread_pid(&s, tid)?;
@@ -1315,6 +1414,7 @@ pub fn with_process_of_thread<R>(tid: ThreadId, f: impl FnOnce(&mut Process) -> 
     Some(f(process))
 }
 /// Access a thread by ID. Closure receives exclusive access to the thread.
+#[inline(never)]
 pub fn with_thread_mut<R>(id: ThreadId, f: impl FnOnce(&mut Thread) -> R) -> R {
     let mut s = STATE.lock();
 

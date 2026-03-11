@@ -522,4 +522,4 @@ Ordered by what unblocks the most, building the happy path first:
 6. ~~**Event loop**~~ (§3.4) — **Done.** Compositor, GPU driver, and input driver all run continuous event loops. Init stays alive.
 7. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
 8. **Filesystem service** (§3.2) — blocked on Decision #16. Unblocks runtime resource loading, documents, everything the OS is about.
-9. **Wait timeout** — kernel `wait` syscall only supports poll (timeout=0) or infinite block. Finite timeouts need a timer handle mixed into the wait set. Should implement internal timer creation for non-zero non-MAX timeouts.
+9. ~~**Wait timeout**~~ — **Done.** For finite timeouts (0 < timeout < u64::MAX), `sys_wait` creates an internal timer, adds it to the wait set with a sentinel index. If the timer fires first, returns `WouldBlock`. Timer cleanup: immediate on non-blocked paths; deferred to next `wait` call for the blocked→woken path (stored on thread struct).

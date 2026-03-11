@@ -442,7 +442,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 
 **Lock ordering:** Channel lock → scheduler lock (unchanged). The readiness check acquires the channel lock (one channel at a time). Blocking acquires the scheduler lock. The wait set stored on the thread (under scheduler lock) bridges the two: signalers under the scheduler lock can read the wait set to compute the return index without needing the channel lock.
 
-**Implementation:** `syscall.rs` (sys_wait), `scheduler.rs` (try_wake_for_handle, set_wake_pending_for_handle, store_wait_set, clear_wait_state, updated block_current_unless_woken), `channel.rs` (signal uses try_wake_for_handle), `thread.rs` (WaitEntry, complete_wait_for, wake_pending/wake_result fields).
+**Implementation:** `syscall.rs` (sys_wait), `scheduler.rs` (try_wake_for_handle, set_wake_pending_for_handle, push_wait_entry, clear_wait_state, updated block_current_unless_woken), `channel.rs` (signal uses try_wake_for_handle), `thread.rs` (WaitEntry, complete_wait_for, wake_pending/wake_result fields).
 
 **Prior art:** Linux epoll, FreeBSD kqueue, Fuchsia `zx_object_wait_many`, seL4 notification objects.
 

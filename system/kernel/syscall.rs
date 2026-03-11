@@ -123,6 +123,9 @@ const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
 
+/// Raw WouldBlock error code as u64 (for direct x[0] patching in wake path).
+pub const WOULD_BLOCK_RAW: u64 = Error::WouldBlock as i64 as u64;
+
 #[repr(i64)]
 pub enum Error {
     UnknownSyscall = -1,
@@ -155,17 +158,17 @@ fn is_user_page_writable(va: u64) -> bool {
     let par: u64;
 
     unsafe {
-        // AT S1E0W: translate va as a Stage 1 EL0 Write.
+        // AT S1E0W translates va, writing the result to PAR_EL1. The mrs
+        // reads that result. These MUST be a single asm block — with separate
+        // blocks, LLVM could reorder the mrs (if marked nomem) before the at,
+        // reading a stale PAR_EL1 from a previous translation.
         core::arch::asm!(
             "at s1e0w, {va}",
             "isb",
-            va = in(reg) va,
-            options(nostack)
-        );
-        core::arch::asm!(
             "mrs {par}, par_el1",
+            va = in(reg) va,
             par = out(reg) par,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
 
@@ -210,8 +213,7 @@ fn sys_channel_create() -> Result<u64, Error> {
             Ok(handle_b) => {
                 // Both handles inserted — now map both shared pages using the
                 // per-process channel SHM bump allocator.
-                let pages =
-                    channel::shared_pages(ch_a).ok_or(HandleError::InvalidHandle)?;
+                let pages = channel::shared_pages(ch_a).ok_or(HandleError::InvalidHandle)?;
 
                 process
                     .address_space
@@ -335,26 +337,24 @@ fn sys_dma_free(va: u64, _order: u64) -> Result<u64, Error> {
 fn sys_exit(ctx: *mut Context) -> *const Context {
     scheduler::exit_current_from_syscall(ctx)
 }
+#[inline(never)]
 fn sys_futex_wait(ctx: *mut Context) -> *const Context {
-    let c = unsafe { &mut *ctx };
-    let addr = c.x[0];
-    let expected = c.x[1] as u32;
+    // Read args via raw pointer — no `&mut *ctx` (aliasing UB with scheduler lock).
+    let (addr, expected) = unsafe {
+        let x = core::ptr::addr_of!((*ctx).x) as *const u64;
+
+        (x.add(0).read(), x.add(1).read() as u32)
+    };
 
     // Validate: must be in user VA space and word-aligned.
     if addr >= USER_VA_END || addr & 3 != 0 {
-        c.x[0] = Error::BadAddress as i64 as u64;
-
-        return ctx as *const Context;
+        return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
 
     // Translate VA → PA for the futex key.
     let pa = match user_va_to_pa(addr) {
         Some(pa) => pa,
-        None => {
-            c.x[0] = Error::BadAddress as i64 as u64;
-
-            return ctx as *const Context;
-        }
+        None => return dispatch_ok(ctx, Error::BadAddress as i64 as u64),
     };
     // Read the current value at the user address.
     // SAFETY: TTBR0 is still loaded, address validated via AT S1E0R.
@@ -362,9 +362,7 @@ fn sys_futex_wait(ctx: *mut Context) -> *const Context {
 
     if current_value != expected {
         // Value changed — don't block (spurious, not a lost wakeup).
-        c.x[0] = Error::WouldBlock as i64 as u64;
-
-        return ctx as *const Context;
+        return dispatch_ok(ctx, Error::WouldBlock as i64 as u64);
     }
 
     // Record this thread in the futex wait table.
@@ -373,7 +371,11 @@ fn sys_futex_wait(ctx: *mut Context) -> *const Context {
     futex::wait(pa, thread_id);
 
     // Pre-set success return value before blocking.
-    c.x[0] = 0;
+    unsafe {
+        let x0_ptr = core::ptr::addr_of_mut!((*ctx).x) as *mut u64;
+
+        x0_ptr.write(0);
+    }
 
     // Block (or return immediately if a wake arrived in the gap).
     // Futex has no post-block cleanup, so both paths are equivalent.
@@ -869,51 +871,59 @@ fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
         }
     }
 }
+#[inline(never)]
 fn sys_wait(ctx: *mut Context) -> *const Context {
-    let c = unsafe { &mut *ctx };
-    let handles_ptr = c.x[0];
-    let count = c.x[1];
-    let timeout = c.x[2];
+    use super::thread::TIMEOUT_SENTINEL;
+
+    // Read args via raw pointer — no `&mut *ctx` (aliasing UB with scheduler lock).
+    let (handles_ptr, count, timeout) = unsafe {
+        let x = core::ptr::addr_of!((*ctx).x) as *const u64;
+
+        (x.add(0).read(), x.add(1).read(), x.add(2).read())
+    };
+
+    // Clean up any stale timeout timer from a previous blocked wait.
+    // This handles the deferred cleanup case where sys_wait couldn't
+    // clean up because the thread was context-switched away.
+    if let Some(stale_timer) = scheduler::take_timeout_timer() {
+        timer::destroy(stale_timer);
+    }
 
     // Validate count.
     if count == 0 || count > MAX_WAIT_HANDLES {
-        c.x[0] = Error::InvalidArgument as i64 as u64;
-
-        return ctx as *const Context;
+        return dispatch_ok(ctx, Error::InvalidArgument as i64 as u64);
     }
 
     // Validate user buffer.
     if handles_ptr >= USER_VA_END {
-        c.x[0] = Error::BadAddress as i64 as u64;
-
-        return ctx as *const Context;
+        return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
 
     if let Some(end) = handles_ptr.checked_add(count) {
         if end > USER_VA_END {
-            c.x[0] = Error::BadAddress as i64 as u64;
-
-            return ctx as *const Context;
+            return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
         }
     } else {
-        c.x[0] = Error::BadAddress as i64 as u64;
-
-        return ctx as *const Context;
+        return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
 
     if !is_user_range_readable(handles_ptr, count) {
-        c.x[0] = Error::BadAddress as i64 as u64;
-
-        return ctx as *const Context;
+        return dispatch_ok(ctx, Error::BadAddress as i64 as u64);
     }
 
     // Read handle indices from user memory.
     // SAFETY: TTBR0 is still loaded. Address and length validated above.
     let handle_bytes =
         unsafe { core::slice::from_raw_parts(handles_ptr as *const u8, count as usize) };
-    // Resolve all handles and validate they are waitable.
+    // Resolve handles and populate thread.wait_set in-place (reuses the Vec's
+    // backing allocation from previous calls — no heap alloc in steady state).
+    // A stack-allocated copy is returned for use outside the scheduler lock.
     let resolve_result = scheduler::current_thread_and_process_do(|thread, process| {
-        let mut entries = Vec::new();
+        thread.wait_set.clear();
+
+        let mut entries: [Option<WaitEntry>; MAX_WAIT_HANDLES as usize + 1] =
+            [None; MAX_WAIT_HANDLES as usize + 1];
+        let mut count = 0usize;
 
         for (i, &h) in handle_bytes.iter().enumerate() {
             let obj = process.handles.get(Handle(h), Rights::READ)?;
@@ -924,30 +934,54 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
                 | HandleObject::Process(_)
                 | HandleObject::Thread(_)
                 | HandleObject::Timer(_) => {
-                    entries.push(WaitEntry {
+                    let entry = WaitEntry {
                         object: obj,
                         user_index: i as u8,
-                    });
+                    };
+
+                    thread.wait_set.push(entry);
+                    entries[count] = Some(entry);
+                    count += 1;
                 }
                 _ => return Err(HandleError::InvalidHandle), // Not waitable
             }
         }
 
-        Ok((entries, thread.id()))
+        Ok((entries, count, thread.id()))
     });
-    let (wait_entries, caller_id) = match resolve_result {
-        Ok(pair) => pair,
-        Err(e) => {
-            c.x[0] = e.into();
+    let (mut entries, mut entry_count, caller_id) = match resolve_result {
+        Ok(tuple) => tuple,
+        Err(e) => return dispatch_ok(ctx, e.into()),
+    };
+    // Create internal timeout timer for finite timeouts (0 < timeout < MAX).
+    // The timer is added to the wait set with a sentinel index. If it fires
+    // first, the wake path returns WouldBlock. The timer is stored on the
+    // thread for deferred cleanup (the Blocked path can't run cleanup code).
+    let timeout_timer = if timeout != 0 && timeout != u64::MAX {
+        match timer::create(timeout) {
+            Some(id) => {
+                let entry = WaitEntry {
+                    object: HandleObject::Timer(id),
+                    user_index: TIMEOUT_SENTINEL,
+                };
 
-            return ctx as *const Context;
+                scheduler::push_wait_entry(entry);
+                entries[entry_count] = Some(entry);
+                entry_count += 1;
+                scheduler::set_timeout_timer(id);
+                Some(id)
+            }
+            None => None, // Timer table full — proceed without timeout.
         }
+    } else {
+        None
     };
     // Collect IDs for waiter registration and cleanup.
     let mut channel_ids: [Option<ChannelId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
-    let mut timer_ids: [Option<TimerId>; MAX_WAIT_HANDLES as usize] =
-        [None; MAX_WAIT_HANDLES as usize];
+    // +1 for potential timeout timer entry.
+    let mut timer_ids: [Option<TimerId>; MAX_WAIT_HANDLES as usize + 1] =
+        [None; MAX_WAIT_HANDLES as usize + 1];
     let mut interrupt_ids: [Option<InterruptId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
     let mut thread_ids: [Option<ThreadId>; MAX_WAIT_HANDLES as usize] =
@@ -955,19 +989,28 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     let mut process_ids: [Option<ProcessId>; MAX_WAIT_HANDLES as usize] =
         [None; MAX_WAIT_HANDLES as usize];
 
-    for entry in &wait_entries {
+    for entry in entries[..entry_count].iter().flatten() {
+        let idx = if entry.user_index == TIMEOUT_SENTINEL {
+            MAX_WAIT_HANDLES as usize // Use the extra slot for the timeout timer.
+        } else {
+            entry.user_index as usize
+        };
+
         match entry.object {
-            HandleObject::Channel(id) => channel_ids[entry.user_index as usize] = Some(id),
-            HandleObject::Timer(id) => timer_ids[entry.user_index as usize] = Some(id),
-            HandleObject::Interrupt(id) => interrupt_ids[entry.user_index as usize] = Some(id),
-            HandleObject::Thread(id) => thread_ids[entry.user_index as usize] = Some(id),
-            HandleObject::Process(id) => process_ids[entry.user_index as usize] = Some(id),
-            HandleObject::SchedulingContext(_) => {} // Not waitable; filtered in resolve step.
+            HandleObject::Channel(id) => channel_ids[idx.min(channel_ids.len() - 1)] = Some(id),
+            HandleObject::Timer(id) => timer_ids[idx] = Some(id),
+            HandleObject::Interrupt(id) => {
+                interrupt_ids[idx.min(interrupt_ids.len() - 1)] = Some(id)
+            }
+            HandleObject::Thread(id) => thread_ids[idx.min(thread_ids.len() - 1)] = Some(id),
+            HandleObject::Process(id) => process_ids[idx.min(process_ids.len() - 1)] = Some(id),
+            HandleObject::SchedulingContext(_) => {}
         }
     }
-    // Register as waiter on each handle BEFORE storing wait set and checking
-    // readiness. If an event fires in the gap, set_wake_pending_for_handle
-    // can target this thread.
+
+    // Register as waiter on each handle. The wait set is already on the thread
+    // (populated in the closure above). If an event fires in the gap,
+    // set_wake_pending_for_handle can find the wait set and target this thread.
     for &id in channel_ids.iter().flatten() {
         channel::register_waiter(id, caller_id);
     }
@@ -984,15 +1027,12 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         process_exit::register_waiter(id, caller_id);
     }
 
-    // Store wait set BEFORE checking readiness. This ensures that if a signal
-    // arrives during the readiness check, set_wake_pending_for_handle can find
-    // the wait set and prevent a lost wakeup.
-    let entries_for_check = wait_entries.clone();
-
-    scheduler::store_wait_set(wait_entries);
+    // Wait set already on the thread (populated in the closure above, before
+    // waiter registration). If a signal arrives during the readiness check,
+    // set_wake_pending_for_handle can find the wait set.
 
     // Check each handle for readiness.
-    for entry in &entries_for_check {
+    for entry in entries[..entry_count].iter().flatten() {
         let ready = match entry.object {
             HandleObject::Channel(ch_id) => channel::check_pending(ch_id),
             HandleObject::Interrupt(int_id) => interrupt::check_pending(int_id),
@@ -1012,9 +1052,20 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             unregister_threads(&thread_ids);
             unregister_processes(&process_ids);
 
-            c.x[0] = entry.user_index as u64;
+            // Destroy internal timeout timer (not needed — a real handle fired).
+            if let Some(tid) = timeout_timer {
+                timer::destroy(tid);
+                scheduler::set_timeout_timer_none();
+            }
 
-            return ctx as *const Context;
+            // Timeout sentinel returns WouldBlock; real handles return index.
+            let val = if entry.user_index == TIMEOUT_SENTINEL {
+                WOULD_BLOCK_RAW
+            } else {
+                entry.user_index as u64
+            };
+
+            return dispatch_ok(ctx, val);
         }
     }
 
@@ -1028,13 +1079,16 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         unregister_threads(&thread_ids);
         unregister_processes(&process_ids);
 
-        c.x[0] = Error::WouldBlock as i64 as u64;
+        if let Some(tid) = timeout_timer {
+            timer::destroy(tid);
+            scheduler::set_timeout_timer_none();
+        }
 
-        return ctx as *const Context;
+        return dispatch_ok(ctx, Error::WouldBlock as i64 as u64);
     }
 
     // Block until woken. wake_pending catches signals that arrived in the gap
-    // between store_wait_set and here.
+    // between populating the wait set and here.
     match scheduler::block_current_unless_woken(ctx) {
         scheduler::BlockResult::WokePending(p) => {
             // Same thread — safe to unregister from waiters that didn't fire.
@@ -1043,6 +1097,12 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
             unregister_interrupts(&interrupt_ids);
             unregister_threads(&thread_ids);
             unregister_processes(&process_ids);
+
+            // Destroy internal timeout timer — we woke before blocking.
+            if let Some(tid) = timeout_timer {
+                timer::destroy(tid);
+                scheduler::set_timeout_timer_none();
+            }
 
             p
         }
@@ -1133,17 +1193,16 @@ fn user_va_to_pa(va: u64) -> Option<u64> {
     let par: u64;
 
     unsafe {
-        // AT S1E0R: translate va as a Stage 1 EL0 Read.
+        // AT S1E0R translates va, writing the result to PAR_EL1. The mrs
+        // reads that result. Single asm block prevents LLVM from reordering
+        // the read before the translation (see is_user_page_writable comment).
         core::arch::asm!(
             "at s1e0r, {va}",
             "isb",
-            va = in(reg) va,
-            options(nostack)
-        );
-        core::arch::asm!(
             "mrs {par}, par_el1",
+            va = in(reg) va,
             par = out(reg) par,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
 
@@ -1159,26 +1218,32 @@ fn user_va_to_pa(va: u64) -> Option<u64> {
     Some(page_pa | offset)
 }
 
-/// Dispatch a standard syscall that returns `Result<u64, E>` where E is `#[repr(i64)]`.
-/// Stores the Ok value or the error code (cast via `as i64 as u64`) into `c.x[0]`
-/// and returns the same context pointer. The four syscalls that manipulate the
-/// context directly (exit, yield, futex_wait, wait) are hand-written instead.
-macro_rules! dispatch_syscall {
-    ($c:ident, $ctx:ident, $handler:expr) => {{
-        $c.x[0] = match $handler {
+/// Convert a syscall Result to the ABI return value.
+/// Both Error and HandleError are #[repr(i64)], so `as i64 as u64` is uniform.
+macro_rules! result_to_u64 {
+    ($result:expr) => {
+        match $result {
             Ok(n) => n,
             Err(e) => e as i64 as u64,
-        };
-
-        $ctx as *const Context
-    }};
+        }
+    };
 }
 
+#[inline(never)]
 pub fn dispatch(ctx: *mut Context) -> *const Context {
     metrics::inc_syscalls();
 
-    let c = unsafe { &mut *ctx };
-    let syscall_nr = c.x[8];
+    // Read syscall arguments from the context via raw pointer. We must NOT
+    // create `&mut *ctx` here — the scheduler lock's `&mut State` transitively
+    // covers the same Context (it's in `cores[core].current`). With inlining
+    // at opt-level 3, LLVM sees two `noalias` mutable references to overlapping
+    // memory, which is UB that causes miscompilation (corrupted return addresses
+    // on the kernel stack).
+    let (syscall_nr, x0, x1) = unsafe {
+        let x = core::ptr::addr_of!((*ctx).x) as *const u64;
+
+        (x.add(8).read(), x.add(0).read(), x.add(1).read())
+    };
 
     match syscall_nr {
         // Special cases: these manipulate ctx directly (may block/switch threads).
@@ -1187,44 +1252,50 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::FUTEX_WAIT => sys_futex_wait(ctx),
         nr::WAIT => sys_wait(ctx),
         // Standard syscalls: Result<u64, E> → x0, return same context.
-        nr::WRITE => dispatch_syscall!(c, ctx, sys_write(c.x[0], c.x[1])),
-        nr::HANDLE_CLOSE => dispatch_syscall!(c, ctx, sys_handle_close(c.x[0])),
-        nr::CHANNEL_SIGNAL => dispatch_syscall!(c, ctx, sys_channel_signal(c.x[0])),
-        nr::CHANNEL_CREATE => dispatch_syscall!(c, ctx, sys_channel_create()),
-        nr::SCHEDULING_CONTEXT_CREATE => {
-            dispatch_syscall!(c, ctx, sys_scheduling_context_create(c.x[0], c.x[1]))
-        }
-        nr::SCHEDULING_CONTEXT_BORROW => {
-            dispatch_syscall!(c, ctx, sys_scheduling_context_borrow(c.x[0]))
-        }
-        nr::SCHEDULING_CONTEXT_RETURN => {
-            dispatch_syscall!(c, ctx, sys_scheduling_context_return())
-        }
-        nr::SCHEDULING_CONTEXT_BIND => {
-            dispatch_syscall!(c, ctx, sys_scheduling_context_bind(c.x[0]))
-        }
-        nr::FUTEX_WAKE => dispatch_syscall!(c, ctx, sys_futex_wake(c.x[0], c.x[1])),
-        nr::TIMER_CREATE => dispatch_syscall!(c, ctx, sys_timer_create(c.x[0])),
-        nr::INTERRUPT_REGISTER => dispatch_syscall!(c, ctx, sys_interrupt_register(c.x[0])),
-        nr::INTERRUPT_ACK => dispatch_syscall!(c, ctx, sys_interrupt_ack(c.x[0])),
-        nr::DEVICE_MAP => dispatch_syscall!(c, ctx, sys_device_map(c.x[0], c.x[1])),
-        nr::DMA_ALLOC => dispatch_syscall!(c, ctx, sys_dma_alloc(c.x[0], c.x[1])),
-        nr::DMA_FREE => dispatch_syscall!(c, ctx, sys_dma_free(c.x[0], c.x[1])),
-        nr::THREAD_CREATE => dispatch_syscall!(c, ctx, sys_thread_create(c.x[0], c.x[1])),
-        nr::PROCESS_CREATE => dispatch_syscall!(c, ctx, sys_process_create(c.x[0], c.x[1])),
-        nr::PROCESS_START => dispatch_syscall!(c, ctx, sys_process_start(c.x[0])),
-        nr::HANDLE_SEND => dispatch_syscall!(c, ctx, sys_handle_send(c.x[0], c.x[1])),
-        nr::PROCESS_KILL => dispatch_syscall!(c, ctx, sys_process_kill(c.x[0])),
+        nr::WRITE => dispatch_ok(ctx, result_to_u64!(sys_write(x0, x1))),
+        nr::HANDLE_CLOSE => dispatch_ok(ctx, result_to_u64!(sys_handle_close(x0))),
+        nr::CHANNEL_SIGNAL => dispatch_ok(ctx, result_to_u64!(sys_channel_signal(x0))),
+        nr::CHANNEL_CREATE => dispatch_ok(ctx, result_to_u64!(sys_channel_create())),
+        nr::SCHEDULING_CONTEXT_CREATE => dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_create(x0, x1))),
+        nr::SCHEDULING_CONTEXT_BORROW => dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_borrow(x0))),
+        nr::SCHEDULING_CONTEXT_RETURN => dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_return())),
+        nr::SCHEDULING_CONTEXT_BIND => dispatch_ok(ctx, result_to_u64!(sys_scheduling_context_bind(x0))),
+        nr::FUTEX_WAKE => dispatch_ok(ctx, result_to_u64!(sys_futex_wake(x0, x1))),
+        nr::TIMER_CREATE => dispatch_ok(ctx, result_to_u64!(sys_timer_create(x0))),
+        nr::INTERRUPT_REGISTER => dispatch_ok(ctx, result_to_u64!(sys_interrupt_register(x0))),
+        nr::INTERRUPT_ACK => dispatch_ok(ctx, result_to_u64!(sys_interrupt_ack(x0))),
+        nr::DEVICE_MAP => dispatch_ok(ctx, result_to_u64!(sys_device_map(x0, x1))),
+        nr::DMA_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_dma_alloc(x0, x1))),
+        nr::DMA_FREE => dispatch_ok(ctx, result_to_u64!(sys_dma_free(x0, x1))),
+        nr::THREAD_CREATE => dispatch_ok(ctx, result_to_u64!(sys_thread_create(x0, x1))),
+        nr::PROCESS_CREATE => dispatch_ok(ctx, result_to_u64!(sys_process_create(x0, x1))),
+        nr::PROCESS_START => dispatch_ok(ctx, result_to_u64!(sys_process_start(x0))),
+        nr::HANDLE_SEND => dispatch_ok(ctx, result_to_u64!(sys_handle_send(x0, x1))),
+        nr::PROCESS_KILL => dispatch_ok(ctx, result_to_u64!(sys_process_kill(x0))),
         nr::MEMORY_SHARE => {
-            dispatch_syscall!(c, ctx, sys_memory_share(c.x[0], c.x[1], c.x[2]))
-        }
-        nr::MEMORY_ALLOC => dispatch_syscall!(c, ctx, sys_memory_alloc(c.x[0])),
-        nr::MEMORY_FREE => dispatch_syscall!(c, ctx, sys_memory_free(c.x[0], c.x[1])),
+            let x2 = unsafe { (core::ptr::addr_of!((*ctx).x) as *const u64).add(2).read() };
 
-        _ => {
-            c.x[0] = Error::UnknownSyscall as i64 as u64;
-
-            ctx as *const Context
+            dispatch_ok(ctx, result_to_u64!(sys_memory_share(x0, x1, x2)))
         }
+        nr::MEMORY_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_memory_alloc(x0))),
+        nr::MEMORY_FREE => dispatch_ok(ctx, result_to_u64!(sys_memory_free(x0, x1))),
+
+        _ => dispatch_ok(ctx, result_to_u64!(Err::<u64, Error>(Error::UnknownSyscall))),
     }
+}
+
+/// Write a syscall result to ctx.x[0] via raw pointer (no reference creation).
+///
+/// Accepts a pre-converted u64 value (Ok value or error code). Avoids creating
+/// `&mut *ctx` which would alias with the scheduler lock's `&mut State`.
+#[inline(never)]
+fn dispatch_ok(ctx: *mut Context, val: u64) -> *const Context {
+
+    unsafe {
+        let x0_ptr = core::ptr::addr_of_mut!((*ctx).x) as *mut u64;
+
+        x0_ptr.write(val);
+    }
+
+    ctx as *const Context
 }

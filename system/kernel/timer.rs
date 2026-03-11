@@ -63,11 +63,14 @@ fn reprogram(freq: u64) {
     let tval = freq / TICKS_PER_SEC;
 
     unsafe {
+        // No nomem: writing CNTP_TVAL has side effects (resets the timer
+        // countdown and de-asserts the interrupt). LLVM must not reorder
+        // this past memory operations in check_expired().
         core::arch::asm!(
             "msr cntp_tval_el0, {tval}",
             "isb",
             tval = in(reg) tval,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
 }
@@ -118,7 +121,9 @@ pub fn counter() -> u64 {
     let cnt: u64;
 
     unsafe {
-        core::arch::asm!("mrs {0}, cntpct_el0", out(reg) cnt, options(nostack, nomem));
+        // No nomem: the counter is monotonically increasing. With nomem,
+        // LLVM could CSE or hoist repeated reads, returning a stale value.
+        core::arch::asm!("mrs {0}, cntpct_el0", out(reg) cnt, options(nostack));
     }
 
     cnt
@@ -198,17 +203,19 @@ pub fn init() {
     reprogram(freq);
 
     unsafe {
+        // No nomem: enabling the timer starts generating IRQs — a side effect
+        // that LLVM must not reorder past surrounding memory operations.
         core::arch::asm!(
             "mov x0, #1",
             "msr cntp_ctl_el0, x0",       // ENABLE=1, IMASK=0
             out("x0") _,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
     // Clear DAIF.I to unmask IRQs at the CPU level.
     // GIC routing is already configured; this is the final gate.
     unsafe {
-        core::arch::asm!("msr daifclr, #2", options(nostack, nomem));
+        core::arch::asm!("msr daifclr, #2", options(nostack));
     }
 }
 /// Register a thread as the waiter for this timer.

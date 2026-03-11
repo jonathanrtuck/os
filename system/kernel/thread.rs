@@ -56,6 +56,10 @@ pub struct Thread {
     /// Handles this thread is waiting on via the `wait` syscall.
     /// Empty when not in a wait. Cleared on wake or early return.
     pub(crate) wait_set: Vec<WaitEntry>,
+    /// Internal timeout timer from a `wait` with finite timeout.
+    /// Cleaned up on the next `wait` call (deferred cleanup for the
+    /// Blocked path, where sys_wait can't run cleanup code).
+    pub(crate) timeout_timer: Option<super::timer::TimerId>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ThreadId(pub u64);
@@ -65,6 +69,10 @@ pub(crate) struct WaitEntry {
     pub(crate) object: HandleObject,
     pub(crate) user_index: u8,
 }
+
+/// Sentinel user_index for internal timeout timer entries in the wait set.
+/// Not a valid user handle index (max handles = 16, index fits in 0..15).
+pub(crate) const TIMEOUT_SENTINEL: u8 = 0xFF;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadState {
@@ -109,6 +117,10 @@ impl Thread {
     /// Finds the matching entry, clears the wait set, and returns the
     /// user_index to place in x0. Returns 0 if the wait set is empty
     /// (thread was not in a `wait` syscall).
+    ///
+    /// If the matching entry has `user_index == TIMEOUT_SENTINEL`, this is
+    /// an internal timeout timer from a `wait` with finite timeout. Returns
+    /// the `WouldBlock` error code instead of a handle index.
     pub(crate) fn complete_wait_for(&mut self, reason: &HandleObject) -> u64 {
         if self.wait_set.is_empty() {
             return 0;
@@ -118,7 +130,14 @@ impl Thread {
             .wait_set
             .iter()
             .find(|e| e.object == *reason)
-            .map(|e| e.user_index as u64)
+            .map(|e| {
+                if e.user_index == TIMEOUT_SENTINEL {
+                    // Internal timeout fired → return WouldBlock error code.
+                    super::syscall::WOULD_BLOCK_RAW
+                } else {
+                    e.user_index as u64
+                }
+            })
             .unwrap_or(0);
 
         self.wait_set.clear();
@@ -239,6 +258,7 @@ impl Thread {
             wake_pending: false,
             wake_result: 0,
             wait_set: Vec::new(),
+            timeout_timer: None,
         }
     }
 
