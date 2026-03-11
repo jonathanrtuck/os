@@ -47,6 +47,8 @@ pub struct AddressSpace {
     heap_pages_allocated: u64,
     /// Maximum heap pages this process may allocate.
     heap_pages_limit: u64,
+    /// Set by free_all() to prevent double-free in Drop.
+    freed: bool,
 }
 pub(crate) struct DmaAllocation {
     va: u64,
@@ -81,6 +83,7 @@ impl AddressSpace {
             heap_allocations: Vec::new(),
             heap_pages_allocated: 0,
             heap_pages_limit: DEFAULT_HEAP_PAGE_LIMIT,
+            freed: false,
         }
     }
 
@@ -281,6 +284,8 @@ impl AddressSpace {
         }
 
         page_allocator::free_frame(self.l0_pa);
+
+        self.freed = true;
     }
     /// Invalidate all TLB entries for this address space's ASID.
     pub fn invalidate_tlb(&self) {
@@ -606,6 +611,23 @@ impl PageAttrs {
     /// User code: readable + executable, not writable.
     pub fn user_rx() -> Self {
         Self(ATTRIDX0 | AF | SH_INNER | AP_EL0 | AP_RO | NG | PXN)
+    }
+}
+
+impl Drop for AddressSpace {
+    fn drop(&mut self) {
+        // Safety net: free all owned resources if not already cleaned up.
+        // The normal process cleanup path calls invalidate_tlb() + free_all()
+        // + address_space_id::free() explicitly and sets freed = true. This
+        // catches error paths (e.g. partial allocation failure in
+        // create_from_user_elf) where the address space was never loaded
+        // into TTBR0 and cleanup would otherwise leak frames.
+        if !self.freed {
+            self.invalidate_tlb();
+            self.free_all();
+
+            super::address_space_id::free(self.asid);
+        }
     }
 }
 

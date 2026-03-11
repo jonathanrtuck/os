@@ -223,11 +223,18 @@ pub fn set_kernel_guard_page(va: usize) {
             }
         }
 
-        // Replace L2 block with table descriptor pointing to the new L3.
-        // SAFETY: l2_table is the live TTBR1 L2 — single 64-bit write is
-        // atomic on AArch64. The L3 table maps identical pages. The
-        // subsequent tlb_invalidate_all() ensures all cores see the new
-        // table descriptor (break-before-make safety).
+        // Break-before-make (ARMv8 ARM B2.2.1): replacing a valid block
+        // descriptor with a valid table descriptor requires an intermediate
+        // invalid step. Without this, other cores walking the TLB could see
+        // an inconsistent descriptor (CONSTRAINED UNPREDICTABLE).
+        unsafe {
+            // Step 1: Write invalid entry (break).
+            l2_table.add(l2_idx).write_volatile(0);
+        }
+
+        tlb_invalidate_all();
+
+        // Step 2: Write the new table descriptor (make).
         unsafe {
             l2_table
                 .add(l2_idx)
