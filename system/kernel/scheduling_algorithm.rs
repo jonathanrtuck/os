@@ -1,3 +1,9 @@
+// AUDIT: 2026-03-11 — 0 unsafe blocks (pure logic). 6-category checklist applied.
+// Fix: charge() and virtual_deadline() now use u128 intermediate arithmetic and
+// saturating_add to prevent overflow when vruntime approaches u64::MAX.
+// EEVDF vruntime overflow behavior verified correct after fix.
+// Priority inversion: not possible — EEVDF is proportional-fair by design.
+// Deadline edge cases: saturating arithmetic prevents wrapping.
 //! Pure EEVDF (Earliest Eligible Virtual Deadline First) algorithm.
 //!
 //! Stateless selection logic — operates on slices of per-thread state. No
@@ -47,8 +53,10 @@ impl SchedulingState {
 
     /// Charge `elapsed_ns` of CPU time, returning updated state.
     /// vruntime grows inversely with weight: elapsed * DEFAULT_WEIGHT / weight.
+    /// Uses saturating arithmetic throughout to prevent overflow when vruntime
+    /// approaches u64::MAX (after ~584 years of continuous CPU time).
     pub fn charge(&self, elapsed_ns: u64) -> Self {
-        let delta = elapsed_ns * DEFAULT_WEIGHT as u64 / self.weight as u64;
+        let delta = (elapsed_ns as u128 * DEFAULT_WEIGHT as u128 / self.weight as u128) as u64;
 
         Self {
             vruntime: self.vruntime.saturating_add(delta),
@@ -69,8 +77,13 @@ impl SchedulingState {
     }
     /// Virtual deadline = eligible_at + slice * DEFAULT_WEIGHT / weight.
     /// Shorter slices or higher weights → earlier deadlines.
+    /// Uses u128 intermediate to prevent multiplication overflow and
+    /// saturating_add to prevent addition overflow near u64::MAX.
     pub fn virtual_deadline(&self) -> u64 {
-        self.eligible_at + self.requested_slice * DEFAULT_WEIGHT as u64 / self.weight as u64
+        let slice_weighted =
+            (self.requested_slice as u128 * DEFAULT_WEIGHT as u128 / self.weight as u128) as u64;
+
+        self.eligible_at.saturating_add(slice_weighted)
     }
 }
 

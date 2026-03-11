@@ -1,3 +1,6 @@
+// AUDIT: 2026-03-11 — 4 unsafe blocks verified, 6-category checklist applied.
+// Fix: added SAFETY comments to swap_ttbr0 and block_current_unless_woken.
+// Idle thread park fix (Fix 1) re-verified sound.
 //! SMP-aware EEVDF scheduler with scheduling contexts.
 //!
 //! Two-layer design:
@@ -520,10 +523,17 @@ fn swap_ttbr0(old: &Thread, new: &Thread) {
     let new_ttbr0 = ttbr0_for(new);
 
     if old_ttbr0 != new_ttbr0 {
+        // SAFETY: Inline assembly for TLB invalidation and TTBR0 switch.
+        // This sequence is correct per the ARMv8 architecture:
+        //   1. DSB ISHST — ensures prior page table writes are visible
+        //   2. TLBI VMALLE1IS — invalidates ALL TLB entries (inner-shareable)
+        //   3. DSB ISH — ensures TLB invalidation completes before TTBR0 write
+        //   4. MSR TTBR0_EL1 — switches the user address space
+        //   5. ISB — ensures subsequent fetches use the new TTBR0
+        // `new_ttbr0` is a valid TTBR0 value from the thread's address space.
+        // `nostack` is correct — no stack operations in the asm block.
         unsafe {
             core::arch::asm!(
-                // Full TLB invalidation on context switch. Flush ALL entries
-                // (both ASIDs and global) before switching TTBR0.
                 "dsb ishst",
                 "tlbi vmalle1is",
                 "dsb ish",
@@ -645,8 +655,13 @@ pub fn block_current_unless_woken(ctx: *mut Context) -> BlockResult {
 
         thread.wait_set.clear();
 
-        // Write return value via raw pointer — no `&mut *ctx` which would alias
-        // with `s: &mut State` (both cover the same Context memory).
+        // SAFETY: Write return value via raw pointer to avoid aliasing UB.
+        // `ctx` is a `*mut Context` pointing to the current thread's context
+        // (offset 0 of the Thread). We cannot create `&mut *ctx` because
+        // `s: &mut State` already borrows the State that contains this Context
+        // (via `cores[core].current`). Using `addr_of_mut!` on the raw pointer
+        // avoids creating a second `&mut` reference. The pointer is valid and
+        // properly aligned because it comes from a live Box<Thread>.
         unsafe {
             let x0_ptr = core::ptr::addr_of_mut!((*ctx).x) as *mut u64;
 

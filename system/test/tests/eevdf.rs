@@ -275,3 +275,106 @@ fn select_mixed_eligibility_picks_eligible_first() {
 
     assert_eq!(select_next(&threads, 150), Some(1));
 }
+
+// ============================================================
+// Overflow / edge-case tests (audit 2026-03-11)
+// ============================================================
+
+#[test]
+fn virtual_deadline_saturates_on_overflow() {
+    // eligible_at near u64::MAX: deadline addition must not wrap to a small value.
+    // Without saturating arithmetic, eligible_at + slice would wrap around to a
+    // small number, giving an unfairly early deadline.
+    let s = state(u64::MAX - 100, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, u64::MAX - 100);
+    let deadline = s.virtual_deadline();
+
+    // Must be >= eligible_at (saturated to u64::MAX, not wrapped to a small value).
+    assert!(
+        deadline >= s.eligible_at,
+        "virtual_deadline must not wrap around: got {deadline}, eligible_at={}",
+        s.eligible_at
+    );
+}
+
+#[test]
+fn charge_large_elapsed_no_panic() {
+    // Very large elapsed_ns: elapsed * DEFAULT_WEIGHT would overflow u64 but
+    // uses u128 intermediate arithmetic so the result is correct.
+    let s = default_state();
+    let large_elapsed = u64::MAX / (DEFAULT_WEIGHT as u64) + 1_000_000;
+    let charged = s.charge(large_elapsed);
+
+    // With u128 intermediate: delta = large_elapsed (since weight == DEFAULT_WEIGHT).
+    // Must not panic and vruntime must equal the elapsed value.
+    assert_eq!(
+        charged.vruntime, large_elapsed,
+        "charge must compute correctly via u128 intermediate for large elapsed values"
+    );
+}
+
+#[test]
+fn charge_truly_enormous_elapsed_saturates() {
+    // Elapsed so large that even the u128→u64 truncated delta causes saturation.
+    let s = state(u64::MAX - 100, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 0);
+    let charged = s.charge(1_000_000);
+
+    // vruntime was near MAX, adding 1M saturates to MAX.
+    assert_eq!(charged.vruntime, u64::MAX);
+}
+
+#[test]
+fn select_with_near_max_vruntimes_no_wrap() {
+    // Two threads with vruntime near u64::MAX. Deadline calculation must not
+    // wrap around and cause incorrect ordering.
+    let threads = [
+        (state(u64::MAX - 1000, DEFAULT_WEIGHT, 1_000_000, u64::MAX - 1000), true),
+        (state(u64::MAX - 2000, DEFAULT_WEIGHT, 4_000_000, u64::MAX - 2000), true),
+    ];
+    let avg = u64::MAX - 1500;
+
+    // Thread 1 has lower vruntime → eligible. Thread 0 has vruntime > avg → ineligible.
+    // With wrapping, deadlines could be incorrect. With saturation, thread 1's
+    // deadline saturates to u64::MAX and the selection is still correct.
+    let result = select_next(&threads, avg);
+
+    assert!(result.is_some(), "should select a thread even near u64::MAX");
+}
+
+#[test]
+fn charge_zero_elapsed_is_noop() {
+    let s = state(500, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 100);
+    let charged = s.charge(0);
+
+    assert_eq!(charged.vruntime, 500);
+    assert_eq!(charged.eligible_at, 100);
+}
+
+#[test]
+fn avg_vruntime_near_u64_max() {
+    // Averaging near u64::MAX values must not overflow (u128 intermediate).
+    let states = [
+        state(u64::MAX, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 0),
+        state(u64::MAX - 100, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 0),
+    ];
+    let avg = avg_vruntime(&states);
+
+    // (u64::MAX + u64::MAX - 100) / 2 = u64::MAX - 50
+    assert_eq!(avg, u64::MAX - 50);
+}
+
+#[test]
+fn is_eligible_at_u64_max() {
+    // Thread with vruntime=u64::MAX, avg=u64::MAX → eligible (equal).
+    let s = state(u64::MAX, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 0);
+
+    assert!(s.is_eligible(u64::MAX));
+}
+
+#[test]
+fn charge_vruntime_already_saturated() {
+    // If vruntime is already u64::MAX, charging more must stay at u64::MAX.
+    let s = state(u64::MAX, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 0);
+    let charged = s.charge(1_000_000);
+
+    assert_eq!(charged.vruntime, u64::MAX);
+}

@@ -176,3 +176,72 @@ fn validate_period_too_large() {
 fn validate_budget_exceeds_period() {
     assert!(!validate_params(5_000_000, 1_000_000));
 }
+
+// ============================================================
+// Overflow / edge-case tests (audit 2026-03-11)
+// ============================================================
+
+#[test]
+fn replenish_at_near_u64_max_saturates() {
+    // replenish_at near u64::MAX: advancing the next replenish point must
+    // saturate rather than wrap around.
+    let ctx = SchedulingContext {
+        budget: 1_000_000,
+        period: 5_000_000,
+        remaining: 0,
+        replenish_at: u64::MAX - 1_000,
+    };
+    let replenished = ctx.maybe_replenish(u64::MAX);
+
+    // Budget should be replenished.
+    assert_eq!(replenished.remaining, 1_000_000);
+    // replenish_at must saturate, not wrap.
+    assert!(
+        replenished.replenish_at >= ctx.replenish_at,
+        "replenish_at must not wrap: got {}, was {}",
+        replenished.replenish_at,
+        ctx.replenish_at
+    );
+}
+
+#[test]
+fn charge_exact_budget_leaves_zero() {
+    let ctx = SchedulingContext::new(500_000, 5_000_000, 0);
+    let charged = ctx.charge(500_000);
+
+    assert_eq!(charged.remaining, 0);
+    assert!(!charged.has_budget());
+}
+
+#[test]
+fn charge_more_than_u64_max_remaining_saturates() {
+    // Even with an impossibly large elapsed, remaining saturates at 0.
+    let ctx = SchedulingContext::new(1_000, 5_000_000, 0);
+    let charged = ctx.charge(u64::MAX);
+
+    assert_eq!(charged.remaining, 0);
+}
+
+#[test]
+fn validate_budget_equals_period() {
+    // budget == period means 100% CPU share — valid.
+    assert!(validate_params(10_000_000, 10_000_000));
+}
+
+#[test]
+fn validate_min_budget_max_period() {
+    assert!(validate_params(MIN_BUDGET_NS, MAX_PERIOD_NS));
+}
+
+#[test]
+fn replenish_many_skipped_periods_correct_next() {
+    // Skip exactly 10 periods. Next replenish should be at period 11.
+    let ctx = SchedulingContext::new(1_000_000, 10_000_000, 0);
+    let drained = ctx.charge(1_000_000);
+    // now = 10 * 10_000_000 + 5_000_000 = 105_000_000
+    let replenished = drained.maybe_replenish(105_000_000);
+
+    assert_eq!(replenished.remaining, 1_000_000);
+    // periods_skipped = (105M - 10M) / 10M = 9. next = 10M + (9+1)*10M = 110M.
+    assert_eq!(replenished.replenish_at, 110_000_000);
+}

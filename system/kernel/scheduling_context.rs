@@ -1,3 +1,8 @@
+// AUDIT: 2026-03-11 — 0 unsafe blocks (pure logic). 6-category checklist applied.
+// All arithmetic uses saturating operations (saturating_sub, saturating_add,
+// saturating_mul). validate_params prevents division-by-zero (period >= 1ms).
+// State transitions (new→charge→replenish cycle) verified complete and sound.
+// No bugs found.
 //! Scheduling context — per-workload temporal isolation.
 //!
 //! A scheduling context is a kernel object that enforces a CPU budget over a

@@ -1,3 +1,7 @@
+// AUDIT: 2026-03-11 — 1 unsafe block verified, 6-category checklist applied.
+// SMP isolation verified: PERCPU uses AtomicBool with Release/Acquire ordering.
+// core_id() reads MPIDR_EL1 (read-only CPU identification register, nomem correct).
+// No data races possible — all shared state is atomic. No bugs found.
 //! Per-CPU data structures.
 //!
 //! Each core has a `PerCpu` slot indexed by its MPIDR affinity (core ID).
@@ -25,6 +29,10 @@ static PERCPU: [PerCpu; MAX_CORES] = {
 pub fn core_id() -> u32 {
     let mpidr: u64;
 
+    // SAFETY: MPIDR_EL1 is a read-only CPU identification register.
+    // It does not access memory (nomem correct) and has no side effects.
+    // The register value is stable for the lifetime of the core.
+    // nostack is correct — no stack operations in the asm block.
     unsafe {
         core::arch::asm!("mrs {}, mpidr_el1", out(reg) mpidr, options(nostack, nomem));
     }
