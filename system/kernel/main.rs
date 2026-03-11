@@ -494,10 +494,10 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     // Microkernel pattern: kernel provides mechanism, init provides policy.
     let (init_pid, _) = process::create_from_user_elf(INIT_ELF).expect("failed to create init");
     let (ch_a, ch_b) = channel::create().expect("failed to create init channel");
-    // Write device manifest to the channel shared page.
-    let (shared_pa, _) = channel::shared_info(ch_a).expect("channel shared page");
+    // Write device manifest to channel page 0 (kernel→init direction).
+    let pages = channel::shared_pages(ch_a).expect("channel shared pages");
 
-    write_device_manifest(shared_pa, &devices, device_count);
+    write_device_manifest(pages[0], &devices, device_count);
 
     // Give init the channel endpoint.
     channel::setup_endpoint(ch_b, init_pid).expect("failed to setup init channel");

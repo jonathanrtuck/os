@@ -1,27 +1,18 @@
 //! Compositor — composites overlapping surfaces with alpha blending.
 //!
-//! Receives framebuffer info (VA, dimensions, stride) from init via channel
-//! shared memory. Draws each panel into its own surface buffer, then composites
-//! them onto the framebuffer in z-order with per-pixel alpha blending.
-//!
-//! # Channel shared page layout (written by init before start)
-//!
-//! ```text
-//! offset 0:  fb_va      (u64) — framebuffer VA in this process's address space
-//! offset 8:  fb_width   (u32) — display width in pixels
-//! offset 12: fb_height  (u32) — display height in pixels
-//! offset 16: fb_stride  (u32) — bytes per row
-//! offset 20: fb_size    (u32) — total framebuffer size in bytes
-//! ```
+//! Receives framebuffer config via IPC ring buffer from init. Draws each panel
+//! into its own surface buffer, then composites them onto the framebuffer in
+//! z-order with per-pixel alpha blending.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
-/// Channel shared memory base (first channel page in our address space).
-const SHM: *const u8 = 0x4000_0000 as *const u8;
-
+/// Channel shared memory base (first channel in our address space).
+const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+// Protocol message type (must match init's definition).
+const MSG_COMPOSITOR_CONFIG: u32 = 3;
 // Panel surface dimensions. Each panel gets its own pixel buffer in BSS,
 // demand-paged by the kernel when first touched.
 const PANEL_W: u32 = 400;
@@ -29,10 +20,18 @@ const PANEL_H: u32 = 260;
 const PANEL_STRIDE: u32 = PANEL_W * 4;
 const PANEL_BUF_SIZE: usize = (PANEL_STRIDE * PANEL_H) as usize;
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CompositorConfig {
+    fb_va: u64,
+    fb_width: u32,
+    fb_height: u32,
+    fb_stride: u32,
+    fb_size: u32,
+}
 static mut PANEL_A_BUF: [u8; PANEL_BUF_SIZE] = [0u8; PANEL_BUF_SIZE];
 static mut PANEL_B_BUF: [u8; PANEL_BUF_SIZE] = [0u8; PANEL_BUF_SIZE];
 static mut PANEL_C_BUF: [u8; PANEL_BUF_SIZE] = [0u8; PANEL_BUF_SIZE];
-
 // TrueType font rasterization scratch space (BSS, demand-paged).
 static mut TTF_SCRATCH: drawing::RasterScratch = drawing::RasterScratch::zeroed();
 static mut TTF_RASTER_BUF: [u8; 128 * 128] = [0u8; 128 * 128];
@@ -311,12 +310,21 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"\n");
     }
 
-    // Read framebuffer info from channel shared page.
-    let fb_va = unsafe { core::ptr::read_volatile(SHM as *const u64) } as usize;
-    let fb_width = unsafe { core::ptr::read_volatile(SHM.add(8) as *const u32) };
-    let fb_height = unsafe { core::ptr::read_volatile(SHM.add(12) as *const u32) };
-    let fb_stride = unsafe { core::ptr::read_volatile(SHM.add(16) as *const u32) };
-    let fb_size = unsafe { core::ptr::read_volatile(SHM.add(20) as *const u32) };
+    // Read compositor config from ring buffer (first message, sent by init).
+    let ch = unsafe { ipc::Channel::from_base(CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    let mut msg = ipc::Message::new(0);
+
+    if !ch.try_recv(&mut msg) || msg.msg_type != MSG_COMPOSITOR_CONFIG {
+        sys::print(b"compositor: no config message\n");
+        sys::exit();
+    }
+
+    let config: CompositorConfig = unsafe { msg.payload_as() };
+    let fb_va = config.fb_va as usize;
+    let fb_width = config.fb_width;
+    let fb_height = config.fb_height;
+    let fb_stride = config.fb_stride;
+    let fb_size = config.fb_size;
 
     if fb_va == 0 || fb_width == 0 || fb_height == 0 {
         sys::print(b"compositor: bad framebuffer info\n");

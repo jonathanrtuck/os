@@ -194,10 +194,10 @@ fn is_user_range_readable(start: u64, len: u64) -> bool {
     true
 }
 fn sys_channel_create() -> Result<u64, Error> {
-    // Allocate channel (shared page + two endpoint IDs).
+    // Allocate channel (two shared pages + two endpoint IDs).
     let (ch_a, ch_b) = channel::create().ok_or(Error::OutOfMemory)?;
-    // Insert both handles first, map shared page only on success.
-    // This avoids leaking a mapped shared page if the second insert fails.
+    // Insert both handles first, map shared pages only on success.
+    // This avoids leaking mapped shared pages if the second insert fails.
     let result = scheduler::current_process_do(|process| {
         let handle_a = process
             .handles
@@ -208,14 +208,18 @@ fn sys_channel_create() -> Result<u64, Error> {
             .insert(HandleObject::Channel(ch_b), Rights::READ_WRITE)
         {
             Ok(handle_b) => {
-                // Both handles inserted — now map the shared page using the
+                // Both handles inserted — now map both shared pages using the
                 // per-process channel SHM bump allocator.
-                let (shared_pa, _global_va) =
-                    channel::shared_info(ch_a).ok_or(HandleError::InvalidHandle)?;
+                let pages =
+                    channel::shared_pages(ch_a).ok_or(HandleError::InvalidHandle)?;
 
                 process
                     .address_space
-                    .map_channel_page(shared_pa.as_u64())
+                    .map_channel_page(pages[0].as_u64())
+                    .ok_or(HandleError::TableFull)?;
+                process
+                    .address_space
+                    .map_channel_page(pages[1].as_u64())
                     .ok_or(HandleError::TableFull)?;
 
                 Ok((handle_a, handle_b))
@@ -471,9 +475,9 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
 
         Ok((target_pid, source_obj, source_rights))
     })?;
-    // Phase 1.5: If the source is a Channel, get shared page PA (channel lock).
-    let channel_pa = match source_obj {
-        HandleObject::Channel(ch_id) => channel::shared_info(ch_id).map(|(pa, _va)| pa),
+    // Phase 1.5: If the source is a Channel, get shared page PAs (channel lock).
+    let channel_pages = match source_obj {
+        HandleObject::Channel(ch_id) => channel::shared_pages(ch_id),
         _ => None,
     };
     // Phase 2: Insert into target process (scheduler lock via with_process).
@@ -483,14 +487,18 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
             return Err(Error::InvalidArgument);
         }
 
-        // For Channel handles, map the shared page into the target's address space
-        // using the target's per-process channel SHM bump allocator. This ensures
-        // the first channel received maps at CHANNEL_SHM_BASE regardless of the
-        // global channel index.
-        if let Some(pa) = channel_pa {
+        // For Channel handles, map both shared pages into the target's address
+        // space using the target's per-process channel SHM bump allocator. This
+        // ensures the first channel received maps at CHANNEL_SHM_BASE regardless
+        // of the global channel index.
+        if let Some(pages) = channel_pages {
             target
                 .address_space
-                .map_channel_page(pa.as_u64())
+                .map_channel_page(pages[0].as_u64())
+                .ok_or(Error::OutOfMemory)?;
+            target
+                .address_space
+                .map_channel_page(pages[1].as_u64())
                 .ok_or(Error::OutOfMemory)?;
         }
 

@@ -17,34 +17,23 @@
 //! 5. TRANSFER_TO_HOST_2D — copy rectangle from guest to host resource
 //! 6. RESOURCE_FLUSH — present the resource on screen
 //!
-//! # Channel shared page layout (written by init before start)
-//!
-//! ```text
-//! offset 0:  mmio_pa    (u64) — physical address of the MMIO region
-//! offset 8:  irq        (u32) — GIC IRQ number
-//! offset 16: fb_pa      (u64) — framebuffer physical address
-//! offset 24: fb_width   (u32) — framebuffer width in pixels
-//! offset 28: fb_height  (u32) — framebuffer height in pixels
-//! ```
+//! Receives device and framebuffer config via IPC ring buffer from init.
 
 #![no_std]
 #![no_main]
 
-/// Channel shared memory base (first channel page in our address space).
-const SHM: *const u8 = 0x4000_0000 as *const u8;
-
+/// Channel shared memory base (first channel in our address space).
+const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+// Protocol message type (must match init's definition).
+const MSG_GPU_CONFIG: u32 = 2;
 /// Control virtqueue index.
 const VIRTQ_CONTROL: u32 = 0;
-
 /// Resource ID for our framebuffer (arbitrary nonzero).
 const FB_RESOURCE_ID: u32 = 1;
-
 /// Scanout index (first/only display).
 const SCANOUT_ID: u32 = 0;
-
 /// Bytes per pixel (BGRA8888).
 const FB_BPP: u32 = 4;
-
 // virtio-gpu command types (enum auto-increments from 0x0100).
 const CMD_GET_DISPLAY_INFO: u32 = 0x0100;
 const CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
@@ -52,11 +41,9 @@ const CMD_SET_SCANOUT: u32 = 0x0103;
 const CMD_RESOURCE_FLUSH: u32 = 0x0104;
 const CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
 const CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
-
 // virtio-gpu response types.
 const RESP_OK_NODATA: u32 = 0x1100;
 const RESP_OK_DISPLAY_INFO: u32 = 0x1101;
-
 // virtio-gpu pixel format (B8G8R8A8_UNORM).
 const FORMAT_B8G8R8A8_UNORM: u32 = 1;
 
@@ -84,6 +71,16 @@ struct DisplayInfo {
     rect_height: u32,
     enabled: u32,
     flags: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GpuConfig {
+    mmio_pa: u64,
+    irq: u32,
+    _pad: u32,
+    fb_pa: u64,
+    fb_width: u32,
+    fb_height: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -479,12 +476,21 @@ fn transfer_to_host(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    // Read device info + framebuffer info from channel shared page.
-    let mmio_pa = unsafe { core::ptr::read_volatile(SHM as *const u64) };
-    let irq = unsafe { core::ptr::read_volatile(SHM.add(8) as *const u32) };
-    let fb_pa = unsafe { core::ptr::read_volatile(SHM.add(16) as *const u64) };
-    let fb_width = unsafe { core::ptr::read_volatile(SHM.add(24) as *const u32) };
-    let fb_height = unsafe { core::ptr::read_volatile(SHM.add(28) as *const u32) };
+    // Read GPU config from ring buffer (first message, sent by init).
+    let ch = unsafe { ipc::Channel::from_base(CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    let mut msg = ipc::Message::new(0);
+
+    if !ch.try_recv(&mut msg) || msg.msg_type != MSG_GPU_CONFIG {
+        sys::print(b"virtio-gpu: no config message\n");
+        sys::exit();
+    }
+
+    let config: GpuConfig = unsafe { msg.payload_as() };
+    let mmio_pa = config.mmio_pa;
+    let irq = config.irq;
+    let fb_pa = config.fb_pa;
+    let fb_width = config.fb_width;
+    let fb_height = config.fb_height;
     let fb_size = fb_width * fb_height * FB_BPP;
     // Map the MMIO region (sub-page alignment for virtio-mmio).
     let page_offset = mmio_pa & 0xFFF;

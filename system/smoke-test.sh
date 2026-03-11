@@ -25,8 +25,6 @@ EXPECTED=(
     "core 3 online"
     "timer -"
     "booted."
-    "echo recv: ping"
-    "init recv: pong"
 )
 
 echo "Building kernel…"

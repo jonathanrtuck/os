@@ -66,12 +66,20 @@ fn main() {
 
     rustc_rlib(&rustc, &drawing_src, &drawing_rlib, "drawing", &[]);
 
+    let ipc_src = manifest_dir.join("libraries/ipc/lib.rs");
+    let ipc_rlib = out_dir.join("libipc.rlib");
+
+    rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[]);
+
     // Step 2: Compile all non-init programs.
     for &(name, dir, needs_virtio, needs_drawing) in PROGRAMS {
         let src_dir = manifest_dir.join(dir);
         let main_rs = src_dir.join("main.rs");
         let elf_path = out_dir.join(format!("{name}.elf"));
-        let mut externs = vec![("sys", sys_rlib.clone())];
+        let mut externs = vec![
+            ("sys", sys_rlib.clone()),
+            ("ipc", ipc_rlib.clone()),
+        ];
 
         if needs_virtio {
             externs.push(("virtio", virtio_rlib.clone()));
@@ -114,7 +122,7 @@ fn main() {
         &init_src,
         &init_elf,
         &link_ld,
-        &[("sys", sys_rlib.clone())],
+        &[("sys", sys_rlib.clone()), ("ipc", ipc_rlib.clone())],
         &init_env,
     );
     println!("cargo:rerun-if-changed={}", init_src.display());
@@ -122,6 +130,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", sys_src.display());
     println!("cargo:rerun-if-changed={}", virtio_src.display());
     println!("cargo:rerun-if-changed={}", drawing_src.display());
+    println!("cargo:rerun-if-changed={}", ipc_src.display());
 }
 /// Compile a Rust source file as a binary ELF.
 fn rustc_bin(

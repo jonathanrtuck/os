@@ -7,7 +7,11 @@
 //! This is the microkernel pattern: kernel provides mechanism, init provides
 //! policy. Matches Fuchsia's component_manager, seL4's root task, QNX's procnto.
 //!
-//! # Kernel channel shared page layout (device manifest)
+//! # Kernel channel (raw bytes, not ring buffer)
+//!
+//! The kernel writes the device manifest as raw bytes before starting init.
+//! The kernel doesn't use the ipc library — it writes directly to the shared
+//! page. This is the only non-ring-buffer channel in the system.
 //!
 //! ```text
 //! offset 0:  device_count (u32)
@@ -16,25 +20,11 @@
 //! offset 24: device[1]: ...
 //! ```
 //!
-//! # GPU driver channel shared page layout
+//! # Init-created channels (ring buffer messages)
 //!
-//! ```text
-//! offset 0:  mmio_pa    (u64)
-//! offset 8:  irq        (u32)
-//! offset 16: fb_pa      (u64) — framebuffer physical address
-//! offset 24: fb_width   (u32)
-//! offset 28: fb_height  (u32)
-//! ```
-//!
-//! # Compositor channel shared page layout
-//!
-//! ```text
-//! offset 0:  fb_va      (u64) — framebuffer VA in compositor's address space
-//! offset 8:  fb_width   (u32)
-//! offset 12: fb_height  (u32)
-//! offset 16: fb_stride  (u32)
-//! offset 20: fb_size    (u32)
-//! ```
+//! All channels that init creates to drivers and compositor use structured
+//! IPC via the `ipc` library. Configuration is sent as the first message
+//! on the channel before the child process starts.
 
 #![no_std]
 #![no_main]
@@ -44,7 +34,7 @@
 include!(env!("INIT_EMBEDDED_RS"));
 
 /// Channel shared memory base. The kernel's channel is at page 0.
-/// Channels created by init are at subsequent pages.
+/// Channels created by init are at subsequent 2-page pairs.
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
 /// Framebuffer dimensions (matches QEMU virtio-gpu default).
 const FB_WIDTH: u32 = 1024;
@@ -56,11 +46,51 @@ const FB_SIZE: u32 = FB_STRIDE * FB_HEIGHT;
 const VIRTIO_DEVICE_BLK: u32 = 2;
 const VIRTIO_DEVICE_CONSOLE: u32 = 3;
 const VIRTIO_DEVICE_GPU: u32 = 16;
+// --- Protocol message types (shared with receivers) ---
+const MSG_DEVICE_CONFIG: u32 = 1;
+const MSG_GPU_CONFIG: u32 = 2;
+const MSG_COMPOSITOR_CONFIG: u32 = 3;
 
-/// Compute the VA of channel shared page N in init's address space.
-/// Page 0 = kernel channel, page 1+ = channels created by init.
-fn channel_shm_va(page_index: usize) -> usize {
-    CHANNEL_SHM_BASE + page_index * 4096
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DeviceConfig {
+    mmio_pa: u64,
+    irq: u32,
+    _pad: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CompositorConfig {
+    fb_va: u64,
+    fb_width: u32,
+    fb_height: u32,
+    fb_stride: u32,
+    fb_size: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GpuConfig {
+    mmio_pa: u64,
+    irq: u32,
+    _pad: u32,
+    fb_pa: u64,
+    fb_width: u32,
+    fb_height: u32,
+}
+
+/// Compute the base VA of channel N's shared pages in init's address space.
+/// Each channel occupies 2 consecutive pages (one per direction).
+/// Channel 0 = kernel channel, channel 1+ = channels created by init.
+fn channel_shm_va(channel_index: usize) -> usize {
+    CHANNEL_SHM_BASE + channel_index * 2 * 4096
+}
+/// Create an IPC channel for a given channel index. Init is always endpoint 0.
+fn init_channel(channel_index: usize) -> ipc::Channel {
+    let ch = unsafe { ipc::Channel::from_base(channel_shm_va(channel_index), ipc::PAGE_SIZE, 0) };
+
+    ch.init();
+
+    ch
 }
 fn print_u32(mut n: u32) {
     if n == 0 {
@@ -84,10 +114,10 @@ fn print_u32(mut n: u32) {
 /// wait for it to draw, then start the GPU driver to present.
 fn setup_display_pipeline(
     gpu_proc: u8,
-    gpu_page: usize,
+    gpu_channel_idx: usize,
     gpu_pa: u64,
     gpu_irq: u32,
-    next_page: &mut usize,
+    next_channel: &mut usize,
 ) {
     sys::print(b"     setting up display pipeline\n");
 
@@ -119,48 +149,54 @@ fn setup_display_pipeline(
 
     sys::print(b" KiB)\n");
 
-    // Write GPU device info + framebuffer PA to GPU driver's channel page.
-    let gpu_shm = channel_shm_va(gpu_page) as *mut u8;
+    // Send GPU config via ring buffer.
+    let gpu_ch = init_channel(gpu_channel_idx);
+    let gpu_config = GpuConfig {
+        mmio_pa: gpu_pa,
+        irq: gpu_irq,
+        _pad: 0,
+        fb_pa: fb_pa_out,
+        fb_width: FB_WIDTH,
+        fb_height: FB_HEIGHT,
+    };
+    let msg = unsafe { ipc::Message::from_payload(MSG_GPU_CONFIG, &gpu_config) };
 
-    unsafe {
-        core::ptr::write_volatile(gpu_shm as *mut u64, gpu_pa);
-        core::ptr::write_volatile(gpu_shm.add(8) as *mut u32, gpu_irq);
-        core::ptr::write_volatile(gpu_shm.add(16) as *mut u64, fb_pa_out);
-        core::ptr::write_volatile(gpu_shm.add(24) as *mut u32, FB_WIDTH);
-        core::ptr::write_volatile(gpu_shm.add(28) as *mut u32, FB_HEIGHT);
-    }
+    gpu_ch.send(&msg);
 
     // Spawn compositor.
-    let (comp_proc, comp_ch, comp_page) = match spawn_with_channel(COMPOSITOR_ELF, next_page) {
-        Some(v) => v,
-        None => {
-            sys::print(b"init: failed to spawn compositor\n");
-            sys::exit();
-        }
-    };
+    let (comp_proc, comp_ch_handle, comp_channel_idx) =
+        match spawn_with_channel(COMPOSITOR_ELF, next_channel) {
+            Some(v) => v,
+            None => {
+                sys::print(b"init: failed to spawn compositor\n");
+                sys::exit();
+            }
+        };
     // Share framebuffer memory with compositor.
     let fb_page_count = fb_alloc_bytes as u64 / 4096;
     let comp_fb_va = sys::memory_share(comp_proc, fb_pa_out, fb_page_count).unwrap_or_else(|_| {
         sys::print(b"init: memory_share (compositor) failed\n");
         sys::exit();
     });
-    // Write compositor info to its channel shared page.
-    let comp_shm = channel_shm_va(comp_page) as *mut u8;
+    // Send compositor config via ring buffer.
+    let comp_ch = init_channel(comp_channel_idx);
+    let comp_config = CompositorConfig {
+        fb_va: comp_fb_va as u64,
+        fb_width: FB_WIDTH,
+        fb_height: FB_HEIGHT,
+        fb_stride: FB_STRIDE,
+        fb_size: FB_SIZE,
+    };
+    let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };
 
-    unsafe {
-        core::ptr::write_volatile(comp_shm as *mut u64, comp_fb_va as u64);
-        core::ptr::write_volatile(comp_shm.add(8) as *mut u32, FB_WIDTH);
-        core::ptr::write_volatile(comp_shm.add(12) as *mut u32, FB_HEIGHT);
-        core::ptr::write_volatile(comp_shm.add(16) as *mut u32, FB_STRIDE);
-        core::ptr::write_volatile(comp_shm.add(20) as *mut u32, FB_SIZE);
-    }
+    comp_ch.send(&msg);
 
     // Start compositor and wait for it to draw.
     let _ = sys::process_start(comp_proc);
 
     sys::print(b"     compositor started, waiting\n");
 
-    let _ = sys::wait(&[comp_ch], u64::MAX);
+    let _ = sys::wait(&[comp_ch_handle], u64::MAX);
 
     sys::print(b"     compositor done, starting gpu driver\n");
 
@@ -173,10 +209,10 @@ fn setup_display_pipeline(
 }
 /// Spawn a suspended process, create a channel to it, and send one endpoint.
 ///
-/// Returns (process_handle, init_channel_handle, shm_page_index) on success.
+/// Returns (process_handle, init_channel_handle, channel_index) on success.
 /// The child receives endpoint B at CHANNEL_SHM_BASE in its address space.
-/// Init retains endpoint A; the shared page is at channel_shm_va(page_index).
-fn spawn_with_channel(elf: &[u8], next_page: &mut usize) -> Option<(u8, u8, usize)> {
+/// Init retains endpoint A at channel_shm_va(channel_index).
+fn spawn_with_channel(elf: &[u8], next_channel: &mut usize) -> Option<(u8, u8, usize)> {
     sys::print(b"       process_create\xE2\x80\xA6");
 
     let proc_handle = match sys::process_create(elf.as_ptr(), elf.len()) {
@@ -209,18 +245,18 @@ fn spawn_with_channel(elf: &[u8], next_page: &mut usize) -> Option<(u8, u8, usiz
 
     sys::print(b" ok\n");
 
-    let page_idx = *next_page;
+    let channel_idx = *next_channel;
 
-    *next_page += 1;
+    *next_channel += 1;
 
-    Some((proc_handle, ch_a, page_idx))
+    Some((proc_handle, ch_a, channel_idx))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     sys::print(b"  \xF0\x9F\x94\xA7 init - proto-os-service starting\n");
 
-    // Page 0 in channel SHM = kernel's channel (device manifest).
+    // Kernel channel (channel 0) uses raw bytes — kernel writes directly.
     let kernel_shm = CHANNEL_SHM_BASE as *const u8;
     let device_count = unsafe { core::ptr::read_volatile(kernel_shm as *const u32) };
 
@@ -230,10 +266,10 @@ pub extern "C" fn _start() -> ! {
 
     sys::print(b" devices in manifest\n");
 
-    // Track channel SHM page allocation (0 = kernel, 1+ = ours).
-    let mut next_page: usize = 1;
+    // Track channel allocation (0 = kernel, 1+ = ours).
+    let mut next_channel: usize = 1;
     // Saved GPU state for Phase 2.
-    // (proc, ch, page, pa, irq)
+    // (proc, ch_handle, channel_idx, pa, irq)
     let mut gpu: Option<(u8, u8, usize, u64, u32)> = None;
     // Phase 1: Spawn a driver for each device in the manifest.
     let actual = if device_count > 8 { 8 } else { device_count };
@@ -272,22 +308,25 @@ pub extern "C" fn _start() -> ! {
 
         sys::print(b" bytes)\n");
 
-        let (proc_h, ch_h, page_idx) = match spawn_with_channel(elf, &mut next_page) {
+        let (proc_h, ch_h, channel_idx) = match spawn_with_channel(elf, &mut next_channel) {
             Some(v) => v,
             None => continue,
         };
 
         if dev_id == VIRTIO_DEVICE_GPU {
             // Defer GPU startup — need framebuffer first.
-            gpu = Some((proc_h, ch_h, page_idx, dev_pa, dev_irq));
+            gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq));
         } else {
-            // Write device info and start immediately.
-            let shm = channel_shm_va(page_idx) as *mut u8;
+            // Send device config via ring buffer.
+            let ch = init_channel(channel_idx);
+            let config = DeviceConfig {
+                mmio_pa: dev_pa,
+                irq: dev_irq,
+                _pad: 0,
+            };
+            let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &config) };
 
-            unsafe {
-                core::ptr::write_volatile(shm as *mut u64, dev_pa);
-                core::ptr::write_volatile(shm.add(8) as *mut u32, dev_irq);
-            }
+            ch.send(&msg);
 
             let _ = sys::process_start(proc_h);
             let name = match dev_id {
@@ -303,8 +342,14 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Phase 2: Display pipeline (compositor → GPU driver).
-    if let Some((gpu_proc, _gpu_ch, gpu_page, gpu_pa, gpu_irq)) = gpu {
-        setup_display_pipeline(gpu_proc, gpu_page, gpu_pa, gpu_irq, &mut next_page);
+    if let Some((gpu_proc, _gpu_ch, gpu_channel_idx, gpu_pa, gpu_irq)) = gpu {
+        setup_display_pipeline(
+            gpu_proc,
+            gpu_channel_idx,
+            gpu_pa,
+            gpu_irq,
+            &mut next_channel,
+        );
     } else {
         sys::print(b"     no gpu found\n");
     }

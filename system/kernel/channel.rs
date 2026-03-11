@@ -2,20 +2,26 @@
 //!
 //! A channel has two endpoints, each identified by a unique ChannelId.
 //! Endpoint identity is encoded in the ChannelId: `channel_index * 2 +
-//! endpoint` (0 or 1). Both endpoints share a physical page mapped into
-//! each process's address space at the same VA.
+//! endpoint` (0 or 1). Each channel has two shared physical pages:
+//!
+//! - Page 0: endpoint 0 → endpoint 1 ring buffer (ep0 produces, ep1 consumes)
+//! - Page 1: endpoint 1 → endpoint 0 ring buffer (ep1 produces, ep0 consumes)
+//!
+//! Both pages are mapped into both processes. The userspace `ipc` library
+//! provides the ring buffer data structure on top of these pages. The kernel
+//! remains ignorant of message format — it provides shared pages and doorbells.
 //!
 //! # Protocol
 //!
 //! ```text
 //! create():
-//!   kernel allocates shared page, returns (ChannelId, ChannelId).
+//!   kernel allocates two shared pages, returns (ChannelId, ChannelId).
 //!   Mapping + handle insertion done separately (boot or syscall path).
 //!
 //! signal(my_id):       sets peer's pending_signal flag, wakes peer if blocked
 //! check_pending(id):   if pending_signal → consume + return true
 //!                      else → return false
-//! close_endpoint(id):  decrements closed_count; frees shared page when both close
+//! close_endpoint(id):  decrements closed_count; frees shared pages when both close
 //! ```
 //!
 //! Lost-wakeup safe: `signal` sets a persistent flag before waking, and
@@ -38,7 +44,8 @@ use super::thread::ThreadId;
 use alloc::vec::Vec;
 
 struct Channel {
-    shared_pa: memory::Pa,
+    /// Two shared pages: [0] = ep0→ep1 direction, [1] = ep1→ep0 direction.
+    pages: [memory::Pa; 2],
     pending_signal: [bool; 2],
     waiter: [Option<ThreadId>; 2],
     closed_count: u8,
@@ -74,9 +81,9 @@ pub fn check_pending(id: ChannelId) -> bool {
         false
     }
 }
-/// Close one endpoint of a channel. Frees the shared page when both sides close.
+/// Close one endpoint of a channel. Frees both shared pages when both sides close.
 pub fn close_endpoint(id: ChannelId) {
-    let shared_pa = {
+    let pages_to_free = {
         let mut s = STATE.lock();
         let ch = &mut s.channels[channel_index(id)];
         let ep = endpoint_index(id);
@@ -85,31 +92,42 @@ pub fn close_endpoint(id: ChannelId) {
         ch.closed_count += 1;
 
         if ch.closed_count == 2 {
-            let pa = ch.shared_pa;
+            let pages = ch.pages;
 
-            ch.shared_pa = memory::Pa(0);
+            ch.pages = [memory::Pa(0), memory::Pa(0)];
 
-            Some(pa)
+            Some(pages)
         } else {
             None
         }
     };
 
-    if let Some(pa) = shared_pa {
-        page_allocator::free_frame(pa);
+    if let Some(pages) = pages_to_free {
+        page_allocator::free_frame(pages[0]);
+        page_allocator::free_frame(pages[1]);
     }
 }
-/// Create a channel. Allocates a shared physical page and returns two endpoint IDs.
+/// Create a channel. Allocates two shared physical pages and returns two endpoint IDs.
 ///
+/// Page 0 carries messages from endpoint 0 to endpoint 1.
+/// Page 1 carries messages from endpoint 1 to endpoint 0.
 /// Both endpoints start unmapped — use `setup_endpoint` for boot-time setup
-/// or map the shared page via the syscall path.
+/// or map the shared pages via the syscall path.
 pub fn create() -> Option<(ChannelId, ChannelId)> {
-    let shared_pa = page_allocator::alloc_frame()?;
+    let page0 = page_allocator::alloc_frame()?;
+    let page1 = match page_allocator::alloc_frame() {
+        Some(pa) => pa,
+        None => {
+            page_allocator::free_frame(page0);
+            return None;
+        }
+    };
+
     let mut s = STATE.lock();
     let idx = s.channels.len() as u32;
 
     s.channels.push(Channel {
-        shared_pa,
+        pages: [page0, page1],
         pending_signal: [false, false],
         waiter: [None, None],
         closed_count: 0,
@@ -125,21 +143,26 @@ pub fn register_waiter(id: ChannelId, waiter: ThreadId) {
 
     ch.waiter[ep] = Some(waiter);
 }
-/// Set up an endpoint for a process: map shared page + insert handle.
+/// Set up an endpoint for a process: map both shared pages + insert handle.
 ///
-/// Boot-time helper. Acquires channel lock (for PA), then scheduler lock
+/// Boot-time helper. Acquires channel lock (for PAs), then scheduler lock
 /// (for process access). Uses the target's per-process channel SHM bump
-/// allocator. Returns the handle index.
+/// allocator. Both pages are mapped at consecutive VAs. Returns the handle index.
 pub fn setup_endpoint(id: ChannelId, pid: ProcessId) -> Result<Handle, HandleError> {
-    let shared_pa = {
+    let pages = {
         let s = STATE.lock();
-        s.channels[channel_index(id)].shared_pa
+        s.channels[channel_index(id)].pages
     };
 
     scheduler::with_process(pid, |process| {
+        // Map both pages (ep0→ep1 and ep1→ep0 rings) at consecutive VAs.
         process
             .address_space
-            .map_channel_page(shared_pa.as_u64())
+            .map_channel_page(pages[0].as_u64())
+            .ok_or(HandleError::TableFull)?;
+        process
+            .address_space
+            .map_channel_page(pages[1].as_u64())
             .ok_or(HandleError::TableFull)?;
         process
             .handles
@@ -147,11 +170,11 @@ pub fn setup_endpoint(id: ChannelId, pid: ProcessId) -> Result<Handle, HandleErr
     })
     .unwrap_or(Err(HandleError::InvalidHandle))
 }
-/// Return the shared page PA and VA for a channel.
+/// Return the shared page PAs for a channel.
 ///
-/// Both endpoints of the same channel share the same page.
-/// Returns `None` if the channel is fully closed (both endpoints closed).
-pub fn shared_info(id: ChannelId) -> Option<(memory::Pa, u64)> {
+/// Returns `[page0_pa, page1_pa]` where page 0 is the ep0→ep1 ring and
+/// page 1 is the ep1→ep0 ring. Returns `None` if the channel is fully closed.
+pub fn shared_pages(id: ChannelId) -> Option<[memory::Pa; 2]> {
     let s = STATE.lock();
     let idx = channel_index(id);
     let ch = &s.channels[idx];
@@ -160,7 +183,7 @@ pub fn shared_info(id: ChannelId) -> Option<(memory::Pa, u64)> {
         return None;
     }
 
-    Some((ch.shared_pa, CHANNEL_SHM_BASE + (idx as u64) * PAGE_SIZE))
+    Some(ch.pages)
 }
 /// Signal the peer endpoint of a channel.
 ///

@@ -1,28 +1,39 @@
 //! Userspace virtio console driver.
 //!
-//! Receives device info (MMIO PA, IRQ) from the kernel via channel shared
-//! memory, maps the device, and writes a test string to validate the
-//! userspace driver model.
-//!
-//! # Shared memory layout (written by kernel before start)
-//!
-//! ```text
-//! offset 0:  mmio_pa (u64) — physical address of the MMIO region
-//! offset 8:  irq     (u32) — GIC IRQ number
-//! ```
+//! Receives device config via IPC ring buffer from init, maps the device,
+//! and writes a test string to validate the userspace driver model.
 
 #![no_std]
 #![no_main]
 
-/// Channel shared memory base (handle 0).
-const SHM: *const u8 = 0x4000_0000 as *const u8; // must match kernel paging::CHANNEL_SHM_BASE
+/// Channel shared memory base (first channel in our address space).
+const CHANNEL_SHM_BASE: usize = 0x4000_0000;
 const VIRTQ_TX: u32 = 1;
+// Protocol message type (must match init's definition).
+const MSG_DEVICE_CONFIG: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DeviceConfig {
+    mmio_pa: u64,
+    irq: u32,
+    _pad: u32,
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    // Read device info from shared memory.
-    let mmio_pa = unsafe { core::ptr::read_volatile(SHM as *const u64) };
-    let irq = unsafe { core::ptr::read_volatile(SHM.add(8) as *const u32) };
+    // Read device config from ring buffer (first message, sent by init).
+    let ch = unsafe { ipc::Channel::from_base(CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    let mut msg = ipc::Message::new(0);
+
+    if !ch.try_recv(&mut msg) || msg.msg_type != MSG_DEVICE_CONFIG {
+        sys::print(b"virtio-console: no config message\n");
+        sys::exit();
+    }
+
+    let config: DeviceConfig = unsafe { msg.payload_as() };
+    let mmio_pa = config.mmio_pa;
+    let irq = config.irq;
     // Map the 4K page containing the MMIO region. Virtio-mmio slots have
     // 0x200 stride, so most sit at sub-page offsets within a 4K page.
     let page_offset = mmio_pa & 0xFFF;
