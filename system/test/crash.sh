@@ -13,9 +13,10 @@ set -euo pipefail
 
 DURATION="${1:-30}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-KERNEL="${SCRIPT_DIR}/target/aarch64-unknown-none/release/kernel"
-DTB_FILE="${SCRIPT_DIR}/virt.dtb"
-DISK_IMG="${SCRIPT_DIR}/test.img"
+SYSTEM_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+KERNEL="${SYSTEM_DIR}/target/aarch64-unknown-none/release/kernel"
+DTB_FILE="${SYSTEM_DIR}/virt.dtb"
+DISK_IMG="${SYSTEM_DIR}/test.img"
 SERIAL_LOG="/tmp/os-crash-test-serial-$$.log"
 
 cleanup() {
@@ -26,7 +27,7 @@ trap cleanup EXIT
 
 # Build.
 echo "Building..."
-cargo build --release 2>&1 | tail -1
+(cd "$SYSTEM_DIR" && cargo build --release 2>&1 | tail -1)
 
 if [ ! -f "$KERNEL" ]; then
     echo "ERROR: kernel not found"

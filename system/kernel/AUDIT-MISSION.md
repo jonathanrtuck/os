@@ -96,8 +96,8 @@ Kernel only: `system/kernel/`. Not libraries, services, or user programs.
 - Host test suite: `cd system/test && cargo test` (runs on macOS, tests kernel logic in isolation)
 - Cross-compilation: `cd system && cargo build` (builds for `aarch64-unknown-none`)
 - Miri (if available): `cd system/test && cargo +nightly miri test` (automatic UB detection, may not work for all tests)
-- Stress tests: `./stress-test.sh 30` (headless, no display needed)
-- Crash test: `./crash-test.sh 120` (needs QEMU + display)
+- Stress tests: `cd system/test && ./stress.sh 45` (headless, no display needed)
+- Crash test: `cd system/test && ./crash.sh 120` (needs QEMU + display)
 
 ### Key Context
 

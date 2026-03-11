@@ -14,9 +14,10 @@ set -euo pipefail
 
 TIMEOUT="${1:-180}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-KERNEL="${SCRIPT_DIR}/target/aarch64-unknown-none/release/kernel"
-DTB_FILE="${SCRIPT_DIR}/virt.dtb"
-DISK_IMG="${SCRIPT_DIR}/test.img"
+SYSTEM_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+KERNEL="${SYSTEM_DIR}/target/aarch64-unknown-none/release/kernel"
+DTB_FILE="${SYSTEM_DIR}/virt.dtb"
+DISK_IMG="${SYSTEM_DIR}/test.img"
 SERIAL_LOG="/tmp/os-stress-test-serial-$$.log"
 QEMU_PID=""
 
@@ -28,7 +29,7 @@ trap cleanup EXIT
 
 # Build.
 echo "Building (release)..."
-(cd "$SCRIPT_DIR" && cargo build --release 2>&1 | tail -3)
+(cd "$SYSTEM_DIR" && cargo build --release 2>&1 | tail -3)
 
 if [ ! -f "$KERNEL" ]; then
     echo "ERROR: kernel not found at $KERNEL"

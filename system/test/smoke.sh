@@ -27,13 +27,16 @@ EXPECTED=(
     "booted."
 )
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SYSTEM_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 echo "Building kernel…"
 
-cargo build --release 2>&1 | tail -1
+(cd "$SYSTEM_DIR" && cargo build --release 2>&1 | tail -1)
 
 echo "Booting QEMU (${TIMEOUT_SECS}s timeout)…"
 
-KERNEL="target/aarch64-unknown-none/release/kernel"
+KERNEL="${SYSTEM_DIR}/target/aarch64-unknown-none/release/kernel"
 OUTPUT_FILE=$(mktemp)
 DISK_IMG=$(mktemp)
 DTB_FILE=$(mktemp)

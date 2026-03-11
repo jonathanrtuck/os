@@ -2,7 +2,7 @@
 # Full integration test — boots QEMU with ALL devices (GPU + keyboard + blk),
 # verifies the complete boot + driver spawn + display pipeline.
 #
-# Unlike smoke-test.sh (blk only) and stress-test.sh (headless, no GPU),
+# Unlike smoke.sh (blk only) and stress.sh (headless, no GPU),
 # this tests the full device pipeline that a real boot would exercise.
 #
 # QEMU display is suppressed (-display none) so this runs in CI/headless.
@@ -16,9 +16,10 @@ set -euo pipefail
 
 TIMEOUT="${1:-15}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-KERNEL="${SCRIPT_DIR}/target/aarch64-unknown-none/release/kernel"
-DTB_FILE="${SCRIPT_DIR}/virt.dtb"
-DISK_IMG="${SCRIPT_DIR}/test.img"
+SYSTEM_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+KERNEL="${SYSTEM_DIR}/target/aarch64-unknown-none/release/kernel"
+DTB_FILE="${SYSTEM_DIR}/virt.dtb"
+DISK_IMG="${SYSTEM_DIR}/test.img"
 SERIAL_LOG=$(mktemp)
 QEMU_PID=""
 
@@ -29,7 +30,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Building (release)..."
-(cd "$SCRIPT_DIR" && cargo build --release 2>&1 | tail -1)
+(cd "$SYSTEM_DIR" && cargo build --release 2>&1 | tail -1)
 
 if [ ! -f "$KERNEL" ]; then
     echo "ERROR: kernel not found at $KERNEL"
