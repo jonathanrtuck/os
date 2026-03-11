@@ -1,3 +1,16 @@
+// AUDIT: 2026-03-11 — 13 unsafe blocks verified, 6-category checklist applied.
+// Fix 5 (aliasing UB with split borrows) re-verified sound: dispatch, sys_futex_wait,
+// sys_wait, and dispatch_ok all use core::ptr::addr_of!/addr_of_mut! to read/write
+// Context fields without creating &mut references that would alias the scheduler lock.
+// User pointer validation verified for all 27 syscall handlers: every user-provided
+// pointer is bounds-checked (< USER_VA_END), overflow-checked (checked_add), alignment-
+// checked where required, and page-accessibility-verified via AT S1E0R/S1E0W hardware
+// translation before dereference. No privilege escalation vectors found: device_map
+// rejects RAM overlap, memory_share rejects non-RAM PAs, DMA order is capped, ELF size
+// is capped. Error codes correctly propagated via result_to_u64! macro. No TOCTOU:
+// validation and dereference occur within the same syscall context with TTBR0 stable.
+// No bugs found.
+
 //! Syscall dispatcher and handlers.
 //!
 //! # ABI (aarch64, EL0 → EL1)
@@ -157,6 +170,11 @@ fn is_user_page_readable(va: u64) -> bool {
 fn is_user_page_writable(va: u64) -> bool {
     let par: u64;
 
+    // SAFETY: AT S1E0W is a privileged instruction that performs address
+    // translation without memory access — it only writes to PAR_EL1. The
+    // ISB ensures PAR_EL1 is visible before the mrs reads it. Single asm
+    // block prevents LLVM reordering. No memory is accessed; nostack is
+    // correct since this uses only system registers.
     unsafe {
         // AT S1E0W translates va, writing the result to PAR_EL1. The mrs
         // reads that result. These MUST be a single asm block — with separate
@@ -339,7 +357,10 @@ fn sys_exit(ctx: *mut Context) -> *const Context {
 }
 #[inline(never)]
 fn sys_futex_wait(ctx: *mut Context) -> *const Context {
-    // Read args via raw pointer — no `&mut *ctx` (aliasing UB with scheduler lock).
+    // SAFETY: Read args via raw pointer — no `&mut *ctx` (aliasing UB with
+    // scheduler lock). ctx is a valid pointer to the current thread's Context
+    // (set by exception.S). addr_of! avoids creating a reference. x[0] and
+    // x[1] are within the [u64; 31] array bounds.
     let (addr, expected) = unsafe {
         let x = core::ptr::addr_of!((*ctx).x) as *const u64;
 
@@ -370,7 +391,9 @@ fn sys_futex_wait(ctx: *mut Context) -> *const Context {
 
     futex::wait(pa, thread_id);
 
-    // Pre-set success return value before blocking.
+    // SAFETY: Pre-set x[0] = 0 (success) before blocking. ctx is valid (current
+    // thread's Context). addr_of_mut! avoids creating &mut that would alias
+    // the scheduler lock's &mut State.
     unsafe {
         let x0_ptr = core::ptr::addr_of_mut!((*ctx).x) as *mut u64;
 
@@ -876,7 +899,10 @@ fn sys_timer_create(timeout_ns: u64) -> Result<u64, HandleError> {
 fn sys_wait(ctx: *mut Context) -> *const Context {
     use super::thread::TIMEOUT_SENTINEL;
 
-    // Read args via raw pointer — no `&mut *ctx` (aliasing UB with scheduler lock).
+    // SAFETY: Read args via raw pointer — no `&mut *ctx` (aliasing UB with
+    // scheduler lock). ctx is a valid pointer to the current thread's Context
+    // (set by exception.S). addr_of! avoids creating a reference. x[0], x[1],
+    // x[2] are within the [u64; 31] array bounds.
     let (handles_ptr, count, timeout) = unsafe {
         let x = core::ptr::addr_of!((*ctx).x) as *const u64;
 
@@ -1193,6 +1219,11 @@ fn unregister_timers(ids: &[Option<TimerId>]) {
 fn user_va_to_pa(va: u64) -> Option<u64> {
     let par: u64;
 
+    // SAFETY: AT S1E0R is a privileged instruction that performs address
+    // translation without memory access — it only writes to PAR_EL1. The
+    // ISB ensures PAR_EL1 is visible before the mrs reads it. Single asm
+    // block prevents LLVM reordering. No memory is accessed; nostack is
+    // correct since this uses only system registers.
     unsafe {
         // AT S1E0R translates va, writing the result to PAR_EL1. The mrs
         // reads that result. Single asm block prevents LLVM from reordering
@@ -1234,12 +1265,14 @@ macro_rules! result_to_u64 {
 pub fn dispatch(ctx: *mut Context) -> *const Context {
     metrics::inc_syscalls();
 
-    // Read syscall arguments from the context via raw pointer. We must NOT
-    // create `&mut *ctx` here — the scheduler lock's `&mut State` transitively
-    // covers the same Context (it's in `cores[core].current`). With inlining
-    // at opt-level 3, LLVM sees two `noalias` mutable references to overlapping
-    // memory, which is UB that causes miscompilation (corrupted return addresses
-    // on the kernel stack).
+    // SAFETY: Read syscall arguments from the context via raw pointer. We must
+    // NOT create `&mut *ctx` here — the scheduler lock's `&mut State`
+    // transitively covers the same Context (it's in `cores[core].current`).
+    // With inlining at opt-level 3, LLVM sees two `noalias` mutable references
+    // to overlapping memory, which is UB that causes miscompilation (corrupted
+    // return addresses on the kernel stack). ctx is valid (set by exception.S
+    // from TPIDR_EL1). addr_of! avoids reference creation. x[0], x[1], x[8]
+    // are within the [u64; 31] array bounds.
     let (syscall_nr, x0, x1) = unsafe {
         let x = core::ptr::addr_of!((*ctx).x) as *const u64;
 
@@ -1274,6 +1307,8 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::HANDLE_SEND => dispatch_ok(ctx, result_to_u64!(sys_handle_send(x0, x1))),
         nr::PROCESS_KILL => dispatch_ok(ctx, result_to_u64!(sys_process_kill(x0))),
         nr::MEMORY_SHARE => {
+            // SAFETY: ctx is valid, x[2] is within [u64; 31] bounds. addr_of!
+            // avoids creating a reference (same aliasing UB prevention as above).
             let x2 = unsafe { (core::ptr::addr_of!((*ctx).x) as *const u64).add(2).read() };
 
             dispatch_ok(ctx, result_to_u64!(sys_memory_share(x0, x1, x2)))
@@ -1291,7 +1326,10 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
 /// `&mut *ctx` which would alias with the scheduler lock's `&mut State`.
 #[inline(never)]
 fn dispatch_ok(ctx: *mut Context, val: u64) -> *const Context {
-
+    // SAFETY: ctx is a valid pointer to the current thread's Context (set by
+    // exception.S from TPIDR_EL1). addr_of_mut! avoids creating &mut *ctx
+    // which would alias with the scheduler lock's &mut State. Writing to x[0]
+    // (the first element) is within the [u64; 31] array bounds.
     unsafe {
         let x0_ptr = core::ptr::addr_of_mut!((*ctx).x) as *mut u64;
 
