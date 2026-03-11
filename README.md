@@ -22,7 +22,7 @@ See the [decision register](design/decisions.md) for the full decision landscape
 
 ## Project Structure
 
-```txt
+```text
 os/
 ├── design/                      # Design documentation
 │   ├── concept.md               # The core idea: OS → Document → Tool
