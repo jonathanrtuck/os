@@ -40,7 +40,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  │ sys │  │ virtio │  │ drawing │  │link.ld │  │
 │  └─────┘  └────────┘  └─────────┘  └────────┘  │
 ├────────────────────────────────────────────────┤
-│  Kernel (25 syscalls, see kernel/DESIGN.md)    │  🟢 production
+│  Kernel (27 syscalls, see kernel/DESIGN.md)    │  🟢 production
 └────────────────────────────────────────────────┘
 ```
 
@@ -48,7 +48,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **IPC:** Kernel creates channels (shared memory page + signal). Processes communicate by reading/writing raw bytes at agreed offsets. No structured message format yet. The mechanism (channels, shared memory, wait) is foundational; the ad hoc byte layouts are scaffolding.
 
-**Memory model for userspace:** Stack (16 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` not yet implemented (next step to unlock `Vec`/`String`/`Box`).
+**Memory model for userspace:** Stack (16 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` in `sys` library (linked-list first-fit with coalescing, grows via `memory_alloc`). Programs opt in with `extern crate alloc;` to get `Vec`/`String`/`Box`.
 
 ---
 
@@ -58,7 +58,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Safe Rust wrappers for all kernel syscalls.
 
-**Status:** ~380 lines, covers all 25 syscalls with typed errors. Every userspace binary links against this.
+**Status:** ~710 lines, covers all 27 syscalls with typed errors + `GlobalAlloc` (linked-list first-fit with coalescing). Every userspace binary links against this. Programs opt in to heap allocation with `extern crate alloc;`.
 
 **What's foundational:**
 
@@ -68,6 +68,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - `SyscallResult<T>` — typed returns on all fallible syscalls. Return types encode meaning: `process_create → SyscallResult<u8>` (handle), `channel_create → SyscallResult<(u8, u8)>` (pair of handles), `dma_alloc → SyscallResult<usize>` (VA).
 - `print()` — fire-and-forget console output (wraps `write`, discards Result). Mirrors Rust's `print!` vs `write!` pattern.
 - Panic handler that calls `exit()` — correct behavior for userspace panics.
+- `GlobalAlloc` — linked-list first-fit allocator with coalescing, grows on demand via `memory_alloc`. Spinlock-protected. Enables `Vec`, `String`, `Box` for all userspace programs. Zero cost if `alloc` crate is not imported.
 
 **What's missing:**
 
@@ -259,7 +260,7 @@ These are the things that limit what can be built above the kernel today, ordere
 
 **Resolved:** `memory_alloc(page_count)` syscall #25 and `memory_free(va, page_count)` syscall #26 implemented. Demand-paged anonymous pages in the heap VA region (16–256 MiB). Per-process budget: 32 MiB. Wrappers in `sys` library.
 
-**Remaining:** Userspace `GlobalAlloc` implementation (a linked-list or bump allocator over `memory_alloc` pages). Once implemented, `Vec`, `String`, `Box` are available to all userspace programs.
+**GlobalAlloc:** Implemented in `sys` library — linked-list first-fit allocator with coalescing, grows on demand via `memory_alloc`. Spinlock-protected (`AtomicBool` CAS) for thread safety. All userspace programs get it automatically; opt in with `extern crate alloc;` for `Vec`, `String`, `Box`.
 
 ---
 
@@ -386,7 +387,7 @@ Ordered by what unblocks the most, building the happy path first:
 
 1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the drawing library. Zero-copy parser, scanline rasterizer with 4× oversampling, coverage map output. Simple interface: `TrueTypeFont::rasterize(codepoint, size, buffer, scratch) → GlyphMetrics`. 21 tests. Running on bare metal in the compositor.
 2. ~~**Syscall error types**~~ — **Done.** `SyscallError` enum (13 variants) + `SyscallResult<T>` on all 25 syscalls + `print()` convenience. All 6 userspace binaries migrated. Eliminated raw `i64` returns and ad-hoc `< 0` checks.
-3. ~~**Userspace memory allocation**~~ (§3.1) — **Syscalls done.** `memory_alloc`/`memory_free` (#25/#26) implemented. Remaining: userspace `GlobalAlloc` over the new syscalls.
+3. ~~**Userspace memory allocation**~~ (§3.1) — **Done.** `memory_alloc`/`memory_free` (#25/#26) + `GlobalAlloc` in `sys` library. `Vec`/`String`/`Box` available to all userspace programs.
 4. **Structured IPC** (§3.5) — replace ad hoc byte offsets with typed messages. Unblocks adding new message types without cross-process breakage.
 5. **Input driver** (§3.3) — unblocks interactive demos. virtio-input follows the same pattern as existing drivers.
 6. **Event loop** (§3.4) — convert compositor or init to loop on `wait`. Unblocks continuous rendering.

@@ -17,6 +17,8 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 /// Channel shared memory base (first channel page in our address space).
 const SHM: *const u8 = 0x4000_0000 as *const u8;
 
@@ -294,6 +296,20 @@ fn draw_truetype_demo(fb: &mut drawing::Surface) {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     sys::print(b"  \xF0\x9F\x8E\xA8 compositor - starting\n");
+
+    // Smoke test: dynamic allocation via Vec (uses memory_alloc under the hood).
+    {
+        let mut v: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+
+        v.push(b'h');
+        v.push(b'e');
+        v.push(b'a');
+        v.push(b'p');
+
+        sys::print(b"     heap ok: ");
+        sys::print(&v);
+        sys::print(b"\n");
+    }
 
     // Read framebuffer info from channel shared page.
     let fb_va = unsafe { core::ptr::read_volatile(SHM as *const u64) } as usize;

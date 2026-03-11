@@ -16,77 +16,9 @@
 
 #![no_std]
 
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
-/// Convenience alias for syscall results.
-pub type SyscallResult<T> = Result<T, SyscallError>;
-
-/// Error codes returned by kernel syscalls.
-///
-/// Unifies the kernel's `syscall::Error` and `handle::HandleError` enums into
-/// one flat enum for userspace. The numeric values match the kernel's `repr(i64)`
-/// discriminants.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i64)]
-pub enum SyscallError {
-    UnknownSyscall = -1,
-    BadAddress = -2,
-    BadLength = -3,
-    InvalidArgument = -4,
-    AlreadyBorrowing = -5,
-    NotBorrowing = -6,
-    AlreadyBound = -7,
-    WouldBlock = -8,
-    OutOfMemory = -9,
-    InvalidHandle = -10,
-    // -11 is unused in the kernel.
-    InsufficientRights = -12,
-    TableFull = -13,
-    SlotOccupied = -14,
-}
-
-impl SyscallError {
-    /// Decode a raw negative return value into a `SyscallError`.
-    ///
-    /// Returns `UnknownSyscall` for unrecognized codes (defensive — kernel
-    /// shouldn't produce codes outside this set, but userspace shouldn't panic
-    /// if it does).
-    pub fn from_raw(val: i64) -> Self {
-        match val {
-            -1 => Self::UnknownSyscall,
-            -2 => Self::BadAddress,
-            -3 => Self::BadLength,
-            -4 => Self::InvalidArgument,
-            -5 => Self::AlreadyBorrowing,
-            -6 => Self::NotBorrowing,
-            -7 => Self::AlreadyBound,
-            -8 => Self::WouldBlock,
-            -9 => Self::OutOfMemory,
-            -10 => Self::InvalidHandle,
-            -12 => Self::InsufficientRights,
-            -13 => Self::TableFull,
-            -14 => Self::SlotOccupied,
-            _ => Self::UnknownSyscall,
-        }
-    }
-}
-
-/// Convert a raw syscall return value to a `SyscallResult`.
-///
-/// Non-negative → `Ok(value as u64)`. Negative → `Err(SyscallError)`.
-fn result(raw: i64) -> SyscallResult<u64> {
-    if raw >= 0 {
-        Ok(raw as u64)
-    } else {
-        Err(SyscallError::from_raw(raw))
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Syscall numbers
-// ---------------------------------------------------------------------------
+use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 mod nr {
     pub const EXIT: u64 = 0;
@@ -118,9 +50,297 @@ mod nr {
     pub const MEMORY_FREE: u64 = 26;
 }
 
+const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
+const PAGE_SIZE: usize = 4096;
+
+struct FreeBlock {
+    size: usize,
+    next: *mut FreeBlock,
+}
+struct UserHeap {
+    head: UnsafeCell<*mut FreeBlock>,
+    lock: AtomicBool,
+}
+
+/// Convenience alias for syscall results.
+pub type SyscallResult<T> = Result<T, SyscallError>;
+
+/// Error codes returned by kernel syscalls.
+///
+/// Unifies the kernel's `syscall::Error` and `handle::HandleError` enums into
+/// one flat enum for userspace. The numeric values match the kernel's `repr(i64)`
+/// discriminants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(i64)]
+pub enum SyscallError {
+    UnknownSyscall = -1,
+    BadAddress = -2,
+    BadLength = -3,
+    InvalidArgument = -4,
+    AlreadyBorrowing = -5,
+    NotBorrowing = -6,
+    AlreadyBound = -7,
+    WouldBlock = -8,
+    OutOfMemory = -9,
+    InvalidHandle = -10,
+    // -11 is unused in the kernel.
+    InsufficientRights = -12,
+    TableFull = -13,
+    SlotOccupied = -14,
+}
+
+#[global_allocator]
+static HEAP: UserHeap = UserHeap {
+    head: UnsafeCell::new(core::ptr::null_mut()),
+    lock: AtomicBool::new(false),
+};
+
+impl UserHeap {
+    fn acquire(&self) {
+        while self
+            .lock
+            .compare_exchange_weak(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            core::hint::spin_loop();
+        }
+    }
+    /// Request pages from the kernel and add them to the free list.
+    ///
+    /// Allocates enough pages to satisfy `min_size` bytes. Returns true
+    /// on success, false if the kernel refuses (out of memory / budget).
+    unsafe fn grow(&self, min_size: usize) -> bool {
+        let pages = (min_size + PAGE_SIZE - 1) / PAGE_SIZE;
+        let va = match memory_alloc(pages as u64) {
+            Ok(va) => va,
+            Err(_) => return false,
+        };
+        let block = va as *mut FreeBlock;
+        let head = &mut *self.head.get();
+
+        (*block).size = pages * PAGE_SIZE;
+        (*block).next = *head;
+        *head = block;
+
+        true
+    }
+    fn release(&self) {
+        self.lock.store(false, Ordering::Release);
+    }
+}
 // ---------------------------------------------------------------------------
-// Raw syscall primitives
+// Heap allocator — linked-list first-fit with coalescing.
+//
+// Grows on demand by calling `memory_alloc`. Programs use this by adding
+// `extern crate alloc;` to get Vec, String, Box, etc. Programs that never
+// import `alloc` pay no cost.
 // ---------------------------------------------------------------------------
+unsafe impl GlobalAlloc for UserHeap {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        self.acquire();
+
+        let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
+        let align = layout.align().max(MIN_BLOCK);
+        let head = &mut *self.head.get();
+        let mut prev = head as *mut *mut FreeBlock;
+
+        // First-fit search with alignment handling.
+        loop {
+            let current = *prev;
+
+            if current.is_null() {
+                break;
+            }
+
+            let block_addr = current as usize;
+            let block_size = (*current).size;
+            let alloc_start = align_up(block_addr, align);
+            let front_pad = alloc_start - block_addr;
+
+            // Front padding must fit a free block header, or be zero.
+            if front_pad > 0 && front_pad < MIN_BLOCK {
+                prev = &mut (*current).next;
+                continue;
+            }
+            if front_pad + size > block_size {
+                prev = &mut (*current).next;
+                continue;
+            }
+
+            let back_left = block_size - front_pad - size;
+
+            // Unlink this block.
+            *prev = (*current).next;
+
+            // Return front padding as a smaller free block.
+            if front_pad >= MIN_BLOCK {
+                let front = block_addr as *mut FreeBlock;
+
+                (*front).size = front_pad;
+                (*front).next = *prev;
+                *prev = front;
+                prev = &mut (*front).next;
+            }
+            // Return back leftover as a free block.
+            if back_left >= MIN_BLOCK {
+                let back = (alloc_start + size) as *mut FreeBlock;
+
+                (*back).size = back_left;
+                (*back).next = *prev;
+                *prev = back;
+            }
+
+            self.release();
+
+            return alloc_start as *mut u8;
+        }
+
+        // Free list exhausted — grow and retry once.
+        if self.grow(size) {
+            // Retry from the head (new block was prepended).
+            prev = &mut *self.head.get() as *mut *mut FreeBlock;
+
+            loop {
+                let current = *prev;
+
+                if current.is_null() {
+                    break;
+                }
+
+                let block_addr = current as usize;
+                let block_size = (*current).size;
+                let alloc_start = align_up(block_addr, align);
+                let front_pad = alloc_start - block_addr;
+
+                if front_pad > 0 && front_pad < MIN_BLOCK {
+                    prev = &mut (*current).next;
+                    continue;
+                }
+                if front_pad + size > block_size {
+                    prev = &mut (*current).next;
+                    continue;
+                }
+
+                let back_left = block_size - front_pad - size;
+
+                *prev = (*current).next;
+
+                if front_pad >= MIN_BLOCK {
+                    let front = block_addr as *mut FreeBlock;
+
+                    (*front).size = front_pad;
+                    (*front).next = *prev;
+                    *prev = front;
+                    prev = &mut (*front).next;
+                }
+                if back_left >= MIN_BLOCK {
+                    let back = (alloc_start + size) as *mut FreeBlock;
+
+                    (*back).size = back_left;
+                    (*back).next = *prev;
+                    *prev = back;
+                }
+
+                self.release();
+
+                return alloc_start as *mut u8;
+            }
+        }
+
+        self.release();
+
+        core::ptr::null_mut()
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        self.acquire();
+
+        let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
+        let addr = ptr as usize;
+        let head = &mut *self.head.get();
+
+        // Walk to the sorted insertion point.
+        let mut prev_block: *mut FreeBlock = core::ptr::null_mut();
+        let mut current = *head;
+
+        while !current.is_null() && (current as usize) < addr {
+            prev_block = current;
+            current = (*current).next;
+        }
+
+        // Insert freed region.
+        let block = addr as *mut FreeBlock;
+
+        (*block).size = size;
+        (*block).next = current;
+
+        if prev_block.is_null() {
+            *head = block;
+        } else {
+            (*prev_block).next = block;
+        }
+
+        // Coalesce with next neighbor.
+        if !current.is_null() && addr + size == current as usize {
+            (*block).size += (*current).size;
+            (*block).next = (*current).next;
+        }
+
+        // Coalesce with previous neighbor.
+        if !prev_block.is_null() {
+            let prev_end = prev_block as usize + (*prev_block).size;
+
+            if prev_end == addr {
+                (*prev_block).size += (*block).size;
+                (*prev_block).next = (*block).next;
+            }
+        }
+
+        self.release();
+    }
+}
+// SAFETY: All free list access is protected by a spinlock (AtomicBool CAS).
+unsafe impl Sync for UserHeap {}
+
+impl SyscallError {
+    /// Decode a raw negative return value into a `SyscallError`.
+    ///
+    /// Returns `UnknownSyscall` for unrecognized codes (defensive — kernel
+    /// shouldn't produce codes outside this set, but userspace shouldn't panic
+    /// if it does).
+    pub fn from_raw(val: i64) -> Self {
+        match val {
+            -1 => Self::UnknownSyscall,
+            -2 => Self::BadAddress,
+            -3 => Self::BadLength,
+            -4 => Self::InvalidArgument,
+            -5 => Self::AlreadyBorrowing,
+            -6 => Self::NotBorrowing,
+            -7 => Self::AlreadyBound,
+            -8 => Self::WouldBlock,
+            -9 => Self::OutOfMemory,
+            -10 => Self::InvalidHandle,
+            -12 => Self::InsufficientRights,
+            -13 => Self::TableFull,
+            -14 => Self::SlotOccupied,
+            _ => Self::UnknownSyscall,
+        }
+    }
+}
+
+fn align_up(addr: usize, align: usize) -> usize {
+    (addr + align - 1) & !(align - 1)
+}
+/// Convert a raw syscall return value to a `SyscallResult`.
+///
+/// Non-negative → `Ok(value as u64)`. Negative → `Err(SyscallError)`.
+fn result(raw: i64) -> SyscallResult<u64> {
+    if raw >= 0 {
+        Ok(raw as u64)
+    } else {
+        Err(SyscallError::from_raw(raw))
+    }
+}
 
 #[inline(always)]
 unsafe fn syscall0(nr: u64) -> u64 {
@@ -463,7 +683,6 @@ pub fn yield_now() {
 // ---------------------------------------------------------------------------
 // Panic handler — exits the process instead of spinning.
 // ---------------------------------------------------------------------------
-
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     exit()

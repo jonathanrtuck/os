@@ -7,6 +7,10 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 const SHM: *mut u8 = 0x4000_0000 as *mut u8; // must match kernel paging::CHANNEL_SHM_BASE
 
 #[unsafe(no_mangle)]
@@ -18,6 +22,18 @@ pub extern "C" fn _start() -> ! {
 
     sys::print(b"echo recv: ");
     sys::print(msg);
+    sys::print(b"\n");
+
+    // Smoke test: dynamic allocation via Vec (uses memory_alloc under the hood).
+    let mut v: Vec<u8> = Vec::new();
+
+    v.push(b'h');
+    v.push(b'e');
+    v.push(b'a');
+    v.push(b'p');
+
+    sys::print(b"  heap ok: ");
+    sys::print(&v);
     sys::print(b"\n");
 
     // Write "pong" to outgoing region (offset 128), then signal init.

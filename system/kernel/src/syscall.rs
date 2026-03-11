@@ -116,8 +116,9 @@ pub mod nr {
 /// Maximum DMA allocation order (2^10 pages = 4 MiB).
 /// Must match page_allocator::MAX_ORDER. Needed for GPU framebuffers.
 const MAX_DMA_ORDER: u64 = 10;
-/// Maximum ELF size for process_create (1 MiB).
-const MAX_ELF_SIZE: u64 = 1024 * 1024;
+/// Maximum ELF size for process_create (2 MiB).
+/// ELF files include debug info and symbol tables beyond loadable segments.
+const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
 /// Maximum number of handles in a single `wait` call.
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
