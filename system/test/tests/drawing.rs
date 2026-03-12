@@ -1727,3 +1727,153 @@ fn gamma_draw_coverage_uses_gamma_correction() {
     assert_eq!(p.r, p.g, "r ({}) should equal g ({})", p.r, p.g);
     assert_eq!(p.r, p.b, "r ({}) should equal b ({})", p.r, p.b);
 }
+
+// ---------------------------------------------------------------------------
+// 2D oversampling tests
+// ---------------------------------------------------------------------------
+
+use drawing::{OVERSAMPLE_X, OVERSAMPLE_Y};
+
+#[test]
+fn oversample_x_is_at_least_2() {
+    assert!(
+        OVERSAMPLE_X >= 2,
+        "OVERSAMPLE_X should be >= 2 for horizontal oversampling, got {}",
+        OVERSAMPLE_X,
+    );
+}
+
+#[test]
+fn oversample_y_is_at_least_4() {
+    assert!(
+        OVERSAMPLE_Y >= 4,
+        "OVERSAMPLE_Y should be >= 4, got {}",
+        OVERSAMPLE_Y,
+    );
+}
+
+#[test]
+fn oversampled_rasterize_produces_intermediate_coverage() {
+    // Diagonal strokes should have intermediate coverage values (not just 0/255)
+    // in the horizontal direction. 'k' has diagonal strokes.
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+
+    let metrics = font.rasterize('k', 24, &mut raster, &mut scratch).unwrap();
+    assert!(metrics.width > 0 && metrics.height > 0);
+
+    // Check that there are intermediate coverage values (not just 0 and 255)
+    // along the edges. With 2D oversampling, horizontal edges should have
+    // smooth gradients.
+    let total = (metrics.width * metrics.height) as usize;
+    let coverage = &buf[..total];
+
+    let intermediate_count = coverage.iter().filter(|&&c| c > 0 && c < 255).count();
+    assert!(
+        intermediate_count > 0,
+        "'k' should have intermediate coverage values (smooth edges), got 0 intermediate pixels",
+    );
+}
+
+#[test]
+fn oversampled_diagonal_has_horizontal_gradients() {
+    // With horizontal oversampling, diagonal strokes should show smooth
+    // horizontal transitions. Check 'x' which has strong diagonals.
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+
+    let metrics = font.rasterize('x', 24, &mut raster, &mut scratch).unwrap();
+    let w = metrics.width;
+    let total = (w * metrics.height) as usize;
+    let coverage = &buf[..total];
+
+    // Find a row in the middle of the glyph (where diagonals cross).
+    let mid_row = metrics.height / 2;
+    let row_start = (mid_row * w) as usize;
+    let row_end = row_start + w as usize;
+    let row = &coverage[row_start..row_end];
+
+    // The middle row should have some intermediate values along edges.
+    let has_intermediate = row.iter().any(|&c| c > 10 && c < 245);
+    assert!(
+        has_intermediate,
+        "'x' mid-row should have intermediate coverage from horizontal oversampling",
+    );
+}
+
+#[test]
+fn oversampled_curve_has_smooth_edges() {
+    // Curved characters like 'o' should have smooth edges with 2D oversampling.
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+
+    let metrics = font.rasterize('o', 24, &mut raster, &mut scratch).unwrap();
+    let w = metrics.width;
+    let total = (w * metrics.height) as usize;
+    let coverage = &buf[..total];
+
+    // Count distinct non-zero coverage levels (more levels = smoother).
+    let mut levels = [false; 256];
+    for &c in coverage.iter() {
+        if c > 0 {
+            levels[c as usize] = true;
+        }
+    }
+    let distinct_levels = levels.iter().filter(|&&v| v).count();
+
+    // With 2D oversampling (OVERSAMPLE_X*OVERSAMPLE_Y = 8 samples per pixel),
+    // we expect more than 4 distinct coverage levels at minimum.
+    assert!(
+        distinct_levels >= 4,
+        "'o' should have at least 4 distinct non-zero coverage levels, got {}",
+        distinct_levels,
+    );
+}
+
+#[test]
+fn oversampled_all_printable_ascii_still_rasterize() {
+    // All printable ASCII should still rasterize successfully after adding
+    // horizontal oversampling.
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+
+    for c in 0x20u8..=0x7Eu8 {
+        let ch = c as char;
+        let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+        let metrics = font.rasterize(ch, 24, &mut raster, &mut scratch);
+        assert!(
+            metrics.is_some(),
+            "oversampled: should rasterize '{}' (0x{:02x}) at 24px",
+            ch, c,
+        );
+    }
+}
+
+#[test]
+fn oversampled_glyph_cache_populated() {
+    // GlyphCache should still populate correctly with 2D oversampling.
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut cache = drawing::GlyphCache::zeroed();
+
+    cache.populate(&font, 16, &mut scratch);
+
+    // Check a few glyphs are cached with valid dimensions.
+    let (g_a, cov_a) = cache.get(b'A').unwrap();
+    assert!(g_a.width > 0 && g_a.height > 0, "'A' should have non-zero cached dimensions");
+    assert!(cov_a.len() > 0, "'A' coverage should be non-empty");
+
+    let (g_k, cov_k) = cache.get(b'k').unwrap();
+    assert!(g_k.width > 0 && g_k.height > 0);
+
+    // Check coverage has intermediate values (smooth edges).
+    let has_intermediate = cov_k.iter().any(|&c| c > 0 && c < 255);
+    assert!(has_intermediate, "'k' cached coverage should have intermediate values");
+}

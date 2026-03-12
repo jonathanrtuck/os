@@ -31,7 +31,11 @@ const GLYPH_LAST: u8 = 0x7E;
 const GLYPH_COUNT: usize = (GLYPH_LAST - GLYPH_FIRST + 1) as usize; // 95
 const GLYPH_MAX_W: usize = 48;
 const GLYPH_MAX_H: usize = 48;
-const GLYPH_BUF_SIZE: usize = GLYPH_MAX_W * GLYPH_MAX_H;
+/// Per-glyph coverage buffer size. Must accommodate the intermediate
+/// oversampled raster (GLYPH_MAX_W * OVERSAMPLE_X * GLYPH_MAX_H) since
+/// rasterize() uses the same buffer for the oversampled coverage map before
+/// downsampling in-place.
+const GLYPH_BUF_SIZE: usize = GLYPH_MAX_W * OVERSAMPLE_X as usize * GLYPH_MAX_H;
 
 /// Built-in 8×16 VGA-style bitmap font covering printable ASCII (0x20–0x7E).
 pub const FONT_8X16: BitmapFont = BitmapFont {

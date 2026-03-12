@@ -9,8 +9,12 @@
 const MAX_SEGMENTS: usize = 2048;
 /// Maximum edges active on a single scanline.
 const MAX_ACTIVE_EDGES: usize = 64;
+/// Horizontal oversampling factor for anti-aliasing.
+/// Rasterise at OVERSAMPLE_X × width, then downsample to produce smooth
+/// horizontal edges on vertical and diagonal strokes.
+pub const OVERSAMPLE_X: i32 = 2;
 /// Vertical oversampling factor for anti-aliasing.
-const OVERSAMPLE_Y: i32 = 4;
+pub const OVERSAMPLE_Y: i32 = 4;
 /// Fixed-point 20.12 format for sub-pixel precision.
 /// 12 fractional bits gives 1/4096 pixel resolution — more than enough.
 const FP_SHIFT: i32 = 12;

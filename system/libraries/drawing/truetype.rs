@@ -748,24 +748,58 @@ impl<'a> TrueTypeFont<'a> {
             return None; // Exceeds caller's buffer.
         }
 
-        // Clear the coverage region.
-        let total = (bmp_w * bmp_h) as usize;
+        // 2D oversampling: rasterize at OVERSAMPLE_X × width, then
+        // downsample horizontally for smoother edges on vertical/diagonal
+        // strokes. Vertical oversampling (OVERSAMPLE_Y) is already handled
+        // by sub-scanlines within rasterize_segments.
+        let over_w = bmp_w * OVERSAMPLE_X as u32;
+        let over_total = (over_w * bmp_h) as usize;
 
-        if total > buffer.data.len() {
+        if over_total > buffer.data.len() {
             return None;
         }
-        let coverage = &mut buffer.data[..total];
 
-        for b in coverage.iter_mut() {
+        // Clear the oversampled coverage region.
+        for b in buffer.data[..over_total].iter_mut() {
             *b = 0;
         }
 
-        // Flatten outline into line segments.
+        // Flatten outline into line segments (at 1× pixel coordinates).
         scratch.num_segments = 0;
 
         flatten_outline_from_scratch(scratch, size_px, upem, x_min_px, y_max_px);
-        // Rasterize segments into coverage map.
-        rasterize_segments(scratch, coverage, bmp_w, bmp_h);
+
+        // Scale segment x-coordinates by OVERSAMPLE_X for wider rasterization.
+        for i in 0..scratch.num_segments {
+            scratch.segments[i].x0 *= OVERSAMPLE_X;
+            scratch.segments[i].x1 *= OVERSAMPLE_X;
+        }
+
+        // Rasterize at oversampled width.
+        rasterize_segments(scratch, &mut buffer.data[..over_total], over_w, bmp_h);
+
+        // Downsample horizontally: average OVERSAMPLE_X adjacent samples per
+        // output pixel. The oversampled buffer is over_w × bmp_h; the output
+        // is bmp_w × bmp_h written into the beginning of the same buffer.
+        // Safe to write in-place because dst_idx <= src_base for all pixels
+        // (output row is narrower than oversampled row, and we process
+        // left-to-right, top-to-bottom).
+        let ox = OVERSAMPLE_X as u32;
+
+        for row in 0..bmp_h {
+            for col in 0..bmp_w {
+                let src_base = (row * over_w + col * ox) as usize;
+                let mut sum = 0u32;
+
+                for s in 0..ox {
+                    sum += buffer.data[src_base + s as usize] as u32;
+                }
+
+                let dst_idx = (row * bmp_w + col) as usize;
+
+                buffer.data[dst_idx] = (sum / ox) as u8;
+            }
+        }
 
         let advance = scale_fu(advance_fu as i32, size_px, self.units_per_em) as u32;
         let bearing_x = scale_fu(lsb_fu as i32, size_px, upem);
