@@ -97,6 +97,8 @@ struct CompositorConfig {
     mono_font_len: u32,
     prop_font_len: u32,
 }
+// Guard: CompositorConfig must fit within the 60-byte IPC payload.
+const _: () = assert!(core::mem::size_of::<CompositorConfig>() <= 60);
 
 #[repr(C)]
 #[derive(Clone, Copy)]

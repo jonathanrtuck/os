@@ -1505,10 +1505,9 @@ pub fn composite_surfaces(dst: &mut Surface, surfaces: &[&CompositeSurface]) {
 // ---------------------------------------------------------------------------
 
 /// Maximum number of dirty rects that fit in a MSG_PRESENT payload.
-/// Payload = 60 bytes. buffer_index (4) + rect_count (1) + pad (3) = 8.
-/// Remaining = 52 bytes / 8 bytes per rect = 6 rects (conservative to fit).
-/// Actually: 60 - 4 (buffer_index) - 4 (rect_count as u32) = 52 / 8 = 6.
-pub const MAX_DIRTY_RECTS: usize = 7;
+/// Payload = 60 bytes. buffer_index (4) + rect_count (4) + pad (4) = 12.
+/// Remaining = 48 bytes / 8 bytes per rect = 6 rects.
+pub const MAX_DIRTY_RECTS: usize = 6;
 
 /// A rectangular region of pixels that has been modified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

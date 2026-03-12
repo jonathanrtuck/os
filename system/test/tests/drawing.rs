@@ -2157,8 +2157,8 @@ fn damage_tracker_add_after_full_screen_is_noop() {
 }
 
 #[test]
-fn damage_tracker_max_rects_is_7() {
-    assert_eq!(drawing::MAX_DIRTY_RECTS, 7);
+fn damage_tracker_max_rects_is_6() {
+    assert_eq!(drawing::MAX_DIRTY_RECTS, 6);
 }
 
 #[test]

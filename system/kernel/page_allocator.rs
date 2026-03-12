@@ -2,7 +2,7 @@
 //!
 //! Manages physical memory above the kernel heap. Supports single-page
 //! allocation (order 0, 4 KiB) and multi-page contiguous allocation (up to
-//! order MAX_ORDER = 4 MiB). Buddy coalescing on free keeps fragmentation low.
+//! order MAX_ORDER = 8 MiB). Buddy coalescing on free keeps fragmentation low.
 //!
 //! Existing single-page API (`alloc_frame`/`free_frame`) is preserved —
 //! callers are unaffected.
