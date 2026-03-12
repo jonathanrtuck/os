@@ -3183,3 +3183,188 @@ fn png_decode_test_image_from_file() {
     }
     // If file doesn't exist, skip (test will be run during verification)
 }
+
+// ---------------------------------------------------------------------------
+// Image viewer: PNG surface rendering within content area bounds
+// ---------------------------------------------------------------------------
+
+#[test]
+fn image_blit_clips_to_content_area() {
+    // Simulate blitting a large image into a smaller content area.
+    // The image should be clipped to the content surface bounds.
+    let img_w: u32 = 16;
+    let img_h: u32 = 16;
+    let content_w: u32 = 10;
+    let content_h: u32 = 10;
+
+    // Create a "decoded image" buffer (BGRA8888).
+    let mut img_data = vec![0u8; (img_w * img_h * 4) as usize];
+    for y in 0..img_h {
+        for x in 0..img_w {
+            let idx = ((y * img_w + x) * 4) as usize;
+            img_data[idx] = 0; // B
+            img_data[idx + 1] = (y * 16) as u8; // G
+            img_data[idx + 2] = (x * 16) as u8; // R
+            img_data[idx + 3] = 255; // A
+        }
+    }
+
+    // Create a content surface smaller than the image.
+    let mut content_buf = vec![0u8; (content_w * content_h * 4) as usize];
+    let mut content = make_surface(&mut content_buf, content_w, content_h);
+
+    // Blit the image at (0,0) — should clip to content bounds.
+    content.blit(
+        &img_data,
+        img_w,
+        img_h,
+        img_w * 4,
+        0,
+        0,
+    );
+
+    // Verify: only the top-left 10x10 of the 16x16 image is visible.
+    for y in 0..content_h {
+        for x in 0..content_w {
+            let px = content.get_pixel(x, y).unwrap();
+            assert_eq!(px.r, (x * 16) as u8, "pixel ({x},{y}) R mismatch");
+            assert_eq!(px.g, (y * 16) as u8, "pixel ({x},{y}) G mismatch");
+            assert_eq!(px.a, 255);
+        }
+    }
+}
+
+#[test]
+fn image_blit_blend_clips_to_content_area() {
+    // Same test but using blit_blend (alpha-aware blitting).
+    let img_w: u32 = 20;
+    let img_h: u32 = 20;
+    let content_w: u32 = 12;
+    let content_h: u32 = 12;
+
+    let mut img_data = vec![0u8; (img_w * img_h * 4) as usize];
+    for y in 0..img_h {
+        for x in 0..img_w {
+            let idx = ((y * img_w + x) * 4) as usize;
+            img_data[idx] = 100; // B
+            img_data[idx + 1] = 150; // G
+            img_data[idx + 2] = 200; // R
+            img_data[idx + 3] = 255; // A (opaque)
+        }
+    }
+
+    let mut content_buf = vec![0u8; (content_w * content_h * 4) as usize];
+    let mut content = make_surface(&mut content_buf, content_w, content_h);
+    content.clear(Color::rgb(0, 0, 0));
+
+    content.blit_blend(
+        &img_data,
+        img_w,
+        img_h,
+        img_w * 4,
+        0,
+        0,
+    );
+
+    // Verify clipped pixels are correct.
+    for y in 0..content_h {
+        for x in 0..content_w {
+            let px = content.get_pixel(x, y).unwrap();
+            assert_eq!(px.r, 200, "pixel ({x},{y}) R");
+            assert_eq!(px.g, 150, "pixel ({x},{y}) G");
+            assert_eq!(px.b, 100, "pixel ({x},{y}) B");
+        }
+    }
+}
+
+#[test]
+fn image_surface_no_overflow_into_chrome_region() {
+    // Simulate the compositor layout: content area is between title bar and
+    // status bar. An image blitted into the content area must not write
+    // outside those bounds.
+    let fb_w: u32 = 64;
+    let fb_h: u32 = 48;
+    let title_h: u32 = 8;
+    let status_h: u32 = 6;
+    let content_h = fb_h - title_h - status_h; // 34
+
+    // Create framebuffer.
+    let mut fb_buf = vec![0u8; (fb_w * fb_h * 4) as usize];
+    let mut fb = make_surface(&mut fb_buf, fb_w, fb_h);
+    fb.clear(Color::rgb(10, 10, 10)); // dark bg
+
+    // Fill title bar region with distinct color.
+    fb.fill_rect(0, 0, fb_w, title_h, Color::rgb(50, 50, 80));
+
+    // Fill status bar region with distinct color.
+    fb.fill_rect(0, fb_h - status_h, fb_w, status_h, Color::rgb(50, 50, 80));
+
+    // Create a content surface the exact size of content area.
+    let mut content_buf = vec![0u8; (fb_w * content_h * 4) as usize];
+    let mut content = make_surface(&mut content_buf, fb_w, content_h);
+    content.clear(Color::rgb(20, 20, 30));
+
+    // Blit a large image (bigger than content) into the content surface.
+    let img_w: u32 = 128;
+    let img_h: u32 = 128;
+    let mut img_data = vec![0u8; (img_w * img_h * 4) as usize];
+    for i in 0..(img_w * img_h) as usize {
+        img_data[i * 4] = 0;     // B
+        img_data[i * 4 + 1] = 255; // G
+        img_data[i * 4 + 2] = 0;   // R
+        img_data[i * 4 + 3] = 255; // A
+    }
+
+    content.blit(&img_data, img_w, img_h, img_w * 4, 0, 0);
+
+    // Blit content surface onto framebuffer at the content area position.
+    fb.blit(content.data, fb_w, content_h, fb_w * 4, 0, title_h);
+
+    // Verify: title bar region is unchanged (still chrome color).
+    for y in 0..title_h {
+        let px = fb.get_pixel(0, y).unwrap();
+        assert_eq!(px.r, 50, "title bar pixel ({},{}): R={}", 0, y, px.r);
+        assert_eq!(px.g, 50, "title bar pixel ({},{}): G={}", 0, y, px.g);
+    }
+
+    // Verify: status bar region is unchanged (still chrome color).
+    for y in (fb_h - status_h)..fb_h {
+        let px = fb.get_pixel(0, y).unwrap();
+        assert_eq!(px.r, 50, "status bar pixel ({},{}): R={}", 0, y, px.r);
+        assert_eq!(px.g, 50, "status bar pixel ({},{}): G={}", 0, y, px.g);
+    }
+
+    // Verify: content area has green pixels from the image.
+    let px = fb.get_pixel(0, title_h).unwrap();
+    assert_eq!(px.g, 255, "content should have green image pixels");
+    assert_eq!(px.r, 0);
+}
+
+#[test]
+fn png_decode_to_surface_correct_colors() {
+    // Decode the test.png and verify pixel color correctness.
+    let data = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/../share/test.png"));
+    if let Ok(data) = data {
+        let hdr = png_decode(&data, &mut vec![0u8; 128 * 128 * 4 + 128]).unwrap();
+        let mut output = vec![0u8; (hdr.width * hdr.height * 4) as usize + hdr.height as usize];
+        let _ = png_decode(&data, &mut output).unwrap();
+
+        // Check a few pixels are non-zero (image is not all black).
+        let mut non_zero = 0;
+        for i in 0..(hdr.width * hdr.height) as usize {
+            let r = output[i * 4 + 2]; // BGRA format: R at offset 2
+            let g = output[i * 4 + 1];
+            let b = output[i * 4];
+            if r > 0 || g > 0 || b > 0 {
+                non_zero += 1;
+            }
+        }
+        assert!(non_zero > 100, "decoded image should have many non-zero pixels, got {}", non_zero);
+
+        // Check image is not all the same color (it's a gradient).
+        let px00_r = output[2]; // pixel (0,0) R channel
+        let center = (64 * 128 + 64) * 4;
+        let px_center_r = output[center + 2];
+        assert_ne!(px00_r, px_center_r, "corner and center should differ (gradient image)");
+    }
+}

@@ -38,6 +38,7 @@ const CHANNEL_SHM_BASE: usize = 0x4000_0000;
 const FONT_SIZE: u32 = 16;
 // Protocol message types.
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
+const MSG_IMAGE_CONFIG: u32 = 6;
 const MSG_KEY_EVENT: u32 = 10;
 const MSG_PRESENT: u32 = 20;
 const MSG_WRITE_INSERT: u32 = 30;
@@ -72,6 +73,13 @@ const TEXT_INSET_TOP: u32 = 4;
 const TEXT_INSET_BOTTOM: u32 = 4;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
+
+/// Whether the compositor is in image viewer mode (true) or text editor mode (false).
+static mut IMAGE_MODE: bool = false;
+/// Decoded image width (pixels). Set when PNG is decoded.
+static mut IMAGE_WIDTH: u32 = 0;
+/// Decoded image height (pixels). Set when PNG is decoded.
+static mut IMAGE_HEIGHT: u32 = 0;
 
 static mut CHAR_W: u32 = 8;
 static mut LINE_H: u32 = 20;
@@ -129,6 +137,16 @@ struct PresentPayload {
     rects: [drawing::DirtyRect; 6],
     _pad: [u8; 4],
 }
+/// Image configuration received from init. Contains the location of
+/// raw PNG data in the shared memory buffer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ImageConfig {
+    image_va: u64,
+    image_len: u32,
+    _pad: u32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct KeyEvent {
@@ -339,6 +357,46 @@ fn render_content_surface(
     unsafe { PREV_LAST_Y = last_y };
 }
 
+/// Render the image viewer content surface: display a decoded PNG image
+/// centered within the content area. If the image is larger than the
+/// content area, it is clipped to fit (no scaling — clipping is simpler
+/// and preserves pixel-perfect rendering).
+fn render_image_content_surface(
+    surf: &mut drawing::Surface,
+    image_data: &[u8],
+    image_w: u32,
+    image_h: u32,
+) {
+    use drawing::Color;
+
+    // Clear to background color.
+    let bg = Color::rgb(24, 24, 36);
+    surf.clear(bg);
+
+    if image_w == 0 || image_h == 0 || image_data.is_empty() {
+        return;
+    }
+
+    let content_w = surf.width;
+    let content_h = surf.height;
+
+    // Center the image within the content area.
+    let dst_x = if image_w < content_w {
+        (content_w - image_w) / 2
+    } else {
+        0
+    };
+    let dst_y = if image_h < content_h {
+        (content_h - image_h) / 2
+    } else {
+        0
+    };
+
+    // Use blit_blend so alpha-transparent pixels composite correctly.
+    let image_stride = image_w * 4;
+    surf.blit_blend(image_data, image_w, image_h, image_stride, dst_x, dst_y);
+}
+
 /// Render the title bar drop shadow: gradient from opaque to transparent,
 /// falling downward from the title bar's bottom edge.
 fn render_title_shadow(surf: &mut drawing::Surface) {
@@ -394,10 +452,12 @@ fn render_title_bar(surf: &mut drawing::Surface) {
 
 /// Render the status bar chrome surface (translucent overlay).
 /// Uses the proportional font (Nunito Sans) for chrome text.
+/// In image viewer mode, shows image dimensions instead of character count.
 fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
     use drawing::Color;
 
     let prop_cache = unsafe { &*PROP_GLYPH_CACHE };
+    let in_image_mode = unsafe { IMAGE_MODE };
 
     // Translucent background.
     surf.clear(Color::rgba(30, 30, 48, 220));
@@ -408,42 +468,58 @@ fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
     // Status text.
     let mut buf = [0u8; 64];
     let mut ci = 0;
-    let prefix = b"Editor process active | ";
 
-    for &b in prefix {
+    if in_image_mode {
+        let prefix = b"Image viewer | ";
+        for &b in prefix {
+            if ci < buf.len() {
+                buf[ci] = b;
+                ci += 1;
+            }
+        }
+
+        // Append image dimensions: WIDTHxHEIGHT px
+        let img_w = unsafe { IMAGE_WIDTH };
+        let img_h = unsafe { IMAGE_HEIGHT };
+
+        ci = append_u32(&mut buf, ci, img_w);
+
         if ci < buf.len() {
-            buf[ci] = b;
+            buf[ci] = b'x';
             ci += 1;
         }
-    }
 
-    if text_len == 0 {
-        buf[ci] = b'0';
-        ci += 1;
+        ci = append_u32(&mut buf, ci, img_h);
+
+        let suffix = b" px";
+        for &b in suffix {
+            if ci < buf.len() {
+                buf[ci] = b;
+                ci += 1;
+            }
+        }
     } else {
-        let mut digits = [0u8; 6];
-        let mut di = 6;
-        let mut n = text_len;
-
-        while n > 0 {
-            di -= 1;
-            digits[di] = b'0' + (n % 10) as u8;
-            n /= 10;
+        let prefix = b"Editor process active | ";
+        for &b in prefix {
+            if ci < buf.len() {
+                buf[ci] = b;
+                ci += 1;
+            }
         }
 
-        while di < 6 && ci < buf.len() {
-            buf[ci] = digits[di];
+        if text_len == 0 {
+            buf[ci] = b'0';
             ci += 1;
-            di += 1;
+        } else {
+            ci = append_u32(&mut buf, ci, text_len as u32);
         }
-    }
 
-    let suffix = b" chars";
-
-    for &b in suffix {
-        if ci < buf.len() {
-            buf[ci] = b;
-            ci += 1;
+        let suffix = b" chars";
+        for &b in suffix {
+            if ci < buf.len() {
+                buf[ci] = b;
+                ci += 1;
+            }
         }
     }
 
@@ -455,6 +531,37 @@ fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
         prop_cache,
         Color::rgb(130, 130, 150),
     );
+}
+
+/// Append a u32 as decimal digits to a byte buffer. Returns the new index.
+fn append_u32(buf: &mut [u8], start: usize, val: u32) -> usize {
+    let mut ci = start;
+
+    if val == 0 {
+        if ci < buf.len() {
+            buf[ci] = b'0';
+            ci += 1;
+        }
+        return ci;
+    }
+
+    let mut digits = [0u8; 10];
+    let mut di = 10;
+    let mut n = val;
+
+    while n > 0 {
+        di -= 1;
+        digits[di] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    while di < 10 && ci < buf.len() {
+        buf[ci] = digits[di];
+        ci += 1;
+        di += 1;
+    }
+
+    ci
 }
 
 /// Allocate a pixel buffer for a surface with given dimensions.
@@ -604,6 +711,76 @@ pub extern "C" fn _start() -> ! {
 
     drop(scratch);
 
+    // -----------------------------------------------------------------------
+    // Check for image configuration (raw PNG data) from init.
+    // If present, decode the PNG into a heap-allocated pixel buffer.
+    // -----------------------------------------------------------------------
+    let mut image_pixels: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+    let mut image_w: u32 = 0;
+    let mut image_h: u32 = 0;
+
+    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_IMAGE_CONFIG {
+        let img_config: ImageConfig = unsafe { msg.payload_as() };
+
+        if img_config.image_va != 0 && img_config.image_len > 0 {
+            sys::print(b"     decoding PNG image (");
+
+            let png_data = unsafe {
+                core::slice::from_raw_parts(
+                    img_config.image_va as *const u8,
+                    img_config.image_len as usize,
+                )
+            };
+
+            // Parse header first to get dimensions.
+            match drawing::png_header(png_data) {
+                Ok(hdr) => {
+                    sys::print(b"");
+                    // Print dimensions.
+                    let mut dim_buf = [0u8; 20];
+                    let mut di = append_u32(&mut dim_buf, 0, hdr.width);
+                    dim_buf[di] = b'x';
+                    di += 1;
+                    di = append_u32(&mut dim_buf, di, hdr.height);
+                    sys::print(&dim_buf[..di]);
+                    sys::print(b")\n");
+
+                    let channels: u32 = if hdr.color_type == 6 { 4 } else { 3 };
+                    let scanline_bytes = 1 + (hdr.width as usize) * (channels as usize);
+                    let total_raw = scanline_bytes * (hdr.height as usize);
+                    let out_size = (hdr.width * hdr.height * 4) as usize;
+                    let decode_buf_size = if total_raw > out_size { total_raw } else { out_size };
+
+                    let mut decode_buf = vec![0u8; decode_buf_size];
+
+                    match drawing::png_decode(png_data, &mut decode_buf) {
+                        Ok(_) => {
+                            // Copy decoded BGRA pixels to final buffer.
+                            image_pixels = vec![0u8; out_size];
+                            image_pixels[..out_size].copy_from_slice(&decode_buf[..out_size]);
+                            image_w = hdr.width;
+                            image_h = hdr.height;
+
+                            unsafe {
+                                IMAGE_MODE = true;
+                                IMAGE_WIDTH = image_w;
+                                IMAGE_HEIGHT = image_h;
+                            }
+
+                            sys::print(b"     PNG decoded successfully\n");
+                        }
+                        Err(_) => {
+                            sys::print(b"     PNG decode failed\n");
+                        }
+                    }
+                }
+                Err(_) => {
+                    sys::print(b"invalid header)\n");
+                }
+            }
+        }
+    }
+
     // Channel 1: input events from input driver (endpoint 1 = recv).
     let input_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
     // Channel 2: GPU present commands (endpoint 0 = send).
@@ -677,10 +854,14 @@ pub extern "C" fn _start() -> ! {
         render_background(&mut bg_surf);
     }
 
-    // Content: text area background + cursor.
+    // Content: image viewer or text area background + cursor.
     {
         let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
-        render_content_surface(&mut content_surf, doc_content());
+        if unsafe { IMAGE_MODE } && !image_pixels.is_empty() {
+            render_image_content_surface(&mut content_surf, &image_pixels, image_w, image_h);
+        } else {
+            render_content_surface(&mut content_surf, doc_content());
+        }
     }
 
     // Drop shadows (rendered once — static gradient, never re-rendered).
@@ -850,14 +1031,16 @@ pub extern "C" fn _start() -> ! {
 
         if changed {
             let back = unsafe { BACK_BUF_IDX };
+            let in_image_mode = unsafe { IMAGE_MODE };
 
-            // 1. Re-render the content surface.
-            {
+            // 1. Re-render the content surface (only in text editor mode).
+            if !in_image_mode {
                 let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
                 render_content_surface(&mut content_surf, doc_content());
             }
+            // In image mode, content surface stays unchanged (showing the image).
 
-            // 2. Re-render the status bar (char count changed).
+            // 2. Re-render the status bar.
             {
                 let mut status_surf = make_surf(&mut status_buf, fb_width, STATUS_BAR_H);
                 render_status_bar(&mut status_surf, unsafe { DOC_LEN });

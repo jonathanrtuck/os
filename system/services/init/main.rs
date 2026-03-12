@@ -62,6 +62,7 @@ const MSG_GPU_CONFIG: u32 = 2;
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
 const MSG_EDITOR_CONFIG: u32 = 4;
 const MSG_DISPLAY_INFO: u32 = 5;
+const MSG_IMAGE_CONFIG: u32 = 6;
 const MSG_FS_READ_REQUEST: u32 = 40;
 const MSG_FS_READ_RESPONSE: u32 = 41;
 
@@ -94,6 +95,18 @@ struct CompositorConfig {
 struct EditorConfig {
     doc_va: u64,
     doc_capacity: u32,
+    _pad: u32,
+}
+/// Image configuration sent to compositor after the main config.
+/// Contains the location of the raw PNG file data in shared memory.
+/// The compositor decodes the PNG itself (it links the drawing library).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct ImageConfig {
+    /// VA (in compositor's address space) of the raw PNG data.
+    image_va: u64,
+    /// Length of the raw PNG data in bytes.
+    image_len: u32,
     _pad: u32,
 }
 #[repr(C)]
@@ -163,7 +176,7 @@ fn setup_display_pipeline(
     gpu_pa: u64,
     gpu_irq: u32,
     input_proc: Option<(u8, usize, u64, u32)>, // (proc, ch_idx, pa, irq)
-    font_buf: Option<(u64, u32, u32)>,         // (pa, mono_len, prop_len) from 9p read
+    font_buf: Option<(u64, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len)
     next_channel: &mut usize,
 ) {
     sys::print(b"     setting up display pipeline\n");
@@ -332,19 +345,20 @@ fn setup_display_pipeline(
             sys::print(b"init: memory_share (compositor doc) failed\n");
             sys::exit();
         });
-    // Share font buffer with compositor (read-only) if available.
-    // The buffer contains both fonts: mono at offset 0, prop at offset mono_len.
-    let (comp_font_va, mono_font_len, prop_font_len) = if let Some((font_pa, mono_len, prop_len)) = font_buf {
-        let total_len = mono_len + prop_len;
+    // Share font+image buffer with compositor (read-only) if available.
+    // The buffer contains: mono font at offset 0, prop font at offset mono_len,
+    // PNG image data at offset png_offset.
+    let (comp_font_va, mono_font_len, prop_font_len, png_offset, png_len) = if let Some((font_pa, mono_len, prop_len, png_off, png_l)) = font_buf {
+        let total_len = mono_len + prop_len + png_l;
         let font_pages = ((total_len as u64) + 4095) / 4096;
         let va = sys::memory_share(comp_proc, font_pa, font_pages, true).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (compositor font) failed\n");
             sys::exit();
         });
 
-        (va as u64, mono_len, prop_len)
+        (va as u64, mono_len, prop_len, png_off, png_l)
     } else {
-        (0u64, 0u32, 0u32)
+        (0u64, 0u32, 0u32, 0u32, 0u32)
     };
     // Send compositor config via ring buffer.
     let comp_ch = init_channel(comp_channel_idx);
@@ -364,6 +378,19 @@ fn setup_display_pipeline(
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };
 
     comp_ch.send(&msg);
+
+    // Send image config as a second message if PNG data is available.
+    if png_len > 0 {
+        let image_va = comp_font_va + png_offset as u64;
+        let img_config = ImageConfig {
+            image_va,
+            image_len: png_len,
+            _pad: 0,
+        };
+        let img_msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_CONFIG, &img_config) };
+
+        comp_ch.send(&img_msg);
+    }
 
     // -----------------------------------------------------------------------
     // Create remaining cross-process channels.
@@ -636,7 +663,7 @@ pub extern "C" fn _start() -> ! {
     // Phase 1.5: Read font files from host via 9p driver (must complete before compositor).
     // Loads both monospace (Source Code Pro) and proportional (Nunito Sans) fonts.
     // Both are stored in a single shared buffer: mono at offset 0, prop at offset mono_len.
-    let font_buf: Option<(u64, u32, u32)> = if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9
+    let font_buf: Option<(u64, u32, u32, u32, u32)> = if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9
     {
         sys::print(b"     loading fonts from host filesystem\n");
 
@@ -759,8 +786,29 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"     prop font read failed\n");
         }
 
+        // Load PNG image (test.png) right after the proportional font.
+        sys::print(b"     loading test.png\n");
+
+        let png_offset = mono_len + prop_len;
+        let png_capacity = font_capacity - png_offset;
+        let png_target_va = p9_font_va as u64 + png_offset as u64;
+
+        let png_len = read_font_file(
+            &p9_ch_obj, p9_ch,
+            png_target_va, png_capacity,
+            b"test.png",
+        );
+
+        if png_len > 0 {
+            sys::print(b"     png loaded: ");
+            print_u32(png_len);
+            sys::print(b" bytes\n");
+        } else {
+            sys::print(b"     png read failed\n");
+        }
+
         if mono_len > 0 {
-            Some((font_pa, mono_len, prop_len))
+            Some((font_pa, mono_len, prop_len, png_offset, png_len))
         } else {
             None
         }
