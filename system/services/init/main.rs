@@ -84,8 +84,9 @@ struct CompositorConfig {
     fb_size: u32,
     doc_va: u64,
     doc_capacity: u32,
-    font_len: u32,
-    font_va: u64,
+    mono_font_len: u32,
+    mono_font_va: u64,
+    prop_font_len: u32,
 }
 
 #[repr(C)]
@@ -162,7 +163,7 @@ fn setup_display_pipeline(
     gpu_pa: u64,
     gpu_irq: u32,
     input_proc: Option<(u8, usize, u64, u32)>, // (proc, ch_idx, pa, irq)
-    font_buf: Option<(u64, u32)>,              // (pa, len) from 9p read
+    font_buf: Option<(u64, u32, u32)>,         // (pa, mono_len, prop_len) from 9p read
     next_channel: &mut usize,
 ) {
     sys::print(b"     setting up display pipeline\n");
@@ -332,16 +333,18 @@ fn setup_display_pipeline(
             sys::exit();
         });
     // Share font buffer with compositor (read-only) if available.
-    let (comp_font_va, font_len) = if let Some((font_pa, flen)) = font_buf {
-        let font_pages = ((flen as u64) + 4095) / 4096;
+    // The buffer contains both fonts: mono at offset 0, prop at offset mono_len.
+    let (comp_font_va, mono_font_len, prop_font_len) = if let Some((font_pa, mono_len, prop_len)) = font_buf {
+        let total_len = mono_len + prop_len;
+        let font_pages = ((total_len as u64) + 4095) / 4096;
         let va = sys::memory_share(comp_proc, font_pa, font_pages, true).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (compositor font) failed\n");
             sys::exit();
         });
 
-        (va as u64, flen)
+        (va as u64, mono_len, prop_len)
     } else {
-        (0u64, 0u32)
+        (0u64, 0u32, 0u32)
     };
     // Send compositor config via ring buffer.
     let comp_ch = init_channel(comp_channel_idx);
@@ -354,8 +357,9 @@ fn setup_display_pipeline(
         fb_size,
         doc_va: comp_doc_va as u64,
         doc_capacity: DOC_BUF_CAPACITY,
-        font_len,
-        font_va: comp_font_va,
+        mono_font_len,
+        mono_font_va: comp_font_va,
+        prop_font_len,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };
 
@@ -629,24 +633,28 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Phase 1.5: Read font file from host via 9p driver (must complete before compositor).
-    // Phase 1.5: Start 9p driver, read font from host, pass to compositor.
-    let font_buf: Option<(u64, u32)> = if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9
+    // Phase 1.5: Read font files from host via 9p driver (must complete before compositor).
+    // Loads both monospace (Source Code Pro) and proportional (Nunito Sans) fonts.
+    // Both are stored in a single shared buffer: mono at offset 0, prop at offset mono_len.
+    let font_buf: Option<(u64, u32, u32)> = if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9
     {
-        sys::print(b"     loading font from host filesystem\n");
+        sys::print(b"     loading fonts from host filesystem\n");
 
-        // Allocate font buffer (16 KiB).
+        // Allocate font buffer (256 KiB = order 6 = 64 pages).
+        // Holds both fonts: Source Code Pro (~10 KiB) + Nunito Sans (~142 KiB).
+        let font_order: u32 = 6;
+        let font_page_count: u64 = 1u64 << font_order;
         let mut font_pa: u64 = 0;
-        let _font_va = sys::dma_alloc(2, &mut font_pa).unwrap_or_else(|_| {
+        let _font_va = sys::dma_alloc(font_order, &mut font_pa).unwrap_or_else(|_| {
             sys::print(b"init: dma_alloc (font buffer) failed\n");
             sys::exit();
         });
-        let font_capacity: u32 = 4 * 4096;
+        let font_capacity: u32 = (font_page_count as u32) * 4096; // 256 KiB
 
         unsafe { core::ptr::write_bytes(_font_va as *mut u8, 0, font_capacity as usize) };
 
         // Share font buffer with 9p driver (read-write).
-        let p9_font_va = sys::memory_share(p9_proc, font_pa, 4, false).unwrap_or_else(|_| {
+        let p9_font_va = sys::memory_share(p9_proc, font_pa, font_page_count, false).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (9p font) failed\n");
             sys::exit();
         });
@@ -661,44 +669,43 @@ pub extern "C" fn _start() -> ! {
 
         p9_ch_obj.send(&cfg_msg);
 
-        // Build font read request. Construct the message manually to avoid
-        // any alignment issues with from_payload on a 60-byte struct.
-        let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
-
-        unsafe {
-            let p = req_msg.payload.as_mut_ptr();
-
-            core::ptr::write_unaligned(p as *mut u64, p9_font_va as u64);
-            core::ptr::write_unaligned(p.add(8) as *mut u32, font_capacity);
-            core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
-
-            let name = b"SourceCodePro-Regular.ttf";
-
-            core::ptr::copy_nonoverlapping(name.as_ptr(), p.add(16), name.len());
-        }
-
-        p9_ch_obj.send(&req_msg);
-
-        // Start 9p driver and wait for font read completion.
+        // Start 9p driver.
         sys::print(b"     starting 9p driver\n");
 
         let _ = sys::process_start(p9_proc);
-        let _ = sys::channel_signal(p9_ch);
 
-        // Wait for font read response. The 9p driver needs time to negotiate
-        // the protocol and read the file, so loop until a response arrives.
-        sys::print(b"     waiting for font read\n");
+        // Helper: send a file read request and wait for the response.
+        // Returns the number of bytes read, or 0 on failure.
+        let read_font_file = |ch_obj: &ipc::Channel, ch_handle: u8,
+                               target_va: u64, capacity: u32,
+                               filename: &[u8]| -> u32 {
+            let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
 
-        let mut resp_msg = ipc::Message::new(0);
-        let result = loop {
-            let _ = sys::wait(&[p9_ch], u64::MAX);
+            unsafe {
+                let p = req_msg.payload.as_mut_ptr();
 
-            if p9_ch_obj.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_FS_READ_RESPONSE {
-                break Some(resp_msg);
+                core::ptr::write_unaligned(p as *mut u64, target_va);
+                core::ptr::write_unaligned(p.add(8) as *mut u32, capacity);
+                core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
+                // Zero-fill filename area first.
+                core::ptr::write_bytes(p.add(16), 0, 44);
+                core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
             }
-        };
 
-        if let Some(resp_msg) = result {
+            ch_obj.send(&req_msg);
+
+            let _ = sys::channel_signal(ch_handle);
+
+            let mut resp_msg = ipc::Message::new(0);
+
+            loop {
+                let _ = sys::wait(&[ch_handle], u64::MAX);
+
+                if ch_obj.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_FS_READ_RESPONSE {
+                    break;
+                }
+            }
+
             let (len, status) = unsafe {
                 let p = resp_msg.payload.as_ptr();
                 let len = core::ptr::read_unaligned(p as *const u32);
@@ -708,22 +715,52 @@ pub extern "C" fn _start() -> ! {
             };
 
             if status == 0 && len > 0 {
-                sys::print(b"     font loaded: ");
-
-                print_u32(len);
-
-                sys::print(b" bytes\n");
-
-                Some((font_pa, len))
+                len
             } else {
-                sys::print(b"     font read failed (status=");
-
-                print_u32(status);
-
-                sys::print(b")\n");
-
-                None
+                0
             }
+        };
+
+        // Load monospace font (Source Code Pro) at offset 0.
+        sys::print(b"     loading SourceCodePro-Regular.ttf\n");
+
+        let mono_len = read_font_file(
+            &p9_ch_obj, p9_ch,
+            p9_font_va as u64, font_capacity,
+            b"SourceCodePro-Regular.ttf",
+        );
+
+        if mono_len > 0 {
+            sys::print(b"     mono font loaded: ");
+            print_u32(mono_len);
+            sys::print(b" bytes\n");
+        } else {
+            sys::print(b"     mono font read failed\n");
+        }
+
+        // Load proportional font (Nunito Sans) right after the mono font.
+        sys::print(b"     loading NunitoSans-Regular.ttf\n");
+
+        let prop_offset = mono_len;
+        let prop_capacity = font_capacity - prop_offset;
+        let prop_target_va = p9_font_va as u64 + prop_offset as u64;
+
+        let prop_len = read_font_file(
+            &p9_ch_obj, p9_ch,
+            prop_target_va, prop_capacity,
+            b"NunitoSans-Regular.ttf",
+        );
+
+        if prop_len > 0 {
+            sys::print(b"     prop font loaded: ");
+            print_u32(prop_len);
+            sys::print(b" bytes\n");
+        } else {
+            sys::print(b"     prop font read failed\n");
+        }
+
+        if mono_len > 0 {
+            Some((font_pa, mono_len, prop_len))
         } else {
             None
         }

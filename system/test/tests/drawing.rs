@@ -1879,6 +1879,139 @@ fn oversampled_glyph_cache_populated() {
 }
 
 // ---------------------------------------------------------------------------
+// Proportional font — GlyphCache with variable advance widths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn proportional_glyph_cache_advance_i_less_than_m() {
+    // VAL-FONT-004: advance('i') < advance('m') — variable widths confirmed.
+    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut cache = drawing::GlyphCache::zeroed();
+
+    cache.populate(&font, 16, &mut scratch);
+
+    let (g_i, _) = cache.get(b'i').unwrap();
+    let (g_m, _) = cache.get(b'm').unwrap();
+
+    assert!(
+        g_i.advance < g_m.advance,
+        "proportional font: 'i' advance ({}) should be < 'm' advance ({})",
+        g_i.advance, g_m.advance
+    );
+}
+
+#[test]
+fn proportional_glyph_cache_has_valid_glyphs() {
+    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut cache = drawing::GlyphCache::zeroed();
+
+    cache.populate(&font, 16, &mut scratch);
+
+    // All printable ASCII should have cached glyphs.
+    for c in 0x20u8..=0x7Eu8 {
+        let result = cache.get(c);
+        assert!(result.is_some(), "proportional cache should have glyph for 0x{:02x}", c);
+        let (g, _) = result.unwrap();
+        // All printable chars except space should have non-zero advance.
+        assert!(g.advance > 0, "glyph 0x{:02x} should have non-zero advance", c);
+    }
+}
+
+#[test]
+fn proportional_glyph_cache_variable_advances() {
+    // Multiple different advance widths exist (not monospace).
+    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut cache = drawing::GlyphCache::zeroed();
+
+    cache.populate(&font, 16, &mut scratch);
+
+    let mut advances = [0u32; 95];
+    for i in 0..95u8 {
+        let (g, _) = cache.get(0x20 + i).unwrap();
+        advances[i as usize] = g.advance;
+    }
+
+    // Count distinct advances.
+    let mut distinct = 1usize;
+    for i in 1..95 {
+        let mut seen = false;
+        for j in 0..i {
+            if advances[i] == advances[j] {
+                seen = true;
+                break;
+            }
+        }
+        if !seen {
+            distinct += 1;
+        }
+    }
+
+    assert!(
+        distinct >= 5,
+        "proportional font should have >= 5 distinct advance widths, got {}",
+        distinct
+    );
+}
+
+#[test]
+fn draw_proportional_string_advances_by_glyph_width() {
+    // Test that draw_proportional_string uses per-glyph advance widths.
+    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut cache = drawing::GlyphCache::zeroed();
+
+    cache.populate(&font, 16, &mut scratch);
+
+    let mut buf = [0u8; 400 * 40 * 4];
+    let mut surf = make_surface(&mut buf, 400, 40);
+
+    // Draw "im" and measure the resulting x.
+    let x1 = drawing::draw_proportional_string(
+        &mut surf, 0, 0, b"im", &cache, Color::WHITE,
+    );
+
+    // Manually sum advances for 'i' + 'm'.
+    let (g_i, _) = cache.get(b'i').unwrap();
+    let (g_m, _) = cache.get(b'm').unwrap();
+    let expected = g_i.advance + g_m.advance;
+
+    assert_eq!(
+        x1, expected,
+        "draw_proportional_string should advance by per-glyph widths"
+    );
+}
+
+#[test]
+fn draw_proportional_string_missing_glyph_uses_fallback() {
+    // Missing glyph (0x01 — below printable range) should advance by
+    // fallback width (space width) without crashing.
+    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut cache = drawing::GlyphCache::zeroed();
+
+    cache.populate(&font, 16, &mut scratch);
+
+    let mut buf = [0u8; 200 * 40 * 4];
+    let mut surf = make_surface(&mut buf, 200, 40);
+
+    // Draw text containing a non-printable byte — must not panic.
+    let x = drawing::draw_proportional_string(
+        &mut surf, 0, 0, b"\x01A", &cache, Color::WHITE,
+    );
+
+    // Should have advanced past the missing glyph + 'A'.
+    let (g_a, _) = cache.get(b'A').unwrap();
+    assert!(
+        x > g_a.advance,
+        "should advance past missing glyph + 'A', got x={}",
+        x
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Damage tracking — DirtyRect + DamageTracker
 // ---------------------------------------------------------------------------
 

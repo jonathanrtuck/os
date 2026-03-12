@@ -1024,6 +1024,53 @@ impl TextLayout {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Proportional text rendering
+// ---------------------------------------------------------------------------
+
+/// Draw a byte string using per-glyph advance widths from a GlyphCache.
+///
+/// Unlike the monospace `draw_string` helper in the compositor, this function
+/// uses each glyph's individual advance width for variable-pitch text layout.
+/// If a codepoint has no cached glyph (outside 0x20..=0x7E), the pen advances
+/// by the space glyph's advance width (fallback) without crashing.
+///
+/// Returns the final pen X position (total advance of all glyphs).
+pub fn draw_proportional_string(
+    fb: &mut Surface,
+    x: u32,
+    y: u32,
+    text: &[u8],
+    cache: &GlyphCache,
+    color: Color,
+) -> u32 {
+    let baseline_y = y as i32 + (cache.line_height * 3 / 4) as i32;
+    let mut cx = x as i32;
+    // Fallback advance: use space glyph width (first cached glyph).
+    let fallback_advance = match cache.get(b' ') {
+        Some((g, _)) => g.advance,
+        None => 8, // absolute fallback
+    };
+
+    for &byte in text {
+        if let Some((glyph, coverage)) = cache.get(byte) {
+            if glyph.width > 0 && glyph.height > 0 {
+                let gx = cx + glyph.bearing_x;
+                let gy = baseline_y - glyph.bearing_y;
+
+                fb.draw_coverage(gx, gy, coverage, glyph.width, glyph.height, color);
+            }
+
+            cx += glyph.advance as i32;
+        } else {
+            // Missing glyph: advance by fallback width, don't crash.
+            cx += fallback_advance as i32;
+        }
+    }
+
+    if cx < 0 { 0 } else { cx as u32 }
+}
+
 fn abs(x: i32) -> i32 {
     if x < 0 {
         -x

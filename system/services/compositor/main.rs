@@ -75,8 +75,10 @@ const DOC_HEADER_SIZE: usize = 64;
 
 static mut CHAR_W: u32 = 8;
 static mut LINE_H: u32 = 20;
-/// Pre-rasterized glyph cache (heap-allocated, initialized at startup).
+/// Pre-rasterized glyph cache for monospace font (heap-allocated, initialized at startup).
 static mut GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
+/// Pre-rasterized glyph cache for proportional font (chrome text).
+static mut PROP_GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Cursor byte offset in the document. Updated by write requests.
 static mut CURSOR_POS: usize = 0;
 /// Previous last-drawn pixel Y per content surface render (for clearing).
@@ -100,8 +102,9 @@ struct CompositorConfig {
     fb_size: u32,
     doc_va: u64,
     doc_capacity: u32,
-    font_len: u32,
-    font_va: u64,
+    mono_font_len: u32,
+    mono_font_va: u64,
+    prop_font_len: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -174,6 +177,24 @@ fn draw_string(
             cx += unsafe { CHAR_W } as i32;
         }
     }
+}
+/// Compute the pixel width of a string using proportional glyph advances.
+fn proportional_string_width(text: &[u8], cache: &drawing::GlyphCache) -> u32 {
+    let fallback = match cache.get(b' ') {
+        Some((g, _)) => g.advance,
+        None => 8,
+    };
+    let mut w = 0u32;
+
+    for &byte in text {
+        if let Some((glyph, _)) = cache.get(byte) {
+            w += glyph.advance;
+        } else {
+            w += fallback;
+        }
+    }
+
+    w
 }
 /// Get a slice of the document content (read from shared buffer).
 fn doc_content() -> &'static [u8] {
@@ -347,33 +368,36 @@ fn render_status_shadow(surf: &mut drawing::Surface) {
 }
 
 /// Render the title bar chrome surface (translucent overlay).
+/// Uses the proportional font (Nunito Sans) for chrome text.
 fn render_title_bar(surf: &mut drawing::Surface) {
     use drawing::Color;
 
-    let cache = unsafe { &*GLYPH_CACHE };
+    let prop_cache = unsafe { &*PROP_GLYPH_CACHE };
 
     // Translucent background.
     surf.clear(Color::rgba(30, 30, 48, 220));
 
-    // Title text.
-    draw_string(surf, 12, 10, b"Document OS", cache, Color::rgb(200, 200, 220));
+    // Title text (proportional font).
+    drawing::draw_proportional_string(surf, 12, 10, b"Document OS", prop_cache, Color::rgb(200, 200, 220));
 
-    // Subtitle on the right.
+    // Subtitle on the right (proportional font).
+    // Estimate width by summing per-glyph advances.
     let subtitle = b"Multi-Surface Compositor";
-    let sub_w = subtitle.len() as u32 * unsafe { CHAR_W };
+    let sub_w = proportional_string_width(subtitle, prop_cache);
     let sx = surf.width.saturating_sub(12 + sub_w);
 
-    draw_string(surf, sx, 10, subtitle, cache, Color::rgb(90, 90, 110));
+    drawing::draw_proportional_string(surf, sx, 10, subtitle, prop_cache, Color::rgb(90, 90, 110));
 
     // Bottom edge line.
     surf.draw_hline(0, surf.height - 1, surf.width, Color::rgba(60, 60, 80, 200));
 }
 
 /// Render the status bar chrome surface (translucent overlay).
+/// Uses the proportional font (Nunito Sans) for chrome text.
 fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
     use drawing::Color;
 
-    let cache = unsafe { &*GLYPH_CACHE };
+    let prop_cache = unsafe { &*PROP_GLYPH_CACHE };
 
     // Translucent background.
     surf.clear(Color::rgba(30, 30, 48, 220));
@@ -423,12 +447,12 @@ fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
         }
     }
 
-    draw_string(
+    drawing::draw_proportional_string(
         surf,
         12,
         6,
         &buf[..ci],
-        cache,
+        prop_cache,
         Color::rgb(130, 130, 150),
     );
 }
@@ -491,25 +515,25 @@ pub extern "C" fn _start() -> ! {
 
     doc_write_header();
 
-    // Load font from runtime buffer (shared by init via 9p driver).
-    if config.font_va == 0 || config.font_len == 0 {
-        sys::print(b"compositor: no font data provided\n");
+    // Load monospace font from runtime buffer (shared by init via 9p driver).
+    if config.mono_font_va == 0 || config.mono_font_len == 0 {
+        sys::print(b"compositor: no monospace font data provided\n");
         sys::exit();
     }
 
-    let font_data = unsafe {
-        core::slice::from_raw_parts(config.font_va as *const u8, config.font_len as usize)
+    let mono_font_data = unsafe {
+        core::slice::from_raw_parts(config.mono_font_va as *const u8, config.mono_font_len as usize)
     };
-    let ttf = drawing::TrueTypeFont::new(font_data).unwrap_or_else(|| {
-        sys::print(b"compositor: failed to parse font\n");
+    let mono_ttf = drawing::TrueTypeFont::new(mono_font_data).unwrap_or_else(|| {
+        sys::print(b"compositor: failed to parse monospace font\n");
         sys::exit();
     });
-    let mut cache: Box<drawing::GlyphCache> = unsafe {
+    let mut mono_cache: Box<drawing::GlyphCache> = unsafe {
         let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
         let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
 
         if ptr.is_null() {
-            sys::print(b"compositor: glyph cache alloc failed\n");
+            sys::print(b"compositor: mono glyph cache alloc failed\n");
             sys::exit();
         }
 
@@ -527,21 +551,58 @@ pub extern "C" fn _start() -> ! {
         Box::from_raw(ptr)
     };
 
-    cache.populate(&ttf, FONT_SIZE, &mut scratch);
-
-    drop(scratch);
+    mono_cache.populate(&mono_ttf, FONT_SIZE, &mut scratch);
 
     // Read advance width from space glyph (monospace: all glyphs same width).
-    if let Some((g, _)) = cache.get(b' ') {
+    if let Some((g, _)) = mono_cache.get(b' ') {
         unsafe { CHAR_W = g.advance };
     }
 
     unsafe {
-        LINE_H = cache.line_height;
-        GLYPH_CACHE = Box::into_raw(cache);
+        LINE_H = mono_cache.line_height;
+        GLYPH_CACHE = Box::into_raw(mono_cache);
     }
 
-    sys::print(b"     font rasterized (Source Code Pro 16px)\n");
+    sys::print(b"     monospace font rasterized (Source Code Pro 16px)\n");
+
+    // Load proportional font (Nunito Sans) for chrome text.
+    // Proportional font is stored right after the monospace font in the same buffer.
+    if config.prop_font_len > 0 {
+        let prop_font_data = unsafe {
+            let offset = config.mono_font_va as usize + config.mono_font_len as usize;
+            core::slice::from_raw_parts(offset as *const u8, config.prop_font_len as usize)
+        };
+
+        if let Some(prop_ttf) = drawing::TrueTypeFont::new(prop_font_data) {
+            let mut prop_cache: Box<drawing::GlyphCache> = unsafe {
+                let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
+                let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
+
+                if ptr.is_null() {
+                    sys::print(b"compositor: prop glyph cache alloc failed\n");
+                    sys::exit();
+                }
+
+                Box::from_raw(ptr)
+            };
+
+            prop_cache.populate(&prop_ttf, FONT_SIZE, &mut scratch);
+
+            unsafe { PROP_GLYPH_CACHE = Box::into_raw(prop_cache) };
+
+            sys::print(b"     proportional font rasterized (Nunito Sans 16px)\n");
+        } else {
+            sys::print(b"     warning: failed to parse proportional font, using monospace for chrome\n");
+            // Fallback: use monospace cache for chrome text too.
+            unsafe { PROP_GLYPH_CACHE = GLYPH_CACHE };
+        }
+    } else {
+        sys::print(b"     no proportional font, using monospace for chrome\n");
+        // Fallback: use monospace cache for chrome text.
+        unsafe { PROP_GLYPH_CACHE = GLYPH_CACHE };
+    }
+
+    drop(scratch);
 
     // Channel 1: input events from input driver (endpoint 1 = recv).
     let input_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
