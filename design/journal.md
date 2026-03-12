@@ -4,6 +4,32 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Virtio-9P Host Filesystem Passthrough (2026-03-11)
+
+**Status:** Working. Font loading end-to-end via 9P2000.L protocol over virtio transport.
+
+**What was built:** Userspace virtio-9p driver (~450 lines) that reads files from the host macOS filesystem via QEMU's `-fsdev` passthrough. Implements 6 9P operations (version, attach, walk, lopen, read, clunk). Init sends a read request via IPC, the driver reads the file through 9P, fills a shared DMA buffer, signals back. Compositor loads the font from the runtime buffer instead of `include_bytes!`.
+
+**Bugs found and fixed:**
+
+1. **`payload_as`/`from_payload` hangs for large structs on aarch64 bare metal.** Both init and the 9p driver hung when using these helpers with FsReadRequest (60 bytes — full payload). Root cause unclear (possibly compiler-generated stack alignment code interacting badly with the bare-metal environment). Fix: manual `read_unaligned`/`write_unaligned` for individual fields. This is a systematic issue — any IPC message struct near the 60-byte limit should use manual construction.
+2. **Spurious wakeup from `sys_wait`.** Init's `wait(&[channel])` returned before the 9p driver sent its response. Fix: loop on wait+try_recv until the expected response message type arrives. Root cause of the spurious wakeup not fully diagnosed — the channel pending_signal logic appears correct but something wakes init prematurely. Not a blocking issue with the retry loop.
+
+**Architecture notes:**
+
+- Chose 9P over virtiofs (simpler protocol, no host daemon, confirmed in QEMU).
+- Shared host directory: `system/share/` — contains SourceCodePro-Regular.ttf (9 KB).
+- QEMU flags added to all 4 scripts (run, test, integration, crash).
+- This validates the prototype-on-host strategy from Decision #16: implement FileStore against the host filesystem during prototyping, defer the real COW filesystem.
+
+**Open questions for later:**
+
+- Should investigate the `payload_as` hang root cause — it affects all IPC with large payloads.
+- Should investigate the spurious wakeup root cause — retry loop works but masks a potential kernel bug.
+- Phase 2 (general file service with event loop, multiple files) deferred.
+
+---
+
 ## Bug Report: Kernel Crash Under Rapid Keyboard Input (2026-03-11)
 
 **Severity:** High — kernel panic (instruction abort at EL1)

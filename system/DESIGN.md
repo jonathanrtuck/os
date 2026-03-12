@@ -352,7 +352,31 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 2.6 Virtio Console Driver (`services/drivers/virtio-console/`) 🟡
+### 2.6 Virtio 9P Driver (`services/drivers/virtio-9p/`) 🟢
+
+**Goal:** Read files from the host macOS filesystem via QEMU's 9p passthrough. Validates the FileStore interface design through practical use before building the real COW filesystem.
+
+**Status:** ~450 lines. Implements 6 of ~30 9P2000.L operations (Tversion, Tattach, Twalk, Tlopen, Tread, Tclunk). Reads files from a shared host directory (`system/share/`) via virtio transport. Currently used to load the Source Code Pro font at boot (9 KB).
+
+**What's foundational:**
+
+- **Host filesystem passthrough pattern.** The driver bridges the gap between the OS and the host, letting userspace load files without `include_bytes!`. This is the prototype-on-host strategy from Decision #16 in action — implement FileStore against the host filesystem first, build the real COW FS later.
+- **9P2000.L wire protocol.** Manual message encoding/decoding (MsgWriter/MsgReader) for the Plan 9 protocol. 2-descriptor virtio chain (T-message readable, R-message writable).
+- **IPC request/response pattern.** Init sends MSG_FS_READ_REQUEST with shared buffer VA + filename, driver fills buffer via 9P reads, sends MSG_FS_READ_RESPONSE with byte count. Shared-memory-reference pattern for large data (§5.5).
+- **Same interrupt-driven pattern** as other virtio drivers (register IRQ → wait → ack → loop).
+
+**What's scaffolding:**
+
+- **Single-directory flat namespace.** Only walks one path component from root. No subdirectories.
+- **Read-only.** No write, create, or delete operations (only 6 of ~30 9P ops implemented).
+- **Init-only client.** The event loop serves requests from init's IPC channel. No multi-client support.
+- **Manual payload construction.** Large IPC payloads (FsReadRequest = 60 bytes) must be constructed with manual `write_unaligned` calls — `payload_as`/`from_payload` hangs on aarch64 bare metal for structs near the 60-byte payload limit. This is a known pressure point (§5.5).
+
+**QEMU flags:** `-fsdev "local,id=fsdev0,path=$SHARE_DIR,security_model=none" -device "virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare"` added to all QEMU scripts.
+
+---
+
+### 2.7 Virtio Console Driver (`services/drivers/virtio-console/`) 🟡
 
 **Status:** 112 lines. TX-only, writes one test string. Not exercised (no QEMU device configured).
 
@@ -360,7 +384,7 @@ Minimal and not yet useful. Would need RX queue, proper character device interfa
 
 ---
 
-### 2.7 Text Editor (`user/text-editor/`) 🟡
+### 2.8 Text Editor (`user/text-editor/`) 🟡
 
 **Goal:** First editor process demonstrating the settled edit protocol: editors are read-only consumers, all writes go through the OS service.
 
@@ -482,7 +506,7 @@ Compositor
 Init
   └── sys (process_create, channel_create, handle_send, memory_share, dma_alloc, wait, ...)
 
-Drivers (virtio-blk, virtio-gpu, virtio-input, virtio-console)
+Drivers (virtio-blk, virtio-gpu, virtio-input, virtio-9p, virtio-console)
   ├── sys (device_map, interrupt_register, dma_alloc, wait, ...)
   ├── virtio (MMIO transport, split virtqueue)
   └── ipc (ring buffer messaging — for cross-process channels)
@@ -553,5 +577,5 @@ Ordered by what unblocks the most, building the happy path first:
 7. ~~**Editor process separation**~~ — **Done.** Text editor process (`user/text-editor/`) receives input events from compositor, sends write requests back. Compositor is sole writer to document state. Demonstrates Decision #9 (editors as read-only consumers). Four processes in the display pipeline: GPU driver, input driver, text editor, compositor.
 8. **Read-only document mapping** — Give the text editor a read-only shared memory mapping of the document buffer so it can read content for cursor positioning, selection, and context-aware editing. Complement to the write-through-IPC path.
 9. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
-10. **Filesystem service** (§3.2) — blocked on Decision #16. FileStore interface designed (12 operations), macOS prototype validated at `prototype/filestore/` with 21 passing tests. Unblocks runtime resource loading, documents, everything the OS is about.
+10. **Filesystem service** (§3.2) — blocked on Decision #16. FileStore interface designed (12 operations), macOS prototype validated at `prototype/filestore/` with 21 passing tests. **Partially unblocked:** virtio-9p driver (§2.6) provides runtime file loading from host filesystem during prototyping. Font loading working end-to-end.
 11. ~~**Wait timeout**~~ — **Done.** For finite timeouts (0 < timeout < u64::MAX), `sys_wait` creates an internal timer, adds it to the wait set with a sentinel index. If the timer fires first, returns `WouldBlock`. Timer cleanup: immediate on non-blocked paths; deferred to next `wait` call for the blocked→woken path (stored on thread struct).
