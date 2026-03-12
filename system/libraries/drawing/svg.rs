@@ -18,7 +18,7 @@ const SVG_MAX_ACTIVE: usize = 128;
 
 /// Fixed-point 20.12 format — same as the TrueType rasterizer.
 const SVG_FP_SHIFT: i32 = 12;
-const SVG_FP_ONE: i32 = 1 << SVG_FP_SHIFT;
+pub const SVG_FP_ONE: i32 = 1 << SVG_FP_SHIFT;
 
 /// Errors that can occur during SVG path parsing.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -120,7 +120,21 @@ impl SvgRasterScratch {
 /// separated coordinate pairs.
 ///
 /// Returns `Err` for empty data, invalid commands, or missing coordinates.
+///
+/// Note: `SvgPath` is ~16 KiB. On stack-constrained targets, prefer
+/// `svg_parse_path_into()` with a heap-allocated `SvgPath`.
 pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
+    let mut path = SvgPath::new();
+    svg_parse_path_into(data, &mut path)?;
+    Ok(path)
+}
+
+/// Parse an SVG path data string into a caller-provided `SvgPath`.
+///
+/// Same as `svg_parse_path()` but avoids allocating `SvgPath` on the
+/// return stack — useful on targets with small stacks (e.g., 16 KiB
+/// bare-metal userspace) where the caller can heap-allocate the path.
+pub fn svg_parse_path_into(data: &[u8], path: &mut SvgPath) -> Result<(), SvgError> {
     if data.is_empty() {
         return Err(SvgError::EmptyData);
     }
@@ -137,7 +151,7 @@ pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
         return Err(SvgError::EmptyData);
     }
 
-    let mut path = SvgPath::new();
+    path.num_commands = 0;
     let mut pos = 0usize;
     let mut current_x: i32 = 0;
     let mut current_y: i32 = 0;
@@ -179,7 +193,7 @@ pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
                 current_y = y;
                 subpath_start_x = x;
                 subpath_start_y = y;
-                push_command(&mut path, SvgCommand::MoveTo { x, y })?;
+                push_command(path, SvgCommand::MoveTo { x, y })?;
             }
             b'm' => {
                 let dx = parse_svg_number(data, &mut pos)?;
@@ -189,7 +203,7 @@ pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
                 subpath_start_x = current_x;
                 subpath_start_y = current_y;
                 push_command(
-                    &mut path,
+                    path,
                     SvgCommand::MoveTo {
                         x: current_x,
                         y: current_y,
@@ -201,7 +215,7 @@ pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
                 let y = parse_svg_number(data, &mut pos)?;
                 current_x = x;
                 current_y = y;
-                push_command(&mut path, SvgCommand::LineTo { x, y })?;
+                push_command(path, SvgCommand::LineTo { x, y })?;
             }
             b'l' => {
                 let dx = parse_svg_number(data, &mut pos)?;
@@ -209,7 +223,7 @@ pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
                 current_x += dx;
                 current_y += dy;
                 push_command(
-                    &mut path,
+                    path,
                     SvgCommand::LineTo {
                         x: current_x,
                         y: current_y,
@@ -226,7 +240,7 @@ pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
                 current_x = x;
                 current_y = y;
                 push_command(
-                    &mut path,
+                    path,
                     SvgCommand::CubicTo {
                         x1,
                         y1,
@@ -253,7 +267,7 @@ pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
                 current_x = x;
                 current_y = y;
                 push_command(
-                    &mut path,
+                    path,
                     SvgCommand::CubicTo {
                         x1,
                         y1,
@@ -267,7 +281,7 @@ pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
             b'Z' | b'z' => {
                 current_x = subpath_start_x;
                 current_y = subpath_start_y;
-                push_command(&mut path, SvgCommand::Close)?;
+                push_command(path, SvgCommand::Close)?;
             }
             _ => {
                 return Err(SvgError::InvalidCommand(cmd));
@@ -279,7 +293,7 @@ pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
         return Err(SvgError::EmptyData);
     }
 
-    Ok(path)
+    Ok(())
 }
 
 fn push_command(path: &mut SvgPath, cmd: SvgCommand) -> Result<(), SvgError> {

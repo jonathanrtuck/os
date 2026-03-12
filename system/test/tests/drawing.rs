@@ -4725,3 +4725,123 @@ fn svg_rasterize_winding_rule_nonzero() {
         coverage[inner_idx]
     );
 }
+
+// ===========================================================================
+// SVG icon tests — document icon loading and rasterization
+// ===========================================================================
+
+/// The document icon path data (same as system/share/doc-icon.svg).
+const DOC_ICON_PATH: &[u8] = b"M 0 0 L 14 0 L 20 6 L 20 24 L 0 24 Z M 4 10 L 4 12 L 16 12 L 16 10 Z M 4 15 L 4 17 L 16 17 L 16 15 Z M 4 20 L 4 22 L 12 22 L 12 20 Z";
+
+#[test]
+fn svg_icon_doc_parses_successfully() {
+    let path = svg_parse_path(DOC_ICON_PATH).unwrap();
+    // Page outline (5 commands: M, L, L, L, L, Z = wait, M+4L+Z=6 commands for outer)
+    // plus 3 text-line holes (each M+3L+Z = 5 commands × 3 = 15)
+    // Total = 6 + 15 = 21 commands.
+    assert!(path.num_commands > 15, "Doc icon should have many commands, got {}", path.num_commands);
+}
+
+#[test]
+fn svg_icon_doc_rasterizes_at_20x24() {
+    // Rasterize the icon at native size (20×24 path units, 1:1 scale).
+    let path = svg_parse_path(DOC_ICON_PATH).unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 24 * 28];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, 24, 28, 4096, 0, 0).unwrap();
+
+    // Interior of the page body (pixel 2, 2) should be filled.
+    let body_idx = 2 * 24 + 2;
+    assert!(
+        coverage[body_idx] > 200,
+        "Page body interior (2,2) should have high coverage, got {}",
+        coverage[body_idx]
+    );
+
+    // Exterior pixel (22, 2) should have zero coverage.
+    let ext_idx = 2 * 24 + 22;
+    assert_eq!(coverage[ext_idx], 0, "Exterior (22,2) should be zero");
+}
+
+#[test]
+fn svg_icon_doc_has_text_line_holes() {
+    // The document icon has counterclockwise subpaths that create holes
+    // in the page body (representing text lines).
+    let path = svg_parse_path(DOC_ICON_PATH).unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 24 * 28];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, 24, 28, 4096, 0, 0).unwrap();
+
+    // Check that the text line holes are empty.
+    // First text line hole: y=10..12, x=4..16. Center: (10, 11).
+    let hole1_idx = 11 * 24 + 10;
+    assert!(
+        coverage[hole1_idx] < 30,
+        "Text line hole 1 center (10,11) should have low coverage (hole), got {}",
+        coverage[hole1_idx]
+    );
+
+    // Compare with body area just above the hole: (10, 8) should be filled.
+    let body_above = 8 * 24 + 10;
+    assert!(
+        coverage[body_above] > 200,
+        "Body above text line (10,8) should be filled, got {}",
+        coverage[body_above]
+    );
+}
+
+#[test]
+fn svg_icon_doc_rasterizes_scaled_for_chrome() {
+    // In the chrome, the icon will be rendered at approximately 20×24 pixels
+    // by scaling the 20×24 unit icon by ~1× (scale = SVG_FP_ONE = 4096).
+    // This test verifies it works at the target size.
+    let path = svg_parse_path(DOC_ICON_PATH).unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let icon_w: u32 = 20;
+    let icon_h: u32 = 24;
+    let mut coverage = [0u8; 20 * 24];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, icon_w, icon_h, 4096, 0, 0).unwrap();
+
+    // The icon should have non-zero coverage pixels (it's not empty).
+    let filled_count = coverage.iter().filter(|&&c| c > 0).count();
+    assert!(
+        filled_count > 50,
+        "Icon should have significant filled area at 20x24, got {} filled pixels",
+        filled_count
+    );
+}
+
+#[test]
+fn svg_icon_doc_has_antialiased_diagonal() {
+    // The page has a diagonal edge at top-right (14,0)→(20,6).
+    // This should produce intermediate coverage values (antialiased).
+    let path = svg_parse_path(DOC_ICON_PATH).unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 24 * 28];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, 24, 28, 4096, 0, 0).unwrap();
+
+    // Check pixels along the diagonal for intermediate coverage values.
+    let mut found_intermediate = false;
+    // The diagonal runs from (14,0) to (20,6). Check pixels near it.
+    for y in 0..6 {
+        for x in 14..21 {
+            let idx = y as usize * 24 + x as usize;
+            let c = coverage[idx];
+            if c > 0 && c < 255 {
+                found_intermediate = true;
+                break;
+            }
+        }
+        if found_intermediate {
+            break;
+        }
+    }
+    assert!(
+        found_intermediate,
+        "Diagonal edge of the doc icon should have antialiased pixels"
+    );
+}

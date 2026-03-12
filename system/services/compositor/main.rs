@@ -39,6 +39,7 @@ const FONT_SIZE: u32 = 16;
 // Protocol message types.
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
 const MSG_IMAGE_CONFIG: u32 = 6;
+const MSG_ICON_CONFIG: u32 = 7;
 const MSG_KEY_EVENT: u32 = 10;
 const MSG_PRESENT: u32 = 20;
 const MSG_WRITE_INSERT: u32 = 30;
@@ -117,6 +118,11 @@ static mut CONTENT_H: u32 = 0;
 static mut GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Pre-rasterized glyph cache for proportional font (chrome text).
 static mut PROP_GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
+/// Pre-rasterized SVG document icon coverage map (heap-allocated, initialized at startup).
+/// Null if no icon was loaded. Width and height stored alongside.
+static mut ICON_COVERAGE: *const u8 = core::ptr::null();
+static mut ICON_W: u32 = 0;
+static mut ICON_H: u32 = 0;
 /// Cursor byte offset in the document. Updated by write requests.
 static mut CURSOR_POS: usize = 0;
 /// Current back buffer index (0 or 1). Swapped after each present.
@@ -179,6 +185,15 @@ struct PresentPayload {
 struct ImageConfig {
     image_va: u64,
     image_len: u32,
+    _pad: u32,
+}
+/// SVG icon configuration received from init. Contains the location of
+/// SVG path data in the shared memory buffer.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct IconConfig {
+    icon_va: u64,
+    icon_len: u32,
     _pad: u32,
 }
 
@@ -513,6 +528,7 @@ fn render_status_shadow(surf: &mut drawing::Surface) {
 
 /// Render the title bar chrome surface (translucent overlay).
 /// Uses the proportional font (Nunito Sans) for chrome text.
+/// If an SVG icon was loaded, renders it before the title text.
 fn render_title_bar(surf: &mut drawing::Surface) {
     use drawing::Color;
 
@@ -521,8 +537,28 @@ fn render_title_bar(surf: &mut drawing::Surface) {
     // Translucent background.
     surf.clear(Color::rgba(30, 30, 48, 220));
 
+    // Render SVG document icon (if loaded) in the title bar.
+    let icon_ptr = unsafe { ICON_COVERAGE };
+    let icon_w = unsafe { ICON_W };
+    let icon_h = unsafe { ICON_H };
+    let text_x: u32;
+
+    if !icon_ptr.is_null() && icon_w > 0 && icon_h > 0 {
+        let icon_coverage = unsafe {
+            core::slice::from_raw_parts(icon_ptr, (icon_w * icon_h) as usize)
+        };
+        // Position icon vertically centered in the title bar, left margin = 10.
+        let icon_x: i32 = 10;
+        let icon_y: i32 = ((TITLE_BAR_H as i32 - icon_h as i32) / 2).max(0);
+        surf.draw_coverage(icon_x, icon_y, icon_coverage, icon_w, icon_h, Color::rgb(180, 190, 220));
+        // Title text starts after the icon with a small gap.
+        text_x = icon_x as u32 + icon_w + 8;
+    } else {
+        text_x = 12;
+    }
+
     // Title text (proportional font).
-    drawing::draw_proportional_string(surf, 12, 10, b"Document OS", prop_cache, Color::rgb(200, 200, 220));
+    drawing::draw_proportional_string(surf, text_x, 10, b"Document OS", prop_cache, Color::rgb(200, 200, 220));
 
     // Subtitle on the right (proportional font).
     // Estimate width by summing per-glyph advances.
@@ -936,6 +972,86 @@ pub extern "C" fn _start() -> ! {
                 Err(_) => {
                     sys::print(b"invalid header)\n");
                 }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Check for SVG icon configuration from init.
+    // If present, parse the SVG path data and rasterize into a coverage map.
+    // -----------------------------------------------------------------------
+    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_ICON_CONFIG {
+        let icn_config: IconConfig = unsafe { msg.payload_as() };
+
+        if icn_config.icon_va != 0 && icn_config.icon_len > 0 {
+            sys::print(b"     parsing SVG icon (");
+
+            let svg_data = unsafe {
+                core::slice::from_raw_parts(
+                    icn_config.icon_va as *const u8,
+                    icn_config.icon_len as usize,
+                )
+            };
+
+            let mut len_buf = [0u8; 10];
+            let li = append_u32(&mut len_buf, 0, icn_config.icon_len);
+            sys::print(&len_buf[..li]);
+            sys::print(b" bytes)\n");
+
+            // Heap-allocate SvgPath and SvgRasterScratch — both are too large
+            // for the 16 KiB userspace stack (~16 KiB + ~64 KiB respectively).
+            // Use alloc_zeroed to avoid constructing on the stack first.
+            let path_ptr = unsafe {
+                let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+                let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgPath;
+                // Zeroed memory: num_commands=0, commands are all-zero bytes.
+                // svg_parse_path_into will overwrite commands[0..n] and set num_commands.
+                ptr
+            };
+            let scratch_ptr = unsafe {
+                let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+                alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
+            };
+
+            match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
+                Ok(()) => {
+                    // Rasterize icon at 20×24 pixels (native path coordinate size).
+                    let icon_w: u32 = 20;
+                    let icon_h: u32 = 24;
+                    let icon_size = (icon_w * icon_h) as usize;
+                    let mut icon_cov = vec![0u8; icon_size];
+
+                    match drawing::svg_rasterize(
+                        unsafe { &*path_ptr }, unsafe { &mut *scratch_ptr }, &mut icon_cov,
+                        icon_w, icon_h,
+                        drawing::SVG_FP_ONE, 0, 0,
+                    ) {
+                        Ok(()) => {
+                            sys::print(b"     SVG icon rasterized (20x24)\n");
+                            // Store coverage map as a leaked heap allocation.
+                            let leaked = icon_cov.leak();
+                            unsafe {
+                                ICON_COVERAGE = leaked.as_ptr();
+                                ICON_W = icon_w;
+                                ICON_H = icon_h;
+                            }
+                        }
+                        Err(_) => {
+                            sys::print(b"     SVG icon rasterize failed\n");
+                        }
+                    }
+                }
+                Err(_) => {
+                    sys::print(b"     SVG icon parse failed\n");
+                }
+            }
+
+            // Free heap allocations.
+            unsafe {
+                let path_layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+                alloc::alloc::dealloc(path_ptr as *mut u8, path_layout);
+                let scratch_layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+                alloc::alloc::dealloc(scratch_ptr as *mut u8, scratch_layout);
             }
         }
     }
