@@ -4142,6 +4142,58 @@ fn byte_to_visual_line_empty() {
     assert_eq!(layout.byte_to_visual_line(b"", 0), 0);
 }
 
+/// byte_to_visual_line: offset beyond text length clamps to the last line.
+#[test]
+fn byte_to_visual_line_offset_past_end() {
+    let layout = make_layout(200);
+    // "a\nb" = 2 lines. Offset 10 is well past end, should clamp to last line.
+    assert_eq!(layout.byte_to_visual_line(b"a\nb", 10), 1);
+    // Single line text, offset past end stays on line 0.
+    assert_eq!(layout.byte_to_visual_line(b"hello", 100), 0);
+}
+
+/// byte_to_visual_line: trailing newline puts the end on the next line.
+#[test]
+fn byte_to_visual_line_trailing_newline() {
+    let layout = make_layout(200);
+    // "abc\n" — byte 3 is '\n' on line 0, byte 4 (past end) is on line 1.
+    assert_eq!(layout.byte_to_visual_line(b"abc\n", 3), 0); // at '\n'
+    assert_eq!(layout.byte_to_visual_line(b"abc\n", 4), 1); // past '\n'
+}
+
+/// byte_to_visual_line: multiple consecutive newlines produce sequential lines.
+#[test]
+fn byte_to_visual_line_consecutive_newlines() {
+    let layout = make_layout(200);
+    // "\n\n\n" = 3 newlines → lines 0, 1, 2, with byte 3 on line 3.
+    assert_eq!(layout.byte_to_visual_line(b"\n\n\n", 0), 0);
+    assert_eq!(layout.byte_to_visual_line(b"\n\n\n", 1), 1);
+    assert_eq!(layout.byte_to_visual_line(b"\n\n\n", 2), 2);
+    assert_eq!(layout.byte_to_visual_line(b"\n\n\n", 3), 3); // end
+}
+
+/// byte_to_visual_line: wrapping at exact column boundary with newlines.
+#[test]
+fn byte_to_visual_line_wrap_and_newline_combined() {
+    let layout = make_layout(24); // 3 chars per row
+    // "abc\ndef" layout: 'a' col0 row0, 'b' col1 row0, 'c' col2 row0,
+    // '\n' at col3 → newline check fires BEFORE wrap check → row becomes 1.
+    // 'd' col0 row1, 'e' col1 row1, 'f' col2 row1.
+    assert_eq!(layout.byte_to_visual_line(b"abc\ndef", 0), 0); // 'a'
+    assert_eq!(layout.byte_to_visual_line(b"abc\ndef", 2), 0); // 'c'
+    assert_eq!(layout.byte_to_visual_line(b"abc\ndef", 4), 1); // 'd'
+    assert_eq!(layout.byte_to_visual_line(b"abc\ndef", 7), 1); // end
+
+    // Longer text with wrap THEN newline: "abcde\nf" with 3 cols.
+    // 'a' col0 row0, 'b' col1 row0, 'c' col2 row0, then col=3.
+    // 'd' → col>=cols → wrap → row1 col0, 'e' col1 row1,
+    // '\n' → newline → row2.
+    // 'f' col0 row2.
+    assert_eq!(layout.byte_to_visual_line(b"abcde\nf", 3), 0); // 'd' — wrap point
+    assert_eq!(layout.byte_to_visual_line(b"abcde\nf", 4), 1); // 'e'
+    assert_eq!(layout.byte_to_visual_line(b"abcde\nf", 6), 2); // 'f'
+}
+
 /// total_visual_lines counts lines correctly with newlines and wraps.
 #[test]
 fn total_visual_lines_basic() {
@@ -4210,6 +4262,52 @@ fn scroll_for_cursor_end_key() {
     // End of text is on line 4. viewport = 3 lines. scroll = 0.
     // Need scroll = 2 so viewport shows [2,3,4].
     assert_eq!(layout.scroll_for_cursor(text, text.len(), 0, 3), 2);
+}
+
+/// scroll_for_cursor with viewport_lines=0 always returns 0.
+#[test]
+fn scroll_for_cursor_zero_viewport() {
+    let layout = make_layout(200);
+    assert_eq!(layout.scroll_for_cursor(b"a\nb\nc", 4, 5, 0), 0);
+}
+
+/// scroll_for_cursor: cursor on the last visible line does not scroll.
+#[test]
+fn scroll_for_cursor_cursor_on_last_visible() {
+    let layout = make_layout(200);
+    let text = b"a\nb\nc\nd\ne";
+    // Viewport=3, scroll=1 → visible lines [1,2,3]. Cursor on line 3 (byte 6='d').
+    assert_eq!(layout.scroll_for_cursor(text, 6, 1, 3), 1);
+}
+
+/// scroll_for_cursor: cursor just below viewport triggers minimal scroll.
+#[test]
+fn scroll_for_cursor_one_past_bottom() {
+    let layout = make_layout(200);
+    let text = b"a\nb\nc\nd\ne";
+    // Viewport=2, scroll=0 → visible lines [0,1]. Cursor on line 2 (byte 4='c').
+    // Should scroll to 1 so viewport shows [1,2].
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 2), 1);
+}
+
+/// scroll_for_cursor: single-line viewport scrolls to the cursor line exactly.
+#[test]
+fn scroll_for_cursor_single_line_viewport() {
+    let layout = make_layout(200);
+    let text = b"a\nb\nc";
+    // Viewport=1, cursor on line 2 → scroll=2.
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 1), 2);
+    // Viewport=1, cursor on line 0, scroll was 2 → scroll=0.
+    assert_eq!(layout.scroll_for_cursor(text, 0, 2, 1), 0);
+}
+
+/// scroll_for_cursor: cursor already visible with large viewport returns unchanged scroll.
+#[test]
+fn scroll_for_cursor_large_viewport() {
+    let layout = make_layout(200);
+    let text = b"a\nb\nc";
+    // Viewport=100 lines, everything fits. scroll=0 should remain.
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 100), 0);
 }
 
 /// draw_tt_sel_scroll: selection byte range survives scrolling.
@@ -4506,10 +4604,32 @@ fn svg_parse_implicit_lineto_after_relative_moveto() {
 }
 
 #[test]
-fn svg_parse_decimal_coords_truncated_to_integer() {
+fn svg_parse_decimal_coords_integer_part_only() {
     // The parser reads the integer part and skips the fractional part.
+    // "10.5" → 10, "20.9" → 20. The fractional part is consumed but discarded.
     let path = svg_parse_path(b"M 10.5 20.9").unwrap();
     assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 10, y: 20 });
+}
+
+#[test]
+fn svg_parse_leading_decimal_treated_as_zero() {
+    // ".5" should parse as 0 (integer part absent, fractional part skipped).
+    let path = svg_parse_path(b"M .5 .9").unwrap();
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 0, y: 0 });
+}
+
+#[test]
+fn svg_parse_leading_decimal_with_integer_part() {
+    // "3.7" should parse as 3.
+    let path = svg_parse_path(b"M 3.7 .2").unwrap();
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 3, y: 0 });
+}
+
+#[test]
+fn svg_parse_negative_leading_decimal() {
+    // "-.5" should parse as -0 = 0.
+    let path = svg_parse_path(b"M -.5 -.9").unwrap();
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 0, y: 0 });
 }
 
 // ---------------------------------------------------------------------------

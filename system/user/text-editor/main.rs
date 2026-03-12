@@ -13,8 +13,12 @@
 //! # IPC protocol
 //!
 //! Receives: MSG_KEY_EVENT (keycode + ascii) from OS service
+//!           MSG_EDITOR_CONFIG (layout dimensions for cursor navigation)
 //! Sends:    MSG_WRITE_INSERT (position + byte to insert at cursor)
 //!           MSG_WRITE_DELETE (position to delete before cursor)
+//!           MSG_WRITE_DELETE_RANGE (delete selected byte range)
+//!           MSG_CURSOR_MOVE (update cursor position)
+//!           MSG_SELECTION_UPDATE (update selection anchor + cursor)
 //!
 //! # Shared memory
 //!

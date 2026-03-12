@@ -1050,6 +1050,8 @@ impl TextLayout {
     /// The selection is normalized internally: if `sel_start > sel_end`, they
     /// are swapped so the highlight always covers the correct range regardless
     /// of anchor vs cursor ordering.
+    ///
+    /// Equivalent to `draw_tt_sel_scroll` with `scroll_offset = 0`.
     pub fn draw_tt_sel(
         &self,
         fb: &mut Surface,
@@ -1065,89 +1067,10 @@ impl TextLayout {
         sel_end: usize,
         sel_color: Color,
     ) -> (u32, u32) {
-        let cols = self.cols();
-        let mut col = 0usize;
-        let mut row = 0u32;
-        let mut cursor_x = origin_x;
-        let mut cursor_y = origin_y;
-        let baseline_offset = cache.line_height * 3 / 4;
-
-        // Normalize selection range.
-        let (s_lo, s_hi) = if sel_start <= sel_end {
-            (sel_start, sel_end)
-        } else {
-            (sel_end, sel_start)
-        };
-        let has_selection = s_lo < s_hi;
-
-        for (i, &byte) in text.iter().enumerate() {
-            let py = origin_y + row * self.line_height;
-
-            if py > max_y {
-                break;
-            }
-
-            if i == cursor_offset {
-                cursor_x = origin_x + col as u32 * self.char_width;
-                cursor_y = py;
-            }
-
-            if byte == b'\n' {
-                col = 0;
-                row += 1;
-
-                continue;
-            }
-
-            if cols > 0 && col >= cols {
-                col = 0;
-                row += 1;
-
-                let py = origin_y + row * self.line_height;
-
-                if py > max_y {
-                    break;
-                }
-            }
-
-            // Draw selection highlight behind the character if selected.
-            if has_selection && i >= s_lo && i < s_hi && sel_color.a > 0 {
-                let hx = origin_x + col as u32 * self.char_width;
-                let hy = origin_y + row * self.line_height;
-
-                fb.fill_rect_blend(hx, hy, self.char_width, cache.line_height, sel_color);
-            }
-
-            if let Some((glyph, coverage)) = cache.get(byte) {
-                if glyph.width > 0 && glyph.height > 0 {
-                    let gx =
-                        origin_x as i32 + col as i32 * self.char_width as i32 + glyph.bearing_x;
-                    let gy = origin_y as i32
-                        + row as i32 * self.line_height as i32
-                        + baseline_offset as i32
-                        - glyph.bearing_y;
-
-                    fb.draw_coverage(gx, gy, coverage, glyph.width, glyph.height, text_color);
-                }
-            }
-
-            col += 1;
-        }
-
-        if cursor_offset >= text.len() {
-            let py = origin_y + row * self.line_height;
-
-            cursor_x = origin_x + col as u32 * self.char_width;
-            cursor_y = py;
-        }
-
-        // Draw cursor: thin bar (no cursor when there's a visible selection,
-        // since the selection end *is* the cursor position).
-        if !has_selection && cursor_y <= max_y {
-            fb.fill_rect(cursor_x, cursor_y, 2, cache.line_height, cursor_color);
-        }
-
-        (cursor_x, cursor_y)
+        self.draw_tt_sel_scroll(
+            fb, text, origin_x, origin_y, cursor_offset, cache,
+            text_color, cursor_color, max_y, sel_start, sel_end, sel_color, 0,
+        )
     }
     /// Return the visual line number (0-based) for a given byte offset.
     /// Uses the same wrapping rules as `layout_lines` and `byte_to_xy`.

@@ -7,7 +7,10 @@
 // Supports: M/m (moveto), L/l (lineto), C/c (cubic Bezier curveto), Z/z
 // (closepath). Both absolute (uppercase) and relative (lowercase) variants.
 //
-// All math is integer/fixed-point. No floating point, no allocations, no_std.
+// All math is integer/fixed-point (20.12 format). No floating point, no
+// allocations, no_std. Intermediate arithmetic widened to i64 where needed
+// to prevent overflow; final results truncated to i32. Safe for SVG
+// coordinates up to ~524,000 at 1× scale (see svg_coord_to_fp docs).
 
 /// Maximum path commands after parsing.
 const SVG_MAX_COMMANDS: usize = 512;
@@ -317,7 +320,7 @@ fn is_svg_command(b: u8) -> bool {
 }
 
 fn is_digit_or_sign(b: u8) -> bool {
-    (b >= b'0' && b <= b'9') || b == b'-' || b == b'+'
+    (b >= b'0' && b <= b'9') || b == b'-' || b == b'+' || b == b'.'
 }
 
 fn skip_whitespace_and_commas(data: &[u8], pos: &mut usize) {
@@ -332,7 +335,8 @@ fn skip_whitespace_and_commas(data: &[u8], pos: &mut usize) {
 }
 
 /// Parse an integer from the path data string, advancing `pos`.
-/// Handles optional leading sign (+ or -).
+/// Handles optional leading sign (+ or -) and leading decimal point
+/// (e.g., ".5" parses as 0, since we use integer coordinates).
 fn parse_svg_number(data: &[u8], pos: &mut usize) -> Result<i32, SvgError> {
     skip_whitespace_and_commas(data, pos);
 
@@ -349,7 +353,11 @@ fn parse_svg_number(data: &[u8], pos: &mut usize) -> Result<i32, SvgError> {
         *pos += 1;
     }
 
-    if *pos >= data.len() || !(data[*pos] >= b'0' && data[*pos] <= b'9') {
+    // Handle leading decimal point (e.g., ".5" parses as 0).
+    let has_integer_part = *pos < data.len() && data[*pos] >= b'0' && data[*pos] <= b'9';
+    let has_decimal_start = *pos < data.len() && data[*pos] == b'.';
+
+    if !has_integer_part && !has_decimal_start {
         return Err(SvgError::InvalidNumber);
     }
 
@@ -459,7 +467,21 @@ fn svg_flatten_path(
 /// produces a fixed-point result. Example: coord=10, scale=4096 (1×) →
 /// 10 * 4096 = 40960 = 10.0 in 20.12 FP. coord=10, scale=8192 (2×) →
 /// 10 * 8192 = 81920 = 20.0 in 20.12 FP.
+///
+/// # Overflow safety
+///
+/// The multiplication is performed in i64 to avoid intermediate overflow,
+/// then truncated to i32. The result is valid as long as
+/// `coord * scale + offset` fits in i32 (±2^31). At 1× scale (4096),
+/// coordinates up to ~524,287 are safe. At 8× scale (32768), coordinates
+/// up to ~65,535 are safe. The addition of `offset` can also overflow if
+/// both the product and offset are near the i32 boundary. In practice,
+/// SVG icons in this system use coordinates < 100 and scales ≤ 8×, so
+/// overflow is not a concern. Callers rendering very large SVGs at high
+/// scale factors should validate coordinate bounds first.
 fn svg_coord_to_fp(coord: i32, scale: i32, offset: i32) -> i32 {
+    // Widening to i64 prevents overflow during multiplication; the final
+    // cast + add assume the result fits in i32 (see doc above).
     (coord as i64 * scale as i64) as i32 + offset
 }
 

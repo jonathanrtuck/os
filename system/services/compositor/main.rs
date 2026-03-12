@@ -1000,50 +1000,68 @@ pub extern "C" fn _start() -> ! {
                 // svg_parse_path_into will overwrite commands[0..n] and set num_commands.
                 ptr
             };
-            let scratch_ptr = unsafe {
-                let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
-                alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
+            if path_ptr.is_null() {
+                sys::print(b"compositor: SVG path alloc failed (OOM)\n");
+            }
+            let scratch_ptr = if path_ptr.is_null() {
+                core::ptr::null_mut()
+            } else {
+                unsafe {
+                    let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+                    alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
+                }
             };
+            if !path_ptr.is_null() && scratch_ptr.is_null() {
+                sys::print(b"compositor: SVG scratch alloc failed (OOM)\n");
+            }
 
-            match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
-                Ok(()) => {
-                    // Rasterize icon at 20×24 pixels (native path coordinate size).
-                    let icon_w: u32 = 20;
-                    let icon_h: u32 = 24;
-                    let icon_size = (icon_w * icon_h) as usize;
-                    let mut icon_cov = vec![0u8; icon_size];
+            if !path_ptr.is_null() && !scratch_ptr.is_null() {
+                match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
+                    Ok(()) => {
+                        // Rasterize icon at 20×24 pixels (native path coordinate size).
+                        let icon_w: u32 = 20;
+                        let icon_h: u32 = 24;
+                        let icon_size = (icon_w * icon_h) as usize;
+                        let mut icon_cov = vec![0u8; icon_size];
 
-                    match drawing::svg_rasterize(
-                        unsafe { &*path_ptr }, unsafe { &mut *scratch_ptr }, &mut icon_cov,
-                        icon_w, icon_h,
-                        drawing::SVG_FP_ONE, 0, 0,
-                    ) {
-                        Ok(()) => {
-                            sys::print(b"     SVG icon rasterized (20x24)\n");
-                            // Store coverage map as a leaked heap allocation.
-                            let leaked = icon_cov.leak();
-                            unsafe {
-                                ICON_COVERAGE = leaked.as_ptr();
-                                ICON_W = icon_w;
-                                ICON_H = icon_h;
+                        match drawing::svg_rasterize(
+                            unsafe { &*path_ptr }, unsafe { &mut *scratch_ptr }, &mut icon_cov,
+                            icon_w, icon_h,
+                            drawing::SVG_FP_ONE, 0, 0,
+                        ) {
+                            Ok(()) => {
+                                sys::print(b"     SVG icon rasterized (20x24)\n");
+                                // Store coverage map as a leaked heap allocation.
+                                let leaked = icon_cov.leak();
+                                unsafe {
+                                    ICON_COVERAGE = leaked.as_ptr();
+                                    ICON_W = icon_w;
+                                    ICON_H = icon_h;
+                                }
+                            }
+                            Err(_) => {
+                                sys::print(b"     SVG icon rasterize failed\n");
                             }
                         }
-                        Err(_) => {
-                            sys::print(b"     SVG icon rasterize failed\n");
-                        }
                     }
-                }
-                Err(_) => {
-                    sys::print(b"     SVG icon parse failed\n");
+                    Err(_) => {
+                        sys::print(b"     SVG icon parse failed\n");
+                    }
                 }
             }
 
-            // Free heap allocations.
-            unsafe {
-                let path_layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
-                alloc::alloc::dealloc(path_ptr as *mut u8, path_layout);
-                let scratch_layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
-                alloc::alloc::dealloc(scratch_ptr as *mut u8, scratch_layout);
+            // Free heap allocations (safe to skip if null).
+            if !path_ptr.is_null() {
+                unsafe {
+                    let path_layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+                    alloc::alloc::dealloc(path_ptr as *mut u8, path_layout);
+                }
+            }
+            if !scratch_ptr.is_null() {
+                unsafe {
+                    let scratch_layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+                    alloc::alloc::dealloc(scratch_ptr as *mut u8, scratch_layout);
+                }
             }
         }
     }
