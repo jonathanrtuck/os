@@ -25,6 +25,7 @@ include!("font_data.rs");
 include!("gamma_tables.rs");
 include!("png.rs");
 include!("rasterizer.rs");
+include!("svg.rs");
 include!("truetype.rs");
 
 const GLYPH_FIRST: u8 = 0x20;

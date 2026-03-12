@@ -4322,3 +4322,406 @@ fn context_switch_status_bar_content_differs() {
     assert!(image_text.windows(2).any(|w| w == b"px"),
         "Image status should contain 'px'");
 }
+
+// ===========================================================================
+// SVG path parser tests
+// ===========================================================================
+
+use drawing::{
+    svg_parse_path, svg_rasterize, SvgCommand, SvgError, SvgPath, SvgRasterScratch,
+};
+
+// ---------------------------------------------------------------------------
+// Parser: absolute commands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn svg_parse_empty_string_returns_error() {
+    let result = svg_parse_path(b"");
+    assert_eq!(result.err(), Some(SvgError::EmptyData));
+}
+
+#[test]
+fn svg_parse_whitespace_only_returns_error() {
+    let result = svg_parse_path(b"   \t\n ");
+    assert_eq!(result.err(), Some(SvgError::EmptyData));
+}
+
+#[test]
+fn svg_parse_invalid_command_returns_error() {
+    let result = svg_parse_path(b"X 10 20");
+    assert_eq!(result.err(), Some(SvgError::InvalidCommand(b'X')));
+}
+
+#[test]
+fn svg_parse_missing_coordinates_returns_error() {
+    let result = svg_parse_path(b"M 10");
+    assert_eq!(result.err(), Some(SvgError::MissingCoordinates));
+}
+
+#[test]
+fn svg_parse_missing_cubic_coords_returns_error() {
+    let result = svg_parse_path(b"M 0 0 C 1 2 3 4 5");
+    assert_eq!(result.err(), Some(SvgError::MissingCoordinates));
+}
+
+#[test]
+fn svg_parse_moveto_absolute() {
+    let path = svg_parse_path(b"M 10 20").unwrap();
+    assert_eq!(path.num_commands, 1);
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 10, y: 20 });
+}
+
+#[test]
+fn svg_parse_moveto_lineto_absolute() {
+    let path = svg_parse_path(b"M 0 0 L 10 20").unwrap();
+    assert_eq!(path.num_commands, 2);
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 0, y: 0 });
+    assert_eq!(path.commands[1], SvgCommand::LineTo { x: 10, y: 20 });
+}
+
+#[test]
+fn svg_parse_cubic_absolute() {
+    let path = svg_parse_path(b"M 0 0 C 1 2 3 4 5 6").unwrap();
+    assert_eq!(path.num_commands, 2);
+    assert_eq!(
+        path.commands[1],
+        SvgCommand::CubicTo {
+            x1: 1,
+            y1: 2,
+            x2: 3,
+            y2: 4,
+            x: 5,
+            y: 6
+        }
+    );
+}
+
+#[test]
+fn svg_parse_close_path() {
+    let path = svg_parse_path(b"M 0 0 L 10 0 L 10 10 Z").unwrap();
+    assert_eq!(path.num_commands, 4);
+    assert_eq!(path.commands[3], SvgCommand::Close);
+}
+
+#[test]
+fn svg_parse_close_lowercase() {
+    let path = svg_parse_path(b"M 0 0 L 10 0 z").unwrap();
+    assert_eq!(path.num_commands, 3);
+    assert_eq!(path.commands[2], SvgCommand::Close);
+}
+
+// ---------------------------------------------------------------------------
+// Parser: relative commands
+// ---------------------------------------------------------------------------
+
+#[test]
+fn svg_parse_moveto_relative() {
+    let path = svg_parse_path(b"m 10 20").unwrap();
+    assert_eq!(path.num_commands, 1);
+    // First m is relative to origin (0,0), so resolves to (10, 20).
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 10, y: 20 });
+}
+
+#[test]
+fn svg_parse_lineto_relative_resolves_against_current() {
+    let path = svg_parse_path(b"M 5 5 l 10 20").unwrap();
+    assert_eq!(path.num_commands, 2);
+    // l 10 20 from (5, 5) → (15, 25).
+    assert_eq!(path.commands[1], SvgCommand::LineTo { x: 15, y: 25 });
+}
+
+#[test]
+fn svg_parse_cubic_relative() {
+    let path = svg_parse_path(b"M 10 10 c 1 2 3 4 5 6").unwrap();
+    assert_eq!(path.num_commands, 2);
+    // Relative c from (10, 10): control points at (11,12), (13,14), end at (15,16).
+    assert_eq!(
+        path.commands[1],
+        SvgCommand::CubicTo {
+            x1: 11,
+            y1: 12,
+            x2: 13,
+            y2: 14,
+            x: 15,
+            y: 16
+        }
+    );
+}
+
+#[test]
+fn svg_parse_relative_moveto_chain() {
+    // m 10 10 m 5 5 → MoveTo(10,10), MoveTo(15,15)
+    let path = svg_parse_path(b"m 10 10 m 5 5").unwrap();
+    assert_eq!(path.num_commands, 2);
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 10, y: 10 });
+    assert_eq!(path.commands[1], SvgCommand::MoveTo { x: 15, y: 15 });
+}
+
+// ---------------------------------------------------------------------------
+// Parser: coordinate formats
+// ---------------------------------------------------------------------------
+
+#[test]
+fn svg_parse_comma_separated_coords() {
+    let path = svg_parse_path(b"M 10,20 L 30,40").unwrap();
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 10, y: 20 });
+    assert_eq!(path.commands[1], SvgCommand::LineTo { x: 30, y: 40 });
+}
+
+#[test]
+fn svg_parse_negative_coords() {
+    let path = svg_parse_path(b"M -10 -20").unwrap();
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: -10, y: -20 });
+}
+
+#[test]
+fn svg_parse_no_space_between_command_and_number() {
+    let path = svg_parse_path(b"M10 20").unwrap();
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 10, y: 20 });
+}
+
+#[test]
+fn svg_parse_multiple_spaces_between_coords() {
+    let path = svg_parse_path(b"M  10   20").unwrap();
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 10, y: 20 });
+}
+
+#[test]
+fn svg_parse_implicit_lineto_after_moveto() {
+    // After M, implicit repeated coordinates become L (SVG spec).
+    let path = svg_parse_path(b"M 0 0 10 20").unwrap();
+    assert_eq!(path.num_commands, 2);
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 0, y: 0 });
+    assert_eq!(path.commands[1], SvgCommand::LineTo { x: 10, y: 20 });
+}
+
+#[test]
+fn svg_parse_implicit_lineto_after_relative_moveto() {
+    // After m, implicit repeated coordinates become l.
+    let path = svg_parse_path(b"m 0 0 10 20").unwrap();
+    assert_eq!(path.num_commands, 2);
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 0, y: 0 });
+    assert_eq!(path.commands[1], SvgCommand::LineTo { x: 10, y: 20 });
+}
+
+#[test]
+fn svg_parse_decimal_coords_truncated_to_integer() {
+    // The parser reads the integer part and skips the fractional part.
+    let path = svg_parse_path(b"M 10.5 20.9").unwrap();
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 10, y: 20 });
+}
+
+// ---------------------------------------------------------------------------
+// Parser: complex paths
+// ---------------------------------------------------------------------------
+
+#[test]
+fn svg_parse_triangle() {
+    let path = svg_parse_path(b"M 0 0 L 10 0 L 5 10 Z").unwrap();
+    assert_eq!(path.num_commands, 4);
+    assert_eq!(path.commands[0], SvgCommand::MoveTo { x: 0, y: 0 });
+    assert_eq!(path.commands[1], SvgCommand::LineTo { x: 10, y: 0 });
+    assert_eq!(path.commands[2], SvgCommand::LineTo { x: 5, y: 10 });
+    assert_eq!(path.commands[3], SvgCommand::Close);
+}
+
+#[test]
+fn svg_parse_multiple_subpaths() {
+    let path = svg_parse_path(b"M 0 0 L 10 0 Z M 20 20 L 30 20 Z").unwrap();
+    assert_eq!(path.num_commands, 6);
+    assert_eq!(path.commands[3], SvgCommand::MoveTo { x: 20, y: 20 });
+}
+
+// ---------------------------------------------------------------------------
+// Rasterizer tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn svg_rasterize_empty_path_returns_error() {
+    let path = SvgPath::new();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 10 * 10];
+    // An empty path (0 commands) — we need to handle this at the rasterize level.
+    // The path is technically valid (zero commands), but nothing to rasterize.
+    let result = svg_rasterize(&path, &mut scratch, &mut coverage, 10, 10, 4096, 0, 0);
+    // No error because path has no commands to process — just no coverage produced.
+    assert!(result.is_ok());
+    assert!(coverage.iter().all(|&v| v == 0));
+}
+
+#[test]
+fn svg_rasterize_filled_square() {
+    // A 10x10 square path from (0,0) to (10,10).
+    let path = svg_parse_path(b"M 0 0 L 10 0 L 10 10 L 0 10 Z").unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 16 * 16];
+
+    // Scale 1:1 (SVG_FP_ONE = 4096).
+    svg_rasterize(&path, &mut scratch, &mut coverage, 16, 16, 4096, 0, 0).unwrap();
+
+    // Interior pixels (e.g., 5,5) should have high coverage.
+    let center_idx = 5 * 16 + 5;
+    assert!(
+        coverage[center_idx] > 200,
+        "Interior pixel (5,5) should have high coverage, got {}",
+        coverage[center_idx]
+    );
+
+    // Exterior pixel (12,12) should have zero coverage.
+    let outside_idx = 12 * 16 + 12;
+    assert_eq!(
+        coverage[outside_idx], 0,
+        "Exterior pixel (12,12) should have zero coverage"
+    );
+}
+
+#[test]
+fn svg_rasterize_triangle() {
+    // Right triangle: (0,0) → (20,0) → (0,20) → close.
+    let path = svg_parse_path(b"M 0 0 L 20 0 L 0 20 Z").unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 24 * 24];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, 24, 24, 4096, 0, 0).unwrap();
+
+    // Point inside the triangle (2, 2).
+    let inside_idx = 2 * 24 + 2;
+    assert!(
+        coverage[inside_idx] > 100,
+        "Interior pixel (2,2) should have significant coverage, got {}",
+        coverage[inside_idx]
+    );
+
+    // Point clearly outside (22, 22).
+    let outside_idx = 22 * 24 + 22;
+    assert_eq!(coverage[outside_idx], 0, "Exterior pixel should be zero");
+}
+
+#[test]
+fn svg_rasterize_with_cubic_produces_coverage() {
+    // A curved shape using cubic Bezier.
+    let path =
+        svg_parse_path(b"M 0 10 C 0 0 20 0 20 10 L 20 20 L 0 20 Z").unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 24 * 24];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, 24, 24, 4096, 0, 0).unwrap();
+
+    // Center of shape should have coverage.
+    let center_idx = 15 * 24 + 10;
+    assert!(
+        coverage[center_idx] > 100,
+        "Interior of curved shape should have coverage, got {}",
+        coverage[center_idx]
+    );
+}
+
+#[test]
+fn svg_rasterize_antialiased_edges() {
+    // A diagonal-edged shape should produce intermediate coverage values
+    // at the edges (not just 0 or 255).
+    let path = svg_parse_path(b"M 0 0 L 20 0 L 10 20 Z").unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 24 * 24];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, 24, 24, 4096, 0, 0).unwrap();
+
+    // Check edge pixels along the diagonal for antialiased (intermediate) values.
+    let mut found_intermediate = false;
+    for y in 0..20 {
+        for x in 0..20 {
+            let idx = y * 24 + x;
+            let c = coverage[idx];
+            if c > 0 && c < 255 {
+                found_intermediate = true;
+                break;
+            }
+        }
+        if found_intermediate {
+            break;
+        }
+    }
+    assert!(
+        found_intermediate,
+        "Antialiased edges should produce intermediate coverage values (not just 0 or 255)"
+    );
+}
+
+#[test]
+fn svg_rasterize_scaled_shape() {
+    // A 5x5 square scaled up 2×.
+    let path = svg_parse_path(b"M 0 0 L 5 0 L 5 5 L 0 5 Z").unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 16 * 16];
+
+    // Scale 2× (SVG_FP_ONE * 2 = 8192).
+    svg_rasterize(&path, &mut scratch, &mut coverage, 16, 16, 8192, 0, 0).unwrap();
+
+    // At 2× scale, the 5-unit square becomes 10 pixels wide.
+    // Interior pixel (5, 5) should have high coverage.
+    let inside = 5 * 16 + 5;
+    assert!(
+        coverage[inside] > 200,
+        "Scaled interior pixel should have high coverage, got {}",
+        coverage[inside]
+    );
+
+    // Pixel (12, 12) should be outside (10×10 square at 2×).
+    let outside = 12 * 16 + 12;
+    assert_eq!(coverage[outside], 0, "Scaled exterior should be zero");
+}
+
+#[test]
+fn svg_rasterize_with_offset() {
+    // A 5x5 square offset by (3, 3).
+    let path = svg_parse_path(b"M 0 0 L 5 0 L 5 5 L 0 5 Z").unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 16 * 16];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, 16, 16, 4096, 3, 3).unwrap();
+
+    // At (3,3) offset, the square runs from pixel (3,3) to (8,8).
+    // Interior: (5, 5) should have coverage.
+    let inside = 5 * 16 + 5;
+    assert!(
+        coverage[inside] > 200,
+        "Offset interior pixel should have high coverage, got {}",
+        coverage[inside]
+    );
+
+    // Origin (0, 0) should be outside.
+    let outside = 0 * 16 + 0;
+    assert_eq!(coverage[outside], 0, "Origin should be zero with offset");
+}
+
+#[test]
+fn svg_rasterize_winding_rule_nonzero() {
+    // A clockwise square with a counterclockwise inner cutout (hole).
+    // Outer: clockwise 0,0 → 20,0 → 20,20 → 0,20
+    // Inner: counterclockwise 5,5 → 5,15 → 15,15 → 15,5
+    let path = svg_parse_path(
+        b"M 0 0 L 20 0 L 20 20 L 0 20 Z M 5 5 L 5 15 L 15 15 L 15 5 Z",
+    )
+    .unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 24 * 24];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, 24, 24, 4096, 0, 0).unwrap();
+
+    // Point in outer ring (2, 2) — should have coverage.
+    let outer_idx = 2 * 24 + 2;
+    assert!(
+        coverage[outer_idx] > 200,
+        "Outer ring should have coverage, got {}",
+        coverage[outer_idx]
+    );
+
+    // Point in inner hole (10, 10) — should have zero (non-zero winding cancels).
+    let inner_idx = 10 * 24 + 10;
+    assert_eq!(
+        coverage[inner_idx], 0,
+        "Inner hole should have zero coverage (non-zero winding), got {}",
+        coverage[inner_idx]
+    );
+}
