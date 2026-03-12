@@ -1,0 +1,45 @@
+{
+  "featureId": "svg-renderer",
+  "reviewedAt": "2026-03-12T23:15:00.000Z",
+  "commitId": "ccc02a0",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of a minimal SVG path renderer. The parser correctly handles all required commands (M/L/C/Z in both absolute and relative forms), coordinate formats (comma/space-separated, negative, implicit lineto after moveto, decimal truncation), and error cases (empty data, invalid commands, missing coordinates, overflow). The rasterizer correctly reuses the same scanline/coverage approach as the existing TrueType rasterizer — non-zero winding rule, 4× vertical oversampling, De Casteljau cubic Bezier subdivision, all integer/fixed-point math. Code style matches the existing codebase conventions (no_std, no alloc, no floating point, SVG_ prefix naming). The dual-entry-point pattern (svg_parse_path returning on stack vs svg_parse_path_into for caller-provided buffer) is a thoughtful accommodation of the 16 KiB userspace stack constraint. 31 tests provide comprehensive coverage of parser commands, coordinate formats, error paths, and rasterizer behavior including antialiasing and winding rule holes. All 821 tests pass, clean release build with zero warnings.",
+    "issues": [
+      {
+        "file": "system/libraries/drawing/svg.rs",
+        "line": 302,
+        "severity": "non_blocking",
+        "description": "parse_svg_number does not support numbers starting with a decimal point (e.g., '.5'). In SVG path data, '.5' is a valid number meaning 0.5. Since the parser uses integer coordinates with decimal truncation, '.5' would become 0 anyway, but the current code returns InvalidNumber for it. This could cause unexpected parse failures on SVG paths copied from external tools that use shorthand like 'M.5.5'. Low risk for this project's use case (hand-authored integer-coordinate icon paths) but worth noting."
+      },
+      {
+        "file": "system/libraries/drawing/svg.rs",
+        "line": 389,
+        "severity": "non_blocking",
+        "description": "The cubic Bezier flatness test compares control point distances to the midpoint of the chord (p0→p3), not to the chord line itself. This simplified heuristic can over-subdivide S-shaped curves where control points are far from the chord center but close to the chord line. With max depth=10 this won't cause stack overflow or segment exhaustion for typical icon paths, but could produce more segments than necessary. The existing TrueType rasterizer uses the same simplified midpoint heuristic for quadratics, so this is consistent."
+      },
+      {
+        "file": "system/libraries/drawing/svg.rs",
+        "line": 356,
+        "severity": "non_blocking",
+        "description": "svg_coord_to_fp casts i64 multiplication result back to i32, which silently truncates for large coordinates. coord=525000 at scale=4096 (1×) → 2,150,400,000 which exceeds i32::MAX (2,147,483,647). Safe for this project's icon-scale SVG paths, but no bounds check or error return. The function's doc comment should note the safe coordinate range (~±524,000 at 1× scale)."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md states 'Existing Test Baseline: 719+ tests must pass at all times (698 system + 21 prototype, increased from 607 baseline during M1)' but the actual test count before this feature was 790 (system) + 21 (prototype) = 811. After this feature it's 821 + 21 = 842. The baseline number in AGENTS.md is stale and increasingly misleading as features accumulate.",
+      "evidence": "Handoff shows 821 system tests (790 baseline + 31 new). AGENTS.md line mentioning '719+ tests' has not been updated since milestone 1."
+    },
+    {
+      "area": "conventions",
+      "observation": "The architecture.md library entry for Drawing Library doesn't mention SVG rendering capabilities. It lists Surface, Color, primitives, CompositeSurface, png_decode, but not svg_parse_path/svg_rasterize. Future workers implementing SVG-dependent features may not discover these functions without searching.",
+      "evidence": ".factory/library/architecture.md 'Drawing Library' section lists Surface, Color, primitives, png_decode but no SVG functions. New svg.rs adds svg_parse_path, svg_parse_path_into, svg_rasterize as public API."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Clean pass. The SVG path renderer is a well-structured, self-contained library addition that correctly implements all required functionality: M/L/C/Z parsing (absolute and relative), coordinate format handling, error returns for malformed input, and scanline rasterization with non-zero winding rule and antialiased edges. The implementation follows existing codebase patterns (integer math, fixed-point, no_std) and reuses the same rasterization approach as the TrueType module. Three non-blocking issues noted: decimal-point-leading numbers not parsed (acceptable for integer coordinate use case), simplified cubic flatness heuristic (consistent with existing quadratic heuristic), and potential i32 overflow for very large coordinates (safe for icon-scale paths). 31 comprehensive tests cover parser, error cases, and rasterizer behavior."
+}

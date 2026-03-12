@@ -57,7 +57,7 @@ Userspace processes have a 16 KiB stack. All userspace programs and libraries ar
 - Two font caches:
   - **Monospace** (Source Code Pro Regular, 16px): used for editor text. Fixed char_width via TextLayout.
   - **Proportional** (Nunito Sans Regular, 16px): used for chrome text (title bar, status bar). Per-glyph advance widths via `draw_proportional_string()`.
-- All assets loaded from `system/share/` via 9p into a single 256 KiB shared buffer (mono font at offset 0, prop font at offset mono_len, PNG image data at offset mono_len + prop_len).
+- All assets loaded from `system/share/` via 9p into a single 256 KiB shared buffer (mono font | prop font | PNG image | SVG icon). Init sends offsets/lengths to compositor via CompositorConfig IPC message.
 - Missing glyph codepoints advance by space width fallback without crashing.
 
 ## Multi-Surface Compositing
@@ -77,6 +77,21 @@ Each surface has a dedicated render function (e.g., `render_content_surface()`, 
 
 Content modes: `IMAGE_MODE` global toggles between text editor (renders document text) and image viewer (renders decoded PNG). F1 key switches modes. Text state is preserved across switches.
 
+## Editor ↔ Compositor IPC Protocol
+
+The text editor and compositor communicate via bidirectional IPC channels using these message types:
+
+| Type ID | Name | Direction | Payload |
+|---------|------|-----------|---------|
+| 1 | MSG_KEY_EVENT | compositor → editor | Keycode + shift/ctrl flags |
+| 30 | MSG_WRITE_INSERT | editor → compositor | Byte position + character to insert |
+| 31 | MSG_WRITE_DELETE | editor → compositor | Byte position to delete at |
+| 32 | MSG_CURSOR_MOVE | editor → compositor | New cursor byte position |
+| 33 | MSG_SELECTION_UPDATE | editor → compositor | Selection start + end byte positions |
+| 34 | MSG_WRITE_DELETE_RANGE | editor → compositor | Start + end byte positions for bulk delete |
+
+The editor sends multiple messages atomically (before signaling), and the compositor drains them all in one event loop iteration. Selection range normalization handles reversed anchor/cursor.
+
 ## Drawing Library
 
 - `Surface<'a>`: wraps a pixel buffer (BGRA8888), provides drawing primitives
@@ -84,4 +99,8 @@ Content modes: `IMAGE_MODE` global toggles between text editor (renders document
 - Primitives: `fill_rect`, `fill_rect_blend`, `draw_line`, `blit`, `blit_blend`, `draw_coverage`, `fill_gradient_v`
 - `CompositeSurface` + `composite_surfaces()`: z-ordered back-to-front compositing with negative-offset clipping and blit_blend delegation
 - `png_decode()`: no-dependency PNG decoder (DEFLATE, all 5 filter types, RGB/RGBA → BGRA8888)
+- `svg_parse_path()` / `svg_parse_path_into()`: SVG path data parser (M/L/C/Z, absolute + relative), returns `SvgPath` segments
+- `svg_rasterize()`: Rasterizes parsed SVG paths into coverage maps using scanline/non-zero winding rule (same approach as TrueType rasterizer)
+- `palette` module: 13 named color constants (dark blue-grey theme) — all UI colors centralized here
+- **SVG struct sizes**: `SvgPath` (~16 KiB) and `SvgRasterScratch` (~64 KiB) exceed the 16 KiB userspace stack — must be heap-allocated via `alloc_zeroed` in bare-metal code
 - No rounded rects, no blur yet

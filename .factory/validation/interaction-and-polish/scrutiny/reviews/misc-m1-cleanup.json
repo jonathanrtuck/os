@@ -1,0 +1,28 @@
+{
+  "featureId": "misc-m1-cleanup",
+  "reviewedAt": "2026-03-12T23:10:00.000Z",
+  "commitId": "6451666ed6a4ed825448270df3975e7f2aef63a8",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "All four cleanup items correctly addressed. (1) MAX_DIRTY_RECTS changed from 7→6 with accurate comment explaining the math: 60-byte payload minus 12 bytes overhead (buffer_index u32 + rect_count u32 + pad [u8;4]) = 48 bytes / 8 bytes per DirtyRect = 6 rects. This matches the hardcoded [DirtyRect; 6] in PresentPayload structs in both compositor and GPU driver. (2) page_allocator.rs docstring correctly updated from '4 MiB' to '8 MiB' — verified MAX_ORDER=11, so 2^11 pages × 4 KiB = 8 MiB. (3) PREV_CURSOR_Y was already removed in a prior commit; worker correctly identified no change needed and confirmed with grep. (4) Const assertions added identically in both compositor/main.rs and init/main.rs — CompositorConfig is 56 bytes (4×u64 + 6×u32), well within the 60-byte limit. Test updated from damage_tracker_max_rects_is_7 to damage_tracker_max_rects_is_6.",
+    "issues": [
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 1508,
+        "severity": "non_blocking",
+        "description": "The updated comment says 'buffer_index (4) + rect_count (4) + pad (4) = 12' — in PresentPayload the _pad field comes AFTER the rects array, not before. The arithmetic (60 - 12 = 48, 48/8 = 6) is correct regardless of field ordering, but the comment implies the pad is overhead counted before rects. Cosmetic only; the value 6 is correct."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "PresentPayload uses hardcoded [DirtyRect; 6] in both compositor/main.rs:181 and virtio-gpu/main.rs:143, rather than referencing drawing::MAX_DIRTY_RECTS. If MAX_DIRTY_RECTS ever changes again, these three locations could drift. The GPU driver also has its own DirtyRect definition (not using drawing::DirtyRect) with a comment 'must match the compositor's DirtyRect layout'. These are pre-existing patterns, not introduced by this feature, but the mismatch between 7 and 6 that this feature fixes was caused by exactly this duplication.",
+      "evidence": "drawing/lib.rs:1510 defines MAX_DIRTY_RECTS=6; compositor/main.rs:181 has rects: [drawing::DirtyRect; 6]; virtio-gpu/main.rs:143 has rects: [DirtyRect; 6] with its own DirtyRect at line 127."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Clean pass. All four scrutiny cleanup items are correctly addressed: MAX_DIRTY_RECTS fixed to match IPC payload capacity, stale docstring updated, PREV_CURSOR_Y confirmed already removed, and compile-time size guards added for CompositorConfig. The only non-blocking note is a minor comment ordering ambiguity in the MAX_DIRTY_RECTS docstring. One shared-state observation: the DirtyRect array size is hardcoded in three locations (drawing lib, compositor, GPU driver) rather than using the constant, which is the root cause of the original drift this feature fixed."
+}
