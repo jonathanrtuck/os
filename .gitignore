@@ -6,5 +6,6 @@
 *.swo
 *.swp
 *~
+design/drafts/
 reference/
 target/
