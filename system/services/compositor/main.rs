@@ -44,6 +44,10 @@ const MSG_PRESENT: u32 = 20;
 const MSG_WRITE_INSERT: u32 = 30;
 const MSG_WRITE_DELETE: u32 = 31;
 const MSG_CURSOR_MOVE: u32 = 32;
+// Linux evdev keycode for F1 — used as the context switch key.
+// F1 is beyond the ASCII keymap (keycodes 0-57), so it won't produce
+// a printable character and doesn't conflict with any editor keys.
+const KEY_F1: u16 = 59;
 // Handle indices (determined by the order init sends handles).
 const INPUT_HANDLE: u8 = 1;
 const GPU_HANDLE: u8 = 2;
@@ -841,12 +845,14 @@ pub extern "C" fn _start() -> ! {
                             image_h = hdr.height;
 
                             unsafe {
-                                IMAGE_MODE = true;
+                                // Boot into editor mode; user switches
+                                // to image viewer via F1.
+                                IMAGE_MODE = false;
                                 IMAGE_WIDTH = image_w;
                                 IMAGE_HEIGHT = image_h;
                             }
 
-                            sys::print(b"     PNG decoded successfully\n");
+                            sys::print(b"     PNG decoded successfully (F1 to view)\n");
                         }
                         Err(_) => {
                             sys::print(b"     PNG decode failed\n");
@@ -1089,12 +1095,53 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Forward input events to the editor.
+        // Forward input events to the editor (except context switch key).
         while input_ch.try_recv(&mut msg) {
             if msg.msg_type == MSG_KEY_EVENT {
-                editor_ch.send(&msg);
+                let key: KeyEvent = unsafe { msg.payload_as() };
 
-                let _ = sys::channel_signal(EDITOR_HANDLE);
+                // F1 toggles between editor and image viewer contexts.
+                if key.keycode == KEY_F1 && key.pressed == 1 {
+                    let has_image = !image_pixels.is_empty();
+
+                    if has_image {
+                        let was_image = unsafe { IMAGE_MODE };
+
+                        unsafe { IMAGE_MODE = !was_image };
+
+                        // Re-render the content surface for the new mode.
+                        {
+                            let mut content_surf =
+                                make_surf(&mut content_buf, content_w, content_h);
+
+                            if unsafe { IMAGE_MODE } {
+                                render_image_content_surface(
+                                    &mut content_surf,
+                                    &image_pixels,
+                                    image_w,
+                                    image_h,
+                                );
+                            } else {
+                                // Switching back to editor: full clear + re-render
+                                // to ensure no image artifacts remain.
+                                unsafe { PREV_LAST_Y = content_h };
+                                render_content_surface(&mut content_surf, doc_content());
+                            }
+                        }
+
+                        changed = true;
+                    }
+
+                    continue; // Don't forward F1 to editor.
+                }
+
+                // In image mode, don't forward editing keys to the editor —
+                // keyboard input only applies in editor mode.
+                if !unsafe { IMAGE_MODE } {
+                    editor_ch.send(&msg);
+
+                    let _ = sys::channel_signal(EDITOR_HANDLE);
+                }
             }
         }
 
