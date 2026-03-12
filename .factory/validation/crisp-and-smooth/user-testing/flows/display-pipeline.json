@@ -1,0 +1,48 @@
+{
+  "flowId": "display-pipeline",
+  "testedAt": "2026-03-12T00:00:00Z",
+  "toolsUsed": ["QEMU framebuffer", "code review"],
+  "assertions": {
+    "VAL-DISP-001": {
+      "status": "pass",
+      "evidence": "Double buffering confirmed via code review and visual testing. Init allocates two separate DMA framebuffers (fb_va0, fb_va1) via sys::dma_alloc, each sized stride*height bytes. Serial log confirms: 'double framebuffer: 1280x800 x2 (8192 KiB)'. Compositor tracks BACK_BUF_IDX (0 or 1), renders into back buffer via make_surface(back), presents it to GPU, then swaps (BACK_BUF_IDX = 1 - back). Chrome is rendered once on both buffers at init. Content is rendered per-frame only on the back buffer. Boot screenshot and rapid-typing screenshot both show clean frames with no tearing or partial renders.",
+      "screenshots": ["/tmp/qemu-screen-display-pipeline-boot.png", "/tmp/qemu-screen-display-pipeline-rapid.png"],
+      "codeReview": "init/main.rs:241-253 — two DMA allocations (fb_va0 for buffer 0, fb_va1 for buffer 1), each fb_size = fb_stride * fb_height bytes. compositor/main.rs:489-503 — FB_PTRS[0] and FB_PTRS[1] store the two buffer base addresses. compositor/main.rs:505-513 — render_chrome called on BOTH buffers at startup. compositor/main.rs:618-649 — event loop: render into make_surface(back), build PresentPayload, send to GPU, swap BACK_BUF_IDX = 1 - back. CompositorConfig struct includes fb_va (buffer 0) and fb_va2 (buffer 1).",
+      "unitTests": []
+    },
+    "VAL-DISP-002": {
+      "status": "pass",
+      "evidence": "Damage-tracked GPU transfer confirmed via code review, serial log output, and 16 unit tests. Only dirty rectangular regions are transferred per frame. Serial log shows every keystroke produces exactly 2 dirty rects: 'gpu: present 2 rects [13,48 1254x40] [0,772 1280x28]'. Rect 1 is the content area (x=13, y=48, w=1254, h=40 — height 40px = 2 * line_height of ~20px, covering current + previous cursor line). Rect 2 is the status bar (x=0, y=772, w=1280, h=28 — tracked separately). Initial frame correctly uses full-screen transfer: 'gpu: present full 1280x800'. The DamageTracker in drawing/lib.rs collects dirty rects during render_content(), which adds content rect and status bar rect via damage.add(). PresentPayload carries rect_count and up to 6 DirtyRect structs to the GPU driver, which transfers only those regions.",
+      "screenshots": [],
+      "codeReview": "drawing/lib.rs:999-1131 — DamageTracker struct with add(), dirty_rects(), mark_full_screen(), bounding_box() methods. DirtyRect is 8 bytes (4x u16). MAX_DIRTY_RECTS=7. compositor/main.rs:267-328 — render_content() takes &mut DamageTracker, adds content dirty rect (line 321) and delegates to render_status which adds status bar rect (line 390). compositor/main.rs:631-647 — builds PresentPayload from damage.dirty_rects(), sends to GPU. virtio-gpu/main.rs:845-912 — GPU driver's damage-tracked partial transfer: when rect_count > 0, transfers each dirty rect individually, then flushes their union bounding box.",
+      "unitTests": [
+        "dirty_rect_new_stores_fields",
+        "dirty_rect_union_basic",
+        "dirty_rect_union_identity_with_zero",
+        "dirty_rect_union_all_multiple",
+        "dirty_rect_union_all_empty",
+        "dirty_rect_size_is_8_bytes",
+        "damage_tracker_starts_empty",
+        "damage_tracker_add_rect",
+        "damage_tracker_ignores_zero_size",
+        "damage_tracker_overflow_triggers_full_screen",
+        "damage_tracker_full_screen_bounding_box",
+        "damage_tracker_partial_bounding_box",
+        "damage_tracker_reset_clears_state",
+        "damage_tracker_add_after_full_screen_is_noop",
+        "damage_tracker_max_rects_is_7",
+        "damage_tracker_multiple_content_and_status_rects"
+      ]
+    },
+    "VAL-DISP-004": {
+      "status": "pass",
+      "evidence": "26 rapid keystrokes (a-z) sent via QEMU monitor socket. Screenshot after all input shows the complete string 'abcdefghijklmnopqrstuvwxyz' rendered in the text area with no missing characters. Status bar confirms '26 chars'. No dropped input. No visible flicker, blink, flash, tearing, or rendering artifacts in either the boot screenshot (clean initial frame) or the post-typing screenshot. Content that didn't change (title bar, empty text area below the first line) remained visually stable. Cursor visible at the end of the typed text.",
+      "screenshots": ["/tmp/qemu-screen-display-pipeline-boot.png", "/tmp/qemu-screen-display-pipeline-rapid.png"],
+      "codeReview": "Flicker-free rendering is achieved by the combination of double buffering (VAL-DISP-001) and batch rendering: compositor/main.rs:603-615 drains ALL pending write requests before rendering once, ensuring multiple rapid keystrokes are coalesced into a single frame update rather than causing per-keystroke redraws.",
+      "unitTests": []
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 3 assertions: all 3 passed. VAL-DISP-001 (double buffering) confirmed via code review of init's dual DMA allocation and compositor's buffer swap logic, plus clean screenshots. VAL-DISP-002 (damage-tracked transfer) confirmed via 16 unit tests, serial log showing per-keystroke 2-rect transfers (content area h=40px ≤ 2*line_height, status bar tracked separately), and code review of DamageTracker/PresentPayload/GPU driver pipeline. VAL-DISP-004 (flicker-free interaction) confirmed via 26 rapid keystrokes all appearing with no dropped input and clean visual output."
+}

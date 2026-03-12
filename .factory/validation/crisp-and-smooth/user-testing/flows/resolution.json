@@ -1,0 +1,24 @@
+{
+  "flowId": "resolution",
+  "testedAt": "2026-03-12T00:00:00Z",
+  "testedBy": "user-testing-validator (direct, after subagent failure)",
+  "toolsUsed": ["QEMU framebuffer", "code review"],
+  "assertions": {
+    "VAL-DISP-003": {
+      "status": "pass",
+      "evidence": "Configurable resolution confirmed via code review and visual testing at 3 different resolutions. Code review: GPU driver calls CMD_GET_DISPLAY_INFO to query scanout dimensions from virtio-gpu hardware, sends result as MSG_DISPLAY_INFO to init. Init reads display_info.width/height (not hardcoded), allocates framebuffers accordingly, passes to compositor via CompositorConfig. Serial log confirms 'display 1024x768' at 1024x768 and 'display resolution: 1920x1080' at 1920x1080. Tested at: (1) QEMU default 1280x800 — screenshot confirms correct rendering with chrome spanning full width; (2) 1920x1080 — screenshot at 1920x1080 confirms correct rendering, title bar spans full 1920px width, content area fills appropriately, status bar at bottom; (3) 1024x768 — screenshot confirms correct rendering. All three resolutions work with the same binary, parameterized by GPU-reported dimensions.",
+      "screenshots": ["/tmp/qemu-screen-font-quality.png", "/tmp/qemu-screen-resolution-1920.png", "/tmp/qemu-screen-resolution-1024.png"],
+      "codeReview": "virtio-gpu/main.rs:289-312 — get_display_info() sends CMD_GET_DISPLAY_INFO, parses RESP_OK_DISPLAY_INFO; virtio-gpu/main.rs:705-720 — calls get_display_info(), sends MSG_DISPLAY_INFO to init; init/main.rs:215-224 — reads MSG_DISPLAY_INFO, extracts width/height, computes stride and fb_size; init/main.rs:259-281 — passes fb_width/fb_height to compositor config. No hardcoded 1024 or 768 in resolution path."
+    },
+    "VAL-DISP-005": {
+      "status": "pass",
+      "evidence": "Resolution regression at 1024x768 confirmed. Booted QEMU with -device virtio-gpu-device,xres=1024,yres=768. Serial log shows 'display 1024x768' and 'double framebuffer: 1024x768 x2 (8192 KiB)'. Screenshot at 1024x768 (actual dimensions confirmed by PIL: 1024x768) shows correct rendering: title bar with 'Document OS' and 'Editor Separation Demo' spans full width, content area with 'hello world' renders correctly, status bar 'Editor process active | 11 chars' at bottom. No layout breakage, no rendering degradation. Text is crisp and properly weighted.",
+      "screenshots": ["/tmp/qemu-screen-resolution-1024.png"]
+    }
+  },
+  "frictions": [
+    "Subagent failed due to QEMU test.img lock conflict when running in parallel with other flow validators. Tested directly by validator instead."
+  ],
+  "blockers": [],
+  "summary": "Both resolution assertions passed. VAL-DISP-003: configurable resolution confirmed — code queries GPU via GET_DISPLAY_INFO (not hardcoded), and OS renders correctly at 1024x768, 1280x800, and 1920x1080. VAL-DISP-005: 1024x768 regression test passed — identical quality rendering with no layout breakage."
+}
