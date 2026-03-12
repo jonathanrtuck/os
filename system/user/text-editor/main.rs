@@ -52,7 +52,6 @@ struct EditorConfig {
     doc_capacity: u32,
     _pad: u32,
 }
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct KeyEvent {
@@ -62,14 +61,14 @@ struct KeyEvent {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct WriteInsert {
+struct WriteDelete {
     position: u32,
-    byte: u8,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct WriteDelete {
+struct WriteInsert {
     position: u32,
+    byte: u8,
 }
 
 fn channel_shm_va(idx: usize) -> usize {

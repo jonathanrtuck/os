@@ -71,6 +71,16 @@ pub struct Surface<'a> {
     pub stride: u32,
     pub format: PixelFormat,
 }
+/// Fixed-pitch text layout engine.
+///
+/// Computes line breaks (hard newlines + soft wrap at max width), cursor
+/// mapping (byte offset to/from pixel coordinates), and combined layout+draw.
+/// Pure computation — no allocations, no side effects.
+pub struct TextLayout {
+    pub char_width: u32,
+    pub line_height: u32,
+    pub max_width: u32,
+}
 
 /// Pixel byte ordering within each pixel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -511,6 +521,225 @@ impl<'a> Surface<'a> {
 
             self.data[offset..offset + bpp].copy_from_slice(&encoded[..bpp]);
         }
+    }
+}
+
+impl TextLayout {
+    /// Map a byte offset to pixel coordinates relative to the text origin.
+    pub fn byte_to_xy(&self, text: &[u8], offset: usize) -> (u32, u32) {
+        let cols = self.cols();
+
+        if cols == 0 || text.is_empty() {
+            return (0, 0);
+        }
+
+        let target = if offset > text.len() {
+            text.len()
+        } else {
+            offset
+        };
+        let mut col = 0usize;
+        let mut row = 0u32;
+
+        for (i, &byte) in text.iter().enumerate() {
+            if i == target {
+                return (col as u32 * self.char_width, row * self.line_height);
+            }
+
+            if byte == b'\n' {
+                row += 1;
+                col = 0;
+
+                continue;
+            }
+
+            if col >= cols {
+                row += 1;
+                col = 0;
+            }
+
+            col += 1;
+        }
+
+        // offset == text.len(): cursor at end.
+        (col as u32 * self.char_width, row * self.line_height)
+    }
+    fn cols(&self) -> usize {
+        if self.char_width == 0 {
+            return 0;
+        }
+
+        (self.max_width / self.char_width) as usize
+    }
+    /// Layout and draw text onto a surface in one pass. Draws characters
+    /// starting at (origin_x, origin_y), wrapping within max_width.
+    /// Returns (cursor_x, cursor_y) for the given cursor byte offset.
+    pub fn draw(
+        &self,
+        fb: &mut Surface,
+        text: &[u8],
+        origin_x: u32,
+        origin_y: u32,
+        cursor_offset: usize,
+        font: &BitmapFont,
+        text_color: Color,
+        cursor_color: Color,
+        max_y: u32,
+    ) -> (u32, u32) {
+        let cols = self.cols();
+        let mut col = 0usize;
+        let mut row = 0u32;
+        let mut cursor_x = origin_x;
+        let mut cursor_y = origin_y;
+
+        for (i, &byte) in text.iter().enumerate() {
+            let py = origin_y + row * self.line_height;
+
+            if py > max_y {
+                break;
+            }
+
+            if i == cursor_offset {
+                cursor_x = origin_x + col as u32 * self.char_width;
+                cursor_y = py;
+            }
+
+            if byte == b'\n' {
+                col = 0;
+                row += 1;
+
+                continue;
+            }
+
+            if cols > 0 && col >= cols {
+                col = 0;
+                row += 1;
+
+                let py = origin_y + row * self.line_height;
+
+                if py > max_y {
+                    break;
+                }
+            }
+
+            if byte >= 0x20 && byte < 0x7F {
+                let ch = [byte];
+                let s = unsafe { core::str::from_utf8_unchecked(&ch) };
+
+                fb.draw_text(
+                    origin_x + col as u32 * self.char_width,
+                    origin_y + row * self.line_height,
+                    s,
+                    font,
+                    text_color,
+                );
+            }
+
+            col += 1;
+        }
+
+        // Cursor at end of text.
+        if cursor_offset >= text.len() {
+            let py = origin_y + row * self.line_height;
+
+            cursor_x = origin_x + col as u32 * self.char_width;
+            cursor_y = py;
+        }
+
+        // Draw cursor.
+        if cursor_y <= max_y {
+            fb.fill_rect(
+                cursor_x,
+                cursor_y,
+                self.char_width,
+                font.glyph_height,
+                cursor_color,
+            );
+        }
+
+        (cursor_x, cursor_y)
+    }
+    /// Walk text and call `f(line_start, line_end, visual_row)` for each
+    /// visual line. Handles hard newlines and soft wrap at max_width.
+    pub fn layout_lines(&self, text: &[u8], mut f: impl FnMut(usize, usize, u32)) {
+        if text.is_empty() {
+            return;
+        }
+
+        let cols = self.cols();
+        if cols == 0 {
+            return;
+        }
+
+        let mut row = 0u32;
+        let mut line_start = 0usize;
+        let mut col = 0usize;
+
+        for (i, &byte) in text.iter().enumerate() {
+            if byte == b'\n' {
+                f(line_start, i, row);
+                row += 1;
+                line_start = i + 1;
+                col = 0;
+                continue;
+            }
+
+            if col >= cols {
+                f(line_start, i, row);
+                row += 1;
+                line_start = i;
+                col = 0;
+            }
+
+            col += 1;
+        }
+
+        // Emit final line (may be empty for trailing newline).
+        f(line_start, text.len(), row);
+    }
+    /// Map pixel coordinates to a byte offset (hit testing). Coordinates
+    /// are relative to the text origin. Rounds to nearest character boundary.
+    pub fn xy_to_byte(&self, text: &[u8], x: u32, y: u32) -> usize {
+        let cols = self.cols();
+
+        if cols == 0 || text.is_empty() {
+            return 0;
+        }
+
+        let target_row = y / self.line_height;
+        let half_char = self.char_width / 2;
+        let target_col = (x + half_char) / self.char_width;
+        let mut col = 0usize;
+        let mut row = 0u32;
+
+        for (i, &byte) in text.iter().enumerate() {
+            if byte == b'\n' {
+                if row == target_row {
+                    return i; // click past line end -> snap to newline
+                }
+
+                row += 1;
+                col = 0;
+
+                continue;
+            }
+
+            if col >= cols {
+                row += 1;
+                col = 0;
+            }
+
+            if row == target_row && col >= target_col as usize {
+                return i;
+            }
+            if row > target_row {
+                return i;
+            }
+
+            col += 1;
+        }
+
+        text.len()
     }
 }
 

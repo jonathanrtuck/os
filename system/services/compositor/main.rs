@@ -44,13 +44,12 @@ const LINE_H: u32 = 20;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
 
-// Cursor position for rendering.
-static mut CURSOR_COL: usize = 0;
-static mut CURSOR_ROW: u32 = 0;
 /// Cursor byte offset in the document. Updated by write requests.
 static mut CURSOR_POS: usize = 0;
-/// Highest text row drawn in the previous render (for dirty-rect clearing).
-static mut LAST_TEXT_ROW: u32 = 0;
+/// Previous cursor pixel Y (for dirty-rect clearing).
+static mut PREV_CURSOR_Y: u32 = 0;
+/// Previous last-drawn pixel Y (for dirty-rect clearing).
+static mut PREV_LAST_Y: u32 = 0;
 // Document shared buffer — owned exclusively by the compositor (sole writer).
 // Set from config message; editor has a read-only mapping of the same pages.
 static mut DOC_BUF: *mut u8 = core::ptr::null_mut();
@@ -71,6 +70,11 @@ struct CompositorConfig {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct CursorMove {
+    position: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct KeyEvent {
     keycode: u16,
     pressed: u8,
@@ -85,11 +89,6 @@ struct WriteInsert {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct WriteDelete {
-    position: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CursorMove {
     position: u32,
 }
 
@@ -150,8 +149,12 @@ fn doc_write_header() {
         core::ptr::write_volatile(DOC_BUF.add(8) as *mut u64, CURSOR_POS as u64);
     }
 }
-fn max_cols(fb_width: u32) -> usize {
-    ((fb_width - 48) / CHAR_W) as usize
+fn text_layout(fb_width: u32) -> drawing::TextLayout {
+    drawing::TextLayout {
+        char_width: CHAR_W,
+        line_height: LINE_H,
+        max_width: fb_width - 48,
+    }
 }
 fn max_text_y(fb_height: u32) -> u32 {
     let text_area_h = fb_height.saturating_sub(48 + 32);
@@ -192,25 +195,20 @@ fn render_chrome(fb: &mut drawing::Surface) {
 /// Redraw text content, cursor, and status bar. Only touches the text area
 /// interior and status bar — leaves the static chrome untouched.
 ///
-/// Optimized: clears and redraws only from the previous cursor row downward,
-/// since characters before the edit point haven't changed. For the common
-/// case (typing at end of text), this means clearing ~1-2 lines instead
-/// of the entire text area (~34x fewer pixels).
+/// Dirty-rect optimization: clears from the previous cursor Y downward,
+/// then delegates to TextLayout::draw for positioning and rendering.
 fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
     use drawing::{Color, FONT_8X16 as F};
 
     let bg = Color::rgb(24, 24, 36);
-    let cols = max_cols(fb.width);
     let my = max_text_y(fb.height);
-    let tc = Color::rgb(200, 210, 230);
+    let layout = text_layout(fb.width);
     let cursor_pos = unsafe { CURSOR_POS };
-    let prev_row = unsafe { CURSOR_ROW };
-    let prev_last = unsafe { LAST_TEXT_ROW };
-    // Clear only the dirty rows: from the previous cursor row to one row
-    // past the previous last text row (handles both growing and shrinking).
-    // For appending at end of single-line text, this clears ~1 line.
-    let clear_start_y = TEXT_Y + prev_row * LINE_H;
-    let clear_end_y = TEXT_Y + (prev_last + 2) * LINE_H;
+    let prev_cursor_y = unsafe { PREV_CURSOR_Y };
+    let prev_last_y = unsafe { PREV_LAST_Y };
+    // Clear dirty region: from previous cursor row to past previous last row.
+    let clear_start_y = TEXT_Y + prev_cursor_y;
+    let clear_end_y = TEXT_Y + prev_last_y + 2 * LINE_H;
     let text_bottom = fb.height.saturating_sub(32) - 1;
     let clear_end_y = if clear_end_y > text_bottom {
         text_bottom
@@ -228,72 +226,24 @@ fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
         );
     }
 
-    // Walk text to find the byte offset where prev_row starts, then draw
-    // only from that row onward.
-    let mut col = 0usize;
-    let mut row = 0u32;
-    let mut cursor_col = 0usize;
-    let mut cursor_row = 0u32;
+    let (_, cursor_y) = layout.draw(
+        fb,
+        text,
+        TEXT_X,
+        TEXT_Y,
+        cursor_pos,
+        &F,
+        Color::rgb(200, 210, 230),
+        Color::rgb(100, 180, 255),
+        my,
+    );
 
-    for (i, &byte) in text.iter().enumerate() {
-        if row * LINE_H + TEXT_Y > my {
-            break;
-        }
-
-        if i == cursor_pos {
-            cursor_col = col;
-            cursor_row = row;
-        }
-
-        if byte == b'\n' {
-            col = 0;
-            row += 1;
-
-            continue;
-        }
-
-        if col >= cols {
-            col = 0;
-            row += 1;
-
-            if row * LINE_H + TEXT_Y > my {
-                break;
-            }
-        }
-
-        // Only draw characters on or after the dirty row.
-        if row >= prev_row && byte >= 0x20 && byte < 0x7F {
-            let ch = [byte];
-            let s = unsafe { core::str::from_utf8_unchecked(&ch) };
-
-            fb.draw_text(
-                TEXT_X + col as u32 * CHAR_W,
-                TEXT_Y + row * LINE_H,
-                s,
-                &F,
-                tc,
-            );
-        }
-
-        col += 1;
-    }
-
-    if cursor_pos >= text.len() {
-        cursor_col = col;
-        cursor_row = row;
-    }
-
-    let cx = TEXT_X + cursor_col as u32 * CHAR_W;
-    let cy = TEXT_Y + cursor_row * LINE_H;
-
-    if cy <= my {
-        fb.fill_rect(cx, cy, CHAR_W, 16, Color::rgb(100, 180, 255));
-    }
+    // Track dirty state for next frame.
+    let (_, last_y) = layout.byte_to_xy(text, text.len());
 
     unsafe {
-        CURSOR_COL = cursor_col;
-        CURSOR_ROW = cursor_row;
-        LAST_TEXT_ROW = row;
+        PREV_CURSOR_Y = cursor_y - TEXT_Y;
+        PREV_LAST_Y = last_y;
     }
 
     render_status(fb, text.len());

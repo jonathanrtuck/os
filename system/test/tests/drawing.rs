@@ -6,7 +6,7 @@
 #[path = "../../libraries/drawing/lib.rs"]
 mod drawing;
 
-use drawing::{Color, PixelFormat, Surface, FONT_8X16};
+use drawing::{Color, PixelFormat, Surface, TextLayout, FONT_8X16};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1231,4 +1231,228 @@ fn draw_coverage_colored() {
     assert_eq!(p.r, 255);
     assert_eq!(p.g, 0);
     assert_eq!(p.b, 0);
+}
+
+// ---------------------------------------------------------------------------
+// TextLayout tests
+// ---------------------------------------------------------------------------
+
+fn make_layout(max_width: u32) -> TextLayout {
+    TextLayout {
+        char_width: 8,
+        line_height: 20,
+        max_width,
+    }
+}
+
+// --- layout_lines ---
+
+#[test]
+fn layout_lines_empty_text() {
+    let layout = make_layout(200);
+    let mut count = 0;
+    layout.layout_lines(b"", |_, _, _| count += 1);
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn layout_lines_single_line_no_wrap() {
+    let layout = make_layout(200); // 25 cols
+    let text = b"hello";
+    let mut lines = Vec::new();
+    layout.layout_lines(text, |start, end, row| lines.push((start, end, row)));
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0], (0, 5, 0));
+}
+
+#[test]
+fn layout_lines_newline_creates_new_line() {
+    let layout = make_layout(200);
+    let text = b"ab\ncd";
+    let mut lines = Vec::new();
+    layout.layout_lines(text, |start, end, row| lines.push((start, end, row)));
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], (0, 2, 0));  // "ab"
+    assert_eq!(lines[1], (3, 5, 1));  // "cd"
+}
+
+#[test]
+fn layout_lines_wrap_at_max_width() {
+    let layout = make_layout(24); // 3 cols (24 / 8)
+    let text = b"abcdef";
+    let mut lines = Vec::new();
+    layout.layout_lines(text, |start, end, row| lines.push((start, end, row)));
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], (0, 3, 0));  // "abc"
+    assert_eq!(lines[1], (3, 6, 1));  // "def"
+}
+
+#[test]
+fn layout_lines_wrap_and_newline_combined() {
+    let layout = make_layout(24); // 3 cols
+    let text = b"abc\nde";
+    let mut lines = Vec::new();
+    layout.layout_lines(text, |start, end, row| lines.push((start, end, row)));
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], (0, 3, 0));  // "abc"
+    assert_eq!(lines[1], (4, 6, 1));  // "de"
+}
+
+#[test]
+fn layout_lines_trailing_newline() {
+    let layout = make_layout(200);
+    let text = b"hello\n";
+    let mut lines = Vec::new();
+    layout.layout_lines(text, |start, end, row| lines.push((start, end, row)));
+    // "hello" on line 0, empty line 1 from trailing newline.
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], (0, 5, 0));
+    assert_eq!(lines[1], (6, 6, 1));
+}
+
+#[test]
+fn layout_lines_multiple_newlines() {
+    let layout = make_layout(200);
+    let text = b"a\n\nb";
+    let mut lines = Vec::new();
+    layout.layout_lines(text, |start, end, row| lines.push((start, end, row)));
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0], (0, 1, 0));  // "a"
+    assert_eq!(lines[1], (2, 2, 1));  // empty
+    assert_eq!(lines[2], (3, 4, 2));  // "b"
+}
+
+#[test]
+fn layout_lines_exact_width_no_extra_wrap() {
+    let layout = make_layout(24); // 3 cols
+    let text = b"abc";
+    let mut lines = Vec::new();
+    layout.layout_lines(text, |start, end, row| lines.push((start, end, row)));
+    // Exactly fills one line, no extra wrap.
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0], (0, 3, 0));
+}
+
+// --- byte_to_xy ---
+
+#[test]
+fn byte_to_xy_start_of_text() {
+    let layout = make_layout(200);
+    let (x, y) = layout.byte_to_xy(b"hello", 0);
+    assert_eq!((x, y), (0, 0));
+}
+
+#[test]
+fn byte_to_xy_middle_of_line() {
+    let layout = make_layout(200);
+    let (x, y) = layout.byte_to_xy(b"hello", 3);
+    assert_eq!((x, y), (24, 0)); // col 3 * 8px
+}
+
+#[test]
+fn byte_to_xy_end_of_text() {
+    let layout = make_layout(200);
+    let (x, y) = layout.byte_to_xy(b"hello", 5);
+    assert_eq!((x, y), (40, 0)); // col 5 * 8px
+}
+
+#[test]
+fn byte_to_xy_after_newline() {
+    let layout = make_layout(200);
+    let (x, y) = layout.byte_to_xy(b"ab\ncd", 3);
+    assert_eq!((x, y), (0, 20)); // start of row 1
+}
+
+#[test]
+fn byte_to_xy_at_newline_char() {
+    let layout = make_layout(200);
+    // Cursor at the newline itself = end of that line.
+    let (x, y) = layout.byte_to_xy(b"ab\ncd", 2);
+    assert_eq!((x, y), (16, 0)); // col 2 on row 0
+}
+
+#[test]
+fn byte_to_xy_wrapped_line() {
+    let layout = make_layout(24); // 3 cols
+    // "abcdef" wraps: "abc" on row 0, "def" on row 1.
+    let (x, y) = layout.byte_to_xy(b"abcdef", 4);
+    assert_eq!((x, y), (8, 20)); // col 1 on row 1
+}
+
+#[test]
+fn byte_to_xy_past_end_clamps() {
+    let layout = make_layout(200);
+    let (x, y) = layout.byte_to_xy(b"hi", 10);
+    // Past end -- should return position at end of text.
+    assert_eq!((x, y), (16, 0));
+}
+
+#[test]
+fn byte_to_xy_empty_text() {
+    let layout = make_layout(200);
+    let (x, y) = layout.byte_to_xy(b"", 0);
+    assert_eq!((x, y), (0, 0));
+}
+
+// --- xy_to_byte ---
+
+#[test]
+fn xy_to_byte_origin() {
+    let layout = make_layout(200);
+    assert_eq!(layout.xy_to_byte(b"hello", 0, 0), 0);
+}
+
+#[test]
+fn xy_to_byte_middle_of_line() {
+    let layout = make_layout(200);
+    // Click at pixel (24, 0) = col 3.
+    assert_eq!(layout.xy_to_byte(b"hello", 24, 0), 3);
+}
+
+#[test]
+fn xy_to_byte_between_chars_rounds_left() {
+    let layout = make_layout(200);
+    // Click at pixel (3, 0) = within first character cell.
+    assert_eq!(layout.xy_to_byte(b"hello", 3, 0), 0);
+}
+
+#[test]
+fn xy_to_byte_between_chars_rounds_right() {
+    let layout = make_layout(200);
+    // Click at pixel (5, 0) = past midpoint of first char (8px wide).
+    assert_eq!(layout.xy_to_byte(b"hello", 5, 0), 1);
+}
+
+#[test]
+fn xy_to_byte_past_end_of_line() {
+    let layout = make_layout(200);
+    // Click past the end of "hi" -- snaps to end of text.
+    assert_eq!(layout.xy_to_byte(b"hi", 100, 0), 2);
+}
+
+#[test]
+fn xy_to_byte_second_line() {
+    let layout = make_layout(200);
+    // "ab\ncd", click on row 1 col 1.
+    assert_eq!(layout.xy_to_byte(b"ab\ncd", 8, 20), 4);
+}
+
+#[test]
+fn xy_to_byte_wrapped_line() {
+    let layout = make_layout(24); // 3 cols
+    // "abcdef" wraps. Click at row 1, col 0 = byte 3.
+    assert_eq!(layout.xy_to_byte(b"abcdef", 0, 20), 3);
+}
+
+#[test]
+fn xy_to_byte_past_last_row() {
+    let layout = make_layout(200);
+    // Click below all text -- snaps to end.
+    assert_eq!(layout.xy_to_byte(b"hello", 0, 100), 5);
+}
+
+#[test]
+fn xy_to_byte_empty_text() {
+    let layout = make_layout(200);
+    assert_eq!(layout.xy_to_byte(b"", 50, 50), 0);
 }
