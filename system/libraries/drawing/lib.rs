@@ -160,6 +160,15 @@ impl Color {
             },
         }
     }
+    /// Decode a Color from a BGRA8888 byte slice (at least 4 bytes).
+    pub fn decode_from_bgra(bytes: &[u8]) -> Self {
+        Color {
+            b: bytes[0],
+            g: bytes[1],
+            r: bytes[2],
+            a: bytes[3],
+        }
+    }
     /// Encode to pixel bytes in the given format.
     fn encode(self, format: PixelFormat) -> [u8; 4] {
         match format {
@@ -871,12 +880,61 @@ impl TextLayout {
         cursor_color: Color,
         max_y: u32,
     ) -> (u32, u32) {
+        self.draw_tt_sel(
+            fb,
+            text,
+            origin_x,
+            origin_y,
+            cursor_offset,
+            cache,
+            text_color,
+            cursor_color,
+            max_y,
+            0,
+            0,
+            Color::TRANSPARENT,
+        )
+    }
+
+    /// Layout and draw text with optional selection highlight.
+    ///
+    /// `sel_start` and `sel_end` define the selected byte range (half-open).
+    /// When `sel_start < sel_end`, characters in that range are rendered with
+    /// `sel_color` as a background highlight. When `sel_start == sel_end`
+    /// (or both are 0), no selection highlight is drawn.
+    ///
+    /// The selection is normalized internally: if `sel_start > sel_end`, they
+    /// are swapped so the highlight always covers the correct range regardless
+    /// of anchor vs cursor ordering.
+    pub fn draw_tt_sel(
+        &self,
+        fb: &mut Surface,
+        text: &[u8],
+        origin_x: u32,
+        origin_y: u32,
+        cursor_offset: usize,
+        cache: &GlyphCache,
+        text_color: Color,
+        cursor_color: Color,
+        max_y: u32,
+        sel_start: usize,
+        sel_end: usize,
+        sel_color: Color,
+    ) -> (u32, u32) {
         let cols = self.cols();
         let mut col = 0usize;
         let mut row = 0u32;
         let mut cursor_x = origin_x;
         let mut cursor_y = origin_y;
         let baseline_offset = cache.line_height * 3 / 4;
+
+        // Normalize selection range.
+        let (s_lo, s_hi) = if sel_start <= sel_end {
+            (sel_start, sel_end)
+        } else {
+            (sel_end, sel_start)
+        };
+        let has_selection = s_lo < s_hi;
 
         for (i, &byte) in text.iter().enumerate() {
             let py = origin_y + row * self.line_height;
@@ -908,6 +966,14 @@ impl TextLayout {
                 }
             }
 
+            // Draw selection highlight behind the character if selected.
+            if has_selection && i >= s_lo && i < s_hi && sel_color.a > 0 {
+                let hx = origin_x + col as u32 * self.char_width;
+                let hy = origin_y + row * self.line_height;
+
+                fb.fill_rect_blend(hx, hy, self.char_width, cache.line_height, sel_color);
+            }
+
             if let Some((glyph, coverage)) = cache.get(byte) {
                 if glyph.width > 0 && glyph.height > 0 {
                     let gx =
@@ -931,7 +997,9 @@ impl TextLayout {
             cursor_y = py;
         }
 
-        if cursor_y <= max_y {
+        // Draw cursor: thin bar (no cursor when there's a visible selection,
+        // since the selection end *is* the cursor position).
+        if !has_selection && cursor_y <= max_y {
             fb.fill_rect(cursor_x, cursor_y, 2, cache.line_height, cursor_color);
         }
 

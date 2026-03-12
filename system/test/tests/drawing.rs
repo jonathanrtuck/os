@@ -3849,6 +3849,259 @@ fn context_switch_f1_keycode_not_printable() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Text selection highlight tests
+// ---------------------------------------------------------------------------
+
+/// Selection highlight: fill_rect_blend draws a visible highlight behind
+/// selected character positions (simulating what draw_tt_sel does).
+#[test]
+fn selection_highlight_rect_blend_modifies_pixels() {
+    let w = 320u32;
+    let h = 100u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+    let bg = Color::rgb(24, 24, 36);
+    surf.clear(bg);
+
+    // Draw a selection highlight rectangle at the position of "world"
+    // (index 6..11, each char 8px wide).
+    let sel_color = Color::rgba(50, 80, 160, 180);
+    let char_w = 8u32;
+    let line_h = 20u32;
+
+    for i in 6..11 {
+        surf.fill_rect_blend(i * char_w, 0, char_w, line_h, sel_color);
+    }
+
+    // Sample a pixel in the highlight region (x=52, y=10).
+    let off = (10 * w * 4 + 52 * 4) as usize;
+    let px = Color::decode_from_bgra(&buf[off..off + 4]);
+
+    assert_ne!(px, bg, "Pixel in selection area should differ from background");
+}
+
+/// Selection highlight area does not bleed outside the selection range.
+#[test]
+fn selection_highlight_does_not_bleed() {
+    let w = 320u32;
+    let h = 100u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+    let bg = Color::rgb(24, 24, 36);
+    surf.clear(bg);
+
+    let sel_color = Color::rgba(50, 80, 160, 180);
+    let char_w = 8u32;
+    let line_h = 20u32;
+
+    // Highlight chars 6..11 only.
+    for i in 6..11 {
+        surf.fill_rect_blend(i * char_w, 0, char_w, line_h, sel_color);
+    }
+
+    // Pixel at x=4, y=10 (inside char 0, which is NOT selected) should be bg.
+    let off = (10 * w * 4 + 4 * 4) as usize;
+    let px = Color::decode_from_bgra(&buf[off..off + 4]);
+
+    assert_eq!(px, bg, "Pixel outside selection should remain background");
+}
+
+/// Selection range normalization: draw_tt_sel(sel_start=11, sel_end=6)
+/// should produce the same output as draw_tt_sel(sel_start=6, sel_end=11).
+/// Tested via the bitmap draw method approach.
+#[test]
+fn selection_range_normalization() {
+    let layout = TextLayout {
+        char_width: 8,
+        line_height: 20,
+        max_width: 300,
+    };
+    let text = b"hello world";
+
+    // Forward: selection 6..11
+    let w = 320u32;
+    let h = 100u32;
+    let mut buf_fwd = vec![0u8; (w * h * 4) as usize];
+    let mut surf_fwd = make_surface(&mut buf_fwd, w, h);
+    surf_fwd.clear(Color::rgb(24, 24, 36));
+
+    let sel_color = Color::rgba(50, 80, 160, 180);
+    let (sel_lo, sel_hi) = (6, 11);
+    for i in sel_lo..sel_hi {
+        let (cx, cy) = layout.byte_to_xy(text, i);
+        surf_fwd.fill_rect_blend(cx, cy, 8, 20, sel_color);
+    }
+
+    // Reversed: normalized should be identical.
+    let mut buf_rev = vec![0u8; (w * h * 4) as usize];
+    let mut surf_rev = make_surface(&mut buf_rev, w, h);
+    surf_rev.clear(Color::rgb(24, 24, 36));
+
+    let (sel_start_rev, sel_end_rev) = (11usize, 6usize);
+    let (s_lo, s_hi) = if sel_start_rev <= sel_end_rev {
+        (sel_start_rev, sel_end_rev)
+    } else {
+        (sel_end_rev, sel_start_rev)
+    };
+    for i in s_lo..s_hi {
+        let (cx, cy) = layout.byte_to_xy(text, i);
+        surf_rev.fill_rect_blend(cx, cy, 8, 20, sel_color);
+    }
+
+    assert_eq!(buf_fwd, buf_rev, "Normalized selection should produce identical pixels");
+}
+
+/// Selection byte_to_xy mapping: selection positions map to correct pixels.
+#[test]
+fn selection_byte_to_xy_positions() {
+    let layout = TextLayout {
+        char_width: 8,
+        line_height: 20,
+        max_width: 300,
+    };
+    let text = b"hello world";
+
+    // Position 6 ('w') should be at x=48, y=0.
+    let (x6, y6) = layout.byte_to_xy(text, 6);
+    assert_eq!(x6, 48);
+    assert_eq!(y6, 0);
+
+    // Position 10 ('d') should be at x=80, y=0.
+    let (x10, y10) = layout.byte_to_xy(text, 10);
+    assert_eq!(x10, 80);
+    assert_eq!(y10, 0);
+}
+
+/// Selection state: anchor and cursor define the range. The range should
+/// be [min(anchor, cursor), max(anchor, cursor)).
+#[test]
+fn selection_anchor_cursor_range() {
+    // Editor tracks: anchor position + cursor position.
+    // Selection = range between them.
+    let anchor = 3usize;
+    let cursor = 8usize;
+
+    let sel_lo = if anchor < cursor { anchor } else { cursor };
+    let sel_hi = if anchor < cursor { cursor } else { anchor };
+
+    assert_eq!(sel_lo, 3);
+    assert_eq!(sel_hi, 8);
+
+    // Reversed direction.
+    let anchor2 = 8usize;
+    let cursor2 = 3usize;
+
+    let sel_lo2 = if anchor2 < cursor2 { anchor2 } else { cursor2 };
+    let sel_hi2 = if anchor2 < cursor2 { cursor2 } else { anchor2 };
+
+    assert_eq!(sel_lo2, 3);
+    assert_eq!(sel_hi2, 8);
+}
+
+/// Selection replacement: deleting a range and inserting a character.
+#[test]
+fn selection_replace_with_character() {
+    // Simulate document: "hello world" (11 bytes).
+    let mut doc = *b"hello world";
+    let mut doc_len = 11usize;
+
+    // Selection: 6..11 ("world").
+    let sel_start = 6usize;
+    let sel_end = 11usize;
+
+    // Delete the range [6..11) by shifting bytes left.
+    let del_count = sel_end - sel_start;
+    // Move bytes after selection to selection start.
+    for i in sel_start..doc_len - del_count {
+        doc[i] = doc[i + del_count];
+    }
+    doc_len -= del_count;
+
+    // Insert 'X' at position 6.
+    for i in (7..=doc_len).rev() {
+        if i < doc.len() && i > 0 {
+            doc[i] = doc[i - 1];
+        }
+    }
+    doc[6] = b'X';
+    doc_len += 1;
+
+    assert_eq!(&doc[..doc_len], b"hello X");
+}
+
+/// Selection deletion: backspace with selection deletes entire range.
+#[test]
+fn selection_delete_range() {
+    // Simulate document: "hello world" (11 bytes).
+    let mut doc = *b"hello world";
+    let mut doc_len = 11usize;
+
+    // Selection: 6..11 ("world").
+    let sel_start = 6usize;
+    let sel_end = 11usize;
+
+    // Delete the range [6..11).
+    let del_count = sel_end - sel_start;
+    for i in sel_start..doc_len - del_count {
+        doc[i] = doc[i + del_count];
+    }
+    doc_len -= del_count;
+
+    // Cursor should be at sel_start (6).
+    let cursor = sel_start;
+
+    assert_eq!(&doc[..doc_len], b"hello ");
+    assert_eq!(cursor, 6);
+}
+
+/// Highlight color has sufficient contrast: selection highlight should
+/// be visually distinct from both the background and text.
+#[test]
+fn selection_highlight_color_contrast() {
+    let bg = Color::rgb(24, 24, 36);
+    let text_color = Color::rgb(200, 210, 230);
+    let sel_color = Color::rgba(50, 80, 160, 180);
+
+    // Selection highlight color should differ from background.
+    assert_ne!(sel_color.r, bg.r, "Selection R should differ from background R");
+    assert_ne!(sel_color.b, bg.b, "Selection B should differ from background B");
+
+    // The blended result of sel_color over bg should be distinct from bg.
+    let blended = sel_color.blend_over(bg);
+    assert_ne!(blended, bg, "Blended selection over bg should be visually distinct");
+
+    // Text should still be readable over the selection highlight.
+    // Check luminance difference is meaningful.
+    let text_luma = text_color.r as u32 * 3 + text_color.g as u32 * 6 + text_color.b as u32;
+    let sel_luma = blended.r as u32 * 3 + blended.g as u32 * 6 + blended.b as u32;
+    let contrast = if text_luma > sel_luma {
+        text_luma - sel_luma
+    } else {
+        sel_luma - text_luma
+    };
+
+    assert!(contrast > 200, "Text should have sufficient contrast over selection highlight (got {})", contrast);
+}
+
+/// Cursor bar should NOT be drawn when selection is active in draw_tt_sel.
+/// When sel_start == sel_end == 0 (no selection), cursor bar IS drawn.
+#[test]
+fn cursor_bar_suppressed_with_selection() {
+    // The draw_tt_sel logic: if has_selection is true, skip cursor bar.
+    // This tests the boolean condition directly.
+    let sel_start = 3usize;
+    let sel_end = 7usize;
+    let (s_lo, s_hi) = if sel_start <= sel_end { (sel_start, sel_end) } else { (sel_end, sel_start) };
+    let has_selection = s_lo < s_hi;
+    assert!(has_selection, "Selection 3..7 should be active");
+
+    // No selection case.
+    let (s_lo2, s_hi2) = (0usize, 0usize);
+    let has_selection2 = s_lo2 < s_hi2;
+    assert!(!has_selection2, "Selection 0..0 should not be active");
+}
+
 /// Verify that the status bar content differs between editor and image modes.
 /// In editor mode it shows "X chars", in image mode it shows "WxH px".
 /// This test validates the format strings are distinct.

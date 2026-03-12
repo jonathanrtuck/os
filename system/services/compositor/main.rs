@@ -44,6 +44,8 @@ const MSG_PRESENT: u32 = 20;
 const MSG_WRITE_INSERT: u32 = 30;
 const MSG_WRITE_DELETE: u32 = 31;
 const MSG_CURSOR_MOVE: u32 = 32;
+const MSG_SELECTION_UPDATE: u32 = 33;
+const MSG_WRITE_DELETE_RANGE: u32 = 34;
 // Linux evdev keycode for F1 — used as the context switch key.
 // F1 is beyond the ASCII keymap (keycodes 0-57), so it won't produce
 // a printable character and doesn't conflict with any editor keys.
@@ -92,6 +94,11 @@ static mut COUNTER_FREQ: u64 = 0;
 static mut TIMER_HANDLE: u8 = 0;
 /// Whether a valid timer handle exists.
 static mut TIMER_ACTIVE: bool = false;
+
+/// Selection start byte offset (0 = no selection when equal to sel_end).
+static mut SEL_START: usize = 0;
+/// Selection end byte offset (0 = no selection when equal to sel_start).
+static mut SEL_END: usize = 0;
 
 static mut CHAR_W: u32 = 8;
 static mut LINE_H: u32 = 20;
@@ -175,8 +182,20 @@ struct KeyEvent {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct SelectionUpdate {
+    sel_start: u32,
+    sel_end: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct WriteDelete {
     position: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WriteDeleteRange {
+    start: u32,
+    end: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -251,6 +270,28 @@ fn doc_delete(pos: usize) -> bool {
         }
 
         DOC_LEN -= 1;
+
+        doc_write_header();
+
+        true
+    }
+}
+/// Delete a range of bytes [start..end), shifting subsequent bytes left.
+/// Returns true if deletion was performed.
+fn doc_delete_range(start: usize, end: usize) -> bool {
+    unsafe {
+        if start >= end || start >= DOC_LEN || end > DOC_LEN {
+            return false;
+        }
+
+        let base = DOC_BUF.add(DOC_HEADER_SIZE);
+        let del_count = end - start;
+
+        if end < DOC_LEN {
+            core::ptr::copy(base.add(end), base.add(start), DOC_LEN - end);
+        }
+
+        DOC_LEN -= del_count;
 
         doc_write_header();
 
@@ -358,7 +399,10 @@ fn render_content_surface(
     let layout = content_text_layout(content_w);
     let my = max_text_y_in_content(content_h);
 
-    let (_, _cursor_y) = layout.draw_tt(
+    let sel_start = unsafe { SEL_START };
+    let sel_end = unsafe { SEL_END };
+
+    let (_, _cursor_y) = layout.draw_tt_sel(
         surf,
         text,
         TEXT_INSET_X,
@@ -368,6 +412,9 @@ fn render_content_surface(
         Color::rgb(200, 210, 230),
         Color::rgb(100, 180, 255),
         my,
+        sel_start,
+        sel_end,
+        Color::rgba(50, 80, 160, 180),
     );
 
     // Track last rendered Y for next frame's clear optimization.
@@ -1184,6 +1231,27 @@ pub extern "C" fn _start() -> ! {
                         unsafe { CURSOR_POS = pos };
 
                         doc_write_header();
+
+                        changed = true;
+                    }
+                }
+                MSG_SELECTION_UPDATE => {
+                    let su: SelectionUpdate = unsafe { msg.payload_as() };
+
+                    unsafe {
+                        SEL_START = su.sel_start as usize;
+                        SEL_END = su.sel_end as usize;
+                    }
+
+                    changed = true;
+                }
+                MSG_WRITE_DELETE_RANGE => {
+                    let dr: WriteDeleteRange = unsafe { msg.payload_as() };
+                    let start = dr.start as usize;
+                    let end = dr.end as usize;
+
+                    if doc_delete_range(start, end) {
+                        unsafe { CURSOR_POS = start };
 
                         changed = true;
                     }

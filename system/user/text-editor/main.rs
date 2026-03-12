@@ -33,12 +33,16 @@ const MSG_KEY_EVENT: u32 = 10;
 const MSG_WRITE_INSERT: u32 = 30;
 const MSG_WRITE_DELETE: u32 = 31;
 const MSG_CURSOR_MOVE: u32 = 32;
+const MSG_SELECTION_UPDATE: u32 = 33;
+const MSG_WRITE_DELETE_RANGE: u32 = 34;
 const MSG_EDITOR_CONFIG: u32 = 4;
 // Keycodes (Linux evdev).
 const KEY_LEFT: u16 = 105;
 const KEY_RIGHT: u16 = 106;
 const KEY_HOME: u16 = 102;
 const KEY_END: u16 = 107;
+const KEY_LSHIFT: u16 = 42;
+const KEY_RSHIFT: u16 = 54;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -61,8 +65,20 @@ struct KeyEvent {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct SelectionUpdate {
+    sel_start: u32,
+    sel_end: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct WriteDelete {
     position: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WriteDeleteRange {
+    start: u32,
+    end: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -112,7 +128,38 @@ pub extern "C" fn _start() -> ! {
     // Editor-local cursor position (byte offset in document).
     let mut cursor: usize = 0;
 
+    // Selection state: anchor is the fixed end of a selection. When
+    // has_selection is true, the selection range is [min(anchor, cursor),
+    // max(anchor, cursor)). Shift+arrow keys set/extend the selection;
+    // regular movement or editing clears it.
+    let mut has_selection: bool = false;
+    let mut anchor: usize = 0;
+
+    // Shift key tracking (left shift = keycode 42, right shift = keycode 54).
+    let mut shift_held: bool = false;
+
     sys::print(b"     entering event loop\n");
+
+    /// Send a selection update message to the compositor.
+    fn send_selection(
+        ch: &ipc::Channel,
+        has_sel: bool,
+        anchor: usize,
+        cursor: usize,
+    ) {
+        let (sel_start, sel_end) = if has_sel {
+            let lo = if anchor < cursor { anchor } else { cursor };
+            let hi = if anchor < cursor { cursor } else { anchor };
+            (lo as u32, hi as u32)
+        } else {
+            (0u32, 0u32)
+        };
+
+        let su = SelectionUpdate { sel_start, sel_end };
+        let su_msg = unsafe { ipc::Message::from_payload(MSG_SELECTION_UPDATE, &su) };
+
+        ch.send(&su_msg);
+    }
 
     loop {
         let _ = sys::wait(&[OS_HANDLE], u64::MAX);
@@ -124,6 +171,12 @@ pub extern "C" fn _start() -> ! {
 
             let key: KeyEvent = unsafe { msg.payload_as() };
 
+            // Track shift key state (press and release).
+            if key.keycode == KEY_LSHIFT || key.keycode == KEY_RSHIFT {
+                shift_held = key.pressed == 1;
+                continue;
+            }
+
             if key.pressed != 1 {
                 continue;
             }
@@ -133,34 +186,126 @@ pub extern "C" fn _start() -> ! {
 
             match key.keycode {
                 KEY_LEFT => {
-                    if cursor > 0 {
-                        cursor -= 1;
+                    if shift_held {
+                        // Shift+Left: extend/create selection.
+                        if !has_selection {
+                            anchor = cursor;
+                            has_selection = true;
+                        }
+
+                        if cursor > 0 {
+                            cursor -= 1;
+                        }
 
                         let cm = CursorMove {
                             position: cursor as u32,
                         };
                         let cm_msg = unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
-
                         os_ch.send(&cm_msg);
+                        send_selection(&os_ch, has_selection, anchor, cursor);
+
+                        // Collapse selection if anchor == cursor.
+                        if anchor == cursor {
+                            has_selection = false;
+                            send_selection(&os_ch, false, 0, 0);
+                        }
 
                         let _ = sys::channel_signal(OS_HANDLE);
+                    } else {
+                        // Regular Left: clear selection, move cursor.
+                        if has_selection {
+                            // Move cursor to selection start (leftmost).
+                            let sel_lo = if anchor < cursor { anchor } else { cursor };
+                            cursor = sel_lo;
+                            has_selection = false;
+
+                            let cm = CursorMove {
+                                position: cursor as u32,
+                            };
+                            let cm_msg =
+                                unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+                            os_ch.send(&cm_msg);
+                            send_selection(&os_ch, false, 0, 0);
+
+                            let _ = sys::channel_signal(OS_HANDLE);
+                        } else if cursor > 0 {
+                            cursor -= 1;
+
+                            let cm = CursorMove {
+                                position: cursor as u32,
+                            };
+                            let cm_msg =
+                                unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+                            os_ch.send(&cm_msg);
+
+                            let _ = sys::channel_signal(OS_HANDLE);
+                        }
                     }
                 }
                 KEY_RIGHT => {
-                    if cursor < len {
-                        cursor += 1;
+                    if shift_held {
+                        // Shift+Right: extend/create selection.
+                        if !has_selection {
+                            anchor = cursor;
+                            has_selection = true;
+                        }
+
+                        if cursor < len {
+                            cursor += 1;
+                        }
 
                         let cm = CursorMove {
                             position: cursor as u32,
                         };
                         let cm_msg = unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
-
                         os_ch.send(&cm_msg);
+                        send_selection(&os_ch, has_selection, anchor, cursor);
+
+                        // Collapse selection if anchor == cursor.
+                        if anchor == cursor {
+                            has_selection = false;
+                            send_selection(&os_ch, false, 0, 0);
+                        }
 
                         let _ = sys::channel_signal(OS_HANDLE);
+                    } else {
+                        // Regular Right: clear selection, move cursor.
+                        if has_selection {
+                            // Move cursor to selection end (rightmost).
+                            let sel_hi = if anchor > cursor { anchor } else { cursor };
+                            cursor = sel_hi;
+                            has_selection = false;
+
+                            let cm = CursorMove {
+                                position: cursor as u32,
+                            };
+                            let cm_msg =
+                                unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+                            os_ch.send(&cm_msg);
+                            send_selection(&os_ch, false, 0, 0);
+
+                            let _ = sys::channel_signal(OS_HANDLE);
+                        } else if cursor < len {
+                            cursor += 1;
+
+                            let cm = CursorMove {
+                                position: cursor as u32,
+                            };
+                            let cm_msg =
+                                unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+                            os_ch.send(&cm_msg);
+
+                            let _ = sys::channel_signal(OS_HANDLE);
+                        }
                     }
                 }
                 KEY_HOME => {
+                    // Clear selection on Home.
+                    if has_selection {
+                        has_selection = false;
+                        send_selection(&os_ch, false, 0, 0);
+                    }
+
                     cursor = 0;
 
                     let cm = CursorMove {
@@ -173,6 +318,12 @@ pub extern "C" fn _start() -> ! {
                     let _ = sys::channel_signal(OS_HANDLE);
                 }
                 KEY_END => {
+                    // Clear selection on End.
+                    if has_selection {
+                        has_selection = false;
+                        send_selection(&os_ch, false, 0, 0);
+                    }
+
                     cursor = len;
 
                     let cm = CursorMove {
@@ -186,8 +337,29 @@ pub extern "C" fn _start() -> ! {
                 }
                 _ => {
                     if key.ascii == 0x08 {
-                        // Backspace: delete character before cursor.
-                        if cursor > 0 {
+                        // Backspace.
+                        if has_selection {
+                            // Delete entire selection range.
+                            let sel_lo = if anchor < cursor { anchor } else { cursor };
+                            let sel_hi = if anchor < cursor { cursor } else { anchor };
+
+                            let del_range = WriteDeleteRange {
+                                start: sel_lo as u32,
+                                end: sel_hi as u32,
+                            };
+                            let del_msg = unsafe {
+                                ipc::Message::from_payload(MSG_WRITE_DELETE_RANGE, &del_range)
+                            };
+
+                            os_ch.send(&del_msg);
+
+                            cursor = sel_lo;
+                            has_selection = false;
+                            send_selection(&os_ch, false, 0, 0);
+
+                            let _ = sys::channel_signal(OS_HANDLE);
+                        } else if cursor > 0 {
+                            // Delete character before cursor.
                             cursor -= 1;
 
                             let del = WriteDelete {
@@ -201,8 +373,40 @@ pub extern "C" fn _start() -> ! {
                             let _ = sys::channel_signal(OS_HANDLE);
                         }
                     } else if key.ascii != 0 {
-                        // Printable character: insert at cursor.
-                        if len < doc_capacity {
+                        // Printable character.
+                        if has_selection {
+                            // Replace selection: delete range, then insert.
+                            let sel_lo = if anchor < cursor { anchor } else { cursor };
+                            let sel_hi = if anchor < cursor { cursor } else { anchor };
+
+                            let del_range = WriteDeleteRange {
+                                start: sel_lo as u32,
+                                end: sel_hi as u32,
+                            };
+                            let del_msg = unsafe {
+                                ipc::Message::from_payload(MSG_WRITE_DELETE_RANGE, &del_range)
+                            };
+
+                            os_ch.send(&del_msg);
+
+                            cursor = sel_lo;
+                            has_selection = false;
+
+                            // Insert the typed character at the selection start.
+                            let insert = WriteInsert {
+                                position: cursor as u32,
+                                byte: key.ascii,
+                            };
+                            let ins_msg =
+                                unsafe { ipc::Message::from_payload(MSG_WRITE_INSERT, &insert) };
+
+                            os_ch.send(&ins_msg);
+                            cursor += 1;
+                            send_selection(&os_ch, false, 0, 0);
+
+                            let _ = sys::channel_signal(OS_HANDLE);
+                        } else if len < doc_capacity {
+                            // Insert at cursor (no selection).
                             let insert = WriteInsert {
                                 position: cursor as u32,
                                 byte: key.ascii,
