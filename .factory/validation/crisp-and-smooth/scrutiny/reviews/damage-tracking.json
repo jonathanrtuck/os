@@ -1,0 +1,39 @@
+{
+  "featureId": "damage-tracking",
+  "reviewedAt": "2026-03-12T18:15:00.000Z",
+  "commitId": "7335f29",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of damage-tracked GPU transfer across three components (drawing library, compositor, GPU driver). DirtyRect and DamageTracker are well-designed with correct union/bounding-box math, zero-size filtering, and full-screen fallback on overflow. The compositor accurately tracks content and status bar as separate dirty rects. The GPU driver correctly computes per-rect byte offsets for transfer_to_host_2d and flushes the union bounding box. PresentPayload is exactly 60 bytes matching IPC constraints. One non-blocking inconsistency found: MAX_DIRTY_RECTS constant (7) exceeds what the payload can carry (6 rects). Edge cases are well-handled: zero-size rect filtering, overflow-to-full-screen, guard against corrupt rect_count > 6 in GPU driver, initial render as full-screen, and per-buffer dirty state tracking for double buffering.",
+    "issues": [
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 1005,
+        "severity": "non_blocking",
+        "description": "MAX_DIRTY_RECTS = 7 but PresentPayload only has room for [DirtyRect; 6] (60 - 8 header bytes = 52 payload bytes, 52/8 = 6 rects). The DamageTracker can accumulate 7 rects (only overflowing to full-screen at 8), but the compositor clips to 6 when building the payload (compositor/main.rs ~line 636: `let n = if rects.len() > 6 { 6 } else { rects.len() }`). If exactly 7 rects accumulate, the 7th is silently dropped — its region won't be transferred. The comment on lines 1003-1005 even calculates '52/8 = 6' but then sets the constant to 7. Fix: change MAX_DIRTY_RECTS to 6 so the tracker falls back to full-screen before exceeding payload capacity. Practically this is harmless (current usage produces 2 rects/frame) but is a latent correctness bug."
+      },
+      {
+        "file": "system/services/drivers/virtio-gpu/main.rs",
+        "line": 114,
+        "severity": "non_blocking",
+        "description": "DirtyRect is duplicated between the drawing library (drawing::DirtyRect) and the GPU driver (local struct DirtyRect). Both are #[repr(C)] with identical fields (x,y,w,h as u16) so layouts match, but future changes to one must be manually mirrored in the other. The GPU driver can't easily import the drawing library since it's a separate bare-metal binary, so this duplication may be intentional, but worth noting as a maintenance concern."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The feature description in features.json states 'up to 7 rects per message' based on the math '60 bytes / 8 bytes per rect = 7', but this doesn't account for the 8 bytes of header fields (buffer_index + rect_count). The actual maximum is 6 rects. The worker implemented the payload with 6 rects correctly but set MAX_DIRTY_RECTS to 7 (matching the spec text rather than the payload reality). This led to the constant/payload mismatch. AGENTS.md could note that IPC payload calculations should always account for header fields within the 60-byte payload budget.",
+      "evidence": "features.json description: 'up to 7 rects per message'. PresentPayload: 4 (buffer_index) + 4 (rect_count) + 6*8 (rects) + 4 (pad) = 60 bytes. drawing/lib.rs line 1005: MAX_DIRTY_RECTS = 7."
+    },
+    {
+      "area": "conventions",
+      "observation": "IPC message payload structs (PresentPayload, DirtyRect) are duplicated between compositor and GPU driver rather than defined in a shared protocol location. The drawing library hosts DirtyRect/DamageTracker, but PresentPayload is defined independently in both compositor/main.rs and virtio-gpu/main.rs with a comment 'Must match layout exactly'. This manual-sync pattern could benefit from a shared protocol definition or at least documentation in AGENTS.md about the pattern and risk.",
+      "evidence": "compositor/main.rs lines 95-105 defines PresentPayload; virtio-gpu/main.rs lines 119-131 defines identical PresentPayload. Both have comment 'Must match compositor's PresentPayload layout exactly'."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Damage tracking implementation passes review. Clean 3-component design: DamageTracker in drawing library, dirty rect population in compositor's render path, per-rect transfer in GPU driver. Correct virtio-gpu offset math, proper double-buffer state tracking, and robust fallbacks (full-screen on overflow/corrupt data). One non-blocking issue: MAX_DIRTY_RECTS constant (7) exceeds the payload capacity (6 rects), creating a window where the 7th rect could be silently dropped. Not a blocker since current usage generates only 2 rects/frame. 16 well-targeted tests cover rect math, tracker lifecycle, overflow, and the typical 2-rect use case."
+}

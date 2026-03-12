@@ -39,10 +39,21 @@ virtio-input driver → compositor → text-editor → compositor → virtio-gpu
 
 Userspace processes have a 16 KiB stack. All userspace programs and libraries are compiled with `-C opt-level=s` (in build.rs) to keep stack usage manageable. Be careful with large stack allocations, deep recursion, or unoptimized code paths that expand stack frames.
 
+## Rendering Invariants
+
+- **Clear before re-render**: Any region that will be drawn with alpha blending (e.g., `draw_coverage` for text) MUST be cleared to the background color before re-rendering. Alpha blending is additive — drawing the same glyph twice without clearing produces darker/heavier strokes. This applies to dirty-rect optimizations: the cleared region must cover everything that `draw_tt()` will redraw, not just the region that "changed."
+- **Gamma-correct blending**: `draw_coverage()` and `blend_over()` convert sRGB→linear before blending and linear→sRGB after. Lookup tables in `gamma_tables.rs` (512 bytes + 4 KiB). Zero-coverage pixels are never modified (fast path preserved).
+
+## DMA Allocation Limits
+
+- `MAX_DMA_ORDER` = 11 (max 8 MiB per allocation, as of configurable-resolution feature).
+- For framebuffers larger than MAX_DMA_ORDER allows in a single allocation, use two separate `dma_alloc` calls and `attach_backing` with `nr_entries=2`. The GPU driver computes transfer offsets as `buffer_index * fb_size` into the combined backing.
+- Example: double buffering at 1920×1080 needs 2 × ~8 MiB = two order-11 allocations.
+
 ## Font Pipeline
 
-- TrueType parser → glyph outline extraction → scanline rasterizer (4x vertical oversampling) → coverage map → alpha blending onto surface
-- GlyphCache: pre-rasterizes printable ASCII (0x20–0x7E) at startup, 48×48 max coverage buffers
+- TrueType parser → glyph outline extraction → scanline rasterizer (2× horizontal + 4× vertical oversampling) → coverage map → gamma-correct alpha blending onto surface
+- GlyphCache: pre-rasterizes printable ASCII (0x20–0x7E) at startup, 48×48 max coverage buffers (~430 KiB with 2D oversampling)
 - Currently: Source Code Pro Regular, 16px, loaded via 9p
 
 ## Drawing Library

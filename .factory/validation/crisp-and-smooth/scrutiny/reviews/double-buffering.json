@@ -1,0 +1,34 @@
+{
+  "featureId": "double-buffering",
+  "reviewedAt": "2026-03-12T18:15:00.000Z",
+  "commitId": "d71fcf6b6a5203a93038df01adb509a8fb295049",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid double-buffering implementation across init, compositor, and GPU driver. Two separate DMA allocations (front + back) correctly work around MAX_DMA_ORDER=10 limit. Compositor renders into back buffer, swaps via BACK_BUF_IDX (0/1 toggle), and per-buffer dirty tracking (PREV_CURSOR_Y[2], PREV_LAST_Y[2]) prevents cross-frame artifact accumulation. GPU driver attaches both physical regions as a single contiguous backing via nr_entries=2, computing transfer offset as buffer_index * fb_size. Chrome rendered on both buffers at startup avoids initialization artifacts. Struct sizes verified: GpuConfig=48 bytes, CompositorConfig=56 bytes, both within the 60-byte IPC payload. Message coalescing in GPU present loop correctly keeps the last buffer_index. No aliasing issues in make_surface closure — buffers are distinct indices and Surfaces don't overlap lifetimes. Visual verification performed with 40+ keystrokes confirming no torn frames.",
+    "issues": [
+      {
+        "file": "system/services/drivers/virtio-gpu/main.rs",
+        "line": 711,
+        "severity": "non_blocking",
+        "description": "No bounds check on buffer_index from MSG_PRESENT payload. If buffer_index is not 0 or 1 (e.g., due to a future bug in compositor or message corruption), transfer_offset could point outside the backing memory, causing a bad GPU transfer. In practice safe because the compositor is trusted and always sends 0 or 1, but a defensive `if last_buffer_index > 1 { last_buffer_index = 0; }` would add robustness."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 467,
+        "severity": "non_blocking",
+        "description": "FB_PTRS is a static mut inside a function body, which is unusual. While correct for this single-threaded bare-metal context, it would be cleaner as a module-level static alongside the other static mut globals (PREV_CURSOR_Y, PREV_LAST_Y, BACK_BUF_IDX). Minor style inconsistency."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Worker discovered that MAX_DMA_ORDER=10 (4 MiB) prevents a single contiguous 2x framebuffer allocation for 1024x768. The workaround (two separate DMA allocs + nr_entries=2 in attach_backing) is important knowledge for anyone working on higher-resolution support or future large DMA allocations.",
+      "evidence": "Handoff discoveredIssues[0]: 'MAX_DMA_ORDER is 10 (max 4 MiB per allocation). A single contiguous 2x framebuffer allocation would require order 11 and fails.' This constraint and workaround pattern is not documented in .factory/library/ or AGENTS.md."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Double-buffering implementation is correct and complete. Two framebuffers allocated via separate DMA allocations, compositor renders into back buffer with per-buffer dirty tracking, GPU driver uses attach_backing with 2 memory entries for contiguous-view offset-based transfers. No blocking issues. Two non-blocking observations: missing bounds check on buffer_index in GPU driver (trusted path, low risk), and a minor style inconsistency with FB_PTRS placement. Worker followed skill procedure, visually verified with QEMU screenshots (40+ keystrokes, no torn frames). IPC struct sizes verified within payload limits."
+}

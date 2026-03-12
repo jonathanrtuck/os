@@ -1,0 +1,40 @@
+{
+  "featureId": "2d-oversampling",
+  "reviewedAt": "2026-03-12T18:15:00.000Z",
+  "commitId": "a89f359",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Correct 2D oversampling implementation. The rasterizer now renders at OVERSAMPLE_X × width by scaling segment x-coordinates in fixed-point space after flattening, rasterizes into the wider buffer, then downsamples in-place by averaging adjacent horizontal samples. The in-place downsample is provably safe: dst_idx = row*bmp_w + col, src_base = row*over_w + col*ox = ox*dst_idx, so src always leads dst (ox >= 2). Buffer sizing in GlyphCache correctly accounts for the intermediate oversampled buffer. Vertical oversampling in rasterize_segments (OVERSAMPLE_Y sub-scanlines) is unmodified and works orthogonally to the new horizontal oversampling. 7 well-designed tests cover constants, intermediate coverage, horizontal gradients, smooth curves, full ASCII regression, and cache population. Two minor stale comments noted below.",
+    "issues": [
+      {
+        "file": "system/libraries/drawing/rasterizer.rs",
+        "line": 4,
+        "severity": "non_blocking",
+        "description": "Module-level comment says 'Pipeline: ... 4× vertical oversampling → coverage map' but no longer describes the full pipeline. Should mention 2× horizontal oversampling + downsample step."
+      },
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": null,
+        "severity": "non_blocking",
+        "description": "GlyphCache::zeroed() doc comment says '~220 KiB' but with OVERSAMPLE_X=2 the coverage buffer doubled from 95*2304=219KB to 95*4608=438KB. The struct is now ~430 KiB. Should update the size estimate."
+      },
+      {
+        "file": "system/libraries/drawing/truetype.rs",
+        "line": 783,
+        "severity": "non_blocking",
+        "description": "Downsample uses floor division (sum / ox). For OVERSAMPLE_X=2, odd sums lose 0.5 coverage (max error 0.2% of 255). Using (sum + ox/2) / ox would give correct rounding. Negligible perceptual impact at current settings but would matter if OVERSAMPLE_X were increased."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md states 'Existing Test Baseline: 607+ tests' but the handoff reports 682 tests passing. The baseline count appears to be outdated after several features have added tests. This could cause confusion about whether test count changes are regressions.",
+      "evidence": "AGENTS.md line 'Existing Test Baseline: 607+ tests must pass at all times (586 system + 21 prototype)' vs handoff reporting '682 tests passed, 0 failed across 30 test binaries'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The 2D horizontal oversampling implementation is correct and well-tested. The rasterizer properly scales segment x-coordinates by OVERSAMPLE_X in fixed-point space, rasterizes into a wider buffer, and downsamples in-place with a provably-safe write pattern (destination index always trails source index). GlyphCache buffer sizing correctly accommodates the intermediate oversampled raster. 7 new tests comprehensively cover the feature's expected behaviors. Three non-blocking issues: two stale comments (rasterizer header and GlyphCache size estimate) and floor-division in the downsample averaging (negligible perceptual impact). Worker followed the skill procedure correctly including TDD, build, visual verification via QEMU screenshot, and regression testing."
+}
