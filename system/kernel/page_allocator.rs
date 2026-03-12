@@ -13,8 +13,8 @@ use super::paging;
 use super::serial;
 use super::sync::IrqMutex;
 
-/// Maximum order: 2^10 pages = 4 MiB.
-const MAX_ORDER: usize = 10;
+/// Maximum order: 2^11 pages = 8 MiB.
+const MAX_ORDER: usize = 11;
 const PAGE_SIZE: usize = paging::PAGE_SIZE as usize;
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {

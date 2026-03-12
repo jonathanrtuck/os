@@ -31,7 +31,9 @@
 /// Channel shared memory base (first channel in our address space).
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
 // Protocol message types (must match init/compositor definitions).
+const MSG_DEVICE_CONFIG: u32 = 1;
 const MSG_GPU_CONFIG: u32 = 2;
+const MSG_DISPLAY_INFO: u32 = 5;
 const MSG_PRESENT: u32 = 20;
 /// Control virtqueue index.
 const VIRTQ_CONTROL: u32 = 0;
@@ -55,9 +57,26 @@ const RESP_OK_DISPLAY_INFO: u32 = 0x1101;
 const FORMAT_B8G8R8A8_UNORM: u32 = 1;
 // Handle indices:
 // Handle 0: init config channel
-// Handle 1: compositor present channel
+// Handle 1: compositor present channel (sent after display query)
 // Handle 2: IRQ handle (allocated by interrupt_register)
+const INIT_HANDLE: u8 = 0;
 const PRESENT_HANDLE: u8 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DeviceConfig {
+    mmio_pa: u64,
+    irq: u32,
+    _pad: u32,
+}
+
+/// Display dimensions queried from virtio-gpu, sent back to init.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DisplayInfoMsg {
+    width: u32,
+    height: u32,
+}
 
 #[repr(C)]
 struct AttachBacking {
@@ -621,23 +640,20 @@ fn transfer_to_host_reuse(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    // Read GPU config from ring buffer (first message, sent by init).
+    // Phase 1: Read device config (MMIO PA + IRQ), initialize hardware,
+    // query display dimensions, and report them back to init.
     let ch = unsafe { ipc::Channel::from_base(channel_shm_va(0), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
-    if !ch.try_recv(&mut msg) || msg.msg_type != MSG_GPU_CONFIG {
-        sys::print(b"virtio-gpu: no config message\n");
+    if !ch.try_recv(&mut msg) || msg.msg_type != MSG_DEVICE_CONFIG {
+        sys::print(b"virtio-gpu: no device config message\n");
         sys::exit();
     }
 
-    let config: GpuConfig = unsafe { msg.payload_as() };
-    let mmio_pa = config.mmio_pa;
-    let irq = config.irq;
-    let fb_pa = config.fb_pa;
-    let fb_pa2 = config.fb_pa2;
-    let fb_width = config.fb_width;
-    let fb_height = config.fb_height;
-    let fb_size = config.fb_size;
+    let dev_config: DeviceConfig = unsafe { msg.payload_as() };
+    let mmio_pa = dev_config.mmio_pa;
+    let irq = dev_config.irq;
+
     // Map the MMIO region (sub-page alignment for virtio-mmio).
     let page_offset = mmio_pa & 0xFFF;
     let page_pa = mmio_pa & !0xFFF;
@@ -685,22 +701,46 @@ pub extern "C" fn _start() -> ! {
 
     sys::print(b"  \xF0\x9F\x96\xA5\xEF\xB8\x8F  virtio-gpu ready\n");
 
-    // Query actual display dimensions (informational).
+    // Query actual display dimensions from the virtual display.
     let (disp_w, disp_h) = get_display_info(&device, &mut vq, irq_handle);
 
+    // Use queried dimensions, fall back to 1024x768 if query returns 0.
+    let width = if disp_w > 0 { disp_w } else { 1024 };
+    let height = if disp_h > 0 { disp_h } else { 768 };
+
     sys::print(b"     display ");
-
-    print_u32(if disp_w > 0 { disp_w } else { fb_width });
-
+    print_u32(width);
     sys::print(b"x");
-
-    print_u32(if disp_h > 0 { disp_h } else { fb_height });
-
+    print_u32(height);
     sys::print(b"\n");
 
-    // Use init-provided dimensions for the resource (matches framebuffer).
-    let width = fb_width;
-    let height = fb_height;
+    // Send display dimensions back to init so it can allocate framebuffers.
+    let info_msg = unsafe {
+        ipc::Message::from_payload(
+            MSG_DISPLAY_INFO,
+            &DisplayInfoMsg { width, height },
+        )
+    };
+
+    ch.send(&info_msg);
+
+    let _ = sys::channel_signal(INIT_HANDLE);
+
+    // Phase 2: Wait for GPU config with framebuffer info from init.
+    sys::print(b"     waiting for framebuffer config\n");
+
+    loop {
+        let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
+
+        if ch.try_recv(&mut msg) && msg.msg_type == MSG_GPU_CONFIG {
+            break;
+        }
+    }
+
+    let config: GpuConfig = unsafe { msg.payload_as() };
+    let fb_pa = config.fb_pa;
+    let fb_pa2 = config.fb_pa2;
+    let fb_size = config.fb_size;
 
     // -----------------------------------------------------------------------
     // One-time device setup: create resource, attach backing, set scanout.

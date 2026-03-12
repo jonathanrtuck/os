@@ -16,7 +16,7 @@ use paging::*;
 
 // --- Duplicated constants from syscall.rs ---
 
-const MAX_DMA_ORDER: u64 = 10;
+const MAX_DMA_ORDER: u64 = 11;
 const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -174,7 +174,7 @@ fn validate_device_map(pa: u64, size: u64) -> Result<(), Error> {
 
 /// Validates memory_share PA range exactly as sys_memory_share does.
 fn validate_memory_share(pa: u64, page_count: u64) -> Result<(), Error> {
-    if page_count == 0 || page_count > 1024 {
+    if page_count == 0 || page_count > 2048 {
         return Err(Error::InvalidArgument);
     }
     if pa & (PAGE_SIZE - 1) != 0 {
@@ -535,7 +535,7 @@ fn memory_share_zero_pages_rejected() {
 #[test]
 fn memory_share_too_many_pages_rejected() {
     assert_eq!(
-        validate_memory_share(RAM_START, 1025),
+        validate_memory_share(RAM_START, 2049),
         Err(Error::InvalidArgument)
     );
 }
@@ -567,7 +567,7 @@ fn memory_share_above_ram_rejected() {
 #[test]
 fn memory_share_valid() {
     assert!(validate_memory_share(RAM_START, 1).is_ok());
-    assert!(validate_memory_share(RAM_START, 1024).is_ok());
+    assert!(validate_memory_share(RAM_START, 2048).is_ok());
 }
 
 #[test]
@@ -822,8 +822,8 @@ fn syscall_numbers_are_unique_and_contiguous() {
 
 #[test]
 fn max_dma_order_matches_page_allocator() {
-    // MAX_DMA_ORDER must be <= 10 (page_allocator::MAX_ORDER).
-    assert!(MAX_DMA_ORDER <= 10);
+    // MAX_DMA_ORDER must be <= 11 (page_allocator::MAX_ORDER).
+    assert!(MAX_DMA_ORDER <= 11);
 }
 
 #[test]

@@ -26,7 +26,7 @@
 //! 0x0A00_0000  Virtio MMIO (32 slots, 0x200 stride)
 //! 0x4000_0000  RAM_START ─── kernel image (.text/.rodata/.data/.bss)
 //!              __kernel_end ─ heap (16 MiB, linked-list + slab allocator)
-//!              heap_end ───── page frame pool (buddy allocator, 4 KiB – 4 MiB)
+//!              heap_end ───── page frame pool (buddy allocator, 4 KiB – 8 MiB)
 //! 0x5000_0000  RAM_END
 //! ```
 //!
@@ -546,7 +546,7 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     page_allocator::init(heap_end, ram_end);
     serial::puts("  🧩 frames - ");
     serial::put_u32(page_allocator::free_count() as u32);
-    serial::puts(" free (buddy allocator, 4k–4m)\n");
+    serial::puts(" free (buddy allocator, 4k–8m)\n");
 
     // Wire DTB into device initialization.
     let gic_from_dtb = if let Some(ref dt) = device_table {

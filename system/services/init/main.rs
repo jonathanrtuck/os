@@ -44,12 +44,8 @@ include!(env!("INIT_EMBEDDED_RS"));
 /// Channel shared memory base. The kernel's channel is at page 0.
 /// Channels created by init are at subsequent 2-page pairs.
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
-/// Framebuffer dimensions (matches QEMU virtio-gpu default).
-const FB_WIDTH: u32 = 1024;
-const FB_HEIGHT: u32 = 768;
+/// Bytes per pixel (BGRA8888).
 const FB_BPP: u32 = 4;
-const FB_STRIDE: u32 = FB_WIDTH * FB_BPP;
-const FB_SIZE: u32 = FB_STRIDE * FB_HEIGHT;
 /// Virtio device IDs (must match kernel probe).
 const VIRTIO_DEVICE_BLK: u32 = 2;
 const VIRTIO_DEVICE_CONSOLE: u32 = 3;
@@ -65,8 +61,17 @@ const MSG_DEVICE_CONFIG: u32 = 1;
 const MSG_GPU_CONFIG: u32 = 2;
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
 const MSG_EDITOR_CONFIG: u32 = 4;
+const MSG_DISPLAY_INFO: u32 = 5;
 const MSG_FS_READ_REQUEST: u32 = 40;
 const MSG_FS_READ_RESPONSE: u32 = 41;
+
+/// Display dimensions reported by the GPU driver from GET_DISPLAY_INFO.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DisplayInfoMsg {
+    width: u32,
+    height: u32,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -152,6 +157,7 @@ fn print_u32(mut n: u32) {
 /// Then starts all three processes. They run their own event loops.
 fn setup_display_pipeline(
     gpu_proc: u8,
+    gpu_ch_handle: u8,
     gpu_channel_idx: usize,
     gpu_pa: u64,
     gpu_irq: u32,
@@ -161,11 +167,72 @@ fn setup_display_pipeline(
 ) {
     sys::print(b"     setting up display pipeline\n");
 
-    // Allocate double framebuffer via DMA (two separate allocations for
-    // front + back buffers). Each buffer is FB_SIZE bytes. We allocate
-    // separately because the maximum DMA order is 10 (4 MiB) and a
-    // single 2× allocation would exceed that.
-    let fb_bytes = FB_SIZE as usize;
+    // -----------------------------------------------------------------------
+    // Phase 1: Create compositor→GPU channel BEFORE starting GPU driver.
+    // handle_send only works on unstarted processes, so all handles must be
+    // sent before process_start.
+    // -----------------------------------------------------------------------
+    sys::print(b"     creating compositor\xE2\x86\x92gpu channel\n");
+
+    let (cg_a, cg_b) = sys::channel_create().unwrap_or_else(|_| {
+        sys::print(b"init: channel_create (comp-gpu) failed\n");
+        sys::exit();
+    });
+
+    *next_channel += 1;
+
+    // Send present channel endpoint B to GPU driver (handle 1).
+    sys::handle_send(gpu_proc, cg_b).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (comp-gpu B) failed\n");
+        sys::exit();
+    });
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Start GPU driver for display query. Send device config first.
+    // -----------------------------------------------------------------------
+    let gpu_ch = init_channel(gpu_channel_idx);
+    let dev_config = DeviceConfig {
+        mmio_pa: gpu_pa,
+        irq: gpu_irq,
+        _pad: 0,
+    };
+    let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
+
+    gpu_ch.send(&msg);
+
+    sys::print(b"     starting gpu driver (display query)\n");
+
+    let _ = sys::process_start(gpu_proc);
+
+    // Wait for the GPU driver to report display dimensions.
+    sys::print(b"     waiting for display info\n");
+
+    let mut resp_msg = ipc::Message::new(0);
+
+    loop {
+        let _ = sys::wait(&[gpu_ch_handle], u64::MAX);
+
+        if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_DISPLAY_INFO {
+            break;
+        }
+    }
+
+    let display_info: DisplayInfoMsg = unsafe { resp_msg.payload_as() };
+    let fb_width = display_info.width;
+    let fb_height = display_info.height;
+    let fb_stride = fb_width * FB_BPP;
+    let fb_size = fb_stride * fb_height;
+
+    sys::print(b"     display resolution: ");
+    print_u32(fb_width);
+    sys::print(b"x");
+    print_u32(fb_height);
+    sys::print(b"\n");
+
+    // -----------------------------------------------------------------------
+    // Phase 3: Allocate double framebuffer using queried dimensions.
+    // -----------------------------------------------------------------------
+    let fb_bytes = fb_size as usize;
     let fb_pages = (fb_bytes + 4095) / 4096;
     let fb_order = (fb_pages.next_power_of_two().trailing_zeros()) as u32;
     let fb_alloc_bytes = (1usize << fb_order) * 4096;
@@ -189,11 +256,11 @@ fn setup_display_pipeline(
 
     sys::print(b"     double framebuffer: ");
 
-    print_u32(FB_WIDTH);
+    print_u32(fb_width);
 
     sys::print(b"x");
 
-    print_u32(FB_HEIGHT);
+    print_u32(fb_height);
 
     sys::print(b" x2 (");
 
@@ -202,23 +269,24 @@ fn setup_display_pipeline(
     sys::print(b" KiB)\n");
 
     // -----------------------------------------------------------------------
-    // Send GPU config via ring buffer (on init↔GPU channel).
+    // Phase 4: Send GPU config with framebuffer info to running GPU driver.
     // -----------------------------------------------------------------------
-    let gpu_ch = init_channel(gpu_channel_idx);
     let gpu_config = GpuConfig {
         mmio_pa: gpu_pa,
         irq: gpu_irq,
         _pad: 0,
         fb_pa: fb_pa0,
         fb_pa2: fb_pa1,
-        fb_width: FB_WIDTH,
-        fb_height: FB_HEIGHT,
-        fb_size: FB_SIZE,
+        fb_width,
+        fb_height,
+        fb_size,
         _pad2: 0,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_GPU_CONFIG, &gpu_config) };
 
     gpu_ch.send(&msg);
+
+    let _ = sys::channel_signal(gpu_ch_handle);
 
     // -----------------------------------------------------------------------
     // Allocate shared document buffer (1 page).
@@ -280,10 +348,10 @@ fn setup_display_pipeline(
     let comp_config = CompositorConfig {
         fb_va: comp_fb_va0 as u64,
         fb_va2: comp_fb_va1 as u64,
-        fb_width: FB_WIDTH,
-        fb_height: FB_HEIGHT,
-        fb_stride: FB_STRIDE,
-        fb_size: FB_SIZE,
+        fb_width,
+        fb_height,
+        fb_stride,
+        fb_size,
         doc_va: comp_doc_va as u64,
         doc_capacity: DOC_BUF_CAPACITY,
         font_len,
@@ -294,7 +362,7 @@ fn setup_display_pipeline(
     comp_ch.send(&msg);
 
     // -----------------------------------------------------------------------
-    // Create cross-process channels.
+    // Create remaining cross-process channels.
     // -----------------------------------------------------------------------
 
     // Input → Compositor channel (keyboard events).
@@ -332,25 +400,9 @@ fn setup_display_pipeline(
         input_ch.send(&msg);
     }
 
-    // Compositor → GPU channel (present commands).
-    // Endpoint A (send) → compositor, Endpoint B (recv) → GPU driver.
-    sys::print(b"     creating compositor\xE2\x86\x92gpu channel\n");
-
-    let (cg_a, cg_b) = sys::channel_create().unwrap_or_else(|_| {
-        sys::print(b"init: channel_create (comp-gpu) failed\n");
-        sys::exit();
-    });
-
-    *next_channel += 1; // channel_create advances init's SHM pointer
-
-    // Send endpoint A to compositor (handle 2 in compositor's table, or 1 if no input).
+    // Compositor → GPU present channel endpoint A → compositor (handle 2, or 1 if no input).
     sys::handle_send(comp_proc, cg_a).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (comp-gpu A) failed\n");
-        sys::exit();
-    });
-    // Send endpoint B to GPU driver (handle 1 in GPU's table).
-    sys::handle_send(gpu_proc, cg_b).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (comp-gpu B) failed\n");
         sys::exit();
     });
 
@@ -407,14 +459,11 @@ fn setup_display_pipeline(
     });
 
     // -----------------------------------------------------------------------
-    // Start all processes. Order: GPU first (does device setup then waits),
-    // input driver (does setup then waits for IRQs), editor (waits for
-    // input), compositor last (draws initial frame then enters event loop).
+    // Start remaining processes. GPU driver was already started in phase 1
+    // (display query). Order: input driver (setup then waits for IRQs),
+    // editor (waits for input), compositor last (draws initial frame then
+    // enters event loop).
     // -----------------------------------------------------------------------
-    sys::print(b"     starting gpu driver\n");
-
-    let _ = sys::process_start(gpu_proc);
-
     if let Some((input_proc_handle, _, _, _)) = input_proc {
         sys::print(b"     starting input driver\n");
 
@@ -683,9 +732,10 @@ pub extern "C" fn _start() -> ! {
     };
 
     // Phase 2: Display pipeline (input driver + compositor + GPU driver).
-    if let Some((gpu_proc, _gpu_ch, gpu_channel_idx, gpu_pa, gpu_irq)) = gpu {
+    if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq)) = gpu {
         setup_display_pipeline(
             gpu_proc,
+            gpu_ch_handle,
             gpu_channel_idx,
             gpu_pa,
             gpu_irq,
