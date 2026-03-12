@@ -112,6 +112,69 @@ Read these before making any design suggestions:
 - Reference the decision register tiers and dependency chains
 - New decisions should be recorded in the appropriate reference documents
 
+## Visual Testing (MANDATORY)
+
+**Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself.
+
+### How to visually test the OS in QEMU
+
+The test harness is `system/test-qemu.sh`. For visual verification, use this workflow directly:
+
+```bash
+# 1. Build
+cd system && cargo build --release
+
+# 2. Launch QEMU (headless, monitor socket for control, serial to file)
+qemu-system-aarch64 \
+    -machine virt,gic-version=2 -cpu cortex-a53 -smp 4 -m 256M \
+    -global virtio-mmio.force-legacy=false \
+    -drive "file=test.img,if=none,format=raw,id=hd0" \
+    -device virtio-blk-device,drive=hd0 \
+    -device virtio-gpu-device -device virtio-keyboard-device \
+    -nographic \
+    -serial file:/tmp/qemu-serial.log \
+    -monitor unix:/tmp/qemu-mon.sock,server,nowait \
+    -device "loader,file=virt.dtb,addr=0x40000000,force-raw=on" \
+    -kernel target/aarch64-unknown-none/release/kernel &
+
+# 3. Wait for boot (~5s)
+sleep 5
+
+# 4. Send keystrokes via monitor socket
+echo "sendkey h" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
+
+# 5. Capture framebuffer screenshot (PPM format)
+echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2 >/dev/null 2>&1
+
+# 6. Convert PPM → PNG and view it
+python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"
+# Then use the Read tool on /tmp/qemu-screen.png to SEE the display
+
+# 7. Check serial output
+cat /tmp/qemu-serial.log
+
+# 8. Kill QEMU when done
+kill $QPID
+```
+
+### What "visually verified" means
+
+- Take a screenshot of the QEMU framebuffer AFTER sending input
+- View the screenshot with the Read tool (it can display PNG images)
+- Confirm the expected pixels are on screen (text appeared, cursor moved, etc.)
+- If debugging latency: take screenshots at multiple time points to measure when content appears
+- Serial output alone is NOT sufficient — it only proves messages flow, not that pixels update
+
+### When to use this
+
+- Any change to: compositor, drawing library, GPU driver, text editor, init (display pipeline setup)
+- Any bug fix where the symptom was visual (wrong rendering, missing content, latency)
+- Before committing display-related changes
+
+### Timing instrumentation
+
+The sys library provides `sys::counter()` (reads CNTVCT_EL0) and `sys::counter_freq()` (reads CNTFRQ_EL0, typically 62500000 Hz on QEMU). Use these for sub-millisecond timing of hot paths. Enabled by kernel setting CNTKCTL_EL1.EL0VCTEN=1 in timer::init().
+
 ## Reference Influences
 
 - **Mercury OS:** Fluid, focused, familiar. Module/Flow/Space hierarchy. Intent-driven. Locus (command bar combining CLI + NLP + GUI). No apps, no folders. Artificial Collaborators. Mirrors (same module in multiple spaces).

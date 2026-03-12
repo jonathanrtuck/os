@@ -55,10 +55,15 @@ const VIRTIO_DEVICE_BLK: u32 = 2;
 const VIRTIO_DEVICE_CONSOLE: u32 = 3;
 const VIRTIO_DEVICE_GPU: u32 = 16;
 const VIRTIO_DEVICE_INPUT: u32 = 18;
+/// Document buffer: 1 page. First 64 bytes = header, rest = content.
+const DOC_BUF_PAGES: u64 = 1;
+const DOC_BUF_HEADER: u32 = 64;
+const DOC_BUF_CAPACITY: u32 = (DOC_BUF_PAGES as u32 * 4096) - DOC_BUF_HEADER;
 // --- Protocol message types (shared with receivers) ---
 const MSG_DEVICE_CONFIG: u32 = 1;
 const MSG_GPU_CONFIG: u32 = 2;
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
+const MSG_EDITOR_CONFIG: u32 = 4;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -68,6 +73,16 @@ struct CompositorConfig {
     fb_height: u32,
     fb_stride: u32,
     fb_size: u32,
+    doc_va: u64,
+    doc_capacity: u32,
+    _pad2: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct EditorConfig {
+    doc_va: u64,
+    doc_capacity: u32,
+    _pad: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -181,6 +196,20 @@ fn setup_display_pipeline(
     gpu_ch.send(&msg);
 
     // -----------------------------------------------------------------------
+    // Allocate shared document buffer (1 page).
+    // Compositor gets read-write (sole writer), editor gets read-only.
+    // -----------------------------------------------------------------------
+    let mut doc_pa: u64 = 0;
+    let _doc_va = sys::dma_alloc(0, &mut doc_pa).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (doc buffer) failed\n");
+        sys::exit();
+    });
+
+    unsafe { core::ptr::write_bytes(_doc_va as *mut u8, 0, 4096) };
+
+    sys::print(b"     document buffer: 4 KiB shared\n");
+
+    // -----------------------------------------------------------------------
     // Spawn compositor.
     // -----------------------------------------------------------------------
     let (comp_proc, _comp_ch_handle, comp_channel_idx) =
@@ -191,12 +220,19 @@ fn setup_display_pipeline(
                 sys::exit();
             }
         };
-    // Share framebuffer memory with compositor.
+    // Share framebuffer memory with compositor (read-write).
     let fb_page_count = fb_alloc_bytes as u64 / 4096;
-    let comp_fb_va = sys::memory_share(comp_proc, fb_pa_out, fb_page_count).unwrap_or_else(|_| {
-        sys::print(b"init: memory_share (compositor) failed\n");
-        sys::exit();
-    });
+    let comp_fb_va =
+        sys::memory_share(comp_proc, fb_pa_out, fb_page_count, false).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (compositor fb) failed\n");
+            sys::exit();
+        });
+    // Share document buffer with compositor (read-write — sole writer).
+    let comp_doc_va =
+        sys::memory_share(comp_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (compositor doc) failed\n");
+            sys::exit();
+        });
     // Send compositor config via ring buffer.
     let comp_ch = init_channel(comp_channel_idx);
     let comp_config = CompositorConfig {
@@ -205,6 +241,9 @@ fn setup_display_pipeline(
         fb_height: FB_HEIGHT,
         fb_stride: FB_STRIDE,
         fb_size: FB_SIZE,
+        doc_va: comp_doc_va as u64,
+        doc_capacity: DOC_BUF_CAPACITY,
+        _pad2: 0,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };
 
@@ -223,6 +262,8 @@ fn setup_display_pipeline(
             sys::print(b"init: channel_create (input-comp) failed\n");
             sys::exit();
         });
+
+        *next_channel += 1; // channel_create advances init's SHM pointer
 
         // Send endpoint A to input driver (handle 1 in input's table).
         sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
@@ -256,6 +297,8 @@ fn setup_display_pipeline(
         sys::exit();
     });
 
+    *next_channel += 1; // channel_create advances init's SHM pointer
+
     // Send endpoint A to compositor (handle 2 in compositor's table, or 1 if no input).
     sys::handle_send(comp_proc, cg_a).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (comp-gpu A) failed\n");
@@ -274,7 +317,7 @@ fn setup_display_pipeline(
     // -----------------------------------------------------------------------
     sys::print(b"     spawning text editor\n");
 
-    let (editor_proc, _editor_ch, _editor_ch_idx) =
+    let (editor_proc, _editor_ch, editor_ch_idx) =
         match spawn_with_channel(TEXT_EDITOR_ELF, next_channel) {
             Some(v) => v,
             None => {
@@ -282,6 +325,22 @@ fn setup_display_pipeline(
                 sys::exit();
             }
         };
+    // Share document buffer with editor (read-only — hardware-enforced).
+    let editor_doc_va =
+        sys::memory_share(editor_proc, doc_pa, DOC_BUF_PAGES, true).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (editor doc ro) failed\n");
+            sys::exit();
+        });
+    // Send editor config via ring buffer.
+    let editor_ch = init_channel(editor_ch_idx);
+    let editor_config = EditorConfig {
+        doc_va: editor_doc_va as u64,
+        doc_capacity: DOC_BUF_CAPACITY,
+        _pad: 0,
+    };
+    let msg = unsafe { ipc::Message::from_payload(MSG_EDITOR_CONFIG, &editor_config) };
+
+    editor_ch.send(&msg);
 
     sys::print(b"     creating compositor\xE2\x86\x94editor channel\n");
 
@@ -289,6 +348,8 @@ fn setup_display_pipeline(
         sys::print(b"init: channel_create (comp-editor) failed\n");
         sys::exit();
     });
+
+    *next_channel += 1; // channel_create advances init's SHM pointer
 
     // Endpoint A (send/recv) → compositor (handle 3 in compositor's table).
     sys::handle_send(comp_proc, ce_a).unwrap_or_else(|_| {

@@ -211,7 +211,7 @@ fn phase_2_bad_handles() {
         phase_fail(b"phase 2", b"channel_create 4 failed");
     });
     let _ = sys::process_start(a); // Channel handle, not process.
-    let _ = sys::process_kill(a);  // Channel handle, not process.
+    let _ = sys::process_kill(a); // Channel handle, not process.
     let _ = sys::handle_close(a);
     let _ = sys::handle_close(b);
 
@@ -224,12 +224,12 @@ fn phase_2_bad_handles() {
 fn phase_3_bad_addresses() {
     // write() with bad pointers.
     let bad_addrs: [u64; 6] = [
-        0,                        // null
-        0xFFFF_FFFF_FFFF_FFFF,    // kernel space
-        0xFFFF_0000_0000_0000,    // kernel space
-        0x0000_FFFF_FFFF_F000,    // near top of user space
-        0xDEAD_BEEF_0000_0000,    // unmapped
-        1,                        // unaligned
+        0,                     // null
+        0xFFFF_FFFF_FFFF_FFFF, // kernel space
+        0xFFFF_0000_0000_0000, // kernel space
+        0x0000_FFFF_FFFF_F000, // near top of user space
+        0xDEAD_BEEF_0000_0000, // unmapped
+        1,                     // unaligned
     ];
 
     // write(bad_addr, length) — kernel must validate, not read.
@@ -334,7 +334,10 @@ fn phase_3_bad_addresses() {
     // Unaligned stack.
     let ret = unsafe { raw_syscall2(19, 0x1000, 0x1001) } as i64;
     if ret >= 0 {
-        phase_fail(b"phase 3", b"thread_create with unaligned stack should fail");
+        phase_fail(
+            b"phase 3",
+            b"thread_create with unaligned stack should fail",
+        );
     }
 
     // memory_alloc(0) — zero pages.
@@ -698,7 +701,9 @@ extern "C" fn chaos_worker(seed: u64) -> ! {
 
         let syscall_choice = (rng % 9) as u8;
         match syscall_choice {
-            0 => { sys::yield_now(); }
+            0 => {
+                sys::yield_now();
+            }
             1 => {
                 if let Ok((a, b)) = sys::channel_create() {
                     let _ = sys::channel_signal(a);
@@ -821,7 +826,7 @@ fn phase_11_wait_edge_cases() {
     let r = sys::wait(&[a], 0);
     match r {
         Ok(0) => {} // Expected.
-        _ => {} // Timer race etc — fine.
+        _ => {}     // Timer race etc — fine.
     }
 
     // Wait with very short timeout.
@@ -888,7 +893,6 @@ fn spawn_helper(cmd: u8) -> Option<ChildProcess> {
         Ok(h) => h,
         Err(_) => return None,
     };
-
     // Pass the command byte via shared memory (dma_alloc gives us the PA,
     // memory_share maps it into the child at SHARED_MEMORY_BASE=0xC000_0000).
     let mut cmd_pa: u64 = 0;
@@ -902,7 +906,7 @@ fn spawn_helper(cmd: u8) -> Option<ChildProcess> {
     };
     unsafe { core::ptr::write_volatile(cmd_va as *mut u8, cmd) };
 
-    if sys::memory_share(proc_h, cmd_pa, 1).is_err() {
+    if sys::memory_share(proc_h, cmd_pa, 1, false).is_err() {
         let _ = sys::dma_free(cmd_va as u64, 0);
         let _ = sys::process_kill(proc_h);
         let _ = sys::handle_close(proc_h);
@@ -927,7 +931,9 @@ fn reap_helper(child: ChildProcess) {
 fn phase_13_kill_while_blocked() {
     match spawn_helper(0x01) {
         Some(child) => {
-            for _ in 0..100 { sys::yield_now(); }
+            for _ in 0..100 {
+                sys::yield_now();
+            }
             let _ = sys::process_kill(child.proc_h);
             reap_helper(child);
         }
@@ -942,7 +948,9 @@ fn phase_13_kill_while_blocked() {
 fn phase_14_kill_while_running() {
     match spawn_helper(0x02) {
         Some(child) => {
-            for _ in 0..200 { sys::yield_now(); }
+            for _ in 0..200 {
+                sys::yield_now();
+            }
             let _ = sys::process_kill(child.proc_h);
             reap_helper(child);
         }
@@ -957,7 +965,9 @@ fn phase_14_kill_while_running() {
 fn phase_15_kill_multi_threaded() {
     match spawn_helper(0x04) {
         Some(child) => {
-            for _ in 0..300 { sys::yield_now(); }
+            for _ in 0..300 {
+                sys::yield_now();
+            }
             let _ = sys::process_kill(child.proc_h);
             reap_helper(child);
         }
@@ -993,7 +1003,9 @@ fn phase_16_rapid_lifecycle() {
 fn phase_17_kill_during_resource_churn() {
     match spawn_helper(0x05) {
         Some(child) => {
-            for _ in 0..500 { sys::yield_now(); }
+            for _ in 0..500 {
+                sys::yield_now();
+            }
             let _ = sys::process_kill(child.proc_h);
             reap_helper(child);
         }
@@ -1058,7 +1070,9 @@ fn phase_18_sibling_close_while_blocked() {
 
         let stack1 = alloc_thread_stack();
         let stack2 = alloc_thread_stack();
-        if stack1 == 0 || stack2 == 0 { break; }
+        if stack1 == 0 || stack2 == 0 {
+            break;
+        }
 
         // Blocker thread: waits on ch_a.
         let args_ptr1 = (stack1 - 8) as *mut u64;
@@ -1118,7 +1132,9 @@ fn phase_20_double_kill() {
     // Double kill while alive.
     match spawn_helper(0x02) {
         Some(child) => {
-            for _ in 0..50 { sys::yield_now(); }
+            for _ in 0..50 {
+                sys::yield_now();
+            }
             let _ = sys::process_kill(child.proc_h);
             let _ = sys::process_kill(child.proc_h);
             reap_helper(child);
@@ -1182,7 +1198,9 @@ extern "C" fn futex_waker_trampoline() -> ! {
 
 fn spawn_with_trampoline(trampoline: u64, arg: u64) -> Option<u8> {
     let stack = alloc_thread_stack();
-    if stack == 0 { return None; }
+    if stack == 0 {
+        return None;
+    }
     let args_ptr = (stack - 8) as *mut u64;
     unsafe { core::ptr::write_volatile(args_ptr, arg) };
     sys::thread_create(trampoline, stack - 16).ok()
@@ -1445,7 +1463,7 @@ fn phase_26_userspace_faults() {
     // UDF fault in a child.
     // We'll create a bare process for this... but we only have the helper ELF.
     // Let's test thread faults and see what happens.
-    
+
     // Thread that executes UDF.
     let t = spawn_with_trampoline(fault_udf_trampoline as u64, 0);
     if let Some(h) = t {
@@ -1601,7 +1619,9 @@ fn phase_30_close_while_waiting() {
             WAIT_HANDLE.store(timer_h as u64, core::sync::atomic::Ordering::Release);
             let t = spawn_with_trampoline(wait_on_shared_trampoline as u64, 0);
             if let Some(th) = t {
-                for _ in 0..200 { sys::yield_now(); }
+                for _ in 0..200 {
+                    sys::yield_now();
+                }
                 // Close the timer handle — kernel must wake the blocked sibling.
                 let _ = sys::handle_close(timer_h);
                 // Sibling should wake and exit promptly.

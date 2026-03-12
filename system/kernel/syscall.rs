@@ -52,7 +52,7 @@
 //! | 21 | process_start             | x0=handle                         | 0                |
 //! | 22 | handle_send               | x0=target_handle, x1=source_handle | 0               |
 //! | 23 | process_kill              | x0=handle                          | 0               |
-//! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count | target VA   |
+//! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count, x3=flags | target VA   |
 //! | 25 | memory_alloc              | x0=page_count                           | user VA     |
 //! | 26 | memory_free               | x0=va, x1=page_count                   | 0           |
 //!
@@ -613,7 +613,14 @@ fn sys_memory_free(va: u64, _page_count: u64) -> Result<u64, Error> {
 /// The target process must not have been started yet. Pages are mapped without
 /// ownership transfer — the caller (or original allocator) retains responsibility
 /// for the physical frames. PA must be page-aligned and within RAM bounds.
-fn sys_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Result<u64, Error> {
+///
+/// Flags bit 0: read_only — map pages without write permission (hardware-enforced).
+fn sys_memory_share(
+    target_handle_nr: u64,
+    pa: u64,
+    page_count: u64,
+    flags: u64,
+) -> Result<u64, Error> {
     if target_handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
@@ -643,6 +650,8 @@ fn sys_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Result<u
         }
     })?;
 
+    let read_only = flags & 1 != 0;
+
     scheduler::with_process(target_pid, |target| {
         if target.started {
             return Err(Error::InvalidArgument);
@@ -650,7 +659,7 @@ fn sys_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Result<u
 
         target
             .address_space
-            .map_shared_region(memory::Pa(pa as usize), page_count)
+            .map_shared_region(memory::Pa(pa as usize), page_count, read_only)
             .ok_or(Error::OutOfMemory)
     })
     .unwrap_or(Err(Error::InvalidArgument))
@@ -1334,11 +1343,13 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::HANDLE_SEND => dispatch_ok(ctx, result_to_u64!(sys_handle_send(x0, x1))),
         nr::PROCESS_KILL => dispatch_ok(ctx, result_to_u64!(sys_process_kill(x0))),
         nr::MEMORY_SHARE => {
-            // SAFETY: ctx is valid, x[2] is within [u64; 31] bounds. addr_of!
+            // SAFETY: ctx is valid, x[2]/x[3] are within [u64; 31] bounds. addr_of!
             // avoids creating a reference (same aliasing UB prevention as above).
-            let x2 = unsafe { (core::ptr::addr_of!((*ctx).x) as *const u64).add(2).read() };
+            let xbase = unsafe { core::ptr::addr_of!((*ctx).x) as *const u64 };
+            let x2 = unsafe { xbase.add(2).read() };
+            let x3 = unsafe { xbase.add(3).read() };
 
-            dispatch_ok(ctx, result_to_u64!(sys_memory_share(x0, x1, x2)))
+            dispatch_ok(ctx, result_to_u64!(sys_memory_share(x0, x1, x2, x3)))
         }
         nr::MEMORY_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_memory_alloc(x0))),
         nr::MEMORY_FREE => dispatch_ok(ctx, result_to_u64!(sys_memory_free(x0, x1))),

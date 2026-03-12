@@ -528,8 +528,11 @@ impl AddressSpace {
     /// physical frames are NOT owned by this address space — the caller (or
     /// the allocating process) retains ownership.
     ///
+    /// When `read_only` is true, pages are mapped without write permission
+    /// (hardware-enforced). Used to give editors read-only document access.
+    ///
     /// Returns the user VA on success, or None if the shared VA space is full.
-    pub fn map_shared_region(&mut self, pa: Pa, page_count: u64) -> Option<u64> {
+    pub fn map_shared_region(&mut self, pa: Pa, page_count: u64, read_only: bool) -> Option<u64> {
         let size = page_count * PAGE_SIZE;
         let va = self.next_shared_va;
 
@@ -537,7 +540,11 @@ impl AddressSpace {
             return None;
         }
 
-        let attrs = PageAttrs::user_rw();
+        let attrs = if read_only {
+            PageAttrs::user_ro()
+        } else {
+            PageAttrs::user_rw()
+        };
 
         for i in 0..page_count {
             if !self.map_inner(va + i * PAGE_SIZE, pa.as_u64() + i * PAGE_SIZE, &attrs) {

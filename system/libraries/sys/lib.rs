@@ -400,6 +400,23 @@ unsafe fn syscall3(nr: u64, a0: u64, a1: u64, a2: u64) -> u64 {
 
     ret
 }
+#[inline(always)]
+unsafe fn syscall4(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
+    let ret: u64;
+
+    core::arch::asm!(
+        "svc #0",
+        in("x0") a0,
+        in("x1") a1,
+        in("x2") a2,
+        in("x3") a3,
+        in("x8") nr,
+        lateout("x0") ret,
+        options(nostack),
+    );
+
+    ret
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -423,6 +440,29 @@ pub fn channel_signal(handle: u8) -> SyscallResult<()> {
     result(raw)?;
 
     Ok(())
+}
+/// Read the AArch64 virtual counter (CNTVCT_EL0).
+/// Requires kernel to have enabled EL0 access via CNTKCTL_EL1.EL0VCTEN.
+#[inline(always)]
+pub fn counter() -> u64 {
+    let val: u64;
+
+    unsafe {
+        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) val, options(nostack, nomem));
+    }
+
+    val
+}
+/// Read the counter frequency (CNTFRQ_EL0) in Hz.
+#[inline(always)]
+pub fn counter_freq() -> u64 {
+    let val: u64;
+
+    unsafe {
+        core::arch::asm!("mrs {0}, cntfrq_el0", out(reg) val, options(nostack, nomem));
+    }
+
+    val
 }
 /// Map a device's MMIO region into this process's address space.
 ///
@@ -551,8 +591,25 @@ pub fn memory_free(va: usize, page_count: u64) -> SyscallResult<()> {
 /// target process (identified by `target_handle`, a Process handle). The
 /// target must not have been started yet. Returns the VA in the target's
 /// address space.
-pub fn memory_share(target_handle: u8, pa: u64, page_count: u64) -> SyscallResult<usize> {
-    let raw = unsafe { syscall3(nr::MEMORY_SHARE, target_handle as u64, pa, page_count) as i64 };
+///
+/// When `read_only` is true, pages are mapped without write permission
+/// (hardware-enforced via page table attributes).
+pub fn memory_share(
+    target_handle: u8,
+    pa: u64,
+    page_count: u64,
+    read_only: bool,
+) -> SyscallResult<usize> {
+    let flags = if read_only { 1u64 } else { 0u64 };
+    let raw = unsafe {
+        syscall4(
+            nr::MEMORY_SHARE,
+            target_handle as u64,
+            pa,
+            page_count,
+            flags,
+        ) as i64
+    };
 
     result(raw).map(|v| v as usize)
 }

@@ -436,25 +436,34 @@ impl<'a> Surface<'a> {
     }
     /// Fill a rectangle with a solid color. Clips to surface bounds.
     pub fn fill_rect(&mut self, x: u32, y: u32, w: u32, h: u32, color: Color) {
-        // Clip to surface bounds.
         if x >= self.width || y >= self.height {
             return;
         }
 
-        let x1 = x;
-        let y1 = y;
         let x2 = min(x.saturating_add(w), self.width);
         let y2 = min(y.saturating_add(h), self.height);
+        let pixel_count = (x2 - x) as usize;
+
+        if pixel_count == 0 {
+            return;
+        }
+
         let encoded = color.encode(self.format);
-        let bpp = self.format.bytes_per_pixel() as usize;
+        let pixel_u32 = u32::from_ne_bytes(encoded);
+        let bpp = self.format.bytes_per_pixel();
+        let ptr = self.data.as_mut_ptr();
 
-        for row in y1..y2 {
-            let row_start = (row * self.stride + x1 * self.format.bytes_per_pixel()) as usize;
+        for row in y..y2 {
+            let row_offset = (row * self.stride + x * bpp) as usize;
 
-            for col in 0..(x2 - x1) {
-                let offset = row_start + col as usize * bpp;
+            // SAFETY: bounds checked above — x..x2 is within width, row is
+            // within height, and stride * height <= data.len().
+            unsafe {
+                let row_ptr = ptr.add(row_offset) as *mut u32;
 
-                self.data[offset..offset + bpp].copy_from_slice(&encoded[..bpp]);
+                for i in 0..pixel_count {
+                    core::ptr::write(row_ptr.add(i), pixel_u32);
+                }
             }
         }
     }

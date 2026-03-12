@@ -236,6 +236,21 @@ pub fn init() {
 
     CNTFRQ.store(freq, Ordering::Relaxed);
 
+    // Allow EL0 (userspace) to read CNTVCT_EL0 (virtual counter).
+    // CNTKCTL_EL1 bit 1 (EL0VCTEN) = 1 enables virtual counter access.
+    // SAFETY: Writing CNTKCTL_EL1. The register controls EL0 access to
+    // timer/counter registers. Setting bit 1 is a hardware side-effect
+    // (enables userspace reads), so nomem is omitted.
+    unsafe {
+        core::arch::asm!(
+            "mrs x0, cntkctl_el1",
+            "orr x0, x0, #2",
+            "msr cntkctl_el1, x0",
+            out("x0") _,
+            options(nostack),
+        );
+    }
+
     // Program first interval and enable the timer.
     reprogram(freq);
 

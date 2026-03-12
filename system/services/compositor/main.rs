@@ -31,6 +31,7 @@ const MSG_KEY_EVENT: u32 = 10;
 const MSG_PRESENT: u32 = 20;
 const MSG_WRITE_INSERT: u32 = 30;
 const MSG_WRITE_DELETE: u32 = 31;
+const MSG_CURSOR_MOVE: u32 = 32;
 // Handle indices (determined by the order init sends handles).
 const INPUT_HANDLE: u8 = 1;
 const GPU_HANDLE: u8 = 2;
@@ -40,14 +41,21 @@ const TEXT_X: u32 = 24;
 const TEXT_Y: u32 = 48;
 const CHAR_W: u32 = 8;
 const LINE_H: u32 = 20;
-const TEXT_BUF_SIZE: usize = 2048;
+// Document header layout (first 64 bytes of shared buffer).
+const DOC_HEADER_SIZE: usize = 64;
 
 // Cursor position for rendering.
 static mut CURSOR_COL: usize = 0;
 static mut CURSOR_ROW: u32 = 0;
-// Document state — owned exclusively by the compositor (sole writer).
-static mut TEXT_BUF: [u8; TEXT_BUF_SIZE] = [0u8; TEXT_BUF_SIZE];
-static mut TEXT_LEN: usize = 0;
+/// Cursor byte offset in the document. Updated by write requests.
+static mut CURSOR_POS: usize = 0;
+/// Highest text row drawn in the previous render (for dirty-rect clearing).
+static mut LAST_TEXT_ROW: u32 = 0;
+// Document shared buffer — owned exclusively by the compositor (sole writer).
+// Set from config message; editor has a read-only mapping of the same pages.
+static mut DOC_BUF: *mut u8 = core::ptr::null_mut();
+static mut DOC_CAPACITY: usize = 0;
+static mut DOC_LEN: usize = 0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -57,6 +65,9 @@ struct CompositorConfig {
     fb_height: u32,
     fb_stride: u32,
     fb_size: u32,
+    doc_va: u64,
+    doc_capacity: u32,
+    _pad2: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -68,26 +79,75 @@ struct KeyEvent {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct WriteInsert {
+    position: u32,
     byte: u8,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct WriteDelete {
+    position: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CursorMove {
+    position: u32,
 }
 
 fn channel_shm_va(idx: usize) -> usize {
     CHANNEL_SHM_BASE + idx * 2 * 4096
 }
-fn draw_cursor(fb: &mut drawing::Surface, col: usize, row: u32) {
-    let x = TEXT_X + col as u32 * CHAR_W;
-    let y = TEXT_Y + row * LINE_H;
+/// Get a slice of the document content (read from shared buffer).
+fn doc_content() -> &'static [u8] {
+    unsafe { core::slice::from_raw_parts(DOC_BUF.add(DOC_HEADER_SIZE), DOC_LEN) }
+}
+/// Delete a byte at position, shifting subsequent bytes left.
+fn doc_delete(pos: usize) -> bool {
+    unsafe {
+        if DOC_LEN == 0 || pos >= DOC_LEN {
+            return false;
+        }
 
-    if y <= max_text_y(fb.height) {
-        fb.fill_rect(x, y, CHAR_W, 16, drawing::Color::rgb(100, 180, 255));
+        let base = DOC_BUF.add(DOC_HEADER_SIZE);
+
+        if pos + 1 < DOC_LEN {
+            core::ptr::copy(base.add(pos + 1), base.add(pos), DOC_LEN - pos - 1);
+        }
+
+        DOC_LEN -= 1;
+
+        doc_write_header();
+
+        true
     }
 }
-fn erase_cursor(fb: &mut drawing::Surface, col: usize, row: u32) {
-    let x = TEXT_X + col as u32 * CHAR_W;
-    let y = TEXT_Y + row * LINE_H;
+/// Insert a byte at position, shifting subsequent bytes right.
+fn doc_insert(pos: usize, byte: u8) -> bool {
+    unsafe {
+        if DOC_LEN >= DOC_CAPACITY || pos > DOC_LEN {
+            return false;
+        }
 
-    if y <= max_text_y(fb.height) {
-        fb.fill_rect(x, y, CHAR_W, 16, drawing::Color::rgb(24, 24, 36));
+        let base = DOC_BUF.add(DOC_HEADER_SIZE);
+
+        if pos < DOC_LEN {
+            core::ptr::copy(base.add(pos), base.add(pos + 1), DOC_LEN - pos);
+        }
+
+        *base.add(pos) = byte;
+
+        DOC_LEN += 1;
+
+        doc_write_header();
+
+        true
+    }
+}
+/// Write the document length to the shared buffer header (offset 0, u64).
+/// The editor reads this atomically to know how much content is present.
+fn doc_write_header() {
+    unsafe {
+        core::ptr::write_volatile(DOC_BUF as *mut u64, DOC_LEN as u64);
+        core::ptr::write_volatile(DOC_BUF.add(8) as *mut u64, CURSOR_POS as u64);
     }
 }
 fn max_cols(fb_width: u32) -> usize {
@@ -98,76 +158,8 @@ fn max_text_y(fb_height: u32) -> u32 {
 
     TEXT_Y + text_area_h - LINE_H - 8
 }
-fn render_backspace(fb: &mut drawing::Surface) {
-    let (col, row) = unsafe { (CURSOR_COL, CURSOR_ROW) };
-    let cols = max_cols(fb.width);
-
-    erase_cursor(fb, col, row);
-
-    let (new_col, new_row) = if col > 0 {
-        (col - 1, row)
-    } else if row > 0 {
-        (cols - 1, row - 1)
-    } else {
-        (0, 0)
-    };
-
-    erase_cursor(fb, new_col, new_row);
-
-    unsafe {
-        CURSOR_COL = new_col;
-        CURSOR_ROW = new_row;
-    }
-
-    draw_cursor(fb, new_col, new_row);
-}
-fn render_char(fb: &mut drawing::Surface, byte: u8) {
-    use drawing::{Color, FONT_8X16 as F};
-
-    let (col, row) = unsafe { (CURSOR_COL, CURSOR_ROW) };
-    let cols = max_cols(fb.width);
-    let my = max_text_y(fb.height);
-
-    erase_cursor(fb, col, row);
-
-    if byte == b'\n' {
-        unsafe {
-            CURSOR_COL = 0;
-            CURSOR_ROW = row + 1;
-        }
-    } else {
-        if byte >= 0x20 && byte < 0x7F && row * LINE_H + TEXT_Y <= my {
-            let ch = [byte];
-            let s = unsafe { core::str::from_utf8_unchecked(&ch) };
-
-            fb.draw_text(
-                TEXT_X + col as u32 * CHAR_W,
-                TEXT_Y + row * LINE_H,
-                s,
-                &F,
-                Color::rgb(200, 210, 230),
-            );
-        }
-
-        let new_col = col + 1;
-
-        if new_col >= cols {
-            unsafe {
-                CURSOR_COL = 0;
-                CURSOR_ROW = row + 1;
-            }
-        } else {
-            unsafe {
-                CURSOR_COL = new_col;
-            }
-        }
-    }
-
-    let (nc, nr) = unsafe { (CURSOR_COL, CURSOR_ROW) };
-
-    draw_cursor(fb, nc, nr);
-}
-fn render_full(fb: &mut drawing::Surface, text: &[u8]) {
+/// Draw static chrome (title bar, text area background/border). Called once.
+fn render_chrome(fb: &mut drawing::Surface) {
     use drawing::{Color, FONT_8X16 as F};
 
     fb.clear(Color::rgb(18, 18, 26));
@@ -196,16 +188,61 @@ fn render_full(fb: &mut drawing::Surface, text: &[u8]) {
         text_area_h,
         Color::rgb(50, 50, 70),
     );
+}
+/// Redraw text content, cursor, and status bar. Only touches the text area
+/// interior and status bar — leaves the static chrome untouched.
+///
+/// Optimized: clears and redraws only from the previous cursor row downward,
+/// since characters before the edit point haven't changed. For the common
+/// case (typing at end of text), this means clearing ~1-2 lines instead
+/// of the entire text area (~34x fewer pixels).
+fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
+    use drawing::{Color, FONT_8X16 as F};
 
+    let bg = Color::rgb(24, 24, 36);
     let cols = max_cols(fb.width);
     let my = max_text_y(fb.height);
     let tc = Color::rgb(200, 210, 230);
+    let cursor_pos = unsafe { CURSOR_POS };
+    let prev_row = unsafe { CURSOR_ROW };
+    let prev_last = unsafe { LAST_TEXT_ROW };
+    // Clear only the dirty rows: from the previous cursor row to one row
+    // past the previous last text row (handles both growing and shrinking).
+    // For appending at end of single-line text, this clears ~1 line.
+    let clear_start_y = TEXT_Y + prev_row * LINE_H;
+    let clear_end_y = TEXT_Y + (prev_last + 2) * LINE_H;
+    let text_bottom = fb.height.saturating_sub(32) - 1;
+    let clear_end_y = if clear_end_y > text_bottom {
+        text_bottom
+    } else {
+        clear_end_y
+    };
+
+    if clear_start_y < clear_end_y {
+        fb.fill_rect(
+            13,
+            clear_start_y,
+            fb.width - 26,
+            clear_end_y - clear_start_y,
+            bg,
+        );
+    }
+
+    // Walk text to find the byte offset where prev_row starts, then draw
+    // only from that row onward.
     let mut col = 0usize;
     let mut row = 0u32;
+    let mut cursor_col = 0usize;
+    let mut cursor_row = 0u32;
 
-    for &byte in text {
+    for (i, &byte) in text.iter().enumerate() {
         if row * LINE_H + TEXT_Y > my {
             break;
+        }
+
+        if i == cursor_pos {
+            cursor_col = col;
+            cursor_row = row;
         }
 
         if byte == b'\n' {
@@ -224,7 +261,8 @@ fn render_full(fb: &mut drawing::Surface, text: &[u8]) {
             }
         }
 
-        if byte >= 0x20 && byte < 0x7F {
+        // Only draw characters on or after the dirty row.
+        if row >= prev_row && byte >= 0x20 && byte < 0x7F {
             let ch = [byte];
             let s = unsafe { core::str::from_utf8_unchecked(&ch) };
 
@@ -240,12 +278,24 @@ fn render_full(fb: &mut drawing::Surface, text: &[u8]) {
         col += 1;
     }
 
-    unsafe {
-        CURSOR_COL = col;
-        CURSOR_ROW = row;
+    if cursor_pos >= text.len() {
+        cursor_col = col;
+        cursor_row = row;
     }
 
-    draw_cursor(fb, col, row);
+    let cx = TEXT_X + cursor_col as u32 * CHAR_W;
+    let cy = TEXT_Y + cursor_row * LINE_H;
+
+    if cy <= my {
+        fb.fill_rect(cx, cy, CHAR_W, 16, Color::rgb(100, 180, 255));
+    }
+
+    unsafe {
+        CURSOR_COL = cursor_col;
+        CURSOR_ROW = cursor_row;
+        LAST_TEXT_ROW = row;
+    }
+
     render_status(fb, text.len());
 }
 fn render_status(fb: &mut drawing::Surface, len: usize) {
@@ -326,6 +376,19 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"compositor: bad framebuffer info\n");
         sys::exit();
     }
+    // Initialize shared document buffer pointers.
+    if config.doc_va == 0 {
+        sys::print(b"compositor: no document buffer\n");
+        sys::exit();
+    }
+
+    unsafe {
+        DOC_BUF = config.doc_va as *mut u8;
+        DOC_CAPACITY = config.doc_capacity as usize;
+        DOC_LEN = 0;
+    }
+
+    doc_write_header();
 
     // Channel 1: input events from input driver (endpoint 1 = recv).
     let input_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
@@ -341,9 +404,9 @@ pub extern "C" fn _start() -> ! {
         stride: fb_stride,
         format: drawing::PixelFormat::Bgra8888,
     };
-    let text = unsafe { &TEXT_BUF[..TEXT_LEN] };
 
-    render_full(&mut fb, text);
+    render_chrome(&mut fb);
+    render_content(&mut fb, doc_content());
 
     let present_msg = ipc::Message::new(MSG_PRESENT);
 
@@ -358,7 +421,7 @@ pub extern "C" fn _start() -> ! {
     //
     // Input events from the input driver are forwarded to the editor.
     // Write requests from the editor are applied to the document (sole writer)
-    // and the display is updated.
+    // and the display is re-rendered once per batch (not per message).
     // -----------------------------------------------------------------------
     loop {
         let _ = sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX);
@@ -372,30 +435,42 @@ pub extern "C" fn _start() -> ! {
                 let _ = sys::channel_signal(EDITOR_HANDLE);
             }
         }
+
         // Apply write requests from the editor (sole writer).
+        // Document mutations are applied immediately; rendering is deferred
+        // until all pending messages are drained (batch rendering).
         while editor_ch.try_recv(&mut msg) {
             match msg.msg_type {
                 MSG_WRITE_INSERT => {
                     let insert: WriteInsert = unsafe { msg.payload_as() };
-                    let text_len = unsafe { TEXT_LEN };
+                    let pos = insert.position as usize;
 
-                    if text_len < TEXT_BUF_SIZE {
-                        unsafe {
-                            TEXT_BUF[text_len] = insert.byte;
-                            TEXT_LEN += 1;
-                        }
-
-                        render_char(&mut fb, insert.byte);
+                    if doc_insert(pos, insert.byte) {
+                        unsafe { CURSOR_POS = pos + 1 };
 
                         changed = true;
                     }
                 }
                 MSG_WRITE_DELETE => {
-                    let text_len = unsafe { TEXT_LEN };
+                    let del: WriteDelete = unsafe { msg.payload_as() };
+                    let pos = del.position as usize;
 
-                    if text_len > 0 {
-                        unsafe { TEXT_LEN -= 1 };
-                        render_backspace(&mut fb);
+                    if doc_delete(pos) {
+                        unsafe { CURSOR_POS = pos };
+
+                        changed = true;
+                    }
+                }
+                MSG_CURSOR_MOVE => {
+                    let cm: CursorMove = unsafe { msg.payload_as() };
+                    let pos = cm.position as usize;
+                    let len = unsafe { DOC_LEN };
+
+                    if pos <= len {
+                        unsafe { CURSOR_POS = pos };
+
+                        doc_write_header();
+
                         changed = true;
                     }
                 }
@@ -404,8 +479,7 @@ pub extern "C" fn _start() -> ! {
         }
 
         if changed {
-            render_status(&mut fb, unsafe { TEXT_LEN });
-
+            render_content(&mut fb, doc_content());
             gpu_ch.send(&present_msg);
 
             let _ = sys::channel_signal(GPU_HANDLE);
