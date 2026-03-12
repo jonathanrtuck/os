@@ -422,8 +422,11 @@ fn channel_config_as_first_message() {
         irq: u32,
         _pad: u32,
         fb_pa: u64,
+        fb_pa2: u64,
         fb_width: u32,
         fb_height: u32,
+        fb_size: u32,
+        _pad2: u32,
     }
 
     let config = GpuConfig {
@@ -431,8 +434,11 @@ fn channel_config_as_first_message() {
         irq: 48,
         _pad: 0,
         fb_pa: 0x4000_0000,
+        fb_pa2: 0x4040_0000,
         fb_width: 1024,
         fb_height: 768,
+        fb_size: 1024 * 768 * 4,
+        _pad2: 0,
     };
 
     const MSG_GPU_CONFIG: u32 = 1;

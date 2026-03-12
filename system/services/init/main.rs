@@ -72,6 +72,7 @@ const MSG_FS_READ_RESPONSE: u32 = 41;
 #[derive(Clone, Copy)]
 struct CompositorConfig {
     fb_va: u64,
+    fb_va2: u64,
     fb_width: u32,
     fb_height: u32,
     fb_stride: u32,
@@ -103,8 +104,11 @@ struct GpuConfig {
     irq: u32,
     _pad: u32,
     fb_pa: u64,
+    fb_pa2: u64,
     fb_width: u32,
     fb_height: u32,
+    fb_size: u32,
+    _pad2: u32,
 }
 
 /// Compute the base VA of channel N's shared pages in init's address space.
@@ -157,21 +161,33 @@ fn setup_display_pipeline(
 ) {
     sys::print(b"     setting up display pipeline\n");
 
-    // Allocate framebuffer via DMA.
+    // Allocate double framebuffer via DMA (two separate allocations for
+    // front + back buffers). Each buffer is FB_SIZE bytes. We allocate
+    // separately because the maximum DMA order is 10 (4 MiB) and a
+    // single 2× allocation would exceed that.
     let fb_bytes = FB_SIZE as usize;
     let fb_pages = (fb_bytes + 4095) / 4096;
     let fb_order = (fb_pages.next_power_of_two().trailing_zeros()) as u32;
-    let mut fb_pa_out: u64 = 0;
-    let fb_va = sys::dma_alloc(fb_order, &mut fb_pa_out).unwrap_or_else(|_| {
-        sys::print(b"init: dma_alloc (framebuffer) failed\n");
+    let fb_alloc_bytes = (1usize << fb_order) * 4096;
+    // Front buffer (buffer 0).
+    let mut fb_pa0: u64 = 0;
+    let fb_va0 = sys::dma_alloc(fb_order, &mut fb_pa0).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (framebuffer 0) failed\n");
         sys::exit();
     });
-    // Zero the framebuffer.
-    let fb_alloc_bytes = (1usize << fb_order) * 4096;
 
-    unsafe { core::ptr::write_bytes(fb_va as *mut u8, 0, fb_alloc_bytes) };
+    unsafe { core::ptr::write_bytes(fb_va0 as *mut u8, 0, fb_alloc_bytes) };
 
-    sys::print(b"     framebuffer: ");
+    // Back buffer (buffer 1).
+    let mut fb_pa1: u64 = 0;
+    let fb_va1 = sys::dma_alloc(fb_order, &mut fb_pa1).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (framebuffer 1) failed\n");
+        sys::exit();
+    });
+
+    unsafe { core::ptr::write_bytes(fb_va1 as *mut u8, 0, fb_alloc_bytes) };
+
+    sys::print(b"     double framebuffer: ");
 
     print_u32(FB_WIDTH);
 
@@ -179,9 +195,9 @@ fn setup_display_pipeline(
 
     print_u32(FB_HEIGHT);
 
-    sys::print(b" (");
+    sys::print(b" x2 (");
 
-    print_u32(fb_alloc_bytes as u32 / 1024);
+    print_u32((fb_alloc_bytes * 2) as u32 / 1024);
 
     sys::print(b" KiB)\n");
 
@@ -193,9 +209,12 @@ fn setup_display_pipeline(
         mmio_pa: gpu_pa,
         irq: gpu_irq,
         _pad: 0,
-        fb_pa: fb_pa_out,
+        fb_pa: fb_pa0,
+        fb_pa2: fb_pa1,
         fb_width: FB_WIDTH,
         fb_height: FB_HEIGHT,
+        fb_size: FB_SIZE,
+        _pad2: 0,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_GPU_CONFIG, &gpu_config) };
 
@@ -226,11 +245,16 @@ fn setup_display_pipeline(
                 sys::exit();
             }
         };
-    // Share framebuffer memory with compositor (read-write).
+    // Share both framebuffers with compositor (read-write).
     let fb_page_count = fb_alloc_bytes as u64 / 4096;
-    let comp_fb_va =
-        sys::memory_share(comp_proc, fb_pa_out, fb_page_count, false).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (compositor fb) failed\n");
+    let comp_fb_va0 =
+        sys::memory_share(comp_proc, fb_pa0, fb_page_count, false).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (compositor fb0) failed\n");
+            sys::exit();
+        });
+    let comp_fb_va1 =
+        sys::memory_share(comp_proc, fb_pa1, fb_page_count, false).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (compositor fb1) failed\n");
             sys::exit();
         });
     // Share document buffer with compositor (read-write — sole writer).
@@ -254,7 +278,8 @@ fn setup_display_pipeline(
     // Send compositor config via ring buffer.
     let comp_ch = init_channel(comp_channel_idx);
     let comp_config = CompositorConfig {
-        fb_va: comp_fb_va as u64,
+        fb_va: comp_fb_va0 as u64,
+        fb_va2: comp_fb_va1 as u64,
         fb_width: FB_WIDTH,
         fb_height: FB_HEIGHT,
         fb_stride: FB_STRIDE,

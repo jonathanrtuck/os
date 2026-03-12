@@ -96,8 +96,17 @@ struct GpuConfig {
     irq: u32,
     _pad: u32,
     fb_pa: u64,
+    fb_pa2: u64,
     fb_width: u32,
     fb_height: u32,
+    fb_size: u32,
+    _pad2: u32,
+}
+/// Payload for MSG_PRESENT with double-buffering info.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PresentInfo {
+    buffer_index: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -169,23 +178,27 @@ fn attach_backing(
     irq_handle: u8,
     resource_id: u32,
     fb_pa: u64,
+    fb_pa2: u64,
     fb_size: u32,
 ) -> bool {
     let cmd = DmaBuf::alloc(0);
     let ptr = cmd.va as *mut u8;
 
+    // Two memory entries for double buffering: the GPU sees them as one
+    // contiguous backing (buffer 0 at offset 0, buffer 1 at offset fb_size).
     unsafe {
         core::ptr::write(
             ptr as *mut AttachBacking,
             AttachBacking {
                 header: ctrl_header(CMD_RESOURCE_ATTACH_BACKING),
                 resource_id,
-                nr_entries: 1,
+                nr_entries: 2,
             },
         );
     }
 
     let entry_offset = core::mem::size_of::<AttachBacking>();
+    let entry_size = core::mem::size_of::<MemEntry>();
 
     unsafe {
         core::ptr::write(
@@ -196,9 +209,17 @@ fn attach_backing(
                 _padding: 0,
             },
         );
+        core::ptr::write(
+            ptr.add(entry_offset + entry_size) as *mut MemEntry,
+            MemEntry {
+                addr: fb_pa2,
+                length: fb_size,
+                _padding: 0,
+            },
+        );
     }
 
-    let cmd_len = (entry_offset + core::mem::size_of::<MemEntry>()) as u32;
+    let cmd_len = (entry_offset + 2 * entry_size) as u32;
     let resp_pa = cmd.pa + 512;
     let resp_va = cmd.va + 512;
     let resp_type = gpu_command(
@@ -528,6 +549,7 @@ fn transfer_to_host(
     ok
 }
 /// Transfer framebuffer to host using a pre-allocated DMA buffer.
+/// `offset` is the byte offset into the backing memory to transfer from.
 fn transfer_to_host_reuse(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
@@ -536,6 +558,7 @@ fn transfer_to_host_reuse(
     resource_id: u32,
     width: u32,
     height: u32,
+    offset: u64,
 ) {
     let ptr = cmd.va as *mut u8;
 
@@ -549,7 +572,7 @@ fn transfer_to_host_reuse(
                 rect_y: 0,
                 rect_width: width,
                 rect_height: height,
-                offset: 0,
+                offset,
                 resource_id,
                 _padding: 0,
             },
@@ -583,9 +606,10 @@ pub extern "C" fn _start() -> ! {
     let mmio_pa = config.mmio_pa;
     let irq = config.irq;
     let fb_pa = config.fb_pa;
+    let fb_pa2 = config.fb_pa2;
     let fb_width = config.fb_width;
     let fb_height = config.fb_height;
-    let fb_size = fb_width * fb_height * FB_BPP;
+    let fb_size = config.fb_size;
     // Map the MMIO region (sub-page alignment for virtio-mmio).
     let page_offset = mmio_pa & 0xFFF;
     let page_pa = mmio_pa & !0xFFF;
@@ -657,7 +681,9 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"virtio-gpu: resource_create_2d failed\n");
         sys::exit();
     }
-    if !attach_backing(&device, &mut vq, irq_handle, FB_RESOURCE_ID, fb_pa, fb_size) {
+    // Attach double-buffer backing (two separate physical regions, seen as one
+    // contiguous buffer by the GPU: buffer 0 at offset 0, buffer 1 at offset fb_size).
+    if !attach_backing(&device, &mut vq, irq_handle, FB_RESOURCE_ID, fb_pa, fb_pa2, fb_size) {
         sys::print(b"virtio-gpu: attach_backing failed\n");
         sys::exit();
     }
@@ -685,16 +711,28 @@ pub extern "C" fn _start() -> ! {
 
     // -----------------------------------------------------------------------
     // Present loop: wait for compositor → transfer → flush → repeat
+    //
+    // Double buffering: MSG_PRESENT carries a buffer_index (0 or 1).
+    // The transfer offset = buffer_index * fb_size into the backing memory.
     // -----------------------------------------------------------------------
+    let mut last_buffer_index: u32 = 0;
+
     loop {
         // Wait for a present command from the compositor.
         let _ = sys::wait(&[PRESENT_HANDLE], u64::MAX);
 
         // Drain all pending present messages (coalesce multiple into one
-        // transfer+flush — the framebuffer already has the latest contents).
+        // transfer+flush). Keep the last buffer_index seen.
         while present_ch.try_recv(&mut msg) {
-            // Consume but don't need to inspect — MSG_PRESENT has no payload.
+            if msg.msg_type == MSG_PRESENT {
+                let info: PresentInfo = unsafe { msg.payload_as() };
+
+                last_buffer_index = info.buffer_index;
+            }
         }
+
+        // Compute byte offset into the double-buffer backing memory.
+        let transfer_offset = (last_buffer_index as u64) * (fb_size as u64);
 
         // Transfer and flush using pre-allocated command buffer.
         transfer_to_host_reuse(
@@ -705,6 +743,7 @@ pub extern "C" fn _start() -> ! {
             FB_RESOURCE_ID,
             width,
             height,
+            transfer_offset,
         );
         resource_flush_reuse(
             &device,

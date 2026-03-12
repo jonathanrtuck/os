@@ -52,9 +52,11 @@ static mut GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Cursor byte offset in the document. Updated by write requests.
 static mut CURSOR_POS: usize = 0;
 /// Previous cursor pixel Y (for dirty-rect clearing).
-static mut PREV_CURSOR_Y: u32 = 0;
+static mut PREV_CURSOR_Y: [u32; 2] = [0; 2];
 /// Previous last-drawn pixel Y (for dirty-rect clearing).
-static mut PREV_LAST_Y: u32 = 0;
+static mut PREV_LAST_Y: [u32; 2] = [0; 2];
+/// Current back buffer index (0 or 1). Swapped after each present.
+static mut BACK_BUF_IDX: usize = 0;
 // Document shared buffer — owned exclusively by the compositor (sole writer).
 // Set from config message; editor has a read-only mapping of the same pages.
 static mut DOC_BUF: *mut u8 = core::ptr::null_mut();
@@ -65,6 +67,7 @@ static mut DOC_LEN: usize = 0;
 #[derive(Clone, Copy)]
 struct CompositorConfig {
     fb_va: u64,
+    fb_va2: u64,
     fb_width: u32,
     fb_height: u32,
     fb_stride: u32,
@@ -78,6 +81,11 @@ struct CompositorConfig {
 #[derive(Clone, Copy)]
 struct CursorMove {
     position: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PresentInfo {
+    buffer_index: u32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -235,7 +243,7 @@ fn render_chrome(fb: &mut drawing::Surface, cache: &drawing::GlyphCache) {
 ///
 /// Dirty-rect optimization: clears from the previous cursor Y downward,
 /// then delegates to TextLayout::draw for positioning and rendering.
-fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
+fn render_content(fb: &mut drawing::Surface, text: &[u8], buf_idx: usize) {
     use drawing::Color;
 
     let bg = Color::rgb(24, 24, 36);
@@ -243,7 +251,7 @@ fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
     let layout = text_layout(fb.width);
     let cache = unsafe { &*GLYPH_CACHE };
     let cursor_pos = unsafe { CURSOR_POS };
-    let prev_last_y = unsafe { PREV_LAST_Y };
+    let prev_last_y = unsafe { PREV_LAST_Y[buf_idx] };
     // Clear the entire text region that was previously drawn. draw_tt()
     // re-renders ALL text from the top, so we must clear from the top of
     // the text area down through the previous last row (plus cursor height).
@@ -272,12 +280,12 @@ fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
         Color::rgb(100, 180, 255),
         my,
     );
-    // Track dirty state for next frame.
+    // Track dirty state for next frame (per-buffer for double buffering).
     let (_, last_y) = layout.byte_to_xy(text, text.len());
 
     unsafe {
-        PREV_CURSOR_Y = cursor_y - TEXT_Y;
-        PREV_LAST_Y = last_y;
+        PREV_CURSOR_Y[buf_idx] = cursor_y - TEXT_Y;
+        PREV_LAST_Y[buf_idx] = last_y;
     }
 
     render_status(fb, text.len());
@@ -357,12 +365,13 @@ pub extern "C" fn _start() -> ! {
 
     let config: CompositorConfig = unsafe { msg.payload_as() };
     let fb_va = config.fb_va as usize;
+    let fb_va2 = config.fb_va2 as usize;
     let fb_width = config.fb_width;
     let fb_height = config.fb_height;
     let fb_stride = config.fb_stride;
     let fb_size = config.fb_size;
 
-    if fb_va == 0 || fb_width == 0 || fb_height == 0 {
+    if fb_va == 0 || fb_va2 == 0 || fb_width == 0 || fb_height == 0 {
         sys::print(b"compositor: bad framebuffer info\n");
         sys::exit();
     }
@@ -438,25 +447,65 @@ pub extern "C" fn _start() -> ! {
     let gpu_ch = unsafe { ipc::Channel::from_base(channel_shm_va(2), ipc::PAGE_SIZE, 0) };
     // Channel 3: editor (endpoint 0 = send input, recv write requests).
     let editor_ch = unsafe { ipc::Channel::from_base(channel_shm_va(3), ipc::PAGE_SIZE, 0) };
-    let fb_slice = unsafe { core::slice::from_raw_parts_mut(fb_va as *mut u8, fb_size as usize) };
-    let mut fb = drawing::Surface {
-        data: fb_slice,
-        width: fb_width,
-        height: fb_height,
-        stride: fb_stride,
-        format: drawing::PixelFormat::Bgra8888,
+
+    // -----------------------------------------------------------------------
+    // Double buffering: two separate framebuffer allocations.
+    // Buffer 0 at fb_va, buffer 1 at fb_va2.
+    // The compositor renders into the back buffer, then presents it.
+    // -----------------------------------------------------------------------
+
+    // Static storage for the two surface base pointers. We need stable
+    // references across iterations, so we store the raw pointers and
+    // rebuild Surfaces on demand.
+    static mut FB_PTRS: [*mut u8; 2] = [core::ptr::null_mut(); 2];
+
+    unsafe {
+        FB_PTRS[0] = fb_va as *mut u8;
+        FB_PTRS[1] = fb_va2 as *mut u8;
+    }
+
+    let make_surface = |idx: usize| -> drawing::Surface<'static> {
+        let ptr = unsafe { FB_PTRS[idx] };
+        let data = unsafe { core::slice::from_raw_parts_mut(ptr, fb_size as usize) };
+
+        drawing::Surface {
+            data,
+            width: fb_width,
+            height: fb_height,
+            stride: fb_stride,
+            format: drawing::PixelFormat::Bgra8888,
+        }
     };
 
-    render_chrome(&mut fb, unsafe { &*GLYPH_CACHE });
-    render_content(&mut fb, doc_content());
+    // Render chrome on BOTH buffers (chrome is static, drawn once).
+    {
+        let mut fb0 = make_surface(0);
 
-    let present_msg = ipc::Message::new(MSG_PRESENT);
+        render_chrome(&mut fb0, unsafe { &*GLYPH_CACHE });
+
+        let mut fb1 = make_surface(1);
+
+        render_chrome(&mut fb1, unsafe { &*GLYPH_CACHE });
+    }
+
+    // Render initial content into buffer 0 and present it.
+    {
+        let mut fb0 = make_surface(0);
+
+        render_content(&mut fb0, doc_content(), 0);
+    }
+
+    let present_info = PresentInfo { buffer_index: 0 };
+    let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &present_info) };
 
     gpu_ch.send(&present_msg);
 
     let _ = sys::channel_signal(GPU_HANDLE);
 
-    sys::print(b"     initial frame rendered, entering event loop\n");
+    // Buffer 0 is now the front (being displayed). Next render goes to buffer 1.
+    unsafe { BACK_BUF_IDX = 1 };
+
+    sys::print(b"     double-buffered, initial frame rendered, entering event loop\n");
 
     // -----------------------------------------------------------------------
     // Event loop: wait for input or editor write requests.
@@ -464,6 +513,8 @@ pub extern "C" fn _start() -> ! {
     // Input events from the input driver are forwarded to the editor.
     // Write requests from the editor are applied to the document (sole writer)
     // and the display is re-rendered once per batch (not per message).
+    //
+    // Double buffering: render into back buffer, present it, swap.
     // -----------------------------------------------------------------------
     loop {
         let _ = sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX);
@@ -521,11 +572,23 @@ pub extern "C" fn _start() -> ! {
         }
 
         if changed {
-            render_content(&mut fb, doc_content());
+            let back = unsafe { BACK_BUF_IDX };
+            let mut fb = make_surface(back);
+
+            render_content(&mut fb, doc_content(), back);
+
+            // Present the back buffer (tell GPU which buffer to transfer).
+            let info = PresentInfo {
+                buffer_index: back as u32,
+            };
+            let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &info) };
 
             gpu_ch.send(&present_msg);
 
             let _ = sys::channel_signal(GPU_HANDLE);
+
+            // Swap: the just-presented buffer becomes front, the other becomes back.
+            unsafe { BACK_BUF_IDX = 1 - back };
         }
     }
 }
