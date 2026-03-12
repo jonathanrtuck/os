@@ -1,0 +1,36 @@
+{
+  "flowId": "comp-chrome",
+  "assertions": {
+    "VAL-COMP-001": {
+      "status": "pass",
+      "evidence": "Code review confirms compositor manages 6 surfaces (background z=0, content z=10, title shadow z=15, status shadow z=15, title bar z=20, status bar z=20) composited back-to-front via composite_surfaces() with explicit z-ordering. Boot screenshot shows layered UI with chrome on top of content in every frame."
+    },
+    "VAL-COMP-002": {
+      "status": "pass",
+      "evidence": "High-res screenshot after typing 'hello world' clearly shows text content visible through the translucent title bar (alpha=220). Content area extends full-screen (CONTENT_MARGIN_TOP=0) so document text renders behind chrome. Chrome uses Color::rgba(30, 30, 48, 220) — real alpha compositing, not opaque."
+    },
+    "VAL-COMP-003": {
+      "status": "pass",
+      "evidence": "Code review confirms fill_gradient_v() renders shadows from alpha=80 to alpha=0 over SHADOW_DEPTH=8 pixels. Title shadow at z=15 between content and chrome. 8 unit tests verify gradient monotonic decrease, intermediate values, clipping, and single-row behavior. Visual inspection shows subtle darkening below title bar edge."
+    },
+    "VAL-COMP-004": {
+      "status": "pass",
+      "evidence": "Boot screenshot shows title bar displaying 'Document OS' branding (left) and 'Multi-Surface Compositor' (right). Status bar shows 'Editor process active | 0 chars' and clock '00:00:16'. Image viewer mode shows 'Image viewer | 128x128 px' — context-appropriate. Chrome visually distinct via rgba(30,30,48,220) overlay with edge lines."
+    },
+    "VAL-COMP-005": {
+      "status": "pass",
+      "evidence": "Boot screenshot (no keystrokes) shows complete UI: translucent title bar with 'Document OS', empty content area with dark background, status bar with '0 chars' counter and clock '00:00:16'. No artifacts, no crash, no partially-drawn elements. All 6 surfaces render correctly on initial frame."
+    },
+    "VAL-FONT-004": {
+      "status": "pass",
+      "evidence": "6 proportional font unit tests pass: proportional_glyph_cache_advance_i_less_than_m confirms advance('i') < advance('m'), proportional_glyph_cache_variable_advances confirms variable widths, draw_proportional_string_missing_glyph_uses_fallback confirms fallback behavior. Screenshot shows natural spacing in chrome text (Nunito Sans 16px loaded via 9p)."
+    },
+    "VAL-CROSS-002": {
+      "status": "pass",
+      "evidence": "High-res text screenshot shows both font types in same frame: proportional 'Document OS' in title bar chrome and monospace 'hello world' / 'text editor' in editor content. Both render with gamma-correct sRGB blending (confirmed by M1 validation). Both crisp and legible simultaneously."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": ["qemu-screenshot", "code-review", "unit-tests"]
+}
