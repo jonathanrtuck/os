@@ -996,6 +996,113 @@ fn min(a: u32, b: u32) -> u32 {
 }
 
 // ---------------------------------------------------------------------------
+// Multi-surface compositing
+// ---------------------------------------------------------------------------
+
+/// A compositing surface: a pixel buffer with position, z-order, and visibility.
+///
+/// The compositor manages a set of these. On each frame, surfaces are composited
+/// back-to-front (lowest z first) into the framebuffer using alpha blending.
+///
+/// Z-ordering convention (bottom to top):
+///   0  = background
+///   10 = content area
+///   15 = shadows
+///   20 = chrome (title bar, status bar)
+pub struct CompositeSurface<'a> {
+    pub surface: Surface<'a>,
+    /// X position in framebuffer coordinates. Can be negative (partially offscreen).
+    pub x: i32,
+    /// Y position in framebuffer coordinates. Can be negative (partially offscreen).
+    pub y: i32,
+    /// Z-order: lower = further back. Composited in ascending z order.
+    pub z: u16,
+    /// Whether this surface participates in compositing.
+    pub visible: bool,
+}
+
+/// Composite surfaces back-to-front onto a destination framebuffer.
+///
+/// Surfaces are sorted by z-order (ascending) and blitted with alpha blending.
+/// Invisible surfaces are skipped. Surfaces may overlap and may extend outside
+/// the destination bounds (clipped automatically by blit_blend).
+///
+/// The destination is NOT cleared — the caller should clear it beforehand if
+/// needed, or include a full-screen background surface at z=0.
+pub fn composite_surfaces(dst: &mut Surface, surfaces: &[&CompositeSurface]) {
+    // Sort indices by z-order. We use a simple insertion sort since the number
+    // of surfaces is small (typically 3-6).
+    const MAX_SURFACES: usize = 16;
+    let count = if surfaces.len() > MAX_SURFACES {
+        MAX_SURFACES
+    } else {
+        surfaces.len()
+    };
+    let mut order: [usize; MAX_SURFACES] = [0; MAX_SURFACES];
+    let mut i = 0;
+    while i < count {
+        order[i] = i;
+        i += 1;
+    }
+    // Insertion sort by z-order.
+    let mut j = 1;
+    while j < count {
+        let key = order[j];
+        let key_z = surfaces[key].z;
+        let mut k = j;
+        while k > 0 && surfaces[order[k - 1]].z > key_z {
+            order[k] = order[k - 1];
+            k -= 1;
+        }
+        order[k] = key;
+        j += 1;
+    }
+
+    // Composite back-to-front.
+    let mut idx = 0;
+    while idx < count {
+        let s = surfaces[order[idx]];
+        idx += 1;
+
+        if !s.visible {
+            continue;
+        }
+
+        // Handle negative offsets by computing source clip region.
+        let src_x_start: u32 = if s.x < 0 { (-s.x) as u32 } else { 0 };
+        let src_y_start: u32 = if s.y < 0 { (-s.y) as u32 } else { 0 };
+        let dst_x: u32 = if s.x < 0 { 0 } else { s.x as u32 };
+        let dst_y: u32 = if s.y < 0 { 0 } else { s.y as u32 };
+
+        let src_w = s.surface.width;
+        let src_h = s.surface.height;
+
+        if src_x_start >= src_w || src_y_start >= src_h {
+            continue; // Entirely off-screen to the left/top.
+        }
+
+        let visible_w = src_w - src_x_start;
+        let visible_h = src_h - src_y_start;
+
+        // Build a sub-region of the source data for blit_blend.
+        // blit_blend takes src_data, src_width, src_height, src_stride.
+        // We offset into the source buffer to skip the clipped rows/cols.
+        let src_offset = (src_y_start * s.surface.stride + src_x_start * s.surface.format.bytes_per_pixel()) as usize;
+
+        if src_offset < s.surface.data.len() {
+            dst.blit_blend(
+                &s.surface.data[src_offset..],
+                visible_w,
+                visible_h,
+                s.surface.stride,
+                dst_x,
+                dst_y,
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Damage tracking — dirty rectangle management for partial GPU transfer
 // ---------------------------------------------------------------------------
 

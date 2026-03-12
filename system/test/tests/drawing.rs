@@ -2042,3 +2042,243 @@ fn damage_tracker_multiple_content_and_status_rects() {
     assert_eq!(rects[0], drawing::DirtyRect::new(13, 48, 998, 22));
     assert_eq!(rects[1], drawing::DirtyRect::new(0, 740, 1024, 28));
 }
+
+// ---------------------------------------------------------------------------
+// CompositeSurface + multi-surface compositing
+// ---------------------------------------------------------------------------
+
+use drawing::CompositeSurface;
+
+fn make_composite_surface<'a>(
+    buf: &'a mut [u8],
+    width: u32,
+    height: u32,
+    x: i32,
+    y: i32,
+    z: u16,
+) -> CompositeSurface<'a> {
+    let bpp = PixelFormat::Bgra8888.bytes_per_pixel();
+    let stride = width * bpp;
+    assert!(buf.len() >= (stride * height) as usize);
+    for b in buf.iter_mut() {
+        *b = 0;
+    }
+    CompositeSurface {
+        surface: Surface {
+            data: buf,
+            width,
+            height,
+            stride,
+            format: PixelFormat::Bgra8888,
+        },
+        x,
+        y,
+        z,
+        visible: true,
+    }
+}
+
+#[test]
+fn composite_surface_stores_position_and_z() {
+    let mut buf = [0u8; 4 * 4 * 4];
+    let cs = make_composite_surface(&mut buf, 4, 4, 10, 20, 5);
+    assert_eq!(cs.x, 10);
+    assert_eq!(cs.y, 20);
+    assert_eq!(cs.z, 5);
+    assert!(cs.visible);
+}
+
+#[test]
+fn composite_two_opaque_surfaces_z_order() {
+    // Background (z=0) is blue, foreground (z=1) is red at (2,2).
+    // After compositing, the framebuffer should show red overlapping blue.
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut bg_buf = [0u8; 8 * 8 * 4];
+    let mut bg = make_composite_surface(&mut bg_buf, 8, 8, 0, 0, 0);
+    bg.surface.clear(Color::rgb(0, 0, 255));
+
+    let mut fg_buf = [0u8; 4 * 4 * 4];
+    let mut fg = make_composite_surface(&mut fg_buf, 4, 4, 2, 2, 1);
+    fg.surface.clear(Color::rgb(255, 0, 0));
+
+    // Composite back-to-front.
+    let surfaces: [&CompositeSurface; 2] = [&bg, &fg];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // Outside the red overlay: should be blue.
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(0, 0, 255)));
+    assert_eq!(dst.get_pixel(1, 1), Some(Color::rgb(0, 0, 255)));
+    // Inside the red overlay: should be red.
+    assert_eq!(dst.get_pixel(2, 2), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(dst.get_pixel(5, 5), Some(Color::rgb(255, 0, 0)));
+    // After the red overlay: should be blue.
+    assert_eq!(dst.get_pixel(6, 6), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn composite_respects_z_order_not_array_order() {
+    // Pass surfaces in reverse z-order — compositing should still sort by z.
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut bg_buf = [0u8; 8 * 8 * 4];
+    let mut bg = make_composite_surface(&mut bg_buf, 8, 8, 0, 0, 0);
+    bg.surface.clear(Color::rgb(0, 0, 255));
+
+    let mut fg_buf = [0u8; 4 * 4 * 4];
+    let mut fg = make_composite_surface(&mut fg_buf, 4, 4, 0, 0, 10);
+    fg.surface.clear(Color::rgb(255, 0, 0));
+
+    // Pass in wrong order (fg first, bg second).
+    let surfaces: [&CompositeSurface; 2] = [&fg, &bg];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // Red (higher z) should be on top of blue (lower z).
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    // Outside red (4..8): should be blue.
+    assert_eq!(dst.get_pixel(5, 5), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn composite_alpha_blending() {
+    // Semi-transparent surface over opaque background.
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut bg_buf = [0u8; 8 * 8 * 4];
+    let mut bg = make_composite_surface(&mut bg_buf, 8, 8, 0, 0, 0);
+    bg.surface.clear(Color::rgb(0, 0, 255));
+
+    let mut fg_buf = [0u8; 8 * 8 * 4];
+    let mut fg = make_composite_surface(&mut fg_buf, 8, 8, 0, 0, 1);
+    fg.surface.clear(Color::rgba(255, 0, 0, 128));
+
+    let surfaces: [&CompositeSurface; 2] = [&bg, &fg];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    let p = dst.get_pixel(4, 4).unwrap();
+    // Gamma-correct 50% red on blue: both channels > 140.
+    assert!(p.r > 140, "blended red should be > 140, got {}", p.r);
+    assert!(p.b > 140, "blended blue should be > 140, got {}", p.b);
+}
+
+#[test]
+fn composite_invisible_surface_skipped() {
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut bg_buf = [0u8; 8 * 8 * 4];
+    let mut bg = make_composite_surface(&mut bg_buf, 8, 8, 0, 0, 0);
+    bg.surface.clear(Color::rgb(0, 0, 255));
+
+    let mut fg_buf = [0u8; 8 * 8 * 4];
+    let mut fg = make_composite_surface(&mut fg_buf, 8, 8, 0, 0, 1);
+    fg.surface.clear(Color::rgb(255, 0, 0));
+    fg.visible = false;
+
+    let surfaces: [&CompositeSurface; 2] = [&bg, &fg];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // Red surface is invisible, should only see blue.
+    assert_eq!(dst.get_pixel(4, 4), Some(Color::rgb(0, 0, 255)));
+}
+
+#[test]
+fn composite_surface_with_negative_offset() {
+    // Surface partially outside the framebuffer (negative x/y).
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut s_buf = [0u8; 4 * 4 * 4];
+    let mut s = make_composite_surface(&mut s_buf, 4, 4, -2, -2, 0);
+    s.surface.clear(Color::rgb(0, 255, 0));
+
+    let surfaces: [&CompositeSurface; 1] = [&s];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // Only the visible portion should be blitted.
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(dst.get_pixel(1, 1), Some(Color::rgb(0, 255, 0)));
+    // Beyond the 4x4 surface from (-2,-2): pixel (2,2) should be black.
+    assert_eq!(dst.get_pixel(2, 2), Some(Color::BLACK));
+}
+
+#[test]
+fn composite_surface_partially_outside_right() {
+    // Surface extends past the right edge.
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut s_buf = [0u8; 4 * 4 * 4];
+    let mut s = make_composite_surface(&mut s_buf, 4, 4, 6, 6, 0);
+    s.surface.clear(Color::rgb(0, 255, 0));
+
+    let surfaces: [&CompositeSurface; 1] = [&s];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // Only (6,6) and (7,7) should be green.
+    assert_eq!(dst.get_pixel(6, 6), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(dst.get_pixel(7, 7), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(dst.get_pixel(5, 5), Some(Color::BLACK));
+}
+
+#[test]
+fn composite_three_layers() {
+    // background (z=0) → content (z=10) → chrome (z=20)
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut bg_buf = [0u8; 8 * 8 * 4];
+    let mut bg = make_composite_surface(&mut bg_buf, 8, 8, 0, 0, 0);
+    bg.surface.clear(Color::rgb(20, 20, 40));
+
+    let mut content_buf = [0u8; 6 * 6 * 4];
+    let mut content = make_composite_surface(&mut content_buf, 6, 6, 1, 1, 10);
+    content.surface.clear(Color::rgb(30, 30, 50));
+
+    let mut chrome_buf = [0u8; 8 * 2 * 4];
+    let mut chrome = make_composite_surface(&mut chrome_buf, 8, 2, 0, 0, 20);
+    chrome.surface.clear(Color::rgba(60, 60, 80, 200));
+
+    let surfaces: [&CompositeSurface; 3] = [&bg, &content, &chrome];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // Top-left pixel (0,0): bg under chrome (alpha blended).
+    let p00 = dst.get_pixel(0, 0).unwrap();
+    // Chrome rgba(60,60,80,200) over bg rgb(20,20,40) — should be close to chrome.
+    assert!(p00.r > 40 && p00.r < 70, "chrome over bg r={}", p00.r);
+
+    // Pixel at (1,1): still under chrome (row 0-1), so content is under chrome.
+    let p11 = dst.get_pixel(1, 1).unwrap();
+    assert!(p11.b > 50, "chrome over content b={}", p11.b);
+
+    // Pixel at (1,3): content area, no chrome overlap.
+    let p13 = dst.get_pixel(1, 3).unwrap();
+    assert_eq!(p13, Color::rgb(30, 30, 50));
+
+    // Pixel at (0,3): background, not covered by content (content starts at 1).
+    let p03 = dst.get_pixel(0, 3).unwrap();
+    assert_eq!(p03, Color::rgb(20, 20, 40));
+}
+
+#[test]
+fn composite_empty_surfaces_list() {
+    let mut dst_buf = [0u8; 4 * 4 * 4];
+    let mut dst = make_surface(&mut dst_buf, 4, 4);
+    dst.clear(Color::rgb(100, 100, 100));
+
+    let surfaces: [&CompositeSurface; 0] = [];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // Destination should be unchanged.
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(100, 100, 100)));
+}

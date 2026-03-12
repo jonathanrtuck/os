@@ -1,9 +1,14 @@
-//! Compositor — OS service with editor process separation.
+//! Compositor — multi-surface compositing model.
 //!
-//! Receives framebuffer config from init, keyboard events from the input
-//! driver, and write requests from the text editor. Routes input to the
-//! editor, applies write requests to the document (sole writer), and
-//! renders the result.
+//! Manages a set of independently-renderable surfaces, composited back-to-front
+//! into the framebuffer using alpha blending each frame.
+//!
+//! # Surface layers (z-order bottom to top)
+//!
+//!   z=0:  Background    — full-screen solid color
+//!   z=10: Content       — text editing area with cursor
+//!   z=20: Title bar     — translucent chrome overlay at top
+//!   z=20: Status bar    — translucent chrome overlay at bottom
 //!
 //! # Architecture
 //!
@@ -25,6 +30,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::vec;
 
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
 const FONT_SIZE: u32 = 16;
@@ -39,9 +45,20 @@ const MSG_CURSOR_MOVE: u32 = 32;
 const INPUT_HANDLE: u8 = 1;
 const GPU_HANDLE: u8 = 2;
 const EDITOR_HANDLE: u8 = 3;
-// Text area layout constants.
-const TEXT_X: u32 = 24;
-const TEXT_Y: u32 = 48;
+// Surface z-order constants.
+const Z_BACKGROUND: u16 = 0;
+const Z_CONTENT: u16 = 10;
+const Z_CHROME: u16 = 20;
+// Chrome dimensions.
+const TITLE_BAR_H: u32 = 36;
+const STATUS_BAR_H: u32 = 28;
+// Content area insets (relative to framebuffer).
+const CONTENT_MARGIN_X: u32 = 12;
+const CONTENT_MARGIN_TOP: u32 = 44;
+const CONTENT_MARGIN_BOTTOM: u32 = 32;
+// Text insets within the content surface.
+const TEXT_INSET_X: u32 = 12;
+const TEXT_INSET_Y: u32 = 4;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
 
@@ -51,10 +68,8 @@ static mut LINE_H: u32 = 20;
 static mut GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Cursor byte offset in the document. Updated by write requests.
 static mut CURSOR_POS: usize = 0;
-/// Previous cursor pixel Y (for dirty-rect clearing).
-static mut PREV_CURSOR_Y: [u32; 2] = [0; 2];
-/// Previous last-drawn pixel Y (for dirty-rect clearing).
-static mut PREV_LAST_Y: [u32; 2] = [0; 2];
+/// Previous last-drawn pixel Y per content surface render (for clearing).
+static mut PREV_LAST_Y: u32 = 0;
 /// Current back buffer index (0 or 1). Swapped after each present.
 static mut BACK_BUF_IDX: usize = 0;
 // Document shared buffer — owned exclusively by the compositor (sole writer).
@@ -203,139 +218,122 @@ fn doc_write_header() {
         core::ptr::write_volatile(DOC_BUF.add(8) as *mut u64, CURSOR_POS as u64);
     }
 }
-fn text_layout(fb_width: u32) -> drawing::TextLayout {
+/// Build a TextLayout for the content surface.
+fn content_text_layout(content_w: u32) -> drawing::TextLayout {
     let cache = unsafe { &*GLYPH_CACHE };
 
     drawing::TextLayout {
         char_width: unsafe { CHAR_W },
         line_height: cache.line_height,
-        max_width: fb_width - 48,
+        max_width: content_w - 2 * TEXT_INSET_X,
     }
 }
-fn max_text_y(fb_height: u32) -> u32 {
-    let text_area_h = fb_height.saturating_sub(48 + 32);
-
-    TEXT_Y + text_area_h - unsafe { LINE_H } - 8
+/// Maximum Y coordinate for text within the content surface (local coords).
+fn max_text_y_in_content(content_h: u32) -> u32 {
+    content_h.saturating_sub(unsafe { LINE_H } + TEXT_INSET_Y)
 }
-/// Draw static chrome (title bar, text area background/border). Called once.
-fn render_chrome(fb: &mut drawing::Surface, cache: &drawing::GlyphCache) {
+
+// ---------------------------------------------------------------------------
+// Surface rendering functions
+// ---------------------------------------------------------------------------
+
+/// Render the background surface: solid dark color, full screen.
+fn render_background(surf: &mut drawing::Surface) {
     use drawing::Color;
 
-    fb.clear(Color::rgb(18, 18, 26));
-    fb.fill_rect(0, 0, fb.width, 36, Color::rgb(30, 30, 48));
-
-    draw_string(fb, 12, 10, b"Document OS", cache, Color::rgb(200, 200, 220));
-
-    let subtitle = b"Editor Separation Demo";
-    let sub_w = subtitle.len() as u32 * unsafe { CHAR_W };
-    let sx = fb.width.saturating_sub(12 + sub_w);
-
-    draw_string(fb, sx, 10, subtitle, cache, Color::rgb(90, 90, 110));
-
-    fb.draw_hline(0, 36, fb.width, Color::rgb(60, 60, 80));
-
-    let text_area_h = fb.height.saturating_sub(48 + 32);
-
-    fb.fill_rect(
-        12,
-        TEXT_Y - 4,
-        fb.width - 24,
-        text_area_h,
-        Color::rgb(24, 24, 36),
-    );
-    fb.draw_rect(
-        12,
-        TEXT_Y - 4,
-        fb.width - 24,
-        text_area_h,
-        Color::rgb(50, 50, 70),
-    );
+    surf.clear(Color::rgb(18, 18, 26));
 }
-/// Redraw text content, cursor, and status bar. Only touches the text area
-/// interior and status bar — leaves the static chrome untouched.
-///
-/// Dirty-rect optimization: clears from the previous cursor Y downward,
-/// then delegates to TextLayout::draw for positioning and rendering.
-///
-/// Populates the DamageTracker with the pixel regions that were modified:
-/// - Text content region (from TEXT_Y to the last drawn line + cursor height)
-/// - Status bar region
-fn render_content(
-    fb: &mut drawing::Surface,
+
+/// Render the content surface: text area background, text content, and cursor.
+fn render_content_surface(
+    surf: &mut drawing::Surface,
     text: &[u8],
-    buf_idx: usize,
-    damage: &mut drawing::DamageTracker,
 ) {
     use drawing::Color;
 
     let bg = Color::rgb(24, 24, 36);
-    let my = max_text_y(fb.height);
-    let layout = text_layout(fb.width);
     let cache = unsafe { &*GLYPH_CACHE };
     let cursor_pos = unsafe { CURSOR_POS };
-    let prev_last_y = unsafe { PREV_LAST_Y[buf_idx] };
-    // Clear the entire text region that was previously drawn. draw_tt()
-    // re-renders ALL text from the top, so we must clear from the top of
-    // the text area down through the previous last row (plus cursor height).
-    // Without this, lines above the cursor would accumulate alpha blending
-    // across frames, producing progressively thicker/bolder strokes.
-    let clear_end_y = TEXT_Y + prev_last_y + 2 * cache.line_height;
-    let text_bottom = fb.height.saturating_sub(32) - 1;
-    let clear_end_y = if clear_end_y > text_bottom {
-        text_bottom
+    let prev_last_y = unsafe { PREV_LAST_Y };
+    let content_w = surf.width;
+    let content_h = surf.height;
+
+    // Clear the text rendering area. We clear from top through previous
+    // last rendered Y + some margin. On first render, clear everything.
+    let clear_end_y = TEXT_INSET_Y + prev_last_y + 2 * cache.line_height;
+    let clear_end_y = if clear_end_y > content_h {
+        content_h
     } else {
         clear_end_y
     };
 
-    if TEXT_Y < clear_end_y {
-        fb.fill_rect(13, TEXT_Y, fb.width - 26, clear_end_y - TEXT_Y, bg);
+    if TEXT_INSET_Y < clear_end_y {
+        surf.fill_rect(0, TEXT_INSET_Y, content_w, clear_end_y - TEXT_INSET_Y, bg);
     }
 
-    let (_, cursor_y) = layout.draw_tt(
-        fb,
+    // Also fill the top inset (above text).
+    surf.fill_rect(0, 0, content_w, TEXT_INSET_Y, bg);
+
+    let layout = content_text_layout(content_w);
+    let my = max_text_y_in_content(content_h);
+
+    let (_, _cursor_y) = layout.draw_tt(
+        surf,
         text,
-        TEXT_X,
-        TEXT_Y,
+        TEXT_INSET_X,
+        TEXT_INSET_Y,
         cursor_pos,
         cache,
         Color::rgb(200, 210, 230),
         Color::rgb(100, 180, 255),
         my,
     );
-    // Track dirty state for next frame (per-buffer for double buffering).
+
+    // Track last rendered Y for next frame's clear optimization.
     let (_, last_y) = layout.byte_to_xy(text, text.len());
 
-    unsafe {
-        PREV_CURSOR_Y[buf_idx] = cursor_y - TEXT_Y;
-        PREV_LAST_Y[buf_idx] = last_y;
-    }
+    unsafe { PREV_LAST_Y = last_y };
 
-    // Record text content dirty rect: from top of text area to the end
-    // of the cleared/rendered region. This covers the area we modified.
-    let content_dirty_h = if clear_end_y > TEXT_Y {
-        clear_end_y - TEXT_Y
-    } else {
-        // First frame or no previous content: dirty from TEXT_Y through cursor
-        cursor_y - TEXT_Y + cache.line_height
-    };
-    damage.add(
-        13,
-        TEXT_Y as u16,
-        (fb.width - 26) as u16,
-        content_dirty_h as u16,
-    );
-
-    render_status(fb, text.len(), damage);
+    // Draw a subtle border around the content surface.
+    surf.draw_rect(0, 0, content_w, content_h, Color::rgb(50, 50, 70));
 }
-fn render_status(fb: &mut drawing::Surface, len: usize, damage: &mut drawing::DamageTracker) {
+
+/// Render the title bar chrome surface (translucent overlay).
+fn render_title_bar(surf: &mut drawing::Surface) {
     use drawing::Color;
 
     let cache = unsafe { &*GLYPH_CACHE };
-    let bar_y = fb.height.saturating_sub(28);
 
-    fb.fill_rect(0, bar_y, fb.width, 28, Color::rgb(30, 30, 48));
-    fb.draw_hline(0, bar_y, fb.width, Color::rgb(60, 60, 80));
+    // Translucent background.
+    surf.clear(Color::rgba(30, 30, 48, 220));
 
+    // Title text.
+    draw_string(surf, 12, 10, b"Document OS", cache, Color::rgb(200, 200, 220));
+
+    // Subtitle on the right.
+    let subtitle = b"Multi-Surface Compositor";
+    let sub_w = subtitle.len() as u32 * unsafe { CHAR_W };
+    let sx = surf.width.saturating_sub(12 + sub_w);
+
+    draw_string(surf, sx, 10, subtitle, cache, Color::rgb(90, 90, 110));
+
+    // Bottom edge line.
+    surf.draw_hline(0, surf.height - 1, surf.width, Color::rgba(60, 60, 80, 200));
+}
+
+/// Render the status bar chrome surface (translucent overlay).
+fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
+    use drawing::Color;
+
+    let cache = unsafe { &*GLYPH_CACHE };
+
+    // Translucent background.
+    surf.clear(Color::rgba(30, 30, 48, 220));
+
+    // Top edge line.
+    surf.draw_hline(0, 0, surf.width, Color::rgba(60, 60, 80, 200));
+
+    // Status text.
     let mut buf = [0u8; 64];
     let mut ci = 0;
     let prefix = b"Editor process active | ";
@@ -347,13 +345,13 @@ fn render_status(fb: &mut drawing::Surface, len: usize, damage: &mut drawing::Da
         }
     }
 
-    if len == 0 {
+    if text_len == 0 {
         buf[ci] = b'0';
         ci += 1;
     } else {
         let mut digits = [0u8; 6];
         let mut di = 6;
-        let mut n = len;
+        let mut n = text_len;
 
         while n > 0 {
             di -= 1;
@@ -378,21 +376,37 @@ fn render_status(fb: &mut drawing::Surface, len: usize, damage: &mut drawing::Da
     }
 
     draw_string(
-        fb,
+        surf,
         12,
-        bar_y + 6,
+        6,
         &buf[..ci],
         cache,
         Color::rgb(130, 130, 150),
     );
+}
 
-    // Record status bar dirty rect.
-    damage.add(0, bar_y as u16, fb.width as u16, 28);
+/// Allocate a pixel buffer for a surface with given dimensions.
+fn alloc_surface_buf(width: u32, height: u32) -> alloc::vec::Vec<u8> {
+    let stride = width * 4; // BGRA8888
+    let size = (stride * height) as usize;
+
+    vec![0u8; size]
+}
+
+/// Build a Surface from a mutable byte slice.
+fn make_surf(buf: &mut [u8], w: u32, h: u32) -> drawing::Surface<'_> {
+    drawing::Surface {
+        data: buf,
+        width: w,
+        height: h,
+        stride: w * 4,
+        format: drawing::PixelFormat::Bgra8888,
+    }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    sys::print(b"  \xF0\x9F\x8E\xA8 compositor - starting\n");
+    sys::print(b"  \xF0\x9F\x8E\xA8 compositor - starting (multi-surface)\n");
 
     // Read compositor config from ring buffer (channel 0 = init).
     let init_ch = unsafe { ipc::Channel::from_base(channel_shm_va(0), ipc::PAGE_SIZE, 1) };
@@ -491,12 +505,9 @@ pub extern "C" fn _start() -> ! {
     // -----------------------------------------------------------------------
     // Double buffering: two separate framebuffer allocations.
     // Buffer 0 at fb_va, buffer 1 at fb_va2.
-    // The compositor renders into the back buffer, then presents it.
+    // The compositor composites surfaces into the back buffer, then presents.
     // -----------------------------------------------------------------------
 
-    // Static storage for the two surface base pointers. We need stable
-    // references across iterations, so we store the raw pointers and
-    // rebuild Surfaces on demand.
     static mut FB_PTRS: [*mut u8; 2] = [core::ptr::null_mut(); 2];
 
     unsafe {
@@ -504,7 +515,7 @@ pub extern "C" fn _start() -> ! {
         FB_PTRS[1] = fb_va2 as *mut u8;
     }
 
-    let make_surface = |idx: usize| -> drawing::Surface<'static> {
+    let make_fb_surface = |idx: usize| -> drawing::Surface<'static> {
         let ptr = unsafe { FB_PTRS[idx] };
         let data = unsafe { core::slice::from_raw_parts_mut(ptr, fb_size as usize) };
 
@@ -517,25 +528,104 @@ pub extern "C" fn _start() -> ! {
         }
     };
 
-    // Render chrome on BOTH buffers (chrome is static, drawn once).
+    // -----------------------------------------------------------------------
+    // Allocate surface pixel buffers.
+    //
+    // Each surface is an independently-renderable pixel buffer. On each
+    // frame, all surfaces are composited back-to-front into the framebuffer.
+    // -----------------------------------------------------------------------
+
+    // Content area dimensions (inside the chrome margins).
+    let content_w = fb_width - 2 * CONTENT_MARGIN_X;
+    let content_h = fb_height.saturating_sub(CONTENT_MARGIN_TOP + CONTENT_MARGIN_BOTTOM);
+    let content_x = CONTENT_MARGIN_X as i32;
+    let content_y = CONTENT_MARGIN_TOP as i32;
+
+    sys::print(b"     allocating surface buffers\n");
+
+    // Background surface (z=0): full-screen solid color.
+    let mut bg_buf = alloc_surface_buf(fb_width, fb_height);
+    // Content surface (z=10): text editing area.
+    let mut content_buf = alloc_surface_buf(content_w, content_h);
+    // Title bar chrome (z=20): translucent overlay at top.
+    let mut title_buf = alloc_surface_buf(fb_width, TITLE_BAR_H);
+    // Status bar chrome (z=20): translucent overlay at bottom.
+    let mut status_buf = alloc_surface_buf(fb_width, STATUS_BAR_H);
+
+    sys::print(b"     surface buffers allocated\n");
+
+    // -----------------------------------------------------------------------
+    // Render initial surface contents.
+    // -----------------------------------------------------------------------
+
+    // Background: solid dark color.
     {
-        let mut fb0 = make_surface(0);
-
-        render_chrome(&mut fb0, unsafe { &*GLYPH_CACHE });
-
-        let mut fb1 = make_surface(1);
-
-        render_chrome(&mut fb1, unsafe { &*GLYPH_CACHE });
+        let mut bg_surf = make_surf(&mut bg_buf, fb_width, fb_height);
+        render_background(&mut bg_surf);
     }
 
-    // Render initial content into buffer 0 and present it (full screen).
+    // Content: text area background + cursor.
     {
-        let mut fb0 = make_surface(0);
-        let mut damage = drawing::DamageTracker::new(fb_width as u16, fb_height as u16);
+        let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
+        render_content_surface(&mut content_surf, doc_content());
+    }
 
-        damage.mark_full_screen(); // initial render = full screen
+    // Title bar chrome.
+    {
+        let mut title_surf = make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
+        render_title_bar(&mut title_surf);
+    }
 
-        render_content(&mut fb0, doc_content(), 0, &mut damage);
+    // Status bar chrome.
+    {
+        let mut status_surf = make_surf(&mut status_buf, fb_width, STATUS_BAR_H);
+        render_status_bar(&mut status_surf, 0);
+    }
+
+    sys::print(b"     surfaces rendered, compositing initial frame\n");
+
+    // -----------------------------------------------------------------------
+    // Composite initial frame into buffer 0 and present.
+    // -----------------------------------------------------------------------
+    let status_y = (fb_height - STATUS_BAR_H) as i32;
+
+    {
+        let mut fb0 = make_fb_surface(0);
+
+        // Build composite surface references.
+        let bg_cs = drawing::CompositeSurface {
+            surface: make_surf(&mut bg_buf, fb_width, fb_height),
+            x: 0,
+            y: 0,
+            z: Z_BACKGROUND,
+            visible: true,
+        };
+        let content_cs = drawing::CompositeSurface {
+            surface: make_surf(&mut content_buf, content_w, content_h),
+            x: content_x,
+            y: content_y,
+            z: Z_CONTENT,
+            visible: true,
+        };
+        let title_cs = drawing::CompositeSurface {
+            surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
+            x: 0,
+            y: 0,
+            z: Z_CHROME,
+            visible: true,
+        };
+        let status_cs = drawing::CompositeSurface {
+            surface: make_surf(&mut status_buf, fb_width, STATUS_BAR_H),
+            x: 0,
+            y: status_y,
+            z: Z_CHROME,
+            visible: true,
+        };
+
+        let surfaces: [&drawing::CompositeSurface; 4] = [
+            &bg_cs, &content_cs, &title_cs, &status_cs,
+        ];
+        drawing::composite_surfaces(&mut fb0, &surfaces);
     }
 
     // Initial present: full screen (rect_count = 0 signals full transfer).
@@ -554,16 +644,17 @@ pub extern "C" fn _start() -> ! {
     // Buffer 0 is now the front (being displayed). Next render goes to buffer 1.
     unsafe { BACK_BUF_IDX = 1 };
 
-    sys::print(b"     damage-tracked double-buffer, initial frame rendered, entering event loop\n");
+    sys::print(b"     multi-surface compositor ready, entering event loop\n");
 
     // -----------------------------------------------------------------------
     // Event loop: wait for input or editor write requests.
     //
-    // Input events from the input driver are forwarded to the editor.
-    // Write requests from the editor are applied to the document (sole writer)
-    // and the display is re-rendered once per batch (not per message).
-    //
-    // Double buffering: render into back buffer, present it, swap.
+    // On each content change:
+    //   1. Re-render the content surface
+    //   2. Re-render the status bar surface (char count changed)
+    //   3. Composite all surfaces into the back framebuffer
+    //   4. Present the back buffer to the GPU
+    //   5. Swap back/front buffers
     // -----------------------------------------------------------------------
     loop {
         let _ = sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX);
@@ -579,8 +670,6 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Apply write requests from the editor (sole writer).
-        // Document mutations are applied immediately; rendering is deferred
-        // until all pending messages are drained (batch rendering).
         while editor_ch.try_recv(&mut msg) {
             match msg.msg_type {
                 MSG_WRITE_INSERT => {
@@ -622,31 +711,66 @@ pub extern "C" fn _start() -> ! {
 
         if changed {
             let back = unsafe { BACK_BUF_IDX };
-            let mut fb = make_surface(back);
-            let mut damage =
-                drawing::DamageTracker::new(fb_width as u16, fb_height as u16);
 
-            render_content(&mut fb, doc_content(), back, &mut damage);
+            // 1. Re-render the content surface.
+            {
+                let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
+                render_content_surface(&mut content_surf, doc_content());
+            }
 
-            // Build the present payload with dirty rects.
-            let mut payload = PresentPayload {
+            // 2. Re-render the status bar (char count changed).
+            {
+                let mut status_surf = make_surf(&mut status_buf, fb_width, STATUS_BAR_H);
+                render_status_bar(&mut status_surf, unsafe { DOC_LEN });
+            }
+
+            // 3. Composite all surfaces into the back framebuffer.
+            {
+                let mut fb = make_fb_surface(back);
+
+                let bg_cs = drawing::CompositeSurface {
+                    surface: make_surf(&mut bg_buf, fb_width, fb_height),
+                    x: 0,
+                    y: 0,
+                    z: Z_BACKGROUND,
+                    visible: true,
+                };
+                let content_cs = drawing::CompositeSurface {
+                    surface: make_surf(&mut content_buf, content_w, content_h),
+                    x: content_x,
+                    y: content_y,
+                    z: Z_CONTENT,
+                    visible: true,
+                };
+                let title_cs = drawing::CompositeSurface {
+                    surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
+                    x: 0,
+                    y: 0,
+                    z: Z_CHROME,
+                    visible: true,
+                };
+                let status_cs = drawing::CompositeSurface {
+                    surface: make_surf(&mut status_buf, fb_width, STATUS_BAR_H),
+                    x: 0,
+                    y: status_y,
+                    z: Z_CHROME,
+                    visible: true,
+                };
+
+                let surfaces: [&drawing::CompositeSurface; 4] = [
+                    &bg_cs, &content_cs, &title_cs, &status_cs,
+                ];
+                drawing::composite_surfaces(&mut fb, &surfaces);
+            }
+
+            // 4. Present: full-screen transfer for now (multi-surface
+            //    compositing touches most of the framebuffer anyway).
+            let payload = PresentPayload {
                 buffer_index: back as u32,
-                rect_count: 0,
+                rect_count: 0, // full screen
                 rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
                 _pad: [0; 4],
             };
-
-            if let Some(rects) = damage.dirty_rects() {
-                let n = if rects.len() > 6 { 6 } else { rects.len() };
-                payload.rect_count = n as u32;
-                let mut i = 0;
-                while i < n {
-                    payload.rects[i] = rects[i];
-                    i += 1;
-                }
-            }
-            // else: rect_count stays 0 → GPU does full-screen transfer.
-
             let present_msg =
                 unsafe { ipc::Message::from_payload(MSG_PRESENT, &payload) };
 
@@ -654,7 +778,7 @@ pub extern "C" fn _start() -> ! {
 
             let _ = sys::channel_signal(GPU_HANDLE);
 
-            // Swap: the just-presented buffer becomes front, the other becomes back.
+            // 5. Swap back/front buffers.
             unsafe { BACK_BUF_IDX = 1 - back };
         }
     }
