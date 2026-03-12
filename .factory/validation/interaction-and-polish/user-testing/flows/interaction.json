@@ -1,0 +1,84 @@
+{
+  "flowId": "interaction",
+  "testedAt": "2026-03-12T18:30:00Z",
+  "credentials": {
+    "account": "n/a",
+    "namespace": "interaction"
+  },
+  "toolsUsed": ["QEMU screendump", "Read tool"],
+  "assertions": [
+    {
+      "id": "VAL-INT-001",
+      "title": "Text selection via keyboard",
+      "status": "pass",
+      "steps": [
+        { "action": "Type 'hello world', press Home, then Shift+Right 5 times", "expected": "First 5 characters 'hello' highlighted", "observed": "Blue highlight visible on 'hello', cursor at position 5, rest of text ('world') unhighlighted" }
+      ],
+      "evidence": {
+        "screenshots": ["qemu-screen-sel.png (shows 'hello' selected with blue highlight, cursor after 'o')"],
+        "consoleErrors": "n/a"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-INT-002",
+      "title": "Selection highlight rendering",
+      "status": "pass",
+      "steps": [
+        { "action": "Observe selection highlight in screenshot", "expected": "Visually distinct highlight, readable text within selection", "observed": "Semi-transparent blue overlay (rgba 50,80,160,180) clearly visible against dark background. Selected text 'hello' remains fully readable through the highlight. Sufficient contrast." }
+      ],
+      "evidence": {
+        "screenshots": ["qemu-screen-sel.png (blue highlight on 'hello', text readable through it)"],
+        "consoleErrors": "n/a"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-INT-003",
+      "title": "Vertical scrolling in both directions",
+      "status": "pass",
+      "steps": [
+        { "action": "Type 40 lines ('line1' through 'line40' with Enter between each)", "expected": "Viewport scrolls down, early lines scroll off top", "observed": "After typing all lines, viewport shows line7 through line40 + cursor. Lines 1-6 scrolled off screen. Content clipped cleanly at title bar and status bar boundaries." },
+        { "action": "Press left arrow 300 times to navigate cursor back to position 0", "expected": "Viewport scrolls back up to show first lines", "observed": "Viewport scrolled back, showing line1 through line35. Cursor at position 0 (start of line1). Content clipped cleanly at both edges." }
+      ],
+      "evidence": {
+        "screenshots": ["qemu-screen-scroll.png (scrolled down: lines 7-40 visible, cursor at bottom)", "qemu-screen-scrollup2.png (scrolled back up: lines 1-35 visible, cursor at top)"],
+        "consoleErrors": "n/a"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-INT-004",
+      "title": "Cursor visibility and positioning",
+      "status": "pass",
+      "steps": [
+        { "action": "Boot and observe cursor", "expected": "Cursor visible at position 0", "observed": "Blue cursor bar visible at top-left of content area (boot screenshot)" },
+        { "action": "Type 'hello world', observe cursor", "expected": "Cursor after 'd'", "observed": "Cursor bar visible at end of 'hello world' text, status shows '11 chars'" },
+        { "action": "Press Home", "expected": "Cursor moves to position 0", "observed": "Cursor bar at beginning of line (confirmed by subsequent shift-right selecting from position 0)" },
+        { "action": "Navigate through 40 lines with arrow keys", "expected": "Cursor moves correctly between lines", "observed": "Up arrow moves cursor to previous lines, cursor always visible after scrolling. Left arrow navigates through all 271 chars back to position 0." }
+      ],
+      "evidence": {
+        "screenshots": ["qemu-screen-boot.png (cursor at pos 0)", "qemu-screen-typed.png (cursor after 'hello world')", "qemu-screen-scrollup2.png (cursor at pos 0 after navigation)"],
+        "consoleErrors": "n/a"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-INT-005",
+      "title": "Selection interacts correctly with editing",
+      "status": "pass",
+      "steps": [
+        { "action": "Select 'hello' (5 chars) via Shift+Right, then type 'X'", "expected": "Selection replaced with 'X', text becomes 'X world'", "observed": "Text shows 'X world' (was 'hello world'), status shows '7 chars'. Cursor correctly positioned after 'X'." },
+        { "action": "Press Home, Shift+Right to select 'X', then press Backspace", "expected": "'X' deleted, text becomes ' world'", "observed": "Text shows ' world', status shows '6 chars'. Cursor at position 0. Entire selection deleted, not just one character." }
+      ],
+      "evidence": {
+        "screenshots": ["qemu-screen-replace.png (X world with 7 chars)", "qemu-screen-seldel.png ( world with 6 chars)"],
+        "consoleErrors": "n/a"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "All 5 interaction assertions pass. Selection via Shift+arrow works correctly, highlight is visible and readable, scrolling works in both directions with clean clipping, cursor is visible and correctly positioned, selection-edit interactions (replace and delete) work as expected."
+}
