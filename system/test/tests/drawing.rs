@@ -944,7 +944,6 @@ fn blit_blend_mixed_alpha_pixels() {
 use drawing::{TrueTypeFont, RasterBuffer, RasterScratch, GlyphOutline};
 
 const PROGGY_CLEAN: &[u8] = include_bytes!("../../libraries/drawing/ProggyClean.ttf");
-const INTER_REGULAR: &[u8] = include_bytes!("../../libraries/drawing/Inter-Regular.ttf");
 const NUNITO_SANS: &[u8] = include_bytes!("../../libraries/drawing/NunitoSans-Regular.ttf");
 const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../libraries/drawing/SourceCodePro-Regular.ttf");
 
@@ -1177,54 +1176,6 @@ fn ttf_rasterize_buffer_too_small() {
 
     let metrics = font.rasterize('M', 64, &mut raster, &mut scratch);
     assert!(metrics.is_none(), "64px 'M' should not fit in 4x4 buffer");
-}
-
-// ---------------------------------------------------------------------------
-// Inter font tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn inter_parse() {
-    assert!(TrueTypeFont::new(INTER_REGULAR).is_some());
-}
-
-#[test]
-fn inter_rasterize_all_printable_ascii() {
-    let font = TrueTypeFont::new(INTER_REGULAR).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-
-    for c in 0x20u8..=0x7Eu8 {
-        let ch = c as char;
-        let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
-        let metrics = font.rasterize(ch, 16, &mut raster, &mut scratch);
-        assert!(
-            metrics.is_some(),
-            "Inter: should rasterize '{}' (0x{:02x}) at 16px",
-            ch, c,
-        );
-    }
-}
-
-#[test]
-fn inter_variable_width() {
-    let font = TrueTypeFont::new(INTER_REGULAR).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-
-    let mut raster_i = RasterBuffer { data: &mut buf, width: 128, height: 128 };
-    let mi = font.rasterize('i', 16, &mut raster_i, &mut scratch).unwrap();
-
-    let mut buf2 = [0u8; 128 * 128];
-    let mut raster_m = RasterBuffer { data: &mut buf2, width: 128, height: 128 };
-    let mm = font.rasterize('M', 16, &mut raster_m, &mut scratch).unwrap();
-
-    // Inter is proportional: 'M' should be wider than 'i'.
-    assert!(
-        mm.advance > mi.advance,
-        "Inter: 'M' advance ({}) should be > 'i' advance ({})",
-        mm.advance, mi.advance,
-    );
 }
 
 // ---------------------------------------------------------------------------

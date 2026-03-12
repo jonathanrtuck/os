@@ -43,11 +43,11 @@ const EDITOR_HANDLE: u8 = 3;
 // Text area layout constants.
 const TEXT_X: u32 = 24;
 const TEXT_Y: u32 = 48;
-static mut CHAR_W: u32 = 8;
-static mut LINE_H: u32 = 20;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
 
+static mut CHAR_W: u32 = 8;
+static mut LINE_H: u32 = 20;
 /// Pre-rasterized glyph cache (heap-allocated, initialized at startup).
 static mut GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Cursor byte offset in the document. Updated by write requests.
@@ -88,14 +88,14 @@ struct KeyEvent {
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct WriteInsert {
+struct WriteDelete {
     position: u32,
-    byte: u8,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct WriteDelete {
+struct WriteInsert {
     position: u32,
+    byte: u8,
 }
 
 fn channel_shm_va(idx: usize) -> usize {
@@ -202,6 +202,7 @@ fn render_chrome(fb: &mut drawing::Surface, cache: &drawing::GlyphCache) {
 
     fb.clear(Color::rgb(18, 18, 26));
     fb.fill_rect(0, 0, fb.width, 36, Color::rgb(30, 30, 48));
+
     draw_string(fb, 12, 10, b"Document OS", cache, Color::rgb(200, 200, 220));
 
     let subtitle = b"Editor Separation Demo";
@@ -209,6 +210,7 @@ fn render_chrome(fb: &mut drawing::Surface, cache: &drawing::GlyphCache) {
     let sx = fb.width.saturating_sub(12 + sub_w);
 
     draw_string(fb, sx, 10, subtitle, cache, Color::rgb(90, 90, 110));
+
     fb.draw_hline(0, 36, fb.width, Color::rgb(60, 60, 80));
 
     let text_area_h = fb.height.saturating_sub(48 + 32);
@@ -274,7 +276,6 @@ fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
         Color::rgb(100, 180, 255),
         my,
     );
-
     // Track dirty state for next frame.
     let (_, last_y) = layout.byte_to_xy(text, text.len());
 
@@ -335,7 +336,14 @@ fn render_status(fb: &mut drawing::Surface, len: usize) {
         }
     }
 
-    draw_string(fb, 12, bar_y + 6, &buf[..ci], cache, Color::rgb(130, 130, 150));
+    draw_string(
+        fb,
+        12,
+        bar_y + 6,
+        &buf[..ci],
+        cache,
+        Color::rgb(130, 130, 150),
+    );
 }
 
 #[unsafe(no_mangle)]
@@ -511,6 +519,7 @@ pub extern "C" fn _start() -> ! {
 
         if changed {
             render_content(&mut fb, doc_content());
+
             gpu_ch.send(&present_msg);
 
             let _ = sys::channel_signal(GPU_HANDLE);

@@ -25,6 +25,13 @@ include!("font_data.rs");
 include!("rasterizer.rs");
 include!("truetype.rs");
 
+const GLYPH_FIRST: u8 = 0x20;
+const GLYPH_LAST: u8 = 0x7E;
+const GLYPH_COUNT: usize = (GLYPH_LAST - GLYPH_FIRST + 1) as usize; // 95
+const GLYPH_MAX_W: usize = 48;
+const GLYPH_MAX_H: usize = 48;
+const GLYPH_BUF_SIZE: usize = GLYPH_MAX_W * GLYPH_MAX_H;
+
 /// Built-in 8×16 VGA-style bitmap font covering printable ASCII (0x20–0x7E).
 pub const FONT_8X16: BitmapFont = BitmapFont {
     glyph_width: 8,
@@ -47,6 +54,16 @@ pub struct BitmapFont {
     first: u8,
     last: u8,
 }
+/// Pre-rasterized metrics for one cached glyph.
+#[derive(Clone, Copy)]
+pub struct CachedGlyph {
+    pub width: u32,
+    pub height: u32,
+    pub bearing_x: i32,
+    pub bearing_y: i32,
+    pub advance: u32,
+    buf_offset: usize,
+}
 /// A color in canonical RGBA order. Converted to the target pixel format
 /// at the point of writing — callers always work in RGBA regardless of the
 /// underlying buffer format.
@@ -56,6 +73,14 @@ pub struct Color {
     pub g: u8,
     pub b: u8,
     pub a: u8,
+}
+/// Fixed-size glyph cache for printable ASCII (0x20–0x7E).
+/// Coverage maps are stored in a single contiguous buffer.
+/// Total size: ~220 KiB (95 glyphs * 48*48 bytes coverage + metadata).
+pub struct GlyphCache {
+    glyphs: [CachedGlyph; GLYPH_COUNT],
+    coverage: [u8; GLYPH_COUNT * GLYPH_BUF_SIZE],
+    pub line_height: u32,
 }
 /// A mutable view into a pixel buffer.
 ///
@@ -80,98 +105,6 @@ pub struct TextLayout {
     pub char_width: u32,
     pub line_height: u32,
     pub max_width: u32,
-}
-
-// ---------------------------------------------------------------------------
-// Glyph cache — pre-rasterized TrueType glyphs for printable ASCII
-// ---------------------------------------------------------------------------
-
-const GLYPH_FIRST: u8 = 0x20;
-const GLYPH_LAST: u8 = 0x7E;
-const GLYPH_COUNT: usize = (GLYPH_LAST - GLYPH_FIRST + 1) as usize; // 95
-const GLYPH_MAX_W: usize = 48;
-const GLYPH_MAX_H: usize = 48;
-const GLYPH_BUF_SIZE: usize = GLYPH_MAX_W * GLYPH_MAX_H;
-
-/// Pre-rasterized metrics for one cached glyph.
-#[derive(Clone, Copy)]
-pub struct CachedGlyph {
-    pub width: u32,
-    pub height: u32,
-    pub bearing_x: i32,
-    pub bearing_y: i32,
-    pub advance: u32,
-    buf_offset: usize,
-}
-
-/// Fixed-size glyph cache for printable ASCII (0x20–0x7E).
-/// Coverage maps are stored in a single contiguous buffer.
-/// Total size: ~220 KiB (95 glyphs * 48*48 bytes coverage + metadata).
-pub struct GlyphCache {
-    glyphs: [CachedGlyph; GLYPH_COUNT],
-    coverage: [u8; GLYPH_COUNT * GLYPH_BUF_SIZE],
-    pub line_height: u32,
-}
-
-impl GlyphCache {
-    /// Zero-initialize the cache. The struct is ~220 KiB -- callers with
-    /// limited stack should allocate on the heap first, then call `populate`.
-    pub const fn zeroed() -> Self {
-        GlyphCache {
-            glyphs: [CachedGlyph {
-                width: 0,
-                height: 0,
-                bearing_x: 0,
-                bearing_y: 0,
-                advance: 0,
-                buf_offset: 0,
-            }; GLYPH_COUNT],
-            coverage: [0u8; GLYPH_COUNT * GLYPH_BUF_SIZE],
-            line_height: 0,
-        }
-    }
-
-    /// Rasterize all printable ASCII glyphs into this cache in place.
-    /// Caller provides scratch space (~60 KiB) to avoid stack overflow.
-    pub fn populate(&mut self, font: &TrueTypeFont, size_px: u32, scratch: &mut RasterScratch) {
-        self.line_height = size_px + size_px / 4;
-
-        for i in 0..GLYPH_COUNT {
-            let ch = (GLYPH_FIRST + i as u8) as char;
-            let buf_offset = i * GLYPH_BUF_SIZE;
-            let buf = &mut self.coverage[buf_offset..buf_offset + GLYPH_BUF_SIZE];
-            let mut raster = RasterBuffer {
-                data: buf,
-                width: GLYPH_MAX_W as u32,
-                height: GLYPH_MAX_H as u32,
-            };
-
-            if let Some(m) = font.rasterize(ch, size_px, &mut raster, &mut *scratch) {
-                self.glyphs[i] = CachedGlyph {
-                    width: m.width,
-                    height: m.height,
-                    bearing_x: m.bearing_x,
-                    bearing_y: m.bearing_y,
-                    advance: m.advance,
-                    buf_offset,
-                };
-            }
-        }
-    }
-
-    /// Get cached glyph data for a character (must be 0x20..=0x7E).
-    pub fn get(&self, ch: u8) -> Option<(&CachedGlyph, &[u8])> {
-        if ch < GLYPH_FIRST || ch > GLYPH_LAST {
-            return None;
-        }
-
-        let idx = (ch - GLYPH_FIRST) as usize;
-        let g = &self.glyphs[idx];
-        let len = (g.width * g.height) as usize;
-        let cov = &self.coverage[g.buf_offset..g.buf_offset + len];
-
-        Some((g, cov))
-    }
 }
 
 /// Pixel byte ordering within each pixel.
@@ -209,15 +142,6 @@ impl Color {
     pub const WHITE: Color = Color::rgb(255, 255, 255);
     pub const BLACK: Color = Color::rgb(0, 0, 0);
     pub const TRANSPARENT: Color = Color::rgba(0, 0, 0, 0);
-
-    /// Opaque color from RGB components.
-    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Color { r, g, b, a: 255 }
-    }
-    /// Color with explicit alpha.
-    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
-        Color { r, g, b, a }
-    }
 
     /// Decode from pixel bytes in the given format.
     fn decode(bytes: &[u8], format: PixelFormat) -> Self {
@@ -271,6 +195,72 @@ impl Color {
             a: if out_a > 255 { 255 } else { out_a as u8 },
         }
     }
+    /// Opaque color from RGB components.
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Color { r, g, b, a: 255 }
+    }
+    /// Color with explicit alpha.
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Color { r, g, b, a }
+    }
+}
+impl GlyphCache {
+    /// Get cached glyph data for a character (must be 0x20..=0x7E).
+    pub fn get(&self, ch: u8) -> Option<(&CachedGlyph, &[u8])> {
+        if ch < GLYPH_FIRST || ch > GLYPH_LAST {
+            return None;
+        }
+
+        let idx = (ch - GLYPH_FIRST) as usize;
+        let g = &self.glyphs[idx];
+        let len = (g.width * g.height) as usize;
+        let cov = &self.coverage[g.buf_offset..g.buf_offset + len];
+
+        Some((g, cov))
+    }
+    /// Rasterize all printable ASCII glyphs into this cache in place.
+    /// Caller provides scratch space (~60 KiB) to avoid stack overflow.
+    pub fn populate(&mut self, font: &TrueTypeFont, size_px: u32, scratch: &mut RasterScratch) {
+        self.line_height = size_px + size_px / 4;
+
+        for i in 0..GLYPH_COUNT {
+            let ch = (GLYPH_FIRST + i as u8) as char;
+            let buf_offset = i * GLYPH_BUF_SIZE;
+            let buf = &mut self.coverage[buf_offset..buf_offset + GLYPH_BUF_SIZE];
+            let mut raster = RasterBuffer {
+                data: buf,
+                width: GLYPH_MAX_W as u32,
+                height: GLYPH_MAX_H as u32,
+            };
+
+            if let Some(m) = font.rasterize(ch, size_px, &mut raster, &mut *scratch) {
+                self.glyphs[i] = CachedGlyph {
+                    width: m.width,
+                    height: m.height,
+                    bearing_x: m.bearing_x,
+                    bearing_y: m.bearing_y,
+                    advance: m.advance,
+                    buf_offset,
+                };
+            }
+        }
+    }
+    /// Zero-initialize the cache. The struct is ~220 KiB -- callers with
+    /// limited stack should allocate on the heap first, then call `populate`.
+    pub const fn zeroed() -> Self {
+        GlyphCache {
+            glyphs: [CachedGlyph {
+                width: 0,
+                height: 0,
+                bearing_x: 0,
+                bearing_y: 0,
+                advance: 0,
+                buf_offset: 0,
+            }; GLYPH_COUNT],
+            coverage: [0u8; GLYPH_COUNT * GLYPH_BUF_SIZE],
+            line_height: 0,
+        }
+    }
 }
 impl PixelFormat {
     /// Number of bytes per pixel.
@@ -281,22 +271,6 @@ impl PixelFormat {
     }
 }
 impl<'a> Surface<'a> {
-    /// Byte offset for pixel (x, y), or `None` if out of bounds.
-    fn pixel_offset(&self, x: u32, y: u32) -> Option<usize> {
-        if x >= self.width || y >= self.height {
-            return None;
-        }
-
-        let offset = (y * self.stride + x * self.format.bytes_per_pixel()) as usize;
-        let bpp = self.format.bytes_per_pixel() as usize;
-
-        if offset + bpp <= self.data.len() {
-            Some(offset)
-        } else {
-            None
-        }
-    }
-
     /// Blend a single pixel using source-over compositing.
     ///
     /// Reads the existing pixel, blends `color` on top, writes back. No-op
@@ -605,6 +579,21 @@ impl<'a> Surface<'a> {
             None
         }
     }
+    /// Byte offset for pixel (x, y), or `None` if out of bounds.
+    fn pixel_offset(&self, x: u32, y: u32) -> Option<usize> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+
+        let offset = (y * self.stride + x * self.format.bytes_per_pixel()) as usize;
+        let bpp = self.format.bytes_per_pixel() as usize;
+
+        if offset + bpp <= self.data.len() {
+            Some(offset)
+        } else {
+            None
+        }
+    }
     /// Write a single pixel. No-op if out of bounds.
     pub fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
         if let Some(offset) = self.pixel_offset(x, y) {
@@ -615,7 +604,6 @@ impl<'a> Surface<'a> {
         }
     }
 }
-
 impl TextLayout {
     /// Map a byte offset to pixel coordinates relative to the text origin.
     pub fn byte_to_xy(&self, text: &[u8], offset: usize) -> (u32, u32) {
@@ -787,13 +775,16 @@ impl TextLayout {
             if byte == b'\n' {
                 col = 0;
                 row += 1;
+
                 continue;
             }
 
             if cols > 0 && col >= cols {
                 col = 0;
                 row += 1;
+
                 let py = origin_y + row * self.line_height;
+
                 if py > max_y {
                     break;
                 }
@@ -801,9 +792,10 @@ impl TextLayout {
 
             if let Some((glyph, coverage)) = cache.get(byte) {
                 if glyph.width > 0 && glyph.height > 0 {
-                    let gx = origin_x as i32 + col as i32 * self.char_width as i32
-                        + glyph.bearing_x;
-                    let gy = origin_y as i32 + row as i32 * self.line_height as i32
+                    let gx =
+                        origin_x as i32 + col as i32 * self.char_width as i32 + glyph.bearing_x;
+                    let gy = origin_y as i32
+                        + row as i32 * self.line_height as i32
                         + baseline_offset as i32
                         - glyph.bearing_y;
 
@@ -816,18 +808,13 @@ impl TextLayout {
 
         if cursor_offset >= text.len() {
             let py = origin_y + row * self.line_height;
+
             cursor_x = origin_x + col as u32 * self.char_width;
             cursor_y = py;
         }
 
         if cursor_y <= max_y {
-            fb.fill_rect(
-                cursor_x,
-                cursor_y,
-                2,
-                cache.line_height,
-                cursor_color,
-            );
+            fb.fill_rect(cursor_x, cursor_y, 2, cache.line_height, cursor_color);
         }
 
         (cursor_x, cursor_y)
@@ -840,6 +827,7 @@ impl TextLayout {
         }
 
         let cols = self.cols();
+
         if cols == 0 {
             return;
         }
@@ -851,14 +839,17 @@ impl TextLayout {
         for (i, &byte) in text.iter().enumerate() {
             if byte == b'\n' {
                 f(line_start, i, row);
+
                 row += 1;
                 line_start = i + 1;
                 col = 0;
+
                 continue;
             }
 
             if col >= cols {
                 f(line_start, i, row);
+
                 row += 1;
                 line_start = i;
                 col = 0;
