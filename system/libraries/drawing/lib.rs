@@ -994,3 +994,137 @@ fn min(a: u32, b: u32) -> u32 {
         b
     }
 }
+
+// ---------------------------------------------------------------------------
+// Damage tracking — dirty rectangle management for partial GPU transfer
+// ---------------------------------------------------------------------------
+
+/// Maximum number of dirty rects that fit in a MSG_PRESENT payload.
+/// Payload = 60 bytes. buffer_index (4) + rect_count (1) + pad (3) = 8.
+/// Remaining = 52 bytes / 8 bytes per rect = 6 rects (conservative to fit).
+/// Actually: 60 - 4 (buffer_index) - 4 (rect_count as u32) = 52 / 8 = 6.
+pub const MAX_DIRTY_RECTS: usize = 7;
+
+/// A rectangular region of pixels that has been modified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct DirtyRect {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+/// Collects dirty rectangles during a render pass.
+///
+/// When the number of rects exceeds MAX_DIRTY_RECTS, the tracker
+/// falls back to a single full-screen rect (signaled by `full_screen = true`).
+pub struct DamageTracker {
+    pub rects: [DirtyRect; MAX_DIRTY_RECTS],
+    pub count: usize,
+    pub full_screen: bool,
+    fb_width: u16,
+    fb_height: u16,
+}
+
+impl DirtyRect {
+    pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
+        Self { x, y, w, h }
+    }
+
+    /// Compute the bounding box (union) of two rects.
+    pub fn union(self, other: DirtyRect) -> DirtyRect {
+        if self.w == 0 || self.h == 0 {
+            return other;
+        }
+        if other.w == 0 || other.h == 0 {
+            return self;
+        }
+
+        let x0 = if self.x < other.x { self.x } else { other.x };
+        let y0 = if self.y < other.y { self.y } else { other.y };
+
+        let self_x1 = self.x as u32 + self.w as u32;
+        let other_x1 = other.x as u32 + other.w as u32;
+        let x1 = if self_x1 > other_x1 { self_x1 } else { other_x1 };
+
+        let self_y1 = self.y as u32 + self.h as u32;
+        let other_y1 = other.y as u32 + other.h as u32;
+        let y1 = if self_y1 > other_y1 { self_y1 } else { other_y1 };
+
+        DirtyRect {
+            x: x0,
+            y: y0,
+            w: (x1 - x0 as u32) as u16,
+            h: (y1 - y0 as u32) as u16,
+        }
+    }
+
+    /// Compute the union of a slice of rects. Returns a zero rect if empty.
+    pub fn union_all(rects: &[DirtyRect]) -> DirtyRect {
+        let mut result = DirtyRect::new(0, 0, 0, 0);
+        for &r in rects {
+            result = result.union(r);
+        }
+        result
+    }
+}
+
+impl DamageTracker {
+    /// Create a new damage tracker for the given framebuffer dimensions.
+    pub const fn new(fb_width: u16, fb_height: u16) -> Self {
+        Self {
+            rects: [DirtyRect { x: 0, y: 0, w: 0, h: 0 }; MAX_DIRTY_RECTS],
+            count: 0,
+            full_screen: false,
+            fb_width,
+            fb_height,
+        }
+    }
+
+    /// Reset the tracker for a new frame.
+    pub fn reset(&mut self) {
+        self.count = 0;
+        self.full_screen = false;
+    }
+
+    /// Mark the entire framebuffer as dirty.
+    pub fn mark_full_screen(&mut self) {
+        self.full_screen = true;
+    }
+
+    /// Add a dirty rectangle. If too many rects accumulate, falls back
+    /// to full-screen damage.
+    pub fn add(&mut self, x: u16, y: u16, w: u16, h: u16) {
+        if self.full_screen || w == 0 || h == 0 {
+            return;
+        }
+
+        if self.count >= MAX_DIRTY_RECTS {
+            self.full_screen = true;
+            return;
+        }
+
+        self.rects[self.count] = DirtyRect::new(x, y, w, h);
+        self.count += 1;
+    }
+
+    /// Get the dirty rects for this frame. Returns `None` if full-screen
+    /// transfer is needed (either explicitly marked or overflow).
+    pub fn dirty_rects(&self) -> Option<&[DirtyRect]> {
+        if self.full_screen || self.count == 0 {
+            None
+        } else {
+            Some(&self.rects[..self.count])
+        }
+    }
+
+    /// Get the bounding box of all dirty rects, or full screen if needed.
+    pub fn bounding_box(&self) -> DirtyRect {
+        if self.full_screen || self.count == 0 {
+            DirtyRect::new(0, 0, self.fb_width, self.fb_height)
+        } else {
+            DirtyRect::union_all(&self.rects[..self.count])
+        }
+    }
+}

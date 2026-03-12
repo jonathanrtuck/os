@@ -82,10 +82,23 @@ struct CompositorConfig {
 struct CursorMove {
     position: u32,
 }
+/// Payload for MSG_PRESENT — includes dirty rects for partial GPU transfer.
+///
+/// Layout (60 bytes total payload):
+///   buffer_index: u32   (4 bytes) — which double-buffer to present
+///   rect_count: u32     (4 bytes) — number of dirty rects (0 = full screen)
+///   rects: [DirtyRect; 6] (48 bytes) — up to 6 dirty rects (8 bytes each)
+///   _pad: [u8; 4]       (4 bytes) — padding to fill 60 bytes
+///
+/// When rect_count == 0, the GPU transfers the entire framebuffer.
+/// When rect_count > 0, the GPU transfers only the specified rects.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct PresentInfo {
+struct PresentPayload {
     buffer_index: u32,
+    rect_count: u32,
+    rects: [drawing::DirtyRect; 6],
+    _pad: [u8; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -243,7 +256,16 @@ fn render_chrome(fb: &mut drawing::Surface, cache: &drawing::GlyphCache) {
 ///
 /// Dirty-rect optimization: clears from the previous cursor Y downward,
 /// then delegates to TextLayout::draw for positioning and rendering.
-fn render_content(fb: &mut drawing::Surface, text: &[u8], buf_idx: usize) {
+///
+/// Populates the DamageTracker with the pixel regions that were modified:
+/// - Text content region (from TEXT_Y to the last drawn line + cursor height)
+/// - Status bar region
+fn render_content(
+    fb: &mut drawing::Surface,
+    text: &[u8],
+    buf_idx: usize,
+    damage: &mut drawing::DamageTracker,
+) {
     use drawing::Color;
 
     let bg = Color::rgb(24, 24, 36);
@@ -288,9 +310,24 @@ fn render_content(fb: &mut drawing::Surface, text: &[u8], buf_idx: usize) {
         PREV_LAST_Y[buf_idx] = last_y;
     }
 
-    render_status(fb, text.len());
+    // Record text content dirty rect: from top of text area to the end
+    // of the cleared/rendered region. This covers the area we modified.
+    let content_dirty_h = if clear_end_y > TEXT_Y {
+        clear_end_y - TEXT_Y
+    } else {
+        // First frame or no previous content: dirty from TEXT_Y through cursor
+        cursor_y - TEXT_Y + cache.line_height
+    };
+    damage.add(
+        13,
+        TEXT_Y as u16,
+        (fb.width - 26) as u16,
+        content_dirty_h as u16,
+    );
+
+    render_status(fb, text.len(), damage);
 }
-fn render_status(fb: &mut drawing::Surface, len: usize) {
+fn render_status(fb: &mut drawing::Surface, len: usize, damage: &mut drawing::DamageTracker) {
     use drawing::Color;
 
     let cache = unsafe { &*GLYPH_CACHE };
@@ -348,6 +385,9 @@ fn render_status(fb: &mut drawing::Surface, len: usize) {
         cache,
         Color::rgb(130, 130, 150),
     );
+
+    // Record status bar dirty rect.
+    damage.add(0, bar_y as u16, fb.width as u16, 28);
 }
 
 #[unsafe(no_mangle)]
@@ -488,15 +528,24 @@ pub extern "C" fn _start() -> ! {
         render_chrome(&mut fb1, unsafe { &*GLYPH_CACHE });
     }
 
-    // Render initial content into buffer 0 and present it.
+    // Render initial content into buffer 0 and present it (full screen).
     {
         let mut fb0 = make_surface(0);
+        let mut damage = drawing::DamageTracker::new(fb_width as u16, fb_height as u16);
 
-        render_content(&mut fb0, doc_content(), 0);
+        damage.mark_full_screen(); // initial render = full screen
+
+        render_content(&mut fb0, doc_content(), 0, &mut damage);
     }
 
-    let present_info = PresentInfo { buffer_index: 0 };
-    let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &present_info) };
+    // Initial present: full screen (rect_count = 0 signals full transfer).
+    let initial_payload = PresentPayload {
+        buffer_index: 0,
+        rect_count: 0,
+        rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
+        _pad: [0; 4],
+    };
+    let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &initial_payload) };
 
     gpu_ch.send(&present_msg);
 
@@ -505,7 +554,7 @@ pub extern "C" fn _start() -> ! {
     // Buffer 0 is now the front (being displayed). Next render goes to buffer 1.
     unsafe { BACK_BUF_IDX = 1 };
 
-    sys::print(b"     double-buffered, initial frame rendered, entering event loop\n");
+    sys::print(b"     damage-tracked double-buffer, initial frame rendered, entering event loop\n");
 
     // -----------------------------------------------------------------------
     // Event loop: wait for input or editor write requests.
@@ -574,14 +623,32 @@ pub extern "C" fn _start() -> ! {
         if changed {
             let back = unsafe { BACK_BUF_IDX };
             let mut fb = make_surface(back);
+            let mut damage =
+                drawing::DamageTracker::new(fb_width as u16, fb_height as u16);
 
-            render_content(&mut fb, doc_content(), back);
+            render_content(&mut fb, doc_content(), back, &mut damage);
 
-            // Present the back buffer (tell GPU which buffer to transfer).
-            let info = PresentInfo {
+            // Build the present payload with dirty rects.
+            let mut payload = PresentPayload {
                 buffer_index: back as u32,
+                rect_count: 0,
+                rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
+                _pad: [0; 4],
             };
-            let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &info) };
+
+            if let Some(rects) = damage.dirty_rects() {
+                let n = if rects.len() > 6 { 6 } else { rects.len() };
+                payload.rect_count = n as u32;
+                let mut i = 0;
+                while i < n {
+                    payload.rects[i] = rects[i];
+                    i += 1;
+                }
+            }
+            // else: rect_count stays 0 → GPU does full-screen transfer.
+
+            let present_msg =
+                unsafe { ipc::Message::from_payload(MSG_PRESENT, &payload) };
 
             gpu_ch.send(&present_msg);
 

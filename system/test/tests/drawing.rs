@@ -1877,3 +1877,168 @@ fn oversampled_glyph_cache_populated() {
     let has_intermediate = cov_k.iter().any(|&c| c > 0 && c < 255);
     assert!(has_intermediate, "'k' cached coverage should have intermediate values");
 }
+
+// ---------------------------------------------------------------------------
+// Damage tracking — DirtyRect + DamageTracker
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dirty_rect_new_stores_fields() {
+    let r = drawing::DirtyRect::new(10, 20, 100, 50);
+    assert_eq!(r.x, 10);
+    assert_eq!(r.y, 20);
+    assert_eq!(r.w, 100);
+    assert_eq!(r.h, 50);
+}
+
+#[test]
+fn dirty_rect_union_basic() {
+    let a = drawing::DirtyRect::new(10, 20, 50, 30);
+    let b = drawing::DirtyRect::new(40, 10, 80, 50);
+    let u = a.union(b);
+    // Union should be: x=10, y=10, x1=120, y1=60 → w=110, h=50
+    assert_eq!(u.x, 10);
+    assert_eq!(u.y, 10);
+    assert_eq!(u.w, 110);
+    assert_eq!(u.h, 50);
+}
+
+#[test]
+fn dirty_rect_union_identity_with_zero() {
+    let a = drawing::DirtyRect::new(10, 20, 50, 30);
+    let zero = drawing::DirtyRect::new(0, 0, 0, 0);
+    assert_eq!(a.union(zero), a);
+    assert_eq!(zero.union(a), a);
+}
+
+#[test]
+fn dirty_rect_union_all_multiple() {
+    let rects = [
+        drawing::DirtyRect::new(0, 0, 10, 10),
+        drawing::DirtyRect::new(100, 200, 50, 30),
+        drawing::DirtyRect::new(50, 100, 20, 20),
+    ];
+    let u = drawing::DirtyRect::union_all(&rects);
+    assert_eq!(u.x, 0);
+    assert_eq!(u.y, 0);
+    assert_eq!(u.w, 150); // max(10, 150, 70)
+    assert_eq!(u.h, 230); // max(10, 230, 120)
+}
+
+#[test]
+fn dirty_rect_union_all_empty() {
+    let u = drawing::DirtyRect::union_all(&[]);
+    assert_eq!(u.w, 0);
+    assert_eq!(u.h, 0);
+}
+
+#[test]
+fn dirty_rect_size_is_8_bytes() {
+    assert_eq!(core::mem::size_of::<drawing::DirtyRect>(), 8);
+}
+
+#[test]
+fn damage_tracker_starts_empty() {
+    let dt = drawing::DamageTracker::new(1024, 768);
+    assert_eq!(dt.count, 0);
+    assert!(!dt.full_screen);
+}
+
+#[test]
+fn damage_tracker_add_rect() {
+    let mut dt = drawing::DamageTracker::new(1024, 768);
+    dt.add(10, 20, 100, 50);
+    assert_eq!(dt.count, 1);
+    assert!(!dt.full_screen);
+    let rects = dt.dirty_rects().unwrap();
+    assert_eq!(rects.len(), 1);
+    assert_eq!(rects[0], drawing::DirtyRect::new(10, 20, 100, 50));
+}
+
+#[test]
+fn damage_tracker_ignores_zero_size() {
+    let mut dt = drawing::DamageTracker::new(1024, 768);
+    dt.add(10, 20, 0, 50);
+    dt.add(10, 20, 50, 0);
+    assert_eq!(dt.count, 0);
+}
+
+#[test]
+fn damage_tracker_overflow_triggers_full_screen() {
+    let mut dt = drawing::DamageTracker::new(1024, 768);
+    for i in 0..drawing::MAX_DIRTY_RECTS {
+        dt.add(i as u16 * 10, 0, 10, 10);
+    }
+    assert!(!dt.full_screen);
+    assert_eq!(dt.count, drawing::MAX_DIRTY_RECTS);
+    // Adding one more should trigger full screen
+    dt.add(200, 0, 10, 10);
+    assert!(dt.full_screen);
+    // dirty_rects returns None when full_screen
+    assert!(dt.dirty_rects().is_none());
+}
+
+#[test]
+fn damage_tracker_full_screen_bounding_box() {
+    let mut dt = drawing::DamageTracker::new(1024, 768);
+    dt.mark_full_screen();
+    let bb = dt.bounding_box();
+    assert_eq!(bb.x, 0);
+    assert_eq!(bb.y, 0);
+    assert_eq!(bb.w, 1024);
+    assert_eq!(bb.h, 768);
+}
+
+#[test]
+fn damage_tracker_partial_bounding_box() {
+    let mut dt = drawing::DamageTracker::new(1024, 768);
+    dt.add(10, 100, 200, 30);
+    dt.add(50, 700, 300, 28);
+    let bb = dt.bounding_box();
+    assert_eq!(bb.x, 10);
+    assert_eq!(bb.y, 100);
+    assert_eq!(bb.w, 340); // 50+300 - 10 = 340
+    assert_eq!(bb.h, 628); // 700+28 - 100 = 628
+}
+
+#[test]
+fn damage_tracker_reset_clears_state() {
+    let mut dt = drawing::DamageTracker::new(1024, 768);
+    dt.add(10, 20, 100, 50);
+    dt.add(50, 60, 200, 100);
+    assert_eq!(dt.count, 2);
+    dt.reset();
+    assert_eq!(dt.count, 0);
+    assert!(!dt.full_screen);
+    // After reset, dirty_rects returns None (no rects = full screen transfer)
+    assert!(dt.dirty_rects().is_none());
+}
+
+#[test]
+fn damage_tracker_add_after_full_screen_is_noop() {
+    let mut dt = drawing::DamageTracker::new(1024, 768);
+    dt.mark_full_screen();
+    dt.add(10, 20, 100, 50);
+    // count stays 0 — once full_screen is set, add is a no-op
+    assert_eq!(dt.count, 0);
+}
+
+#[test]
+fn damage_tracker_max_rects_is_7() {
+    assert_eq!(drawing::MAX_DIRTY_RECTS, 7);
+}
+
+#[test]
+fn damage_tracker_multiple_content_and_status_rects() {
+    // Simulates the real use case: content area change + status bar change
+    let mut dt = drawing::DamageTracker::new(1024, 768);
+    // Content area: one line of text changed (approx one line_height tall)
+    dt.add(13, 48, 998, 22); // text region
+    // Status bar updated
+    dt.add(0, 740, 1024, 28); // status bar
+    assert_eq!(dt.count, 2);
+    let rects = dt.dirty_rects().unwrap();
+    assert_eq!(rects.len(), 2);
+    assert_eq!(rects[0], drawing::DirtyRect::new(13, 48, 998, 22));
+    assert_eq!(rects[1], drawing::DirtyRect::new(0, 740, 1024, 28));
+}

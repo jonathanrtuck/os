@@ -102,11 +102,27 @@ struct GpuConfig {
     fb_size: u32,
     _pad2: u32,
 }
-/// Payload for MSG_PRESENT with double-buffering info.
+/// A dirty rectangle (must match the compositor's DirtyRect layout).
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct PresentInfo {
+struct DirtyRect {
+    x: u16,
+    y: u16,
+    w: u16,
+    h: u16,
+}
+/// Payload for MSG_PRESENT with double-buffering and damage tracking info.
+/// Must match the compositor's PresentPayload layout exactly.
+///
+/// When rect_count == 0: full-screen transfer (initial render, etc.)
+/// When rect_count > 0: transfer only the specified dirty rects
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PresentPayload {
     buffer_index: u32,
+    rect_count: u32,
+    rects: [DirtyRect; 6],
+    _pad: [u8; 4],
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -426,8 +442,10 @@ fn resource_flush_reuse(
     irq_handle: u8,
     cmd: &DmaBuf,
     resource_id: u32,
-    width: u32,
-    height: u32,
+    rect_x: u32,
+    rect_y: u32,
+    rect_w: u32,
+    rect_h: u32,
 ) {
     let ptr = cmd.va as *mut u8;
 
@@ -437,10 +455,10 @@ fn resource_flush_reuse(
             ptr as *mut ResourceFlush,
             ResourceFlush {
                 header: ctrl_header(CMD_RESOURCE_FLUSH),
-                rect_x: 0,
-                rect_y: 0,
-                rect_width: width,
-                rect_height: height,
+                rect_x,
+                rect_y,
+                rect_width: rect_w,
+                rect_height: rect_h,
                 resource_id,
                 _padding: 0,
             },
@@ -549,18 +567,28 @@ fn transfer_to_host(
     ok
 }
 /// Transfer framebuffer to host using a pre-allocated DMA buffer.
-/// `offset` is the byte offset into the backing memory to transfer from.
+/// `base_offset` is the byte offset to the start of the buffer (for double-buffering).
+/// `rect_x`, `rect_y`, `rect_w`, `rect_h` define the rectangular region to transfer.
+/// `stride` is the framebuffer row stride in bytes (width * BPP).
 fn transfer_to_host_reuse(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
     irq_handle: u8,
     cmd: &DmaBuf,
     resource_id: u32,
-    width: u32,
-    height: u32,
-    offset: u64,
+    rect_x: u32,
+    rect_y: u32,
+    rect_w: u32,
+    rect_h: u32,
+    base_offset: u64,
+    stride: u32,
 ) {
     let ptr = cmd.va as *mut u8;
+    // The transfer offset must point to the start of the rect within the
+    // backing memory. For virtio-gpu 2D, the offset is computed as:
+    //   base_offset + rect_y * stride + rect_x * BPP
+    let pixel_offset = (rect_y as u64) * (stride as u64) + (rect_x as u64) * (FB_BPP as u64);
+    let offset = base_offset + pixel_offset;
 
     unsafe {
         core::ptr::write_bytes(ptr, 0, 512);
@@ -568,10 +596,10 @@ fn transfer_to_host_reuse(
             ptr as *mut TransferToHost2d,
             TransferToHost2d {
                 header: ctrl_header(CMD_TRANSFER_TO_HOST_2D),
-                rect_x: 0,
-                rect_y: 0,
-                rect_width: width,
-                rect_height: height,
+                rect_x,
+                rect_y,
+                rect_width: rect_w,
+                rect_height: rect_h,
                 offset,
                 resource_id,
                 _padding: 0,
@@ -709,50 +737,142 @@ pub extern "C" fn _start() -> ! {
     // Channel 1: compositor present commands (endpoint 1 = receive side).
     let present_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
 
+    let stride = width * FB_BPP;
+
     // -----------------------------------------------------------------------
-    // Present loop: wait for compositor → transfer → flush → repeat
+    // Present loop: wait for compositor → transfer dirty rects → flush → repeat
     //
-    // Double buffering: MSG_PRESENT carries a buffer_index (0 or 1).
-    // The transfer offset = buffer_index * fb_size into the backing memory.
+    // Double buffering: MSG_PRESENT carries a buffer_index (0 or 1) and
+    // dirty rects describing which pixel regions changed.
+    //
+    // When rect_count == 0: full-screen transfer (initial render, etc.).
+    // When rect_count > 0: transfer only the dirty rects, flush their union.
     // -----------------------------------------------------------------------
-    let mut last_buffer_index: u32 = 0;
+    let mut last_payload = PresentPayload {
+        buffer_index: 0,
+        rect_count: 0,
+        rects: [DirtyRect { x: 0, y: 0, w: 0, h: 0 }; 6],
+        _pad: [0; 4],
+    };
 
     loop {
         // Wait for a present command from the compositor.
         let _ = sys::wait(&[PRESENT_HANDLE], u64::MAX);
 
-        // Drain all pending present messages (coalesce multiple into one
-        // transfer+flush). Keep the last buffer_index seen.
+        // Drain all pending present messages (coalesce: use the last one).
         while present_ch.try_recv(&mut msg) {
             if msg.msg_type == MSG_PRESENT {
-                let info: PresentInfo = unsafe { msg.payload_as() };
-
-                last_buffer_index = info.buffer_index;
+                last_payload = unsafe { msg.payload_as() };
             }
         }
 
         // Compute byte offset into the double-buffer backing memory.
-        let transfer_offset = (last_buffer_index as u64) * (fb_size as u64);
+        let base_offset = (last_payload.buffer_index as u64) * (fb_size as u64);
+        let rc = last_payload.rect_count;
 
-        // Transfer and flush using pre-allocated command buffer.
-        transfer_to_host_reuse(
-            &device,
-            &mut vq,
-            irq_handle,
-            &present_cmd,
-            FB_RESOURCE_ID,
-            width,
-            height,
-            transfer_offset,
-        );
-        resource_flush_reuse(
-            &device,
-            &mut vq,
-            irq_handle,
-            &present_cmd,
-            FB_RESOURCE_ID,
-            width,
-            height,
-        );
+        if rc == 0 || rc > 6 {
+            // Full-screen transfer (initial render or overflow).
+            sys::print(b"gpu: present full ");
+            print_u32(width);
+            sys::print(b"x");
+            print_u32(height);
+            sys::print(b"\n");
+            transfer_to_host_reuse(
+                &device,
+                &mut vq,
+                irq_handle,
+                &present_cmd,
+                FB_RESOURCE_ID,
+                0,
+                0,
+                width,
+                height,
+                base_offset,
+                stride,
+            );
+            resource_flush_reuse(
+                &device,
+                &mut vq,
+                irq_handle,
+                &present_cmd,
+                FB_RESOURCE_ID,
+                0,
+                0,
+                width,
+                height,
+            );
+        } else {
+            // Damage-tracked partial transfer: transfer each dirty rect.
+            sys::print(b"gpu: present ");
+            print_u32(rc);
+            sys::print(b" rects");
+            let n = rc as usize;
+            // Track bounding box for the flush.
+            let mut union_x0: u32 = u32::MAX;
+            let mut union_y0: u32 = u32::MAX;
+            let mut union_x1: u32 = 0;
+            let mut union_y1: u32 = 0;
+
+            let mut i = 0;
+            while i < n {
+                let r = &last_payload.rects[i];
+                let rx = r.x as u32;
+                let ry = r.y as u32;
+                let rw = r.w as u32;
+                let rh = r.h as u32;
+
+                if rw > 0 && rh > 0 {
+                    sys::print(b" [");
+                    print_u32(rx);
+                    sys::print(b",");
+                    print_u32(ry);
+                    sys::print(b" ");
+                    print_u32(rw);
+                    sys::print(b"x");
+                    print_u32(rh);
+                    sys::print(b"]");
+                    transfer_to_host_reuse(
+                        &device,
+                        &mut vq,
+                        irq_handle,
+                        &present_cmd,
+                        FB_RESOURCE_ID,
+                        rx,
+                        ry,
+                        rw,
+                        rh,
+                        base_offset,
+                        stride,
+                    );
+
+                    // Update bounding box for flush.
+                    if rx < union_x0 { union_x0 = rx; }
+                    if ry < union_y0 { union_y0 = ry; }
+                    let x1 = rx + rw;
+                    let y1 = ry + rh;
+                    if x1 > union_x1 { union_x1 = x1; }
+                    if y1 > union_y1 { union_y1 = y1; }
+                }
+
+                i += 1;
+            }
+
+            sys::print(b"\n");
+
+            // Flush the union of all dirty rects.
+            if union_x1 > union_x0 && union_y1 > union_y0 {
+                resource_flush_reuse(
+                    &device,
+                    &mut vq,
+                    irq_handle,
+                    &present_cmd,
+                    FB_RESOURCE_ID,
+                    union_x0,
+                    union_y0,
+                    union_x1 - union_x0,
+                    union_y1 - union_y0,
+                );
+            }
+        }
     }
 }
