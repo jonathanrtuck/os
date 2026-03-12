@@ -55,6 +55,7 @@ const VIRTIO_DEVICE_BLK: u32 = 2;
 const VIRTIO_DEVICE_CONSOLE: u32 = 3;
 const VIRTIO_DEVICE_GPU: u32 = 16;
 const VIRTIO_DEVICE_INPUT: u32 = 18;
+const VIRTIO_DEVICE_9P: u32 = 9;
 /// Document buffer: 1 page. First 64 bytes = header, rest = content.
 const DOC_BUF_PAGES: u64 = 1;
 const DOC_BUF_HEADER: u32 = 64;
@@ -64,6 +65,8 @@ const MSG_DEVICE_CONFIG: u32 = 1;
 const MSG_GPU_CONFIG: u32 = 2;
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
 const MSG_EDITOR_CONFIG: u32 = 4;
+const MSG_FS_READ_REQUEST: u32 = 40;
+const MSG_FS_READ_RESPONSE: u32 = 41;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -75,8 +78,10 @@ struct CompositorConfig {
     fb_size: u32,
     doc_va: u64,
     doc_capacity: u32,
-    _pad2: u32,
+    font_len: u32,
+    font_va: u64,
 }
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct EditorConfig {
@@ -147,6 +152,7 @@ fn setup_display_pipeline(
     gpu_pa: u64,
     gpu_irq: u32,
     input_proc: Option<(u8, usize, u64, u32)>, // (proc, ch_idx, pa, irq)
+    font_buf: Option<(u64, u32)>,              // (pa, len) from 9p read
     next_channel: &mut usize,
 ) {
     sys::print(b"     setting up display pipeline\n");
@@ -233,6 +239,18 @@ fn setup_display_pipeline(
             sys::print(b"init: memory_share (compositor doc) failed\n");
             sys::exit();
         });
+    // Share font buffer with compositor (read-only) if available.
+    let (comp_font_va, font_len) = if let Some((font_pa, flen)) = font_buf {
+        let font_pages = ((flen as u64) + 4095) / 4096;
+        let va = sys::memory_share(comp_proc, font_pa, font_pages, true).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (compositor font) failed\n");
+            sys::exit();
+        });
+
+        (va as u64, flen)
+    } else {
+        (0u64, 0u32)
+    };
     // Send compositor config via ring buffer.
     let comp_ch = init_channel(comp_channel_idx);
     let comp_config = CompositorConfig {
@@ -243,7 +261,8 @@ fn setup_display_pipeline(
         fb_size: FB_SIZE,
         doc_va: comp_doc_va as u64,
         doc_capacity: DOC_BUF_CAPACITY,
-        _pad2: 0,
+        font_len,
+        font_va: comp_font_va,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };
 
@@ -451,7 +470,9 @@ pub extern "C" fn _start() -> ! {
     // Saved device state for Phase 2 (display pipeline).
     let mut gpu: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
     let mut input: Option<(u8, usize, u64, u32)> = None; // (proc, ch_idx, pa, irq)
-                                                         // Phase 1: Spawn a driver for each device in the manifest.
+    let mut p9: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
+
+    // Phase 1: Spawn a driver for each device in the manifest.
     let actual = if device_count > 8 { 8 } else { device_count };
 
     for i in 0..actual as usize {
@@ -475,6 +496,7 @@ pub extern "C" fn _start() -> ! {
             VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
             VIRTIO_DEVICE_GPU => VIRTIO_GPU_ELF,
             VIRTIO_DEVICE_INPUT => VIRTIO_INPUT_ELF,
+            VIRTIO_DEVICE_9P => VIRTIO_9P_ELF,
             _ => {
                 sys::print(b"     skipping unknown device id=");
                 print_u32(dev_id);
@@ -503,6 +525,10 @@ pub extern "C" fn _start() -> ! {
                 // Defer input startup — needs cross-process channel to compositor.
                 input = Some((proc_h, channel_idx, dev_pa, dev_irq));
             }
+            VIRTIO_DEVICE_9P => {
+                // Defer 9p startup — font read must complete before compositor.
+                p9 = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq));
+            }
             _ => {
                 // Start simple drivers (blk, console) immediately.
                 let ch = init_channel(channel_idx);
@@ -529,6 +555,108 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // Phase 1.5: Read font file from host via 9p driver (must complete before compositor).
+    // Phase 1.5: Start 9p driver, read font from host, pass to compositor.
+    let font_buf: Option<(u64, u32)> = if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9
+    {
+        sys::print(b"     loading font from host filesystem\n");
+
+        // Allocate font buffer (16 KiB).
+        let mut font_pa: u64 = 0;
+        let _font_va = sys::dma_alloc(2, &mut font_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (font buffer) failed\n");
+            sys::exit();
+        });
+        let font_capacity: u32 = 4 * 4096;
+
+        unsafe { core::ptr::write_bytes(_font_va as *mut u8, 0, font_capacity as usize) };
+
+        // Share font buffer with 9p driver (read-write).
+        let p9_font_va = sys::memory_share(p9_proc, font_pa, 4, false).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (9p font) failed\n");
+            sys::exit();
+        });
+        // Send device config via IPC.
+        let p9_ch_obj = init_channel(p9_ch_idx);
+        let dev_config = DeviceConfig {
+            mmio_pa: p9_pa,
+            irq: p9_irq,
+            _pad: 0,
+        };
+        let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
+
+        p9_ch_obj.send(&cfg_msg);
+
+        // Build font read request. Construct the message manually to avoid
+        // any alignment issues with from_payload on a 60-byte struct.
+        let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
+
+        unsafe {
+            let p = req_msg.payload.as_mut_ptr();
+
+            core::ptr::write_unaligned(p as *mut u64, p9_font_va as u64);
+            core::ptr::write_unaligned(p.add(8) as *mut u32, font_capacity);
+            core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
+
+            let name = b"SourceCodePro-Regular.ttf";
+
+            core::ptr::copy_nonoverlapping(name.as_ptr(), p.add(16), name.len());
+        }
+
+        p9_ch_obj.send(&req_msg);
+
+        // Start 9p driver and wait for font read completion.
+        sys::print(b"     starting 9p driver\n");
+
+        let _ = sys::process_start(p9_proc);
+        let _ = sys::channel_signal(p9_ch);
+
+        // Wait for font read response. The 9p driver needs time to negotiate
+        // the protocol and read the file, so loop until a response arrives.
+        sys::print(b"     waiting for font read\n");
+
+        let mut resp_msg = ipc::Message::new(0);
+        let result = loop {
+            let _ = sys::wait(&[p9_ch], u64::MAX);
+
+            if p9_ch_obj.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_FS_READ_RESPONSE {
+                break Some(resp_msg);
+            }
+        };
+
+        if let Some(resp_msg) = result {
+            let (len, status) = unsafe {
+                let p = resp_msg.payload.as_ptr();
+                let len = core::ptr::read_unaligned(p as *const u32);
+                let status = core::ptr::read_unaligned(p.add(4) as *const u32);
+
+                (len, status)
+            };
+
+            if status == 0 && len > 0 {
+                sys::print(b"     font loaded: ");
+
+                print_u32(len);
+
+                sys::print(b" bytes\n");
+
+                Some((font_pa, len))
+            } else {
+                sys::print(b"     font read failed (status=");
+
+                print_u32(status);
+
+                sys::print(b")\n");
+
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     // Phase 2: Display pipeline (input driver + compositor + GPU driver).
     if let Some((gpu_proc, _gpu_ch, gpu_channel_idx, gpu_pa, gpu_irq)) = gpu {
         setup_display_pipeline(
@@ -537,6 +665,7 @@ pub extern "C" fn _start() -> ! {
             gpu_pa,
             gpu_irq,
             input,
+            font_buf,
             &mut next_channel,
         );
     } else {
@@ -557,7 +686,6 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b"     fuzz test spawn failed\n");
             }
         }
-
         // Stress test — IPC/scheduler/timer saturation.
         match sys::process_create(STRESS_ELF.as_ptr(), STRESS_ELF.len()) {
             Ok(proc_h) => {

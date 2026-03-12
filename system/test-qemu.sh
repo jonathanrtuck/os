@@ -65,6 +65,8 @@ rm -f "$MON_SOCK" "$SERIAL_LOG"
 #   - Serial output → file (clean, no monitor noise)
 #   - Monitor → Unix socket (for sending keys)
 #   - No display window (-nographic)
+SHARE_DIR="${SCRIPT_DIR}/share"
+
 qemu-system-aarch64 \
     -machine virt,gic-version=2 \
     -cpu cortex-a53 -smp 4 -m 256M \
@@ -73,6 +75,8 @@ qemu-system-aarch64 \
     -device virtio-blk-device,drive=hd0 \
     -device virtio-gpu-device \
     -device virtio-keyboard-device \
+    -fsdev "local,id=fsdev0,path=$SHARE_DIR,security_model=none" \
+    -device "virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare" \
     -nographic \
     -serial file:"$SERIAL_LOG" \
     -monitor unix:"$MON_SOCK",server,nowait \

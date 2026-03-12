@@ -27,7 +27,6 @@ extern crate alloc;
 use alloc::boxed::Box;
 
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
-const FONT_DATA: &[u8] = include_bytes!("../../libraries/drawing/SourceCodePro-Regular.ttf");
 const FONT_SIZE: u32 = 16;
 // Protocol message types.
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
@@ -72,7 +71,8 @@ struct CompositorConfig {
     fb_size: u32,
     doc_va: u64,
     doc_capacity: u32,
-    _pad2: u32,
+    font_len: u32,
+    font_va: u64,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -384,9 +384,16 @@ pub extern "C" fn _start() -> ! {
 
     doc_write_header();
 
-    // Rasterize font glyphs into cache (heap-allocated, ~220 KiB).
-    // Allocated zeroed on heap first to avoid stack overflow, then populated.
-    let ttf = drawing::TrueTypeFont::new(FONT_DATA).unwrap_or_else(|| {
+    // Load font from runtime buffer (shared by init via 9p driver).
+    if config.font_va == 0 || config.font_len == 0 {
+        sys::print(b"compositor: no font data provided\n");
+        sys::exit();
+    }
+
+    let font_data = unsafe {
+        core::slice::from_raw_parts(config.font_va as *const u8, config.font_len as usize)
+    };
+    let ttf = drawing::TrueTypeFont::new(font_data).unwrap_or_else(|| {
         sys::print(b"compositor: failed to parse font\n");
         sys::exit();
     });

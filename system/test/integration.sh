@@ -61,7 +61,9 @@ mv "${INTEGRATION_DTB}.trim" "$INTEGRATION_DTB"
 # Kill any lingering QEMU.
 pkill -f "qemu-system-aarch64.*integration" 2>/dev/null && sleep 0.2 || true
 
-echo "Starting QEMU with full device set (GPU + keyboard + blk)..."
+SHARE_DIR="${SYSTEM_DIR}/share"
+
+echo "Starting QEMU with full device set (GPU + keyboard + blk + 9p)..."
 
 qemu-system-aarch64 \
     -machine "virt,gic-version=2" \
@@ -72,6 +74,8 @@ qemu-system-aarch64 \
     -device virtio-blk-device,drive=hd0 \
     -device virtio-gpu-device \
     -device virtio-keyboard-device \
+    -fsdev "local,id=fsdev0,path=$SHARE_DIR,security_model=none" \
+    -device "virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare" \
     -serial "file:${SERIAL_LOG}" \
     -device "loader,file=$INTEGRATION_DTB,addr=0x40000000,force-raw=on" \
     -kernel "$KERNEL" &

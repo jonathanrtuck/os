@@ -56,6 +56,8 @@ pkill -f "qemu-system-aarch64.*${DISK_IMG}" 2>/dev/null && sleep 0.2 || true
 echo "Starting QEMU with display window (${DURATION}s test)..."
 
 # Launch QEMU WITH a display window (required for virtio-keyboard input).
+SHARE_DIR="${SYSTEM_DIR}/share"
+
 qemu-system-aarch64 \
     -machine "virt,gic-version=2" \
     -cpu cortex-a53 -smp 4 -m 256M \
@@ -64,6 +66,8 @@ qemu-system-aarch64 \
     -device virtio-blk-device,drive=hd0 \
     -device virtio-gpu-device \
     -device virtio-keyboard-device \
+    -fsdev "local,id=fsdev0,path=$SHARE_DIR,security_model=none" \
+    -device "virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare" \
     -serial "file:${SERIAL_LOG}" \
     -device "loader,file=$DTB_FILE,addr=0x40000000,force-raw=on" \
     -kernel "$KERNEL" &

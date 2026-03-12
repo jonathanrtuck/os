@@ -26,6 +26,8 @@ if [ ! -f "$DISK_IMG" ]; then
 fi
 
 QEMU_MACHINE="virt,gic-version=2"
+SHARE_DIR="${SCRIPT_DIR}/share"
+
 QEMU_COMMON=(
     -cpu cortex-a53
     -smp 4
@@ -35,6 +37,8 @@ QEMU_COMMON=(
     -device virtio-blk-device,drive=hd0
     -device virtio-gpu-device
     -device virtio-keyboard-device
+    -fsdev "local,id=fsdev0,path=$SHARE_DIR,security_model=none"
+    -device "virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare"
 )
 
 # Generate DTB if missing. Uses minimal machine config (no disk needed —
