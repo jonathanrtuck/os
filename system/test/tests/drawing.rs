@@ -3368,3 +3368,127 @@ fn png_decode_to_surface_correct_colors() {
         assert_ne!(px00_r, px_center_r, "corner and center should differ (gradient image)");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Clock time formatting tests
+// ---------------------------------------------------------------------------
+
+/// Format total seconds since boot into HH:MM:SS.
+/// This mirrors the logic used by the compositor's clock display.
+fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
+    let hours = ((total_seconds / 3600) % 24) as u8;
+    let minutes = ((total_seconds / 60) % 60) as u8;
+    let seconds = (total_seconds % 60) as u8;
+    buf[0] = b'0' + hours / 10;
+    buf[1] = b'0' + hours % 10;
+    buf[2] = b':';
+    buf[3] = b'0' + minutes / 10;
+    buf[4] = b'0' + minutes % 10;
+    buf[5] = b':';
+    buf[6] = b'0' + seconds / 10;
+    buf[7] = b'0' + seconds % 10;
+}
+
+#[test]
+fn clock_format_zero_seconds() {
+    let mut buf = [0u8; 8];
+    format_time_hms(0, &mut buf);
+    assert_eq!(&buf, b"00:00:00");
+}
+
+#[test]
+fn clock_format_one_second() {
+    let mut buf = [0u8; 8];
+    format_time_hms(1, &mut buf);
+    assert_eq!(&buf, b"00:00:01");
+}
+
+#[test]
+fn clock_format_one_minute() {
+    let mut buf = [0u8; 8];
+    format_time_hms(60, &mut buf);
+    assert_eq!(&buf, b"00:01:00");
+}
+
+#[test]
+fn clock_format_one_hour() {
+    let mut buf = [0u8; 8];
+    format_time_hms(3600, &mut buf);
+    assert_eq!(&buf, b"01:00:00");
+}
+
+#[test]
+fn clock_format_max_time() {
+    // 23:59:59 = 23*3600 + 59*60 + 59 = 86399
+    let mut buf = [0u8; 8];
+    format_time_hms(86399, &mut buf);
+    assert_eq!(&buf, b"23:59:59");
+}
+
+#[test]
+fn clock_format_wraps_at_24_hours() {
+    // 24 hours = 86400 seconds → wraps to 00:00:00
+    let mut buf = [0u8; 8];
+    format_time_hms(86400, &mut buf);
+    assert_eq!(&buf, b"00:00:00");
+}
+
+#[test]
+fn clock_format_arbitrary_time() {
+    // 12345 seconds = 3h 25m 45s
+    let mut buf = [0u8; 8];
+    format_time_hms(12345, &mut buf);
+    assert_eq!(&buf, b"03:25:45");
+}
+
+#[test]
+fn clock_format_large_value_wraps() {
+    // 100000 seconds = 27h 46m 40s → wraps to 03:46:40
+    let mut buf = [0u8; 8];
+    format_time_hms(100000, &mut buf);
+    assert_eq!(&buf, b"03:46:40");
+}
+
+#[test]
+fn clock_format_all_digits_valid() {
+    // Check that all formatted characters are valid (digits or ':')
+    for secs in [0u64, 1, 59, 60, 3599, 3600, 43200, 86399] {
+        let mut buf = [0u8; 8];
+        format_time_hms(secs, &mut buf);
+        // buf[2] and buf[5] must be ':'
+        assert_eq!(buf[2], b':', "secs={}: buf[2] should be ':'", secs);
+        assert_eq!(buf[5], b':', "secs={}: buf[5] should be ':'", secs);
+        // All other positions must be ASCII digits
+        for &i in &[0usize, 1, 3, 4, 6, 7] {
+            assert!(buf[i] >= b'0' && buf[i] <= b'9',
+                "secs={}: buf[{}] = {} is not a digit", secs, i, buf[i]);
+        }
+        // Hours 00-23
+        let h = (buf[0] - b'0') * 10 + (buf[1] - b'0');
+        assert!(h <= 23, "secs={}: hours {} > 23", secs, h);
+        // Minutes 00-59
+        let m = (buf[3] - b'0') * 10 + (buf[4] - b'0');
+        assert!(m <= 59, "secs={}: minutes {} > 59", secs, m);
+        // Seconds 00-59
+        let s = (buf[6] - b'0') * 10 + (buf[7] - b'0');
+        assert!(s <= 59, "secs={}: seconds {} > 59", secs, s);
+    }
+}
+
+#[test]
+fn clock_seconds_from_counter() {
+    // Simulate deriving seconds from ARM generic counter.
+    // QEMU typical: freq = 62_500_000 Hz (62.5 MHz)
+    let freq: u64 = 62_500_000;
+    let boot_counter: u64 = 1_000_000_000; // some boot time counter value
+    let current_counter: u64 = boot_counter + 5 * freq; // 5 seconds later
+
+    let elapsed_ticks = current_counter - boot_counter;
+    let elapsed_seconds = elapsed_ticks / freq;
+
+    assert_eq!(elapsed_seconds, 5);
+
+    let mut buf = [0u8; 8];
+    format_time_hms(elapsed_seconds, &mut buf);
+    assert_eq!(&buf, b"00:00:05");
+}

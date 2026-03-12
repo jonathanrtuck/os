@@ -80,6 +80,14 @@ static mut IMAGE_MODE: bool = false;
 static mut IMAGE_WIDTH: u32 = 0;
 /// Decoded image height (pixels). Set when PNG is decoded.
 static mut IMAGE_HEIGHT: u32 = 0;
+/// Counter value captured at boot for deriving elapsed wall-clock time.
+static mut BOOT_COUNTER: u64 = 0;
+/// Counter frequency in Hz (read once at boot).
+static mut COUNTER_FREQ: u64 = 0;
+/// Current timer handle for the 1-second periodic clock. 0 = no timer.
+static mut TIMER_HANDLE: u8 = 0;
+/// Whether a valid timer handle exists.
+static mut TIMER_ACTIVE: bool = false;
 
 static mut CHAR_W: u32 = 8;
 static mut LINE_H: u32 = 20;
@@ -531,6 +539,71 @@ fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
         prop_cache,
         Color::rgb(130, 130, 150),
     );
+
+    // Clock display (right-aligned): HH:MM:SS
+    let mut time_buf = [0u8; 8];
+    let secs = elapsed_seconds();
+
+    format_time_hms(secs, &mut time_buf);
+
+    let time_w = proportional_string_width(&time_buf, prop_cache);
+    let time_x = surf.width.saturating_sub(12 + time_w);
+
+    drawing::draw_proportional_string(
+        surf,
+        time_x,
+        6,
+        &time_buf,
+        prop_cache,
+        Color::rgb(160, 170, 190),
+    );
+}
+
+/// Format total seconds into HH:MM:SS in the given 8-byte buffer.
+fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
+    let hours = ((total_seconds / 3600) % 24) as u8;
+    let minutes = ((total_seconds / 60) % 60) as u8;
+    let seconds = (total_seconds % 60) as u8;
+
+    buf[0] = b'0' + hours / 10;
+    buf[1] = b'0' + hours % 10;
+    buf[2] = b':';
+    buf[3] = b'0' + minutes / 10;
+    buf[4] = b'0' + minutes % 10;
+    buf[5] = b':';
+    buf[6] = b'0' + seconds / 10;
+    buf[7] = b'0' + seconds % 10;
+}
+
+/// Get elapsed seconds since boot using the ARM generic counter.
+fn elapsed_seconds() -> u64 {
+    let now = sys::counter();
+    let boot = unsafe { BOOT_COUNTER };
+    let freq = unsafe { COUNTER_FREQ };
+
+    if freq == 0 {
+        return 0;
+    }
+
+    (now - boot) / freq
+}
+
+/// Create a new 1-second periodic timer. Stores the handle in TIMER_HANDLE.
+/// Returns true on success.
+fn create_clock_timer() -> bool {
+    match sys::timer_create(1_000_000_000) {
+        Ok(handle) => {
+            unsafe {
+                TIMER_HANDLE = handle;
+                TIMER_ACTIVE = true;
+            }
+            true
+        }
+        Err(_) => {
+            unsafe { TIMER_ACTIVE = false };
+            false
+        }
+    }
 }
 
 /// Append a u32 as decimal digits to a byte buffer. Returns the new index.
@@ -585,6 +658,12 @@ fn make_surf(buf: &mut [u8], w: u32, h: u32) -> drawing::Surface<'_> {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    // Capture boot time counter for deriving wall-clock seconds since boot.
+    unsafe {
+        BOOT_COUNTER = sys::counter();
+        COUNTER_FREQ = sys::counter_freq();
+    }
+
     sys::print(b"  \xF0\x9F\x8E\xA8 compositor - starting (multi-surface)\n");
 
     // Read compositor config from ring buffer (channel 0 = init).
@@ -964,21 +1043,51 @@ pub extern "C" fn _start() -> ! {
     // Buffer 0 is now the front (being displayed). Next render goes to buffer 1.
     unsafe { BACK_BUF_IDX = 1 };
 
+    // Create the initial 1-second periodic timer for the clock display.
+    create_clock_timer();
+
     sys::print(b"     multi-surface compositor ready, entering event loop\n");
 
     // -----------------------------------------------------------------------
-    // Event loop: wait for input or editor write requests.
+    // Event loop: wait for input, editor write requests, or timer.
     //
-    // On each content change:
-    //   1. Re-render the content surface
-    //   2. Re-render the status bar surface (char count changed)
+    // On each content change or timer tick:
+    //   1. Re-render the content surface (only on content change)
+    //   2. Re-render the status bar surface (char count + clock)
     //   3. Composite all surfaces into the back framebuffer
     //   4. Present the back buffer to the GPU
     //   5. Swap back/front buffers
     // -----------------------------------------------------------------------
     loop {
-        let _ = sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX);
+        // Build the wait handle set: input + editor + optional timer.
+        let timer_active = unsafe { TIMER_ACTIVE };
+        let timer_handle = unsafe { TIMER_HANDLE };
+
+        let wait_result = if timer_active {
+            sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], u64::MAX)
+        } else {
+            sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX)
+        };
+
+        let _ = wait_result;
         let mut changed = false;
+        let mut timer_fired = false;
+
+        // Check if the timer fired: the timer handle becomes permanently
+        // ready once its deadline passes (level-triggered). We detect this
+        // by polling it — if it's active, close it and recreate.
+        if timer_active {
+            // Poll the timer handle to see if it fired (non-blocking).
+            if let Ok(_) = sys::wait(&[timer_handle], 0) {
+                timer_fired = true;
+
+                // Close the expired one-shot timer handle.
+                let _ = sys::handle_close(timer_handle);
+
+                // Create a new 1-second timer for the next tick.
+                create_clock_timer();
+            }
+        }
 
         // Forward input events to the editor.
         while input_ch.try_recv(&mut msg) {
@@ -1029,12 +1138,13 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        if changed {
+        if changed || timer_fired {
             let back = unsafe { BACK_BUF_IDX };
             let in_image_mode = unsafe { IMAGE_MODE };
 
-            // 1. Re-render the content surface (only in text editor mode).
-            if !in_image_mode {
+            // 1. Re-render the content surface (only on actual content changes,
+            //    not on timer ticks — avoids unnecessary re-rendering).
+            if changed && !in_image_mode {
                 let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
                 render_content_surface(&mut content_surf, doc_content());
             }
