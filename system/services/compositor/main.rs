@@ -7,6 +7,8 @@
 //!
 //!   z=0:  Background    — full-screen solid color
 //!   z=10: Content       — text editing area with cursor
+//!   z=15: Title shadow  — gradient falloff beneath title bar
+//!   z=15: Status shadow — gradient falloff above status bar
 //!   z=20: Title bar     — translucent chrome overlay at top
 //!   z=20: Status bar    — translucent chrome overlay at bottom
 //!
@@ -48,7 +50,11 @@ const EDITOR_HANDLE: u8 = 3;
 // Surface z-order constants.
 const Z_BACKGROUND: u16 = 0;
 const Z_CONTENT: u16 = 10;
+const Z_SHADOW: u16 = 15;
 const Z_CHROME: u16 = 20;
+// Drop shadow configuration.
+const SHADOW_DEPTH: u32 = 8;
+const SHADOW_ALPHA_MAX: u8 = 80;
 // Chrome dimensions.
 const TITLE_BAR_H: u32 = 36;
 const STATUS_BAR_H: u32 = 28;
@@ -312,6 +318,34 @@ fn render_content_surface(
     unsafe { PREV_LAST_Y = last_y };
 }
 
+/// Render the title bar drop shadow: gradient from opaque to transparent,
+/// falling downward from the title bar's bottom edge.
+fn render_title_shadow(surf: &mut drawing::Surface) {
+    use drawing::Color;
+
+    surf.clear(Color::TRANSPARENT);
+
+    surf.fill_gradient_v(
+        0, 0, surf.width, surf.height,
+        Color::rgba(0, 0, 0, SHADOW_ALPHA_MAX),
+        Color::rgba(0, 0, 0, 0),
+    );
+}
+
+/// Render the status bar drop shadow: gradient from transparent to opaque,
+/// falling upward from the status bar's top edge.
+fn render_status_shadow(surf: &mut drawing::Surface) {
+    use drawing::Color;
+
+    surf.clear(Color::TRANSPARENT);
+
+    surf.fill_gradient_v(
+        0, 0, surf.width, surf.height,
+        Color::rgba(0, 0, 0, 0),
+        Color::rgba(0, 0, 0, SHADOW_ALPHA_MAX),
+    );
+}
+
 /// Render the title bar chrome surface (translucent overlay).
 fn render_title_bar(surf: &mut drawing::Surface) {
     use drawing::Color;
@@ -561,6 +595,10 @@ pub extern "C" fn _start() -> ! {
     let mut bg_buf = alloc_surface_buf(fb_width, fb_height);
     // Content surface (z=10): text editing area.
     let mut content_buf = alloc_surface_buf(content_w, content_h);
+    // Title bar drop shadow (z=15): gradient beneath title bar.
+    let mut title_shadow_buf = alloc_surface_buf(fb_width, SHADOW_DEPTH);
+    // Status bar drop shadow (z=15): gradient above status bar.
+    let mut status_shadow_buf = alloc_surface_buf(fb_width, SHADOW_DEPTH);
     // Title bar chrome (z=20): translucent overlay at top.
     let mut title_buf = alloc_surface_buf(fb_width, TITLE_BAR_H);
     // Status bar chrome (z=20): translucent overlay at bottom.
@@ -584,6 +622,16 @@ pub extern "C" fn _start() -> ! {
         render_content_surface(&mut content_surf, doc_content());
     }
 
+    // Drop shadows (rendered once — static gradient, never re-rendered).
+    {
+        let mut title_shadow_surf = make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH);
+        render_title_shadow(&mut title_shadow_surf);
+    }
+    {
+        let mut status_shadow_surf = make_surf(&mut status_shadow_buf, fb_width, SHADOW_DEPTH);
+        render_status_shadow(&mut status_shadow_surf);
+    }
+
     // Title bar chrome.
     {
         let mut title_surf = make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
@@ -602,6 +650,8 @@ pub extern "C" fn _start() -> ! {
     // Composite initial frame into buffer 0 and present.
     // -----------------------------------------------------------------------
     let status_y = (fb_height - STATUS_BAR_H) as i32;
+    let title_shadow_y = TITLE_BAR_H as i32;
+    let status_shadow_y = (fb_height - STATUS_BAR_H - SHADOW_DEPTH) as i32;
 
     {
         let mut fb0 = make_fb_surface(0);
@@ -621,6 +671,20 @@ pub extern "C" fn _start() -> ! {
             z: Z_CONTENT,
             visible: true,
         };
+        let title_shadow_cs = drawing::CompositeSurface {
+            surface: make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH),
+            x: 0,
+            y: title_shadow_y,
+            z: Z_SHADOW,
+            visible: true,
+        };
+        let status_shadow_cs = drawing::CompositeSurface {
+            surface: make_surf(&mut status_shadow_buf, fb_width, SHADOW_DEPTH),
+            x: 0,
+            y: status_shadow_y,
+            z: Z_SHADOW,
+            visible: true,
+        };
         let title_cs = drawing::CompositeSurface {
             surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
             x: 0,
@@ -636,8 +700,8 @@ pub extern "C" fn _start() -> ! {
             visible: true,
         };
 
-        let surfaces: [&drawing::CompositeSurface; 4] = [
-            &bg_cs, &content_cs, &title_cs, &status_cs,
+        let surfaces: [&drawing::CompositeSurface; 6] = [
+            &bg_cs, &content_cs, &title_shadow_cs, &status_shadow_cs, &title_cs, &status_cs,
         ];
         drawing::composite_surfaces(&mut fb0, &surfaces);
     }
@@ -756,6 +820,20 @@ pub extern "C" fn _start() -> ! {
                     z: Z_CONTENT,
                     visible: true,
                 };
+                let title_shadow_cs = drawing::CompositeSurface {
+                    surface: make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH),
+                    x: 0,
+                    y: title_shadow_y,
+                    z: Z_SHADOW,
+                    visible: true,
+                };
+                let status_shadow_cs = drawing::CompositeSurface {
+                    surface: make_surf(&mut status_shadow_buf, fb_width, SHADOW_DEPTH),
+                    x: 0,
+                    y: status_shadow_y,
+                    z: Z_SHADOW,
+                    visible: true,
+                };
                 let title_cs = drawing::CompositeSurface {
                     surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
                     x: 0,
@@ -771,8 +849,8 @@ pub extern "C" fn _start() -> ! {
                     visible: true,
                 };
 
-                let surfaces: [&drawing::CompositeSurface; 4] = [
-                    &bg_cs, &content_cs, &title_cs, &status_cs,
+                let surfaces: [&drawing::CompositeSurface; 6] = [
+                    &bg_cs, &content_cs, &title_shadow_cs, &status_shadow_cs, &title_cs, &status_cs,
                 ];
                 drawing::composite_surfaces(&mut fb, &surfaces);
             }

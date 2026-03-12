@@ -609,6 +609,57 @@ impl<'a> Surface<'a> {
             }
         }
     }
+    /// Fill a rectangle with a vertical gradient from `color_top` to `color_bottom`.
+    ///
+    /// Each row linearly interpolates RGBA between the two colors. Row 0 gets
+    /// `color_top`, row h-1 gets `color_bottom`. Clips to surface bounds.
+    /// Integer math only. Useful for drop-shadow falloff effects.
+    pub fn fill_gradient_v(
+        &mut self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        color_top: Color,
+        color_bottom: Color,
+    ) {
+        if w == 0 || h == 0 {
+            return;
+        }
+        if x >= self.width || y >= self.height {
+            return;
+        }
+
+        let x2 = min(x.saturating_add(w), self.width);
+        let y2 = min(y.saturating_add(h), self.height);
+
+        // For h=1, just fill with color_top.
+        if h == 1 {
+            self.fill_rect(x, y, x2 - x, 1, color_top);
+            return;
+        }
+
+        let denom = (h - 1) as u32;
+
+        for row in y..y2 {
+            let t = (row - y) as u32; // 0..h-1
+
+            // Linearly interpolate each channel: c = top + (bottom - top) * t / denom.
+            let r = (color_top.r as u32 * (denom - t) + color_bottom.r as u32 * t + denom / 2) / denom;
+            let g = (color_top.g as u32 * (denom - t) + color_bottom.g as u32 * t + denom / 2) / denom;
+            let b = (color_top.b as u32 * (denom - t) + color_bottom.b as u32 * t + denom / 2) / denom;
+            let a = (color_top.a as u32 * (denom - t) + color_bottom.a as u32 * t + denom / 2) / denom;
+
+            let row_color = Color {
+                r: if r > 255 { 255 } else { r as u8 },
+                g: if g > 255 { 255 } else { g as u8 },
+                b: if b > 255 { 255 } else { b as u8 },
+                a: if a > 255 { 255 } else { a as u8 },
+            };
+
+            self.fill_rect(x, row, x2 - x, 1, row_color);
+        }
+    }
     /// Fill a rectangle with alpha-blended color. Clips to surface bounds.
     ///
     /// Each destination pixel is blended with `color` using source-over.

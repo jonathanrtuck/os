@@ -2421,3 +2421,220 @@ fn status_bar_chrome_over_content_shows_bleedthrough() {
     let p_above = dst.get_pixel(8, 5).unwrap();
     assert_eq!(p_above, Color::rgb(0, 0, 180));
 }
+
+// ---------------------------------------------------------------------------
+// Drop shadows (VAL-COMP-003)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fill_gradient_v_first_row_is_top_color() {
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut surf = make_surface(&mut buf, 8, 8);
+    surf.clear(Color::BLACK);
+
+    surf.fill_gradient_v(0, 0, 8, 8, Color::rgba(0, 0, 0, 80), Color::rgba(0, 0, 0, 0));
+
+    // First row should have the top color (alpha ~80).
+    let p = surf.get_pixel(4, 0).unwrap();
+    assert!(p.a >= 70 && p.a <= 90, "top row alpha should be ~80, got {}", p.a);
+}
+
+#[test]
+fn fill_gradient_v_last_row_is_bottom_color() {
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut surf = make_surface(&mut buf, 8, 8);
+    surf.clear(Color::BLACK);
+
+    surf.fill_gradient_v(0, 0, 8, 8, Color::rgba(0, 0, 0, 80), Color::rgba(0, 0, 0, 0));
+
+    // Last row should have the bottom color (alpha ~0).
+    let p = surf.get_pixel(4, 7).unwrap();
+    assert!(p.a <= 15, "bottom row alpha should be ~0, got {}", p.a);
+}
+
+#[test]
+fn fill_gradient_v_monotonic_alpha_decrease() {
+    // Shadow gradient from alpha=80 to alpha=0 over 8 rows.
+    // Each row's alpha should be <= the row above it.
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut surf = make_surface(&mut buf, 8, 8);
+    surf.clear(Color::BLACK);
+
+    surf.fill_gradient_v(0, 0, 8, 8, Color::rgba(0, 0, 0, 80), Color::rgba(0, 0, 0, 0));
+
+    let mut prev_alpha = 255u8;
+    for row in 0..8 {
+        let p = surf.get_pixel(4, row).unwrap();
+        assert!(
+            p.a <= prev_alpha,
+            "alpha should decrease monotonically: row {} has a={}, prev={}",
+            row, p.a, prev_alpha
+        );
+        prev_alpha = p.a;
+    }
+}
+
+#[test]
+fn fill_gradient_v_intermediate_rows_have_intermediate_alpha() {
+    // Over 8 rows from alpha=80 to alpha=0, the middle row should have ~40.
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut surf = make_surface(&mut buf, 8, 8);
+    surf.clear(Color::BLACK);
+
+    surf.fill_gradient_v(0, 0, 8, 8, Color::rgba(0, 0, 0, 80), Color::rgba(0, 0, 0, 0));
+
+    let p_mid = surf.get_pixel(4, 4).unwrap();
+    // At row 4/8, alpha should be roughly 80 * (1 - 4/7) ≈ 34.
+    assert!(
+        p_mid.a > 15 && p_mid.a < 60,
+        "middle row alpha should be intermediate, got {}",
+        p_mid.a
+    );
+}
+
+#[test]
+fn fill_gradient_v_fills_all_columns() {
+    // All columns in a given row should have the same alpha.
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut surf = make_surface(&mut buf, 8, 8);
+    surf.clear(Color::BLACK);
+
+    surf.fill_gradient_v(0, 0, 8, 8, Color::rgba(0, 0, 0, 80), Color::rgba(0, 0, 0, 0));
+
+    let expected_a = surf.get_pixel(0, 3).unwrap().a;
+    for col in 1..8 {
+        let p = surf.get_pixel(col, 3).unwrap();
+        assert_eq!(p.a, expected_a, "all columns in row should have same alpha");
+    }
+}
+
+#[test]
+fn fill_gradient_v_clips_to_surface_bounds() {
+    // Gradient positioned partially outside surface should clip without panic.
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut surf = make_surface(&mut buf, 8, 8);
+    surf.clear(Color::BLACK);
+
+    // Starts at y=6, height=8: only 2 rows should be visible.
+    surf.fill_gradient_v(0, 6, 8, 8, Color::rgba(0, 0, 0, 80), Color::rgba(0, 0, 0, 0));
+
+    let p_visible = surf.get_pixel(4, 6).unwrap();
+    assert!(p_visible.a > 0, "visible row should have some alpha");
+
+    // Row 5 should be unaffected (still black, a=0 from clear to BLACK).
+    let p_above = surf.get_pixel(4, 5).unwrap();
+    assert_eq!(p_above, Color::BLACK);
+}
+
+#[test]
+fn fill_gradient_v_zero_height_is_noop() {
+    let mut buf = [0u8; 8 * 8 * 4];
+    let mut surf = make_surface(&mut buf, 8, 8);
+    surf.clear(Color::rgb(100, 100, 100));
+
+    surf.fill_gradient_v(0, 0, 8, 0, Color::rgba(0, 0, 0, 80), Color::rgba(0, 0, 0, 0));
+
+    // Surface should be unchanged.
+    assert_eq!(surf.get_pixel(4, 4), Some(Color::rgb(100, 100, 100)));
+}
+
+#[test]
+fn fill_gradient_v_single_row() {
+    let mut buf = [0u8; 8 * 4 * 4];
+    let mut surf = make_surface(&mut buf, 8, 4);
+    surf.clear(Color::BLACK);
+
+    // A single row gradient should just have the top color.
+    surf.fill_gradient_v(0, 0, 8, 1, Color::rgba(0, 0, 0, 80), Color::rgba(0, 0, 0, 0));
+
+    let p = surf.get_pixel(4, 0).unwrap();
+    assert_eq!(p.a, 80, "single row should have top color alpha");
+}
+
+#[test]
+fn shadow_surface_composites_between_content_and_chrome() {
+    // Verify that a shadow surface (z=15) composites between content (z=10)
+    // and chrome (z=20), creating a visible darkening effect beneath chrome.
+    let mut dst_buf = [0u8; 16 * 16 * 4];
+    let mut dst = make_surface(&mut dst_buf, 16, 16);
+    dst.clear(Color::BLACK);
+
+    // Content surface: bright white.
+    let mut content_buf = [0u8; 16 * 16 * 4];
+    let mut content = make_composite_surface(&mut content_buf, 16, 16, 0, 0, 10);
+    content.surface.clear(Color::rgb(200, 200, 200));
+
+    // Shadow surface: covers rows 4-7 (just below where chrome would be),
+    // filled with semi-transparent black gradient.
+    let mut shadow_buf = [0u8; 16 * 4 * 4];
+    let mut shadow = make_composite_surface(&mut shadow_buf, 16, 4, 0, 4, 15);
+    shadow.surface.fill_gradient_v(
+        0, 0, 16, 4,
+        Color::rgba(0, 0, 0, 80),
+        Color::rgba(0, 0, 0, 0),
+    );
+
+    // Chrome surface: covers rows 0-3.
+    let mut chrome_buf = [0u8; 16 * 4 * 4];
+    let mut chrome = make_composite_surface(&mut chrome_buf, 16, 4, 0, 0, 20);
+    chrome.surface.clear(Color::rgba(30, 30, 48, 220));
+
+    let surfaces: [&drawing::CompositeSurface; 3] = [&content, &shadow, &chrome];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // In the shadow region (row 4): content should be darkened by shadow.
+    let p_shadow = dst.get_pixel(8, 4).unwrap();
+    let p_no_shadow = dst.get_pixel(8, 10).unwrap();
+
+    // The shadowed pixel should be darker than the unshadowed content.
+    assert!(
+        p_shadow.r < p_no_shadow.r,
+        "shadow should darken content: shadow_r={} < content_r={}",
+        p_shadow.r, p_no_shadow.r
+    );
+
+    // The shadow should have gradient falloff: row 4 darker than row 7.
+    let p_shadow_top = dst.get_pixel(8, 4).unwrap();
+    let p_shadow_bottom = dst.get_pixel(8, 7).unwrap();
+    assert!(
+        p_shadow_top.r <= p_shadow_bottom.r,
+        "shadow should fade: top_r={} <= bottom_r={}",
+        p_shadow_top.r, p_shadow_bottom.r
+    );
+}
+
+#[test]
+fn shadow_gradient_not_hard_edged() {
+    // Verify the shadow has at least 3 distinct alpha levels (not just on/off).
+    let mut buf = [0u8; 16 * 8 * 4];
+    let mut surf = make_surface(&mut buf, 16, 8);
+    surf.clear(Color::TRANSPARENT);
+
+    surf.fill_gradient_v(0, 0, 16, 8, Color::rgba(0, 0, 0, 80), Color::rgba(0, 0, 0, 0));
+
+    let mut distinct_alphas = [0u8; 8];
+    for row in 0..8 {
+        distinct_alphas[row as usize] = surf.get_pixel(8, row).unwrap().a;
+    }
+
+    // Count unique alpha values.
+    let mut unique_count = 0;
+    for i in 0..8 {
+        let mut is_unique = true;
+        for j in 0..i {
+            if distinct_alphas[i] == distinct_alphas[j] {
+                is_unique = false;
+                break;
+            }
+        }
+        if is_unique {
+            unique_count += 1;
+        }
+    }
+
+    assert!(
+        unique_count >= 3,
+        "shadow should have gradient falloff with >= 3 distinct alpha levels, got {}",
+        unique_count
+    );
+}
