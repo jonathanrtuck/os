@@ -271,7 +271,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **What's scaffolding (the implementation):**
 
-- **Static text buffer in BSS.** Real OS service reads document content from a FileStore-backed memory mapping.
+- **Static text buffer in BSS.** Real OS service reads document content from a Files-backed memory mapping.
 - **No operation boundary detection.** Every write is applied immediately without snapshot/undo tracking. In the real OS, the service groups writes into operations (idle-gap detection or editor hints) and takes COW snapshots at boundaries.
 - **Bitmap font only.** TrueType rendering available in drawing library but not used.
 - **No read-only document mapping to editor.** Editor currently works without reading document content (it just sends write requests). Next step: share a read-only mapping so the editor can read the document for cursor positioning, selection, etc.
@@ -354,13 +354,13 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ### 2.6 Virtio 9P Driver (`services/drivers/virtio-9p/`) 🟢
 
-**Goal:** Read files from the host macOS filesystem via QEMU's 9p passthrough. Validates the FileStore interface design through practical use before building the real COW filesystem.
+**Goal:** Read files from the host macOS filesystem via QEMU's 9p passthrough. Validates the Files interface design through practical use before building the real COW filesystem.
 
 **Status:** ~450 lines. Implements 6 of ~30 9P2000.L operations (Tversion, Tattach, Twalk, Tlopen, Tread, Tclunk). Reads files from a shared host directory (`system/share/`) via virtio transport. Currently used to load the Source Code Pro font at boot (9 KB).
 
 **What's foundational:**
 
-- **Host filesystem passthrough pattern.** The driver bridges the gap between the OS and the host, letting userspace load files without `include_bytes!`. This is the prototype-on-host strategy from Decision #16 in action — implement FileStore against the host filesystem first, build the real COW FS later.
+- **Host filesystem passthrough pattern.** The driver bridges the gap between the OS and the host, letting userspace load files without `include_bytes!`. This is the prototype-on-host strategy from Decision #16 in action — implement Files against the host filesystem first, build the real COW FS later.
 - **9P2000.L wire protocol.** Manual message encoding/decoding (MsgWriter/MsgReader) for the Plan 9 protocol. 2-descriptor virtio chain (T-message readable, R-message writable).
 - **IPC request/response pattern.** Init sends MSG_FS_READ_REQUEST with shared buffer VA + filename, driver fills buffer via 9P reads, sends MSG_FS_READ_RESPONSE with byte count. Shared-memory-reference pattern for large data (§5.5).
 - **Same interrupt-driven pattern** as other virtio drivers (register IRQ → wait → ack → loop).
@@ -577,5 +577,5 @@ Ordered by what unblocks the most, building the happy path first:
 7. ~~**Editor process separation**~~ — **Done.** Text editor process (`user/text-editor/`) receives input events from compositor, sends write requests back. Compositor is sole writer to document state. Demonstrates Decision #9 (editors as read-only consumers). Four processes in the display pipeline: GPU driver, input driver, text editor, compositor.
 8. **Read-only document mapping** — Give the text editor a read-only shared memory mapping of the document buffer so it can read content for cursor positioning, selection, and context-aware editing. Complement to the write-through-IPC path.
 9. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
-10. **Filesystem service** (§3.2) — blocked on Decision #16. FileStore interface designed (12 operations), macOS prototype validated at `prototype/filestore/` with 21 passing tests. **Partially unblocked:** virtio-9p driver (§2.6) provides runtime file loading from host filesystem during prototyping. Font loading working end-to-end.
+10. **Filesystem service** (§3.2) — blocked on Decision #16. Files interface designed (12 operations), macOS prototype validated at `prototype/files/` with 21 passing tests. **Partially unblocked:** virtio-9p driver (§2.6) provides runtime file loading from host filesystem during prototyping. Font loading working end-to-end.
 11. ~~**Wait timeout**~~ — **Done.** For finite timeouts (0 < timeout < u64::MAX), `sys_wait` creates an internal timer, adds it to the wait set with a sentinel index. If the timer fires first, returns `WouldBlock`. Timer cleanup: immediate on non-blocked paths; deferred to next `wait` call for the blocked→woken path (stored on thread struct).

@@ -1,18 +1,18 @@
 use std::env;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::{FileStore, HostFileStore};
+use crate::{Files, HostFiles};
 
 /// Monotonic counter to give each test its own directory.
 static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Create a `HostFileStore` in a unique temp directory.
-fn make_store() -> HostFileStore {
+/// Create a `HostFiles` in a unique temp directory.
+fn make_store() -> HostFiles {
     let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = env::temp_dir().join(format!("filestore-test-{}-{}", std::process::id(), n));
+    let dir = env::temp_dir().join(format!("files-test-{}-{}", std::process::id(), n));
     // Clean up any leftover from a previous run.
     let _ = std::fs::remove_dir_all(&dir);
-    HostFileStore::new(&dir).expect("failed to create HostFileStore")
+    HostFiles::new(&dir).expect("failed to create HostFiles")
 }
 
 // ── basic create / write / read ──────────────────────────────────────

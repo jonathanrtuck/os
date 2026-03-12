@@ -1,7 +1,7 @@
-//! FileStore — the filesystem interface for the OS service.
+//! Files — the filesystem interface for the OS service.
 //!
-//! This crate defines the `FileStore` trait (12 operations) and provides a
-//! macOS-backed prototype implementation (`HostFileStore`) that stores files
+//! This crate defines the `Files` trait (12 operations) and provides a
+//! macOS-backed prototype implementation (`HostFiles`) that stores files
 //! as regular files on the host filesystem. The real implementation will use
 //! a COW filesystem with memory-mapped access; this prototype substitutes
 //! explicit read/write for mmap and file copies for snapshots.
@@ -13,7 +13,7 @@ mod host;
 #[cfg(test)]
 mod tests;
 
-pub use host::HostFileStore;
+pub use host::HostFiles;
 
 /// Opaque, globally unique file identifier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -35,7 +35,7 @@ pub struct SnapshotInfo {
 /// The filesystem knows nothing about documents, undo ordering, compound
 /// structures, or metadata. It stores files, provides mapped access, and
 /// takes snapshots.
-pub trait FileStore {
+pub trait Files {
     /// Create a new independent file with the same content as source.
     /// Implementation may share physical blocks (COW clone) for efficiency.
     fn clone_file(&mut self, source: FileId) -> io::Result<FileId>;

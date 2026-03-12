@@ -3,5 +3,5 @@
 version = 4
 
 [[package]]
-name = "filestore"
+name = "files"
 version = "0.1.0"

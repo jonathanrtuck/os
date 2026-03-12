@@ -1,4 +1,4 @@
-//! macOS-backed prototype of `FileStore`.
+//! macOS-backed prototype of `Files`.
 //!
 //! Files live at `{base}/files/{id}`, snapshots at `{base}/snapshots/{id}`.
 //! An atomic counter generates unique IDs. Snapshots are plain file copies —
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
-use crate::{FileId, FileStore, SnapshotId, SnapshotInfo};
+use crate::{FileId, Files, SnapshotId, SnapshotInfo};
 
 /// Snapshot bookkeeping stored in memory.
 struct SnapshotEntry {
@@ -20,13 +20,13 @@ struct SnapshotEntry {
     timestamp: SystemTime,
 }
 
-/// A `FileStore` backed by the macOS (host) filesystem.
+/// A `Files` implementation backed by the macOS (host) filesystem.
 ///
 /// Intended for prototyping only — validates the interface before building
 /// the real COW filesystem. Files and snapshots are regular files in a
 /// directory tree; snapshots are full copies.
 #[derive(Debug)]
-pub struct HostFileStore {
+pub struct HostFiles {
     base: PathBuf,
     files_dir: PathBuf,
     snapshots_dir: PathBuf,
@@ -37,8 +37,8 @@ pub struct HostFileStore {
     snapshots: HashMap<SnapshotId, SnapshotEntry>,
 }
 
-impl HostFileStore {
-    /// Create a new `HostFileStore` rooted at `base`.
+impl HostFiles {
+    /// Create a new `HostFiles` rooted at `base`.
     ///
     /// Creates the `files/` and `snapshots/` subdirectories if they don't
     /// already exist.
@@ -87,13 +87,13 @@ impl HostFileStore {
         })
     }
 }
-impl Drop for HostFileStore {
+impl Drop for HostFiles {
     /// Best-effort cleanup of the base directory on drop.
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.base);
     }
 }
-impl FileStore for HostFileStore {
+impl Files for HostFiles {
     fn clone_file(&mut self, source: FileId) -> io::Result<FileId> {
         let src_path = self.file_path(source)?.clone();
         let id = FileId(self.next_id());
@@ -244,11 +244,6 @@ impl FileStore for HostFileStore {
     }
 }
 
-// Manual Debug can't be derived because SnapshotEntry doesn't impl Debug,
-// but we derived Debug on the struct and just skip the snapshots map detail
-// via the HashMap's Debug impl (which shows keys). That's fine — we only
-// need Debug for ergonomics, not precision. Actually, let's just impl Debug
-// for SnapshotEntry too so the derive works cleanly.
 impl std::fmt::Debug for SnapshotEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SnapshotEntry")
