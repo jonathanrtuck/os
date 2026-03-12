@@ -14,7 +14,7 @@ virtio-input driver → compositor → text-editor → compositor → virtio-gpu
 ```
 
 1. **virtio-input**: Blocks on IRQ, reads evdev events, translates keycodes, sends MSG_KEY_EVENT to compositor
-2. **Compositor**: Event loop waiting on input + editor channels. Forwards key events to editor. Applies editor's write requests to document buffer. Renders content. Signals GPU.
+2. **Compositor**: Event loop waiting on input + editor + timer channels. Forwards key events to editor. Applies editor's write requests to document buffer. Manages multi-surface compositing (background, content, shadows, chrome). Supports two content modes: text editor (default) and image viewer (toggled via F1). Updates live clock from timer events. Signals GPU.
 3. **Text editor**: Receives key events, translates to editing intent (insert/delete/cursor move), sends write requests back to compositor. Has read-only shared memory mapping of document buffer.
 4. **virtio-gpu**: Waits for MSG_PRESENT, coalesces pending presents, does transfer_to_host_2d + resource_flush.
 
@@ -54,11 +54,34 @@ Userspace processes have a 16 KiB stack. All userspace programs and libraries ar
 
 - TrueType parser → glyph outline extraction → scanline rasterizer (2× horizontal + 4× vertical oversampling) → coverage map → gamma-correct alpha blending onto surface
 - GlyphCache: pre-rasterizes printable ASCII (0x20–0x7E) at startup, 48×48 max coverage buffers (~430 KiB with 2D oversampling)
-- Currently: Source Code Pro Regular, 16px, loaded via 9p
+- Two font caches:
+  - **Monospace** (Source Code Pro Regular, 16px): used for editor text. Fixed char_width via TextLayout.
+  - **Proportional** (Nunito Sans Regular, 16px): used for chrome text (title bar, status bar). Per-glyph advance widths via `draw_proportional_string()`.
+- All assets loaded from `system/share/` via 9p into a single 256 KiB shared buffer (mono font at offset 0, prop font at offset mono_len, PNG image data at offset mono_len + prop_len).
+- Missing glyph codepoints advance by space width fallback without crashing.
+
+## Multi-Surface Compositing
+
+The compositor uses a multi-surface model with z-ordered back-to-front compositing:
+
+| Surface          | Z-order | Description |
+|-----------------|---------|-------------|
+| Background       | 0       | Solid dark background fill |
+| Content          | 10      | Text editor or image viewer (full-screen, extends behind chrome) |
+| Title shadow     | 15      | Soft gradient shadow below title bar |
+| Status shadow    | 15      | Soft gradient shadow above status bar |
+| Title bar chrome | 20      | Translucent (alpha=220) with "Document OS" branding |
+| Status bar chrome| 20      | Translucent (alpha=220) with clock + context info |
+
+Each surface has a dedicated render function (e.g., `render_content_surface()`, `render_title_bar()`). Surfaces are allocated once at startup and re-rendered in-place each frame. The `composite_surfaces()` function sorts by z-order (stable sort) and composites via `blit_blend`.
+
+Content modes: `IMAGE_MODE` global toggles between text editor (renders document text) and image viewer (renders decoded PNG). F1 key switches modes. Text state is preserved across switches.
 
 ## Drawing Library
 
 - `Surface<'a>`: wraps a pixel buffer (BGRA8888), provides drawing primitives
 - `Color`: BGRA8888 with `blend_over()` (Porter-Duff source-over, integer math)
-- Primitives: `fill_rect`, `fill_rect_blend`, `draw_line`, `blit`, `blit_blend`, `draw_coverage`
-- No rounded rects, no blur, no gradients yet
+- Primitives: `fill_rect`, `fill_rect_blend`, `draw_line`, `blit`, `blit_blend`, `draw_coverage`, `fill_gradient_v`
+- `CompositeSurface` + `composite_surfaces()`: z-ordered back-to-front compositing with negative-offset clipping and blit_blend delegation
+- `png_decode()`: no-dependency PNG decoder (DEFLATE, all 5 filter types, RGB/RGBA → BGRA8888)
+- No rounded rects, no blur yet

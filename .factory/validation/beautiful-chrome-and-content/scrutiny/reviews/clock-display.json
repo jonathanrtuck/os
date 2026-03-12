@@ -1,0 +1,34 @@
+{
+  "featureId": "clock-display",
+  "reviewedAt": "2026-03-12T20:15:00.000Z",
+  "commitId": "8338d68",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, well-structured implementation of a live clock display in the compositor status bar. The design is sound: boot counter captured once at startup, elapsed_seconds() derives wall-clock time from the ARM generic counter (always accurate regardless of timer drift), format_time_hms() uses correct modular arithmetic with 24h wrapping. The event loop integration properly separates timer events from input events — timer polling is non-blocking, and the content surface is only re-rendered on actual text changes (not timer ticks), which is a good efficiency optimization. Timer recreation (one-shot close + recreate pattern) correctly implements periodic behavior. 10 well-chosen tests cover boundary values, wrapping, digit validity, and counter derivation. Test function is duplicated from compositor source (necessary since compositor targets aarch64-unknown-none while tests run on macOS host) — this is the established pattern in the codebase.",
+    "issues": [
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 1070,
+        "severity": "non_blocking",
+        "description": "Double sys::wait syscall per loop iteration when timer is active: the blocking wait returns, then a second poll (timeout=0) checks the timer handle. This extra syscall on every wake (including input-only wakes) is cheap but unnecessary — the blocking wait already returned because something was ready. Could be avoided by checking channel readiness first and only polling the timer if no input/editor messages were consumed. Minor efficiency concern, not a correctness issue."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 1067,
+        "severity": "non_blocking",
+        "description": "If create_clock_timer() fails after the old timer handle is closed, the clock simply stops updating (TIMER_ACTIVE=false). This is graceful degradation but there's no serial log message indicating the failure, which could make debugging harder. A sys::print in the Err arm of create_clock_timer() or at the event loop call site would help diagnostics."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The architecture.md document describes the compositor event loop as waiting on input + editor channels. Now it also waits on timer handles for the clock display. The 'Display Pipeline' section and event loop description could note the timer as a third event source.",
+      "evidence": ".factory/library/architecture.md says 'Event loop waiting on input + editor channels' but compositor now waits on [INPUT_HANDLE, EDITOR_HANDLE, timer_handle]. The timer is an implementation detail of the compositor rather than an architectural change, so this is low priority."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The clock-display feature is correctly implemented with no blocking issues. The core design is well-thought-out: elapsed time is derived from the ARM generic counter (not from counting timer ticks), so the displayed time is always accurate. The event loop cleanly separates timer events from input events without mutual blocking. Timer handles are properly managed (close + recreate for periodic behavior). Tests comprehensively cover formatting edge cases. Two non-blocking observations: (1) an extra polling syscall per event loop iteration when the timer is active, and (2) silent failure if timer recreation fails. Neither affects correctness or user experience."
+}

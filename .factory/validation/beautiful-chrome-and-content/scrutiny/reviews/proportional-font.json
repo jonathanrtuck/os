@@ -1,0 +1,51 @@
+{
+  "featureId": "proportional-font",
+  "reviewedAt": "2026-03-12T20:15:00.000Z",
+  "commitId": "5c314b1",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "fail",
+  "codeReview": {
+    "summary": "Implementation is well-structured and covers all expected behaviors: proportional font loaded via 9p, second GlyphCache created, draw_proportional_string() with per-glyph advances, chrome text uses proportional font while editor keeps monospace, missing glyph fallback works, 5 solid tests added. However, there is one blocking issue: the updated CompositorConfig struct is 64 bytes due to repr(C) alignment padding (u64 fields force struct size to a multiple of 8), but the IPC payload is only 60 bytes. This causes a 4-byte buffer overflow in from_payload() and a 4-byte out-of-bounds read in payload_as(). The old struct was 56 bytes (safe); adding prop_font_len pushed it to 60 bytes of content but 64 bytes of struct size. This is UB that happens to be benign today but is a real regression.",
+    "issues": [
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 102,
+        "severity": "blocking",
+        "description": "CompositorConfig is 64 bytes with repr(C) due to u64 alignment padding (fields end at offset 60, but struct size rounds up to next multiple of 8 = 64). IPC PAYLOAD_SIZE is 60. from_payload() copies size_of::<CompositorConfig>() = 64 bytes into the 60-byte payload — a 4-byte buffer overwrite past the payload array. payload_as() reads 64 bytes from a 60-byte payload — a 4-byte out-of-bounds read. Both are undefined behavior. The debug_assert in from_payload catches this in debug builds but is compiled away in release. Fix: reorder fields to place all u64s first and all u32s last with an even count of u32s, or add a _pad field to make the struct exactly 64 bytes and increase PAYLOAD_SIZE, or manually serialize/deserialize the config instead of using from_payload."
+      },
+      {
+        "file": "system/services/init/main.rs",
+        "line": 84,
+        "severity": "blocking",
+        "description": "Same CompositorConfig struct is duplicated in init/main.rs with the same 64-byte size issue. Both copies must be fixed together."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 178,
+        "severity": "non_blocking",
+        "description": "proportional_string_width() duplicates the fallback-advance + per-glyph-advance logic from draw_proportional_string() in the drawing library. Consider exposing a measure_proportional_string() function from the drawing library to keep this DRY."
+      },
+      {
+        "file": "system/test/tests/drawing.rs",
+        "line": 1884,
+        "severity": "non_blocking",
+        "description": "Commit message claims '6 new tests' but only 5 test functions were added (proportional_glyph_cache_advance_i_less_than_m, proportional_glyph_cache_has_valid_glyphs, proportional_glyph_cache_variable_advances, draw_proportional_string_advances_by_glyph_width, draw_proportional_string_missing_glyph_uses_fallback). Minor discrepancy — handoff correctly lists 5."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md documents the 60-byte IPC payload constraint but doesn't warn about repr(C) struct alignment padding. A struct with u64 fields will have its total size rounded up to the next multiple of 8, which can silently exceed 60 bytes even when the sum of field sizes fits. This is the root cause of the blocking issue in this feature. A convention note about always verifying size_of::<T>() <= 60 with a static_assert would prevent recurrence.",
+      "evidence": "CompositorConfig has fields summing to 60 bytes of content but size_of::<CompositorConfig>() = 64 due to struct alignment padding. Verified with a standalone Rust program. The worker's handoff states 'struct now exactly 60 bytes' — they measured field sizes but not actual struct size."
+    },
+    {
+      "area": "conventions",
+      "observation": "The IPC from_payload function has only a debug_assert for size checking, which is compiled away in release builds. A compile-time static assertion (const assert) would be more robust for catching payload size violations.",
+      "evidence": "system/libraries/ipc/lib.rs from_payload: debug_assert!(size <= PAYLOAD_SIZE) — this line is inactive in the release builds used for QEMU testing."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Proportional font implementation is architecturally sound — clean separation of drawing library function, proper dual-cache setup in compositor, graceful fallback on missing fonts, good test coverage. However, adding prop_font_len to CompositorConfig pushed the repr(C) struct from 56 to 64 bytes (not 60 as the worker believed), causing a 4-byte buffer overflow/overread through the IPC from_payload/payload_as functions. This is undefined behavior that works by coincidence in the current environment but is a real bug that must be fixed before this feature can pass review."
+}
