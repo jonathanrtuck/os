@@ -31,6 +31,10 @@ virtio-input driver → compositor → text-editor → compositor → virtio-gpu
 - Document buffer: 4 KiB shared page. First 64 bytes = header (length + cursor position). Rest = text content.
 - Each IPC channel: 2 pages (one per direction), each a SPSC ring buffer.
 
+## Process Startup Constraint
+
+`handle_send` only works on unstarted processes. This is a critical constraint for IPC protocol design — if two processes need to communicate during initialization (e.g., GPU driver sending display dimensions to init), the channel must be created and one process started before the other.
+
 ## Stack Constraint
 
 Userspace processes have a 16 KiB stack. All userspace programs and libraries are compiled with `-C opt-level=s` (in build.rs) to keep stack usage manageable. Be careful with large stack allocations, deep recursion, or unoptimized code paths that expand stack frames.
