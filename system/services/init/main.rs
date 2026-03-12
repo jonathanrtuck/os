@@ -74,19 +74,26 @@ struct DisplayInfoMsg {
     height: u32,
 }
 
+/// Compositor configuration sent to the compositor via IPC.
+///
+/// Layout: all u64 fields first, then all u32 fields, so that
+/// `size_of::<CompositorConfig>() == 56` (no trailing alignment padding)
+/// and the struct fits within the 60-byte IPC payload.
+///
+/// `fb_size` is intentionally omitted — the compositor computes it as
+/// `fb_stride * fb_height`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CompositorConfig {
     fb_va: u64,
     fb_va2: u64,
+    doc_va: u64,
+    mono_font_va: u64,
     fb_width: u32,
     fb_height: u32,
     fb_stride: u32,
-    fb_size: u32,
-    doc_va: u64,
     doc_capacity: u32,
     mono_font_len: u32,
-    mono_font_va: u64,
     prop_font_len: u32,
 }
 
@@ -365,14 +372,13 @@ fn setup_display_pipeline(
     let comp_config = CompositorConfig {
         fb_va: comp_fb_va0 as u64,
         fb_va2: comp_fb_va1 as u64,
+        doc_va: comp_doc_va as u64,
+        mono_font_va: comp_font_va,
         fb_width,
         fb_height,
         fb_stride,
-        fb_size,
-        doc_va: comp_doc_va as u64,
         doc_capacity: DOC_BUF_CAPACITY,
         mono_font_len,
-        mono_font_va: comp_font_va,
         prop_font_len,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };

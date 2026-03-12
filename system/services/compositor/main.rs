@@ -111,19 +111,26 @@ static mut DOC_BUF: *mut u8 = core::ptr::null_mut();
 static mut DOC_CAPACITY: usize = 0;
 static mut DOC_LEN: usize = 0;
 
+/// Compositor configuration received from init via IPC.
+///
+/// Layout: all u64 fields first, then all u32 fields, so that
+/// `size_of::<CompositorConfig>() == 56` (no trailing alignment padding)
+/// and the struct fits within the 60-byte IPC payload.
+///
+/// `fb_size` is intentionally omitted — the compositor computes it as
+/// `fb_stride * fb_height`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CompositorConfig {
     fb_va: u64,
     fb_va2: u64,
+    doc_va: u64,
+    mono_font_va: u64,
     fb_width: u32,
     fb_height: u32,
     fb_stride: u32,
-    fb_size: u32,
-    doc_va: u64,
     doc_capacity: u32,
     mono_font_len: u32,
-    mono_font_va: u64,
     prop_font_len: u32,
 }
 #[repr(C)]
@@ -685,7 +692,7 @@ pub extern "C" fn _start() -> ! {
     let fb_width = config.fb_width;
     let fb_height = config.fb_height;
     let fb_stride = config.fb_stride;
-    let fb_size = config.fb_size;
+    let fb_size = fb_stride * fb_height;
 
     if fb_va == 0 || fb_va2 == 0 || fb_width == 0 || fb_height == 0 {
         sys::print(b"compositor: bad framebuffer info\n");
