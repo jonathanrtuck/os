@@ -100,16 +100,25 @@ static mut SEL_START: usize = 0;
 /// Selection end byte offset (0 = no selection when equal to sel_start).
 static mut SEL_END: usize = 0;
 
+/// Vertical scroll offset in visual lines. Lines above this offset are
+/// not rendered. Updated automatically when the cursor moves outside the
+/// visible viewport.
+static mut SCROLL_OFFSET: u32 = 0;
+/// Saved scroll offset for the text editor when switching to image viewer.
+/// Restored when switching back.
+static mut SAVED_EDITOR_SCROLL: u32 = 0;
+
 static mut CHAR_W: u32 = 8;
 static mut LINE_H: u32 = 20;
+/// Content surface dimensions (set once during initialization).
+static mut CONTENT_W: u32 = 0;
+static mut CONTENT_H: u32 = 0;
 /// Pre-rasterized glyph cache for monospace font (heap-allocated, initialized at startup).
 static mut GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Pre-rasterized glyph cache for proportional font (chrome text).
 static mut PROP_GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Cursor byte offset in the document. Updated by write requests.
 static mut CURSOR_POS: usize = 0;
-/// Previous last-drawn pixel Y per content surface render (for clearing).
-static mut PREV_LAST_Y: u32 = 0;
 /// Current back buffer index (0 or 1). Swapped after each present.
 static mut BACK_BUF_IDX: usize = 0;
 // Document shared buffer — owned exclusively by the compositor (sole writer).
@@ -343,6 +352,38 @@ fn content_text_layout(content_w: u32) -> drawing::TextLayout {
 fn max_text_y_in_content(content_h: u32) -> u32 {
     content_h.saturating_sub(unsafe { LINE_H } + TEXT_INSET_BOTTOM)
 }
+/// Number of visible text lines in the content viewport.
+fn viewport_lines(content_h: u32) -> u32 {
+    let line_h = unsafe { LINE_H };
+
+    if line_h == 0 {
+        return 0;
+    }
+
+    // Usable vertical space: content height minus top and bottom insets.
+    let usable = content_h.saturating_sub(TEXT_INSET_TOP + TEXT_INSET_BOTTOM);
+
+    usable / line_h
+}
+/// Update SCROLL_OFFSET so that the cursor remains visible in the viewport.
+/// Uses the stored CONTENT_W and CONTENT_H dimensions.
+fn update_scroll_offset() {
+    let content_w = unsafe { CONTENT_W };
+    let content_h = unsafe { CONTENT_H };
+    let vp_lines = viewport_lines(content_h);
+
+    if vp_lines == 0 {
+        return;
+    }
+
+    let layout = content_text_layout(content_w);
+    let text = doc_content();
+    let cursor = unsafe { CURSOR_POS };
+    let current = unsafe { SCROLL_OFFSET };
+    let new_scroll = layout.scroll_for_cursor(text, cursor, current, vp_lines);
+
+    unsafe { SCROLL_OFFSET = new_scroll };
+}
 
 // ---------------------------------------------------------------------------
 // Surface rendering functions
@@ -370,31 +411,14 @@ fn render_content_surface(
     let bg = Color::rgb(24, 24, 36);
     let cache = unsafe { &*GLYPH_CACHE };
     let cursor_pos = unsafe { CURSOR_POS };
-    let prev_last_y = unsafe { PREV_LAST_Y };
     let content_w = surf.width;
     let content_h = surf.height;
+    let scroll_offset = unsafe { SCROLL_OFFSET };
 
-    // Clear the text rendering area. We clear from the text top through
-    // previous last rendered Y + some margin. On first render, clear everything.
-    let clear_end_y = TEXT_INSET_TOP + prev_last_y + 2 * cache.line_height;
-    let clear_end_y = if clear_end_y > content_h {
-        content_h
-    } else {
-        clear_end_y
-    };
-
-    if TEXT_INSET_TOP < clear_end_y {
-        surf.fill_rect(0, TEXT_INSET_TOP, content_w, clear_end_y - TEXT_INSET_TOP, bg);
-    }
-
-    // Fill the area above text (behind the title bar chrome).
-    surf.fill_rect(0, 0, content_w, TEXT_INSET_TOP, bg);
-
-    // Fill the area below text (behind the status bar chrome).
-    let status_top = content_h.saturating_sub(TEXT_INSET_BOTTOM);
-    if status_top < content_h {
-        surf.fill_rect(0, status_top, content_w, TEXT_INSET_BOTTOM, bg);
-    }
+    // With scrolling, we need to clear the entire text rendering area each
+    // frame because any scroll change shifts all visible content. The
+    // previous incremental-clear optimization doesn't work with scrolling.
+    surf.clear(bg);
 
     let layout = content_text_layout(content_w);
     let my = max_text_y_in_content(content_h);
@@ -402,7 +426,7 @@ fn render_content_surface(
     let sel_start = unsafe { SEL_START };
     let sel_end = unsafe { SEL_END };
 
-    let (_, _cursor_y) = layout.draw_tt_sel(
+    let (_, _cursor_y) = layout.draw_tt_sel_scroll(
         surf,
         text,
         TEXT_INSET_X,
@@ -415,12 +439,8 @@ fn render_content_surface(
         sel_start,
         sel_end,
         Color::rgba(50, 80, 160, 180),
+        scroll_offset,
     );
-
-    // Track last rendered Y for next frame's clear optimization.
-    let (_, last_y) = layout.byte_to_xy(text, text.len());
-
-    unsafe { PREV_LAST_Y = last_y };
 }
 
 /// Render the image viewer content surface: display a decoded PNG image
@@ -966,6 +986,12 @@ pub extern "C" fn _start() -> ! {
     let content_x = CONTENT_MARGIN_X as i32;
     let content_y = CONTENT_MARGIN_TOP as i32;
 
+    // Store content dimensions for scroll offset calculations.
+    unsafe {
+        CONTENT_W = content_w;
+        CONTENT_H = content_h;
+    }
+
     sys::print(b"     allocating surface buffers\n");
 
     // Background surface (z=0): full-screen solid color.
@@ -1161,7 +1187,17 @@ pub extern "C" fn _start() -> ! {
                     if has_image {
                         let was_image = unsafe { IMAGE_MODE };
 
+                        if !was_image {
+                            // Switching TO image: save editor scroll offset.
+                            unsafe { SAVED_EDITOR_SCROLL = SCROLL_OFFSET };
+                        }
+
                         unsafe { IMAGE_MODE = !was_image };
+
+                        if was_image {
+                            // Switching BACK to editor: restore scroll offset.
+                            unsafe { SCROLL_OFFSET = SAVED_EDITOR_SCROLL };
+                        }
 
                         // Re-render the content surface for the new mode.
                         {
@@ -1178,7 +1214,6 @@ pub extern "C" fn _start() -> ! {
                             } else {
                                 // Switching back to editor: full clear + re-render
                                 // to ensure no image artifacts remain.
-                                unsafe { PREV_LAST_Y = content_h };
                                 render_content_surface(&mut content_surf, doc_content());
                             }
                         }
@@ -1258,6 +1293,12 @@ pub extern "C" fn _start() -> ! {
                 }
                 _ => {}
             }
+        }
+
+        // Update scroll offset after processing all editor messages so that
+        // the cursor remains visible in the viewport.
+        if changed && !unsafe { IMAGE_MODE } {
+            update_scroll_offset();
         }
 
         if changed || timer_fired {

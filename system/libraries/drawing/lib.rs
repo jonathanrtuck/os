@@ -896,6 +896,148 @@ impl TextLayout {
         )
     }
 
+    /// Layout and draw text with selection and vertical scrolling.
+    ///
+    /// `scroll_offset` is the number of visual lines to skip at the top.
+    /// Lines above the scroll offset are not drawn. The cursor and selection
+    /// positions are adjusted so that line `scroll_offset` appears at
+    /// `origin_y`. Content below `max_y` is clipped as before.
+    ///
+    /// Returns `(cursor_x, cursor_y)` in surface coordinates (accounting for
+    /// scroll). If the cursor is above the viewport, returns `(origin_x, 0)`.
+    pub fn draw_tt_sel_scroll(
+        &self,
+        fb: &mut Surface,
+        text: &[u8],
+        origin_x: u32,
+        origin_y: u32,
+        cursor_offset: usize,
+        cache: &GlyphCache,
+        text_color: Color,
+        cursor_color: Color,
+        max_y: u32,
+        sel_start: usize,
+        sel_end: usize,
+        sel_color: Color,
+        scroll_offset: u32,
+    ) -> (u32, u32) {
+        let cols = self.cols();
+        let mut col = 0usize;
+        let mut row = 0u32;
+        let mut cursor_x = origin_x;
+        let mut cursor_y = origin_y;
+        let baseline_offset = cache.line_height * 3 / 4;
+
+        // Normalize selection range.
+        let (s_lo, s_hi) = if sel_start <= sel_end {
+            (sel_start, sel_end)
+        } else {
+            (sel_end, sel_start)
+        };
+        let has_selection = s_lo < s_hi;
+
+        for (i, &byte) in text.iter().enumerate() {
+            // Compute the visual Y for this row, accounting for scroll.
+            // If this row is above the scroll offset, it's not drawn.
+            let visual_row = row as i32 - scroll_offset as i32;
+
+            if i == cursor_offset {
+                if visual_row >= 0 {
+                    cursor_x = origin_x + col as u32 * self.char_width;
+                    cursor_y = origin_y + visual_row as u32 * self.line_height;
+                } else {
+                    // Cursor is above viewport (shouldn't happen with auto-scroll,
+                    // but handle gracefully).
+                    cursor_x = origin_x;
+                    cursor_y = 0;
+                }
+            }
+
+            if byte == b'\n' {
+                col = 0;
+                row += 1;
+
+                continue;
+            }
+
+            if cols > 0 && col >= cols {
+                col = 0;
+                row += 1;
+
+                // Recompute visual_row after wrap.
+                let visual_row = row as i32 - scroll_offset as i32;
+
+                if visual_row >= 0 {
+                    let py = origin_y + visual_row as u32 * self.line_height;
+                    if py > max_y {
+                        break;
+                    }
+                }
+            }
+
+            // Only draw if this row is within the visible viewport.
+            let visual_row = row as i32 - scroll_offset as i32;
+
+            if visual_row >= 0 {
+                let py = origin_y + visual_row as u32 * self.line_height;
+
+                if py > max_y {
+                    break;
+                }
+
+                // Draw selection highlight behind the character if selected.
+                if has_selection && i >= s_lo && i < s_hi && sel_color.a > 0 {
+                    let hx = origin_x + col as u32 * self.char_width;
+
+                    fb.fill_rect_blend(hx, py, self.char_width, cache.line_height, sel_color);
+                }
+
+                if let Some((glyph, coverage)) = cache.get(byte) {
+                    if glyph.width > 0 && glyph.height > 0 {
+                        let gx = origin_x as i32
+                            + col as i32 * self.char_width as i32
+                            + glyph.bearing_x;
+                        let gy = py as i32 + baseline_offset as i32 - glyph.bearing_y;
+
+                        fb.draw_coverage(
+                            gx,
+                            gy,
+                            coverage,
+                            glyph.width,
+                            glyph.height,
+                            text_color,
+                        );
+                    }
+                }
+            }
+
+            col += 1;
+        }
+
+        // Cursor at end of text.
+        if cursor_offset >= text.len() {
+            let visual_row = row as i32 - scroll_offset as i32;
+
+            if visual_row >= 0 {
+                let py = origin_y + visual_row as u32 * self.line_height;
+
+                cursor_x = origin_x + col as u32 * self.char_width;
+                cursor_y = py;
+            } else {
+                cursor_x = origin_x;
+                cursor_y = 0;
+            }
+        }
+
+        // Draw cursor: thin bar (no cursor when there's a visible selection,
+        // since the selection end *is* the cursor position).
+        if !has_selection && cursor_y >= origin_y && cursor_y <= max_y {
+            fb.fill_rect(cursor_x, cursor_y, 2, cache.line_height, cursor_color);
+        }
+
+        (cursor_x, cursor_y)
+    }
+
     /// Layout and draw text with optional selection highlight.
     ///
     /// `sel_start` and `sel_end` define the selected byte range (half-open).
@@ -1004,6 +1146,94 @@ impl TextLayout {
         }
 
         (cursor_x, cursor_y)
+    }
+    /// Return the visual line number (0-based) for a given byte offset.
+    /// Uses the same wrapping rules as `layout_lines` and `byte_to_xy`.
+    pub fn byte_to_visual_line(&self, text: &[u8], offset: usize) -> u32 {
+        let cols = self.cols();
+
+        if cols == 0 || text.is_empty() {
+            return 0;
+        }
+
+        let target = if offset > text.len() {
+            text.len()
+        } else {
+            offset
+        };
+        let mut col = 0usize;
+        let mut row = 0u32;
+
+        for (i, &byte) in text.iter().enumerate() {
+            if i == target {
+                return row;
+            }
+
+            if byte == b'\n' {
+                row += 1;
+                col = 0;
+
+                continue;
+            }
+
+            if col >= cols {
+                row += 1;
+                col = 0;
+            }
+
+            col += 1;
+        }
+
+        // offset == text.len()
+        row
+    }
+    /// Count the total number of visual lines in the text.
+    /// Empty text returns 0. A single line of text returns 1.
+    pub fn total_visual_lines(&self, text: &[u8]) -> u32 {
+        if text.is_empty() {
+            return 0;
+        }
+
+        let mut count = 0u32;
+
+        self.layout_lines(text, |_, _, _| {
+            count += 1;
+        });
+
+        count
+    }
+    /// Compute the scroll offset (in visual lines) needed to keep the cursor
+    /// visible within a viewport of `viewport_lines` visual lines.
+    ///
+    /// - If the cursor is above the current viewport, scrolls up.
+    /// - If the cursor is below the current viewport, scrolls down.
+    /// - Otherwise returns the current scroll unchanged.
+    pub fn scroll_for_cursor(
+        &self,
+        text: &[u8],
+        cursor_offset: usize,
+        current_scroll: u32,
+        viewport_lines: u32,
+    ) -> u32 {
+        if viewport_lines == 0 {
+            return 0;
+        }
+
+        let cursor_line = self.byte_to_visual_line(text, cursor_offset);
+
+        // If cursor is above the visible region, scroll up to show it.
+        if cursor_line < current_scroll {
+            return cursor_line;
+        }
+
+        // If cursor is below the visible region, scroll down.
+        let last_visible = current_scroll + viewport_lines - 1;
+
+        if cursor_line > last_visible {
+            return cursor_line - (viewport_lines - 1);
+        }
+
+        current_scroll
     }
     /// Walk text and call `f(line_start, line_end, visual_row)` for each
     /// visual line. Handles hard newlines and soft wrap at max_width.
