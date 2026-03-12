@@ -31,6 +31,10 @@ virtio-input driver → compositor → text-editor → compositor → virtio-gpu
 - Document buffer: 4 KiB shared page. First 64 bytes = header (length + cursor position). Rest = text content.
 - Each IPC channel: 2 pages (one per direction), each a SPSC ring buffer.
 
+## Stack Constraint
+
+Userspace processes have a 16 KiB stack. All userspace programs and libraries are compiled with `-C opt-level=s` (in build.rs) to keep stack usage manageable. Be careful with large stack allocations, deep recursion, or unoptimized code paths that expand stack frames.
+
 ## Font Pipeline
 
 - TrueType parser → glyph outline extraction → scanline rasterizer (4x vertical oversampling) → coverage map → alpha blending onto surface
