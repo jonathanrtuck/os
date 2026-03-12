@@ -24,7 +24,11 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
+
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+const FONT_DATA: &[u8] = include_bytes!("../../libraries/drawing/SourceCodePro-Regular.ttf");
+const FONT_SIZE: u32 = 16;
 // Protocol message types.
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
 const MSG_KEY_EVENT: u32 = 10;
@@ -39,11 +43,13 @@ const EDITOR_HANDLE: u8 = 3;
 // Text area layout constants.
 const TEXT_X: u32 = 24;
 const TEXT_Y: u32 = 48;
-const CHAR_W: u32 = 8;
-const LINE_H: u32 = 20;
+static mut CHAR_W: u32 = 8;
+static mut LINE_H: u32 = 20;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
 
+/// Pre-rasterized glyph cache (heap-allocated, initialized at startup).
+static mut GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Cursor byte offset in the document. Updated by write requests.
 static mut CURSOR_POS: usize = 0;
 /// Previous cursor pixel Y (for dirty-rect clearing).
@@ -94,6 +100,33 @@ struct WriteDelete {
 
 fn channel_shm_va(idx: usize) -> usize {
     CHANNEL_SHM_BASE + idx * 2 * 4096
+}
+/// Draw a byte string using the glyph cache (simple helper, no wrapping).
+fn draw_string(
+    fb: &mut drawing::Surface,
+    x: u32,
+    y: u32,
+    text: &[u8],
+    cache: &drawing::GlyphCache,
+    color: drawing::Color,
+) {
+    let baseline_y = y as i32 + (cache.line_height * 3 / 4) as i32;
+    let mut cx = x as i32;
+
+    for &byte in text {
+        if let Some((glyph, coverage)) = cache.get(byte) {
+            if glyph.width > 0 && glyph.height > 0 {
+                let gx = cx + glyph.bearing_x;
+                let gy = baseline_y - glyph.bearing_y;
+
+                fb.draw_coverage(gx, gy, coverage, glyph.width, glyph.height, color);
+            }
+
+            cx += glyph.advance as i32;
+        } else {
+            cx += unsafe { CHAR_W } as i32;
+        }
+    }
 }
 /// Get a slice of the document content (read from shared buffer).
 fn doc_content() -> &'static [u8] {
@@ -150,29 +183,32 @@ fn doc_write_header() {
     }
 }
 fn text_layout(fb_width: u32) -> drawing::TextLayout {
+    let cache = unsafe { &*GLYPH_CACHE };
+
     drawing::TextLayout {
-        char_width: CHAR_W,
-        line_height: LINE_H,
+        char_width: unsafe { CHAR_W },
+        line_height: cache.line_height,
         max_width: fb_width - 48,
     }
 }
 fn max_text_y(fb_height: u32) -> u32 {
     let text_area_h = fb_height.saturating_sub(48 + 32);
 
-    TEXT_Y + text_area_h - LINE_H - 8
+    TEXT_Y + text_area_h - unsafe { LINE_H } - 8
 }
 /// Draw static chrome (title bar, text area background/border). Called once.
-fn render_chrome(fb: &mut drawing::Surface) {
-    use drawing::{Color, FONT_8X16 as F};
+fn render_chrome(fb: &mut drawing::Surface, cache: &drawing::GlyphCache) {
+    use drawing::Color;
 
     fb.clear(Color::rgb(18, 18, 26));
     fb.fill_rect(0, 0, fb.width, 36, Color::rgb(30, 30, 48));
-    fb.draw_text(12, 10, "Document OS", &F, Color::rgb(200, 200, 220));
+    draw_string(fb, 12, 10, b"Document OS", cache, Color::rgb(200, 200, 220));
 
-    let subtitle = "Editor Separation Demo";
-    let sx = fb.width.saturating_sub(12 + subtitle.len() as u32 * 8);
+    let subtitle = b"Editor Separation Demo";
+    let sub_w = subtitle.len() as u32 * unsafe { CHAR_W };
+    let sx = fb.width.saturating_sub(12 + sub_w);
 
-    fb.draw_text(sx, 10, subtitle, &F, Color::rgb(90, 90, 110));
+    draw_string(fb, sx, 10, subtitle, cache, Color::rgb(90, 90, 110));
     fb.draw_hline(0, 36, fb.width, Color::rgb(60, 60, 80));
 
     let text_area_h = fb.height.saturating_sub(48 + 32);
@@ -198,17 +234,18 @@ fn render_chrome(fb: &mut drawing::Surface) {
 /// Dirty-rect optimization: clears from the previous cursor Y downward,
 /// then delegates to TextLayout::draw for positioning and rendering.
 fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
-    use drawing::{Color, FONT_8X16 as F};
+    use drawing::Color;
 
     let bg = Color::rgb(24, 24, 36);
     let my = max_text_y(fb.height);
     let layout = text_layout(fb.width);
+    let cache = unsafe { &*GLYPH_CACHE };
     let cursor_pos = unsafe { CURSOR_POS };
     let prev_cursor_y = unsafe { PREV_CURSOR_Y };
     let prev_last_y = unsafe { PREV_LAST_Y };
     // Clear dirty region: from previous cursor row to past previous last row.
     let clear_start_y = TEXT_Y + prev_cursor_y;
-    let clear_end_y = TEXT_Y + prev_last_y + 2 * LINE_H;
+    let clear_end_y = TEXT_Y + prev_last_y + 2 * cache.line_height;
     let text_bottom = fb.height.saturating_sub(32) - 1;
     let clear_end_y = if clear_end_y > text_bottom {
         text_bottom
@@ -226,13 +263,13 @@ fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
         );
     }
 
-    let (_, cursor_y) = layout.draw(
+    let (_, cursor_y) = layout.draw_tt(
         fb,
         text,
         TEXT_X,
         TEXT_Y,
         cursor_pos,
-        &F,
+        cache,
         Color::rgb(200, 210, 230),
         Color::rgb(100, 180, 255),
         my,
@@ -249,8 +286,9 @@ fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
     render_status(fb, text.len());
 }
 fn render_status(fb: &mut drawing::Surface, len: usize) {
-    use drawing::{Color, FONT_8X16 as F};
+    use drawing::Color;
 
+    let cache = unsafe { &*GLYPH_CACHE };
     let bar_y = fb.height.saturating_sub(28);
 
     fb.fill_rect(0, bar_y, fb.width, 28, Color::rgb(30, 30, 48));
@@ -297,9 +335,7 @@ fn render_status(fb: &mut drawing::Surface, len: usize) {
         }
     }
 
-    let status = unsafe { core::str::from_utf8_unchecked(&buf[..ci]) };
-
-    fb.draw_text(12, bar_y + 6, status, &F, Color::rgb(130, 130, 150));
+    draw_string(fb, 12, bar_y + 6, &buf[..ci], cache, Color::rgb(130, 130, 150));
 }
 
 #[unsafe(no_mangle)]
@@ -340,6 +376,51 @@ pub extern "C" fn _start() -> ! {
 
     doc_write_header();
 
+    // Rasterize font glyphs into cache (heap-allocated, ~220 KiB).
+    // Allocated zeroed on heap first to avoid stack overflow, then populated.
+    let ttf = drawing::TrueTypeFont::new(FONT_DATA).unwrap_or_else(|| {
+        sys::print(b"compositor: failed to parse font\n");
+        sys::exit();
+    });
+    let mut cache: Box<drawing::GlyphCache> = unsafe {
+        let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
+        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
+
+        if ptr.is_null() {
+            sys::print(b"compositor: glyph cache alloc failed\n");
+            sys::exit();
+        }
+
+        Box::from_raw(ptr)
+    };
+    let mut scratch: Box<drawing::RasterScratch> = unsafe {
+        let layout = alloc::alloc::Layout::new::<drawing::RasterScratch>();
+        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::RasterScratch;
+
+        if ptr.is_null() {
+            sys::print(b"compositor: scratch alloc failed\n");
+            sys::exit();
+        }
+
+        Box::from_raw(ptr)
+    };
+
+    cache.populate(&ttf, FONT_SIZE, &mut scratch);
+
+    drop(scratch);
+
+    // Read advance width from space glyph (monospace: all glyphs same width).
+    if let Some((g, _)) = cache.get(b' ') {
+        unsafe { CHAR_W = g.advance };
+    }
+
+    unsafe {
+        LINE_H = cache.line_height;
+        GLYPH_CACHE = Box::into_raw(cache);
+    }
+
+    sys::print(b"     font rasterized (Source Code Pro 16px)\n");
+
     // Channel 1: input events from input driver (endpoint 1 = recv).
     let input_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
     // Channel 2: GPU present commands (endpoint 0 = send).
@@ -355,7 +436,7 @@ pub extern "C" fn _start() -> ! {
         format: drawing::PixelFormat::Bgra8888,
     };
 
-    render_chrome(&mut fb);
+    render_chrome(&mut fb, unsafe { &*GLYPH_CACHE });
     render_content(&mut fb, doc_content());
 
     let present_msg = ipc::Message::new(MSG_PRESENT);

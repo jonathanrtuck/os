@@ -407,7 +407,7 @@ impl<'a> TrueTypeFont<'a> {
         Some((off_this, off_next - off_this))
     }
 
-    /// Extract the outline for a simple glyph (no compound glyph support yet).
+    /// Extract the outline for a glyph (simple or compound).
     pub fn glyph_outline(&self, glyph_index: u16, out: &mut GlyphOutline) -> bool {
         out.num_points = 0;
         out.num_contours = 0;
@@ -431,34 +431,47 @@ impl<'a> TrueTypeFont<'a> {
             None => return false,
         };
 
-        // Compound glyphs (negative contour count) not yet supported.
-        if num_contours <= 0 {
-            return false;
-        }
-
-        let nc = num_contours as usize;
-
-        if nc > MAX_CONTOURS {
-            return false;
-        }
-
         out.x_min = read_i16_be(g, 2).unwrap_or(0);
         out.y_min = read_i16_be(g, 4).unwrap_or(0);
         out.x_max = read_i16_be(g, 6).unwrap_or(0);
         out.y_max = read_i16_be(g, 8).unwrap_or(0);
-        out.num_contours = num_contours as u16;
 
-        // Read endPtsOfContours.
+        if num_contours < 0 {
+            self.glyph_outline_compound(g, out)
+        } else if num_contours > 0 {
+            Self::glyph_outline_simple(g, num_contours as usize, out)
+        } else {
+            false
+        }
+    }
+
+    /// Parse a simple glyph's contours, points, and flags from raw glyf data.
+    fn glyph_outline_simple(g: &[u8], nc: usize, out: &mut GlyphOutline) -> bool {
+        if nc > MAX_CONTOURS {
+            return false;
+        }
+
+        let base_contours = out.num_contours as usize;
+        let base_points = out.num_points as usize;
+
+        if base_contours + nc > MAX_CONTOURS {
+            return false;
+        }
+
         for i in 0..nc {
-            out.contour_ends[i] = match read_u16_be(g, 10 + i * 2) {
-                Some(v) => v,
+            out.contour_ends[base_contours + i] = match read_u16_be(g, 10 + i * 2) {
+                Some(v) => v + base_points as u16,
                 None => return false,
             };
         }
 
-        let num_points = out.contour_ends[nc - 1] as usize + 1;
+        let local_last = match read_u16_be(g, 10 + (nc - 1) * 2) {
+            Some(v) => v as usize,
+            None => return false,
+        };
+        let num_points = local_last + 1;
 
-        if num_points > MAX_GLYPH_POINTS {
+        if base_points + num_points > MAX_GLYPH_POINTS {
             return false;
         }
 
@@ -468,7 +481,7 @@ impl<'a> TrueTypeFont<'a> {
             Some(v) => v as usize,
             None => return false,
         };
-        // Parse flags.
+
         let mut flags = [0u8; MAX_GLYPH_POINTS];
         let mut cursor = instr_off + 2 + instr_len;
         let mut fi = 0;
@@ -483,7 +496,6 @@ impl<'a> TrueTypeFont<'a> {
             flags[fi] = flag;
             fi += 1;
 
-            // Bit 3: repeat flag — next byte is repeat count.
             if flag & 0x08 != 0 && fi < num_points {
                 let repeat = match read_u8(g, cursor) {
                     Some(v) => v as usize,
@@ -501,20 +513,17 @@ impl<'a> TrueTypeFont<'a> {
             }
         }
 
-        // Parse x-coordinates (delta-encoded).
         let mut x: i32 = 0;
 
         for i in 0..num_points {
             let f = flags[i];
 
             if f & 0x02 != 0 {
-                // 1-byte x delta.
                 let dx = read_u8(g, cursor).unwrap_or(0) as i32;
 
                 cursor += 1;
                 x += if f & 0x10 != 0 { dx } else { -dx };
             } else if f & 0x10 == 0 {
-                // 2-byte signed x delta.
                 let dx = match read_i16_be(g, cursor) {
                     Some(v) => v as i32,
                     None => return false,
@@ -523,24 +532,21 @@ impl<'a> TrueTypeFont<'a> {
                 cursor += 2;
                 x += dx;
             }
-            // else: x same as previous (delta = 0).
-            out.points[i].x = x;
+
+            out.points[base_points + i].x = x;
         }
 
-        // Parse y-coordinates (delta-encoded).
         let mut y: i32 = 0;
 
         for i in 0..num_points {
             let f = flags[i];
 
             if f & 0x04 != 0 {
-                // 1-byte y delta.
                 let dy = read_u8(g, cursor).unwrap_or(0) as i32;
 
                 cursor += 1;
                 y += if f & 0x20 != 0 { dy } else { -dy };
             } else if f & 0x20 == 0 {
-                // 2-byte signed y delta.
                 let dy = match read_i16_be(g, cursor) {
                     Some(v) => v as i32,
                     None => return false,
@@ -549,17 +555,137 @@ impl<'a> TrueTypeFont<'a> {
                 cursor += 2;
                 y += dy;
             }
-            out.points[i].y = y;
+
+            out.points[base_points + i].y = y;
         }
 
-        // Set on-curve flags.
         for i in 0..num_points {
-            out.points[i].on_curve = flags[i] & 0x01 != 0;
+            out.points[base_points + i].on_curve = flags[i] & 0x01 != 0;
         }
 
-        out.num_points = num_points as u16;
+        out.num_contours = (base_contours + nc) as u16;
+        out.num_points = (base_points + num_points) as u16;
 
         true
+    }
+
+    /// Parse a compound glyph: read components and recursively extract
+    /// simple outlines, applying x/y offsets to each component's points.
+    fn glyph_outline_compound(&self, g: &[u8], out: &mut GlyphOutline) -> bool {
+        const ARG_1_AND_2_ARE_WORDS: u16 = 0x0001;
+        const ARGS_ARE_XY_VALUES: u16 = 0x0002;
+        const MORE_COMPONENTS: u16 = 0x0020;
+        const WE_HAVE_A_SCALE: u16 = 0x0008;
+        const WE_HAVE_AN_X_AND_Y_SCALE: u16 = 0x0040;
+        const WE_HAVE_A_TWO_BY_TWO: u16 = 0x0080;
+
+        let mut cursor = 10; // skip header (numContours + bbox)
+        let mut any = false;
+
+        loop {
+            if cursor + 4 > g.len() {
+                break;
+            }
+
+            let flags = match read_u16_be(g, cursor) {
+                Some(v) => v,
+                None => break,
+            };
+            let component_idx = match read_u16_be(g, cursor + 2) {
+                Some(v) => v,
+                None => break,
+            };
+
+            cursor += 4;
+
+            // Read offset arguments.
+            let (dx, dy) = if flags & ARG_1_AND_2_ARE_WORDS != 0 {
+                let a = read_i16_be(g, cursor).unwrap_or(0) as i32;
+                let b = read_i16_be(g, cursor + 2).unwrap_or(0) as i32;
+
+                cursor += 4;
+                (a, b)
+            } else {
+                if cursor + 2 > g.len() {
+                    break;
+                }
+
+                let a = g[cursor] as i8 as i32;
+                let b = g[cursor + 1] as i8 as i32;
+
+                cursor += 2;
+                (a, b)
+            };
+
+            // Skip optional scale/transform data (we don't apply transforms).
+            if flags & WE_HAVE_A_SCALE != 0 {
+                cursor += 2;
+            } else if flags & WE_HAVE_AN_X_AND_Y_SCALE != 0 {
+                cursor += 4;
+            } else if flags & WE_HAVE_A_TWO_BY_TWO != 0 {
+                cursor += 8;
+            }
+
+            // Recursively extract the component's outline.
+            let (comp_off, comp_len) = match self.glyph_location(component_idx) {
+                Some(v) => v,
+                None => {
+                    if flags & MORE_COMPONENTS == 0 {
+                        break;
+                    }
+                    continue;
+                }
+            };
+            let glyf_data = match self.glyf.slice(self.data) {
+                Some(d) => d,
+                None => break,
+            };
+
+            if comp_off + comp_len > glyf_data.len() {
+                if flags & MORE_COMPONENTS == 0 {
+                    break;
+                }
+                continue;
+            }
+
+            let comp_g = &glyf_data[comp_off..comp_off + comp_len];
+            let comp_nc = match read_i16_be(comp_g, 0) {
+                Some(n) if n > 0 => n as usize,
+                _ => {
+                    if flags & MORE_COMPONENTS == 0 {
+                        break;
+                    }
+                    continue;
+                }
+            };
+
+            let pts_before = out.num_points as usize;
+
+            if !Self::glyph_outline_simple(comp_g, comp_nc, out) {
+                if flags & MORE_COMPONENTS == 0 {
+                    break;
+                }
+                continue;
+            }
+
+            // Apply offset to the newly added points.
+            if (flags & ARGS_ARE_XY_VALUES != 0) && (dx != 0 || dy != 0) {
+                let pts_after = out.num_points as usize;
+
+                for i in pts_before..pts_after {
+                    out.points[i].x += dx;
+                    out.points[i].y += dy;
+                }
+            }
+
+            any = true;
+
+            if flags & MORE_COMPONENTS == 0 {
+                break;
+            }
+        }
+
+        any
     }
 
     /// Rasterize a glyph into the provided coverage buffer.

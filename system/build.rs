@@ -157,6 +157,12 @@ fn main() {
     println!("cargo:rerun-if-changed={}", sys_src.display());
     println!("cargo:rerun-if-changed={}", virtio_src.display());
     println!("cargo:rerun-if-changed={}", drawing_src.display());
+    for inc in &["truetype.rs", "rasterizer.rs", "font_data.rs"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir.join("libraries/drawing").join(inc).display()
+        );
+    }
     println!("cargo:rerun-if-changed={}", ipc_src.display());
 }
 /// Compile a Rust source file as a binary ELF.
