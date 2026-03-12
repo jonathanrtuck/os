@@ -22,6 +22,7 @@
 #![no_std]
 
 include!("font_data.rs");
+include!("gamma_tables.rs");
 include!("rasterizer.rs");
 include!("truetype.rs");
 
@@ -163,6 +164,10 @@ impl Color {
 
     /// Porter-Duff source-over: composite `self` on top of `dst`.
     ///
+    /// sRGB gamma-correct blending: colors are converted to linear light before
+    /// compositing, then converted back to sRGB. This produces perceptually
+    /// correct results (especially for translucent overlays and text).
+    ///
     /// Straight (non-premultiplied) alpha, integer math only. Returns the
     /// blended color. Fast-paths for fully opaque or fully transparent source.
     pub fn blend_over(self, dst: Color) -> Color {
@@ -183,15 +188,25 @@ impl Color {
             return Color::TRANSPARENT;
         }
 
-        // out_c = (src_c * src_a + dst_c * dst_a * (1 - src_a / 255)) / out_a
-        let r = (self.r as u32 * sa + dst.r as u32 * da * inv_sa / 255) / out_a;
-        let g = (self.g as u32 * sa + dst.g as u32 * da * inv_sa / 255) / out_a;
-        let b = (self.b as u32 * sa + dst.b as u32 * da * inv_sa / 255) / out_a;
+        // Convert to linear space for color blending.
+        let src_r_lin = SRGB_TO_LINEAR[self.r as usize] as u32;
+        let src_g_lin = SRGB_TO_LINEAR[self.g as usize] as u32;
+        let src_b_lin = SRGB_TO_LINEAR[self.b as usize] as u32;
+        let dst_r_lin = SRGB_TO_LINEAR[dst.r as usize] as u32;
+        let dst_g_lin = SRGB_TO_LINEAR[dst.g as usize] as u32;
+        let dst_b_lin = SRGB_TO_LINEAR[dst.b as usize] as u32;
 
+        // out_c = (src_c * src_a + dst_c * dst_a * (1 - src_a / 255)) / out_a
+        // Computed in linear space.
+        let r_lin = (src_r_lin * sa + dst_r_lin * da * inv_sa / 255) / out_a;
+        let g_lin = (src_g_lin * sa + dst_g_lin * da * inv_sa / 255) / out_a;
+        let b_lin = (src_b_lin * sa + dst_b_lin * da * inv_sa / 255) / out_a;
+
+        // Convert back to sRGB (table is indexed by linear >> 4).
         Color {
-            r: if r > 255 { 255 } else { r as u8 },
-            g: if g > 255 { 255 } else { g as u8 },
-            b: if b > 255 { 255 } else { b as u8 },
+            r: LINEAR_TO_SRGB[linear_to_idx(r_lin)],
+            g: LINEAR_TO_SRGB[linear_to_idx(g_lin)],
+            b: LINEAR_TO_SRGB[linear_to_idx(b_lin)],
             a: if out_a > 255 { 255 } else { out_a as u8 },
         }
     }
@@ -367,6 +382,12 @@ impl<'a> Surface<'a> {
     /// Draw a coverage map (anti-aliased glyph) at position (x, y) in the
     /// given color. Each byte in the coverage map modulates the color's alpha.
     ///
+    /// Blending is performed in linear light (sRGB gamma-correct): destination
+    /// pixels are converted to linear space, blended with the coverage-modulated
+    /// source color, then converted back to sRGB. This produces perceptually
+    /// correct stroke weights (fixes the "wispy text" problem where thin strokes
+    /// appear too light with naive linear-in-sRGB blending).
+    ///
     /// `x` and `y` can be negative (glyph bearings may position the bitmap
     /// outside the pen origin). Clips to surface bounds.
     pub fn draw_coverage(
@@ -378,6 +399,11 @@ impl<'a> Surface<'a> {
         cov_height: u32,
         color: Color,
     ) {
+        // Pre-convert source color to linear space.
+        let src_r_lin = SRGB_TO_LINEAR[color.r as usize] as u32;
+        let src_g_lin = SRGB_TO_LINEAR[color.g as usize] as u32;
+        let src_b_lin = SRGB_TO_LINEAR[color.b as usize] as u32;
+
         for row in 0..cov_height {
             for col in 0..cov_width {
                 let idx = (row * cov_width + col) as usize;
@@ -399,10 +425,46 @@ impl<'a> Surface<'a> {
                     continue;
                 }
 
-                let alpha = (color.a as u32 * cov as u32 / 255) as u8;
-                let c = Color::rgba(color.r, color.g, color.b, alpha);
+                let ux = px as u32;
+                let uy = py as u32;
 
-                self.blend_pixel(px as u32, py as u32, c);
+                // Effective alpha: color.a * coverage / 255.
+                let alpha = (color.a as u32 * cov as u32 + 127) / 255;
+
+                if alpha >= 255 {
+                    // Full coverage + opaque color: just write the source.
+                    self.set_pixel(ux, uy, color);
+                    continue;
+                }
+
+                if let Some(dst) = self.get_pixel(ux, uy) {
+                    // Convert destination to linear space.
+                    let dst_r_lin = SRGB_TO_LINEAR[dst.r as usize] as u32;
+                    let dst_g_lin = SRGB_TO_LINEAR[dst.g as usize] as u32;
+                    let dst_b_lin = SRGB_TO_LINEAR[dst.b as usize] as u32;
+
+                    // Blend in linear space: out = dst * (1 - alpha/255) + src * alpha/255.
+                    let inv_alpha = 255 - alpha;
+                    let out_r_lin = (dst_r_lin * inv_alpha + src_r_lin * alpha + 127) / 255;
+                    let out_g_lin = (dst_g_lin * inv_alpha + src_g_lin * alpha + 127) / 255;
+                    let out_b_lin = (dst_b_lin * inv_alpha + src_b_lin * alpha + 127) / 255;
+
+                    // Convert back to sRGB (table is indexed by linear >> 4).
+                    let out_r = LINEAR_TO_SRGB[linear_to_idx(out_r_lin)];
+                    let out_g = LINEAR_TO_SRGB[linear_to_idx(out_g_lin)];
+                    let out_b = LINEAR_TO_SRGB[linear_to_idx(out_b_lin)];
+
+                    // Alpha: blend destination alpha in sRGB space (alpha is perceptually
+                    // uniform already). For opaque destinations this is always 255.
+                    let out_a = dst.a as u32 + alpha * (255 - dst.a as u32) / 255;
+
+                    self.set_pixel(ux, uy, Color {
+                        r: out_r,
+                        g: out_g,
+                        b: out_b,
+                        a: if out_a > 255 { 255 } else { out_a as u8 },
+                    });
+                }
             }
         }
     }
@@ -913,6 +975,13 @@ fn abs(x: i32) -> i32 {
     } else {
         x
     }
+}
+/// Convert a linear light value (0–65535 u32) to a LINEAR_TO_SRGB table index.
+/// The table has 4096 entries; index is `value >> 4`, clamped to 4095.
+fn linear_to_idx(v: u32) -> usize {
+    let idx = v >> 4;
+
+    if idx > 4095 { 4095 } else { idx as usize }
 }
 fn min(a: u32, b: u32) -> u32 {
     if a < b {

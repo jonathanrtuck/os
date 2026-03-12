@@ -635,10 +635,11 @@ fn blend_over_50_percent_red_on_opaque_blue() {
 
     // out_a = 128 + 255*(255-128)/255 = 128 + 127 = 255
     assert_eq!(result.a, 255);
-    // out_r = (255*128 + 0) / 255 = 128
-    assert_eq!(result.r, 128);
-    // out_b = (0 + 255*255*127/255) / 255 = (255*127)/255 = 127
-    assert_eq!(result.b, 127);
+    // Gamma-correct: blending happens in linear space then converts back to sRGB.
+    // 50% alpha red on blue produces sRGB ~188 red (higher than linear's 128)
+    // because the gamma curve maps linear 0.5 to sRGB ~0.74.
+    assert!(result.r > 140, "gamma-correct red should be > 140, got {}", result.r);
+    assert!(result.b > 140, "gamma-correct blue should be > 140, got {}", result.b);
     assert_eq!(result.g, 0);
 }
 
@@ -649,10 +650,11 @@ fn blend_over_25_percent_white_on_black() {
     let result = src.blend_over(dst);
 
     assert_eq!(result.a, 255);
-    // out_r = (255*64 + 0) / 255 = 64
-    assert_eq!(result.r, 64);
-    assert_eq!(result.g, 64);
-    assert_eq!(result.b, 64);
+    // Gamma-correct: 25% alpha white on black. In linear space, 25% of max
+    // intensity maps to a higher sRGB value than 64 due to the gamma curve.
+    assert!(result.r > 100, "gamma-correct 25% white on black should be > 100, got {}", result.r);
+    assert_eq!(result.r, result.g);
+    assert_eq!(result.r, result.b);
 }
 
 #[test]
@@ -702,8 +704,9 @@ fn blend_pixel_on_opaque_background() {
     s.blend_pixel(1, 1, Color::rgba(255, 0, 0, 128));
 
     let result = s.get_pixel(1, 1).unwrap();
-    assert_eq!(result.r, 128);
-    assert_eq!(result.b, 127);
+    // Gamma-correct blending produces higher sRGB values than linear.
+    assert!(result.r > 140, "gamma-correct red should be > 140, got {}", result.r);
+    assert!(result.b > 140, "gamma-correct blue should be > 140, got {}", result.b);
     assert_eq!(result.a, 255);
 }
 
@@ -752,11 +755,11 @@ fn fill_rect_blend_on_opaque_background() {
     s.clear(Color::BLACK);
     s.fill_rect_blend(2, 2, 4, 4, Color::rgba(255, 255, 255, 128));
 
-    // Inside: ~128 gray (50% white on black).
+    // Inside: gamma-correct 50% white on black gives sRGB ~188 (not 128).
     let inside = s.get_pixel(3, 3).unwrap();
-    assert_eq!(inside.r, 128);
-    assert_eq!(inside.g, 128);
-    assert_eq!(inside.b, 128);
+    assert!(inside.r > 140, "gamma-correct 50% white on black should be > 140, got {}", inside.r);
+    assert_eq!(inside.r, inside.g);
+    assert_eq!(inside.r, inside.b);
 
     // Outside: still black.
     assert_eq!(s.get_pixel(0, 0), Some(Color::BLACK));
@@ -792,9 +795,9 @@ fn fill_rect_blend_clips_to_bounds() {
     s.clear(Color::BLACK);
     s.fill_rect_blend(2, 2, 10, 10, Color::rgba(255, 0, 0, 128));
 
-    // Clipped region blended.
+    // Clipped region blended — gamma-correct produces higher sRGB values.
     let px = s.get_pixel(3, 3).unwrap();
-    assert_eq!(px.r, 128);
+    assert!(px.r > 140, "gamma-correct 50% red on black should be > 140, got {}", px.r);
     // Outside clipped region unchanged.
     assert_eq!(s.get_pixel(1, 1), Some(Color::BLACK));
 }
@@ -864,8 +867,9 @@ fn blit_blend_semi_transparent() {
     dst.blit_blend(&src_buf, 4, 4, 16, 2, 2);
 
     let result = dst.get_pixel(3, 3).unwrap();
-    assert_eq!(result.r, 128);
-    assert_eq!(result.b, 127);
+    // Gamma-correct blending: 50% red on blue produces higher sRGB values.
+    assert!(result.r > 140, "gamma-correct red should be > 140, got {}", result.r);
+    assert!(result.b > 140, "gamma-correct blue should be > 140, got {}", result.b);
     assert_eq!(result.a, 255);
 }
 
@@ -1537,4 +1541,189 @@ fn xy_to_byte_past_last_row() {
 fn xy_to_byte_empty_text() {
     let layout = make_layout(200);
     assert_eq!(layout.xy_to_byte(b"", 50, 50), 0);
+}
+
+// ---------------------------------------------------------------------------
+// sRGB gamma-correct blending tests
+// ---------------------------------------------------------------------------
+
+use drawing::{SRGB_TO_LINEAR, LINEAR_TO_SRGB};
+
+#[test]
+fn srgb_to_linear_boundary_values() {
+    // sRGB 0 → linear 0
+    assert_eq!(SRGB_TO_LINEAR[0], 0);
+    // sRGB 255 → linear 65535
+    assert_eq!(SRGB_TO_LINEAR[255], 65535);
+    // sRGB 128 → roughly 21.6% linear ≈ 14158 (should be in that neighborhood)
+    assert!(
+        SRGB_TO_LINEAR[128] > 13000 && SRGB_TO_LINEAR[128] < 16000,
+        "sRGB 128 → linear {} should be near 14158",
+        SRGB_TO_LINEAR[128],
+    );
+}
+
+#[test]
+fn srgb_to_linear_monotonically_increasing() {
+    for i in 1..256 {
+        assert!(
+            SRGB_TO_LINEAR[i] >= SRGB_TO_LINEAR[i - 1],
+            "srgb_to_linear should be monotonic: [{}]={} < [{}]={}",
+            i, SRGB_TO_LINEAR[i], i - 1, SRGB_TO_LINEAR[i - 1],
+        );
+    }
+}
+
+#[test]
+fn linear_to_srgb_boundary_values() {
+    // linear 0 → sRGB 0
+    assert_eq!(LINEAR_TO_SRGB[0], 0);
+    // linear 4095 (max index = 65535 >> 4) → sRGB 255
+    assert_eq!(LINEAR_TO_SRGB[4095], 255);
+}
+
+#[test]
+fn linear_to_srgb_monotonically_increasing() {
+    for i in 1..4096 {
+        assert!(
+            LINEAR_TO_SRGB[i] >= LINEAR_TO_SRGB[i - 1],
+            "linear_to_srgb should be monotonic: [{}]={} < [{}]={}",
+            i, LINEAR_TO_SRGB[i], i - 1, LINEAR_TO_SRGB[i - 1],
+        );
+    }
+}
+
+#[test]
+fn srgb_linear_roundtrip() {
+    // Converting sRGB → linear → sRGB should return the original value (or ±1).
+    // LINEAR_TO_SRGB is indexed by linear >> 4 (4096 entries).
+    for srgb in 0u16..=255 {
+        let linear = SRGB_TO_LINEAR[srgb as usize];
+        let idx = (linear >> 4) as usize;
+        let idx = if idx > 4095 { 4095 } else { idx };
+        let back = LINEAR_TO_SRGB[idx];
+        let diff = if back > srgb as u8 {
+            back - srgb as u8
+        } else {
+            srgb as u8 - back
+        };
+        assert!(
+            diff <= 1,
+            "roundtrip sRGB {} → linear {} → sRGB {}: diff {}",
+            srgb, linear, back, diff,
+        );
+    }
+}
+
+#[test]
+fn gamma_blend_zero_coverage_unchanged() {
+    // Zero-coverage pixels must not be modified at all.
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::rgb(100, 150, 200));
+
+    // Read the original pixel value.
+    let orig = dst.get_pixel(0, 0).unwrap();
+
+    // Draw with zero coverage.
+    let coverage = [0u8; 4];
+    dst.draw_coverage(0, 0, &coverage, 2, 2, Color::WHITE);
+
+    // Pixel must be identical.
+    let after = dst.get_pixel(0, 0).unwrap();
+    assert_eq!(orig, after, "zero-coverage should not modify destination");
+}
+
+#[test]
+fn gamma_blend_full_coverage_replaces() {
+    // Full coverage (255) with opaque color should fully replace the destination.
+    let mut dst_buf = [0u8; 4 * 4 * 4];
+    let mut dst = make_surface(&mut dst_buf, 4, 4);
+    dst.clear(Color::rgb(0, 0, 255));
+
+    let coverage = [255u8; 1];
+    dst.draw_coverage(0, 0, &coverage, 1, 1, Color::rgb(255, 0, 0));
+
+    let p = dst.get_pixel(0, 0).unwrap();
+    assert_eq!(p.r, 255);
+    assert_eq!(p.g, 0);
+    assert_eq!(p.b, 0);
+}
+
+#[test]
+fn gamma_blend_half_coverage_heavier_than_linear() {
+    // At 50% coverage, gamma-correct blending on a black background should
+    // produce higher sRGB values than naive linear blending would (128).
+    // This is the key test: gamma correction makes text appear heavier.
+    let mut dst_buf = [0u8; 4 * 4 * 4];
+    let mut dst = make_surface(&mut dst_buf, 4, 4);
+    dst.clear(Color::BLACK);
+
+    let coverage = [128u8; 1]; // ~50% coverage
+    dst.draw_coverage(0, 0, &coverage, 1, 1, Color::WHITE);
+
+    let p = dst.get_pixel(0, 0).unwrap();
+    // Linear blending would give r=128. Gamma-correct blending should give
+    // a higher value (~188) because 50% linear light maps to ~74% sRGB.
+    assert!(
+        p.r > 140,
+        "gamma-correct 50% coverage on black should produce r > 140, got {}",
+        p.r,
+    );
+}
+
+#[test]
+fn gamma_blend_over_half_red_on_blue_heavier() {
+    // blend_over with 50% alpha: gamma-correct should produce heavier result.
+    let src = Color::rgba(255, 0, 0, 128);
+    let dst = Color::rgb(0, 0, 255);
+    let result = src.blend_over(dst);
+
+    // In gamma-correct blending, the red channel should be higher than 128
+    // (linear would give ~128). The blue channel should also reflect the
+    // gamma curve behavior.
+    assert!(
+        result.r > 140,
+        "gamma-correct blend_over: 50% red on blue should produce r > 140, got {}",
+        result.r,
+    );
+}
+
+#[test]
+fn gamma_blend_over_opaque_src_returns_src() {
+    // Opaque source fast path must still work.
+    let src = Color::rgb(200, 100, 50);
+    let dst = Color::rgb(0, 0, 255);
+    assert_eq!(src.blend_over(dst), src);
+}
+
+#[test]
+fn gamma_blend_over_transparent_src_returns_dst() {
+    // Transparent source fast path must still work.
+    let src = Color::TRANSPARENT;
+    let dst = Color::rgb(0, 255, 0);
+    assert_eq!(src.blend_over(dst), dst);
+}
+
+#[test]
+fn gamma_draw_coverage_uses_gamma_correction() {
+    // Compare: 50% coverage white on black should produce sRGB value ~188,
+    // not the linear-blended value of ~128.
+    let mut dst_buf = [0u8; 4 * 4 * 4];
+    let mut dst = make_surface(&mut dst_buf, 4, 4);
+    dst.clear(Color::BLACK);
+
+    let coverage = [128u8; 1];
+    dst.draw_coverage(0, 0, &coverage, 1, 1, Color::WHITE);
+
+    let p = dst.get_pixel(0, 0).unwrap();
+    // Gamma-correct: 50% linear ≈ 188 sRGB. Should be in range 180-195.
+    assert!(
+        p.r >= 180 && p.r <= 200,
+        "gamma-correct coverage blend should give r ≈ 188, got {}",
+        p.r,
+    );
+    // All channels should be equal for white on black.
+    assert_eq!(p.r, p.g, "r ({}) should equal g ({})", p.r, p.g);
+    assert_eq!(p.r, p.b, "r ({}) should equal b ({})", p.r, p.b);
 }

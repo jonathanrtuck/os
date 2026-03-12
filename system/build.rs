@@ -182,6 +182,7 @@ fn rustc_bin(
         .arg("--edition=2021")
         .arg("--crate-type=bin")
         .args(["-C", "panic=abort"])
+        .args(["-C", "opt-level=s"])
         .arg(format!("-Clink-arg=-T{}", link_ld.display()));
 
     for (name, path) in externs {
@@ -223,7 +224,8 @@ fn rustc_rlib(
         .arg("--edition=2021")
         .arg("--crate-type=rlib")
         .arg(format!("--crate-name={crate_name}"))
-        .args(["-C", "panic=abort"]);
+        .args(["-C", "panic=abort"])
+        .args(["-C", "opt-level=s"]);
 
     for &(name, path) in externs {
         cmd.arg(format!("--extern={name}={}", path.display()));
