@@ -243,10 +243,12 @@ fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
     let layout = text_layout(fb.width);
     let cache = unsafe { &*GLYPH_CACHE };
     let cursor_pos = unsafe { CURSOR_POS };
-    let prev_cursor_y = unsafe { PREV_CURSOR_Y };
     let prev_last_y = unsafe { PREV_LAST_Y };
-    // Clear dirty region: from previous cursor row to past previous last row.
-    let clear_start_y = TEXT_Y + prev_cursor_y;
+    // Clear the entire text region that was previously drawn. draw_tt()
+    // re-renders ALL text from the top, so we must clear from the top of
+    // the text area down through the previous last row (plus cursor height).
+    // Without this, lines above the cursor would accumulate alpha blending
+    // across frames, producing progressively thicker/bolder strokes.
     let clear_end_y = TEXT_Y + prev_last_y + 2 * cache.line_height;
     let text_bottom = fb.height.saturating_sub(32) - 1;
     let clear_end_y = if clear_end_y > text_bottom {
@@ -255,14 +257,8 @@ fn render_content(fb: &mut drawing::Surface, text: &[u8]) {
         clear_end_y
     };
 
-    if clear_start_y < clear_end_y {
-        fb.fill_rect(
-            13,
-            clear_start_y,
-            fb.width - 26,
-            clear_end_y - clear_start_y,
-            bg,
-        );
+    if TEXT_Y < clear_end_y {
+        fb.fill_rect(13, TEXT_Y, fb.width - 26, clear_end_y - TEXT_Y, bg);
     }
 
     let (_, cursor_y) = layout.draw_tt(
