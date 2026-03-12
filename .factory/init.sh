@@ -3,24 +3,28 @@ set -e
 
 cd /Users/user/Sites/os/system
 
-# Verify Rust nightly toolchain is available
-rustc --version | grep -q nightly || {
-    echo "ERROR: nightly Rust required. Run: rustup default nightly"
-    exit 1
-}
+# Ensure test.img exists
+if [ ! -f test.img ]; then
+  dd if=/dev/zero of=test.img bs=1M count=1 2>/dev/null
+  echo -n "HELLO VIRTIO BLK" | dd of=test.img bs=1 count=16 conv=notrunc 2>/dev/null
+  echo "Created test.img"
+fi
 
-# Verify aarch64-unknown-none target is installed
-rustup target list --installed | grep -q aarch64-unknown-none || {
-    echo "Installing aarch64-unknown-none target..."
-    rustup target add aarch64-unknown-none
-}
+# Ensure virt.dtb exists (QEMU auto-generates on first run)
+if [ ! -f virt.dtb ]; then
+  echo "virt.dtb missing — will be generated on first QEMU boot via run-qemu.sh"
+fi
 
-# Verify kernel builds
-echo "Verifying kernel build..."
-cargo build 2>&1 | tail -5
+# Ensure share directory exists with required assets
+mkdir -p share
+if [ ! -f share/SourceCodePro-Regular.ttf ]; then
+  echo "WARNING: share/SourceCodePro-Regular.ttf missing — font loading will fail at boot"
+fi
 
-# Verify test suite passes
-echo "Verifying test suite..."
-cd test && cargo test -- --test-threads=1 2>&1 | tail -5
+# Verify toolchain
+rustup show active-toolchain 2>/dev/null || echo "WARNING: Rust toolchain not found"
 
-echo "Environment ready."
+# Build to verify everything compiles
+cargo build --release 2>&1 | tail -3
+
+echo "Init complete. Build successful."

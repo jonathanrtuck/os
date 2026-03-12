@@ -1,39 +1,36 @@
 # Environment
 
-**What belongs here:** Required env vars, toolchain details, dependency quirks, platform-specific notes.
+Environment variables, external dependencies, and setup notes.
+
+**What belongs here:** Required env vars, external dependencies, dependency quirks, platform-specific notes.
 **What does NOT belong here:** Service ports/commands (use `.factory/services.yaml`).
 
 ---
 
 ## Toolchain
 
-- **Rust:** nightly-aarch64-apple-darwin (1.96.0-nightly, 2026-03-05)
-- **Kernel target:** `aarch64-unknown-none` (bare-metal ARM64)
-- **Test target:** `aarch64-apple-darwin` (host macOS)
-- **QEMU:** 10.2.1 at `/opt/homebrew/bin/qemu-system-aarch64`
+- **Rust nightly** (pinned in `rust-toolchain.toml`): `channel = "nightly"`, target `aarch64-unknown-none`
+- **QEMU 10.2.1**: `/opt/homebrew/bin/qemu-system-aarch64`
+- **Python 3.9.6** with Pillow: for PPM→PNG screenshot conversion
+- **netcat (nc)**: macOS BSD variant, for QEMU monitor socket communication
 
-## Project Structure
+## Build Notes
 
-- `system/kernel/` — 33 .rs files + 2 .S + link.ld (audit scope)
-- `system/test/` — Host-side test suite (348 tests across 18 files)
-- `system/libraries/` — Shared libs (ipc, sys, virtio, drawing) — OUT OF SCOPE
-- `system/services/` — Userspace services — OUT OF SCOPE
+- Single Cargo workspace at `system/Cargo.toml`
+- `build.rs` compiles the entire userspace as a sub-build (libraries as rlibs, programs as standalone ELFs)
+- Init embeds all userspace ELFs via `include_bytes!()`; kernel embeds only init
+- Profile: `opt-level = 3`, `panic = "abort"` for both dev and release
+- Linker script: `kernel/link.ld`
 
-## Test Architecture
+## Assets
 
-Tests in `system/test/` CANNOT import kernel modules directly. The kernel compiles for `aarch64-unknown-none` with bare-metal deps (inline asm, MMIO) that don't run on the host. Tests duplicate/stub the pure algorithmic logic for host-side testing. Follow existing test file patterns.
+- Fonts and other runtime assets go in `system/share/` (mounted via virtio-9p at `hostshare`)
+- Currently: `SourceCodePro-Regular.ttf` (9,436 bytes)
+- New assets for this mission: proportional font, PNG test image, SVG icons
 
-## Unsafe Code Profile
+## QEMU Notes
 
-- 100 `unsafe {}` blocks + 5 `unsafe fn` across 17 of 33 kernel files
-- Top 5: memory.rs (20), main.rs (19), syscall.rs (13), address_space.rs (10), memory_mapped_io.rs/page_allocator.rs (6 each)
-- Zero `#[allow(...)]` attributes in the kernel
-
-## Recent Bug History (2026-03-11)
-
-11 bugs fixed in crash debugging session. Key fixes:
-
-- Fix 5: Aliasing UB in syscall dispatch (noalias mutable references)
-- Fix 6: `nomem` on DAIF asm (primary fix for SMP race)
-- Fix 4: Deferred thread drop (use-after-free)
-- Fix 9: Systematic `nomem` removal across all inline asm
+- DTB loaded at 0x40000000 via `-device loader` (HVF on macOS doesn't pass DTB in x0)
+- `run-qemu.sh` auto-generates `virt.dtb` if missing
+- `sendkey` via monitor socket works for basic ASCII input to virtio-keyboard
+- 8 second boot wait is reliable for the healthcheck

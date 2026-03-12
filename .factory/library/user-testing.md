@@ -1,66 +1,51 @@
 # User Testing
 
-**What belongs here:** Testing surface, tools, URLs, setup steps, isolation notes, known quirks.
+Testing surface, tools, setup steps, and known quirks for manual/visual testing.
+
+**What belongs here:** How to test the running OS, screenshot workflow, known quirks, isolation notes.
 
 ---
 
 ## Testing Surface
 
-This is a bare-metal kernel. There is no web UI, API, or interactive application to test. "User testing" for this mission means running automated verification commands.
+The only user-facing surface is the **QEMU framebuffer**. Testing means:
+1. Boot the OS in QEMU (headless mode with monitor socket)
+2. Send keystrokes via `sendkey` on the monitor socket
+3. Capture framebuffer screenshots via `screendump`
+4. Convert PPM→PNG and view with the Read tool
 
-## Tools
-
-- **Terminal commands** (cargo test, cargo build) — primary verification method
-- **QEMU** (stress-test.sh, crash-test.sh) — for on-target verification
-- No browser testing, no TUI testing needed
-
-## Verification Commands
+## Screenshot Workflow
 
 ```bash
-# Run all tests (must pass after every feature)
-cd system/test && cargo test -- --test-threads=1
+# Prerequisites: QEMU running with monitor socket at /tmp/qemu-mon.sock
 
-# Build kernel (must succeed after every feature)
-cd system && cargo build
+# Send a keystroke
+echo "sendkey h" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
+sleep 1
 
-# Run specific test
-cd system/test && cargo test <test_name> -- --test-threads=1
+# Capture screenshot
+echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2 >/dev/null 2>&1
+sleep 2
 
-# Headless stress test (30 seconds)
-cd system && ./stress-test.sh 30
-
-# Miri (if installed)
-cd system/test && cargo +nightly miri test -- --test-threads=1
+# Convert and view
+python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"
+# Use Read tool on /tmp/qemu-screen.png
 ```
 
-## Test Count Baseline
+## Timing Notes
 
-348 tests across 18 files as of mission start. This count should only increase.
+- 8 second boot wait is reliable
+- 1 second between keystrokes is reliable
+- 2 seconds after screendump before reading the PPM file
+- Multiple rapid sendkeys may need cumulative sleep
 
 ## Known Quirks
 
-- Tests require `--test-threads=1` (some tests use global state)
-- Tests duplicate/stub kernel logic rather than importing it directly
-- 31 compiler warnings (dead code) are pre-existing and expected
-- Miri is not installed by default; needs `rustup component add miri`
+- `sendkey` via monitor socket goes to PS/2 emulation, but virtio-keyboard still receives it in QEMU 10.2.1
+- Serial output is interleaved from concurrent driver processes (normal)
+- The 9p share directory (`system/share/`) MUST be included in the QEMU command for font loading
+- QEMU monitor commands are case-sensitive
 
-## Flow Validator Guidance: Terminal
+## Key Names for sendkey
 
-**Surface:** All assertions for this mission are verified via terminal commands (cargo test, cargo build, cargo miri test, shell scripts).
-
-**Isolation:** Terminal commands are inherently isolated — no shared user accounts, sessions, or mutable state between runs. Multiple flow validators can run in parallel since they only read build artifacts and run tests.
-
-**Boundaries:**
-
-- Do NOT modify any source files — validators only verify current state
-- Run commands from the repo root at `/Users/user/Sites/os`
-- Always use `--test-threads=1` for cargo test
-- Report exact exit codes and output excerpts as evidence
-
-**Miri notes:**
-
-- Miri has been assessed during infra verification
-- 330/348 tests pass clean under Miri
-- buddy test fails due to Miri provenance limitation (not real UB)
-- ipc test finds UB in library code (out of kernel scope)
-- scheduler_state takes ~1400s under Miri — may need reduced iterations
+Common: `a`-`z`, `0`-`9`, `spc` (space), `ret` (enter), `backspace`, `tab`, `shift` (modifier), `shift-a` (capital A), `left`, `right`, `up`, `down`, `esc`

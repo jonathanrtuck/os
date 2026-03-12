@@ -1,62 +1,45 @@
 # Architecture
 
-**What belongs here:** Architectural decisions, patterns discovered, subsystem relationships.
+Architectural decisions, patterns, and component relationships.
+
+**What belongs here:** Component architecture, design patterns, inter-process communication, memory layout.
 
 ---
 
-## Kernel Subsystems
+## Display Pipeline (4 processes)
 
-Detailed rationale in `system/kernel/DESIGN.md` (1462 lines). Key subsystems:
+```
+virtio-input driver → compositor → text-editor → compositor → virtio-gpu driver
+     (IRQ)          (event loop)   (read-only)   (sole writer)    (present)
+```
 
-### Memory (boot.S, memory.rs, paging.rs, page_allocator.rs, heap.rs, slab.rs)
+1. **virtio-input**: Blocks on IRQ, reads evdev events, translates keycodes, sends MSG_KEY_EVENT to compositor
+2. **Compositor**: Event loop waiting on input + editor channels. Forwards key events to editor. Applies editor's write requests to document buffer. Renders content. Signals GPU.
+3. **Text editor**: Receives key events, translates to editing intent (insert/delete/cursor move), sends write requests back to compositor. Has read-only shared memory mapping of document buffer.
+4. **virtio-gpu**: Waits for MSG_PRESENT, coalesces pending presents, does transfer_to_host_2d + resource_flush.
 
-- Split TTBR: TTBR1 for kernel (upper VA), TTBR0 for user (lower VA, swapped on context switch)
-- Three-tier allocation: slab (<=2KiB), linked-list (variable), buddy (page frames)
-- W^X enforced: .text RX, .rodata RO, .data/.bss RW
-- Dealloc routes by address range, not size class (prevents cross-allocator contamination)
+## Key Patterns
 
-### Process (process.rs, process_exit.rs, address_space.rs, address_space_id.rs, executable.rs)
+- **Compositor is sole writer**: All document mutations go through the compositor. Editors are read-only. This makes undo automatic and non-circumventable.
+- **IPC via ring buffers**: SPSC ring buffers (2 pages per channel), 64-byte fixed messages (one cache line), 62 slots per ring.
+- **Init orchestrates everything**: Creates channels, allocates shared memory (framebuffer, document buffer), spawns all processes with appropriate handle mappings.
+- **DMA allocation**: Kernel provides `dma_alloc` syscall for physically-contiguous pages. Used for framebuffer and virtio descriptor rings.
 
-- ELF64 loading with demand paging (first code page + top stack page eagerly mapped)
-- ASID-based TLB isolation (8-bit ASID pool)
-- Full cleanup on exit: drain handles, invalidate TLB, free pages + page tables, release ASID
+## Memory Layout
 
-### Scheduling (scheduler.rs, scheduling_algorithm.rs, scheduling_context.rs, thread.rs, per_core.rs)
+- Framebuffer: DMA-allocated, shared between compositor (write) and GPU driver (read). Currently 1024×768 BGRA8888 (~3 MiB).
+- Document buffer: 4 KiB shared page. First 64 bytes = header (length + cursor position). Rest = text content.
+- Each IPC channel: 2 pages (one per direction), each a SPSC ring buffer.
 
-- EEVDF algorithm (Earliest Eligible Virtual Deadline First)
-- 4 SMP cores, per-core idle threads
-- Deferred thread drops (free kernel stack after switching away, not during)
-- Scheduling contexts for per-content-type CPU budgets
+## Font Pipeline
 
-### Synchronization (sync.rs, futex.rs, waitable.rs, channel.rs, handle.rs)
+- TrueType parser → glyph outline extraction → scanline rasterizer (4x vertical oversampling) → coverage map → alpha blending onto surface
+- GlyphCache: pre-rasterizes printable ASCII (0x20–0x7E) at startup, 48×48 max coverage buffers
+- Currently: Source Code Pro Regular, 16px, loaded via 9p
 
-- IrqMutex: spinlock with interrupt masking (DAIF manipulation)
-- Ring buffer IPC channels (2 pages per channel, 64-byte fixed messages)
-- Waitable abstraction: channels, timers, process exit, thread exit, interrupts
-- Handle table per process (typed handles: channel endpoints, timers, processes)
+## Drawing Library
 
-### Hardware (interrupt.rs, interrupt_controller.rs, timer.rs, device_tree.rs, serial.rs, power.rs)
-
-- GICv2 interrupt controller
-- ARM generic timer (250 Hz tick)
-- FDT device tree parser
-- PSCI for SMP boot
-
-### Syscall (syscall.rs)
-
-- 27 syscalls via SVC instruction
-- Context passed as raw pointer (aliasing fix from Fix 5)
-- User pointer validation via AT S1E0R + PAR_EL1
-
-## Lock Ordering (to be mapped during milestone 6)
-
-Known locks:
-
-- `scheduler::STATE` (IrqMutex) — the big lock
-- `channel::CHANNELS` (IrqMutex)
-- `timer::TIMERS` (IrqMutex)
-- `process_exit::STATE` (IrqMutex)
-- `thread_exit::STATE` (IrqMutex)
-- Various per-subsystem IrqMutex instances
-
-All use IrqMutex (interrupt-masking spinlock). Ordering must be verified.
+- `Surface<'a>`: wraps a pixel buffer (BGRA8888), provides drawing primitives
+- `Color`: BGRA8888 with `blend_over()` (Porter-Duff source-over, integer math)
+- Primitives: `fill_rect`, `fill_rect_blend`, `draw_line`, `blit`, `blit_blend`, `draw_coverage`
+- No rounded rects, no blur, no gradients yet
