@@ -53,12 +53,17 @@ const Z_CHROME: u16 = 20;
 const TITLE_BAR_H: u32 = 36;
 const STATUS_BAR_H: u32 = 28;
 // Content area insets (relative to framebuffer).
-const CONTENT_MARGIN_X: u32 = 12;
-const CONTENT_MARGIN_TOP: u32 = 44;
-const CONTENT_MARGIN_BOTTOM: u32 = 32;
-// Text insets within the content surface.
+// The content surface now extends full-screen so that document content is
+// visible through translucent chrome (title bar and status bar).
+const CONTENT_MARGIN_X: u32 = 0;
+const CONTENT_MARGIN_TOP: u32 = 0;
+const CONTENT_MARGIN_BOTTOM: u32 = 0;
+// Text insets within the content surface. Text starts near the top of the
+// content surface so that document content is genuinely visible through
+// the translucent chrome overlays — not just a background color.
 const TEXT_INSET_X: u32 = 12;
-const TEXT_INSET_Y: u32 = 4;
+const TEXT_INSET_TOP: u32 = 4;
+const TEXT_INSET_BOTTOM: u32 = 4;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
 
@@ -229,8 +234,9 @@ fn content_text_layout(content_w: u32) -> drawing::TextLayout {
     }
 }
 /// Maximum Y coordinate for text within the content surface (local coords).
+/// Text must stay above the status bar chrome area.
 fn max_text_y_in_content(content_h: u32) -> u32 {
-    content_h.saturating_sub(unsafe { LINE_H } + TEXT_INSET_Y)
+    content_h.saturating_sub(unsafe { LINE_H } + TEXT_INSET_BOTTOM)
 }
 
 // ---------------------------------------------------------------------------
@@ -245,6 +251,11 @@ fn render_background(surf: &mut drawing::Surface) {
 }
 
 /// Render the content surface: text area background, text content, and cursor.
+///
+/// The content surface extends full-screen so that document content is
+/// visible through the translucent chrome (title bar and status bar).
+/// Text is rendered with margins that keep it below the title bar and
+/// above the status bar, but the background fills the entire surface.
 fn render_content_surface(
     surf: &mut drawing::Surface,
     text: &[u8],
@@ -258,21 +269,27 @@ fn render_content_surface(
     let content_w = surf.width;
     let content_h = surf.height;
 
-    // Clear the text rendering area. We clear from top through previous
-    // last rendered Y + some margin. On first render, clear everything.
-    let clear_end_y = TEXT_INSET_Y + prev_last_y + 2 * cache.line_height;
+    // Clear the text rendering area. We clear from the text top through
+    // previous last rendered Y + some margin. On first render, clear everything.
+    let clear_end_y = TEXT_INSET_TOP + prev_last_y + 2 * cache.line_height;
     let clear_end_y = if clear_end_y > content_h {
         content_h
     } else {
         clear_end_y
     };
 
-    if TEXT_INSET_Y < clear_end_y {
-        surf.fill_rect(0, TEXT_INSET_Y, content_w, clear_end_y - TEXT_INSET_Y, bg);
+    if TEXT_INSET_TOP < clear_end_y {
+        surf.fill_rect(0, TEXT_INSET_TOP, content_w, clear_end_y - TEXT_INSET_TOP, bg);
     }
 
-    // Also fill the top inset (above text).
-    surf.fill_rect(0, 0, content_w, TEXT_INSET_Y, bg);
+    // Fill the area above text (behind the title bar chrome).
+    surf.fill_rect(0, 0, content_w, TEXT_INSET_TOP, bg);
+
+    // Fill the area below text (behind the status bar chrome).
+    let status_top = content_h.saturating_sub(TEXT_INSET_BOTTOM);
+    if status_top < content_h {
+        surf.fill_rect(0, status_top, content_w, TEXT_INSET_BOTTOM, bg);
+    }
 
     let layout = content_text_layout(content_w);
     let my = max_text_y_in_content(content_h);
@@ -281,7 +298,7 @@ fn render_content_surface(
         surf,
         text,
         TEXT_INSET_X,
-        TEXT_INSET_Y,
+        TEXT_INSET_TOP,
         cursor_pos,
         cache,
         Color::rgb(200, 210, 230),
@@ -293,9 +310,6 @@ fn render_content_surface(
     let (_, last_y) = layout.byte_to_xy(text, text.len());
 
     unsafe { PREV_LAST_Y = last_y };
-
-    // Draw a subtle border around the content surface.
-    surf.draw_rect(0, 0, content_w, content_h, Color::rgb(50, 50, 70));
 }
 
 /// Render the title bar chrome surface (translucent overlay).

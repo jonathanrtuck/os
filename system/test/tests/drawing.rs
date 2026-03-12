@@ -2282,3 +2282,142 @@ fn composite_empty_surfaces_list() {
     // Destination should be unchanged.
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(100, 100, 100)));
 }
+
+// ---------------------------------------------------------------------------
+// Translucent chrome over content (VAL-COMP-002)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn translucent_chrome_shows_content_beneath() {
+    // Simulates the translucent chrome feature: content surface extends
+    // full-height (behind chrome), chrome overlay is translucent (alpha < 255).
+    // The result: chrome area shows a blend of chrome and content colors.
+    let mut dst_buf = [0u8; 16 * 16 * 4];
+    let mut dst = make_surface(&mut dst_buf, 16, 16);
+    dst.clear(Color::BLACK);
+
+    // Content surface: full height, bright green (easy to detect bleed-through).
+    let mut content_buf = [0u8; 16 * 16 * 4];
+    let mut content = make_composite_surface(&mut content_buf, 16, 16, 0, 0, 10);
+    content.surface.clear(Color::rgb(0, 200, 0));
+
+    // Chrome overlay: covers top 4 rows, translucent dark (alpha=200).
+    let mut chrome_buf = [0u8; 16 * 4 * 4];
+    let mut chrome = make_composite_surface(&mut chrome_buf, 16, 4, 0, 0, 20);
+    chrome.surface.clear(Color::rgba(40, 40, 60, 200));
+
+    let surfaces: [&CompositeSurface; 2] = [&content, &chrome];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // In the chrome region (row 0-3), the green content should bleed through.
+    let p_chrome = dst.get_pixel(8, 2).unwrap();
+    // Green channel should be > 0 (content bleeds through) but < 200 (attenuated by chrome).
+    assert!(
+        p_chrome.g > 5,
+        "green content should bleed through translucent chrome, got g={}",
+        p_chrome.g
+    );
+    assert!(
+        p_chrome.g < 200,
+        "chrome should attenuate content green, got g={}",
+        p_chrome.g
+    );
+
+    // Below chrome (row 5+), pure content visible.
+    let p_content = dst.get_pixel(8, 8).unwrap();
+    assert_eq!(p_content, Color::rgb(0, 200, 0));
+}
+
+#[test]
+fn translucent_chrome_is_visually_distinct_from_content() {
+    // Chrome with alpha < 255 should produce a different color from the
+    // uncovered content region — proving the chrome is visually distinct.
+    let mut dst_buf = [0u8; 16 * 16 * 4];
+    let mut dst = make_surface(&mut dst_buf, 16, 16);
+    dst.clear(Color::BLACK);
+
+    // Content: white text area background.
+    let mut content_buf = [0u8; 16 * 16 * 4];
+    let mut content = make_composite_surface(&mut content_buf, 16, 16, 0, 0, 10);
+    content.surface.clear(Color::rgb(24, 24, 36));
+
+    // Chrome: translucent with alpha=220 (like the actual compositor).
+    let mut chrome_buf = [0u8; 16 * 4 * 4];
+    let mut chrome = make_composite_surface(&mut chrome_buf, 16, 4, 0, 0, 20);
+    chrome.surface.clear(Color::rgba(30, 30, 48, 220));
+
+    let surfaces: [&CompositeSurface; 2] = [&content, &chrome];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    let p_chrome = dst.get_pixel(8, 2).unwrap();
+    let p_content = dst.get_pixel(8, 8).unwrap();
+
+    // Chrome region and content region should NOT be identical.
+    assert_ne!(
+        p_chrome, p_content,
+        "chrome and content should be visually distinct"
+    );
+}
+
+#[test]
+fn chrome_alpha_200_produces_visible_translucency() {
+    // Verify that alpha=200 (not 255) produces measurable bleed-through
+    // when composited over bright content.
+    let mut dst_buf = [0u8; 4 * 4 * 4];
+    let mut dst = make_surface(&mut dst_buf, 4, 4);
+    dst.clear(Color::BLACK);
+
+    // Bright red content underneath.
+    let mut content_buf = [0u8; 4 * 4 * 4];
+    let mut content = make_composite_surface(&mut content_buf, 4, 4, 0, 0, 0);
+    content.surface.clear(Color::rgb(255, 0, 0));
+
+    // Dark chrome on top with alpha=200.
+    let mut chrome_buf = [0u8; 4 * 4 * 4];
+    let mut chrome = make_composite_surface(&mut chrome_buf, 4, 4, 0, 0, 10);
+    chrome.surface.clear(Color::rgba(30, 30, 48, 200));
+
+    let surfaces: [&CompositeSurface; 2] = [&content, &chrome];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    let p = dst.get_pixel(2, 2).unwrap();
+    // Red should bleed through: r > chrome_r (30) due to content contribution.
+    assert!(
+        p.r > 35,
+        "red content should bleed through alpha=200 chrome, got r={}",
+        p.r
+    );
+}
+
+#[test]
+fn status_bar_chrome_over_content_shows_bleedthrough() {
+    // Status bar at the bottom of the frame with content extending behind it.
+    let mut dst_buf = [0u8; 16 * 16 * 4];
+    let mut dst = make_surface(&mut dst_buf, 16, 16);
+    dst.clear(Color::BLACK);
+
+    // Content: full height, has blue pixels.
+    let mut content_buf = [0u8; 16 * 16 * 4];
+    let mut content = make_composite_surface(&mut content_buf, 16, 16, 0, 0, 10);
+    content.surface.clear(Color::rgb(0, 0, 180));
+
+    // Status bar: bottom 4 rows, translucent.
+    let mut status_buf = [0u8; 16 * 4 * 4];
+    let mut status = make_composite_surface(&mut status_buf, 16, 4, 0, 12, 20);
+    status.surface.clear(Color::rgba(30, 30, 48, 220));
+
+    let surfaces: [&CompositeSurface; 2] = [&content, &status];
+    drawing::composite_surfaces(&mut dst, &surfaces);
+
+    // In the status bar region, blue from content should be partially visible.
+    let p_status = dst.get_pixel(8, 13).unwrap();
+    assert!(
+        p_status.b > 40,
+        "blue content should partially show through status bar, got b={}",
+        p_status.b
+    );
+
+    // Above the status bar, pure content.
+    let p_above = dst.get_pixel(8, 5).unwrap();
+    assert_eq!(p_above, Color::rgb(0, 0, 180));
+}
