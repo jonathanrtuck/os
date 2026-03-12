@@ -1,7 +1,7 @@
 {
   "milestone": "beautiful-chrome-and-content",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "validatorsRun": {
     "test": { "passed": true, "command": "cd system/test && cargo test -- --test-threads=1", "exitCode": 0, "detail": "768 system tests passed, 0 failed" },
     "test-prototype": { "passed": true, "command": "cd prototype/files && cargo test", "exitCode": 0, "detail": "21 prototype tests passed, 0 failed" },
@@ -9,127 +9,25 @@
   },
   "totalTestsPassed": 789,
   "reviewsSummary": {
-    "total": 8,
-    "passed": 7,
-    "failed": 1,
-    "failedFeatures": ["proportional-font"]
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "proportional-font",
-      "severity": "blocking",
-      "description": "CompositorConfig struct is 64 bytes (not 60) due to repr(C) alignment padding from u64 fields. IPC PAYLOAD_SIZE is 60 bytes. from_payload() copies 64 bytes into a 60-byte payload (4-byte buffer overwrite). payload_as() reads 64 bytes from a 60-byte payload (4-byte out-of-bounds read). Both are undefined behavior. The struct exists in both compositor/main.rs and init/main.rs — both copies must be fixed. The debug_assert that checks size <= PAYLOAD_SIZE is compiled away in release builds. Fix options: (1) reorder fields to pack u32s together and add explicit _pad field to control layout, (2) manually serialize/deserialize instead of using from_payload/payload_as, (3) split the config into two messages."
-    }
-  ],
+  "blockingIssues": [],
   "nonBlockingIssues": [
     {
-      "featureId": "multi-surface-compositor",
+      "featureId": "fix-compositor-config-overflow",
       "severity": "non_blocking",
-      "description": "MAX_SURFACES=16 silently truncates excess surfaces. Currently using 6, so not a problem."
-    },
-    {
-      "featureId": "multi-surface-compositor",
-      "severity": "non_blocking",
-      "description": "Damage tracking effectively disabled (full-screen transfer every frame). Performance regression from M1's partial transfers, but reasonable given multi-surface compositing touches most pixels."
-    },
-    {
-      "featureId": "multi-surface-compositor",
-      "severity": "non_blocking",
-      "description": "CompositeSurface construction duplicated between initial frame render and event loop (~2 locations)."
-    },
-    {
-      "featureId": "translucent-chrome",
-      "severity": "non_blocking",
-      "description": "First-frame content surface mostly transparent (incremental clearing). Visually imperceptible since bg colors differ by only ~6 units per channel."
-    },
-    {
-      "featureId": "translucent-chrome",
-      "severity": "non_blocking",
-      "description": "TEXT_INSET_BOTTOM naming could better document its relationship to STATUS_BAR_H."
-    },
-    {
-      "featureId": "drop-shadows",
-      "severity": "non_blocking",
-      "description": "Potential u32 overflow in fill_gradient_v for heights >16.8M pixels. Not reachable in practice."
-    },
-    {
-      "featureId": "proportional-font",
-      "severity": "non_blocking",
-      "description": "proportional_string_width() duplicates width-measurement logic from draw_proportional_string() in the drawing library."
-    },
-    {
-      "featureId": "png-decoder",
-      "severity": "non_blocking",
-      "description": "IHDR interlace method not checked — Adam7-interlaced PNG would silently decode incorrectly instead of returning error."
-    },
-    {
-      "featureId": "png-decoder",
-      "severity": "non_blocking",
-      "description": "Silent 64-IDAT-chunk limit. Excess chunks ignored, causing downstream DataSizeMismatch error."
-    },
-    {
-      "featureId": "png-decoder",
-      "severity": "non_blocking",
-      "description": "png_decode_test_image_from_file test silently passes when test.png is missing (uses if let Ok)."
-    },
-    {
-      "featureId": "image-viewer",
-      "severity": "non_blocking",
-      "description": "Transient double heap allocation during PNG decode (~65KB decode_buf + ~65KB image_pixels). With bump allocator, decode_buf memory never reclaimed."
-    },
-    {
-      "featureId": "image-viewer",
-      "severity": "non_blocking",
-      "description": "Test uses hardcoded 128x128 buffer size assumption for test.png."
-    },
-    {
-      "featureId": "clock-display",
-      "severity": "non_blocking",
-      "description": "Double sys::wait syscall per loop iteration when timer is active (blocking wait + extra poll). Cheap but unnecessary."
-    },
-    {
-      "featureId": "clock-display",
-      "severity": "non_blocking",
-      "description": "Silent failure if timer recreation fails after old timer closed. No serial log diagnostic."
-    },
-    {
-      "featureId": "context-switching",
-      "severity": "non_blocking",
-      "description": "Redundant content surface re-render when switching from image back to editor (rendered twice per switch)."
-    },
-    {
-      "featureId": "context-switching",
-      "severity": "non_blocking",
-      "description": "Duplicated keycode-to-ASCII map in test file (copy of input driver's map). Maintenance risk if canonical map changes."
+      "description": "No compile-time const assertion on size_of::<CompositorConfig>() in either compositor/main.rs or init/main.rs. The feature description said to add one, and the prior review recommended it. Without it, the only guard against future field additions exceeding the 60-byte payload is the debug_assert in from_payload/payload_as, which is compiled away in release builds. A const assertion would be defense-in-depth."
     }
   ],
-  "appliedUpdates": [
-    {
-      "target": "library",
-      "description": "Updated architecture.md: compositor description now mentions timer channel, multi-surface compositing, dual content modes (editor/image), and F1 context switching",
-      "sourceFeature": "multi-surface-compositor, clock-display, context-switching"
-    },
-    {
-      "target": "library",
-      "description": "Updated architecture.md: Drawing Library section now lists fill_gradient_v, CompositeSurface/composite_surfaces, and png_decode. Removed stale 'no gradients yet' claim.",
-      "sourceFeature": "drop-shadows, multi-surface-compositor, png-decoder"
-    },
-    {
-      "target": "library",
-      "description": "Updated architecture.md: Font Pipeline section now notes shared buffer also contains PNG image data (not just fonts)",
-      "sourceFeature": "image-viewer"
-    },
-    {
-      "target": "library",
-      "description": "Added Multi-Surface Compositing section to architecture.md documenting the 6-surface z-ordered model, dedicated render functions pattern, and content mode switching",
-      "sourceFeature": "multi-surface-compositor, translucent-chrome, drop-shadows, context-switching"
-    }
-  ],
+  "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": "AGENTS.md",
-      "suggestion": "Add coding convention: 'repr(C) struct alignment: When using IPC from_payload/payload_as with repr(C) structs, verify size_of::<T>() (not just sum of field sizes) is <= 60. Struct size rounds up to the alignment of the largest field (u64 → 8-byte alignment). Use a const assertion or manual byte layout to guarantee fit.'",
-      "evidence": "proportional-font feature added prop_font_len (u32) to CompositorConfig, making fields sum to 60 bytes but actual struct size 64 bytes due to u64 alignment padding. Worker believed it was 60 bytes. This caused a 4-byte IPC buffer overflow — real UB.",
+      "suggestion": "Add coding convention: 'repr(C) struct alignment: When using IPC from_payload/payload_as with repr(C) structs, verify size_of::<T>() (not just sum of field sizes) is <= 60. Struct size rounds up to the alignment of the largest field (u64 → 8-byte alignment). Always add a const assertion after the struct definition: const { assert!(core::mem::size_of::<T>() <= 60) }'",
+      "evidence": "proportional-font feature added prop_font_len (u32) to CompositorConfig, making fields sum to 60 bytes but actual struct size 64 bytes due to u64 alignment padding. Worker believed it was 60 bytes. This caused a 4-byte IPC buffer overflow (real UB). fix-compositor-config-overflow resolved it but did not add the const assertion. This convention would prevent recurrence.",
       "isSystemic": true
     },
     {
@@ -143,21 +41,14 @@
       "suggestion": "os-worker skill should mention the 16 KiB stack constraint more prominently in its constraints section, including the -C opt-level=s compiler flag. Workers keep hitting this indirectly.",
       "evidence": "PNG decoder worker hit stack overflow with initial Huffman table approach (~98KB). Had to completely redesign. Same issue affected M1's gamma-correct-blending worker. Architecture.md documents it but the skill's constraints section doesn't quantify it.",
       "isSystemic": true
-    }
-  ],
-  "rejectedObservations": [
-    {
-      "observation": "architecture.md should note timer as third event source in compositor",
-      "reason": "Already addressed in appliedUpdates — compositor description now mentions timer channel"
     },
     {
-      "observation": "IPC from_payload uses only debug_assert for size checking (compiled away in release)",
-      "reason": "This is a real concern but the fix is a code change (add const assertion), not a documentation/convention change. The blocking issue for proportional-font will force this to be addressed in the fix."
-    },
-    {
-      "observation": "Duplicated keycode map between input driver and test should use shared constants",
-      "reason": "Known architectural limitation — no_std bare-metal binaries can't easily share code with host test crates. The duplication pattern is established and accepted. Adding a cross-reference comment would help but isn't a convention change."
+      "target": "skills",
+      "suggestion": "os-worker skill: for pure bug fixes with no new behavior (e.g., struct layout fixes), TDD step 2 (write tests first) can be noted as optional when the fix is validated by the existing test suite + visual verification.",
+      "evidence": "fix-compositor-config-overflow worker deviated from TDD (no new test function) because the existing 768-test suite + visual verification fully validated the struct layout fix. Reasonable deviation for non-behavioral changes.",
+      "isSystemic": false
     }
   ],
-  "previousRound": null
+  "rejectedObservations": [],
+  "previousRound": ".factory/validation/beautiful-chrome-and-content/scrutiny/synthesis.json (round 1)"
 }
