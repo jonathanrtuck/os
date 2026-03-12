@@ -62,7 +62,7 @@ const Z_SHADOW: u16 = 15;
 const Z_CHROME: u16 = 20;
 // Drop shadow configuration.
 const SHADOW_DEPTH: u32 = 8;
-const SHADOW_ALPHA_MAX: u8 = 80;
+// Shadow alpha max is defined in drawing::SHADOW_PEAK.
 // Chrome dimensions.
 const TITLE_BAR_H: u32 = 36;
 const STATUS_BAR_H: u32 = 28;
@@ -72,12 +72,12 @@ const STATUS_BAR_H: u32 = 28;
 const CONTENT_MARGIN_X: u32 = 0;
 const CONTENT_MARGIN_TOP: u32 = 0;
 const CONTENT_MARGIN_BOTTOM: u32 = 0;
-// Text insets within the content surface. Text starts near the top of the
-// content surface so that document content is genuinely visible through
-// the translucent chrome overlays — not just a background color.
+// Text insets within the content surface. The top inset places text below
+// the title bar with adequate margin; the bottom inset keeps text above the
+// status bar. Minimum 8px margin from any chrome boundary.
 const TEXT_INSET_X: u32 = 12;
-const TEXT_INSET_TOP: u32 = 4;
-const TEXT_INSET_BOTTOM: u32 = 4;
+const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
+const TEXT_INSET_BOTTOM: u32 = STATUS_BAR_H + SHADOW_DEPTH + 8;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
 
@@ -409,9 +409,7 @@ fn update_scroll_offset() {
 
 /// Render the background surface: solid dark color, full screen.
 fn render_background(surf: &mut drawing::Surface) {
-    use drawing::Color;
-
-    surf.clear(Color::rgb(18, 18, 26));
+    surf.clear(drawing::BG_BASE);
 }
 
 /// Render the content surface: text area background, text content, and cursor.
@@ -424,9 +422,6 @@ fn render_content_surface(
     surf: &mut drawing::Surface,
     text: &[u8],
 ) {
-    use drawing::Color;
-
-    let bg = Color::rgb(24, 24, 36);
     let cache = unsafe { &*GLYPH_CACHE };
     let cursor_pos = unsafe { CURSOR_POS };
     let content_w = surf.width;
@@ -436,7 +431,7 @@ fn render_content_surface(
     // With scrolling, we need to clear the entire text rendering area each
     // frame because any scroll change shifts all visible content. The
     // previous incremental-clear optimization doesn't work with scrolling.
-    surf.clear(bg);
+    surf.clear(drawing::BG_CONTENT);
 
     let layout = content_text_layout(content_w);
     let my = max_text_y_in_content(content_h);
@@ -451,12 +446,12 @@ fn render_content_surface(
         TEXT_INSET_TOP,
         cursor_pos,
         cache,
-        Color::rgb(200, 210, 230),
-        Color::rgb(100, 180, 255),
+        drawing::TEXT_PRIMARY,
+        drawing::TEXT_CURSOR,
         my,
         sel_start,
         sel_end,
-        Color::rgba(50, 80, 160, 180),
+        drawing::TEXT_SELECTION,
         scroll_offset,
     );
 }
@@ -471,11 +466,8 @@ fn render_image_content_surface(
     image_w: u32,
     image_h: u32,
 ) {
-    use drawing::Color;
-
     // Clear to background color.
-    let bg = Color::rgb(24, 24, 36);
-    surf.clear(bg);
+    surf.clear(drawing::BG_CONTENT);
 
     if image_w == 0 || image_h == 0 || image_data.is_empty() {
         return;
@@ -504,28 +496,24 @@ fn render_image_content_surface(
 /// Render the title bar drop shadow: gradient from opaque to transparent,
 /// falling downward from the title bar's bottom edge.
 fn render_title_shadow(surf: &mut drawing::Surface) {
-    use drawing::Color;
-
-    surf.clear(Color::TRANSPARENT);
+    surf.clear(drawing::Color::TRANSPARENT);
 
     surf.fill_gradient_v(
         0, 0, surf.width, surf.height,
-        Color::rgba(0, 0, 0, SHADOW_ALPHA_MAX),
-        Color::rgba(0, 0, 0, 0),
+        drawing::SHADOW_PEAK,
+        drawing::SHADOW_ZERO,
     );
 }
 
 /// Render the status bar drop shadow: gradient from transparent to opaque,
 /// falling upward from the status bar's top edge.
 fn render_status_shadow(surf: &mut drawing::Surface) {
-    use drawing::Color;
-
-    surf.clear(Color::TRANSPARENT);
+    surf.clear(drawing::Color::TRANSPARENT);
 
     surf.fill_gradient_v(
         0, 0, surf.width, surf.height,
-        Color::rgba(0, 0, 0, 0),
-        Color::rgba(0, 0, 0, SHADOW_ALPHA_MAX),
+        drawing::SHADOW_ZERO,
+        drawing::SHADOW_PEAK,
     );
 }
 
@@ -533,18 +521,19 @@ fn render_status_shadow(surf: &mut drawing::Surface) {
 /// Uses the proportional font (Nunito Sans) for chrome text.
 /// If an SVG icon was loaded, renders it before the title text.
 fn render_title_bar(surf: &mut drawing::Surface) {
-    use drawing::Color;
-
     let prop_cache = unsafe { &*PROP_GLYPH_CACHE };
 
     // Translucent background.
-    surf.clear(Color::rgba(30, 30, 48, 220));
+    surf.clear(drawing::CHROME_BG);
 
     // Render SVG document icon (if loaded) in the title bar.
     let icon_ptr = unsafe { ICON_COVERAGE };
     let icon_w = unsafe { ICON_W };
     let icon_h = unsafe { ICON_H };
     let text_x: u32;
+
+    // Vertically center text within the title bar (line_height centered).
+    let text_y = (TITLE_BAR_H.saturating_sub(prop_cache.line_height)) / 2;
 
     if !icon_ptr.is_null() && icon_w > 0 && icon_h > 0 {
         let icon_coverage = unsafe {
@@ -553,7 +542,7 @@ fn render_title_bar(surf: &mut drawing::Surface) {
         // Position icon vertically centered in the title bar, left margin = 10.
         let icon_x: i32 = 10;
         let icon_y: i32 = ((TITLE_BAR_H as i32 - icon_h as i32) / 2).max(0);
-        surf.draw_coverage(icon_x, icon_y, icon_coverage, icon_w, icon_h, Color::rgb(180, 190, 220));
+        surf.draw_coverage(icon_x, icon_y, icon_coverage, icon_w, icon_h, drawing::CHROME_ICON);
         // Title text starts after the icon with a small gap.
         text_x = icon_x as u32 + icon_w + 8;
     } else {
@@ -561,34 +550,31 @@ fn render_title_bar(surf: &mut drawing::Surface) {
     }
 
     // Title text (proportional font).
-    drawing::draw_proportional_string(surf, text_x, 10, b"Document OS", prop_cache, Color::rgb(200, 200, 220));
+    drawing::draw_proportional_string(surf, text_x, text_y, b"Document OS", prop_cache, drawing::CHROME_TITLE);
 
     // Subtitle on the right (proportional font).
-    // Estimate width by summing per-glyph advances.
     let subtitle = b"Multi-Surface Compositor";
     let sub_w = proportional_string_width(subtitle, prop_cache);
     let sx = surf.width.saturating_sub(12 + sub_w);
 
-    drawing::draw_proportional_string(surf, sx, 10, subtitle, prop_cache, Color::rgb(90, 90, 110));
+    drawing::draw_proportional_string(surf, sx, text_y, subtitle, prop_cache, drawing::CHROME_SUBTITLE);
 
     // Bottom edge line.
-    surf.draw_hline(0, surf.height - 1, surf.width, Color::rgba(60, 60, 80, 200));
+    surf.draw_hline(0, surf.height - 1, surf.width, drawing::CHROME_BORDER);
 }
 
 /// Render the status bar chrome surface (translucent overlay).
 /// Uses the proportional font (Nunito Sans) for chrome text.
 /// In image viewer mode, shows image dimensions instead of character count.
 fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
-    use drawing::Color;
-
     let prop_cache = unsafe { &*PROP_GLYPH_CACHE };
     let in_image_mode = unsafe { IMAGE_MODE };
 
     // Translucent background.
-    surf.clear(Color::rgba(30, 30, 48, 220));
+    surf.clear(drawing::CHROME_BG);
 
     // Top edge line.
-    surf.draw_hline(0, 0, surf.width, Color::rgba(60, 60, 80, 200));
+    surf.draw_hline(0, 0, surf.width, drawing::CHROME_BORDER);
 
     // Status text.
     let mut buf = [0u8; 64];
@@ -648,13 +634,16 @@ fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
         }
     }
 
+    // Vertically center text within the status bar.
+    let text_y = (STATUS_BAR_H.saturating_sub(prop_cache.line_height)) / 2;
+
     drawing::draw_proportional_string(
         surf,
         12,
-        6,
+        text_y,
         &buf[..ci],
         prop_cache,
-        Color::rgb(130, 130, 150),
+        drawing::CHROME_STATUS,
     );
 
     // Clock display (right-aligned): HH:MM:SS
@@ -669,10 +658,10 @@ fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
     drawing::draw_proportional_string(
         surf,
         time_x,
-        6,
+        text_y,
         &time_buf,
         prop_cache,
-        Color::rgb(160, 170, 190),
+        drawing::CHROME_CLOCK,
     );
 }
 

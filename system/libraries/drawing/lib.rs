@@ -23,6 +23,7 @@
 
 include!("font_data.rs");
 include!("gamma_tables.rs");
+include!("palette.rs");
 include!("png.rs");
 include!("rasterizer.rs");
 include!("svg.rs");
