@@ -1,0 +1,45 @@
+{
+  "featureId": "virtio-tablet-driver",
+  "reviewedAt": "2026-03-13T04:15:00.000Z",
+  "commitId": "fff3ad1",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, well-structured implementation that correctly extends the virtio-input driver for tablet support. Handle ordering in init is carefully managed to preserve backward compatibility (keyboard=1, GPU=2, editor=3, tablet=4+). The compositor's handle detection via wait() probe with timeout 0 is pragmatic. The input driver correctly accumulates EV_ABS X/Y events per IRQ batch and sends a single MSG_POINTER_ABS, avoiding redundant intermediate messages. Button events (BTN_LEFT/BTN_RIGHT) are properly differentiated from keyboard EV_KEY events. The compositor drains but does not yet process pointer events — appropriate since cursor-surface and click-to-position are separate features. QEMU scripts correctly updated. No blocking issues found.",
+    "issues": [
+      {
+        "file": "system/services/drivers/virtio-input/main.rs",
+        "line": 300,
+        "severity": "non_blocking",
+        "description": "MSG_POINTER_ABS is sent after draining all used buffers (per-IRQ batch) rather than on EV_SYN boundaries. If multiple SYN groups arrive in one IRQ, only the last position will be sent. Acceptable for a prototype but a more correct implementation would track EV_SYN and flush accumulated coordinates at each SYN boundary."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 1339,
+        "severity": "non_blocking",
+        "description": "The channel_shm_va(4) index for input2_ch assumes handle 4 always maps to SHM channel index 4. This works because handles are received sequentially and the SHM layout mirrors handle indices, but the coupling is implicit rather than computed from the handle itself. If handle ordering ever changes, this will break silently."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 1645,
+        "severity": "non_blocking",
+        "description": "Struct definitions for PointerAbs and PointerButton are duplicated between the input driver and compositor. This is consistent with the existing codebase pattern (KeyEvent, DeviceConfig, etc. are similarly duplicated), but as the IPC protocol grows, a shared definitions library would reduce maintenance burden."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md IPC message type allocation section lists types 1-7 (config), 8 (GPU_READY), 20 (PRESENT), 30-39 (editor), 40+ (filesystem) but does not document the input event range 10-12 (MSG_KEY_EVENT=10, MSG_POINTER_ABS=11, MSG_POINTER_BUTTON=12). Future workers allocating new message types may not know these are taken.",
+      "evidence": "AGENTS.md Coding Conventions section: 'IPC message type allocation: Types 1-7 = config messages, 8 = MSG_GPU_READY, 20 = MSG_PRESENT, 30-39 = editor messages...' — missing 10-12 for input event types."
+    },
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md test baseline says '869 tests' but 887 tests passed in this worker's run. The baseline appears outdated from prior features in this mission. Workers seeing a different count than documented may be confused about whether they broke or added tests.",
+      "evidence": "AGENTS.md: '869 tests must pass at all times (848 system + 21 prototype)'. Handoff verification: '887 tests passed, 0 failed across 30 test suites'."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "The virtio-tablet-driver feature is a clean pass. All five requirements are met: (1) init spawns a driver per virtio-input device, (2) input driver handles EV_ABS events for ABS_X/ABS_Y, (3) button events BTN_LEFT/BTN_RIGHT are handled, (4) MSG_POINTER_ABS and MSG_POINTER_BUTTON IPC messages are sent to compositor, (5) QEMU scripts include -device virtio-tablet-device. Keyboard input continues working alongside tablet input. Handle ordering in init is carefully managed. Three non-blocking issues noted: per-batch rather than per-SYN pointer flushing, implicit SHM index coupling, and struct duplication (all consistent with existing codebase patterns). Two shared state observations: IPC message type allocation in AGENTS.md needs updating, and test baseline count is stale."
+}

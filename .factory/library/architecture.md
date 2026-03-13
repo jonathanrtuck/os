@@ -91,6 +91,7 @@ The text editor and compositor communicate via bidirectional IPC channels using 
 | 32 | MSG_CURSOR_MOVE | editor → compositor | New cursor byte position |
 | 33 | MSG_SELECTION_UPDATE | editor → compositor | Selection start + end byte positions |
 | 34 | MSG_WRITE_DELETE_RANGE | editor → compositor | Start + end byte positions for bulk delete |
+| 35 | MSG_SET_CURSOR | compositor → editor | New cursor byte position (from click-to-position) |
 
 The editor sends multiple messages atomically (before signaling), and the compositor drains them all in one event loop iteration. Selection range normalization handles reversed anchor/cursor.
 
@@ -105,6 +106,8 @@ The virtio-tablet device produces absolute coordinate events (EV_ABS, ABS_X/ABS_
 5. Clicks in title bar are ignored (not forwarded to editor)
 
 The tablet device appears as a second virtio-input device (device ID 18) in the kernel's device manifest. Init spawns a driver for each virtio-input device.
+
+**QEMU device enumeration order:** QEMU enumerates virtio-mmio devices in REVERSE command-line order. The last `-device` flag on the QEMU command line gets the highest MMIO address, which the DTB enumerates first. When both `virtio-keyboard-device` and `virtio-tablet-device` are present, the tablet (listed last) becomes `input_devices[0]` (handle 1) and the keyboard becomes `input_devices[1]` (handle 4). Both input channels must handle keyboard shortcuts (e.g., Ctrl+Tab) since the keyboard may arrive on either channel depending on QEMU device ordering.
 
 ## Drawing Library
 
