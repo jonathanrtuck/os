@@ -1,0 +1,65 @@
+{
+  "milestone": "visual-overhaul",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "cd /Users/user/Sites/os/system && cargo build --release", "exitCode": 0 },
+    "lint": { "passed": true, "command": "cd /Users/user/Sites/os/prototype/files && cargo test", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 9,
+    "passed": 9,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Updated architecture.md: F1→Ctrl+Tab references (2 places), background surface description (solid→radial gradient), font pipeline (2x→6x subpixel, stem darkening, 20px, GPOS kerning), GlyphCache size (~430KiB→~1.3MiB), shared buffer layout (1→2 SVG icons), palette count (13→14), removed status bar references from font pipeline, added init→compositor message ordering invariant",
+      "sourceFeature": "ctrl-tab-switch, background-gradient, subpixel-rendering, stem-darkening, font-metrics-and-sizing, remove-status-bar, title-bar-redesign, rtc-clock"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Update IPC message type allocation ranges. Current text says 'Types 1-7 = config messages, 8 = MSG_GPU_READY'. Reality is now types 1-15 for config/setup messages (including 9=IMG_ICON_CONFIG, 15=RTC_CONFIG). Suggest: 'Types 1-15 = config/setup messages, 20 = MSG_PRESENT, 30-39 = editor messages'",
+      "evidence": "Features title-bar-redesign (MSG_IMG_ICON_CONFIG=9) and rtc-clock (MSG_RTC_CONFIG=15) both allocated message types outside the documented 1-7 range. Compositor main.rs confirms types 3,6,7,9,15 as config messages.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Update compositor surfaces heading from '(current: 6, target: fewer after status bar removal)' to '(current: 4 surfaces)' since status bar removal is complete.",
+      "evidence": "Feature remove-status-bar (commit f5bdfd0) reduced surfaces from 6 to 4. AGENTS.md heading is stale.",
+      "isSystemic": false
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Extend the 'When changing a constant value' convention to cover feature/concept removal: 'When removing a feature or concept, search for ALL references (code, comments, docstrings, documentation) to the removed concept and update or remove them.'",
+      "evidence": "Feature remove-status-bar left 4 stale 'status bar' comment references in compositor/main.rs. The existing convention only covers constant value changes, not feature removals.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add note about font metrics: 'When specifying kerning implementation, check which mechanism the target font actually uses (kern table vs GPOS) before specifying the approach in feature descriptions.'",
+      "evidence": "Feature font-metrics-and-sizing specified 'kern table format 0' but Nunito Sans only has GPOS kerning. Worker correctly adapted but the feature description was misleading.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "AGENTS.md convention about constant references not fully followed (stale GlyphCache docstrings in lib.rs)",
+      "reason": "This is a code-level issue already captured as a non-blocking review finding in subpixel-rendering review, not a shared state update"
+    },
+    {
+      "observation": "os-worker skill should mention heap-allocating GlyphCache in tests when OVERSAMPLE_X increases",
+      "reason": "Too narrow and implementation-specific for a general skill procedure. The existing stack constraint guidance in AGENTS.md ('Stack budget: Userspace processes have 16 KiB stack. Large structures >1 KiB must be heap-allocated') already covers this principle."
+    },
+    {
+      "observation": "Premature comment edit in monochrome-palette dropping status bar reference before it was removed",
+      "reason": "Already resolved by subsequent commit (f5bdfd0). No ongoing issue."
+    }
+  ],
+  "previousRound": null
+}

@@ -14,7 +14,7 @@ virtio-input driver → compositor → text-editor → compositor → virtio-gpu
 ```
 
 1. **virtio-input**: Blocks on IRQ, reads evdev events, translates keycodes, sends MSG_KEY_EVENT to compositor
-2. **Compositor**: Event loop waiting on input + editor + timer channels. Forwards key events to editor. Applies editor's write requests to document buffer. Manages multi-surface compositing (background, content, shadows, chrome). Supports two content modes: text editor (default) and image viewer (toggled via F1). Updates live clock from timer events. Signals GPU.
+2. **Compositor**: Event loop waiting on input + editor + timer channels. Forwards key events to editor. Applies editor's write requests to document buffer. Manages multi-surface compositing (background, content, shadows, chrome). Supports two content modes: text editor (default) and image viewer (toggled via Ctrl+Tab). Updates live clock from timer events. Signals GPU.
 3. **Text editor**: Receives key events, translates to editing intent (insert/delete/cursor move), sends write requests back to compositor. Has read-only shared memory mapping of document buffer.
 4. **virtio-gpu**: Waits for MSG_PRESENT, coalesces pending presents, does transfer_to_host_2d + resource_flush.
 
@@ -52,12 +52,12 @@ Userspace processes have a 16 KiB stack. All userspace programs and libraries ar
 
 ## Font Pipeline
 
-- TrueType parser → glyph outline extraction → scanline rasterizer (2× horizontal + 4× vertical oversampling) → coverage map → gamma-correct alpha blending onto surface
-- GlyphCache: pre-rasterizes printable ASCII (0x20–0x7E) at startup, 48×48 max coverage buffers (~430 KiB with 2D oversampling)
+- TrueType parser → glyph outline extraction → scanline rasterizer (6× horizontal subpixel + 4× vertical oversampling) → 3-channel RGB downsample → FIR low-pass filter → stem darkening LUT (boost=70) → gamma-correct per-channel alpha blending onto surface
+- GlyphCache: pre-rasterizes printable ASCII (0x20–0x7E) at startup, 48×48 max coverage buffers with 3 bytes/pixel (~1.3 MiB with subpixel oversampling)
 - Two font caches:
-  - **Monospace** (Source Code Pro Regular, 16px): used for editor text. Fixed char_width via TextLayout.
-  - **Proportional** (Nunito Sans Regular, 16px): used for chrome text (title bar, status bar). Per-glyph advance widths via `draw_proportional_string()`.
-- All assets loaded from `system/share/` via 9p into a single 256 KiB shared buffer (mono font | prop font | PNG image | SVG icon). Init sends offsets/lengths to compositor via CompositorConfig IPC message.
+  - **Monospace** (Source Code Pro Regular, 20px): used for editor text. Fixed char_width via TextLayout.
+  - **Proportional** (Nunito Sans Regular, 20px): used for chrome text (title bar). Per-glyph advance widths via `draw_proportional_string()`. GPOS PairPos kerning applied via `draw_proportional_string_kerned()`.
+- All assets loaded from `system/share/` via 9p into a single 256 KiB shared buffer (mono font | prop font | PNG image | doc-icon SVG | img-icon SVG). Init sends offsets/lengths to compositor via CompositorConfig and icon-config IPC messages.
 - Missing glyph codepoints advance by space width fallback without crashing.
 
 ## Multi-Surface Compositing
@@ -66,14 +66,18 @@ The compositor uses a multi-surface model with z-ordered back-to-front compositi
 
 | Surface          | Z-order | Description |
 |-----------------|---------|-------------|
-| Background       | 0       | Solid dark background fill |
+| Background       | 0       | Radial gradient (lighter center, darker edges) with per-pixel noise |
 | Content          | 10      | Text editor or image viewer (full-screen, extends behind chrome) |
 | Title shadow     | 15      | Soft gradient shadow below title bar |
 | Title bar chrome | 20      | Translucent (alpha=170) with [icon] Untitled + HH:MM:SS clock |
 
 Each surface has a dedicated render function (e.g., `render_content_surface()`, `render_title_bar()`). Surfaces are allocated once at startup and re-rendered in-place each frame. The `composite_surfaces()` function sorts by z-order (stable sort) and composites via `blit_blend`.
 
-Content modes: `IMAGE_MODE` global toggles between text editor (renders document text) and image viewer (renders decoded PNG). F1 key switches modes. Text state is preserved across switches.
+Content modes: `IMAGE_MODE` global toggles between text editor (renders document text) and image viewer (renders decoded PNG). Ctrl+Tab switches modes. Text state is preserved across switches.
+
+## Init → Compositor Config Protocol
+
+Init sends configuration messages to the compositor in a fixed sequential order at startup. The compositor receives them via sequential `try_recv` calls that expect specific message types. **The send order in init must exactly match the receive order in compositor.** Ordering: COMPOSITOR_CONFIG → IMAGE_CONFIG → ICON_CONFIG → IMG_ICON_CONFIG → RTC_CONFIG. If any intermediate message is not sent, subsequent messages will be silently dropped.
 
 ## Editor ↔ Compositor IPC Protocol
 
@@ -111,6 +115,6 @@ The tablet device appears as a second virtio-input device (device ID 18) in the 
 - `png_decode()`: no-dependency PNG decoder (DEFLATE, all 5 filter types, RGB/RGBA → BGRA8888)
 - `svg_parse_path()` / `svg_parse_path_into()`: SVG path data parser (M/L/C/Z, absolute + relative), returns `SvgPath` segments
 - `svg_rasterize()`: Rasterizes parsed SVG paths into coverage maps using scanline/non-zero winding rule (same approach as TrueType rasterizer)
-- `palette` module: 13 named color constants (dark blue-grey theme) — all UI colors centralized here
+- `palette` module: 14 named color constants (pure monochrome grey theme, R=G=B for all colors) — all UI colors centralized here
 - **SVG struct sizes**: `SvgPath` (~16 KiB) and `SvgRasterScratch` (~64 KiB) exceed the 16 KiB userspace stack — must be heap-allocated via `alloc_zeroed` in bare-metal code
 - No rounded rects, no blur yet

@@ -1,0 +1,34 @@
+{
+  "featureId": "stem-darkening",
+  "reviewedAt": "2026-03-13T03:10:00.000Z",
+  "commitId": "8d6d15a",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, correct implementation. A 256-entry compile-time LUT with boost=70 applies a non-linear coverage boost after rasterization, subpixel downsampling, and FIR filtering. The LUT preserves zero (special-cased) and 255, is monotonically non-decreasing, and strictly boosts mid-range values 1–251. Applied equally to all 3 subpixel channels via a simple loop over the output buffer. 7 well-structured tests cover boundary values, mid-range boost, monotonicity, tunability, integration with a rasterized glyph, and full formula verification. TDD workflow followed correctly (initial LUT[0] bug caught by failing test, then fixed). No bugs or missed edge cases. Two minor documentation inaccuracies noted as non-blocking.",
+    "issues": [
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 52,
+        "severity": "non_blocking",
+        "description": "Doc comment claims 'LUT[c] > c for all c in 1..254 (strict boost)' but integer division truncation means LUT[252]=252, LUT[253]=253, LUT[254]=254 — these are NOT strictly boosted. The correct claim is 'LUT[c] > c for c in 1..251' and 'LUT[c] >= c for c in 252..254'. The test only checks 30–200 so this doesn't cause test failures, but the doc comment is misleading."
+      },
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 60,
+        "severity": "non_blocking",
+        "description": "The LUT has a steep discontinuity: LUT[0]=0 but LUT[1]=70. Any pixel with raw coverage=1 jumps to 70 after darkening. This is inherent to the formula combined with the zero special-case and is unlikely to cause visible artifacts (the FIR filter smooths very-low-coverage values before darkening), but it's worth noting for future tuning — a smoothed ramp for very low coverage values (e.g., scaling boost by cov/N for small cov) would produce a gentler transition."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The font pipeline description in .factory/library/architecture.md does not mention stem darkening. The pipeline currently reads 'TrueType parser → glyph outline extraction → scanline rasterizer (2× horizontal + 4× vertical oversampling) → coverage map → gamma-correct alpha blending onto surface' but should include the stem darkening step between coverage map generation and output.",
+      "evidence": ".factory/library/architecture.md 'Font Pipeline' section — no mention of stem darkening after FIR filter. Actual pipeline in truetype.rs is: oversample rasterize → downsample → FIR filter → stem darkening LUT → output."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Stem darkening is correctly implemented as specified. The 256-entry compile-time LUT with boost=70 applies equally to all 3 subpixel channels after the FIR filter. Zero stays zero, 255 stays 255, mid-range values are strictly boosted. 7 comprehensive tests pass. Visual verification confirmed heavier, more legible text. Two non-blocking doc comment inaccuracies noted (strict boost range overstated by 3 values, and steep LUT[0]→LUT[1] discontinuity worth noting for future tuning). One shared-state gap: architecture.md font pipeline description should be updated to include the stem darkening step. Overall: pass."
+}

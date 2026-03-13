@@ -1,0 +1,44 @@
+{
+  "featureId": "subpixel-rendering",
+  "reviewedAt": "2026-03-13T03:15:00.000Z",
+  "commitId": "897e0cf",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of LCD subpixel font rendering. OVERSAMPLE_X correctly changed from 2 to 6 (3 sub-pixels × 2× each). Rasterizer produces 3-channel RGB coverage by downsampling oversampled columns into R (cols 0-1), G (cols 2-3), B (cols 4-5). The 3-tap FIR [1/4, 1/2, 1/4] filter correctly runs across the flat subpixel stream to reduce color fringing. draw_coverage() does per-channel blending in linear light with per-channel effective alpha. In-place downsample is safe (out_total W*H*3 always ≤ over_total W*H*6). GlyphCache.get() correctly returns 3-channel coverage. Both fonts use subpixel rendering. 7 well-targeted tests added. Two stale docstrings found but non-blocking.",
+    "issues": [
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 128,
+        "severity": "non_blocking",
+        "description": "Stale docstring: GlyphCache struct comment says 'Total size: ~220 KiB (95 glyphs * 48*48 bytes coverage + metadata)'. With OVERSAMPLE_X=6, GLYPH_BUF_SIZE is 48*6*48=13824 bytes/glyph, total ~1.3 MiB. The handoff even acknowledges '~1.3 MB' as a discovered issue but the docstring was not updated."
+      },
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 351,
+        "severity": "non_blocking",
+        "description": "Stale docstring: GlyphCache::zeroed() comment says 'The struct is ~220 KiB'. Actual size with OVERSAMPLE_X=6 is ~1.3 MiB."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md coding conventions say 'When changing a constant value, search for ALL comments and docstrings referencing the old value and update them.' The worker changed OVERSAMPLE_X from 2 to 6, which tripled GlyphCache size from ~440 KiB to ~1.3 MiB, but did not update the two GlyphCache docstrings (lines 128 and 351 in lib.rs) that reference '~220 KiB'. The convention was documented but not fully followed.",
+      "evidence": "system/libraries/drawing/lib.rs:128 still says '~220 KiB (95 glyphs * 48*48 bytes coverage + metadata)'. system/libraries/drawing/lib.rs:351 still says '~220 KiB'. Handoff's discoveredIssues acknowledges the size is ~1.3 MiB."
+    },
+    {
+      "area": "knowledge",
+      "observation": "architecture.md in .factory/library/ contains stale font pipeline details after this feature. Line 55 says '2× horizontal + 4× vertical oversampling' (now 6× horizontal). Line 56 says 'GlyphCache: ~430 KiB with 2D oversampling' (now ~1.3 MiB with 6× subpixel). Line 56 also says '48×48 max coverage buffers' which is technically still correct for output pixel dimensions but misleading since buffers are now 3 bytes per pixel. The architecture doc should reflect that coverage maps are 3-channel RGB subpixel.",
+      "evidence": ".factory/library/architecture.md:55 — '2× horizontal + 4× vertical oversampling' is now '6× horizontal + 4× vertical'. Line 56 — '~430 KiB' is now ~1.3 MiB."
+    },
+    {
+      "area": "skills",
+      "observation": "Worker followed the os-worker skill procedure correctly (TDD, build, visual verification via QEMU). The worker's skillFeedback.suggestedChanges notes that the skill could mention heap-allocating GlyphCache in tests when OVERSAMPLE_X increases. This is a valid observation — the heap_glyph_cache() workaround using raw alloc_zeroed + Box::from_raw was necessary because Box::new(GlyphCache::zeroed()) would overflow the test thread stack at ~1.3 MiB.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The os-worker skill could mention that GlyphCache should be heap-allocated in tests when OVERSAMPLE_X is increased, since the coverage buffer size scales with the oversampling factor.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Subpixel font rendering implementation is correct and complete. All 5 requirements from the feature description are met: (1) 6× horizontal rasterization, (2) 3-channel RGB downsample, (3) 3-tap FIR filter for color fringing, (4) per-channel draw_coverage blending, (5) 3-channel GlyphCache. Both fonts verified. Visual verification confirms RGB channel differences at glyph edges. 7 well-designed tests cover the full pipeline. Two stale GlyphCache size docstrings (~220 KiB → ~1.3 MiB) are the only code issues, both non-blocking. Pass."
+}

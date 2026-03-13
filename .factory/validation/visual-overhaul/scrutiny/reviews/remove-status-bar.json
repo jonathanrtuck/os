@@ -1,0 +1,57 @@
+{
+  "featureId": "remove-status-bar",
+  "reviewedAt": "2026-03-13T03:15:00.000Z",
+  "commitId": "f5bdfd0",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean removal of status bar (6→4 surfaces). All functional code correctly removed: render_status_bar(), render_status_shadow(), STATUS_BAR_H, IMAGE_WIDTH/IMAGE_HEIGHT globals, status bar surface allocation, compositing, and damage tracking. TEXT_INSET_BOTTOM correctly changed from STATUS_BAR_H + SHADOW_DEPTH + 8 to 8. Clock utilities preserved with #[allow(dead_code)] for upcoming title-bar clock. Timer-only tick path correctly uses 'continue' to skip compositing (no visible clock at this commit). Tests appropriately updated (3 modified, 1 removed). Architecture docs updated. Visual verification performed via QEMU screenshot. 4 stale comments referencing 'status bar' remain in compositor source — non-blocking.",
+    "issues": [
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 68,
+        "severity": "non_blocking",
+        "description": "Stale comment: 'visible through translucent chrome (title bar and status bar)' — status bar no longer exists. Should read 'title bar' only."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 378,
+        "severity": "non_blocking",
+        "description": "Stale comment: 'Text must stay above the status bar chrome area.' — status bar removed. Should reference the bottom margin instead."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 427,
+        "severity": "non_blocking",
+        "description": "Stale comment in render_content_surface doc: 'visible through the translucent chrome (title bar and status bar)' — status bar no longer exists."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 429,
+        "severity": "non_blocking",
+        "description": "Stale comment: 'above the status bar, but the background fills the entire surface' — status bar no longer exists."
+      },
+      {
+        "file": ".factory/library/architecture.md",
+        "line": 59,
+        "severity": "non_blocking",
+        "description": "Stale reference in Font Pipeline section: 'used for chrome text (title bar, status bar)' — status bar removed. Should say 'title bar' only."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "Worker left 4 stale 'status bar' references in compositor comments after removing the feature. AGENTS.md has a convention about updating comments when changing constants ('When changing a constant value, search for ALL comments and docstrings referencing the old value and update them'), but this convention's wording only covers constant value changes, not feature removals. The spirit should extend to any removed concept — searching for all references to the removed feature name.",
+      "evidence": "system/services/compositor/main.rs lines 68, 378, 427, 429 at commit f5bdfd0 — all reference 'status bar' in comments despite the feature being removed. Subsequent commits (7 later commits exist) may have cleaned these up."
+    },
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md heading at line 47 reads 'Compositor Surfaces (current: 6, target: fewer after status bar removal)' — the heading is stale after this feature completed (body correctly lists 4 surfaces). This may be expected to be updated by the orchestrator rather than the worker, but it's worth noting the inconsistency.",
+      "evidence": "Mission AGENTS.md line 47 still says '(current: 6, target: fewer after status bar removal)' after commit f5bdfd0 reduced to 4 surfaces."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The status bar removal is comprehensive and correct. All rendering code, surface allocations, globals, compositing arrays, and damage tracking for both the status bar and its shadow are cleanly removed. Content area extends to the bottom with an 8px margin as specified. Clock infrastructure correctly preserved for the planned title-bar clock feature. Tests appropriately updated. Only non-blocking issues: 4 stale comments in compositor source and 1 stale reference in architecture.md still mention 'status bar'."
+}

@@ -1,0 +1,46 @@
+{
+  "featureId": "font-metrics-and-sizing",
+  "reviewedAt": "2026-03-13T03:30:00.000Z",
+  "commitId": "4b4150ed714e693280639090c056abaeefba2f4b",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation of all three font improvements. (1) FONT_SIZE correctly changed from 16 to 20 with log messages updated. (2) hhea ascent/descent/lineGap correctly parsed from TrueType hhea table at offsets 4/6/8, stored in GlyphCache, and used for baseline positioning — all 4 occurrences of the old line_height*3/4 heuristic replaced with cache.ascent (two TextLayout draw methods, draw_proportional_string_kerned, compositor draw_string). (3) GPOS PairPos kerning parser is comprehensive: supports format 1 (individual pairs) and format 2 (class-based with ClassDef format 1 and 2), Coverage table format 1 and 2, binary search for pair lookups, correct ValueFormat bit counting for XAdvance extraction. The worker correctly pivoted from the described 'kern table format 0' to GPOS since Nunito Sans only has GPOS kerning. 12 well-structured tests cover both fonts' hhea metrics, GlyphCache computation, descender fitting, multiple kern pairs, monospace no-kern, and kerned-vs-unkerned width comparison.",
+    "issues": [
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 760,
+        "severity": "non_blocking",
+        "description": "Font is re-parsed via TrueTypeFont::new() on every render_title_bar() call (which happens on every clock tick, keystroke, etc.). The font data is static and doesn't change. While TrueTypeFont::new() is not catastrophically expensive (iterates table directory, reads a few header fields), it's unnecessary repeated work. Could be cached as a static, though the lifetime management with static mut is admittedly tricky in this codebase."
+      },
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 1519,
+        "severity": "non_blocking",
+        "description": "Idiomatic Rust would use `font.and_then(|f| f.glyph_index(byte as char))` instead of `if font.is_some() { font.unwrap()... } else { None }`. Functionally correct but less idiomatic."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 292,
+        "severity": "non_blocking",
+        "description": "proportional_string_width() does not account for kerning, but is used to right-align the clock text which is rendered with kerning. For digit/colon characters the discrepancy is negligible, but the width calculation and rendering are technically inconsistent."
+      },
+      {
+        "file": "system/test/tests/drawing.rs",
+        "line": 5857,
+        "severity": "non_blocking",
+        "description": "The baseline_uses_ascent_not_heuristic test is weak — it only verifies ascent > 0 and line_height = ascent + descent, not that draw functions actually use ascent. The test comment acknowledges the old heuristic and new ascent coincide at 21 for NunitoSans 20px. The test passes regardless of which method is used. Other tests (descender fitting, visual verification) compensate."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The feature description specified 'kern table (format 0)' but the target font (Nunito Sans) only has GPOS kerning, not a traditional kern table. The worker correctly adapted to implement GPOS PairPos instead. Future feature descriptions involving kerning should check which mechanism the font actually uses (kern vs GPOS) before specifying the implementation approach.",
+      "evidence": "Feature description says 'Parse the kern table (format 0) from Nunito Sans'; handoff discoveredIssues[0] explains the pivot; commit implements GPOS PairPos (format 1 + format 2 class-based) instead."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "All three font improvements correctly implemented: FONT_SIZE 16→20, hhea-based baseline positioning replacing the hardcoded heuristic (all 4 call sites updated), and comprehensive GPOS PairPos kerning parser (format 1 + format 2). 12 new tests with good coverage. Four non-blocking issues: repeated font parsing in render_title_bar, non-idiomatic unwrap pattern, kerning-unaware width calculation for clock alignment, and a weak baseline test. None affect correctness. The worker's pivot from kern table to GPOS was the right call."
+}

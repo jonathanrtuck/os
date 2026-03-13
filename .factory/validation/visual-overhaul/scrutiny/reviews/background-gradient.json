@@ -1,0 +1,45 @@
+{
+  "featureId": "background-gradient",
+  "reviewedAt": "2026-03-13T03:40:00.000Z",
+  "commitId": "e08d3c01a2f33e3dd2fac69b331c27423101e699",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, well-structured implementation. Xorshift32 PRNG is standard and correct. Radial gradient uses integer-only math with u64 for overflow safety. Noise maintains monochrome property (same value across R/G/B channels). Content surface full-clear and image viewer both updated to use the gradient, making it visible through translucent chrome. Incremental re-render uses a per-row gradient approximation (center-column color only, no noise) which is a reasonable tradeoff documented in code comments. 9 tests cover determinism, range, brightness gradient, noise variation, edge cases (1×1 surface), and zero-noise smoothness. All expectedBehavior items are satisfied.",
+    "issues": [
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 1699,
+        "severity": "non_blocking",
+        "description": "Missing blank line between clamp_u8() closing brace and the next function's doc comment (/// Convert a linear light value...). Minor style inconsistency with the rest of the file which uses blank lines between function definitions."
+      },
+      {
+        "file": "system/libraries/drawing/palette.rs",
+        "line": 24,
+        "severity": "non_blocking",
+        "description": "BG_CONTENT (RGB 20,20,20) is now dead code — it was the former content surface background color, replaced by the gradient fill. No code references it (only a comment in compositor/main.rs:464 mentions the old name). Should be removed or have its doc comment updated to indicate it's reserved/unused."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 596,
+        "severity": "non_blocking",
+        "description": "Incremental line-clear path loses noise and horizontal gradient variation: gradient_row_color() computes a single flat color per row (vertical distance only, no noise), while the full surface fill has per-pixel noise and full radial gradient. Over time, incrementally cleared lines will differ subtly from the original gradient. Practically invisible given the 12-unit gradient span and text drawn on top, and the code comment acknowledges this tradeoff."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The architecture.md Multi-Surface Compositing table describes the Background surface (z=0) as 'Solid dark background fill', but it's now a radial gradient with noise. The description should be updated to 'Radial gradient (lighter center, darker edges) with per-pixel noise'.",
+      "evidence": ".factory/library/architecture.md — Multi-Surface Compositing table, Background row says 'Solid dark background fill'. Actual implementation in compositor/main.rs:render_background() calls fill_radial_gradient_noise()."
+    },
+    {
+      "area": "conventions",
+      "observation": "The architecture.md Drawing Library section says palette module has '13 named color constants' — this is now 14 with the addition of BG_CENTER. The count should be updated.",
+      "evidence": ".factory/library/architecture.md says '13 named color constants'. system/libraries/drawing/palette.rs now has BG_CENTER added at line 19."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The background-gradient feature is correctly implemented: Xorshift32 PRNG provides deterministic noise, fill_radial_gradient_noise() generates a clean radial gradient (BG_CENTER=28 at center to BG_BASE=16 at edges) with ±3 noise, and the gradient is applied to background, content, and image viewer surfaces so it shows through translucent chrome. 9 well-targeted tests verify the key properties. Three non-blocking issues noted: a missing blank line (style), dead BG_CONTENT constant, and incremental re-render losing noise/horizontal gradient variation (acknowledged tradeoff). Two shared state observations: architecture.md has stale descriptions of the background surface and palette constant count."
+}
