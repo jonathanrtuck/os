@@ -1,0 +1,36 @@
+{
+  "flowId": "serial-perf",
+  "milestone": "responsive-rendering",
+  "testedAt": "2026-03-12T00:00:00Z",
+  "toolsUsed": ["qemu-monitor", "serial-log", "screenshot"],
+  "assertions": {
+    "VAL-PERF-001": {
+      "status": "pass",
+      "evidence": "Serial log shows keystroke presents use 3 dirty rects: 1280x20 (content line), 1280x28 (title bar), 1280x8 (status bar). Content dirty rect height is 20px, which is 2.5% of the 800px screen height — well under the 10% threshold.",
+      "details": "23 keystroke presents logged as 'compositor: present rects=3 1280x20 1280x28 1280x8'. GPU driver transfers only these dirty regions, not full 1280x800 framebuffer. Content rect 20/800 = 2.5% < 10% required maximum."
+    },
+    "VAL-PERF-002": {
+      "status": "pass",
+      "evidence": "When no input is happening (before typing started and after typing stopped), serial log shows only 'compositor: present rects=1 1280x28' — a single rect covering the title bar region (1280 wide x 28 pixels tall).",
+      "details": "98 timer-only presents observed, all showing 'rects=1 1280x28'. Title bar height is 28px, screen width is 1280px. Only title bar region transferred on clock ticks, not full screen."
+    },
+    "VAL-PERF-003": {
+      "status": "pass",
+      "evidence": "Zero 'gpu: present' lines found in the entire serial log after running for 20+ seconds with typing and idle periods. GPU driver per-present logging has been removed.",
+      "details": "grep -c 'gpu: present' returned 0 across 210 total log lines. The compositor logs present info ('compositor: present rects=...') for debugging, but the GPU driver itself produces no per-present serial output."
+    },
+    "VAL-PERF-004": {
+      "status": "pass",
+      "evidence": "Boot serial output is clean and well-structured. All log lines are complete and readable with no garbled or interleaved text. Process startup messages appear in logical sequence: kernel boot → init → driver spawning → virtio device init → font loading → display pipeline setup → compositor ready.",
+      "details": "89 boot lines (before compositor present messages begin) all well-formed. Unicode emoji prefixes render correctly. No mid-line garbling like 'channel_create... device setup'. Each process startup is clearly delineated with indentation and emoji markers."
+    },
+    "VAL-PERF-005": {
+      "status": "pass",
+      "evidence": "Typed 23 characters ('hello world testing 123') at 0.1s intervals. Screenshot shows all 23 characters in correct order with cursor at end. Status bar confirms '23 chars'. No characters dropped or out of order.",
+      "details": "Characters sent: h,e,l,l,o,spc,w,o,r,l,d,spc,t,e,s,t,i,n,g,spc,1,2,3 (23 total at 0.1s spacing). Screenshot taken 3 seconds after last keystroke. All characters rendered correctly in the text editor content area."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "summary": "All 5 PERF assertions passed. Dirty-rect transfers confirmed for both keystroke (2.5% screen height) and timer-only (title bar only) presents. GPU per-present logging eliminated. Boot output clean. All 23 rapid keystrokes rendered correctly."
+}
