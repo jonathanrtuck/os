@@ -155,11 +155,15 @@ impl P9Client {
             {
                 let mut buf = [0u8; 32];
                 let prefix = b"9p: attach error ";
+
                 buf[..prefix.len()].copy_from_slice(prefix);
+
                 let mut pos = prefix.len();
+
                 pos += format_u32(ecode, &mut buf[pos..]);
                 buf[pos] = b'\n';
                 pos += 1;
+
                 sys::print(&buf[..pos]);
             }
 
@@ -209,11 +213,15 @@ impl P9Client {
             {
                 let mut buf = [0u8; 32];
                 let prefix = b"9p: lopen error ";
+
                 buf[..prefix.len()].copy_from_slice(prefix);
+
                 let mut pos = prefix.len();
+
                 pos += format_u32(ecode, &mut buf[pos..]);
                 buf[pos] = b'\n';
                 pos += 1;
+
                 sys::print(&buf[..pos]);
             }
 
@@ -347,11 +355,15 @@ impl P9Client {
             {
                 let mut buf = [0u8; 32];
                 let prefix = b"9p: walk error ";
+
                 buf[..prefix.len()].copy_from_slice(prefix);
+
                 let mut pos = prefix.len();
+
                 pos += format_u32(ecode, &mut buf[pos..]);
                 buf[pos] = b'\n';
                 pos += 1;
+
                 sys::print(&buf[..pos]);
             }
 
@@ -362,29 +374,11 @@ impl P9Client {
     }
 }
 
-fn print_u32(mut n: u32) {
-    if n == 0 {
-        sys::print(b"0");
-
-        return;
-    }
-
-    let mut buf = [0u8; 10];
-    let mut i = 10;
-
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    sys::print(&buf[i..]);
-}
-
 /// Format a u32 into a buffer, returning the number of bytes written.
 fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
     if n == 0 {
         buf[0] = b'0';
+
         return 1;
     }
 
@@ -402,6 +396,24 @@ fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
     buf[..len].copy_from_slice(&tmp[i..]);
 
     len
+}
+fn print_u32(mut n: u32) {
+    if n == 0 {
+        sys::print(b"0");
+
+        return;
+    }
+
+    let mut buf = [0u8; 10];
+    let mut i = 10;
+
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    sys::print(&buf[i..]);
 }
 
 #[unsafe(no_mangle)]
@@ -512,6 +524,7 @@ pub extern "C" fn _start() -> ! {
                 while name_len < 44 && *name_start.add(name_len) != 0 {
                     name_len += 1;
                 }
+
                 (
                     va,
                     capacity,
@@ -523,12 +536,21 @@ pub extern "C" fn _start() -> ! {
                 let prefix = b"     reading: ";
                 let mut buf = [0u8; 80];
                 let mut pos = prefix.len();
+
                 buf[..pos].copy_from_slice(prefix);
-                let name_len = if name_bytes.len() > 60 { 60 } else { name_bytes.len() };
+
+                let name_len = if name_bytes.len() > 60 {
+                    60
+                } else {
+                    name_bytes.len()
+                };
+
                 buf[pos..pos + name_len].copy_from_slice(&name_bytes[..name_len]);
+
                 pos += name_len;
                 buf[pos] = b'\n';
                 pos += 1;
+
                 sys::print(&buf[..pos]);
             }
 
@@ -579,12 +601,19 @@ pub extern "C" fn _start() -> ! {
             {
                 let mut buf = [0u8; 32];
                 let prefix = b"     read ";
+
                 buf[..prefix.len()].copy_from_slice(prefix);
+
                 let mut pos = prefix.len();
+
                 pos += format_u32(len, &mut buf[pos..]);
+
                 let suffix = b" bytes\n";
+
                 buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
                 pos += suffix.len();
+
                 sys::print(&buf[..pos]);
             }
 

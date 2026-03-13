@@ -99,16 +99,16 @@ mod thread_exit;
 mod timer;
 mod waitable;
 
+/// Pseudo device ID for the PL031 RTC in the device manifest.
+/// Not a virtio device — uses a distinct ID range (200+) so init can
+/// differentiate it from virtio devices (IDs 1–26).
+const DEVICE_ID_PL031_RTC: u32 = 200;
 /// Virtio MMIO constants for device probe.
 const VIRTIO_MAGIC: u32 = 0x7472_6976;
 const VIRTIO_MMIO_BASE_PA: u64 = 0x0A00_0000;
 const VIRTIO_MMIO_STRIDE: u64 = 0x200;
 const VIRTIO_MMIO_COUNT: usize = 32;
 const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
-/// Pseudo device ID for the PL031 RTC in the device manifest.
-/// Not a virtio device — uses a distinct ID range (200+) so init can
-/// differentiate it from virtio devices (IDs 1–26).
-const DEVICE_ID_PL031_RTC: u32 = 200;
 
 /// Init ELF — the only process the kernel spawns directly.
 /// Init is the proto-OS-service that spawns all other processes.
@@ -610,6 +610,7 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
                         device_id: DEVICE_ID_PL031_RTC,
                     });
                     total_count += 1;
+
                     serial::puts("  🕐 rtc - pl031 discovered\n");
                 }
             }

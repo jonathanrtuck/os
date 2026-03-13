@@ -287,6 +287,28 @@ fn ctrl_header(cmd_type: u32) -> CtrlHeader {
 fn channel_shm_va(idx: usize) -> usize {
     CHANNEL_SHM_BASE + idx * 2 * 4096
 }
+/// Format a u32 into a buffer, returning the number of bytes written.
+fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
+    if n == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+
+    let mut tmp = [0u8; 10];
+    let mut i = 10;
+
+    while n > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    let len = 10 - i;
+
+    buf[..len].copy_from_slice(&tmp[i..]);
+
+    len
+}
 fn get_display_info(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
@@ -367,29 +389,6 @@ fn print_u32(mut n: u32) {
     }
 
     sys::print(&buf[i..]);
-}
-
-/// Format a u32 into a buffer, returning the number of bytes written.
-fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
-    if n == 0 {
-        buf[0] = b'0';
-        return 1;
-    }
-
-    let mut tmp = [0u8; 10];
-    let mut i = 10;
-
-    while n > 0 {
-        i -= 1;
-        tmp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    let len = 10 - i;
-
-    buf[..len].copy_from_slice(&tmp[i..]);
-
-    len
 }
 fn resource_create_2d(
     device: &virtio::Device,
@@ -727,7 +726,6 @@ pub extern "C" fn _start() -> ! {
 
     // Query actual display dimensions from the virtual display.
     let (disp_w, disp_h) = get_display_info(&device, &mut vq, irq_handle);
-
     // Use queried dimensions, fall back to 1024x768 if query returns 0.
     let width = if disp_w > 0 { disp_w } else { 1024 };
     let height = if disp_h > 0 { disp_h } else { 768 };
@@ -735,24 +733,24 @@ pub extern "C" fn _start() -> ! {
     {
         let mut buf = [0u8; 32];
         let prefix = b"     display ";
+
         buf[..prefix.len()].copy_from_slice(prefix);
+
         let mut pos = prefix.len();
+
         pos += format_u32(width, &mut buf[pos..]);
         buf[pos] = b'x';
         pos += 1;
         pos += format_u32(height, &mut buf[pos..]);
         buf[pos] = b'\n';
         pos += 1;
+
         sys::print(&buf[..pos]);
     }
 
     // Send display dimensions back to init so it can allocate framebuffers.
-    let info_msg = unsafe {
-        ipc::Message::from_payload(
-            MSG_DISPLAY_INFO,
-            &DisplayInfoMsg { width, height },
-        )
-    };
+    let info_msg =
+        unsafe { ipc::Message::from_payload(MSG_DISPLAY_INFO, &DisplayInfoMsg { width, height }) };
 
     ch.send(&info_msg);
 
@@ -783,7 +781,15 @@ pub extern "C" fn _start() -> ! {
     }
     // Attach double-buffer backing (two separate physical regions, seen as one
     // contiguous buffer by the GPU: buffer 0 at offset 0, buffer 1 at offset fb_size).
-    if !attach_backing(&device, &mut vq, irq_handle, FB_RESOURCE_ID, fb_pa, fb_pa2, fb_size) {
+    if !attach_backing(
+        &device,
+        &mut vq,
+        irq_handle,
+        FB_RESOURCE_ID,
+        fb_pa,
+        fb_pa2,
+        fb_size,
+    ) {
         sys::print(b"virtio-gpu: attach_backing failed\n");
         sys::exit();
     }
@@ -808,12 +814,12 @@ pub extern "C" fn _start() -> ! {
 
     // Signal init that device setup is complete (prevents serial interleaving).
     let ready_msg = ipc::Message::new(MSG_GPU_READY);
-    ch.send(&ready_msg);
-    let _ = sys::channel_signal(INIT_HANDLE);
 
+    ch.send(&ready_msg);
+
+    let _ = sys::channel_signal(INIT_HANDLE);
     // Channel 1: compositor present commands (endpoint 1 = receive side).
     let present_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
-
     let stride = width * FB_BPP;
 
     // -----------------------------------------------------------------------
@@ -828,7 +834,12 @@ pub extern "C" fn _start() -> ! {
     let mut last_payload = PresentPayload {
         buffer_index: 0,
         rect_count: 0,
-        rects: [DirtyRect { x: 0, y: 0, w: 0, h: 0 }; 6],
+        rects: [DirtyRect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        }; 6],
         _pad: [0; 4],
     };
 
@@ -881,8 +892,8 @@ pub extern "C" fn _start() -> ! {
             let mut union_y0: u32 = u32::MAX;
             let mut union_x1: u32 = 0;
             let mut union_y1: u32 = 0;
-
             let mut i = 0;
+
             while i < n {
                 let r = &last_payload.rects[i];
                 let rx = r.x as u32;
@@ -906,12 +917,22 @@ pub extern "C" fn _start() -> ! {
                     );
 
                     // Update bounding box for flush.
-                    if rx < union_x0 { union_x0 = rx; }
-                    if ry < union_y0 { union_y0 = ry; }
+                    if rx < union_x0 {
+                        union_x0 = rx;
+                    }
+                    if ry < union_y0 {
+                        union_y0 = ry;
+                    }
+
                     let x1 = rx + rw;
                     let y1 = ry + rh;
-                    if x1 > union_x1 { union_x1 = x1; }
-                    if y1 > union_y1 { union_y1 = y1; }
+
+                    if x1 > union_x1 {
+                        union_x1 = x1;
+                    }
+                    if y1 > union_y1 {
+                        union_y1 = y1;
+                    }
                 }
 
                 i += 1;

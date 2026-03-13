@@ -72,14 +72,6 @@ struct KeyEvent {
     pressed: u8,
     ascii: u8,
 }
-/// A virtio-input event (matches Linux's input_event without timeval).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct VirtioInputEvent {
-    event_type: u16,
-    code: u16,
-    value: u32,
-}
 /// Absolute pointer position sent to the compositor via IPC.
 /// Coordinates are in the raw [0, 32767] range; the compositor scales them.
 #[repr(C)]
@@ -96,6 +88,14 @@ struct PointerButton {
     button: u8,
     pressed: u8,
     _pad: [u8; 2],
+}
+/// A virtio-input event (matches Linux's input_event without timeval).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct VirtioInputEvent {
+    event_type: u16,
+    code: u16,
+    value: u32,
 }
 
 /// Compute the base VA of channel N's shared pages.

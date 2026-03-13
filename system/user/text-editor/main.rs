@@ -133,26 +133,19 @@ pub extern "C" fn _start() -> ! {
 
     // Editor-local cursor position (byte offset in document).
     let mut cursor: usize = 0;
-
     // Selection state: anchor is the fixed end of a selection. When
     // has_selection is true, the selection range is [min(anchor, cursor),
     // max(anchor, cursor)). Shift+arrow keys set/extend the selection;
     // regular movement or editing clears it.
     let mut has_selection: bool = false;
     let mut anchor: usize = 0;
-
     // Shift key tracking (left shift = keycode 42, right shift = keycode 54).
     let mut shift_held: bool = false;
 
     sys::print(b"     entering event loop\n");
 
     /// Send a selection update message to the compositor.
-    fn send_selection(
-        ch: &ipc::Channel,
-        has_sel: bool,
-        anchor: usize,
-        cursor: usize,
-    ) {
+    fn send_selection(ch: &ipc::Channel, has_sel: bool, anchor: usize, cursor: usize) {
         let (sel_start, sel_end) = if has_sel {
             let lo = if anchor < cursor { anchor } else { cursor };
             let hi = if anchor < cursor { cursor } else { anchor };
@@ -174,6 +167,7 @@ pub extern "C" fn _start() -> ! {
             // Handle click-to-position: compositor sets cursor directly.
             if msg.msg_type == MSG_SET_CURSOR {
                 let cm: CursorMove = unsafe { msg.payload_as() };
+
                 cursor = cm.position as usize;
                 // Clear any active selection on click.
                 has_selection = false;
@@ -181,7 +175,6 @@ pub extern "C" fn _start() -> ! {
 
                 continue;
             }
-
             if msg.msg_type != MSG_KEY_EVENT {
                 continue;
             }
@@ -191,9 +184,9 @@ pub extern "C" fn _start() -> ! {
             // Track shift key state (press and release).
             if key.keycode == KEY_LSHIFT || key.keycode == KEY_RSHIFT {
                 shift_held = key.pressed == 1;
+
                 continue;
             }
-
             if key.pressed != 1 {
                 continue;
             }
@@ -218,12 +211,15 @@ pub extern "C" fn _start() -> ! {
                             position: cursor as u32,
                         };
                         let cm_msg = unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+
                         os_ch.send(&cm_msg);
+
                         send_selection(&os_ch, has_selection, anchor, cursor);
 
                         // Collapse selection if anchor == cursor.
                         if anchor == cursor {
                             has_selection = false;
+
                             send_selection(&os_ch, false, 0, 0);
                         }
 
@@ -233,6 +229,7 @@ pub extern "C" fn _start() -> ! {
                         if has_selection {
                             // Move cursor to selection start (leftmost).
                             let sel_lo = if anchor < cursor { anchor } else { cursor };
+
                             cursor = sel_lo;
                             has_selection = false;
 
@@ -241,7 +238,9 @@ pub extern "C" fn _start() -> ! {
                             };
                             let cm_msg =
                                 unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+
                             os_ch.send(&cm_msg);
+
                             send_selection(&os_ch, false, 0, 0);
 
                             let _ = sys::channel_signal(OS_HANDLE);
@@ -253,6 +252,7 @@ pub extern "C" fn _start() -> ! {
                             };
                             let cm_msg =
                                 unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+
                             os_ch.send(&cm_msg);
 
                             let _ = sys::channel_signal(OS_HANDLE);
@@ -266,7 +266,6 @@ pub extern "C" fn _start() -> ! {
                             anchor = cursor;
                             has_selection = true;
                         }
-
                         if cursor < len {
                             cursor += 1;
                         }
@@ -275,12 +274,15 @@ pub extern "C" fn _start() -> ! {
                             position: cursor as u32,
                         };
                         let cm_msg = unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+
                         os_ch.send(&cm_msg);
+
                         send_selection(&os_ch, has_selection, anchor, cursor);
 
                         // Collapse selection if anchor == cursor.
                         if anchor == cursor {
                             has_selection = false;
+
                             send_selection(&os_ch, false, 0, 0);
                         }
 
@@ -290,6 +292,7 @@ pub extern "C" fn _start() -> ! {
                         if has_selection {
                             // Move cursor to selection end (rightmost).
                             let sel_hi = if anchor > cursor { anchor } else { cursor };
+
                             cursor = sel_hi;
                             has_selection = false;
 
@@ -298,7 +301,9 @@ pub extern "C" fn _start() -> ! {
                             };
                             let cm_msg =
                                 unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+
                             os_ch.send(&cm_msg);
+
                             send_selection(&os_ch, false, 0, 0);
 
                             let _ = sys::channel_signal(OS_HANDLE);
@@ -310,6 +315,7 @@ pub extern "C" fn _start() -> ! {
                             };
                             let cm_msg =
                                 unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
+
                             os_ch.send(&cm_msg);
 
                             let _ = sys::channel_signal(OS_HANDLE);
@@ -320,6 +326,7 @@ pub extern "C" fn _start() -> ! {
                     // Clear selection on Home.
                     if has_selection {
                         has_selection = false;
+
                         send_selection(&os_ch, false, 0, 0);
                     }
 
@@ -338,6 +345,7 @@ pub extern "C" fn _start() -> ! {
                     // Clear selection on End.
                     if has_selection {
                         has_selection = false;
+
                         send_selection(&os_ch, false, 0, 0);
                     }
 
@@ -359,7 +367,6 @@ pub extern "C" fn _start() -> ! {
                             // Delete entire selection range.
                             let sel_lo = if anchor < cursor { anchor } else { cursor };
                             let sel_hi = if anchor < cursor { cursor } else { anchor };
-
                             let del_range = WriteDeleteRange {
                                 start: sel_lo as u32,
                                 end: sel_hi as u32,
@@ -372,6 +379,7 @@ pub extern "C" fn _start() -> ! {
 
                             cursor = sel_lo;
                             has_selection = false;
+
                             send_selection(&os_ch, false, 0, 0);
 
                             let _ = sys::channel_signal(OS_HANDLE);
@@ -395,7 +403,6 @@ pub extern "C" fn _start() -> ! {
                             // Replace selection: delete range, then insert.
                             let sel_lo = if anchor < cursor { anchor } else { cursor };
                             let sel_hi = if anchor < cursor { cursor } else { anchor };
-
                             let del_range = WriteDeleteRange {
                                 start: sel_lo as u32,
                                 end: sel_hi as u32,
@@ -418,7 +425,9 @@ pub extern "C" fn _start() -> ! {
                                 unsafe { ipc::Message::from_payload(MSG_WRITE_INSERT, &insert) };
 
                             os_ch.send(&ins_msg);
+
                             cursor += 1;
+
                             send_selection(&os_ch, false, 0, 0);
 
                             let _ = sys::channel_signal(OS_HANDLE);
@@ -432,6 +441,7 @@ pub extern "C" fn _start() -> ! {
                                 unsafe { ipc::Message::from_payload(MSG_WRITE_INSERT, &insert) };
 
                             os_ch.send(&ins_msg);
+
                             cursor += 1;
 
                             let _ = sys::channel_signal(OS_HANDLE);

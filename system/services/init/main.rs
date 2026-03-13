@@ -58,6 +58,15 @@ const DEVICE_PL031_RTC: u32 = 200;
 const DOC_BUF_PAGES: u64 = 1;
 const DOC_BUF_HEADER: u32 = 64;
 const DOC_BUF_CAPACITY: u32 = (DOC_BUF_PAGES as u32 * 4096) - DOC_BUF_HEADER;
+/// Set up the interactive display pipeline with input.
+///
+/// Creates cross-process channels:
+/// - input driver → compositor (keyboard events)
+/// - compositor → GPU driver (present commands)
+///
+/// Then starts all three processes. They run their own event loops.
+/// Maximum number of virtio-input devices we can handle (keyboard + tablet).
+const MAX_INPUT_DEVICES: usize = 4;
 // --- Protocol message types (shared with receivers) ---
 const MSG_DEVICE_CONFIG: u32 = 1;
 const MSG_GPU_CONFIG: u32 = 2;
@@ -72,13 +81,8 @@ const MSG_RTC_CONFIG: u32 = 15;
 const MSG_FS_READ_REQUEST: u32 = 40;
 const MSG_FS_READ_RESPONSE: u32 = 41;
 
-/// Display dimensions reported by the GPU driver from GET_DISPLAY_INFO.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DisplayInfoMsg {
-    width: u32,
-    height: u32,
-}
+// Guard: CompositorConfig must fit within the 60-byte IPC payload.
+const _: () = assert!(core::mem::size_of::<CompositorConfig>() <= 60);
 
 /// Compositor configuration sent to the compositor via IPC.
 ///
@@ -102,15 +106,39 @@ struct CompositorConfig {
     mono_font_len: u32,
     prop_font_len: u32,
 }
-// Guard: CompositorConfig must fit within the 60-byte IPC payload.
-const _: () = assert!(core::mem::size_of::<CompositorConfig>() <= 60);
-
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DeviceConfig {
+    mmio_pa: u64,
+    irq: u32,
+    _pad: u32,
+}
+/// Display dimensions reported by the GPU driver from GET_DISPLAY_INFO.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct DisplayInfoMsg {
+    width: u32,
+    height: u32,
+}
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct EditorConfig {
     doc_va: u64,
     doc_capacity: u32,
     _pad: u32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct GpuConfig {
+    mmio_pa: u64,
+    irq: u32,
+    _pad: u32,
+    fb_pa: u64,
+    fb_pa2: u64,
+    fb_width: u32,
+    fb_height: u32,
+    fb_size: u32,
+    _pad2: u32,
 }
 /// Image configuration sent to compositor after the main config.
 /// Contains the location of the raw PNG file data in shared memory.
@@ -143,32 +171,33 @@ struct RtcConfig {
     mmio_pa: u64,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DeviceConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct GpuConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-    fb_pa: u64,
-    fb_pa2: u64,
-    fb_width: u32,
-    fb_height: u32,
-    fb_size: u32,
-    _pad2: u32,
-}
-
 /// Compute the base VA of channel N's shared pages in init's address space.
 /// Each channel occupies 2 consecutive pages (one per direction).
 /// Channel 0 = kernel channel, channel 1+ = channels created by init.
 fn channel_shm_va(channel_index: usize) -> usize {
     CHANNEL_SHM_BASE + channel_index * 2 * 4096
+}
+/// Format a u32 into a buffer, returning the number of bytes written.
+fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
+    if n == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+
+    let mut tmp = [0u8; 10];
+    let mut i = 10;
+
+    while n > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    let len = 10 - i;
+
+    buf[..len].copy_from_slice(&tmp[i..]);
+
+    len
 }
 /// Create an IPC channel for a given channel index. Init is always endpoint 0.
 fn init_channel(channel_index: usize) -> ipc::Channel {
@@ -196,39 +225,6 @@ fn print_u32(mut n: u32) {
 
     sys::print(&buf[i..]);
 }
-
-/// Format a u32 into a buffer, returning the number of bytes written.
-fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
-    if n == 0 {
-        buf[0] = b'0';
-        return 1;
-    }
-
-    let mut tmp = [0u8; 10];
-    let mut i = 10;
-
-    while n > 0 {
-        i -= 1;
-        tmp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    let len = 10 - i;
-
-    buf[..len].copy_from_slice(&tmp[i..]);
-
-    len
-}
-/// Set up the interactive display pipeline with input.
-///
-/// Creates cross-process channels:
-/// - input driver → compositor (keyboard events)
-/// - compositor → GPU driver (present commands)
-///
-/// Then starts all three processes. They run their own event loops.
-/// Maximum number of virtio-input devices we can handle (keyboard + tablet).
-const MAX_INPUT_DEVICES: usize = 4;
-
 fn setup_display_pipeline(
     gpu_proc: u8,
     gpu_ch_handle: u8,
@@ -301,14 +297,18 @@ fn setup_display_pipeline(
     {
         let mut buf = [0u8; 40];
         let prefix = b"     display resolution: ";
+
         buf[..prefix.len()].copy_from_slice(prefix);
+
         let mut pos = prefix.len();
+
         pos += format_u32(fb_width, &mut buf[pos..]);
         buf[pos] = b'x';
         pos += 1;
         pos += format_u32(fb_height, &mut buf[pos..]);
         buf[pos] = b'\n';
         pos += 1;
+
         sys::print(&buf[..pos]);
     }
 
@@ -340,19 +340,29 @@ fn setup_display_pipeline(
     {
         let mut buf = [0u8; 64];
         let prefix = b"     double framebuffer: ";
+
         buf[..prefix.len()].copy_from_slice(prefix);
+
         let mut pos = prefix.len();
+
         pos += format_u32(fb_width, &mut buf[pos..]);
         buf[pos] = b'x';
         pos += 1;
         pos += format_u32(fb_height, &mut buf[pos..]);
+
         let mid = b" x2 (";
+
         buf[pos..pos + mid.len()].copy_from_slice(mid);
+
         pos += mid.len();
         pos += format_u32((fb_alloc_bytes * 2) as u32 / 1024, &mut buf[pos..]);
+
         let suffix = b" KiB)\n";
+
         buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
         pos += suffix.len();
+
         sys::print(&buf[..pos]);
     }
 
@@ -433,7 +443,28 @@ fn setup_display_pipeline(
     // Share font+image buffer with compositor (read-only) if available.
     // The buffer contains: mono font at offset 0, prop font at offset mono_len,
     // PNG image data at offset png_offset, SVG icon data at offset icon_offset.
-    let (comp_font_va, mono_font_len, prop_font_len, png_offset, png_len, icon_offset, icon_len, img_icon_offset, img_icon_len) = if let Some((font_pa, mono_len, prop_len, png_off, png_l, icon_off, icon_l, img_off, img_l)) = font_buf {
+    let (
+        comp_font_va,
+        mono_font_len,
+        prop_font_len,
+        png_offset,
+        png_len,
+        icon_offset,
+        icon_len,
+        img_icon_offset,
+        img_icon_len,
+    ) = if let Some((
+        font_pa,
+        mono_len,
+        prop_len,
+        png_off,
+        png_l,
+        icon_off,
+        icon_l,
+        img_off,
+        img_l,
+    )) = font_buf
+    {
         let total_len = mono_len + prop_len + png_l + icon_l + img_l;
         let font_pages = ((total_len as u64) + 4095) / 4096;
         let va = sys::memory_share(comp_proc, font_pa, font_pages, true).unwrap_or_else(|_| {
@@ -441,7 +472,9 @@ fn setup_display_pipeline(
             sys::exit();
         });
 
-        (va as u64, mono_len, prop_len, png_off, png_l, icon_off, icon_l, img_off, img_l)
+        (
+            va as u64, mono_len, prop_len, png_off, png_l, icon_off, icon_l, img_off, img_l,
+        )
     } else {
         (0u64, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32)
     };
@@ -497,7 +530,8 @@ fn setup_display_pipeline(
             icon_len: img_icon_len,
             _pad: 0,
         };
-        let img_icn_msg = unsafe { ipc::Message::from_payload(MSG_IMG_ICON_CONFIG, &img_icn_config) };
+        let img_icn_msg =
+            unsafe { ipc::Message::from_payload(MSG_IMG_ICON_CONFIG, &img_icn_config) };
 
         comp_ch.send(&img_icn_msg);
     }
@@ -660,12 +694,19 @@ fn setup_display_pipeline(
         {
             let mut buf = [0u8; 48];
             let prefix = b"     input device ";
+
             buf[..prefix.len()].copy_from_slice(prefix);
+
             let mut pos = prefix.len();
+
             pos += format_u32(i as u32, &mut buf[pos..]);
+
             let suffix = b" channel created\n";
+
             buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
             pos += suffix.len();
+
             sys::print(&buf[..pos]);
         }
     }
@@ -723,7 +764,6 @@ fn spawn_with_channel(elf: &[u8], next_channel: &mut usize) -> Option<(u8, u8, u
             return None;
         }
     };
-
     let (ch_a, ch_b) = match sys::channel_create() {
         Ok(pair) => pair,
         Err(_) => {
@@ -758,12 +798,19 @@ pub extern "C" fn _start() -> ! {
     {
         let mut buf = [0u8; 40];
         let prefix = b"     ";
+
         buf[..prefix.len()].copy_from_slice(prefix);
+
         let mut pos = prefix.len();
+
         pos += format_u32(device_count, &mut buf[pos..]);
+
         let suffix = b" devices in manifest\n";
+
         buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
         pos += suffix.len();
+
         sys::print(&buf[..pos]);
     }
 
@@ -771,8 +818,10 @@ pub extern "C" fn _start() -> ! {
     let mut next_channel: usize = 1;
     // Saved device state for Phase 2 (display pipeline).
     let mut gpu: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
+
     // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
-    let mut input_devices: [(u8, usize, u64, u32); MAX_INPUT_DEVICES] = [(0, 0, 0, 0); MAX_INPUT_DEVICES];
+    let mut input_devices: [(u8, usize, u64, u32); MAX_INPUT_DEVICES] =
+        [(0, 0, 0, 0); MAX_INPUT_DEVICES];
     let mut input_count: usize = 0;
     let mut p9: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
     let mut rtc_pa: u64 = 0; // PL031 RTC physical address (0 = not found)
@@ -789,22 +838,32 @@ pub extern "C" fn _start() -> ! {
         {
             let mut buf = [0u8; 40];
             let prefix = b"     device ";
+
             buf[..prefix.len()].copy_from_slice(prefix);
+
             let mut pos = prefix.len();
+
             pos += format_u32(i as u32, &mut buf[pos..]);
+
             let mid = b": id=";
+
             buf[pos..pos + mid.len()].copy_from_slice(mid);
+
             pos += mid.len();
             pos += format_u32(dev_id, &mut buf[pos..]);
+
             buf[pos] = b'\n';
             pos += 1;
+
             sys::print(&buf[..pos]);
         }
 
         // PL031 RTC: no driver needed — just save the PA for the compositor.
         if dev_id == DEVICE_PL031_RTC {
             rtc_pa = dev_pa;
+
             sys::print(b"     pl031 rtc registered\n");
+
             continue;
         }
 
@@ -817,12 +876,17 @@ pub extern "C" fn _start() -> ! {
             _ => {
                 let mut buf = [0u8; 48];
                 let prefix = b"     skipping unknown device id=";
+
                 buf[..prefix.len()].copy_from_slice(prefix);
+
                 let mut pos = prefix.len();
+
                 pos += format_u32(dev_id, &mut buf[pos..]);
                 buf[pos] = b'\n';
                 pos += 1;
+
                 sys::print(&buf[..pos]);
+
                 continue;
             }
         };
@@ -830,12 +894,19 @@ pub extern "C" fn _start() -> ! {
         {
             let mut buf = [0u8; 48];
             let prefix = b"     spawning driver (elf ";
+
             buf[..prefix.len()].copy_from_slice(prefix);
+
             let mut pos = prefix.len();
+
             pos += format_u32(elf.len() as u32, &mut buf[pos..]);
+
             let suffix = b" bytes)\n";
+
             buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
             pos += suffix.len();
+
             sys::print(&buf[..pos]);
         }
 
@@ -892,230 +963,280 @@ pub extern "C" fn _start() -> ! {
     // Loads monospace + proportional fonts, PNG image, and SVG icons.
     // All stored in a single shared buffer: mono | prop | PNG | doc-icon SVG | img-icon SVG.
     // Tuple: (font_pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len, img_icon_offset, img_icon_len)
-    let font_buf: Option<(u64, u32, u32, u32, u32, u32, u32, u32, u32)> = if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9
-    {
-        sys::print(b"     loading fonts from host filesystem\n");
+    let font_buf: Option<(u64, u32, u32, u32, u32, u32, u32, u32, u32)> =
+        if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
+            sys::print(b"     loading fonts from host filesystem\n");
 
-        // Allocate font buffer (256 KiB = order 6 = 64 pages).
-        // Holds both fonts: Source Code Pro (~10 KiB) + Nunito Sans (~142 KiB).
-        let font_order: u32 = 6;
-        let font_page_count: u64 = 1u64 << font_order;
-        let mut font_pa: u64 = 0;
-        let _font_va = sys::dma_alloc(font_order, &mut font_pa).unwrap_or_else(|_| {
-            sys::print(b"init: dma_alloc (font buffer) failed\n");
-            sys::exit();
-        });
-        let font_capacity: u32 = (font_page_count as u32) * 4096; // 256 KiB
+            // Allocate font buffer (256 KiB = order 6 = 64 pages).
+            // Holds both fonts: Source Code Pro (~10 KiB) + Nunito Sans (~142 KiB).
+            let font_order: u32 = 6;
+            let font_page_count: u64 = 1u64 << font_order;
+            let mut font_pa: u64 = 0;
+            let _font_va = sys::dma_alloc(font_order, &mut font_pa).unwrap_or_else(|_| {
+                sys::print(b"init: dma_alloc (font buffer) failed\n");
+                sys::exit();
+            });
+            let font_capacity: u32 = (font_page_count as u32) * 4096; // 256 KiB
 
-        unsafe { core::ptr::write_bytes(_font_va as *mut u8, 0, font_capacity as usize) };
+            unsafe { core::ptr::write_bytes(_font_va as *mut u8, 0, font_capacity as usize) };
 
-        // Share font buffer with 9p driver (read-write).
-        let p9_font_va = sys::memory_share(p9_proc, font_pa, font_page_count, false).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (9p font) failed\n");
-            sys::exit();
-        });
-        // Send device config via IPC.
-        let p9_ch_obj = init_channel(p9_ch_idx);
-        let dev_config = DeviceConfig {
-            mmio_pa: p9_pa,
-            irq: p9_irq,
-            _pad: 0,
-        };
-        let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
+            // Share font buffer with 9p driver (read-write).
+            let p9_font_va = sys::memory_share(p9_proc, font_pa, font_page_count, false)
+                .unwrap_or_else(|_| {
+                    sys::print(b"init: memory_share (9p font) failed\n");
+                    sys::exit();
+                });
+            // Send device config via IPC.
+            let p9_ch_obj = init_channel(p9_ch_idx);
+            let dev_config = DeviceConfig {
+                mmio_pa: p9_pa,
+                irq: p9_irq,
+                _pad: 0,
+            };
+            let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
 
-        p9_ch_obj.send(&cfg_msg);
+            p9_ch_obj.send(&cfg_msg);
 
-        // Start 9p driver.
-        sys::print(b"     starting 9p driver\n");
+            // Start 9p driver.
+            sys::print(b"     starting 9p driver\n");
 
-        let _ = sys::process_start(p9_proc);
+            let _ = sys::process_start(p9_proc);
 
-        // Helper: send a file read request and wait for the response.
-        // Returns the number of bytes read, or 0 on failure.
-        let read_font_file = |ch_obj: &ipc::Channel, ch_handle: u8,
-                               target_va: u64, capacity: u32,
-                               filename: &[u8]| -> u32 {
-            let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
+            // Helper: send a file read request and wait for the response.
+            // Returns the number of bytes read, or 0 on failure.
+            let read_font_file = |ch_obj: &ipc::Channel,
+                                  ch_handle: u8,
+                                  target_va: u64,
+                                  capacity: u32,
+                                  filename: &[u8]|
+             -> u32 {
+                let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
 
-            unsafe {
-                let p = req_msg.payload.as_mut_ptr();
+                unsafe {
+                    let p = req_msg.payload.as_mut_ptr();
 
-                core::ptr::write_unaligned(p as *mut u64, target_va);
-                core::ptr::write_unaligned(p.add(8) as *mut u32, capacity);
-                core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
-                // Zero-fill filename area first.
-                core::ptr::write_bytes(p.add(16), 0, 44);
-                core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
-            }
-
-            ch_obj.send(&req_msg);
-
-            let _ = sys::channel_signal(ch_handle);
-
-            let mut resp_msg = ipc::Message::new(0);
-
-            loop {
-                let _ = sys::wait(&[ch_handle], u64::MAX);
-
-                if ch_obj.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_FS_READ_RESPONSE {
-                    break;
+                    core::ptr::write_unaligned(p as *mut u64, target_va);
+                    core::ptr::write_unaligned(p.add(8) as *mut u32, capacity);
+                    core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
+                                                                          // Zero-fill filename area first.
+                    core::ptr::write_bytes(p.add(16), 0, 44);
+                    core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
                 }
-            }
 
-            let (len, status) = unsafe {
-                let p = resp_msg.payload.as_ptr();
-                let len = core::ptr::read_unaligned(p as *const u32);
-                let status = core::ptr::read_unaligned(p.add(4) as *const u32);
+                ch_obj.send(&req_msg);
 
-                (len, status)
+                let _ = sys::channel_signal(ch_handle);
+                let mut resp_msg = ipc::Message::new(0);
+
+                loop {
+                    let _ = sys::wait(&[ch_handle], u64::MAX);
+
+                    if ch_obj.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_FS_READ_RESPONSE {
+                        break;
+                    }
+                }
+
+                let (len, status) = unsafe {
+                    let p = resp_msg.payload.as_ptr();
+                    let len = core::ptr::read_unaligned(p as *const u32);
+                    let status = core::ptr::read_unaligned(p.add(4) as *const u32);
+
+                    (len, status)
+                };
+
+                if status == 0 && len > 0 {
+                    len
+                } else {
+                    0
+                }
             };
 
-            if status == 0 && len > 0 {
-                len
+            // Load monospace font (Source Code Pro) at offset 0.
+            sys::print(b"     loading SourceCodePro-Regular.ttf\n");
+
+            let mono_len = read_font_file(
+                &p9_ch_obj,
+                p9_ch,
+                p9_font_va as u64,
+                font_capacity,
+                b"SourceCodePro-Regular.ttf",
+            );
+
+            if mono_len > 0 {
+                let mut buf = [0u8; 48];
+                let prefix = b"     mono font loaded: ";
+
+                buf[..prefix.len()].copy_from_slice(prefix);
+
+                let mut pos = prefix.len();
+
+                pos += format_u32(mono_len, &mut buf[pos..]);
+
+                let suffix = b" bytes\n";
+
+                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
+                pos += suffix.len();
+
+                sys::print(&buf[..pos]);
             } else {
-                0
+                sys::print(b"     mono font read failed\n");
             }
-        };
 
-        // Load monospace font (Source Code Pro) at offset 0.
-        sys::print(b"     loading SourceCodePro-Regular.ttf\n");
+            // Load proportional font (Nunito Sans) right after the mono font.
+            sys::print(b"     loading NunitoSans-Regular.ttf\n");
 
-        let mono_len = read_font_file(
-            &p9_ch_obj, p9_ch,
-            p9_font_va as u64, font_capacity,
-            b"SourceCodePro-Regular.ttf",
-        );
+            let prop_offset = mono_len;
+            let prop_capacity = font_capacity - prop_offset;
+            let prop_target_va = p9_font_va as u64 + prop_offset as u64;
+            let prop_len = read_font_file(
+                &p9_ch_obj,
+                p9_ch,
+                prop_target_va,
+                prop_capacity,
+                b"NunitoSans-Regular.ttf",
+            );
 
-        if mono_len > 0 {
-            let mut buf = [0u8; 48];
-            let prefix = b"     mono font loaded: ";
-            buf[..prefix.len()].copy_from_slice(prefix);
-            let mut pos = prefix.len();
-            pos += format_u32(mono_len, &mut buf[pos..]);
-            let suffix = b" bytes\n";
-            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-            pos += suffix.len();
-            sys::print(&buf[..pos]);
-        } else {
-            sys::print(b"     mono font read failed\n");
-        }
+            if prop_len > 0 {
+                let mut buf = [0u8; 48];
+                let prefix = b"     prop font loaded: ";
 
-        // Load proportional font (Nunito Sans) right after the mono font.
-        sys::print(b"     loading NunitoSans-Regular.ttf\n");
+                buf[..prefix.len()].copy_from_slice(prefix);
 
-        let prop_offset = mono_len;
-        let prop_capacity = font_capacity - prop_offset;
-        let prop_target_va = p9_font_va as u64 + prop_offset as u64;
+                let mut pos = prefix.len();
 
-        let prop_len = read_font_file(
-            &p9_ch_obj, p9_ch,
-            prop_target_va, prop_capacity,
-            b"NunitoSans-Regular.ttf",
-        );
+                pos += format_u32(prop_len, &mut buf[pos..]);
 
-        if prop_len > 0 {
-            let mut buf = [0u8; 48];
-            let prefix = b"     prop font loaded: ";
-            buf[..prefix.len()].copy_from_slice(prefix);
-            let mut pos = prefix.len();
-            pos += format_u32(prop_len, &mut buf[pos..]);
-            let suffix = b" bytes\n";
-            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-            pos += suffix.len();
-            sys::print(&buf[..pos]);
-        } else {
-            sys::print(b"     prop font read failed\n");
-        }
+                let suffix = b" bytes\n";
 
-        // Load PNG image (test.png) right after the proportional font.
-        sys::print(b"     loading test.png\n");
+                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
 
-        let png_offset = mono_len + prop_len;
-        let png_capacity = font_capacity - png_offset;
-        let png_target_va = p9_font_va as u64 + png_offset as u64;
+                pos += suffix.len();
 
-        let png_len = read_font_file(
-            &p9_ch_obj, p9_ch,
-            png_target_va, png_capacity,
-            b"test.png",
-        );
+                sys::print(&buf[..pos]);
+            } else {
+                sys::print(b"     prop font read failed\n");
+            }
 
-        if png_len > 0 {
-            let mut buf = [0u8; 40];
-            let prefix = b"     png loaded: ";
-            buf[..prefix.len()].copy_from_slice(prefix);
-            let mut pos = prefix.len();
-            pos += format_u32(png_len, &mut buf[pos..]);
-            let suffix = b" bytes\n";
-            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-            pos += suffix.len();
-            sys::print(&buf[..pos]);
-        } else {
-            sys::print(b"     png read failed\n");
-        }
+            // Load PNG image (test.png) right after the proportional font.
+            sys::print(b"     loading test.png\n");
 
-        // Load SVG icon (doc-icon.svg) right after the PNG data.
-        sys::print(b"     loading doc-icon.svg\n");
+            let png_offset = mono_len + prop_len;
+            let png_capacity = font_capacity - png_offset;
+            let png_target_va = p9_font_va as u64 + png_offset as u64;
+            let png_len =
+                read_font_file(&p9_ch_obj, p9_ch, png_target_va, png_capacity, b"test.png");
 
-        let icon_offset = mono_len + prop_len + png_len;
-        let icon_capacity = font_capacity - icon_offset;
-        let icon_target_va = p9_font_va as u64 + icon_offset as u64;
+            if png_len > 0 {
+                let mut buf = [0u8; 40];
+                let prefix = b"     png loaded: ";
 
-        let icon_len = read_font_file(
-            &p9_ch_obj, p9_ch,
-            icon_target_va, icon_capacity,
-            b"doc-icon.svg",
-        );
+                buf[..prefix.len()].copy_from_slice(prefix);
 
-        if icon_len > 0 {
-            let mut buf = [0u8; 40];
-            let prefix = b"     icon loaded: ";
-            buf[..prefix.len()].copy_from_slice(prefix);
-            let mut pos = prefix.len();
-            pos += format_u32(icon_len, &mut buf[pos..]);
-            let suffix = b" bytes\n";
-            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-            pos += suffix.len();
-            sys::print(&buf[..pos]);
-        } else {
-            sys::print(b"     icon read failed\n");
-        }
+                let mut pos = prefix.len();
 
-        // Load image icon (img-icon.svg) right after the doc icon.
-        sys::print(b"     loading img-icon.svg\n");
+                pos += format_u32(png_len, &mut buf[pos..]);
 
-        let img_icon_offset = mono_len + prop_len + png_len + icon_len;
-        let img_icon_capacity = font_capacity - img_icon_offset;
-        let img_icon_target_va = p9_font_va as u64 + img_icon_offset as u64;
+                let suffix = b" bytes\n";
 
-        let img_icon_len = read_font_file(
-            &p9_ch_obj, p9_ch,
-            img_icon_target_va, img_icon_capacity,
-            b"img-icon.svg",
-        );
+                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
 
-        if img_icon_len > 0 {
-            let mut buf = [0u8; 48];
-            let prefix = b"     img icon loaded: ";
-            buf[..prefix.len()].copy_from_slice(prefix);
-            let mut pos = prefix.len();
-            pos += format_u32(img_icon_len, &mut buf[pos..]);
-            let suffix = b" bytes\n";
-            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-            pos += suffix.len();
-            sys::print(&buf[..pos]);
-        } else {
-            sys::print(b"     img icon read failed\n");
-        }
+                pos += suffix.len();
 
-        if mono_len > 0 {
-            Some((font_pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len, img_icon_offset, img_icon_len))
+                sys::print(&buf[..pos]);
+            } else {
+                sys::print(b"     png read failed\n");
+            }
+
+            // Load SVG icon (doc-icon.svg) right after the PNG data.
+            sys::print(b"     loading doc-icon.svg\n");
+
+            let icon_offset = mono_len + prop_len + png_len;
+            let icon_capacity = font_capacity - icon_offset;
+            let icon_target_va = p9_font_va as u64 + icon_offset as u64;
+            let icon_len = read_font_file(
+                &p9_ch_obj,
+                p9_ch,
+                icon_target_va,
+                icon_capacity,
+                b"doc-icon.svg",
+            );
+
+            if icon_len > 0 {
+                let mut buf = [0u8; 40];
+                let prefix = b"     icon loaded: ";
+
+                buf[..prefix.len()].copy_from_slice(prefix);
+
+                let mut pos = prefix.len();
+
+                pos += format_u32(icon_len, &mut buf[pos..]);
+
+                let suffix = b" bytes\n";
+
+                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
+                pos += suffix.len();
+
+                sys::print(&buf[..pos]);
+            } else {
+                sys::print(b"     icon read failed\n");
+            }
+
+            // Load image icon (img-icon.svg) right after the doc icon.
+            sys::print(b"     loading img-icon.svg\n");
+
+            let img_icon_offset = mono_len + prop_len + png_len + icon_len;
+            let img_icon_capacity = font_capacity - img_icon_offset;
+            let img_icon_target_va = p9_font_va as u64 + img_icon_offset as u64;
+            let img_icon_len = read_font_file(
+                &p9_ch_obj,
+                p9_ch,
+                img_icon_target_va,
+                img_icon_capacity,
+                b"img-icon.svg",
+            );
+
+            if img_icon_len > 0 {
+                let mut buf = [0u8; 48];
+
+                let prefix = b"     img icon loaded: ";
+
+                buf[..prefix.len()].copy_from_slice(prefix);
+
+                let mut pos = prefix.len();
+
+                pos += format_u32(img_icon_len, &mut buf[pos..]);
+
+                let suffix = b" bytes\n";
+
+                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
+                pos += suffix.len();
+
+                sys::print(&buf[..pos]);
+            } else {
+                sys::print(b"     img icon read failed\n");
+            }
+
+            if mono_len > 0 {
+                Some((
+                    font_pa,
+                    mono_len,
+                    prop_len,
+                    png_offset,
+                    png_len,
+                    icon_offset,
+                    icon_len,
+                    img_icon_offset,
+                    img_icon_len,
+                ))
+            } else {
+                None
+            }
         } else {
             None
-        }
-    } else {
-        None
-    };
+        };
 
     // Phase 2: Display pipeline (input drivers + compositor + GPU driver).
     if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq)) = gpu {

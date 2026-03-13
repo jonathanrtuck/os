@@ -280,41 +280,6 @@ impl<'a> TrueTypeFont<'a> {
         })
     }
 
-    /// Map a Unicode codepoint to a glyph index via the cmap table.
-    /// Returns `None` if the codepoint has no mapping (falls to .notdef).
-    pub fn glyph_index(&self, codepoint: char) -> Option<u16> {
-        let cmap_data = self.cmap.slice(self.data)?;
-        let cp = codepoint as u32;
-        // Walk encoding records to find a format 4 subtable.
-        let num_subtables = read_u16_be(cmap_data, 2)? as usize;
-
-        for i in 0..num_subtables {
-            let rec = 4 + i * 8;
-            let platform = read_u16_be(cmap_data, rec)?;
-            let encoding = read_u16_be(cmap_data, rec + 2)?;
-            let sub_offset = read_u32_be(cmap_data, rec + 4)? as usize;
-            // Accept Unicode BMP subtables.
-            let is_unicode = platform == 0 || (platform == 3 && (encoding == 1 || encoding == 10));
-
-            if !is_unicode {
-                continue;
-            }
-
-            if sub_offset >= cmap_data.len() {
-                continue;
-            }
-
-            let sub = &cmap_data[sub_offset..];
-            let format = read_u16_be(sub, 0)?;
-
-            if format == 4 {
-                return self.cmap_format4(sub, cp);
-            }
-        }
-
-        None
-    }
-
     /// Format 4 cmap lookup (segmented mapping for BMP codepoints).
     fn cmap_format4(&self, sub: &[u8], cp: u32) -> Option<u16> {
         if cp > 0xFFFF {
@@ -381,29 +346,58 @@ impl<'a> TrueTypeFont<'a> {
             Some(glyph_index)
         }
     }
+    /// Look up a glyph index in a Coverage table.
+    /// Returns the coverage index, or None if not found.
+    fn coverage_index(&self, cov: &[u8], glyph: u16) -> Option<u16> {
+        if cov.len() < 4 {
+            return None;
+        }
 
-    /// Get horizontal metrics for a glyph: (advance_width, left_side_bearing).
-    pub fn glyph_h_metrics(&self, glyph_index: u16) -> Option<(u16, i16)> {
-        let hmtx_data = self.hmtx.slice(self.data)?;
+        let fmt = read_u16_be(cov, 0)?;
 
-        if glyph_index < self.num_h_metrics {
-            let off = glyph_index as usize * 4;
-            let advance = read_u16_be(hmtx_data, off)?;
-            let lsb = read_i16_be(hmtx_data, off + 2)?;
+        match fmt {
+            1 => {
+                // Format 1: array of glyph IDs.
+                let count = read_u16_be(cov, 2)? as usize;
+                // Binary search.
+                let mut lo = 0usize;
+                let mut hi = count;
 
-            Some((advance, lsb))
-        } else {
-            // Glyphs beyond num_h_metrics share the last advance width.
-            let last_adv_off = (self.num_h_metrics as usize - 1) * 4;
-            let advance = read_u16_be(hmtx_data, last_adv_off)?;
-            let lsb_off =
-                self.num_h_metrics as usize * 4 + (glyph_index - self.num_h_metrics) as usize * 2;
-            let lsb = read_i16_be(hmtx_data, lsb_off)?;
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let g = read_u16_be(cov, 4 + mid * 2)?;
 
-            Some((advance, lsb))
+                    if g < glyph {
+                        lo = mid + 1;
+                    } else if g > glyph {
+                        hi = mid;
+                    } else {
+                        return Some(mid as u16);
+                    }
+                }
+
+                None
+            }
+            2 => {
+                // Format 2: ranges.
+                let range_count = read_u16_be(cov, 2)? as usize;
+
+                for r in 0..range_count {
+                    let roff = 4 + r * 6;
+                    let start = read_u16_be(cov, roff)?;
+                    let end = read_u16_be(cov, roff + 2)?;
+                    let start_idx = read_u16_be(cov, roff + 4)?;
+
+                    if glyph >= start && glyph <= end {
+                        return Some(start_idx + (glyph - start));
+                    }
+                }
+
+                None
+            }
+            _ => None,
         }
     }
-
     /// Locate a glyph's data in the glyf table. Returns the byte offset and
     /// length within the glyf table, or `None` for empty glyphs (e.g. space).
     fn glyph_location(&self, glyph_index: u16) -> Option<(usize, usize)> {
@@ -412,11 +406,13 @@ impl<'a> TrueTypeFont<'a> {
             // Short format: offsets are u16, multiplied by 2.
             let a = read_u16_be(loca_data, glyph_index as usize * 2)? as usize * 2;
             let b = read_u16_be(loca_data, (glyph_index as usize + 1) * 2)? as usize * 2;
+
             (a, b)
         } else {
             // Long format: offsets are u32.
             let a = read_u32_be(loca_data, glyph_index as usize * 4)? as usize;
             let b = read_u32_be(loca_data, (glyph_index as usize + 1) * 4)? as usize;
+
             (a, b)
         };
 
@@ -426,169 +422,6 @@ impl<'a> TrueTypeFont<'a> {
 
         Some((off_this, off_next - off_this))
     }
-
-    /// Extract the outline for a glyph (simple or compound).
-    pub fn glyph_outline(&self, glyph_index: u16, out: &mut GlyphOutline) -> bool {
-        out.num_points = 0;
-        out.num_contours = 0;
-
-        let (glyf_off, glyf_len) = match self.glyph_location(glyph_index) {
-            Some(v) => v,
-            None => return false,
-        };
-        let glyf_data = match self.glyf.slice(self.data) {
-            Some(d) => d,
-            None => return false,
-        };
-
-        if glyf_off + glyf_len > glyf_data.len() {
-            return false;
-        }
-
-        let g = &glyf_data[glyf_off..glyf_off + glyf_len];
-        let num_contours = match read_i16_be(g, 0) {
-            Some(n) => n,
-            None => return false,
-        };
-
-        out.x_min = read_i16_be(g, 2).unwrap_or(0);
-        out.y_min = read_i16_be(g, 4).unwrap_or(0);
-        out.x_max = read_i16_be(g, 6).unwrap_or(0);
-        out.y_max = read_i16_be(g, 8).unwrap_or(0);
-
-        if num_contours < 0 {
-            self.glyph_outline_compound(g, out)
-        } else if num_contours > 0 {
-            Self::glyph_outline_simple(g, num_contours as usize, out)
-        } else {
-            false
-        }
-    }
-
-    /// Parse a simple glyph's contours, points, and flags from raw glyf data.
-    fn glyph_outline_simple(g: &[u8], nc: usize, out: &mut GlyphOutline) -> bool {
-        if nc > MAX_CONTOURS {
-            return false;
-        }
-
-        let base_contours = out.num_contours as usize;
-        let base_points = out.num_points as usize;
-
-        if base_contours + nc > MAX_CONTOURS {
-            return false;
-        }
-
-        for i in 0..nc {
-            out.contour_ends[base_contours + i] = match read_u16_be(g, 10 + i * 2) {
-                Some(v) => v + base_points as u16,
-                None => return false,
-            };
-        }
-
-        let local_last = match read_u16_be(g, 10 + (nc - 1) * 2) {
-            Some(v) => v as usize,
-            None => return false,
-        };
-        let num_points = local_last + 1;
-
-        if base_points + num_points > MAX_GLYPH_POINTS {
-            return false;
-        }
-
-        // Skip instructions.
-        let instr_off = 10 + nc * 2;
-        let instr_len = match read_u16_be(g, instr_off) {
-            Some(v) => v as usize,
-            None => return false,
-        };
-
-        let mut flags = [0u8; MAX_GLYPH_POINTS];
-        let mut cursor = instr_off + 2 + instr_len;
-        let mut fi = 0;
-
-        while fi < num_points {
-            let flag = match read_u8(g, cursor) {
-                Some(v) => v,
-                None => return false,
-            };
-
-            cursor += 1;
-            flags[fi] = flag;
-            fi += 1;
-
-            if flag & 0x08 != 0 && fi < num_points {
-                let repeat = match read_u8(g, cursor) {
-                    Some(v) => v as usize,
-                    None => return false,
-                };
-
-                cursor += 1;
-
-                let end = min_usize(fi + repeat, num_points);
-
-                while fi < end {
-                    flags[fi] = flag;
-                    fi += 1;
-                }
-            }
-        }
-
-        let mut x: i32 = 0;
-
-        for i in 0..num_points {
-            let f = flags[i];
-
-            if f & 0x02 != 0 {
-                let dx = read_u8(g, cursor).unwrap_or(0) as i32;
-
-                cursor += 1;
-                x += if f & 0x10 != 0 { dx } else { -dx };
-            } else if f & 0x10 == 0 {
-                let dx = match read_i16_be(g, cursor) {
-                    Some(v) => v as i32,
-                    None => return false,
-                };
-
-                cursor += 2;
-                x += dx;
-            }
-
-            out.points[base_points + i].x = x;
-        }
-
-        let mut y: i32 = 0;
-
-        for i in 0..num_points {
-            let f = flags[i];
-
-            if f & 0x04 != 0 {
-                let dy = read_u8(g, cursor).unwrap_or(0) as i32;
-
-                cursor += 1;
-                y += if f & 0x20 != 0 { dy } else { -dy };
-            } else if f & 0x20 == 0 {
-                let dy = match read_i16_be(g, cursor) {
-                    Some(v) => v as i32,
-                    None => return false,
-                };
-
-                cursor += 2;
-                y += dy;
-            }
-
-            out.points[base_points + i].y = y;
-        }
-
-        for i in 0..num_points {
-            out.points[base_points + i].on_curve = flags[i] & 0x01 != 0;
-        }
-
-        out.num_contours = (base_contours + nc) as u16;
-        out.num_points = (base_points + num_points) as u16;
-
-        true
-    }
-
     /// Parse a compound glyph: read components and recursively extract
     /// simple outlines, applying x/y offsets to each component's points.
     fn glyph_outline_compound(&self, g: &[u8], out: &mut GlyphOutline) -> bool {
@@ -707,7 +540,482 @@ impl<'a> TrueTypeFont<'a> {
 
         any
     }
+    /// Parse a simple glyph's contours, points, and flags from raw glyf data.
+    fn glyph_outline_simple(g: &[u8], nc: usize, out: &mut GlyphOutline) -> bool {
+        if nc > MAX_CONTOURS {
+            return false;
+        }
 
+        let base_contours = out.num_contours as usize;
+        let base_points = out.num_points as usize;
+
+        if base_contours + nc > MAX_CONTOURS {
+            return false;
+        }
+
+        for i in 0..nc {
+            out.contour_ends[base_contours + i] = match read_u16_be(g, 10 + i * 2) {
+                Some(v) => v + base_points as u16,
+                None => return false,
+            };
+        }
+
+        let local_last = match read_u16_be(g, 10 + (nc - 1) * 2) {
+            Some(v) => v as usize,
+            None => return false,
+        };
+        let num_points = local_last + 1;
+
+        if base_points + num_points > MAX_GLYPH_POINTS {
+            return false;
+        }
+
+        // Skip instructions.
+        let instr_off = 10 + nc * 2;
+        let instr_len = match read_u16_be(g, instr_off) {
+            Some(v) => v as usize,
+            None => return false,
+        };
+        let mut flags = [0u8; MAX_GLYPH_POINTS];
+        let mut cursor = instr_off + 2 + instr_len;
+        let mut fi = 0;
+
+        while fi < num_points {
+            let flag = match read_u8(g, cursor) {
+                Some(v) => v,
+                None => return false,
+            };
+
+            cursor += 1;
+            flags[fi] = flag;
+            fi += 1;
+
+            if flag & 0x08 != 0 && fi < num_points {
+                let repeat = match read_u8(g, cursor) {
+                    Some(v) => v as usize,
+                    None => return false,
+                };
+
+                cursor += 1;
+
+                let end = min_usize(fi + repeat, num_points);
+
+                while fi < end {
+                    flags[fi] = flag;
+                    fi += 1;
+                }
+            }
+        }
+
+        let mut x: i32 = 0;
+
+        for i in 0..num_points {
+            let f = flags[i];
+
+            if f & 0x02 != 0 {
+                let dx = read_u8(g, cursor).unwrap_or(0) as i32;
+
+                cursor += 1;
+                x += if f & 0x10 != 0 { dx } else { -dx };
+            } else if f & 0x10 == 0 {
+                let dx = match read_i16_be(g, cursor) {
+                    Some(v) => v as i32,
+                    None => return false,
+                };
+
+                cursor += 2;
+                x += dx;
+            }
+
+            out.points[base_points + i].x = x;
+        }
+
+        let mut y: i32 = 0;
+
+        for i in 0..num_points {
+            let f = flags[i];
+
+            if f & 0x04 != 0 {
+                let dy = read_u8(g, cursor).unwrap_or(0) as i32;
+
+                cursor += 1;
+                y += if f & 0x20 != 0 { dy } else { -dy };
+            } else if f & 0x20 == 0 {
+                let dy = match read_i16_be(g, cursor) {
+                    Some(v) => v as i32,
+                    None => return false,
+                };
+
+                cursor += 2;
+                y += dy;
+            }
+
+            out.points[base_points + i].y = y;
+        }
+
+        for i in 0..num_points {
+            out.points[base_points + i].on_curve = flags[i] & 0x01 != 0;
+        }
+
+        out.num_contours = (base_contours + nc) as u16;
+        out.num_points = (base_points + num_points) as u16;
+
+        true
+    }
+    /// PairPos format 1: individual glyph pairs with per-pair adjustments.
+    fn gpos_pairpos_format1(&self, sub: &[u8], left: u16, right: u16) -> i16 {
+        // Format: posFormat(2), coverageOffset(2), valueFormat1(2),
+        //         valueFormat2(2), pairSetCount(2), pairSetOffsets[](2 each)
+        if sub.len() < 10 {
+            return 0;
+        }
+
+        let cov_off = match read_u16_be(sub, 2) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+        let val_format1 = match read_u16_be(sub, 4) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let _val_format2 = match read_u16_be(sub, 6) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let pair_set_count = match read_u16_be(sub, 8) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+        // Find the left glyph's index in the coverage table.
+        let cov_idx = match self.coverage_index(&sub[cov_off..], left) {
+            Some(idx) => idx as usize,
+            None => return 0,
+        };
+
+        if cov_idx >= pair_set_count {
+            return 0;
+        }
+
+        let ps_off = match read_u16_be(sub, 10 + cov_idx * 2) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        if ps_off >= sub.len() {
+            return 0;
+        }
+
+        let ps = &sub[ps_off..];
+        let pv_count = match read_u16_be(ps, 0) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        // Record size: secondGlyph(2) + valueFormat1 values + valueFormat2 values.
+        let vf1_size = value_format_size(val_format1);
+        let vf2_size = value_format_size(_val_format2);
+        let record_size = 2 + vf1_size + vf2_size;
+
+        // Binary search for right glyph in the sorted pair list.
+        let mut lo = 0usize;
+        let mut hi = pv_count;
+
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let rec_off = 2 + mid * record_size;
+            let second = match read_u16_be(ps, rec_off) {
+                Some(v) => v,
+                None => return 0,
+            };
+
+            if second < right {
+                lo = mid + 1;
+            } else if second > right {
+                hi = mid;
+            } else {
+                // Found the pair — extract XAdvance from valueFormat1.
+                // valueFormat1 bit 0x0004 = XAdvance is at bit position 2.
+                // The offset depends on which lower bits are set.
+                return extract_x_advance(ps, rec_off + 2, val_format1);
+            }
+        }
+
+        0
+    }
+    /// PairPos format 2: class-based pair adjustments.
+    fn gpos_pairpos_format2(&self, sub: &[u8], left: u16, right: u16) -> i16 {
+        // Format: posFormat(2), coverageOffset(2), valueFormat1(2),
+        //         valueFormat2(2), classDef1Offset(2), classDef2Offset(2),
+        //         class1Count(2), class2Count(2), class1Records[]
+        if sub.len() < 16 {
+            return 0;
+        }
+
+        let cov_off = match read_u16_be(sub, 2) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        // Check coverage for the left glyph first.
+        if cov_off >= sub.len() {
+            return 0;
+        }
+        if self.coverage_index(&sub[cov_off..], left).is_none() {
+            return 0;
+        }
+
+        let val_format1 = match read_u16_be(sub, 4) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let val_format2 = match read_u16_be(sub, 6) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let cd1_off = match read_u16_be(sub, 8) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+        let cd2_off = match read_u16_be(sub, 10) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+        let class1_count = match read_u16_be(sub, 12) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+        let class2_count = match read_u16_be(sub, 14) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        if cd1_off >= sub.len() || cd2_off >= sub.len() {
+            return 0;
+        }
+
+        let c1 = classdef_lookup(&sub[cd1_off..], left) as usize;
+        let c2 = classdef_lookup(&sub[cd2_off..], right) as usize;
+
+        if c1 >= class1_count || c2 >= class2_count {
+            return 0;
+        }
+
+        let vf1_size = value_format_size(val_format1);
+        let vf2_size = value_format_size(val_format2);
+        let record_size = vf1_size + vf2_size;
+        // Class1Record array starts at offset 16. Each Class1Record contains
+        // class2_count * (vf1_size + vf2_size) bytes.
+        let class1_record_size = class2_count * record_size;
+        let rec_off = 16 + c1 * class1_record_size + c2 * record_size;
+
+        extract_x_advance(sub, rec_off, val_format1)
+    }
+    /// Look up kerning in a single GPOS PairPos subtable.
+    fn gpos_pairpos_lookup(&self, sub: &[u8], left: u16, right: u16) -> i16 {
+        if sub.len() < 2 {
+            return 0;
+        }
+
+        let pos_format = match read_u16_be(sub, 0) {
+            Some(v) => v,
+            None => return 0,
+        };
+
+        match pos_format {
+            1 => self.gpos_pairpos_format1(sub, left, right),
+            2 => self.gpos_pairpos_format2(sub, left, right),
+            _ => 0,
+        }
+    }
+
+    /// Map a Unicode codepoint to a glyph index via the cmap table.
+    /// Returns `None` if the codepoint has no mapping (falls to .notdef).
+    pub fn glyph_index(&self, codepoint: char) -> Option<u16> {
+        let cmap_data = self.cmap.slice(self.data)?;
+        let cp = codepoint as u32;
+        // Walk encoding records to find a format 4 subtable.
+        let num_subtables = read_u16_be(cmap_data, 2)? as usize;
+
+        for i in 0..num_subtables {
+            let rec = 4 + i * 8;
+            let platform = read_u16_be(cmap_data, rec)?;
+            let encoding = read_u16_be(cmap_data, rec + 2)?;
+            let sub_offset = read_u32_be(cmap_data, rec + 4)? as usize;
+            // Accept Unicode BMP subtables.
+            let is_unicode = platform == 0 || (platform == 3 && (encoding == 1 || encoding == 10));
+
+            if !is_unicode {
+                continue;
+            }
+
+            if sub_offset >= cmap_data.len() {
+                continue;
+            }
+
+            let sub = &cmap_data[sub_offset..];
+            let format = read_u16_be(sub, 0)?;
+
+            if format == 4 {
+                return self.cmap_format4(sub, cp);
+            }
+        }
+
+        None
+    }
+    /// Get horizontal metrics for a glyph: (advance_width, left_side_bearing).
+    pub fn glyph_h_metrics(&self, glyph_index: u16) -> Option<(u16, i16)> {
+        let hmtx_data = self.hmtx.slice(self.data)?;
+
+        if glyph_index < self.num_h_metrics {
+            let off = glyph_index as usize * 4;
+            let advance = read_u16_be(hmtx_data, off)?;
+            let lsb = read_i16_be(hmtx_data, off + 2)?;
+
+            Some((advance, lsb))
+        } else {
+            // Glyphs beyond num_h_metrics share the last advance width.
+            let last_adv_off = (self.num_h_metrics as usize - 1) * 4;
+            let advance = read_u16_be(hmtx_data, last_adv_off)?;
+            let lsb_off =
+                self.num_h_metrics as usize * 4 + (glyph_index - self.num_h_metrics) as usize * 2;
+            let lsb = read_i16_be(hmtx_data, lsb_off)?;
+
+            Some((advance, lsb))
+        }
+    }
+    /// Extract the outline for a glyph (simple or compound).
+    pub fn glyph_outline(&self, glyph_index: u16, out: &mut GlyphOutline) -> bool {
+        out.num_points = 0;
+        out.num_contours = 0;
+
+        let (glyf_off, glyf_len) = match self.glyph_location(glyph_index) {
+            Some(v) => v,
+            None => return false,
+        };
+        let glyf_data = match self.glyf.slice(self.data) {
+            Some(d) => d,
+            None => return false,
+        };
+
+        if glyf_off + glyf_len > glyf_data.len() {
+            return false;
+        }
+
+        let g = &glyf_data[glyf_off..glyf_off + glyf_len];
+        let num_contours = match read_i16_be(g, 0) {
+            Some(n) => n,
+            None => return false,
+        };
+
+        out.x_min = read_i16_be(g, 2).unwrap_or(0);
+        out.y_min = read_i16_be(g, 4).unwrap_or(0);
+        out.x_max = read_i16_be(g, 6).unwrap_or(0);
+        out.y_max = read_i16_be(g, 8).unwrap_or(0);
+
+        if num_contours < 0 {
+            self.glyph_outline_compound(g, out)
+        } else if num_contours > 0 {
+            Self::glyph_outline_simple(g, num_contours as usize, out)
+        } else {
+            false
+        }
+    }
+    /// Returns hhea ascent in font units (positive above baseline).
+    pub fn hhea_ascent(&self) -> i16 {
+        self.hhea_ascent
+    }
+    /// Returns hhea descent in font units (negative below baseline).
+    pub fn hhea_descent(&self) -> i16 {
+        self.hhea_descent
+    }
+    /// Returns hhea lineGap in font units.
+    pub fn hhea_line_gap(&self) -> i16 {
+        self.hhea_line_gap
+    }
+    /// Look up the GPOS kerning adjustment (x-advance delta) for a glyph pair.
+    ///
+    /// Searches the GPOS table for a PairPos lookup (lookup type 2). Supports
+    /// format 1 (individual pairs) and format 2 (class-based). Returns the
+    /// x-advance adjustment in font units, or 0 if no kerning is found.
+    pub fn kern_advance(&self, left_glyph: u16, right_glyph: u16) -> i16 {
+        if self.gpos.length == 0 {
+            return 0;
+        }
+
+        let gpos_data = match self.gpos.slice(self.data) {
+            Some(d) => d,
+            None => return 0,
+        };
+
+        // GPOS header: version (4 bytes), scriptListOff (2), featureListOff (2),
+        // lookupListOff (2).
+        if gpos_data.len() < 10 {
+            return 0;
+        }
+
+        let lookup_list_off = match read_u16_be(gpos_data, 8) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        if lookup_list_off >= gpos_data.len() {
+            return 0;
+        }
+
+        let ll = &gpos_data[lookup_list_off..];
+        let lookup_count = match read_u16_be(ll, 0) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        // Search all lookups for PairPos (type 2).
+        for li in 0..lookup_count {
+            let lookup_off = match read_u16_be(ll, 2 + li * 2) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+
+            if lookup_off + 6 > ll.len() {
+                continue;
+            }
+
+            let lookup = &ll[lookup_off..];
+            let lookup_type = match read_u16_be(lookup, 0) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            if lookup_type != 2 {
+                continue; // Not PairPos.
+            }
+
+            let sub_count = match read_u16_be(lookup, 4) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+
+            // Check each subtable.
+            for si in 0..sub_count {
+                let sub_off = match read_u16_be(lookup, 6 + si * 2) {
+                    Some(v) => v as usize,
+                    None => continue,
+                };
+
+                if lookup_off + sub_off >= ll.len() {
+                    continue;
+                }
+
+                let sub = &ll[lookup_off + sub_off..];
+                let result = self.gpos_pairpos_lookup(sub, left_glyph, right_glyph);
+
+                if result != 0 {
+                    return result;
+                }
+            }
+        }
+
+        0
+    }
     /// Rasterize a glyph into the provided coverage buffer.
     ///
     /// `size_px` is the font size in pixels (height of the em square).
@@ -821,23 +1129,27 @@ impl<'a> TrueTypeFont<'a> {
             for col in 0..bmp_w {
                 let src_base = (row * over_w + col * OVERSAMPLE_X as u32) as usize;
                 let dst_base = (row * bmp_w * 3 + col * 3) as usize;
-
                 // R channel: average of first 2 oversampled columns.
                 let mut sum_r = 0u32;
+
                 for s in 0..samples_per_channel {
                     sum_r += buffer.data[src_base + s as usize] as u32;
                 }
 
                 // G channel: average of middle 2 oversampled columns.
                 let mut sum_g = 0u32;
+
                 for s in 0..samples_per_channel {
-                    sum_g += buffer.data[src_base + samples_per_channel as usize + s as usize] as u32;
+                    sum_g +=
+                        buffer.data[src_base + samples_per_channel as usize + s as usize] as u32;
                 }
 
                 // B channel: average of last 2 oversampled columns.
                 let mut sum_b = 0u32;
+
                 for s in 0..samples_per_channel {
-                    sum_b += buffer.data[src_base + 2 * samples_per_channel as usize + s as usize] as u32;
+                    sum_b += buffer.data[src_base + 2 * samples_per_channel as usize + s as usize]
+                        as u32;
                 }
 
                 buffer.data[dst_base] = (sum_r / samples_per_channel) as u8;
@@ -871,10 +1183,17 @@ impl<'a> TrueTypeFont<'a> {
                 // Apply FIR filter: out[i] = tmp[i-1]/4 + tmp[i]/2 + tmp[i+1]/4
                 // Boundary: clamp to edge (repeat edge value).
                 for i in 0..stride3 {
-                    let prev = if i > 0 { tmp[i - 1] as u32 } else { tmp[0] as u32 };
+                    let prev = if i > 0 {
+                        tmp[i - 1] as u32
+                    } else {
+                        tmp[0] as u32
+                    };
                     let curr = tmp[i] as u32;
-                    let next = if i + 1 < stride3 { tmp[i + 1] as u32 } else { tmp[stride3 - 1] as u32 };
-
+                    let next = if i + 1 < stride3 {
+                        tmp[i + 1] as u32
+                    } else {
+                        tmp[stride3 - 1] as u32
+                    };
                     // [1/4, 1/2, 1/4] = (prev + 2*curr + next) / 4
                     let filtered = (prev + 2 * curr + next + 2) / 4;
 
@@ -904,376 +1223,15 @@ impl<'a> TrueTypeFont<'a> {
             advance,
         })
     }
-
     /// Returns units-per-em for external use (e.g., computing line height).
     pub fn units_per_em(&self) -> u16 {
         self.units_per_em
-    }
-
-    /// Returns hhea ascent in font units (positive above baseline).
-    pub fn hhea_ascent(&self) -> i16 {
-        self.hhea_ascent
-    }
-
-    /// Returns hhea descent in font units (negative below baseline).
-    pub fn hhea_descent(&self) -> i16 {
-        self.hhea_descent
-    }
-
-    /// Returns hhea lineGap in font units.
-    pub fn hhea_line_gap(&self) -> i16 {
-        self.hhea_line_gap
-    }
-
-    /// Look up the GPOS kerning adjustment (x-advance delta) for a glyph pair.
-    ///
-    /// Searches the GPOS table for a PairPos lookup (lookup type 2). Supports
-    /// format 1 (individual pairs) and format 2 (class-based). Returns the
-    /// x-advance adjustment in font units, or 0 if no kerning is found.
-    pub fn kern_advance(&self, left_glyph: u16, right_glyph: u16) -> i16 {
-        if self.gpos.length == 0 {
-            return 0;
-        }
-
-        let gpos_data = match self.gpos.slice(self.data) {
-            Some(d) => d,
-            None => return 0,
-        };
-
-        // GPOS header: version (4 bytes), scriptListOff (2), featureListOff (2),
-        // lookupListOff (2).
-        if gpos_data.len() < 10 {
-            return 0;
-        }
-
-        let lookup_list_off = match read_u16_be(gpos_data, 8) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-
-        if lookup_list_off >= gpos_data.len() {
-            return 0;
-        }
-
-        let ll = &gpos_data[lookup_list_off..];
-        let lookup_count = match read_u16_be(ll, 0) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-
-        // Search all lookups for PairPos (type 2).
-        for li in 0..lookup_count {
-            let lookup_off = match read_u16_be(ll, 2 + li * 2) {
-                Some(v) => v as usize,
-                None => continue,
-            };
-
-            if lookup_off + 6 > ll.len() {
-                continue;
-            }
-
-            let lookup = &ll[lookup_off..];
-            let lookup_type = match read_u16_be(lookup, 0) {
-                Some(v) => v,
-                None => continue,
-            };
-
-            if lookup_type != 2 {
-                continue; // Not PairPos.
-            }
-
-            let sub_count = match read_u16_be(lookup, 4) {
-                Some(v) => v as usize,
-                None => continue,
-            };
-
-            // Check each subtable.
-            for si in 0..sub_count {
-                let sub_off = match read_u16_be(lookup, 6 + si * 2) {
-                    Some(v) => v as usize,
-                    None => continue,
-                };
-
-                if lookup_off + sub_off >= ll.len() {
-                    continue;
-                }
-
-                let sub = &ll[lookup_off + sub_off..];
-                let result = self.gpos_pairpos_lookup(sub, left_glyph, right_glyph);
-
-                if result != 0 {
-                    return result;
-                }
-            }
-        }
-
-        0
-    }
-
-    /// Look up kerning in a single GPOS PairPos subtable.
-    fn gpos_pairpos_lookup(&self, sub: &[u8], left: u16, right: u16) -> i16 {
-        if sub.len() < 2 {
-            return 0;
-        }
-
-        let pos_format = match read_u16_be(sub, 0) {
-            Some(v) => v,
-            None => return 0,
-        };
-
-        match pos_format {
-            1 => self.gpos_pairpos_format1(sub, left, right),
-            2 => self.gpos_pairpos_format2(sub, left, right),
-            _ => 0,
-        }
-    }
-
-    /// PairPos format 1: individual glyph pairs with per-pair adjustments.
-    fn gpos_pairpos_format1(&self, sub: &[u8], left: u16, right: u16) -> i16 {
-        // Format: posFormat(2), coverageOffset(2), valueFormat1(2),
-        //         valueFormat2(2), pairSetCount(2), pairSetOffsets[](2 each)
-        if sub.len() < 10 {
-            return 0;
-        }
-
-        let cov_off = match read_u16_be(sub, 2) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-        let val_format1 = match read_u16_be(sub, 4) {
-            Some(v) => v,
-            None => return 0,
-        };
-        let _val_format2 = match read_u16_be(sub, 6) {
-            Some(v) => v,
-            None => return 0,
-        };
-        let pair_set_count = match read_u16_be(sub, 8) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-
-        // Find the left glyph's index in the coverage table.
-        let cov_idx = match self.coverage_index(&sub[cov_off..], left) {
-            Some(idx) => idx as usize,
-            None => return 0,
-        };
-
-        if cov_idx >= pair_set_count {
-            return 0;
-        }
-
-        let ps_off = match read_u16_be(sub, 10 + cov_idx * 2) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-
-        if ps_off >= sub.len() {
-            return 0;
-        }
-
-        let ps = &sub[ps_off..];
-        let pv_count = match read_u16_be(ps, 0) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-
-        // Record size: secondGlyph(2) + valueFormat1 values + valueFormat2 values.
-        let vf1_size = value_format_size(val_format1);
-        let vf2_size = value_format_size(_val_format2);
-        let record_size = 2 + vf1_size + vf2_size;
-
-        // Binary search for right glyph in the sorted pair list.
-        let mut lo = 0usize;
-        let mut hi = pv_count;
-
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let rec_off = 2 + mid * record_size;
-            let second = match read_u16_be(ps, rec_off) {
-                Some(v) => v,
-                None => return 0,
-            };
-
-            if second < right {
-                lo = mid + 1;
-            } else if second > right {
-                hi = mid;
-            } else {
-                // Found the pair — extract XAdvance from valueFormat1.
-                // valueFormat1 bit 0x0004 = XAdvance is at bit position 2.
-                // The offset depends on which lower bits are set.
-                return extract_x_advance(ps, rec_off + 2, val_format1);
-            }
-        }
-
-        0
-    }
-
-    /// PairPos format 2: class-based pair adjustments.
-    fn gpos_pairpos_format2(&self, sub: &[u8], left: u16, right: u16) -> i16 {
-        // Format: posFormat(2), coverageOffset(2), valueFormat1(2),
-        //         valueFormat2(2), classDef1Offset(2), classDef2Offset(2),
-        //         class1Count(2), class2Count(2), class1Records[]
-        if sub.len() < 16 {
-            return 0;
-        }
-
-        let cov_off = match read_u16_be(sub, 2) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-
-        // Check coverage for the left glyph first.
-        if cov_off >= sub.len() {
-            return 0;
-        }
-        if self.coverage_index(&sub[cov_off..], left).is_none() {
-            return 0;
-        }
-
-        let val_format1 = match read_u16_be(sub, 4) {
-            Some(v) => v,
-            None => return 0,
-        };
-        let val_format2 = match read_u16_be(sub, 6) {
-            Some(v) => v,
-            None => return 0,
-        };
-        let cd1_off = match read_u16_be(sub, 8) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-        let cd2_off = match read_u16_be(sub, 10) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-        let class1_count = match read_u16_be(sub, 12) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-        let class2_count = match read_u16_be(sub, 14) {
-            Some(v) => v as usize,
-            None => return 0,
-        };
-
-        if cd1_off >= sub.len() || cd2_off >= sub.len() {
-            return 0;
-        }
-
-        let c1 = classdef_lookup(&sub[cd1_off..], left) as usize;
-        let c2 = classdef_lookup(&sub[cd2_off..], right) as usize;
-
-        if c1 >= class1_count || c2 >= class2_count {
-            return 0;
-        }
-
-        let vf1_size = value_format_size(val_format1);
-        let vf2_size = value_format_size(val_format2);
-        let record_size = vf1_size + vf2_size;
-        // Class1Record array starts at offset 16. Each Class1Record contains
-        // class2_count * (vf1_size + vf2_size) bytes.
-        let class1_record_size = class2_count * record_size;
-        let rec_off = 16 + c1 * class1_record_size + c2 * record_size;
-
-        extract_x_advance(sub, rec_off, val_format1)
-    }
-
-    /// Look up a glyph index in a Coverage table.
-    /// Returns the coverage index, or None if not found.
-    fn coverage_index(&self, cov: &[u8], glyph: u16) -> Option<u16> {
-        if cov.len() < 4 {
-            return None;
-        }
-
-        let fmt = read_u16_be(cov, 0)?;
-
-        match fmt {
-            1 => {
-                // Format 1: array of glyph IDs.
-                let count = read_u16_be(cov, 2)? as usize;
-                // Binary search.
-                let mut lo = 0usize;
-                let mut hi = count;
-
-                while lo < hi {
-                    let mid = lo + (hi - lo) / 2;
-                    let g = read_u16_be(cov, 4 + mid * 2)?;
-
-                    if g < glyph {
-                        lo = mid + 1;
-                    } else if g > glyph {
-                        hi = mid;
-                    } else {
-                        return Some(mid as u16);
-                    }
-                }
-
-                None
-            }
-            2 => {
-                // Format 2: ranges.
-                let range_count = read_u16_be(cov, 2)? as usize;
-
-                for r in 0..range_count {
-                    let roff = 4 + r * 6;
-                    let start = read_u16_be(cov, roff)?;
-                    let end = read_u16_be(cov, roff + 2)?;
-                    let start_idx = read_u16_be(cov, roff + 4)?;
-
-                    if glyph >= start && glyph <= end {
-                        return Some(start_idx + (glyph - start));
-                    }
-                }
-
-                None
-            }
-            _ => None,
-        }
     }
 }
 
 // ---------------------------------------------------------------------------
 // GPOS helpers (outside impl — pure functions)
 // ---------------------------------------------------------------------------
-
-/// Count the number of i16 values in a GPOS ValueRecord based on ValueFormat.
-/// Each set bit in the format means one i16 (2 bytes) in the record.
-fn value_format_size(fmt: u16) -> usize {
-    let mut count = 0usize;
-    let mut bits = fmt;
-
-    while bits != 0 {
-        count += (bits & 1) as usize;
-        bits >>= 1;
-    }
-
-    count * 2 // each value is 2 bytes (i16)
-}
-
-/// Extract the XAdvance value from a ValueRecord at the given offset.
-/// ValueFormat bit 0x0004 indicates XAdvance is present. The position of
-/// XAdvance within the record depends on how many lower bits are set:
-/// - bit 0 (XPlacement): if set, skip 2 bytes
-/// - bit 1 (YPlacement): if set, skip 2 bytes
-/// - bit 2 (XAdvance): the value we want
-fn extract_x_advance(data: &[u8], offset: usize, val_format: u16) -> i16 {
-    if val_format & 0x0004 == 0 {
-        return 0; // No XAdvance in this format.
-    }
-
-    // Count how many values precede XAdvance (bits 0 and 1).
-    let mut skip = 0usize;
-
-    if val_format & 0x0001 != 0 {
-        skip += 2; // XPlacement
-    }
-    if val_format & 0x0002 != 0 {
-        skip += 2; // YPlacement
-    }
-
-    read_i16_be(data, offset + skip).unwrap_or(0)
-}
 
 /// Look up a glyph's class in a ClassDef table. Returns 0 (class 0) if
 /// the glyph is not covered by any range.
@@ -1347,6 +1305,42 @@ fn classdef_lookup(data: &[u8], glyph: u16) -> u16 {
         }
         _ => 0,
     }
+}
+/// Extract the XAdvance value from a ValueRecord at the given offset.
+/// ValueFormat bit 0x0004 indicates XAdvance is present. The position of
+/// XAdvance within the record depends on how many lower bits are set:
+/// - bit 0 (XPlacement): if set, skip 2 bytes
+/// - bit 1 (YPlacement): if set, skip 2 bytes
+/// - bit 2 (XAdvance): the value we want
+fn extract_x_advance(data: &[u8], offset: usize, val_format: u16) -> i16 {
+    if val_format & 0x0004 == 0 {
+        return 0; // No XAdvance in this format.
+    }
+
+    // Count how many values precede XAdvance (bits 0 and 1).
+    let mut skip = 0usize;
+
+    if val_format & 0x0001 != 0 {
+        skip += 2; // XPlacement
+    }
+    if val_format & 0x0002 != 0 {
+        skip += 2; // YPlacement
+    }
+
+    read_i16_be(data, offset + skip).unwrap_or(0)
+}
+/// Count the number of i16 values in a GPOS ValueRecord based on ValueFormat.
+/// Each set bit in the format means one i16 (2 bytes) in the record.
+fn value_format_size(fmt: u16) -> usize {
+    let mut count = 0usize;
+    let mut bits = fmt;
+
+    while bits != 0 {
+        count += (bits & 1) as usize;
+        bits >>= 1;
+    }
+
+    count * 2 // each value is 2 bytes (i16)
 }
 
 // ---------------------------------------------------------------------------

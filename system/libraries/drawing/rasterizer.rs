@@ -9,12 +9,6 @@
 const MAX_SEGMENTS: usize = 2048;
 /// Maximum edges active on a single scanline.
 const MAX_ACTIVE_EDGES: usize = 64;
-/// Horizontal oversampling factor for anti-aliasing.
-/// Rasterise at OVERSAMPLE_X × width, then downsample into per-channel
-/// (R, G, B) subpixel coverage. 6 = 3 subpixels × 2× oversampling each.
-pub const OVERSAMPLE_X: i32 = 6;
-/// Vertical oversampling factor for anti-aliasing.
-pub const OVERSAMPLE_Y: i32 = 4;
 /// Fixed-point 20.12 format for sub-pixel precision.
 /// 12 fractional bits gives 1/4096 pixel resolution — more than enough.
 const FP_SHIFT: i32 = 12;
@@ -22,6 +16,13 @@ const FP_ONE: i32 = 1 << FP_SHIFT;
 // FP_HALF available for future use (e.g., rounding).
 #[allow(dead_code)]
 const FP_HALF: i32 = FP_ONE / 2;
+
+/// Horizontal oversampling factor for anti-aliasing.
+/// Rasterise at OVERSAMPLE_X × width, then downsample into per-channel
+/// (R, G, B) subpixel coverage. 6 = 3 subpixels × 2× oversampling each.
+pub const OVERSAMPLE_X: i32 = 6;
+/// Vertical oversampling factor for anti-aliasing.
+pub const OVERSAMPLE_Y: i32 = 4;
 
 /// A line segment in pixel-space fixed-point coordinates.
 #[derive(Clone, Copy, Default)]
@@ -401,7 +402,6 @@ fn rasterize_segments(scratch: &RasterScratch, coverage: &mut [u8], width: u32, 
                 if num_active >= MAX_ACTIVE_EDGES {
                     break;
                 }
-
                 // Compute x at scan_y via linear interpolation.
                 let dy = y_bot - y_top;
                 let t = scan_y - y_top;
@@ -463,6 +463,7 @@ fn rasterize_segments(scratch: &RasterScratch, coverage: &mut [u8], width: u32, 
                         }
                         ei += 1;
                     }
+
                     if winding != 0 {
                         // Unbalanced — shouldn't happen with valid outlines.
                         break;
