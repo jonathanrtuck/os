@@ -130,6 +130,13 @@ pub struct GlyphCache {
     glyphs: [CachedGlyph; GLYPH_COUNT],
     coverage: [u8; GLYPH_COUNT * GLYPH_BUF_SIZE],
     pub line_height: u32,
+    /// Distance from top of line to baseline, in pixels. Derived from hhea ascent.
+    pub ascent: u32,
+    /// Distance from baseline to bottom of line, in pixels. Derived from hhea descent.
+    /// Stored as a positive value (descent below baseline).
+    pub descent: u32,
+    /// The font size in pixels used to rasterize this cache (for kerning scaling).
+    pub size_px: u32,
 }
 /// A mutable view into a pixel buffer.
 ///
@@ -300,7 +307,24 @@ impl GlyphCache {
     /// coverage: width × height × 3 bytes per glyph. The GLYPH_BUF_SIZE
     /// accommodates the oversampled intermediate (which is always larger).
     pub fn populate(&mut self, font: &TrueTypeFont, size_px: u32, scratch: &mut RasterScratch) {
-        self.line_height = size_px + size_px / 4;
+        let upem = font.units_per_em();
+        // Compute ascent and descent from hhea table metrics (font units → pixels).
+        let asc_fu = font.hhea_ascent() as i32;
+        let desc_fu = font.hhea_descent() as i32; // negative
+        let gap_fu = font.hhea_line_gap() as i32;
+
+        // Scale to pixels: ascent * size_px / units_per_em (ceil for ascent).
+        let ascent_px = scale_fu_ceil(asc_fu, size_px, upem);
+        // descent is negative in font units; negate to get positive pixel value.
+        let descent_px = scale_fu_ceil(-desc_fu, size_px, upem);
+        let gap_px = scale_fu(gap_fu, size_px, upem);
+        // Ensure non-negative.
+        let gap_px = if gap_px < 0 { 0 } else { gap_px as u32 };
+
+        self.ascent = ascent_px as u32;
+        self.descent = descent_px as u32;
+        self.size_px = size_px;
+        self.line_height = self.ascent + self.descent + gap_px;
 
         for i in 0..GLYPH_COUNT {
             let ch = (GLYPH_FIRST + i as u8) as char;
@@ -338,6 +362,9 @@ impl GlyphCache {
             }; GLYPH_COUNT],
             coverage: [0u8; GLYPH_COUNT * GLYPH_BUF_SIZE],
             line_height: 0,
+            ascent: 0,
+            descent: 0,
+            size_px: 0,
         }
     }
 }
@@ -986,7 +1013,7 @@ impl TextLayout {
         let mut row = 0u32;
         let mut cursor_x = origin_x;
         let mut cursor_y = origin_y;
-        let baseline_offset = cache.line_height * 3 / 4;
+        let baseline_offset = cache.ascent;
 
         // Normalize selection range.
         let (s_lo, s_hi) = if sel_start <= sel_end {
@@ -1129,7 +1156,7 @@ impl TextLayout {
         let mut row = 0u32;
         let mut cursor_x = origin_x;
         let mut cursor_y = origin_y;
-        let baseline_offset = cache.line_height * 3 / 4;
+        let baseline_offset = cache.ascent;
 
         // Normalize selection range.
         let (s_lo, s_hi) = if sel_start <= sel_end {
@@ -1460,7 +1487,24 @@ pub fn draw_proportional_string(
     cache: &GlyphCache,
     color: Color,
 ) -> u32 {
-    let baseline_y = y as i32 + (cache.line_height * 3 / 4) as i32;
+    draw_proportional_string_kerned(fb, x, y, text, cache, color, None)
+}
+
+/// Draw a proportional string with optional GPOS kerning from the given font.
+///
+/// If `font` is `Some`, kerning adjustments from the GPOS table are applied
+/// between each pair of adjacent glyphs, producing tighter spacing for pairs
+/// like "AV", "To", "We". If `font` is `None`, no kerning is applied.
+pub fn draw_proportional_string_kerned(
+    fb: &mut Surface,
+    x: u32,
+    y: u32,
+    text: &[u8],
+    cache: &GlyphCache,
+    color: Color,
+    font: Option<&TrueTypeFont>,
+) -> u32 {
+    let baseline_y = y as i32 + cache.ascent as i32;
     let mut cx = x as i32;
     // Fallback advance: use space glyph width (first cached glyph).
     let fallback_advance = match cache.get(b' ') {
@@ -1468,7 +1512,26 @@ pub fn draw_proportional_string(
         None => 8, // absolute fallback
     };
 
+    let mut prev_glyph_index: Option<u16> = None;
+
     for &byte in text {
+        // Look up current glyph index for kerning.
+        let cur_glyph_index = if font.is_some() {
+            font.unwrap().glyph_index(byte as char)
+        } else {
+            None
+        };
+
+        // Apply kerning adjustment between previous and current glyphs.
+        if let (Some(f), Some(prev), Some(cur)) = (font, prev_glyph_index, cur_glyph_index) {
+            let kern_fu = f.kern_advance(prev, cur);
+
+            if kern_fu != 0 {
+                let kern_px = scale_fu(kern_fu as i32, cache.size_px, f.units_per_em());
+                cx += kern_px;
+            }
+        }
+
         if let Some((glyph, coverage)) = cache.get(byte) {
             if glyph.width > 0 && glyph.height > 0 {
                 let gx = cx + glyph.bearing_x;
@@ -1482,6 +1545,8 @@ pub fn draw_proportional_string(
             // Missing glyph: advance by fallback width, don't crash.
             cx += fallback_advance as i32;
         }
+
+        prev_glyph_index = cur_glyph_index;
     }
 
     if cx < 0 { 0 } else { cx as u32 }

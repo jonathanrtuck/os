@@ -33,7 +33,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
-const FONT_SIZE: u32 = 16;
+const FONT_SIZE: u32 = 20;
 // Protocol message types.
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
 const MSG_IMAGE_CONFIG: u32 = 6;
@@ -125,6 +125,9 @@ static mut CONTENT_H: u32 = 0;
 static mut GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Pre-rasterized glyph cache for proportional font (chrome text).
 static mut PROP_GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
+/// Raw font data pointer and length for the proportional font (used for kerning lookups).
+static mut PROP_FONT_DATA: *const u8 = core::ptr::null();
+static mut PROP_FONT_LEN: usize = 0;
 /// Pre-rasterized SVG document icon coverage map (heap-allocated, initialized at startup).
 /// Null if no icon was loaded. Width and height stored alongside.
 static mut ICON_COVERAGE: *const u8 = core::ptr::null();
@@ -255,7 +258,7 @@ fn draw_string(
     cache: &drawing::GlyphCache,
     color: drawing::Color,
 ) {
-    let baseline_y = y as i32 + (cache.line_height * 3 / 4) as i32;
+    let baseline_y = y as i32 + cache.ascent as i32;
     let mut cx = x as i32;
 
     for &byte in text {
@@ -742,8 +745,21 @@ fn render_title_bar(surf: &mut drawing::Surface) {
         text_x = 12;
     }
 
-    // Document name (proportional font) — "Untitled" as default.
-    drawing::draw_proportional_string(surf, text_x, text_y, b"Untitled", prop_cache, drawing::CHROME_TITLE);
+    // Parse the proportional font for kerning (if available).
+    let prop_font = unsafe {
+        if !PROP_FONT_DATA.is_null() && PROP_FONT_LEN > 0 {
+            let data = core::slice::from_raw_parts(PROP_FONT_DATA, PROP_FONT_LEN);
+            drawing::TrueTypeFont::new(data)
+        } else {
+            None
+        }
+    };
+
+    // Document name (proportional font with kerning) — "Untitled" as default.
+    drawing::draw_proportional_string_kerned(
+        surf, text_x, text_y, b"Untitled", prop_cache, drawing::CHROME_TITLE,
+        prop_font.as_ref(),
+    );
 
     // Clock on the right side — HH:MM:SS format.
     let mut time_buf = [0u8; 8];
@@ -752,7 +768,10 @@ fn render_title_bar(surf: &mut drawing::Surface) {
     let clock_w = proportional_string_width(&time_buf, prop_cache);
     let clock_x = surf.width.saturating_sub(12 + clock_w);
 
-    drawing::draw_proportional_string(surf, clock_x, text_y, &time_buf, prop_cache, drawing::CHROME_CLOCK);
+    drawing::draw_proportional_string_kerned(
+        surf, clock_x, text_y, &time_buf, prop_cache, drawing::CHROME_CLOCK,
+        prop_font.as_ref(),
+    );
 
     // Bottom edge line.
     surf.draw_hline(0, surf.height - 1, surf.width, drawing::CHROME_BORDER);
@@ -950,7 +969,7 @@ pub extern "C" fn _start() -> ! {
         GLYPH_CACHE = Box::into_raw(mono_cache);
     }
 
-    sys::print(b"     monospace font rasterized (Source Code Pro 16px)\n");
+    sys::print(b"     monospace font rasterized (Source Code Pro 20px)\n");
 
     // Load proportional font (Nunito Sans) for chrome text.
     // Proportional font is stored right after the monospace font in the same buffer.
@@ -959,6 +978,12 @@ pub extern "C" fn _start() -> ! {
             let offset = config.mono_font_va as usize + config.mono_font_len as usize;
             core::slice::from_raw_parts(offset as *const u8, config.prop_font_len as usize)
         };
+
+        // Store raw font data pointer for kerning lookups at render time.
+        unsafe {
+            PROP_FONT_DATA = prop_font_data.as_ptr();
+            PROP_FONT_LEN = prop_font_data.len();
+        }
 
         if let Some(prop_ttf) = drawing::TrueTypeFont::new(prop_font_data) {
             let mut prop_cache: Box<drawing::GlyphCache> = unsafe {
@@ -977,7 +1002,7 @@ pub extern "C" fn _start() -> ! {
 
             unsafe { PROP_GLYPH_CACHE = Box::into_raw(prop_cache) };
 
-            sys::print(b"     proportional font rasterized (Nunito Sans 16px)\n");
+            sys::print(b"     proportional font rasterized (Nunito Sans 20px)\n");
         } else {
             sys::print(b"     warning: failed to parse proportional font, using monospace for chrome\n");
             // Fallback: use monospace cache for chrome text too.

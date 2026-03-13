@@ -94,11 +94,18 @@ pub struct TrueTypeFont<'a> {
     glyf: TableLoc,
     hmtx: TableLoc,
     loca: TableLoc,
+    gpos: TableLoc,
     units_per_em: u16,
     #[allow(dead_code)]
     num_glyphs: u16,
     loca_format: i16, // 0 = short (u16 * 2), 1 = long (u32)
     num_h_metrics: u16,
+    /// hhea ascent (positive, in font units).
+    hhea_ascent: i16,
+    /// hhea descent (negative, in font units).
+    hhea_descent: i16,
+    /// hhea lineGap (in font units).
+    hhea_line_gap: i16,
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +184,7 @@ impl<'a> TrueTypeFont<'a> {
         let mut hmtx = TableLoc::default();
         let mut loca = TableLoc::default();
         let mut glyf = TableLoc::default();
+        let mut gpos = TableLoc::default();
         let mut found: u8 = 0;
 
         for i in 0..num_tables {
@@ -225,6 +233,9 @@ impl<'a> TrueTypeFont<'a> {
                     glyf = loc;
                     found |= 1 << 6;
                 }
+                b"GPOS" => {
+                    gpos = loc; // optional
+                }
                 _ => {}
             }
         }
@@ -247,16 +258,25 @@ impl<'a> TrueTypeFont<'a> {
             return None;
         }
 
+        // Parse hhea ascent/descent/lineGap (offsets 4, 6, 8 in hhea table).
+        let hhea_ascent = read_i16_be(hhea_data, 4)?;
+        let hhea_descent = read_i16_be(hhea_data, 6)?;
+        let hhea_line_gap = read_i16_be(hhea_data, 8)?;
+
         Some(TrueTypeFont {
             data,
             cmap,
             glyf,
             hmtx,
             loca,
+            gpos,
             units_per_em,
             num_glyphs,
             loca_format,
             num_h_metrics,
+            hhea_ascent,
+            hhea_descent,
+            hhea_line_gap,
         })
     }
 
@@ -888,6 +908,444 @@ impl<'a> TrueTypeFont<'a> {
     /// Returns units-per-em for external use (e.g., computing line height).
     pub fn units_per_em(&self) -> u16 {
         self.units_per_em
+    }
+
+    /// Returns hhea ascent in font units (positive above baseline).
+    pub fn hhea_ascent(&self) -> i16 {
+        self.hhea_ascent
+    }
+
+    /// Returns hhea descent in font units (negative below baseline).
+    pub fn hhea_descent(&self) -> i16 {
+        self.hhea_descent
+    }
+
+    /// Returns hhea lineGap in font units.
+    pub fn hhea_line_gap(&self) -> i16 {
+        self.hhea_line_gap
+    }
+
+    /// Look up the GPOS kerning adjustment (x-advance delta) for a glyph pair.
+    ///
+    /// Searches the GPOS table for a PairPos lookup (lookup type 2). Supports
+    /// format 1 (individual pairs) and format 2 (class-based). Returns the
+    /// x-advance adjustment in font units, or 0 if no kerning is found.
+    pub fn kern_advance(&self, left_glyph: u16, right_glyph: u16) -> i16 {
+        if self.gpos.length == 0 {
+            return 0;
+        }
+
+        let gpos_data = match self.gpos.slice(self.data) {
+            Some(d) => d,
+            None => return 0,
+        };
+
+        // GPOS header: version (4 bytes), scriptListOff (2), featureListOff (2),
+        // lookupListOff (2).
+        if gpos_data.len() < 10 {
+            return 0;
+        }
+
+        let lookup_list_off = match read_u16_be(gpos_data, 8) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        if lookup_list_off >= gpos_data.len() {
+            return 0;
+        }
+
+        let ll = &gpos_data[lookup_list_off..];
+        let lookup_count = match read_u16_be(ll, 0) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        // Search all lookups for PairPos (type 2).
+        for li in 0..lookup_count {
+            let lookup_off = match read_u16_be(ll, 2 + li * 2) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+
+            if lookup_off + 6 > ll.len() {
+                continue;
+            }
+
+            let lookup = &ll[lookup_off..];
+            let lookup_type = match read_u16_be(lookup, 0) {
+                Some(v) => v,
+                None => continue,
+            };
+
+            if lookup_type != 2 {
+                continue; // Not PairPos.
+            }
+
+            let sub_count = match read_u16_be(lookup, 4) {
+                Some(v) => v as usize,
+                None => continue,
+            };
+
+            // Check each subtable.
+            for si in 0..sub_count {
+                let sub_off = match read_u16_be(lookup, 6 + si * 2) {
+                    Some(v) => v as usize,
+                    None => continue,
+                };
+
+                if lookup_off + sub_off >= ll.len() {
+                    continue;
+                }
+
+                let sub = &ll[lookup_off + sub_off..];
+                let result = self.gpos_pairpos_lookup(sub, left_glyph, right_glyph);
+
+                if result != 0 {
+                    return result;
+                }
+            }
+        }
+
+        0
+    }
+
+    /// Look up kerning in a single GPOS PairPos subtable.
+    fn gpos_pairpos_lookup(&self, sub: &[u8], left: u16, right: u16) -> i16 {
+        if sub.len() < 2 {
+            return 0;
+        }
+
+        let pos_format = match read_u16_be(sub, 0) {
+            Some(v) => v,
+            None => return 0,
+        };
+
+        match pos_format {
+            1 => self.gpos_pairpos_format1(sub, left, right),
+            2 => self.gpos_pairpos_format2(sub, left, right),
+            _ => 0,
+        }
+    }
+
+    /// PairPos format 1: individual glyph pairs with per-pair adjustments.
+    fn gpos_pairpos_format1(&self, sub: &[u8], left: u16, right: u16) -> i16 {
+        // Format: posFormat(2), coverageOffset(2), valueFormat1(2),
+        //         valueFormat2(2), pairSetCount(2), pairSetOffsets[](2 each)
+        if sub.len() < 10 {
+            return 0;
+        }
+
+        let cov_off = match read_u16_be(sub, 2) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+        let val_format1 = match read_u16_be(sub, 4) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let _val_format2 = match read_u16_be(sub, 6) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let pair_set_count = match read_u16_be(sub, 8) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        // Find the left glyph's index in the coverage table.
+        let cov_idx = match self.coverage_index(&sub[cov_off..], left) {
+            Some(idx) => idx as usize,
+            None => return 0,
+        };
+
+        if cov_idx >= pair_set_count {
+            return 0;
+        }
+
+        let ps_off = match read_u16_be(sub, 10 + cov_idx * 2) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        if ps_off >= sub.len() {
+            return 0;
+        }
+
+        let ps = &sub[ps_off..];
+        let pv_count = match read_u16_be(ps, 0) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        // Record size: secondGlyph(2) + valueFormat1 values + valueFormat2 values.
+        let vf1_size = value_format_size(val_format1);
+        let vf2_size = value_format_size(_val_format2);
+        let record_size = 2 + vf1_size + vf2_size;
+
+        // Binary search for right glyph in the sorted pair list.
+        let mut lo = 0usize;
+        let mut hi = pv_count;
+
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let rec_off = 2 + mid * record_size;
+            let second = match read_u16_be(ps, rec_off) {
+                Some(v) => v,
+                None => return 0,
+            };
+
+            if second < right {
+                lo = mid + 1;
+            } else if second > right {
+                hi = mid;
+            } else {
+                // Found the pair — extract XAdvance from valueFormat1.
+                // valueFormat1 bit 0x0004 = XAdvance is at bit position 2.
+                // The offset depends on which lower bits are set.
+                return extract_x_advance(ps, rec_off + 2, val_format1);
+            }
+        }
+
+        0
+    }
+
+    /// PairPos format 2: class-based pair adjustments.
+    fn gpos_pairpos_format2(&self, sub: &[u8], left: u16, right: u16) -> i16 {
+        // Format: posFormat(2), coverageOffset(2), valueFormat1(2),
+        //         valueFormat2(2), classDef1Offset(2), classDef2Offset(2),
+        //         class1Count(2), class2Count(2), class1Records[]
+        if sub.len() < 16 {
+            return 0;
+        }
+
+        let cov_off = match read_u16_be(sub, 2) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        // Check coverage for the left glyph first.
+        if cov_off >= sub.len() {
+            return 0;
+        }
+        if self.coverage_index(&sub[cov_off..], left).is_none() {
+            return 0;
+        }
+
+        let val_format1 = match read_u16_be(sub, 4) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let val_format2 = match read_u16_be(sub, 6) {
+            Some(v) => v,
+            None => return 0,
+        };
+        let cd1_off = match read_u16_be(sub, 8) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+        let cd2_off = match read_u16_be(sub, 10) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+        let class1_count = match read_u16_be(sub, 12) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+        let class2_count = match read_u16_be(sub, 14) {
+            Some(v) => v as usize,
+            None => return 0,
+        };
+
+        if cd1_off >= sub.len() || cd2_off >= sub.len() {
+            return 0;
+        }
+
+        let c1 = classdef_lookup(&sub[cd1_off..], left) as usize;
+        let c2 = classdef_lookup(&sub[cd2_off..], right) as usize;
+
+        if c1 >= class1_count || c2 >= class2_count {
+            return 0;
+        }
+
+        let vf1_size = value_format_size(val_format1);
+        let vf2_size = value_format_size(val_format2);
+        let record_size = vf1_size + vf2_size;
+        // Class1Record array starts at offset 16. Each Class1Record contains
+        // class2_count * (vf1_size + vf2_size) bytes.
+        let class1_record_size = class2_count * record_size;
+        let rec_off = 16 + c1 * class1_record_size + c2 * record_size;
+
+        extract_x_advance(sub, rec_off, val_format1)
+    }
+
+    /// Look up a glyph index in a Coverage table.
+    /// Returns the coverage index, or None if not found.
+    fn coverage_index(&self, cov: &[u8], glyph: u16) -> Option<u16> {
+        if cov.len() < 4 {
+            return None;
+        }
+
+        let fmt = read_u16_be(cov, 0)?;
+
+        match fmt {
+            1 => {
+                // Format 1: array of glyph IDs.
+                let count = read_u16_be(cov, 2)? as usize;
+                // Binary search.
+                let mut lo = 0usize;
+                let mut hi = count;
+
+                while lo < hi {
+                    let mid = lo + (hi - lo) / 2;
+                    let g = read_u16_be(cov, 4 + mid * 2)?;
+
+                    if g < glyph {
+                        lo = mid + 1;
+                    } else if g > glyph {
+                        hi = mid;
+                    } else {
+                        return Some(mid as u16);
+                    }
+                }
+
+                None
+            }
+            2 => {
+                // Format 2: ranges.
+                let range_count = read_u16_be(cov, 2)? as usize;
+
+                for r in 0..range_count {
+                    let roff = 4 + r * 6;
+                    let start = read_u16_be(cov, roff)?;
+                    let end = read_u16_be(cov, roff + 2)?;
+                    let start_idx = read_u16_be(cov, roff + 4)?;
+
+                    if glyph >= start && glyph <= end {
+                        return Some(start_idx + (glyph - start));
+                    }
+                }
+
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GPOS helpers (outside impl — pure functions)
+// ---------------------------------------------------------------------------
+
+/// Count the number of i16 values in a GPOS ValueRecord based on ValueFormat.
+/// Each set bit in the format means one i16 (2 bytes) in the record.
+fn value_format_size(fmt: u16) -> usize {
+    let mut count = 0usize;
+    let mut bits = fmt;
+
+    while bits != 0 {
+        count += (bits & 1) as usize;
+        bits >>= 1;
+    }
+
+    count * 2 // each value is 2 bytes (i16)
+}
+
+/// Extract the XAdvance value from a ValueRecord at the given offset.
+/// ValueFormat bit 0x0004 indicates XAdvance is present. The position of
+/// XAdvance within the record depends on how many lower bits are set:
+/// - bit 0 (XPlacement): if set, skip 2 bytes
+/// - bit 1 (YPlacement): if set, skip 2 bytes
+/// - bit 2 (XAdvance): the value we want
+fn extract_x_advance(data: &[u8], offset: usize, val_format: u16) -> i16 {
+    if val_format & 0x0004 == 0 {
+        return 0; // No XAdvance in this format.
+    }
+
+    // Count how many values precede XAdvance (bits 0 and 1).
+    let mut skip = 0usize;
+
+    if val_format & 0x0001 != 0 {
+        skip += 2; // XPlacement
+    }
+    if val_format & 0x0002 != 0 {
+        skip += 2; // YPlacement
+    }
+
+    read_i16_be(data, offset + skip).unwrap_or(0)
+}
+
+/// Look up a glyph's class in a ClassDef table. Returns 0 (class 0) if
+/// the glyph is not covered by any range.
+fn classdef_lookup(data: &[u8], glyph: u16) -> u16 {
+    if data.len() < 4 {
+        return 0;
+    }
+
+    let fmt = match read_u16_be(data, 0) {
+        Some(v) => v,
+        None => return 0,
+    };
+
+    match fmt {
+        1 => {
+            // Format 1: array indexed by glyph ID.
+            let start_glyph = match read_u16_be(data, 2) {
+                Some(v) => v,
+                None => return 0,
+            };
+            let count = match read_u16_be(data, 4) {
+                Some(v) => v as usize,
+                None => return 0,
+            };
+
+            if glyph < start_glyph {
+                return 0;
+            }
+
+            let idx = (glyph - start_glyph) as usize;
+
+            if idx >= count {
+                return 0;
+            }
+
+            read_u16_be(data, 6 + idx * 2).unwrap_or(0)
+        }
+        2 => {
+            // Format 2: ranges (startGlyphID, endGlyphID, class).
+            let range_count = match read_u16_be(data, 2) {
+                Some(v) => v as usize,
+                None => return 0,
+            };
+
+            // Binary search for the range containing glyph.
+            let mut lo = 0usize;
+            let mut hi = range_count;
+
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let roff = 4 + mid * 6;
+                let start = match read_u16_be(data, roff) {
+                    Some(v) => v,
+                    None => return 0,
+                };
+                let end = match read_u16_be(data, roff + 2) {
+                    Some(v) => v,
+                    None => return 0,
+                };
+
+                if glyph > end {
+                    lo = mid + 1;
+                } else if glyph < start {
+                    hi = mid;
+                } else {
+                    return read_u16_be(data, roff + 4).unwrap_or(0);
+                }
+            }
+
+            0
+        }
+        _ => 0,
     }
 }
 
