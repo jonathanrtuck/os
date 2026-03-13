@@ -109,6 +109,18 @@ static mut SCROLL_OFFSET: u32 = 0;
 /// Restored when switching back.
 static mut SAVED_EDITOR_SCROLL: u32 = 0;
 
+/// Whether the content surface has been fully rendered at least once.
+/// First frame always requires a full clear+render.
+static mut CONTENT_FIRST_RENDER: bool = true;
+/// Previous frame's cursor position (for computing which lines changed).
+static mut PREV_CURSOR_POS: usize = 0;
+/// Previous frame's document length.
+static mut PREV_DOC_LEN: usize = 0;
+/// Previous frame's selection start.
+static mut PREV_SEL_START: usize = 0;
+/// Previous frame's selection end.
+static mut PREV_SEL_END: usize = 0;
+
 static mut CHAR_W: u32 = 8;
 static mut LINE_H: u32 = 20;
 /// Content surface dimensions (set once during initialization).
@@ -418,42 +430,150 @@ fn render_background(surf: &mut drawing::Surface) {
 /// visible through the translucent chrome (title bar and status bar).
 /// Text is rendered with margins that keep it below the title bar and
 /// above the status bar, but the background fills the entire surface.
+///
+/// When `force_full` is true (first frame, context switch, scroll change,
+/// selection change), the entire surface is cleared and re-rendered.
+/// Otherwise, only the lines that changed (based on cursor movement and
+/// content changes) are cleared and re-rendered — an incremental update.
 fn render_content_surface(
     surf: &mut drawing::Surface,
     text: &[u8],
+    force_full: bool,
 ) {
     let cache = unsafe { &*GLYPH_CACHE };
     let cursor_pos = unsafe { CURSOR_POS };
     let content_w = surf.width;
     let content_h = surf.height;
     let scroll_offset = unsafe { SCROLL_OFFSET };
-
-    // With scrolling, we need to clear the entire text rendering area each
-    // frame because any scroll change shifts all visible content. The
-    // previous incremental-clear optimization doesn't work with scrolling.
-    surf.clear(drawing::BG_CONTENT);
-
     let layout = content_text_layout(content_w);
     let my = max_text_y_in_content(content_h);
-
     let sel_start = unsafe { SEL_START };
     let sel_end = unsafe { SEL_END };
+    let line_h = unsafe { LINE_H };
 
-    let (_, _cursor_y) = layout.draw_tt_sel_scroll(
-        surf,
-        text,
-        TEXT_INSET_X,
-        TEXT_INSET_TOP,
-        cursor_pos,
-        cache,
-        drawing::TEXT_PRIMARY,
-        drawing::TEXT_CURSOR,
-        my,
-        sel_start,
-        sel_end,
-        drawing::TEXT_SELECTION,
-        scroll_offset,
-    );
+    if force_full || line_h == 0 {
+        // Full clear + full render.
+        surf.clear(drawing::BG_CONTENT);
+
+        let (_, _cursor_y) = layout.draw_tt_sel_scroll(
+            surf,
+            text,
+            TEXT_INSET_X,
+            TEXT_INSET_TOP,
+            cursor_pos,
+            cache,
+            drawing::TEXT_PRIMARY,
+            drawing::TEXT_CURSOR,
+            my,
+            sel_start,
+            sel_end,
+            drawing::TEXT_SELECTION,
+            scroll_offset,
+        );
+    } else {
+        // Incremental render: only clear+redraw changed lines.
+        let prev_cursor = unsafe { PREV_CURSOR_POS };
+        let prev_doc_len = unsafe { PREV_DOC_LEN };
+        let doc_len = text.len();
+
+        // Compute which visual lines are affected.
+        // The cursor line always needs re-rendering (cursor bar moved).
+        let new_cursor_line = layout.byte_to_visual_line(text, cursor_pos);
+        let prev_cursor_line = layout.byte_to_visual_line(text, prev_cursor.min(doc_len));
+
+        // Determine the range of lines to re-render.
+        // For simple insertions/deletions at the cursor, the changed content
+        // starts at the cursor line. All lines from the cursor to the end of
+        // text may have shifted (e.g., inserting a newline pushes everything
+        // down). We also need to cover the previous cursor line (to erase
+        // the old cursor bar).
+        let first_changed = prev_cursor_line.min(new_cursor_line);
+
+        // Compute the last line we need to re-render.
+        // For a single character insert/delete on the same line (no reflow),
+        // we only need the cursor line. But if lines reflow (e.g., soft wrap
+        // changes, newline insert/delete), we need everything from the
+        // changed line to the end. We detect reflow by checking if the
+        // total line count changed.
+        let new_total_lines = if doc_len == 0 {
+            1u32
+        } else {
+            layout.byte_to_visual_line(text, doc_len) + 1
+        };
+        let prev_total_lines = if prev_doc_len == 0 {
+            1u32
+        } else {
+            layout.byte_to_visual_line(text, prev_doc_len.min(doc_len)) + 1
+        };
+
+        // If the cursor stayed on the same line and total line count didn't
+        // change, only re-render the cursor line (+ previous if different).
+        let last_changed = if new_total_lines != prev_total_lines
+            || new_cursor_line != prev_cursor_line
+        {
+            // Lines reflowed or cursor moved between lines — re-render from
+            // first_changed to the end of visible text.
+            let max_total = if new_total_lines > prev_total_lines {
+                new_total_lines
+            } else {
+                prev_total_lines
+            };
+            max_total.saturating_sub(1)
+        } else {
+            // Same line, no reflow — only the cursor line.
+            new_cursor_line
+        };
+
+        // Convert to viewport-relative visual lines (after scroll).
+        let vp_lines = viewport_lines(content_h);
+        let first_vis = first_changed.saturating_sub(scroll_offset);
+        let last_vis = last_changed.saturating_sub(scroll_offset).min(
+            if vp_lines > 0 { vp_lines - 1 } else { 0 }
+        );
+
+        if first_vis <= last_vis {
+            // Clear only the affected lines in the content surface.
+            let clear_y = TEXT_INSET_TOP + first_vis * line_h;
+            let clear_h = (last_vis - first_vis + 1) * line_h;
+            // Clamp to surface bounds.
+            let clamped_h = if clear_y + clear_h > content_h {
+                content_h.saturating_sub(clear_y)
+            } else {
+                clear_h
+            };
+
+            if clamped_h > 0 {
+                surf.fill_rect(0, clear_y, content_w, clamped_h, drawing::BG_CONTENT);
+            }
+
+            // Re-render only the affected lines.
+            let (_, _cursor_y) = layout.draw_tt_sel_scroll_lines(
+                surf,
+                text,
+                TEXT_INSET_X,
+                TEXT_INSET_TOP,
+                cursor_pos,
+                cache,
+                drawing::TEXT_PRIMARY,
+                drawing::TEXT_CURSOR,
+                my,
+                sel_start,
+                sel_end,
+                drawing::TEXT_SELECTION,
+                scroll_offset,
+                first_vis,
+                last_vis,
+            );
+        }
+    }
+
+    // Update previous frame state for next incremental render.
+    unsafe {
+        PREV_CURSOR_POS = cursor_pos;
+        PREV_DOC_LEN = text.len();
+        PREV_SEL_START = sel_start;
+        PREV_SEL_END = sel_end;
+    }
 }
 
 /// Render the image viewer content surface: display a decoded PNG image
@@ -1159,7 +1279,7 @@ pub extern "C" fn _start() -> ! {
         if unsafe { IMAGE_MODE } && !image_pixels.is_empty() {
             render_image_content_surface(&mut content_surf, &image_pixels, image_w, image_h);
         } else {
-            render_content_surface(&mut content_surf, doc_content());
+            render_content_surface(&mut content_surf, doc_content(), true);
         }
     }
 
@@ -1357,7 +1477,7 @@ pub extern "C" fn _start() -> ! {
                             } else {
                                 // Switching back to editor: full clear + re-render
                                 // to ensure no image artifacts remain.
-                                render_content_surface(&mut content_surf, doc_content());
+                                render_content_surface(&mut content_surf, doc_content(), true);
                             }
                         }
 
@@ -1453,7 +1573,29 @@ pub extern "C" fn _start() -> ! {
             //    not on timer ticks — avoids unnecessary re-rendering).
             if changed && !in_image_mode {
                 let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
-                render_content_surface(&mut content_surf, doc_content());
+                let new_scroll = unsafe { SCROLL_OFFSET };
+                let sel_start = unsafe { SEL_START };
+                let sel_end = unsafe { SEL_END };
+                let prev_sel_start = unsafe { PREV_SEL_START };
+                let prev_sel_end = unsafe { PREV_SEL_END };
+                let first_render = unsafe { CONTENT_FIRST_RENDER };
+
+                // Full clear is needed when:
+                // - First render of the content surface
+                // - Context switch (already handled above with force_full: true)
+                // - Scroll offset changed (entire viewport shifted)
+                // - Selection changed (highlight may span many lines)
+                let force_full = first_render
+                    || context_switched
+                    || old_scroll != new_scroll
+                    || sel_start != prev_sel_start
+                    || sel_end != prev_sel_end;
+
+                render_content_surface(&mut content_surf, doc_content(), force_full);
+
+                if first_render {
+                    unsafe { CONTENT_FIRST_RENDER = false };
+                }
             }
             // In image mode, content surface stays unchanged (showing the image).
 

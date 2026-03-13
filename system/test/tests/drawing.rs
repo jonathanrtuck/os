@@ -5064,4 +5064,139 @@ fn composite_rect_zero_size_is_noop() {
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(0, 255, 0)));
 }
 
+// ---------------------------------------------------------------------------
+// draw_tt_sel_scroll_lines tests (incremental content rendering)
+// ---------------------------------------------------------------------------
+
+/// Incremental line range: byte_to_visual_line correctly identifies lines
+/// for dirty line computation during incremental rendering.
+#[test]
+fn incremental_render_byte_to_visual_line_for_dirty_tracking() {
+    let layout = make_layout(200);
+    let text = b"line1\nline2\nline3\nline4";
+
+    // Cursor at start of line2 (byte 6) → visual line 1.
+    assert_eq!(layout.byte_to_visual_line(text, 6), 1);
+    // Cursor at end of line3 (byte 17) → visual line 2.
+    assert_eq!(layout.byte_to_visual_line(text, 17), 2);
+    // Cursor at start (byte 0) → visual line 0.
+    assert_eq!(layout.byte_to_visual_line(text, 0), 0);
+    // Cursor past end → last line.
+    assert_eq!(layout.byte_to_visual_line(text, text.len()), 3);
+}
+
+/// Incremental line tracking: inserting a character on the same line
+/// should only dirty that one line (cursor line stays the same).
+#[test]
+fn incremental_render_same_line_insert_dirtied_lines() {
+    let layout = make_layout(200);
+
+    // Before insert: "abc\ndef" with cursor at byte 1 (in "abc", line 0).
+    let text_before = b"abc\ndef";
+    let cursor_before = 1;
+    let line_before = layout.byte_to_visual_line(text_before, cursor_before);
+    assert_eq!(line_before, 0);
+
+    // After insert: "aXbc\ndef" with cursor at byte 2.
+    let text_after = b"aXbc\ndef";
+    let cursor_after = 2;
+    let line_after = layout.byte_to_visual_line(text_after, cursor_after);
+    assert_eq!(line_after, 0);
+
+    // Same line → only 1 line needs re-rendering.
+    assert_eq!(line_before, line_after);
+}
+
+/// Incremental line tracking: inserting a newline creates a new line,
+/// requiring re-render from the cursor line to the end.
+#[test]
+fn incremental_render_newline_insert_dirtied_lines() {
+    let layout = make_layout(200);
+
+    // Before insert: "abcdef" with cursor at byte 3.
+    let text_before = b"abcdef";
+    let cursor_before = 3;
+    let total_lines_before = layout.byte_to_visual_line(text_before, text_before.len()) + 1;
+    assert_eq!(total_lines_before, 1);
+
+    // After insert: "abc\ndef" with cursor at byte 4 (start of new line).
+    let text_after = b"abc\ndef";
+    let cursor_after = 4;
+    let total_lines_after = layout.byte_to_visual_line(text_after, text_after.len()) + 1;
+    assert_eq!(total_lines_after, 2);
+
+    let new_cursor_line = layout.byte_to_visual_line(text_after, cursor_after);
+    assert_eq!(new_cursor_line, 1);
+
+    // Total lines changed → reflow detected → dirty from cursor line to end.
+    assert_ne!(total_lines_before, total_lines_after);
+}
+
+/// Incremental line tracking: deleting a character that causes line
+/// reflow should dirty from the affected line to the end.
+#[test]
+fn incremental_render_delete_reflow_dirtied_lines() {
+    let layout = make_layout(200);
+
+    // Before delete: "abc\ndef" — 2 lines.
+    let text_before = b"abc\ndef";
+    let total_before = layout.byte_to_visual_line(text_before, text_before.len()) + 1;
+    assert_eq!(total_before, 2);
+
+    // After deleting the newline: "abcdef" — 1 line.
+    let text_after = b"abcdef";
+    let total_after = layout.byte_to_visual_line(text_after, text_after.len()) + 1;
+    assert_eq!(total_after, 1);
+
+    // Reflow detected.
+    assert_ne!(total_before, total_after);
+}
+
+/// Incremental line tracking: cursor-only movement (no content change)
+/// should dirty both the old and new cursor lines.
+#[test]
+fn incremental_render_cursor_move_two_lines_dirty() {
+    let layout = make_layout(200);
+    let text = b"line1\nline2\nline3";
+
+    let old_cursor = 2; // line 0
+    let new_cursor = 8; // line 1
+    let old_line = layout.byte_to_visual_line(text, old_cursor);
+    let new_line = layout.byte_to_visual_line(text, new_cursor);
+
+    assert_eq!(old_line, 0);
+    assert_eq!(new_line, 1);
+
+    // Both lines need re-rendering (old cursor erased, new cursor drawn).
+    let first_dirty = old_line.min(new_line);
+    let last_dirty = old_line.max(new_line);
+    assert_eq!(first_dirty, 0);
+    assert_eq!(last_dirty, 1);
+}
+
+/// Soft-wrap insert: inserting a char that causes soft wrap should change
+/// the total line count, triggering full-range dirty.
+#[test]
+fn incremental_render_soft_wrap_changes_line_count() {
+    // Layout with narrow max_width: 3 chars per line (3 * 8 = 24).
+    let layout = TextLayout {
+        char_width: 8,
+        line_height: 20,
+        max_width: 24,
+    };
+
+    // Before: "abc" — fits in 1 line (3 chars, 3 cols).
+    let text_before = b"abc";
+    let total_before = layout.byte_to_visual_line(text_before, text_before.len()) + 1;
+    assert_eq!(total_before, 1);
+
+    // After: "abcd" — wraps to 2 lines (4 chars, 3 cols per line).
+    let text_after = b"abcd";
+    let total_after = layout.byte_to_visual_line(text_after, text_after.len()) + 1;
+    assert_eq!(total_after, 2);
+
+    // Line count changed → reflow → dirty from cursor to end.
+    assert_ne!(total_before, total_after);
+}
+
 

@@ -1040,6 +1040,140 @@ impl TextLayout {
         (cursor_x, cursor_y)
     }
 
+    /// Like `draw_tt_sel_scroll`, but only renders visual lines in the range
+    /// `[first_vis_line, last_vis_line]` (inclusive, viewport-relative — i.e.,
+    /// visual line 0 is the first visible line after `scroll_offset`).
+    ///
+    /// The caller is responsible for clearing those lines in the surface
+    /// before calling this method (alpha blending is additive).
+    ///
+    /// Returns `(cursor_x, cursor_y)` as in `draw_tt_sel_scroll`.
+    pub fn draw_tt_sel_scroll_lines(
+        &self,
+        fb: &mut Surface,
+        text: &[u8],
+        origin_x: u32,
+        origin_y: u32,
+        cursor_offset: usize,
+        cache: &GlyphCache,
+        text_color: Color,
+        cursor_color: Color,
+        max_y: u32,
+        sel_start: usize,
+        sel_end: usize,
+        sel_color: Color,
+        scroll_offset: u32,
+        first_vis_line: u32,
+        last_vis_line: u32,
+    ) -> (u32, u32) {
+        let cols = self.cols();
+        let mut col = 0usize;
+        let mut row = 0u32;
+        let mut cursor_x = origin_x;
+        let mut cursor_y = origin_y;
+        let baseline_offset = cache.line_height * 3 / 4;
+
+        // Normalize selection range.
+        let (s_lo, s_hi) = if sel_start <= sel_end {
+            (sel_start, sel_end)
+        } else {
+            (sel_end, sel_start)
+        };
+        let has_selection = s_lo < s_hi;
+
+        for (i, &byte) in text.iter().enumerate() {
+            let visual_row = row as i32 - scroll_offset as i32;
+
+            if i == cursor_offset {
+                if visual_row >= 0 {
+                    cursor_x = origin_x + col as u32 * self.char_width;
+                    cursor_y = origin_y + visual_row as u32 * self.line_height;
+                } else {
+                    cursor_x = origin_x;
+                    cursor_y = 0;
+                }
+            }
+
+            if byte == b'\n' {
+                col = 0;
+                row += 1;
+                continue;
+            }
+
+            if cols > 0 && col >= cols {
+                col = 0;
+                row += 1;
+
+                let visual_row = row as i32 - scroll_offset as i32;
+                if visual_row >= 0 {
+                    let py = origin_y + visual_row as u32 * self.line_height;
+                    if py > max_y {
+                        break;
+                    }
+                }
+            }
+
+            let visual_row = row as i32 - scroll_offset as i32;
+
+            if visual_row >= 0 {
+                let vis = visual_row as u32;
+                let py = origin_y + vis * self.line_height;
+
+                if py > max_y {
+                    break;
+                }
+
+                // Only render if this visual line is within the requested range.
+                if vis >= first_vis_line && vis <= last_vis_line {
+                    // Draw selection highlight behind the character if selected.
+                    if has_selection && i >= s_lo && i < s_hi && sel_color.a > 0 {
+                        let hx = origin_x + col as u32 * self.char_width;
+                        fb.fill_rect_blend(hx, py, self.char_width, cache.line_height, sel_color);
+                    }
+
+                    if let Some((glyph, coverage)) = cache.get(byte) {
+                        if glyph.width > 0 && glyph.height > 0 {
+                            let gx = origin_x as i32
+                                + col as i32 * self.char_width as i32
+                                + glyph.bearing_x;
+                            let gy = py as i32 + baseline_offset as i32 - glyph.bearing_y;
+
+                            fb.draw_coverage(
+                                gx, gy, coverage,
+                                glyph.width, glyph.height, text_color,
+                            );
+                        }
+                    }
+                }
+            }
+
+            col += 1;
+        }
+
+        // Cursor at end of text.
+        if cursor_offset >= text.len() {
+            let visual_row = row as i32 - scroll_offset as i32;
+            if visual_row >= 0 {
+                let py = origin_y + visual_row as u32 * self.line_height;
+                cursor_x = origin_x + col as u32 * self.char_width;
+                cursor_y = py;
+            } else {
+                cursor_x = origin_x;
+                cursor_y = 0;
+            }
+        }
+
+        // Draw cursor only if it falls within the requested line range.
+        if !has_selection && cursor_y >= origin_y && cursor_y <= max_y {
+            let cursor_vis_line = (cursor_y - origin_y) / self.line_height;
+            if cursor_vis_line >= first_vis_line && cursor_vis_line <= last_vis_line {
+                fb.fill_rect(cursor_x, cursor_y, 2, cache.line_height, cursor_color);
+            }
+        }
+
+        (cursor_x, cursor_y)
+    }
+
     /// Layout and draw text with optional selection highlight.
     ///
     /// `sel_start` and `sel_end` define the selected byte range (half-open).
