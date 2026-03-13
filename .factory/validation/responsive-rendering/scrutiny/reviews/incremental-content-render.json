@@ -1,0 +1,61 @@
+{
+  "featureId": "incremental-content-render",
+  "reviewedAt": "2026-03-13T01:50:00.000Z",
+  "commitId": "189ad67eb040650e6a100a8f856e82c1d2e549cf",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "verdict": "pass",
+  "status": "pass",
+  "codeReview": {
+    "summary": "Implementation is correct and well-structured. The drawing library gains draw_tt_sel_scroll_lines() that selectively renders a viewport-relative line range, and the compositor tracks previous-frame state to compute minimal dirty line ranges. Full-clear fallback is properly triggered for first frame, context switch, scroll change, and selection change. The dirty-line computation correctly handles same-line edits (1 line), newline insert/delete (reflow→all lines from cursor to end), and cursor movement. The prev_cursor clamping via .min(doc_len) correctly handles text shrinkage. Two minor efficiency items noted as non-blocking.",
+    "issues": [
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 519,
+        "severity": "non_blocking",
+        "description": "Over-dirtying on cursor-only movement between lines: when the cursor moves from line A to line B without content change, last_changed is set to max_total-1 (end of document) instead of max(A,B). Only 2 lines need re-rendering (old cursor erased, new cursor drawn), but the current code re-renders all lines from min(A,B) to end. This is still better than full-surface clear but leaves perf on the table for arrow-key navigation."
+      },
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 1068,
+        "severity": "non_blocking",
+        "description": "draw_tt_sel_scroll_lines iterates all text bytes even when only rendering a single line near the end of the document. The per-byte loop is O(n) in document size regardless of the line range. A future optimization could skip directly to the first dirty line's byte offset. Not a correctness issue and acceptable for current document sizes."
+      },
+      {
+        "file": "system/test/tests/drawing.rs",
+        "line": 5068,
+        "severity": "non_blocking",
+        "description": "No direct unit test for draw_tt_sel_scroll_lines rendering output (e.g., verifying that pixels appear only on specified lines and not on others). The 6 tests only validate the dirty-line computation logic via byte_to_visual_line. Rendering correctness was verified via QEMU visual testing, which is adequate for the project, but a pixel-level test would catch regressions more reliably."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md says existing test baseline is 859 tests, but the handoff reports 848 tests passing. This discrepancy could indicate the baseline count in AGENTS.md is stale or includes prototype tests (21) that the worker's command didn't run. The worker ran system tests only (cd system/test && cargo test), not prototype tests. Either the baseline number needs updating or verification should consistently include both suites.",
+      "evidence": "AGENTS.md says '859 tests must pass at all times (838 system + 21 prototype)'. Handoff says '848 tests passed... across 30 test suites'. 848 system tests (838 baseline + 6 new + 4 from dirty-rect feature?) vs 838 expected. Worker did not run prototype/files tests separately."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "issues": [
+    {
+      "severity": "non_blocking",
+      "description": "Over-dirtying on cursor-only movement between lines: renders all lines from min(old,new) to document end instead of just the two cursor lines.",
+      "file": "system/services/compositor/main.rs",
+      "line": 519
+    },
+    {
+      "severity": "non_blocking",
+      "description": "draw_tt_sel_scroll_lines is O(n) in document size even for single-line renders — iterates all bytes to find the target line range.",
+      "file": "system/libraries/drawing/lib.rs",
+      "line": 1068
+    },
+    {
+      "severity": "non_blocking",
+      "description": "No pixel-level unit test for draw_tt_sel_scroll_lines; dirty-line computation is tested but not the selective rendering output itself.",
+      "file": "system/test/tests/drawing.rs",
+      "line": null
+    }
+  ],
+  "summary": "PASS. The incremental content rendering implementation is correct and fulfills all feature requirements. Single-char inserts re-render only 1 line (20px) vs the full surface (~800px). Full clear properly triggers on first frame, context switch, scroll, and selection change. 6 new tests cover dirty-line computation. Three non-blocking issues noted: (1) cursor-only movement over-dirties, (2) O(n) iteration for partial renders, (3) no pixel-level test for the selective draw function. All are performance/coverage improvements for future work, not correctness bugs."
+}
