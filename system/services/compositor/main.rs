@@ -34,7 +34,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
-const FONT_SIZE: u32 = 20;
+const FONT_SIZE: u32 = 18;
 // Protocol message types.
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
 const MSG_IMAGE_CONFIG: u32 = 6;
@@ -98,10 +98,12 @@ struct RtcConfig {
     mmio_pa: u64,
 }
 
+// Guard: CompositorConfig must fit within the 60-byte IPC payload.
+const _: () = assert!(core::mem::size_of::<CompositorConfig>() <= 60);
+
 /// Mapped VA of the PL031 RTC MMIO page. 0 = not mapped / not available.
 /// The Data Register at offset 0x000 contains Unix epoch seconds (read-only u32).
 static mut RTC_MMIO_VA: usize = 0;
-
 /// Whether the compositor is in image viewer mode (true) or text editor mode (false).
 static mut IMAGE_MODE: bool = false;
 /// Counter value captured at boot for deriving elapsed wall-clock time.
@@ -112,12 +114,10 @@ static mut COUNTER_FREQ: u64 = 0;
 static mut TIMER_HANDLE: u8 = 0;
 /// Whether a valid timer handle exists.
 static mut TIMER_ACTIVE: bool = false;
-
 /// Selection start byte offset (0 = no selection when equal to sel_end).
 static mut SEL_START: usize = 0;
 /// Selection end byte offset (0 = no selection when equal to sel_start).
 static mut SEL_END: usize = 0;
-
 /// Vertical scroll offset in visual lines. Lines above this offset are
 /// not rendered. Updated automatically when the cursor moves outside the
 /// visible viewport.
@@ -125,7 +125,6 @@ static mut SCROLL_OFFSET: u32 = 0;
 /// Saved scroll offset for the text editor when switching to image viewer.
 /// Restored when switching back.
 static mut SAVED_EDITOR_SCROLL: u32 = 0;
-
 /// Whether the content surface has been fully rendered at least once.
 /// First frame always requires a full clear+render.
 static mut CONTENT_FIRST_RENDER: bool = true;
@@ -137,7 +136,6 @@ static mut PREV_DOC_LEN: usize = 0;
 static mut PREV_SEL_START: usize = 0;
 /// Previous frame's selection end.
 static mut PREV_SEL_END: usize = 0;
-
 /// Current mouse cursor X position in framebuffer pixels.
 static mut MOUSE_X: u32 = 0;
 /// Current mouse cursor Y position in framebuffer pixels.
@@ -150,7 +148,6 @@ static mut PREV_MOUSE_Y: u32 = 0;
 static mut CURSOR_VISIBLE: bool = false;
 /// Whether cursor position changed this frame (needs dirty rects).
 static mut CURSOR_MOVED: bool = false;
-
 static mut CHAR_W: u32 = 8;
 static mut LINE_H: u32 = 20;
 /// Content surface dimensions (set once during initialization).
@@ -208,9 +205,6 @@ struct CompositorConfig {
     mono_font_len: u32,
     prop_font_len: u32,
 }
-// Guard: CompositorConfig must fit within the 60-byte IPC payload.
-const _: () = assert!(core::mem::size_of::<CompositorConfig>() <= 60);
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CursorMove {
@@ -252,7 +246,6 @@ struct IconConfig {
     icon_len: u32,
     _pad: u32,
 }
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct KeyEvent {
@@ -304,50 +297,15 @@ struct WriteInsert {
 fn channel_shm_va(idx: usize) -> usize {
     CHANNEL_SHM_BASE + idx * 2 * 4096
 }
-/// Draw a byte string using the glyph cache (simple helper, no wrapping).
-fn draw_string(
-    fb: &mut drawing::Surface,
-    x: u32,
-    y: u32,
-    text: &[u8],
-    cache: &drawing::GlyphCache,
-    color: drawing::Color,
-) {
-    let baseline_y = y as i32 + cache.ascent as i32;
-    let mut cx = x as i32;
+/// Build a TextLayout for the content surface.
+fn content_text_layout(content_w: u32) -> drawing::TextLayout {
+    let cache = unsafe { &*GLYPH_CACHE };
 
-    for &byte in text {
-        if let Some((glyph, coverage)) = cache.get(byte) {
-            if glyph.width > 0 && glyph.height > 0 {
-                let gx = cx + glyph.bearing_x;
-                let gy = baseline_y - glyph.bearing_y;
-
-                fb.draw_coverage(gx, gy, coverage, glyph.width, glyph.height, color);
-            }
-
-            cx += glyph.advance as i32;
-        } else {
-            cx += unsafe { CHAR_W } as i32;
-        }
+    drawing::TextLayout {
+        char_width: unsafe { CHAR_W },
+        line_height: cache.line_height,
+        max_width: content_w - 2 * TEXT_INSET_X,
     }
-}
-/// Compute the pixel width of a string using proportional glyph advances.
-fn proportional_string_width(text: &[u8], cache: &drawing::GlyphCache) -> u32 {
-    let fallback = match cache.get(b' ') {
-        Some((g, _)) => g.advance,
-        None => 8,
-    };
-    let mut w = 0u32;
-
-    for &byte in text {
-        if let Some((glyph, _)) = cache.get(byte) {
-            w += glyph.advance;
-        } else {
-            w += fallback;
-        }
-    }
-
-    w
 }
 /// Get a slice of the document content (read from shared buffer).
 fn doc_content() -> &'static [u8] {
@@ -425,14 +383,31 @@ fn doc_write_header() {
         core::ptr::write_volatile(DOC_BUF.add(8) as *mut u64, CURSOR_POS as u64);
     }
 }
-/// Build a TextLayout for the content surface.
-fn content_text_layout(content_w: u32) -> drawing::TextLayout {
-    let cache = unsafe { &*GLYPH_CACHE };
+/// Draw a byte string using the glyph cache (simple helper, no wrapping).
+fn draw_string(
+    fb: &mut drawing::Surface,
+    x: u32,
+    y: u32,
+    text: &[u8],
+    cache: &drawing::GlyphCache,
+    color: drawing::Color,
+) {
+    let baseline_y = y as i32 + cache.ascent as i32;
+    let mut cx = x as i32;
 
-    drawing::TextLayout {
-        char_width: unsafe { CHAR_W },
-        line_height: cache.line_height,
-        max_width: content_w - 2 * TEXT_INSET_X,
+    for &byte in text {
+        if let Some((glyph, coverage)) = cache.get(byte) {
+            if glyph.width > 0 && glyph.height > 0 {
+                let gx = cx + glyph.bearing_x;
+                let gy = baseline_y - glyph.bearing_y;
+
+                fb.draw_coverage(gx, gy, coverage, glyph.width, glyph.height, color);
+            }
+
+            cx += glyph.advance as i32;
+        } else {
+            cx += unsafe { CHAR_W } as i32;
+        }
     }
 }
 /// Maximum Y coordinate for text within the content surface (local coords).
@@ -440,18 +415,23 @@ fn content_text_layout(content_w: u32) -> drawing::TextLayout {
 fn max_text_y_in_content(content_h: u32) -> u32 {
     content_h.saturating_sub(unsafe { LINE_H } + TEXT_INSET_BOTTOM)
 }
-/// Number of visible text lines in the content viewport.
-fn viewport_lines(content_h: u32) -> u32 {
-    let line_h = unsafe { LINE_H };
+/// Compute the pixel width of a string using proportional glyph advances.
+fn proportional_string_width(text: &[u8], cache: &drawing::GlyphCache) -> u32 {
+    let fallback = match cache.get(b' ') {
+        Some((g, _)) => g.advance,
+        None => 8,
+    };
+    let mut w = 0u32;
 
-    if line_h == 0 {
-        return 0;
+    for &byte in text {
+        if let Some((glyph, _)) = cache.get(byte) {
+            w += glyph.advance;
+        } else {
+            w += fallback;
+        }
     }
 
-    // Usable vertical space: content height minus top and bottom insets.
-    let usable = content_h.saturating_sub(TEXT_INSET_TOP + TEXT_INSET_BOTTOM);
-
-    usable / line_h
+    w
 }
 /// Update SCROLL_OFFSET so that the cursor remains visible in the viewport.
 /// Uses the stored CONTENT_W and CONTENT_H dimensions.
@@ -472,6 +452,19 @@ fn update_scroll_offset() {
 
     unsafe { SCROLL_OFFSET = new_scroll };
 }
+/// Number of visible text lines in the content viewport.
+fn viewport_lines(content_h: u32) -> u32 {
+    let line_h = unsafe { LINE_H };
+
+    if line_h == 0 {
+        return 0;
+    }
+
+    // Usable vertical space: content height minus top and bottom insets.
+    let usable = content_h.saturating_sub(TEXT_INSET_TOP + TEXT_INSET_BOTTOM);
+
+    usable / line_h
+}
 
 // ---------------------------------------------------------------------------
 // Surface rendering functions
@@ -482,6 +475,344 @@ const BG_GRADIENT_SEED: u32 = 0xDEAD_BEEF;
 // Noise amplitude for background gradient (±3 RGB units per pixel).
 const BG_NOISE_AMP: u32 = 3;
 
+/// Result of processing a single key event. Used by `process_key_event()`
+/// to communicate state changes back to the event loop caller.
+struct KeyAction {
+    /// Whether the display changed and needs a present.
+    changed: bool,
+    /// Whether text/content was modified (forces content dirty rects).
+    text_changed: bool,
+    /// Whether a Ctrl+Tab context switch occurred.
+    context_switched: bool,
+    /// Whether the event was fully consumed (should not be forwarded to editor).
+    consumed: bool,
+}
+
+/// Allocate a pixel buffer for a surface with given dimensions.
+fn alloc_surface_buf(width: u32, height: u32) -> alloc::vec::Vec<u8> {
+    let stride = width * 4; // BGRA8888
+    let size = (stride * height) as usize;
+
+    vec![0u8; size]
+}
+/// Append a u32 as decimal digits to a byte buffer. Returns the new index.
+fn append_u32(buf: &mut [u8], start: usize, val: u32) -> usize {
+    let mut ci = start;
+
+    if val == 0 {
+        if ci < buf.len() {
+            buf[ci] = b'0';
+            ci += 1;
+        }
+        return ci;
+    }
+
+    let mut digits = [0u8; 10];
+    let mut di = 10;
+    let mut n = val;
+
+    while n > 0 {
+        di -= 1;
+        digits[di] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    while di < 10 && ci < buf.len() {
+        buf[ci] = digits[di];
+        ci += 1;
+        di += 1;
+    }
+
+    ci
+}
+/// Get the current time in seconds for the clock display.
+///
+/// If the PL031 RTC is mapped, reads Unix epoch seconds from the Data
+/// Register (offset 0x000). Otherwise, falls back to elapsed seconds
+/// since boot using the ARM generic counter.
+fn clock_seconds() -> u64 {
+    let rtc_va = unsafe { RTC_MMIO_VA };
+
+    if rtc_va != 0 {
+        // PL031 Data Register at offset 0x000: read-only 32-bit Unix epoch seconds.
+        let epoch = unsafe { core::ptr::read_volatile(rtc_va as *const u32) };
+
+        epoch as u64
+    } else {
+        // Fallback: elapsed seconds since boot.
+        let now = sys::counter();
+        let boot = unsafe { BOOT_COUNTER };
+        let freq = unsafe { COUNTER_FREQ };
+
+        if freq == 0 {
+            return 0;
+        }
+
+        (now - boot) / freq
+    }
+}
+/// Create a new 1-second periodic timer. Stores the handle in TIMER_HANDLE.
+/// Returns true on success.
+fn create_clock_timer() -> bool {
+    match sys::timer_create(1_000_000_000) {
+        Ok(handle) => {
+            unsafe {
+                TIMER_HANDLE = handle;
+                TIMER_ACTIVE = true;
+            }
+            true
+        }
+        Err(_) => {
+            unsafe { TIMER_ACTIVE = false };
+            false
+        }
+    }
+}
+/// Format total seconds into HH:MM:SS in the given 8-byte buffer.
+fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
+    let hours = ((total_seconds / 3600) % 24) as u8;
+    let minutes = ((total_seconds / 60) % 60) as u8;
+    let seconds = (total_seconds % 60) as u8;
+
+    buf[0] = b'0' + hours / 10;
+    buf[1] = b'0' + hours % 10;
+    buf[2] = b':';
+    buf[3] = b'0' + minutes / 10;
+    buf[4] = b'0' + minutes % 10;
+    buf[5] = b':';
+    buf[6] = b'0' + seconds / 10;
+    buf[7] = b'0' + seconds % 10;
+}
+/// Compute the approximate gradient background color for a horizontal line
+/// at the given Y coordinate in the full framebuffer. Uses the radial
+/// gradient formula with the horizontal center (x=fb_width/2) as reference.
+///
+/// This is used for incremental content re-renders: when clearing a single
+/// text line, we fill it with the gradient color at that Y instead of a
+/// flat BG_CONTENT, so the gradient remains visible.
+fn gradient_row_color(y: u32, fb_width: u32, fb_height: u32) -> drawing::Color {
+    let cx = fb_width / 2;
+    let cy = fb_height / 2;
+    let max_dx = if cx > fb_width - cx - 1 {
+        cx
+    } else {
+        fb_width - cx - 1
+    };
+    let max_dy = if cy > fb_height - cy - 1 {
+        cy
+    } else {
+        fb_height - cy - 1
+    };
+    let max_dist_sq = (max_dx as u64) * (max_dx as u64) + (max_dy as u64) * (max_dy as u64);
+    let max_dist_sq = if max_dist_sq == 0 { 1 } else { max_dist_sq };
+    // Distance from (cx, y) to center (cx, cy) — only vertical component.
+    let dy = if y >= cy { y - cy } else { cy - y };
+    let dist_sq = (dy as u64) * (dy as u64); // dx=0 at center column
+    let t = ((dist_sq * 255) / max_dist_sq) as u32;
+    let t = if t > 255 { 255 } else { t };
+    let inv_t = 255 - t;
+    let r = (drawing::BG_CENTER.r as u32 * inv_t + drawing::BG_BASE.r as u32 * t + 127) / 255;
+    let g = (drawing::BG_CENTER.g as u32 * inv_t + drawing::BG_BASE.g as u32 * t + 127) / 255;
+    let b = (drawing::BG_CENTER.b as u32 * inv_t + drawing::BG_BASE.b as u32 * t + 127) / 255;
+
+    drawing::Color::rgb(r as u8, g as u8, b as u8)
+}
+/// Build a Surface from a mutable byte slice.
+fn make_surf(buf: &mut [u8], w: u32, h: u32) -> drawing::Surface<'_> {
+    drawing::Surface {
+        data: buf,
+        width: w,
+        height: h,
+        stride: w * 4,
+        format: drawing::PixelFormat::Bgra8888,
+    }
+}
+/// Handle a single key event from any input channel. Encapsulates the Ctrl
+/// modifier tracking, Ctrl+Tab context switch, and editor forwarding logic
+/// that is shared across all input channels.
+///
+/// Returns a `KeyAction` describing what happened. If `consumed` is true,
+/// the caller should not forward the event further.
+fn process_key_event(
+    key: &KeyEvent,
+    ctrl_pressed: &mut bool,
+    has_image: bool,
+    content_buf: &mut [u8],
+    title_buf: &mut [u8],
+    content_w: u32,
+    content_h: u32,
+    fb_width: u32,
+    image_pixels: &[u8],
+    image_w: u32,
+    image_h: u32,
+    editor_ch: &ipc::Channel,
+    msg: &ipc::Message,
+) -> KeyAction {
+    // Track Left Ctrl modifier state.
+    if key.keycode == KEY_LEFTCTRL {
+        *ctrl_pressed = key.pressed == 1;
+
+        return KeyAction {
+            changed: false,
+            text_changed: false,
+            context_switched: false,
+            consumed: true,
+        };
+    }
+
+    // Ctrl+Tab toggles between editor and image viewer contexts.
+    if key.keycode == KEY_TAB && key.pressed == 1 && *ctrl_pressed {
+        if has_image {
+            let was_image = unsafe { IMAGE_MODE };
+
+            if !was_image {
+                // Switching TO image: save editor scroll offset.
+                unsafe { SAVED_EDITOR_SCROLL = SCROLL_OFFSET };
+            }
+
+            unsafe { IMAGE_MODE = !was_image };
+
+            if was_image {
+                // Switching BACK to editor: restore scroll offset.
+                unsafe { SCROLL_OFFSET = SAVED_EDITOR_SCROLL };
+            }
+
+            // Re-render the content surface for the new mode.
+            {
+                let mut content_surf = make_surf(content_buf, content_w, content_h);
+
+                if unsafe { IMAGE_MODE } {
+                    render_image_content_surface(&mut content_surf, image_pixels, image_w, image_h);
+                } else {
+                    // Switching back to editor: full clear + re-render
+                    // to ensure no image artifacts remain.
+                    render_content_surface(&mut content_surf, doc_content(), true);
+                }
+            }
+
+            // Re-render the title bar to switch the icon.
+            {
+                let mut title_surf = make_surf(title_buf, fb_width, TITLE_BAR_H);
+
+                render_title_bar(&mut title_surf);
+            }
+
+            return KeyAction {
+                changed: true,
+                text_changed: true,
+                context_switched: true,
+                consumed: true,
+            };
+        }
+
+        return KeyAction {
+            changed: false,
+            text_changed: false,
+            context_switched: false,
+            consumed: true,
+        };
+    }
+
+    // Forward non-modifier keys to editor in text mode.
+    if !unsafe { IMAGE_MODE } {
+        editor_ch.send(msg);
+
+        let _ = sys::channel_signal(EDITOR_HANDLE);
+    }
+
+    KeyAction {
+        changed: false,
+        text_changed: false,
+        context_switched: false,
+        consumed: false,
+    }
+}
+/// Parse SVG path data and rasterize into a leaked coverage map.
+///
+/// Heap-allocates both `SvgPath` and `SvgRasterScratch` to avoid blowing the
+/// 16 KiB userspace stack (~16 KiB + ~64 KiB respectively). On success,
+/// returns the coverage pointer, width, and height as a leaked allocation
+/// (caller stores the pointer in a static). On failure (OOM or parse/raster
+/// error), returns `None` and all temporary allocations are freed.
+fn rasterize_svg_icon(
+    svg_data: &[u8],
+    label: &[u8],
+    icon_w: u32,
+    icon_h: u32,
+) -> Option<(*const u8, u32, u32)> {
+    sys::print(label);
+
+    let path_ptr = unsafe {
+        let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgPath;
+        ptr
+    };
+
+    if path_ptr.is_null() {
+        sys::print(b"compositor: SVG path alloc failed (OOM)\n");
+
+        return None;
+    }
+
+    let scratch_ptr = unsafe {
+        let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+        alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
+    };
+
+    if scratch_ptr.is_null() {
+        sys::print(b"compositor: SVG scratch alloc failed (OOM)\n");
+
+        unsafe {
+            let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+            alloc::alloc::dealloc(path_ptr as *mut u8, layout);
+        }
+
+        return None;
+    }
+
+    let result = match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
+        Ok(()) => {
+            let icon_size = (icon_w * icon_h) as usize;
+            let mut icon_cov = vec![0u8; icon_size];
+
+            match drawing::svg_rasterize(
+                unsafe { &*path_ptr },
+                unsafe { &mut *scratch_ptr },
+                &mut icon_cov,
+                icon_w,
+                icon_h,
+                drawing::SVG_FP_ONE,
+                0,
+                0,
+            ) {
+                Ok(()) => {
+                    let leaked = icon_cov.leak();
+                    Some((leaked.as_ptr(), icon_w, icon_h))
+                }
+                Err(_) => {
+                    sys::print(b"     SVG icon rasterize failed\n");
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            sys::print(b"     SVG icon parse failed\n");
+            None
+        }
+    };
+
+    // Free temporary heap allocations.
+    unsafe {
+        let path_layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+
+        alloc::alloc::dealloc(path_ptr as *mut u8, path_layout);
+
+        let scratch_layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+
+        alloc::alloc::dealloc(scratch_ptr as *mut u8, scratch_layout);
+    }
+
+    result
+}
 /// Render the background surface: radial gradient (lighter center, darker
 /// edges) with subtle per-pixel noise to break up banding.
 ///
@@ -497,37 +828,6 @@ fn render_background(surf: &mut drawing::Surface) {
         BG_GRADIENT_SEED,
     );
 }
-
-/// Compute the approximate gradient background color for a horizontal line
-/// at the given Y coordinate in the full framebuffer. Uses the radial
-/// gradient formula with the horizontal center (x=fb_width/2) as reference.
-///
-/// This is used for incremental content re-renders: when clearing a single
-/// text line, we fill it with the gradient color at that Y instead of a
-/// flat BG_CONTENT, so the gradient remains visible.
-fn gradient_row_color(y: u32, fb_width: u32, fb_height: u32) -> drawing::Color {
-    let cx = fb_width / 2;
-    let cy = fb_height / 2;
-    let max_dx = if cx > fb_width - cx - 1 { cx } else { fb_width - cx - 1 };
-    let max_dy = if cy > fb_height - cy - 1 { cy } else { fb_height - cy - 1 };
-    let max_dist_sq = (max_dx as u64) * (max_dx as u64) + (max_dy as u64) * (max_dy as u64);
-    let max_dist_sq = if max_dist_sq == 0 { 1 } else { max_dist_sq };
-
-    // Distance from (cx, y) to center (cx, cy) — only vertical component.
-    let dy = if y >= cy { y - cy } else { cy - y };
-    let dist_sq = (dy as u64) * (dy as u64); // dx=0 at center column
-
-    let t = ((dist_sq * 255) / max_dist_sq) as u32;
-    let t = if t > 255 { 255 } else { t };
-    let inv_t = 255 - t;
-
-    let r = (drawing::BG_CENTER.r as u32 * inv_t + drawing::BG_BASE.r as u32 * t + 127) / 255;
-    let g = (drawing::BG_CENTER.g as u32 * inv_t + drawing::BG_BASE.g as u32 * t + 127) / 255;
-    let b = (drawing::BG_CENTER.b as u32 * inv_t + drawing::BG_BASE.b as u32 * t + 127) / 255;
-
-    drawing::Color::rgb(r as u8, g as u8, b as u8)
-}
-
 /// Render the content surface: text area background, text content, and cursor.
 ///
 /// The content surface extends full-screen so that document content is
@@ -539,11 +839,7 @@ fn gradient_row_color(y: u32, fb_width: u32, fb_height: u32) -> drawing::Color {
 /// selection change), the entire surface is cleared and re-rendered.
 /// Otherwise, only the lines that changed (based on cursor movement and
 /// content changes) are cleared and re-rendered — an incremental update.
-fn render_content_surface(
-    surf: &mut drawing::Surface,
-    text: &[u8],
-    force_full: bool,
-) {
+fn render_content_surface(surf: &mut drawing::Surface, text: &[u8], force_full: bool) {
     let cache = unsafe { &*GLYPH_CACHE };
     let cursor_pos = unsafe { CURSOR_POS };
     let content_w = surf.width;
@@ -586,12 +882,10 @@ fn render_content_surface(
         let prev_cursor = unsafe { PREV_CURSOR_POS };
         let prev_doc_len = unsafe { PREV_DOC_LEN };
         let doc_len = text.len();
-
         // Compute which visual lines are affected.
         // The cursor line always needs re-rendering (cursor bar moved).
         let new_cursor_line = layout.byte_to_visual_line(text, cursor_pos);
         let prev_cursor_line = layout.byte_to_visual_line(text, prev_cursor.min(doc_len));
-
         // Determine the range of lines to re-render.
         // For simple insertions/deletions at the cursor, the changed content
         // starts at the cursor line. All lines from the cursor to the end of
@@ -599,7 +893,6 @@ fn render_content_surface(
         // down). We also need to cover the previous cursor line (to erase
         // the old cursor bar).
         let first_changed = prev_cursor_line.min(new_cursor_line);
-
         // Compute the last line we need to re-render.
         // For a single character insert/delete on the same line (no reflow),
         // we only need the cursor line. But if lines reflow (e.g., soft wrap
@@ -616,31 +909,28 @@ fn render_content_surface(
         } else {
             layout.byte_to_visual_line(text, prev_doc_len.min(doc_len)) + 1
         };
-
         // If the cursor stayed on the same line and total line count didn't
         // change, only re-render the cursor line (+ previous if different).
-        let last_changed = if new_total_lines != prev_total_lines
-            || new_cursor_line != prev_cursor_line
-        {
-            // Lines reflowed or cursor moved between lines — re-render from
-            // first_changed to the end of visible text.
-            let max_total = if new_total_lines > prev_total_lines {
-                new_total_lines
+        let last_changed =
+            if new_total_lines != prev_total_lines || new_cursor_line != prev_cursor_line {
+                // Lines reflowed or cursor moved between lines — re-render from
+                // first_changed to the end of visible text.
+                let max_total = if new_total_lines > prev_total_lines {
+                    new_total_lines
+                } else {
+                    prev_total_lines
+                };
+                max_total.saturating_sub(1)
             } else {
-                prev_total_lines
+                // Same line, no reflow — only the cursor line.
+                new_cursor_line
             };
-            max_total.saturating_sub(1)
-        } else {
-            // Same line, no reflow — only the cursor line.
-            new_cursor_line
-        };
-
         // Convert to viewport-relative visual lines (after scroll).
         let vp_lines = viewport_lines(content_h);
         let first_vis = first_changed.saturating_sub(scroll_offset);
-        let last_vis = last_changed.saturating_sub(scroll_offset).min(
-            if vp_lines > 0 { vp_lines - 1 } else { 0 }
-        );
+        let last_vis = last_changed
+            .saturating_sub(scroll_offset)
+            .min(if vp_lines > 0 { vp_lines - 1 } else { 0 });
 
         if first_vis <= last_vis {
             // Clear only the affected lines in the content surface.
@@ -661,9 +951,11 @@ fn render_content_surface(
                 // gradient span (~12 RGB units) and the text drawn on top.
                 let fb_w = unsafe { CONTENT_W };
                 let fb_h = unsafe { CONTENT_H };
+
                 for row_off in 0..clamped_h {
                     let row_y = clear_y + row_off;
                     let row_color = gradient_row_color(row_y, fb_w, fb_h);
+
                     surf.fill_rect(0, row_y, content_w, 1, row_color);
                 }
             }
@@ -697,7 +989,6 @@ fn render_content_surface(
         PREV_SEL_END = sel_end;
     }
 }
-
 /// Render the image viewer content surface: display a decoded PNG image
 /// centered within the content area. If the image is larger than the
 /// content area, it is clipped to fit (no scaling — clipping is simpler
@@ -724,7 +1015,6 @@ fn render_image_content_surface(
 
     let content_w = surf.width;
     let content_h = surf.height;
-
     // Center the image within the content area.
     let dst_x = if image_w < content_w {
         (content_w - image_w) / 2
@@ -736,24 +1026,11 @@ fn render_image_content_surface(
     } else {
         0
     };
-
     // Use blit_blend so alpha-transparent pixels composite correctly.
     let image_stride = image_w * 4;
+
     surf.blit_blend(image_data, image_w, image_h, image_stride, dst_x, dst_y);
 }
-
-/// Render the title bar drop shadow: gradient from opaque to transparent,
-/// falling downward from the title bar's bottom edge.
-fn render_title_shadow(surf: &mut drawing::Surface) {
-    surf.clear(drawing::Color::TRANSPARENT);
-
-    surf.fill_gradient_v(
-        0, 0, surf.width, surf.height,
-        drawing::SHADOW_PEAK,
-        drawing::SHADOW_ZERO,
-    );
-}
-
 /// Render the title bar chrome surface (translucent overlay).
 /// Layout: [icon] Untitled on the left, HH:MM:SS clock on the right.
 /// Uses the proportional font (Nunito Sans) for all chrome text.
@@ -771,29 +1048,41 @@ fn render_title_bar(surf: &mut drawing::Surface) {
         let ptr = unsafe { IMG_ICON_COVERAGE };
         let w = unsafe { IMG_ICON_W };
         let h = unsafe { IMG_ICON_H };
+
         if !ptr.is_null() && w > 0 && h > 0 {
             (ptr, w, h)
         } else {
             // Fallback to doc icon if image icon not loaded.
-            (unsafe { ICON_COVERAGE }, unsafe { ICON_W }, unsafe { ICON_H })
+            (unsafe { ICON_COVERAGE }, unsafe { ICON_W }, unsafe {
+                ICON_H
+            })
         }
     } else {
-        (unsafe { ICON_COVERAGE }, unsafe { ICON_W }, unsafe { ICON_H })
+        (unsafe { ICON_COVERAGE }, unsafe { ICON_W }, unsafe {
+            ICON_H
+        })
     };
 
     let text_x: u32;
-
     // Vertically center text within the title bar (line_height centered).
     let text_y = (TITLE_BAR_H.saturating_sub(prop_cache.line_height)) / 2;
 
     if !icon_ptr.is_null() && icon_w > 0 && icon_h > 0 {
-        let icon_coverage = unsafe {
-            core::slice::from_raw_parts(icon_ptr, (icon_w * icon_h) as usize)
-        };
+        let icon_coverage =
+            unsafe { core::slice::from_raw_parts(icon_ptr, (icon_w * icon_h) as usize) };
         // Position icon vertically centered in the title bar, left margin = 10.
         let icon_x: i32 = 10;
         let icon_y: i32 = ((TITLE_BAR_H as i32 - icon_h as i32) / 2).max(0);
-        surf.draw_coverage(icon_x, icon_y, icon_coverage, icon_w, icon_h, drawing::CHROME_ICON);
+
+        surf.draw_coverage(
+            icon_x,
+            icon_y,
+            icon_coverage,
+            icon_w,
+            icon_h,
+            drawing::CHROME_ICON,
+        );
+
         // Title text starts after the icon with a small gap.
         text_x = icon_x as u32 + icon_w + 8;
     } else {
@@ -803,319 +1092,58 @@ fn render_title_bar(surf: &mut drawing::Surface) {
     // Use the cached parsed proportional TrueTypeFont for kerning (avoids
     // re-parsing font tables on every title bar render).
     let prop_font: Option<&drawing::TrueTypeFont<'static>> = unsafe {
-        if !PROP_TTF.is_null() { Some(&*PROP_TTF) } else { None }
+        if !PROP_TTF.is_null() {
+            Some(&*PROP_TTF)
+        } else {
+            None
+        }
     };
 
     // Document name (proportional font with kerning) — "Untitled" as default.
     drawing::draw_proportional_string_kerned(
-        surf, text_x, text_y, b"Untitled", prop_cache, drawing::CHROME_TITLE,
+        surf,
+        text_x,
+        text_y,
+        b"Untitled",
+        prop_cache,
+        drawing::CHROME_TITLE,
         prop_font,
     );
 
     // Clock on the right side — HH:MM:SS format.
     let mut time_buf = [0u8; 8];
     let total_seconds = clock_seconds();
+
     format_time_hms(total_seconds, &mut time_buf);
+
     let clock_w = proportional_string_width(&time_buf, prop_cache);
     let clock_x = surf.width.saturating_sub(12 + clock_w);
 
     drawing::draw_proportional_string_kerned(
-        surf, clock_x, text_y, &time_buf, prop_cache, drawing::CHROME_CLOCK,
+        surf,
+        clock_x,
+        text_y,
+        &time_buf,
+        prop_cache,
+        drawing::CHROME_CLOCK,
         prop_font,
     );
 
     // Bottom edge line.
     surf.draw_hline(0, surf.height - 1, surf.width, drawing::CHROME_BORDER);
 }
-
-
-
-/// Format total seconds into HH:MM:SS in the given 8-byte buffer.
-fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
-    let hours = ((total_seconds / 3600) % 24) as u8;
-    let minutes = ((total_seconds / 60) % 60) as u8;
-    let seconds = (total_seconds % 60) as u8;
-
-    buf[0] = b'0' + hours / 10;
-    buf[1] = b'0' + hours % 10;
-    buf[2] = b':';
-    buf[3] = b'0' + minutes / 10;
-    buf[4] = b'0' + minutes % 10;
-    buf[5] = b':';
-    buf[6] = b'0' + seconds / 10;
-    buf[7] = b'0' + seconds % 10;
-}
-
-/// Get the current time in seconds for the clock display.
-///
-/// If the PL031 RTC is mapped, reads Unix epoch seconds from the Data
-/// Register (offset 0x000). Otherwise, falls back to elapsed seconds
-/// since boot using the ARM generic counter.
-fn clock_seconds() -> u64 {
-    let rtc_va = unsafe { RTC_MMIO_VA };
-
-    if rtc_va != 0 {
-        // PL031 Data Register at offset 0x000: read-only 32-bit Unix epoch seconds.
-        let epoch = unsafe { core::ptr::read_volatile(rtc_va as *const u32) };
-
-        epoch as u64
-    } else {
-        // Fallback: elapsed seconds since boot.
-        let now = sys::counter();
-        let boot = unsafe { BOOT_COUNTER };
-        let freq = unsafe { COUNTER_FREQ };
-
-        if freq == 0 {
-            return 0;
-        }
-
-        (now - boot) / freq
-    }
-}
-
-/// Create a new 1-second periodic timer. Stores the handle in TIMER_HANDLE.
-/// Returns true on success.
-fn create_clock_timer() -> bool {
-    match sys::timer_create(1_000_000_000) {
-        Ok(handle) => {
-            unsafe {
-                TIMER_HANDLE = handle;
-                TIMER_ACTIVE = true;
-            }
-            true
-        }
-        Err(_) => {
-            unsafe { TIMER_ACTIVE = false };
-            false
-        }
-    }
-}
-
-/// Append a u32 as decimal digits to a byte buffer. Returns the new index.
-fn append_u32(buf: &mut [u8], start: usize, val: u32) -> usize {
-    let mut ci = start;
-
-    if val == 0 {
-        if ci < buf.len() {
-            buf[ci] = b'0';
-            ci += 1;
-        }
-        return ci;
-    }
-
-    let mut digits = [0u8; 10];
-    let mut di = 10;
-    let mut n = val;
-
-    while n > 0 {
-        di -= 1;
-        digits[di] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    while di < 10 && ci < buf.len() {
-        buf[ci] = digits[di];
-        ci += 1;
-        di += 1;
-    }
-
-    ci
-}
-
-/// Allocate a pixel buffer for a surface with given dimensions.
-fn alloc_surface_buf(width: u32, height: u32) -> alloc::vec::Vec<u8> {
-    let stride = width * 4; // BGRA8888
-    let size = (stride * height) as usize;
-
-    vec![0u8; size]
-}
-
-/// Build a Surface from a mutable byte slice.
-fn make_surf(buf: &mut [u8], w: u32, h: u32) -> drawing::Surface<'_> {
-    drawing::Surface {
-        data: buf,
-        width: w,
-        height: h,
-        stride: w * 4,
-        format: drawing::PixelFormat::Bgra8888,
-    }
-}
-
-/// Result of processing a single key event. Used by `process_key_event()`
-/// to communicate state changes back to the event loop caller.
-struct KeyAction {
-    /// Whether the display changed and needs a present.
-    changed: bool,
-    /// Whether text/content was modified (forces content dirty rects).
-    text_changed: bool,
-    /// Whether a Ctrl+Tab context switch occurred.
-    context_switched: bool,
-    /// Whether the event was fully consumed (should not be forwarded to editor).
-    consumed: bool,
-}
-
-/// Handle a single key event from any input channel. Encapsulates the Ctrl
-/// modifier tracking, Ctrl+Tab context switch, and editor forwarding logic
-/// that is shared across all input channels.
-///
-/// Returns a `KeyAction` describing what happened. If `consumed` is true,
-/// the caller should not forward the event further.
-fn process_key_event(
-    key: &KeyEvent,
-    ctrl_pressed: &mut bool,
-    has_image: bool,
-    content_buf: &mut [u8],
-    title_buf: &mut [u8],
-    content_w: u32,
-    content_h: u32,
-    fb_width: u32,
-    image_pixels: &[u8],
-    image_w: u32,
-    image_h: u32,
-    editor_ch: &ipc::Channel,
-    msg: &ipc::Message,
-) -> KeyAction {
-    // Track Left Ctrl modifier state.
-    if key.keycode == KEY_LEFTCTRL {
-        *ctrl_pressed = key.pressed == 1;
-
-        return KeyAction { changed: false, text_changed: false, context_switched: false, consumed: true };
-    }
-
-    // Ctrl+Tab toggles between editor and image viewer contexts.
-    if key.keycode == KEY_TAB && key.pressed == 1 && *ctrl_pressed {
-        if has_image {
-            let was_image = unsafe { IMAGE_MODE };
-
-            if !was_image {
-                // Switching TO image: save editor scroll offset.
-                unsafe { SAVED_EDITOR_SCROLL = SCROLL_OFFSET };
-            }
-
-            unsafe { IMAGE_MODE = !was_image };
-
-            if was_image {
-                // Switching BACK to editor: restore scroll offset.
-                unsafe { SCROLL_OFFSET = SAVED_EDITOR_SCROLL };
-            }
-
-            // Re-render the content surface for the new mode.
-            {
-                let mut content_surf = make_surf(content_buf, content_w, content_h);
-
-                if unsafe { IMAGE_MODE } {
-                    render_image_content_surface(
-                        &mut content_surf,
-                        image_pixels,
-                        image_w,
-                        image_h,
-                    );
-                } else {
-                    // Switching back to editor: full clear + re-render
-                    // to ensure no image artifacts remain.
-                    render_content_surface(&mut content_surf, doc_content(), true);
-                }
-            }
-
-            // Re-render the title bar to switch the icon.
-            {
-                let mut title_surf = make_surf(title_buf, fb_width, TITLE_BAR_H);
-                render_title_bar(&mut title_surf);
-            }
-
-            return KeyAction { changed: true, text_changed: true, context_switched: true, consumed: true };
-        }
-
-        return KeyAction { changed: false, text_changed: false, context_switched: false, consumed: true };
-    }
-
-    // Forward non-modifier keys to editor in text mode.
-    if !unsafe { IMAGE_MODE } {
-        editor_ch.send(msg);
-        let _ = sys::channel_signal(EDITOR_HANDLE);
-    }
-
-    KeyAction { changed: false, text_changed: false, context_switched: false, consumed: false }
-}
-
-/// Parse SVG path data and rasterize into a leaked coverage map.
-///
-/// Heap-allocates both `SvgPath` and `SvgRasterScratch` to avoid blowing the
-/// 16 KiB userspace stack (~16 KiB + ~64 KiB respectively). On success,
-/// returns the coverage pointer, width, and height as a leaked allocation
-/// (caller stores the pointer in a static). On failure (OOM or parse/raster
-/// error), returns `None` and all temporary allocations are freed.
-fn rasterize_svg_icon(
-    svg_data: &[u8],
-    label: &[u8],
-    icon_w: u32,
-    icon_h: u32,
-) -> Option<(*const u8, u32, u32)> {
-    sys::print(label);
-
-    let path_ptr = unsafe {
-        let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
-        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgPath;
-        ptr
-    };
-    if path_ptr.is_null() {
-        sys::print(b"compositor: SVG path alloc failed (OOM)\n");
-        return None;
-    }
-
-    let scratch_ptr = unsafe {
-        let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
-        alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
-    };
-    if scratch_ptr.is_null() {
-        sys::print(b"compositor: SVG scratch alloc failed (OOM)\n");
-        unsafe {
-            let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
-            alloc::alloc::dealloc(path_ptr as *mut u8, layout);
-        }
-        return None;
-    }
-
-    let result = match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
-        Ok(()) => {
-            let icon_size = (icon_w * icon_h) as usize;
-            let mut icon_cov = vec![0u8; icon_size];
-
-            match drawing::svg_rasterize(
-                unsafe { &*path_ptr },
-                unsafe { &mut *scratch_ptr },
-                &mut icon_cov,
-                icon_w,
-                icon_h,
-                drawing::SVG_FP_ONE,
-                0,
-                0,
-            ) {
-                Ok(()) => {
-                    let leaked = icon_cov.leak();
-                    Some((leaked.as_ptr(), icon_w, icon_h))
-                }
-                Err(_) => {
-                    sys::print(b"     SVG icon rasterize failed\n");
-                    None
-                }
-            }
-        }
-        Err(_) => {
-            sys::print(b"     SVG icon parse failed\n");
-            None
-        }
-    };
-
-    // Free temporary heap allocations.
-    unsafe {
-        let path_layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
-        alloc::alloc::dealloc(path_ptr as *mut u8, path_layout);
-        let scratch_layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
-        alloc::alloc::dealloc(scratch_ptr as *mut u8, scratch_layout);
-    }
-
-    result
+/// Render the title bar drop shadow: gradient from opaque to transparent,
+/// falling downward from the title bar's bottom edge.
+fn render_title_shadow(surf: &mut drawing::Surface) {
+    surf.clear(drawing::Color::TRANSPARENT);
+    surf.fill_gradient_v(
+        0,
+        0,
+        surf.width,
+        surf.height,
+        drawing::SHADOW_PEAK,
+        drawing::SHADOW_ZERO,
+    );
 }
 
 #[unsafe(no_mangle)]
@@ -1170,7 +1198,10 @@ pub extern "C" fn _start() -> ! {
     }
 
     let mono_font_data = unsafe {
-        core::slice::from_raw_parts(config.mono_font_va as *const u8, config.mono_font_len as usize)
+        core::slice::from_raw_parts(
+            config.mono_font_va as *const u8,
+            config.mono_font_len as usize,
+        )
     };
     let mono_ttf = drawing::TrueTypeFont::new(mono_font_data).unwrap_or_else(|| {
         sys::print(b"compositor: failed to parse monospace font\n");
@@ -1211,7 +1242,7 @@ pub extern "C" fn _start() -> ! {
         GLYPH_CACHE = Box::into_raw(mono_cache);
     }
 
-    sys::print(b"     monospace font rasterized (Source Code Pro 20px)\n");
+    sys::print(b"     monospace font rasterized (Source Code Pro 18px)\n");
 
     // Load proportional font (Nunito Sans) for chrome text.
     // Proportional font is stored right after the monospace font in the same buffer.
@@ -1255,11 +1286,14 @@ pub extern "C" fn _start() -> ! {
                     drawing::TrueTypeFont<'static>,
                 >(prop_ttf))
             };
+
             unsafe { PROP_TTF = Box::into_raw(boxed_ttf) };
 
-            sys::print(b"     proportional font rasterized (Nunito Sans 20px)\n");
+            sys::print(b"     proportional font rasterized (Nunito Sans 18px)\n");
         } else {
-            sys::print(b"     warning: failed to parse proportional font, using monospace for chrome\n");
+            sys::print(
+                b"     warning: failed to parse proportional font, using monospace for chrome\n",
+            );
             // Fallback: use monospace cache for chrome text too.
             unsafe { PROP_GLYPH_CACHE = GLYPH_CACHE };
         }
@@ -1316,8 +1350,11 @@ pub extern "C" fn _start() -> ! {
                     // Print dimensions as a single line.
                     let mut dim_buf = [0u8; 40];
                     let prefix = b"     decoding PNG image (";
+
                     dim_buf[..prefix.len()].copy_from_slice(prefix);
+
                     let mut di = prefix.len();
+
                     di = append_u32(&mut dim_buf, di, hdr.width);
                     dim_buf[di] = b'x';
                     di += 1;
@@ -1326,14 +1363,18 @@ pub extern "C" fn _start() -> ! {
                     di += 1;
                     dim_buf[di] = b'\n';
                     di += 1;
+
                     sys::print(&dim_buf[..di]);
 
                     let channels: u32 = if hdr.color_type == 6 { 4 } else { 3 };
                     let scanline_bytes = 1 + (hdr.width as usize) * (channels as usize);
                     let total_raw = scanline_bytes * (hdr.height as usize);
                     let out_size = (hdr.width * hdr.height * 4) as usize;
-                    let decode_buf_size = if total_raw > out_size { total_raw } else { out_size };
-
+                    let decode_buf_size = if total_raw > out_size {
+                        total_raw
+                    } else {
+                        out_size
+                    };
                     let mut decode_buf = vec![0u8; decode_buf_size];
 
                     match drawing::png_decode(png_data, &mut decode_buf) {
@@ -1383,6 +1424,7 @@ pub extern "C" fn _start() -> ! {
                 rasterize_svg_icon(svg_data, b"     parsing SVG doc icon\n", 20, 24)
             {
                 sys::print(b"     SVG icon rasterized (20x24)\n");
+
                 unsafe {
                     ICON_COVERAGE = ptr;
                     ICON_W = w;
@@ -1411,6 +1453,7 @@ pub extern "C" fn _start() -> ! {
                 rasterize_svg_icon(svg_data, b"     parsing image icon SVG\n", 20, 24)
             {
                 sys::print(b"     image icon rasterized (20x24)\n");
+
                 unsafe {
                     IMG_ICON_COVERAGE = ptr;
                     IMG_ICON_W = w;
@@ -1521,8 +1564,8 @@ pub extern "C" fn _start() -> ! {
     let mut title_buf = alloc_surface_buf(fb_width, TITLE_BAR_H);
     // Mouse cursor (z=30): procedural arrow cursor, highest z-order.
     let mut cursor_buf = alloc_surface_buf(drawing::CURSOR_W, drawing::CURSOR_H);
-    drawing::render_cursor(&mut cursor_buf);
 
+    drawing::render_cursor(&mut cursor_buf);
     sys::print(b"     surface buffers allocated\n");
 
     // -----------------------------------------------------------------------
@@ -1532,28 +1575,29 @@ pub extern "C" fn _start() -> ! {
     // Background: solid dark color.
     {
         let mut bg_surf = make_surf(&mut bg_buf, fb_width, fb_height);
+
         render_background(&mut bg_surf);
     }
-
     // Content: image viewer or text area background + cursor.
     {
         let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
+
         if unsafe { IMAGE_MODE } && !image_pixels.is_empty() {
             render_image_content_surface(&mut content_surf, &image_pixels, image_w, image_h);
         } else {
             render_content_surface(&mut content_surf, doc_content(), true);
         }
     }
-
     // Drop shadow (rendered once — static gradient, never re-rendered).
     {
         let mut title_shadow_surf = make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH);
+
         render_title_shadow(&mut title_shadow_surf);
     }
-
     // Title bar chrome.
     {
         let mut title_surf = make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
+
         render_title_bar(&mut title_surf);
     }
 
@@ -1566,7 +1610,6 @@ pub extern "C" fn _start() -> ! {
 
     {
         let mut fb0 = make_fb_surface(0);
-
         // Build composite surface references.
         let bg_cs = drawing::CompositeSurface {
             surface: make_surf(&mut bg_buf, fb_width, fb_height),
@@ -1603,10 +1646,9 @@ pub extern "C" fn _start() -> ! {
             z: Z_CURSOR,
             visible: false, // Hidden until first pointer event.
         };
+        let surfaces: [&drawing::CompositeSurface; 5] =
+            [&bg_cs, &content_cs, &title_shadow_cs, &title_cs, &cursor_cs];
 
-        let surfaces: [&drawing::CompositeSurface; 5] = [
-            &bg_cs, &content_cs, &title_shadow_cs, &title_cs, &cursor_cs,
-        ];
         drawing::composite_surfaces(&mut fb0, &surfaces);
     }
 
@@ -1648,20 +1690,20 @@ pub extern "C" fn _start() -> ! {
         // Build the wait handle set: input + editor + optional timer.
         let timer_active = unsafe { TIMER_ACTIVE };
         let timer_handle = unsafe { TIMER_HANDLE };
-
         let wait_result = match (timer_active, has_input2) {
-            (true, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE], u64::MAX),
+            (true, true) => sys::wait(
+                &[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE],
+                u64::MAX,
+            ),
             (true, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], u64::MAX),
             (false, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, INPUT2_HANDLE], u64::MAX),
             (false, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX),
         };
-
         let _ = wait_result;
         let mut changed = false;
         let mut text_changed = false; // Text/editor content actually modified.
         let mut timer_fired = false;
         let mut context_switched = false;
-
         // Snapshot cursor/text state before processing events so we can
         // compute which visual lines changed afterward.
         let old_cursor = unsafe { CURSOR_POS };
@@ -1689,14 +1731,30 @@ pub extern "C" fn _start() -> ! {
             if msg.msg_type == MSG_KEY_EVENT {
                 let key: KeyEvent = unsafe { msg.payload_as() };
                 let action = process_key_event(
-                    &key, &mut ctrl_pressed, !image_pixels.is_empty(),
-                    &mut content_buf, &mut title_buf, content_w, content_h, fb_width,
-                    &image_pixels, image_w, image_h, &editor_ch, &msg,
+                    &key,
+                    &mut ctrl_pressed,
+                    !image_pixels.is_empty(),
+                    &mut content_buf,
+                    &mut title_buf,
+                    content_w,
+                    content_h,
+                    fb_width,
+                    &image_pixels,
+                    image_w,
+                    image_h,
+                    &editor_ch,
+                    &msg,
                 );
 
-                if action.changed { changed = true; }
-                if action.text_changed { text_changed = true; }
-                if action.context_switched { context_switched = true; }
+                if action.changed {
+                    changed = true;
+                }
+                if action.text_changed {
+                    text_changed = true;
+                }
+                if action.context_switched {
+                    context_switched = true;
+                }
             }
         }
 
@@ -1710,14 +1768,30 @@ pub extern "C" fn _start() -> ! {
                     MSG_KEY_EVENT => {
                         let key: KeyEvent = unsafe { msg.payload_as() };
                         let action = process_key_event(
-                            &key, &mut ctrl_pressed, !image_pixels.is_empty(),
-                            &mut content_buf, &mut title_buf, content_w, content_h, fb_width,
-                            &image_pixels, image_w, image_h, &editor_ch, &msg,
+                            &key,
+                            &mut ctrl_pressed,
+                            !image_pixels.is_empty(),
+                            &mut content_buf,
+                            &mut title_buf,
+                            content_w,
+                            content_h,
+                            fb_width,
+                            &image_pixels,
+                            image_w,
+                            image_h,
+                            &editor_ch,
+                            &msg,
                         );
 
-                        if action.changed { changed = true; }
-                        if action.text_changed { text_changed = true; }
-                        if action.context_switched { context_switched = true; }
+                        if action.changed {
+                            changed = true;
+                        }
+                        if action.text_changed {
+                            text_changed = true;
+                        }
+                        if action.context_switched {
+                            context_switched = true;
+                        }
                     }
                     MSG_POINTER_ABS => {
                         let ptr: PointerAbs = unsafe { msg.payload_as() };
@@ -1762,18 +1836,15 @@ pub extern "C" fn _start() -> ! {
                             // insets TEXT_INSET_X and TEXT_INSET_TOP.
                             let text_origin_x = content_x as u32 + TEXT_INSET_X;
                             let text_origin_y = content_y as u32 + TEXT_INSET_TOP;
-
                             // If click is above the text area (in shadow region
                             // between title bar and text start), clamp to line 0.
                             let rel_x = click_x.saturating_sub(text_origin_x);
                             let rel_y = click_y.saturating_sub(text_origin_y);
-
                             // Account for scroll offset: add scroll_offset
                             // visual lines worth of pixels to the y coordinate.
                             let scroll = unsafe { SCROLL_OFFSET };
                             let line_h = unsafe { LINE_H };
                             let adjusted_y = rel_y + scroll * line_h;
-
                             // Use TextLayout::xy_to_byte to convert pixel
                             // position to byte offset.
                             let layout = content_text_layout(content_w);
@@ -1792,11 +1863,13 @@ pub extern "C" fn _start() -> ! {
 
                             // Notify the editor of the new cursor position
                             // so its local cursor variable stays in sync.
-                            let cm = CursorMove { position: byte_pos as u32 };
-                            let cm_msg = unsafe {
-                                ipc::Message::from_payload(MSG_SET_CURSOR, &cm)
+                            let cm = CursorMove {
+                                position: byte_pos as u32,
                             };
+                            let cm_msg = unsafe { ipc::Message::from_payload(MSG_SET_CURSOR, &cm) };
+
                             editor_ch.send(&cm_msg);
+
                             let _ = sys::channel_signal(EDITOR_HANDLE);
 
                             changed = true;
@@ -1894,7 +1967,6 @@ pub extern "C" fn _start() -> ! {
                 let prev_sel_start = unsafe { PREV_SEL_START };
                 let prev_sel_end = unsafe { PREV_SEL_END };
                 let first_render = unsafe { CONTENT_FIRST_RENDER };
-
                 // Full clear is needed when:
                 // - First render of the content surface
                 // - Context switch (already handled above with force_full: true)
@@ -1919,6 +1991,7 @@ pub extern "C" fn _start() -> ! {
             //    above, but timer + content change needs handling here.
             if timer_fired && !context_switched {
                 let mut title_surf = make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
+
                 render_title_bar(&mut title_surf);
             }
 
@@ -1930,6 +2003,7 @@ pub extern "C" fn _start() -> ! {
             if !first_present_done || context_switched {
                 // First frame after init or context switch: full screen.
                 damage.mark_full_screen();
+
                 first_present_done = true;
             } else if text_changed && !in_image_mode {
                 // Content change in text editor mode: compute which visual
@@ -1958,12 +2032,14 @@ pub extern "C" fn _start() -> ! {
                     // New cursor line:
                     let (_, new_cy) = layout.byte_to_xy(text, new_cursor);
                     let new_line = new_cy / line_h;
-
                     // The changed region spans from the earliest affected line
                     // down to the last line of text (insertions/deletions shift
                     // all subsequent lines).
-                    let first_changed = if old_line < new_line { old_line } else { new_line };
-
+                    let first_changed = if old_line < new_line {
+                        old_line
+                    } else {
+                        new_line
+                    };
                     // Compute the last visible line of text.
                     let total_text_lines = if new_doc_len == 0 {
                         1
@@ -1979,14 +2055,16 @@ pub extern "C" fn _start() -> ! {
                         let (_, old_end_cy) = layout.byte_to_xy(text, old_doc_len.min(new_doc_len));
                         old_end_cy / line_h + 1
                     };
-                    let last_line = if total_text_lines > old_total { total_text_lines } else { old_total };
-
+                    let last_line = if total_text_lines > old_total {
+                        total_text_lines
+                    } else {
+                        old_total
+                    };
                     // Convert visual lines to content-surface Y coordinates,
                     // accounting for scroll offset.
                     let vis_first = first_changed.saturating_sub(new_scroll);
                     let vis_last = last_line.saturating_sub(new_scroll);
                     let vp = viewport_lines(content_h);
-
                     // Clamp to the visible viewport.
                     let draw_first = vis_first;
                     let draw_last = if vis_last > vp { vp } else { vis_last };
@@ -2009,8 +2087,10 @@ pub extern "C" fn _start() -> ! {
                     // (cursor bar moved between lines).
                     if old_line != new_line {
                         let vis_old = old_line.saturating_sub(new_scroll);
+
                         if vis_old < vp {
                             let old_dirty_y = content_y as u32 + TEXT_INSET_TOP + vis_old * line_h;
+
                             damage.add(0, old_dirty_y as u16, fb_width as u16, line_h as u16);
                         }
                     }
@@ -2089,10 +2169,8 @@ pub extern "C" fn _start() -> ! {
                 z: Z_CURSOR,
                 visible: cursor_vis,
             };
-
-            let surfaces: [&drawing::CompositeSurface; 5] = [
-                &bg_cs, &content_cs, &title_shadow_cs, &title_cs, &cursor_cs,
-            ];
+            let surfaces: [&drawing::CompositeSurface; 5] =
+                [&bg_cs, &content_cs, &title_shadow_cs, &title_cs, &cursor_cs];
 
             {
                 let mut fb = make_fb_surface(back);
@@ -2101,9 +2179,7 @@ pub extern "C" fn _start() -> ! {
                     // Partial composite: only re-composite dirty regions.
                     for r in rects {
                         drawing::composite_surfaces_rect(
-                            &mut fb, &surfaces,
-                            r.x as u32, r.y as u32,
-                            r.w as u32, r.h as u32,
+                            &mut fb, &surfaces, r.x as u32, r.y as u32, r.w as u32, r.h as u32,
                         );
                     }
                 } else {
@@ -2119,6 +2195,7 @@ pub extern "C" fn _start() -> ! {
                 let n = rects.len();
                 let mut pr = [drawing::DirtyRect::new(0, 0, 0, 0); 6];
                 let mut i = 0;
+
                 while i < n && i < 6 {
                     pr[i] = rects[i];
                     i += 1;
@@ -2139,38 +2216,7 @@ pub extern "C" fn _start() -> ! {
                     _pad: [0; 4],
                 }
             };
-            // Log dirty rect dimensions to serial for verification.
-            if payload.rect_count > 0 {
-                let n = payload.rect_count;
-                let mut log_buf = [0u8; 80];
-                let prefix = b"compositor: present rects=";
-                log_buf[..prefix.len()].copy_from_slice(prefix);
-                let mut li = prefix.len();
-                li = append_u32(&mut log_buf, li, n);
-                let mut ri = 0;
-                while ri < n as usize && ri < 6 {
-                    let r = &payload.rects[ri];
-                    if li + 1 < log_buf.len() {
-                        log_buf[li] = b' ';
-                        li += 1;
-                    }
-                    li = append_u32(&mut log_buf, li, r.w as u32);
-                    if li < log_buf.len() {
-                        log_buf[li] = b'x';
-                        li += 1;
-                    }
-                    li = append_u32(&mut log_buf, li, r.h as u32);
-                    ri += 1;
-                }
-                if li < log_buf.len() {
-                    log_buf[li] = b'\n';
-                    li += 1;
-                }
-                sys::print(&log_buf[..li]);
-            }
-
-            let present_msg =
-                unsafe { ipc::Message::from_payload(MSG_PRESENT, &payload) };
+            let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &payload) };
 
             gpu_ch.send(&present_msg);
 
@@ -2199,11 +2245,14 @@ pub extern "C" fn _start() -> ! {
 
                     for row in 0..rh {
                         let y = ry + row;
+
                         if y >= fb_height as usize {
                             break;
                         }
+
                         let offset = y * stride + rx * bpp;
                         let bytes = rw * bpp;
+
                         if offset + bytes <= fb_size as usize {
                             unsafe {
                                 core::ptr::copy_nonoverlapping(
