@@ -812,11 +812,6 @@ pub extern "C" fn _start() -> ! {
 
         if rc == 0 || rc > 6 {
             // Full-screen transfer (initial render or overflow).
-            sys::print(b"gpu: present full ");
-            print_u32(width);
-            sys::print(b"x");
-            print_u32(height);
-            sys::print(b"\n");
             transfer_to_host_reuse(
                 &device,
                 &mut vq,
@@ -843,9 +838,6 @@ pub extern "C" fn _start() -> ! {
             );
         } else {
             // Damage-tracked partial transfer: transfer each dirty rect.
-            sys::print(b"gpu: present ");
-            print_u32(rc);
-            sys::print(b" rects");
             let n = rc as usize;
             // Track bounding box for the flush.
             let mut union_x0: u32 = u32::MAX;
@@ -862,15 +854,6 @@ pub extern "C" fn _start() -> ! {
                 let rh = r.h as u32;
 
                 if rw > 0 && rh > 0 {
-                    sys::print(b" [");
-                    print_u32(rx);
-                    sys::print(b",");
-                    print_u32(ry);
-                    sys::print(b" ");
-                    print_u32(rw);
-                    sys::print(b"x");
-                    print_u32(rh);
-                    sys::print(b"]");
                     transfer_to_host_reuse(
                         &device,
                         &mut vq,
@@ -896,8 +879,6 @@ pub extern "C" fn _start() -> ! {
 
                 i += 1;
             }
-
-            sys::print(b"\n");
 
             // Flush the union of all dirty rects.
             if union_x1 > union_x0 && union_y1 > union_y0 {
