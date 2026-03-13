@@ -25,7 +25,7 @@ Environment variables, external dependencies, and setup notes.
 ## Assets
 
 - Fonts and other runtime assets go in `system/share/` (mounted via virtio-9p at `hostshare`)
-- Currently: `SourceCodePro-Regular.ttf` (9,436 bytes)
+- Currently: `source-code-pro.ttf` (9,436 bytes)
 - New assets for this mission: proportional font, PNG test image, SVG icons
 
 ## QEMU Notes

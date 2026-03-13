@@ -17,8 +17,8 @@ fi
 
 # Ensure share directory exists with required assets
 mkdir -p share
-if [ ! -f share/SourceCodePro-Regular.ttf ]; then
-  echo "WARNING: share/SourceCodePro-Regular.ttf missing — font loading will fail at boot"
+if [ ! -f share/source-code-pro.ttf ]; then
+  echo "WARNING: share/source-code-pro.ttf missing — font loading will fail at boot"
 fi
 
 # Verify toolchain

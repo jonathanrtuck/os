@@ -966,16 +966,16 @@ pub extern "C" fn _start() -> ! {
         if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
             sys::print(b"     loading fonts from host filesystem\n");
 
-            // Allocate font buffer (256 KiB = order 6 = 64 pages).
-            // Holds both fonts: Source Code Pro (~10 KiB) + Nunito Sans (~142 KiB).
-            let font_order: u32 = 6;
+            // Allocate font buffer (1 MiB = order 8 = 256 pages).
+            // Holds fonts, PNG image, and SVG icons.
+            let font_order: u32 = 8;
             let font_page_count: u64 = 1u64 << font_order;
             let mut font_pa: u64 = 0;
             let _font_va = sys::dma_alloc(font_order, &mut font_pa).unwrap_or_else(|_| {
                 sys::print(b"init: dma_alloc (font buffer) failed\n");
                 sys::exit();
             });
-            let font_capacity: u32 = (font_page_count as u32) * 4096; // 256 KiB
+            let font_capacity: u32 = (font_page_count as u32) * 4096; // 1 MiB
 
             unsafe { core::ptr::write_bytes(_font_va as *mut u8, 0, font_capacity as usize) };
 
@@ -1052,14 +1052,14 @@ pub extern "C" fn _start() -> ! {
             };
 
             // Load monospace font (Source Code Pro) at offset 0.
-            sys::print(b"     loading SourceCodePro-Regular.ttf\n");
+            sys::print(b"     loading source-code-pro.ttf\n");
 
             let mono_len = read_font_file(
                 &p9_ch_obj,
                 p9_ch,
                 p9_font_va as u64,
                 font_capacity,
-                b"SourceCodePro-Regular.ttf",
+                b"source-code-pro.ttf",
             );
 
             if mono_len > 0 {
@@ -1084,7 +1084,7 @@ pub extern "C" fn _start() -> ! {
             }
 
             // Load proportional font (Nunito Sans) right after the mono font.
-            sys::print(b"     loading NunitoSans-Regular.ttf\n");
+            sys::print(b"     loading nunito-sans.ttf\n");
 
             let prop_offset = mono_len;
             let prop_capacity = font_capacity - prop_offset;
@@ -1094,7 +1094,7 @@ pub extern "C" fn _start() -> ! {
                 p9_ch,
                 prop_target_va,
                 prop_capacity,
-                b"NunitoSans-Regular.ttf",
+                b"nunito-sans.ttf",
             );
 
             if prop_len > 0 {

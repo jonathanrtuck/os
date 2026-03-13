@@ -18,7 +18,7 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 **Architecture notes:**
 
 - Chose 9P over virtiofs (simpler protocol, no host daemon, confirmed in QEMU).
-- Shared host directory: `system/share/` — contains SourceCodePro-Regular.ttf (9 KB).
+- Shared host directory: `system/share/` — contains source-code-pro.ttf (9 KB).
 - QEMU flags added to all 4 scripts (run, test, integration, crash).
 - This validates the prototype-on-host strategy from Decision #16: implement Files against the host filesystem during prototyping, defer the real COW filesystem.
 

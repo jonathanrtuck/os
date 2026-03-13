@@ -121,7 +121,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **What's scaffolding:**
 
 - `PixelFormat` enum has only `Bgra8888`. Trivial to extend (add variant + match arms), but currently untested with other formats.
-- Runtime fonts (SourceCodePro-Regular.ttf, NunitoSans-Regular.ttf) are loaded from the host filesystem via the 9p driver. Tests embed these same fonts for TrueType parser and rasterizer validation.
+- Runtime fonts (source-code-pro.ttf, nunito-sans.ttf) are loaded from the host filesystem via the 9p driver. Tests embed these same fonts for TrueType parser and rasterizer validation.
 
 **What's missing:**
 
