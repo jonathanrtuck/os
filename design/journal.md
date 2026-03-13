@@ -4,6 +4,69 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Compositor Split + Scene Graph Design (2026-03-13)
+
+**Status:** Design conversation in progress. Key architectural decisions settling.
+
+### Context
+
+Reviewed the full userspace architecture above the kernel. The compositor (`services/compositor/`, 2260 lines) had accumulated two fundamentally different responsibilities: OS service work (document ownership, input routing, edit protocol) and rendering work (surface management, compositing, GPU presentation). These need to separate into distinct processes.
+
+### Protocol Crate (completed)
+
+Created `libraries/protocol/` as the single source of truth for all IPC message types and payload structs. 8 modules organized by protocol boundary (device, gpu, input, edit, compose, editor, present, fs). All 22 message type constants centralized; zero duplicates remain across the codebase. Net -333 lines.
+
+Also fixed test infrastructure: libraries now have proper Cargo.toml files so the test crate uses normal Cargo dependencies instead of `#[path]` source includes. This eliminated a duplicate `DirtyRect` definition that existed solely to work around the test build limitation.
+
+### Design Decisions Reached
+
+**1. OS service and compositor are separate processes.**
+Not a code-organization split — a process boundary with IPC. The OS service owns document semantics; the compositor owns pixels. This matches the design principle of simple connective tissue between components, and validates the IPC protocol at a real boundary.
+
+**2. The interface between them is a scene graph.**
+Evaluated three options:
+- **Buffer-based (Wayland model):** OS service renders content into pixel buffers, compositor just composites. Simple but puts all rendering work in the OS service.
+- **Scene-graph-based (Fuchsia Scenic, Core Animation, game engines):** OS service sends a tree of typed visual nodes, compositor renders and composites. More capable.
+- **Command-based (X11, Plan 9 draw):** OS service sends drawing commands. Historical — every modern system moved away from this.
+
+Chose scene graph because:
+- "OS renders everything" means the OS *layer* (everything in `/services` and `/libraries`), not specifically the OS service process. The compositor IS part of the OS.
+- Layout and compositing are the same pipeline: document structure → positioned visual elements → pixels. The scene graph is the intermediate representation between those two stages.
+- It naturally supports compound documents (Decision #14): the document's spatial/temporal/logical relationships compile to a scene tree.
+- It doesn't artificially prevent game-engine-level rendering later (3D, animation, transforms) — you just add node types.
+
+**3. The scene graph is NOT the document structure — it's a compiled output.**
+The document model has semantic content (logical relationships, metadata, temporal sync) that the compositor doesn't need. The screen has visual elements (chrome, cursor, selection) that aren't in any document. The OS service *compiles* document structure into a scene graph, like a compiler turns source into machine code.
+
+**4. The scene graph lives in shared memory.**
+Written by the OS service, read by the compositor. The compositor is a pure function from scene graph to pixels. No scene graph state inside the compositor — if it crashes, the graph is still there, just restart and re-render. Same pattern as the existing document buffer.
+
+**5. The screen is the root compound document.**
+The entire visual output can be thought of as a compound document with system chrome and document content as its parts. The compositor doesn't know it's rendering "the screen" — it renders a scene graph, and the screen is just the root node. No special case for "the desktop." Multi-document views are just different layout types for the root document.
+
+### Research: Prior Art Surveyed
+
+- **Fuchsia FIDL + Scenic:** Full IDL for IPC (FIDL), scene-graph compositor (Scenic). Validated the typed-channel approach and scene-graph-at-OS-level pattern.
+- **Singularity OS contracts:** State-machine-typed channels. Too complex for single-language Rust OS, but the insight that channels should be typed per-protocol is applicable.
+- **seL4 CAmkES:** Framework-generated typed interfaces. Userspace typing over untyped kernel transport — same pattern we're following.
+- **Wayland:** Buffer-based compositor protocol. Good surface lifecycle model but doesn't match "OS renders everything."
+- **Core Animation:** Property-based layer tree with animations. The hybrid model (pre-rendered backing stores in a scene tree) is close to the right answer.
+- **Game engines (Unity, Godot, Bevy):** Scene tree of typed nodes with transforms and components. The compositor is essentially a document rendering engine — same structure.
+
+### Open Questions (next in this session)
+
+1. **What do the scene graph node types look like?** What are the primitives the compositor accepts for the initial 2D document case?
+2. **How do typed channels work?** `Channel<P>` API design, multiplexing across different protocol types with `wait()`.
+3. **Content rendering:** Does the compositor contain content-type leaf renderers (text, image), or does the OS service pre-render into buffers that become scene graph leaves? Leaning toward: leaf renderers inside the compositor (push complexity to leaf nodes).
+
+### Implications for Existing Decisions
+
+- **Decision #11 (Rendering Technology):** The "existing web engine" leaning may shift. If the compositor is a scene-graph renderer, a web engine becomes a content-type translator that produces scene graph nodes, not the rendering substrate. The scene graph IS the rendering engine.
+- **Decision #15 (Layout Engine):** The layout engine compiles document structure into the scene graph. The "CSS for spatial" option still works — CSS layout produces positioned nodes that become scene graph nodes. But the layout engine is now clearly upstream of the compositor, not inside it.
+- **Decision #14 (Compound Documents):** The three-axis relationship model (spatial, temporal, logical) maps to the scene graph. Spatial relationships become positions/transforms. Temporal and logical relationships may need scene graph support beyond static trees (animation timelines, visibility state).
+
+---
+
 ## Virtio-9P Host Filesystem Passthrough (2026-03-11)
 
 **Status:** Working. Font loading end-to-end via 9P2000.L protocol over virtio transport.

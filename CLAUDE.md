@@ -70,7 +70,13 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-11 (latest):** Filesystem design session. Major edit protocol revision + Files interface designed. Kernel bug audit mission running in parallel.
+**Session 2026-03-13 (latest):** Compositor split + scene graph design. Protocol crate refactor.
+
+**Protocol crate (2026-03-13):** Created `libraries/protocol/` as single source of truth for all IPC message types and payload structs. 8 modules by protocol boundary. Zero duplicated constants or structs remain. Libraries now have proper Cargo.toml files; test crate uses normal Cargo dependencies instead of `#[path]` source includes.
+
+**Compositor split design (2026-03-13, in progress):** The compositor (2260 lines) splits into OS service (document semantics) and compositor (pixels). Interface between them: a **scene graph in shared memory** — the OS service compiles document structure into a tree of typed visual nodes, the compositor renders them. Key insight: the screen is the root compound document. Layout and compositing are the same pipeline: document → scene graph → pixels. Prior art surveyed: Fuchsia Scenic, Core Animation, Wayland, game engines (Unity/Godot/Bevy). **Next:** scene graph node type design.
+
+**Session 2026-03-11:** Filesystem design session. Major edit protocol revision + Files interface designed. Kernel bug audit mission running in parallel.
 
 **Filesystem design (2026-03-11):** Comprehensive filesystem discussion settling several open questions. Key decisions: (1) **Editors are read-only consumers** — all writes go through the OS service via IPC. "Never make the wrong path the happy path": undo is automatic and non-circumventable, no editor cooperation required. (2) **Compound documents use copy semantics** — embedding creates an independent copy, COW shares physical blocks, provenance metadata enables "update to latest." (3) **Files interface designed** — 12 operations, files by opaque ID, no paths/permissions/locking/links. A dumb file store; all semantics live above. (4) **Prototype-on-host strategy** — implement Files against macOS during prototyping, build real COW FS later. (5) **Compound atomicity solved** — OS service as sole writer sequences multi-file writes, no FS transactions needed. (6) **Snapshot scope punted** — per-document vs global vs time-correlated still open, doesn't block interface.
 
