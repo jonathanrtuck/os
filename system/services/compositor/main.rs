@@ -50,6 +50,9 @@ const MSG_WRITE_DELETE: u32 = 31;
 const MSG_CURSOR_MOVE: u32 = 32;
 const MSG_SELECTION_UPDATE: u32 = 33;
 const MSG_WRITE_DELETE_RANGE: u32 = 34;
+/// Compositor → editor: set cursor position from click-to-position.
+/// Payload: CursorMove { position: u32 }.
+const MSG_SET_CURSOR: u32 = 35;
 // Linux evdev keycodes for Ctrl+Tab — used as the context switch combo.
 // Tab (keycode 15) alone produces '\t' and is forwarded to the editor.
 // Only Tab while Left Ctrl is held triggers context switching.
@@ -1706,8 +1709,69 @@ pub extern "C" fn _start() -> ! {
                         changed = true;
                     }
                     MSG_POINTER_BUTTON => {
-                        // Pointer button event — will be processed by
-                        // click-to-position feature.
+                        let btn: PointerButton = unsafe { msg.payload_as() };
+
+                        // Only process left button press (not release).
+                        if btn.button == 0 && btn.pressed == 1 {
+                            let click_x = unsafe { MOUSE_X };
+                            let click_y = unsafe { MOUSE_Y };
+
+                            // Ignore clicks in the title bar region.
+                            if click_y < TITLE_BAR_H {
+                                continue;
+                            }
+
+                            // Only process clicks in text editor mode.
+                            if unsafe { IMAGE_MODE } {
+                                continue;
+                            }
+
+                            // Convert screen coordinates to content-relative
+                            // text coordinates. The content surface starts at
+                            // (content_x, content_y) and text within it has
+                            // insets TEXT_INSET_X and TEXT_INSET_TOP.
+                            let text_origin_x = content_x as u32 + TEXT_INSET_X;
+                            let text_origin_y = content_y as u32 + TEXT_INSET_TOP;
+
+                            // If click is above the text area (in shadow region
+                            // between title bar and text start), clamp to line 0.
+                            let rel_x = click_x.saturating_sub(text_origin_x);
+                            let rel_y = click_y.saturating_sub(text_origin_y);
+
+                            // Account for scroll offset: add scroll_offset
+                            // visual lines worth of pixels to the y coordinate.
+                            let scroll = unsafe { SCROLL_OFFSET };
+                            let line_h = unsafe { LINE_H };
+                            let adjusted_y = rel_y + scroll * line_h;
+
+                            // Use TextLayout::xy_to_byte to convert pixel
+                            // position to byte offset.
+                            let layout = content_text_layout(content_w);
+                            let text = doc_content();
+                            let byte_pos = layout.xy_to_byte(text, rel_x, adjusted_y);
+
+                            // Update cursor position (compositor is sole writer).
+                            unsafe {
+                                CURSOR_POS = byte_pos;
+                                // Clear selection on click.
+                                SEL_START = 0;
+                                SEL_END = 0;
+                            }
+
+                            doc_write_header();
+
+                            // Notify the editor of the new cursor position
+                            // so its local cursor variable stays in sync.
+                            let cm = CursorMove { position: byte_pos as u32 };
+                            let cm_msg = unsafe {
+                                ipc::Message::from_payload(MSG_SET_CURSOR, &cm)
+                            };
+                            editor_ch.send(&cm_msg);
+                            let _ = sys::channel_signal(EDITOR_HANDLE);
+
+                            changed = true;
+                            text_changed = true;
+                        }
                     }
                     _ => {}
                 }

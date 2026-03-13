@@ -6103,4 +6103,82 @@ fn test_scale_pointer_coord_zero_max() {
     assert_eq!(drawing::scale_pointer_coord(16384, 0), 0);
 }
 
+// ---------------------------------------------------------------------------
+// xy_to_byte tests — click-to-position: verify pixel-to-byte conversion
+// for click placement in the text editor content area.
+// ---------------------------------------------------------------------------
+
+/// Click-to-position: clicking at the exact pixel position from byte_to_xy
+/// round-trips back to the same byte offset for all positions in multiline text.
+#[test]
+fn click_to_position_round_trip_multiline() {
+    let layout = TextLayout {
+        char_width: 10,
+        line_height: 24,
+        max_width: 800,
+    };
+    let text = b"hello world\nline two\nthird line here";
+
+    for pos in 0..=text.len() {
+        let (x, y) = layout.byte_to_xy(text, pos);
+        let result = layout.xy_to_byte(text, x, y);
+        assert_eq!(
+            result, pos,
+            "click round-trip failed for pos={}: byte_to_xy→({},{}) xy_to_byte→{}",
+            pos, x, y, result,
+        );
+    }
+}
+
+/// Click-to-position: clicking past the end of text on the last line returns
+/// text.len() (cursor positioned at end of document).
+#[test]
+fn click_to_position_past_end_of_document() {
+    let layout = TextLayout {
+        char_width: 10,
+        line_height: 24,
+        max_width: 800,
+    };
+    let text = b"hello";
+    // Click far past the end of "hello" on line 0.
+    let result = layout.xy_to_byte(text, 500, 0);
+    assert_eq!(result, 5);
+}
+
+/// Click-to-position: clicking below all text positions cursor at end of
+/// nearest (last) line.
+#[test]
+fn click_to_position_below_all_text() {
+    let layout = TextLayout {
+        char_width: 10,
+        line_height: 24,
+        max_width: 800,
+    };
+    let text = b"ab\ncd";
+    // Click at y=200 which is well below the last line (line 1 at y=24).
+    let result = layout.xy_to_byte(text, 0, 200);
+    assert_eq!(result, text.len());
+}
+
+/// Click-to-position with scroll offset: after subtracting scroll_offset
+/// visual lines, the click should map to the correct byte in the document.
+#[test]
+fn click_to_position_with_scroll_offset() {
+    let layout = TextLayout {
+        char_width: 10,
+        line_height: 24,
+        max_width: 800,
+    };
+    // 3 lines: "aaa\nbbb\nccc"
+    let text = b"aaa\nbbb\nccc";
+    // Simulate scroll_offset = 1 (first visible line is "bbb").
+    // A click at y=0 in the viewport maps to visual line 1 in the document.
+    let scroll_offset: u32 = 1;
+    let click_y: u32 = 0; // top of viewport
+    let adjusted_y = click_y + scroll_offset * layout.line_height;
+    let result = layout.xy_to_byte(text, 0, adjusted_y);
+    // Visual line 1 starts at byte 4 ('b').
+    assert_eq!(result, 4);
+}
+
 

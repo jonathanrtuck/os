@@ -39,6 +39,8 @@ const MSG_WRITE_DELETE: u32 = 31;
 const MSG_CURSOR_MOVE: u32 = 32;
 const MSG_SELECTION_UPDATE: u32 = 33;
 const MSG_WRITE_DELETE_RANGE: u32 = 34;
+/// Compositor → editor: set cursor position from click-to-position.
+const MSG_SET_CURSOR: u32 = 35;
 const MSG_EDITOR_CONFIG: u32 = 4;
 // Keycodes (Linux evdev).
 const KEY_LEFT: u16 = 105;
@@ -169,6 +171,17 @@ pub extern "C" fn _start() -> ! {
         let _ = sys::wait(&[OS_HANDLE], u64::MAX);
 
         while os_ch.try_recv(&mut msg) {
+            // Handle click-to-position: compositor sets cursor directly.
+            if msg.msg_type == MSG_SET_CURSOR {
+                let cm: CursorMove = unsafe { msg.payload_as() };
+                cursor = cm.position as usize;
+                // Clear any active selection on click.
+                has_selection = false;
+                anchor = 0;
+
+                continue;
+            }
+
             if msg.msg_type != MSG_KEY_EVENT {
                 continue;
             }
