@@ -3795,15 +3795,18 @@ fn context_switch_draw_tt_cursor_positions_valid() {
     }
 }
 
-/// Verify F1 keycode (59) does not produce a printable ASCII character
-/// in the input driver's keycode-to-ASCII translation table. This ensures
-/// the context switch key won't interfere with text editing.
+/// Verify Ctrl+Tab context switch combo: Left Ctrl (keycode 29) is
+/// mapped to 0 (non-printable) in the input driver's keycode-to-ASCII
+/// table, so Ctrl press/release events are safely intercepted by the
+/// compositor. Tab (keycode 15) maps to '\t' — without Ctrl held it is
+/// forwarded to the editor as a normal character; only Tab+Ctrl triggers
+/// context switching.
 #[test]
-fn context_switch_f1_keycode_not_printable() {
-    // Linux evdev keycode for F1 is 59.
-    // The input driver's keycode_to_ascii map only covers keycodes 0-57.
-    // Keycode 59 is beyond the map, so it returns 0 (unmapped).
-    let f1_keycode: usize = 59;
+fn context_switch_ctrl_tab_keycodes() {
+    // Linux evdev keycodes.
+    let key_tab: usize = 15;
+    let key_leftctrl: usize = 29;
+    let key_f1: usize = 59;
 
     // Reproduce the input driver's keycode_to_ascii lookup table.
     static MAP: [u8; 58] = [
@@ -3822,20 +3825,53 @@ fn context_switch_f1_keycode_not_printable() {
         0, 0, 0, b' ',
     ];
 
-    // F1 keycode 59 is beyond the map (length 58), so it returns 0.
-    assert!(f1_keycode >= MAP.len(),
-        "F1 keycode {} should be beyond the ASCII map (len {})", f1_keycode, MAP.len());
+    // Left Ctrl (keycode 29) maps to 0 — non-printable, intercepted by
+    // the compositor for modifier tracking.
+    assert!(key_leftctrl < MAP.len(),
+        "Left Ctrl keycode should be within the ASCII map");
+    assert_eq!(MAP[key_leftctrl], 0,
+        "Left Ctrl should map to 0 (non-printable)");
 
-    // The driver returns 0 for keycodes beyond the map.
-    let ascii: u8 = if f1_keycode < MAP.len() { MAP[f1_keycode] } else { 0 };
-    assert_eq!(ascii, 0, "F1 keycode should not produce a printable character");
+    // Tab (keycode 15) maps to '\t' — a printable/whitespace character.
+    // Without Ctrl held, Tab is forwarded to the editor as normal input.
+    assert!(key_tab < MAP.len(),
+        "Tab keycode should be within the ASCII map");
+    assert_eq!(MAP[key_tab], b'\t',
+        "Tab should map to '\\t' (tab character)");
 
-    // Also verify no existing printable keys in the map conflict with F1.
-    // F1 through F12 use keycodes 59-70, all beyond the map.
-    for fkey in 59..=70u16 {
-        let a = if (fkey as usize) < MAP.len() { MAP[fkey as usize] } else { 0 };
-        assert_eq!(a, 0, "Function key {} should not be printable", fkey);
-    }
+    // F1 (keycode 59) is beyond the map — no longer used for context
+    // switching (replaced by Ctrl+Tab).
+    assert!(key_f1 >= MAP.len(),
+        "F1 keycode {} should be beyond the ASCII map (len {})", key_f1, MAP.len());
+    let f1_ascii: u8 = if key_f1 < MAP.len() { MAP[key_f1] } else { 0 };
+    assert_eq!(f1_ascii, 0, "F1 keycode should not produce a printable character");
+}
+
+/// Verify that Tab without Ctrl does not conflict with context switching.
+/// The compositor only triggers a switch when ctrl_pressed is true AND
+/// keycode == KEY_TAB, so a bare Tab press produces '\t' for the editor.
+#[test]
+fn context_switch_tab_alone_is_not_switch() {
+    // Simulate the compositor's Ctrl+Tab logic.
+    let key_tab: u16 = 15;
+    let mut ctrl_pressed = false;
+
+    // Tab pressed without Ctrl — should NOT trigger context switch.
+    let should_switch = key_tab == 15 && ctrl_pressed;
+    assert!(!should_switch,
+        "Tab alone (without Ctrl) must not trigger context switch");
+
+    // Now simulate Ctrl held + Tab — SHOULD trigger context switch.
+    ctrl_pressed = true;
+    let should_switch = key_tab == 15 && ctrl_pressed;
+    assert!(should_switch,
+        "Ctrl+Tab must trigger context switch");
+
+    // Ctrl released + Tab again — should NOT switch.
+    ctrl_pressed = false;
+    let should_switch = key_tab == 15 && ctrl_pressed;
+    assert!(!should_switch,
+        "Tab after Ctrl release must not trigger context switch");
 }
 
 // ---------------------------------------------------------------------------

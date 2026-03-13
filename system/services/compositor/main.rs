@@ -45,10 +45,11 @@ const MSG_WRITE_DELETE: u32 = 31;
 const MSG_CURSOR_MOVE: u32 = 32;
 const MSG_SELECTION_UPDATE: u32 = 33;
 const MSG_WRITE_DELETE_RANGE: u32 = 34;
-// Linux evdev keycode for F1 — used as the context switch key.
-// F1 is beyond the ASCII keymap (keycodes 0-57), so it won't produce
-// a printable character and doesn't conflict with any editor keys.
-const KEY_F1: u16 = 59;
+// Linux evdev keycodes for Ctrl+Tab — used as the context switch combo.
+// Tab (keycode 15) alone produces '\t' and is forwarded to the editor.
+// Only Tab while Left Ctrl is held triggers context switching.
+const KEY_TAB: u16 = 15;
+const KEY_LEFTCTRL: u16 = 29;
 // Handle indices (determined by the order init sends handles).
 const INPUT_HANDLE: u8 = 1;
 const GPU_HANDLE: u8 = 2;
@@ -960,11 +961,11 @@ pub extern "C" fn _start() -> ! {
 
                             unsafe {
                                 // Boot into editor mode; user switches
-                                // to image viewer via F1.
+                                // to image viewer via Ctrl+Tab.
                                 IMAGE_MODE = false;
                             }
 
-                            sys::print(b"     PNG decoded successfully (F1 to view)\n");
+                            sys::print(b"     PNG decoded successfully (Ctrl+Tab to view)\n");
                         }
                         Err(_) => {
                             sys::print(b"     PNG decode failed\n");
@@ -1256,6 +1257,7 @@ pub extern "C" fn _start() -> ! {
     //   5. Swap back/front buffers
     // -----------------------------------------------------------------------
     let mut first_present_done = false;
+    let mut ctrl_pressed = false;
 
     loop {
         // Build the wait handle set: input + editor + optional timer.
@@ -1295,13 +1297,20 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Forward input events to the editor (except context switch key).
+        // Forward input events to the editor (except context switch combo).
         while input_ch.try_recv(&mut msg) {
             if msg.msg_type == MSG_KEY_EVENT {
                 let key: KeyEvent = unsafe { msg.payload_as() };
 
-                // F1 toggles between editor and image viewer contexts.
-                if key.keycode == KEY_F1 && key.pressed == 1 {
+                // Track Left Ctrl modifier state.
+                if key.keycode == KEY_LEFTCTRL {
+                    ctrl_pressed = key.pressed == 1;
+
+                    continue; // Don't forward Ctrl to editor.
+                }
+
+                // Ctrl+Tab toggles between editor and image viewer contexts.
+                if key.keycode == KEY_TAB && key.pressed == 1 && ctrl_pressed {
                     let has_image = !image_pixels.is_empty();
 
                     if has_image {
@@ -1342,7 +1351,7 @@ pub extern "C" fn _start() -> ! {
                         context_switched = true;
                     }
 
-                    continue; // Don't forward F1 to editor.
+                    continue; // Don't forward Ctrl+Tab to editor.
                 }
 
                 // In image mode, don't forward editing keys to the editor —
