@@ -5,59 +5,56 @@
 // constant. This makes the palette reviewable as a cohesive set and makes
 // it trivial to tune the overall theme.
 //
-// Design: dark theme with cool blue-grey tones. Background is near-black
-// with a slight blue cast. Chrome overlays are translucent dark panels.
-// Text uses light grey/blue for readability. Accent colors (cursor,
-// selection) use saturated blue to stand out without clashing.
+// Design: pure monochrome dark theme — neutral greys only (R=G=B for every
+// color). No blue, warm, or cool tint. Background is near-black, chrome
+// overlays are translucent grey panels, text is light grey/white.
 // --------------------------------------------------------------------------
 
-/// Deep near-black background with a subtle blue cast.
+/// Deep near-black background (R=G=B=16).
 /// Used as the full-screen background fill (z=0).
-pub const BG_BASE: Color = Color::rgb(18, 18, 26);
+pub const BG_BASE: Color = Color::rgb(16, 16, 16);
 
-/// Content area background — slightly lighter than BG_BASE to
-/// give the editor region a subtle distinction under the chrome.
-pub const BG_CONTENT: Color = Color::rgb(24, 24, 36);
+/// Content area background — slightly lighter than BG_BASE (R=G=B=20)
+/// to give the editor region a subtle distinction under the chrome.
+pub const BG_CONTENT: Color = Color::rgb(20, 20, 20);
 
 /// Translucent chrome panel background (title bar, status bar).
-/// Alpha 220/255 ≈ 86% opaque — lets content peek through.
-pub const CHROME_BG: Color = Color::rgba(30, 30, 48, 220);
+/// Alpha 170/255 ≈ 67% opaque — content visibly peeks through.
+pub const CHROME_BG: Color = Color::rgba(48, 48, 48, 170);
 
 /// Chrome separator line (bottom of title bar, top of status bar).
 /// Subtle divider that reinforces the boundary without being harsh.
-pub const CHROME_BORDER: Color = Color::rgba(60, 60, 80, 200);
+pub const CHROME_BORDER: Color = Color::rgba(80, 80, 80, 220);
 
-/// Primary text in the editor — high contrast on dark background.
-pub const TEXT_PRIMARY: Color = Color::rgb(200, 210, 230);
+/// Primary text in the editor — high contrast on dark background (R=G=B=220).
+pub const TEXT_PRIMARY: Color = Color::rgb(220, 220, 220);
 
-/// Cursor color — bright accent blue, same as the cursor bar.
-pub const TEXT_CURSOR: Color = Color::rgb(100, 180, 255);
+/// Cursor color — pure bright white, immediately locatable.
+pub const TEXT_CURSOR: Color = Color::rgb(255, 255, 255);
 
-/// Selection highlight — semi-transparent blue overlay behind
-/// selected text. Alpha 180 keeps the text readable.
-pub const TEXT_SELECTION: Color = Color::rgba(50, 80, 160, 180);
+/// Selection highlight — semi-transparent grey overlay behind
+/// selected text. Alpha 140 keeps the text readable.
+pub const TEXT_SELECTION: Color = Color::rgba(100, 100, 100, 140);
 
-/// Chrome title text ("Document OS") — slightly muted white.
-pub const CHROME_TITLE: Color = Color::rgb(200, 200, 220);
+/// Chrome title text — bright grey for readability (R=G=B=210).
+pub const CHROME_TITLE: Color = Color::rgb(210, 210, 210);
 
-/// Chrome subtitle text (right-aligned descriptive text) — dim,
-/// secondary information that doesn't compete with the title.
-pub const CHROME_SUBTITLE: Color = Color::rgb(90, 90, 110);
+/// Chrome subtitle text — dim secondary info (R=G=B=100).
+pub const CHROME_SUBTITLE: Color = Color::rgb(100, 100, 100);
 
-/// Chrome status text (left side of status bar) — medium contrast.
-pub const CHROME_STATUS: Color = Color::rgb(130, 130, 150);
+/// Chrome status text — medium contrast (R=G=B=140).
+pub const CHROME_STATUS: Color = Color::rgb(140, 140, 140);
 
-/// Chrome clock text (right side of status bar) — slightly brighter
-/// than status text to draw the eye toward the time display.
-pub const CHROME_CLOCK: Color = Color::rgb(160, 170, 190);
+/// Chrome clock text — slightly brighter than status text (R=G=B=200)
+/// to draw the eye toward the time display.
+pub const CHROME_CLOCK: Color = Color::rgb(200, 200, 200);
 
-/// SVG icon tint in the title bar — soft blue-grey that harmonizes
-/// with the title text.
-pub const CHROME_ICON: Color = Color::rgb(180, 190, 220);
+/// SVG icon tint in the title bar — neutral light grey (R=G=B=190).
+pub const CHROME_ICON: Color = Color::rgb(190, 190, 190);
 
 /// Drop shadow peak opacity — used for the gradient shadows between
-/// chrome and content. Pure black with controlled alpha.
-pub const SHADOW_PEAK: Color = Color::rgba(0, 0, 0, 80);
+/// chrome and content. Pure black with alpha 160 for visible darkening.
+pub const SHADOW_PEAK: Color = Color::rgba(0, 0, 0, 160);
 
 /// Drop shadow transparent end — fully transparent black.
 pub const SHADOW_ZERO: Color = Color::rgba(0, 0, 0, 0);

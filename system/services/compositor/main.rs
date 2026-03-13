@@ -60,8 +60,8 @@ const Z_BACKGROUND: u16 = 0;
 const Z_CONTENT: u16 = 10;
 const Z_SHADOW: u16 = 15;
 const Z_CHROME: u16 = 20;
-// Drop shadow configuration.
-const SHADOW_DEPTH: u32 = 8;
+// Drop shadow configuration — 12px depth for visible darkening.
+const SHADOW_DEPTH: u32 = 12;
 // Shadow alpha max is defined in drawing::SHADOW_PEAK.
 // Chrome dimensions.
 const TITLE_BAR_H: u32 = 36;
