@@ -1,0 +1,140 @@
+{
+  "groupId": "palette-background",
+  "testedAt": "2026-03-12T03:36:00Z",
+  "credentials": {
+    "account": "n/a (bare-metal OS in QEMU)",
+    "namespace": "n/a"
+  },
+  "toolsUsed": ["QEMU screendump", "PIL pixel inspection", "code review"],
+  "assertions": [
+    {
+      "id": "VAL-PAL-001",
+      "title": "Pure monochrome palette",
+      "status": "pass",
+      "steps": [
+        { "action": "Code review of palette.rs", "expected": "All color constants have R=G=B", "observed": "All 15 color constants are neutral greys (R=G=B). BG_BASE(16,16,16), BG_CENTER(28,28,28), BG_CONTENT(20,20,20), CHROME_BG(48,48,48,a170), CHROME_BORDER(80,80,80,a220), TEXT_PRIMARY(220,220,220), TEXT_CURSOR(255,255,255), TEXT_SELECTION(100,100,100,a140), CHROME_TITLE(210,210,210), CHROME_SUBTITLE(100,100,100), CHROME_STATUS(140,140,140), CHROME_CLOCK(200,200,200), CHROME_ICON(190,190,190), SHADOW_PEAK(0,0,0,a160), SHADOW_ZERO(0,0,0,a0)." },
+        { "action": "Pixel sample chrome background (78 pixels, y=5-15)", "expected": "R=G=B for non-text pixels", "observed": "74/78 grey. 4 non-grey pixels all on text/icon glyph edges (subpixel fringing, excluded). 0 non-grey in chrome background." },
+        { "action": "Pixel sample content background (430 pixels, y=200-500)", "expected": "R=G=B everywhere", "observed": "0 non-grey pixels out of 430 sampled. All perfectly neutral grey." },
+        { "action": "Pixel sample text area (630 pixels, y=42-62)", "expected": "R=G=B for non-glyph pixels", "observed": "0 non-grey pixels out of 630 sampled." },
+        { "action": "Full chrome scan (1280x26 area) for non-grey pixels", "expected": "Non-grey only at glyph edges", "observed": "1063 non-grey pixels, ALL on text/icon positions (title text, clock text, icon). 0 in non-text chrome areas. Non-grey is subpixel color fringing (excluded per assertion)." }
+      ],
+      "evidence": {
+        "screenshots": ["/tmp/qemu-screen.png"],
+        "consoleErrors": "n/a (bare-metal OS)",
+        "codeReview": "palette.rs: all 15 color constants verified R=G=B",
+        "pixelData": "430 bg pixels: 0 non-grey. 630 text pixels: 0 non-grey. 78 chrome pixels: 4 non-grey (all subpixel fringing on glyphs)."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PAL-002",
+      "title": "Visible translucency",
+      "status": "pass",
+      "steps": [
+        { "action": "Code review of CHROME_BG in palette.rs", "expected": "Alpha between 128-200", "observed": "CHROME_BG alpha = 170 (67% opaque), within 128-200 range." },
+        { "action": "Pixel inspection: chrome composited values", "expected": "Composited values consistent with translucent blending", "observed": "Chrome pixels average ~41 grey. Math: 48*(170/255) + ~24*(85/255) ≈ 40.0, consistent with translucent compositing." },
+        { "action": "Check gradient bleed-through across chrome", "expected": "Center chrome slightly lighter than edge chrome", "observed": "Chrome center (640,10)=41, edge (100,10)=40 and (1180,10)=40. 1-unit variation consistent with radial gradient bleeding through translucent chrome." },
+        { "action": "Visual inspection of screenshot", "expected": "Chrome panel appears translucent", "observed": "Title bar is visibly a translucent dark panel overlaying the background. Content behind chrome contributes to the composited result." }
+      ],
+      "evidence": {
+        "screenshots": ["/tmp/qemu-screen.png"],
+        "consoleErrors": "n/a",
+        "codeReview": "CHROME_BG = Color::rgba(48, 48, 48, 170) — alpha 170 is within 128-200 range",
+        "pixelData": "Chrome composited at ~40-42 grey, consistent with alpha=170 blending over bg ~24."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PAL-003",
+      "title": "Visible shadows",
+      "status": "pass",
+      "steps": [
+        { "action": "Code review of shadow colors in palette.rs", "expected": "Shadow gradient defined", "observed": "SHADOW_PEAK = rgba(0,0,0,160), SHADOW_ZERO = rgba(0,0,0,0) — gradient from opaque black to transparent." },
+        { "action": "Vertical pixel strip at x=640 through chrome→shadow→content", "expected": "Darkening gradient below chrome", "observed": "Chrome area (y=22-34): ~41-42. Shadow peak (y=36): 13. Recovery: y=38→15, y=40→20, y=42→22, y=46→26. Content settles at ~26 by y=60+." },
+        { "action": "Visual inspection of screenshot", "expected": "Visible darkening below title bar", "observed": "Shadow is clearly visible in screenshot — a dark band below the title bar transitioning into the content area." }
+      ],
+      "evidence": {
+        "screenshots": ["/tmp/qemu-screen.png"],
+        "consoleErrors": "n/a",
+        "codeReview": "SHADOW_PEAK(0,0,0,160) → SHADOW_ZERO(0,0,0,0) gradient",
+        "pixelData": "Chrome=42 → Shadow peak=13 (y=36) → gradual recovery to content=26 (y=60). Drop of 29 units at shadow peak, clearly perceptible."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PAL-004",
+      "title": "White cursor clearly visible",
+      "status": "pass",
+      "steps": [
+        { "action": "Code review of TEXT_CURSOR in palette.rs", "expected": "Pure white (255,255,255)", "observed": "TEXT_CURSOR = Color::rgb(255, 255, 255) — pure white." },
+        { "action": "Type 'hello world' and scan for bright pixels", "expected": "Bright white cursor visible", "observed": "Found 18 pure white (255,255,255) pixels at x=144-145, y=56-64. Vertical bar cursor clearly present." },
+        { "action": "Measure contrast against background", "expected": "High contrast", "observed": "Background around cursor: ~16-22 grey. Cursor: 255. Contrast ratio ~12:1 — extremely high visibility." },
+        { "action": "Visual inspection of screenshot", "expected": "Cursor immediately locatable", "observed": "Bright white cursor bar is immediately visible at end of 'hello world' text." }
+      ],
+      "evidence": {
+        "screenshots": ["/tmp/qemu-screen.png"],
+        "consoleErrors": "n/a",
+        "codeReview": "TEXT_CURSOR = Color::rgb(255, 255, 255)",
+        "pixelData": "18 pixels at (144-145, 56-64) all R=G=B=255. Background ~18 grey. Contrast ratio ~14:1."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PAL-005",
+      "title": "Selection highlight visible",
+      "status": "pass",
+      "steps": [
+        { "action": "Code review of TEXT_SELECTION in palette.rs", "expected": "Semi-transparent selection color", "observed": "TEXT_SELECTION = Color::rgba(100, 100, 100, 140) — semi-transparent grey overlay." },
+        { "action": "Select 'world' with shift-left arrows", "expected": "Selection highlight appears", "observed": "Selection created. Screenshot shows 'world' visually highlighted with lighter background." },
+        { "action": "Pixel comparison: selected vs unselected at same y positions", "expected": "Selected area visibly brighter", "observed": "Selected area (x=90, y=56-65): ~76 grey. Unselected area (x=30, same y): ~15-21 grey. Difference of 55-61 units — selection is clearly visible." },
+        { "action": "Check text readability within selection", "expected": "Text readable within selection", "observed": "Text pixels within selection at ~220 grey against 76 grey selection background. Text remains clearly readable." }
+      ],
+      "evidence": {
+        "screenshots": ["/tmp/qemu-selection.png"],
+        "consoleErrors": "n/a",
+        "codeReview": "TEXT_SELECTION = Color::rgba(100, 100, 100, 140)",
+        "pixelData": "Selection region y=56-66: ~76 grey vs background ~17 grey. 55+ unit brightness difference. Text at ~220 remains readable."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-BG-001",
+      "title": "Radial gradient background",
+      "status": "pass",
+      "steps": [
+        { "action": "Code review: BG_BASE and BG_CENTER in palette.rs", "expected": "Two gradient endpoints defined", "observed": "BG_BASE=rgb(16,16,16) for edges, BG_CENTER=rgb(28,28,28) for center. 12-unit radial gradient." },
+        { "action": "Pixel sample center vs corners", "expected": "Center brighter than corners", "observed": "Center (640,400)=30. Corners: TL(10,100)=16, TR(1270,100)=15, BL(10,790)=13, BR(1270,790)=19. Center is ~14 units brighter." },
+        { "action": "Sample midpoints of edges", "expected": "Intermediate brightness between center and corners", "observed": "Top-mid=26, Bottom-center=24, Left-mid=21, Right-mid=18. Values decrease radially from center." },
+        { "action": "Visual inspection of screenshot", "expected": "Visible gradient, not flat color", "observed": "Screenshot clearly shows lighter center fading to darker edges — not a flat solid color." }
+      ],
+      "evidence": {
+        "screenshots": ["/tmp/qemu-screen.png"],
+        "consoleErrors": "n/a",
+        "codeReview": "BG_BASE(16,16,16) edges, BG_CENTER(28,28,28) center — 12-unit gradient range",
+        "pixelData": "Center=30, avg corners=15.8. 14.2-unit radial gradient clearly measurable."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-BG-002",
+      "title": "Noise texture",
+      "status": "pass",
+      "steps": [
+        { "action": "Code review: palette comments mention noise", "expected": "Noise described in design", "observed": "BG_CENTER comment: 'radial gradient from BG_CENTER to BG_BASE with per-pixel noise to break up banding'." },
+        { "action": "Sample adjacent background pixels", "expected": "Value variation between neighbors", "observed": "30 adjacent pixels at y=400: values range 24-30 with 7 unique values. Pattern varies row to row — not smooth gradient." },
+        { "action": "Check 5 rows of 30 pixels each", "expected": "Each row has value variation", "observed": "All 5 rows (y=400-404) show 7 unique values each. Adjacent pixels differ by 1-6 units — visible noise texture." },
+        { "action": "Verify pixels are NOT all identical", "expected": "Not perfectly smooth", "observed": "Confirmed: adjacent pixels vary. Background is textured, not smooth." }
+      ],
+      "evidence": {
+        "screenshots": ["/tmp/qemu-screen.png"],
+        "consoleErrors": "n/a",
+        "codeReview": "BG_CENTER comment: 'per-pixel noise to break up banding'",
+        "pixelData": "y=400 row sample: [28,28,30,25,27,27,28,30,30,30,26,29,29,24,24,30,27,27,25,25,27,30,29,29,28,25,24,28,28,27] — 7 unique values in 30 pixels. Adjacent pixels vary 1-6 units."
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 7 assertions: all 7 passed. VAL-PAL-001 (monochrome palette) confirmed via code review (15 R=G=B colors) and pixel inspection (0 non-grey in background/text areas; chrome non-grey only at subpixel-rendered glyphs, excluded). VAL-PAL-002 (translucency) confirmed: chrome alpha=170, composited pixels consistent with blending. VAL-PAL-003 (shadows) confirmed: 29-unit darkening at shadow peak below chrome. VAL-PAL-004 (cursor) confirmed: 255-white cursor against ~18 background, 14:1 contrast. VAL-PAL-005 (selection) confirmed: 55+ unit brightness difference, text readable. VAL-BG-001 (radial gradient) confirmed: center=30 vs corner avg=15.8. VAL-BG-002 (noise) confirmed: 7 unique values in 30 adjacent pixels."
+}

@@ -1,0 +1,37 @@
+{
+  "milestone": "visual-overhaul",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 20,
+    "passed": 20,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-BG-001",
+    "VAL-BG-002",
+    "VAL-CHROME-001",
+    "VAL-CHROME-002",
+    "VAL-CHROME-003",
+    "VAL-CHROME-004",
+    "VAL-CHROME-005",
+    "VAL-CLK-001",
+    "VAL-CLK-002",
+    "VAL-CROSS-002",
+    "VAL-FONT-001",
+    "VAL-FONT-002",
+    "VAL-FONT-003",
+    "VAL-FONT-004",
+    "VAL-FONT-005",
+    "VAL-PAL-001",
+    "VAL-PAL-002",
+    "VAL-PAL-003",
+    "VAL-PAL-004",
+    "VAL-PAL-005"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}
