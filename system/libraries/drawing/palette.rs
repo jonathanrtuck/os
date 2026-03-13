@@ -18,11 +18,11 @@ pub const BG_BASE: Color = Color::rgb(16, 16, 16);
 /// to give the editor region a subtle distinction under the chrome.
 pub const BG_CONTENT: Color = Color::rgb(20, 20, 20);
 
-/// Translucent chrome panel background (title bar, status bar).
+/// Translucent chrome panel background (title bar).
 /// Alpha 170/255 ≈ 67% opaque — content visibly peeks through.
 pub const CHROME_BG: Color = Color::rgba(48, 48, 48, 170);
 
-/// Chrome separator line (bottom of title bar, top of status bar).
+/// Chrome separator line (bottom of title bar).
 /// Subtle divider that reinforces the boundary without being harsh.
 pub const CHROME_BORDER: Color = Color::rgba(80, 80, 80, 220);
 

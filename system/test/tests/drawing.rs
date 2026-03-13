@@ -2162,18 +2162,18 @@ fn damage_tracker_max_rects_is_6() {
 }
 
 #[test]
-fn damage_tracker_multiple_content_and_status_rects() {
-    // Simulates the real use case: content area change + status bar change
+fn damage_tracker_multiple_content_and_chrome_rects() {
+    // Simulates the real use case: content area change + chrome change
     let mut dt = drawing::DamageTracker::new(1024, 768);
     // Content area: one line of text changed (approx one line_height tall)
     dt.add(13, 48, 998, 22); // text region
-    // Status bar updated
-    dt.add(0, 740, 1024, 28); // status bar
+    // Chrome area (e.g., title bar)
+    dt.add(0, 0, 1024, 36); // title bar
     assert_eq!(dt.count, 2);
     let rects = dt.dirty_rects().unwrap();
     assert_eq!(rects.len(), 2);
     assert_eq!(rects[0], drawing::DirtyRect::new(13, 48, 998, 22));
-    assert_eq!(rects[1], drawing::DirtyRect::new(0, 740, 1024, 28));
+    assert_eq!(rects[1], drawing::DirtyRect::new(0, 0, 1024, 36));
 }
 
 // ---------------------------------------------------------------------------
@@ -2523,8 +2523,8 @@ fn chrome_alpha_200_produces_visible_translucency() {
 }
 
 #[test]
-fn status_bar_chrome_over_content_shows_bleedthrough() {
-    // Status bar at the bottom of the frame with content extending behind it.
+fn title_bar_chrome_over_content_shows_bleedthrough() {
+    // Title bar at the top of the frame with content extending behind it.
     let mut dst_buf = [0u8; 16 * 16 * 4];
     let mut dst = make_surface(&mut dst_buf, 16, 16);
     dst.clear(Color::BLACK);
@@ -2534,25 +2534,25 @@ fn status_bar_chrome_over_content_shows_bleedthrough() {
     let mut content = make_composite_surface(&mut content_buf, 16, 16, 0, 0, 10);
     content.surface.clear(Color::rgb(0, 0, 180));
 
-    // Status bar: bottom 4 rows, translucent.
-    let mut status_buf = [0u8; 16 * 4 * 4];
-    let mut status = make_composite_surface(&mut status_buf, 16, 4, 0, 12, 20);
-    status.surface.clear(Color::rgba(30, 30, 48, 220));
+    // Title bar: top 4 rows, translucent.
+    let mut title_buf = [0u8; 16 * 4 * 4];
+    let mut title = make_composite_surface(&mut title_buf, 16, 4, 0, 0, 20);
+    title.surface.clear(Color::rgba(30, 30, 48, 220));
 
-    let surfaces: [&CompositeSurface; 2] = [&content, &status];
+    let surfaces: [&CompositeSurface; 2] = [&content, &title];
     drawing::composite_surfaces(&mut dst, &surfaces);
 
-    // In the status bar region, blue from content should be partially visible.
-    let p_status = dst.get_pixel(8, 13).unwrap();
+    // In the title bar region, blue from content should be partially visible.
+    let p_title = dst.get_pixel(8, 1).unwrap();
     assert!(
-        p_status.b > 40,
-        "blue content should partially show through status bar, got b={}",
-        p_status.b
+        p_title.b > 40,
+        "blue content should partially show through title bar, got b={}",
+        p_title.b
     );
 
-    // Above the status bar, pure content.
-    let p_above = dst.get_pixel(8, 5).unwrap();
-    assert_eq!(p_above, Color::rgb(0, 0, 180));
+    // Below the title bar, pure content.
+    let p_below = dst.get_pixel(8, 8).unwrap();
+    assert_eq!(p_below, Color::rgb(0, 0, 180));
 }
 
 // ---------------------------------------------------------------------------
@@ -3279,14 +3279,13 @@ fn image_blit_blend_clips_to_content_area() {
 
 #[test]
 fn image_surface_no_overflow_into_chrome_region() {
-    // Simulate the compositor layout: content area is between title bar and
-    // status bar. An image blitted into the content area must not write
-    // outside those bounds.
+    // Simulate the compositor layout: content area is below the title bar
+    // and extends to the bottom of the screen. An image blitted into the
+    // content area must not write into the title bar region.
     let fb_w: u32 = 64;
     let fb_h: u32 = 48;
     let title_h: u32 = 8;
-    let status_h: u32 = 6;
-    let content_h = fb_h - title_h - status_h; // 34
+    let content_h = fb_h - title_h; // 40
 
     // Create framebuffer.
     let mut fb_buf = vec![0u8; (fb_w * fb_h * 4) as usize];
@@ -3295,9 +3294,6 @@ fn image_surface_no_overflow_into_chrome_region() {
 
     // Fill title bar region with distinct color.
     fb.fill_rect(0, 0, fb_w, title_h, Color::rgb(50, 50, 80));
-
-    // Fill status bar region with distinct color.
-    fb.fill_rect(0, fb_h - status_h, fb_w, status_h, Color::rgb(50, 50, 80));
 
     // Create a content surface the exact size of content area.
     let mut content_buf = vec![0u8; (fb_w * content_h * 4) as usize];
@@ -3325,13 +3321,6 @@ fn image_surface_no_overflow_into_chrome_region() {
         let px = fb.get_pixel(0, y).unwrap();
         assert_eq!(px.r, 50, "title bar pixel ({},{}): R={}", 0, y, px.r);
         assert_eq!(px.g, 50, "title bar pixel ({},{}): G={}", 0, y, px.g);
-    }
-
-    // Verify: status bar region is unchanged (still chrome color).
-    for y in (fb_h - status_h)..fb_h {
-        let px = fb.get_pixel(0, y).unwrap();
-        assert_eq!(px.r, 50, "status bar pixel ({},{}): R={}", 0, y, px.r);
-        assert_eq!(px.g, 50, "status bar pixel ({},{}): G={}", 0, y, px.g);
     }
 
     // Verify: content area has green pixels from the image.
@@ -4378,48 +4367,7 @@ fn scroll_offset_preserved_across_context_switch() {
     assert_eq!(restored, 7);
 }
 
-/// Verify that the status bar content differs between editor and image modes.
-/// In editor mode it shows "X chars", in image mode it shows "WxH px".
-/// This test validates the format strings are distinct.
-#[test]
-fn context_switch_status_bar_content_differs() {
-    // Simulate editor mode status text.
-    let mut editor_buf = [0u8; 64];
-    let mut ci = 0;
-    let prefix = b"Editor process active | ";
-    for &b in prefix.iter() {
-        if ci < editor_buf.len() { editor_buf[ci] = b; ci += 1; }
-    }
-    // Append "42 chars"
-    editor_buf[ci] = b'4'; ci += 1;
-    editor_buf[ci] = b'2'; ci += 1;
-    let suffix = b" chars";
-    for &b in suffix.iter() {
-        if ci < editor_buf.len() { editor_buf[ci] = b; ci += 1; }
-    }
-    let editor_text = &editor_buf[..ci];
 
-    // Simulate image mode status text.
-    let mut image_buf = [0u8; 64];
-    ci = 0;
-    let prefix = b"Image viewer | ";
-    for &b in prefix.iter() {
-        if ci < image_buf.len() { image_buf[ci] = b; ci += 1; }
-    }
-    // Append "128x96 px"
-    let dims = b"128x96 px";
-    for &b in dims.iter() {
-        if ci < image_buf.len() { image_buf[ci] = b; ci += 1; }
-    }
-    let image_text = &image_buf[..ci];
-
-    assert_ne!(editor_text, image_text,
-        "Status bar text should differ between editor and image modes");
-    assert!(editor_text.windows(5).any(|w| w == b"chars"),
-        "Editor status should contain 'chars'");
-    assert!(image_text.windows(2).any(|w| w == b"px"),
-        "Image status should contain 'px'");
-}
 
 // ===========================================================================
 // SVG path parser tests

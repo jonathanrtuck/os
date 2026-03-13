@@ -1464,7 +1464,7 @@ fn min(a: u32, b: u32) -> u32 {
 ///   0  = background
 ///   10 = content area
 ///   15 = shadows
-///   20 = chrome (title bar, status bar)
+///   20 = chrome (title bar)
 pub struct CompositeSurface<'a> {
     pub surface: Surface<'a>,
     /// X position in framebuffer coordinates. Can be negative (partially offscreen).

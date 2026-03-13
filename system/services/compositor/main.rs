@@ -8,9 +8,7 @@
 //!   z=0:  Background    — full-screen solid color
 //!   z=10: Content       — text editing area with cursor
 //!   z=15: Title shadow  — gradient falloff beneath title bar
-//!   z=15: Status shadow — gradient falloff above status bar
 //!   z=20: Title bar     — translucent chrome overlay at top
-//!   z=20: Status bar    — translucent chrome overlay at bottom
 //!
 //! # Architecture
 //!
@@ -65,7 +63,6 @@ const SHADOW_DEPTH: u32 = 12;
 // Shadow alpha max is defined in drawing::SHADOW_PEAK.
 // Chrome dimensions.
 const TITLE_BAR_H: u32 = 36;
-const STATUS_BAR_H: u32 = 28;
 // Content area insets (relative to framebuffer).
 // The content surface now extends full-screen so that document content is
 // visible through translucent chrome (title bar and status bar).
@@ -74,22 +71,22 @@ const CONTENT_MARGIN_TOP: u32 = 0;
 const CONTENT_MARGIN_BOTTOM: u32 = 0;
 // Text insets within the content surface. The top inset places text below
 // the title bar with adequate margin; the bottom inset keeps text above the
-// status bar. Minimum 8px margin from any chrome boundary.
+// bottom edge with a small margin.
 const TEXT_INSET_X: u32 = 12;
 const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
-const TEXT_INSET_BOTTOM: u32 = STATUS_BAR_H + SHADOW_DEPTH + 8;
+const TEXT_INSET_BOTTOM: u32 = 8;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
 
 /// Whether the compositor is in image viewer mode (true) or text editor mode (false).
 static mut IMAGE_MODE: bool = false;
-/// Decoded image width (pixels). Set when PNG is decoded.
-static mut IMAGE_WIDTH: u32 = 0;
-/// Decoded image height (pixels). Set when PNG is decoded.
-static mut IMAGE_HEIGHT: u32 = 0;
 /// Counter value captured at boot for deriving elapsed wall-clock time.
+/// Kept for the upcoming title-bar clock feature.
+#[allow(dead_code)]
 static mut BOOT_COUNTER: u64 = 0;
 /// Counter frequency in Hz (read once at boot).
+/// Kept for the upcoming title-bar clock feature.
+#[allow(dead_code)]
 static mut COUNTER_FREQ: u64 = 0;
 /// Current timer handle for the 1-second periodic clock. 0 = no timer.
 static mut TIMER_HANDLE: u8 = 0;
@@ -625,18 +622,6 @@ fn render_title_shadow(surf: &mut drawing::Surface) {
     );
 }
 
-/// Render the status bar drop shadow: gradient from transparent to opaque,
-/// falling upward from the status bar's top edge.
-fn render_status_shadow(surf: &mut drawing::Surface) {
-    surf.clear(drawing::Color::TRANSPARENT);
-
-    surf.fill_gradient_v(
-        0, 0, surf.width, surf.height,
-        drawing::SHADOW_ZERO,
-        drawing::SHADOW_PEAK,
-    );
-}
-
 /// Render the title bar chrome surface (translucent overlay).
 /// Uses the proportional font (Nunito Sans) for chrome text.
 /// If an SVG icon was loaded, renders it before the title text.
@@ -683,109 +668,11 @@ fn render_title_bar(surf: &mut drawing::Surface) {
     surf.draw_hline(0, surf.height - 1, surf.width, drawing::CHROME_BORDER);
 }
 
-/// Render the status bar chrome surface (translucent overlay).
-/// Uses the proportional font (Nunito Sans) for chrome text.
-/// In image viewer mode, shows image dimensions instead of character count.
-fn render_status_bar(surf: &mut drawing::Surface, text_len: usize) {
-    let prop_cache = unsafe { &*PROP_GLYPH_CACHE };
-    let in_image_mode = unsafe { IMAGE_MODE };
 
-    // Translucent background.
-    surf.clear(drawing::CHROME_BG);
-
-    // Top edge line.
-    surf.draw_hline(0, 0, surf.width, drawing::CHROME_BORDER);
-
-    // Status text.
-    let mut buf = [0u8; 64];
-    let mut ci = 0;
-
-    if in_image_mode {
-        let prefix = b"Image viewer | ";
-        for &b in prefix {
-            if ci < buf.len() {
-                buf[ci] = b;
-                ci += 1;
-            }
-        }
-
-        // Append image dimensions: WIDTHxHEIGHT px
-        let img_w = unsafe { IMAGE_WIDTH };
-        let img_h = unsafe { IMAGE_HEIGHT };
-
-        ci = append_u32(&mut buf, ci, img_w);
-
-        if ci < buf.len() {
-            buf[ci] = b'x';
-            ci += 1;
-        }
-
-        ci = append_u32(&mut buf, ci, img_h);
-
-        let suffix = b" px";
-        for &b in suffix {
-            if ci < buf.len() {
-                buf[ci] = b;
-                ci += 1;
-            }
-        }
-    } else {
-        let prefix = b"Editor process active | ";
-        for &b in prefix {
-            if ci < buf.len() {
-                buf[ci] = b;
-                ci += 1;
-            }
-        }
-
-        if text_len == 0 {
-            buf[ci] = b'0';
-            ci += 1;
-        } else {
-            ci = append_u32(&mut buf, ci, text_len as u32);
-        }
-
-        let suffix = b" chars";
-        for &b in suffix {
-            if ci < buf.len() {
-                buf[ci] = b;
-                ci += 1;
-            }
-        }
-    }
-
-    // Vertically center text within the status bar.
-    let text_y = (STATUS_BAR_H.saturating_sub(prop_cache.line_height)) / 2;
-
-    drawing::draw_proportional_string(
-        surf,
-        12,
-        text_y,
-        &buf[..ci],
-        prop_cache,
-        drawing::CHROME_STATUS,
-    );
-
-    // Clock display (right-aligned): HH:MM:SS
-    let mut time_buf = [0u8; 8];
-    let secs = elapsed_seconds();
-
-    format_time_hms(secs, &mut time_buf);
-
-    let time_w = proportional_string_width(&time_buf, prop_cache);
-    let time_x = surf.width.saturating_sub(12 + time_w);
-
-    drawing::draw_proportional_string(
-        surf,
-        time_x,
-        text_y,
-        &time_buf,
-        prop_cache,
-        drawing::CHROME_CLOCK,
-    );
-}
 
 /// Format total seconds into HH:MM:SS in the given 8-byte buffer.
+/// Kept for the upcoming title-bar clock feature.
+#[allow(dead_code)]
 fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
     let hours = ((total_seconds / 3600) % 24) as u8;
     let minutes = ((total_seconds / 60) % 60) as u8;
@@ -802,6 +689,8 @@ fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
 }
 
 /// Get elapsed seconds since boot using the ARM generic counter.
+/// Kept for the upcoming title-bar clock feature.
+#[allow(dead_code)]
 fn elapsed_seconds() -> u64 {
     let now = sys::counter();
     let boot = unsafe { BOOT_COUNTER };
@@ -1073,8 +962,6 @@ pub extern "C" fn _start() -> ! {
                                 // Boot into editor mode; user switches
                                 // to image viewer via F1.
                                 IMAGE_MODE = false;
-                                IMAGE_WIDTH = image_w;
-                                IMAGE_HEIGHT = image_h;
                             }
 
                             sys::print(b"     PNG decoded successfully (F1 to view)\n");
@@ -1254,12 +1141,8 @@ pub extern "C" fn _start() -> ! {
     let mut content_buf = alloc_surface_buf(content_w, content_h);
     // Title bar drop shadow (z=15): gradient beneath title bar.
     let mut title_shadow_buf = alloc_surface_buf(fb_width, SHADOW_DEPTH);
-    // Status bar drop shadow (z=15): gradient above status bar.
-    let mut status_shadow_buf = alloc_surface_buf(fb_width, SHADOW_DEPTH);
     // Title bar chrome (z=20): translucent overlay at top.
     let mut title_buf = alloc_surface_buf(fb_width, TITLE_BAR_H);
-    // Status bar chrome (z=20): translucent overlay at bottom.
-    let mut status_buf = alloc_surface_buf(fb_width, STATUS_BAR_H);
 
     sys::print(b"     surface buffers allocated\n");
 
@@ -1283,14 +1166,10 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Drop shadows (rendered once — static gradient, never re-rendered).
+    // Drop shadow (rendered once — static gradient, never re-rendered).
     {
         let mut title_shadow_surf = make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH);
         render_title_shadow(&mut title_shadow_surf);
-    }
-    {
-        let mut status_shadow_surf = make_surf(&mut status_shadow_buf, fb_width, SHADOW_DEPTH);
-        render_status_shadow(&mut status_shadow_surf);
     }
 
     // Title bar chrome.
@@ -1299,20 +1178,12 @@ pub extern "C" fn _start() -> ! {
         render_title_bar(&mut title_surf);
     }
 
-    // Status bar chrome.
-    {
-        let mut status_surf = make_surf(&mut status_buf, fb_width, STATUS_BAR_H);
-        render_status_bar(&mut status_surf, 0);
-    }
-
     sys::print(b"     surfaces rendered, compositing initial frame\n");
 
     // -----------------------------------------------------------------------
     // Composite initial frame into buffer 0 and present.
     // -----------------------------------------------------------------------
-    let status_y = (fb_height - STATUS_BAR_H) as i32;
     let title_shadow_y = TITLE_BAR_H as i32;
-    let status_shadow_y = (fb_height - STATUS_BAR_H - SHADOW_DEPTH) as i32;
 
     {
         let mut fb0 = make_fb_surface(0);
@@ -1339,13 +1210,6 @@ pub extern "C" fn _start() -> ! {
             z: Z_SHADOW,
             visible: true,
         };
-        let status_shadow_cs = drawing::CompositeSurface {
-            surface: make_surf(&mut status_shadow_buf, fb_width, SHADOW_DEPTH),
-            x: 0,
-            y: status_shadow_y,
-            z: Z_SHADOW,
-            visible: true,
-        };
         let title_cs = drawing::CompositeSurface {
             surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
             x: 0,
@@ -1353,16 +1217,9 @@ pub extern "C" fn _start() -> ! {
             z: Z_CHROME,
             visible: true,
         };
-        let status_cs = drawing::CompositeSurface {
-            surface: make_surf(&mut status_buf, fb_width, STATUS_BAR_H),
-            x: 0,
-            y: status_y,
-            z: Z_CHROME,
-            visible: true,
-        };
 
-        let surfaces: [&drawing::CompositeSurface; 6] = [
-            &bg_cs, &content_cs, &title_shadow_cs, &status_shadow_cs, &title_cs, &status_cs,
+        let surfaces: [&drawing::CompositeSurface; 4] = [
+            &bg_cs, &content_cs, &title_shadow_cs, &title_cs,
         ];
         drawing::composite_surfaces(&mut fb0, &surfaces);
     }
@@ -1599,12 +1456,6 @@ pub extern "C" fn _start() -> ! {
             }
             // In image mode, content surface stays unchanged (showing the image).
 
-            // 2. Re-render the status bar (clock + char count).
-            {
-                let mut status_surf = make_surf(&mut status_buf, fb_width, STATUS_BAR_H);
-                render_status_bar(&mut status_surf, unsafe { DOC_LEN });
-            }
-
             // ---------------------------------------------------------------
             // 3. Compute dirty rects based on what changed this frame.
             // ---------------------------------------------------------------
@@ -1699,17 +1550,15 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
 
-                // Status bar always changes on content edit (char count).
-                damage.add(0, status_y as u16, fb_width as u16, STATUS_BAR_H as u16);
-                // Status bar shadow also needs refresh.
-                damage.add(0, status_shadow_y as u16, fb_width as u16, SHADOW_DEPTH as u16);
             } else if changed && in_image_mode {
                 // Image mode content change (context switch already handled
                 // above via context_switched). Fall back to full screen.
                 damage.mark_full_screen();
             } else {
-                // Timer-only tick: only the status bar clock changed.
-                damage.add(0, status_y as u16, fb_width as u16, STATUS_BAR_H as u16);
+                // Timer-only tick: no visible clock to update (clock will
+                // move to title bar in a subsequent feature). Nothing to
+                // dirty — skip the present entirely.
+                continue;
             }
 
             // ---------------------------------------------------------------
@@ -1736,13 +1585,6 @@ pub extern "C" fn _start() -> ! {
                 z: Z_SHADOW,
                 visible: true,
             };
-            let status_shadow_cs = drawing::CompositeSurface {
-                surface: make_surf(&mut status_shadow_buf, fb_width, SHADOW_DEPTH),
-                x: 0,
-                y: status_shadow_y,
-                z: Z_SHADOW,
-                visible: true,
-            };
             let title_cs = drawing::CompositeSurface {
                 surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
                 x: 0,
@@ -1750,16 +1592,9 @@ pub extern "C" fn _start() -> ! {
                 z: Z_CHROME,
                 visible: true,
             };
-            let status_cs = drawing::CompositeSurface {
-                surface: make_surf(&mut status_buf, fb_width, STATUS_BAR_H),
-                x: 0,
-                y: status_y,
-                z: Z_CHROME,
-                visible: true,
-            };
 
-            let surfaces: [&drawing::CompositeSurface; 6] = [
-                &bg_cs, &content_cs, &title_shadow_cs, &status_shadow_cs, &title_cs, &status_cs,
+            let surfaces: [&drawing::CompositeSurface; 4] = [
+                &bg_cs, &content_cs, &title_shadow_cs, &title_cs,
             ];
 
             {
