@@ -1,0 +1,46 @@
+{
+  "milestone": "pointer",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 9,
+    "passed": 9,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-PTR-001",
+    "VAL-PTR-002",
+    "VAL-PTR-003",
+    "VAL-PTR-004",
+    "VAL-CROSS-001",
+    "VAL-CROSS-003",
+    "VAL-CROSS-004",
+    "VAL-CROSS-005",
+    "VAL-CROSS-006"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added 'Flow Validator Guidance: Code Review (Pointer)' section with QEMU limitation documentation, key source files list, and isolation rules for pointer assertions. Added 'Validation Concurrency' section with surface-specific max concurrency limits.",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null,
+  "testingStrategy": {
+    "codeReview": {
+      "assertions": ["VAL-PTR-001", "VAL-PTR-002", "VAL-PTR-003", "VAL-PTR-004", "VAL-CROSS-004", "VAL-CROSS-005", "VAL-CROSS-006"],
+      "reason": "QEMU does not route HMP/QMP/VNC mouse events to virtio-tablet devices in headless mode. Validated via code review of compositor, input driver, drawing library, and text editor source + 22 pointer-specific unit tests."
+    },
+    "qemuScreenshots": {
+      "assertions": ["VAL-CROSS-001"],
+      "reason": "Full demo flow requires interactive keyboard input and visual verification via QEMU screenshots."
+    },
+    "unitTests": {
+      "assertions": ["VAL-CROSS-003"],
+      "reason": "Regression check — ran full 921 test suite (900 system + 21 prototype), 0 failures."
+    }
+  }
+}

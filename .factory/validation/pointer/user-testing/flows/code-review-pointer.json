@@ -1,0 +1,253 @@
+{
+  "groupId": "code-review-pointer",
+  "testedAt": "2026-03-13T00:00:00Z",
+  "isolation": {
+    "method": "code-review",
+    "sourceRoot": "/Users/user/Sites/os/system/",
+    "noQemuRequired": true
+  },
+  "toolsUsed": ["code-review", "cargo-test"],
+  "assertions": [
+    {
+      "id": "VAL-PTR-001",
+      "title": "Mouse cursor visible",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Review cursor surface allocation in compositor main.rs",
+          "expected": "Cursor buffer allocated with CURSOR_W×CURSOR_H dimensions",
+          "observed": "cursor_buf allocated via alloc_surface_buf(drawing::CURSOR_W, drawing::CURSOR_H) — 12×16 pixels"
+        },
+        {
+          "action": "Review render_cursor() in drawing/lib.rs",
+          "expected": "Procedural arrow bitmap rendered into BGRA8888 buffer",
+          "observed": "CURSOR_BITMAP defines a 12×16 arrow shape (1=fill white, 2=outline dark grey, 0=transparent). render_cursor() iterates the bitmap, writing BGRA pixels using palette colors CURSOR_FILL and CURSOR_OUTLINE."
+        },
+        {
+          "action": "Review cursor CompositeSurface z-order",
+          "expected": "Cursor surface at highest z-order (z=30)",
+          "observed": "cursor_cs created with z: Z_CURSOR (const Z_CURSOR: u16 = 30), which is the highest z in the system (bg=0, content=10, shadow=15, chrome=20, cursor=30)"
+        },
+        {
+          "action": "Review cursor visibility logic",
+          "expected": "Cursor hidden until first pointer event, then visible",
+          "observed": "CURSOR_VISIBLE static starts false. Initial cursor_cs has visible: false. On MSG_POINTER_ABS, CURSOR_VISIBLE set to true. In event loop, cursor_cs.visible = cursor_vis (the current CURSOR_VISIBLE value)."
+        },
+        {
+          "action": "Run unit tests for cursor rendering",
+          "expected": "All cursor rendering tests pass",
+          "observed": "4 tests pass: test_render_cursor_dimensions (>20 opaque pixels), test_render_cursor_top_left_pixel_is_outline, test_render_cursor_has_fill_pixels, test_render_cursor_has_transparent_pixels"
+        }
+      ],
+      "evidence": {
+        "codeReferences": [
+          "system/services/compositor/main.rs: Z_CURSOR=30, cursor_buf alloc, cursor_cs with z:Z_CURSOR",
+          "system/libraries/drawing/lib.rs: CURSOR_BITMAP, render_cursor(), CURSOR_W=12, CURSOR_H=16"
+        ],
+        "unitTests": "test_render_cursor_dimensions, test_render_cursor_top_left_pixel_is_outline, test_render_cursor_has_fill_pixels, test_render_cursor_has_transparent_pixels — all pass"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PTR-002",
+      "title": "Cursor tracks mouse movement",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Review EV_ABS handling in virtio-input driver",
+          "expected": "EV_ABS events for ABS_X/ABS_Y accumulated and sent as MSG_POINTER_ABS",
+          "observed": "virtio-input/main.rs: EV_ABS events update pointer_x/pointer_y accumulators. After processing all events in an IRQ batch, a single MSG_POINTER_ABS with PointerAbs{x,y} is sent to compositor via IPC."
+        },
+        {
+          "action": "Review MSG_POINTER_ABS handling in compositor",
+          "expected": "Raw [0,32767] coordinates scaled to screen pixels, cursor position updated",
+          "observed": "Compositor receives MSG_POINTER_ABS on input2_ch, calls drawing::scale_pointer_coord(ptr.x, fb_width) and scale_pointer_coord(ptr.y, fb_height). Updates MOUSE_X/MOUSE_Y. Saves previous position to PREV_MOUSE_X/PREV_MOUSE_Y for dirty-rect generation. Sets CURSOR_MOVED=true and CURSOR_VISIBLE=true."
+        },
+        {
+          "action": "Review scale_pointer_coord() in drawing/lib.rs",
+          "expected": "Correct integer scaling from [0,32767] to [0,max_pixels-1]",
+          "observed": "scale_pointer_coord uses (coord as u64 * max_pixels as u64) / 32768. Clamps result to max_pixels-1 if it would equal or exceed max_pixels. Division by 32768 (not 32767) ensures result is always < max_pixels."
+        },
+        {
+          "action": "Run unit tests for coordinate scaling",
+          "expected": "All scaling tests pass",
+          "observed": "5 tests pass: test_scale_pointer_coord_zero, test_scale_pointer_coord_max, test_scale_pointer_coord_midpoint, test_scale_pointer_coord_never_exceeds_max (property test over 0..=32767 × {1,640,800,1280,1920}), test_scale_pointer_coord_zero_max"
+        }
+      ],
+      "evidence": {
+        "codeReferences": [
+          "system/services/drivers/virtio-input/main.rs: EV_ABS handling, PointerAbs IPC message",
+          "system/services/compositor/main.rs: MSG_POINTER_ABS handler, MOUSE_X/Y update, PREV_MOUSE_X/Y save",
+          "system/libraries/drawing/lib.rs: scale_pointer_coord()"
+        ],
+        "unitTests": "test_scale_pointer_coord_zero, test_scale_pointer_coord_max, test_scale_pointer_coord_midpoint, test_scale_pointer_coord_never_exceeds_max, test_scale_pointer_coord_zero_max — all pass"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PTR-003",
+      "title": "Click positions text cursor",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Review MSG_POINTER_BUTTON handling in compositor",
+          "expected": "Left button press converts screen coords to text byte offset, ignores title bar clicks",
+          "observed": "Compositor handles MSG_POINTER_BUTTON: checks btn.button==0 (left) && btn.pressed==1. Rejects clicks where click_y < TITLE_BAR_H (36px). Rejects clicks in IMAGE_MODE. Computes text_origin_x = content_x + TEXT_INSET_X, text_origin_y = content_y + TEXT_INSET_TOP. Converts to relative coords with saturating_sub. Adjusts for scroll offset (adjusted_y = rel_y + scroll * line_h). Calls layout.xy_to_byte(text, rel_x, adjusted_y) for byte position."
+        },
+        {
+          "action": "Review xy_to_byte() in drawing/lib.rs",
+          "expected": "Pixel-to-byte conversion with rounding to nearest character boundary",
+          "observed": "xy_to_byte: computes target_row from y/line_height, target_col from (x + half_char)/char_width (rounds to nearest). Iterates text byte-by-byte tracking row/col. Handles newlines (snaps to newline when past line end), soft wrapping (col >= cols triggers row increment). Returns text.len() when click is past end."
+        },
+        {
+          "action": "Review cursor position update and editor notification",
+          "expected": "Compositor updates CURSOR_POS, writes header, notifies editor via MSG_SET_CURSOR",
+          "observed": "After xy_to_byte returns byte_pos: CURSOR_POS = byte_pos, SEL_START/SEL_END cleared to 0, doc_write_header() called. MSG_SET_CURSOR sent to editor_ch with CursorMove{position: byte_pos as u32}. Editor handles MSG_SET_CURSOR by updating its local cursor and clearing selection."
+        },
+        {
+          "action": "Run unit tests for click-to-position",
+          "expected": "All click-to-position tests pass",
+          "observed": "12 tests pass: xy_to_byte_origin, xy_to_byte_middle_of_line, xy_to_byte_between_chars_rounds_left, xy_to_byte_between_chars_rounds_right, xy_to_byte_past_end_of_line, xy_to_byte_second_line, xy_to_byte_wrapped_line, xy_to_byte_past_last_row, xy_to_byte_empty_text, click_to_position_round_trip_multiline, click_to_position_past_end_of_document, click_to_position_below_all_text, click_to_position_with_scroll_offset"
+        }
+      ],
+      "evidence": {
+        "codeReferences": [
+          "system/services/compositor/main.rs: MSG_POINTER_BUTTON handler (title bar exclusion, coord conversion, xy_to_byte call, MSG_SET_CURSOR)",
+          "system/libraries/drawing/lib.rs: xy_to_byte() with rounding, line wrapping, boundary handling",
+          "system/user/text-editor/main.rs: MSG_SET_CURSOR handler updating local cursor"
+        ],
+        "unitTests": "xy_to_byte_origin, xy_to_byte_middle_of_line, xy_to_byte_between_chars_rounds_left, xy_to_byte_between_chars_rounds_right, xy_to_byte_past_end_of_line, xy_to_byte_second_line, xy_to_byte_wrapped_line, xy_to_byte_past_last_row, xy_to_byte_empty_text, click_to_position_round_trip_multiline, click_to_position_past_end_of_document, click_to_position_below_all_text, click_to_position_with_scroll_offset — all pass"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PTR-004",
+      "title": "Cursor above all surfaces",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Review surface z-order constants in compositor",
+          "expected": "Cursor z-order is highest among all surfaces",
+          "observed": "Z-order constants: Z_BACKGROUND=0, Z_CONTENT=10, Z_SHADOW=15, Z_CHROME=20, Z_CURSOR=30. Cursor at z=30 is the highest z-order value in the system."
+        },
+        {
+          "action": "Review composite_surfaces in drawing/lib.rs",
+          "expected": "Surfaces composited in ascending z-order (lowest first, highest last = on top)",
+          "observed": "composite_surfaces() sorts surfaces by z-order ascending using insertion sort, then iterates in order calling blit_blend. The cursor surface (z=30) is blitted last, rendering on top of everything."
+        },
+        {
+          "action": "Review all surface array construction in compositor event loop",
+          "expected": "Cursor surface always included in composite surface array",
+          "observed": "Both initial composite and event-loop composite use the same 5-surface array: [bg_cs, content_cs, title_shadow_cs, title_cs, cursor_cs]. cursor_cs.visible depends on CURSOR_VISIBLE (hidden until first pointer event)."
+        }
+      ],
+      "evidence": {
+        "codeReferences": [
+          "system/services/compositor/main.rs: Z_CURSOR=30 (line ~60), cursor_cs construction in both initial and event-loop compositing",
+          "system/libraries/drawing/lib.rs: composite_surfaces() insertion sort by z-order, CompositeSurface struct z:u16 field"
+        ],
+        "unitTests": "N/A (z-order is a simple constant comparison verified by code review)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-004",
+      "title": "Keyboard and mouse coexist",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Review input channel architecture",
+          "expected": "Keyboard and tablet inputs processed on separate channels without interference",
+          "observed": "Compositor has two input channels: input_ch (handle 1, keyboard via virtio-input) and input2_ch (handle 4, tablet via second virtio-input). Each is an independent IPC ring buffer. The wait() call includes both handles. Events are drained independently in sequence: first input_ch, then input2_ch."
+        },
+        {
+          "action": "Review shared state between keyboard and mouse handling",
+          "expected": "No shared mutable state conflicts between keyboard and mouse event processing",
+          "observed": "Keyboard events (MSG_KEY_EVENT) modify: ctrl_pressed flag, forward to editor_ch. Mouse events (MSG_POINTER_ABS) modify: MOUSE_X/Y, PREV_MOUSE_X/Y, CURSOR_VISIBLE, CURSOR_MOVED. Mouse clicks (MSG_POINTER_BUTTON) modify: CURSOR_POS, SEL_START/SEL_END. The only shared flag is ctrl_pressed (used for Ctrl+Tab on both channels), which is correct behavior. Keyboard and mouse operate on disjoint state variables."
+        },
+        {
+          "action": "Review event loop flow",
+          "expected": "Both input types trigger appropriate rendering updates",
+          "observed": "The 'changed' flag is set by both keyboard (via text_changed from editor write requests) and mouse (via CURSOR_MOVED or click_to_position). Both trigger compositing and present. The damage tracker handles both text dirty rects and cursor dirty rects independently."
+        }
+      ],
+      "evidence": {
+        "codeReferences": [
+          "system/services/compositor/main.rs: separate input_ch and input2_ch channels, independent event draining loops",
+          "system/services/drivers/virtio-input/main.rs: single driver sends both MSG_KEY_EVENT and MSG_POINTER_ABS/MSG_POINTER_BUTTON over same IPC channel"
+        ],
+        "unitTests": "N/A (channel independence verified by code review of the single-threaded event loop structure)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-005",
+      "title": "Mouse movement uses dirty-rect transfers",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Review cursor dirty-rect generation in compositor event loop",
+          "expected": "Cursor movement generates 2 dirty rects (old position + new position), not full-screen",
+          "observed": "In the damage tracking section: when cursor_moved && cursor_vis, the compositor adds two dirty rects to the DamageTracker: damage.add(old_mx, old_my, cw, ch) for the old position and damage.add(new_mx, new_my, cw, ch) for the new position. cw=CURSOR_W=12, ch=CURSOR_H=16. This generates two small rects, NOT a full-screen transfer."
+        },
+        {
+          "action": "Review that cursor-only movement does NOT trigger text_changed",
+          "expected": "Pure mouse movement sets changed=true but NOT text_changed=true",
+          "observed": "MSG_POINTER_ABS handler sets changed=true only. text_changed is only set by MSG_POINTER_BUTTON (click) or editor write requests. For pure cursor movement, only the cursor dirty rects are generated. No content re-render occurs."
+        },
+        {
+          "action": "Review DamageTracker and present payload",
+          "expected": "Dirty rects are forwarded to GPU driver for partial transfer",
+          "observed": "DamageTracker collects up to 6 DirtyRect entries. PresentPayload includes rect_count and rects[6]. When rect_count > 0, GPU driver transfers only the specified rects. Serial log shows 'compositor: present rects=N WxH WxH' for verification."
+        }
+      ],
+      "evidence": {
+        "codeReferences": [
+          "system/services/compositor/main.rs: cursor dirty rect code block (CURSOR_MOVED section), damage.add() for old+new positions",
+          "system/services/compositor/main.rs: PresentPayload construction with dirty rects, serial log of rect dimensions"
+        ],
+        "unitTests": "N/A (dirty-rect generation for cursor movement is verified by code review; DamageTracker unit tests exist for general damage tracking)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-006",
+      "title": "Type after click-to-position",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Review click-to-position cursor update flow",
+          "expected": "Click sets CURSOR_POS and notifies editor of new position",
+          "observed": "MSG_POINTER_BUTTON handler: CURSOR_POS = byte_pos (from xy_to_byte), doc_write_header() writes to shared buffer, MSG_SET_CURSOR sent to editor. Editor receives MSG_SET_CURSOR and updates its local cursor variable."
+        },
+        {
+          "action": "Review subsequent typing after click",
+          "expected": "Editor uses updated cursor for insert position",
+          "observed": "Text editor's MSG_SET_CURSOR handler sets cursor = cm.position. Subsequent key events use this cursor for WriteInsert{position: cursor as u32, byte: key.ascii}. The compositor processes MSG_WRITE_INSERT at the specified position via doc_insert(pos, byte), then sets CURSOR_POS = pos + 1. This correctly inserts at the clicked position."
+        },
+        {
+          "action": "Review dirty rect generation for typing after click",
+          "expected": "Content change triggers appropriate dirty rects",
+          "observed": "After processing editor write requests, text_changed=true triggers content surface re-render and damage tracking. The compositor computes visual line ranges that changed (incremental render) and generates dirty rects for the affected text lines. The present payload includes these dirty rects for partial GPU transfer."
+        },
+        {
+          "action": "Run unit test for click round-trip",
+          "expected": "click_to_position_round_trip_multiline passes",
+          "observed": "click_to_position_round_trip_multiline: verifies that for every byte position in multiline text, byte_to_xy → xy_to_byte round-trips correctly. All positions match."
+        }
+      ],
+      "evidence": {
+        "codeReferences": [
+          "system/services/compositor/main.rs: MSG_POINTER_BUTTON handler → CURSOR_POS update → MSG_SET_CURSOR to editor",
+          "system/user/text-editor/main.rs: MSG_SET_CURSOR handler, subsequent MSG_WRITE_INSERT uses updated cursor",
+          "system/services/compositor/main.rs: MSG_WRITE_INSERT handler with doc_insert() and dirty rect generation"
+        ],
+        "unitTests": "click_to_position_round_trip_multiline — passes"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 7 assertions via code review + unit tests: all 7 passed. 22 pointer-related unit tests pass (cursor rendering: 4, coordinate scaling: 5, click-to-position/xy_to_byte: 13). Full test suite: 900/900 pass. Implementation correctly handles: procedural arrow cursor at z=30 (highest), EV_ABS coordinate scaling from [0,32767], click-to-position with title bar exclusion and scroll offset, independent keyboard/mouse channels, dirty-rect transfers for cursor movement, and type-after-click via MSG_SET_CURSOR synchronization."
+}

@@ -102,3 +102,40 @@ pkill -f qemu-system-aarch64 2>/dev/null
 - QEMU monitor socket commands need `nc -U` (Unix socket)
 - Serial log is append-only within a session; clear between runs by restarting QEMU
 - GPU transfer messages in serial log show rect dimensions for dirty-rect verification
+
+## Flow Validator Guidance: Code Review (Pointer)
+
+### Context
+QEMU does NOT route HMP/QMP/VNC mouse events to virtio-tablet devices in headless mode. This is a confirmed QEMU architectural limitation. Pointer assertions (VAL-PTR-*, VAL-CROSS-004/005/006) must be validated via code review + unit tests, NOT interactive mouse movement.
+
+### What to Review
+- **Cursor surface**: Check compositor code for cursor surface registration at z=30, render_cursor() function, cursor bitmap generation (procedural arrow shape)
+- **Coordinate scaling**: Verify EV_ABS events from virtio-tablet are scaled from [0,32767] to screen coordinates
+- **Dirty-rect cursor movement**: Check that cursor movement generates dirty rects for old+new cursor positions (not full-screen transfers)
+- **Click-to-position**: Verify EV_BTN events trigger text cursor positioning, coordinate conversion from screen to text grid
+- **Surface ordering**: Cursor surface must be above all other surfaces (z=30 or highest z-order)
+- **Keyboard/mouse coexistence**: Check that both input channels (keyboard + tablet) are processed without interference
+
+### Key Source Files
+- `system/services/compositor/main.rs` — compositor, cursor surface, input handling
+- `system/services/drivers/virtio-input/main.rs` — input driver, EV_ABS/EV_BTN handling
+- `system/libraries/ipc/lib.rs` — IPC message types (MSG types 11=pointer_abs, 12=pointer_button)
+- `system/user/text-editor/main.rs` — text editor, cursor positioning from click
+
+### Unit Tests to Check
+Run `cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1` and look for tests related to:
+- Cursor rendering / arrow bitmap
+- Coordinate scaling (32767 → screen coordinates)
+- Click-to-position / hit testing
+- Dirty rect generation for cursor movement
+
+### Isolation
+- Code review validators do NOT need QEMU running
+- They can run in parallel with each other
+- They only need read access to source files and ability to run unit tests
+
+## Validation Concurrency
+
+- **QEMU Display**: max 1 (shared monitor socket)
+- **Code Review**: max 3 (read-only source access, no shared state)
+- **Unit Tests**: max 1 (cargo test uses shared build artifacts)
