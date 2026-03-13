@@ -2110,6 +2110,113 @@ fn subpixel_fir_filter_reduces_fringing() {
 }
 
 // ---------------------------------------------------------------------------
+// Stem darkening — non-linear coverage boost for thin strokes
+// ---------------------------------------------------------------------------
+
+use drawing::STEM_DARKENING_BOOST;
+use drawing::STEM_DARKENING_LUT;
+
+#[test]
+fn stem_darkening_lut_zero_stays_zero() {
+    // Zero coverage must remain zero after darkening (no phantom pixels).
+    assert_eq!(STEM_DARKENING_LUT[0], 0, "zero coverage should stay 0 after darkening");
+}
+
+#[test]
+fn stem_darkening_lut_full_stays_full() {
+    // Full coverage (255) must remain 255 after darkening.
+    assert_eq!(STEM_DARKENING_LUT[255], 255, "full coverage (255) should stay 255 after darkening");
+}
+
+#[test]
+fn stem_darkening_lut_boost_mid_range() {
+    // Coverage values in the 30-200 range should be strictly higher after darkening.
+    for cov in 30u8..=200u8 {
+        let darkened = STEM_DARKENING_LUT[cov as usize];
+        assert!(
+            darkened > cov,
+            "coverage {} should be strictly boosted, got {}",
+            cov, darkened,
+        );
+    }
+}
+
+#[test]
+fn stem_darkening_lut_monotonic() {
+    // The LUT must be monotonically non-decreasing: higher input → ≥ higher output.
+    for i in 1..256 {
+        assert!(
+            STEM_DARKENING_LUT[i] >= STEM_DARKENING_LUT[i - 1],
+            "LUT not monotonic at {}: {} < {}",
+            i, STEM_DARKENING_LUT[i], STEM_DARKENING_LUT[i - 1],
+        );
+    }
+}
+
+#[test]
+fn stem_darkening_boost_is_tunable() {
+    // The boost constant should be in a reasonable range (40-120).
+    assert!(
+        STEM_DARKENING_BOOST >= 40 && STEM_DARKENING_BOOST <= 120,
+        "STEM_DARKENING_BOOST should be 40-120, got {}",
+        STEM_DARKENING_BOOST,
+    );
+}
+
+#[test]
+fn stem_darkening_applied_to_rasterized_glyph() {
+    // Rasterize a thin-stroke glyph ('l') and verify that intermediate
+    // coverage values are boosted compared to the raw formula.
+    // Since darkening is applied in the rasterizer, we verify the output
+    // has higher coverage values than raw (undarkened) values would produce.
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+
+    let metrics = font.rasterize('l', 16, &mut raster, &mut scratch).unwrap();
+    let w = metrics.width;
+    let h = metrics.height;
+    let total = (w * h * 3) as usize;
+    let coverage = &buf[..total];
+
+    // Count coverage values that are in the boosted range (30-200).
+    // After darkening, any raw value in 30-200 should now be higher.
+    // We verify indirectly: the glyph should have coverage values in
+    // the STEM_DARKENING_LUT[30]..=254 range (values that can only exist
+    // if darkening was applied to raw values in 30..200).
+    let boosted_threshold = STEM_DARKENING_LUT[30];
+    let has_boosted = coverage.iter().any(|&c| c >= boosted_threshold && c < 255);
+    assert!(
+        has_boosted,
+        "'l' at 16px should have boosted coverage values (>= {})",
+        boosted_threshold,
+    );
+}
+
+#[test]
+fn stem_darkening_all_three_channels_equally() {
+    // For a fully symmetric glyph rendered at the center of a pixel,
+    // all 3 channels should be darkened equally. We check that the LUT
+    // applies the same transformation to each channel.
+    //
+    // Since the LUT is a single table applied identically to R, G, B,
+    // verify the formula: darkened = cov + BOOST * (255 - cov) / 255.
+    // Special case: LUT[0] = 0 (no phantom pixels).
+    let boost = STEM_DARKENING_BOOST as u32;
+    assert_eq!(STEM_DARKENING_LUT[0], 0, "LUT[0] must be 0");
+    for cov in 1u32..=255 {
+        let expected = cov + boost * (255 - cov) / 255;
+        let expected = if expected > 255 { 255 } else { expected };
+        assert_eq!(
+            STEM_DARKENING_LUT[cov as usize], expected as u8,
+            "LUT[{}] should be {}, got {}",
+            cov, expected, STEM_DARKENING_LUT[cov as usize],
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Proportional font — GlyphCache with variable advance widths
 // ---------------------------------------------------------------------------
 

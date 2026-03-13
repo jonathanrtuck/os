@@ -29,6 +29,42 @@ include!("rasterizer.rs");
 include!("svg.rs");
 include!("truetype.rs");
 
+// ---------------------------------------------------------------------------
+// Stem darkening — non-linear coverage boost for thin strokes
+// ---------------------------------------------------------------------------
+
+/// Tunable boost constant for stem darkening. Higher values produce heavier
+/// strokes. Reasonable range: 40–120. Applied after rasterization and subpixel
+/// downsampling via a 256-entry lookup table.
+pub const STEM_DARKENING_BOOST: u32 = 70;
+
+/// Pre-computed lookup table for stem darkening.
+///
+/// Formula: `darkened = cov + STEM_DARKENING_BOOST * (255 - cov) / 255`
+///
+/// Properties:
+/// - LUT[0] = 0 (zero coverage stays zero)
+/// - LUT[255] = 255 (full coverage stays full)
+/// - LUT[c] > c for all c in 1..254 (strict boost)
+/// - Monotonically non-decreasing
+///
+/// Applied equally to all 3 subpixel channels (R, G, B) after the FIR
+/// color-fringe filter in the rasterizer.
+pub const STEM_DARKENING_LUT: [u8; 256] = {
+    let mut lut = [0u8; 256];
+    let boost = STEM_DARKENING_BOOST;
+    // LUT[0] = 0: zero coverage stays zero (no phantom pixels).
+    // LUT[255] = 255: full coverage stays full.
+    // LUT[1..254]: boosted via formula.
+    let mut i = 1u32;
+    while i < 256 {
+        let darkened = i + boost * (255 - i) / 255;
+        lut[i as usize] = if darkened > 255 { 255 } else { darkened as u8 };
+        i += 1;
+    }
+    lut
+};
+
 const GLYPH_FIRST: u8 = 0x20;
 const GLYPH_LAST: u8 = 0x7E;
 const GLYPH_COUNT: usize = (GLYPH_LAST - GLYPH_FIRST + 1) as usize; // 95

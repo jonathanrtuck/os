@@ -863,6 +863,15 @@ impl<'a> TrueTypeFont<'a> {
             }
         }
 
+        // Apply stem darkening: boost coverage values using the pre-computed
+        // lookup table. This makes thin strokes heavier and more legible.
+        // Applied equally to all 3 subpixel channels (R, G, B).
+        {
+            for i in 0..out_total {
+                buffer.data[i] = STEM_DARKENING_LUT[buffer.data[i] as usize];
+            }
+        }
+
         let advance = scale_fu(advance_fu as i32, size_px, self.units_per_em) as u32;
         let bearing_x = scale_fu(lsb_fu as i32, size_px, upem);
         let bearing_y = y_max_px;
