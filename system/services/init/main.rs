@@ -226,13 +226,16 @@ fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
 /// - compositor → GPU driver (present commands)
 ///
 /// Then starts all three processes. They run their own event loops.
+/// Maximum number of virtio-input devices we can handle (keyboard + tablet).
+const MAX_INPUT_DEVICES: usize = 4;
+
 fn setup_display_pipeline(
     gpu_proc: u8,
     gpu_ch_handle: u8,
     gpu_channel_idx: usize,
     gpu_pa: u64,
     gpu_irq: u32,
-    input_proc: Option<(u8, usize, u64, u32)>, // (proc, ch_idx, pa, irq)
+    input_devices: &[(u8, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
     font_buf: Option<(u64, u32, u32, u32, u32, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len, img_icon_offset, img_icon_len)
     rtc_pa: u64, // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
@@ -514,9 +517,23 @@ fn setup_display_pipeline(
     // Create remaining cross-process channels.
     // -----------------------------------------------------------------------
 
-    // Input → Compositor channel (keyboard events).
+    // Input → Compositor channels (keyboard/tablet events).
+    // Each input device gets its own channel to the compositor.
     // Endpoint A (send) → input driver, Endpoint B (recv) → compositor.
-    if let Some((input_proc_handle, input_ch_idx, input_pa, input_irq)) = input_proc {
+    //
+    // Handle assignment order matters! The compositor expects:
+    //   handle 1 = first input (keyboard)
+    //   handle 2 = GPU present
+    //   handle 3 = editor
+    //   handle 4+ = additional input devices (tablet, etc.)
+    //
+    // So we send only the FIRST input channel here, then GPU+editor,
+    // then additional input channels after.
+
+    // Send first input device → compositor handle 1.
+    if !input_devices.is_empty() {
+        let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[0];
+
         sys::print(b"     creating input\xE2\x86\x92compositor channel\n");
 
         let (ic_a, ic_b) = sys::channel_create().unwrap_or_else(|_| {
@@ -524,20 +541,17 @@ fn setup_display_pipeline(
             sys::exit();
         });
 
-        *next_channel += 1; // channel_create advances init's SHM pointer
+        *next_channel += 1;
 
-        // Send endpoint A to input driver (handle 1 in input's table).
         sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-comp A) failed\n");
             sys::exit();
         });
-        // Send endpoint B to compositor (handle 1 in compositor's table).
         sys::handle_send(comp_proc, ic_b).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-comp B) failed\n");
             sys::exit();
         });
 
-        // Send input driver config via ring buffer.
         let input_ch = init_channel(input_ch_idx);
         let input_config = DeviceConfig {
             mmio_pa: input_pa,
@@ -547,9 +561,11 @@ fn setup_display_pipeline(
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
 
         input_ch.send(&msg);
+
+        sys::print(b"     input device 0 channel created\n");
     }
 
-    // Compositor → GPU present channel endpoint A → compositor (handle 2, or 1 if no input).
+    // Compositor → GPU present channel endpoint A → compositor handle 2.
     sys::handle_send(comp_proc, cg_a).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (comp-gpu A) failed\n");
         sys::exit();
@@ -607,6 +623,53 @@ fn setup_display_pipeline(
         sys::exit();
     });
 
+    // Send additional input device channels → compositor handle 4, 5, ...
+    // These go AFTER the editor channel (handle 3) to preserve the fixed
+    // handle layout expected by the compositor.
+    for i in 1..input_devices.len() {
+        let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[i];
+
+        sys::print(b"     creating input\xE2\x86\x92compositor channel\n");
+
+        let (ic_a, ic_b) = sys::channel_create().unwrap_or_else(|_| {
+            sys::print(b"init: channel_create (input-comp) failed\n");
+            sys::exit();
+        });
+
+        *next_channel += 1;
+
+        sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
+            sys::print(b"init: handle_send (input-comp A) failed\n");
+            sys::exit();
+        });
+        sys::handle_send(comp_proc, ic_b).unwrap_or_else(|_| {
+            sys::print(b"init: handle_send (input-comp B) failed\n");
+            sys::exit();
+        });
+
+        let input_ch = init_channel(input_ch_idx);
+        let input_config = DeviceConfig {
+            mmio_pa: input_pa,
+            irq: input_irq,
+            _pad: 0,
+        };
+        let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
+
+        input_ch.send(&msg);
+
+        {
+            let mut buf = [0u8; 48];
+            let prefix = b"     input device ";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            let mut pos = prefix.len();
+            pos += format_u32(i as u32, &mut buf[pos..]);
+            let suffix = b" channel created\n";
+            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+            pos += suffix.len();
+            sys::print(&buf[..pos]);
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Start remaining processes. GPU driver was already started in phase 1
     // (display query). Order: input driver (setup then waits for IRQs),
@@ -616,7 +679,7 @@ fn setup_display_pipeline(
     // Brief yields between starts let each process print its startup banner
     // before the next process begins, preventing serial output interleaving.
     // -----------------------------------------------------------------------
-    if let Some((input_proc_handle, _, _, _)) = input_proc {
+    for &(input_proc_handle, _, _, _) in input_devices {
         sys::print(b"     starting input driver\n");
 
         let _ = sys::process_start(input_proc_handle);
@@ -708,7 +771,9 @@ pub extern "C" fn _start() -> ! {
     let mut next_channel: usize = 1;
     // Saved device state for Phase 2 (display pipeline).
     let mut gpu: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
-    let mut input: Option<(u8, usize, u64, u32)> = None; // (proc, ch_idx, pa, irq)
+    // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
+    let mut input_devices: [(u8, usize, u64, u32); MAX_INPUT_DEVICES] = [(0, 0, 0, 0); MAX_INPUT_DEVICES];
+    let mut input_count: usize = 0;
     let mut p9: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
     let mut rtc_pa: u64 = 0; // PL031 RTC physical address (0 = not found)
 
@@ -786,7 +851,12 @@ pub extern "C" fn _start() -> ! {
             }
             VIRTIO_DEVICE_INPUT => {
                 // Defer input startup — needs cross-process channel to compositor.
-                input = Some((proc_h, channel_idx, dev_pa, dev_irq));
+                if input_count < MAX_INPUT_DEVICES {
+                    input_devices[input_count] = (proc_h, channel_idx, dev_pa, dev_irq);
+                    input_count += 1;
+                } else {
+                    sys::print(b"     too many input devices, skipping\n");
+                }
             }
             VIRTIO_DEVICE_9P => {
                 // Defer 9p startup — font read must complete before compositor.
@@ -1047,7 +1117,7 @@ pub extern "C" fn _start() -> ! {
         None
     };
 
-    // Phase 2: Display pipeline (input driver + compositor + GPU driver).
+    // Phase 2: Display pipeline (input drivers + compositor + GPU driver).
     if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq)) = gpu {
         setup_display_pipeline(
             gpu_proc,
@@ -1055,7 +1125,7 @@ pub extern "C" fn _start() -> ! {
             gpu_channel_idx,
             gpu_pa,
             gpu_irq,
-            input,
+            &input_devices[..input_count],
             font_buf,
             rtc_pa,
             &mut next_channel,

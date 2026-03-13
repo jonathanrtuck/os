@@ -1,8 +1,16 @@
-//! Userspace virtio-input keyboard driver.
+//! Userspace virtio-input driver (keyboard + tablet).
 //!
 //! Receives device config (MMIO PA, IRQ) from init via IPC ring buffer.
-//! Reads keyboard events from the virtio event queue and forwards them
+//! Reads input events from the virtio event queue and forwards them
 //! to the compositor via a direct IPC channel.
+//!
+//! Handles three event types:
+//! - EV_KEY (type 1): keyboard key press/release → MSG_KEY_EVENT
+//!   Also handles mouse button events: BTN_LEFT (0x110), BTN_RIGHT (0x111)
+//!   → MSG_POINTER_BUTTON
+//! - EV_ABS (type 3): absolute pointer coordinates from virtio-tablet
+//!   ABS_X (code 0x00) and ABS_Y (code 0x01) in [0, 32767]
+//!   → MSG_POINTER_ABS
 //!
 //! # virtio-input protocol
 //!
@@ -13,7 +21,8 @@
 //! ```text
 //! le16 type   — EV_KEY (1), EV_REL (2), EV_ABS (3), EV_SYN (0)
 //! le16 code   — Linux keycode (e.g. KEY_A = 30)
-//! le32 value  — 1 = press, 0 = release, 2 = repeat
+//! le32 value  — 1 = press, 0 = release, 2 = repeat (for EV_KEY)
+//!               absolute coordinate (for EV_ABS)
 //! ```
 //!
 //! # Architecture note
@@ -30,11 +39,21 @@
 const CHANNEL_SHM_BASE: usize = 0x4000_0000;
 /// Linux evdev event type for key press/release.
 const EV_KEY: u16 = 1;
+/// Linux evdev event type for absolute axis events (touch/tablet).
+const EV_ABS: u16 = 3;
+/// Absolute axis codes (Linux input.h).
+const ABS_X: u16 = 0x00;
+const ABS_Y: u16 = 0x01;
+/// Mouse button codes (Linux input.h). These arrive as EV_KEY events.
+const BTN_LEFT: u16 = 0x110;
+const BTN_RIGHT: u16 = 0x111;
 /// Size of a virtio_input_event struct (8 bytes).
 const EVENT_SIZE: u32 = 8;
 /// Protocol message types (must match init/compositor definitions).
 const MSG_DEVICE_CONFIG: u32 = 1;
 const MSG_KEY_EVENT: u32 = 10;
+const MSG_POINTER_ABS: u32 = 11;
+const MSG_POINTER_BUTTON: u32 = 12;
 /// Event virtqueue index.
 const VIRTQ_EVENT: u32 = 0;
 
@@ -60,6 +79,23 @@ struct VirtioInputEvent {
     event_type: u16,
     code: u16,
     value: u32,
+}
+/// Absolute pointer position sent to the compositor via IPC.
+/// Coordinates are in the raw [0, 32767] range; the compositor scales them.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PointerAbs {
+    x: u32,
+    y: u32,
+}
+/// Pointer button event sent to the compositor via IPC.
+/// button: 0 = left, 1 = right. pressed: 1 = down, 0 = up.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PointerButton {
+    button: u8,
+    pressed: u8,
+    _pad: [u8; 2],
 }
 
 /// Compute the base VA of channel N's shared pages.
@@ -185,8 +221,14 @@ pub extern "C" fn _start() -> ! {
 
     sys::print(b"  \xE2\x8C\xA8\xEF\xB8\x8F  virtio-input ready\n");
 
+    // Track absolute pointer state. EV_ABS events for X and Y arrive as
+    // separate events before an EV_SYN. We accumulate them and send a
+    // single MSG_POINTER_ABS when either axis updates.
+    let mut pointer_x: u32 = 0;
+    let mut pointer_y: u32 = 0;
+
     // -----------------------------------------------------------------------
-    // Event loop: wait for keyboard IRQ → read event → forward to compositor
+    // Event loop: wait for IRQ → read events → forward to compositor
     // -----------------------------------------------------------------------
     loop {
         let _ = sys::wait(&[irq_handle], u64::MAX);
@@ -194,6 +236,7 @@ pub extern "C" fn _start() -> ! {
         device.ack_interrupt();
 
         let mut repost_count = 0u32;
+        let mut pointer_moved = false;
 
         while let Some(used) = vq.pop_used() {
             // Compute buffer VA from descriptor index (each buffer = 8 bytes).
@@ -204,19 +247,47 @@ pub extern "C" fn _start() -> ! {
             let event: VirtioInputEvent =
                 unsafe { core::ptr::read_volatile(buf_va as *const VirtioInputEvent) };
 
-            // Forward key press/release events (ignore EV_SYN, EV_REP=2, etc).
             if event.event_type == EV_KEY && event.value <= 1 {
-                let ascii = keycode_to_ascii(event.code);
-                let key_event = KeyEvent {
-                    keycode: event.code,
-                    pressed: event.value as u8,
-                    ascii,
-                };
-                let msg = unsafe { ipc::Message::from_payload(MSG_KEY_EVENT, &key_event) };
+                // Check if this is a mouse button event.
+                if event.code == BTN_LEFT || event.code == BTN_RIGHT {
+                    let button = if event.code == BTN_LEFT { 0u8 } else { 1u8 };
+                    let ptr_btn = PointerButton {
+                        button,
+                        pressed: event.value as u8,
+                        _pad: [0; 2],
+                    };
+                    let msg = unsafe { ipc::Message::from_payload(MSG_POINTER_BUTTON, &ptr_btn) };
 
-                comp_ch.send(&msg);
+                    comp_ch.send(&msg);
 
-                let _ = sys::channel_signal(1); // signal compositor channel
+                    let _ = sys::channel_signal(1);
+                } else {
+                    // Regular keyboard key press/release.
+                    let ascii = keycode_to_ascii(event.code);
+                    let key_event = KeyEvent {
+                        keycode: event.code,
+                        pressed: event.value as u8,
+                        ascii,
+                    };
+                    let msg = unsafe { ipc::Message::from_payload(MSG_KEY_EVENT, &key_event) };
+
+                    comp_ch.send(&msg);
+
+                    let _ = sys::channel_signal(1);
+                }
+            } else if event.event_type == EV_ABS {
+                // Absolute pointer axis event from virtio-tablet.
+                match event.code {
+                    ABS_X => {
+                        pointer_x = event.value;
+                        pointer_moved = true;
+                    }
+                    ABS_Y => {
+                        pointer_y = event.value;
+                        pointer_moved = true;
+                    }
+                    _ => {} // Ignore other axes.
+                }
             }
 
             // Re-post this buffer for reuse.
@@ -227,6 +298,20 @@ pub extern "C" fn _start() -> ! {
             vq.push(buf_pa, EVENT_SIZE, true);
 
             repost_count += 1;
+        }
+
+        // Send accumulated pointer position after processing all events
+        // in this IRQ batch (avoids sending redundant intermediate positions).
+        if pointer_moved {
+            let ptr_abs = PointerAbs {
+                x: pointer_x,
+                y: pointer_y,
+            };
+            let msg = unsafe { ipc::Message::from_payload(MSG_POINTER_ABS, &ptr_abs) };
+
+            comp_ch.send(&msg);
+
+            let _ = sys::channel_signal(1);
         }
 
         // Batch-notify after reposting all consumed buffers.

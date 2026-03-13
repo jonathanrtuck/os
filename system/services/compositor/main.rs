@@ -41,6 +41,8 @@ const MSG_ICON_CONFIG: u32 = 7;
 const MSG_IMG_ICON_CONFIG: u32 = 9;
 const MSG_RTC_CONFIG: u32 = 15;
 const MSG_KEY_EVENT: u32 = 10;
+const MSG_POINTER_ABS: u32 = 11;
+const MSG_POINTER_BUTTON: u32 = 12;
 const MSG_PRESENT: u32 = 20;
 const MSG_WRITE_INSERT: u32 = 30;
 const MSG_WRITE_DELETE: u32 = 31;
@@ -56,6 +58,9 @@ const KEY_LEFTCTRL: u16 = 29;
 const INPUT_HANDLE: u8 = 1;
 const GPU_HANDLE: u8 = 2;
 const EDITOR_HANDLE: u8 = 3;
+// Additional input devices (e.g. virtio-tablet) get handles starting at 4.
+// Handle 4 is the second input device if present.
+const INPUT2_HANDLE: u8 = 4;
 // Surface z-order constants.
 const Z_BACKGROUND: u16 = 0;
 const Z_CONTENT: u16 = 10;
@@ -233,6 +238,23 @@ struct KeyEvent {
     keycode: u16,
     pressed: u8,
     ascii: u8,
+}
+/// Absolute pointer position from virtio-tablet driver.
+/// Coordinates are in the raw [0, 32767] range; compositor scales to screen.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PointerAbs {
+    x: u32,
+    y: u32,
+}
+/// Pointer button event from virtio-tablet driver.
+/// button: 0 = left, 1 = right. pressed: 1 = down, 0 = up.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PointerButton {
+    button: u8,
+    pressed: u8,
+    _pad: [u8; 2],
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -1317,12 +1339,28 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Channel 1: input events from input driver (endpoint 1 = recv).
+    // Channel 1: input events from keyboard driver (endpoint 1 = recv).
     let input_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
     // Channel 2: GPU present commands (endpoint 0 = send).
     let gpu_ch = unsafe { ipc::Channel::from_base(channel_shm_va(2), ipc::PAGE_SIZE, 0) };
     // Channel 3: editor (endpoint 0 = send input, recv write requests).
     let editor_ch = unsafe { ipc::Channel::from_base(channel_shm_va(3), ipc::PAGE_SIZE, 0) };
+    // Channel 4: input events from tablet driver (endpoint 1 = recv).
+    // This channel exists only when a second input device (virtio-tablet) is
+    // present. Probe whether handle 4 was sent by init: poll with timeout 0.
+    // WouldBlock means the handle exists (just no events yet); InvalidHandle
+    // means no second input device.
+    let has_input2 = match sys::wait(&[INPUT2_HANDLE], 0) {
+        Ok(_) => true,
+        Err(sys::SyscallError::WouldBlock) => true,
+        _ => false,
+    };
+    let input2_ch = if has_input2 {
+        sys::print(b"compositor: tablet input handle detected\n");
+        Some(unsafe { ipc::Channel::from_base(channel_shm_va(4), ipc::PAGE_SIZE, 1) })
+    } else {
+        None
+    };
 
     // -----------------------------------------------------------------------
     // Double buffering: two separate framebuffer allocations.
@@ -1499,10 +1537,11 @@ pub extern "C" fn _start() -> ! {
         let timer_active = unsafe { TIMER_ACTIVE };
         let timer_handle = unsafe { TIMER_HANDLE };
 
-        let wait_result = if timer_active {
-            sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], u64::MAX)
-        } else {
-            sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX)
+        let wait_result = match (timer_active, has_input2) {
+            (true, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE], u64::MAX),
+            (true, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], u64::MAX),
+            (false, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, INPUT2_HANDLE], u64::MAX),
+            (false, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX),
         };
 
         let _ = wait_result;
@@ -1602,6 +1641,34 @@ pub extern "C" fn _start() -> ! {
                     editor_ch.send(&msg);
 
                     let _ = sys::channel_signal(EDITOR_HANDLE);
+                }
+            }
+        }
+
+        // Drain second input channel (tablet) if present.
+        // Handles MSG_POINTER_ABS, MSG_POINTER_BUTTON, and any MSG_KEY_EVENT
+        // from the tablet device.
+        if let Some(ref ch2) = input2_ch {
+            while ch2.try_recv(&mut msg) {
+                match msg.msg_type {
+                    MSG_KEY_EVENT => {
+                        // Keyboard event from second input device (unlikely
+                        // from a tablet, but handle for robustness).
+                        if !unsafe { IMAGE_MODE } {
+                            editor_ch.send(&msg);
+
+                            let _ = sys::channel_signal(EDITOR_HANDLE);
+                        }
+                    }
+                    MSG_POINTER_ABS => {
+                        // Absolute pointer position — will be processed by
+                        // cursor-surface feature. Log for now.
+                    }
+                    MSG_POINTER_BUTTON => {
+                        // Pointer button event — will be processed by
+                        // click-to-position feature. Log for now.
+                    }
+                    _ => {}
                 }
             }
         }
