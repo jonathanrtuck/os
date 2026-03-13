@@ -37,12 +37,11 @@ pub fn channel_shm_va(idx: usize) -> usize {
     CHANNEL_SHM_BASE + idx * 2 * 4096
 }
 
-/// A dirty rectangle for the present protocol wire format.
+/// A rectangular region of pixels that has been modified.
 ///
-/// Layout-compatible with `drawing::DirtyRect`. Both are `repr(C)` with
-/// identical fields, so they can be safely transmuted across the IPC
-/// boundary. The drawing library owns the full type with methods;
-/// this is the protocol's wire representation.
+/// Used by the drawing library (damage tracking) and the present protocol
+/// (dirty rects in MSG_PRESENT payloads). Defined here as the single source
+/// of truth; drawing re-exports it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
 pub struct DirtyRect {
@@ -52,13 +51,60 @@ pub struct DirtyRect {
     pub h: u16,
 }
 
+impl DirtyRect {
+    pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
+        Self { x, y, w, h }
+    }
+
+    pub fn union(self, other: DirtyRect) -> DirtyRect {
+        if self.w == 0 || self.h == 0 {
+            return other;
+        }
+        if other.w == 0 || other.h == 0 {
+            return self;
+        }
+
+        let x0 = if self.x < other.x { self.x } else { other.x };
+        let y0 = if self.y < other.y { self.y } else { other.y };
+        let self_x1 = self.x as u32 + self.w as u32;
+        let other_x1 = other.x as u32 + other.w as u32;
+        let x1 = if self_x1 > other_x1 {
+            self_x1
+        } else {
+            other_x1
+        };
+        let self_y1 = self.y as u32 + self.h as u32;
+        let other_y1 = other.y as u32 + other.h as u32;
+        let y1 = if self_y1 > other_y1 {
+            self_y1
+        } else {
+            other_y1
+        };
+
+        DirtyRect {
+            x: x0,
+            y: y0,
+            w: (x1 - x0 as u32) as u16,
+            h: (y1 - y0 as u32) as u16,
+        }
+    }
+
+    pub fn union_all(rects: &[DirtyRect]) -> DirtyRect {
+        let mut result = DirtyRect::new(0, 0, 0, 0);
+        for &r in rects {
+            result = result.union(r);
+        }
+        result
+    }
+}
+
 // ── device: init -> all drivers ─────────────────────────────────────
 
 pub mod device {
     pub const MSG_DEVICE_CONFIG: u32 = 1;
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct DeviceConfig {
         pub mmio_pa: u64,
         pub irq: u32,
@@ -74,7 +120,7 @@ pub mod gpu {
     pub const MSG_GPU_READY: u32 = 8;
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct GpuConfig {
         pub mmio_pa: u64,
         pub irq: u32,
@@ -88,7 +134,7 @@ pub mod gpu {
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct DisplayInfoMsg {
         pub width: u32,
         pub height: u32,
@@ -103,7 +149,7 @@ pub mod input {
     pub const MSG_POINTER_BUTTON: u32 = 12;
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct KeyEvent {
         pub keycode: u16,
         pub pressed: u8,
@@ -111,14 +157,14 @@ pub mod input {
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct PointerAbs {
         pub x: u32,
         pub y: u32,
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct PointerButton {
         pub button: u8,
         pub pressed: u8,
@@ -137,33 +183,33 @@ pub mod edit {
     pub const MSG_SET_CURSOR: u32 = 35;
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct WriteInsert {
         pub position: u32,
         pub byte: u8,
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct WriteDelete {
         pub position: u32,
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct WriteDeleteRange {
         pub start: u32,
         pub end: u32,
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CursorMove {
         pub position: u32,
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct SelectionUpdate {
         pub sel_start: u32,
         pub sel_end: u32,
@@ -183,7 +229,7 @@ pub mod compose {
     /// fields, so `size_of::<CompositorConfig>() == 56` (no trailing
     /// alignment padding) and fits within the 60-byte IPC payload.
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CompositorConfig {
         pub fb_va: u64,
         pub fb_va2: u64,
@@ -201,7 +247,7 @@ pub mod compose {
     const _: () = assert!(core::mem::size_of::<CompositorConfig>() <= 60);
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct ImageConfig {
         pub image_va: u64,
         pub image_len: u32,
@@ -209,7 +255,7 @@ pub mod compose {
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct IconConfig {
         pub icon_va: u64,
         pub icon_len: u32,
@@ -217,7 +263,7 @@ pub mod compose {
     }
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct RtcConfig {
         pub mmio_pa: u64,
     }
@@ -229,7 +275,7 @@ pub mod editor {
     pub const MSG_EDITOR_CONFIG: u32 = 4;
 
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct EditorConfig {
         pub doc_va: u64,
         pub doc_capacity: u32,
@@ -249,7 +295,7 @@ pub mod present {
     /// When `rect_count == 0`: full-screen transfer.
     /// When `rect_count > 0`: transfer only the specified dirty rects.
     #[repr(C)]
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct PresentPayload {
         pub buffer_index: u32,
         pub rect_count: u32,

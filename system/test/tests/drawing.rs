@@ -1,10 +1,4 @@
 //! Host-side tests for the drawing library.
-//!
-//! Includes the library directly — it has zero external dependencies (no_std,
-//! no syscalls, no hardware), making it fully testable on the host.
-
-#[path = "../../libraries/drawing/lib.rs"]
-mod drawing;
 
 use drawing::{Color, PixelFormat, Surface, TextLayout};
 

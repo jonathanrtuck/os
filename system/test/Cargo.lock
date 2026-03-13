@@ -3,5 +3,25 @@
 version = 4
 
 [[package]]
+name = "drawing"
+version = "0.1.0"
+dependencies = [
+ "protocol",
+]
+
+[[package]]
+name = "ipc"
+version = "0.1.0"
+
+[[package]]
+name = "protocol"
+version = "0.1.0"
+
+[[package]]
 name = "test"
 version = "0.1.0"
+dependencies = [
+ "drawing",
+ "ipc",
+ "protocol",
+]

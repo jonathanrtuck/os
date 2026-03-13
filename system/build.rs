@@ -81,7 +81,13 @@ fn main() {
     let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
     let drawing_rlib = out_dir.join("libdrawing.rlib");
 
-    rustc_rlib(&rustc, &drawing_src, &drawing_rlib, "drawing", &[]);
+    rustc_rlib(
+        &rustc,
+        &drawing_src,
+        &drawing_rlib,
+        "drawing",
+        &[("protocol", &protocol_rlib)],
+    );
 
     let ipc_src = manifest_dir.join("libraries/ipc/lib.rs");
     let ipc_rlib = out_dir.join("libipc.rlib");

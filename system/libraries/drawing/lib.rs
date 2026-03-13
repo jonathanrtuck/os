@@ -21,6 +21,8 @@
 
 #![no_std]
 
+pub use protocol::DirtyRect;
+
 include!("gamma_tables.rs");
 include!("palette.rs");
 include!("png.rs");
@@ -1989,63 +1991,6 @@ pub fn scale_pointer_coord(coord: u32, max_pixels: u32) -> u32 {
 /// Payload = 60 bytes. buffer_index (4) + rect_count (4) + pad (4) = 12.
 /// Remaining = 48 bytes / 8 bytes per rect = 6 rects.
 pub const MAX_DIRTY_RECTS: usize = 6;
-
-/// A rectangular region of pixels that has been modified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C)]
-pub struct DirtyRect {
-    pub x: u16,
-    pub y: u16,
-    pub w: u16,
-    pub h: u16,
-}
-
-impl DirtyRect {
-    pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
-        Self { x, y, w, h }
-    }
-
-    pub fn union(self, other: DirtyRect) -> DirtyRect {
-        if self.w == 0 || self.h == 0 {
-            return other;
-        }
-        if other.w == 0 || other.h == 0 {
-            return self;
-        }
-
-        let x0 = if self.x < other.x { self.x } else { other.x };
-        let y0 = if self.y < other.y { self.y } else { other.y };
-        let self_x1 = self.x as u32 + self.w as u32;
-        let other_x1 = other.x as u32 + other.w as u32;
-        let x1 = if self_x1 > other_x1 {
-            self_x1
-        } else {
-            other_x1
-        };
-        let self_y1 = self.y as u32 + self.h as u32;
-        let other_y1 = other.y as u32 + other.h as u32;
-        let y1 = if self_y1 > other_y1 {
-            self_y1
-        } else {
-            other_y1
-        };
-
-        DirtyRect {
-            x: x0,
-            y: y0,
-            w: (x1 - x0 as u32) as u16,
-            h: (y1 - y0 as u32) as u16,
-        }
-    }
-
-    pub fn union_all(rects: &[DirtyRect]) -> DirtyRect {
-        let mut result = DirtyRect::new(0, 0, 0, 0);
-        for &r in rects {
-            result = result.union(r);
-        }
-        result
-    }
-}
 
 /// Collects dirty rectangles during a render pass.
 ///

@@ -1526,7 +1526,7 @@ pub extern "C" fn _start() -> ! {
     let initial_payload = PresentPayload {
         buffer_index: 0,
         rect_count: 0,
-        rects: [protocol::DirtyRect { x: 0, y: 0, w: 0, h: 0 }; 6],
+        rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
         _pad: [0; 4],
     };
     let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &initial_payload) };
@@ -2061,16 +2061,11 @@ pub extern "C" fn _start() -> ! {
             let payload = if let Some(rects) = damage.dirty_rects() {
                 let n = rects.len();
                 let n = rects.len();
-                let mut pr = [protocol::DirtyRect { x: 0, y: 0, w: 0, h: 0 }; 6];
+                let mut pr = [drawing::DirtyRect::new(0, 0, 0, 0); 6];
                 let mut i = 0;
 
                 while i < n && i < 6 {
-                    pr[i] = protocol::DirtyRect {
-                        x: rects[i].x,
-                        y: rects[i].y,
-                        w: rects[i].w,
-                        h: rects[i].h,
-                    };
+                    pr[i] = rects[i];
                     i += 1;
                 }
 
@@ -2085,7 +2080,7 @@ pub extern "C" fn _start() -> ! {
                 PresentPayload {
                     buffer_index: back as u32,
                     rect_count: 0,
-                    rects: [protocol::DirtyRect { x: 0, y: 0, w: 0, h: 0 }; 6],
+                    rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
                     _pad: [0; 4],
                 }
             };

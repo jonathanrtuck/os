@@ -1,15 +1,4 @@
 //! Host-side tests for the IPC ring buffer library.
-//!
-//! Includes the library directly — it has zero external dependencies (no_std,
-//! no syscalls, no hardware), making it fully testable on the host.
-//!
-//! All tests are `#[cfg_attr(miri, ignore)]` because `libraries/ipc/lib.rs:198`
-//! creates an unaligned `AtomicU32` reference (real UB, but the library is
-//! outside kernel audit scope). The UB is in `RingBuf::head_atomic` which is
-//! called by `RingBuf::init`, triggered by every test.
-
-#[path = "../../libraries/ipc/lib.rs"]
-mod ipc;
 
 use ipc::{Channel, Message, RingBuf, PAYLOAD_SIZE, SLOT_COUNT};
 
@@ -415,19 +404,7 @@ fn channel_config_as_first_message() {
     };
     init_ch.init();
 
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    struct GpuConfig {
-        mmio_pa: u64,
-        irq: u32,
-        _pad: u32,
-        fb_pa: u64,
-        fb_pa2: u64,
-        fb_width: u32,
-        fb_height: u32,
-        fb_size: u32,
-        _pad2: u32,
-    }
+    use protocol::gpu::GpuConfig;
 
     let config = GpuConfig {
         mmio_pa: 0x0A00_0000,
@@ -441,8 +418,7 @@ fn channel_config_as_first_message() {
         _pad2: 0,
     };
 
-    const MSG_GPU_CONFIG: u32 = 1;
-    let msg = unsafe { Message::from_payload(MSG_GPU_CONFIG, &config) };
+    let msg = unsafe { Message::from_payload(protocol::gpu::MSG_GPU_CONFIG, &config) };
     assert!(init_ch.send(&msg));
 
     // Child side (endpoint 1) — reads config as first message.
@@ -452,7 +428,7 @@ fn channel_config_as_first_message() {
 
     let mut out = Message::new(0);
     assert!(child_ch.try_recv(&mut out));
-    assert_eq!(out.msg_type, MSG_GPU_CONFIG);
+    assert_eq!(out.msg_type, protocol::gpu::MSG_GPU_CONFIG);
 
     let recovered: GpuConfig = unsafe { out.payload_as() };
     assert_eq!(recovered, config);

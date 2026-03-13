@@ -779,12 +779,7 @@ pub extern "C" fn _start() -> ! {
     let mut last_payload = PresentPayload {
         buffer_index: 0,
         rect_count: 0,
-        rects: [protocol::DirtyRect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        }; 6],
+        rects: [protocol::DirtyRect::new(0, 0, 0, 0); 6],
         _pad: [0; 4],
     };
 
