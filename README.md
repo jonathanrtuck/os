@@ -61,23 +61,10 @@ cargo build --release
 
 ```bash
 cd system
-qemu-system-aarch64 \
-    -machine virt,gic-version=2 \
-    -cpu cortex-a53 -smp 4 -m 256M \
-    -global virtio-mmio.force-legacy=false \
-    -drive "file=test.img,if=none,format=raw,id=hd0" \
-    -device virtio-blk-device,drive=hd0 \
-    -device virtio-gpu-device \
-    -device virtio-keyboard-device \
-    -device virtio-tablet-device \
-    -fsdev "local,id=fsdev0,path=share,security_model=none" \
-    -device "virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare" \
-    -serial stdio \
-    -device "loader,file=virt.dtb,addr=0x40000000,force-raw=on" \
-    -kernel target/aarch64-unknown-none/release/kernel
+cargo run --release
 ```
 
-Or use the provided script: `./run-qemu.sh target/aarch64-unknown-none/release/kernel`
+This builds the kernel and launches QEMU with the correct device configuration (see `run-qemu.sh` for details). `Ctrl-A X` to exit QEMU.
 
 ### Interaction
 
