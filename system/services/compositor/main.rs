@@ -39,6 +39,7 @@ const MSG_COMPOSITOR_CONFIG: u32 = 3;
 const MSG_IMAGE_CONFIG: u32 = 6;
 const MSG_ICON_CONFIG: u32 = 7;
 const MSG_IMG_ICON_CONFIG: u32 = 9;
+const MSG_RTC_CONFIG: u32 = 15;
 const MSG_KEY_EVENT: u32 = 10;
 const MSG_PRESENT: u32 = 20;
 const MSG_WRITE_INSERT: u32 = 30;
@@ -79,6 +80,17 @@ const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_BOTTOM: u32 = 8;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
+
+/// RTC configuration received from init. Contains the PL031 MMIO PA.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RtcConfig {
+    mmio_pa: u64,
+}
+
+/// Mapped VA of the PL031 RTC MMIO page. 0 = not mapped / not available.
+/// The Data Register at offset 0x000 contains Unix epoch seconds (read-only u32).
+static mut RTC_MMIO_VA: usize = 0;
 
 /// Whether the compositor is in image viewer mode (true) or text editor mode (false).
 static mut IMAGE_MODE: bool = false;
@@ -763,7 +775,7 @@ fn render_title_bar(surf: &mut drawing::Surface) {
 
     // Clock on the right side — HH:MM:SS format.
     let mut time_buf = [0u8; 8];
-    let total_seconds = elapsed_seconds();
+    let total_seconds = clock_seconds();
     format_time_hms(total_seconds, &mut time_buf);
     let clock_w = proportional_string_width(&time_buf, prop_cache);
     let clock_x = surf.width.saturating_sub(12 + clock_w);
@@ -795,17 +807,31 @@ fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
     buf[7] = b'0' + seconds % 10;
 }
 
-/// Get elapsed seconds since boot using the ARM generic counter.
-fn elapsed_seconds() -> u64 {
-    let now = sys::counter();
-    let boot = unsafe { BOOT_COUNTER };
-    let freq = unsafe { COUNTER_FREQ };
+/// Get the current time in seconds for the clock display.
+///
+/// If the PL031 RTC is mapped, reads Unix epoch seconds from the Data
+/// Register (offset 0x000). Otherwise, falls back to elapsed seconds
+/// since boot using the ARM generic counter.
+fn clock_seconds() -> u64 {
+    let rtc_va = unsafe { RTC_MMIO_VA };
 
-    if freq == 0 {
-        return 0;
+    if rtc_va != 0 {
+        // PL031 Data Register at offset 0x000: read-only 32-bit Unix epoch seconds.
+        let epoch = unsafe { core::ptr::read_volatile(rtc_va as *const u32) };
+
+        epoch as u64
+    } else {
+        // Fallback: elapsed seconds since boot.
+        let now = sys::counter();
+        let boot = unsafe { BOOT_COUNTER };
+        let freq = unsafe { COUNTER_FREQ };
+
+        if freq == 0 {
+            return 0;
+        }
+
+        (now - boot) / freq
     }
-
-    (now - boot) / freq
 }
 
 /// Create a new 1-second periodic timer. Stores the handle in TIMER_HANDLE.
@@ -1266,6 +1292,26 @@ pub extern "C" fn _start() -> ! {
                 unsafe {
                     let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
                     alloc::alloc::dealloc(scratch_ptr as *mut u8, layout);
+                }
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Check for RTC configuration from init (PL031 physical address).
+    // If present, map the MMIO page and read the Data Register for wall-clock time.
+    // -----------------------------------------------------------------------
+    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_RTC_CONFIG {
+        let rtc_config: RtcConfig = unsafe { msg.payload_as() };
+
+        if rtc_config.mmio_pa != 0 {
+            match sys::device_map(rtc_config.mmio_pa, 4096) {
+                Ok(va) => {
+                    unsafe { RTC_MMIO_VA = va };
+                    sys::print(b"     pl031 rtc mapped\n");
+                }
+                Err(_) => {
+                    sys::print(b"     pl031 rtc device_map failed\n");
                 }
             }
         }

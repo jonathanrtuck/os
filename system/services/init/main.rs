@@ -52,6 +52,8 @@ const VIRTIO_DEVICE_CONSOLE: u32 = 3;
 const VIRTIO_DEVICE_GPU: u32 = 16;
 const VIRTIO_DEVICE_INPUT: u32 = 18;
 const VIRTIO_DEVICE_9P: u32 = 9;
+/// Pseudo device ID for the PL031 RTC (matches kernel's DEVICE_ID_PL031_RTC).
+const DEVICE_PL031_RTC: u32 = 200;
 /// Document buffer: 1 page. First 64 bytes = header, rest = content.
 const DOC_BUF_PAGES: u64 = 1;
 const DOC_BUF_HEADER: u32 = 64;
@@ -66,6 +68,7 @@ const MSG_IMAGE_CONFIG: u32 = 6;
 const MSG_ICON_CONFIG: u32 = 7;
 const MSG_GPU_READY: u32 = 8;
 const MSG_IMG_ICON_CONFIG: u32 = 9;
+const MSG_RTC_CONFIG: u32 = 15;
 const MSG_FS_READ_REQUEST: u32 = 40;
 const MSG_FS_READ_RESPONSE: u32 = 41;
 
@@ -132,6 +135,14 @@ struct IconConfig {
     icon_len: u32,
     _pad: u32,
 }
+/// RTC configuration sent to the compositor. Contains the physical address
+/// of the PL031 MMIO register page so the compositor can map and read it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RtcConfig {
+    mmio_pa: u64,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct DeviceConfig {
@@ -223,6 +234,7 @@ fn setup_display_pipeline(
     gpu_irq: u32,
     input_proc: Option<(u8, usize, u64, u32)>, // (proc, ch_idx, pa, irq)
     font_buf: Option<(u64, u32, u32, u32, u32, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len, img_icon_offset, img_icon_len)
+    rtc_pa: u64, // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
 ) {
     sys::print(b"     setting up display pipeline\n");
@@ -487,6 +499,17 @@ fn setup_display_pipeline(
         comp_ch.send(&img_icn_msg);
     }
 
+    // Send RTC config if PL031 was discovered. The compositor maps the
+    // MMIO page and reads the Data Register for wall-clock time.
+    if rtc_pa != 0 {
+        let rtc_config = RtcConfig { mmio_pa: rtc_pa };
+        let rtc_msg = unsafe { ipc::Message::from_payload(MSG_RTC_CONFIG, &rtc_config) };
+
+        comp_ch.send(&rtc_msg);
+
+        sys::print(b"     rtc config sent to compositor\n");
+    }
+
     // -----------------------------------------------------------------------
     // Create remaining cross-process channels.
     // -----------------------------------------------------------------------
@@ -687,6 +710,7 @@ pub extern "C" fn _start() -> ! {
     let mut gpu: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
     let mut input: Option<(u8, usize, u64, u32)> = None; // (proc, ch_idx, pa, irq)
     let mut p9: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
+    let mut rtc_pa: u64 = 0; // PL031 RTC physical address (0 = not found)
 
     // Phase 1: Spawn a driver for each device in the manifest.
     let actual = if device_count > 8 { 8 } else { device_count };
@@ -710,6 +734,13 @@ pub extern "C" fn _start() -> ! {
             buf[pos] = b'\n';
             pos += 1;
             sys::print(&buf[..pos]);
+        }
+
+        // PL031 RTC: no driver needed — just save the PA for the compositor.
+        if dev_id == DEVICE_PL031_RTC {
+            rtc_pa = dev_pa;
+            sys::print(b"     pl031 rtc registered\n");
+            continue;
         }
 
         let elf: &[u8] = match dev_id {
@@ -1026,6 +1057,7 @@ pub extern "C" fn _start() -> ! {
             gpu_irq,
             input,
             font_buf,
+            rtc_pa,
             &mut next_channel,
         );
     } else {

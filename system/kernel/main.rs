@@ -105,6 +105,10 @@ const VIRTIO_MMIO_BASE_PA: u64 = 0x0A00_0000;
 const VIRTIO_MMIO_STRIDE: u64 = 0x200;
 const VIRTIO_MMIO_COUNT: usize = 32;
 const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
+/// Pseudo device ID for the PL031 RTC in the device manifest.
+/// Not a virtio device — uses a distinct ID range (200+) so init can
+/// differentiate it from virtio devices (IDs 1–26).
+const DEVICE_ID_PL031_RTC: u32 = 200;
 
 /// Init ELF — the only process the kernel spawns directly.
 /// Init is the proto-OS-service that spawns all other processes.
@@ -590,6 +594,28 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
         serial::puts(" devices found\n");
     }
 
+    // Probe PL031 RTC from DTB and append to device manifest.
+    // The PL031 is a simple read-only clock — no IRQ needed, just the MMIO PA.
+    let mut total_count = device_count;
+
+    if let Some(ref dt) = device_table {
+        if total_count < devices.len() {
+            if let Some(rtc) = dt.find_first("arm,pl031") {
+                let pa = rtc.base_address();
+
+                if pa != 0 {
+                    devices[total_count] = Some(VirtioDeviceInfo {
+                        pa,
+                        irq: 0,
+                        device_id: DEVICE_ID_PL031_RTC,
+                    });
+                    total_count += 1;
+                    serial::puts("  🕐 rtc - pl031 discovered\n");
+                }
+            }
+        }
+    }
+
     // Spawn init (suspended) — the only process the kernel creates directly.
     // Microkernel pattern: kernel provides mechanism, init provides policy.
     let (init_pid, _) = process::create_from_user_elf(INIT_ELF).expect("failed to create init");
@@ -597,7 +623,7 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     // Write device manifest to channel page 0 (kernel→init direction).
     let pages = channel::shared_pages(ch_a).expect("channel shared pages");
 
-    write_device_manifest(pages[0], &devices, device_count);
+    write_device_manifest(pages[0], &devices, total_count);
 
     // Give init the channel endpoint.
     channel::setup_endpoint(ch_b, init_pid).expect("failed to setup init channel");
