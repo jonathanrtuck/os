@@ -1,0 +1,56 @@
+{
+  "flowId": "visual-assertions",
+  "surface": "qemu-display",
+  "testedAt": "2026-03-13T05:12:00Z",
+  "assertions": {
+    "VAL-PERF-003": {
+      "status": "pass",
+      "evidence": "serial-log after 10+ seconds of typing and idle time shows only boot-time initialization messages. No 'gpu: present' or 'compositor: present rects=' lines appear after boot.",
+      "details": "Serial log contains boot messages up to 'multi-surface compositor ready, entering event loop' and nothing after. Multiple keystrokes were sent, Ctrl+Tab was used, and 10+ seconds of idle waited — zero per-present log lines."
+    },
+    "VAL-FONT-003": {
+      "status": "pass",
+      "evidence": "code-review: FONT_SIZE constant is 18 at compositor/main.rs:37. Both mono_cache and prop_cache populate with FONT_SIZE=18. screenshot: text 'hello world' and 'test line two' clearly readable and appropriately sized.",
+      "details": "FONT_SIZE=18 confirmed in code. Screenshot shows text at legible size, well-proportioned for 1280x800 display. Monospace Source Code Pro and proportional Nunito Sans both rasterized at 18px (visible in serial: 'Source Code Pro 18px', 'Nunito Sans 18px')."
+    },
+    "VAL-CONTENT-001": {
+      "status": "pass",
+      "evidence": "screenshot + pixel inspection: Sampled pixels at y=55-120 (text line area) vs y=200-300 (gradient-only area). Both follow the same smooth radial gradient pattern. No flat solid-color strips behind text lines.",
+      "details": "Pixel values at x=400: text region y=70 → R=25,G=25,B=25; non-text y=200 → R=26,G=26,B=26. The 1-unit difference follows the expected radial gradient (center brighter, edges darker). Noise texture adds ±1 variation. No visible line backgrounds — incrementally-cleared lines match surrounding gradient."
+    },
+    "VAL-BG-002": {
+      "status": "pass",
+      "evidence": "screenshot + pixel analysis: Vertical gradient strip sampled every 5px from y=100 to y=700. Max step between consecutive samples = 1.0. Values range from 26 (top) to 28 (center) to 27 (bottom). No visible banding.",
+      "details": "The gradient transitions are extremely smooth with maximum 1-unit steps in brightness. Radial pattern confirmed: center (640,400) brightness=28 vs corner (20,780) brightness=17. Noise texture helps mask any potential banding. No discrete color steps visible in screenshot."
+    },
+    "VAL-CHROME-002": {
+      "status": "pass",
+      "evidence": "screenshot: Title bar shows [document icon] 'Text' on left with proportional Nunito Sans font, clock '05:09:24' in HH:MM:SS format on right. Icon is recognizable document shape (stacked horizontal lines), no garbled pixels, appropriately sized (~30x36 per SVG spec).",
+      "details": "Title bar layout matches expected: icon + name on left, clock on right. 'Text' label renders in proportional font with visible natural spacing (subpixel rendering detected at glyph edges: x=60 shows R=160,G=167,B=172). Clock is legible and well-spaced from right edge. Document name and clock are clearly separated."
+    },
+    "VAL-CHROME-003": {
+      "status": "pass",
+      "evidence": "screenshot(editor-mode): document icon + 'Text'. screenshot(image-mode): image icon (mountain/picture shape) + 'Image'. Icons have visibly different shapes and render without artifacts.",
+      "details": "Before Ctrl+Tab: title bar shows stacked-lines document icon + 'Text'. After Ctrl+Tab: title bar shows mountain/frame image icon + 'Image'. Both icons are clearly distinct shapes at 30x36 pixels, cleanly rasterized from SVGs. No garbled pixels or artifacts in either icon."
+    },
+    "VAL-CLK-001": {
+      "status": "pass",
+      "evidence": "screenshot: clock shows '05:08:45'. Host time at same moment: 05:08:45. Exact match (within 0 seconds). code-review: PL031 MMIO read at compositor/main.rs:537-541, -rtc base=localtime in run-qemu.sh:35, test-qemu.sh:73, and services.yaml:17/45/71.",
+      "details": "Clock reads PL031 RTC Data Register (offset 0x000) as Unix epoch seconds. Kernel discovers PL031 from DTB ('arm,pl031'), init forwards PA via MSG_RTC_CONFIG, compositor maps it and reads volatile. All 3 QEMU launch scripts include -rtc base=localtime. Host time and displayed time matched exactly."
+    },
+    "VAL-CONTENT-002": {
+      "status": "pass",
+      "evidence": "screenshot(before): 3 lines — 'hello world', 'test line two', cursor on empty line 3. screenshot(after): 2 lines — 'hello world', 'test line two' with cursor at end of line 2. No ghost cursor at old line 3 position.",
+      "details": "Created empty line 3 via Enter, then pressed Backspace. The newline was deleted, cursor moved to end of 'test line two' on line 2, and the area where line 3 cursor was is clean gradient with no remaining white vertical bar artifact. Old cursor position fully erased."
+    },
+    "VAL-CROSS-001": {
+      "status": "pass",
+      "evidence": "4 screenshots: (1) boot — empty editor with cursor, document icon + 'Text', clock 05:08:45. (2) typed text — 'hello world' / 'test line two', cursor at end. (3) image viewer — colorful test image centered, image icon + 'Image', clock 05:11:31. (4) back to editor — text preserved ('hello world' / 'test line two'), cursor at end of line 2, document icon + 'Text', clock 05:11:53.",
+      "details": "Full demo flow verified: Boot → type text → Ctrl+Tab to image viewer → Ctrl+Tab back. Text and cursor position preserved across context switch. Title bar icon switches between document and image icons correctly. Document name changes between 'Text' and 'Image'. Clock ticked continuously throughout (05:08:45 → 05:09:24 → 05:10:35 → 05:11:31 → 05:11:53)."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": ["qemu-screendump", "nc", "PIL", "Read-tool", "grep", "python3-pixel-analysis"],
+  "summary": "Tested 9 assertions: all 9 passed. Visual rendering, title bar chrome, icon switching, clock accuracy, gradient quality, backspace behavior, and full demo flow all verified through QEMU framebuffer screenshots and pixel-level analysis."
+}
