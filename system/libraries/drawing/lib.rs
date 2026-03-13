@@ -45,7 +45,8 @@ pub const STEM_DARKENING_BOOST: u32 = 70;
 /// Properties:
 /// - LUT[0] = 0 (zero coverage stays zero)
 /// - LUT[255] = 255 (full coverage stays full)
-/// - LUT[c] > c for all c in 1..254 (strict boost)
+/// - LUT[c] > c for all c in 1..=251 (strict boost)
+/// - LUT[c] = c for c in 252..=254 (boost rounds to zero at high coverage)
 /// - Monotonically non-decreasing
 ///
 /// Applied equally to all 3 subpixel channels (R, G, B) after the FIR
@@ -125,7 +126,9 @@ pub struct Color {
 }
 /// Fixed-size glyph cache for printable ASCII (0x20–0x7E).
 /// Coverage maps are stored in a single contiguous buffer.
-/// Total size: ~220 KiB (95 glyphs * 48*48 bytes coverage + metadata).
+/// Total size: ~1.3 MiB (95 glyphs × 13 824 bytes coverage + metadata).
+/// Each glyph buffer is GLYPH_MAX_W × OVERSAMPLE_X × GLYPH_MAX_H = 48×6×48 = 13 824 bytes
+/// to accommodate the 6× oversampled intermediate raster used by subpixel rendering.
 pub struct GlyphCache {
     glyphs: [CachedGlyph; GLYPH_COUNT],
     coverage: [u8; GLYPH_COUNT * GLYPH_BUF_SIZE],
@@ -348,7 +351,7 @@ impl GlyphCache {
             }
         }
     }
-    /// Zero-initialize the cache. The struct is ~220 KiB -- callers with
+    /// Zero-initialize the cache. The struct is ~1.3 MiB -- callers with
     /// limited stack should allocate on the heap first, then call `populate`.
     pub const fn zeroed() -> Self {
         GlyphCache {

@@ -78,7 +78,7 @@ const SHADOW_DEPTH: u32 = 12;
 const TITLE_BAR_H: u32 = 36;
 // Content area insets (relative to framebuffer).
 // The content surface now extends full-screen so that document content is
-// visible through translucent chrome (title bar and status bar).
+// visible through translucent chrome (title bar).
 const CONTENT_MARGIN_X: u32 = 0;
 const CONTENT_MARGIN_TOP: u32 = 0;
 const CONTENT_MARGIN_BOTTOM: u32 = 0;
@@ -163,6 +163,9 @@ static mut PROP_GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 /// Raw font data pointer and length for the proportional font (used for kerning lookups).
 static mut PROP_FONT_DATA: *const u8 = core::ptr::null();
 static mut PROP_FONT_LEN: usize = 0;
+/// Cached parsed proportional TrueTypeFont (heap-allocated at startup, avoids
+/// re-parsing on every `render_title_bar()` call). Null if no proportional font.
+static mut PROP_TTF: *const drawing::TrueTypeFont<'static> = core::ptr::null();
 /// Pre-rasterized SVG document icon coverage map (heap-allocated, initialized at startup).
 /// Null if no icon was loaded. Width and height stored alongside.
 static mut ICON_COVERAGE: *const u8 = core::ptr::null();
@@ -433,7 +436,7 @@ fn content_text_layout(content_w: u32) -> drawing::TextLayout {
     }
 }
 /// Maximum Y coordinate for text within the content surface (local coords).
-/// Text must stay above the status bar chrome area.
+/// Text must stay above the bottom edge margin.
 fn max_text_y_in_content(content_h: u32) -> u32 {
     content_h.saturating_sub(unsafe { LINE_H } + TEXT_INSET_BOTTOM)
 }
@@ -528,9 +531,9 @@ fn gradient_row_color(y: u32, fb_width: u32, fb_height: u32) -> drawing::Color {
 /// Render the content surface: text area background, text content, and cursor.
 ///
 /// The content surface extends full-screen so that document content is
-/// visible through the translucent chrome (title bar and status bar).
+/// visible through the translucent chrome (title bar).
 /// Text is rendered with margins that keep it below the title bar and
-/// above the status bar, but the background fills the entire surface.
+/// above the bottom edge, but the background fills the entire surface.
 ///
 /// When `force_full` is true (first frame, context switch, scroll change,
 /// selection change), the entire surface is cleared and re-rendered.
@@ -797,20 +800,16 @@ fn render_title_bar(surf: &mut drawing::Surface) {
         text_x = 12;
     }
 
-    // Parse the proportional font for kerning (if available).
-    let prop_font = unsafe {
-        if !PROP_FONT_DATA.is_null() && PROP_FONT_LEN > 0 {
-            let data = core::slice::from_raw_parts(PROP_FONT_DATA, PROP_FONT_LEN);
-            drawing::TrueTypeFont::new(data)
-        } else {
-            None
-        }
+    // Use the cached parsed proportional TrueTypeFont for kerning (avoids
+    // re-parsing font tables on every title bar render).
+    let prop_font: Option<&drawing::TrueTypeFont<'static>> = unsafe {
+        if !PROP_TTF.is_null() { Some(&*PROP_TTF) } else { None }
     };
 
     // Document name (proportional font with kerning) — "Untitled" as default.
     drawing::draw_proportional_string_kerned(
         surf, text_x, text_y, b"Untitled", prop_cache, drawing::CHROME_TITLE,
-        prop_font.as_ref(),
+        prop_font,
     );
 
     // Clock on the right side — HH:MM:SS format.
@@ -822,7 +821,7 @@ fn render_title_bar(surf: &mut drawing::Surface) {
 
     drawing::draw_proportional_string_kerned(
         surf, clock_x, text_y, &time_buf, prop_cache, drawing::CHROME_CLOCK,
-        prop_font.as_ref(),
+        prop_font,
     );
 
     // Bottom edge line.
@@ -940,6 +939,183 @@ fn make_surf(buf: &mut [u8], w: u32, h: u32) -> drawing::Surface<'_> {
         stride: w * 4,
         format: drawing::PixelFormat::Bgra8888,
     }
+}
+
+/// Result of processing a single key event. Used by `process_key_event()`
+/// to communicate state changes back to the event loop caller.
+struct KeyAction {
+    /// Whether the display changed and needs a present.
+    changed: bool,
+    /// Whether text/content was modified (forces content dirty rects).
+    text_changed: bool,
+    /// Whether a Ctrl+Tab context switch occurred.
+    context_switched: bool,
+    /// Whether the event was fully consumed (should not be forwarded to editor).
+    consumed: bool,
+}
+
+/// Handle a single key event from any input channel. Encapsulates the Ctrl
+/// modifier tracking, Ctrl+Tab context switch, and editor forwarding logic
+/// that is shared across all input channels.
+///
+/// Returns a `KeyAction` describing what happened. If `consumed` is true,
+/// the caller should not forward the event further.
+fn process_key_event(
+    key: &KeyEvent,
+    ctrl_pressed: &mut bool,
+    has_image: bool,
+    content_buf: &mut [u8],
+    title_buf: &mut [u8],
+    content_w: u32,
+    content_h: u32,
+    fb_width: u32,
+    image_pixels: &[u8],
+    image_w: u32,
+    image_h: u32,
+    editor_ch: &ipc::Channel,
+    msg: &ipc::Message,
+) -> KeyAction {
+    // Track Left Ctrl modifier state.
+    if key.keycode == KEY_LEFTCTRL {
+        *ctrl_pressed = key.pressed == 1;
+
+        return KeyAction { changed: false, text_changed: false, context_switched: false, consumed: true };
+    }
+
+    // Ctrl+Tab toggles between editor and image viewer contexts.
+    if key.keycode == KEY_TAB && key.pressed == 1 && *ctrl_pressed {
+        if has_image {
+            let was_image = unsafe { IMAGE_MODE };
+
+            if !was_image {
+                // Switching TO image: save editor scroll offset.
+                unsafe { SAVED_EDITOR_SCROLL = SCROLL_OFFSET };
+            }
+
+            unsafe { IMAGE_MODE = !was_image };
+
+            if was_image {
+                // Switching BACK to editor: restore scroll offset.
+                unsafe { SCROLL_OFFSET = SAVED_EDITOR_SCROLL };
+            }
+
+            // Re-render the content surface for the new mode.
+            {
+                let mut content_surf = make_surf(content_buf, content_w, content_h);
+
+                if unsafe { IMAGE_MODE } {
+                    render_image_content_surface(
+                        &mut content_surf,
+                        image_pixels,
+                        image_w,
+                        image_h,
+                    );
+                } else {
+                    // Switching back to editor: full clear + re-render
+                    // to ensure no image artifacts remain.
+                    render_content_surface(&mut content_surf, doc_content(), true);
+                }
+            }
+
+            // Re-render the title bar to switch the icon.
+            {
+                let mut title_surf = make_surf(title_buf, fb_width, TITLE_BAR_H);
+                render_title_bar(&mut title_surf);
+            }
+
+            return KeyAction { changed: true, text_changed: true, context_switched: true, consumed: true };
+        }
+
+        return KeyAction { changed: false, text_changed: false, context_switched: false, consumed: true };
+    }
+
+    // Forward non-modifier keys to editor in text mode.
+    if !unsafe { IMAGE_MODE } {
+        editor_ch.send(msg);
+        let _ = sys::channel_signal(EDITOR_HANDLE);
+    }
+
+    KeyAction { changed: false, text_changed: false, context_switched: false, consumed: false }
+}
+
+/// Parse SVG path data and rasterize into a leaked coverage map.
+///
+/// Heap-allocates both `SvgPath` and `SvgRasterScratch` to avoid blowing the
+/// 16 KiB userspace stack (~16 KiB + ~64 KiB respectively). On success,
+/// returns the coverage pointer, width, and height as a leaked allocation
+/// (caller stores the pointer in a static). On failure (OOM or parse/raster
+/// error), returns `None` and all temporary allocations are freed.
+fn rasterize_svg_icon(
+    svg_data: &[u8],
+    label: &[u8],
+    icon_w: u32,
+    icon_h: u32,
+) -> Option<(*const u8, u32, u32)> {
+    sys::print(label);
+
+    let path_ptr = unsafe {
+        let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgPath;
+        ptr
+    };
+    if path_ptr.is_null() {
+        sys::print(b"compositor: SVG path alloc failed (OOM)\n");
+        return None;
+    }
+
+    let scratch_ptr = unsafe {
+        let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+        alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
+    };
+    if scratch_ptr.is_null() {
+        sys::print(b"compositor: SVG scratch alloc failed (OOM)\n");
+        unsafe {
+            let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+            alloc::alloc::dealloc(path_ptr as *mut u8, layout);
+        }
+        return None;
+    }
+
+    let result = match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
+        Ok(()) => {
+            let icon_size = (icon_w * icon_h) as usize;
+            let mut icon_cov = vec![0u8; icon_size];
+
+            match drawing::svg_rasterize(
+                unsafe { &*path_ptr },
+                unsafe { &mut *scratch_ptr },
+                &mut icon_cov,
+                icon_w,
+                icon_h,
+                drawing::SVG_FP_ONE,
+                0,
+                0,
+            ) {
+                Ok(()) => {
+                    let leaked = icon_cov.leak();
+                    Some((leaked.as_ptr(), icon_w, icon_h))
+                }
+                Err(_) => {
+                    sys::print(b"     SVG icon rasterize failed\n");
+                    None
+                }
+            }
+        }
+        Err(_) => {
+            sys::print(b"     SVG icon parse failed\n");
+            None
+        }
+    };
+
+    // Free temporary heap allocations.
+    unsafe {
+        let path_layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+        alloc::alloc::dealloc(path_ptr as *mut u8, path_layout);
+        let scratch_layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+        alloc::alloc::dealloc(scratch_ptr as *mut u8, scratch_layout);
+    }
+
+    result
 }
 
 #[unsafe(no_mangle)]
@@ -1068,6 +1244,19 @@ pub extern "C" fn _start() -> ! {
 
             unsafe { PROP_GLYPH_CACHE = Box::into_raw(prop_cache) };
 
+            // Cache the parsed TrueTypeFont so render_title_bar() can use it
+            // for kerning without re-parsing the font tables on every call.
+            // Safety: prop_font_data is backed by PROP_FONT_DATA which lives
+            // for the entire process lifetime. We transmute the lifetime to
+            // 'static since the data will never be freed.
+            let boxed_ttf: Box<drawing::TrueTypeFont<'static>> = unsafe {
+                Box::new(core::mem::transmute::<
+                    drawing::TrueTypeFont<'_>,
+                    drawing::TrueTypeFont<'static>,
+                >(prop_ttf))
+            };
+            unsafe { PROP_TTF = Box::into_raw(boxed_ttf) };
+
             sys::print(b"     proportional font rasterized (Nunito Sans 20px)\n");
         } else {
             sys::print(b"     warning: failed to parse proportional font, using monospace for chrome\n");
@@ -1081,6 +1270,26 @@ pub extern "C" fn _start() -> ! {
     }
 
     drop(scratch);
+
+    // -----------------------------------------------------------------------
+    // Init→compositor message ordering invariant.
+    //
+    // Init enqueues configuration messages into the ring buffer in a fixed
+    // order before the compositor process starts executing. The compositor
+    // drains them via sequential `try_recv` calls and **must** read them in
+    // the same order init writes them:
+    //
+    //   1. MSG_COMPOSITOR_CONFIG  — framebuffer + document + font pointers (required)
+    //   2. MSG_IMAGE_CONFIG       — raw PNG data for image viewer (optional)
+    //   3. MSG_ICON_CONFIG        — SVG document icon path data (optional)
+    //   4. MSG_IMG_ICON_CONFIG    — SVG image icon path data (optional)
+    //   5. MSG_RTC_CONFIG         — PL031 RTC MMIO address (optional)
+    //
+    // If init omits an optional message, the corresponding `try_recv` will
+    // either see the next message type (and skip processing) or return false
+    // (ring empty). Reordering the reads here would silently mis-parse
+    // payloads because messages are identified by position, not type lookup.
+    // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
     // Check for image configuration (raw PNG data) from init.
@@ -1170,89 +1379,14 @@ pub extern "C" fn _start() -> ! {
                 )
             };
 
+            if let Some((ptr, w, h)) =
+                rasterize_svg_icon(svg_data, b"     parsing SVG doc icon\n", 20, 24)
             {
-                let mut len_buf = [0u8; 40];
-                let prefix = b"     parsing SVG icon (";
-                len_buf[..prefix.len()].copy_from_slice(prefix);
-                let mut li = prefix.len();
-                li = append_u32(&mut len_buf, li, icn_config.icon_len);
-                let suffix = b" bytes)\n";
-                len_buf[li..li + suffix.len()].copy_from_slice(suffix);
-                li += suffix.len();
-                sys::print(&len_buf[..li]);
-            }
-
-            // Heap-allocate SvgPath and SvgRasterScratch — both are too large
-            // for the 16 KiB userspace stack (~16 KiB + ~64 KiB respectively).
-            // Use alloc_zeroed to avoid constructing on the stack first.
-            let path_ptr = unsafe {
-                let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
-                let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgPath;
-                // Zeroed memory: num_commands=0, commands are all-zero bytes.
-                // svg_parse_path_into will overwrite commands[0..n] and set num_commands.
-                ptr
-            };
-            if path_ptr.is_null() {
-                sys::print(b"compositor: SVG path alloc failed (OOM)\n");
-            }
-            let scratch_ptr = if path_ptr.is_null() {
-                core::ptr::null_mut()
-            } else {
+                sys::print(b"     SVG icon rasterized (20x24)\n");
                 unsafe {
-                    let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
-                    alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
-                }
-            };
-            if !path_ptr.is_null() && scratch_ptr.is_null() {
-                sys::print(b"compositor: SVG scratch alloc failed (OOM)\n");
-            }
-
-            if !path_ptr.is_null() && !scratch_ptr.is_null() {
-                match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
-                    Ok(()) => {
-                        // Rasterize icon at 20×24 pixels (native path coordinate size).
-                        let icon_w: u32 = 20;
-                        let icon_h: u32 = 24;
-                        let icon_size = (icon_w * icon_h) as usize;
-                        let mut icon_cov = vec![0u8; icon_size];
-
-                        match drawing::svg_rasterize(
-                            unsafe { &*path_ptr }, unsafe { &mut *scratch_ptr }, &mut icon_cov,
-                            icon_w, icon_h,
-                            drawing::SVG_FP_ONE, 0, 0,
-                        ) {
-                            Ok(()) => {
-                                sys::print(b"     SVG icon rasterized (20x24)\n");
-                                // Store coverage map as a leaked heap allocation.
-                                let leaked = icon_cov.leak();
-                                unsafe {
-                                    ICON_COVERAGE = leaked.as_ptr();
-                                    ICON_W = icon_w;
-                                    ICON_H = icon_h;
-                                }
-                            }
-                            Err(_) => {
-                                sys::print(b"     SVG icon rasterize failed\n");
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        sys::print(b"     SVG icon parse failed\n");
-                    }
-                }
-            }
-
-            // Free heap allocations (safe to skip if null).
-            if !path_ptr.is_null() {
-                unsafe {
-                    let path_layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
-                    alloc::alloc::dealloc(path_ptr as *mut u8, path_layout);
-                }
-            }
-            if !scratch_ptr.is_null() {
-                unsafe {
-                    let scratch_layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
-                    alloc::alloc::dealloc(scratch_ptr as *mut u8, scratch_layout);
+                    ICON_COVERAGE = ptr;
+                    ICON_W = w;
+                    ICON_H = h;
                 }
             }
         }
@@ -1273,65 +1407,14 @@ pub extern "C" fn _start() -> ! {
                 )
             };
 
-            sys::print(b"     parsing image icon SVG\n");
-
-            let path_ptr = unsafe {
-                let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
-                let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgPath;
-                ptr
-            };
-            let scratch_ptr = if path_ptr.is_null() {
-                core::ptr::null_mut()
-            } else {
+            if let Some((ptr, w, h)) =
+                rasterize_svg_icon(svg_data, b"     parsing image icon SVG\n", 20, 24)
+            {
+                sys::print(b"     image icon rasterized (20x24)\n");
                 unsafe {
-                    let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
-                    alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
-                }
-            };
-
-            if !path_ptr.is_null() && !scratch_ptr.is_null() {
-                match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
-                    Ok(()) => {
-                        let iw: u32 = 20;
-                        let ih: u32 = 24;
-                        let icon_size = (iw * ih) as usize;
-                        let mut icon_cov = vec![0u8; icon_size];
-
-                        match drawing::svg_rasterize(
-                            unsafe { &*path_ptr }, unsafe { &mut *scratch_ptr }, &mut icon_cov,
-                            iw, ih,
-                            drawing::SVG_FP_ONE, 0, 0,
-                        ) {
-                            Ok(()) => {
-                                sys::print(b"     image icon rasterized (20x24)\n");
-                                let leaked = icon_cov.leak();
-                                unsafe {
-                                    IMG_ICON_COVERAGE = leaked.as_ptr();
-                                    IMG_ICON_W = iw;
-                                    IMG_ICON_H = ih;
-                                }
-                            }
-                            Err(_) => {
-                                sys::print(b"     image icon rasterize failed\n");
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        sys::print(b"     image icon parse failed\n");
-                    }
-                }
-            }
-
-            if !path_ptr.is_null() {
-                unsafe {
-                    let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
-                    alloc::alloc::dealloc(path_ptr as *mut u8, layout);
-                }
-            }
-            if !scratch_ptr.is_null() {
-                unsafe {
-                    let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
-                    alloc::alloc::dealloc(scratch_ptr as *mut u8, layout);
+                    IMG_ICON_COVERAGE = ptr;
+                    IMG_ICON_W = w;
+                    IMG_ICON_H = h;
                 }
             }
         }
@@ -1605,74 +1688,15 @@ pub extern "C" fn _start() -> ! {
         while input_ch.try_recv(&mut msg) {
             if msg.msg_type == MSG_KEY_EVENT {
                 let key: KeyEvent = unsafe { msg.payload_as() };
+                let action = process_key_event(
+                    &key, &mut ctrl_pressed, !image_pixels.is_empty(),
+                    &mut content_buf, &mut title_buf, content_w, content_h, fb_width,
+                    &image_pixels, image_w, image_h, &editor_ch, &msg,
+                );
 
-                // Track Left Ctrl modifier state.
-                if key.keycode == KEY_LEFTCTRL {
-                    ctrl_pressed = key.pressed == 1;
-
-                    continue; // Don't forward Ctrl to editor.
-                }
-
-                // Ctrl+Tab toggles between editor and image viewer contexts.
-                if key.keycode == KEY_TAB && key.pressed == 1 && ctrl_pressed {
-                    let has_image = !image_pixels.is_empty();
-
-                    if has_image {
-                        let was_image = unsafe { IMAGE_MODE };
-
-                        if !was_image {
-                            // Switching TO image: save editor scroll offset.
-                            unsafe { SAVED_EDITOR_SCROLL = SCROLL_OFFSET };
-                        }
-
-                        unsafe { IMAGE_MODE = !was_image };
-
-                        if was_image {
-                            // Switching BACK to editor: restore scroll offset.
-                            unsafe { SCROLL_OFFSET = SAVED_EDITOR_SCROLL };
-                        }
-
-                        // Re-render the content surface for the new mode.
-                        {
-                            let mut content_surf =
-                                make_surf(&mut content_buf, content_w, content_h);
-
-                            if unsafe { IMAGE_MODE } {
-                                render_image_content_surface(
-                                    &mut content_surf,
-                                    &image_pixels,
-                                    image_w,
-                                    image_h,
-                                );
-                            } else {
-                                // Switching back to editor: full clear + re-render
-                                // to ensure no image artifacts remain.
-                                render_content_surface(&mut content_surf, doc_content(), true);
-                            }
-                        }
-
-                        // Re-render the title bar to switch the icon.
-                        {
-                            let mut title_surf =
-                                make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
-                            render_title_bar(&mut title_surf);
-                        }
-
-                        changed = true;
-                        text_changed = true;
-                        context_switched = true;
-                    }
-
-                    continue; // Don't forward Ctrl+Tab to editor.
-                }
-
-                // In image mode, don't forward editing keys to the editor —
-                // keyboard input only applies in editor mode.
-                if !unsafe { IMAGE_MODE } {
-                    editor_ch.send(&msg);
-
-                    let _ = sys::channel_signal(EDITOR_HANDLE);
-                }
+                if action.changed { changed = true; }
+                if action.text_changed { text_changed = true; }
+                if action.context_switched { context_switched = true; }
             }
         }
 
@@ -1685,67 +1709,15 @@ pub extern "C" fn _start() -> ! {
                 match msg.msg_type {
                     MSG_KEY_EVENT => {
                         let key: KeyEvent = unsafe { msg.payload_as() };
+                        let action = process_key_event(
+                            &key, &mut ctrl_pressed, !image_pixels.is_empty(),
+                            &mut content_buf, &mut title_buf, content_w, content_h, fb_width,
+                            &image_pixels, image_w, image_h, &editor_ch, &msg,
+                        );
 
-                        // Track Left Ctrl modifier state (same as first channel).
-                        if key.keycode == KEY_LEFTCTRL {
-                            ctrl_pressed = key.pressed == 1;
-
-                            continue;
-                        }
-
-                        // Ctrl+Tab context switch (same logic as first channel).
-                        if key.keycode == KEY_TAB && key.pressed == 1 && ctrl_pressed {
-                            let has_image = !image_pixels.is_empty();
-
-                            if has_image {
-                                let was_image = unsafe { IMAGE_MODE };
-
-                                if !was_image {
-                                    unsafe { SAVED_EDITOR_SCROLL = SCROLL_OFFSET };
-                                }
-
-                                unsafe { IMAGE_MODE = !was_image };
-
-                                if was_image {
-                                    unsafe { SCROLL_OFFSET = SAVED_EDITOR_SCROLL };
-                                }
-
-                                {
-                                    let mut content_surf =
-                                        make_surf(&mut content_buf, content_w, content_h);
-
-                                    if unsafe { IMAGE_MODE } {
-                                        render_image_content_surface(
-                                            &mut content_surf,
-                                            &image_pixels,
-                                            image_w,
-                                            image_h,
-                                        );
-                                    } else {
-                                        render_content_surface(&mut content_surf, doc_content(), true);
-                                    }
-                                }
-
-                                {
-                                    let mut title_surf =
-                                        make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
-                                    render_title_bar(&mut title_surf);
-                                }
-
-                                changed = true;
-                                text_changed = true;
-                                context_switched = true;
-                            }
-
-                            continue;
-                        }
-
-                        // Forward non-modifier keys to editor in text mode.
-                        if !unsafe { IMAGE_MODE } {
-                            editor_ch.send(&msg);
-
-                            let _ = sys::channel_signal(EDITOR_HANDLE);
-                        }
+                        if action.changed { changed = true; }
+                        if action.text_changed { text_changed = true; }
+                        if action.context_switched { context_switched = true; }
                     }
                     MSG_POINTER_ABS => {
                         let ptr: PointerAbs = unsafe { msg.payload_as() };
