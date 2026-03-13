@@ -69,7 +69,7 @@ The compositor uses a multi-surface model with z-ordered back-to-front compositi
 | Background       | 0       | Solid dark background fill |
 | Content          | 10      | Text editor or image viewer (full-screen, extends behind chrome) |
 | Title shadow     | 15      | Soft gradient shadow below title bar |
-| Title bar chrome | 20      | Translucent (alpha=170) with "Document OS" branding |
+| Title bar chrome | 20      | Translucent (alpha=170) with [icon] Untitled + HH:MM:SS clock |
 
 Each surface has a dedicated render function (e.g., `render_content_surface()`, `render_title_bar()`). Surfaces are allocated once at startup and re-rendered in-place each frame. The `composite_surfaces()` function sorts by z-order (stable sort) and composites via `blit_blend`.
 

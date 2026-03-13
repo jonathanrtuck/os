@@ -65,6 +65,7 @@ const MSG_DISPLAY_INFO: u32 = 5;
 const MSG_IMAGE_CONFIG: u32 = 6;
 const MSG_ICON_CONFIG: u32 = 7;
 const MSG_GPU_READY: u32 = 8;
+const MSG_IMG_ICON_CONFIG: u32 = 9;
 const MSG_FS_READ_REQUEST: u32 = 40;
 const MSG_FS_READ_RESPONSE: u32 = 41;
 
@@ -221,7 +222,7 @@ fn setup_display_pipeline(
     gpu_pa: u64,
     gpu_irq: u32,
     input_proc: Option<(u8, usize, u64, u32)>, // (proc, ch_idx, pa, irq)
-    font_buf: Option<(u64, u32, u32, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len)
+    font_buf: Option<(u64, u32, u32, u32, u32, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len, img_icon_offset, img_icon_len)
     next_channel: &mut usize,
 ) {
     sys::print(b"     setting up display pipeline\n");
@@ -417,17 +418,17 @@ fn setup_display_pipeline(
     // Share font+image buffer with compositor (read-only) if available.
     // The buffer contains: mono font at offset 0, prop font at offset mono_len,
     // PNG image data at offset png_offset, SVG icon data at offset icon_offset.
-    let (comp_font_va, mono_font_len, prop_font_len, png_offset, png_len, icon_offset, icon_len) = if let Some((font_pa, mono_len, prop_len, png_off, png_l, icon_off, icon_l)) = font_buf {
-        let total_len = mono_len + prop_len + png_l + icon_l;
+    let (comp_font_va, mono_font_len, prop_font_len, png_offset, png_len, icon_offset, icon_len, img_icon_offset, img_icon_len) = if let Some((font_pa, mono_len, prop_len, png_off, png_l, icon_off, icon_l, img_off, img_l)) = font_buf {
+        let total_len = mono_len + prop_len + png_l + icon_l + img_l;
         let font_pages = ((total_len as u64) + 4095) / 4096;
         let va = sys::memory_share(comp_proc, font_pa, font_pages, true).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (compositor font) failed\n");
             sys::exit();
         });
 
-        (va as u64, mono_len, prop_len, png_off, png_l, icon_off, icon_l)
+        (va as u64, mono_len, prop_len, png_off, png_l, icon_off, icon_l, img_off, img_l)
     } else {
-        (0u64, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32)
+        (0u64, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32)
     };
     // Send compositor config via ring buffer.
     let comp_ch = init_channel(comp_channel_idx);
@@ -471,6 +472,19 @@ fn setup_display_pipeline(
         let icn_msg = unsafe { ipc::Message::from_payload(MSG_ICON_CONFIG, &icn_config) };
 
         comp_ch.send(&icn_msg);
+    }
+
+    // Send image icon config as a fourth message if available.
+    if img_icon_len > 0 {
+        let img_icon_va = comp_font_va + img_icon_offset as u64;
+        let img_icn_config = IconConfig {
+            icon_va: img_icon_va,
+            icon_len: img_icon_len,
+            _pad: 0,
+        };
+        let img_icn_msg = unsafe { ipc::Message::from_payload(MSG_IMG_ICON_CONFIG, &img_icn_config) };
+
+        comp_ch.send(&img_icn_msg);
     }
 
     // -----------------------------------------------------------------------
@@ -774,10 +788,10 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Phase 1.5: Read font files from host via 9p driver (must complete before compositor).
-    // Loads monospace + proportional fonts, PNG image, and SVG icon.
-    // All stored in a single shared buffer: mono | prop | PNG | SVG icon.
-    // Tuple: (font_pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len)
-    let font_buf: Option<(u64, u32, u32, u32, u32, u32, u32)> = if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9
+    // Loads monospace + proportional fonts, PNG image, and SVG icons.
+    // All stored in a single shared buffer: mono | prop | PNG | doc-icon SVG | img-icon SVG.
+    // Tuple: (font_pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len, img_icon_offset, img_icon_len)
+    let font_buf: Option<(u64, u32, u32, u32, u32, u32, u32, u32, u32)> = if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9
     {
         sys::print(b"     loading fonts from host filesystem\n");
 
@@ -966,8 +980,35 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"     icon read failed\n");
         }
 
+        // Load image icon (img-icon.svg) right after the doc icon.
+        sys::print(b"     loading img-icon.svg\n");
+
+        let img_icon_offset = mono_len + prop_len + png_len + icon_len;
+        let img_icon_capacity = font_capacity - img_icon_offset;
+        let img_icon_target_va = p9_font_va as u64 + img_icon_offset as u64;
+
+        let img_icon_len = read_font_file(
+            &p9_ch_obj, p9_ch,
+            img_icon_target_va, img_icon_capacity,
+            b"img-icon.svg",
+        );
+
+        if img_icon_len > 0 {
+            let mut buf = [0u8; 48];
+            let prefix = b"     img icon loaded: ";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            let mut pos = prefix.len();
+            pos += format_u32(img_icon_len, &mut buf[pos..]);
+            let suffix = b" bytes\n";
+            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+            pos += suffix.len();
+            sys::print(&buf[..pos]);
+        } else {
+            sys::print(b"     img icon read failed\n");
+        }
+
         if mono_len > 0 {
-            Some((font_pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len))
+            Some((font_pa, mono_len, prop_len, png_offset, png_len, icon_offset, icon_len, img_icon_offset, img_icon_len))
         } else {
             None
         }

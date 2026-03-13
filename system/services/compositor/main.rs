@@ -38,6 +38,7 @@ const FONT_SIZE: u32 = 16;
 const MSG_COMPOSITOR_CONFIG: u32 = 3;
 const MSG_IMAGE_CONFIG: u32 = 6;
 const MSG_ICON_CONFIG: u32 = 7;
+const MSG_IMG_ICON_CONFIG: u32 = 9;
 const MSG_KEY_EVENT: u32 = 10;
 const MSG_PRESENT: u32 = 20;
 const MSG_WRITE_INSERT: u32 = 30;
@@ -82,12 +83,8 @@ const DOC_HEADER_SIZE: usize = 64;
 /// Whether the compositor is in image viewer mode (true) or text editor mode (false).
 static mut IMAGE_MODE: bool = false;
 /// Counter value captured at boot for deriving elapsed wall-clock time.
-/// Kept for the upcoming title-bar clock feature.
-#[allow(dead_code)]
 static mut BOOT_COUNTER: u64 = 0;
 /// Counter frequency in Hz (read once at boot).
-/// Kept for the upcoming title-bar clock feature.
-#[allow(dead_code)]
 static mut COUNTER_FREQ: u64 = 0;
 /// Current timer handle for the 1-second periodic clock. 0 = no timer.
 static mut TIMER_HANDLE: u8 = 0;
@@ -133,6 +130,11 @@ static mut PROP_GLYPH_CACHE: *const drawing::GlyphCache = core::ptr::null();
 static mut ICON_COVERAGE: *const u8 = core::ptr::null();
 static mut ICON_W: u32 = 0;
 static mut ICON_H: u32 = 0;
+/// Pre-rasterized SVG image icon coverage map (for image viewer mode).
+/// Null if no icon was loaded.
+static mut IMG_ICON_COVERAGE: *const u8 = core::ptr::null();
+static mut IMG_ICON_W: u32 = 0;
+static mut IMG_ICON_H: u32 = 0;
 /// Cursor byte offset in the document. Updated by write requests.
 static mut CURSOR_POS: usize = 0;
 /// Current back buffer index (0 or 1). Swapped after each present.
@@ -624,18 +626,32 @@ fn render_title_shadow(surf: &mut drawing::Surface) {
 }
 
 /// Render the title bar chrome surface (translucent overlay).
-/// Uses the proportional font (Nunito Sans) for chrome text.
-/// If an SVG icon was loaded, renders it before the title text.
+/// Layout: [icon] Untitled on the left, HH:MM:SS clock on the right.
+/// Uses the proportional font (Nunito Sans) for all chrome text.
+/// The icon switches between a document icon and an image icon based
+/// on the current context (IMAGE_MODE).
 fn render_title_bar(surf: &mut drawing::Surface) {
     let prop_cache = unsafe { &*PROP_GLYPH_CACHE };
+    let in_image_mode = unsafe { IMAGE_MODE };
 
     // Translucent background.
     surf.clear(drawing::CHROME_BG);
 
-    // Render SVG document icon (if loaded) in the title bar.
-    let icon_ptr = unsafe { ICON_COVERAGE };
-    let icon_w = unsafe { ICON_W };
-    let icon_h = unsafe { ICON_H };
+    // Select the correct icon based on the current context.
+    let (icon_ptr, icon_w, icon_h) = if in_image_mode {
+        let ptr = unsafe { IMG_ICON_COVERAGE };
+        let w = unsafe { IMG_ICON_W };
+        let h = unsafe { IMG_ICON_H };
+        if !ptr.is_null() && w > 0 && h > 0 {
+            (ptr, w, h)
+        } else {
+            // Fallback to doc icon if image icon not loaded.
+            (unsafe { ICON_COVERAGE }, unsafe { ICON_W }, unsafe { ICON_H })
+        }
+    } else {
+        (unsafe { ICON_COVERAGE }, unsafe { ICON_W }, unsafe { ICON_H })
+    };
+
     let text_x: u32;
 
     // Vertically center text within the title bar (line_height centered).
@@ -655,15 +671,17 @@ fn render_title_bar(surf: &mut drawing::Surface) {
         text_x = 12;
     }
 
-    // Title text (proportional font).
-    drawing::draw_proportional_string(surf, text_x, text_y, b"Document OS", prop_cache, drawing::CHROME_TITLE);
+    // Document name (proportional font) — "Untitled" as default.
+    drawing::draw_proportional_string(surf, text_x, text_y, b"Untitled", prop_cache, drawing::CHROME_TITLE);
 
-    // Subtitle on the right (proportional font).
-    let subtitle = b"Multi-Surface Compositor";
-    let sub_w = proportional_string_width(subtitle, prop_cache);
-    let sx = surf.width.saturating_sub(12 + sub_w);
+    // Clock on the right side — HH:MM:SS format.
+    let mut time_buf = [0u8; 8];
+    let total_seconds = elapsed_seconds();
+    format_time_hms(total_seconds, &mut time_buf);
+    let clock_w = proportional_string_width(&time_buf, prop_cache);
+    let clock_x = surf.width.saturating_sub(12 + clock_w);
 
-    drawing::draw_proportional_string(surf, sx, text_y, subtitle, prop_cache, drawing::CHROME_SUBTITLE);
+    drawing::draw_proportional_string(surf, clock_x, text_y, &time_buf, prop_cache, drawing::CHROME_CLOCK);
 
     // Bottom edge line.
     surf.draw_hline(0, surf.height - 1, surf.width, drawing::CHROME_BORDER);
@@ -672,8 +690,6 @@ fn render_title_bar(surf: &mut drawing::Surface) {
 
 
 /// Format total seconds into HH:MM:SS in the given 8-byte buffer.
-/// Kept for the upcoming title-bar clock feature.
-#[allow(dead_code)]
 fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
     let hours = ((total_seconds / 3600) % 24) as u8;
     let minutes = ((total_seconds / 60) % 60) as u8;
@@ -690,8 +706,6 @@ fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
 }
 
 /// Get elapsed seconds since boot using the ARM generic counter.
-/// Kept for the upcoming title-bar clock feature.
-#[allow(dead_code)]
 fn elapsed_seconds() -> u64 {
     let now = sys::counter();
     let boot = unsafe { BOOT_COUNTER };
@@ -1082,6 +1096,85 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Check for image icon configuration from init (second SVG icon).
+    // Used in image viewer mode; switches with doc icon on Ctrl+Tab.
+    // -----------------------------------------------------------------------
+    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_IMG_ICON_CONFIG {
+        let icn_config: IconConfig = unsafe { msg.payload_as() };
+
+        if icn_config.icon_va != 0 && icn_config.icon_len > 0 {
+            let svg_data = unsafe {
+                core::slice::from_raw_parts(
+                    icn_config.icon_va as *const u8,
+                    icn_config.icon_len as usize,
+                )
+            };
+
+            sys::print(b"     parsing image icon SVG\n");
+
+            let path_ptr = unsafe {
+                let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+                let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgPath;
+                ptr
+            };
+            let scratch_ptr = if path_ptr.is_null() {
+                core::ptr::null_mut()
+            } else {
+                unsafe {
+                    let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+                    alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
+                }
+            };
+
+            if !path_ptr.is_null() && !scratch_ptr.is_null() {
+                match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
+                    Ok(()) => {
+                        let iw: u32 = 20;
+                        let ih: u32 = 24;
+                        let icon_size = (iw * ih) as usize;
+                        let mut icon_cov = vec![0u8; icon_size];
+
+                        match drawing::svg_rasterize(
+                            unsafe { &*path_ptr }, unsafe { &mut *scratch_ptr }, &mut icon_cov,
+                            iw, ih,
+                            drawing::SVG_FP_ONE, 0, 0,
+                        ) {
+                            Ok(()) => {
+                                sys::print(b"     image icon rasterized (20x24)\n");
+                                let leaked = icon_cov.leak();
+                                unsafe {
+                                    IMG_ICON_COVERAGE = leaked.as_ptr();
+                                    IMG_ICON_W = iw;
+                                    IMG_ICON_H = ih;
+                                }
+                            }
+                            Err(_) => {
+                                sys::print(b"     image icon rasterize failed\n");
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        sys::print(b"     image icon parse failed\n");
+                    }
+                }
+            }
+
+            if !path_ptr.is_null() {
+                unsafe {
+                    let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+                    alloc::alloc::dealloc(path_ptr as *mut u8, layout);
+                }
+            }
+            if !scratch_ptr.is_null() {
+                unsafe {
+                    let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+                    alloc::alloc::dealloc(scratch_ptr as *mut u8, layout);
+                }
+            }
+        }
+    }
+
     // Channel 1: input events from input driver (endpoint 1 = recv).
     let input_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
     // Channel 2: GPU present commands (endpoint 0 = send).
@@ -1347,6 +1440,13 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
+                        // Re-render the title bar to switch the icon.
+                        {
+                            let mut title_surf =
+                                make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
+                            render_title_bar(&mut title_surf);
+                        }
+
                         changed = true;
                         context_switched = true;
                     }
@@ -1465,6 +1565,14 @@ pub extern "C" fn _start() -> ! {
             }
             // In image mode, content surface stays unchanged (showing the image).
 
+            // 2. Re-render title bar if timer fired (clock update) or context
+            //    switched (icon change). Context switch already re-rendered
+            //    above, but timer + content change needs handling here.
+            if timer_fired && !context_switched {
+                let mut title_surf = make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
+                render_title_bar(&mut title_surf);
+            }
+
             // ---------------------------------------------------------------
             // 3. Compute dirty rects based on what changed this frame.
             // ---------------------------------------------------------------
@@ -1559,15 +1667,19 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
 
+                // If timer also fired, dirty the title bar for clock update.
+                if timer_fired {
+                    damage.add(0, 0, fb_width as u16, TITLE_BAR_H as u16);
+                }
             } else if changed && in_image_mode {
                 // Image mode content change (context switch already handled
                 // above via context_switched). Fall back to full screen.
                 damage.mark_full_screen();
             } else {
-                // Timer-only tick: no visible clock to update (clock will
-                // move to title bar in a subsequent feature). Nothing to
-                // dirty — skip the present entirely.
-                continue;
+                // Timer-only tick: re-render title bar to update the clock.
+                // (Title bar surface is already re-rendered above in step 2.)
+                // Dirty the title bar region only.
+                damage.add(0, 0, fb_width as u16, TITLE_BAR_H as u16);
             }
 
             // ---------------------------------------------------------------
