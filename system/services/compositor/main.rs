@@ -582,40 +582,7 @@ fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
     buf[6] = b'0' + seconds / 10;
     buf[7] = b'0' + seconds % 10;
 }
-/// Compute the approximate gradient background color for a horizontal line
-/// at the given Y coordinate in the full framebuffer. Uses the radial
-/// gradient formula with the horizontal center (x=fb_width/2) as reference.
-///
-/// This is used for incremental content re-renders: when clearing a single
-/// text line, we fill it with the gradient color at that Y instead of a
-/// flat BG_CONTENT, so the gradient remains visible.
-fn gradient_row_color(y: u32, fb_width: u32, fb_height: u32) -> drawing::Color {
-    let cx = fb_width / 2;
-    let cy = fb_height / 2;
-    let max_dx = if cx > fb_width - cx - 1 {
-        cx
-    } else {
-        fb_width - cx - 1
-    };
-    let max_dy = if cy > fb_height - cy - 1 {
-        cy
-    } else {
-        fb_height - cy - 1
-    };
-    let max_dist_sq = (max_dx as u64) * (max_dx as u64) + (max_dy as u64) * (max_dy as u64);
-    let max_dist_sq = if max_dist_sq == 0 { 1 } else { max_dist_sq };
-    // Distance from (cx, y) to center (cx, cy) — only vertical component.
-    let dy = if y >= cy { y - cy } else { cy - y };
-    let dist_sq = (dy as u64) * (dy as u64); // dx=0 at center column
-    let t = ((dist_sq * 255) / max_dist_sq) as u32;
-    let t = if t > 255 { 255 } else { t };
-    let inv_t = 255 - t;
-    let r = (drawing::BG_CENTER.r as u32 * inv_t + drawing::BG_BASE.r as u32 * t + 127) / 255;
-    let g = (drawing::BG_CENTER.g as u32 * inv_t + drawing::BG_BASE.g as u32 * t + 127) / 255;
-    let b = (drawing::BG_CENTER.b as u32 * inv_t + drawing::BG_BASE.b as u32 * t + 127) / 255;
 
-    drawing::Color::rgb(r as u8, g as u8, b as u8)
-}
 /// Build a Surface from a mutable byte slice.
 fn make_surf(buf: &mut [u8], w: u32, h: u32) -> drawing::Surface<'_> {
     drawing::Surface {
@@ -944,20 +911,17 @@ fn render_content_surface(surf: &mut drawing::Surface, text: &[u8], force_full: 
             };
 
             if clamped_h > 0 {
-                // Clear each row with its approximate gradient color so the
-                // background gradient remains visible during incremental
-                // re-renders. The per-row color matches the radial gradient
-                // at the horizontal center — close enough given the subtle
-                // gradient span (~12 RGB units) and the text drawn on top.
-                let fb_w = unsafe { CONTENT_W };
-                let fb_h = unsafe { CONTENT_H };
-
-                for row_off in 0..clamped_h {
-                    let row_y = clear_y + row_off;
-                    let row_color = gradient_row_color(row_y, fb_w, fb_h);
-
-                    surf.fill_rect(0, row_y, content_w, 1, row_color);
-                }
+                // Re-render the exact gradient+dither pixels for these rows.
+                // Uses fill_radial_gradient_rows which produces output
+                // identical to fill_radial_gradient_noise for the same
+                // coordinates — no visible flat rectangles behind text.
+                drawing::fill_radial_gradient_rows(
+                    surf,
+                    drawing::BG_CENTER,
+                    drawing::BG_BASE,
+                    clear_y,
+                    clamped_h,
+                );
             }
 
             // Re-render only the affected lines.

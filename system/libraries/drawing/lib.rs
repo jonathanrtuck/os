@@ -37,7 +37,6 @@ include!("truetype.rs");
 /// strokes. Reasonable range: 40–120. Applied after rasterization and subpixel
 /// downsampling via a 256-entry lookup table.
 pub const STEM_DARKENING_BOOST: u32 = 70;
-
 /// Pre-computed lookup table for stem darkening.
 ///
 /// Formula: `darkened = cov + STEM_DARKENING_BOOST * (255 - cov) / 255`
@@ -213,15 +212,6 @@ impl Color {
             },
         }
     }
-    /// Decode a Color from a BGRA8888 byte slice (at least 4 bytes).
-    pub fn decode_from_bgra(bytes: &[u8]) -> Self {
-        Color {
-            b: bytes[0],
-            g: bytes[1],
-            r: bytes[2],
-            a: bytes[3],
-        }
-    }
     /// Encode to pixel bytes in the given format.
     fn encode(self, format: PixelFormat) -> [u8; 4] {
         match format {
@@ -262,7 +252,6 @@ impl Color {
         let dst_r_lin = SRGB_TO_LINEAR[dst.r as usize] as u32;
         let dst_g_lin = SRGB_TO_LINEAR[dst.g as usize] as u32;
         let dst_b_lin = SRGB_TO_LINEAR[dst.b as usize] as u32;
-
         // out_c = (src_c * src_a + dst_c * dst_a * (1 - src_a / 255)) / out_a
         // Computed in linear space.
         let r_lin = (src_r_lin * sa + dst_r_lin * da * inv_sa / 255) / out_a;
@@ -275,6 +264,15 @@ impl Color {
             g: LINEAR_TO_SRGB[linear_to_idx(g_lin)],
             b: LINEAR_TO_SRGB[linear_to_idx(b_lin)],
             a: if out_a > 255 { 255 } else { out_a as u8 },
+        }
+    }
+    /// Decode a Color from a BGRA8888 byte slice (at least 4 bytes).
+    pub fn decode_from_bgra(bytes: &[u8]) -> Self {
+        Color {
+            b: bytes[0],
+            g: bytes[1],
+            r: bytes[2],
+            a: bytes[3],
         }
     }
     /// Opaque color from RGB components.
@@ -315,7 +313,6 @@ impl GlyphCache {
         let asc_fu = font.hhea_ascent() as i32;
         let desc_fu = font.hhea_descent() as i32; // negative
         let gap_fu = font.hhea_line_gap() as i32;
-
         // Scale to pixels: ascent * size_px / units_per_em (ceil for ascent).
         let ascent_px = scale_fu_ceil(asc_fu, size_px, upem);
         // descent is negative in font units; negate to get positive pixel value.
@@ -380,6 +377,22 @@ impl PixelFormat {
     }
 }
 impl<'a> Surface<'a> {
+    /// Byte offset for pixel (x, y), or `None` if out of bounds.
+    fn pixel_offset(&self, x: u32, y: u32) -> Option<usize> {
+        if x >= self.width || y >= self.height {
+            return None;
+        }
+
+        let offset = (y * self.stride + x * self.format.bytes_per_pixel()) as usize;
+        let bpp = self.format.bytes_per_pixel() as usize;
+
+        if offset + bpp <= self.data.len() {
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
     /// Blend a single pixel using source-over compositing.
     ///
     /// Reads the existing pixel, blends `color` on top, writes back. No-op
@@ -393,6 +406,7 @@ impl<'a> Surface<'a> {
         if color.a == 0 {
             return;
         }
+
         if let Some(dst) = self.get_pixel(x, y) {
             self.set_pixel(x, y, color.blend_over(dst));
         }
@@ -526,7 +540,6 @@ impl<'a> Surface<'a> {
 
                 let ux = px as u32;
                 let uy = py as u32;
-
                 // Per-channel effective alpha: color.a * channel_coverage / 255.
                 let alpha_r = (color.a as u32 * cov_r as u32 + 127) / 255;
                 let alpha_g = (color.a as u32 * cov_g as u32 + 127) / 255;
@@ -535,6 +548,7 @@ impl<'a> Surface<'a> {
                 // Fast path: all channels full coverage + opaque color.
                 if alpha_r >= 255 && alpha_g >= 255 && alpha_b >= 255 {
                     self.set_pixel(ux, uy, color);
+
                     continue;
                 }
 
@@ -543,7 +557,6 @@ impl<'a> Surface<'a> {
                     let dst_r_lin = SRGB_TO_LINEAR[dst.r as usize] as u32;
                     let dst_g_lin = SRGB_TO_LINEAR[dst.g as usize] as u32;
                     let dst_b_lin = SRGB_TO_LINEAR[dst.b as usize] as u32;
-
                     // Blend each channel independently in linear space.
                     let inv_r = 255 - alpha_r;
                     let inv_g = 255 - alpha_g;
@@ -551,23 +564,29 @@ impl<'a> Surface<'a> {
                     let out_r_lin = (dst_r_lin * inv_r + src_r_lin * alpha_r + 127) / 255;
                     let out_g_lin = (dst_g_lin * inv_g + src_g_lin * alpha_g + 127) / 255;
                     let out_b_lin = (dst_b_lin * inv_b + src_b_lin * alpha_b + 127) / 255;
-
                     // Convert back to sRGB.
                     let out_r = LINEAR_TO_SRGB[linear_to_idx(out_r_lin)];
                     let out_g = LINEAR_TO_SRGB[linear_to_idx(out_g_lin)];
                     let out_b = LINEAR_TO_SRGB[linear_to_idx(out_b_lin)];
-
                     // Alpha: use max channel alpha for the output alpha.
                     let max_alpha = if alpha_r > alpha_g { alpha_r } else { alpha_g };
-                    let max_alpha = if alpha_b > max_alpha { alpha_b } else { max_alpha };
+                    let max_alpha = if alpha_b > max_alpha {
+                        alpha_b
+                    } else {
+                        max_alpha
+                    };
                     let out_a = dst.a as u32 + max_alpha * (255 - dst.a as u32) / 255;
 
-                    self.set_pixel(ux, uy, Color {
-                        r: out_r,
-                        g: out_g,
-                        b: out_b,
-                        a: if out_a > 255 { 255 } else { out_a as u8 },
-                    });
+                    self.set_pixel(
+                        ux,
+                        uy,
+                        Color {
+                            r: out_r,
+                            g: out_g,
+                            b: out_b,
+                            a: if out_a > 255 { 255 } else { out_a as u8 },
+                        },
+                    );
                 }
             }
         }
@@ -667,6 +686,7 @@ impl<'a> Surface<'a> {
 
         for ch in text.chars() {
             self.draw_glyph(cx, y, ch, font, color);
+
             cx = cx.saturating_add(font.glyph_width);
         }
 
@@ -743,13 +763,15 @@ impl<'a> Surface<'a> {
 
         for row in y..y2 {
             let t = (row - y) as u32; // 0..h-1
-
-            // Linearly interpolate each channel: c = top + (bottom - top) * t / denom.
-            let r = (color_top.r as u32 * (denom - t) + color_bottom.r as u32 * t + denom / 2) / denom;
-            let g = (color_top.g as u32 * (denom - t) + color_bottom.g as u32 * t + denom / 2) / denom;
-            let b = (color_top.b as u32 * (denom - t) + color_bottom.b as u32 * t + denom / 2) / denom;
-            let a = (color_top.a as u32 * (denom - t) + color_bottom.a as u32 * t + denom / 2) / denom;
-
+                                      // Linearly interpolate each channel: c = top + (bottom - top) * t / denom.
+            let r =
+                (color_top.r as u32 * (denom - t) + color_bottom.r as u32 * t + denom / 2) / denom;
+            let g =
+                (color_top.g as u32 * (denom - t) + color_bottom.g as u32 * t + denom / 2) / denom;
+            let b =
+                (color_top.b as u32 * (denom - t) + color_bottom.b as u32 * t + denom / 2) / denom;
+            let a =
+                (color_top.a as u32 * (denom - t) + color_bottom.a as u32 * t + denom / 2) / denom;
             let row_color = Color {
                 r: if r > 255 { 255 } else { r as u8 },
                 g: if g > 255 { 255 } else { g as u8 },
@@ -796,21 +818,6 @@ impl<'a> Surface<'a> {
             None
         }
     }
-    /// Byte offset for pixel (x, y), or `None` if out of bounds.
-    fn pixel_offset(&self, x: u32, y: u32) -> Option<usize> {
-        if x >= self.width || y >= self.height {
-            return None;
-        }
-
-        let offset = (y * self.stride + x * self.format.bytes_per_pixel()) as usize;
-        let bpp = self.format.bytes_per_pixel() as usize;
-
-        if offset + bpp <= self.data.len() {
-            Some(offset)
-        } else {
-            None
-        }
-    }
     /// Write a single pixel. No-op if out of bounds.
     pub fn set_pixel(&mut self, x: u32, y: u32, color: Color) {
         if let Some(offset) = self.pixel_offset(x, y) {
@@ -822,6 +829,54 @@ impl<'a> Surface<'a> {
     }
 }
 impl TextLayout {
+    fn cols(&self) -> usize {
+        if self.char_width == 0 {
+            return 0;
+        }
+
+        (self.max_width / self.char_width) as usize
+    }
+
+    /// Return the visual line number (0-based) for a given byte offset.
+    /// Uses the same wrapping rules as `layout_lines` and `byte_to_xy`.
+    pub fn byte_to_visual_line(&self, text: &[u8], offset: usize) -> u32 {
+        let cols = self.cols();
+
+        if cols == 0 || text.is_empty() {
+            return 0;
+        }
+
+        let target = if offset > text.len() {
+            text.len()
+        } else {
+            offset
+        };
+        let mut col = 0usize;
+        let mut row = 0u32;
+
+        for (i, &byte) in text.iter().enumerate() {
+            if i == target {
+                return row;
+            }
+
+            if byte == b'\n' {
+                row += 1;
+                col = 0;
+
+                continue;
+            }
+
+            if col >= cols {
+                row += 1;
+                col = 0;
+            }
+
+            col += 1;
+        }
+
+        // offset == text.len()
+        row
+    }
     /// Map a byte offset to pixel coordinates relative to the text origin.
     pub fn byte_to_xy(&self, text: &[u8], offset: usize) -> (u32, u32) {
         let cols = self.cols();
@@ -860,13 +915,6 @@ impl TextLayout {
 
         // offset == text.len(): cursor at end.
         (col as u32 * self.char_width, row * self.line_height)
-    }
-    fn cols(&self) -> usize {
-        if self.char_width == 0 {
-            return 0;
-        }
-
-        (self.max_width / self.char_width) as usize
     }
     /// Layout and draw text onto a surface in one pass. Draws characters
     /// starting at (origin_x, origin_y), wrapping within max_width.
@@ -985,7 +1033,49 @@ impl TextLayout {
             Color::TRANSPARENT,
         )
     }
-
+    /// Layout and draw text with optional selection highlight.
+    ///
+    /// `sel_start` and `sel_end` define the selected byte range (half-open).
+    /// When `sel_start < sel_end`, characters in that range are rendered with
+    /// `sel_color` as a background highlight. When `sel_start == sel_end`
+    /// (or both are 0), no selection highlight is drawn.
+    ///
+    /// The selection is normalized internally: if `sel_start > sel_end`, they
+    /// are swapped so the highlight always covers the correct range regardless
+    /// of anchor vs cursor ordering.
+    ///
+    /// Equivalent to `draw_tt_sel_scroll` with `scroll_offset = 0`.
+    pub fn draw_tt_sel(
+        &self,
+        fb: &mut Surface,
+        text: &[u8],
+        origin_x: u32,
+        origin_y: u32,
+        cursor_offset: usize,
+        cache: &GlyphCache,
+        text_color: Color,
+        cursor_color: Color,
+        max_y: u32,
+        sel_start: usize,
+        sel_end: usize,
+        sel_color: Color,
+    ) -> (u32, u32) {
+        self.draw_tt_sel_scroll(
+            fb,
+            text,
+            origin_x,
+            origin_y,
+            cursor_offset,
+            cache,
+            text_color,
+            cursor_color,
+            max_y,
+            sel_start,
+            sel_end,
+            sel_color,
+            0,
+        )
+    }
     /// Layout and draw text with selection and vertical scrolling.
     ///
     /// `scroll_offset` is the number of visual lines to skip at the top.
@@ -1017,7 +1107,6 @@ impl TextLayout {
         let mut cursor_x = origin_x;
         let mut cursor_y = origin_y;
         let baseline_offset = cache.ascent;
-
         // Normalize selection range.
         let (s_lo, s_hi) = if sel_start <= sel_end {
             (sel_start, sel_end)
@@ -1059,6 +1148,7 @@ impl TextLayout {
 
                 if visual_row >= 0 {
                     let py = origin_y + visual_row as u32 * self.line_height;
+
                     if py > max_y {
                         break;
                     }
@@ -1084,19 +1174,11 @@ impl TextLayout {
 
                 if let Some((glyph, coverage)) = cache.get(byte) {
                     if glyph.width > 0 && glyph.height > 0 {
-                        let gx = origin_x as i32
-                            + col as i32 * self.char_width as i32
-                            + glyph.bearing_x;
+                        let gx =
+                            origin_x as i32 + col as i32 * self.char_width as i32 + glyph.bearing_x;
                         let gy = py as i32 + baseline_offset as i32 - glyph.bearing_y;
 
-                        fb.draw_coverage(
-                            gx,
-                            gy,
-                            coverage,
-                            glyph.width,
-                            glyph.height,
-                            text_color,
-                        );
+                        fb.draw_coverage(gx, gy, coverage, glyph.width, glyph.height, text_color);
                     }
                 }
             }
@@ -1127,7 +1209,6 @@ impl TextLayout {
 
         (cursor_x, cursor_y)
     }
-
     /// Like `draw_tt_sel_scroll`, but only renders visual lines in the range
     /// `[first_vis_line, last_vis_line]` (inclusive, viewport-relative — i.e.,
     /// visual line 0 is the first visible line after `scroll_offset`).
@@ -1160,7 +1241,6 @@ impl TextLayout {
         let mut cursor_x = origin_x;
         let mut cursor_y = origin_y;
         let baseline_offset = cache.ascent;
-
         // Normalize selection range.
         let (s_lo, s_hi) = if sel_start <= sel_end {
             (sel_start, sel_end)
@@ -1193,8 +1273,10 @@ impl TextLayout {
                 row += 1;
 
                 let visual_row = row as i32 - scroll_offset as i32;
+
                 if visual_row >= 0 {
                     let py = origin_y + visual_row as u32 * self.line_height;
+
                     if py > max_y {
                         break;
                     }
@@ -1216,6 +1298,7 @@ impl TextLayout {
                     // Draw selection highlight behind the character if selected.
                     if has_selection && i >= s_lo && i < s_hi && sel_color.a > 0 {
                         let hx = origin_x + col as u32 * self.char_width;
+
                         fb.fill_rect_blend(hx, py, self.char_width, cache.line_height, sel_color);
                     }
 
@@ -1227,8 +1310,12 @@ impl TextLayout {
                             let gy = py as i32 + baseline_offset as i32 - glyph.bearing_y;
 
                             fb.draw_coverage(
-                                gx, gy, coverage,
-                                glyph.width, glyph.height, text_color,
+                                gx,
+                                gy,
+                                coverage,
+                                glyph.width,
+                                glyph.height,
+                                text_color,
                             );
                         }
                     }
@@ -1241,8 +1328,10 @@ impl TextLayout {
         // Cursor at end of text.
         if cursor_offset >= text.len() {
             let visual_row = row as i32 - scroll_offset as i32;
+
             if visual_row >= 0 {
                 let py = origin_y + visual_row as u32 * self.line_height;
+
                 cursor_x = origin_x + col as u32 * self.char_width;
                 cursor_y = py;
             } else {
@@ -1254,85 +1343,13 @@ impl TextLayout {
         // Draw cursor only if it falls within the requested line range.
         if !has_selection && cursor_y >= origin_y && cursor_y <= max_y {
             let cursor_vis_line = (cursor_y - origin_y) / self.line_height;
+
             if cursor_vis_line >= first_vis_line && cursor_vis_line <= last_vis_line {
                 fb.fill_rect(cursor_x, cursor_y, 2, cache.line_height, cursor_color);
             }
         }
 
         (cursor_x, cursor_y)
-    }
-
-    /// Layout and draw text with optional selection highlight.
-    ///
-    /// `sel_start` and `sel_end` define the selected byte range (half-open).
-    /// When `sel_start < sel_end`, characters in that range are rendered with
-    /// `sel_color` as a background highlight. When `sel_start == sel_end`
-    /// (or both are 0), no selection highlight is drawn.
-    ///
-    /// The selection is normalized internally: if `sel_start > sel_end`, they
-    /// are swapped so the highlight always covers the correct range regardless
-    /// of anchor vs cursor ordering.
-    ///
-    /// Equivalent to `draw_tt_sel_scroll` with `scroll_offset = 0`.
-    pub fn draw_tt_sel(
-        &self,
-        fb: &mut Surface,
-        text: &[u8],
-        origin_x: u32,
-        origin_y: u32,
-        cursor_offset: usize,
-        cache: &GlyphCache,
-        text_color: Color,
-        cursor_color: Color,
-        max_y: u32,
-        sel_start: usize,
-        sel_end: usize,
-        sel_color: Color,
-    ) -> (u32, u32) {
-        self.draw_tt_sel_scroll(
-            fb, text, origin_x, origin_y, cursor_offset, cache,
-            text_color, cursor_color, max_y, sel_start, sel_end, sel_color, 0,
-        )
-    }
-    /// Return the visual line number (0-based) for a given byte offset.
-    /// Uses the same wrapping rules as `layout_lines` and `byte_to_xy`.
-    pub fn byte_to_visual_line(&self, text: &[u8], offset: usize) -> u32 {
-        let cols = self.cols();
-
-        if cols == 0 || text.is_empty() {
-            return 0;
-        }
-
-        let target = if offset > text.len() {
-            text.len()
-        } else {
-            offset
-        };
-        let mut col = 0usize;
-        let mut row = 0u32;
-
-        for (i, &byte) in text.iter().enumerate() {
-            if i == target {
-                return row;
-            }
-
-            if byte == b'\n' {
-                row += 1;
-                col = 0;
-
-                continue;
-            }
-
-            if col >= cols {
-                row += 1;
-                col = 0;
-            }
-
-            col += 1;
-        }
-
-        // offset == text.len()
-        row
     }
     /// Count the total number of visual lines in the text.
     /// Empty text returns 0. A single line of text returns 1.
@@ -1409,7 +1426,6 @@ impl TextLayout {
 
                 continue;
             }
-
             if col >= cols {
                 f(line_start, i, row);
 
@@ -1474,6 +1490,14 @@ impl TextLayout {
 // Proportional text rendering
 // ---------------------------------------------------------------------------
 
+fn abs(x: i32) -> i32 {
+    if x < 0 {
+        -x
+    } else {
+        x
+    }
+}
+
 /// Draw a byte string using per-glyph advance widths from a GlyphCache.
 ///
 /// Unlike the monospace `draw_string` helper in the compositor, this function
@@ -1492,7 +1516,6 @@ pub fn draw_proportional_string(
 ) -> u32 {
     draw_proportional_string_kerned(fb, x, y, text, cache, color, None)
 }
-
 /// Draw a proportional string with optional GPOS kerning from the given font.
 ///
 /// If `font` is `Some`, kerning adjustments from the GPOS table are applied
@@ -1514,7 +1537,6 @@ pub fn draw_proportional_string_kerned(
         Some((g, _)) => g.advance,
         None => 8, // absolute fallback
     };
-
     let mut prev_glyph_index: Option<u16> = None;
 
     for &byte in text {
@@ -1531,6 +1553,7 @@ pub fn draw_proportional_string_kerned(
 
             if kern_fu != 0 {
                 let kern_px = scale_fu(kern_fu as i32, cache.size_px, f.units_per_em());
+
                 cx += kern_px;
             }
         }
@@ -1552,14 +1575,10 @@ pub fn draw_proportional_string_kerned(
         prev_glyph_index = cur_glyph_index;
     }
 
-    if cx < 0 { 0 } else { cx as u32 }
-}
-
-fn abs(x: i32) -> i32 {
-    if x < 0 {
-        -x
+    if cx < 0 {
+        0
     } else {
-        x
+        cx as u32
     }
 }
 
@@ -1578,24 +1597,27 @@ impl Xorshift32 {
     pub const fn new(seed: u32) -> Self {
         // Ensure seed is never zero (xorshift32 has a zero fixed-point).
         let s = if seed == 0 { 0x12345678 } else { seed };
+
         Xorshift32 { state: s }
     }
 
     /// Generate the next pseudo-random u32 value.
     pub fn next(&mut self) -> u32 {
         let mut x = self.state;
+
         x ^= x << 13;
         x ^= x >> 17;
         x ^= x << 5;
         self.state = x;
+
         x
     }
-
     /// Generate a random value in the range [-amplitude, +amplitude] (inclusive).
     /// Uses integer math only. `amplitude` should be small (e.g., 2–4).
     pub fn noise(&mut self, amplitude: u32) -> i32 {
         let range = amplitude * 2 + 1; // e.g., amplitude=3 → range=7
         let val = self.next();
+
         // Map to [0, range) then shift to [-amplitude, +amplitude].
         (val % range) as i32 - amplitude as i32
     }
@@ -1604,91 +1626,6 @@ impl Xorshift32 {
 // ---------------------------------------------------------------------------
 // Radial gradient with noise — background generation
 // ---------------------------------------------------------------------------
-
-/// Fill a surface with a radial gradient from `center_color` (at the center
-/// of the surface) to `edge_color` (at the corners), with per-pixel noise
-/// to break up banding.
-///
-/// The gradient uses an approximation of Euclidean distance (no sqrt, no FP):
-/// `d² = dx² + dy²` is compared to `max_d²` to interpolate linearly.
-///
-/// Noise adds `±noise_amplitude` RGB units to each pixel using a deterministic
-/// xorshift32 PRNG seeded with `prng_seed`. The pattern is identical on every
-/// call with the same seed and dimensions.
-///
-/// All math is integer only (no floating point).
-pub fn fill_radial_gradient_noise(
-    surf: &mut Surface,
-    center_color: Color,
-    edge_color: Color,
-    noise_amplitude: u32,
-    prng_seed: u32,
-) {
-    let w = surf.width;
-    let h = surf.height;
-
-    if w == 0 || h == 0 {
-        return;
-    }
-
-    // Center point (in pixels, integer).
-    let cx = w / 2;
-    let cy = h / 2;
-
-    // Maximum squared distance: from center to a corner.
-    let max_dx = if cx > w - cx - 1 { cx } else { w - cx - 1 };
-    let max_dy = if cy > h - cy - 1 { cy } else { h - cy - 1 };
-    let max_dist_sq = (max_dx as u64) * (max_dx as u64) + (max_dy as u64) * (max_dy as u64);
-
-    // Avoid division by zero for 1×1 surfaces.
-    let max_dist_sq = if max_dist_sq == 0 { 1 } else { max_dist_sq };
-
-    let mut rng = Xorshift32::new(prng_seed);
-
-    let bpp = surf.format.bytes_per_pixel();
-
-    for y in 0..h {
-        let dy = if y >= cy { y - cy } else { cy - y };
-
-        for x in 0..w {
-            let dx = if x >= cx { x - cx } else { cx - x };
-
-            // Squared distance from center (u64 to avoid overflow for large screens).
-            let dist_sq = (dx as u64) * (dx as u64) + (dy as u64) * (dy as u64);
-
-            // Linear interpolation factor: t = dist_sq * 255 / max_dist_sq.
-            // t=0 at center, t=255 at corners.
-            let t = ((dist_sq * 255) / max_dist_sq) as u32;
-            let t = if t > 255 { 255 } else { t };
-            let inv_t = 255 - t;
-
-            // Interpolate each channel: center_color * (255-t) + edge_color * t.
-            let base_r = (center_color.r as u32 * inv_t + edge_color.r as u32 * t + 127) / 255;
-            let base_g = (center_color.g as u32 * inv_t + edge_color.g as u32 * t + 127) / 255;
-            let base_b = (center_color.b as u32 * inv_t + edge_color.b as u32 * t + 127) / 255;
-
-            // Add noise. Same noise value for all channels to maintain the
-            // monochrome property (R=G=B) of the palette.
-            let n = rng.noise(noise_amplitude);
-
-            // Clamp to [0, 255].
-            let r = clamp_u8(base_r as i32 + n);
-            let g = clamp_u8(base_g as i32 + n);
-            let b = clamp_u8(base_b as i32 + n);
-
-            let color = Color::rgb(r, g, b);
-
-            // Write pixel directly (faster than set_pixel for full-surface fill).
-            let offset = (y * surf.stride + x * bpp) as usize;
-            let encoded = color.encode(surf.format);
-            let end = offset + bpp as usize;
-
-            if end <= surf.data.len() {
-                surf.data[offset..end].copy_from_slice(&encoded[..bpp as usize]);
-            }
-        }
-    }
-}
 
 /// Clamp an i32 to [0, 255] and return as u8.
 fn clamp_u8(v: i32) -> u8 {
@@ -1705,13 +1642,183 @@ fn clamp_u8(v: i32) -> u8 {
 fn linear_to_idx(v: u32) -> usize {
     let idx = v >> 4;
 
-    if idx > 4095 { 4095 } else { idx as usize }
+    if idx > 4095 {
+        4095
+    } else {
+        idx as usize
+    }
 }
 fn min(a: u32, b: u32) -> u32 {
     if a < b {
         a
     } else {
         b
+    }
+}
+
+/// 4×4 Bayer ordered-dither threshold matrix (0–15).
+///
+/// Each entry represents a threshold at which a fractional color value
+/// rounds UP instead of down. By distributing these thresholds in a
+/// structured 4×4 pattern, quantization bands are broken into an
+/// imperceptible stipple — far superior to random noise for gradient
+/// banding elimination.
+///
+/// The matrix is indexed as `BAYER4[y & 3][x & 3]`.
+const BAYER4: [[u8; 4]; 4] = [
+    [0, 8, 2, 10],
+    [12, 4, 14, 6],
+    [3, 11, 1, 9],
+    [15, 7, 13, 5],
+];
+
+/// Compute the gradient parameters needed for radial gradient rendering.
+/// Returns (cx, cy, max_dist_sq).
+fn gradient_params(w: u32, h: u32) -> (u32, u32, u64) {
+    let cx = w / 2;
+    let cy = h / 2;
+    let max_dx = if cx > w - cx - 1 { cx } else { w - cx - 1 };
+    let max_dy = if cy > h - cy - 1 { cy } else { h - cy - 1 };
+    let max_dist_sq = (max_dx as u64) * (max_dx as u64) + (max_dy as u64) * (max_dy as u64);
+    let max_dist_sq = if max_dist_sq == 0 { 1 } else { max_dist_sq };
+
+    (cx, cy, max_dist_sq)
+}
+
+/// Compute a single dithered gradient pixel at coordinates (x, y)
+/// within a surface of dimensions (w, h), with center at (cx, cy)
+/// and max squared distance `max_dist_sq`.
+///
+/// Uses Bayer 4×4 ordered dithering: the continuous gradient value
+/// (in 20.12 fixed-point) is offset by a Bayer threshold before
+/// truncating to 8-bit, so the rounding boundary varies per pixel in
+/// a structured pattern that breaks up quantization bands.
+fn gradient_pixel(
+    x: u32,
+    y: u32,
+    cx: u32,
+    cy: u32,
+    max_dist_sq: u64,
+    center_color: Color,
+    edge_color: Color,
+) -> Color {
+    let dx = if x >= cx { x - cx } else { cx - x };
+    let dy = if y >= cy { y - cy } else { cy - y };
+    let dist_sq = (dx as u64) * (dx as u64) + (dy as u64) * (dy as u64);
+    // Interpolation factor in 20.12 fixed-point (0..255 << 12 range).
+    // t_fp = dist_sq * (255 << 12) / max_dist_sq.
+    let t_fp = ((dist_sq * (255 << 12)) / max_dist_sq) as u32;
+    let t_fp = if t_fp > (255 << 12) { 255 << 12 } else { t_fp };
+    let inv_t_fp = (255 << 12) - t_fp;
+    // Interpolate each channel in fixed-point: result has 12 fraction bits.
+    let base_r_fp =
+        (center_color.r as u32 * inv_t_fp + edge_color.r as u32 * t_fp + (127 << 12)) / 255;
+    let base_g_fp =
+        (center_color.g as u32 * inv_t_fp + edge_color.g as u32 * t_fp + (127 << 12)) / 255;
+    let base_b_fp =
+        (center_color.b as u32 * inv_t_fp + edge_color.b as u32 * t_fp + (127 << 12)) / 255;
+    // Apply Bayer dither: add threshold * (1 << 12) / 16 to the
+    // fixed-point value before truncating.
+    // threshold is 0..15, so dither_offset ranges from 0..(15/16 of
+    // one integer unit), i.e., 0..3840 in fixed-point.
+    let threshold = BAYER4[(y & 3) as usize][(x & 3) as usize] as u32;
+    let dither_offset = (threshold << 12) / 16; // 0..3840
+    // Add dither offset then truncate (shift right by 12).
+    let r = clamp_u8(((base_r_fp + dither_offset) >> 12) as i32);
+    let g = clamp_u8(((base_g_fp + dither_offset) >> 12) as i32);
+    let b = clamp_u8(((base_b_fp + dither_offset) >> 12) as i32);
+
+    Color::rgb(r, g, b)
+}
+
+/// Fill a surface with a radial gradient from `center_color` (at the center
+/// of the surface) to `edge_color` (at the corners), using ordered dithering
+/// to eliminate gradient banding.
+///
+/// The gradient uses an approximation of Euclidean distance (no sqrt, no FP):
+/// `d² = dx² + dy²` is compared to `max_d²` to interpolate linearly.
+///
+/// Banding is eliminated via a 4×4 Bayer ordered-dither matrix: the
+/// continuous gradient value is offset by a structured threshold before
+/// truncating to 8-bit, so quantization bands break into an imperceptible
+/// stipple pattern. The dither is fully deterministic and depends only on
+/// pixel coordinates — no PRNG state.
+///
+/// `_noise_amplitude` and `_prng_seed` are accepted for API compatibility
+/// but ignored; dithering replaces random noise entirely.
+///
+/// All math is integer only (no floating point).
+pub fn fill_radial_gradient_noise(
+    surf: &mut Surface,
+    center_color: Color,
+    edge_color: Color,
+    _noise_amplitude: u32,
+    _prng_seed: u32,
+) {
+    let w = surf.width;
+    let h = surf.height;
+
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let (cx, cy, max_dist_sq) = gradient_params(w, h);
+    let bpp = surf.format.bytes_per_pixel();
+
+    for y in 0..h {
+        for x in 0..w {
+            let color = gradient_pixel(x, y, cx, cy, max_dist_sq, center_color, edge_color);
+            let offset = (y * surf.stride + x * bpp) as usize;
+            let encoded = color.encode(surf.format);
+            let end = offset + bpp as usize;
+
+            if end <= surf.data.len() {
+                surf.data[offset..end].copy_from_slice(&encoded[..bpp as usize]);
+            }
+        }
+    }
+}
+
+/// Fill specific rows of a surface with a radial gradient using ordered
+/// dithering. Produces pixels identical to `fill_radial_gradient_noise`
+/// for the same coordinates — the dither pattern depends only on (x, y),
+/// not on PRNG state.
+///
+/// `start_y` is the first row to fill (inclusive); `row_count` is the
+/// number of rows. Rows outside the surface bounds are silently skipped.
+pub fn fill_radial_gradient_rows(
+    surf: &mut Surface,
+    center_color: Color,
+    edge_color: Color,
+    start_y: u32,
+    row_count: u32,
+) {
+    let w = surf.width;
+    let h = surf.height;
+
+    if w == 0 || h == 0 || row_count == 0 {
+        return;
+    }
+
+    let (cx, cy, max_dist_sq) = gradient_params(w, h);
+    let bpp = surf.format.bytes_per_pixel();
+    let end_y = if start_y + row_count > h {
+        h
+    } else {
+        start_y + row_count
+    };
+
+    for y in start_y..end_y {
+        for x in 0..w {
+            let color = gradient_pixel(x, y, cx, cy, max_dist_sq, center_color, edge_color);
+            let offset = (y * surf.stride + x * bpp) as usize;
+            let encoded = color.encode(surf.format);
+            let end = offset + bpp as usize;
+
+            if end <= surf.data.len() {
+                surf.data[offset..end].copy_from_slice(&encoded[..bpp as usize]);
+            }
+        }
     }
 }
 
@@ -1753,6 +1860,7 @@ pub fn composite_surfaces(dst: &mut Surface, surfaces: &[&CompositeSurface]) {
     // Sort indices by z-order. We use a simple insertion sort since the number
     // of surfaces is small (typically 3-6).
     const MAX_SURFACES: usize = 16;
+
     let count = if surfaces.len() > MAX_SURFACES {
         MAX_SURFACES
     } else {
@@ -1760,28 +1868,35 @@ pub fn composite_surfaces(dst: &mut Surface, surfaces: &[&CompositeSurface]) {
     };
     let mut order: [usize; MAX_SURFACES] = [0; MAX_SURFACES];
     let mut i = 0;
+
     while i < count {
         order[i] = i;
         i += 1;
     }
+
     // Insertion sort by z-order.
     let mut j = 1;
+
     while j < count {
         let key = order[j];
         let key_z = surfaces[key].z;
         let mut k = j;
+
         while k > 0 && surfaces[order[k - 1]].z > key_z {
             order[k] = order[k - 1];
             k -= 1;
         }
+
         order[k] = key;
         j += 1;
     }
 
     // Composite back-to-front.
     let mut idx = 0;
+
     while idx < count {
         let s = surfaces[order[idx]];
+
         idx += 1;
 
         if !s.visible {
@@ -1793,7 +1908,6 @@ pub fn composite_surfaces(dst: &mut Surface, surfaces: &[&CompositeSurface]) {
         let src_y_start: u32 = if s.y < 0 { (-s.y) as u32 } else { 0 };
         let dst_x: u32 = if s.x < 0 { 0 } else { s.x as u32 };
         let dst_y: u32 = if s.y < 0 { 0 } else { s.y as u32 };
-
         let src_w = s.surface.width;
         let src_h = s.surface.height;
 
@@ -1803,11 +1917,11 @@ pub fn composite_surfaces(dst: &mut Surface, surfaces: &[&CompositeSurface]) {
 
         let visible_w = src_w - src_x_start;
         let visible_h = src_h - src_y_start;
-
         // Build a sub-region of the source data for blit_blend.
         // blit_blend takes src_data, src_width, src_height, src_stride.
         // We offset into the source buffer to skip the clipped rows/cols.
-        let src_offset = (src_y_start * s.surface.stride + src_x_start * s.surface.format.bytes_per_pixel()) as usize;
+        let src_offset = (src_y_start * s.surface.stride
+            + src_x_start * s.surface.format.bytes_per_pixel()) as usize;
 
         if src_offset < s.surface.data.len() {
             dst.blit_blend(
@@ -1821,7 +1935,6 @@ pub fn composite_surfaces(dst: &mut Surface, surfaces: &[&CompositeSurface]) {
         }
     }
 }
-
 /// Composite surfaces back-to-front onto a rectangular sub-region of the
 /// destination framebuffer. Only pixels within `(rx, ry, rw, rh)` are
 /// written. Surfaces are sorted by z-order as in `composite_surfaces`.
@@ -1842,6 +1955,7 @@ pub fn composite_surfaces_rect(
 
     // Sort indices by z-order (same insertion sort as composite_surfaces).
     const MAX_SURFACES: usize = 16;
+
     let count = if surfaces.len() > MAX_SURFACES {
         MAX_SURFACES
     } else {
@@ -1849,19 +1963,24 @@ pub fn composite_surfaces_rect(
     };
     let mut order: [usize; MAX_SURFACES] = [0; MAX_SURFACES];
     let mut i = 0;
+
     while i < count {
         order[i] = i;
         i += 1;
     }
+
     let mut j = 1;
+
     while j < count {
         let key = order[j];
         let key_z = surfaces[key].z;
         let mut k = j;
+
         while k > 0 && surfaces[order[k - 1]].z > key_z {
             order[k] = order[k - 1];
             k -= 1;
         }
+
         order[k] = key;
         j += 1;
     }
@@ -1869,6 +1988,7 @@ pub fn composite_surfaces_rect(
     // Clamp the rect to destination bounds.
     let rx_end = min(rx + rw, dst.width);
     let ry_end = min(ry + rh, dst.height);
+
     if rx >= rx_end || ry >= ry_end {
         return;
     }
@@ -1877,6 +1997,7 @@ pub fn composite_surfaces_rect(
     let mut idx = 0;
     while idx < count {
         let s = surfaces[order[idx]];
+
         idx += 1;
 
         if !s.visible {
@@ -1889,12 +2010,27 @@ pub fn composite_surfaces_rect(
         let surf_fb_y0 = if s.y < 0 { 0i32 } else { s.y };
         let surf_fb_x1 = s.x + s.surface.width as i32;
         let surf_fb_y1 = s.y + s.surface.height as i32;
-
         // Intersect surface's FB region with the dirty rect.
-        let ix0 = if surf_fb_x0 > rx as i32 { surf_fb_x0 } else { rx as i32 };
-        let iy0 = if surf_fb_y0 > ry as i32 { surf_fb_y0 } else { ry as i32 };
-        let ix1 = if surf_fb_x1 < rx_end as i32 { surf_fb_x1 } else { rx_end as i32 };
-        let iy1 = if surf_fb_y1 < ry_end as i32 { surf_fb_y1 } else { ry_end as i32 };
+        let ix0 = if surf_fb_x0 > rx as i32 {
+            surf_fb_x0
+        } else {
+            rx as i32
+        };
+        let iy0 = if surf_fb_y0 > ry as i32 {
+            surf_fb_y0
+        } else {
+            ry as i32
+        };
+        let ix1 = if surf_fb_x1 < rx_end as i32 {
+            surf_fb_x1
+        } else {
+            rx_end as i32
+        };
+        let iy1 = if surf_fb_y1 < ry_end as i32 {
+            surf_fb_y1
+        } else {
+            ry_end as i32
+        };
 
         if ix0 >= ix1 || iy0 >= iy1 {
             continue; // No overlap.
@@ -1905,9 +2041,8 @@ pub fn composite_surfaces_rect(
         let src_y = (iy0 - s.y) as u32;
         let blit_w = (ix1 - ix0) as u32;
         let blit_h = (iy1 - iy0) as u32;
-
-        let src_offset = (src_y * s.surface.stride
-            + src_x * s.surface.format.bytes_per_pixel()) as usize;
+        let src_offset =
+            (src_y * s.surface.stride + src_x * s.surface.format.bytes_per_pixel()) as usize;
 
         if src_offset < s.surface.data.len() {
             dst.blit_blend(
@@ -1969,8 +2104,9 @@ pub fn render_cursor(buf: &mut [u8]) {
 
     // Clear to fully transparent.
     let mut i = 0;
+
     while i < total {
-        buf[i] = 0;     // B
+        buf[i] = 0; // B
         buf[i + 1] = 0; // G
         buf[i + 2] = 0; // R
         buf[i + 3] = 0; // A
@@ -1979,10 +2115,11 @@ pub fn render_cursor(buf: &mut [u8]) {
 
     let fill = CURSOR_FILL;
     let outline = CURSOR_OUTLINE;
-
     let mut y = 0u32;
+
     while y < CURSOR_H {
         let mut x = 0u32;
+
         while x < CURSOR_W {
             let idx = (y * CURSOR_W + x) as usize;
             let color = match CURSOR_BITMAP[idx] {
@@ -1993,9 +2130,9 @@ pub fn render_cursor(buf: &mut [u8]) {
                     continue;
                 }
             };
-
             let off = (y * stride + x * 4) as usize;
             let encoded = color.encode(PixelFormat::Bgra8888);
+
             buf[off] = encoded[0];
             buf[off + 1] = encoded[1];
             buf[off + 2] = encoded[2];
@@ -2006,7 +2143,6 @@ pub fn render_cursor(buf: &mut [u8]) {
         y += 1;
     }
 }
-
 /// Scale an absolute pointer coordinate from the [0, 32767] range to
 /// [0, max_pixels). Uses integer math: `coord * max_pixels / 32768`.
 /// The divisor is 32768 (not 32767) to ensure the result never equals
@@ -2014,6 +2150,7 @@ pub fn render_cursor(buf: &mut [u8]) {
 pub fn scale_pointer_coord(coord: u32, max_pixels: u32) -> u32 {
     let result = (coord as u64 * max_pixels as u64) / 32768;
     let r = result as u32;
+
     if r >= max_pixels && max_pixels > 0 {
         max_pixels - 1
     } else {
@@ -2030,16 +2167,6 @@ pub fn scale_pointer_coord(coord: u32, max_pixels: u32) -> u32 {
 /// Remaining = 48 bytes / 8 bytes per rect = 6 rects.
 pub const MAX_DIRTY_RECTS: usize = 6;
 
-/// A rectangular region of pixels that has been modified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C)]
-pub struct DirtyRect {
-    pub x: u16,
-    pub y: u16,
-    pub w: u16,
-    pub h: u16,
-}
-
 /// Collects dirty rectangles during a render pass.
 ///
 /// When the number of rects exceeds MAX_DIRTY_RECTS, the tracker
@@ -2050,6 +2177,15 @@ pub struct DamageTracker {
     pub full_screen: bool,
     fb_width: u16,
     fb_height: u16,
+}
+/// A rectangular region of pixels that has been modified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(C)]
+pub struct DirtyRect {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
 }
 
 impl DirtyRect {
@@ -2068,14 +2204,20 @@ impl DirtyRect {
 
         let x0 = if self.x < other.x { self.x } else { other.x };
         let y0 = if self.y < other.y { self.y } else { other.y };
-
         let self_x1 = self.x as u32 + self.w as u32;
         let other_x1 = other.x as u32 + other.w as u32;
-        let x1 = if self_x1 > other_x1 { self_x1 } else { other_x1 };
-
+        let x1 = if self_x1 > other_x1 {
+            self_x1
+        } else {
+            other_x1
+        };
         let self_y1 = self.y as u32 + self.h as u32;
         let other_y1 = other.y as u32 + other.h as u32;
-        let y1 = if self_y1 > other_y1 { self_y1 } else { other_y1 };
+        let y1 = if self_y1 > other_y1 {
+            self_y1
+        } else {
+            other_y1
+        };
 
         DirtyRect {
             x: x0,
@@ -2084,13 +2226,14 @@ impl DirtyRect {
             h: (y1 - y0 as u32) as u16,
         }
     }
-
     /// Compute the union of a slice of rects. Returns a zero rect if empty.
     pub fn union_all(rects: &[DirtyRect]) -> DirtyRect {
         let mut result = DirtyRect::new(0, 0, 0, 0);
+
         for &r in rects {
             result = result.union(r);
         }
+
         result
     }
 }
@@ -2099,23 +2242,17 @@ impl DamageTracker {
     /// Create a new damage tracker for the given framebuffer dimensions.
     pub const fn new(fb_width: u16, fb_height: u16) -> Self {
         Self {
-            rects: [DirtyRect { x: 0, y: 0, w: 0, h: 0 }; MAX_DIRTY_RECTS],
+            rects: [DirtyRect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            }; MAX_DIRTY_RECTS],
             count: 0,
             full_screen: false,
             fb_width,
             fb_height,
         }
-    }
-
-    /// Reset the tracker for a new frame.
-    pub fn reset(&mut self) {
-        self.count = 0;
-        self.full_screen = false;
-    }
-
-    /// Mark the entire framebuffer as dirty.
-    pub fn mark_full_screen(&mut self) {
-        self.full_screen = true;
     }
 
     /// Add a dirty rectangle. If too many rects accumulate, falls back
@@ -2127,13 +2264,21 @@ impl DamageTracker {
 
         if self.count >= MAX_DIRTY_RECTS {
             self.full_screen = true;
+
             return;
         }
 
         self.rects[self.count] = DirtyRect::new(x, y, w, h);
         self.count += 1;
     }
-
+    /// Get the bounding box of all dirty rects, or full screen if needed.
+    pub fn bounding_box(&self) -> DirtyRect {
+        if self.full_screen || self.count == 0 {
+            DirtyRect::new(0, 0, self.fb_width, self.fb_height)
+        } else {
+            DirtyRect::union_all(&self.rects[..self.count])
+        }
+    }
     /// Get the dirty rects for this frame. Returns `None` if full-screen
     /// transfer is needed (either explicitly marked or overflow).
     pub fn dirty_rects(&self) -> Option<&[DirtyRect]> {
@@ -2143,13 +2288,13 @@ impl DamageTracker {
             Some(&self.rects[..self.count])
         }
     }
-
-    /// Get the bounding box of all dirty rects, or full screen if needed.
-    pub fn bounding_box(&self) -> DirtyRect {
-        if self.full_screen || self.count == 0 {
-            DirtyRect::new(0, 0, self.fb_width, self.fb_height)
-        } else {
-            DirtyRect::union_all(&self.rects[..self.count])
-        }
+    /// Mark the entire framebuffer as dirty.
+    pub fn mark_full_screen(&mut self) {
+        self.full_screen = true;
+    }
+    /// Reset the tracker for a new frame.
+    pub fn reset(&mut self) {
+        self.count = 0;
+        self.full_screen = false;
     }
 }

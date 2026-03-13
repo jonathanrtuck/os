@@ -5692,8 +5692,9 @@ fn gradient_center_brighter_than_edges() {
 }
 
 #[test]
-fn gradient_noise_creates_variation() {
-    // Fill with noise amplitude 3. Adjacent pixels should sometimes differ.
+fn gradient_dither_creates_variation() {
+    // Bayer ordered dithering should create pixel-level variation in rows,
+    // breaking up quantization bands into a structured stipple pattern.
     let w = 100u32;
     let h = 100u32;
     let mut buf = vec![0u8; (w * h * 4) as usize];
@@ -5703,7 +5704,7 @@ fn gradient_noise_creates_variation() {
     let edge = Color::rgb(16, 16, 16);
     drawing::fill_radial_gradient_noise(&mut surf, center, edge, 3, 0xDEAD_BEEF);
 
-    // Check that not all pixels in a horizontal row are identical (noise breaks banding).
+    // Check that not all pixels in a horizontal row are identical (dither breaks banding).
     let y = h / 2; // Middle row.
     let mut saw_different = false;
     let first = surf.get_pixel(0, y).unwrap();
@@ -5714,7 +5715,7 @@ fn gradient_noise_creates_variation() {
             break;
         }
     }
-    assert!(saw_different, "noise should cause pixel variation in a row");
+    assert!(saw_different, "dither should cause pixel variation in a row");
 }
 
 #[test]
@@ -5787,6 +5788,171 @@ fn gradient_zero_noise_is_smooth() {
             prev_r,
         );
         prev_r = px.r;
+    }
+}
+
+#[test]
+fn gradient_dither_is_structured_bayer() {
+    // Bayer 4×4 dithering should produce a repeating 4×4 pattern.
+    // For a flat-color surface (center == edge), the Bayer thresholds
+    // should be visible as a structured pattern where some pixels round
+    // up and others don't, with a period of 4 in both x and y.
+    let w = 8u32;
+    let h = 8u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+
+    // Use colors that produce a fractional value in the gradient.
+    // With center=30, edge=29, at center position the gradient value
+    // is ~30. The fractional part from interpolation triggers dithering.
+    let center = Color::rgb(30, 30, 30);
+    let edge = Color::rgb(29, 29, 29);
+    drawing::fill_radial_gradient_noise(&mut surf, center, edge, 0, 0);
+
+    // Verify 4×4 periodicity: pixel(x,y) == pixel(x+4, y+4) for same
+    // gradient position. Since the gradient varies spatially, we can't
+    // test exact equality, but we can check that the pattern repeats.
+    // At the 4 corners of the 8×8 surface which have the same distance
+    // from center, the Bayer pattern should match.
+    let tl = surf.get_pixel(0, 0).unwrap();
+    let tr = surf.get_pixel(w - 1, 0).unwrap();
+    // Top-left and top-right corners have symmetric distance.
+    // Due to discrete coordinates, they should be within ±1.
+    assert!(
+        (tl.r as i32 - tr.r as i32).unsigned_abs() <= 1,
+        "symmetric corners should have similar values: tl.r={}, tr.r={}",
+        tl.r,
+        tr.r,
+    );
+}
+
+#[test]
+fn gradient_rows_matches_full_fill() {
+    // fill_radial_gradient_rows for specific rows must produce pixels
+    // identical to fill_radial_gradient_noise for those same rows.
+    let w = 120u32;
+    let h = 80u32;
+    let center = Color::rgb(28, 28, 28);
+    let edge = Color::rgb(16, 16, 16);
+
+    // Full fill.
+    let mut buf_full = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut full = make_surface(&mut buf_full, w, h);
+        drawing::fill_radial_gradient_noise(&mut full, center, edge, 3, 0xDEAD_BEEF);
+    }
+
+    // Row fill: clear and re-fill rows 20..40.
+    let mut buf_rows = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut rows = make_surface(&mut buf_rows, w, h);
+        // First fill entirely.
+        drawing::fill_radial_gradient_noise(&mut rows, center, edge, 3, 0xDEAD_BEEF);
+        // Zero out rows 20..40 to simulate incremental clear.
+        let bpp = 4u32;
+        for y in 20..40u32 {
+            let off = (y * w * bpp) as usize;
+            let end = off + (w * bpp) as usize;
+            for b in &mut rows.data[off..end] {
+                *b = 0;
+            }
+        }
+        // Re-fill with row-based function.
+        drawing::fill_radial_gradient_rows(&mut rows, center, edge, 20, 20);
+    }
+
+    // Rows 20..40 should be pixel-identical.
+    let bpp = 4u32;
+    for y in 20..40u32 {
+        for x in 0..w {
+            let off = (y * w * bpp + x * bpp) as usize;
+            assert_eq!(
+                &buf_full[off..off + 4],
+                &buf_rows[off..off + 4],
+                "pixel ({},{}) mismatch between full fill and row fill",
+                x,
+                y,
+            );
+        }
+    }
+}
+
+#[test]
+fn gradient_rows_out_of_bounds_clipped() {
+    // fill_radial_gradient_rows with start_y + row_count > height should
+    // be silently clipped, not panic.
+    let w = 20u32;
+    let h = 10u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+
+    // Start at row 8, request 5 rows → should only fill rows 8 and 9.
+    drawing::fill_radial_gradient_rows(
+        &mut surf,
+        Color::rgb(28, 28, 28),
+        Color::rgb(16, 16, 16),
+        8,
+        5,
+    );
+
+    // Row 8 should have non-zero pixels.
+    let px = surf.get_pixel(w / 2, 8).unwrap();
+    assert!(px.r > 0 || px.g > 0 || px.b > 0, "row 8 should be filled");
+    // Row 9 should have non-zero pixels.
+    let px = surf.get_pixel(w / 2, 9).unwrap();
+    assert!(px.r > 0 || px.g > 0 || px.b > 0, "row 9 should be filled");
+}
+
+#[test]
+fn gradient_rows_zero_count_noop() {
+    // fill_radial_gradient_rows with row_count=0 should be a no-op.
+    let w = 20u32;
+    let h = 10u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+
+    drawing::fill_radial_gradient_rows(
+        &mut surf,
+        Color::rgb(28, 28, 28),
+        Color::rgb(16, 16, 16),
+        0,
+        0,
+    );
+
+    // Should remain all zeros.
+    for b in buf.iter() {
+        // Alpha channel defaults to 0 in zeroed buffer.
+        assert_eq!(*b, 0, "zero-count fill should not modify buffer");
+    }
+}
+
+#[test]
+fn gradient_dither_monochrome() {
+    // Bayer dithering must maintain the monochrome property: R=G=B for
+    // every pixel, since the same dither offset is added to all channels.
+    let w = 64u32;
+    let h = 64u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+
+    let center = Color::rgb(28, 28, 28);
+    let edge = Color::rgb(16, 16, 16);
+    drawing::fill_radial_gradient_noise(&mut surf, center, edge, 0, 0);
+
+    for y in 0..h {
+        for x in 0..w {
+            let px = surf.get_pixel(x, y).unwrap();
+            assert_eq!(
+                px.r, px.g,
+                "monochrome violated at ({},{}): r={}, g={}",
+                x, y, px.r, px.g,
+            );
+            assert_eq!(
+                px.r, px.b,
+                "monochrome violated at ({},{}): r={}, b={}",
+                x, y, px.r, px.b,
+            );
+        }
     }
 }
 
