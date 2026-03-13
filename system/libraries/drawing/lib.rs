@@ -21,7 +21,6 @@
 
 #![no_std]
 
-include!("font_data.rs");
 include!("gamma_tables.rs");
 include!("palette.rs");
 include!("png.rs");
@@ -57,8 +56,10 @@ pub const STEM_DARKENING_LUT: [u8; 256] = {
     // LUT[255] = 255: full coverage stays full.
     // LUT[1..254]: boosted via formula.
     let mut i = 1u32;
+
     while i < 256 {
         let darkened = i + boost * (255 - i) / 255;
+
         lut[i as usize] = if darkened > 255 { 255 } else { darkened as u8 };
         i += 1;
     }
@@ -81,28 +82,6 @@ const GLYPH_MAX_H: usize = 48;
 /// So the oversampled intermediate is always larger.
 const GLYPH_BUF_SIZE: usize = GLYPH_MAX_W * OVERSAMPLE_X as usize * GLYPH_MAX_H;
 
-/// Built-in 8×16 VGA-style bitmap font covering printable ASCII (0x20–0x7E).
-pub const FONT_8X16: BitmapFont = BitmapFont {
-    glyph_width: 8,
-    glyph_height: 16,
-    data: &FONT_8X16_DATA,
-    first: 0x20,
-    last: 0x7E,
-};
-
-/// An embedded monospace bitmap font (1 bit per pixel).
-///
-/// Each glyph is `glyph_height` bytes — one byte per scanline row, MSB is the
-/// leftmost pixel. Covers a contiguous range of ASCII codepoints.
-pub struct BitmapFont {
-    /// Glyph cell width in pixels.
-    pub glyph_width: u32,
-    /// Glyph cell height in pixels.
-    pub glyph_height: u32,
-    data: &'static [u8],
-    first: u8,
-    last: u8,
-}
 /// Pre-rasterized metrics for one cached glyph.
 #[derive(Clone, Copy)]
 pub struct CachedGlyph {
@@ -172,30 +151,6 @@ pub enum PixelFormat {
     Bgra8888,
 }
 
-impl BitmapFont {
-    /// Return the bitmap rows for a character, or `None` if outside the font.
-    ///
-    /// The returned slice is `glyph_height` bytes. Each byte is one scanline
-    /// row (MSB = leftmost pixel).
-    pub fn glyph(&self, ch: char) -> Option<&[u8]> {
-        let c = ch as u32;
-
-        if c < self.first as u32 || c > self.last as u32 {
-            return None;
-        }
-
-        let idx = (c - self.first as u32) as usize;
-        let bpg = self.glyph_height as usize;
-        let start = idx * bpg;
-        let end = start + bpg;
-
-        if end <= self.data.len() {
-            Some(&self.data[start..end])
-        } else {
-            None
-        }
-    }
-}
 impl Color {
     pub const WHITE: Color = Color::rgb(255, 255, 255);
     pub const BLACK: Color = Color::rgb(0, 0, 0);
@@ -595,25 +550,6 @@ impl<'a> Surface<'a> {
     pub fn draw_hline(&mut self, x: u32, y: u32, w: u32, color: Color) {
         self.fill_rect(x, y, w, 1, color);
     }
-    /// Draw a single glyph at (x, y) in the given color.
-    ///
-    /// Only foreground pixels (bit = 1) are drawn; the background is left
-    /// unchanged. Out-of-bounds pixels clip silently.
-    pub fn draw_glyph(&mut self, x: u32, y: u32, ch: char, font: &BitmapFont, color: Color) {
-        if let Some(glyph) = font.glyph(ch) {
-            for row in 0..font.glyph_height {
-                let byte = glyph[row as usize];
-
-                for col in 0..font.glyph_width {
-                    if byte & (0x80 >> col) != 0 {
-                        if let (Some(px), Some(py)) = (x.checked_add(col), y.checked_add(row)) {
-                            self.set_pixel(px, py, color);
-                        }
-                    }
-                }
-            }
-        }
-    }
     /// Draw a line using Bresenham's algorithm. Clips per-pixel.
     pub fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
         let dx = abs(x1 - x0);
@@ -668,29 +604,6 @@ impl<'a> Surface<'a> {
                 self.draw_vline(x + w - 1, y + 1, h - 2, color);
             }
         }
-    }
-    /// Draw a string starting at (x, y). Returns the x position after the
-    /// last glyph.
-    ///
-    /// Each character advances by `font.glyph_width` regardless of whether
-    /// the glyph exists. Characters outside the font's range render as blanks.
-    pub fn draw_text(
-        &mut self,
-        x: u32,
-        y: u32,
-        text: &str,
-        font: &BitmapFont,
-        color: Color,
-    ) -> u32 {
-        let mut cx = x;
-
-        for ch in text.chars() {
-            self.draw_glyph(cx, y, ch, font, color);
-
-            cx = cx.saturating_add(font.glyph_width);
-        }
-
-        cx
     }
     /// Draw a vertical line. Clips to surface bounds.
     pub fn draw_vline(&mut self, x: u32, y: u32, h: u32, color: Color) {
@@ -756,6 +669,7 @@ impl<'a> Surface<'a> {
         // For h=1, just fill with color_top.
         if h == 1 {
             self.fill_rect(x, y, x2 - x, 1, color_top);
+
             return;
         }
 
@@ -763,7 +677,8 @@ impl<'a> Surface<'a> {
 
         for row in y..y2 {
             let t = (row - y) as u32; // 0..h-1
-                                      // Linearly interpolate each channel: c = top + (bottom - top) * t / denom.
+
+            // Linearly interpolate each channel: c = top + (bottom - top) * t / denom.
             let r =
                 (color_top.r as u32 * (denom - t) + color_bottom.r as u32 * t + denom / 2) / denom;
             let g =
@@ -915,94 +830,6 @@ impl TextLayout {
 
         // offset == text.len(): cursor at end.
         (col as u32 * self.char_width, row * self.line_height)
-    }
-    /// Layout and draw text onto a surface in one pass. Draws characters
-    /// starting at (origin_x, origin_y), wrapping within max_width.
-    /// Returns (cursor_x, cursor_y) for the given cursor byte offset.
-    pub fn draw(
-        &self,
-        fb: &mut Surface,
-        text: &[u8],
-        origin_x: u32,
-        origin_y: u32,
-        cursor_offset: usize,
-        font: &BitmapFont,
-        text_color: Color,
-        cursor_color: Color,
-        max_y: u32,
-    ) -> (u32, u32) {
-        let cols = self.cols();
-        let mut col = 0usize;
-        let mut row = 0u32;
-        let mut cursor_x = origin_x;
-        let mut cursor_y = origin_y;
-
-        for (i, &byte) in text.iter().enumerate() {
-            let py = origin_y + row * self.line_height;
-
-            if py > max_y {
-                break;
-            }
-
-            if i == cursor_offset {
-                cursor_x = origin_x + col as u32 * self.char_width;
-                cursor_y = py;
-            }
-
-            if byte == b'\n' {
-                col = 0;
-                row += 1;
-
-                continue;
-            }
-
-            if cols > 0 && col >= cols {
-                col = 0;
-                row += 1;
-
-                let py = origin_y + row * self.line_height;
-
-                if py > max_y {
-                    break;
-                }
-            }
-
-            if byte >= 0x20 && byte < 0x7F {
-                let ch = [byte];
-                let s = unsafe { core::str::from_utf8_unchecked(&ch) };
-
-                fb.draw_text(
-                    origin_x + col as u32 * self.char_width,
-                    origin_y + row * self.line_height,
-                    s,
-                    font,
-                    text_color,
-                );
-            }
-
-            col += 1;
-        }
-
-        // Cursor at end of text.
-        if cursor_offset >= text.len() {
-            let py = origin_y + row * self.line_height;
-
-            cursor_x = origin_x + col as u32 * self.char_width;
-            cursor_y = py;
-        }
-
-        // Draw cursor.
-        if cursor_y <= max_y {
-            fb.fill_rect(
-                cursor_x,
-                cursor_y,
-                self.char_width,
-                font.glyph_height,
-                cursor_color,
-            );
-        }
-
-        (cursor_x, cursor_y)
     }
     /// Layout and draw text using pre-rasterized TrueType glyphs.
     /// Anti-aliased rendering via coverage maps. Same interface as `draw`.
@@ -1665,12 +1492,7 @@ fn min(a: u32, b: u32) -> u32 {
 /// banding elimination.
 ///
 /// The matrix is indexed as `BAYER4[y & 3][x & 3]`.
-const BAYER4: [[u8; 4]; 4] = [
-    [0, 8, 2, 10],
-    [12, 4, 14, 6],
-    [3, 11, 1, 9],
-    [15, 7, 13, 5],
-];
+const BAYER4: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
 
 /// Compute the gradient parameters needed for radial gradient rendering.
 /// Returns (cx, cy, max_dist_sq).
@@ -1723,6 +1545,7 @@ fn gradient_pixel(
     // one integer unit), i.e., 0..3840 in fixed-point.
     let threshold = BAYER4[(y & 3) as usize][(x & 3) as usize] as u32;
     let dither_offset = (threshold << 12) / 16; // 0..3840
+
     // Add dither offset then truncate (shift right by 12).
     let r = clamp_u8(((base_r_fp + dither_offset) >> 12) as i32);
     let g = clamp_u8(((base_g_fp + dither_offset) >> 12) as i32);

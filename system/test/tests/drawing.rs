@@ -6,7 +6,7 @@
 #[path = "../../libraries/drawing/lib.rs"]
 mod drawing;
 
-use drawing::{Color, PixelFormat, Surface, TextLayout, FONT_8X16};
+use drawing::{Color, PixelFormat, Surface, TextLayout};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -412,134 +412,6 @@ fn fill_rect_saturating_add_no_overflow() {
     // Should fill from x=2 to x=3 (clipped to width).
     assert_eq!(s.get_pixel(2, 0), Some(Color::WHITE));
     assert_eq!(s.get_pixel(3, 0), Some(Color::WHITE));
-}
-
-// ---------------------------------------------------------------------------
-// BitmapFont tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn font_8x16_dimensions() {
-    assert_eq!(FONT_8X16.glyph_width, 8);
-    assert_eq!(FONT_8X16.glyph_height, 16);
-}
-
-#[test]
-fn font_glyph_returns_correct_length() {
-    let glyph = FONT_8X16.glyph('A').unwrap();
-    assert_eq!(glyph.len(), 16);
-}
-
-#[test]
-fn font_glyph_space_is_blank() {
-    let glyph = FONT_8X16.glyph(' ').unwrap();
-    assert!(glyph.iter().all(|&b| b == 0));
-}
-
-#[test]
-fn font_glyph_printable_ascii_all_present() {
-    for c in 0x20u8..=0x7E {
-        assert!(
-            FONT_8X16.glyph(c as char).is_some(),
-            "missing glyph for 0x{c:02X} '{}'",
-            c as char
-        );
-    }
-}
-
-#[test]
-fn font_glyph_outside_range_returns_none() {
-    assert!(FONT_8X16.glyph('\0').is_none());
-    assert!(FONT_8X16.glyph('\x1F').is_none());
-    assert!(FONT_8X16.glyph('\x7F').is_none());
-    assert!(FONT_8X16.glyph('é').is_none());
-}
-
-#[test]
-fn font_glyph_a_has_nonzero_rows() {
-    let glyph = FONT_8X16.glyph('A').unwrap();
-    assert!(glyph.iter().any(|&b| b != 0));
-}
-
-// ---------------------------------------------------------------------------
-// Surface: draw_glyph
-// ---------------------------------------------------------------------------
-
-#[test]
-fn draw_glyph_exclamation_mark() {
-    // '!' row 2 = 0x18 (bits 3,4 set), row 9 = 0x00 (gap), row 10 = 0x18 (dot).
-    let mut buf = [0u8; 16 * 16 * 4];
-    let mut s = make_surface(&mut buf, 16, 16);
-
-    s.draw_glyph(0, 0, '!', &FONT_8X16, Color::WHITE);
-
-    assert_eq!(s.get_pixel(3, 2), Some(Color::WHITE));
-    assert_eq!(s.get_pixel(4, 2), Some(Color::WHITE));
-    assert_eq!(s.get_pixel(0, 2), Some(Color::rgba(0, 0, 0, 0)));
-    assert_eq!(s.get_pixel(3, 9), Some(Color::rgba(0, 0, 0, 0)));
-    assert_eq!(s.get_pixel(3, 10), Some(Color::WHITE));
-}
-
-#[test]
-fn draw_glyph_unknown_char_is_noop() {
-    let mut buf = [0u8; 16 * 16 * 4];
-    let mut s = make_surface(&mut buf, 16, 16);
-
-    s.draw_glyph(0, 0, '\x7F', &FONT_8X16, Color::WHITE);
-
-    assert!(buf.iter().all(|&b| b == 0));
-}
-
-#[test]
-fn draw_glyph_clips_at_surface_edge() {
-    // Place an 8x16 glyph on a tiny 4x4 surface — no panic.
-    let mut buf = [0u8; 4 * 4 * 4];
-    let mut s = make_surface(&mut buf, 4, 4);
-
-    s.draw_glyph(0, 0, 'A', &FONT_8X16, Color::WHITE);
-
-    // 'A' row 2 = 0x10 → bit 4 → pixel column 3. Surface is 4 wide, so col 3 is visible.
-    assert_eq!(s.get_pixel(3, 2), Some(Color::WHITE));
-}
-
-// ---------------------------------------------------------------------------
-// Surface: draw_text
-// ---------------------------------------------------------------------------
-
-#[test]
-fn draw_text_returns_advanced_x() {
-    let mut buf = [0u8; 64 * 16 * 4];
-    let mut s = make_surface(&mut buf, 64, 16);
-
-    let end_x = s.draw_text(0, 0, "Hi", &FONT_8X16, Color::WHITE);
-
-    assert_eq!(end_x, 16);
-}
-
-#[test]
-fn draw_text_empty_string() {
-    let mut buf = [0u8; 16 * 16 * 4];
-    let mut s = make_surface(&mut buf, 16, 16);
-
-    let end_x = s.draw_text(5, 0, "", &FONT_8X16, Color::WHITE);
-
-    assert_eq!(end_x, 5);
-    assert!(buf.iter().all(|&b| b == 0));
-}
-
-#[test]
-fn draw_text_two_glyphs_are_adjacent() {
-    let mut buf = [0u8; 32 * 16 * 4];
-    let mut s = make_surface(&mut buf, 32, 16);
-
-    s.draw_text(0, 0, "!!", &FONT_8X16, Color::WHITE);
-
-    // First '!' at x=0: pixel (3,2) set.
-    assert_eq!(s.get_pixel(3, 2), Some(Color::WHITE));
-    // Second '!' at x=8: pixel (11,2) set.
-    assert_eq!(s.get_pixel(11, 2), Some(Color::WHITE));
-    // Gap between glyphs: pixel (7,2) should be blank.
-    assert_eq!(s.get_pixel(7, 2), Some(Color::rgba(0, 0, 0, 0)));
 }
 
 // ---------------------------------------------------------------------------
@@ -964,14 +836,13 @@ fn blit_blend_mixed_alpha_pixels() {
 
 use drawing::{TrueTypeFont, RasterBuffer, RasterScratch, GlyphOutline};
 
-const PROGGY_CLEAN: &[u8] = include_bytes!("../../libraries/drawing/ProggyClean.ttf");
 const NUNITO_SANS: &[u8] = include_bytes!("../../libraries/drawing/NunitoSans-Regular.ttf");
 const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../libraries/drawing/SourceCodePro-Regular.ttf");
 
 #[test]
 fn ttf_parse_valid_font() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN);
-    assert!(font.is_some(), "should parse ProggyClean.ttf");
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO);
+    assert!(font.is_some(), "should parse SourceCodePro-Regular.ttf");
 }
 
 #[test]
@@ -981,13 +852,13 @@ fn ttf_parse_empty_data_returns_none() {
 
 #[test]
 fn ttf_parse_truncated_data_returns_none() {
-    assert!(TrueTypeFont::new(&PROGGY_CLEAN[..10]).is_none());
+    assert!(TrueTypeFont::new(&SOURCE_CODE_PRO[..10]).is_none());
 }
 
 #[test]
 fn ttf_parse_not_truetype_returns_none() {
     // CFF/OpenType magic "OTTO".
-    let mut data = PROGGY_CLEAN.to_vec();
+    let mut data = SOURCE_CODE_PRO.to_vec();
     data[0] = b'O';
     data[1] = b'T';
     data[2] = b'T';
@@ -997,7 +868,7 @@ fn ttf_parse_not_truetype_returns_none() {
 
 #[test]
 fn ttf_glyph_index_ascii() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     // 'A' should have a valid glyph index.
     let idx = font.glyph_index('A');
     assert!(idx.is_some(), "'A' should have a glyph");
@@ -1006,7 +877,7 @@ fn ttf_glyph_index_ascii() {
 
 #[test]
 fn ttf_glyph_index_different_chars_different_indices() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let a = font.glyph_index('A').unwrap();
     let b = font.glyph_index('B').unwrap();
     assert_ne!(a, b, "'A' and 'B' should have different glyph indices");
@@ -1014,7 +885,7 @@ fn ttf_glyph_index_different_chars_different_indices() {
 
 #[test]
 fn ttf_glyph_index_all_printable_ascii() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     for c in 0x21u8..=0x7Eu8 {
         let ch = c as char;
         assert!(
@@ -1027,7 +898,7 @@ fn ttf_glyph_index_all_printable_ascii() {
 
 #[test]
 fn ttf_glyph_outline_a() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let glyph_idx = font.glyph_index('A').unwrap();
     let mut outline = GlyphOutline::zeroed();
     let ok = font.glyph_outline(glyph_idx, &mut outline);
@@ -1038,7 +909,7 @@ fn ttf_glyph_outline_a() {
 
 #[test]
 fn ttf_glyph_outline_o_has_two_contours() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let glyph_idx = font.glyph_index('O').unwrap();
     let mut outline = GlyphOutline::zeroed();
     let ok = font.glyph_outline(glyph_idx, &mut outline);
@@ -1053,7 +924,7 @@ fn ttf_glyph_outline_o_has_two_contours() {
 
 #[test]
 fn ttf_glyph_h_metrics() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let glyph_idx = font.glyph_index('A').unwrap();
     let (advance, _lsb) = font.glyph_h_metrics(glyph_idx).unwrap();
     assert!(advance > 0, "'A' should have positive advance width");
@@ -1061,7 +932,7 @@ fn ttf_glyph_h_metrics() {
 
 #[test]
 fn ttf_space_has_no_outline() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let glyph_idx = font.glyph_index(' ').unwrap();
     let mut outline = GlyphOutline::zeroed();
     // Space has no outline — glyph_outline returns false.
@@ -1071,7 +942,7 @@ fn ttf_space_has_no_outline() {
 
 #[test]
 fn ttf_units_per_em() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let upem = font.units_per_em();
     assert!(upem > 0, "units_per_em should be positive");
     // Typical values: 1000, 2048, etc.
@@ -1084,7 +955,7 @@ fn ttf_units_per_em() {
 
 #[test]
 fn ttf_rasterize_a() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let mut scratch = RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = RasterBuffer {
@@ -1108,7 +979,7 @@ fn ttf_rasterize_a() {
 
 #[test]
 fn ttf_rasterize_multiple_sizes() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let mut scratch = RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
 
@@ -1131,7 +1002,7 @@ fn ttf_rasterize_multiple_sizes() {
 
 #[test]
 fn ttf_rasterize_larger_is_bigger() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let mut scratch = RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
 
@@ -1156,7 +1027,7 @@ fn ttf_rasterize_larger_is_bigger() {
 
 #[test]
 fn ttf_rasterize_space_returns_metrics_only() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let mut scratch = RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
@@ -1171,7 +1042,7 @@ fn ttf_rasterize_space_returns_metrics_only() {
 
 #[test]
 fn ttf_rasterize_all_printable_ascii() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let mut scratch = RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
 
@@ -1189,7 +1060,7 @@ fn ttf_rasterize_all_printable_ascii() {
 
 #[test]
 fn ttf_rasterize_buffer_too_small() {
-    let font = TrueTypeFont::new(PROGGY_CLEAN).unwrap();
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let mut scratch = RasterScratch::zeroed();
     // Tiny buffer — large glyph shouldn't fit.
     let mut buf = [0u8; 4 * 4];
@@ -3849,8 +3720,7 @@ fn context_switch_text_content_preserved_after_roundtrip() {
             format: PixelFormat::Bgra8888,
         };
         surf.clear(Color::rgb(24, 24, 36));
-        // Simple text rendering via bitmap font.
-        surf.draw_text(10, 10, "hello world", &FONT_8X16, Color::rgb(200, 210, 230));
+        surf.fill_rect(10, 10, 80, 16, Color::rgb(200, 210, 230));
     }
 
     // Render a different surface (image mode) — just clear to a different color.
@@ -3873,7 +3743,7 @@ fn context_switch_text_content_preserved_after_roundtrip() {
             format: PixelFormat::Bgra8888,
         };
         surf.clear(Color::rgb(24, 24, 36));
-        surf.draw_text(10, 10, "hello world", &FONT_8X16, Color::rgb(200, 210, 230));
+        surf.fill_rect(10, 10, 80, 16, Color::rgb(200, 210, 230));
     }
 
     // The two text renders must be byte-identical.
@@ -3926,7 +3796,7 @@ fn context_switch_image_and_text_are_distinct() {
             format: PixelFormat::Bgra8888,
         };
         surf.clear(Color::rgb(24, 24, 36));
-        surf.draw_text(4, 4, "Hi", &FONT_8X16, Color::rgb(200, 200, 200));
+        surf.fill_rect(4, 4, 16, 16, Color::rgb(200, 200, 200));
     }
 
     // Image mode: fill with a recognizable pattern (simulating a PNG).
@@ -3983,7 +3853,7 @@ fn context_switch_composite_chrome_survives() {
             format: PixelFormat::Bgra8888,
         };
         surf.clear(Color::rgb(24, 24, 36));
-        surf.draw_text(4, 4, "Editor", &FONT_8X16, Color::rgb(200, 200, 200));
+        surf.fill_rect(4, 4, 48, 16, Color::rgb(200, 200, 200));
     }
 
     // Content surface — image mode.
@@ -5372,60 +5242,59 @@ fn svg_icon_img_has_frame_border() {
 }
 
 #[test]
-fn svg_icon_doc_rasterizes_at_30x36_chrome_size() {
-    // The compositor now renders icons at 30×36 pixels (1.5× scale) to fit
-    // cleanly within the 36px title bar. Verify both icons produce clean output.
+fn svg_icon_doc_rasterizes_at_20x24_chrome_size() {
+    // The compositor renders icons at 20×24 pixels (1× scale) to fit
+    // within the 36px title bar with 6px vertical margin.
     let path = svg_parse_path(DOC_ICON_PATH).unwrap();
     let mut scratch = SvgRasterScratch::zeroed();
-    let mut coverage = [0u8; 30 * 36];
+    let mut coverage = [0u8; 20 * 24];
 
-    // 1.5× scale = SVG_FP_ONE * 3 / 2 = 6144.
-    svg_rasterize(&path, &mut scratch, &mut coverage, 30, 36, 6144, 0, 0).unwrap();
+    svg_rasterize(&path, &mut scratch, &mut coverage, 20, 24, 4096, 0, 0).unwrap();
 
     let filled_count = coverage.iter().filter(|&&c| c > 0).count();
     assert!(
-        filled_count > 200,
-        "Doc icon at 30x36 (1.5×) should have significant coverage, got {} filled pixels",
+        filled_count > 100,
+        "Doc icon at 20x24 (1×) should have significant coverage, got {} filled pixels",
         filled_count
     );
 }
 
 #[test]
-fn svg_icon_img_rasterizes_at_30x36_chrome_size() {
-    // Image icon at 1.5× scale for the chrome title bar.
+fn svg_icon_img_rasterizes_at_20x24_chrome_size() {
+    // Image icon at 1× scale for the chrome title bar.
     let path = svg_parse_path(IMG_ICON_PATH).unwrap();
     let mut scratch = SvgRasterScratch::zeroed();
-    let mut coverage = [0u8; 30 * 36];
+    let mut coverage = [0u8; 20 * 24];
 
-    svg_rasterize(&path, &mut scratch, &mut coverage, 30, 36, 6144, 0, 0).unwrap();
+    svg_rasterize(&path, &mut scratch, &mut coverage, 20, 24, 4096, 0, 0).unwrap();
 
     let filled_count = coverage.iter().filter(|&&c| c > 0).count();
     assert!(
-        filled_count > 150,
-        "Image icon at 30x36 (1.5×) should have significant coverage, got {} filled pixels",
+        filled_count > 80,
+        "Image icon at 20x24 (1×) should have significant coverage, got {} filled pixels",
         filled_count
     );
 }
 
 #[test]
-fn svg_icon_both_differ_at_30x36() {
-    // Both icons at chrome size (30×36) should still be clearly distinguishable.
+fn svg_icon_both_differ_at_20x24() {
+    // Both icons at chrome size (20×24) should still be clearly distinguishable.
     let doc_path = svg_parse_path(DOC_ICON_PATH).unwrap();
     let img_path = svg_parse_path(IMG_ICON_PATH).unwrap();
     let mut doc_scratch = SvgRasterScratch::zeroed();
     let mut img_scratch = SvgRasterScratch::zeroed();
-    let mut doc_cov = [0u8; 30 * 36];
-    let mut img_cov = [0u8; 30 * 36];
+    let mut doc_cov = [0u8; 20 * 24];
+    let mut img_cov = [0u8; 20 * 24];
 
-    svg_rasterize(&doc_path, &mut doc_scratch, &mut doc_cov, 30, 36, 6144, 0, 0).unwrap();
-    svg_rasterize(&img_path, &mut img_scratch, &mut img_cov, 30, 36, 6144, 0, 0).unwrap();
+    svg_rasterize(&doc_path, &mut doc_scratch, &mut doc_cov, 20, 24, 4096, 0, 0).unwrap();
+    svg_rasterize(&img_path, &mut img_scratch, &mut img_cov, 20, 24, 4096, 0, 0).unwrap();
 
     let diff_count = doc_cov.iter().zip(img_cov.iter())
         .filter(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() > 30)
         .count();
     assert!(
-        diff_count > 80,
-        "Doc and image icons should differ significantly at 30x36, only {} pixels differ",
+        diff_count > 40,
+        "Doc and image icons should differ significantly at 20x24, only {} pixels differ",
         diff_count
     );
 }

@@ -121,8 +121,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **What's scaffolding:**
 
 - `PixelFormat` enum has only `Bgra8888`. Trivial to extend (add variant + match arms), but currently untested with other formats.
-- `BitmapFont` is an embedded 8×16 VGA font covering ASCII 0x20–0x7E. Fine as a fallback, not a real text solution.
-- ProggyClean.ttf (40 KiB, MIT license) is the embedded TrueType font. A vectorized bitmap font — exercises the full parser and rasterizer but glyphs are mostly straight lines. A font with real curves (variable-width, bezier-heavy) would test the rasterizer more thoroughly.
+- Runtime fonts (SourceCodePro-Regular.ttf, NunitoSans-Regular.ttf) are loaded from the host filesystem via the 9p driver. Tests embed these same fonts for TrueType parser and rasterizer validation.
 
 **What's missing:**
 

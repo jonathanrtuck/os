@@ -18,27 +18,10 @@ const SVG_MAX_COMMANDS: usize = 512;
 const SVG_MAX_SEGMENTS: usize = 4096;
 /// Maximum active edges during scanline sweep.
 const SVG_MAX_ACTIVE: usize = 128;
-
 /// Fixed-point 20.12 format — same as the TrueType rasterizer.
 const SVG_FP_SHIFT: i32 = 12;
-pub const SVG_FP_ONE: i32 = 1 << SVG_FP_SHIFT;
 
-/// Errors that can occur during SVG path parsing.
-#[derive(Debug, PartialEq, Eq, Clone, Copy)]
-pub enum SvgError {
-    /// The path data string is empty.
-    EmptyData,
-    /// An unrecognized command letter was encountered.
-    InvalidCommand(u8),
-    /// A command requires more coordinates than were available.
-    MissingCoordinates,
-    /// A number in the path data could not be parsed.
-    InvalidNumber,
-    /// The path has too many commands (exceeds SVG_MAX_COMMANDS).
-    TooManyCommands,
-    /// The path has too many segments after flattening (exceeds SVG_MAX_SEGMENTS).
-    TooManySegments,
-}
+pub const SVG_FP_ONE: i32 = 1 << SVG_FP_SHIFT;
 
 /// A parsed SVG path command.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -59,6 +42,22 @@ pub enum SvgCommand {
     },
     /// Close the current subpath.
     Close,
+}
+/// Errors that can occur during SVG path parsing.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum SvgError {
+    /// The path data string is empty.
+    EmptyData,
+    /// An unrecognized command letter was encountered.
+    InvalidCommand(u8),
+    /// A command requires more coordinates than were available.
+    MissingCoordinates,
+    /// A number in the path data could not be parsed.
+    InvalidNumber,
+    /// The path has too many commands (exceeds SVG_MAX_COMMANDS).
+    TooManyCommands,
+    /// The path has too many segments after flattening (exceeds SVG_MAX_SEGMENTS).
+    TooManySegments,
 }
 
 /// A parsed SVG path — a sequence of commands.
@@ -116,6 +115,92 @@ impl SvgRasterScratch {
 // Parser: SVG path data string → SvgPath
 // ---------------------------------------------------------------------------
 
+fn is_digit_or_sign(b: u8) -> bool {
+    (b >= b'0' && b <= b'9') || b == b'-' || b == b'+' || b == b'.'
+}
+fn is_svg_command(b: u8) -> bool {
+    matches!(b, b'M' | b'm' | b'L' | b'l' | b'C' | b'c' | b'Z' | b'z')
+}
+fn is_svg_whitespace(b: u8) -> bool {
+    b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
+}
+/// Parse an integer from the path data string, advancing `pos`.
+/// Handles optional leading sign (+ or -) and leading decimal point
+/// (e.g., ".5" parses as 0, since we use integer coordinates).
+fn parse_svg_number(data: &[u8], pos: &mut usize) -> Result<i32, SvgError> {
+    skip_whitespace_and_commas(data, pos);
+
+    if *pos >= data.len() {
+        return Err(SvgError::MissingCoordinates);
+    }
+
+    let mut negative = false;
+    let b = data[*pos];
+
+    if b == b'-' {
+        negative = true;
+        *pos += 1;
+    } else if b == b'+' {
+        *pos += 1;
+    }
+
+    // Handle leading decimal point (e.g., ".5" parses as 0).
+    let has_integer_part = *pos < data.len() && data[*pos] >= b'0' && data[*pos] <= b'9';
+    let has_decimal_start = *pos < data.len() && data[*pos] == b'.';
+
+    if !has_integer_part && !has_decimal_start {
+        return Err(SvgError::InvalidNumber);
+    }
+
+    let mut value: i32 = 0;
+
+    while *pos < data.len() && data[*pos] >= b'0' && data[*pos] <= b'9' {
+        let digit = (data[*pos] - b'0') as i32;
+
+        // Check for overflow.
+        value = value.checked_mul(10).ok_or(SvgError::InvalidNumber)?;
+        value = value.checked_add(digit).ok_or(SvgError::InvalidNumber)?;
+        *pos += 1;
+    }
+
+    // Skip decimal point and fractional part (we use integer coordinates).
+    if *pos < data.len() && data[*pos] == b'.' {
+        *pos += 1;
+
+        while *pos < data.len() && data[*pos] >= b'0' && data[*pos] <= b'9' {
+            *pos += 1;
+        }
+    }
+
+    if negative {
+        Ok(-value)
+    } else {
+        Ok(value)
+    }
+}
+fn push_command(path: &mut SvgPath, cmd: SvgCommand) -> Result<(), SvgError> {
+    if path.num_commands >= SVG_MAX_COMMANDS {
+        return Err(SvgError::TooManyCommands);
+    }
+
+    path.commands[path.num_commands] = cmd;
+    path.num_commands += 1;
+
+    Ok(())
+}
+
+fn skip_whitespace_and_commas(data: &[u8], pos: &mut usize) {
+    while *pos < data.len() {
+        let b = data[*pos];
+
+        if is_svg_whitespace(b) || b == b',' {
+            *pos += 1;
+        } else {
+            break;
+        }
+    }
+}
+
 /// Parse an SVG path data string (the `d` attribute) into an `SvgPath`.
 ///
 /// Coordinates are parsed as integers (sub-pixel precision via fixed-point
@@ -128,10 +213,11 @@ impl SvgRasterScratch {
 /// `svg_parse_path_into()` with a heap-allocated `SvgPath`.
 pub fn svg_parse_path(data: &[u8]) -> Result<SvgPath, SvgError> {
     let mut path = SvgPath::new();
+
     svg_parse_path_into(data, &mut path)?;
+
     Ok(path)
 }
-
 /// Parse an SVG path data string into a caller-provided `SvgPath`.
 ///
 /// Same as `svg_parse_path()` but avoids allocating `SvgPath` on the
@@ -144,12 +230,15 @@ pub fn svg_parse_path_into(data: &[u8], path: &mut SvgPath) -> Result<(), SvgErr
 
     // Check if there's any non-whitespace content.
     let mut has_content = false;
+
     for &b in data {
         if !is_svg_whitespace(b) {
             has_content = true;
+
             break;
         }
     }
+
     if !has_content {
         return Err(SvgError::EmptyData);
     }
@@ -164,12 +253,12 @@ pub fn svg_parse_path_into(data: &[u8], path: &mut SvgPath) -> Result<(), SvgErr
 
     while pos < data.len() {
         skip_whitespace_and_commas(data, &mut pos);
+
         if pos >= data.len() {
             break;
         }
 
         let b = data[pos];
-
         // Determine command letter.
         let cmd = if is_svg_command(b) {
             pos += 1;
@@ -192,19 +281,23 @@ pub fn svg_parse_path_into(data: &[u8], path: &mut SvgPath) -> Result<(), SvgErr
             b'M' => {
                 let x = parse_svg_number(data, &mut pos)?;
                 let y = parse_svg_number(data, &mut pos)?;
+
                 current_x = x;
                 current_y = y;
                 subpath_start_x = x;
                 subpath_start_y = y;
+
                 push_command(path, SvgCommand::MoveTo { x, y })?;
             }
             b'm' => {
                 let dx = parse_svg_number(data, &mut pos)?;
                 let dy = parse_svg_number(data, &mut pos)?;
+
                 current_x += dx;
                 current_y += dy;
                 subpath_start_x = current_x;
                 subpath_start_y = current_y;
+
                 push_command(
                     path,
                     SvgCommand::MoveTo {
@@ -216,15 +309,19 @@ pub fn svg_parse_path_into(data: &[u8], path: &mut SvgPath) -> Result<(), SvgErr
             b'L' => {
                 let x = parse_svg_number(data, &mut pos)?;
                 let y = parse_svg_number(data, &mut pos)?;
+
                 current_x = x;
                 current_y = y;
+
                 push_command(path, SvgCommand::LineTo { x, y })?;
             }
             b'l' => {
                 let dx = parse_svg_number(data, &mut pos)?;
                 let dy = parse_svg_number(data, &mut pos)?;
+
                 current_x += dx;
                 current_y += dy;
+
                 push_command(
                     path,
                     SvgCommand::LineTo {
@@ -240,8 +337,10 @@ pub fn svg_parse_path_into(data: &[u8], path: &mut SvgPath) -> Result<(), SvgErr
                 let y2 = parse_svg_number(data, &mut pos)?;
                 let x = parse_svg_number(data, &mut pos)?;
                 let y = parse_svg_number(data, &mut pos)?;
+
                 current_x = x;
                 current_y = y;
+
                 push_command(
                     path,
                     SvgCommand::CubicTo {
@@ -267,8 +366,10 @@ pub fn svg_parse_path_into(data: &[u8], path: &mut SvgPath) -> Result<(), SvgErr
                 let y2 = current_y + dy2;
                 let x = current_x + dx;
                 let y = current_y + dy;
+
                 current_x = x;
                 current_y = y;
+
                 push_command(
                     path,
                     SvgCommand::CubicTo {
@@ -284,6 +385,7 @@ pub fn svg_parse_path_into(data: &[u8], path: &mut SvgPath) -> Result<(), SvgErr
             b'Z' | b'z' => {
                 current_x = subpath_start_x;
                 current_y = subpath_start_y;
+
                 push_command(path, SvgCommand::Close)?;
             }
             _ => {
@@ -299,96 +401,115 @@ pub fn svg_parse_path_into(data: &[u8], path: &mut SvgPath) -> Result<(), SvgErr
     Ok(())
 }
 
-fn push_command(path: &mut SvgPath, cmd: SvgCommand) -> Result<(), SvgError> {
-    if path.num_commands >= SVG_MAX_COMMANDS {
-        return Err(SvgError::TooManyCommands);
-    }
-    path.commands[path.num_commands] = cmd;
-    path.num_commands += 1;
-    Ok(())
-}
-
-fn is_svg_whitespace(b: u8) -> bool {
-    b == b' ' || b == b'\t' || b == b'\n' || b == b'\r'
-}
-
-fn is_svg_command(b: u8) -> bool {
-    matches!(
-        b,
-        b'M' | b'm' | b'L' | b'l' | b'C' | b'c' | b'Z' | b'z'
-    )
-}
-
-fn is_digit_or_sign(b: u8) -> bool {
-    (b >= b'0' && b <= b'9') || b == b'-' || b == b'+' || b == b'.'
-}
-
-fn skip_whitespace_and_commas(data: &[u8], pos: &mut usize) {
-    while *pos < data.len() {
-        let b = data[*pos];
-        if is_svg_whitespace(b) || b == b',' {
-            *pos += 1;
-        } else {
-            break;
-        }
-    }
-}
-
-/// Parse an integer from the path data string, advancing `pos`.
-/// Handles optional leading sign (+ or -) and leading decimal point
-/// (e.g., ".5" parses as 0, since we use integer coordinates).
-fn parse_svg_number(data: &[u8], pos: &mut usize) -> Result<i32, SvgError> {
-    skip_whitespace_and_commas(data, pos);
-
-    if *pos >= data.len() {
-        return Err(SvgError::MissingCoordinates);
-    }
-
-    let mut negative = false;
-    let b = data[*pos];
-    if b == b'-' {
-        negative = true;
-        *pos += 1;
-    } else if b == b'+' {
-        *pos += 1;
-    }
-
-    // Handle leading decimal point (e.g., ".5" parses as 0).
-    let has_integer_part = *pos < data.len() && data[*pos] >= b'0' && data[*pos] <= b'9';
-    let has_decimal_start = *pos < data.len() && data[*pos] == b'.';
-
-    if !has_integer_part && !has_decimal_start {
-        return Err(SvgError::InvalidNumber);
-    }
-
-    let mut value: i32 = 0;
-    while *pos < data.len() && data[*pos] >= b'0' && data[*pos] <= b'9' {
-        let digit = (data[*pos] - b'0') as i32;
-        // Check for overflow.
-        value = value.checked_mul(10).ok_or(SvgError::InvalidNumber)?;
-        value = value.checked_add(digit).ok_or(SvgError::InvalidNumber)?;
-        *pos += 1;
-    }
-
-    // Skip decimal point and fractional part (we use integer coordinates).
-    if *pos < data.len() && data[*pos] == b'.' {
-        *pos += 1;
-        while *pos < data.len() && data[*pos] >= b'0' && data[*pos] <= b'9' {
-            *pos += 1;
-        }
-    }
-
-    if negative {
-        Ok(-value)
-    } else {
-        Ok(value)
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Flatten: SvgPath → line segments in fixed-point pixel coordinates
 // ---------------------------------------------------------------------------
 
+/// Convert SVG coordinate to fixed-point pixel coordinate.
+///
+/// `scale` is a 20.12 fixed-point multiplier (SVG_FP_ONE = 1× scale).
+/// `offset` is already in fixed-point.
+///
+/// Since `scale` carries the 12-bit fractional shift, `coord * scale` directly
+/// produces a fixed-point result. Example: coord=10, scale=4096 (1×) →
+/// 10 * 4096 = 40960 = 10.0 in 20.12 FP. coord=10, scale=8192 (2×) →
+/// 10 * 8192 = 81920 = 20.0 in 20.12 FP.
+///
+/// # Overflow safety
+///
+/// The multiplication is performed in i64 to avoid intermediate overflow,
+/// then truncated to i32. The result is valid as long as
+/// `coord * scale + offset` fits in i32 (±2^31). At 1× scale (4096),
+/// coordinates up to ~524,287 are safe. At 8× scale (32768), coordinates
+/// up to ~65,535 are safe. The addition of `offset` can also overflow if
+/// both the product and offset are near the i32 boundary. In practice,
+/// SVG icons in this system use coordinates < 100 and scales ≤ 8×, so
+/// overflow is not a concern. Callers rendering very large SVGs at high
+/// scale factors should validate coordinate bounds first.
+fn svg_coord_to_fp(coord: i32, scale: i32, offset: i32) -> i32 {
+    // Widening to i64 prevents overflow during multiplication; the final
+    // cast + add assume the result fits in i32 (see doc above).
+    (coord as i64 * scale as i64) as i32 + offset
+}
+fn svg_emit_segment(
+    scratch: &mut SvgRasterScratch,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+) -> Result<(), SvgError> {
+    if y0 == y1 {
+        return Ok(()); // Horizontal lines don't affect scanline fill.
+    }
+    if scratch.num_segments >= SVG_MAX_SEGMENTS {
+        return Err(SvgError::TooManySegments);
+    }
+
+    scratch.segments[scratch.num_segments] = SvgSegment { x0, y0, x1, y1 };
+    scratch.num_segments += 1;
+
+    Ok(())
+}
+/// Recursively flatten a cubic Bezier (p0, c1, c2, p3) into line segments.
+///
+/// Uses De Casteljau subdivision. Stops when the control points are close
+/// enough to the chord (flatness test) or at max recursion depth.
+fn svg_flatten_cubic(
+    scratch: &mut SvgRasterScratch,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+    x3: i32,
+    y3: i32,
+    depth: u32,
+) -> Result<(), SvgError> {
+    if scratch.num_segments >= SVG_MAX_SEGMENTS {
+        return Err(SvgError::TooManySegments);
+    }
+
+    // Flatness test: max distance from control points to the chord (p0→p3).
+    // We use a simplified test: if both control points are within 0.5 pixel
+    // of the line from p0 to p3, the curve is flat enough.
+    let threshold = (SVG_FP_ONE / 2) as i64 * (SVG_FP_ONE / 2) as i64;
+    // Distance from control point (x1,y1) to the midpoint of chord.
+    let mx = ((x0 as i64 + x3 as i64) / 2) as i32;
+    let my = ((y0 as i64 + y3 as i64) / 2) as i32;
+    let d1x = x1 as i64 - mx as i64;
+    let d1y = y1 as i64 - my as i64;
+    let d2x = x2 as i64 - mx as i64;
+    let d2y = y2 as i64 - my as i64;
+    let dist1_sq = d1x * d1x + d1y * d1y;
+    let dist2_sq = d2x * d2x + d2y * d2y;
+
+    if depth >= 10 || (dist1_sq <= threshold && dist2_sq <= threshold) {
+        // Flat enough — emit line segment from p0 to p3.
+        svg_emit_segment(scratch, x0, y0, x3, y3)?;
+
+        return Ok(());
+    }
+
+    // De Casteljau split at t=0.5.
+    let q0x = ((x0 as i64 + x1 as i64) / 2) as i32;
+    let q0y = ((y0 as i64 + y1 as i64) / 2) as i32;
+    let q1x = ((x1 as i64 + x2 as i64) / 2) as i32;
+    let q1y = ((y1 as i64 + y2 as i64) / 2) as i32;
+    let q2x = ((x2 as i64 + x3 as i64) / 2) as i32;
+    let q2y = ((y2 as i64 + y3 as i64) / 2) as i32;
+    let r0x = ((q0x as i64 + q1x as i64) / 2) as i32;
+    let r0y = ((q0y as i64 + q1y as i64) / 2) as i32;
+    let r1x = ((q1x as i64 + q2x as i64) / 2) as i32;
+    let r1y = ((q1y as i64 + q2y as i64) / 2) as i32;
+    let sx = ((r0x as i64 + r1x as i64) / 2) as i32;
+    let sy = ((r0y as i64 + r1y as i64) / 2) as i32;
+
+    svg_flatten_cubic(scratch, x0, y0, q0x, q0y, r0x, r0y, sx, sy, depth + 1)?;
+    svg_flatten_cubic(scratch, sx, sy, r1x, r1y, q2x, q2y, x3, y3, depth + 1)?;
+
+    Ok(())
+}
 /// Convert an SvgPath to line segments in fixed-point pixel coordinates,
 /// suitable for scanline rasterization.
 ///
@@ -423,7 +544,9 @@ fn svg_flatten_path(
             SvgCommand::LineTo { x, y } => {
                 let nx = svg_coord_to_fp(x, scale, offset_x);
                 let ny = svg_coord_to_fp(y, scale, offset_y);
+
                 svg_emit_segment(scratch, cur_x, cur_y, nx, ny)?;
+
                 cur_x = nx;
                 cur_y = ny;
             }
@@ -441,7 +564,9 @@ fn svg_flatten_path(
                 let cy2 = svg_coord_to_fp(y2, scale, offset_y);
                 let ex = svg_coord_to_fp(x, scale, offset_x);
                 let ey = svg_coord_to_fp(y, scale, offset_y);
+
                 svg_flatten_cubic(scratch, cur_x, cur_y, cx1, cy1, cx2, cy2, ex, ey, 0)?;
+
                 cur_x = ex;
                 cur_y = ey;
             }
@@ -449,6 +574,7 @@ fn svg_flatten_path(
                 if cur_x != subpath_x || cur_y != subpath_y {
                     svg_emit_segment(scratch, cur_x, cur_y, subpath_x, subpath_y)?;
                 }
+
                 cur_x = subpath_x;
                 cur_y = subpath_y;
             }
@@ -458,156 +584,62 @@ fn svg_flatten_path(
     Ok(())
 }
 
-/// Convert SVG coordinate to fixed-point pixel coordinate.
-///
-/// `scale` is a 20.12 fixed-point multiplier (SVG_FP_ONE = 1× scale).
-/// `offset` is already in fixed-point.
-///
-/// Since `scale` carries the 12-bit fractional shift, `coord * scale` directly
-/// produces a fixed-point result. Example: coord=10, scale=4096 (1×) →
-/// 10 * 4096 = 40960 = 10.0 in 20.12 FP. coord=10, scale=8192 (2×) →
-/// 10 * 8192 = 81920 = 20.0 in 20.12 FP.
-///
-/// # Overflow safety
-///
-/// The multiplication is performed in i64 to avoid intermediate overflow,
-/// then truncated to i32. The result is valid as long as
-/// `coord * scale + offset` fits in i32 (±2^31). At 1× scale (4096),
-/// coordinates up to ~524,287 are safe. At 8× scale (32768), coordinates
-/// up to ~65,535 are safe. The addition of `offset` can also overflow if
-/// both the product and offset are near the i32 boundary. In practice,
-/// SVG icons in this system use coordinates < 100 and scales ≤ 8×, so
-/// overflow is not a concern. Callers rendering very large SVGs at high
-/// scale factors should validate coordinate bounds first.
-fn svg_coord_to_fp(coord: i32, scale: i32, offset: i32) -> i32 {
-    // Widening to i64 prevents overflow during multiplication; the final
-    // cast + add assume the result fits in i32 (see doc above).
-    (coord as i64 * scale as i64) as i32 + offset
-}
-
-fn svg_emit_segment(
-    scratch: &mut SvgRasterScratch,
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-) -> Result<(), SvgError> {
-    if y0 == y1 {
-        return Ok(()); // Horizontal lines don't affect scanline fill.
-    }
-    if scratch.num_segments >= SVG_MAX_SEGMENTS {
-        return Err(SvgError::TooManySegments);
-    }
-    scratch.segments[scratch.num_segments] = SvgSegment { x0, y0, x1, y1 };
-    scratch.num_segments += 1;
-    Ok(())
-}
-
-/// Recursively flatten a cubic Bezier (p0, c1, c2, p3) into line segments.
-///
-/// Uses De Casteljau subdivision. Stops when the control points are close
-/// enough to the chord (flatness test) or at max recursion depth.
-fn svg_flatten_cubic(
-    scratch: &mut SvgRasterScratch,
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-    x2: i32,
-    y2: i32,
-    x3: i32,
-    y3: i32,
-    depth: u32,
-) -> Result<(), SvgError> {
-    if scratch.num_segments >= SVG_MAX_SEGMENTS {
-        return Err(SvgError::TooManySegments);
-    }
-
-    // Flatness test: max distance from control points to the chord (p0→p3).
-    // We use a simplified test: if both control points are within 0.5 pixel
-    // of the line from p0 to p3, the curve is flat enough.
-    let threshold = (SVG_FP_ONE / 2) as i64 * (SVG_FP_ONE / 2) as i64;
-
-    // Distance from control point (x1,y1) to the midpoint of chord.
-    let mx = ((x0 as i64 + x3 as i64) / 2) as i32;
-    let my = ((y0 as i64 + y3 as i64) / 2) as i32;
-    let d1x = x1 as i64 - mx as i64;
-    let d1y = y1 as i64 - my as i64;
-    let d2x = x2 as i64 - mx as i64;
-    let d2y = y2 as i64 - my as i64;
-    let dist1_sq = d1x * d1x + d1y * d1y;
-    let dist2_sq = d2x * d2x + d2y * d2y;
-
-    if depth >= 10 || (dist1_sq <= threshold && dist2_sq <= threshold) {
-        // Flat enough — emit line segment from p0 to p3.
-        svg_emit_segment(scratch, x0, y0, x3, y3)?;
-        return Ok(());
-    }
-
-    // De Casteljau split at t=0.5.
-    let q0x = ((x0 as i64 + x1 as i64) / 2) as i32;
-    let q0y = ((y0 as i64 + y1 as i64) / 2) as i32;
-    let q1x = ((x1 as i64 + x2 as i64) / 2) as i32;
-    let q1y = ((y1 as i64 + y2 as i64) / 2) as i32;
-    let q2x = ((x2 as i64 + x3 as i64) / 2) as i32;
-    let q2y = ((y2 as i64 + y3 as i64) / 2) as i32;
-
-    let r0x = ((q0x as i64 + q1x as i64) / 2) as i32;
-    let r0y = ((q0y as i64 + q1y as i64) / 2) as i32;
-    let r1x = ((q1x as i64 + q2x as i64) / 2) as i32;
-    let r1y = ((q1y as i64 + q2y as i64) / 2) as i32;
-
-    let sx = ((r0x as i64 + r1x as i64) / 2) as i32;
-    let sy = ((r0y as i64 + r1y as i64) / 2) as i32;
-
-    svg_flatten_cubic(scratch, x0, y0, q0x, q0y, r0x, r0y, sx, sy, depth + 1)?;
-    svg_flatten_cubic(scratch, sx, sy, r1x, r1y, q2x, q2y, x3, y3, depth + 1)?;
-
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Rasterizer: line segments → coverage map
 // ---------------------------------------------------------------------------
 
-/// Rasterize an SVG path into a coverage map (0–255 per pixel).
-///
-/// The coverage map has dimensions `width × height`. Each byte represents
-/// the alpha coverage of that pixel. The path is scaled by `scale` (a 20.12
-/// fixed-point factor) and offset by (`offset_x`, `offset_y`) in pixels.
-///
-/// Uses non-zero winding rule with 4× vertical oversampling for antialiasing.
-pub fn svg_rasterize(
-    path: &SvgPath,
-    scratch: &mut SvgRasterScratch,
+/// Add coverage for a horizontal span within one sub-scanline.
+fn svg_fill_coverage_span(
     coverage: &mut [u8],
     width: u32,
-    height: u32,
-    scale: i32,
-    offset_x: i32,
-    offset_y: i32,
-) -> Result<(), SvgError> {
-    // Clear coverage map.
-    let total = (width * height) as usize;
-    for i in 0..total {
-        if i < coverage.len() {
-            coverage[i] = 0;
+    row: u32,
+    x_start_fp: i32,
+    x_end_fp: i32,
+    oversample: i32,
+) {
+    let contribution = (256 / oversample) as u16;
+    let px_start = x_start_fp >> SVG_FP_SHIFT;
+    let px_end = (x_end_fp + SVG_FP_ONE - 1) >> SVG_FP_SHIFT;
+    let px_start = if px_start < 0 { 0 } else { px_start as u32 };
+    let px_end = if px_end < 0 {
+        return;
+    } else if (px_end as u32) > width {
+        width
+    } else {
+        px_end as u32
+    };
+    let row_start = (row * width) as usize;
+
+    for px in px_start..px_end {
+        let idx = row_start + px as usize;
+
+        if idx < coverage.len() {
+            let cov = if px as i32 == (x_start_fp >> SVG_FP_SHIFT)
+                && px as i32 == ((x_end_fp - 1) >> SVG_FP_SHIFT)
+            {
+                let frac = x_end_fp - x_start_fp;
+
+                (contribution as i32 * frac / SVG_FP_ONE) as u16
+            } else if px as i32 == (x_start_fp >> SVG_FP_SHIFT) {
+                let right_edge = ((px + 1) as i32) << SVG_FP_SHIFT;
+                let frac = right_edge - x_start_fp;
+
+                (contribution as i32 * frac / SVG_FP_ONE) as u16
+            } else if px as i32 == ((x_end_fp - 1) >> SVG_FP_SHIFT) {
+                let left_edge = (px as i32) << SVG_FP_SHIFT;
+                let frac = x_end_fp - left_edge;
+
+                (contribution as i32 * frac / SVG_FP_ONE) as u16
+            } else {
+                contribution
+            };
+
+            let val = coverage[idx] as u16 + cov;
+
+            coverage[idx] = if val > 255 { 255 } else { val as u8 };
         }
     }
-
-    // Convert offsets to fixed-point.
-    let fp_offset_x = offset_x * SVG_FP_ONE;
-    let fp_offset_y = offset_y * SVG_FP_ONE;
-
-    // Flatten path into line segments.
-    svg_flatten_path(path, scratch, scale, fp_offset_x, fp_offset_y)?;
-
-    // Scanline rasterization with vertical oversampling.
-    svg_rasterize_segments(scratch, coverage, width, height);
-
-    Ok(())
 }
-
 /// Scanline rasterizer for SVG segments — non-zero winding rule with
 /// 4× vertical oversampling. Same algorithm as the TrueType rasterizer.
 fn svg_rasterize_segments(
@@ -617,6 +649,7 @@ fn svg_rasterize_segments(
     height: u32,
 ) {
     let nseg = scratch.num_segments;
+
     if nseg == 0 {
         return;
     }
@@ -666,10 +699,12 @@ fn svg_rasterize_segments(
             for i in 1..num_active {
                 let key = active[i];
                 let mut j = i;
+
                 while j > 0 && active[j - 1].x > key.x {
                     active[j] = active[j - 1];
                     j -= 1;
                 }
+
                 active[j] = key;
             }
 
@@ -679,6 +714,7 @@ fn svg_rasterize_segments(
 
             while edge_idx < num_active {
                 let old_winding = winding;
+
                 winding += active[edge_idx].direction;
 
                 if old_winding == 0 && winding != 0 {
@@ -687,8 +723,10 @@ fn svg_rasterize_segments(
 
                     while ei < num_active {
                         winding += active[ei].direction;
+
                         if winding == 0 {
                             let x_end = active[ei].x;
+
                             svg_fill_coverage_span(
                                 coverage,
                                 width,
@@ -697,7 +735,9 @@ fn svg_rasterize_segments(
                                 x_end,
                                 OVERSAMPLE_Y,
                             );
+
                             edge_idx = ei + 1;
+
                             break;
                         }
                         ei += 1;
@@ -713,50 +753,40 @@ fn svg_rasterize_segments(
     }
 }
 
-/// Add coverage for a horizontal span within one sub-scanline.
-fn svg_fill_coverage_span(
+/// Rasterize an SVG path into a coverage map (0–255 per pixel).
+///
+/// The coverage map has dimensions `width × height`. Each byte represents
+/// the alpha coverage of that pixel. The path is scaled by `scale` (a 20.12
+/// fixed-point factor) and offset by (`offset_x`, `offset_y`) in pixels.
+///
+/// Uses non-zero winding rule with 4× vertical oversampling for antialiasing.
+pub fn svg_rasterize(
+    path: &SvgPath,
+    scratch: &mut SvgRasterScratch,
     coverage: &mut [u8],
     width: u32,
-    row: u32,
-    x_start_fp: i32,
-    x_end_fp: i32,
-    oversample: i32,
-) {
-    let contribution = (256 / oversample) as u16;
-    let px_start = x_start_fp >> SVG_FP_SHIFT;
-    let px_end = (x_end_fp + SVG_FP_ONE - 1) >> SVG_FP_SHIFT;
-    let px_start = if px_start < 0 { 0 } else { px_start as u32 };
-    let px_end = if px_end < 0 {
-        return;
-    } else if (px_end as u32) > width {
-        width
-    } else {
-        px_end as u32
-    };
-    let row_start = (row * width) as usize;
+    height: u32,
+    scale: i32,
+    offset_x: i32,
+    offset_y: i32,
+) -> Result<(), SvgError> {
+    // Clear coverage map.
+    let total = (width * height) as usize;
 
-    for px in px_start..px_end {
-        let idx = row_start + px as usize;
-        if idx < coverage.len() {
-            let cov = if px as i32 == (x_start_fp >> SVG_FP_SHIFT)
-                && px as i32 == ((x_end_fp - 1) >> SVG_FP_SHIFT)
-            {
-                let frac = x_end_fp - x_start_fp;
-                (contribution as i32 * frac / SVG_FP_ONE) as u16
-            } else if px as i32 == (x_start_fp >> SVG_FP_SHIFT) {
-                let right_edge = ((px + 1) as i32) << SVG_FP_SHIFT;
-                let frac = right_edge - x_start_fp;
-                (contribution as i32 * frac / SVG_FP_ONE) as u16
-            } else if px as i32 == ((x_end_fp - 1) >> SVG_FP_SHIFT) {
-                let left_edge = (px as i32) << SVG_FP_SHIFT;
-                let frac = x_end_fp - left_edge;
-                (contribution as i32 * frac / SVG_FP_ONE) as u16
-            } else {
-                contribution
-            };
-
-            let val = coverage[idx] as u16 + cov;
-            coverage[idx] = if val > 255 { 255 } else { val as u8 };
+    for i in 0..total {
+        if i < coverage.len() {
+            coverage[i] = 0;
         }
     }
+
+    // Convert offsets to fixed-point.
+    let fp_offset_x = offset_x * SVG_FP_ONE;
+    let fp_offset_y = offset_y * SVG_FP_ONE;
+
+    // Flatten path into line segments.
+    svg_flatten_path(path, scratch, scale, fp_offset_x, fp_offset_y)?;
+    // Scanline rasterization with vertical oversampling.
+    svg_rasterize_segments(scratch, coverage, width, height);
+
+    Ok(())
 }

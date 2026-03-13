@@ -457,6 +457,7 @@ impl<'a> TrueTypeFont<'a> {
                 let b = read_i16_be(g, cursor + 2).unwrap_or(0) as i32;
 
                 cursor += 4;
+
                 (a, b)
             } else {
                 if cursor + 2 > g.len() {
@@ -467,6 +468,7 @@ impl<'a> TrueTypeFont<'a> {
                 let b = g[cursor + 1] as i8 as i32;
 
                 cursor += 2;
+
                 (a, b)
             };
 
@@ -486,6 +488,7 @@ impl<'a> TrueTypeFont<'a> {
                     if flags & MORE_COMPONENTS == 0 {
                         break;
                     }
+
                     continue;
                 }
             };
@@ -498,6 +501,7 @@ impl<'a> TrueTypeFont<'a> {
                 if flags & MORE_COMPONENTS == 0 {
                     break;
                 }
+
                 continue;
             }
 
@@ -508,6 +512,7 @@ impl<'a> TrueTypeFont<'a> {
                     if flags & MORE_COMPONENTS == 0 {
                         break;
                     }
+
                     continue;
                 }
             };
@@ -518,6 +523,7 @@ impl<'a> TrueTypeFont<'a> {
                 if flags & MORE_COMPONENTS == 0 {
                     break;
                 }
+
                 continue;
             }
 
@@ -1275,7 +1281,6 @@ fn classdef_lookup(data: &[u8], glyph: u16) -> u16 {
                 Some(v) => v as usize,
                 None => return 0,
             };
-
             // Binary search for the range containing glyph.
             let mut lo = 0usize;
             let mut hi = range_count;

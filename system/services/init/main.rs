@@ -851,7 +851,6 @@ pub extern "C" fn _start() -> ! {
 
             pos += mid.len();
             pos += format_u32(dev_id, &mut buf[pos..]);
-
             buf[pos] = b'\n';
             pos += 1;
 
@@ -1018,7 +1017,8 @@ pub extern "C" fn _start() -> ! {
                     core::ptr::write_unaligned(p as *mut u64, target_va);
                     core::ptr::write_unaligned(p.add(8) as *mut u32, capacity);
                     core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
-                                                                          // Zero-fill filename area first.
+
+                    // Zero-fill filename area first.
                     core::ptr::write_bytes(p.add(16), 0, 44);
                     core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
                 }

@@ -751,7 +751,7 @@ fn rasterize_svg_icon(
                 &mut icon_cov,
                 icon_w,
                 icon_h,
-                drawing::SVG_FP_ONE * 3 / 2,
+                drawing::SVG_FP_ONE,
                 0,
                 0,
             ) {
@@ -759,13 +759,16 @@ fn rasterize_svg_icon(
                     // Convert single-channel SVG coverage to 3-channel (RGB)
                     // for draw_coverage() which expects subpixel format.
                     let mut rgb_cov = vec![0u8; icon_size * 3];
+
                     for i in 0..icon_size {
                         let c = icon_cov[i];
                         rgb_cov[i * 3] = c;
                         rgb_cov[i * 3 + 1] = c;
                         rgb_cov[i * 3 + 2] = c;
                     }
+
                     let leaked = rgb_cov.leak();
+
                     Some((leaked.as_ptr(), icon_w, icon_h))
                 }
                 Err(_) => {
@@ -900,6 +903,7 @@ fn render_content_surface(surf: &mut drawing::Surface, text: &[u8], force_full: 
                 } else {
                     prev_total_lines
                 };
+
                 max_total.saturating_sub(1)
             } else {
                 // Same line, no reflow — only the cursor line.
@@ -1409,9 +1413,9 @@ pub extern "C" fn _start() -> ! {
             };
 
             if let Some((ptr, w, h)) =
-                rasterize_svg_icon(svg_data, b"     parsing SVG doc icon\n", 30, 36)
+                rasterize_svg_icon(svg_data, b"     parsing SVG doc icon\n", 20, 24)
             {
-                sys::print(b"     SVG icon rasterized (30x36)\n");
+                sys::print(b"     SVG icon rasterized (20x24)\n");
 
                 unsafe {
                     ICON_COVERAGE = ptr;
@@ -1438,9 +1442,9 @@ pub extern "C" fn _start() -> ! {
             };
 
             if let Some((ptr, w, h)) =
-                rasterize_svg_icon(svg_data, b"     parsing image icon SVG\n", 30, 36)
+                rasterize_svg_icon(svg_data, b"     parsing image icon SVG\n", 20, 24)
             {
-                sys::print(b"     image icon rasterized (30x36)\n");
+                sys::print(b"     image icon rasterized (20x24)\n");
 
                 unsafe {
                     IMG_ICON_COVERAGE = ptr;
@@ -1813,7 +1817,6 @@ pub extern "C" fn _start() -> ! {
                             if click_y < TITLE_BAR_H {
                                 continue;
                             }
-
                             // Only process clicks in text editor mode.
                             if unsafe { IMAGE_MODE } {
                                 continue;
