@@ -5266,4 +5266,190 @@ fn incremental_render_soft_wrap_changes_line_count() {
     assert_ne!(total_before, total_after);
 }
 
+// ---------------------------------------------------------------------------
+// Xorshift32 PRNG tests
+// ---------------------------------------------------------------------------
+
+use drawing::Xorshift32;
+
+#[test]
+fn xorshift32_deterministic() {
+    // Same seed produces same sequence.
+    let mut a = Xorshift32::new(42);
+    let mut b = Xorshift32::new(42);
+    for _ in 0..100 {
+        assert_eq!(a.next(), b.next());
+    }
+}
+
+#[test]
+fn xorshift32_different_seeds_differ() {
+    let mut a = Xorshift32::new(42);
+    let mut b = Xorshift32::new(99);
+    // Very unlikely for first 10 outputs to match with different seeds.
+    let mut same_count = 0;
+    for _ in 0..10 {
+        if a.next() == b.next() {
+            same_count += 1;
+        }
+    }
+    assert!(same_count < 3, "different seeds should produce different sequences");
+}
+
+#[test]
+fn xorshift32_noise_in_range() {
+    let mut rng = Xorshift32::new(0xCAFE);
+    for _ in 0..1000 {
+        let n = rng.noise(3);
+        assert!(n >= -3 && n <= 3, "noise({}) out of range [-3, 3]", n);
+    }
+}
+
+#[test]
+fn xorshift32_zero_seed_handled() {
+    // Zero seed should not produce all-zero output (it gets replaced).
+    let mut rng = Xorshift32::new(0);
+    let first = rng.next();
+    assert_ne!(first, 0, "zero seed should be replaced internally");
+}
+
+// ---------------------------------------------------------------------------
+// Radial gradient + noise tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn gradient_center_brighter_than_edges() {
+    // Create a 100×100 surface and fill with radial gradient.
+    let w = 100u32;
+    let h = 100u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+
+    let center = Color::rgb(28, 28, 28);
+    let edge = Color::rgb(16, 16, 16);
+    drawing::fill_radial_gradient_noise(&mut surf, center, edge, 0, 42);
+
+    // Sample center pixel.
+    let center_px = surf.get_pixel(w / 2, h / 2).unwrap();
+    // Sample corner pixel.
+    let corner_px = surf.get_pixel(0, 0).unwrap();
+
+    // Center should be brighter than corner (higher R value).
+    assert!(
+        center_px.r > corner_px.r,
+        "center ({}) should be brighter than corner ({})",
+        center_px.r,
+        corner_px.r,
+    );
+
+    // Center should be close to center_color, corner close to edge_color.
+    assert!(center_px.r >= 26 && center_px.r <= 30, "center R={}", center_px.r);
+    assert!(corner_px.r >= 14 && corner_px.r <= 18, "corner R={}", corner_px.r);
+
+    // Monochrome: R=G=B for all pixels (no noise, amplitude=0).
+    assert_eq!(center_px.r, center_px.g);
+    assert_eq!(center_px.r, center_px.b);
+    assert_eq!(corner_px.r, corner_px.g);
+    assert_eq!(corner_px.r, corner_px.b);
+}
+
+#[test]
+fn gradient_noise_creates_variation() {
+    // Fill with noise amplitude 3. Adjacent pixels should sometimes differ.
+    let w = 100u32;
+    let h = 100u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+
+    let center = Color::rgb(28, 28, 28);
+    let edge = Color::rgb(16, 16, 16);
+    drawing::fill_radial_gradient_noise(&mut surf, center, edge, 3, 0xDEAD_BEEF);
+
+    // Check that not all pixels in a horizontal row are identical (noise breaks banding).
+    let y = h / 2; // Middle row.
+    let mut saw_different = false;
+    let first = surf.get_pixel(0, y).unwrap();
+    for x in 1..w {
+        let px = surf.get_pixel(x, y).unwrap();
+        if px.r != first.r || px.g != first.g || px.b != first.b {
+            saw_different = true;
+            break;
+        }
+    }
+    assert!(saw_different, "noise should cause pixel variation in a row");
+}
+
+#[test]
+fn gradient_deterministic_across_calls() {
+    // Same parameters → identical output.
+    let w = 50u32;
+    let h = 50u32;
+    let mut buf1 = vec![0u8; (w * h * 4) as usize];
+    let mut buf2 = vec![0u8; (w * h * 4) as usize];
+
+    let center = Color::rgb(28, 28, 28);
+    let edge = Color::rgb(16, 16, 16);
+
+    {
+        let mut s1 = make_surface(&mut buf1, w, h);
+        drawing::fill_radial_gradient_noise(&mut s1, center, edge, 3, 0xDEAD_BEEF);
+    }
+    {
+        let mut s2 = make_surface(&mut buf2, w, h);
+        drawing::fill_radial_gradient_noise(&mut s2, center, edge, 3, 0xDEAD_BEEF);
+    }
+
+    assert_eq!(buf1, buf2, "gradient should be deterministic with same seed");
+}
+
+#[test]
+fn gradient_1x1_surface_no_panic() {
+    let mut buf = [0u8; 4];
+    let mut surf = make_surface(&mut buf, 1, 1);
+    drawing::fill_radial_gradient_noise(
+        &mut surf,
+        Color::rgb(28, 28, 28),
+        Color::rgb(16, 16, 16),
+        3,
+        42,
+    );
+    // Just ensure it doesn't panic or divide by zero.
+    let px = surf.get_pixel(0, 0).unwrap();
+    assert_eq!(px.a, 255);
+}
+
+#[test]
+fn gradient_zero_noise_is_smooth() {
+    // With no noise, pixels along a horizontal line at the center should
+    // be monotonically changing (or equal) from center outward.
+    let w = 200u32;
+    let h = 200u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+
+    drawing::fill_radial_gradient_noise(
+        &mut surf,
+        Color::rgb(40, 40, 40),
+        Color::rgb(20, 20, 20),
+        0, // no noise
+        42,
+    );
+
+    // From center outward to the right, values should be non-increasing.
+    let cy = h / 2;
+    let cx = w / 2;
+    let mut prev_r = surf.get_pixel(cx, cy).unwrap().r;
+    for x in (cx + 1)..w {
+        let px = surf.get_pixel(x, cy).unwrap();
+        assert!(
+            px.r <= prev_r + 1, // +1 for rounding tolerance
+            "gradient should get darker from center outward: x={}, r={}, prev={}",
+            x,
+            px.r,
+            prev_r,
+        );
+        prev_r = px.r;
+    }
+}
+
 

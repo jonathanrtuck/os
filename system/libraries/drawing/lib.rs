@@ -1436,6 +1436,144 @@ fn abs(x: i32) -> i32 {
         x
     }
 }
+
+// ---------------------------------------------------------------------------
+// Xorshift32 PRNG — deterministic noise generation
+// ---------------------------------------------------------------------------
+
+/// A simple 32-bit xorshift PRNG for deterministic noise generation.
+/// Period is 2^32 - 1. State must never be zero.
+pub struct Xorshift32 {
+    pub state: u32,
+}
+
+impl Xorshift32 {
+    /// Create a new PRNG with the given seed. Seed must not be zero.
+    pub const fn new(seed: u32) -> Self {
+        // Ensure seed is never zero (xorshift32 has a zero fixed-point).
+        let s = if seed == 0 { 0x12345678 } else { seed };
+        Xorshift32 { state: s }
+    }
+
+    /// Generate the next pseudo-random u32 value.
+    pub fn next(&mut self) -> u32 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.state = x;
+        x
+    }
+
+    /// Generate a random value in the range [-amplitude, +amplitude] (inclusive).
+    /// Uses integer math only. `amplitude` should be small (e.g., 2–4).
+    pub fn noise(&mut self, amplitude: u32) -> i32 {
+        let range = amplitude * 2 + 1; // e.g., amplitude=3 → range=7
+        let val = self.next();
+        // Map to [0, range) then shift to [-amplitude, +amplitude].
+        (val % range) as i32 - amplitude as i32
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Radial gradient with noise — background generation
+// ---------------------------------------------------------------------------
+
+/// Fill a surface with a radial gradient from `center_color` (at the center
+/// of the surface) to `edge_color` (at the corners), with per-pixel noise
+/// to break up banding.
+///
+/// The gradient uses an approximation of Euclidean distance (no sqrt, no FP):
+/// `d² = dx² + dy²` is compared to `max_d²` to interpolate linearly.
+///
+/// Noise adds `±noise_amplitude` RGB units to each pixel using a deterministic
+/// xorshift32 PRNG seeded with `prng_seed`. The pattern is identical on every
+/// call with the same seed and dimensions.
+///
+/// All math is integer only (no floating point).
+pub fn fill_radial_gradient_noise(
+    surf: &mut Surface,
+    center_color: Color,
+    edge_color: Color,
+    noise_amplitude: u32,
+    prng_seed: u32,
+) {
+    let w = surf.width;
+    let h = surf.height;
+
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    // Center point (in pixels, integer).
+    let cx = w / 2;
+    let cy = h / 2;
+
+    // Maximum squared distance: from center to a corner.
+    let max_dx = if cx > w - cx - 1 { cx } else { w - cx - 1 };
+    let max_dy = if cy > h - cy - 1 { cy } else { h - cy - 1 };
+    let max_dist_sq = (max_dx as u64) * (max_dx as u64) + (max_dy as u64) * (max_dy as u64);
+
+    // Avoid division by zero for 1×1 surfaces.
+    let max_dist_sq = if max_dist_sq == 0 { 1 } else { max_dist_sq };
+
+    let mut rng = Xorshift32::new(prng_seed);
+
+    let bpp = surf.format.bytes_per_pixel();
+
+    for y in 0..h {
+        let dy = if y >= cy { y - cy } else { cy - y };
+
+        for x in 0..w {
+            let dx = if x >= cx { x - cx } else { cx - x };
+
+            // Squared distance from center (u64 to avoid overflow for large screens).
+            let dist_sq = (dx as u64) * (dx as u64) + (dy as u64) * (dy as u64);
+
+            // Linear interpolation factor: t = dist_sq * 255 / max_dist_sq.
+            // t=0 at center, t=255 at corners.
+            let t = ((dist_sq * 255) / max_dist_sq) as u32;
+            let t = if t > 255 { 255 } else { t };
+            let inv_t = 255 - t;
+
+            // Interpolate each channel: center_color * (255-t) + edge_color * t.
+            let base_r = (center_color.r as u32 * inv_t + edge_color.r as u32 * t + 127) / 255;
+            let base_g = (center_color.g as u32 * inv_t + edge_color.g as u32 * t + 127) / 255;
+            let base_b = (center_color.b as u32 * inv_t + edge_color.b as u32 * t + 127) / 255;
+
+            // Add noise. Same noise value for all channels to maintain the
+            // monochrome property (R=G=B) of the palette.
+            let n = rng.noise(noise_amplitude);
+
+            // Clamp to [0, 255].
+            let r = clamp_u8(base_r as i32 + n);
+            let g = clamp_u8(base_g as i32 + n);
+            let b = clamp_u8(base_b as i32 + n);
+
+            let color = Color::rgb(r, g, b);
+
+            // Write pixel directly (faster than set_pixel for full-surface fill).
+            let offset = (y * surf.stride + x * bpp) as usize;
+            let encoded = color.encode(surf.format);
+            let end = offset + bpp as usize;
+
+            if end <= surf.data.len() {
+                surf.data[offset..end].copy_from_slice(&encoded[..bpp as usize]);
+            }
+        }
+    }
+}
+
+/// Clamp an i32 to [0, 255] and return as u8.
+fn clamp_u8(v: i32) -> u8 {
+    if v < 0 {
+        0
+    } else if v > 255 {
+        255
+    } else {
+        v as u8
+    }
+}
 /// Convert a linear light value (0–65535 u32) to a LINEAR_TO_SRGB table index.
 /// The table has 4096 entries; index is `value >> 4`, clamped to 4095.
 fn linear_to_idx(v: u32) -> usize {

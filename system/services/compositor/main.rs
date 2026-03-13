@@ -419,9 +419,55 @@ fn update_scroll_offset() {
 // Surface rendering functions
 // ---------------------------------------------------------------------------
 
-/// Render the background surface: solid dark color, full screen.
+// Deterministic PRNG seed for the background gradient noise.
+const BG_GRADIENT_SEED: u32 = 0xDEAD_BEEF;
+// Noise amplitude for background gradient (±3 RGB units per pixel).
+const BG_NOISE_AMP: u32 = 3;
+
+/// Render the background surface: radial gradient (lighter center, darker
+/// edges) with subtle per-pixel noise to break up banding.
+///
+/// The gradient runs from BG_CENTER (center of screen) to BG_BASE (corners).
+/// A deterministic xorshift32 PRNG adds ±3 RGB units of noise per pixel so
+/// the pattern is reproducible across boots.
 fn render_background(surf: &mut drawing::Surface) {
-    surf.clear(drawing::BG_BASE);
+    drawing::fill_radial_gradient_noise(
+        surf,
+        drawing::BG_CENTER,
+        drawing::BG_BASE,
+        BG_NOISE_AMP,
+        BG_GRADIENT_SEED,
+    );
+}
+
+/// Compute the approximate gradient background color for a horizontal line
+/// at the given Y coordinate in the full framebuffer. Uses the radial
+/// gradient formula with the horizontal center (x=fb_width/2) as reference.
+///
+/// This is used for incremental content re-renders: when clearing a single
+/// text line, we fill it with the gradient color at that Y instead of a
+/// flat BG_CONTENT, so the gradient remains visible.
+fn gradient_row_color(y: u32, fb_width: u32, fb_height: u32) -> drawing::Color {
+    let cx = fb_width / 2;
+    let cy = fb_height / 2;
+    let max_dx = if cx > fb_width - cx - 1 { cx } else { fb_width - cx - 1 };
+    let max_dy = if cy > fb_height - cy - 1 { cy } else { fb_height - cy - 1 };
+    let max_dist_sq = (max_dx as u64) * (max_dx as u64) + (max_dy as u64) * (max_dy as u64);
+    let max_dist_sq = if max_dist_sq == 0 { 1 } else { max_dist_sq };
+
+    // Distance from (cx, y) to center (cx, cy) — only vertical component.
+    let dy = if y >= cy { y - cy } else { cy - y };
+    let dist_sq = (dy as u64) * (dy as u64); // dx=0 at center column
+
+    let t = ((dist_sq * 255) / max_dist_sq) as u32;
+    let t = if t > 255 { 255 } else { t };
+    let inv_t = 255 - t;
+
+    let r = (drawing::BG_CENTER.r as u32 * inv_t + drawing::BG_BASE.r as u32 * t + 127) / 255;
+    let g = (drawing::BG_CENTER.g as u32 * inv_t + drawing::BG_BASE.g as u32 * t + 127) / 255;
+    let b = (drawing::BG_CENTER.b as u32 * inv_t + drawing::BG_BASE.b as u32 * t + 127) / 255;
+
+    drawing::Color::rgb(r as u8, g as u8, b as u8)
 }
 
 /// Render the content surface: text area background, text content, and cursor.
@@ -452,8 +498,15 @@ fn render_content_surface(
     let line_h = unsafe { LINE_H };
 
     if force_full || line_h == 0 {
-        // Full clear + full render.
-        surf.clear(drawing::BG_CONTENT);
+        // Full clear with gradient background (matches the bg surface gradient
+        // so that the gradient is visible through the translucent title bar chrome).
+        drawing::fill_radial_gradient_noise(
+            surf,
+            drawing::BG_CENTER,
+            drawing::BG_BASE,
+            BG_NOISE_AMP,
+            BG_GRADIENT_SEED,
+        );
 
         let (_, _cursor_y) = layout.draw_tt_sel_scroll(
             surf,
@@ -543,7 +596,18 @@ fn render_content_surface(
             };
 
             if clamped_h > 0 {
-                surf.fill_rect(0, clear_y, content_w, clamped_h, drawing::BG_CONTENT);
+                // Clear each row with its approximate gradient color so the
+                // background gradient remains visible during incremental
+                // re-renders. The per-row color matches the radial gradient
+                // at the horizontal center — close enough given the subtle
+                // gradient span (~12 RGB units) and the text drawn on top.
+                let fb_w = unsafe { CONTENT_W };
+                let fb_h = unsafe { CONTENT_H };
+                for row_off in 0..clamped_h {
+                    let row_y = clear_y + row_off;
+                    let row_color = gradient_row_color(row_y, fb_w, fb_h);
+                    surf.fill_rect(0, row_y, content_w, 1, row_color);
+                }
             }
 
             // Re-render only the affected lines.
@@ -586,8 +650,15 @@ fn render_image_content_surface(
     image_w: u32,
     image_h: u32,
 ) {
-    // Clear to background color.
-    surf.clear(drawing::BG_CONTENT);
+    // Clear with gradient background (matches the bg surface gradient so
+    // gradient is visible through translucent title bar chrome).
+    drawing::fill_radial_gradient_noise(
+        surf,
+        drawing::BG_CENTER,
+        drawing::BG_BASE,
+        BG_NOISE_AMP,
+        BG_GRADIENT_SEED,
+    );
 
     if image_w == 0 || image_h == 0 || image_data.is_empty() {
         return;

@@ -11,8 +11,13 @@
 // --------------------------------------------------------------------------
 
 /// Deep near-black background (R=G=B=16).
-/// Used as the full-screen background fill (z=0).
+/// Used as the radial gradient edge color for the full-screen background (z=0).
 pub const BG_BASE: Color = Color::rgb(16, 16, 16);
+
+/// Background gradient center — brighter than BG_BASE by ~12 RGB units.
+/// The background surface uses a radial gradient from BG_CENTER (center) to
+/// BG_BASE (edges) with per-pixel noise to break up banding.
+pub const BG_CENTER: Color = Color::rgb(28, 28, 28);
 
 /// Content area background — slightly lighter than BG_BASE (R=G=B=20)
 /// to give the editor region a subtle distinction under the chrome.
