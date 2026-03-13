@@ -43,7 +43,15 @@ include!(env!("INIT_EMBEDDED_RS"));
 
 /// Channel shared memory base. The kernel's channel is at page 0.
 /// Channels created by init are at subsequent 2-page pairs.
-const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+use protocol::compose::{
+    CompositorConfig, IconConfig, ImageConfig, RtcConfig,
+    MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG, MSG_IMAGE_CONFIG, MSG_IMG_ICON_CONFIG, MSG_RTC_CONFIG,
+};
+use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
+use protocol::editor::{EditorConfig, MSG_EDITOR_CONFIG};
+use protocol::fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE};
+use protocol::gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY};
+
 /// Bytes per pixel (BGRA8888).
 const FB_BPP: u32 = 4;
 /// Virtio device IDs (must match kernel probe).
@@ -58,124 +66,11 @@ const DEVICE_PL031_RTC: u32 = 200;
 const DOC_BUF_PAGES: u64 = 1;
 const DOC_BUF_HEADER: u32 = 64;
 const DOC_BUF_CAPACITY: u32 = (DOC_BUF_PAGES as u32 * 4096) - DOC_BUF_HEADER;
-/// Set up the interactive display pipeline with input.
-///
-/// Creates cross-process channels:
-/// - input driver → compositor (keyboard events)
-/// - compositor → GPU driver (present commands)
-///
-/// Then starts all three processes. They run their own event loops.
 /// Maximum number of virtio-input devices we can handle (keyboard + tablet).
 const MAX_INPUT_DEVICES: usize = 4;
-// --- Protocol message types (shared with receivers) ---
-const MSG_DEVICE_CONFIG: u32 = 1;
-const MSG_GPU_CONFIG: u32 = 2;
-const MSG_COMPOSITOR_CONFIG: u32 = 3;
-const MSG_EDITOR_CONFIG: u32 = 4;
-const MSG_DISPLAY_INFO: u32 = 5;
-const MSG_IMAGE_CONFIG: u32 = 6;
-const MSG_ICON_CONFIG: u32 = 7;
-const MSG_GPU_READY: u32 = 8;
-const MSG_IMG_ICON_CONFIG: u32 = 9;
-const MSG_RTC_CONFIG: u32 = 15;
-const MSG_FS_READ_REQUEST: u32 = 40;
-const MSG_FS_READ_RESPONSE: u32 = 41;
 
-// Guard: CompositorConfig must fit within the 60-byte IPC payload.
-const _: () = assert!(core::mem::size_of::<CompositorConfig>() <= 60);
-
-/// Compositor configuration sent to the compositor via IPC.
-///
-/// Layout: all u64 fields first, then all u32 fields, so that
-/// `size_of::<CompositorConfig>() == 56` (no trailing alignment padding)
-/// and the struct fits within the 60-byte IPC payload.
-///
-/// `fb_size` is intentionally omitted — the compositor computes it as
-/// `fb_stride * fb_height`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CompositorConfig {
-    fb_va: u64,
-    fb_va2: u64,
-    doc_va: u64,
-    mono_font_va: u64,
-    fb_width: u32,
-    fb_height: u32,
-    fb_stride: u32,
-    doc_capacity: u32,
-    mono_font_len: u32,
-    prop_font_len: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DeviceConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-}
-/// Display dimensions reported by the GPU driver from GET_DISPLAY_INFO.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DisplayInfoMsg {
-    width: u32,
-    height: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct EditorConfig {
-    doc_va: u64,
-    doc_capacity: u32,
-    _pad: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct GpuConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-    fb_pa: u64,
-    fb_pa2: u64,
-    fb_width: u32,
-    fb_height: u32,
-    fb_size: u32,
-    _pad2: u32,
-}
-/// Image configuration sent to compositor after the main config.
-/// Contains the location of the raw PNG file data in shared memory.
-/// The compositor decodes the PNG itself (it links the drawing library).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ImageConfig {
-    /// VA (in compositor's address space) of the raw PNG data.
-    image_va: u64,
-    /// Length of the raw PNG data in bytes.
-    image_len: u32,
-    _pad: u32,
-}
-/// SVG icon configuration sent to compositor after the image config.
-/// Contains the location of SVG path data in shared memory.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct IconConfig {
-    /// VA (in compositor's address space) of the SVG path data.
-    icon_va: u64,
-    /// Length of the SVG path data in bytes.
-    icon_len: u32,
-    _pad: u32,
-}
-/// RTC configuration sent to the compositor. Contains the physical address
-/// of the PL031 MMIO register page so the compositor can map and read it.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RtcConfig {
-    mmio_pa: u64,
-}
-
-/// Compute the base VA of channel N's shared pages in init's address space.
-/// Each channel occupies 2 consecutive pages (one per direction).
-/// Channel 0 = kernel channel, channel 1+ = channels created by init.
 fn channel_shm_va(channel_index: usize) -> usize {
-    CHANNEL_SHM_BASE + channel_index * 2 * 4096
+    protocol::channel_shm_va(channel_index)
 }
 /// Format a u32 into a buffer, returning the number of bytes written.
 fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
@@ -792,7 +687,7 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"  \xF0\x9F\x94\xA7 init - proto-os-service starting\n");
 
     // Kernel channel (channel 0) uses raw bytes — kernel writes directly.
-    let kernel_shm = CHANNEL_SHM_BASE as *const u8;
+    let kernel_shm = protocol::CHANNEL_SHM_BASE as *const u8;
     let device_count = unsafe { core::ptr::read_volatile(kernel_shm as *const u32) };
 
     {

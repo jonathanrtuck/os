@@ -62,6 +62,11 @@ fn main() {
 
     rustc_rlib(&rustc, &sys_src, &sys_rlib, "sys", &[]);
 
+    let protocol_src = manifest_dir.join("libraries/protocol/lib.rs");
+    let protocol_rlib = out_dir.join("libprotocol.rlib");
+
+    rustc_rlib(&rustc, &protocol_src, &protocol_rlib, "protocol", &[]);
+
     let virtio_src = manifest_dir.join("libraries/virtio/lib.rs");
     let virtio_rlib = out_dir.join("libvirtio.rlib");
 
@@ -89,7 +94,11 @@ fn main() {
         let src_dir = manifest_dir.join(dir);
         let main_rs = src_dir.join("main.rs");
         let elf_path = out_dir.join(format!("{name}.elf"));
-        let mut externs = vec![("sys", sys_rlib.clone()), ("ipc", ipc_rlib.clone())];
+        let mut externs = vec![
+            ("sys", sys_rlib.clone()),
+            ("ipc", ipc_rlib.clone()),
+            ("protocol", protocol_rlib.clone()),
+        ];
 
         if needs_virtio {
             externs.push(("virtio", virtio_rlib.clone()));
@@ -151,7 +160,11 @@ fn main() {
         &init_src,
         &init_elf,
         &link_ld,
-        &[("sys", sys_rlib.clone()), ("ipc", ipc_rlib.clone())],
+        &[
+            ("sys", sys_rlib.clone()),
+            ("ipc", ipc_rlib.clone()),
+            ("protocol", protocol_rlib.clone()),
+        ],
         &init_env,
     );
     println!("cargo:rerun-if-changed={}", init_src.display());
@@ -166,6 +179,7 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-changed={}", ipc_src.display());
+    println!("cargo:rerun-if-changed={}", protocol_src.display());
 }
 /// Compile a Rust source file as a binary ELF.
 fn rustc_bin(
@@ -184,6 +198,13 @@ fn rustc_bin(
         .args(["-C", "panic=abort"])
         .args(["-C", "opt-level=s"])
         .arg(format!("-Clink-arg=-T{}", link_ld.display()));
+
+    // Add search path so rustc can resolve transitive rlib dependencies.
+    if let Some(first) = externs.first() {
+        if let Some(dir) = first.1.parent() {
+            cmd.arg(format!("-L{}", dir.display()));
+        }
+    }
 
     for (name, path) in externs {
         cmd.arg(format!("--extern={name}={}", path.display()));
@@ -226,6 +247,12 @@ fn rustc_rlib(
         .arg(format!("--crate-name={crate_name}"))
         .args(["-C", "panic=abort"])
         .args(["-C", "opt-level=s"]);
+
+    if let Some(first) = externs.first() {
+        if let Some(dir) = first.1.parent() {
+            cmd.arg(format!("-L{}", dir.display()));
+        }
+    }
 
     for &(name, path) in externs {
         cmd.arg(format!("--extern={name}={}", path.display()));

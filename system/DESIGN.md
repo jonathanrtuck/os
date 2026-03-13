@@ -134,7 +134,25 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 1.4 Linker Script (`libraries/link.ld`) 🟢
+### 1.4 Protocol Library (`libraries/protocol/`) 🟢
+
+**Goal:** Single source of truth for all IPC message types and payload structs. Every component that sends or receives IPC messages imports from here.
+
+**Status:** ~280 lines. Defines all 22 message type constants and all shared payload structs across 8 protocol modules, plus `CHANNEL_SHM_BASE` and `channel_shm_va()`.
+
+**What's foundational:**
+
+- **One module per protocol boundary.** `device` (init→drivers), `gpu` (init↔GPU), `input` (input→compositor), `edit` (compositor↔editor), `compose` (init→compositor), `editor` (init→editor), `present` (compositor→GPU), `fs` (init↔9p). The module structure mirrors the IPC topology.
+- **All payload structs are `#[repr(C)]`** and fit within the 60-byte IPC message payload. Size guards via `const _: ()` assertions where payloads approach the limit.
+- **`CHANNEL_SHM_BASE` and `channel_shm_va()`** defined once. Every userspace component imports these instead of defining local copies.
+- **Zero dependencies.** Pure `no_std` library, fully testable on the host.
+
+**No restrictions imposed.** Pure library with no opinions about transport or control flow. The `ipc` library handles ring buffer mechanics; this library defines what flows through them.
+
+---
+
+### 1.5 Linker Script (`libraries/link.ld`) 🟢
+
 
 **Goal:** Shared ELF layout for all userspace binaries.
 
@@ -495,20 +513,27 @@ Init no longer exits — it sets up all cross-process channels, starts all proce
 ```text
 User Programs (text-editor)
   ├── sys (wait, channel_signal, exit, print)
-  └── ipc (Channel, Message — ring buffer messaging)
+  ├── ipc (Channel, Message — ring buffer messaging)
+  └── protocol (edit, editor, input — message types + payload structs)
 
 Compositor
   ├── sys (wait, channel_signal, exit)
   ├── drawing (Surface, Color, blit_blend, fonts)
-  └── ipc (Channel, Message — ring buffer messaging)
+  ├── ipc (Channel, Message — ring buffer messaging)
+  └── protocol (compose, edit, input, present — message types + payload structs)
 
 Init
-  └── sys (process_create, channel_create, handle_send, memory_share, dma_alloc, wait, ...)
+  ├── sys (process_create, channel_create, handle_send, memory_share, dma_alloc, wait, ...)
+  └── protocol (device, gpu, compose, editor, fs — message types + payload structs)
 
 Drivers (virtio-blk, virtio-gpu, virtio-input, virtio-9p, virtio-console)
   ├── sys (device_map, interrupt_register, dma_alloc, wait, ...)
   ├── virtio (MMIO transport, split virtqueue)
-  └── ipc (ring buffer messaging — for cross-process channels)
+  ├── ipc (ring buffer messaging — for cross-process channels)
+  └── protocol (device, gpu, input, present, fs — message types + payload structs)
+
+Protocol Library
+  └── (none — pure, no dependencies. Defines all IPC message types + payload structs)
 
 Drawing Library
   └── (none — pure, no dependencies)
@@ -523,7 +548,7 @@ Virtio Library
   └── (none — pure, no dependencies)
 ```
 
-**Observation:** The libraries are clean leaves with no dependencies. The platform services depend on libraries + syscalls. User programs (text-editor) depend only on `sys` + `ipc` — they don't touch `drawing` or `virtio`. This is architecturally correct: editors don't render, the OS service does. The coupling between platform services (init knows about compositor, GPU driver, editor, etc.) is all scaffolding — a real OS service would mediate these relationships.
+**Observation:** All five libraries are clean leaves with no dependencies. The `protocol` library is the single source of truth for all IPC message types and payload structs — no component defines its own message constants or wire-format structs. The platform services depend on libraries + syscalls. User programs (text-editor) depend on `sys` + `ipc` + `protocol` — they don't touch `drawing` or `virtio`. This is architecturally correct: editors don't render, the OS service does. The coupling between platform services (init knows about compositor, GPU driver, editor, etc.) is all scaffolding — a real OS service would mediate these relationships.
 
 ---
 

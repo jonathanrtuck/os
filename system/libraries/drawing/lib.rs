@@ -1990,17 +1990,6 @@ pub fn scale_pointer_coord(coord: u32, max_pixels: u32) -> u32 {
 /// Remaining = 48 bytes / 8 bytes per rect = 6 rects.
 pub const MAX_DIRTY_RECTS: usize = 6;
 
-/// Collects dirty rectangles during a render pass.
-///
-/// When the number of rects exceeds MAX_DIRTY_RECTS, the tracker
-/// falls back to a single full-screen rect (signaled by `full_screen = true`).
-pub struct DamageTracker {
-    pub rects: [DirtyRect; MAX_DIRTY_RECTS],
-    pub count: usize,
-    pub full_screen: bool,
-    fb_width: u16,
-    fb_height: u16,
-}
 /// A rectangular region of pixels that has been modified.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
@@ -2016,7 +2005,6 @@ impl DirtyRect {
         Self { x, y, w, h }
     }
 
-    /// Compute the bounding box (union) of two rects.
     pub fn union(self, other: DirtyRect) -> DirtyRect {
         if self.w == 0 || self.h == 0 {
             return other;
@@ -2049,17 +2037,28 @@ impl DirtyRect {
             h: (y1 - y0 as u32) as u16,
         }
     }
-    /// Compute the union of a slice of rects. Returns a zero rect if empty.
+
     pub fn union_all(rects: &[DirtyRect]) -> DirtyRect {
         let mut result = DirtyRect::new(0, 0, 0, 0);
-
         for &r in rects {
             result = result.union(r);
         }
-
         result
     }
 }
+
+/// Collects dirty rectangles during a render pass.
+///
+/// When the number of rects exceeds MAX_DIRTY_RECTS, the tracker
+/// falls back to a single full-screen rect (signaled by `full_screen = true`).
+pub struct DamageTracker {
+    pub rects: [DirtyRect; MAX_DIRTY_RECTS],
+    pub count: usize,
+    pub full_screen: bool,
+    fb_width: u16,
+    fb_height: u16,
+}
+
 
 impl DamageTracker {
     /// Create a new damage tracker for the given framebuffer dimensions.

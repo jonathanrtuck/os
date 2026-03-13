@@ -32,27 +32,19 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use alloc::vec;
+use protocol::compose::{
+    CompositorConfig, IconConfig, ImageConfig, RtcConfig,
+    MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG, MSG_IMAGE_CONFIG, MSG_IMG_ICON_CONFIG, MSG_RTC_CONFIG,
+};
+use protocol::edit::{
+    CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
+    MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE,
+    MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
+};
+use protocol::input::{KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON};
+use protocol::present::{PresentPayload, MSG_PRESENT};
 
-const CHANNEL_SHM_BASE: usize = 0x4000_0000;
 const FONT_SIZE: u32 = 18;
-// Protocol message types.
-const MSG_COMPOSITOR_CONFIG: u32 = 3;
-const MSG_IMAGE_CONFIG: u32 = 6;
-const MSG_ICON_CONFIG: u32 = 7;
-const MSG_IMG_ICON_CONFIG: u32 = 9;
-const MSG_RTC_CONFIG: u32 = 15;
-const MSG_KEY_EVENT: u32 = 10;
-const MSG_POINTER_ABS: u32 = 11;
-const MSG_POINTER_BUTTON: u32 = 12;
-const MSG_PRESENT: u32 = 20;
-const MSG_WRITE_INSERT: u32 = 30;
-const MSG_WRITE_DELETE: u32 = 31;
-const MSG_CURSOR_MOVE: u32 = 32;
-const MSG_SELECTION_UPDATE: u32 = 33;
-const MSG_WRITE_DELETE_RANGE: u32 = 34;
-/// Compositor → editor: set cursor position from click-to-position.
-/// Payload: CursorMove { position: u32 }.
-const MSG_SET_CURSOR: u32 = 35;
 // Linux evdev keycodes for Ctrl+Tab — used as the context switch combo.
 // Tab (keycode 15) alone produces '\t' and is forwarded to the editor.
 // Only Tab while Left Ctrl is held triggers context switching.
@@ -90,16 +82,6 @@ const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_BOTTOM: u32 = 8;
 // Document header layout (first 64 bytes of shared buffer).
 const DOC_HEADER_SIZE: usize = 64;
-
-/// RTC configuration received from init. Contains the PL031 MMIO PA.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RtcConfig {
-    mmio_pa: u64,
-}
-
-// Guard: CompositorConfig must fit within the 60-byte IPC payload.
-const _: () = assert!(core::mem::size_of::<CompositorConfig>() <= 60);
 
 /// Mapped VA of the PL031 RTC MMIO page. 0 = not mapped / not available.
 /// The Data Register at offset 0x000 contains Unix epoch seconds (read-only u32).
@@ -194,112 +176,8 @@ static mut DOC_LEN: usize = 0;
 /// and the struct fits within the 60-byte IPC payload.
 ///
 /// `fb_size` is intentionally omitted — the compositor computes it as
-/// `fb_stride * fb_height`.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CompositorConfig {
-    fb_va: u64,
-    fb_va2: u64,
-    doc_va: u64,
-    mono_font_va: u64,
-    fb_width: u32,
-    fb_height: u32,
-    fb_stride: u32,
-    doc_capacity: u32,
-    mono_font_len: u32,
-    prop_font_len: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CursorMove {
-    position: u32,
-}
-/// Payload for MSG_PRESENT — includes dirty rects for partial GPU transfer.
-///
-/// Layout (60 bytes total payload):
-///   buffer_index: u32   (4 bytes) — which double-buffer to present
-///   rect_count: u32     (4 bytes) — number of dirty rects (0 = full screen)
-///   rects: [DirtyRect; 6] (48 bytes) — up to 6 dirty rects (8 bytes each)
-///   _pad: [u8; 4]       (4 bytes) — padding to fill 60 bytes
-///
-/// When rect_count == 0, the GPU transfers the entire framebuffer.
-/// When rect_count > 0, the GPU transfers only the specified rects.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PresentPayload {
-    buffer_index: u32,
-    rect_count: u32,
-    rects: [drawing::DirtyRect; 6],
-    _pad: [u8; 4],
-}
-/// Image configuration received from init. Contains the location of
-/// raw PNG data in the shared memory buffer.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct ImageConfig {
-    image_va: u64,
-    image_len: u32,
-    _pad: u32,
-}
-/// SVG icon configuration received from init. Contains the location of
-/// SVG path data in the shared memory buffer.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct IconConfig {
-    icon_va: u64,
-    icon_len: u32,
-    _pad: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KeyEvent {
-    keycode: u16,
-    pressed: u8,
-    ascii: u8,
-}
-/// Absolute pointer position from virtio-tablet driver.
-/// Coordinates are in the raw [0, 32767] range; compositor scales to screen.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PointerAbs {
-    x: u32,
-    y: u32,
-}
-/// Pointer button event from virtio-tablet driver.
-/// button: 0 = left, 1 = right. pressed: 1 = down, 0 = up.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PointerButton {
-    button: u8,
-    pressed: u8,
-    _pad: [u8; 2],
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SelectionUpdate {
-    sel_start: u32,
-    sel_end: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct WriteDelete {
-    position: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct WriteDeleteRange {
-    start: u32,
-    end: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct WriteInsert {
-    position: u32,
-    byte: u8,
-}
-
 fn channel_shm_va(idx: usize) -> usize {
-    CHANNEL_SHM_BASE + idx * 2 * 4096
+    protocol::channel_shm_va(idx)
 }
 /// Build a TextLayout for the content surface.
 fn content_text_layout(content_w: u32) -> drawing::TextLayout {
@@ -1648,7 +1526,7 @@ pub extern "C" fn _start() -> ! {
     let initial_payload = PresentPayload {
         buffer_index: 0,
         rect_count: 0,
-        rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
+        rects: [protocol::DirtyRect { x: 0, y: 0, w: 0, h: 0 }; 6],
         _pad: [0; 4],
     };
     let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &initial_payload) };
@@ -2182,11 +2060,17 @@ pub extern "C" fn _start() -> ! {
             // ---------------------------------------------------------------
             let payload = if let Some(rects) = damage.dirty_rects() {
                 let n = rects.len();
-                let mut pr = [drawing::DirtyRect::new(0, 0, 0, 0); 6];
+                let n = rects.len();
+                let mut pr = [protocol::DirtyRect { x: 0, y: 0, w: 0, h: 0 }; 6];
                 let mut i = 0;
 
                 while i < n && i < 6 {
-                    pr[i] = rects[i];
+                    pr[i] = protocol::DirtyRect {
+                        x: rects[i].x,
+                        y: rects[i].y,
+                        w: rects[i].w,
+                        h: rects[i].h,
+                    };
                     i += 1;
                 }
 
@@ -2201,7 +2085,7 @@ pub extern "C" fn _start() -> ! {
                 PresentPayload {
                     buffer_index: back as u32,
                     rect_count: 0,
-                    rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
+                    rects: [protocol::DirtyRect { x: 0, y: 0, w: 0, h: 0 }; 6],
                     _pad: [0; 4],
                 }
             };
