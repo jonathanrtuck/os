@@ -63,3 +63,9 @@ pub const SHADOW_PEAK: Color = Color::rgba(0, 0, 0, 160);
 
 /// Drop shadow transparent end — fully transparent black.
 pub const SHADOW_ZERO: Color = Color::rgba(0, 0, 0, 0);
+
+/// Mouse cursor fill — bright white, opaque.
+pub const CURSOR_FILL: Color = Color::rgb(255, 255, 255);
+
+/// Mouse cursor outline — dark grey, opaque.
+pub const CURSOR_OUTLINE: Color = Color::rgb(40, 40, 40);

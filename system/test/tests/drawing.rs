@@ -6001,4 +6001,106 @@ fn kerned_proportional_string_is_narrower() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Mouse cursor tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_render_cursor_dimensions() {
+    let size = (drawing::CURSOR_W * drawing::CURSOR_H * 4) as usize;
+    let mut buf = vec![0u8; size];
+    drawing::render_cursor(&mut buf);
+
+    // The cursor should have some non-transparent pixels (fill + outline).
+    let mut opaque_count = 0;
+    for y in 0..drawing::CURSOR_H {
+        for x in 0..drawing::CURSOR_W {
+            let off = ((y * drawing::CURSOR_W + x) * 4) as usize;
+            if buf[off + 3] > 0 {
+                opaque_count += 1;
+            }
+        }
+    }
+    assert!(opaque_count > 20, "cursor should have >20 opaque pixels, got {}", opaque_count);
+}
+
+#[test]
+fn test_render_cursor_top_left_pixel_is_outline() {
+    let size = (drawing::CURSOR_W * drawing::CURSOR_H * 4) as usize;
+    let mut buf = vec![0u8; size];
+    drawing::render_cursor(&mut buf);
+
+    // Pixel (0,0) should be the outline color (dark grey, opaque).
+    // BGRA8888 encoding: B=40, G=40, R=40, A=255.
+    assert_eq!(buf[3], 255, "top-left pixel alpha should be 255 (opaque)");
+    assert_eq!(buf[0], buf[1], "top-left pixel should be grey (B==G)");
+    assert_eq!(buf[1], buf[2], "top-left pixel should be grey (G==R)");
+}
+
+#[test]
+fn test_render_cursor_has_fill_pixels() {
+    let size = (drawing::CURSOR_W * drawing::CURSOR_H * 4) as usize;
+    let mut buf = vec![0u8; size];
+    drawing::render_cursor(&mut buf);
+
+    // Pixel at (1,2) in the bitmap is fill (white, 255/255/255/255).
+    let off = ((2 * drawing::CURSOR_W + 1) * 4) as usize;
+    assert_eq!(buf[off + 3], 255, "fill pixel alpha should be 255");
+    assert_eq!(buf[off + 0], 255, "fill pixel B channel should be 255");
+    assert_eq!(buf[off + 1], 255, "fill pixel G channel should be 255");
+    assert_eq!(buf[off + 2], 255, "fill pixel R channel should be 255");
+}
+
+#[test]
+fn test_render_cursor_has_transparent_pixels() {
+    let size = (drawing::CURSOR_W * drawing::CURSOR_H * 4) as usize;
+    let mut buf = vec![0u8; size];
+    drawing::render_cursor(&mut buf);
+
+    // Pixel at (11,0) should be transparent (outside the arrow).
+    let off = ((0 * drawing::CURSOR_W + 11) * 4) as usize;
+    assert_eq!(buf[off + 3], 0, "pixel outside arrow should be transparent");
+}
+
+#[test]
+fn test_scale_pointer_coord_zero() {
+    assert_eq!(drawing::scale_pointer_coord(0, 1280), 0);
+}
+
+#[test]
+fn test_scale_pointer_coord_max() {
+    // 32767 * 1280 / 32768 = 1279.96... → 1279
+    let result = drawing::scale_pointer_coord(32767, 1280);
+    assert!(result < 1280, "result {} should be < 1280", result);
+    assert_eq!(result, 1279);
+}
+
+#[test]
+fn test_scale_pointer_coord_midpoint() {
+    // 16384 * 1280 / 32768 = 640
+    let result = drawing::scale_pointer_coord(16384, 1280);
+    assert_eq!(result, 640);
+}
+
+#[test]
+fn test_scale_pointer_coord_never_exceeds_max() {
+    // Even with coord = 32767 and max = 800, result should be < 800.
+    for max in [640u32, 768, 800, 1024, 1080, 1280, 1920] {
+        for coord in [0, 1, 16383, 16384, 32766, 32767] {
+            let result = drawing::scale_pointer_coord(coord, max);
+            assert!(
+                result < max,
+                "scale_pointer_coord({}, {}) = {} (should be < {})",
+                coord, max, result, max,
+            );
+        }
+    }
+}
+
+#[test]
+fn test_scale_pointer_coord_zero_max() {
+    // Edge case: max_pixels = 0 should not panic.
+    assert_eq!(drawing::scale_pointer_coord(16384, 0), 0);
+}
+
 

@@ -9,6 +9,7 @@
 //!   z=10: Content       — text editing area with cursor
 //!   z=15: Title shadow  — gradient falloff beneath title bar
 //!   z=20: Title bar     — translucent chrome overlay at top
+//!   z=30: Mouse cursor  — procedural arrow, tracks pointer position
 //!
 //! # Architecture
 //!
@@ -66,6 +67,7 @@ const Z_BACKGROUND: u16 = 0;
 const Z_CONTENT: u16 = 10;
 const Z_SHADOW: u16 = 15;
 const Z_CHROME: u16 = 20;
+const Z_CURSOR: u16 = 30;
 // Drop shadow configuration — 12px depth for visible darkening.
 const SHADOW_DEPTH: u32 = 12;
 // Shadow alpha max is defined in drawing::SHADOW_PEAK.
@@ -132,6 +134,19 @@ static mut PREV_DOC_LEN: usize = 0;
 static mut PREV_SEL_START: usize = 0;
 /// Previous frame's selection end.
 static mut PREV_SEL_END: usize = 0;
+
+/// Current mouse cursor X position in framebuffer pixels.
+static mut MOUSE_X: u32 = 0;
+/// Current mouse cursor Y position in framebuffer pixels.
+static mut MOUSE_Y: u32 = 0;
+/// Previous frame's cursor X (for dirty-rect generation).
+static mut PREV_MOUSE_X: u32 = 0;
+/// Previous frame's cursor Y (for dirty-rect generation).
+static mut PREV_MOUSE_Y: u32 = 0;
+/// Whether a pointer event has been received (cursor becomes visible).
+static mut CURSOR_VISIBLE: bool = false;
+/// Whether cursor position changed this frame (needs dirty rects).
+static mut CURSOR_MOVED: bool = false;
 
 static mut CHAR_W: u32 = 8;
 static mut LINE_H: u32 = 20;
@@ -1356,8 +1371,9 @@ pub extern "C" fn _start() -> ! {
         _ => false,
     };
     let input2_ch = if has_input2 {
-        sys::print(b"compositor: tablet input handle detected\n");
-        Some(unsafe { ipc::Channel::from_base(channel_shm_va(4), ipc::PAGE_SIZE, 1) })
+        sys::print(b"     tablet input channel detected\n");
+        let ch = unsafe { ipc::Channel::from_base(channel_shm_va(4), ipc::PAGE_SIZE, 1) };
+        Some(ch)
     } else {
         None
     };
@@ -1417,6 +1433,9 @@ pub extern "C" fn _start() -> ! {
     let mut title_shadow_buf = alloc_surface_buf(fb_width, SHADOW_DEPTH);
     // Title bar chrome (z=20): translucent overlay at top.
     let mut title_buf = alloc_surface_buf(fb_width, TITLE_BAR_H);
+    // Mouse cursor (z=30): procedural arrow cursor, highest z-order.
+    let mut cursor_buf = alloc_surface_buf(drawing::CURSOR_W, drawing::CURSOR_H);
+    drawing::render_cursor(&mut cursor_buf);
 
     sys::print(b"     surface buffers allocated\n");
 
@@ -1491,9 +1510,16 @@ pub extern "C" fn _start() -> ! {
             z: Z_CHROME,
             visible: true,
         };
+        let cursor_cs = drawing::CompositeSurface {
+            surface: make_surf(&mut cursor_buf, drawing::CURSOR_W, drawing::CURSOR_H),
+            x: 0,
+            y: 0,
+            z: Z_CURSOR,
+            visible: false, // Hidden until first pointer event.
+        };
 
-        let surfaces: [&drawing::CompositeSurface; 4] = [
-            &bg_cs, &content_cs, &title_shadow_cs, &title_cs,
+        let surfaces: [&drawing::CompositeSurface; 5] = [
+            &bg_cs, &content_cs, &title_shadow_cs, &title_cs, &cursor_cs,
         ];
         drawing::composite_surfaces(&mut fb0, &surfaces);
     }
@@ -1546,6 +1572,7 @@ pub extern "C" fn _start() -> ! {
 
         let _ = wait_result;
         let mut changed = false;
+        let mut text_changed = false; // Text/editor content actually modified.
         let mut timer_fired = false;
         let mut context_switched = false;
 
@@ -1629,6 +1656,7 @@ pub extern "C" fn _start() -> ! {
                         }
 
                         changed = true;
+                        text_changed = true;
                         context_switched = true;
                     }
 
@@ -1646,8 +1674,6 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Drain second input channel (tablet) if present.
-        // Handles MSG_POINTER_ABS, MSG_POINTER_BUTTON, and any MSG_KEY_EVENT
-        // from the tablet device.
         if let Some(ref ch2) = input2_ch {
             while ch2.try_recv(&mut msg) {
                 match msg.msg_type {
@@ -1661,12 +1687,27 @@ pub extern "C" fn _start() -> ! {
                         }
                     }
                     MSG_POINTER_ABS => {
-                        // Absolute pointer position — will be processed by
-                        // cursor-surface feature. Log for now.
+                        let ptr: PointerAbs = unsafe { msg.payload_as() };
+                        let new_x = drawing::scale_pointer_coord(ptr.x, fb_width);
+                        let new_y = drawing::scale_pointer_coord(ptr.y, fb_height);
+
+                        unsafe {
+                            PREV_MOUSE_X = MOUSE_X;
+                            PREV_MOUSE_Y = MOUSE_Y;
+                            MOUSE_X = new_x;
+                            MOUSE_Y = new_y;
+                            CURSOR_MOVED = true;
+
+                            if !CURSOR_VISIBLE {
+                                CURSOR_VISIBLE = true;
+                            }
+                        }
+
+                        changed = true;
                     }
                     MSG_POINTER_BUTTON => {
                         // Pointer button event — will be processed by
-                        // click-to-position feature. Log for now.
+                        // click-to-position feature.
                     }
                     _ => {}
                 }
@@ -1684,6 +1725,7 @@ pub extern "C" fn _start() -> ! {
                         unsafe { CURSOR_POS = pos + 1 };
 
                         changed = true;
+                        text_changed = true;
                     }
                 }
                 MSG_WRITE_DELETE => {
@@ -1694,6 +1736,7 @@ pub extern "C" fn _start() -> ! {
                         unsafe { CURSOR_POS = pos };
 
                         changed = true;
+                        text_changed = true;
                     }
                 }
                 MSG_CURSOR_MOVE => {
@@ -1707,6 +1750,7 @@ pub extern "C" fn _start() -> ! {
                         doc_write_header();
 
                         changed = true;
+                        text_changed = true;
                     }
                 }
                 MSG_SELECTION_UPDATE => {
@@ -1718,6 +1762,7 @@ pub extern "C" fn _start() -> ! {
                     }
 
                     changed = true;
+                    text_changed = true;
                 }
                 MSG_WRITE_DELETE_RANGE => {
                     let dr: WriteDeleteRange = unsafe { msg.payload_as() };
@@ -1728,6 +1773,7 @@ pub extern "C" fn _start() -> ! {
                         unsafe { CURSOR_POS = start };
 
                         changed = true;
+                        text_changed = true;
                     }
                 }
                 _ => {}
@@ -1736,7 +1782,7 @@ pub extern "C" fn _start() -> ! {
 
         // Update scroll offset after processing all editor messages so that
         // the cursor remains visible in the viewport.
-        if changed && !unsafe { IMAGE_MODE } {
+        if text_changed && !unsafe { IMAGE_MODE } {
             update_scroll_offset();
         }
 
@@ -1744,9 +1790,9 @@ pub extern "C" fn _start() -> ! {
             let back = unsafe { BACK_BUF_IDX };
             let in_image_mode = unsafe { IMAGE_MODE };
 
-            // 1. Re-render the content surface (only on actual content changes,
-            //    not on timer ticks — avoids unnecessary re-rendering).
-            if changed && !in_image_mode {
+            // 1. Re-render the content surface (only on actual text/editor
+            //    changes, not on timer ticks or mouse moves).
+            if text_changed && !in_image_mode {
                 let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
                 let new_scroll = unsafe { SCROLL_OFFSET };
                 let sel_start = unsafe { SEL_START };
@@ -1791,7 +1837,7 @@ pub extern "C" fn _start() -> ! {
                 // First frame after init or context switch: full screen.
                 damage.mark_full_screen();
                 first_present_done = true;
-            } else if changed && !in_image_mode {
+            } else if text_changed && !in_image_mode {
                 // Content change in text editor mode: compute which visual
                 // lines changed and add dirty rects for those lines.
                 let new_cursor = unsafe { CURSOR_POS };
@@ -1880,15 +1926,35 @@ pub extern "C" fn _start() -> ! {
                 if timer_fired {
                     damage.add(0, 0, fb_width as u16, TITLE_BAR_H as u16);
                 }
-            } else if changed && in_image_mode {
+            } else if text_changed && in_image_mode {
                 // Image mode content change (context switch already handled
                 // above via context_switched). Fall back to full screen.
                 damage.mark_full_screen();
-            } else {
-                // Timer-only tick: re-render title bar to update the clock.
-                // (Title bar surface is already re-rendered above in step 2.)
-                // Dirty the title bar region only.
+            }
+
+            // Timer-only tick or timer+cursor: re-render title bar for clock.
+            if timer_fired && !context_switched && !damage.full_screen {
                 damage.add(0, 0, fb_width as u16, TITLE_BAR_H as u16);
+            }
+
+            // 3b. Cursor dirty rects: old position + new position.
+            let cursor_moved = unsafe { CURSOR_MOVED };
+            let cursor_vis = unsafe { CURSOR_VISIBLE };
+
+            if cursor_moved && cursor_vis {
+                let old_mx = unsafe { PREV_MOUSE_X };
+                let old_my = unsafe { PREV_MOUSE_Y };
+                let new_mx = unsafe { MOUSE_X };
+                let new_my = unsafe { MOUSE_Y };
+                let cw = drawing::CURSOR_W as u16;
+                let ch = drawing::CURSOR_H as u16;
+
+                // Dirty the old cursor position (erase).
+                damage.add(old_mx as u16, old_my as u16, cw, ch);
+                // Dirty the new cursor position (draw).
+                damage.add(new_mx as u16, new_my as u16, cw, ch);
+
+                unsafe { CURSOR_MOVED = false };
             }
 
             // ---------------------------------------------------------------
@@ -1922,9 +1988,16 @@ pub extern "C" fn _start() -> ! {
                 z: Z_CHROME,
                 visible: true,
             };
+            let cursor_cs = drawing::CompositeSurface {
+                surface: make_surf(&mut cursor_buf, drawing::CURSOR_W, drawing::CURSOR_H),
+                x: unsafe { MOUSE_X } as i32,
+                y: unsafe { MOUSE_Y } as i32,
+                z: Z_CURSOR,
+                visible: cursor_vis,
+            };
 
-            let surfaces: [&drawing::CompositeSurface; 4] = [
-                &bg_cs, &content_cs, &title_shadow_cs, &title_cs,
+            let surfaces: [&drawing::CompositeSurface; 5] = [
+                &bg_cs, &content_cs, &title_shadow_cs, &title_cs, &cursor_cs,
             ];
 
             {
