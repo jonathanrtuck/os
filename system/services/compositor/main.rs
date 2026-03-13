@@ -1676,13 +1676,71 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Drain second input channel (tablet) if present.
+        // Drain second input channel (tablet/keyboard) if present.
+        // NOTE: QEMU may enumerate virtio devices in reverse command-line order,
+        // so the keyboard can end up on the second channel. We must handle
+        // Ctrl+Tab context switching on BOTH input channels.
         if let Some(ref ch2) = input2_ch {
             while ch2.try_recv(&mut msg) {
                 match msg.msg_type {
                     MSG_KEY_EVENT => {
-                        // Keyboard event from second input device (unlikely
-                        // from a tablet, but handle for robustness).
+                        let key: KeyEvent = unsafe { msg.payload_as() };
+
+                        // Track Left Ctrl modifier state (same as first channel).
+                        if key.keycode == KEY_LEFTCTRL {
+                            ctrl_pressed = key.pressed == 1;
+
+                            continue;
+                        }
+
+                        // Ctrl+Tab context switch (same logic as first channel).
+                        if key.keycode == KEY_TAB && key.pressed == 1 && ctrl_pressed {
+                            let has_image = !image_pixels.is_empty();
+
+                            if has_image {
+                                let was_image = unsafe { IMAGE_MODE };
+
+                                if !was_image {
+                                    unsafe { SAVED_EDITOR_SCROLL = SCROLL_OFFSET };
+                                }
+
+                                unsafe { IMAGE_MODE = !was_image };
+
+                                if was_image {
+                                    unsafe { SCROLL_OFFSET = SAVED_EDITOR_SCROLL };
+                                }
+
+                                {
+                                    let mut content_surf =
+                                        make_surf(&mut content_buf, content_w, content_h);
+
+                                    if unsafe { IMAGE_MODE } {
+                                        render_image_content_surface(
+                                            &mut content_surf,
+                                            &image_pixels,
+                                            image_w,
+                                            image_h,
+                                        );
+                                    } else {
+                                        render_content_surface(&mut content_surf, doc_content(), true);
+                                    }
+                                }
+
+                                {
+                                    let mut title_surf =
+                                        make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
+                                    render_title_bar(&mut title_surf);
+                                }
+
+                                changed = true;
+                                text_changed = true;
+                                context_switched = true;
+                            }
+
+                            continue;
+                        }
+
+                        // Forward non-modifier keys to editor in text mode.
                         if !unsafe { IMAGE_MODE } {
                             editor_ch.send(&msg);
 
