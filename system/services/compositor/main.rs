@@ -908,8 +908,6 @@ pub extern "C" fn _start() -> ! {
         let img_config: ImageConfig = unsafe { msg.payload_as() };
 
         if img_config.image_va != 0 && img_config.image_len > 0 {
-            sys::print(b"     decoding PNG image (");
-
             let png_data = unsafe {
                 core::slice::from_raw_parts(
                     img_config.image_va as *const u8,
@@ -920,15 +918,20 @@ pub extern "C" fn _start() -> ! {
             // Parse header first to get dimensions.
             match drawing::png_header(png_data) {
                 Ok(hdr) => {
-                    sys::print(b"");
-                    // Print dimensions.
-                    let mut dim_buf = [0u8; 20];
-                    let mut di = append_u32(&mut dim_buf, 0, hdr.width);
+                    // Print dimensions as a single line.
+                    let mut dim_buf = [0u8; 40];
+                    let prefix = b"     decoding PNG image (";
+                    dim_buf[..prefix.len()].copy_from_slice(prefix);
+                    let mut di = prefix.len();
+                    di = append_u32(&mut dim_buf, di, hdr.width);
                     dim_buf[di] = b'x';
                     di += 1;
                     di = append_u32(&mut dim_buf, di, hdr.height);
+                    dim_buf[di] = b')';
+                    di += 1;
+                    dim_buf[di] = b'\n';
+                    di += 1;
                     sys::print(&dim_buf[..di]);
-                    sys::print(b")\n");
 
                     let channels: u32 = if hdr.color_type == 6 { 4 } else { 3 };
                     let scanline_bytes = 1 + (hdr.width as usize) * (channels as usize);
@@ -976,8 +979,6 @@ pub extern "C" fn _start() -> ! {
         let icn_config: IconConfig = unsafe { msg.payload_as() };
 
         if icn_config.icon_va != 0 && icn_config.icon_len > 0 {
-            sys::print(b"     parsing SVG icon (");
-
             let svg_data = unsafe {
                 core::slice::from_raw_parts(
                     icn_config.icon_va as *const u8,
@@ -985,10 +986,17 @@ pub extern "C" fn _start() -> ! {
                 )
             };
 
-            let mut len_buf = [0u8; 10];
-            let li = append_u32(&mut len_buf, 0, icn_config.icon_len);
-            sys::print(&len_buf[..li]);
-            sys::print(b" bytes)\n");
+            {
+                let mut len_buf = [0u8; 40];
+                let prefix = b"     parsing SVG icon (";
+                len_buf[..prefix.len()].copy_from_slice(prefix);
+                let mut li = prefix.len();
+                li = append_u32(&mut len_buf, li, icn_config.icon_len);
+                let suffix = b" bytes)\n";
+                len_buf[li..li + suffix.len()].copy_from_slice(suffix);
+                li += suffix.len();
+                sys::print(&len_buf[..li]);
+            }
 
             // Heap-allocate SvgPath and SvgRasterScratch — both are too large
             // for the 16 KiB userspace stack (~16 KiB + ~64 KiB respectively).

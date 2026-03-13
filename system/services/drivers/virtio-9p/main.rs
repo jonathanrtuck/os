@@ -152,11 +152,16 @@ impl P9Client {
         if msg_type == P9_RLERROR {
             let ecode = r.get_u32();
 
-            sys::print(b"9p: attach error ");
-
-            print_u32(ecode);
-
-            sys::print(b"\n");
+            {
+                let mut buf = [0u8; 32];
+                let prefix = b"9p: attach error ";
+                buf[..prefix.len()].copy_from_slice(prefix);
+                let mut pos = prefix.len();
+                pos += format_u32(ecode, &mut buf[pos..]);
+                buf[pos] = b'\n';
+                pos += 1;
+                sys::print(&buf[..pos]);
+            }
 
             return false;
         }
@@ -201,11 +206,16 @@ impl P9Client {
         if msg_type == P9_RLERROR {
             let ecode = r.get_u32();
 
-            sys::print(b"9p: lopen error ");
-
-            print_u32(ecode);
-
-            sys::print(b"\n");
+            {
+                let mut buf = [0u8; 32];
+                let prefix = b"9p: lopen error ";
+                buf[..prefix.len()].copy_from_slice(prefix);
+                let mut pos = prefix.len();
+                pos += format_u32(ecode, &mut buf[pos..]);
+                buf[pos] = b'\n';
+                pos += 1;
+                sys::print(&buf[..pos]);
+            }
 
             return false;
         }
@@ -334,11 +344,16 @@ impl P9Client {
         if msg_type == P9_RLERROR {
             let ecode = r.get_u32();
 
-            sys::print(b"9p: walk error ");
-
-            print_u32(ecode);
-
-            sys::print(b"\n");
+            {
+                let mut buf = [0u8; 32];
+                let prefix = b"9p: walk error ";
+                buf[..prefix.len()].copy_from_slice(prefix);
+                let mut pos = prefix.len();
+                pos += format_u32(ecode, &mut buf[pos..]);
+                buf[pos] = b'\n';
+                pos += 1;
+                sys::print(&buf[..pos]);
+            }
 
             return false;
         }
@@ -364,6 +379,29 @@ fn print_u32(mut n: u32) {
     }
 
     sys::print(&buf[i..]);
+}
+
+/// Format a u32 into a buffer, returning the number of bytes written.
+fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
+    if n == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+
+    let mut tmp = [0u8; 10];
+    let mut i = 10;
+
+    while n > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    let len = 10 - i;
+
+    buf[..len].copy_from_slice(&tmp[i..]);
+
+    len
 }
 
 #[unsafe(no_mangle)]
@@ -481,9 +519,18 @@ pub extern "C" fn _start() -> ! {
                 )
             };
 
-            sys::print(b"     reading: ");
-            sys::print(name_bytes);
-            sys::print(b"\n");
+            {
+                let prefix = b"     reading: ";
+                let mut buf = [0u8; 80];
+                let mut pos = prefix.len();
+                buf[..pos].copy_from_slice(prefix);
+                let name_len = if name_bytes.len() > 60 { 60 } else { name_bytes.len() };
+                buf[pos..pos + name_len].copy_from_slice(&name_bytes[..name_len]);
+                pos += name_len;
+                buf[pos] = b'\n';
+                pos += 1;
+                sys::print(&buf[..pos]);
+            }
 
             // Walk from root to file.
             if !client.walk(ROOT_FID, FILE_FID, name_bytes) {
@@ -529,11 +576,17 @@ pub extern "C" fn _start() -> ! {
 
             client.clunk(FILE_FID);
 
-            sys::print(b"     read ");
-
-            print_u32(len);
-
-            sys::print(b" bytes\n");
+            {
+                let mut buf = [0u8; 32];
+                let prefix = b"     read ";
+                buf[..prefix.len()].copy_from_slice(prefix);
+                let mut pos = prefix.len();
+                pos += format_u32(len, &mut buf[pos..]);
+                let suffix = b" bytes\n";
+                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+                pos += suffix.len();
+                sys::print(&buf[..pos]);
+            }
 
             let mut resp_msg = ipc::Message::new(MSG_FS_READ_RESPONSE);
 

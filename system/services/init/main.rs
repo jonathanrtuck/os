@@ -64,6 +64,7 @@ const MSG_EDITOR_CONFIG: u32 = 4;
 const MSG_DISPLAY_INFO: u32 = 5;
 const MSG_IMAGE_CONFIG: u32 = 6;
 const MSG_ICON_CONFIG: u32 = 7;
+const MSG_GPU_READY: u32 = 8;
 const MSG_FS_READ_REQUEST: u32 = 40;
 const MSG_FS_READ_RESPONSE: u32 = 41;
 
@@ -183,6 +184,29 @@ fn print_u32(mut n: u32) {
 
     sys::print(&buf[i..]);
 }
+
+/// Format a u32 into a buffer, returning the number of bytes written.
+fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
+    if n == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+
+    let mut tmp = [0u8; 10];
+    let mut i = 10;
+
+    while n > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    let len = 10 - i;
+
+    buf[..len].copy_from_slice(&tmp[i..]);
+
+    len
+}
 /// Set up the interactive display pipeline with input.
 ///
 /// Creates cross-process channels:
@@ -258,11 +282,19 @@ fn setup_display_pipeline(
     let fb_stride = fb_width * FB_BPP;
     let fb_size = fb_stride * fb_height;
 
-    sys::print(b"     display resolution: ");
-    print_u32(fb_width);
-    sys::print(b"x");
-    print_u32(fb_height);
-    sys::print(b"\n");
+    {
+        let mut buf = [0u8; 40];
+        let prefix = b"     display resolution: ";
+        buf[..prefix.len()].copy_from_slice(prefix);
+        let mut pos = prefix.len();
+        pos += format_u32(fb_width, &mut buf[pos..]);
+        buf[pos] = b'x';
+        pos += 1;
+        pos += format_u32(fb_height, &mut buf[pos..]);
+        buf[pos] = b'\n';
+        pos += 1;
+        sys::print(&buf[..pos]);
+    }
 
     // -----------------------------------------------------------------------
     // Phase 3: Allocate double framebuffer using queried dimensions.
@@ -289,19 +321,24 @@ fn setup_display_pipeline(
 
     unsafe { core::ptr::write_bytes(fb_va1 as *mut u8, 0, fb_alloc_bytes) };
 
-    sys::print(b"     double framebuffer: ");
-
-    print_u32(fb_width);
-
-    sys::print(b"x");
-
-    print_u32(fb_height);
-
-    sys::print(b" x2 (");
-
-    print_u32((fb_alloc_bytes * 2) as u32 / 1024);
-
-    sys::print(b" KiB)\n");
+    {
+        let mut buf = [0u8; 64];
+        let prefix = b"     double framebuffer: ";
+        buf[..prefix.len()].copy_from_slice(prefix);
+        let mut pos = prefix.len();
+        pos += format_u32(fb_width, &mut buf[pos..]);
+        buf[pos] = b'x';
+        pos += 1;
+        pos += format_u32(fb_height, &mut buf[pos..]);
+        let mid = b" x2 (";
+        buf[pos..pos + mid.len()].copy_from_slice(mid);
+        pos += mid.len();
+        pos += format_u32((fb_alloc_bytes * 2) as u32 / 1024, &mut buf[pos..]);
+        let suffix = b" KiB)\n";
+        buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+        pos += suffix.len();
+        sys::print(&buf[..pos]);
+    }
 
     // -----------------------------------------------------------------------
     // Phase 4: Send GPU config with framebuffer info to running GPU driver.
@@ -322,6 +359,17 @@ fn setup_display_pipeline(
     gpu_ch.send(&msg);
 
     let _ = sys::channel_signal(gpu_ch_handle);
+
+    // Wait for the GPU driver to complete device setup before continuing.
+    // This prevents the GPU driver's startup logging from interleaving with
+    // init's compositor/editor spawn logging on the serial console.
+    loop {
+        let _ = sys::wait(&[gpu_ch_handle], u64::MAX);
+
+        if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_GPU_READY {
+            break;
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Allocate shared document buffer (1 page).
@@ -527,20 +575,38 @@ fn setup_display_pipeline(
     // (display query). Order: input driver (setup then waits for IRQs),
     // editor (waits for input), compositor last (draws initial frame then
     // enters event loop).
+    //
+    // Brief yields between starts let each process print its startup banner
+    // before the next process begins, preventing serial output interleaving.
     // -----------------------------------------------------------------------
     if let Some((input_proc_handle, _, _, _)) = input_proc {
         sys::print(b"     starting input driver\n");
 
         let _ = sys::process_start(input_proc_handle);
+
+        // Yield to let the input driver print its startup banner.
+        for _ in 0..8 {
+            sys::yield_now();
+        }
     }
 
     sys::print(b"     starting text editor\n");
 
     let _ = sys::process_start(editor_proc);
 
+    // Yield to let the text editor print its startup banner.
+    for _ in 0..8 {
+        sys::yield_now();
+    }
+
     sys::print(b"     starting compositor\n");
 
     let _ = sys::process_start(comp_proc);
+
+    // Yield to let the compositor print its startup banner.
+    for _ in 0..8 {
+        sys::yield_now();
+    }
 
     sys::print(b"     display pipeline running (with editor separation)\n");
 }
@@ -550,41 +616,33 @@ fn setup_display_pipeline(
 /// The child receives endpoint B at CHANNEL_SHM_BASE in its address space.
 /// Init retains endpoint A at channel_shm_va(channel_index).
 fn spawn_with_channel(elf: &[u8], next_channel: &mut usize) -> Option<(u8, u8, usize)> {
-    sys::print(b"       process_create\xE2\x80\xA6");
-
     let proc_handle = match sys::process_create(elf.as_ptr(), elf.len()) {
         Ok(h) => h,
         Err(_) => {
-            sys::print(b" FAILED\n");
+            sys::print(b"       spawn: process_create FAILED\n");
             return None;
         }
     };
-
-    sys::print(b" ok\n");
-    sys::print(b"       channel_create\xE2\x80\xA6");
 
     let (ch_a, ch_b) = match sys::channel_create() {
         Ok(pair) => pair,
         Err(_) => {
-            sys::print(b" FAILED\n");
+            sys::print(b"       spawn: channel_create FAILED\n");
             return None;
         }
     };
 
-    sys::print(b" ok\n");
-    sys::print(b"       handle_send\xE2\x80\xA6");
-
     if let Err(_) = sys::handle_send(proc_handle, ch_b) {
-        sys::print(b" FAILED\n");
+        sys::print(b"       spawn: handle_send FAILED\n");
 
         return None;
     }
 
-    sys::print(b" ok\n");
-
     let channel_idx = *next_channel;
 
     *next_channel += 1;
+
+    sys::print(b"       spawned (process+channel+handle ok)\n");
 
     Some((proc_handle, ch_a, channel_idx))
 }
@@ -597,11 +655,17 @@ pub extern "C" fn _start() -> ! {
     let kernel_shm = CHANNEL_SHM_BASE as *const u8;
     let device_count = unsafe { core::ptr::read_volatile(kernel_shm as *const u32) };
 
-    sys::print(b"     ");
-
-    print_u32(device_count);
-
-    sys::print(b" devices in manifest\n");
+    {
+        let mut buf = [0u8; 40];
+        let prefix = b"     ";
+        buf[..prefix.len()].copy_from_slice(prefix);
+        let mut pos = prefix.len();
+        pos += format_u32(device_count, &mut buf[pos..]);
+        let suffix = b" devices in manifest\n";
+        buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+        pos += suffix.len();
+        sys::print(&buf[..pos]);
+    }
 
     // Track channel allocation (0 = kernel, 1+ = ours).
     let mut next_channel: usize = 1;
@@ -619,15 +683,20 @@ pub extern "C" fn _start() -> ! {
         let dev_irq = unsafe { core::ptr::read_volatile(base.add(8) as *const u32) };
         let dev_id = unsafe { core::ptr::read_volatile(base.add(12) as *const u32) };
 
-        sys::print(b"     device ");
-
-        print_u32(i as u32);
-
-        sys::print(b": id=");
-
-        print_u32(dev_id);
-
-        sys::print(b"\n");
+        {
+            let mut buf = [0u8; 40];
+            let prefix = b"     device ";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            let mut pos = prefix.len();
+            pos += format_u32(i as u32, &mut buf[pos..]);
+            let mid = b": id=";
+            buf[pos..pos + mid.len()].copy_from_slice(mid);
+            pos += mid.len();
+            pos += format_u32(dev_id, &mut buf[pos..]);
+            buf[pos] = b'\n';
+            pos += 1;
+            sys::print(&buf[..pos]);
+        }
 
         let elf: &[u8] = match dev_id {
             VIRTIO_DEVICE_BLK => VIRTIO_BLK_ELF,
@@ -636,18 +705,29 @@ pub extern "C" fn _start() -> ! {
             VIRTIO_DEVICE_INPUT => VIRTIO_INPUT_ELF,
             VIRTIO_DEVICE_9P => VIRTIO_9P_ELF,
             _ => {
-                sys::print(b"     skipping unknown device id=");
-                print_u32(dev_id);
-                sys::print(b"\n");
+                let mut buf = [0u8; 48];
+                let prefix = b"     skipping unknown device id=";
+                buf[..prefix.len()].copy_from_slice(prefix);
+                let mut pos = prefix.len();
+                pos += format_u32(dev_id, &mut buf[pos..]);
+                buf[pos] = b'\n';
+                pos += 1;
+                sys::print(&buf[..pos]);
                 continue;
             }
         };
 
-        sys::print(b"     spawning driver (elf ");
-
-        print_u32(elf.len() as u32);
-
-        sys::print(b" bytes)\n");
+        {
+            let mut buf = [0u8; 48];
+            let prefix = b"     spawning driver (elf ";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            let mut pos = prefix.len();
+            pos += format_u32(elf.len() as u32, &mut buf[pos..]);
+            let suffix = b" bytes)\n";
+            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+            pos += suffix.len();
+            sys::print(&buf[..pos]);
+        }
 
         let (proc_h, ch_h, channel_idx) = match spawn_with_channel(elf, &mut next_channel) {
             Some(v) => v,
@@ -792,9 +872,15 @@ pub extern "C" fn _start() -> ! {
         );
 
         if mono_len > 0 {
-            sys::print(b"     mono font loaded: ");
-            print_u32(mono_len);
-            sys::print(b" bytes\n");
+            let mut buf = [0u8; 48];
+            let prefix = b"     mono font loaded: ";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            let mut pos = prefix.len();
+            pos += format_u32(mono_len, &mut buf[pos..]);
+            let suffix = b" bytes\n";
+            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+            pos += suffix.len();
+            sys::print(&buf[..pos]);
         } else {
             sys::print(b"     mono font read failed\n");
         }
@@ -813,9 +899,15 @@ pub extern "C" fn _start() -> ! {
         );
 
         if prop_len > 0 {
-            sys::print(b"     prop font loaded: ");
-            print_u32(prop_len);
-            sys::print(b" bytes\n");
+            let mut buf = [0u8; 48];
+            let prefix = b"     prop font loaded: ";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            let mut pos = prefix.len();
+            pos += format_u32(prop_len, &mut buf[pos..]);
+            let suffix = b" bytes\n";
+            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+            pos += suffix.len();
+            sys::print(&buf[..pos]);
         } else {
             sys::print(b"     prop font read failed\n");
         }
@@ -834,9 +926,15 @@ pub extern "C" fn _start() -> ! {
         );
 
         if png_len > 0 {
-            sys::print(b"     png loaded: ");
-            print_u32(png_len);
-            sys::print(b" bytes\n");
+            let mut buf = [0u8; 40];
+            let prefix = b"     png loaded: ";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            let mut pos = prefix.len();
+            pos += format_u32(png_len, &mut buf[pos..]);
+            let suffix = b" bytes\n";
+            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+            pos += suffix.len();
+            sys::print(&buf[..pos]);
         } else {
             sys::print(b"     png read failed\n");
         }
@@ -855,9 +953,15 @@ pub extern "C" fn _start() -> ! {
         );
 
         if icon_len > 0 {
-            sys::print(b"     icon loaded: ");
-            print_u32(icon_len);
-            sys::print(b" bytes\n");
+            let mut buf = [0u8; 40];
+            let prefix = b"     icon loaded: ";
+            buf[..prefix.len()].copy_from_slice(prefix);
+            let mut pos = prefix.len();
+            pos += format_u32(icon_len, &mut buf[pos..]);
+            let suffix = b" bytes\n";
+            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+            pos += suffix.len();
+            sys::print(&buf[..pos]);
         } else {
             sys::print(b"     icon read failed\n");
         }

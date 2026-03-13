@@ -49,6 +49,29 @@ fn print_u64(mut n: u64) {
 
     sys::print(&buf[i..]);
 }
+
+/// Format a u64 into a buffer, returning the number of bytes written.
+fn format_u64(mut n: u64, buf: &mut [u8]) -> usize {
+    if n == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+
+    let mut tmp = [0u8; 20];
+    let mut i = 20;
+
+    while n > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    let len = 20 - i;
+
+    buf[..len].copy_from_slice(&tmp[i..]);
+
+    len
+}
 /// Read a sector and print its first 16 bytes as ASCII.
 fn read_and_print_sector(
     device: &virtio::Device,
@@ -109,20 +132,16 @@ fn read_and_print_sector(
     if status != 0 {
         sys::print(b"     sector 0 - read failed\n");
     } else {
-        sys::print(b"     sector 0 - ");
-
         // Print first 16 bytes as ASCII where printable, '.' otherwise.
         let data = unsafe { core::slice::from_raw_parts(buf_ptr.add(16), 16) };
-        let mut ascii = [b'.'; 16];
-
+        let mut line = [0u8; 34]; // "     sector 0 - " (16) + 16 ascii + "\n" + pad
+        let prefix = b"     sector 0 - ";
+        line[..prefix.len()].copy_from_slice(prefix);
         for (i, &b) in data.iter().enumerate() {
-            if b >= 0x20 && b < 0x7F {
-                ascii[i] = b;
-            }
+            line[prefix.len() + i] = if b >= 0x20 && b < 0x7F { b } else { b'.' };
         }
-
-        sys::print(&ascii);
-        sys::print(b"\n");
+        line[prefix.len() + 16] = b'\n';
+        sys::print(&line[..prefix.len() + 17]);
     }
 
     let _ = sys::dma_free(buf_va as u64, 0);
@@ -192,12 +211,18 @@ pub extern "C" fn _start() -> ! {
     );
     device.driver_ok();
 
-    // Print capacity.
-    sys::print(b"  \xF0\x9F\x94\x8C virtio - blk capacity=");
-
-    print_u64(capacity);
-
-    sys::print(b" sectors\n");
+    // Print capacity as a single line.
+    {
+        let mut buf = [0u8; 64];
+        let prefix = b"  \xF0\x9F\x94\x8C virtio - blk capacity=";
+        buf[..prefix.len()].copy_from_slice(prefix);
+        let mut pos = prefix.len();
+        pos += format_u64(capacity, &mut buf[pos..]);
+        let suffix = b" sectors\n";
+        buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+        pos += suffix.len();
+        sys::print(&buf[..pos]);
+    }
 
     // Read sector 0 if the device has any capacity.
     if capacity > 0 {

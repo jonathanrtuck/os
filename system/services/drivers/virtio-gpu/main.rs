@@ -34,6 +34,7 @@ const CHANNEL_SHM_BASE: usize = 0x4000_0000;
 const MSG_DEVICE_CONFIG: u32 = 1;
 const MSG_GPU_CONFIG: u32 = 2;
 const MSG_DISPLAY_INFO: u32 = 5;
+const MSG_GPU_READY: u32 = 8;
 const MSG_PRESENT: u32 = 20;
 /// Control virtqueue index.
 const VIRTQ_CONTROL: u32 = 0;
@@ -366,6 +367,29 @@ fn print_u32(mut n: u32) {
     }
 
     sys::print(&buf[i..]);
+}
+
+/// Format a u32 into a buffer, returning the number of bytes written.
+fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
+    if n == 0 {
+        buf[0] = b'0';
+        return 1;
+    }
+
+    let mut tmp = [0u8; 10];
+    let mut i = 10;
+
+    while n > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+
+    let len = 10 - i;
+
+    buf[..len].copy_from_slice(&tmp[i..]);
+
+    len
 }
 fn resource_create_2d(
     device: &virtio::Device,
@@ -708,11 +732,19 @@ pub extern "C" fn _start() -> ! {
     let width = if disp_w > 0 { disp_w } else { 1024 };
     let height = if disp_h > 0 { disp_h } else { 768 };
 
-    sys::print(b"     display ");
-    print_u32(width);
-    sys::print(b"x");
-    print_u32(height);
-    sys::print(b"\n");
+    {
+        let mut buf = [0u8; 32];
+        let prefix = b"     display ";
+        buf[..prefix.len()].copy_from_slice(prefix);
+        let mut pos = prefix.len();
+        pos += format_u32(width, &mut buf[pos..]);
+        buf[pos] = b'x';
+        pos += 1;
+        pos += format_u32(height, &mut buf[pos..]);
+        buf[pos] = b'\n';
+        pos += 1;
+        sys::print(&buf[..pos]);
+    }
 
     // Send display dimensions back to init so it can allocate framebuffers.
     let info_msg = unsafe {
@@ -773,6 +805,11 @@ pub extern "C" fn _start() -> ! {
     let present_cmd = DmaBuf::alloc(0);
 
     sys::print(b"     device setup complete, entering present loop\n");
+
+    // Signal init that device setup is complete (prevents serial interleaving).
+    let ready_msg = ipc::Message::new(MSG_GPU_READY);
+    ch.send(&ready_msg);
+    let _ = sys::channel_signal(INIT_HANDLE);
 
     // Channel 1: compositor present commands (endpoint 1 = receive side).
     let present_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
