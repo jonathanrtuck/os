@@ -747,12 +747,21 @@ fn rasterize_svg_icon(
                 &mut icon_cov,
                 icon_w,
                 icon_h,
-                drawing::SVG_FP_ONE,
+                drawing::SVG_FP_ONE * 3 / 2,
                 0,
                 0,
             ) {
                 Ok(()) => {
-                    let leaked = icon_cov.leak();
+                    // Convert single-channel SVG coverage to 3-channel (RGB)
+                    // for draw_coverage() which expects subpixel format.
+                    let mut rgb_cov = vec![0u8; icon_size * 3];
+                    for i in 0..icon_size {
+                        let c = icon_cov[i];
+                        rgb_cov[i * 3] = c;
+                        rgb_cov[i * 3 + 1] = c;
+                        rgb_cov[i * 3 + 2] = c;
+                    }
+                    let leaked = rgb_cov.leak();
                     Some((leaked.as_ptr(), icon_w, icon_h))
                 }
                 Err(_) => {
@@ -996,10 +1005,10 @@ fn render_image_content_surface(
     surf.blit_blend(image_data, image_w, image_h, image_stride, dst_x, dst_y);
 }
 /// Render the title bar chrome surface (translucent overlay).
-/// Layout: [icon] Untitled on the left, HH:MM:SS clock on the right.
+/// Layout: [icon] Text/Image on the left, HH:MM:SS clock on the right.
 /// Uses the proportional font (Nunito Sans) for all chrome text.
-/// The icon switches between a document icon and an image icon based
-/// on the current context (IMAGE_MODE).
+/// The icon and document name switch between text editor ("Text" + doc
+/// icon) and image viewer ("Image" + img icon) based on IMAGE_MODE.
 fn render_title_bar(surf: &mut drawing::Surface) {
     let prop_cache = unsafe { &*PROP_GLYPH_CACHE };
     let in_image_mode = unsafe { IMAGE_MODE };
@@ -1033,7 +1042,7 @@ fn render_title_bar(surf: &mut drawing::Surface) {
 
     if !icon_ptr.is_null() && icon_w > 0 && icon_h > 0 {
         let icon_coverage =
-            unsafe { core::slice::from_raw_parts(icon_ptr, (icon_w * icon_h) as usize) };
+            unsafe { core::slice::from_raw_parts(icon_ptr, (icon_w * icon_h * 3) as usize) };
         // Position icon vertically centered in the title bar, left margin = 10.
         let icon_x: i32 = 10;
         let icon_y: i32 = ((TITLE_BAR_H as i32 - icon_h as i32) / 2).max(0);
@@ -1063,12 +1072,14 @@ fn render_title_bar(surf: &mut drawing::Surface) {
         }
     };
 
-    // Document name (proportional font with kerning) — "Untitled" as default.
+    // Document name (proportional font with kerning) — "Text" or "Image"
+    // depending on the active context (text editor vs image viewer).
+    let doc_name: &[u8] = if in_image_mode { b"Image" } else { b"Text" };
     drawing::draw_proportional_string_kerned(
         surf,
         text_x,
         text_y,
-        b"Untitled",
+        doc_name,
         prop_cache,
         drawing::CHROME_TITLE,
         prop_font,
@@ -1385,9 +1396,9 @@ pub extern "C" fn _start() -> ! {
             };
 
             if let Some((ptr, w, h)) =
-                rasterize_svg_icon(svg_data, b"     parsing SVG doc icon\n", 20, 24)
+                rasterize_svg_icon(svg_data, b"     parsing SVG doc icon\n", 30, 36)
             {
-                sys::print(b"     SVG icon rasterized (20x24)\n");
+                sys::print(b"     SVG icon rasterized (30x36)\n");
 
                 unsafe {
                     ICON_COVERAGE = ptr;
@@ -1414,9 +1425,9 @@ pub extern "C" fn _start() -> ! {
             };
 
             if let Some((ptr, w, h)) =
-                rasterize_svg_icon(svg_data, b"     parsing image icon SVG\n", 20, 24)
+                rasterize_svg_icon(svg_data, b"     parsing image icon SVG\n", 30, 36)
             {
-                sys::print(b"     image icon rasterized (20x24)\n");
+                sys::print(b"     image icon rasterized (30x36)\n");
 
                 unsafe {
                     IMG_ICON_COVERAGE = ptr;

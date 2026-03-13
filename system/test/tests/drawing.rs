@@ -5293,7 +5293,7 @@ fn svg_icon_doc_has_antialiased_diagonal() {
 // ===========================================================================
 
 /// The image icon path data (same as system/share/img-icon.svg).
-const IMG_ICON_PATH: &[u8] = b"M 0 2 L 20 2 L 20 22 L 0 22 Z M 2 4 L 2 20 L 18 20 L 18 4 Z M 4 14 L 8 9 L 12 14 L 14 11 L 17 15 L 17 18 L 4 18 Z M 13 7 C 14 6 16 6 16 8 C 16 9 14 10 13 9 C 12 8 12 8 13 7 Z";
+const IMG_ICON_PATH: &[u8] = b"M 0 0 L 20 0 L 20 20 L 0 20 Z M 2 2 L 2 18 L 18 18 L 18 2 Z M 4 12 L 8 7 L 12 12 L 14 9 L 17 13 L 17 16 L 4 16 Z M 13 5 C 14 4 16 4 16 6 C 16 7 14 8 13 7 C 12 6 12 6 13 5 Z";
 
 #[test]
 fn svg_icon_img_parses_successfully() {
@@ -5352,12 +5352,12 @@ fn svg_icon_img_has_frame_border() {
 
     svg_rasterize(&path, &mut scratch, &mut coverage, 20, 24, 4096, 0, 0).unwrap();
 
-    // Top-left area of the frame border (pixel 0,3 should be filled since
-    // the outer rect is 0..20 x 2..22 and the inner cutout is 2..18 x 4..20).
-    let border_idx = 3 * 20 + 0;
+    // Top-left area of the frame border (pixel 0,1 should be filled since
+    // the outer rect is 0..20 x 0..20 and the inner cutout is 2..18 x 2..18).
+    let border_idx = 1 * 20 + 0;
     assert!(
         coverage[border_idx] > 100,
-        "Frame border at (0,3) should be filled, got {}",
+        "Frame border at (0,1) should be filled, got {}",
         coverage[border_idx]
     );
 
@@ -5369,6 +5369,65 @@ fn svg_icon_img_has_frame_border() {
     let total_filled = coverage.iter().filter(|&&c| c > 0).count();
     assert!(total_filled > 50, "Icon should not be mostly blank: {} filled", total_filled);
     let _ = interior_idx; // used only for documentation
+}
+
+#[test]
+fn svg_icon_doc_rasterizes_at_30x36_chrome_size() {
+    // The compositor now renders icons at 30×36 pixels (1.5× scale) to fit
+    // cleanly within the 36px title bar. Verify both icons produce clean output.
+    let path = svg_parse_path(DOC_ICON_PATH).unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 30 * 36];
+
+    // 1.5× scale = SVG_FP_ONE * 3 / 2 = 6144.
+    svg_rasterize(&path, &mut scratch, &mut coverage, 30, 36, 6144, 0, 0).unwrap();
+
+    let filled_count = coverage.iter().filter(|&&c| c > 0).count();
+    assert!(
+        filled_count > 200,
+        "Doc icon at 30x36 (1.5×) should have significant coverage, got {} filled pixels",
+        filled_count
+    );
+}
+
+#[test]
+fn svg_icon_img_rasterizes_at_30x36_chrome_size() {
+    // Image icon at 1.5× scale for the chrome title bar.
+    let path = svg_parse_path(IMG_ICON_PATH).unwrap();
+    let mut scratch = SvgRasterScratch::zeroed();
+    let mut coverage = [0u8; 30 * 36];
+
+    svg_rasterize(&path, &mut scratch, &mut coverage, 30, 36, 6144, 0, 0).unwrap();
+
+    let filled_count = coverage.iter().filter(|&&c| c > 0).count();
+    assert!(
+        filled_count > 150,
+        "Image icon at 30x36 (1.5×) should have significant coverage, got {} filled pixels",
+        filled_count
+    );
+}
+
+#[test]
+fn svg_icon_both_differ_at_30x36() {
+    // Both icons at chrome size (30×36) should still be clearly distinguishable.
+    let doc_path = svg_parse_path(DOC_ICON_PATH).unwrap();
+    let img_path = svg_parse_path(IMG_ICON_PATH).unwrap();
+    let mut doc_scratch = SvgRasterScratch::zeroed();
+    let mut img_scratch = SvgRasterScratch::zeroed();
+    let mut doc_cov = [0u8; 30 * 36];
+    let mut img_cov = [0u8; 30 * 36];
+
+    svg_rasterize(&doc_path, &mut doc_scratch, &mut doc_cov, 30, 36, 6144, 0, 0).unwrap();
+    svg_rasterize(&img_path, &mut img_scratch, &mut img_cov, 30, 36, 6144, 0, 0).unwrap();
+
+    let diff_count = doc_cov.iter().zip(img_cov.iter())
+        .filter(|(&a, &b)| (a as i16 - b as i16).unsigned_abs() > 30)
+        .count();
+    assert!(
+        diff_count > 80,
+        "Doc and image icons should differ significantly at 30x36, only {} pixels differ",
+        diff_count
+    );
 }
 
 // ---------------------------------------------------------------------------
