@@ -14,6 +14,7 @@ services:
       qemu-system-aarch64 \
         -machine virt,gic-version=2 \
         -cpu cortex-a53 -smp 4 -m 256M \
+        -rtc base=localtime \
         -global virtio-mmio.force-legacy=false \
         -drive "file=test.img,if=none,format=raw,id=hd0" \
         -device virtio-blk-device,drive=hd0 \
@@ -41,6 +42,7 @@ services:
         -global virtio-mmio.force-legacy=false \
         -drive "file=test.img,if=none,format=raw,id=hd0" \
         -device virtio-blk-device,drive=hd0 \
+        -rtc base=localtime \
         -device virtio-gpu-device,xres=1920,yres=1080 \
         -device virtio-keyboard-device \
         -fsdev "local,id=fsdev0,path=share,security_model=none" \
@@ -66,6 +68,7 @@ services:
         -global virtio-mmio.force-legacy=false \
         -drive "file=test.img,if=none,format=raw,id=hd0" \
         -device virtio-blk-device,drive=hd0 \
+        -rtc base=localtime \
         -device virtio-gpu-device -device virtio-keyboard-device \
         -device virtio-tablet-device \
         -fsdev "local,id=fsdev0,path=share,security_model=none" \

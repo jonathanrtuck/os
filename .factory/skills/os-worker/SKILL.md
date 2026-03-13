@@ -77,6 +77,7 @@ rm -f /tmp/qemu-mon.sock /tmp/qemu-serial.log /tmp/qemu-screen.ppm /tmp/qemu-scr
 cd /Users/user/Sites/os/system && qemu-system-aarch64 \
     -machine virt,gic-version=2 \
     -cpu cortex-a53 -smp 4 -m 256M \
+    -rtc base=localtime \
     -global virtio-mmio.force-legacy=false \
     -drive "file=test.img,if=none,format=raw,id=hd0" \
     -device virtio-blk-device,drive=hd0 \
