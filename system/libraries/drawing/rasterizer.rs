@@ -10,9 +10,9 @@ const MAX_SEGMENTS: usize = 2048;
 /// Maximum edges active on a single scanline.
 const MAX_ACTIVE_EDGES: usize = 64;
 /// Horizontal oversampling factor for anti-aliasing.
-/// Rasterise at OVERSAMPLE_X × width, then downsample to produce smooth
-/// horizontal edges on vertical and diagonal strokes.
-pub const OVERSAMPLE_X: i32 = 2;
+/// Rasterise at OVERSAMPLE_X × width, then downsample into per-channel
+/// (R, G, B) subpixel coverage. 6 = 3 subpixels × 2× oversampling each.
+pub const OVERSAMPLE_X: i32 = 6;
 /// Vertical oversampling factor for anti-aliasing.
 pub const OVERSAMPLE_Y: i32 = 4;
 /// Fixed-point 20.12 format for sub-pixel precision.

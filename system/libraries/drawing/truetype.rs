@@ -748,12 +748,19 @@ impl<'a> TrueTypeFont<'a> {
             return None; // Exceeds caller's buffer.
         }
 
-        // 2D oversampling: rasterize at OVERSAMPLE_X × width, then
-        // downsample horizontally for smoother edges on vertical/diagonal
-        // strokes. Vertical oversampling (OVERSAMPLE_Y) is already handled
-        // by sub-scanlines within rasterize_segments.
+        // Subpixel rendering: rasterize at OVERSAMPLE_X × width (6× = 3
+        // sub-pixels × 2× oversampling each), then downsample into 3 channels
+        // (R, G, B) for LCD subpixel coverage. Vertical oversampling
+        // (OVERSAMPLE_Y) is already handled by sub-scanlines in
+        // rasterize_segments.
+        //
+        // OVERSAMPLE_X must be 6 for subpixel rendering (3 sub-pixels × 2).
+        // Each output pixel gets 3 bytes: R from columns [0..1], G from
+        // columns [2..3], B from columns [4..5] of the oversampled row.
         let over_w = bmp_w * OVERSAMPLE_X as u32;
         let over_total = (over_w * bmp_h) as usize;
+        // Output is 3 bytes per pixel (RGB coverage).
+        let out_total = (bmp_w * bmp_h * 3) as usize;
 
         if over_total > buffer.data.len() {
             return None;
@@ -778,26 +785,81 @@ impl<'a> TrueTypeFont<'a> {
         // Rasterize at oversampled width.
         rasterize_segments(scratch, &mut buffer.data[..over_total], over_w, bmp_h);
 
-        // Downsample horizontally: average OVERSAMPLE_X adjacent samples per
-        // output pixel. The oversampled buffer is over_w × bmp_h; the output
-        // is bmp_w × bmp_h written into the beginning of the same buffer.
-        // Safe to write in-place because dst_idx <= src_base for all pixels
-        // (output row is narrower than oversampled row, and we process
-        // left-to-right, top-to-bottom).
-        let ox = OVERSAMPLE_X as u32;
+        // Downsample into 3-channel (RGB) subpixel coverage.
+        //
+        // For each output pixel, the 6 oversampled columns map to:
+        //   R = average of columns [0, 1] (sub-pixel 0)
+        //   G = average of columns [2, 3] (sub-pixel 1)
+        //   B = average of columns [4, 5] (sub-pixel 2)
+        //
+        // We write the 3-channel output into the beginning of the same buffer.
+        // Safe because out_total (W*H*3) <= over_total (W*H*6) always, and
+        // we process left-to-right, top-to-bottom so dst never overtakes src.
+        let samples_per_channel = (OVERSAMPLE_X / 3) as u32; // 2
 
         for row in 0..bmp_h {
             for col in 0..bmp_w {
-                let src_base = (row * over_w + col * ox) as usize;
-                let mut sum = 0u32;
+                let src_base = (row * over_w + col * OVERSAMPLE_X as u32) as usize;
+                let dst_base = (row * bmp_w * 3 + col * 3) as usize;
 
-                for s in 0..ox {
-                    sum += buffer.data[src_base + s as usize] as u32;
+                // R channel: average of first 2 oversampled columns.
+                let mut sum_r = 0u32;
+                for s in 0..samples_per_channel {
+                    sum_r += buffer.data[src_base + s as usize] as u32;
                 }
 
-                let dst_idx = (row * bmp_w + col) as usize;
+                // G channel: average of middle 2 oversampled columns.
+                let mut sum_g = 0u32;
+                for s in 0..samples_per_channel {
+                    sum_g += buffer.data[src_base + samples_per_channel as usize + s as usize] as u32;
+                }
 
-                buffer.data[dst_idx] = (sum / ox) as u8;
+                // B channel: average of last 2 oversampled columns.
+                let mut sum_b = 0u32;
+                for s in 0..samples_per_channel {
+                    sum_b += buffer.data[src_base + 2 * samples_per_channel as usize + s as usize] as u32;
+                }
+
+                buffer.data[dst_base] = (sum_r / samples_per_channel) as u8;
+                buffer.data[dst_base + 1] = (sum_g / samples_per_channel) as u8;
+                buffer.data[dst_base + 2] = (sum_b / samples_per_channel) as u8;
+            }
+        }
+
+        // Apply 3-tap low-pass FIR filter [1/4, 1/2, 1/4] to reduce color
+        // fringing. The filter runs across the 3*W subpixel samples in each
+        // row, treating all R, G, B values as a flat stream of sub-pixels.
+        //
+        // The filter smooths sharp transitions between channels, reducing the
+        // visible colored edges at glyph boundaries while preserving overall
+        // sharpness.
+        //
+        // We need a temporary row buffer for the filter (max 48*3 = 144 bytes).
+        {
+            let stride3 = (bmp_w * 3) as usize;
+            // Temporary buffer for one row of subpixel data.
+            let mut tmp = [0u8; GLYPH_MAX_W * 3];
+
+            for row in 0..bmp_h {
+                let row_start = (row * bmp_w * 3) as usize;
+
+                // Copy current row to temporary buffer.
+                for i in 0..stride3 {
+                    tmp[i] = buffer.data[row_start + i];
+                }
+
+                // Apply FIR filter: out[i] = tmp[i-1]/4 + tmp[i]/2 + tmp[i+1]/4
+                // Boundary: clamp to edge (repeat edge value).
+                for i in 0..stride3 {
+                    let prev = if i > 0 { tmp[i - 1] as u32 } else { tmp[0] as u32 };
+                    let curr = tmp[i] as u32;
+                    let next = if i + 1 < stride3 { tmp[i + 1] as u32 } else { tmp[stride3 - 1] as u32 };
+
+                    // [1/4, 1/2, 1/4] = (prev + 2*curr + next) / 4
+                    let filtered = (prev + 2 * curr + next + 2) / 4;
+
+                    buffer.data[row_start + i] = if filtered > 255 { 255 } else { filtered as u8 };
+                }
             }
         }
 

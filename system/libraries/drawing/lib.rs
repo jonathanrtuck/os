@@ -37,7 +37,12 @@ const GLYPH_MAX_H: usize = 48;
 /// Per-glyph coverage buffer size. Must accommodate the intermediate
 /// oversampled raster (GLYPH_MAX_W * OVERSAMPLE_X * GLYPH_MAX_H) since
 /// rasterize() uses the same buffer for the oversampled coverage map before
-/// downsampling in-place.
+/// downsampling in-place. With subpixel rendering, the final coverage is
+/// 3 bytes per pixel (RGB), so GLYPH_MAX_W * 3 * GLYPH_MAX_H for the output.
+/// We need the max of (oversampled intermediate, 3-channel output).
+/// Oversampled = GLYPH_MAX_W * 6 * GLYPH_MAX_H = 48*6*48 = 13824.
+/// 3-channel output = GLYPH_MAX_W * 3 * GLYPH_MAX_H = 48*3*48 = 6912.
+/// So the oversampled intermediate is always larger.
 const GLYPH_BUF_SIZE: usize = GLYPH_MAX_W * OVERSAMPLE_X as usize * GLYPH_MAX_H;
 
 /// Built-in 8×16 VGA-style bitmap font covering printable ASCII (0x20–0x7E).
@@ -237,6 +242,9 @@ impl Color {
 }
 impl GlyphCache {
     /// Get cached glyph data for a character (must be 0x20..=0x7E).
+    ///
+    /// Returns 3-channel (RGB) subpixel coverage: 3 bytes per pixel
+    /// (R, G, B coverage), stored row-major. Total length = width * height * 3.
     pub fn get(&self, ch: u8) -> Option<(&CachedGlyph, &[u8])> {
         if ch < GLYPH_FIRST || ch > GLYPH_LAST {
             return None;
@@ -244,13 +252,17 @@ impl GlyphCache {
 
         let idx = (ch - GLYPH_FIRST) as usize;
         let g = &self.glyphs[idx];
-        let len = (g.width * g.height) as usize;
+        let len = (g.width * g.height) as usize * 3; // 3 channels (RGB)
         let cov = &self.coverage[g.buf_offset..g.buf_offset + len];
 
         Some((g, cov))
     }
     /// Rasterize all printable ASCII glyphs into this cache in place.
     /// Caller provides scratch space (~60 KiB) to avoid stack overflow.
+    ///
+    /// With subpixel rendering, the rasterizer writes 3-channel (RGB)
+    /// coverage: width × height × 3 bytes per glyph. The GLYPH_BUF_SIZE
+    /// accommodates the oversampled intermediate (which is always larger).
     pub fn populate(&mut self, font: &TrueTypeFont, size_px: u32, scratch: &mut RasterScratch) {
         self.line_height = size_px + size_px / 4;
 
@@ -395,17 +407,19 @@ impl<'a> Surface<'a> {
     pub fn clear(&mut self, color: Color) {
         self.fill_rect(0, 0, self.width, self.height, color);
     }
-    /// Draw a coverage map (anti-aliased glyph) at position (x, y) in the
-    /// given color. Each byte in the coverage map modulates the color's alpha.
+    /// Draw a 3-channel subpixel coverage map (anti-aliased glyph) at
+    /// position (x, y) in the given color. The coverage data has 3 bytes
+    /// per pixel (R, G, B coverage), stored row-major:
+    /// `coverage[(row * cov_width + col) * 3 + channel]` where channel
+    /// 0=R, 1=G, 2=B.
     ///
-    /// Blending is performed in linear light (sRGB gamma-correct): destination
-    /// pixels are converted to linear space, blended with the coverage-modulated
-    /// source color, then converted back to sRGB. This produces perceptually
-    /// correct stroke weights (fixes the "wispy text" problem where thin strokes
-    /// appear too light with naive linear-in-sRGB blending).
+    /// Each channel's coverage independently modulates the corresponding
+    /// color channel's alpha, enabling LCD subpixel rendering (RGB sub-pixel
+    /// order). This produces crisper text than greyscale antialiasing by
+    /// exploiting the separate R, G, B sub-pixels of LCD displays.
     ///
-    /// `x` and `y` can be negative (glyph bearings may position the bitmap
-    /// outside the pen origin). Clips to surface bounds.
+    /// Blending is performed in linear light (sRGB gamma-correct) per
+    /// channel. `x` and `y` can be negative. Clips to surface bounds.
     pub fn draw_coverage(
         &mut self,
         x: i32,
@@ -422,15 +436,18 @@ impl<'a> Surface<'a> {
 
         for row in 0..cov_height {
             for col in 0..cov_width {
-                let idx = (row * cov_width + col) as usize;
+                let base = ((row * cov_width + col) * 3) as usize;
 
-                if idx >= coverage.len() {
+                if base + 2 >= coverage.len() {
                     return;
                 }
 
-                let cov = coverage[idx];
+                let cov_r = coverage[base];
+                let cov_g = coverage[base + 1];
+                let cov_b = coverage[base + 2];
 
-                if cov == 0 {
+                // Skip if all channels are zero.
+                if cov_r == 0 && cov_g == 0 && cov_b == 0 {
                     continue;
                 }
 
@@ -444,11 +461,13 @@ impl<'a> Surface<'a> {
                 let ux = px as u32;
                 let uy = py as u32;
 
-                // Effective alpha: color.a * coverage / 255.
-                let alpha = (color.a as u32 * cov as u32 + 127) / 255;
+                // Per-channel effective alpha: color.a * channel_coverage / 255.
+                let alpha_r = (color.a as u32 * cov_r as u32 + 127) / 255;
+                let alpha_g = (color.a as u32 * cov_g as u32 + 127) / 255;
+                let alpha_b = (color.a as u32 * cov_b as u32 + 127) / 255;
 
-                if alpha >= 255 {
-                    // Full coverage + opaque color: just write the source.
+                // Fast path: all channels full coverage + opaque color.
+                if alpha_r >= 255 && alpha_g >= 255 && alpha_b >= 255 {
                     self.set_pixel(ux, uy, color);
                     continue;
                 }
@@ -459,20 +478,23 @@ impl<'a> Surface<'a> {
                     let dst_g_lin = SRGB_TO_LINEAR[dst.g as usize] as u32;
                     let dst_b_lin = SRGB_TO_LINEAR[dst.b as usize] as u32;
 
-                    // Blend in linear space: out = dst * (1 - alpha/255) + src * alpha/255.
-                    let inv_alpha = 255 - alpha;
-                    let out_r_lin = (dst_r_lin * inv_alpha + src_r_lin * alpha + 127) / 255;
-                    let out_g_lin = (dst_g_lin * inv_alpha + src_g_lin * alpha + 127) / 255;
-                    let out_b_lin = (dst_b_lin * inv_alpha + src_b_lin * alpha + 127) / 255;
+                    // Blend each channel independently in linear space.
+                    let inv_r = 255 - alpha_r;
+                    let inv_g = 255 - alpha_g;
+                    let inv_b = 255 - alpha_b;
+                    let out_r_lin = (dst_r_lin * inv_r + src_r_lin * alpha_r + 127) / 255;
+                    let out_g_lin = (dst_g_lin * inv_g + src_g_lin * alpha_g + 127) / 255;
+                    let out_b_lin = (dst_b_lin * inv_b + src_b_lin * alpha_b + 127) / 255;
 
-                    // Convert back to sRGB (table is indexed by linear >> 4).
+                    // Convert back to sRGB.
                     let out_r = LINEAR_TO_SRGB[linear_to_idx(out_r_lin)];
                     let out_g = LINEAR_TO_SRGB[linear_to_idx(out_g_lin)];
                     let out_b = LINEAR_TO_SRGB[linear_to_idx(out_b_lin)];
 
-                    // Alpha: blend destination alpha in sRGB space (alpha is perceptually
-                    // uniform already). For opaque destinations this is always 255.
-                    let out_a = dst.a as u32 + alpha * (255 - dst.a as u32) / 255;
+                    // Alpha: use max channel alpha for the output alpha.
+                    let max_alpha = if alpha_r > alpha_g { alpha_r } else { alpha_g };
+                    let max_alpha = if alpha_b > max_alpha { alpha_b } else { max_alpha };
+                    let out_a = dst.a as u32 + max_alpha * (255 - dst.a as u32) / 255;
 
                     self.set_pixel(ux, uy, Color {
                         r: out_r,

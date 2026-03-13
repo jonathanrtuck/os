@@ -12,6 +12,23 @@ use drawing::{Color, PixelFormat, Surface, TextLayout, FONT_8X16};
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Heap-allocate a zeroed GlyphCache without touching the stack.
+///
+/// GlyphCache is ~1.3 MB with OVERSAMPLE_X=6, which overflows test thread
+/// stacks if allocated via `Box::new(GlyphCache::zeroed())` (the value is
+/// constructed on stack before moving to heap). This uses `Box::new_uninit`
+/// + zero-fill to avoid that.
+fn heap_glyph_cache() -> Box<drawing::GlyphCache> {
+    unsafe {
+        let layout = std::alloc::Layout::new::<drawing::GlyphCache>();
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
+        if ptr.is_null() {
+            std::alloc::handle_alloc_error(layout);
+        }
+        Box::from_raw(ptr)
+    }
+}
+
 /// Create a small test surface (zeroed buffer).
 fn make_surface(buf: &mut [u8], width: u32, height: u32) -> Surface<'_> {
     let bpp = PixelFormat::Bgra8888.bytes_per_pixel();
@@ -1272,8 +1289,15 @@ fn draw_coverage_basic() {
     let mut dst = make_surface(&mut dst_buf, 8, 8);
     dst.clear(Color::BLACK);
 
-    // 2x2 coverage map with varying coverage.
-    let coverage = [255u8, 128, 64, 0];
+    // 2x2 coverage map with varying coverage (3-channel: RGB per pixel).
+    // Pixel (0,0): full coverage on all channels.
+    // Pixel (1,0): half coverage on all channels.
+    // Pixel (0,1): quarter coverage on all channels.
+    // Pixel (1,1): zero coverage on all channels.
+    let coverage = [
+        255, 255, 255,  128, 128, 128,  // row 0: full, half
+         64,  64,  64,    0,   0,   0,  // row 1: quarter, zero
+    ];
     dst.draw_coverage(2, 2, &coverage, 2, 2, Color::WHITE);
 
     // Full coverage → white.
@@ -1296,7 +1320,8 @@ fn draw_coverage_negative_coords_clip() {
     let mut dst = make_surface(&mut dst_buf, 8, 8);
 
     // Place at negative coords — should clip without panic.
-    let coverage = [255u8; 4];
+    // 2x2 coverage, 3-channel (RGB). All full coverage.
+    let coverage = [255u8; 12]; // 2*2*3 = 12 bytes
     dst.draw_coverage(-1, -1, &coverage, 2, 2, Color::WHITE);
 
     // (0, 0) should be drawn (it's at local (1, 1) of the coverage map).
@@ -1310,7 +1335,8 @@ fn draw_coverage_colored() {
     let mut dst = make_surface(&mut dst_buf, 8, 8);
     dst.clear(Color::BLACK);
 
-    let coverage = [255u8; 1];
+    // 1x1 pixel, 3-channel (RGB) coverage, all channels full.
+    let coverage = [255u8, 255, 255];
     dst.draw_coverage(0, 0, &coverage, 1, 1, Color::rgb(255, 0, 0));
 
     let p = dst.get_pixel(0, 0).unwrap();
@@ -1625,8 +1651,8 @@ fn gamma_blend_zero_coverage_unchanged() {
     // Read the original pixel value.
     let orig = dst.get_pixel(0, 0).unwrap();
 
-    // Draw with zero coverage.
-    let coverage = [0u8; 4];
+    // Draw with zero coverage (3-channel: 2x2 pixels * 3 = 12 bytes).
+    let coverage = [0u8; 12];
     dst.draw_coverage(0, 0, &coverage, 2, 2, Color::WHITE);
 
     // Pixel must be identical.
@@ -1641,7 +1667,8 @@ fn gamma_blend_full_coverage_replaces() {
     let mut dst = make_surface(&mut dst_buf, 4, 4);
     dst.clear(Color::rgb(0, 0, 255));
 
-    let coverage = [255u8; 1];
+    // 1x1 pixel, 3-channel (RGB), all full coverage.
+    let coverage = [255u8, 255, 255];
     dst.draw_coverage(0, 0, &coverage, 1, 1, Color::rgb(255, 0, 0));
 
     let p = dst.get_pixel(0, 0).unwrap();
@@ -1659,7 +1686,8 @@ fn gamma_blend_half_coverage_heavier_than_linear() {
     let mut dst = make_surface(&mut dst_buf, 4, 4);
     dst.clear(Color::BLACK);
 
-    let coverage = [128u8; 1]; // ~50% coverage
+    // 1x1 pixel, 3-channel (RGB), all channels at 50% coverage.
+    let coverage = [128u8, 128, 128]; // ~50% coverage
     dst.draw_coverage(0, 0, &coverage, 1, 1, Color::WHITE);
 
     let p = dst.get_pixel(0, 0).unwrap();
@@ -1713,7 +1741,8 @@ fn gamma_draw_coverage_uses_gamma_correction() {
     let mut dst = make_surface(&mut dst_buf, 4, 4);
     dst.clear(Color::BLACK);
 
-    let coverage = [128u8; 1];
+    // 1x1 pixel, 3-channel (RGB), all at 50% coverage.
+    let coverage = [128u8, 128, 128];
     dst.draw_coverage(0, 0, &coverage, 1, 1, Color::WHITE);
 
     let p = dst.get_pixel(0, 0).unwrap();
@@ -1765,9 +1794,8 @@ fn oversampled_rasterize_produces_intermediate_coverage() {
     assert!(metrics.width > 0 && metrics.height > 0);
 
     // Check that there are intermediate coverage values (not just 0 and 255)
-    // along the edges. With 2D oversampling, horizontal edges should have
-    // smooth gradients.
-    let total = (metrics.width * metrics.height) as usize;
+    // along the edges. With subpixel rendering, output is 3 bytes per pixel.
+    let total = (metrics.width * metrics.height * 3) as usize;
     let coverage = &buf[..total];
 
     let intermediate_count = coverage.iter().filter(|&&c| c > 0 && c < 255).count();
@@ -1779,8 +1807,8 @@ fn oversampled_rasterize_produces_intermediate_coverage() {
 
 #[test]
 fn oversampled_diagonal_has_horizontal_gradients() {
-    // With horizontal oversampling, diagonal strokes should show smooth
-    // horizontal transitions. Check 'x' which has strong diagonals.
+    // With horizontal oversampling + subpixel rendering, diagonal strokes
+    // should show smooth horizontal transitions. Check 'x' which has diagonals.
     let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let mut scratch = RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
@@ -1788,13 +1816,14 @@ fn oversampled_diagonal_has_horizontal_gradients() {
 
     let metrics = font.rasterize('x', 24, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
-    let total = (w * metrics.height) as usize;
+    // Output is 3 bytes per pixel (RGB subpixel coverage).
+    let total = (w * metrics.height * 3) as usize;
     let coverage = &buf[..total];
 
     // Find a row in the middle of the glyph (where diagonals cross).
     let mid_row = metrics.height / 2;
-    let row_start = (mid_row * w) as usize;
-    let row_end = row_start + w as usize;
+    let row_start = (mid_row * w * 3) as usize;
+    let row_end = row_start + (w * 3) as usize;
     let row = &coverage[row_start..row_end];
 
     // The middle row should have some intermediate values along edges.
@@ -1807,7 +1836,7 @@ fn oversampled_diagonal_has_horizontal_gradients() {
 
 #[test]
 fn oversampled_curve_has_smooth_edges() {
-    // Curved characters like 'o' should have smooth edges with 2D oversampling.
+    // Curved characters like 'o' should have smooth edges with subpixel rendering.
     let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let mut scratch = RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
@@ -1815,7 +1844,8 @@ fn oversampled_curve_has_smooth_edges() {
 
     let metrics = font.rasterize('o', 24, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
-    let total = (w * metrics.height) as usize;
+    // Output is 3 bytes per pixel (RGB subpixel coverage).
+    let total = (w * metrics.height * 3) as usize;
     let coverage = &buf[..total];
 
     // Count distinct non-zero coverage levels (more levels = smoother).
@@ -1827,8 +1857,8 @@ fn oversampled_curve_has_smooth_edges() {
     }
     let distinct_levels = levels.iter().filter(|&&v| v).count();
 
-    // With 2D oversampling (OVERSAMPLE_X*OVERSAMPLE_Y = 8 samples per pixel),
-    // we expect more than 4 distinct coverage levels at minimum.
+    // With 6× horizontal oversampling (OVERSAMPLE_X*OVERSAMPLE_Y = 24
+    // samples per channel), we expect more than 4 distinct levels at minimum.
     assert!(
         distinct_levels >= 4,
         "'o' should have at least 4 distinct non-zero coverage levels, got {}",
@@ -1858,10 +1888,11 @@ fn oversampled_all_printable_ascii_still_rasterize() {
 
 #[test]
 fn oversampled_glyph_cache_populated() {
-    // GlyphCache should still populate correctly with 2D oversampling.
+    // GlyphCache should still populate correctly with subpixel rendering.
     let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
     let mut scratch = RasterScratch::zeroed();
-    let mut cache = drawing::GlyphCache::zeroed();
+    // Heap-allocate: GlyphCache is ~1.3 MB with OVERSAMPLE_X=6 (too big for stack).
+    let mut cache = heap_glyph_cache();
 
     cache.populate(&font, 16, &mut scratch);
 
@@ -1869,6 +1900,11 @@ fn oversampled_glyph_cache_populated() {
     let (g_a, cov_a) = cache.get(b'A').unwrap();
     assert!(g_a.width > 0 && g_a.height > 0, "'A' should have non-zero cached dimensions");
     assert!(cov_a.len() > 0, "'A' coverage should be non-empty");
+    // Coverage length should be 3× (width * height) for RGB subpixel.
+    assert_eq!(
+        cov_a.len(), (g_a.width * g_a.height * 3) as usize,
+        "'A' coverage should be 3 bytes per pixel (RGB subpixel)"
+    );
 
     let (g_k, cov_k) = cache.get(b'k').unwrap();
     assert!(g_k.width > 0 && g_k.height > 0);
@@ -1876,6 +1912,201 @@ fn oversampled_glyph_cache_populated() {
     // Check coverage has intermediate values (smooth edges).
     let has_intermediate = cov_k.iter().any(|&c| c > 0 && c < 255);
     assert!(has_intermediate, "'k' cached coverage should have intermediate values");
+}
+
+// ---------------------------------------------------------------------------
+// Subpixel rendering tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn subpixel_oversample_x_is_6() {
+    // OVERSAMPLE_X must be 6 for subpixel rendering (3 sub-pixels × 2× each).
+    assert_eq!(
+        OVERSAMPLE_X, 6,
+        "OVERSAMPLE_X must be 6 for subpixel rendering, got {}",
+        OVERSAMPLE_X,
+    );
+}
+
+#[test]
+fn subpixel_coverage_has_3_channels() {
+    // Rasterized glyph coverage should be 3 bytes per pixel (R, G, B).
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+
+    let metrics = font.rasterize('H', 24, &mut raster, &mut scratch).unwrap();
+    assert!(metrics.width > 0 && metrics.height > 0);
+
+    // Total output bytes should be width * height * 3.
+    let expected_bytes = (metrics.width * metrics.height * 3) as usize;
+
+    // Verify the data region is valid (non-zero coverage exists).
+    let coverage = &buf[..expected_bytes];
+    let has_nonzero = coverage.iter().any(|&c| c > 0);
+    assert!(has_nonzero, "'H' subpixel coverage should have non-zero values");
+}
+
+#[test]
+fn subpixel_rgb_channels_differ_at_edges() {
+    // At glyph edges, the R, G, B coverage channels should differ — this is
+    // the signature of subpixel rendering. In greyscale AA, all channels are
+    // equal; in subpixel, they diverge at horizontal edges.
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+
+    let metrics = font.rasterize('l', 24, &mut raster, &mut scratch).unwrap();
+    let w = metrics.width;
+    let h = metrics.height;
+    let total = (w * h * 3) as usize;
+    let coverage = &buf[..total];
+
+    // Find pixels where R != G or G != B (subpixel color fringing).
+    let mut rgb_differ_count = 0;
+    for pixel in 0..(w * h) as usize {
+        let r = coverage[pixel * 3];
+        let g = coverage[pixel * 3 + 1];
+        let b = coverage[pixel * 3 + 2];
+        // Only count pixels at edges (partial coverage, not fully on or off).
+        if (r > 0 || g > 0 || b > 0) && (r < 255 || g < 255 || b < 255) {
+            if r != g || g != b {
+                rgb_differ_count += 1;
+            }
+        }
+    }
+
+    assert!(
+        rgb_differ_count > 0,
+        "subpixel rendering should produce pixels where R != G != B at glyph edges, found 0"
+    );
+}
+
+#[test]
+fn subpixel_monospace_cache_has_3_channel_coverage() {
+    // Both the monospace (Source Code Pro) cache should produce 3-channel data.
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut cache = heap_glyph_cache();
+    cache.populate(&font, 16, &mut scratch);
+
+    let (g, cov) = cache.get(b'A').unwrap();
+    assert_eq!(
+        cov.len(), (g.width * g.height * 3) as usize,
+        "monospace cache: coverage should be 3 bytes per pixel"
+    );
+
+    // Check that RGB channels differ at some edge pixels.
+    let mut has_rgb_diff = false;
+    for pixel in 0..(g.width * g.height) as usize {
+        let r = cov[pixel * 3];
+        let g_ch = cov[pixel * 3 + 1];
+        let b = cov[pixel * 3 + 2];
+        if r != g_ch || g_ch != b {
+            if r > 0 || g_ch > 0 || b > 0 {
+                has_rgb_diff = true;
+                break;
+            }
+        }
+    }
+    assert!(has_rgb_diff, "monospace cache 'A': subpixel rendering should produce R!=G!=B at edges");
+}
+
+#[test]
+fn subpixel_proportional_cache_has_3_channel_coverage() {
+    // The proportional (Nunito Sans) cache should produce 3-channel data.
+    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut cache = heap_glyph_cache();
+    cache.populate(&font, 16, &mut scratch);
+
+    let (g, cov) = cache.get(b'A').unwrap();
+    assert_eq!(
+        cov.len(), (g.width * g.height * 3) as usize,
+        "proportional cache: coverage should be 3 bytes per pixel"
+    );
+
+    // Check that RGB channels differ at some edge pixels.
+    let mut has_rgb_diff = false;
+    for pixel in 0..(g.width * g.height) as usize {
+        let r = cov[pixel * 3];
+        let g_ch = cov[pixel * 3 + 1];
+        let b = cov[pixel * 3 + 2];
+        if r != g_ch || g_ch != b {
+            if r > 0 || g_ch > 0 || b > 0 {
+                has_rgb_diff = true;
+                break;
+            }
+        }
+    }
+    assert!(has_rgb_diff, "proportional cache 'A': subpixel rendering should produce R!=G!=B at edges");
+}
+
+#[test]
+fn subpixel_draw_coverage_rgb_per_channel_blend() {
+    // Verify that draw_coverage with different R, G, B coverage values
+    // produces per-channel blending (R, G, B of output differ).
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    // 1x1 pixel: R=255 (full), G=128 (half), B=0 (zero).
+    let coverage = [255u8, 128, 0];
+    dst.draw_coverage(0, 0, &coverage, 1, 1, Color::WHITE);
+
+    let p = dst.get_pixel(0, 0).unwrap();
+    // R channel: full coverage of white on black → white.
+    assert_eq!(p.r, 255, "R channel with full coverage should be 255");
+    // G channel: half coverage → intermediate (gamma-correct, so > 128).
+    assert!(p.g > 128 && p.g < 255, "G channel with half coverage should be intermediate, got {}", p.g);
+    // B channel: zero coverage → unchanged (black).
+    assert_eq!(p.b, 0, "B channel with zero coverage should be 0");
+}
+
+#[test]
+fn subpixel_fir_filter_reduces_fringing() {
+    // The FIR filter should smooth the transition between channels.
+    // Rasterize a vertical stroke ('l') and check that the filtered
+    // coverage has smoother channel transitions than raw subpixel data.
+    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = RasterBuffer { data: &mut buf, width: 128, height: 128 };
+
+    let metrics = font.rasterize('l', 24, &mut raster, &mut scratch).unwrap();
+    let w = metrics.width;
+    let h = metrics.height;
+    let total = (w * h * 3) as usize;
+    let coverage = &buf[..total];
+
+    // At edge pixels, the maximum difference between any two channels
+    // should be limited by the FIR filter. Count high-contrast transitions.
+    let mut max_channel_diff = 0u8;
+    for pixel in 0..(w * h) as usize {
+        let r = coverage[pixel * 3];
+        let g = coverage[pixel * 3 + 1];
+        let b = coverage[pixel * 3 + 2];
+        let diff_rg = if r > g { r - g } else { g - r };
+        let diff_gb = if g > b { g - b } else { b - g };
+        let diff_rb = if r > b { r - b } else { b - r };
+        let max_d = if diff_rg > diff_gb { diff_rg } else { diff_gb };
+        let max_d = if diff_rb > max_d { diff_rb } else { max_d };
+        if max_d > max_channel_diff {
+            max_channel_diff = max_d;
+        }
+    }
+
+    // The FIR filter should keep max channel difference < 255
+    // (i.e., we never have R=255,B=0 — the filter smooths that).
+    // With a [1/4, 1/2, 1/4] filter, the max difference should be
+    // significantly less than 255 for most glyphs.
+    assert!(
+        max_channel_diff < 200,
+        "FIR filter should reduce channel difference below 200, got {}",
+        max_channel_diff,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1887,7 +2118,7 @@ fn proportional_glyph_cache_advance_i_less_than_m() {
     // VAL-FONT-004: advance('i') < advance('m') — variable widths confirmed.
     let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
     let mut scratch = RasterScratch::zeroed();
-    let mut cache = drawing::GlyphCache::zeroed();
+    let mut cache = heap_glyph_cache();
 
     cache.populate(&font, 16, &mut scratch);
 
@@ -1905,7 +2136,7 @@ fn proportional_glyph_cache_advance_i_less_than_m() {
 fn proportional_glyph_cache_has_valid_glyphs() {
     let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
     let mut scratch = RasterScratch::zeroed();
-    let mut cache = drawing::GlyphCache::zeroed();
+    let mut cache = heap_glyph_cache();
 
     cache.populate(&font, 16, &mut scratch);
 
@@ -1924,7 +2155,7 @@ fn proportional_glyph_cache_variable_advances() {
     // Multiple different advance widths exist (not monospace).
     let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
     let mut scratch = RasterScratch::zeroed();
-    let mut cache = drawing::GlyphCache::zeroed();
+    let mut cache = heap_glyph_cache();
 
     cache.populate(&font, 16, &mut scratch);
 
@@ -1961,7 +2192,7 @@ fn draw_proportional_string_advances_by_glyph_width() {
     // Test that draw_proportional_string uses per-glyph advance widths.
     let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
     let mut scratch = RasterScratch::zeroed();
-    let mut cache = drawing::GlyphCache::zeroed();
+    let mut cache = heap_glyph_cache();
 
     cache.populate(&font, 16, &mut scratch);
 
@@ -1990,7 +2221,7 @@ fn draw_proportional_string_missing_glyph_uses_fallback() {
     // fallback width (space width) without crashing.
     let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
     let mut scratch = RasterScratch::zeroed();
-    let mut cache = drawing::GlyphCache::zeroed();
+    let mut cache = heap_glyph_cache();
 
     cache.populate(&font, 16, &mut scratch);
 
