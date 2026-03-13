@@ -1272,12 +1272,14 @@ pub extern "C" fn _start() -> ! {
     // Event loop: wait for input, editor write requests, or timer.
     //
     // On each content change or timer tick:
-    //   1. Re-render the content surface (only on content change)
-    //   2. Re-render the status bar surface (char count + clock)
-    //   3. Composite all surfaces into the back framebuffer
-    //   4. Present the back buffer to the GPU
+    //   1. Compute dirty rects (which framebuffer regions changed)
+    //   2. Re-render the affected surfaces
+    //   3. Composite only the dirty regions into the back framebuffer
+    //   4. Present the back buffer with dirty rects for partial GPU transfer
     //   5. Swap back/front buffers
     // -----------------------------------------------------------------------
+    let mut first_present_done = false;
+
     loop {
         // Build the wait handle set: input + editor + optional timer.
         let timer_active = unsafe { TIMER_ACTIVE };
@@ -1292,6 +1294,13 @@ pub extern "C" fn _start() -> ! {
         let _ = wait_result;
         let mut changed = false;
         let mut timer_fired = false;
+        let mut context_switched = false;
+
+        // Snapshot cursor/text state before processing events so we can
+        // compute which visual lines changed afterward.
+        let old_cursor = unsafe { CURSOR_POS };
+        let old_doc_len = unsafe { DOC_LEN };
+        let old_scroll = unsafe { SCROLL_OFFSET };
 
         // Check if the timer fired: the timer handle becomes permanently
         // ready once its deadline passes (level-triggered). We detect this
@@ -1353,6 +1362,7 @@ pub extern "C" fn _start() -> ! {
                         }
 
                         changed = true;
+                        context_switched = true;
                     }
 
                     continue; // Don't forward F1 to editor.
@@ -1447,73 +1457,244 @@ pub extern "C" fn _start() -> ! {
             }
             // In image mode, content surface stays unchanged (showing the image).
 
-            // 2. Re-render the status bar.
+            // 2. Re-render the status bar (clock + char count).
             {
                 let mut status_surf = make_surf(&mut status_buf, fb_width, STATUS_BAR_H);
                 render_status_bar(&mut status_surf, unsafe { DOC_LEN });
             }
 
-            // 3. Composite all surfaces into the back framebuffer.
+            // ---------------------------------------------------------------
+            // 3. Compute dirty rects based on what changed this frame.
+            // ---------------------------------------------------------------
+            let mut damage = drawing::DamageTracker::new(fb_width as u16, fb_height as u16);
+
+            if !first_present_done || context_switched {
+                // First frame after init or context switch: full screen.
+                damage.mark_full_screen();
+                first_present_done = true;
+            } else if changed && !in_image_mode {
+                // Content change in text editor mode: compute which visual
+                // lines changed and add dirty rects for those lines.
+                let new_cursor = unsafe { CURSOR_POS };
+                let new_doc_len = unsafe { DOC_LEN };
+                let new_scroll = unsafe { SCROLL_OFFSET };
+                let layout = content_text_layout(content_w);
+                let text = doc_content();
+                let line_h = unsafe { LINE_H };
+
+                if old_scroll != new_scroll {
+                    // Scroll offset changed — the entire content area shifted.
+                    // Dirty the full content region.
+                    damage.add(
+                        content_x as u16,
+                        content_y as u16,
+                        content_w as u16,
+                        content_h as u16,
+                    );
+                } else if line_h > 0 {
+                    // Compute the visual line range that changed.
+                    // Old cursor line (before scroll adjustment):
+                    let (_, old_cy) = layout.byte_to_xy(text, old_cursor);
+                    let old_line = old_cy / line_h;
+                    // New cursor line:
+                    let (_, new_cy) = layout.byte_to_xy(text, new_cursor);
+                    let new_line = new_cy / line_h;
+
+                    // The changed region spans from the earliest affected line
+                    // down to the last line of text (insertions/deletions shift
+                    // all subsequent lines).
+                    let first_changed = if old_line < new_line { old_line } else { new_line };
+
+                    // Compute the last visible line of text.
+                    let total_text_lines = if new_doc_len == 0 {
+                        1
+                    } else {
+                        let (_, end_cy) = layout.byte_to_xy(text, new_doc_len);
+                        end_cy / line_h + 1
+                    };
+                    // Also account for old text extent (deletion may have
+                    // shortened the text, leaving stale lines).
+                    let old_total = if old_doc_len == 0 {
+                        1
+                    } else {
+                        let (_, old_end_cy) = layout.byte_to_xy(text, old_doc_len.min(new_doc_len));
+                        old_end_cy / line_h + 1
+                    };
+                    let last_line = if total_text_lines > old_total { total_text_lines } else { old_total };
+
+                    // Convert visual lines to content-surface Y coordinates,
+                    // accounting for scroll offset.
+                    let vis_first = first_changed.saturating_sub(new_scroll);
+                    let vis_last = last_line.saturating_sub(new_scroll);
+                    let vp = viewport_lines(content_h);
+
+                    // Clamp to the visible viewport.
+                    let draw_first = vis_first;
+                    let draw_last = if vis_last > vp { vp } else { vis_last };
+
+                    if draw_last > draw_first {
+                        // Convert to framebuffer coordinates.
+                        let dirty_y = content_y as u32 + TEXT_INSET_TOP + draw_first * line_h;
+                        let dirty_h = (draw_last - draw_first) * line_h;
+                        // Clamp to framebuffer height.
+                        let clamped_h = if dirty_y + dirty_h > fb_height {
+                            fb_height - dirty_y
+                        } else {
+                            dirty_h
+                        };
+
+                        damage.add(0, dirty_y as u16, fb_width as u16, clamped_h as u16);
+                    }
+
+                    // Also dirty the old cursor line if different from new
+                    // (cursor bar moved between lines).
+                    if old_line != new_line {
+                        let vis_old = old_line.saturating_sub(new_scroll);
+                        if vis_old < vp {
+                            let old_dirty_y = content_y as u32 + TEXT_INSET_TOP + vis_old * line_h;
+                            damage.add(0, old_dirty_y as u16, fb_width as u16, line_h as u16);
+                        }
+                    }
+                }
+
+                // Status bar always changes on content edit (char count).
+                damage.add(0, status_y as u16, fb_width as u16, STATUS_BAR_H as u16);
+                // Status bar shadow also needs refresh.
+                damage.add(0, status_shadow_y as u16, fb_width as u16, SHADOW_DEPTH as u16);
+            } else if changed && in_image_mode {
+                // Image mode content change (context switch already handled
+                // above via context_switched). Fall back to full screen.
+                damage.mark_full_screen();
+            } else {
+                // Timer-only tick: only the status bar clock changed.
+                damage.add(0, status_y as u16, fb_width as u16, STATUS_BAR_H as u16);
+            }
+
+            // ---------------------------------------------------------------
+            // 4. Composite dirty regions into the back framebuffer.
+            // ---------------------------------------------------------------
+            let bg_cs = drawing::CompositeSurface {
+                surface: make_surf(&mut bg_buf, fb_width, fb_height),
+                x: 0,
+                y: 0,
+                z: Z_BACKGROUND,
+                visible: true,
+            };
+            let content_cs = drawing::CompositeSurface {
+                surface: make_surf(&mut content_buf, content_w, content_h),
+                x: content_x,
+                y: content_y,
+                z: Z_CONTENT,
+                visible: true,
+            };
+            let title_shadow_cs = drawing::CompositeSurface {
+                surface: make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH),
+                x: 0,
+                y: title_shadow_y,
+                z: Z_SHADOW,
+                visible: true,
+            };
+            let status_shadow_cs = drawing::CompositeSurface {
+                surface: make_surf(&mut status_shadow_buf, fb_width, SHADOW_DEPTH),
+                x: 0,
+                y: status_shadow_y,
+                z: Z_SHADOW,
+                visible: true,
+            };
+            let title_cs = drawing::CompositeSurface {
+                surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
+                x: 0,
+                y: 0,
+                z: Z_CHROME,
+                visible: true,
+            };
+            let status_cs = drawing::CompositeSurface {
+                surface: make_surf(&mut status_buf, fb_width, STATUS_BAR_H),
+                x: 0,
+                y: status_y,
+                z: Z_CHROME,
+                visible: true,
+            };
+
+            let surfaces: [&drawing::CompositeSurface; 6] = [
+                &bg_cs, &content_cs, &title_shadow_cs, &status_shadow_cs, &title_cs, &status_cs,
+            ];
+
             {
                 let mut fb = make_fb_surface(back);
 
-                let bg_cs = drawing::CompositeSurface {
-                    surface: make_surf(&mut bg_buf, fb_width, fb_height),
-                    x: 0,
-                    y: 0,
-                    z: Z_BACKGROUND,
-                    visible: true,
-                };
-                let content_cs = drawing::CompositeSurface {
-                    surface: make_surf(&mut content_buf, content_w, content_h),
-                    x: content_x,
-                    y: content_y,
-                    z: Z_CONTENT,
-                    visible: true,
-                };
-                let title_shadow_cs = drawing::CompositeSurface {
-                    surface: make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH),
-                    x: 0,
-                    y: title_shadow_y,
-                    z: Z_SHADOW,
-                    visible: true,
-                };
-                let status_shadow_cs = drawing::CompositeSurface {
-                    surface: make_surf(&mut status_shadow_buf, fb_width, SHADOW_DEPTH),
-                    x: 0,
-                    y: status_shadow_y,
-                    z: Z_SHADOW,
-                    visible: true,
-                };
-                let title_cs = drawing::CompositeSurface {
-                    surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
-                    x: 0,
-                    y: 0,
-                    z: Z_CHROME,
-                    visible: true,
-                };
-                let status_cs = drawing::CompositeSurface {
-                    surface: make_surf(&mut status_buf, fb_width, STATUS_BAR_H),
-                    x: 0,
-                    y: status_y,
-                    z: Z_CHROME,
-                    visible: true,
-                };
-
-                let surfaces: [&drawing::CompositeSurface; 6] = [
-                    &bg_cs, &content_cs, &title_shadow_cs, &status_shadow_cs, &title_cs, &status_cs,
-                ];
-                drawing::composite_surfaces(&mut fb, &surfaces);
+                if let Some(rects) = damage.dirty_rects() {
+                    // Partial composite: only re-composite dirty regions.
+                    for r in rects {
+                        drawing::composite_surfaces_rect(
+                            &mut fb, &surfaces,
+                            r.x as u32, r.y as u32,
+                            r.w as u32, r.h as u32,
+                        );
+                    }
+                } else {
+                    // Full-screen composite.
+                    drawing::composite_surfaces(&mut fb, &surfaces);
+                }
             }
 
-            // 4. Present: full-screen transfer for now (multi-surface
-            //    compositing touches most of the framebuffer anyway).
-            let payload = PresentPayload {
-                buffer_index: back as u32,
-                rect_count: 0, // full screen
-                rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
-                _pad: [0; 4],
+            // ---------------------------------------------------------------
+            // 5. Present with dirty rects for partial GPU transfer.
+            // ---------------------------------------------------------------
+            let payload = if let Some(rects) = damage.dirty_rects() {
+                let n = rects.len();
+                let mut pr = [drawing::DirtyRect::new(0, 0, 0, 0); 6];
+                let mut i = 0;
+                while i < n && i < 6 {
+                    pr[i] = rects[i];
+                    i += 1;
+                }
+
+                PresentPayload {
+                    buffer_index: back as u32,
+                    rect_count: n as u32,
+                    rects: pr,
+                    _pad: [0; 4],
+                }
+            } else {
+                // Full-screen present.
+                PresentPayload {
+                    buffer_index: back as u32,
+                    rect_count: 0,
+                    rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
+                    _pad: [0; 4],
+                }
             };
+            // Log dirty rect dimensions to serial for verification.
+            if payload.rect_count > 0 {
+                let n = payload.rect_count;
+                let mut log_buf = [0u8; 80];
+                let prefix = b"compositor: present rects=";
+                log_buf[..prefix.len()].copy_from_slice(prefix);
+                let mut li = prefix.len();
+                li = append_u32(&mut log_buf, li, n);
+                let mut ri = 0;
+                while ri < n as usize && ri < 6 {
+                    let r = &payload.rects[ri];
+                    if li + 1 < log_buf.len() {
+                        log_buf[li] = b' ';
+                        li += 1;
+                    }
+                    li = append_u32(&mut log_buf, li, r.w as u32);
+                    if li < log_buf.len() {
+                        log_buf[li] = b'x';
+                        li += 1;
+                    }
+                    li = append_u32(&mut log_buf, li, r.h as u32);
+                    ri += 1;
+                }
+                if li < log_buf.len() {
+                    log_buf[li] = b'\n';
+                    li += 1;
+                }
+                sys::print(&log_buf[..li]);
+            }
+
             let present_msg =
                 unsafe { ipc::Message::from_payload(MSG_PRESENT, &payload) };
 
@@ -1521,8 +1702,46 @@ pub extern "C" fn _start() -> ! {
 
             let _ = sys::channel_signal(GPU_HANDLE);
 
-            // 5. Swap back/front buffers.
+            // 6. Swap back/front buffers.
             unsafe { BACK_BUF_IDX = 1 - back };
+
+            // 7. Synchronize: copy dirty regions from the just-presented
+            //    buffer to the new back buffer so both buffers stay identical.
+            //    Without this, the new back buffer contains stale content from
+            //    two frames ago in non-dirty regions, causing visual glitches
+            //    when the GPU transfers only dirty rects.
+            if let Some(rects) = damage.dirty_rects() {
+                let new_back = unsafe { BACK_BUF_IDX };
+                let src_ptr = unsafe { FB_PTRS[back] };
+                let dst_ptr = unsafe { FB_PTRS[new_back] };
+                let stride = fb_stride as usize;
+
+                for r in rects {
+                    let rx = r.x as usize;
+                    let ry = r.y as usize;
+                    let rw = r.w as usize;
+                    let rh = r.h as usize;
+                    let bpp = 4usize; // BGRA8888
+
+                    for row in 0..rh {
+                        let y = ry + row;
+                        if y >= fb_height as usize {
+                            break;
+                        }
+                        let offset = y * stride + rx * bpp;
+                        let bytes = rw * bpp;
+                        if offset + bytes <= fb_size as usize {
+                            unsafe {
+                                core::ptr::copy_nonoverlapping(
+                                    src_ptr.add(offset),
+                                    dst_ptr.add(offset),
+                                    bytes,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

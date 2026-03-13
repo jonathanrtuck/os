@@ -4965,3 +4965,103 @@ fn svg_icon_doc_has_antialiased_diagonal() {
         "Diagonal edge of the doc icon should have antialiased pixels"
     );
 }
+
+// ---------------------------------------------------------------------------
+// composite_surfaces_rect — partial framebuffer compositing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn composite_rect_only_updates_target_region() {
+    // 8x8 destination, pre-filled with green. Composite a red surface (4x4 at 0,0)
+    // but only update the rect (0,0,2,2). Outside the rect should remain green.
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::rgb(0, 255, 0)); // Green
+
+    let mut fg_buf = [0u8; 4 * 4 * 4];
+    let mut fg = make_composite_surface(&mut fg_buf, 4, 4, 0, 0, 0);
+    fg.surface.clear(Color::rgb(255, 0, 0)); // Red
+
+    let surfaces: [&CompositeSurface; 1] = [&fg];
+    drawing::composite_surfaces_rect(&mut dst, &surfaces, 0, 0, 2, 2);
+
+    // Inside the rect (0,0)-(2,2): should be red.
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(dst.get_pixel(1, 1), Some(Color::rgb(255, 0, 0)));
+    // Just outside the rect but inside the surface: should still be green
+    // (not composited).
+    assert_eq!(dst.get_pixel(2, 0), Some(Color::rgb(0, 255, 0)));
+    assert_eq!(dst.get_pixel(0, 2), Some(Color::rgb(0, 255, 0)));
+    // Far outside: green.
+    assert_eq!(dst.get_pixel(5, 5), Some(Color::rgb(0, 255, 0)));
+}
+
+#[test]
+fn composite_rect_respects_z_order() {
+    // Two overlapping surfaces composited in a rect. Higher z should win.
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut bg_buf = [0u8; 8 * 8 * 4];
+    let mut bg = make_composite_surface(&mut bg_buf, 8, 8, 0, 0, 0);
+    bg.surface.clear(Color::rgb(0, 0, 255)); // Blue
+
+    let mut fg_buf = [0u8; 4 * 4 * 4];
+    let mut fg = make_composite_surface(&mut fg_buf, 4, 4, 0, 0, 10);
+    fg.surface.clear(Color::rgb(255, 0, 0)); // Red, higher z
+
+    let surfaces: [&CompositeSurface; 2] = [&fg, &bg];
+    drawing::composite_surfaces_rect(&mut dst, &surfaces, 0, 0, 3, 3);
+
+    // Inside rect where both surfaces overlap: red (higher z) wins.
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(dst.get_pixel(2, 2), Some(Color::rgb(255, 0, 0)));
+    // Outside rect: still black (not composited).
+    assert_eq!(dst.get_pixel(5, 5), Some(Color::BLACK));
+}
+
+#[test]
+fn composite_rect_with_offset_surface() {
+    // Surface at position (2,2), dirty rect at (3,3,2,2).
+    // The intersection is (3,3)-(5,5) in FB coords.
+    let mut dst_buf = [0u8; 8 * 8 * 4];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::BLACK);
+
+    let mut fg_buf = [0u8; 4 * 4 * 4];
+    let mut fg = make_composite_surface(&mut fg_buf, 4, 4, 2, 2, 0);
+    fg.surface.clear(Color::rgb(255, 0, 0)); // Red
+
+    let surfaces: [&CompositeSurface; 1] = [&fg];
+    drawing::composite_surfaces_rect(&mut dst, &surfaces, 3, 3, 2, 2);
+
+    // (3,3) is inside both the dirty rect and the surface. Should be red.
+    assert_eq!(dst.get_pixel(3, 3), Some(Color::rgb(255, 0, 0)));
+    assert_eq!(dst.get_pixel(4, 4), Some(Color::rgb(255, 0, 0)));
+    // (2,2) is inside the surface but outside the dirty rect. Should be black.
+    assert_eq!(dst.get_pixel(2, 2), Some(Color::BLACK));
+    // (5,5) is outside the surface (4x4 at 2,2 → x range 2..6). But (5,5)
+    // is inside the dirty rect (3..5 in both dimensions)... wait, rect is
+    // (3,3,2,2) → x range 3..5, y range 3..5. So (5,5) is outside. Black.
+    assert_eq!(dst.get_pixel(5, 5), Some(Color::BLACK));
+}
+
+#[test]
+fn composite_rect_zero_size_is_noop() {
+    let mut dst_buf = [0u8; 4 * 4 * 4];
+    let mut dst = make_surface(&mut dst_buf, 4, 4);
+    dst.clear(Color::rgb(0, 255, 0)); // Green
+
+    let mut fg_buf = [0u8; 4 * 4 * 4];
+    let mut fg = make_composite_surface(&mut fg_buf, 4, 4, 0, 0, 0);
+    fg.surface.clear(Color::rgb(255, 0, 0));
+
+    let surfaces: [&CompositeSurface; 1] = [&fg];
+    drawing::composite_surfaces_rect(&mut dst, &surfaces, 0, 0, 0, 0);
+
+    // Nothing should have changed.
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(0, 255, 0)));
+}
+
+

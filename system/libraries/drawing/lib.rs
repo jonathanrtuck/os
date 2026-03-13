@@ -1424,6 +1424,106 @@ pub fn composite_surfaces(dst: &mut Surface, surfaces: &[&CompositeSurface]) {
     }
 }
 
+/// Composite surfaces back-to-front onto a rectangular sub-region of the
+/// destination framebuffer. Only pixels within `(rx, ry, rw, rh)` are
+/// written. Surfaces are sorted by z-order as in `composite_surfaces`.
+///
+/// This is the damage-tracked variant: instead of re-compositing the entire
+/// framebuffer, only the dirty region is updated.
+pub fn composite_surfaces_rect(
+    dst: &mut Surface,
+    surfaces: &[&CompositeSurface],
+    rx: u32,
+    ry: u32,
+    rw: u32,
+    rh: u32,
+) {
+    if rw == 0 || rh == 0 {
+        return;
+    }
+
+    // Sort indices by z-order (same insertion sort as composite_surfaces).
+    const MAX_SURFACES: usize = 16;
+    let count = if surfaces.len() > MAX_SURFACES {
+        MAX_SURFACES
+    } else {
+        surfaces.len()
+    };
+    let mut order: [usize; MAX_SURFACES] = [0; MAX_SURFACES];
+    let mut i = 0;
+    while i < count {
+        order[i] = i;
+        i += 1;
+    }
+    let mut j = 1;
+    while j < count {
+        let key = order[j];
+        let key_z = surfaces[key].z;
+        let mut k = j;
+        while k > 0 && surfaces[order[k - 1]].z > key_z {
+            order[k] = order[k - 1];
+            k -= 1;
+        }
+        order[k] = key;
+        j += 1;
+    }
+
+    // Clamp the rect to destination bounds.
+    let rx_end = min(rx + rw, dst.width);
+    let ry_end = min(ry + rh, dst.height);
+    if rx >= rx_end || ry >= ry_end {
+        return;
+    }
+
+    // For each surface, composite only the intersection with the dirty rect.
+    let mut idx = 0;
+    while idx < count {
+        let s = surfaces[order[idx]];
+        idx += 1;
+
+        if !s.visible {
+            continue;
+        }
+
+        // Compute the region of the surface that overlaps the dirty rect in
+        // framebuffer coordinates.
+        let surf_fb_x0 = if s.x < 0 { 0i32 } else { s.x };
+        let surf_fb_y0 = if s.y < 0 { 0i32 } else { s.y };
+        let surf_fb_x1 = s.x + s.surface.width as i32;
+        let surf_fb_y1 = s.y + s.surface.height as i32;
+
+        // Intersect surface's FB region with the dirty rect.
+        let ix0 = if surf_fb_x0 > rx as i32 { surf_fb_x0 } else { rx as i32 };
+        let iy0 = if surf_fb_y0 > ry as i32 { surf_fb_y0 } else { ry as i32 };
+        let ix1 = if surf_fb_x1 < rx_end as i32 { surf_fb_x1 } else { rx_end as i32 };
+        let iy1 = if surf_fb_y1 < ry_end as i32 { surf_fb_y1 } else { ry_end as i32 };
+
+        if ix0 >= ix1 || iy0 >= iy1 {
+            continue; // No overlap.
+        }
+
+        // Compute source coordinates in the surface's local space.
+        let src_x = (ix0 - s.x) as u32;
+        let src_y = (iy0 - s.y) as u32;
+        let blit_w = (ix1 - ix0) as u32;
+        let blit_h = (iy1 - iy0) as u32;
+
+        let src_offset = (src_y * s.surface.stride
+            + src_x * s.surface.format.bytes_per_pixel()) as usize;
+
+        if src_offset < s.surface.data.len() {
+            dst.blit_blend(
+                &s.surface.data[src_offset..],
+                blit_w,
+                blit_h,
+                s.surface.stride,
+                ix0 as u32,
+                iy0 as u32,
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Damage tracking — dirty rectangle management for partial GPU transfer
 // ---------------------------------------------------------------------------
