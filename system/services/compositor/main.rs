@@ -132,6 +132,10 @@ static mut CONTENT_FIRST_RENDER: bool = true;
 static mut PREV_CURSOR_POS: usize = 0;
 /// Previous frame's document length.
 static mut PREV_DOC_LEN: usize = 0;
+/// Previous frame's total visual line count (for accurate dirty rect
+/// computation when newlines are deleted — we can't recompute old line
+/// count from new text content).
+static mut PREV_TOTAL_LINES: u32 = 1;
 /// Previous frame's selection start.
 static mut PREV_SEL_START: usize = 0;
 /// Previous frame's selection end.
@@ -880,11 +884,11 @@ fn render_content_surface(surf: &mut drawing::Surface, text: &[u8], force_full: 
         } else {
             layout.byte_to_visual_line(text, doc_len) + 1
         };
-        let prev_total_lines = if prev_doc_len == 0 {
-            1u32
-        } else {
-            layout.byte_to_visual_line(text, prev_doc_len.min(doc_len)) + 1
-        };
+        // Use the stored previous total line count — computing it from
+        // the new text with the old byte offset gives wrong results when
+        // a newline was deleted (the old text had more lines than the new
+        // text at that position).
+        let prev_total_lines = unsafe { PREV_TOTAL_LINES };
         // If the cursor stayed on the same line and total line count didn't
         // change, only re-render the cursor line (+ previous if different).
         let last_changed =
@@ -955,9 +959,18 @@ fn render_content_surface(surf: &mut drawing::Surface, text: &[u8], force_full: 
     }
 
     // Update previous frame state for next incremental render.
+    // Compute current total line count for the next frame's dirty tracking.
+    let doc_len = text.len();
+    let current_total_lines = if doc_len == 0 {
+        1u32
+    } else {
+        layout.byte_to_visual_line(text, doc_len) + 1
+    };
+
     unsafe {
         PREV_CURSOR_POS = cursor_pos;
-        PREV_DOC_LEN = text.len();
+        PREV_DOC_LEN = doc_len;
+        PREV_TOTAL_LINES = current_total_lines;
         PREV_SEL_START = sel_start;
         PREV_SEL_END = sel_end;
     }
@@ -1684,6 +1697,7 @@ pub extern "C" fn _start() -> ! {
         let old_cursor = unsafe { CURSOR_POS };
         let old_doc_len = unsafe { DOC_LEN };
         let old_scroll = unsafe { SCROLL_OFFSET };
+        let old_total_lines = unsafe { PREV_TOTAL_LINES };
 
         // Check if the timer fired: the timer handle becomes permanently
         // ready once its deadline passes (level-triggered). We detect this
@@ -2022,14 +2036,11 @@ pub extern "C" fn _start() -> ! {
                         let (_, end_cy) = layout.byte_to_xy(text, new_doc_len);
                         end_cy / line_h + 1
                     };
-                    // Also account for old text extent (deletion may have
-                    // shortened the text, leaving stale lines).
-                    let old_total = if old_doc_len == 0 {
-                        1
-                    } else {
-                        let (_, old_end_cy) = layout.byte_to_xy(text, old_doc_len.min(new_doc_len));
-                        old_end_cy / line_h + 1
-                    };
+                    // Use the total line count captured before
+                    // render_content_surface (which updates PREV_TOTAL_LINES)
+                    // so we get the pre-render line count for accurate dirty
+                    // tracking when newlines are deleted.
+                    let old_total = old_total_lines;
                     let last_line = if total_text_lines > old_total {
                         total_text_lines
                     } else {

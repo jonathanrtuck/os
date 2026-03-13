@@ -32,6 +32,7 @@ QEMU_COMMON=(
     -cpu cortex-a53
     -smp 4
     -m 256M
+    -rtc base=localtime
     -global virtio-mmio.force-legacy=false
     -drive "file=$DISK_IMG,if=none,format=raw,id=hd0"
     -device virtio-blk-device,drive=hd0
