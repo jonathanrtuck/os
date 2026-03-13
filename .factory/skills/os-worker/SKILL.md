@@ -109,6 +109,20 @@ Then use the **Read tool** on `/tmp/qemu-screen.png` to VIEW the screenshot. You
 
 For features requiring high-resolution verification, use `xres=1920,yres=1080` in the virtio-gpu-device flags.
 
+**For pointer/mouse features (milestone 3):** Add `-device virtio-tablet-device` to the QEMU launch command. Test mouse input via QEMU HMP:
+
+```bash
+# Move mouse (relative pixel offsets)
+echo "mouse_move 500 400" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
+
+# Click left button (1=left, 2=middle, 4=right; 0=release)
+echo "mouse_button 1" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
+sleep 0.5
+echo "mouse_button 0" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
+```
+
+**For Ctrl+Tab context switching:** Send `sendkey ctrl-tab` via QEMU monitor.
+
 **Always kill QEMU when done:** `pkill -f qemu-system-aarch64`
 
 ### 7. Run Regression Tests

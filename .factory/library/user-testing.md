@@ -108,6 +108,50 @@ rm -f /tmp/qemu-mon-{FLOW_ID}.sock /tmp/qemu-serial-{FLOW_ID}.log
 rm -f /tmp/qemu-screen-{FLOW_ID}.ppm /tmp/qemu-screen-{FLOW_ID}.png
 ```
 
+### Mouse/Pointer Testing (Milestone 3)
+
+For pointer features, QEMU must be launched with `-device virtio-tablet-device` in addition to `-device virtio-keyboard-device`. Use the `qemu-mouse` service from `services.yaml`.
+
+**Sending mouse events via QEMU HMP:**
+
+```bash
+# Move mouse to absolute position (coordinates are absolute pixel values)
+# QEMU mouse_move takes dx, dy relative offsets by default
+echo "mouse_move 500 400" | nc -U /tmp/qemu-mon-{FLOW_ID}.sock -w 1 >/dev/null 2>&1
+
+# Click left mouse button (1 = left, 2 = middle, 4 = right)
+echo "mouse_button 1" | nc -U /tmp/qemu-mon-{FLOW_ID}.sock -w 1 >/dev/null 2>&1
+sleep 0.5
+echo "mouse_button 0" | nc -U /tmp/qemu-mon-{FLOW_ID}.sock -w 1 >/dev/null 2>&1
+```
+
+**QEMU Launch Template (with tablet device):**
+
+```bash
+cd /Users/user/Sites/os/system && \
+pkill -f "qemu.*mon-{FLOW_ID}" 2>/dev/null; sleep 1; \
+rm -f /tmp/qemu-mon-{FLOW_ID}.sock /tmp/qemu-serial-{FLOW_ID}.log; \
+qemu-system-aarch64 \
+  -machine virt,gic-version=2 \
+  -cpu cortex-a53 -smp 4 -m 256M \
+  -global virtio-mmio.force-legacy=false \
+  -drive "file=test.img,if=none,format=raw,id=hd0" \
+  -device virtio-blk-device,drive=hd0 \
+  -device virtio-gpu-device -device virtio-keyboard-device \
+  -device virtio-tablet-device \
+  -fsdev "local,id=fsdev0,path=share,security_model=none" \
+  -device "virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare" \
+  -nographic \
+  -serial file:/tmp/qemu-serial-{FLOW_ID}.log \
+  -monitor unix:/tmp/qemu-mon-{FLOW_ID}.sock,server,nowait \
+  -device "loader,file=virt.dtb,addr=0x40000000,force-raw=on" \
+  -kernel target/aarch64-unknown-none/release/kernel &
+```
+
+**Verifying cursor visibility:** Take screenshot, look for the arrow cursor shape. Move mouse, take another screenshot — cursor should be at a different position.
+
+**Verifying click-to-position:** Type some text, move mouse to middle of text area, click, type more — new characters should appear at click point.
+
 ### Shared Resources (Off-Limits for Modification)
 
 - `system/share/` — shared asset directory, read-only during testing

@@ -92,6 +92,18 @@ The text editor and compositor communicate via bidirectional IPC channels using 
 
 The editor sends multiple messages atomically (before signaling), and the compositor drains them all in one event loop iteration. Selection range normalization handles reversed anchor/cursor.
 
+## Pointer Pipeline (Milestone 3)
+
+The virtio-tablet device produces absolute coordinate events (EV_ABS, ABS_X/ABS_Y in 0-32767 range) and button events (EV_KEY, BTN_LEFT/BTN_RIGHT). The input driver sends these as MSG_POINTER_ABS and MSG_POINTER_BUTTON to the compositor, which:
+
+1. Scales coordinates from [0, 32767] to screen pixel coordinates
+2. Updates cursor surface position (z=30, above all other surfaces)
+3. Generates dirty rects for old + new cursor positions
+4. On click in content area: converts screen coords to text position (column = x / char_width, line = y / line_height) and sends cursor-position message to editor
+5. Clicks in title bar are ignored (not forwarded to editor)
+
+The tablet device appears as a second virtio-input device (device ID 18) in the kernel's device manifest. Init spawns a driver for each virtio-input device.
+
 ## Drawing Library
 
 - `Surface<'a>`: wraps a pixel buffer (BGRA8888), provides drawing primitives
