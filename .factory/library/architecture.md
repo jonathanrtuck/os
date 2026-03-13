@@ -42,6 +42,7 @@ Userspace processes have a 16 KiB stack. All userspace programs and libraries ar
 ## Rendering Invariants
 
 - **Clear before re-render**: Any region that will be drawn with alpha blending (e.g., `draw_coverage` for text) MUST be cleared to the background color before re-rendering. Alpha blending is additive — drawing the same glyph twice without clearing produces darker/heavier strokes. This applies to dirty-rect optimizations: the cleared region must cover everything that `draw_tt()` will redraw, not just the region that "changed."
+- **Dirty rects use pre-render state**: Dirty rect computation must use state captured *before* the render pass, not state modified during it. For example, PREV_TOTAL_LINES must be snapshotted before `render_content_surface()` mutates the line count, so the dirty region correctly covers lines that were removed. Computing dirty rects from post-mutation state causes missed regions (e.g., ghost pixels from deleted newlines).
 - **Gamma-correct blending**: `draw_coverage()` and `blend_over()` convert sRGB→linear before blending and linear→sRGB after. Lookup tables in `gamma_tables.rs` (512 bytes + 4 KiB). Zero-coverage pixels are never modified (fast path preserved).
 
 ## DMA Allocation Limits
@@ -55,8 +56,8 @@ Userspace processes have a 16 KiB stack. All userspace programs and libraries ar
 - TrueType parser → glyph outline extraction → scanline rasterizer (6× horizontal subpixel + 4× vertical oversampling) → 3-channel RGB downsample → FIR low-pass filter → stem darkening LUT (boost=70) → gamma-correct per-channel alpha blending onto surface
 - GlyphCache: pre-rasterizes printable ASCII (0x20–0x7E) at startup, 48×48 max coverage buffers with 3 bytes/pixel (~1.3 MiB with subpixel oversampling)
 - Two font caches:
-  - **Monospace** (Source Code Pro Regular, 20px): used for editor text. Fixed char_width via TextLayout.
-  - **Proportional** (Nunito Sans Regular, 20px): used for chrome text (title bar). Per-glyph advance widths via `draw_proportional_string()`. GPOS PairPos kerning applied via `draw_proportional_string_kerned()`.
+  - **Monospace** (Source Code Pro Regular, 18px): used for editor text. Fixed char_width via TextLayout.
+  - **Proportional** (Nunito Sans Regular, 18px): used for chrome text (title bar). Per-glyph advance widths via `draw_proportional_string()`. GPOS PairPos kerning applied via `draw_proportional_string_kerned()`.
 - All assets loaded from `system/share/` via 9p into a single 256 KiB shared buffer (mono font | prop font | PNG image | doc-icon SVG | img-icon SVG). Init sends offsets/lengths to compositor via CompositorConfig and icon-config IPC messages.
 - Missing glyph codepoints advance by space width fallback without crashing.
 
@@ -66,10 +67,10 @@ The compositor uses a multi-surface model with z-ordered back-to-front compositi
 
 | Surface          | Z-order | Description |
 |-----------------|---------|-------------|
-| Background       | 0       | Radial gradient (lighter center, darker edges) with per-pixel noise |
+| Background       | 0       | Radial gradient (lighter center, darker edges) with Bayer 4×4 ordered dithering |
 | Content          | 10      | Text editor or image viewer (full-screen, extends behind chrome) |
 | Title shadow     | 15      | Soft gradient shadow below title bar |
-| Title bar chrome | 20      | Translucent (alpha=170) with [icon] Untitled + HH:MM:SS clock |
+| Title bar chrome | 20      | Translucent (alpha=170) with [icon] Text/Image + HH:MM:SS clock |
 
 Each surface has a dedicated render function (e.g., `render_content_surface()`, `render_title_bar()`). Surfaces are allocated once at startup and re-rendered in-place each frame. The `composite_surfaces()` function sorts by z-order (stable sort) and composites via `blit_blend`.
 

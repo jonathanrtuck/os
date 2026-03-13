@@ -1,0 +1,26 @@
+{
+  "featureId": "fix-clock-localtime-and-backspace",
+  "reviewedAt": "2026-03-13T10:05:00.000Z",
+  "commitId": "bdcde8f",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, well-targeted fix for two distinct issues. (1) Clock localtime: -rtc base=localtime added to run-qemu.sh and test-qemu.sh; services.yaml already had it. All QEMU launch paths now covered. (2) Backspace ghost pixels: Root cause correctly identified — render_content_surface was updating PREV_TOTAL_LINES before the dirty rect computation read it, so deleted lines weren't included in the dirty region. Fix introduces a PREV_TOTAL_LINES static global that persists the previous frame's line count, snapshots it before render, and uses the snapshot in dirty rect computation. The fix is correct: (a) initialization to 1 matches empty-document state, (b) no stale-state risk on context switch because force_full=true triggers a full re-render that updates PREV_TOTAL_LINES at the end, (c) the event loop captures old_total_lines before render_content_surface runs so both dirty rect sites (inside render_content_surface and in the event loop's GPU transfer region) use consistent pre-render values. No new tests added, which is appropriate — this is a compositor rendering timing bug that can only be verified visually, and the worker performed thorough interactive verification (3 scenarios with screenshots).",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The Rendering Invariants section in .factory/library/architecture.md documents 'clear before re-render' but does not mention the timing constraint that dirty rect computation must use pre-render state (not post-render state). This bug's root cause was exactly this — computing dirty rects from state updated during the current render. A convention note like 'Dirty rect computation must use state captured before the render pass, not state modified during it' would help prevent similar bugs.",
+      "evidence": "The fix in compositor/main.rs:887-891 replaced on-the-fly computation with a stored PREV_TOTAL_LINES value because the old approach computed from post-mutation text, giving wrong results when newlines were deleted."
+    },
+    {
+      "area": "skills",
+      "observation": "Worker's skill feedback suggests adding a note about force_full experiments for dirty-rect debugging. This is a reasonable suggestion — the os-worker skill's visual verification section could mention that toggling force_full=true is a diagnostic technique to isolate whether a rendering bug is in content rendering vs dirty rect computation.",
+      "evidence": "Handoff skillFeedback.suggestedChanges mentions this technique. The worker used it during debugging (transcript shows investigation of force_full paths)."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Both fixes are correct and well-implemented. The -rtc base=localtime flag now covers all QEMU launch paths (run-qemu.sh, test-qemu.sh, services.yaml). The backspace ghost pixel fix correctly addresses the root cause: a timing bug where PREV_TOTAL_LINES was recomputed from mutated text rather than stored from the previous frame. The fix is minimal, correctly handles edge cases (initialization, context switching, force_full), and was thoroughly verified visually. No blocking issues found."
+}

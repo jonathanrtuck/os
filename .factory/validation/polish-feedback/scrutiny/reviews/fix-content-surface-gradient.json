@@ -1,0 +1,40 @@
+{
+  "featureId": "fix-content-surface-gradient",
+  "reviewedAt": "2026-03-13T10:05:00.000Z",
+  "commitId": "30ba726",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Correct and well-structured implementation. The 4×4 Bayer ordered-dither matrix replaces the PRNG noise approach, computing the continuous gradient in 20.12 fixed-point and adding a Bayer threshold (0–15 mapped to fractional units) before truncating to 8-bit. This properly breaks quantization bands into a structured stipple pattern. The key factoring into gradient_params() + gradient_pixel() helpers ensures fill_radial_gradient_rows() and fill_radial_gradient_noise() produce pixel-identical output for the same coordinates — directly verified by the gradient_rows_matches_full_fill test. The compositor's incremental line-clear path now calls fill_radial_gradient_rows() instead of the removed gradient_row_color() helper, eliminating the flat-colored rectangles behind text lines that the prior review (background-gradient, visual-overhaul milestone) identified as a non-blocking issue. Fixed-point overflow analysis checks out: all intermediate values stay within u64/u32 bounds for typical display resolutions. The Bayer matrix values are the standard ordered-dither pattern. 5 new tests + 1 renamed test provide strong coverage: pixel-identity between row fill and full fill, bounds clipping, zero-count noop, structured dithering verification, and monochrome preservation.",
+    "issues": [
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 478,
+        "severity": "non_blocking",
+        "description": "Stale comments on compositor constants: BG_GRADIENT_SEED comment says 'Deterministic PRNG seed for the background gradient noise' and BG_NOISE_AMP says 'Noise amplitude for background gradient (±3 RGB units per pixel)'. Both parameters are now silently ignored by fill_radial_gradient_noise() (prefixed with underscore). The comments should be updated to note they are vestigial/ignored, or the constants and their corresponding function parameters should be removed."
+      },
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 1751,
+        "severity": "non_blocking",
+        "description": "fill_radial_gradient_noise retains the old function name and accepts unused _noise_amplitude and _prng_seed parameters 'for API compatibility'. Since this is an internal crate with no external consumers, a rename to fill_radial_gradient_dither() and removal of unused params would be cleaner. However, this is acceptable as-is during prototype phase to minimize churn across call sites."
+      },
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 1677,
+        "severity": "non_blocking",
+        "description": "Minor: several whitespace-only changes throughout the diff (blank lines added/removed, struct reordering of DirtyRect and DamageTracker, abs() function relocated). These are harmless but add noise to the diff. Not a functional concern."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The architecture.md description of the Background surface (from the prior visual-overhaul milestone review) likely still says 'radial gradient with per-pixel noise' — it should now say 'radial gradient with Bayer ordered dithering' since the PRNG noise has been replaced. The rendering technique changed from random noise to structured dithering.",
+      "evidence": "Prior review (.factory/validation/visual-overhaul/scrutiny/reviews/background-gradient.json) suggested updating architecture.md to say 'Radial gradient (lighter center, darker edges) with per-pixel noise'. With this commit, noise is replaced by Bayer 4×4 ordered dithering — no PRNG state, deterministic based solely on pixel coordinates."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The fix correctly addresses both issues from the feature description: (1) Incremental line clearing now produces pixel-identical gradient output by using fill_radial_gradient_rows() which shares the same gradient_params()/gradient_pixel() helpers as the full fill — eliminating the visible flat rectangles that gradient_row_color() produced. The gradient_row_color helper is completely removed. (2) Gradient banding is eliminated via a standard 4×4 Bayer ordered-dither matrix applied in 20.12 fixed-point before 8-bit truncation, replacing the xorshift32 PRNG random noise. The dither is fully deterministic and coordinate-based (no PRNG state). 5 new tests plus 1 renamed test provide thorough coverage. Three non-blocking issues noted: stale compositor constant comments, vestigial function name/parameters, and minor whitespace churn in the diff."
+}
