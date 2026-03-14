@@ -46,8 +46,8 @@ include!(env!("INIT_EMBEDDED_RS"));
 /// Channel shared memory base. The kernel's channel is at page 0.
 /// Channels created by init are at subsequent 2-page pairs.
 use protocol::compose::{
-    CompositorConfig, IconConfig, ImageConfig, RtcConfig,
-    MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG, MSG_IMAGE_CONFIG, MSG_IMG_ICON_CONFIG, MSG_RTC_CONFIG,
+    CompositorConfig, IconConfig, ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG,
+    MSG_IMAGE_CONFIG, MSG_IMG_ICON_CONFIG, MSG_RTC_CONFIG,
 };
 use protocol::core_config::{CoreConfig, MSG_CORE_CONFIG};
 use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
@@ -304,7 +304,9 @@ fn setup_display_pipeline(
         sys::print(b"init: dma_alloc (doc buffer) failed\n");
         sys::exit();
     });
+
     unsafe { core::ptr::write_bytes(_doc_va as *mut u8, 0, 4096) };
+
     sys::print(b"     document buffer: 4 KiB shared\n");
 
     // -----------------------------------------------------------------------
@@ -320,22 +322,35 @@ fn setup_display_pipeline(
         sys::print(b"init: dma_alloc (scene graph) failed\n");
         sys::exit();
     });
+
     unsafe { core::ptr::write_bytes(_scene_va as *mut u8, 0, scene_alloc_bytes) };
+
     sys::print(b"     scene graph: shared memory allocated\n");
 
     // Unpack font buffer info.
     let (
-        font_pa_val, mono_font_len, prop_font_len,
-        png_offset, png_len,
-        icon_offset, icon_len,
-        img_icon_offset, img_icon_len,
+        font_pa_val,
+        mono_font_len,
+        prop_font_len,
+        png_offset,
+        png_len,
+        icon_offset,
+        icon_len,
+        img_icon_offset,
+        img_icon_len,
     ) = if let Some((pa, mono, prop, png_off, png_l, icon_off, icon_l, img_off, img_l)) = font_buf {
-        (pa, mono, prop, png_off, png_l, icon_off, icon_l, img_off, img_l)
+        (
+            pa, mono, prop, png_off, png_l, icon_off, icon_l, img_off, img_l,
+        )
     } else {
         (0u64, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32)
     };
     let font_total_len = mono_font_len + prop_font_len + png_len + icon_len + img_icon_len;
-    let font_pages = if font_total_len > 0 { ((font_total_len as u64) + 4095) / 4096 } else { 0 };
+    let font_pages = if font_total_len > 0 {
+        ((font_total_len as u64) + 4095) / 4096
+    } else {
+        0
+    };
 
     // -----------------------------------------------------------------------
     // Spawn core process.
@@ -356,8 +371,8 @@ fn setup_display_pipeline(
         });
     // Share scene graph with core (read-write).
     let scene_page_count = scene_alloc_bytes as u64 / 4096;
-    let core_scene_va =
-        sys::memory_share(core_proc, scene_pa, scene_page_count, false).unwrap_or_else(|_| {
+    let core_scene_va = sys::memory_share(core_proc, scene_pa, scene_page_count, false)
+        .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (core scene) failed\n");
             sys::exit();
         });
@@ -367,8 +382,9 @@ fn setup_display_pipeline(
             sys::print(b"init: memory_share (core font) failed\n");
             sys::exit();
         }) as u64
-    } else { 0u64 };
-
+    } else {
+        0u64
+    };
     // Send core config.
     let core_ch = init_channel(core_channel_idx);
     let core_config = CoreConfig {
@@ -383,13 +399,19 @@ fn setup_display_pipeline(
         _pad: 0,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_CORE_CONFIG, &core_config) };
+
     core_ch.send(&msg);
 
     // Send image config to core (for has_image detection).
     if png_len > 0 {
         let image_va = core_font_va + png_offset as u64;
-        let img_config = ImageConfig { image_va, image_len: png_len, _pad: 0 };
+        let img_config = ImageConfig {
+            image_va,
+            image_len: png_len,
+            _pad: 0,
+        };
         let img_msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_CONFIG, &img_config) };
+
         core_ch.send(&img_msg);
     }
 
@@ -397,7 +419,9 @@ fn setup_display_pipeline(
     if rtc_pa != 0 {
         let rtc_config = RtcConfig { mmio_pa: rtc_pa };
         let rtc_msg = unsafe { ipc::Message::from_payload(MSG_RTC_CONFIG, &rtc_config) };
+
         core_ch.send(&rtc_msg);
+
         sys::print(b"     rtc config sent to core\n");
     }
 
@@ -425,8 +449,8 @@ fn setup_display_pipeline(
             sys::exit();
         });
     // Share scene graph with compositor (read-only for rendering).
-    let comp_scene_va =
-        sys::memory_share(comp_proc, scene_pa, scene_page_count, false).unwrap_or_else(|_| {
+    let comp_scene_va = sys::memory_share(comp_proc, scene_pa, scene_page_count, false)
+        .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (comp scene) failed\n");
             sys::exit();
         });
@@ -436,8 +460,9 @@ fn setup_display_pipeline(
             sys::print(b"init: memory_share (comp font) failed\n");
             sys::exit();
         }) as u64
-    } else { 0u64 };
-
+    } else {
+        0u64
+    };
     // Send compositor config.
     let comp_ch = init_channel(comp_channel_idx);
     let comp_config = CompositorConfig {
@@ -453,27 +478,43 @@ fn setup_display_pipeline(
         _pad: 0,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };
+
     comp_ch.send(&msg);
 
     // Send image config to compositor (consumed but not used for now).
     if png_len > 0 {
         let image_va = comp_font_va + png_offset as u64;
-        let img_config = ImageConfig { image_va, image_len: png_len, _pad: 0 };
+        let img_config = ImageConfig {
+            image_va,
+            image_len: png_len,
+            _pad: 0,
+        };
         let img_msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_CONFIG, &img_config) };
+
         comp_ch.send(&img_msg);
     }
-
     // Send icon configs to compositor (for SVG rasterization).
     if icon_len > 0 {
         let icon_va = comp_font_va + icon_offset as u64;
-        let icn_config = IconConfig { icon_va, icon_len, _pad: 0 };
+        let icn_config = IconConfig {
+            icon_va,
+            icon_len,
+            _pad: 0,
+        };
         let icn_msg = unsafe { ipc::Message::from_payload(MSG_ICON_CONFIG, &icn_config) };
+
         comp_ch.send(&icn_msg);
     }
     if img_icon_len > 0 {
         let img_icon_va = comp_font_va + img_icon_offset as u64;
-        let img_icn_config = IconConfig { icon_va: img_icon_va, icon_len: img_icon_len, _pad: 0 };
-        let img_icn_msg = unsafe { ipc::Message::from_payload(MSG_IMG_ICON_CONFIG, &img_icn_config) };
+        let img_icn_config = IconConfig {
+            icon_va: img_icon_va,
+            icon_len: img_icon_len,
+            _pad: 0,
+        };
+        let img_icn_msg =
+            unsafe { ipc::Message::from_payload(MSG_IMG_ICON_CONFIG, &img_icn_config) };
+
         comp_ch.send(&img_icn_msg);
     }
 
@@ -494,12 +535,14 @@ fn setup_display_pipeline(
     // Input → Core channel (keyboard events).
     if !input_devices.is_empty() {
         let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[0];
+
         sys::print(b"     creating input\xE2\x86\x92core channel\n");
 
         let (ic_a, ic_b) = sys::channel_create().unwrap_or_else(|_| {
             sys::print(b"init: channel_create (input-core) failed\n");
             sys::exit();
         });
+
         *next_channel += 1;
 
         sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
@@ -513,19 +556,28 @@ fn setup_display_pipeline(
         });
 
         let input_ch = init_channel(input_ch_idx);
-        let input_config = DeviceConfig { mmio_pa: input_pa, irq: input_irq, _pad: 0 };
+        let input_config = DeviceConfig {
+            mmio_pa: input_pa,
+            irq: input_irq,
+            _pad: 0,
+        };
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
+
         input_ch.send(&msg);
+
         sys::print(b"     input device 0 channel created\n");
     }
 
     // Core → Compositor scene update channel.
     sys::print(b"     creating core\xE2\x86\x92compositor channel\n");
+
     let (cc_a, cc_b) = sys::channel_create().unwrap_or_else(|_| {
         sys::print(b"init: channel_create (core-comp) failed\n");
         sys::exit();
     });
+
     *next_channel += 1;
+
     // Endpoint A → core (handle 2 = COMPOSITOR_HANDLE in core).
     sys::handle_send(core_proc, cc_a).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-comp A) failed\n");
@@ -536,7 +588,6 @@ fn setup_display_pipeline(
         sys::print(b"init: handle_send (core-comp B) failed\n");
         sys::exit();
     });
-
     // Compositor → GPU present channel endpoint A → compositor (handle 2).
     sys::handle_send(comp_proc, cg_a).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (comp-gpu A) failed\n");
@@ -547,6 +598,7 @@ fn setup_display_pipeline(
     // Core ↔ Editor channel.
     // -----------------------------------------------------------------------
     sys::print(b"     spawning text editor\n");
+
     let (editor_proc, _editor_ch, editor_ch_idx) =
         match spawn_with_channel(TEXT_EDITOR_ELF, next_channel) {
             Some(v) => v,
@@ -568,14 +620,18 @@ fn setup_display_pipeline(
         _pad: 0,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_EDITOR_CONFIG, &editor_config) };
+
     editor_ch.send(&msg);
 
     sys::print(b"     creating core\xE2\x86\x94editor channel\n");
+
     let (ce_a, ce_b) = sys::channel_create().unwrap_or_else(|_| {
         sys::print(b"init: channel_create (core-editor) failed\n");
         sys::exit();
     });
+
     *next_channel += 1;
+
     // Endpoint A → core (handle 3 = EDITOR_HANDLE in core).
     sys::handle_send(core_proc, ce_a).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-editor A) failed\n");
@@ -590,12 +646,14 @@ fn setup_display_pipeline(
     // Additional input device channels → core handle 4+.
     for i in 1..input_devices.len() {
         let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[i];
+
         sys::print(b"     creating input\xE2\x86\x92core channel\n");
 
         let (ic_a, ic_b) = sys::channel_create().unwrap_or_else(|_| {
             sys::print(b"init: channel_create (input-core) failed\n");
             sys::exit();
         });
+
         *next_channel += 1;
 
         sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
@@ -608,8 +666,13 @@ fn setup_display_pipeline(
         });
 
         let input_ch = init_channel(input_ch_idx);
-        let input_config = DeviceConfig { mmio_pa: input_pa, irq: input_irq, _pad: 0 };
+        let input_config = DeviceConfig {
+            mmio_pa: input_pa,
+            irq: input_irq,
+            _pad: 0,
+        };
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
+
         input_ch.send(&msg);
     }
 
@@ -620,21 +683,37 @@ fn setup_display_pipeline(
     // -----------------------------------------------------------------------
     for &(input_proc_handle, _, _, _) in input_devices {
         sys::print(b"     starting input driver\n");
+
         let _ = sys::process_start(input_proc_handle);
-        for _ in 0..8 { sys::yield_now(); }
+
+        for _ in 0..8 {
+            sys::yield_now();
+        }
     }
 
     sys::print(b"     starting text editor\n");
+
     let _ = sys::process_start(editor_proc);
-    for _ in 0..8 { sys::yield_now(); }
+
+    for _ in 0..8 {
+        sys::yield_now();
+    }
 
     sys::print(b"     starting compositor\n");
+
     let _ = sys::process_start(comp_proc);
-    for _ in 0..8 { sys::yield_now(); }
+
+    for _ in 0..8 {
+        sys::yield_now();
+    }
 
     sys::print(b"     starting core\n");
+
     let _ = sys::process_start(core_proc);
-    for _ in 0..8 { sys::yield_now(); }
+
+    for _ in 0..8 {
+        sys::yield_now();
+    }
 
     sys::print(b"     display pipeline running\n");
 }
@@ -705,15 +784,13 @@ pub extern "C" fn _start() -> ! {
     let mut next_channel: usize = 1;
     // Saved device state for Phase 2 (display pipeline).
     let mut gpu: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
-
-    // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
+                                                           // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
     let mut input_devices: [(u8, usize, u64, u32); MAX_INPUT_DEVICES] =
         [(0, 0, 0, 0); MAX_INPUT_DEVICES];
     let mut input_count: usize = 0;
     let mut p9: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
     let mut rtc_pa: u64 = 0; // PL031 RTC physical address (0 = not found)
-
-    // Phase 1: Spawn a driver for each device in the manifest.
+                             // Phase 1: Spawn a driver for each device in the manifest.
     let actual = if device_count > 8 { 8 } else { device_count };
 
     for i in 0..actual as usize {

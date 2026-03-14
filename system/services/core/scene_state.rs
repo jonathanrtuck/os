@@ -27,7 +27,9 @@ impl SceneState {
     /// Create from an externally-provided buffer (shared memory).
     pub fn from_buf(buf: &'static mut [u8]) -> Self {
         assert!(buf.len() >= DOUBLE_SCENE_SIZE);
+
         let _ = DoubleWriter::new(buf);
+
         Self { buf }
     }
 
@@ -106,7 +108,6 @@ impl SceneState {
             // Push text data first (before allocating nodes).
             let title_ref = w.push_data(title_label);
             let clock_ref = w.push_data(clock_text);
-
             // Push document line glyph data into the data buffer and
             // build TextRun array with correct DataRefs.
             let mut final_runs: Vec<TextRun> = Vec::with_capacity(doc_runs.len());
@@ -273,7 +274,6 @@ impl SceneState {
                     byte_to_line_col(doc_text, sel_lo, chars_per_line as usize);
                 let (sel_end_line, sel_end_col) =
                     byte_to_line_col(doc_text, sel_hi, chars_per_line as usize);
-
                 let sel_bg = dc(sel_color);
                 let mut prev_sel_node: u16 = NULL;
 
@@ -295,6 +295,7 @@ impl SceneState {
 
                     if let Some(sel_id) = w.alloc_node() {
                         let n = w.node_mut(sel_id);
+
                         n.x = (col_start as u32 * char_width) as i16;
                         n.y = (line as u32 * line_height) as i16;
                         n.width = ((col_end - col_start) as u32 * char_width) as u16;
