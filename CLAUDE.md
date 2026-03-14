@@ -95,7 +95,7 @@ Read these before making any design suggestions:
 
 2. **Structured IPC designed.** Four sub-decisions settled: (a) one mechanism — ring buffers for everything, config = first message (Singularity pattern), no separate config path; (b) separate pages per direction — each channel has two 4 KiB pages, each a SPSC ring buffer; (c) fixed 64-byte messages — one AArch64 cache line, 4-byte type + 60-byte payload, 62 slots per ring; (d) split architecture — shared `ipc` library for ring mechanics, per-protocol payload definitions. Ring buffer layout designed in `system/DESIGN.md` §1.5. Kernel change: `channel::create()` allocates 2 pages. Pressure point documented: messages >60 bytes use shared-memory reference pattern. Prior art: io_uring, LMAX Disruptor, Singularity contracts. Implementation next.
 
-3. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables). Scanline rasterizer with 4× oversampling. ProggyClean.ttf embedded. 21 new tests (83 total).
+3. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables). Scanline rasterizer with 4× vertical and 6× horizontal (subpixel) oversampling. GPOS kerning. Fonts: Source Code Pro (mono) and Nunito Sans (proportional), loaded from host via 9p. 21 new tests (83 total).
 
 4. **Alpha blending + compositor rewrite.** Porter-Duff source-over compositing. Three panels with per-pixel alpha, composited back-to-front. TrueType text demo.
 
