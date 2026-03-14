@@ -44,7 +44,7 @@ These are genuine strengths — not just "works," but differentiated:
 
 Widen the rights bitfield and add a mask parameter to `handle_send`. Recommended rights bits:
 
-```
+```text
 READ     = 1 << 0   // read from channel, map read-only
 WRITE    = 1 << 1   // write to channel, map writable
 SIGNAL   = 1 << 2   // signal a channel/interrupt
@@ -112,7 +112,7 @@ W^X enforcement (kernel + user), split TTBR (kernel/user isolation), handle + ri
 
 Current user VA layout (all fixed):
 
-```
+```text
 Code:          0x0040_0000
 Heap:          0x0100_0000 – 0x1000_0000
 DMA:           0x1000_0000 – 0x2000_0000

@@ -32,7 +32,7 @@ IRQs (DAIF.I) on acquire and restores on release. 13 instances total.
 
 ### DAG Edges (verified cycle-free)
 
-```
+```text
 Level 0 → [release] → Level 1 (two-phase wake pattern, 11 paths)
 Level 1 → Level 2 (schedule_inner → free_all, address_space_id::free)
 Level 2: slab → page_allocator (grow)
@@ -45,7 +45,7 @@ Implicit: scheduler → ALLOC_LOCK → slab → page_allocator (via Vec::push)
 The kernel's central concurrency pattern: event source locks are **always
 released before** acquiring the scheduler lock.
 
-```
+```text
 Phase 1: acquire event lock → collect waiter ThreadId → release lock
 Phase 2: scheduler::try_wake_for_handle(tid) [acquires scheduler lock]
 ```
