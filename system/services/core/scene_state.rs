@@ -6,9 +6,8 @@
 
 use alloc::vec::Vec;
 use scene::{
-    Border, Color, Content, DataRef, DoubleWriter, NodeFlags, TextRun,
-    DOUBLE_SCENE_SIZE, NULL,
-    layout_mono_lines, byte_to_line_col, line_bytes_for_run, scroll_runs,
+    byte_to_line_col, layout_mono_lines, line_bytes_for_run, scroll_runs, Border, Color, Content,
+    DataRef, DoubleWriter, NodeFlags, TextRun, DOUBLE_SCENE_SIZE, NULL,
 };
 
 /// Well-known node indices for direct mutation.
@@ -75,7 +74,6 @@ impl SceneState {
     ) {
         let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
         let scene_text_color = dc(text_color);
-
         // Layout document text into visual lines (monospace line-breaking).
         let doc_width = fb_width.saturating_sub(2 * text_inset_x);
         let chars_per_line = if char_width > 0 {
@@ -83,7 +81,6 @@ impl SceneState {
         } else {
             80
         };
-
         let all_runs = layout_mono_lines(
             doc_text,
             chars_per_line as usize,
@@ -92,16 +89,13 @@ impl SceneState {
             char_width as u16,
             font_size,
         );
-
         // Apply scroll: filter to visible viewport, adjust y positions.
         let content_y = title_bar_h + shadow_depth;
         let content_h = fb_height.saturating_sub(content_y) as i32;
         let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
         let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, content_h);
-
         // Scroll offset in pixels for cursor/selection positioning.
         let scroll_px = scroll_lines as i32 * line_height as i32;
-
         // Compute cursor line/col for positioning.
         let cursor_byte = cursor_pos as usize;
         let (cursor_line, cursor_col) =
@@ -114,8 +108,8 @@ impl SceneState {
             (sel_end as usize, sel_start as usize)
         };
         let has_selection = sel_lo < sel_hi;
-
         let mut dw = self.double();
+
         {
             let mut w = dw.back();
 
@@ -123,7 +117,6 @@ impl SceneState {
 
             let title_ref = w.push_data(title_label);
             let clock_ref = w.push_data(clock_text);
-
             // Push only visible line glyph data (scroll-filtered).
             let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
 
@@ -274,6 +267,7 @@ impl SceneState {
             // Scroll-adjusted: cursor_line is absolute, subtract scroll.
             let cursor_x = (cursor_col as u32 * char_width) as i16;
             let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+
             {
                 let n = w.node_mut(N_CURSOR);
 
@@ -347,5 +341,3 @@ impl SceneState {
         dw.swap();
     }
 }
-
-
