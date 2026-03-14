@@ -272,22 +272,26 @@ fn sys_channel_create() -> Result<u64, Error> {
                     }
                 };
 
-                if process
+                let va_a = match process
                     .address_space
                     .map_channel_page(pages[0].as_u64())
-                    .is_none()
                 {
-                    let _ = process.handles.close(handle_a);
-                    let _ = process.handles.close(handle_b);
+                    Some(va) => va,
+                    None => {
+                        let _ = process.handles.close(handle_a);
+                        let _ = process.handles.close(handle_b);
 
-                    return Err(HandleError::TableFull);
-                }
+                        return Err(HandleError::TableFull);
+                    }
+                };
 
                 if process
                     .address_space
                     .map_channel_page(pages[1].as_u64())
                     .is_none()
                 {
+                    // Second map failed — unmap the first page's PTE.
+                    process.address_space.unmap_channel_page(va_a);
                     let _ = process.handles.close(handle_a);
                     let _ = process.handles.close(handle_b);
 
