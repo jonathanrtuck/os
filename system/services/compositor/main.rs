@@ -1432,6 +1432,7 @@ pub extern "C" fn _start() -> ! {
         unsafe { SEL_END } as u32,
         b"Text",
         &time_buf,
+        0,
     );
 
     let icon_cov: &[u8] = unsafe {
@@ -1769,9 +1770,8 @@ pub extern "C" fn _start() -> ! {
                 unsafe { SEL_END } as u32,
                 b"Text",
                 &time_buf,
+                unsafe { SCROLL_OFFSET } as i32,
             );
-            // Set scroll on the text node.
-            scene.update_scroll(unsafe { SCROLL_OFFSET } as i32);
 
             // 2. Render full scene graph to back buffer.
             {

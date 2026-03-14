@@ -529,3 +529,185 @@ impl<'a> SceneReader<'a> {
         self.header().root
     }
 }
+
+// ── Double-buffered scene graph ─────────────────────────────────────
+
+/// Total size for a double-buffered scene graph: two full scene buffers
+/// side by side. The writer writes to the back buffer (lower generation),
+/// then `swap()` publishes it as the new front. The reader always reads
+/// the front buffer (higher generation). No lock needed — they never
+/// access the same buffer simultaneously.
+pub const DOUBLE_SCENE_SIZE: usize = 2 * SCENE_SIZE;
+
+/// Read the generation counter from a scene buffer at the given byte
+/// offset within the parent buffer. Uses volatile to prevent reordering
+/// past the read (important for cross-process shared memory).
+fn read_generation(buf: &[u8], offset: usize) -> u32 {
+    // SAFETY: SceneHeader starts at `offset`; generation is the first u32.
+    unsafe { core::ptr::read_volatile(buf.as_ptr().add(offset) as *const u32) }
+}
+
+/// Write a generation counter to a scene buffer at the given offset.
+/// Uses volatile + release fence to ensure all prior writes (node data,
+/// text content) are visible before the generation update is published.
+fn write_generation(buf: &mut [u8], offset: usize, value: u32) {
+    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
+    // SAFETY: SceneHeader starts at `offset`; generation is the first u32.
+    unsafe { core::ptr::write_volatile(buf.as_mut_ptr().add(offset) as *mut u32, value) }
+}
+
+/// Return the byte offset and generation of the front (higher-gen) buffer.
+/// When both generations are equal, buffer 0 is the front (arbitrary tiebreak).
+fn front_of(buf: &[u8]) -> (usize, u32) {
+    let g0 = read_generation(buf, 0);
+    let g1 = read_generation(buf, SCENE_SIZE);
+    if g1 > g0 {
+        (SCENE_SIZE, g1)
+    } else {
+        (0, g0)
+    }
+}
+
+/// Return the byte offset of the back (lower-gen) buffer.
+fn back_offset_of(buf: &[u8]) -> usize {
+    let g0 = read_generation(buf, 0);
+    let g1 = read_generation(buf, SCENE_SIZE);
+    if g0 <= g1 { 0 } else { SCENE_SIZE }
+}
+
+/// Mutable access to a double-buffered scene graph.
+///
+/// The OS service uses this to write scenes and publish them. It can
+/// also read the current front buffer (e.g. for diffing).
+pub struct DoubleWriter<'a> {
+    buf: &'a mut [u8],
+}
+
+impl<'a> DoubleWriter<'a> {
+    pub fn new(buf: &'a mut [u8]) -> Self {
+        assert!(buf.len() >= DOUBLE_SCENE_SIZE);
+        // Initialize both scene buffer headers.
+        {
+            let (b0, b1) = buf.split_at_mut(SCENE_SIZE);
+            let _ = SceneWriter::new(b0);
+            let _ = SceneWriter::new(b1);
+        }
+        Self { buf }
+    }
+
+    /// Wrap a previously initialized double buffer without resetting.
+    pub fn from_existing(buf: &'a mut [u8]) -> Self {
+        assert!(buf.len() >= DOUBLE_SCENE_SIZE);
+        Self { buf }
+    }
+
+    /// Get a `SceneWriter` for the back buffer (lower generation).
+    /// The caller writes the scene, then calls `swap()` to publish.
+    pub fn back(&mut self) -> SceneWriter<'_> {
+        let off = back_offset_of(self.buf);
+        SceneWriter::from_existing(&mut self.buf[off..off + SCENE_SIZE])
+    }
+
+    /// Publish the back buffer as the new front by setting its generation
+    /// above the current front's. A release fence ensures all scene data
+    /// written via `back()` is visible before the generation update.
+    pub fn swap(&mut self) {
+        let g0 = read_generation(self.buf, 0);
+        let g1 = read_generation(self.buf, SCENE_SIZE);
+        // The back buffer is the one with the lower generation (same
+        // tiebreak as back()). Set its generation above the front's.
+        let (back_off, max_gen) = if g0 <= g1 { (0, g1) } else { (SCENE_SIZE, g0) };
+        write_generation(self.buf, back_off, max_gen.wrapping_add(1));
+    }
+
+    /// Generation counter of the current front buffer.
+    pub fn front_generation(&self) -> u32 {
+        let (_, g) = front_of(self.buf);
+        g
+    }
+
+    /// Node slice from the current front buffer.
+    pub fn front_nodes(&self) -> &[Node] {
+        let (off, _) = front_of(self.buf);
+        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
+        let count = hdr.node_count as usize;
+        let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
+        unsafe { core::slice::from_raw_parts(ptr, count) }
+    }
+
+    /// Data buffer slice from the current front buffer.
+    pub fn front_data_buf(&self) -> &[u8] {
+        let (off, _) = front_of(self.buf);
+        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
+        let used = hdr.data_used as usize;
+        &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
+    }
+
+    /// Resolve a `DataRef` against the current front buffer.
+    pub fn front_data(&self, dref: DataRef) -> &[u8] {
+        let (off, _) = front_of(self.buf);
+        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
+        let start = off + DATA_OFFSET + dref.offset as usize;
+        let end = start + dref.length as usize;
+        if end <= self.buf.len() && dref.offset + dref.length <= hdr.data_used {
+            &self.buf[start..end]
+        } else {
+            &[]
+        }
+    }
+}
+
+/// Read-only access to a double-buffered scene graph.
+///
+/// The compositor uses this when reading from shared memory written by
+/// the OS service. Always reads the front buffer (higher generation).
+pub struct DoubleReader<'a> {
+    buf: &'a [u8],
+}
+
+impl<'a> DoubleReader<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
+        assert!(buf.len() >= DOUBLE_SCENE_SIZE);
+        Self { buf }
+    }
+
+    /// Generation counter of the current front buffer.
+    pub fn front_generation(&self) -> u32 {
+        let (_, g) = front_of(self.buf);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        g
+    }
+
+    /// Node slice from the current front buffer.
+    pub fn front_nodes(&self) -> &[Node] {
+        let (off, _) = front_of(self.buf);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
+        let count = hdr.node_count as usize;
+        let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
+        unsafe { core::slice::from_raw_parts(ptr, count) }
+    }
+
+    /// Resolve a `DataRef` against the current front buffer.
+    pub fn front_data(&self, dref: DataRef) -> &[u8] {
+        let (off, _) = front_of(self.buf);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
+        let start = off + DATA_OFFSET + dref.offset as usize;
+        let end = start + dref.length as usize;
+        if end <= self.buf.len() && dref.offset + dref.length <= hdr.data_used {
+            &self.buf[start..end]
+        } else {
+            &[]
+        }
+    }
+
+    /// Data buffer slice from the current front buffer.
+    pub fn front_data_buf(&self) -> &[u8] {
+        let (off, _) = front_of(self.buf);
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
+        let used = hdr.data_used as usize;
+        &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
+    }
+}

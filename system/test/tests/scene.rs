@@ -446,3 +446,231 @@ fn writer_reset_data_clears_usage() {
     w.reset_data();
     assert_eq!(w.data_used(), 0);
 }
+
+// ── DoubleWriter / DoubleReader ─────────────────────────────────────
+
+fn make_double_buf() -> Vec<u8> {
+    vec![0u8; DOUBLE_SCENE_SIZE]
+}
+
+#[test]
+fn double_writer_initial_state() {
+    let mut buf = make_double_buf();
+    let dw = DoubleWriter::new(&mut buf);
+    // Both buffers start at generation 0.
+    assert_eq!(dw.front_generation(), 0);
+}
+
+#[test]
+fn double_writer_first_frame() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    // Write to back buffer.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.node_mut(root).width = 800;
+        w.set_root(root);
+    }
+    // Swap makes back the new front.
+    dw.swap();
+    assert_eq!(dw.front_generation(), 1);
+    assert_eq!(dw.front_nodes().len(), 1);
+    assert_eq!(dw.front_nodes()[0].width, 800);
+}
+
+#[test]
+fn double_writer_alternates_buffers() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    // Frame 1: write "first".
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n = w.alloc_node().unwrap();
+        let d = w.push_data(b"first");
+        w.node_mut(n).content = Content::Text {
+            data: d, font_size: 16, color: Color::rgb(255, 255, 255),
+            cursor: u32::MAX, sel_start: 0, sel_end: 0,
+        };
+        w.set_root(n);
+    }
+    dw.swap();
+    assert_eq!(dw.front_generation(), 1);
+    // Frame 2: write "second" to the OTHER buffer.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n = w.alloc_node().unwrap();
+        let d = w.push_data(b"second");
+        w.node_mut(n).content = Content::Text {
+            data: d, font_size: 16, color: Color::rgb(255, 255, 255),
+            cursor: u32::MAX, sel_start: 0, sel_end: 0,
+        };
+        w.set_root(n);
+    }
+    dw.swap();
+    assert_eq!(dw.front_generation(), 2);
+    // Front now has "second".
+    match dw.front_nodes()[0].content {
+        Content::Text { data, .. } => {
+            assert_eq!(dw.front_data(data), b"second");
+        }
+        _ => panic!("expected text"),
+    }
+}
+
+#[test]
+fn double_writer_old_front_becomes_back() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    // Frame 1.
+    {
+        let mut w = dw.back();
+        w.clear();
+        w.alloc_node().unwrap();
+        w.set_root(0);
+    }
+    dw.swap(); // buf 0 = gen 1, buf 1 = gen 0
+    // Frame 2 should write to buf 1 (gen 0 = back).
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n0 = w.alloc_node().unwrap();
+        let n1 = w.alloc_node().unwrap();
+        w.set_root(n0);
+        w.add_child(n0, n1);
+    }
+    dw.swap(); // buf 1 = gen 2, buf 0 = gen 1
+    // Front is buf 1 with 2 nodes.
+    assert_eq!(dw.front_nodes().len(), 2);
+    assert_eq!(dw.front_generation(), 2);
+}
+
+#[test]
+fn double_writer_many_frames() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    for i in 0u32..20 {
+        {
+            let mut w = dw.back();
+            w.clear();
+            let n = w.alloc_node().unwrap();
+            w.node_mut(n).width = (i + 1) as u16;
+            w.set_root(n);
+        }
+        dw.swap();
+        assert_eq!(dw.front_generation(), i + 1);
+        assert_eq!(dw.front_nodes()[0].width, (i + 1) as u16);
+    }
+}
+
+#[test]
+fn double_reader_reads_front() {
+    let mut buf = make_double_buf();
+    {
+        let mut dw = DoubleWriter::new(&mut buf);
+        {
+            let mut w = dw.back();
+            w.clear();
+            let n = w.alloc_node().unwrap();
+            let d = w.push_data(b"visible");
+            w.node_mut(n).content = Content::Text {
+                data: d, font_size: 14, color: Color::rgb(200, 200, 200),
+                cursor: 0, sel_start: 0, sel_end: 0,
+            };
+            w.set_root(n);
+        }
+        dw.swap();
+    }
+    // Read-only access.
+    let dr = DoubleReader::new(&buf);
+    assert_eq!(dr.front_generation(), 1);
+    assert_eq!(dr.front_nodes().len(), 1);
+    match dr.front_nodes()[0].content {
+        Content::Text { data, .. } => {
+            assert_eq!(dr.front_data(data), b"visible");
+        }
+        _ => panic!("expected text"),
+    }
+}
+
+#[test]
+fn double_reader_sees_latest_after_two_swaps() {
+    let mut buf = make_double_buf();
+    {
+        let mut dw = DoubleWriter::new(&mut buf);
+        // Frame 1.
+        {
+            let mut w = dw.back();
+            w.clear();
+            let n = w.alloc_node().unwrap();
+            w.node_mut(n).width = 100;
+            w.set_root(n);
+        }
+        dw.swap();
+        // Frame 2.
+        {
+            let mut w = dw.back();
+            w.clear();
+            let n = w.alloc_node().unwrap();
+            w.node_mut(n).width = 200;
+            w.set_root(n);
+        }
+        dw.swap();
+    }
+    let dr = DoubleReader::new(&buf);
+    assert_eq!(dr.front_nodes()[0].width, 200);
+    assert_eq!(dr.front_generation(), 2);
+}
+
+#[test]
+fn double_writer_front_data_resolves_refs() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n = w.alloc_node().unwrap();
+        let d = w.push_data(b"hello world");
+        w.node_mut(n).content = Content::Text {
+            data: d, font_size: 16, color: Color::rgb(0, 0, 0),
+            cursor: u32::MAX, sel_start: 0, sel_end: 0,
+        };
+        w.set_root(n);
+    }
+    dw.swap();
+    match dw.front_nodes()[0].content {
+        Content::Text { data, .. } => {
+            assert_eq!(dw.front_data(data), b"hello world");
+        }
+        _ => panic!("expected text"),
+    }
+}
+
+#[test]
+fn double_writer_back_does_not_corrupt_front() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    // Frame 1: commit a scene.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n = w.alloc_node().unwrap();
+        w.node_mut(n).width = 111;
+        w.set_root(n);
+    }
+    dw.swap();
+    // Start writing frame 2 to back buffer but DON'T swap.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n = w.alloc_node().unwrap();
+        w.node_mut(n).width = 222;
+        w.set_root(n);
+    }
+    // Front still shows frame 1.
+    assert_eq!(dw.front_nodes()[0].width, 111);
+    assert_eq!(dw.front_generation(), 1);
+}

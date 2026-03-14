@@ -272,8 +272,9 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 - `SceneWriter` — builds/mutates a scene graph in a `&mut [u8]` buffer. Provides `alloc_node()`, `node_mut()`, `push_data()`, `add_child()`, `commit()`. Also exposes read-back via `nodes()` and `data_buf()` for single-process use.
 - `SceneReader` — read-only access to a scene graph buffer. Provides `node()`, `nodes()`, `data()`, `data_buf()`. This is the API the compositor will use when reading from shared memory after the OS service / compositor process split.
+- `DoubleWriter` / `DoubleReader` — double-buffered wrapper over two `SCENE_SIZE` regions (`DOUBLE_SCENE_SIZE = 2 × SCENE_SIZE`). The writer writes to the back buffer (lower generation), then `swap()` atomically publishes it as the new front by bumping its generation counter. The reader always reads the front buffer (higher generation). No locks — they never access the same buffer. A release fence before the generation write and an acquire fence after the generation read ensure cross-core visibility on AArch64.
 
-**No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the buffer. 25 host-side tests.
+**No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the buffer. 34 host-side tests.
 
 ---
 
