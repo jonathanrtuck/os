@@ -440,10 +440,31 @@ fn clock_seconds() -> u64 {
         (now - boot) / freq
     }
 }
-/// Create a new 1-second periodic timer. Stores the handle in TIMER_HANDLE.
-/// Returns true on success.
+/// Create a timer that fires at the next whole-second boundary.
+///
+/// Instead of "1 second from now" (which drifts by the processing time
+/// of each frame), we compute the nanoseconds remaining until the next
+/// whole second using the ARM generic counter. This keeps clock ticks
+/// aligned to real time regardless of frame rendering duration.
 fn create_clock_timer() -> bool {
-    match sys::timer_create(1_000_000_000) {
+    let freq = unsafe { COUNTER_FREQ };
+    let timeout_ns = if freq > 0 {
+        let now = sys::counter();
+        let boot = unsafe { BOOT_COUNTER };
+        let elapsed_ticks = now - boot;
+        // Ticks into the current second.
+        let ticks_this_second = elapsed_ticks % freq;
+        // Ticks remaining until the next whole second.
+        let remaining_ticks = freq - ticks_this_second;
+        // Convert to nanoseconds: remaining_ticks * 1_000_000_000 / freq.
+        // Use u128 to avoid overflow (freq ~62.5M, remaining up to ~62.5M).
+        (remaining_ticks as u128 * 1_000_000_000 / freq as u128) as u64
+    } else {
+        1_000_000_000
+    };
+    // Clamp to at least 10ms to avoid busy-spinning on rounding edge.
+    let timeout_ns = if timeout_ns < 10_000_000 { 1_000_000_000 } else { timeout_ns };
+    match sys::timer_create(timeout_ns) {
         Ok(handle) => {
             unsafe {
                 TIMER_HANDLE = handle;
