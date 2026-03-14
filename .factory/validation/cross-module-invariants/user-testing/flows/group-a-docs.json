@@ -1,0 +1,167 @@
+{
+  "groupId": "group-a-docs",
+  "testedAt": "2026-03-14T00:00:00Z",
+  "isolation": {
+    "type": "code-review-documentation-verification",
+    "access": "read-only source files and documentation",
+    "services": "none"
+  },
+  "toolsUsed": ["Read", "Grep"],
+  "assertions": {
+    "VAL-INVAR-001": {
+      "status": "pass",
+      "title": "Lock ordering verified",
+      "steps": [
+        {
+          "action": "Read /Users/user/Sites/os/.factory/library/lock-ordering-dag.md",
+          "expected": "DAG covering all listed locks with code references",
+          "observed": "13 IrqMutex instances documented with file:line references, ~80 acquisition sites, 5 ordering levels, 11 two-phase wake paths, cycle-freedom proof table"
+        },
+        {
+          "action": "Grep for 'static.*IrqMutex' in system/kernel/ to cross-reference",
+          "expected": "All documented locks match source",
+          "observed": "All 13 IrqMutex instances in source match documentation exactly (same file names and line numbers)"
+        },
+        {
+          "action": "Verify required locks are covered (channel, scheduler, futex, timer, interrupt, thread_exit, process_exit, heap/slab)",
+          "expected": "All listed locks present in DAG",
+          "observed": "All 8 required lock categories covered plus 5 additional (page_allocator, memory, serial, address_space_id, slab)"
+        },
+        {
+          "action": "Verify cycle-free conclusion",
+          "expected": "Document concludes cycle-free",
+          "observed": "§6 provides explicit cycle-freedom proof: 10 forward edges verified with no reverse edges. Conclusion: 'No cycles. The lock ordering is a strict DAG.'"
+        }
+      ],
+      "evidence": {
+        "documentation": "cross-module-invariants/group-a/VAL-INVAR-001-lock-dag-verification.md",
+        "sourceVerification": "grep confirmed 13 IrqMutex instances matching documentation"
+      },
+      "issues": null
+    },
+    "VAL-INVAR-002": {
+      "status": "pass",
+      "title": "TPIDR_EL1 invariant chain verified",
+      "steps": [
+        {
+          "action": "Read safety-map.md §2 (TPIDR_EL1 Invariant Chain)",
+          "expected": "Section listing all write sites (~6)",
+          "observed": "6 write sites documented: scheduler::init (1050), scheduler::init_secondary (1076), schedule_inner (431), exception.S:347, exception.S:372, exception.S:390"
+        },
+        {
+          "action": "Grep for 'msr tpidr_el1' in system/kernel/ source (.rs and .S files)",
+          "expected": "Documented write sites match source",
+          "observed": "Exactly 6 'msr tpidr_el1' instructions found in source: scheduler.rs:431, scheduler.rs:1050, scheduler.rs:1076, exception.S:347, exception.S:372, exception.S:390. All match documentation."
+        },
+        {
+          "action": "Verify boot.S has no TPIDR_EL1 writes (task mentions boot.S as expected)",
+          "expected": "boot.S either has or explicitly documents absence of TPIDR_EL1 write",
+          "observed": "TPIDR-CHAIN.md §7 explicitly documents 'No boot.S TPIDR_EL1 Writes' with justification. grep confirms no 'msr tpidr_el1' in boot.S. Correct: TPIDR set in scheduler::init after boot.S."
+        },
+        {
+          "action": "Verify Fix 17 documentation",
+          "expected": "Fix 17 defense-in-depth confirmed sound",
+          "observed": "Fix 17 documented in safety-map.md §2: TPIDR written under scheduler lock in schedule_inner, exception.S writes are redundant defense-in-depth. 3000-key stress test validation noted."
+        },
+        {
+          "action": "Verify 4 read sites documented",
+          "expected": "All TPIDR_EL1 read sites traced",
+          "observed": "4 read sites: save_context (exception.S:223), exc_fatal (exception.S:193), handler_returned_null (exception.S:402), kernel_fault_handler (main.rs:541)"
+        }
+      ],
+      "evidence": {
+        "documentation": "cross-module-invariants/group-a/VAL-INVAR-002-tpidr-verification.md",
+        "sourceVerification": "grep confirmed 6 write sites in scheduler.rs and exception.S, zero in boot.S"
+      },
+      "issues": null
+    },
+    "VAL-INVAR-003": {
+      "status": "pass",
+      "title": "Handle lifecycle verified",
+      "steps": [
+        {
+          "action": "Read /Users/user/Sites/os/.factory/library/handle-lifecycle.md",
+          "expected": "All 6 handle types with creation/transfer/close/cleanup traced",
+          "observed": "6 handle types documented in 6 sections: Channel (§1), Timer (§2), Interrupt (§3), Thread (§4), Process (§5), SchedulingContext (§6). Each has Creation, Transfer, Close, Process Exit Cleanup, and Leak Analysis subsections."
+        },
+        {
+          "action": "Verify files traced: handle.rs, syscall.rs, process.rs, channel.rs",
+          "expected": "Cross-file lifecycle trace",
+          "observed": "Document references handle.rs, syscall.rs, process.rs, channel.rs, timer.rs, interrupt.rs, thread_exit.rs, process_exit.rs, scheduler.rs"
+        },
+        {
+          "action": "Verify leak-free conclusion for each type",
+          "expected": "Each type concludes leak-free",
+          "observed": "All 6 types have 'Leak Analysis: No leaks. ✅'. Cross-cutting verification section covers handle drain completeness, rollback completeness, handle_send rollback, and double-close prevention."
+        },
+        {
+          "action": "Check for test coverage reference",
+          "expected": "Tests related to handle lifecycle exist",
+          "observed": "Document references system/test/tests/handle_lifecycle.rs with 30 tests"
+        }
+      ],
+      "evidence": {
+        "documentation": "cross-module-invariants/group-a/VAL-INVAR-003-handle-lifecycle-verification.md"
+      },
+      "issues": null
+    },
+    "VAL-INVAR-004": {
+      "status": "pass",
+      "title": "Process exit cleanup complete",
+      "steps": [
+        {
+          "action": "Read /Users/user/Sites/os/.factory/library/process-exit-cleanup.md",
+          "expected": "Both normal exit and kill paths with all resource types",
+          "observed": "Three paths documented: Path 1 (normal exit, 5 phases), Path 2 (kill, 4 phases), Path 3 (deferred cleanup for killed processes with running threads on other cores)"
+        },
+        {
+          "action": "Verify all resource types listed",
+          "expected": "Handles, channels, timers, interrupts, scheduling contexts, DMA, heap, page tables, TLB, ASID",
+          "observed": "15 resource categories documented: handles (6 types), scheduling context refs, internal timeout timers, futex wait entries, DMA buffers, owned page frames, heap metadata, page table frames (L1-L3), L0 page table, TLB entries, ASID, kernel stack, thread object, process slot, waiter registrations (soft leak)"
+        },
+        {
+          "action": "Verify cleanup ordering documented",
+          "expected": "Step-by-step cleanup trace with ordering",
+          "observed": "Detailed phase-by-phase ordering for all 3 paths. Normal exit: Phase 1 (scheduler lock, release sched ctx refs, collect timeout timer, drain handles) → Phase 2 (notify exits, remove futex) → Phase 3 (close handle resources) → Phase 4 (TLB invalidate, free address space, release ASID) → Phase 5 (mark exited, reschedule, deferred drop)."
+        },
+        {
+          "action": "Verify gaps found have tests/fixes",
+          "expected": "Any gaps documented with resolution",
+          "observed": "Bug found and fixed: internal timeout timer leak. 18 model-based tests added. Soft leak (stale waiter registrations) documented as acceptable with justification."
+        }
+      ],
+      "evidence": {
+        "documentation": "cross-module-invariants/group-a/VAL-INVAR-004-process-exit-verification.md"
+      },
+      "issues": null
+    },
+    "VAL-INVAR-005": {
+      "status": "pass",
+      "title": "Safety invariant map created",
+      "steps": [
+        {
+          "action": "Read /Users/user/Sites/os/.factory/library/safety-map.md",
+          "expected": "Sections for: lock ordering, TPIDR_EL1, handle lifecycle, process cleanup, allocator routing, ASID lifecycle",
+          "observed": "9 sections present: §1 Lock Ordering DAG, §2 TPIDR_EL1 Invariant Chain, §3 Handle Lifecycle Per Type, §4 Process Exit Cleanup, §5 Allocator Routing, §6 ASID Lifecycle, §7 Scheduling Context ref_count, §8 Emergency Stack Sizing, §9 Cross-Cutting Invariant Summary"
+        },
+        {
+          "action": "Verify all 6 required topics present",
+          "expected": "Lock ordering, TPIDR_EL1, handle lifecycle, process cleanup, allocator routing, ASID lifecycle",
+          "observed": "All 6 required topics present as dedicated sections (§1-§6). Plus 3 additional sections covering scheduling context ref_count, emergency stack sizing, and a 22-invariant cross-cutting summary."
+        },
+        {
+          "action": "Verify comprehensiveness",
+          "expected": "Comprehensive invariant map",
+          "observed": "§9 summarizes 22 cross-cutting invariants with verification method and violation symptom for each. Document covers 35 .rs + 2 .S source files. References companion documents (LOCK-ORDERING.md, TPIDR-CHAIN.md, DESIGN.md)."
+        }
+      ],
+      "evidence": {
+        "documentation": "cross-module-invariants/group-a/VAL-INVAR-005-safety-map-verification.md"
+      },
+      "issues": null
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 5 assertions: all 5 passed. Lock ordering DAG covers 13 locks with cycle-freedom proof. TPIDR_EL1 invariant chain traces 6 write sites (confirmed against kernel source grep). Handle lifecycle documents all 6 types as leak-free. Process exit cleanup covers 15 resource categories across 3 exit paths. Safety invariant map has 9 sections covering all required topics plus 22 cross-cutting invariants."
+}
