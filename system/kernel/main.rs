@@ -396,6 +396,67 @@ fn write_device_manifest(
     }
 }
 
+/// Validate a context pointer before returning to exception.S for eret.
+///
+/// Catches corruption early: if SPSR says EL1 but ELR is in user VA range
+/// (or vice versa), the eret would crash. This check detects the mismatch
+/// before the eret, providing better diagnostics.
+#[inline(always)]
+fn validate_context_before_eret(ctx: *const Context) {
+    // SAFETY: ctx was returned by the scheduler and is a valid Context pointer.
+    // Reading elr and spsr for validation — no mutation, no aliasing concern.
+    let elr = unsafe { core::ptr::addr_of!((*ctx).elr).read() };
+    let spsr = unsafe { core::ptr::addr_of!((*ctx).spsr).read() };
+    let sp = unsafe { core::ptr::addr_of!((*ctx).sp).read() };
+    let mode = spsr & 0xF; // M[3:0]
+
+    let is_el1 = mode == 0x4 || mode == 0x5; // EL1t or EL1h
+    let is_kernel_va = elr >= 0xFFFF_0000_0000_0000;
+
+    // EL1 return with user-range ELR: the eret would try to fetch instructions
+    // from a lower-half VA at EL1, using TTBR0 (which may be empty for idle
+    // threads). This is the EC=0x21 crash pattern.
+    if is_el1 && !is_kernel_va && elr != 0 {
+        serial::panic_puts("\n🛑 eret validation: EL1 return to user VA\n  elr=0x");
+        serial::panic_put_hex(elr);
+        serial::panic_puts(" spsr=0x");
+        serial::panic_put_hex(spsr);
+        serial::panic_puts(" sp=0x");
+        serial::panic_put_hex(sp);
+        serial::panic_puts(" ctx=0x");
+        serial::panic_put_hex(ctx as u64);
+        // Dump more context: x30 (link register), thread ID
+        let x30 = unsafe { core::ptr::addr_of!((*ctx).x).cast::<u64>().add(30).read() };
+        let thread_id = unsafe { core::ptr::read_volatile((ctx as *const u8).add(0x330) as *const u64) };
+        serial::panic_puts("\n  x30=0x");
+        serial::panic_put_hex(x30);
+        serial::panic_puts(" thread_id=0x");
+        serial::panic_put_hex(thread_id);
+        serial::panic_puts("\n");
+        panic!("corrupt context: EL1 eret to user VA");
+    }
+
+    // EL0 return with kernel-range ELR: would give user code kernel access.
+    if !is_el1 && is_kernel_va {
+        serial::panic_puts("\n🛑 eret validation: EL0 return to kernel VA\n  elr=0x");
+        serial::panic_put_hex(elr);
+        serial::panic_puts(" spsr=0x");
+        serial::panic_put_hex(spsr);
+        serial::panic_puts("\n");
+        panic!("corrupt context: EL0 eret to kernel VA");
+    }
+
+    // EL1 return with invalid kernel SP: stack corruption.
+    if is_el1 && (sp < 0xFFFF_0000_0000_0000 || sp == 0) {
+        serial::panic_puts("\n🛑 eret validation: EL1 return with bad SP\n  sp=0x");
+        serial::panic_put_hex(sp);
+        serial::panic_puts(" elr=0x");
+        serial::panic_put_hex(elr);
+        serial::panic_puts("\n");
+        panic!("corrupt context: EL1 eret with non-kernel SP");
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
     debug_assert!(!ctx.is_null(), "irq_handler: ctx is null (TPIDR_EL1 was 0)");
@@ -423,6 +484,8 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
         !next.is_null(),
         "irq_handler: returning null context pointer"
     );
+
+    validate_context_before_eret(next);
 
     next
 }
@@ -696,6 +759,8 @@ pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
         "svc_handler: returning null context pointer"
     );
 
+    validate_context_before_eret(result);
+
     result
 }
 /// Handle non-SVC synchronous exceptions from EL0 (user faults).
@@ -760,7 +825,11 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     serial::panic_puts(" FAR=0x");
     serial::panic_put_hex(far);
     serial::panic_puts("\n");
-    scheduler::exit_current_from_syscall(ctx)
+    let result = scheduler::exit_current_from_syscall(ctx);
+
+    validate_context_before_eret(result);
+
+    result
 }
 
 #[panic_handler]

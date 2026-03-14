@@ -342,6 +342,8 @@ exc_irq:
   save_context
   bl irq_handler
   cbz x0, handler_returned_null
+  // TPIDR_EL1 already set by schedule_inner (before lock drop).
+  // Redundant write here for defense-in-depth.
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret
@@ -365,6 +367,8 @@ exc_lower_sync:
   save_context
   bl svc_handler
   cbz x0, handler_returned_null
+  // TPIDR_EL1 already set by schedule_inner (before lock drop).
+  // Redundant write here for defense-in-depth.
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret
@@ -381,6 +385,8 @@ exc_user_fault:
   save_context
   bl user_fault_handler
   cbz x0, handler_returned_null
+  // TPIDR_EL1 already set by schedule_inner (before lock drop).
+  // Redundant write here for defense-in-depth.
   msr tpidr_el1, x0
   mov x19, x0
   restore_context_and_eret

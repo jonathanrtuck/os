@@ -406,6 +406,27 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         "schedule_inner returned null context pointer"
     );
 
+    // Update TPIDR_EL1 to point at the new thread's Context while the
+    // scheduler lock is held and IRQs are masked. This is critical: when the
+    // lock drops, IRQs are re-enabled. If a timer IRQ fires before the caller
+    // (exception.S) updates TPIDR, save_context would write to the OLD
+    // thread's Context — which has been parked in the ready queue. That
+    // corrupts the old thread's saved state with kernel-mode registers
+    // (SPSR=EL1h, ELR=kernel addr, SP=wrong stack), causing an EC=0x21
+    // instruction abort when the old thread is later restored.
+    //
+    // SAFETY: `result` is a valid Context pointer from context_ptr() (stable
+    // heap address). TPIDR_EL1 is always valid to write at EL1. `nostack`
+    // is correct. No `nomem` — the compiler must not reorder this past the
+    // lock release (which restores DAIF and re-enables IRQs).
+    unsafe {
+        core::arch::asm!(
+            "msr tpidr_el1, {ctx}",
+            ctx = in(reg) result,
+            options(nostack),
+        );
+    }
+
     result
 }
 /// Select the best thread from the ready queue using EEVDF.
