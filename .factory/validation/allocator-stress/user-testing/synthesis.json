@@ -1,0 +1,22 @@
+{
+  "milestone": "allocator-stress",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-STRESS-001",
+    "VAL-STRESS-002",
+    "VAL-STRESS-003",
+    "VAL-STRESS-004",
+    "VAL-STRESS-005"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}
