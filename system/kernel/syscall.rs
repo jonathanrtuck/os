@@ -55,6 +55,7 @@
 //! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count, x3=flags | target VA   |
 //! | 25 | memory_alloc              | x0=page_count                           | user VA     |
 //! | 26 | memory_free               | x0=va, x1=page_count                   | 0           |
+//! | 27 | process_set_syscall_filter | x0=handle, x1=mask                     | 0           |
 //!
 //! # Error codes
 //!
@@ -72,6 +73,7 @@
 //! | -10  | InvalidHandle       | `HandleError` |
 //! | -12  | InsufficientRights  | `HandleError` |
 //! | -13  | TableFull           | `HandleError` |
+//! | -15  | SyscallBlocked      | `Error`       |
 
 use super::channel;
 use super::futex;
@@ -124,6 +126,7 @@ pub mod nr {
     pub const MEMORY_SHARE: u64 = 24;
     pub const MEMORY_ALLOC: u64 = 25;
     pub const MEMORY_FREE: u64 = 26;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
 }
 
 /// Maximum DMA allocation order (2^11 pages = 8 MiB).
@@ -162,6 +165,7 @@ pub enum Error {
     AlreadyBound = -7,
     WouldBlock = -8,
     OutOfMemory = -9,
+    SyscallBlocked = -15,
 }
 
 impl From<HandleError> for u64 {
@@ -854,6 +858,30 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
 
     Ok(0)
 }
+fn sys_process_set_syscall_filter(handle_nr: u64, mask: u64) -> Result<u64, Error> {
+    if handle_nr > u8::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let process_id = scheduler::current_process_do(|p| {
+        match p.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+            Ok(HandleObject::Process(id)) => Ok(id),
+            Ok(_) => Err(Error::InvalidArgument),
+            Err(_) => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    scheduler::with_process(process_id, |target| {
+        if target.started {
+            return Err(Error::InvalidArgument);
+        }
+
+        target.syscall_mask = mask as u32;
+
+        Ok(0)
+    })
+    .unwrap_or(Err(Error::InvalidArgument))
+}
 fn sys_process_start(handle_nr: u64) -> Result<u64, Error> {
     if handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
@@ -1376,6 +1404,23 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         (x.add(8).read(), x.add(0).read(), x.add(1).read())
     };
 
+    // Syscall filtering: check caller's per-process mask.
+    // EXIT is always allowed (can't trap a process with no way out).
+    // Syscall numbers >= 32 skip the filter (future-proofing — they fall
+    // through to the UnknownSyscall arm naturally).
+    if syscall_nr != nr::EXIT && syscall_nr < 32 {
+        let allowed = scheduler::current_process_do(|p| {
+            p.syscall_mask & (1u32 << syscall_nr as u32) != 0
+        });
+
+        if !allowed {
+            return dispatch_ok(
+                ctx,
+                result_to_u64!(Err::<u64, Error>(Error::SyscallBlocked)),
+            );
+        }
+    }
+
     match syscall_nr {
         // Special cases: these manipulate ctx directly (may block/switch threads).
         nr::EXIT => sys_exit(ctx),
@@ -1422,6 +1467,12 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::MEMORY_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_memory_alloc(x0))),
         nr::MEMORY_FREE => dispatch_ok(ctx, result_to_u64!(sys_memory_free(x0, x1))),
+        nr::PROCESS_SET_SYSCALL_FILTER => {
+            dispatch_ok(
+                ctx,
+                result_to_u64!(sys_process_set_syscall_filter(x0, x1)),
+            )
+        }
 
         _ => dispatch_ok(
             ctx,

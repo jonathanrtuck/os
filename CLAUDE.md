@@ -139,7 +139,7 @@ Read these before making any design suggestions:
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~960 tests).
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~1,351 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```bash
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds

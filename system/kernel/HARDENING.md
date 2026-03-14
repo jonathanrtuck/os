@@ -59,13 +59,11 @@ KILL     = 1 << 7   // process_kill
 
 Scope: ~50 lines changed in `handle.rs`, `syscall.rs`. No new modules. Userspace API gains one parameter.
 
-**Phase 2 — Syscall filtering (very low cost, high value):**
+**Phase 2 — Syscall filtering: ✅ IMPLEMENTED (2026-03-14)**
 
-Per-process bitmask of allowed syscalls. OS service sets it before `process_start`. Checked at the top of `sys_dispatch` — ~20 lines.
+Per-process `syscall_mask: u32` bitmask. OS service sets it before `process_start` via `PROCESS_SET_SYSCALL_FILTER` (syscall 27). Checked at the top of `dispatch()`. EXIT always allowed regardless of mask. Returns `SyscallBlocked` (-15) for filtered syscalls. 15 tests.
 
-An editor's allowed syscalls: `exit`, `write`, `yield`, `handle_close`, `channel_signal`, `wait`, `futex_wait`, `futex_wake`, `memory_alloc`, `memory_free`. That's 10 of 27. The other 17 (process_create, process_kill, interrupt_register, device_map, dma_alloc, etc.) are blocked.
-
-This is the single cheapest hardening measure with the highest impact.
+An editor's recommended mask: `exit`, `write`, `yield`, `handle_close`, `channel_signal`, `wait`, `futex_wait`, `futex_wake`, `memory_alloc`, `memory_free`. That's 10 of 28. The other 18 (process_create, process_kill, interrupt_register, device_map, dma_alloc, etc.) are blocked.
 
 **Phase 3 — Dynamic handle table (moderate cost):**
 
@@ -106,7 +104,7 @@ W^X enforcement (kernel + user), split TTBR (kernel/user isolation), handle + ri
 
 ### Remediation Path (Ordered by Value/Cost)
 
-**1. Syscall filtering — see Gap 1 Phase 2.** Listed here too because it's security hardening, not just capability model. Highest value, lowest cost.
+**1. Syscall filtering — ✅ DONE (see Gap 1 Phase 2).** Implemented 2026-03-14.
 
 **2. User ASLR (moderate cost, moderate value):**
 
@@ -147,7 +145,7 @@ These matter for multi-tenant systems where an attacker runs code alongside a vi
 
 **What to skip for now:**
 
-- KASAN (kernel address sanitizer). Useful for kernel development debugging, not a runtime hardening feature. The existing test suite (960 tests) + manual audits cover this.
+- KASAN (kernel address sanitizer). Useful for kernel development debugging, not a runtime hardening feature. The existing test suite (1,336 tests) + manual audits cover this.
 - CFI. Requires clang toolchain integration. Rust's type system already prevents most control flow attacks in safe code.
 
 ---
@@ -237,7 +235,7 @@ The lost-wakeup prevention (`wake_pending` flag, store-before-check ordering) mu
 
 | Trigger                                              | Action                                                                    |
 | ---------------------------------------------------- | ------------------------------------------------------------------------- |
-| Start loading external documents / untrusted content | Syscall filtering (Gap 1.2), user ASLR (Gap 2.2)                          |
+| Start loading external documents / untrusted content | ~~Syscall filtering (Gap 1.2)~~ ✅, user ASLR (Gap 2.2)                    |
 | Compound documents with multiple editors             | Rights attenuation (Gap 1.1), dynamic handle table (Gap 1.3)              |
 | `metrics::lock_spins` climbing under real workloads  | Per-core ready queues (Gap 3.1), IPI wake (Gap 3.2)                       |
 | Considering open-sourcing for others to build on     | All of Gap 2 (demonstrates security baseline)                             |

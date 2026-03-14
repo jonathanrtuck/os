@@ -35,6 +35,7 @@ enum Error {
     AlreadyBound = -7,
     WouldBlock = -8,
     OutOfMemory = -9,
+    SyscallBlocked = -15,
 }
 
 #[repr(i64)]
@@ -254,6 +255,7 @@ fn error_codes_are_negative() {
     assert_eq!(Error::AlreadyBound as i64, -7);
     assert_eq!(Error::WouldBlock as i64, -8);
     assert_eq!(Error::OutOfMemory as i64, -9);
+    assert_eq!(Error::SyscallBlocked as i64, -15);
 }
 
 #[test]
@@ -801,16 +803,16 @@ fn range_readable_unaligned_start_covers_correct_pages() {
 fn syscall_numbers_are_unique_and_contiguous() {
     let numbers = [
         0u64, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
-        23, 24, 25, 26,
+        23, 24, 25, 26, 27,
     ];
 
     // All unique.
     let mut sorted = numbers.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), 27, "27 unique syscall numbers expected");
+    assert_eq!(sorted.len(), 28, "28 unique syscall numbers expected");
 
-    // Contiguous from 0 to 26.
+    // Contiguous from 0 to 27.
     for (i, &n) in sorted.iter().enumerate() {
         assert_eq!(n, i as u64, "syscall numbers should be contiguous");
     }
