@@ -1,0 +1,14 @@
+[package]
+name = "shaping"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+harfrust = { version = "0.5", default-features = false }
+
+[profile.release]
+panic = "abort"
+opt-level = "s"

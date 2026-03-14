@@ -5,6 +5,7 @@
 //! # Build order
 //!
 //! 1. Shared libraries: sys, virtio, drawing (rlibs)
+//! 1b. Cargo-managed libraries: shaping (with harfrust dependency tree)
 //! 2. All user/driver/compositor programs (ELFs)
 //! 3. Generate `init_embedded.rs` with `include_bytes!` for ELFs init needs
 //! 4. Compile init last (depends on all other ELFs via init_embedded.rs)
@@ -16,6 +17,15 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Output of building a Cargo-managed library for the bare-metal target.
+#[allow(dead_code)]
+struct CargoLibOutput {
+    /// Path to the main rlib file.
+    rlib: PathBuf,
+    /// Path to the deps directory containing transitive dependency rlibs.
+    deps_dir: PathBuf,
+}
 
 /// ELFs that init embeds (must be a subset of PROGRAMS names).
 const INIT_EMBEDDED: &[(&str, &str)] = &[
@@ -101,6 +111,11 @@ fn main() {
 
     rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[]);
 
+    // Step 1b: Build Cargo-managed libraries (libraries with external deps).
+    // These use `cargo build` to resolve dependency graphs, then we link the
+    // resulting rlibs alongside hand-compiled libraries.
+    let shaping_output = cargo_lib(&manifest_dir.join("libraries/shaping"));
+
     // Step 2: Compile all non-init programs.
     // fuzz-helper must be compiled before fuzz (fuzz embeds it).
     for &(name, dir, needs_virtio, needs_drawing) in PROGRAMS {
@@ -140,7 +155,23 @@ fn main() {
             ));
         }
 
-        rustc_bin(&rustc, &main_rs, &elf_path, &link_ld, &externs, &env_vars);
+        // Add shaping library search paths for programs that need drawing
+        // (core service and compositor will use shaping in later features).
+        let search_paths: Vec<&Path> = if needs_drawing {
+            vec![&shaping_output.deps_dir]
+        } else {
+            vec![]
+        };
+
+        rustc_bin(
+            &rustc,
+            &main_rs,
+            &elf_path,
+            &link_ld,
+            &externs,
+            &env_vars,
+            &search_paths,
+        );
         println!("cargo:rerun-if-changed={}", main_rs.display());
     }
 
@@ -181,6 +212,7 @@ fn main() {
             ("scene", scene_rlib.clone()),
         ],
         &init_env,
+        &[],
     );
     println!("cargo:rerun-if-changed={}", init_src.display());
     println!("cargo:rerun-if-changed={}", link_ld.display());
@@ -196,6 +228,14 @@ fn main() {
     println!("cargo:rerun-if-changed={}", ipc_src.display());
     println!("cargo:rerun-if-changed={}", protocol_src.display());
     println!("cargo:rerun-if-changed={}", scene_src.display());
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("libraries/shaping/src/lib.rs").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("libraries/shaping/Cargo.toml").display()
+    );
 }
 /// Compile a Rust source file as a binary ELF.
 fn rustc_bin(
@@ -205,6 +245,7 @@ fn rustc_bin(
     link_ld: &Path,
     externs: &[(&str, PathBuf)],
     env_vars: &[(&str, String)],
+    extra_search_paths: &[&Path],
 ) {
     let mut cmd = Command::new(rustc);
 
@@ -220,6 +261,9 @@ fn rustc_bin(
         if let Some(dir) = first.1.parent() {
             cmd.arg(format!("-L{}", dir.display()));
         }
+    }
+    for path in extra_search_paths {
+        cmd.arg(format!("-L{}", path.display()));
     }
 
     for (name, path) in externs {
@@ -282,4 +326,43 @@ fn rustc_rlib(
         .unwrap_or_else(|e| panic!("failed to invoke rustc for {crate_name}: {e}"));
 
     assert!(status.success(), "failed to build {crate_name}.rlib");
+}
+
+/// Build a Cargo-managed library for the bare-metal target.
+///
+/// Invokes `cargo build --target aarch64-unknown-none --release` inside the
+/// library's directory. Returns the path to the main rlib and the deps
+/// directory containing transitive dependency rlibs.
+fn cargo_lib(crate_dir: &Path) -> CargoLibOutput {
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let crate_name = crate_dir
+        .file_name()
+        .unwrap()
+        .to_str()
+        .unwrap();
+
+    let status = Command::new(&cargo)
+        .current_dir(crate_dir)
+        .arg("build")
+        .arg("--target=aarch64-unknown-none")
+        .arg("--release")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo for {crate_name}: {e}"));
+
+    assert!(
+        status.success(),
+        "cargo build failed for {crate_name}"
+    );
+
+    let target_dir = crate_dir.join("target/aarch64-unknown-none/release");
+    let rlib = target_dir.join(format!("lib{crate_name}.rlib"));
+    let deps_dir = target_dir.join("deps");
+
+    assert!(
+        rlib.exists(),
+        "rlib not found at {}",
+        rlib.display()
+    );
+
+    CargoLibOutput { rlib, deps_dir }
 }
