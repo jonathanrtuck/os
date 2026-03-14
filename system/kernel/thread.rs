@@ -83,6 +83,11 @@ pub struct Thread {
     /// Handles this thread is waiting on via the `wait` syscall.
     /// Empty when not in a wait. Cleared on wake or early return.
     pub(crate) wait_set: Vec<WaitEntry>,
+    /// Stale waiter registrations from a previous `wait` that took the
+    /// BlockResult::Blocked path. The Blocked path can't unregister waiters
+    /// (it's already running as a different thread). These are cleaned up
+    /// at the start of the next `sys_wait` call.
+    pub(crate) stale_waiters: Vec<WaitEntry>,
     /// Internal timeout timer from a `wait` with finite timeout.
     /// Cleaned up on the next `wait` call (deferred cleanup for the
     /// Blocked path, where sys_wait can't run cleanup code).
@@ -155,6 +160,18 @@ impl Thread {
                 }
             })
             .unwrap_or(0);
+
+        // Move unfired entries to stale_waiters for deferred cleanup.
+        // The Blocked path in sys_wait can't unregister waiters (it's
+        // running as a different thread). The next sys_wait call will
+        // clean these up.
+        self.stale_waiters.clear();
+
+        for entry in self.wait_set.iter() {
+            if entry.object != *reason {
+                self.stale_waiters.push(*entry);
+            }
+        }
 
         self.wait_set.clear();
 
@@ -243,6 +260,7 @@ impl Thread {
             wake_pending: false,
             wake_result: 0,
             wait_set: Vec::new(),
+            stale_waiters: Vec::new(),
             timeout_timer: None,
         }
     }

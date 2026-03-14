@@ -18,10 +18,15 @@ name = "protocol"
 version = "0.1.0"
 
 [[package]]
+name = "scene"
+version = "0.1.0"
+
+[[package]]
 name = "test"
 version = "0.1.0"
 dependencies = [
  "drawing",
  "ipc",
  "protocol",
+ "scene",
 ]

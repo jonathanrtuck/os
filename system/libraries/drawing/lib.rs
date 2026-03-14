@@ -1015,8 +1015,8 @@ impl TextLayout {
             col += 1;
         }
 
-        // Cursor at end of text.
-        if cursor_offset >= text.len() {
+        // Cursor at end of text (but not when cursor is disabled via usize::MAX).
+        if cursor_offset != usize::MAX && cursor_offset >= text.len() {
             let visual_row = row as i32 - scroll_offset as i32;
 
             if visual_row >= 0 {
@@ -1030,9 +1030,12 @@ impl TextLayout {
             }
         }
 
-        // Draw cursor: thin bar (no cursor when there's a visible selection,
-        // since the selection end *is* the cursor position).
-        if !has_selection && cursor_y >= origin_y && cursor_y <= max_y {
+        // Draw cursor: thin bar (no cursor when disabled or there's a visible selection).
+        if cursor_offset != usize::MAX
+            && !has_selection
+            && cursor_y >= origin_y
+            && cursor_y <= max_y
+        {
             fb.fill_rect(cursor_x, cursor_y, 2, cache.line_height, cursor_color);
         }
 
@@ -1154,8 +1157,8 @@ impl TextLayout {
             col += 1;
         }
 
-        // Cursor at end of text.
-        if cursor_offset >= text.len() {
+        // Cursor at end of text (not when disabled via usize::MAX).
+        if cursor_offset != usize::MAX && cursor_offset >= text.len() {
             let visual_row = row as i32 - scroll_offset as i32;
 
             if visual_row >= 0 {
@@ -1169,8 +1172,12 @@ impl TextLayout {
             }
         }
 
-        // Draw cursor only if it falls within the requested line range.
-        if !has_selection && cursor_y >= origin_y && cursor_y <= max_y {
+        // Draw cursor only if enabled and within the requested line range.
+        if cursor_offset != usize::MAX
+            && !has_selection
+            && cursor_y >= origin_y
+            && cursor_y <= max_y
+        {
             let cursor_vis_line = (cursor_y - origin_y) / self.line_height;
 
             if cursor_vis_line >= first_vis_line && cursor_vis_line <= last_vis_line {

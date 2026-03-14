@@ -29,19 +29,27 @@
 #![no_main]
 
 extern crate alloc;
+extern crate scene;
+
+#[path = "scene_render.rs"]
+mod scene_render;
+#[path = "scene_state.rs"]
+mod scene_state;
 
 use alloc::boxed::Box;
 use alloc::vec;
 use protocol::compose::{
-    CompositorConfig, IconConfig, ImageConfig, RtcConfig,
-    MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG, MSG_IMAGE_CONFIG, MSG_IMG_ICON_CONFIG, MSG_RTC_CONFIG,
+    CompositorConfig, IconConfig, ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG,
+    MSG_IMAGE_CONFIG, MSG_IMG_ICON_CONFIG, MSG_RTC_CONFIG,
 };
 use protocol::edit::{
-    CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
-    MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE,
-    MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
+    CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE,
+    MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE,
+    MSG_WRITE_INSERT,
 };
-use protocol::input::{KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON};
+use protocol::input::{
+    KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
+};
 use protocol::present::{PresentPayload, MSG_PRESENT};
 
 const FONT_SIZE: u32 = 18;
@@ -485,14 +493,6 @@ fn process_key_event(
     key: &KeyEvent,
     ctrl_pressed: &mut bool,
     has_image: bool,
-    content_buf: &mut [u8],
-    title_buf: &mut [u8],
-    content_w: u32,
-    content_h: u32,
-    fb_width: u32,
-    image_pixels: &[u8],
-    image_w: u32,
-    image_h: u32,
     editor_ch: &ipc::Channel,
     msg: &ipc::Message,
 ) -> KeyAction {
@@ -514,37 +514,16 @@ fn process_key_event(
             let was_image = unsafe { IMAGE_MODE };
 
             if !was_image {
-                // Switching TO image: save editor scroll offset.
                 unsafe { SAVED_EDITOR_SCROLL = SCROLL_OFFSET };
             }
 
             unsafe { IMAGE_MODE = !was_image };
 
             if was_image {
-                // Switching BACK to editor: restore scroll offset.
                 unsafe { SCROLL_OFFSET = SAVED_EDITOR_SCROLL };
             }
 
-            // Re-render the content surface for the new mode.
-            {
-                let mut content_surf = make_surf(content_buf, content_w, content_h);
-
-                if unsafe { IMAGE_MODE } {
-                    render_image_content_surface(&mut content_surf, image_pixels, image_w, image_h);
-                } else {
-                    // Switching back to editor: full clear + re-render
-                    // to ensure no image artifacts remain.
-                    render_content_surface(&mut content_surf, doc_content(), true);
-                }
-            }
-
-            // Re-render the title bar to switch the icon.
-            {
-                let mut title_surf = make_surf(title_buf, fb_width, TITLE_BAR_H);
-
-                render_title_bar(&mut title_surf);
-            }
-
+            // Scene graph re-render handles the visual update.
             return KeyAction {
                 changed: true,
                 text_changed: true,
@@ -1422,107 +1401,75 @@ pub extern "C" fn _start() -> ! {
         CONTENT_H = content_h;
     }
 
-    sys::print(b"     allocating surface buffers\n");
-
-    // Background surface (z=0): full-screen solid color.
-    let mut bg_buf = alloc_surface_buf(fb_width, fb_height);
-    // Content surface (z=10): text editing area.
-    let mut content_buf = alloc_surface_buf(content_w, content_h);
-    // Title bar drop shadow (z=15): gradient beneath title bar.
-    let mut title_shadow_buf = alloc_surface_buf(fb_width, SHADOW_DEPTH);
-    // Title bar chrome (z=20): translucent overlay at top.
-    let mut title_buf = alloc_surface_buf(fb_width, TITLE_BAR_H);
-    // Mouse cursor (z=30): procedural arrow cursor, highest z-order.
-    let mut cursor_buf = alloc_surface_buf(drawing::CURSOR_W, drawing::CURSOR_H);
-
-    drawing::render_cursor(&mut cursor_buf);
-    sys::print(b"     surface buffers allocated\n");
-
     // -----------------------------------------------------------------------
-    // Render initial surface contents.
+    // Build scene graph for initial frame.
     // -----------------------------------------------------------------------
+    sys::print(b"     building scene graph\n");
 
-    // Background: solid dark color.
-    {
-        let mut bg_surf = make_surf(&mut bg_buf, fb_width, fb_height);
-
-        render_background(&mut bg_surf);
-    }
-    // Content: image viewer or text area background + cursor.
-    {
-        let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
-
-        if unsafe { IMAGE_MODE } && !image_pixels.is_empty() {
-            render_image_content_surface(&mut content_surf, &image_pixels, image_w, image_h);
-        } else {
-            render_content_surface(&mut content_surf, doc_content(), true);
+    let mut scene: Box<scene_state::SceneState> = unsafe {
+        let layout = alloc::alloc::Layout::new::<scene_state::SceneState>();
+        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut scene_state::SceneState;
+        if ptr.is_null() {
+            sys::print(b"compositor: scene state alloc failed\n");
+            sys::exit();
         }
-    }
-    // Drop shadow (rendered once — static gradient, never re-rendered).
-    {
-        let mut title_shadow_surf = make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH);
+        Box::from_raw(ptr)
+    };
+    let mut time_buf = [0u8; 8];
 
-        render_title_shadow(&mut title_shadow_surf);
-    }
-    // Title bar chrome.
-    {
-        let mut title_surf = make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
+    format_time_hms(clock_seconds(), &mut time_buf);
 
-        render_title_bar(&mut title_surf);
-    }
+    scene.build_editor_scene(
+        fb_width,
+        fb_height,
+        TITLE_BAR_H,
+        SHADOW_DEPTH,
+        TEXT_INSET_X,
+        TEXT_INSET_TOP,
+        drawing::CHROME_BG,
+        drawing::CHROME_BORDER,
+        drawing::CHROME_TITLE,
+        drawing::CHROME_CLOCK,
+        drawing::BG_BASE,
+        drawing::TEXT_PRIMARY,
+        FONT_SIZE as u16,
+        unsafe { LINE_H },
+        doc_content(),
+        unsafe { CURSOR_POS } as u32,
+        unsafe { SEL_START } as u32,
+        unsafe { SEL_END } as u32,
+        b"Text",
+        &time_buf,
+    );
 
-    sys::print(b"     surfaces rendered, compositing initial frame\n");
+    let icon_cov: &[u8] = unsafe {
+        if !ICON_COVERAGE.is_null() && ICON_W > 0 && ICON_H > 0 {
+            core::slice::from_raw_parts(ICON_COVERAGE, (ICON_W * ICON_H * 3) as usize)
+        } else {
+            &[]
+        }
+    };
+    let render_ctx = scene_render::RenderCtx {
+        mono_cache: unsafe { &*GLYPH_CACHE },
+        prop_cache: unsafe { &*PROP_GLYPH_CACHE },
+        icon_coverage: icon_cov,
+        icon_w: unsafe { ICON_W },
+        icon_h: unsafe { ICON_H },
+        icon_color: drawing::CHROME_ICON,
+        icon_node: scene_state::N_TITLE_TEXT as scene::NodeId,
+    };
 
-    // -----------------------------------------------------------------------
-    // Composite initial frame into buffer 0 and present.
-    // -----------------------------------------------------------------------
-    let title_shadow_y = TITLE_BAR_H as i32;
-
+    // Render scene graph to buffer 0 and present.
     {
         let mut fb0 = make_fb_surface(0);
-        // Build composite surface references.
-        let bg_cs = drawing::CompositeSurface {
-            surface: make_surf(&mut bg_buf, fb_width, fb_height),
-            x: 0,
-            y: 0,
-            z: Z_BACKGROUND,
-            visible: true,
+        let graph = scene_render::SceneGraph {
+            nodes: &scene.nodes[..scene.node_count],
+            data: &scene.data[..scene.data_used as usize],
         };
-        let content_cs = drawing::CompositeSurface {
-            surface: make_surf(&mut content_buf, content_w, content_h),
-            x: content_x,
-            y: content_y,
-            z: Z_CONTENT,
-            visible: true,
-        };
-        let title_shadow_cs = drawing::CompositeSurface {
-            surface: make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH),
-            x: 0,
-            y: title_shadow_y,
-            z: Z_SHADOW,
-            visible: true,
-        };
-        let title_cs = drawing::CompositeSurface {
-            surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
-            x: 0,
-            y: 0,
-            z: Z_CHROME,
-            visible: true,
-        };
-        let cursor_cs = drawing::CompositeSurface {
-            surface: make_surf(&mut cursor_buf, drawing::CURSOR_W, drawing::CURSOR_H),
-            x: 0,
-            y: 0,
-            z: Z_CURSOR,
-            visible: false, // Hidden until first pointer event.
-        };
-        let surfaces: [&drawing::CompositeSurface; 5] =
-            [&bg_cs, &content_cs, &title_shadow_cs, &title_cs, &cursor_cs];
 
-        drawing::composite_surfaces(&mut fb0, &surfaces);
+        scene_render::render_scene(&mut fb0, &graph, &render_ctx);
     }
 
-    // Initial present: full screen (rect_count = 0 signals full transfer).
     let initial_payload = PresentPayload {
         buffer_index: 0,
         rect_count: 0,
@@ -1535,13 +1482,12 @@ pub extern "C" fn _start() -> ! {
 
     let _ = sys::channel_signal(GPU_HANDLE);
 
-    // Buffer 0 is now the front (being displayed). Next render goes to buffer 1.
     unsafe { BACK_BUF_IDX = 1 };
 
     // Create the initial 1-second periodic timer for the clock display.
     create_clock_timer();
 
-    sys::print(b"     multi-surface compositor ready, entering event loop\n");
+    sys::print(b"     scene graph compositor ready, entering event loop\n");
 
     // -----------------------------------------------------------------------
     // Event loop: wait for input, editor write requests, or timer.
@@ -1605,14 +1551,6 @@ pub extern "C" fn _start() -> ! {
                     &key,
                     &mut ctrl_pressed,
                     !image_pixels.is_empty(),
-                    &mut content_buf,
-                    &mut title_buf,
-                    content_w,
-                    content_h,
-                    fb_width,
-                    &image_pixels,
-                    image_w,
-                    image_h,
                     &editor_ch,
                     &msg,
                 );
@@ -1630,9 +1568,6 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Drain second input channel (tablet/keyboard) if present.
-        // NOTE: QEMU may enumerate virtio devices in reverse command-line order,
-        // so the keyboard can end up on the second channel. We must handle
-        // Ctrl+Tab context switching on BOTH input channels.
         if let Some(ref ch2) = input2_ch {
             while ch2.try_recv(&mut msg) {
                 match msg.msg_type {
@@ -1642,14 +1577,6 @@ pub extern "C" fn _start() -> ! {
                             &key,
                             &mut ctrl_pressed,
                             !image_pixels.is_empty(),
-                            &mut content_buf,
-                            &mut title_buf,
-                            content_w,
-                            content_h,
-                            fb_width,
-                            &image_pixels,
-                            image_w,
-                            image_h,
                             &editor_ch,
                             &msg,
                         );
@@ -1825,264 +1752,52 @@ pub extern "C" fn _start() -> ! {
 
         if changed || timer_fired {
             let back = unsafe { BACK_BUF_IDX };
-            let in_image_mode = unsafe { IMAGE_MODE };
 
-            // 1. Re-render the content surface (only on actual text/editor
-            //    changes, not on timer ticks or mouse moves).
-            if text_changed && !in_image_mode {
-                let mut content_surf = make_surf(&mut content_buf, content_w, content_h);
-                let new_scroll = unsafe { SCROLL_OFFSET };
-                let sel_start = unsafe { SEL_START };
-                let sel_end = unsafe { SEL_END };
-                let prev_sel_start = unsafe { PREV_SEL_START };
-                let prev_sel_end = unsafe { PREV_SEL_END };
-                let first_render = unsafe { CONTENT_FIRST_RENDER };
-                // Full clear is needed when:
-                // - First render of the content surface
-                // - Context switch (already handled above with force_full: true)
-                // - Scroll offset changed (entire viewport shifted)
-                // - Selection changed (highlight may span many lines)
-                let force_full = first_render
-                    || context_switched
-                    || old_scroll != new_scroll
-                    || sel_start != prev_sel_start
-                    || sel_end != prev_sel_end;
+            // Rebuild the scene graph from current state.
+            format_time_hms(clock_seconds(), &mut time_buf);
 
-                render_content_surface(&mut content_surf, doc_content(), force_full);
+            scene.build_editor_scene(
+                fb_width,
+                fb_height,
+                TITLE_BAR_H,
+                SHADOW_DEPTH,
+                TEXT_INSET_X,
+                TEXT_INSET_TOP,
+                drawing::CHROME_BG,
+                drawing::CHROME_BORDER,
+                drawing::CHROME_TITLE,
+                drawing::CHROME_CLOCK,
+                drawing::BG_BASE,
+                drawing::TEXT_PRIMARY,
+                FONT_SIZE as u16,
+                unsafe { LINE_H },
+                doc_content(),
+                unsafe { CURSOR_POS } as u32,
+                unsafe { SEL_START } as u32,
+                unsafe { SEL_END } as u32,
+                b"Text",
+                &time_buf,
+            );
+            // Set scroll on the text node directly (in lines, not pixels).
+            scene.nodes[scene_state::N_DOC_TEXT].scroll_y = unsafe { SCROLL_OFFSET } as i32;
 
-                if first_render {
-                    unsafe { CONTENT_FIRST_RENDER = false };
-                }
-            }
-            // In image mode, content surface stays unchanged (showing the image).
-
-            // 2. Re-render title bar if timer fired (clock update) or context
-            //    switched (icon change). Context switch already re-rendered
-            //    above, but timer + content change needs handling here.
-            if timer_fired && !context_switched {
-                let mut title_surf = make_surf(&mut title_buf, fb_width, TITLE_BAR_H);
-
-                render_title_bar(&mut title_surf);
-            }
-
-            // ---------------------------------------------------------------
-            // 3. Compute dirty rects based on what changed this frame.
-            // ---------------------------------------------------------------
-            let mut damage = drawing::DamageTracker::new(fb_width as u16, fb_height as u16);
-
-            if !first_present_done || context_switched {
-                // First frame after init or context switch: full screen.
-                damage.mark_full_screen();
-
-                first_present_done = true;
-            } else if text_changed && !in_image_mode {
-                // Content change in text editor mode: compute which visual
-                // lines changed and add dirty rects for those lines.
-                let new_cursor = unsafe { CURSOR_POS };
-                let new_doc_len = unsafe { DOC_LEN };
-                let new_scroll = unsafe { SCROLL_OFFSET };
-                let layout = content_text_layout(content_w);
-                let text = doc_content();
-                let line_h = unsafe { LINE_H };
-
-                if old_scroll != new_scroll {
-                    // Scroll offset changed — the entire content area shifted.
-                    // Dirty the full content region.
-                    damage.add(
-                        content_x as u16,
-                        content_y as u16,
-                        content_w as u16,
-                        content_h as u16,
-                    );
-                } else if line_h > 0 {
-                    // Compute the visual line range that changed.
-                    // Old cursor line (before scroll adjustment):
-                    let (_, old_cy) = layout.byte_to_xy(text, old_cursor);
-                    let old_line = old_cy / line_h;
-                    // New cursor line:
-                    let (_, new_cy) = layout.byte_to_xy(text, new_cursor);
-                    let new_line = new_cy / line_h;
-                    // The changed region spans from the earliest affected line
-                    // down to the last line of text (insertions/deletions shift
-                    // all subsequent lines).
-                    let first_changed = if old_line < new_line {
-                        old_line
-                    } else {
-                        new_line
-                    };
-                    // Compute the last visible line of text.
-                    let total_text_lines = if new_doc_len == 0 {
-                        1
-                    } else {
-                        let (_, end_cy) = layout.byte_to_xy(text, new_doc_len);
-                        end_cy / line_h + 1
-                    };
-                    // Use the total line count captured before
-                    // render_content_surface (which updates PREV_TOTAL_LINES)
-                    // so we get the pre-render line count for accurate dirty
-                    // tracking when newlines are deleted.
-                    let old_total = old_total_lines;
-                    let last_line = if total_text_lines > old_total {
-                        total_text_lines
-                    } else {
-                        old_total
-                    };
-                    // Convert visual lines to content-surface Y coordinates,
-                    // accounting for scroll offset.
-                    let vis_first = first_changed.saturating_sub(new_scroll);
-                    let vis_last = last_line.saturating_sub(new_scroll);
-                    let vp = viewport_lines(content_h);
-                    // Clamp to the visible viewport.
-                    let draw_first = vis_first;
-                    let draw_last = if vis_last > vp { vp } else { vis_last };
-
-                    if draw_last > draw_first {
-                        // Convert to framebuffer coordinates.
-                        let dirty_y = content_y as u32 + TEXT_INSET_TOP + draw_first * line_h;
-                        let dirty_h = (draw_last - draw_first) * line_h;
-                        // Clamp to framebuffer height.
-                        let clamped_h = if dirty_y + dirty_h > fb_height {
-                            fb_height - dirty_y
-                        } else {
-                            dirty_h
-                        };
-
-                        damage.add(0, dirty_y as u16, fb_width as u16, clamped_h as u16);
-                    }
-
-                    // Also dirty the old cursor line if different from new
-                    // (cursor bar moved between lines).
-                    if old_line != new_line {
-                        let vis_old = old_line.saturating_sub(new_scroll);
-
-                        if vis_old < vp {
-                            let old_dirty_y = content_y as u32 + TEXT_INSET_TOP + vis_old * line_h;
-
-                            damage.add(0, old_dirty_y as u16, fb_width as u16, line_h as u16);
-                        }
-                    }
-                }
-
-                // If timer also fired, dirty the title bar for clock update.
-                if timer_fired {
-                    damage.add(0, 0, fb_width as u16, TITLE_BAR_H as u16);
-                }
-            } else if text_changed && in_image_mode {
-                // Image mode content change (context switch already handled
-                // above via context_switched). Fall back to full screen.
-                damage.mark_full_screen();
-            }
-
-            // Timer-only tick or timer+cursor: re-render title bar for clock.
-            if timer_fired && !context_switched && !damage.full_screen {
-                damage.add(0, 0, fb_width as u16, TITLE_BAR_H as u16);
-            }
-
-            // 3b. Cursor dirty rects: old position + new position.
-            let cursor_moved = unsafe { CURSOR_MOVED };
-            let cursor_vis = unsafe { CURSOR_VISIBLE };
-
-            if cursor_moved && cursor_vis {
-                let old_mx = unsafe { PREV_MOUSE_X };
-                let old_my = unsafe { PREV_MOUSE_Y };
-                let new_mx = unsafe { MOUSE_X };
-                let new_my = unsafe { MOUSE_Y };
-                let cw = drawing::CURSOR_W as u16;
-                let ch = drawing::CURSOR_H as u16;
-
-                // Dirty the old cursor position (erase).
-                damage.add(old_mx as u16, old_my as u16, cw, ch);
-                // Dirty the new cursor position (draw).
-                damage.add(new_mx as u16, new_my as u16, cw, ch);
-
-                unsafe { CURSOR_MOVED = false };
-            }
-
-            // ---------------------------------------------------------------
-            // 4. Composite dirty regions into the back framebuffer.
-            // ---------------------------------------------------------------
-            let bg_cs = drawing::CompositeSurface {
-                surface: make_surf(&mut bg_buf, fb_width, fb_height),
-                x: 0,
-                y: 0,
-                z: Z_BACKGROUND,
-                visible: true,
-            };
-            let content_cs = drawing::CompositeSurface {
-                surface: make_surf(&mut content_buf, content_w, content_h),
-                x: content_x,
-                y: content_y,
-                z: Z_CONTENT,
-                visible: true,
-            };
-            let title_shadow_cs = drawing::CompositeSurface {
-                surface: make_surf(&mut title_shadow_buf, fb_width, SHADOW_DEPTH),
-                x: 0,
-                y: title_shadow_y,
-                z: Z_SHADOW,
-                visible: true,
-            };
-            let title_cs = drawing::CompositeSurface {
-                surface: make_surf(&mut title_buf, fb_width, TITLE_BAR_H),
-                x: 0,
-                y: 0,
-                z: Z_CHROME,
-                visible: true,
-            };
-            let cursor_cs = drawing::CompositeSurface {
-                surface: make_surf(&mut cursor_buf, drawing::CURSOR_W, drawing::CURSOR_H),
-                x: unsafe { MOUSE_X } as i32,
-                y: unsafe { MOUSE_Y } as i32,
-                z: Z_CURSOR,
-                visible: cursor_vis,
-            };
-            let surfaces: [&drawing::CompositeSurface; 5] =
-                [&bg_cs, &content_cs, &title_shadow_cs, &title_cs, &cursor_cs];
-
+            // 2. Render full scene graph to back buffer.
             {
                 let mut fb = make_fb_surface(back);
+                let graph = scene_render::SceneGraph {
+                    nodes: &scene.nodes[..scene.node_count],
+                    data: &scene.data[..scene.data_used as usize],
+                };
 
-                if let Some(rects) = damage.dirty_rects() {
-                    // Partial composite: only re-composite dirty regions.
-                    for r in rects {
-                        drawing::composite_surfaces_rect(
-                            &mut fb, &surfaces, r.x as u32, r.y as u32, r.w as u32, r.h as u32,
-                        );
-                    }
-                } else {
-                    // Full-screen composite.
-                    drawing::composite_surfaces(&mut fb, &surfaces);
-                }
+                scene_render::render_scene(&mut fb, &graph, &render_ctx);
             }
 
-            // ---------------------------------------------------------------
-            // 5. Present with dirty rects for partial GPU transfer.
-            // ---------------------------------------------------------------
-            let payload = if let Some(rects) = damage.dirty_rects() {
-                let n = rects.len();
-                let n = rects.len();
-                let mut pr = [drawing::DirtyRect::new(0, 0, 0, 0); 6];
-                let mut i = 0;
-
-                while i < n && i < 6 {
-                    pr[i] = rects[i];
-                    i += 1;
-                }
-
-                PresentPayload {
-                    buffer_index: back as u32,
-                    rect_count: n as u32,
-                    rects: pr,
-                    _pad: [0; 4],
-                }
-            } else {
-                // Full-screen present.
-                PresentPayload {
-                    buffer_index: back as u32,
-                    rect_count: 0,
-                    rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
-                    _pad: [0; 4],
-                }
+            // 3. Present full screen.
+            let payload = PresentPayload {
+                buffer_index: back as u32,
+                rect_count: 0,
+                rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
+                _pad: [0; 4],
             };
             let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &payload) };
 
@@ -2090,49 +1805,8 @@ pub extern "C" fn _start() -> ! {
 
             let _ = sys::channel_signal(GPU_HANDLE);
 
-            // 6. Swap back/front buffers.
+            // 4. Swap back/front buffers.
             unsafe { BACK_BUF_IDX = 1 - back };
-
-            // 7. Synchronize: copy dirty regions from the just-presented
-            //    buffer to the new back buffer so both buffers stay identical.
-            //    Without this, the new back buffer contains stale content from
-            //    two frames ago in non-dirty regions, causing visual glitches
-            //    when the GPU transfers only dirty rects.
-            if let Some(rects) = damage.dirty_rects() {
-                let new_back = unsafe { BACK_BUF_IDX };
-                let src_ptr = unsafe { FB_PTRS[back] };
-                let dst_ptr = unsafe { FB_PTRS[new_back] };
-                let stride = fb_stride as usize;
-
-                for r in rects {
-                    let rx = r.x as usize;
-                    let ry = r.y as usize;
-                    let rw = r.w as usize;
-                    let rh = r.h as usize;
-                    let bpp = 4usize; // BGRA8888
-
-                    for row in 0..rh {
-                        let y = ry + row;
-
-                        if y >= fb_height as usize {
-                            break;
-                        }
-
-                        let offset = y * stride + rx * bpp;
-                        let bytes = rw * bpp;
-
-                        if offset + bytes <= fb_size as usize {
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    src_ptr.add(offset),
-                                    dst_ptr.add(offset),
-                                    bytes,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 }

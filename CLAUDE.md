@@ -118,6 +118,34 @@ Read these before making any design suggestions:
 - Reference the decision register tiers and dependency chains
 - New decisions should be recorded in the appropriate reference documents
 
+## Kernel Change Protocol (MANDATORY)
+
+**Every change to the kernel MUST follow this protocol.** These rules exist because 14 kernel bugs were found in a single investigation — most were latent bugs that only manifested under concurrent load. The kernel is the foundation; a bug here corrupts everything above.
+
+### Unsafe code and inline assembly
+
+- Every `unsafe` block MUST have a `// SAFETY:` comment explaining the invariant it relies on and what would break if violated.
+- Inline asm `options()`: **never use `nomem` by default.** Only add `nomem` with explicit justification citing the instruction's side effects from the ARM architecture manual. `nomem` tells LLVM the instruction doesn't access memory — if that's a lie, LLVM will reorder memory accesses past it, creating races that only manifest at higher optimization levels or under SMP load.
+  - **Safe to use `nomem`:** `mrs` of truly immutable registers (MPIDR_EL1, CNTFRQ_EL0), `wfe`/`wfi` hints.
+  - **Never use `nomem`:** `msr` to any system register (DAIF, TTBR, TPIDR, timer registers), `dsb`/`isb` barriers, `hvc`/`smc` calls, `tlbi` instructions, any `ldr`/`str` (obviously reads/writes memory).
+- When editing existing `unsafe` blocks, re-verify the SAFETY comment still holds with the change.
+
+### Testing requirements
+
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~960 tests).
+- Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
+  ```bash
+  # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
+  # Verify no crash (💥) or panic in serial output
+  ```
+- Property-based scheduler tests (`cargo test scheduler_state`) cover state machine invariants — run after scheduler changes.
+
+### Anomaly tracking
+
+- Any unexplained kernel behavior (spurious wakeups, unexpected fault codes, timing anomalies) MUST be documented in `design/journal.md` with `Status: open-bug`.
+- Workarounds (retry loops, defensive checks) are acceptable as defense-in-depth but do NOT close the bug. The root cause investigation continues.
+- Check for `Status: open-bug` entries in the journal at session start.
+
 ## Visual Testing (MANDATORY)
 
 **Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself.

@@ -398,6 +398,8 @@ fn write_device_manifest(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
+    debug_assert!(!ctx.is_null(), "irq_handler: ctx is null (TPIDR_EL1 was 0)");
+
     let mut next: *const Context = ctx;
 
     if let Some(iar) = interrupt_controller::acknowledge() {
@@ -416,6 +418,11 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
 
         interrupt_controller::end_of_interrupt(iar);
     }
+
+    debug_assert!(
+        !next.is_null(),
+        "irq_handler: returning null context pointer"
+    );
 
     next
 }
@@ -680,7 +687,16 @@ pub extern "C" fn secondary_main(core_id: u64) -> ! {
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
-    syscall::dispatch(ctx)
+    debug_assert!(!ctx.is_null(), "svc_handler: ctx is null (TPIDR_EL1 was 0)");
+
+    let result = syscall::dispatch(ctx);
+
+    debug_assert!(
+        !result.is_null(),
+        "svc_handler: returning null context pointer"
+    );
+
+    result
 }
 /// Handle non-SVC synchronous exceptions from EL0 (user faults).
 ///
@@ -695,6 +711,11 @@ pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
 /// and create an infinite fault loop with a one-page-per-iteration leak.
 #[unsafe(no_mangle)]
 pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
+    debug_assert!(
+        !ctx.is_null(),
+        "user_fault_handler: ctx is null (TPIDR_EL1 was 0)"
+    );
+
     let esr: u64;
     let far: u64;
     let elr: u64;

@@ -78,6 +78,11 @@ fn main() {
         &[("sys", &sys_rlib)],
     );
 
+    let scene_src = manifest_dir.join("libraries/scene/lib.rs");
+    let scene_rlib = out_dir.join("libscene.rlib");
+
+    rustc_rlib(&rustc, &scene_src, &scene_rlib, "scene", &[]);
+
     let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
     let drawing_rlib = out_dir.join("libdrawing.rlib");
 
@@ -111,6 +116,7 @@ fn main() {
         }
         if needs_drawing {
             externs.push(("drawing", drawing_rlib.clone()));
+            externs.push(("scene", scene_rlib.clone()));
         }
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
@@ -186,6 +192,7 @@ fn main() {
     }
     println!("cargo:rerun-if-changed={}", ipc_src.display());
     println!("cargo:rerun-if-changed={}", protocol_src.display());
+    println!("cargo:rerun-if-changed={}", scene_src.display());
 }
 /// Compile a Rust source file as a binary ELF.
 fn rustc_bin(

@@ -197,10 +197,12 @@ extern "C" fn worker_trampoline() -> ! {
     unsafe {
         // Args were written at SP+8 by the parent (stack_top - 8).
         // thread_create set SP = stack_top - 16, so args are at SP+8.
+        // No `nomem`: this reads from the stack — LLVM must not reorder
+        // stores to [sp, #8] past this load.
         core::arch::asm!(
             "ldr {0}, [sp, #8]",
             out(reg) args,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
     worker_entry(args);
@@ -211,10 +213,11 @@ extern "C" fn worker_trampoline() -> ! {
 extern "C" fn timer_trampoline() -> ! {
     let args: u64;
     unsafe {
+        // No `nomem`: reads from stack memory.
         core::arch::asm!(
             "ldr {0}, [sp, #8]",
             out(reg) args,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
     timer_worker(args);

@@ -12,3 +12,4 @@ edition = "2021"
 protocol = { path = "../libraries/protocol" }
 ipc = { path = "../libraries/ipc" }
 drawing = { path = "../libraries/drawing" }
+scene = { path = "../libraries/scene" }

@@ -401,6 +401,11 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     // the running count and free the address space when it reaches zero.
     maybe_cleanup_killed_process(s, old_pid, old_exited);
 
+    debug_assert!(
+        !result.is_null(),
+        "schedule_inner returned null context pointer"
+    );
+
     result
 }
 /// Select the best thread from the ready queue using EEVDF.
@@ -486,28 +491,42 @@ fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
 /// stale TLB entries from the old process remain cached — if a physical
 /// page is freed and reused (e.g., as a kernel stack), the stale entry
 /// creates a memory alias that corrupts the new allocation.
+///
+/// Uses per-ASID invalidation (TLBI ASIDE1IS) instead of full flush
+/// (TLBI VMALLE1IS) to avoid unnecessarily flushing kernel I-TLB entries
+/// on all cores, which could cause transient performance issues and
+/// interact badly with speculative execution.
 #[inline(never)]
 fn swap_ttbr0(old: &Thread, new: &Thread) {
     let old_ttbr0 = ttbr0_for(old);
     let new_ttbr0 = ttbr0_for(new);
 
     if old_ttbr0 != new_ttbr0 {
+        // Extract old ASID from TTBR0 bits [63:48].
+        let old_asid = old_ttbr0 >> 48;
+
         // SAFETY: Inline assembly for TLB invalidation and TTBR0 switch.
         // This sequence is correct per the ARMv8 architecture:
         //   1. DSB ISHST — ensures prior page table writes are visible
-        //   2. TLBI VMALLE1IS — invalidates ALL TLB entries (inner-shareable)
+        //   2. TLBI ASIDE1IS, <old_asid> — invalidates only the old ASID's
+        //      TLB entries (inner-shareable). The ASID is placed in bits
+        //      [63:48] of the Xt operand per ARMv8 TLBI encoding.
         //   3. DSB ISH — ensures TLB invalidation completes before TTBR0 write
         //   4. MSR TTBR0_EL1 — switches the user address space
         //   5. ISB — ensures subsequent fetches use the new TTBR0
         // `new_ttbr0` is a valid TTBR0 value from the thread's address space.
         // `nostack` is correct — no stack operations in the asm block.
         unsafe {
+            // ASIDE1IS Xt encoding: ASID in bits [63:48], other bits RES0.
+            let aside_arg = old_asid << 48;
+
             core::arch::asm!(
                 "dsb ishst",
-                "tlbi vmalle1is",
+                "tlbi aside1is, {asid}",
                 "dsb ish",
                 "msr ttbr0_el1, {new}",
                 "isb",
+                asid = in(reg) aside_arg,
                 new = in(reg) new_ttbr0,
                 options(nostack)
             );
@@ -1344,6 +1363,17 @@ pub fn push_wait_entry(entry: WaitEntry) {
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
     thread.wait_set.push(entry);
+}
+/// Take and return stale waiter entries from the current thread.
+/// Called at the start of `sys_wait` to clean up registrations from a
+/// previous wait that took the BlockResult::Blocked path.
+#[inline(never)]
+pub fn take_stale_waiters() -> Vec<WaitEntry> {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+    core::mem::take(&mut thread.stale_waiters)
 }
 /// Take and return any stale timeout timer from the current thread.
 /// Called at the start of `sys_wait` to clean up from a previous blocked wait.

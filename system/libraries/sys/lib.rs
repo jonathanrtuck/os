@@ -443,12 +443,16 @@ pub fn channel_signal(handle: u8) -> SyscallResult<()> {
 }
 /// Read the AArch64 virtual counter (CNTVCT_EL0).
 /// Requires kernel to have enabled EL0 access via CNTKCTL_EL1.EL0VCTEN.
+///
+/// `nomem` is intentionally omitted: the counter is monotonically increasing
+/// hardware state. With `nomem`, LLVM could CSE or hoist repeated reads,
+/// returning stale values. Without it, each call reads the current counter.
 #[inline(always)]
 pub fn counter() -> u64 {
     let val: u64;
 
     unsafe {
-        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) val, options(nostack, nomem));
+        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) val, options(nostack));
     }
 
     val

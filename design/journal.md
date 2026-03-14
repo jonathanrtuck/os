@@ -53,17 +53,115 @@ The entire visual output can be thought of as a compound document with system ch
 - **Core Animation:** Property-based layer tree with animations. The hybrid model (pre-rendered backing stores in a scene tree) is close to the right answer.
 - **Game engines (Unity, Godot, Bevy):** Scene tree of typed nodes with transforms and components. The compositor is essentially a document rendering engine — same structure.
 
-### Open Questions (next in this session)
+### Additional Decisions (continued discussion)
 
-1. **What do the scene graph node types look like?** What are the primitives the compositor accepts for the initial 2D document case?
-2. **How do typed channels work?** `Channel<P>` API design, multiplexing across different protocol types with `wait()`.
-3. **Content rendering:** Does the compositor contain content-type leaf renderers (text, image), or does the OS service pre-render into buffers that become scene graph leaves? Leaning toward: leaf renderers inside the compositor (push complexity to leaf nodes).
+**6. Interaction state (cursor, selection) belongs to the View, not to individual document nodes.**
+The cursor navigates the compound document's flow layout, crossing content-type boundaries. The text editor owns "cursor within text" but the OS service owns "cursor within the compound document." When the cursor reaches the boundary of one content part (e.g., top of a paragraph), the OS service consults the layout to determine what's above/below and moves focus accordingly. Editors signal boundary-hit; the OS service navigates between content parts.
+
+**7. Focus path model for compound document editing.**
+The View tracks a focus path (stack) through the compound document tree. Each level has its own cursor state. "Zooming into" a sub-document pushes onto the stack; returning pops. Whether child cursor state is preserved on pop is a UX policy decision, not structural -- the architecture supports both.
+
+**8. One node type with content variants (Core Animation model).**
+Rejected separate types for Container, Text, Image, Path. Instead: one Node type with a rich visual base and an optional Content variant (None, Text, Image, Path). Inspired by CALayer.
+
+Rationale:
+- In compound documents, almost every container also needs visual properties (background, border, corner radius). Separate types force wrapper nodes everywhere.
+- Fixed-size nodes in shared memory: one flat array, one allocation strategy, indices work uniformly.
+- Core Animation proved this works at scale -- CALayer handles 95% of cases.
+- Starting with four types, you'd gradually merge them anyway as each gains the others' properties.
+
+Node carries: tree links (first_child, next_sibling as indices), geometry (x, y, width, height relative to parent), scroll_y, visual decoration (background, border, corner_radius, opacity), flags (clips_children, visible), and a content variant.
+
+Content variants:
+- None: pure container
+- Text: string ref (offset+len into data buffer), font_size, color
+- Image: pixel data ref (shm offset), source dimensions
+- Path: command ref (offset+len into data buffer), fill, stroke
+
+Variable-length data (text strings, path commands) lives in a separate data buffer region of shared memory, referenced by offset+length from the node.
+
+**9. Relative positioning with scroll_offset solves scrolling immediately.**
+Children are positioned relative to parent's content area. Scrolling = changing one scroll_y value on a clipping container. Compositor offsets all children during render. No OS service round-trip. Full declarative layout (flex, column, row) is the right end state but can be added later as a field on Node without structural change.
+
+**10. The View is an OS service concept, not a scene graph concept.**
+The View (focus path, cursor state, document binding) lives entirely in the OS service. The OS service translates View state into scene graph mutations (position cursor node, update text content, set scroll_y). The compositor never knows about Views, documents, or editing. It renders a tree of Nodes. Clean separation: scene graph = rendering interface, View = document interaction model.
+
+**11. Compositor owns text layout.**
+The compositor has the font rasterizer; it also owns line breaking, word wrapping, and glyph positioning. The OS service sends raw strings with a width constraint; the compositor handles the rest, including reflow on resize without a round-trip.
+
+Key consequence: the OS service doesn't know glyph positions, so it can't position a separate cursor node. Solution: cursor and selection are properties of the Text content variant, not separate scene graph nodes. `cursor_offset: Option<u32>` (byte offset) and `selection: Option<(u32, u32)>` (byte range). The compositor knows where byte 45 lands because it did the layout. Cleaner than separate Path nodes -- cursor and selection are visual properties of text, not standalone geometry.
+
+**TODO:** Better name for "View" (the thing that holds document + focus path + overlays).
+
+### Scene Graph TODOs
+
+- **Ctrl+Tab image viewer**: Scene graph only builds text editor view. Need Image content node support or hybrid approach for image mode. Medium effort (~1hr).
+- **Text editor keystrokes**: Up/Down arrows (line navigation), Cmd+arrow (start/end of line/document), Shift+key (uppercase), Delete (forward delete). ~100-150 lines in text-editor/main.rs. All mechanical — patterns established.
+
+### Open Questions
+
+1. **How do typed channels work?** `Channel<P>` API design, multiplexing across different protocol types with `wait()`.
+2. **Shared memory double-buffering:** Two copies of the scene graph, swap atomically. Header contains generation counter for change detection. Exact mechanism TBD.
+3. **Scene graph shared memory layout:** Header + node array (fixed-size entries) + data buffer (variable-length, append-only). Details TBD during implementation.
 
 ### Implications for Existing Decisions
 
 - **Decision #11 (Rendering Technology):** The "existing web engine" leaning may shift. If the compositor is a scene-graph renderer, a web engine becomes a content-type translator that produces scene graph nodes, not the rendering substrate. The scene graph IS the rendering engine.
 - **Decision #15 (Layout Engine):** The layout engine compiles document structure into the scene graph. The "CSS for spatial" option still works — CSS layout produces positioned nodes that become scene graph nodes. But the layout engine is now clearly upstream of the compositor, not inside it.
 - **Decision #14 (Compound Documents):** The three-axis relationship model (spatial, temporal, logical) maps to the scene graph. Spatial relationships become positions/transforms. Temporal and logical relationships may need scene graph support beyond static trees (animation timelines, visibility state).
+
+---
+
+## Kernel Bug Investigation Follow-up (2026-03-13)
+
+**Status:** Investigated. Two correctness bugs fixed, one performance issue fixed. Original crash not reproduced with the new scene graph compositor.
+
+**Context:** User reported kernel crash (EC=0x21, ELR=0x0) during normal typing speed (not rapid input as in the 2026-03-11 crash). The crash signature was identical — instruction abort at EL1 with null ELR — but the trigger conditions differed. The scene graph compositor migration had changed the userspace event loop structure.
+
+### Bugs Found and Fixed
+
+**Fix 12: Stale waiter registrations (correctness bug).**
+When `sys_wait` takes the `BlockResult::Blocked` path, the thread is context-switched away. Unfired handle registrations (channel, timer, interrupt, thread exit, process exit waiters) remained live even after the thread was woken. On subsequent signals to those handles, the stale registrations could cause: (a) spurious wakeups with incorrect return values, (b) redundant wake attempts. The spurious wakeup issue explains the "spurious wakeup from sys_wait" bug noted in the Virtio-9P section — init's `wait(&[channel])` returning before the response was the stale waiter bug in action.
+
+Fix: Added `stale_waiters` field to Thread. `complete_wait_for` now copies unfired entries to `stale_waiters` before clearing `wait_set`. At the start of the next `sys_wait`, stale waiters are unregistered from all handle types. Added `scheduler::take_stale_waiters()` to support this deferred cleanup pattern.
+
+**Fix 13: Per-ASID TLB invalidation (performance + correctness hardening).**
+`swap_ttbr0` used `TLBI VMALLE1IS` which flushes ALL TLB entries (both TTBR0 and TTBR1) across ALL cores on every context switch between different address spaces. This unnecessarily flushed kernel I-TLB entries on all cores, causing every core to re-walk page tables for kernel code. Under high context-switch rates (~400/sec), this created sustained TLB pressure that could transiently affect instruction fetch timing. While not a correctness bug per se, the unnecessary full flush was wasteful and the per-ASID alternative (`TLBI ASIDE1IS`) was already used correctly elsewhere in `address_space.rs::invalidate_tlb()`.
+
+Fix: Changed `swap_ttbr0` to use `TLBI ASIDE1IS, <old_asid>` — invalidates only the outgoing ASID's TLB entries. Kernel TTBR1 entries and other processes' TTBR0 entries are preserved.
+
+**Fix 14: Diagnostic assertions in exception handlers.**
+Added `debug_assert` checks for null context pointers in `irq_handler`, `svc_handler`, and `user_fault_handler`. These will catch the null pointer at its source rather than manifesting as EC=0x21 in the exception vector. Also added a null check on the `schedule_inner` return value.
+
+### Analysis
+
+The original crash (ELR=0x0 at EL1) was likely a transient issue exposed by the combination of:
+1. Stale waiter registrations causing unexpected wake patterns
+2. Full TLB flushes creating timing variability across cores
+3. High-frequency context switches with 4 SMP cores
+
+The stale waiter bug (Fix 12) is the most likely contributor. A spurious wakeup could cause userspace to process incorrect data, leading to unexpected syscall patterns that interact with kernel timing. The TLB fix (Fix 13) reduces cross-core interference during context switches.
+
+Stress tested: 14,484 keys over 120 seconds with full scene graph compositor running (with fonts, RTC, tablet input, 4 SMP cores). No crash. The 2026-03-11 fixes (especially Fix 5: aliasing UB and Fix 6: nomem) remain the primary crash fixes.
+
+### Proactive Bug Hunting (continued, same session)
+
+**Fix 15: sys::counter() nomem removed.** `mrs cntvct_el0` had `nomem` — same class as Fix 6. The counter is monotonically increasing hardware state; with `nomem`, LLVM could CSE or hoist repeated reads, returning stale timestamps.
+
+**Fix 16: Trampoline `ldr [sp, #8]` nomem removed.** 18 thread trampolines across fuzz/fuzz-helper/stress used `options(nostack, nomem)` on `ldr [sp, #8]` — a memory read falsely declared non-memory. LLVM could reorder the preceding `write_volatile` of the argument past the load.
+
+**Coverage analysis** identified critical gaps: `interrupt_register` (zero coverage), `handle_send` success path (zero), `interrupt_ack` success path (zero), `device_map` success path (zero), 9 syscalls never tested under concurrency. Addressed with 5 new fuzz phases (32–36):
+- Phase 32: interrupt register/ack full lifecycle (register, ack, duplicate rejection, re-register after close, multi-IRQ, poll)
+- Phase 33: handle_send success path (create channel → create child → send endpoint → child signals back via received handle)
+- Phase 34: device_map success path (map UART0 MMIO, read register, error cases)
+- Phase 35: concurrent scheduling context create/bind/borrow/return (4 threads, 100 ops each)
+- Phase 36: concurrent DMA alloc/free (4 threads, 50 ops each, varied orders)
+
+**Unsafe audit** reviewed all kernel modules with `unsafe` blocks: scheduler, address_space, memory, paging, per_core, thread_exit, process_exit. No new bugs found. Lock ordering verified correct.
+
+**Kernel Change Protocol** codified in CLAUDE.md: nomem default-deny, SAFETY comments required, stress test mandate, anomaly tracking.
+
+All 36 fuzz phases pass. 896 host tests pass. Build clean.
 
 ---
 
@@ -75,8 +173,8 @@ The entire visual output can be thought of as a compound document with system ch
 
 **Bugs found and fixed:**
 
-1. **`payload_as`/`from_payload` hangs for large structs on aarch64 bare metal.** Both init and the 9p driver hung when using these helpers with FsReadRequest (60 bytes — full payload). Root cause unclear (possibly compiler-generated stack alignment code interacting badly with the bare-metal environment). Fix: manual `read_unaligned`/`write_unaligned` for individual fields. This is a systematic issue — any IPC message struct near the 60-byte limit should use manual construction.
-2. **Spurious wakeup from `sys_wait`.** Init's `wait(&[channel])` returned before the 9p driver sent its response. Fix: loop on wait+try_recv until the expected response message type arrives. Root cause of the spurious wakeup not fully diagnosed — the channel pending_signal logic appears correct but something wakes init prematurely. Not a blocking issue with the retry loop.
+1. **`payload_as`/`from_payload` hangs for large structs on aarch64 bare metal.** Both init and the 9p driver hung when using these helpers with FsReadRequest (60 bytes — full payload). ~~Root cause unclear.~~ **Retrospective (2026-03-13):** Likely caused by kernel Fix 5 (aliasing UB) or Fix 6 (`nomem` on DAIF) — both produced timing-dependent miscompilation at opt-level 3 that could manifest as hangs in userspace syscall paths. Evidence: `payload_as` uses `read_unaligned` internally and works correctly for 56-byte `CompositorConfig` structs in the compositor (added after the kernel fixes). The manual field-by-field workaround remains in the 9P driver and init but is no longer believed necessary. **Status: resolved** (root cause was kernel UB, not `payload_as`).
+2. **Spurious wakeup from `sys_wait`.** Init's `wait(&[channel])` returned before the 9p driver sent its response. Fix: loop on wait+try_recv until the expected response message type arrives. ~~Root cause of the spurious wakeup not fully diagnosed.~~ **Retrospective (2026-03-13):** Root cause identified as kernel Fix 12 (stale waiter registrations). When `sys_wait` takes the `BlockResult::Blocked` path, unfired handle registrations remained live. A subsequent signal to one of those stale handles would spuriously wake the thread. The retry loop remains correct as defense-in-depth. **Status: resolved.**
 
 **Architecture notes:**
 

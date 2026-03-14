@@ -956,6 +956,25 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
         timer::destroy(stale_timer);
     }
 
+    // Clean up stale waiter registrations from a previous blocked wait.
+    // When sys_wait takes the BlockResult::Blocked path, unfired handles
+    // still have this thread registered as a waiter. Those registrations
+    // can cause spurious wakeups with incorrect results on subsequent waits.
+    let stale = scheduler::take_stale_waiters();
+
+    for entry in &stale {
+        match entry.object {
+            HandleObject::Channel(id) => channel::unregister_waiter(id),
+            HandleObject::Timer(id) => timer::unregister_waiter(id),
+            HandleObject::Interrupt(id) => interrupt::unregister_waiter(id),
+            HandleObject::Thread(id) => thread_exit::unregister_waiter(id),
+            HandleObject::Process(id) => process_exit::unregister_waiter(id),
+            HandleObject::SchedulingContext(_) => {}
+        }
+    }
+
+    drop(stale);
+
     // Validate count.
     if count == 0 || count > MAX_WAIT_HANDLES {
         return dispatch_ok(ctx, Error::InvalidArgument as i64 as u64);

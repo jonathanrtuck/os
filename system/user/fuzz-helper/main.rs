@@ -29,7 +29,7 @@ extern "C" fn thread_trampoline() -> ! {
         core::arch::asm!(
             "ldr {0}, [sp, #8]",
             out(reg) args,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
     blocking_thread(args);
@@ -88,6 +88,12 @@ pub extern "C" fn _start() -> ! {
                 }
                 sys::yield_now();
             }
+        }
+        0x06 => {
+            // Signal channel handle 0 (received via handle_send) then exit.
+            sys::print(b"H:06\n");
+            let _ = sys::channel_signal(0);
+            sys::exit();
         }
         _ => {
             sys::print(b"H:??\n");
