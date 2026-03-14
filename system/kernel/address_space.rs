@@ -400,6 +400,17 @@ impl AddressSpace {
 
         Some(va)
     }
+    /// Unmap a channel shared page previously mapped by `map_channel_page`.
+    ///
+    /// Clears the L3 page table entry for `va`. Does NOT free the physical
+    /// frame (channel module retains ownership). Does NOT rewind the bump
+    /// allocator — consumed VA is lost (same as all other bump allocators).
+    ///
+    /// Used for rollback when `handle_send` partially maps channel pages into
+    /// a target process but a subsequent step fails.
+    pub fn unmap_channel_page(&mut self, va: u64) {
+        self.unmap_page_inner(va);
+    }
     /// Map a device MMIO region into this address space.
     ///
     /// Allocates VA from the device MMIO region (bump allocator), maps each

@@ -567,22 +567,34 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
         // For Channel handles, map both shared pages into the target's address
         // space using the target's per-process channel SHM bump allocator. This
         // ensures the first channel received maps at CHANNEL_SHM_BASE regardless
-        // of the global channel index.
+        // of the global channel index. Track mapped VAs for rollback on failure.
         if let Some(pages) = channel_pages {
-            target
+            let va_a = target
                 .address_space
                 .map_channel_page(pages[0].as_u64())
                 .ok_or(Error::OutOfMemory)?;
-            target
-                .address_space
-                .map_channel_page(pages[1].as_u64())
-                .ok_or(Error::OutOfMemory)?;
-        }
 
-        target
-            .handles
-            .insert(source_obj, source_rights)
-            .map_err(|_| Error::InvalidArgument)?;
+            let va_b = match target.address_space.map_channel_page(pages[1].as_u64()) {
+                Some(va) => va,
+                None => {
+                    // Second map failed — unmap the first page.
+                    target.address_space.unmap_channel_page(va_a);
+                    return Err(Error::OutOfMemory);
+                }
+            };
+
+            if let Err(_) = target.handles.insert(source_obj, source_rights) {
+                // Handle insert failed — unmap both pages.
+                target.address_space.unmap_channel_page(va_a);
+                target.address_space.unmap_channel_page(va_b);
+                return Err(Error::InvalidArgument);
+            }
+        } else {
+            target
+                .handles
+                .insert(source_obj, source_rights)
+                .map_err(|_| Error::InvalidArgument)?;
+        }
 
         Ok(())
     })
