@@ -70,7 +70,7 @@ The scene graph is data, not a process. It is a tree of `Node` values in shared 
 The compositor is a **content-agnostic pixel pump.** It walks the scene graph and produces pixels. It knows about:
 
 - Rectangles, colors, alpha blending
-- Rasterizing glyphs at given positions
+- Rasterizing glyphs at given positions (position decided by OS service)
 - Clipping, scrolling (as viewport offset)
 - Compositing layers back-to-front
 
@@ -81,6 +81,8 @@ It does **not** know about:
 - What any visual element *means*
 
 If you find yourself adding content-type awareness to the compositor, the responsibility is in the wrong place. Move it to the OS service.
+
+**How text reaches pixels:** The OS service sends *positioned text runs* in the scene graph — each run is a (x, y, text, advances) tuple for one line of text. The compositor walks each run, rasterizing glyphs at the given positions. The OS service has font metrics (advance widths — small data). The compositor has the glyph cache (rasterized coverage maps — big data). Layout in the OS service, rasterization in the compositor. Cursor and selection are regular positioned rectangles — the compositor doesn't know they relate to text.
 
 ### The GPU Driver
 

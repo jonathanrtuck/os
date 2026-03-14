@@ -109,7 +109,11 @@ Cursor and selection remain properties of the Text content variant for now. The 
 1. **How do typed channels work?** `Channel<P>` API design, multiplexing across different protocol types with `wait()`.
 2. ~~**Shared memory double-buffering.**~~ **Done (2026-03-14).** `DoubleWriter`/`DoubleReader` in scene library. Two `SCENE_SIZE` regions, generation-counter-based swap with release/acquire fences. Compositor `SceneState` migrated.
 3. ~~**Scene graph shared memory layout.**~~ **Done (2026-03-14).** `SceneWriter`/`SceneReader` in scene library. Header (64 B) + node array (512 × Node) + data buffer (64 KiB). 34 host-side tests.
-4. **Text content variant redesign.** Current `Content::Text` carries raw string + width constraint (compositor-does-layout model). Needs redesign for OS-service-does-layout model: pre-computed line breaks, positioned runs, or glyph positions. Cursor/selection become positioned rects.
+4. **Text content variant redesign — settled on A' (positioned text runs).** The OS service sends runs of text with a starting (x, y) and pre-computed per-character advance widths. Each run is a contiguous sequence of characters on one line. The compositor walks the run, rasterizing each glyph at `x + sum(advances[0..i])`. The OS service has the font metrics (advance widths, kerning — small data). The compositor has the glyph cache (rasterized coverage maps — big data). Layout lives entirely in the OS service. Rasterization lives entirely in the compositor. Cursor and selection become positioned pixel-coordinate rects (regular scene graph nodes with backgrounds), not byte offsets.
+
+   For monospace text (current prototype), per-character advances are uniform, so a single `char_advance: u16` value suffices. For proportional text (future), the OS service sends a `DataRef` to an array of per-glyph u16 advances in the data buffer.
+
+   **Implementation sequence:** Redesign Content::Text first (with tests), then proceed to the process split. The current Content::Text with byte-offset cursor/selection bakes layout into the compositor — changing the representation first makes the split clean.
 
 ### Implications for Existing Decisions
 
