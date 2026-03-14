@@ -21,6 +21,13 @@ if [ ! -f share/source-code-pro.ttf ]; then
   echo "WARNING: share/source-code-pro.ttf missing — font loading will fail at boot"
 fi
 
+# Copy variable Nunito Sans from Desktop if not already in share/
+VARFONT_SRC="$HOME/Desktop/Nunito_Sans/NunitoSans-VariableFont_YTLC,opsz,wdth,wght.ttf"
+if [ ! -f share/nunito-sans-variable.ttf ] && [ -f "$VARFONT_SRC" ]; then
+  cp "$VARFONT_SRC" share/nunito-sans-variable.ttf
+  echo "Copied variable Nunito Sans to share/"
+fi
+
 # Verify toolchain
 rustup show active-toolchain 2>/dev/null || echo "WARNING: Rust toolchain not found"
 
