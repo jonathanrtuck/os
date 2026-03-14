@@ -1,38 +1,38 @@
-//! Mutable scene graph state: node array + data buffer.
+//! Mutable scene graph state backed by the shared memory layout.
 //!
-//! The compositor builds this at startup and mutates it in response to
-//! events (text changes, cursor moves, scroll, timer ticks). Each frame,
-//! the scene renderer reads it and draws to the framebuffer.
+//! Wraps a `SceneWriter` operating on a heap-allocated buffer. Provides
+//! the same well-known node indices and build/update API that the
+//! compositor event loop uses. When the compositor splits into OS service
+//! + compositor processes, the buffer becomes shared memory.
 
-use scene::{Border, Color, Content, DataRef, Node, NodeFlags, NodeId, NULL};
+use alloc::vec;
+use scene::{Border, Color, Content, DataRef, Node, NodeFlags, SceneWriter, NULL, SCENE_SIZE};
 
-pub const DATA_BUF_SIZE: usize = 32768;
-pub const MAX_NODES: usize = 64;
 /// Well-known node indices for direct mutation.
-pub const N_ROOT: usize = 0;
-pub const N_TITLE_BAR: usize = 1;
-pub const N_TITLE_TEXT: usize = 2;
-pub const N_CLOCK_TEXT: usize = 3;
-pub const N_SHADOW: usize = 4;
-pub const N_CONTENT: usize = 5;
-pub const N_DOC_TEXT: usize = 6;
-pub const N_CURSOR_ICON: usize = 7;
+pub const N_ROOT: u16 = 0;
+pub const N_TITLE_BAR: u16 = 1;
+pub const N_TITLE_TEXT: u16 = 2;
+pub const N_CLOCK_TEXT: u16 = 3;
+pub const N_SHADOW: u16 = 4;
+pub const N_CONTENT: u16 = 5;
+pub const N_DOC_TEXT: u16 = 6;
+pub const N_CURSOR_ICON: u16 = 7;
 
 pub struct SceneState {
-    pub nodes: [Node; MAX_NODES],
-    pub data: [u8; DATA_BUF_SIZE],
-    pub data_used: u32,
-    pub node_count: usize,
+    buf: alloc::vec::Vec<u8>,
 }
 
 impl SceneState {
     pub fn new() -> Self {
-        Self {
-            nodes: [Node::EMPTY; MAX_NODES],
-            data: [0u8; DATA_BUF_SIZE],
-            data_used: 0,
-            node_count: 0,
-        }
+        let mut buf = vec![0u8; SCENE_SIZE];
+        // Initialize the shared memory header.
+        let _ = SceneWriter::new(&mut buf);
+
+        Self { buf }
+    }
+
+    fn writer(&mut self) -> SceneWriter<'_> {
+        SceneWriter::from_existing(&mut self.buf)
     }
 
     /// Build the initial scene tree for the text editor screen layout.
@@ -59,187 +59,175 @@ impl SceneState {
         title_label: &[u8],
         clock_text: &[u8],
     ) {
-        self.data_used = 0;
-        self.node_count = 0;
+        let mut w = self.writer();
 
-        let title_ref = self.push_data(title_label);
-        let clock_ref = self.push_data(clock_text);
-        let doc_ref = self.push_data(doc_text);
+        w.clear();
+
+        let title_ref = w.push_data(title_label);
+        let clock_ref = w.push_data(clock_text);
+        let doc_ref = w.push_data(doc_text);
         let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
+        // Allocate all well-known nodes in order (sequential IDs).
+        let _root = w.alloc_node().unwrap(); // 0
+        let _title_bar = w.alloc_node().unwrap(); // 1
+        let _title_text = w.alloc_node().unwrap(); // 2
+        let _clock_text = w.alloc_node().unwrap(); // 3
+        let _shadow = w.alloc_node().unwrap(); // 4
+        let _content = w.alloc_node().unwrap(); // 5
+        let _doc_text = w.alloc_node().unwrap(); // 6
+        let _cursor_icon = w.alloc_node().unwrap(); // 7
 
         // N_ROOT: full-screen background
-        self.nodes[N_ROOT] = Node {
-            first_child: N_TITLE_BAR as NodeId,
-            next_sibling: NULL,
-            x: 0,
-            y: 0,
-            width: fb_width as u16,
-            height: fb_height as u16,
-            background: dc(bg_color),
-            flags: NodeFlags::VISIBLE,
-            ..Node::EMPTY
-        };
+        {
+            let n = w.node_mut(N_ROOT);
+
+            n.first_child = N_TITLE_BAR;
+            n.width = fb_width as u16;
+            n.height = fb_height as u16;
+            n.background = dc(bg_color);
+            n.flags = NodeFlags::VISIBLE;
+        }
         // N_TITLE_BAR: translucent chrome overlay
-        self.nodes[N_TITLE_BAR] = Node {
-            first_child: N_TITLE_TEXT as NodeId,
-            next_sibling: N_SHADOW as NodeId,
-            x: 0,
-            y: 0,
-            width: fb_width as u16,
-            height: title_bar_h as u16,
-            background: dc(chrome_bg),
-            border: Border {
+        {
+            let n = w.node_mut(N_TITLE_BAR);
+
+            n.first_child = N_TITLE_TEXT;
+            n.next_sibling = N_SHADOW;
+            n.width = fb_width as u16;
+            n.height = title_bar_h as u16;
+            n.background = dc(chrome_bg);
+            n.border = Border {
                 color: dc(chrome_border),
                 width: 1,
                 _pad: [0; 3],
-            },
-            flags: NodeFlags::VISIBLE,
-            ..Node::EMPTY
-        };
+            };
+            n.flags = NodeFlags::VISIBLE;
+        }
 
-        // N_TITLE_TEXT: "Text" label in title bar (vertically centered)
+        // N_TITLE_TEXT: label in title bar
         let text_y_offset = (title_bar_h.saturating_sub(line_height)) / 2;
 
-        self.nodes[N_TITLE_TEXT] = Node {
-            first_child: NULL,
-            next_sibling: N_CLOCK_TEXT as NodeId,
-            x: 12,
-            y: text_y_offset as i16,
-            width: (fb_width / 2) as u16,
-            height: line_height as u16,
-            content: Content::Text {
+        {
+            let n = w.node_mut(N_TITLE_TEXT);
+
+            n.next_sibling = N_CLOCK_TEXT;
+            n.x = 12;
+            n.y = text_y_offset as i16;
+            n.width = (fb_width / 2) as u16;
+            n.height = line_height as u16;
+            n.content = Content::Text {
                 data: title_ref,
                 font_size,
                 color: dc(chrome_title_color),
                 cursor: u32::MAX,
                 sel_start: 0,
                 sel_end: 0,
-            },
-            flags: NodeFlags::VISIBLE,
-            ..Node::EMPTY
-        };
+            };
+            n.flags = NodeFlags::VISIBLE;
+        }
 
-        // N_CLOCK_TEXT: clock on right side of title bar
-        // Position will be updated each frame when clock text changes.
+        // N_CLOCK_TEXT: clock on right side
         let clock_x = (fb_width - 12 - 80) as i16;
 
-        self.nodes[N_CLOCK_TEXT] = Node {
-            first_child: NULL,
-            next_sibling: NULL,
-            x: clock_x,
-            y: text_y_offset as i16,
-            width: 80,
-            height: line_height as u16,
-            content: Content::Text {
+        {
+            let n = w.node_mut(N_CLOCK_TEXT);
+
+            n.x = clock_x;
+            n.y = text_y_offset as i16;
+            n.width = 80;
+            n.height = line_height as u16;
+            n.content = Content::Text {
                 data: clock_ref,
                 font_size,
                 color: dc(chrome_clock_color),
                 cursor: u32::MAX,
                 sel_start: 0,
                 sel_end: 0,
-            },
-            flags: NodeFlags::VISIBLE,
-            ..Node::EMPTY
-        };
+            };
+            n.flags = NodeFlags::VISIBLE;
+        }
         // N_SHADOW: drop shadow below title bar
-        // Rendered as a semi-transparent gradient. For now, a simple
-        // translucent fill (the gradient will come later).
-        self.nodes[N_SHADOW] = Node {
-            first_child: NULL,
-            next_sibling: N_CONTENT as NodeId,
-            x: 0,
-            y: title_bar_h as i16,
-            width: fb_width as u16,
-            height: shadow_depth as u16,
-            background: Color::rgba(0, 0, 0, 40),
-            flags: NodeFlags::VISIBLE,
-            ..Node::EMPTY
-        };
+        {
+            let n = w.node_mut(N_SHADOW);
+
+            n.next_sibling = N_CONTENT;
+            n.y = title_bar_h as i16;
+            n.width = fb_width as u16;
+            n.height = shadow_depth as u16;
+            n.background = Color::rgba(0, 0, 0, 40);
+            n.flags = NodeFlags::VISIBLE;
+        }
 
         // N_CONTENT: document content area (clips children for scrolling)
         let content_y = title_bar_h + shadow_depth;
         let content_h = fb_height.saturating_sub(content_y);
 
-        self.nodes[N_CONTENT] = Node {
-            first_child: N_DOC_TEXT as NodeId,
-            next_sibling: N_CURSOR_ICON as NodeId,
-            x: 0,
-            y: content_y as i16,
-            width: fb_width as u16,
-            height: content_h as u16,
-            flags: NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN,
-            ..Node::EMPTY
-        };
+        {
+            let n = w.node_mut(N_CONTENT);
+
+            n.first_child = N_DOC_TEXT;
+            n.next_sibling = N_CURSOR_ICON;
+            n.y = content_y as i16;
+            n.width = fb_width as u16;
+            n.height = content_h as u16;
+            n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+        }
         // N_DOC_TEXT: document text content
-        // Height is u16::MAX so that max_y never clips text rendering.
-        // The parent N_CONTENT node clips children to the viewport.
-        self.nodes[N_DOC_TEXT] = Node {
-            first_child: NULL,
-            next_sibling: NULL,
-            x: text_inset_x as i16,
-            y: 8,
-            width: (fb_width - 2 * text_inset_x) as u16,
-            height: u16::MAX,
-            content: Content::Text {
+        {
+            let n = w.node_mut(N_DOC_TEXT);
+
+            n.x = text_inset_x as i16;
+            n.y = 8;
+            n.width = (fb_width - 2 * text_inset_x) as u16;
+            n.height = u16::MAX;
+            n.content = Content::Text {
                 data: doc_ref,
                 font_size,
                 color: dc(text_color),
                 cursor: cursor_pos,
                 sel_start,
                 sel_end,
-            },
-            flags: NodeFlags::VISIBLE,
-            ..Node::EMPTY
-        };
+            };
+            n.flags = NodeFlags::VISIBLE;
+        }
         // N_CURSOR_ICON: mouse cursor (hidden until pointer event)
-        self.nodes[N_CURSOR_ICON] = Node {
-            first_child: NULL,
-            next_sibling: NULL,
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-            flags: NodeFlags::empty(), // invisible by default
-            ..Node::EMPTY
-        };
-        self.node_count = 8;
-    }
-    /// Append bytes to the data buffer. Returns a DataRef.
-    /// If the buffer is full, truncates to fit and returns a shorter DataRef.
-    pub fn push_data(&mut self, bytes: &[u8]) -> DataRef {
-        let off = self.data_used;
-        let avail = DATA_BUF_SIZE.saturating_sub(off as usize);
-        let actual = if bytes.len() < avail {
-            bytes.len()
-        } else {
-            avail
-        };
+        {
+            let n = w.node_mut(N_CURSOR_ICON);
 
-        if actual > 0 {
-            self.data[off as usize..off as usize + actual].copy_from_slice(&bytes[..actual]);
-
-            self.data_used = off + actual as u32;
+            n.flags = NodeFlags::empty();
         }
 
-        DataRef {
-            offset: off,
-            length: actual as u32,
-        }
+        w.set_root(N_ROOT);
+        w.commit();
     }
-    /// Re-allocate a data region with new content (may be different length).
-    /// Returns a new DataRef. Old data is abandoned (simple bump allocator).
-    pub fn replace_data(&mut self, bytes: &[u8]) -> DataRef {
-        self.push_data(bytes)
+    pub fn data_buf(&self) -> &[u8] {
+        let used = {
+            let hdr = unsafe { &*(self.buf.as_ptr() as *const scene::SceneHeader) };
+
+            hdr.data_used as usize
+        };
+
+        &self.buf[scene::DATA_OFFSET..scene::DATA_OFFSET + used]
     }
-    /// Reset the data buffer (call when rebuilding the scene).
-    pub fn reset_data(&mut self) {
-        self.data_used = 0;
+    pub fn nodes(&self) -> &[Node] {
+        let hdr = unsafe { &*(self.buf.as_ptr() as *const scene::SceneHeader) };
+        let count = hdr.node_count as usize;
+        let ptr = unsafe { self.buf.as_ptr().add(scene::NODES_OFFSET) as *const Node };
+
+        unsafe { core::slice::from_raw_parts(ptr, count) }
+    }
+    pub fn node_count(&self) -> usize {
+        let hdr = unsafe { &*(self.buf.as_ptr() as *const scene::SceneHeader) };
+
+        hdr.node_count as usize
     }
     /// Update the clock text.
     pub fn update_clock(&mut self, clock_text: &[u8]) {
-        let clock_ref = self.replace_data(clock_text);
+        let mut w = self.writer();
+        let clock_ref = w.push_data(clock_text);
+        let n = w.node_mut(N_CLOCK_TEXT);
 
-        self.nodes[N_CLOCK_TEXT].content = match self.nodes[N_CLOCK_TEXT].content {
+        n.content = match n.content {
             Content::Text {
                 font_size,
                 color,
@@ -260,7 +248,10 @@ impl SceneState {
     }
     /// Update just the cursor position and selection (no text change).
     pub fn update_cursor(&mut self, cursor_pos: u32, sel_s: u32, sel_e: u32) {
-        self.nodes[N_DOC_TEXT].content = match self.nodes[N_DOC_TEXT].content {
+        let mut w = self.writer();
+        let n = w.node_mut(N_DOC_TEXT);
+
+        n.content = match n.content {
             Content::Text {
                 data,
                 font_size,
@@ -277,20 +268,13 @@ impl SceneState {
             other => other,
         };
     }
-    /// Overwrite the data for an existing DataRef (same length).
-    pub fn update_data(&mut self, dref: DataRef, bytes: &[u8]) {
-        let off = dref.offset as usize;
-        let len = dref.length as usize;
-
-        if bytes.len() == len && off + len <= DATA_BUF_SIZE {
-            self.data[off..off + len].copy_from_slice(bytes);
-        }
-    }
     /// Update the document text content and cursor.
     pub fn update_doc_text(&mut self, doc_text: &[u8], cursor_pos: u32, sel_s: u32, sel_e: u32) {
-        let doc_ref = self.replace_data(doc_text);
+        let mut w = self.writer();
+        let doc_ref = w.push_data(doc_text);
+        let n = w.node_mut(N_DOC_TEXT);
 
-        self.nodes[N_DOC_TEXT].content = match self.nodes[N_DOC_TEXT].content {
+        n.content = match n.content {
             Content::Text {
                 font_size, color, ..
             } => Content::Text {
@@ -306,6 +290,8 @@ impl SceneState {
     }
     /// Update scroll offset on the content area.
     pub fn update_scroll(&mut self, scroll_y: i32) {
-        self.nodes[N_CONTENT].scroll_y = scroll_y;
+        let mut w = self.writer();
+
+        w.node_mut(N_DOC_TEXT).scroll_y = scroll_y;
     }
 }

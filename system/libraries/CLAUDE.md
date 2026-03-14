@@ -9,6 +9,7 @@ Shared `#![no_std]` libraries used by userspace services and programs.
 | `virtio/`    | Virtio MMIO device initialization + virtqueue management                      | Foundational |
 | `drawing/`   | 2D rendering: surfaces, alpha blending, TrueType rasterizer                  | Foundational |
 | `ipc/`       | Lock-free SPSC ring buffer for 64-byte IPC messages over shared memory        | Foundational |
+| `scene/`     | Scene graph types, shared memory layout, writer/reader APIs for OS service ↔ compositor | Foundational |
 | `link.ld`    | Linker script for all userspace ELF binaries (code at 4 MiB, stack at 2 GiB)  | Foundational |
 
 ## Conventions

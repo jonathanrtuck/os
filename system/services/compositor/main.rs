@@ -1406,15 +1406,7 @@ pub extern "C" fn _start() -> ! {
     // -----------------------------------------------------------------------
     sys::print(b"     building scene graph\n");
 
-    let mut scene: Box<scene_state::SceneState> = unsafe {
-        let layout = alloc::alloc::Layout::new::<scene_state::SceneState>();
-        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut scene_state::SceneState;
-        if ptr.is_null() {
-            sys::print(b"compositor: scene state alloc failed\n");
-            sys::exit();
-        }
-        Box::from_raw(ptr)
-    };
+    let mut scene = scene_state::SceneState::new();
     let mut time_buf = [0u8; 8];
 
     format_time_hms(clock_seconds(), &mut time_buf);
@@ -1456,15 +1448,15 @@ pub extern "C" fn _start() -> ! {
         icon_w: unsafe { ICON_W },
         icon_h: unsafe { ICON_H },
         icon_color: drawing::CHROME_ICON,
-        icon_node: scene_state::N_TITLE_TEXT as scene::NodeId,
+        icon_node: scene_state::N_TITLE_TEXT,
     };
 
     // Render scene graph to buffer 0 and present.
     {
         let mut fb0 = make_fb_surface(0);
         let graph = scene_render::SceneGraph {
-            nodes: &scene.nodes[..scene.node_count],
-            data: &scene.data[..scene.data_used as usize],
+            nodes: scene.nodes(),
+            data: scene.data_buf(),
         };
 
         scene_render::render_scene(&mut fb0, &graph, &render_ctx);
@@ -1778,15 +1770,15 @@ pub extern "C" fn _start() -> ! {
                 b"Text",
                 &time_buf,
             );
-            // Set scroll on the text node directly (in lines, not pixels).
-            scene.nodes[scene_state::N_DOC_TEXT].scroll_y = unsafe { SCROLL_OFFSET } as i32;
+            // Set scroll on the text node.
+            scene.update_scroll(unsafe { SCROLL_OFFSET } as i32);
 
             // 2. Render full scene graph to back buffer.
             {
                 let mut fb = make_fb_surface(back);
                 let graph = scene_render::SceneGraph {
-                    nodes: &scene.nodes[..scene.node_count],
-                    data: &scene.data[..scene.data_used as usize],
+                    nodes: scene.nodes(),
+                    data: scene.data_buf(),
                 };
 
                 scene_render::render_scene(&mut fb, &graph, &render_ctx);

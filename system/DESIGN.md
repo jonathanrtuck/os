@@ -243,6 +243,38 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the shared memory page address. Fully testable on the host.
 
+### 1.7 Scene Graph Library (`libraries/scene/`) 🟢
+
+**Goal:** Define the scene graph data structures and shared memory layout that form the interface between the OS service (document semantics) and the compositor (pixels). The OS service builds a tree of typed visual nodes; the compositor reads the tree and renders it.
+
+**Design decisions (from 2026-03-13 session):**
+
+- One `Node` type with content variants: `None`, `Text`, `Image`, `Path` (Core Animation model — avoids wrapper nodes).
+- Tree encoded via `first_child` / `next_sibling` (left-child right-sibling representation).
+- Cursor and selection are properties of `Text` content, not separate nodes (compositor owns text layout, knows glyph positions).
+- Relative positioning with `scroll_y` for scrolling.
+- The scene graph is a **compiled output** of the document model, not the document model itself.
+
+**Shared memory layout:**
+
+```text
+┌──────────┬──────────────────────────┬──────────────────────────┐
+│  Header  │  Node array              │  Data buffer              │
+│  64 B    │  512 × sizeof(Node)      │  64 KiB                   │
+└──────────┴──────────────────────────┴──────────────────────────┘
+```
+
+- **Header (64 B):** generation counter (u32), node count (u16), root NodeId (u16), data bytes used (u32), reserved.
+- **Node array:** fixed-size entries indexed by `NodeId` (u16). Each node has geometry (x, y, width, height), visual decoration (background, border, corner radius, opacity), flags (visible, clips children), and an optional `Content` variant.
+- **Data buffer (64 KiB):** variable-length data (text strings, pixel buffers, path commands) referenced by offset+length (`DataRef`).
+
+**APIs:**
+
+- `SceneWriter` — builds/mutates a scene graph in a `&mut [u8]` buffer. Provides `alloc_node()`, `node_mut()`, `push_data()`, `add_child()`, `commit()`. Also exposes read-back via `nodes()` and `data_buf()` for single-process use.
+- `SceneReader` — read-only access to a scene graph buffer. Provides `node()`, `nodes()`, `data()`, `data_buf()`. This is the API the compositor will use when reading from shared memory after the OS service / compositor process split.
+
+**No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the buffer. 25 host-side tests.
+
 ---
 
 ## 2. Platform Services
