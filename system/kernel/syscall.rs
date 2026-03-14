@@ -1409,9 +1409,8 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
     // Syscall numbers >= 32 skip the filter (future-proofing — they fall
     // through to the UnknownSyscall arm naturally).
     if syscall_nr != nr::EXIT && syscall_nr < 32 {
-        let allowed = scheduler::current_process_do(|p| {
-            p.syscall_mask & (1u32 << syscall_nr as u32) != 0
-        });
+        let allowed =
+            scheduler::current_process_do(|p| p.syscall_mask & (1u32 << syscall_nr as u32) != 0);
 
         if !allowed {
             return dispatch_ok(
@@ -1468,10 +1467,7 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         nr::MEMORY_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_memory_alloc(x0))),
         nr::MEMORY_FREE => dispatch_ok(ctx, result_to_u64!(sys_memory_free(x0, x1))),
         nr::PROCESS_SET_SYSCALL_FILTER => {
-            dispatch_ok(
-                ctx,
-                result_to_u64!(sys_process_set_syscall_filter(x0, x1)),
-            )
+            dispatch_ok(ctx, result_to_u64!(sys_process_set_syscall_filter(x0, x1)))
         }
 
         _ => dispatch_ok(

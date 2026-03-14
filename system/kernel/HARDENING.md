@@ -235,7 +235,7 @@ The lost-wakeup prevention (`wake_pending` flag, store-before-check ordering) mu
 
 | Trigger                                              | Action                                                                    |
 | ---------------------------------------------------- | ------------------------------------------------------------------------- |
-| Start loading external documents / untrusted content | ~~Syscall filtering (Gap 1.2)~~ ✅, user ASLR (Gap 2.2)                    |
+| Start loading external documents / untrusted content | ~~Syscall filtering (Gap 1.2)~~ ✅, user ASLR (Gap 2.2)                   |
 | Compound documents with multiple editors             | Rights attenuation (Gap 1.1), dynamic handle table (Gap 1.3)              |
 | `metrics::lock_spins` climbing under real workloads  | Per-core ready queues (Gap 3.1), IPI wake (Gap 3.2)                       |
 | Considering open-sourcing for others to build on     | All of Gap 2 (demonstrates security baseline)                             |
