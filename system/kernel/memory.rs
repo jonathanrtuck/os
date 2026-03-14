@@ -1,3 +1,12 @@
+// AUDIT: 2026-03-14 — 19 unsafe blocks + 1 unsafe impl verified, 6-category checklist applied.
+// No bugs found. Break-before-make correct in try_set_kernel_guard_page (3-step: invalidate→flush→write).
+// init() skips BBM (valid→valid L2 transition) — justified: single-core boot, TLB flush immediately after.
+// W^X enforcement verified: .text RX, .rodata RO, data RW NX. Block attribute extraction for L3
+// replication verified against ARM ARM D5-29/D5-30 — L2 block and L3 page share attribute layout.
+// Neighbor-based attribute recovery in clear_kernel_guard_page relies on guard pages never being
+// adjacent — sound given buddy allocator pattern (guard is always first page of ≥2-page block).
+// TLB sequences correct per ARM ARM D5.10.2. SAFETY comments accurate for all 19 blocks.
+
 //! Kernel page table refinement and address translation.
 //!
 //! Refines the coarse 2MB-block TTBR1 tables from boot.S with 4KB L3
