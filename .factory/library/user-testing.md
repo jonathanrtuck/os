@@ -136,6 +136,41 @@ Run `cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1` and 
 - They can run in parallel with each other
 - They only need read access to source files and ability to run unit tests
 
+## Flow Validator Guidance: Terminal (Unit Tests + Code Review)
+
+### Context
+Code audit milestones validate through terminal output (test suite results, build output) and source file inspection (AUDIT comments, SAFETY comments, specific test presence). No QEMU or GUI needed.
+
+### What to Verify
+- **AUDIT comments**: Each audited file must have a top-level `// AUDIT:` comment summarizing findings
+- **Test suite**: `cargo test -- --test-threads=1` must pass with 0 failures
+- **Specific tests**: Certain assertions require named tests to exist and pass (e.g., dealloc routing, PA validation)
+- **Build**: `cargo build --release` must succeed with no errors
+
+### Commands
+```bash
+# Build
+cd /Users/user/Sites/os/system && cargo build --release
+
+# Full test suite
+cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1
+
+# Run specific tests (filter by name)
+cd /Users/user/Sites/os/system/test && cargo test <pattern> -- --test-threads=1
+```
+
+### Key Source Files (Allocator Audit)
+- `system/kernel/src/heap.rs` — GlobalAlloc, linked-list first-fit, dealloc routing
+- `system/kernel/src/slab.rs` — slab cache, intrusive free list
+- `system/kernel/src/page_allocator.rs` — buddy allocator, PA validation
+- `system/kernel/src/memory_region.rs` — VMA management (pure logic)
+
+### Isolation
+- Terminal validators do NOT need QEMU running
+- Only 1 subagent should run `cargo test` at a time (shared build artifacts)
+- Read-only file inspection can run in parallel
+- No shared mutable state concerns
+
 ## Validation Concurrency
 
 - **QEMU Display**: max 1 (shared monitor socket)
