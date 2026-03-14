@@ -286,6 +286,114 @@ fn remove_by_start_not_middle() {
     assert!(list.lookup(0x1000).is_some());
 }
 
+// --- edge cases from audit ---
+
+#[test]
+fn zero_length_vma_is_never_matched() {
+    let mut list = VmaList::new();
+
+    // A degenerate VMA where start == end has zero size.
+    list.insert(anon_vma(0x1000, 0x1000));
+
+    // No address should match a zero-length range.
+    assert!(list.lookup(0x1000).is_none());
+    assert!(list.lookup(0x0FFF).is_none());
+}
+
+#[test]
+fn inverted_range_is_never_matched() {
+    let mut list = VmaList::new();
+
+    // A degenerate VMA where start > end.
+    list.insert(anon_vma(0x2000, 0x1000));
+
+    // No address should match an inverted range.
+    assert!(list.lookup(0x1000).is_none());
+    assert!(list.lookup(0x1500).is_none());
+    assert!(list.lookup(0x2000).is_none());
+}
+
+#[test]
+fn duplicate_start_insert_preserves_both() {
+    let mut list = VmaList::new();
+
+    // Insert two VMAs with the same start. The struct's doc says "no overlaps
+    // allowed" but the contract is caller-enforced — insert doesn't reject.
+    list.insert(anon_vma(0x1000, 0x2000));
+    list.insert(code_vma(0x1000, 0x3000));
+
+    // Lookup should find one of them (whichever binary search hits).
+    let vma = list.lookup(0x1000).unwrap();
+    assert_eq!(vma.start, 0x1000);
+}
+
+#[test]
+fn insert_and_remove_then_reinsert() {
+    let mut list = VmaList::new();
+
+    list.insert(anon_vma(0x1000, 0x2000));
+    list.insert(anon_vma(0x3000, 0x4000));
+
+    // Remove middle, reinsert.
+    list.remove(0x1000);
+    assert!(list.lookup(0x1000).is_none());
+
+    list.insert(anon_vma(0x1000, 0x2000));
+    assert!(list.lookup(0x1000).is_some());
+    assert!(list.lookup(0x3000).is_some());
+}
+
+#[test]
+fn lookup_at_zero_address() {
+    let mut list = VmaList::new();
+
+    list.insert(anon_vma(0, 0x1000));
+
+    assert!(list.lookup(0).is_some());
+    assert_eq!(list.lookup(0).unwrap().start, 0);
+}
+
+#[test]
+fn remove_first_vma_preserves_rest() {
+    let mut list = VmaList::new();
+
+    list.insert(anon_vma(0x1000, 0x2000));
+    list.insert(anon_vma(0x3000, 0x4000));
+    list.insert(anon_vma(0x5000, 0x6000));
+
+    list.remove(0x1000);
+
+    assert!(list.lookup(0x1000).is_none());
+    assert!(list.lookup(0x3000).is_some());
+    assert!(list.lookup(0x5000).is_some());
+}
+
+#[test]
+fn remove_last_vma_preserves_rest() {
+    let mut list = VmaList::new();
+
+    list.insert(anon_vma(0x1000, 0x2000));
+    list.insert(anon_vma(0x3000, 0x4000));
+    list.insert(anon_vma(0x5000, 0x6000));
+
+    list.remove(0x5000);
+
+    assert!(list.lookup(0x1000).is_some());
+    assert!(list.lookup(0x3000).is_some());
+    assert!(list.lookup(0x5000).is_none());
+}
+
+#[test]
+fn single_page_vma() {
+    let mut list = VmaList::new();
+
+    // Smallest valid VMA: one byte.
+    list.insert(anon_vma(0x1000, 0x1001));
+
+    assert!(list.lookup(0x1000).is_some());
+    assert!(list.lookup(0x1001).is_none());
+}
+
 // --- permissions ---
 
 #[test]

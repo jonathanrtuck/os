@@ -1,3 +1,11 @@
+// AUDIT: 2026-03-14 — 0 unsafe blocks. 6-category checklist applied. Pure logic
+// audit: binary search insert/lookup/remove verified correct for empty list,
+// adjacent VMAs, gaps, boundary addresses (0, u64::MAX-PAGE_SIZE), zero-length
+// and inverted ranges (harmless no-match). "No overlaps" invariant is
+// caller-enforced (3 call sites in address_space.rs/process.rs, all correct).
+// Previously identified issues (11.34 page_offset dead code, 11.35 readable
+// field) already removed. No bugs found.
+
 //! Virtual Memory Areas — tracks logical regions of a process's address space.
 //!
 //! Each VMA describes a contiguous range of virtual addresses with uniform
