@@ -314,7 +314,7 @@ doesn't check generation on switch.)
 | `sys_process_kill` immediate cleanup       | syscall.rs:783       | No running threads on other cores |
 | `exit_current_from_syscall` Phase 4        | syscall.rs:855       | Last thread exit                  |
 | `maybe_cleanup_killed_process`             | scheduler.rs:259     | Deferred cleanup (killed process) |
-| `AddressSpace::Drop` safety net            | address_space.rs:640 | Error path catchall               |
+| `AddressSpace::Drop` safety net            | address_space.rs:703 | Error path catchall               |
 
 **Mechanism:** Clear the ASID's bit in the bitmap. ASID 0 free is a no-op (guard).
 Double-free is harmless (clears already-clear bit).

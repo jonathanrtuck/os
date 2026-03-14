@@ -18,7 +18,7 @@ at each site by tracing the pointer's provenance.
 
 ## 1. Structural Foundation
 
-### Thread layout (thread.rs:59–62)
+### Thread layout (thread.rs:134–137)
 
 ```rust
 /// `context` MUST be the first field — `TPIDR_EL1` points at the start of

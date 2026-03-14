@@ -27,7 +27,7 @@ acquire, restored on release). There are no bare `Mutex` or other lock types.
 | 8   | `page_allocator::STATE`   | page_allocator.rs:25   | `IrqMutex<State>`                       | Buddy allocator free lists (physical page frames)                                             |
 | 9   | `slab::SLAB`              | slab.rs:28             | `IrqMutex<SlabState>`                   | Slab allocator caches (6 size classes)                                                        |
 | 10  | `heap::ALLOC_LOCK`        | heap.rs:47             | `IrqMutex<()>`                          | Linked-list allocator free list                                                               |
-| 11  | `memory::KERNEL_PT_LOCK`  | memory.rs:33           | `IrqMutex<()>`                          | Kernel TTBR1 page table modifications (break-block, guard pages)                              |
+| 11  | `memory::KERNEL_PT_LOCK`  | memory.rs:101          | `IrqMutex<()>`                          | Kernel TTBR1 page table modifications (break-block, guard pages)                              |
 | 12  | `serial::LOCK`            | serial.rs:25           | `IrqMutex<()>`                          | UART output serialization (prevents interleaved multi-core output)                            |
 | 13  | `address_space_id::STATE` | address_space_id.rs:32 | `IrqMutex<State>`                       | ASID bitmap and generation counter                                                            |
 
@@ -183,7 +183,7 @@ KERNEL_PT_LOCK.lock() (level 3)
   → page_allocator::alloc_frame() (level 2)
 ```
 
-The documented ordering comment in `memory.rs:38` says:
+The documented ordering comment in `memory.rs:100` says:
 `"Lock ordering: KERNEL_PT_LOCK → page allocator lock (never the reverse)."`
 
 Note: This is level 3 → 2, which appears to violate the level hierarchy.
