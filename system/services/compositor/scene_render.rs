@@ -1,7 +1,7 @@
 //! Scene graph renderer: walks a tree of `scene::Node` and draws to a Surface.
 
-use drawing::{Color, GlyphCache, Surface, TextLayout};
-use scene::{Content, Node, NodeFlags, NodeId, NULL};
+use drawing::{Color, GlyphCache, Surface};
+use scene::{Content, Node, NodeFlags, NodeId, TextRun, NULL};
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.
 #[derive(Clone, Copy)]
@@ -165,69 +165,69 @@ fn render_node(
     // Draw content.
     match node.content {
         Content::None => {}
-        Content::Text {
-            data,
-            font_size,
-            color,
-            cursor,
-            sel_start,
-            sel_end,
-        } => {
-            let text: &[u8] = if data.length > 0
-                && (data.offset as usize + data.length as usize) <= graph.data.len()
+        Content::Text { runs, run_count, .. } => {
+            let run_size = core::mem::size_of::<TextRun>();
+            let runs_bytes = if runs.length > 0
+                && (runs.offset as usize + runs.length as usize) <= graph.data.len()
             {
-                &graph.data[data.offset as usize..][..data.length as usize]
+                &graph.data[runs.offset as usize..][..runs.length as usize]
             } else {
                 &[]
             };
-
-            let text_color = scene_to_draw_color(color);
-            let cache = ctx.mono_cache;
-            let char_w = match cache.get(b' ') {
-                Some((g, _)) => g.advance,
-                None => 8,
-            };
-            let layout = TextLayout {
-                char_width: char_w,
-                line_height: cache.line_height,
-                max_width: if nw > 0 { nw as u32 } else { fb.width },
-            };
-
-            let cursor_offset = if cursor == u32::MAX {
-                usize::MAX
+            let text_runs: &[TextRun] = if runs_bytes.len() >= run_size {
+                // SAFETY: TextRun is repr(C), data buffer alignment >= TextRun alignment.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        runs_bytes.as_ptr() as *const TextRun,
+                        run_count as usize,
+                    )
+                }
             } else {
-                cursor as usize
+                &[]
             };
-
-            // The node's scroll_y is the text scroll offset in lines
-            // (set by the OS service, not pixels). The text renderer
-            // handles scrolling internally -- no parent scroll needed.
-            let text_scroll_lines = if node.scroll_y > 0 {
-                node.scroll_y as u32
-            } else {
-                0
-            };
-
             let text_nx = nx + icon_advance;
-            let text_x = if text_nx >= 0 { text_nx as u32 } else { 0 };
-            let text_y = if ny >= 0 { ny as u32 } else { 0 };
-            let max_y = visible.y as u32 + visible.h as u32;
-
-            layout.draw_tt_sel_scroll(
-                fb,
-                text,
-                text_x,
-                text_y,
-                cursor_offset,
-                cache,
-                text_color,
-                drawing::TEXT_CURSOR,
-                max_y,
-                sel_start as usize,
-                sel_end as usize,
-                drawing::TEXT_SELECTION,
-                text_scroll_lines,
-            );
+            let max_y = (visible.y + visible.h) as u32;
+            for run in text_runs {
+                let glyphs: &[u8] = if run.glyphs.length > 0
+                    && (run.glyphs.offset as usize + run.glyphs.length as usize)
+                        <= graph.data.len()
+                {
+                    &graph.data[run.glyphs.offset as usize..][..run.glyphs.length as usize]
+                } else {
+                    &[]
+                };
+                let run_color = scene_to_draw_color(run.color);
+                let cache = ctx.mono_cache;
+                let advance = if run.advance > 0 {
+                    run.advance as u32
+                } else {
+                    match cache.get(b' ') {
+                        Some((g, _)) => g.advance,
+                        None => 8,
+                    }
+                };
+                let gx0 = text_nx + run.x as i32;
+                let gy0 = ny + run.y as i32;
+                if gy0 >= max_y as i32 {
+                    break;
+                }
+                let mut cx = gx0;
+                for &ch in glyphs {
+                    if let Some((glyph, coverage)) = cache.get(ch) {
+                        let px = cx + glyph.bearing_x;
+                        let py = gy0 + (cache.ascent as i32 - glyph.bearing_y);
+                        fb.draw_coverage(
+                            px,
+                            py,
+                            coverage,
+                            glyph.width,
+                            glyph.height,
+                            run_color,
+                        );
+                    }
+                    cx += advance as i32;
+                }
+            }
         }
         Content::Image {
             data,

@@ -4,6 +4,22 @@ fn make_buf() -> Vec<u8> {
     vec![0u8; SCENE_SIZE]
 }
 
+/// Build a monospace Content::Text from raw UTF-8 bytes.
+/// Each byte is treated as a glyph ID with uniform advance.
+fn make_mono_text(w: &mut SceneWriter, text: &[u8], font_size: u16, color: Color, advance: u16) -> Content {
+    let run = TextRun {
+        glyphs: w.push_data(text),
+        glyph_count: text.len() as u16,
+        x: 0,
+        y: 0,
+        color,
+        advance,
+        font_size,
+    };
+    let (runs, run_count) = w.push_text_runs(&[run]);
+    Content::Text { runs, run_count, _pad: [0; 2] }
+}
+
 // ── SceneWriter basics ──────────────────────────────────────────────
 
 #[test]
@@ -153,30 +169,68 @@ fn writer_text_node_round_trip() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     let text_data = b"Hello, OS!";
-    let dref = w.push_data(text_data);
     let id = w.alloc_node().unwrap();
-    {
-        let n = w.node_mut(id);
-        n.content = Content::Text {
-            data: dref,
-            font_size: 18,
-            color: Color::rgb(220, 220, 220),
-            cursor: 5,
-            sel_start: 0,
-            sel_end: 0,
-        };
-    }
+    w.node_mut(id).content = make_mono_text(&mut w, text_data, 18, Color::rgb(220, 220, 220), 8);
     // Read back via SceneReader.
     let r = SceneReader::new(&buf);
     let node = r.node(id);
     match node.content {
-        Content::Text { data, font_size, cursor, .. } => {
-            assert_eq!(font_size, 18);
-            assert_eq!(cursor, 5);
-            assert_eq!(r.data(data), text_data);
+        Content::Text { runs, run_count, .. } => {
+            assert_eq!(run_count, 1);
+            let text_runs = r.text_runs(runs);
+            assert_eq!(text_runs.len(), 1);
+            assert_eq!(text_runs[0].font_size, 18);
+            assert_eq!(text_runs[0].advance, 8);
+            assert_eq!(r.data(text_runs[0].glyphs), text_data);
         }
         _ => panic!("expected Text content"),
     }
+}
+
+#[test]
+fn writer_text_runs_multiple_lines() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let line1 = b"Hello";
+    let line2 = b"World";
+    let d1 = w.push_data(line1);
+    let d2 = w.push_data(line2);
+    let runs = [
+        TextRun { glyphs: d1, glyph_count: 5, x: 0, y: 0,
+                  color: Color::rgb(200, 200, 200), advance: 8, font_size: 16 },
+        TextRun { glyphs: d2, glyph_count: 5, x: 0, y: 18,
+                  color: Color::rgb(200, 200, 200), advance: 8, font_size: 16 },
+    ];
+    let (runs_ref, count) = w.push_text_runs(&runs);
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
+
+    let r = SceneReader::new(&buf);
+    let text_runs = r.text_runs(runs_ref);
+    assert_eq!(text_runs.len(), 2);
+    assert_eq!(r.data(text_runs[0].glyphs), b"Hello");
+    assert_eq!(r.data(text_runs[1].glyphs), b"World");
+    assert_eq!(text_runs[1].y, 18);
+}
+
+#[test]
+fn push_text_runs_round_trips_struct_fields() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let d = w.push_data(b"x");
+    let run = TextRun {
+        glyphs: d, glyph_count: 1, x: -5, y: 100,
+        color: Color::rgba(10, 20, 30, 40), advance: 12, font_size: 24,
+    };
+    let (runs_ref, count) = w.push_text_runs(&[run]);
+    assert_eq!(count, 1);
+    let r = SceneReader::new(&buf);
+    let read_runs = r.text_runs(runs_ref);
+    assert_eq!(read_runs[0].x, -5);
+    assert_eq!(read_runs[0].y, 100);
+    assert_eq!(read_runs[0].color, Color::rgba(10, 20, 30, 40));
+    assert_eq!(read_runs[0].advance, 12);
+    assert_eq!(read_runs[0].font_size, 24);
 }
 
 // ── Image content ───────────────────────────────────────────────────
@@ -221,15 +275,7 @@ fn reader_reads_writer_output() {
         w.node_mut(root).height = 600;
         w.node_mut(root).background = Color::rgb(30, 30, 30);
         w.add_child(root, child);
-        let dref = w.push_data(b"content");
-        w.node_mut(child).content = Content::Text {
-            data: dref,
-            font_size: 16,
-            color: Color::rgb(200, 200, 200),
-            cursor: u32::MAX,
-            sel_start: 0,
-            sel_end: 0,
-        };
+        w.node_mut(child).content = make_mono_text(&mut w, b"content", 16, Color::rgb(200, 200, 200), 8);
         w.set_root(root);
         w.commit();
     }
@@ -239,10 +285,14 @@ fn reader_reads_writer_output() {
     assert_eq!(r.root(), 0);
     assert_eq!(r.node(0).width, 800);
     assert_eq!(r.node(0).first_child, 1);
-    assert_eq!(r.data(match r.node(1).content {
-        Content::Text { data, .. } => data,
+    match r.node(1).content {
+        Content::Text { runs, run_count, .. } => {
+            assert_eq!(run_count, 1);
+            let text_runs = r.text_runs(runs);
+            assert_eq!(r.data(text_runs[0].glyphs), b"content");
+        }
         _ => panic!("expected text"),
-    }), b"content");
+    }
 }
 
 #[test]
@@ -333,18 +383,10 @@ fn writer_build_typical_editor_scene() {
     w.add_child(root, title);
 
     // Title text.
-    let title_text_data = w.push_data(b"Text");
     let title_text = w.alloc_node().unwrap();
     w.node_mut(title_text).x = 12;
     w.node_mut(title_text).y = 8;
-    w.node_mut(title_text).content = Content::Text {
-        data: title_text_data,
-        font_size: 18,
-        color: Color::rgb(200, 200, 200),
-        cursor: u32::MAX,
-        sel_start: 0,
-        sel_end: 0,
-    };
+    w.node_mut(title_text).content = make_mono_text(&mut w, b"Text", 18, Color::rgb(200, 200, 200), 8);
     w.add_child(title, title_text);
 
     // Content area.
@@ -356,20 +398,12 @@ fn writer_build_typical_editor_scene() {
     w.add_child(root, content);
 
     // Document text.
-    let doc_data = w.push_data(b"Hello, world!\nThis is a test.");
     let doc_text = w.alloc_node().unwrap();
     w.node_mut(doc_text).x = 12;
     w.node_mut(doc_text).y = 8;
     w.node_mut(doc_text).width = 1000;
     w.node_mut(doc_text).height = u16::MAX;
-    w.node_mut(doc_text).content = Content::Text {
-        data: doc_data,
-        font_size: 18,
-        color: Color::rgb(220, 220, 220),
-        cursor: 13,
-        sel_start: 0,
-        sel_end: 0,
-    };
+    w.node_mut(doc_text).content = make_mono_text(&mut w, b"Hello, world!\nThis is a test.", 18, Color::rgb(220, 220, 220), 8);
     w.add_child(content, doc_text);
 
     w.commit();
@@ -390,9 +424,10 @@ fn writer_build_typical_editor_scene() {
 
     // Verify text content.
     match r.node(4).content {
-        Content::Text { data, cursor, .. } => {
-            assert_eq!(r.data(data), b"Hello, world!\nThis is a test.");
-            assert_eq!(cursor, 13);
+        Content::Text { runs, run_count, .. } => {
+            assert_eq!(run_count, 1);
+            let text_runs = r.text_runs(runs);
+            assert_eq!(r.data(text_runs[0].glyphs), b"Hello, world!\nThis is a test.");
         }
         _ => panic!("expected Text"),
     }
@@ -489,11 +524,7 @@ fn double_writer_alternates_buffers() {
         let mut w = dw.back();
         w.clear();
         let n = w.alloc_node().unwrap();
-        let d = w.push_data(b"first");
-        w.node_mut(n).content = Content::Text {
-            data: d, font_size: 16, color: Color::rgb(255, 255, 255),
-            cursor: u32::MAX, sel_start: 0, sel_end: 0,
-        };
+        w.node_mut(n).content = make_mono_text(&mut w, b"first", 16, Color::rgb(255, 255, 255), 8);
         w.set_root(n);
     }
     dw.swap();
@@ -503,19 +534,16 @@ fn double_writer_alternates_buffers() {
         let mut w = dw.back();
         w.clear();
         let n = w.alloc_node().unwrap();
-        let d = w.push_data(b"second");
-        w.node_mut(n).content = Content::Text {
-            data: d, font_size: 16, color: Color::rgb(255, 255, 255),
-            cursor: u32::MAX, sel_start: 0, sel_end: 0,
-        };
+        w.node_mut(n).content = make_mono_text(&mut w, b"second", 16, Color::rgb(255, 255, 255), 8);
         w.set_root(n);
     }
     dw.swap();
     assert_eq!(dw.front_generation(), 2);
     // Front now has "second".
     match dw.front_nodes()[0].content {
-        Content::Text { data, .. } => {
-            assert_eq!(dw.front_data(data), b"second");
+        Content::Text { runs, .. } => {
+            let text_runs = dw.front_text_runs(runs);
+            assert_eq!(dw.front_data(text_runs[0].glyphs), b"second");
         }
         _ => panic!("expected text"),
     }
@@ -575,11 +603,7 @@ fn double_reader_reads_front() {
             let mut w = dw.back();
             w.clear();
             let n = w.alloc_node().unwrap();
-            let d = w.push_data(b"visible");
-            w.node_mut(n).content = Content::Text {
-                data: d, font_size: 14, color: Color::rgb(200, 200, 200),
-                cursor: 0, sel_start: 0, sel_end: 0,
-            };
+            w.node_mut(n).content = make_mono_text(&mut w, b"visible", 14, Color::rgb(200, 200, 200), 8);
             w.set_root(n);
         }
         dw.swap();
@@ -589,8 +613,9 @@ fn double_reader_reads_front() {
     assert_eq!(dr.front_generation(), 1);
     assert_eq!(dr.front_nodes().len(), 1);
     match dr.front_nodes()[0].content {
-        Content::Text { data, .. } => {
-            assert_eq!(dr.front_data(data), b"visible");
+        Content::Text { runs, .. } => {
+            let text_runs = dr.front_text_runs(runs);
+            assert_eq!(dr.front_data(text_runs[0].glyphs), b"visible");
         }
         _ => panic!("expected text"),
     }
@@ -633,17 +658,14 @@ fn double_writer_front_data_resolves_refs() {
         let mut w = dw.back();
         w.clear();
         let n = w.alloc_node().unwrap();
-        let d = w.push_data(b"hello world");
-        w.node_mut(n).content = Content::Text {
-            data: d, font_size: 16, color: Color::rgb(0, 0, 0),
-            cursor: u32::MAX, sel_start: 0, sel_end: 0,
-        };
+        w.node_mut(n).content = make_mono_text(&mut w, b"hello world", 16, Color::rgb(0, 0, 0), 8);
         w.set_root(n);
     }
     dw.swap();
     match dw.front_nodes()[0].content {
-        Content::Text { data, .. } => {
-            assert_eq!(dw.front_data(data), b"hello world");
+        Content::Text { runs, .. } => {
+            let text_runs = dw.front_text_runs(runs);
+            assert_eq!(dw.front_data(text_runs[0].glyphs), b"hello world");
         }
         _ => panic!("expected text"),
     }

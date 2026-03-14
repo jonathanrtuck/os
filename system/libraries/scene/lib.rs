@@ -120,27 +120,61 @@ impl Color {
     }
 }
 
+// ── Text runs ───────────────────────────────────────────────────────
+
+/// A positioned run of shaped glyphs — one line (or fragment) of text.
+///
+/// The OS service computes layout (line breaking, shaping, positioning)
+/// and emits runs. The compositor just rasterizes glyphs at the given
+/// positions. Layout in the OS service, rasterization in the compositor.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(C)]
+pub struct TextRun {
+    /// Glyph data in the data buffer. For monospace: raw UTF-8 bytes
+    /// (glyph ID == byte value). For shaped text (future): array of
+    /// `ShapedGlyph`.
+    pub glyphs: DataRef,
+    /// Number of glyphs in this run.
+    pub glyph_count: u16,
+    /// Starting pixel position relative to the parent node.
+    pub x: i16,
+    pub y: i16,
+    /// Text color.
+    pub color: Color,
+    /// Uniform advance width per glyph (monospace). When 0, per-glyph
+    /// advances are stored in the data buffer as `ShapedGlyph` entries.
+    pub advance: u16,
+    /// Font size in pixels (selects the glyph cache).
+    pub font_size: u16,
+}
+
+/// A shaped glyph with individual advance (proportional/shaped text).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(C)]
+pub struct ShapedGlyph {
+    pub glyph_id: u16,
+    pub advance: u16,
+}
+
 // ── Content variant ─────────────────────────────────────────────────
 
 /// What a node draws (beyond its container decoration).
+///
+/// Cursor and selection are not part of Text — they are regular nodes
+/// with backgrounds, positioned by the OS service's layout engine.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub enum Content {
-    /// Pure container -- no content, just children and decoration.
+    /// Pure container — no content, just children and decoration.
     None,
-    /// A run of text. The compositor owns layout (line breaking, wrapping).
+    /// Positioned text runs laid out by the OS service.
+    /// The compositor rasterizes glyphs at given positions.
     Text {
-        /// Reference to UTF-8 string in the data buffer.
-        data: DataRef,
-        /// Font size in pixels.
-        font_size: u16,
-        /// Text color.
-        color: Color,
-        /// Cursor position as byte offset, or `u32::MAX` for no cursor.
-        cursor: u32,
-        /// Selection range as (start, end) byte offsets. Equal = no selection.
-        sel_start: u32,
-        sel_end: u32,
+        /// Reference to array of `TextRun` in the data buffer.
+        runs: DataRef,
+        /// Number of runs.
+        run_count: u16,
+        _pad: [u8; 2],
     },
     /// A pixel buffer reference.
     Image {
@@ -444,6 +478,26 @@ impl<'a> SceneWriter<'a> {
     pub fn set_root(&mut self, id: NodeId) {
         self.header_mut().root = id;
     }
+    /// Push an array of `TextRun` structs into the data buffer.
+    /// Aligns the write offset to `align_of::<TextRun>()` first.
+    /// Returns a `DataRef` and the count.
+    pub fn push_text_runs(&mut self, runs: &[TextRun]) -> (DataRef, u16) {
+        // Align data_used to TextRun alignment (typically 4 bytes).
+        let align = core::mem::align_of::<TextRun>();
+        let used = self.header().data_used as usize;
+        let aligned = (used + align - 1) & !(align - 1);
+        if aligned > used && aligned <= DATA_BUFFER_SIZE {
+            self.header_mut().data_used = aligned as u32;
+        }
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                runs.as_ptr() as *const u8,
+                runs.len() * core::mem::size_of::<TextRun>(),
+            )
+        };
+        (self.push_data(bytes), runs.len() as u16)
+    }
+
     /// Overwrite an existing DataRef in place (must be same length).
     /// Returns true on success, false if lengths don't match.
     pub fn update_data(&mut self, dref: DataRef, bytes: &[u8]) -> bool {
@@ -527,6 +581,19 @@ impl<'a> SceneReader<'a> {
     }
     pub fn root(&self) -> NodeId {
         self.header().root
+    }
+
+    /// Interpret a DataRef as an array of `TextRun` structs.
+    pub fn text_runs(&self, dref: DataRef) -> &[TextRun] {
+        let bytes = self.data(dref);
+        let run_size = core::mem::size_of::<TextRun>();
+        if bytes.is_empty() || bytes.len() < run_size {
+            return &[];
+        }
+        let count = bytes.len() / run_size;
+        // SAFETY: TextRun is repr(C), data buffer is aligned to node size
+        // which is >= alignment of TextRun.
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
     }
 }
 
@@ -642,6 +709,16 @@ impl<'a> DoubleWriter<'a> {
 
         &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
     }
+    /// Interpret a DataRef from the front buffer as TextRun array.
+    pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
+        let bytes = self.front_data(dref);
+        let run_size = core::mem::size_of::<TextRun>();
+        if bytes.is_empty() || bytes.len() < run_size {
+            return &[];
+        }
+        let count = bytes.len() / run_size;
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
+    }
     /// Generation counter of the current front buffer.
     pub fn front_generation(&self) -> u32 {
         let (_, g) = front_of(self.buf);
@@ -703,6 +780,16 @@ impl<'a> DoubleReader<'a> {
         let used = hdr.data_used as usize;
 
         &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
+    }
+    /// Interpret a DataRef from the front buffer as TextRun array.
+    pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
+        let bytes = self.front_data(dref);
+        let run_size = core::mem::size_of::<TextRun>();
+        if bytes.is_empty() || bytes.len() < run_size {
+            return &[];
+        }
+        let count = bytes.len() / run_size;
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
     }
     /// Generation counter of the current front buffer.
     pub fn front_generation(&self) -> u32 {
