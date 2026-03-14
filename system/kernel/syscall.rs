@@ -895,7 +895,12 @@ fn sys_scheduling_context_create(budget: u64, period: u64) -> Result<u64, Error>
             .handles
             .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
     })
-    .map_err(|_| Error::InvalidArgument)?;
+    .map_err(|_| {
+        // Handle table full — release the scheduling context to avoid leaking
+        // it (ref_count=1 would never reach 0 without a handle to close).
+        scheduler::release_scheduling_context(ctx_id);
+        Error::InvalidArgument
+    })?;
 
     Ok(handle.0 as u64)
 }
