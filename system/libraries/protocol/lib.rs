@@ -7,14 +7,15 @@
 //!
 //! One module per protocol boundary:
 //!
-//! - `device`  — init -> all drivers (device config)
-//! - `gpu`     — init <-> GPU driver, compositor -> GPU driver
-//! - `input`   — input driver -> compositor
-//! - `edit`    — compositor <-> text editor
-//! - `compose` — init -> compositor (compositor config)
-//! - `editor`  — init -> text editor (editor config)
-//! - `fs`      — init <-> 9p driver (filesystem requests)
-//! - `present` — compositor -> GPU driver (frame presentation)
+//! - `device`      — init -> all drivers (device config)
+//! - `gpu`         — init <-> GPU driver, compositor -> GPU driver
+//! - `input`       — input driver -> core
+//! - `edit`        — core <-> text editor
+//! - `core_config` — init -> core (core config, scene update signal)
+//! - `compose`     — init -> compositor (compositor config)
+//! - `editor`      — init -> text editor (editor config)
+//! - `fs`          — init <-> 9p driver (filesystem requests)
+//! - `present`     — compositor -> GPU driver (frame presentation)
 //!
 //! # Conventions
 //!
@@ -216,6 +217,33 @@ pub mod edit {
     }
 }
 
+// ── core: init -> core (OS service) ─────────────────────────────────
+
+pub mod core_config {
+    pub const MSG_CORE_CONFIG: u32 = 50;
+    pub const MSG_SCENE_UPDATED: u32 = 51;
+
+    /// Core process configuration. The core owns documents, layout, input
+    /// routing, and scene graph building. It writes to the scene graph in
+    /// shared memory and signals the compositor when a new frame is ready.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct CoreConfig {
+        pub doc_va: u64,
+        pub scene_va: u64,
+        pub mono_font_va: u64,
+        pub fb_width: u32,
+        pub fb_height: u32,
+        pub doc_capacity: u32,
+        pub mono_font_len: u32,
+        pub prop_font_len: u32,
+        pub _pad: u32,
+    }
+
+    // Guard: must fit within the 60-byte IPC payload.
+    const _: () = assert!(core::mem::size_of::<CoreConfig>() <= 60);
+}
+
 // ── compose: init -> compositor ─────────────────────────────────────
 
 pub mod compose {
@@ -225,22 +253,22 @@ pub mod compose {
     pub const MSG_IMG_ICON_CONFIG: u32 = 9;
     pub const MSG_RTC_CONFIG: u32 = 15;
 
-    /// Compositor configuration. Layout: u64 fields first, then u32
-    /// fields, so `size_of::<CompositorConfig>() == 56` (no trailing
-    /// alignment padding) and fits within the 60-byte IPC payload.
+    /// Compositor configuration. The compositor owns rendering: fonts,
+    /// glyph caches, framebuffers, and GPU presentation. It reads the
+    /// scene graph from shared memory and renders to pixels.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CompositorConfig {
         pub fb_va: u64,
         pub fb_va2: u64,
-        pub doc_va: u64,
+        pub scene_va: u64,
         pub mono_font_va: u64,
         pub fb_width: u32,
         pub fb_height: u32,
         pub fb_stride: u32,
-        pub doc_capacity: u32,
         pub mono_font_len: u32,
         pub prop_font_len: u32,
+        pub _pad: u32,
     }
 
     // Guard: must fit within the 60-byte IPC payload.

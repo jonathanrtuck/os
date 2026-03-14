@@ -24,6 +24,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("virtio-gpu", "VIRTIO_GPU_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
     ("virtio-9p", "VIRTIO_9P_ELF"),
+    ("core", "CORE_ELF"),
     ("compositor", "COMPOSITOR_ELF"),
     ("text-editor", "TEXT_EDITOR_ELF"),
     ("stress", "STRESS_ELF"),
@@ -44,6 +45,7 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("virtio-gpu", "services/drivers/virtio-gpu", true, false),
     ("virtio-input", "services/drivers/virtio-input", true, false),
     ("virtio-9p", "services/drivers/virtio-9p", true, false),
+    ("core", "services/core", false, true),
     ("compositor", "services/compositor", false, true),
     ("text-editor", "user/text-editor", false, false),
     ("stress", "user/stress", false, false),
@@ -176,6 +178,7 @@ fn main() {
             ("sys", sys_rlib.clone()),
             ("ipc", ipc_rlib.clone()),
             ("protocol", protocol_rlib.clone()),
+            ("scene", scene_rlib.clone()),
         ],
         &init_env,
     );
