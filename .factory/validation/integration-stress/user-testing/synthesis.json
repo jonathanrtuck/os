@@ -1,0 +1,25 @@
+{
+  "milestone": "integration-stress",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 8,
+    "passed": 8,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-INTEG-001",
+    "VAL-INTEG-002",
+    "VAL-INTEG-003",
+    "VAL-INTEG-004",
+    "VAL-INTEG-005",
+    "VAL-CROSS-001",
+    "VAL-CROSS-002",
+    "VAL-CROSS-003"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}
