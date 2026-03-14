@@ -456,14 +456,21 @@ fn create_clock_timer() -> bool {
         let ticks_this_second = elapsed_ticks % freq;
         // Ticks remaining until the next whole second.
         let remaining_ticks = freq - ticks_this_second;
+
         // Convert to nanoseconds: remaining_ticks * 1_000_000_000 / freq.
         // Use u128 to avoid overflow (freq ~62.5M, remaining up to ~62.5M).
         (remaining_ticks as u128 * 1_000_000_000 / freq as u128) as u64
     } else {
         1_000_000_000
     };
+
     // Clamp to at least 10ms to avoid busy-spinning on rounding edge.
-    let timeout_ns = if timeout_ns < 10_000_000 { 1_000_000_000 } else { timeout_ns };
+    let timeout_ns = if timeout_ns < 10_000_000 {
+        1_000_000_000
+    } else {
+        timeout_ns
+    };
+
     match sys::timer_create(timeout_ns) {
         Ok(handle) => {
             unsafe {
