@@ -1,0 +1,77 @@
+{
+  "milestone": "memory-audit",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1",
+      "exitCode": 0,
+      "details": "1006 tests passed, 0 failed, across 24 test binaries"
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cd /Users/user/Sites/os/system && cargo build --release",
+      "exitCode": 0,
+      "details": "Build succeeded with no errors (Rust compiler is the type checker for this bare-metal project)"
+    },
+    "lint": {
+      "passed": true,
+      "command": "cd /Users/user/Sites/os/system && cargo build --release",
+      "exitCode": 0,
+      "details": "No clippy configured; build warnings are dead_code from test host stubs (expected pattern for kernel test architecture)"
+    }
+  },
+  "reviewsSummary": {
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "audit-memory",
+      "severity": "non_blocking",
+      "description": "Test l3_index_extraction uses misleading PA literal 0x4021_FF000 (should be 0x4021_F000). Test logic is correct because only index bits [20:12] are checked, but the value is cosmetically misleading (represents ~16GB address, not within the expected 2MB block)."
+    },
+    {
+      "featureId": "audit-memory",
+      "severity": "non_blocking",
+      "description": "AUDIT comment could explicitly name the unsafe impl (Sync for SyncPageTable) for future auditors searching for it."
+    },
+    {
+      "featureId": "audit-paging-mmio",
+      "severity": "non_blocking",
+      "description": "paging.rs AUDIT comment says 'regions contiguous, no gaps or overlaps' but user VA layout has intentional unmapped gaps. The intent is clear (adjacent defined regions do abut) but wording could be more precise."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Remove or mark resolved the 'Post-Audit Additions' note that says 'main.rs has 5 unsafe blocks added by Fix 17 (TPIDR race). AUDIT comment says 19 but file has 24. Needs update in M4.' This was resolved by audit-paging-mmio — main.rs AUDIT comment now correctly says 24.",
+      "evidence": "audit-paging-mmio (commit 364c412) updated main.rs AUDIT from 19→24. AGENTS.md still says 'Needs update in M4' which is now stale.",
+      "isSystemic": false
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Standardize the AUDIT comment format for files with unsafe fn/unsafe impl in addition to unsafe blocks. Current format varies: some count 'unsafe blocks' only, others count 'blocks + fn + impl' separately. Suggest: 'N unsafe blocks [+ M unsafe fn] [+ K unsafe impl] verified' as the canonical format.",
+      "evidence": "heap.rs: '2 unsafe blocks, 3 unsafe fn, 2 unsafe impl'; slab.rs: '2 unsafe blocks + 2 unsafe fn'; memory_mapped_io.rs: '3 unsafe blocks verified'. No standard in AGENTS.md or skill definition.",
+      "isSystemic": true
+    },
+    {
+      "target": "library",
+      "suggestion": "The guard page adjacency invariant (guard pages are never adjacent because buddy allocator places them at first page of >=2-page block) should be captured in the safety map when it's created in M5 (cross-module-invariants). This invariant is critical for clear_kernel_guard_page's neighbor-based attribute recovery soundness.",
+      "evidence": "memory.rs AUDIT comment documents this locally, but it's a cross-module invariant (memory.rs depends on page_allocator.rs behavior). create-safety-map feature in M5 should include it.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Model-based TDD pattern for kernel audit tests should be documented more prominently in AGENTS.md",
+      "reason": "The pattern is already well-established across 24 test files and is self-documenting. Adding explicit documentation would be overhead without clear benefit — new workers can see the pattern in any existing test file."
+    }
+  ],
+  "previousRound": null
+}
