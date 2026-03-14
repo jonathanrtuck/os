@@ -6,6 +6,7 @@
 use shaping::{shape, Feature, ShapedGlyph};
 
 const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
+const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
 const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf");
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,52 @@ fn shape_empty_string_produces_no_glyphs() {
     assert!(
         glyphs.is_empty(),
         "empty string should produce 0 glyphs, got {}",
+        glyphs.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VAL-SHAPE-002: Ligature production
+// ---------------------------------------------------------------------------
+// Font: Variable Nunito Sans (nunito-sans-variable.ttf) — a variable OpenType
+// font with GSUB ligature tables, including standard "fi" and "fl" ligatures.
+
+#[test]
+fn shape_ligature_fi_fewer_glyphs() {
+    // "fi" (2 chars) should produce fewer than 2 glyphs when the font's GSUB
+    // ligature tables are active (default shaping enables standard ligatures).
+    let liga_on = vec!["+liga".parse::<Feature>().unwrap()];
+    let glyphs = shape(NUNITO_SANS_VARIABLE, "fi", &liga_on);
+    assert!(
+        glyphs.len() < 2,
+        "Variable Nunito Sans: 'fi' with +liga should produce fewer than 2 glyphs \
+         (ligature substitution), got {} glyphs",
+        glyphs.len()
+    );
+}
+
+#[test]
+fn shape_ligature_fl_fewer_glyphs() {
+    // "fl" (2 chars) should also produce fewer than 2 glyphs via GSUB ligature.
+    let liga_on = vec!["+liga".parse::<Feature>().unwrap()];
+    let glyphs = shape(NUNITO_SANS_VARIABLE, "fl", &liga_on);
+    assert!(
+        glyphs.len() < 2,
+        "Variable Nunito Sans: 'fl' with +liga should produce fewer than 2 glyphs \
+         (ligature substitution), got {} glyphs",
+        glyphs.len()
+    );
+}
+
+#[test]
+fn shape_ligature_disabled_no_merge() {
+    // With ligatures explicitly disabled, "fi" should produce exactly 2 glyphs.
+    let liga_off = vec!["-liga".parse::<Feature>().unwrap()];
+    let glyphs = shape(NUNITO_SANS_VARIABLE, "fi", &liga_off);
+    assert_eq!(
+        glyphs.len(),
+        2,
+        "Variable Nunito Sans: 'fi' with -liga should produce 2 glyphs (no ligature), got {}",
         glyphs.len()
     );
 }
