@@ -2,7 +2,9 @@
 
 ## Testing Surface
 
-QEMU framebuffer screenshots. No browser, no web UI. The OS boots as a bare-metal kernel in QEMU `virt` machine.
+**Current mission (Systematic Kernel Bug Audit):** Terminal output only. The validation surface is `cargo test` output and `cargo build` output. No QEMU, no screenshots, no GUI. All assertions are verified by running tests and checking results.
+
+**General (non-audit missions):** QEMU framebuffer screenshots. No browser, no web UI. The OS boots as a bare-metal kernel in QEMU `virt` machine.
 
 ## Environment Setup
 

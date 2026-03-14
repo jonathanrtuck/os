@@ -69,7 +69,7 @@ Apply the minimal correct fix. Prefer fixes that:
 
 1. Run the new test to confirm it passes: `cd system/test && cargo test <test_name> -- --test-threads=1`
 2. Run the full test suite to check for regressions: `cd system/test && cargo test -- --test-threads=1`
-3. Build the kernel to verify it still compiles: `cd system && cargo build`
+3. Build the kernel to verify it still compiles: `cd system && cargo build --release`
 
 ### Step 8: Commit
 
@@ -90,6 +90,8 @@ fix(<subsystem>): <what was wrong>
 **For Miri features:** Install Miri (`rustup component add miri`), then run `cd system/test && cargo +nightly miri test -- --test-threads=1 2>&1`. Not all tests may be Miri-compatible. Fix what Miri finds; mark incompatible tests with `#[cfg_attr(miri, ignore)]`.
 
 **For stress test features:** Design tests that exercise audit findings under pressure. Follow patterns in existing `system/user/fuzz/` and `system/user/stress/`. New host-side stress tests go in `system/test/tests/`.
+
+**For adversarial fuzzing features:** Write tests that exercise syscall handlers with hostile inputs: null pointers, kernel-range addresses, invalid handles, u64::MAX values, wrong-type handles, double-close, etc. Each test should verify the syscall returns an appropriate error (not panic). Test file naming: `system/test/tests/adversarial_*.rs`. Use seeded RNG (`let mut rng = StdRng::seed_from_u64(42);`) for any randomized tests.
 
 ## Example Handoff
 

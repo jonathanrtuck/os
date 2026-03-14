@@ -1,6 +1,7 @@
 commands:
   build: cd /Users/user/Sites/os/system && cargo build --release
   test: cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1
+  miri: cd /Users/user/Sites/os/system/test && cargo +nightly miri test -- --test-threads=1
   test-prototype: cd /Users/user/Sites/os/prototype/files && cargo test
   smoke: cd /Users/user/Sites/os/system/test && ./smoke.sh
   integration: cd /Users/user/Sites/os/system/test && ./integration.sh
