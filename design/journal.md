@@ -86,10 +86,16 @@ Children are positioned relative to parent's content area. Scrolling = changing 
 **10. The View is an OS service concept, not a scene graph concept.**
 The View (focus path, cursor state, document binding) lives entirely in the OS service. The OS service translates View state into scene graph mutations (position cursor node, update text content, set scroll_y). The compositor never knows about Views, documents, or editing. It renders a tree of Nodes. Clean separation: scene graph = rendering interface, View = document interaction model.
 
-**11. Compositor owns text layout.**
-The compositor has the font rasterizer; it also owns line breaking, word wrapping, and glyph positioning. The OS service sends raw strings with a width constraint; the compositor handles the rest, including reflow on resize without a round-trip.
+**11. ~~Compositor owns text layout.~~ REVERSED (2026-03-14): OS service owns text layout.**
+~~The compositor has the font rasterizer; it also owns line breaking, word wrapping, and glyph positioning.~~
 
-Key consequence: the OS service doesn't know glyph positions, so it can't position a separate cursor node. Solution: cursor and selection are properties of the Text content variant, not separate scene graph nodes. `cursor_offset: Option<u32>` (byte offset) and `selection: Option<(u32, u32)>` (byte range). The compositor knows where byte 45 lands because it did the layout. Cleaner than separate Path nodes -- cursor and selection are visual properties of text, not standalone geometry.
+**Revised (2026-03-14):** The OS service owns all text layout (line breaking, wrapping, glyph positioning, hit testing). The compositor is content-agnostic — it renders positioned visual elements without knowing what "text" is. This is consistent with the architecture: the OS service will house the layout engine for all content types (text, images, compound documents), so text is not a special case. The scene graph carries pre-laid-out content (positioned glyphs or pre-computed line breaks), not raw strings. The OS service needs font metrics (advance widths, line height — a few hundred bytes) but not the full rasterized glyph cache.
+
+Prior art is unanimous: Core Animation, Wayland, Fuchsia Scenic, web browsers, game engines — all put text layout above the compositor, never inside it. Reason: text layout is content understanding, and the design axiom "OS natively understands content types" means that understanding belongs in the OS service, not the pixel pump.
+
+Cursor and selection remain properties of the Text content variant for now. The OS service knows glyph positions (it did the layout) so it can position cursor and selection rects directly. The compositor renders them without understanding what they mean.
+
+**TODO:** Redesign the Text content variant to carry positioned/pre-laid-out text instead of raw strings + width constraints. The cursor and selection may become positioned rects (Path nodes) rather than byte offsets, since the OS service can compute their pixel positions.
 
 **TODO:** Better name for "View" (the thing that holds document + focus path + overlays).
 
@@ -101,8 +107,9 @@ Key consequence: the OS service doesn't know glyph positions, so it can't positi
 ### Open Questions
 
 1. **How do typed channels work?** `Channel<P>` API design, multiplexing across different protocol types with `wait()`.
-2. **Shared memory double-buffering:** Two copies of the scene graph, swap atomically. Header contains generation counter for change detection. Exact mechanism TBD.
-3. **Scene graph shared memory layout:** Header + node array (fixed-size entries) + data buffer (variable-length, append-only). Details TBD during implementation.
+2. ~~**Shared memory double-buffering.**~~ **Done (2026-03-14).** `DoubleWriter`/`DoubleReader` in scene library. Two `SCENE_SIZE` regions, generation-counter-based swap with release/acquire fences. Compositor `SceneState` migrated.
+3. ~~**Scene graph shared memory layout.**~~ **Done (2026-03-14).** `SceneWriter`/`SceneReader` in scene library. Header (64 B) + node array (512 × Node) + data buffer (64 KiB). 34 host-side tests.
+4. **Text content variant redesign.** Current `Content::Text` carries raw string + width constraint (compositor-does-layout model). Needs redesign for OS-service-does-layout model: pre-computed line breaks, positioned runs, or glyph positions. Cursor/selection become positioned rects.
 
 ### Implications for Existing Decisions
 
