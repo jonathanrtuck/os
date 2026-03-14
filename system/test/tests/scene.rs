@@ -696,3 +696,143 @@ fn double_writer_back_does_not_corrupt_front() {
     assert_eq!(dw.front_nodes()[0].width, 111);
     assert_eq!(dw.front_generation(), 1);
 }
+
+// ── Monospace layout ────────────────────────────────────────────────
+
+const WHITE: Color = Color { r: 255, g: 255, b: 255, a: 255 };
+
+#[test]
+fn layout_mono_basic_lines() {
+    let text = b"hello\nworld";
+    let runs = layout_mono_lines(text, 80, 20, WHITE, 8, 16);
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].y, 0);
+    assert_eq!(runs[1].y, 20);
+    assert_eq!(line_bytes_for_run(text, &runs[0]), b"hello");
+    assert_eq!(line_bytes_for_run(text, &runs[1]), b"world");
+}
+
+#[test]
+fn layout_mono_trailing_newline() {
+    let text = b"hello\nworld\n";
+    let runs = layout_mono_lines(text, 80, 20, WHITE, 8, 16);
+    // Trailing newline: "hello", "world" — newline consumed, no empty line after.
+    assert_eq!(runs.len(), 2);
+    assert_eq!(line_bytes_for_run(text, &runs[0]), b"hello");
+    assert_eq!(line_bytes_for_run(text, &runs[1]), b"world");
+}
+
+#[test]
+fn layout_mono_soft_wrap() {
+    let text = b"abcdefghij"; // 10 chars, wrap at 4
+    let runs = layout_mono_lines(text, 4, 20, WHITE, 8, 16);
+    assert_eq!(runs.len(), 3); // "abcd", "efgh", "ij"
+    assert_eq!(line_bytes_for_run(text, &runs[0]), b"abcd");
+    assert_eq!(line_bytes_for_run(text, &runs[1]), b"efgh");
+    assert_eq!(line_bytes_for_run(text, &runs[2]), b"ij");
+    assert_eq!(runs[2].y, 40);
+}
+
+#[test]
+fn layout_mono_empty_text() {
+    let runs = layout_mono_lines(b"", 80, 20, WHITE, 8, 16);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].glyph_count, 0);
+}
+
+#[test]
+fn byte_to_line_col_basic() {
+    let text = b"hello\nworld";
+    // Byte 0 = (0, 0), byte 5 = end of "hello" = (0, 5)
+    assert_eq!(byte_to_line_col(text, 0, 80), (0, 0));
+    assert_eq!(byte_to_line_col(text, 5, 80), (0, 5));
+    // Byte 6 = start of "world" = (1, 0)
+    assert_eq!(byte_to_line_col(text, 6, 80), (1, 0));
+    // Byte 11 = end of "world" = (1, 5)
+    assert_eq!(byte_to_line_col(text, 11, 80), (1, 5));
+}
+
+#[test]
+fn byte_to_line_col_soft_wrap() {
+    let text = b"abcdefgh"; // 8 chars, wrap at 4
+    // "abcd" is line 0, "efgh" is line 1
+    assert_eq!(byte_to_line_col(text, 0, 4), (0, 0));
+    assert_eq!(byte_to_line_col(text, 3, 4), (0, 3));
+    assert_eq!(byte_to_line_col(text, 4, 4), (1, 0));
+    assert_eq!(byte_to_line_col(text, 7, 4), (1, 3));
+}
+
+// ── Scroll filtering ────────────────────────────────────────────────
+
+#[test]
+fn scroll_runs_no_scroll() {
+    let text = b"a\nb\nc";
+    let runs = layout_mono_lines(text, 80, 20, WHITE, 8, 16);
+    assert_eq!(runs.len(), 3);
+    let visible = scroll_runs(runs, 0, 20, 100);
+    assert_eq!(visible.len(), 3);
+    assert_eq!(visible[0].y, 0);
+    assert_eq!(visible[1].y, 20);
+    assert_eq!(visible[2].y, 40);
+}
+
+#[test]
+fn scroll_runs_filters_above_viewport() {
+    // 10 lines of text (no trailing newline), scroll = 5, viewport = 60px.
+    let mut text = Vec::new();
+    for i in 0u8..10 {
+        if i > 0 { text.push(b'\n'); }
+        text.push(b'a' + i);
+    }
+    let runs = layout_mono_lines(&text, 80, 20, WHITE, 8, 16);
+    assert_eq!(runs.len(), 10);
+    let visible = scroll_runs(runs, 5, 20, 60);
+    // Lines 5, 6, 7 visible (y = 0, 20, 40). Lines 0-4 above, 8-9 below.
+    assert_eq!(visible.len(), 3);
+    assert_eq!(visible[0].y, 0);
+    assert_eq!(visible[1].y, 20);
+    assert_eq!(visible[2].y, 40);
+    assert_eq!(line_bytes_for_run(&text, &visible[0]), &[b'f']); // line 5 = 'f'
+}
+
+#[test]
+fn scroll_runs_cursor_at_bottom_forces_scroll() {
+    // 40 lines, viewport 30 lines, scroll = 6.
+    let mut text = Vec::new();
+    for i in 0u8..40 {
+        if i > 0 { text.push(b'\n'); }
+        text.push(b'x');
+    }
+    let runs = layout_mono_lines(&text, 80, 20, WHITE, 8, 16);
+    assert_eq!(runs.len(), 40);
+    let visible = scroll_runs(runs, 6, 20, 600); // 600px = 30 lines
+    // First visible line should be line 6 at y=0.
+    assert_eq!(visible[0].y, 0);
+    // Last visible line should be line 35 at y = 29*20 = 580.
+    let last = visible.last().unwrap();
+    assert_eq!(last.y, (visible.len() as i16 - 1) * 20);
+    // Nothing should have y >= 600 (viewport height).
+    for run in &visible {
+        assert!(run.y < 600, "run.y={} exceeds viewport", run.y);
+    }
+}
+
+#[test]
+fn scroll_runs_empty_text_with_scroll() {
+    let runs = layout_mono_lines(b"", 80, 20, WHITE, 8, 16);
+    let visible = scroll_runs(runs, 0, 20, 600);
+    assert_eq!(visible.len(), 1); // empty placeholder run
+}
+
+#[test]
+fn byte_to_line_col_cursor_consistency_with_layout() {
+    let text = b"aaa\nbbb\nccc\nddd";
+    let runs = layout_mono_lines(text, 80, 20, WHITE, 8, 16);
+    assert_eq!(runs.len(), 4);
+    // byte_to_line_col should agree with layout_mono_lines on line assignments.
+    assert_eq!(byte_to_line_col(text, 0, 80).0, 0);   // 'a' on line 0
+    assert_eq!(byte_to_line_col(text, 4, 80).0, 1);   // 'b' on line 1
+    assert_eq!(byte_to_line_col(text, 8, 80).0, 2);   // 'c' on line 2
+    assert_eq!(byte_to_line_col(text, 12, 80).0, 3);  // 'd' on line 3
+    assert_eq!(byte_to_line_col(text, 15, 80).0, 3);  // end of text, still line 3
+}

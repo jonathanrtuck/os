@@ -5,9 +5,11 @@
 //! The compositor reads the front buffer from the same shared memory region.
 
 use alloc::vec::Vec;
-use scene::{Border, Color, Content, DoubleWriter, Node, NodeFlags, TextRun, DOUBLE_SCENE_SIZE};
-
-use scene::NULL;
+use scene::{
+    Border, Color, Content, DataRef, DoubleWriter, NodeFlags, TextRun,
+    DOUBLE_SCENE_SIZE, NULL,
+    layout_mono_lines, byte_to_line_col, line_bytes_for_run, scroll_runs,
+};
 
 /// Well-known node indices for direct mutation.
 pub const N_ROOT: u16 = 0;
@@ -73,6 +75,7 @@ impl SceneState {
     ) {
         let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
         let scene_text_color = dc(text_color);
+
         // Layout document text into visual lines (monospace line-breaking).
         let doc_width = fb_width.saturating_sub(2 * text_inset_x);
         let chars_per_line = if char_width > 0 {
@@ -80,7 +83,8 @@ impl SceneState {
         } else {
             80
         };
-        let doc_runs = layout_mono_lines(
+
+        let all_runs = layout_mono_lines(
             doc_text,
             chars_per_line as usize,
             line_height as i16,
@@ -88,10 +92,21 @@ impl SceneState {
             char_width as u16,
             font_size,
         );
+
+        // Apply scroll: filter to visible viewport, adjust y positions.
+        let content_y = title_bar_h + shadow_depth;
+        let content_h = fb_height.saturating_sub(content_y) as i32;
+        let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
+        let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, content_h);
+
+        // Scroll offset in pixels for cursor/selection positioning.
+        let scroll_px = scroll_lines as i32 * line_height as i32;
+
         // Compute cursor line/col for positioning.
         let cursor_byte = cursor_pos as usize;
         let (cursor_line, cursor_col) =
             byte_to_line_col(doc_text, cursor_byte, chars_per_line as usize);
+
         // Compute selection rectangles.
         let (sel_lo, sel_hi) = if sel_start <= sel_end {
             (sel_start as usize, sel_end as usize)
@@ -99,21 +114,21 @@ impl SceneState {
             (sel_end as usize, sel_start as usize)
         };
         let has_selection = sel_lo < sel_hi;
+
         let mut dw = self.double();
         {
             let mut w = dw.back();
 
             w.clear();
 
-            // Push text data first (before allocating nodes).
             let title_ref = w.push_data(title_label);
             let clock_ref = w.push_data(clock_text);
-            // Push document line glyph data into the data buffer and
-            // build TextRun array with correct DataRefs.
-            let mut final_runs: Vec<TextRun> = Vec::with_capacity(doc_runs.len());
 
-            for mut run in doc_runs {
-                let line_text = line_bytes_for_run(doc_text, &run, chars_per_line as usize);
+            // Push only visible line glyph data (scroll-filtered).
+            let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
+
+            for mut run in visible_runs {
+                let line_text = line_bytes_for_run(doc_text, &run);
 
                 run.glyphs = w.push_data(line_text);
                 run.glyph_count = line_text.len() as u16;
@@ -243,19 +258,22 @@ impl SceneState {
                 n.x = text_inset_x as i16;
                 n.y = 8;
                 n.width = doc_width as u16;
-                n.height = u16::MAX;
-                n.scroll_y = scroll_y;
+                n.height = content_h as u16;
+                // scroll_y = 0: core pre-applies scroll to run positions
+                // and cursor/selection rects. The compositor just renders.
+                n.scroll_y = 0;
                 n.content = Content::Text {
                     runs: doc_runs_ref,
                     run_count: doc_run_count,
                     _pad: [0; 2],
                 };
-                n.flags = NodeFlags::VISIBLE;
+                n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
             }
 
             // Cursor: positioned rectangle child of doc text node.
+            // Scroll-adjusted: cursor_line is absolute, subtract scroll.
             let cursor_x = (cursor_col as u32 * char_width) as i16;
-            let cursor_y = (cursor_line as u32 * line_height) as i16;
+            let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
             {
                 let n = w.node_mut(N_CURSOR);
 
@@ -268,7 +286,7 @@ impl SceneState {
                 n.next_sibling = NULL;
             }
 
-            // Selection highlight rectangles (dynamically allocated nodes).
+            // Selection highlight rectangles (dynamically allocated, scroll-adjusted).
             if has_selection {
                 let (sel_start_line, sel_start_col) =
                     byte_to_line_col(doc_text, sel_lo, chars_per_line as usize);
@@ -293,11 +311,19 @@ impl SceneState {
                         continue;
                     }
 
+                    // Scroll-adjust selection rect y position.
+                    let sel_y = line as i32 * line_height as i32 - scroll_px;
+
+                    // Skip selection rects outside visible viewport.
+                    if sel_y + line_height as i32 <= 0 || sel_y >= content_h as i32 {
+                        continue;
+                    }
+
                     if let Some(sel_id) = w.alloc_node() {
                         let n = w.node_mut(sel_id);
 
                         n.x = (col_start as u32 * char_width) as i16;
-                        n.y = (line as u32 * line_height) as i16;
+                        n.y = sel_y as i16;
                         n.width = ((col_end - col_start) as u32 * char_width) as u16;
                         n.height = line_height as u16;
                         n.background = sel_bg;
@@ -305,7 +331,6 @@ impl SceneState {
                         n.next_sibling = NULL;
 
                         if prev_sel_node == NULL {
-                            // First selection rect: make it sibling of cursor.
                             w.node_mut(N_CURSOR).next_sibling = sel_id;
                         } else {
                             w.node_mut(prev_sel_node).next_sibling = sel_id;
@@ -323,114 +348,4 @@ impl SceneState {
     }
 }
 
-// ── Text layout helpers (proto-OS-service) ──────────────────────────
 
-/// Convert a byte offset in text to (visual_line, column) using monospace wrapping.
-fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
-    let mut line: usize = 0;
-    let mut col: usize = 0;
-    let mut pos: usize = 0;
-
-    while pos < text.len() && pos < byte_offset {
-        if text[pos] == b'\n' {
-            line += 1;
-            col = 0;
-            pos += 1;
-        } else {
-            col += 1;
-            pos += 1;
-
-            if col >= chars_per_line && pos < text.len() && text[pos] != b'\n' {
-                // Soft wrap.
-                line += 1;
-                col = 0;
-            }
-        }
-    }
-
-    (line, col)
-}
-/// Break text into visual lines using monospace line-breaking.
-/// Returns TextRun per line with placeholder DataRefs (glyphs.offset
-/// stores the byte offset into doc_text; caller must push actual data).
-fn layout_mono_lines(
-    text: &[u8],
-    chars_per_line: usize,
-    line_height: i16,
-    color: Color,
-    advance: u16,
-    font_size: u16,
-) -> Vec<TextRun> {
-    let mut runs = Vec::new();
-    let mut line_y: i16 = 0;
-    let mut pos: usize = 0;
-
-    while pos < text.len() {
-        // Find end of this visual line: either a newline or wrap at chars_per_line.
-        let remaining = &text[pos..];
-        let line_end = if let Some(nl) = remaining.iter().position(|&b| b == b'\n') {
-            if nl <= chars_per_line {
-                pos + nl
-            } else {
-                pos + chars_per_line
-            }
-        } else if remaining.len() <= chars_per_line {
-            text.len()
-        } else {
-            pos + chars_per_line
-        };
-        let line_len = line_end - pos;
-
-        runs.push(TextRun {
-            // Placeholder: offset = byte position in source text, length = byte count.
-            // Caller replaces with actual push_data result.
-            glyphs: scene::DataRef {
-                offset: pos as u32,
-                length: line_len as u32,
-            },
-            glyph_count: line_len as u16,
-            x: 0,
-            y: line_y,
-            color,
-            advance,
-            font_size,
-        });
-
-        line_y = line_y.saturating_add(line_height);
-        // Advance past the line content + newline if present.
-        pos = if line_end < text.len() && text[line_end] == b'\n' {
-            line_end + 1
-        } else {
-            line_end
-        };
-    }
-
-    // Ensure at least one run for empty text (so the cursor has a home).
-    if runs.is_empty() {
-        runs.push(TextRun {
-            glyphs: scene::DataRef {
-                offset: 0,
-                length: 0,
-            },
-            glyph_count: 0,
-            x: 0,
-            y: 0,
-            color,
-            advance,
-            font_size,
-        });
-    }
-
-    runs
-}
-/// Extract the source text bytes for a run (using the placeholder DataRef).
-fn line_bytes_for_run<'a>(text: &'a [u8], run: &TextRun, _chars_per_line: usize) -> &'a [u8] {
-    let start = run.glyphs.offset as usize;
-    let len = run.glyphs.length as usize;
-
-    if start + len <= text.len() {
-        &text[start..start + len]
-    } else {
-        &[]
-    }
-}

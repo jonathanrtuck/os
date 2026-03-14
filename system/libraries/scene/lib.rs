@@ -29,6 +29,10 @@
 
 #![no_std]
 
+extern crate alloc;
+
+use alloc::vec::Vec;
+
 // ── Bitflags macro (must precede usage) ─────────────────────────────
 
 macro_rules! bitflags {
@@ -599,6 +603,127 @@ impl<'a> SceneReader<'a> {
         // which is >= alignment of TextRun.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
     }
+}
+
+// ── Monospace text layout ───────────────────────────────────────────
+
+/// Break text into visual lines using monospace line-breaking.
+///
+/// Returns one `TextRun` per visual line. The `glyphs` DataRef is a
+/// placeholder: `offset` = byte position in source text, `length` =
+/// byte count. The caller must replace these with actual `push_data`
+/// results before writing to the scene graph.
+pub fn layout_mono_lines(
+    text: &[u8],
+    chars_per_line: usize,
+    line_height: i16,
+    color: Color,
+    advance: u16,
+    font_size: u16,
+) -> Vec<TextRun> {
+    let mut runs = Vec::new();
+    let mut line_y: i16 = 0;
+    let mut pos: usize = 0;
+
+    while pos < text.len() {
+        let remaining = &text[pos..];
+        let line_end = if let Some(nl) = remaining.iter().position(|&b| b == b'\n') {
+            if nl <= chars_per_line { pos + nl } else { pos + chars_per_line }
+        } else if remaining.len() <= chars_per_line {
+            text.len()
+        } else {
+            pos + chars_per_line
+        };
+        let line_len = line_end - pos;
+
+        runs.push(TextRun {
+            glyphs: DataRef { offset: pos as u32, length: line_len as u32 },
+            glyph_count: line_len as u16,
+            x: 0,
+            y: line_y,
+            color,
+            advance,
+            font_size,
+        });
+
+        line_y = line_y.saturating_add(line_height);
+
+        pos = if line_end < text.len() && text[line_end] == b'\n' {
+            line_end + 1
+        } else {
+            line_end
+        };
+    }
+
+    if runs.is_empty() {
+        runs.push(TextRun {
+            glyphs: DataRef { offset: 0, length: 0 },
+            glyph_count: 0,
+            x: 0, y: 0,
+            color, advance, font_size,
+        });
+    }
+
+    runs
+}
+
+/// Convert a byte offset to (visual_line, column) with monospace wrapping.
+pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
+    let mut line: usize = 0;
+    let mut col: usize = 0;
+    let mut pos: usize = 0;
+
+    while pos < text.len() && pos < byte_offset {
+        if text[pos] == b'\n' {
+            line += 1;
+            col = 0;
+            pos += 1;
+        } else {
+            col += 1;
+            pos += 1;
+            if col >= chars_per_line && pos < text.len() && text[pos] != b'\n' {
+                line += 1;
+                col = 0;
+            }
+        }
+    }
+
+    (line, col)
+}
+
+/// Extract source text bytes for a run using its placeholder DataRef.
+pub fn line_bytes_for_run<'a>(text: &'a [u8], run: &TextRun) -> &'a [u8] {
+    let start = run.glyphs.offset as usize;
+    let len = run.glyphs.length as usize;
+    if start + len <= text.len() {
+        &text[start..start + len]
+    } else {
+        &[]
+    }
+}
+
+/// Filter and reposition runs for a scrolled viewport.
+///
+/// `scroll_lines` is the number of visual lines scrolled (top of viewport).
+/// `viewport_height_px` is the visible area height in pixels.
+/// Returns only runs visible in the viewport, with y adjusted.
+pub fn scroll_runs(
+    runs: Vec<TextRun>,
+    scroll_lines: u32,
+    line_height: u32,
+    viewport_height_px: i32,
+) -> Vec<TextRun> {
+    let scroll_px = scroll_lines as i32 * line_height as i32;
+
+    runs.into_iter()
+        .filter_map(|mut run| {
+            let adjusted_y = run.y as i32 - scroll_px;
+            if adjusted_y + line_height as i32 <= 0 { return None; }
+            if adjusted_y >= viewport_height_px { return None; }
+            run.y = adjusted_y as i16;
+            Some(run)
+        })
+        .collect()
 }
 
 // ── Double-buffered scene graph ─────────────────────────────────────
