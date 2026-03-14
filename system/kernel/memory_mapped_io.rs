@@ -1,3 +1,8 @@
+// AUDIT: 2026-03-14 — 3 unsafe blocks verified, 6-category checklist applied.
+// All volatile MMIO access (read32, write8, write32) sound: alignment guarded by
+// debug_assert, Device-nGnRE memory type ensures hardware ordering, SAFETY comments
+// accurate. No bugs found.
+
 //! Memory-mapped I/O helpers.
 //!
 //! Centralizes all volatile hardware access so `unsafe` lives in one place.

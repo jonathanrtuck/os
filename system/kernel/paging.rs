@@ -1,3 +1,8 @@
+// AUDIT: 2026-03-14 — 0 unsafe blocks, 6-category checklist applied. Pure constants
+// and helpers. All ARMv8 descriptor bits verified against spec. Address space layout
+// verified: regions contiguous, no gaps or overlaps. align_up/align_up_u64 wrapping
+// behavior documented. No bugs found.
+
 //! Page table descriptor constants and shared memory layout definitions.
 //!
 //! Single source of truth for ARMv8 page table bits used by both the

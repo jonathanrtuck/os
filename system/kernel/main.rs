@@ -1,17 +1,22 @@
-// AUDIT: 2026-03-11 — All 19 unsafe blocks enumerated and verified.
+// AUDIT: 2026-03-14 — All 24 unsafe blocks enumerated and verified.
 // Each has a // SAFETY: comment explaining the invariant. Categories:
-//   - Linker symbol address (4): __kernel_end, boot_tt0_l0..l2_1
-//   - System register read (3): mrs esr_el1/far_el1/elr_el1
+//   - Linker symbol address (4): __kernel_end (×3), boot_tt0_l0..l2_1
+//   - Context read — Fix 17 eret validation (5): validate_context_before_eret
+//     reads elr, spsr, sp, x30, thread_id via addr_of!/read_volatile. Sound:
+//     ctx from scheduler is valid, no mutation, no aliasing.
+//   - Volatile read (8): SECONDARY_ENTRY_PA, FDT magic scan, kernel_fault_handler
+//     Context diagnostics (5), stack walk
+//   - Volatile write (1): write_device_manifest
 //   - Inline asm barrier (1): dsb ish (no nomem — intentional, Fix 6/9)
 //   - Inline asm hint (2): wfe idle loops (nomem correct)
-//   - Volatile read (7): SECONDARY_ENTRY_PA, FDT magic scan, Context
-//     diagnostics, stack walk
-//   - Volatile write (1): write_device_manifest
+//   - System register read (1): mrs esr_el1/far_el1/elr_el1 (1 block, 3 reads)
 //   - from_raw_parts (1): DTB blob slice
 //   - from_utf8_unchecked (1): secondary_main message
 // Fix 6/Fix 9 (nomem removal from DAIF/system register asm) re-verified:
-//   DSB at line 132 correctly omits nomem. WFE and MRS correctly use nomem.
-// Doc comment fix: write_device_manifest offset 4→8 (matches init reader).
+//   DSB correctly omits nomem. WFE and MRS correctly use nomem.
+// Fix 17 (TPIDR race, 5 blocks): formally reviewed 2026-03-14. All 5 blocks
+//   use addr_of! to avoid aliasing UB, read from documented Context/Thread
+//   offsets, execute only in validation/error paths. Sound.
 // No code bugs found.
 //!
 //! Bare-metal aarch64 kernel for QEMU `virt`.
