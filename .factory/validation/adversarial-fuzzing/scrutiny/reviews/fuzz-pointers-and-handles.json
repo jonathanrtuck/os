@@ -1,0 +1,34 @@
+{
+  "featureId": "fuzz-pointers-and-handles",
+  "reviewedAt": "2026-03-14T19:10:00.000Z",
+  "commitId": "c168f20",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "91 adversarial tests in system/test/tests/adversarial_pointers_handles.rs comprehensively covering all pointer-accepting and handle-accepting syscalls. All 11 validation functions faithfully replicate the kernel's actual validation logic from syscall.rs — cross-referenced line-by-line against the kernel source. Constants (MAX_DMA_ORDER=11, MAX_ELF_SIZE=2MiB, MAX_WAIT_HANDLES=16, MAX_WRITE_LEN=4096) and error enum values match exactly. Handle table tests use the real HandleTable type via #[path] includes (established project pattern). AT hardware translation checks are correctly omitted (can't run on host) with accurate comments explaining the gap. The partially-mapped simulation (Section 17) correctly models the page iteration logic from is_user_range_readable. Test organization into 20 sections is clear and systematic. The exhaustive wrong-type matrix (Section 16) covers all 7 type-checking syscalls × 6 handle types. Stress tests (100-cycle close/reuse, 256-slot fill/close/refill) exercise lifecycle edge cases thoroughly.",
+    "issues": [
+      {
+        "file": "system/test/tests/adversarial_pointers_handles.rs",
+        "line": 1488,
+        "severity": "non_blocking",
+        "description": "adversarial_handle_send_out_of_range (Section 19) tests a trivial inline closure `both_fail` that just checks `> u8::MAX as u64` without going through any actual validation function. The test asserts trivially true boolean expressions. The out-of-range handle coverage for handle_send is already provided by Section 10's adversarial_handle_out_of_range_error/sweep tests via validate_handle_nr. This test adds no real verification value — it could be removed or rewritten to use validate_handle_nr directly for both target and source handles, mirroring the kernel's `if target_handle_nr > u8::MAX as u64 || source_handle_nr > u8::MAX as u64` check."
+      },
+      {
+        "file": "system/test/tests/adversarial_pointers_handles.rs",
+        "line": 439,
+        "severity": "non_blocking",
+        "description": "adversarial_memory_share_overflow_pa intends to test checked_add overflow for pa + page_count * PAGE_SIZE, but the page_count value (u64::MAX / PAGE_SIZE + 1) always exceeds the 2048 cap, so the InvalidArgument check fires first. The checked_add overflow path is never exercised. This is actually correct behavior (the 2048 cap means checked_add can never overflow in practice: 2048 * 4096 = 8MiB << u64::MAX), but the test name is misleading — it tests the page_count cap, not overflow."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The feature description lists channel_create, scheduling_context_return, timer_create, interrupt_register, and thread_create as 'handle-accepting syscalls', but none of these actually accept handle arguments (they either create new resources, take non-handle parameters, or take no arguments at all). The worker correctly identified this and only tested syscalls that genuinely accept handles. The feature description's syscall list could be more precise to avoid confusion in future reviews.",
+      "evidence": "Kernel syscall.rs: sys_channel_create() takes no args, sys_scheduling_context_return() takes no args, sys_timer_create(timeout_ns) takes a u64 timeout, sys_interrupt_register(irq) takes an IRQ number, sys_thread_create(entry_va, stack_top) takes pointers not handles. Worker correctly tested these for pointer validation where applicable (thread_create) and skipped handle validation for non-handle-accepting syscalls."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Strong pass. 91 adversarial tests with faithful validation logic duplication verified against kernel source. All 10 pointer-accepting syscalls tested with null, kernel-range, unaligned, boundary, overflow, and partially-mapped inputs. All handle-accepting syscalls tested with out-of-range (>255), wrong-type (exhaustive 6-type matrix), and already-closed handles. Two non-blocking issues: one trivially-true test in Section 19 (covered elsewhere) and one misleadingly-named overflow test that actually tests the page_count cap. Worker followed the kernel-auditor skill procedure correctly, built clean, 1145 tests pass with zero regressions."
+}
