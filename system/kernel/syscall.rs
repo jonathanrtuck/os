@@ -262,16 +262,37 @@ fn sys_channel_create() -> Result<u64, Error> {
             Ok(handle_b) => {
                 // Both handles inserted — now map both shared pages using the
                 // per-process channel SHM bump allocator.
-                let pages = channel::shared_pages(ch_a).ok_or(HandleError::InvalidHandle)?;
+                let pages = match channel::shared_pages(ch_a) {
+                    Some(p) => p,
+                    None => {
+                        let _ = process.handles.close(handle_a);
+                        let _ = process.handles.close(handle_b);
 
-                process
+                        return Err(HandleError::InvalidHandle);
+                    }
+                };
+
+                if process
                     .address_space
                     .map_channel_page(pages[0].as_u64())
-                    .ok_or(HandleError::TableFull)?;
-                process
+                    .is_none()
+                {
+                    let _ = process.handles.close(handle_a);
+                    let _ = process.handles.close(handle_b);
+
+                    return Err(HandleError::TableFull);
+                }
+
+                if process
                     .address_space
                     .map_channel_page(pages[1].as_u64())
-                    .ok_or(HandleError::TableFull)?;
+                    .is_none()
+                {
+                    let _ = process.handles.close(handle_a);
+                    let _ = process.handles.close(handle_b);
+
+                    return Err(HandleError::TableFull);
+                }
 
                 Ok((handle_a, handle_b))
             }
