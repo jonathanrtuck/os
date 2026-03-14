@@ -141,7 +141,7 @@ Read these before making any design suggestions:
 
 - `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~1,351 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
-  ```bash
+  ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
   # Verify no crash (💥) or panic in serial output
   ```
@@ -161,7 +161,7 @@ Read these before making any design suggestions:
 
 The test harness is `system/test-qemu.sh`. For visual verification, use this workflow directly:
 
-```bash
+```sh
 # 1. Build
 cd system && cargo build --release
 

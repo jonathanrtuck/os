@@ -24,7 +24,7 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 **Symptom:** Intermittent kernel crash — EC=0x21 (instruction abort at current EL) with ELR=FAR=0x0A003A00 (virtio MMIO physical address range, level 0 translation fault). Only manifested under concurrent load with 4 SMP cores and 5+ processes.
 
-**Root cause:** `schedule_inner` parks the old thread in the ready queue and returns the new thread's context pointer. But `TPIDR_EL1` (used by `save_context` in exception.S to locate the write target) was only updated by exception.S *after* the Rust handler returned — which is after the `IrqMutex` lock drops and re-enables IRQs. If a pending timer IRQ fires in that window (between lock release and the `msr tpidr_el1` in exception.S), `save_context` reads the stale TPIDR and overwrites the **old** thread's Context with kernel-mode state (SPSR=EL1h, ELR=kernel addr, SP from the wrong thread's stack). When the old thread is later scheduled from the ready queue, `eret` restores EL1 mode with a garbage low address as ELR, causing the instruction abort.
+**Root cause:** `schedule_inner` parks the old thread in the ready queue and returns the new thread's context pointer. But `TPIDR_EL1` (used by `save_context` in exception.S to locate the write target) was only updated by exception.S _after_ the Rust handler returned — which is after the `IrqMutex` lock drops and re-enables IRQs. If a pending timer IRQ fires in that window (between lock release and the `msr tpidr_el1` in exception.S), `save_context` reads the stale TPIDR and overwrites the **old** thread's Context with kernel-mode state (SPSR=EL1h, ELR=kernel addr, SP from the wrong thread's stack). When the old thread is later scheduled from the ready queue, `eret` restores EL1 mode with a garbage low address as ELR, causing the instruction abort.
 
 **Why the address was `0x0A003A00`:** This is a user-range VA (low address). With SPSR=EL1h, the eret returns to EL1 which uses TTBR0 for lower-half VA walks. If TTBR0 is the empty L0 table (kernel/idle thread) or any table without a mapping at that address, the walk fails at level 0 — exactly matching ESR=0x86000004 (IFSC=4, level 0 translation fault).
 
@@ -59,18 +59,20 @@ Not a code-organization split — a process boundary with IPC. The OS service ow
 
 **2. The interface between them is a scene graph.**
 Evaluated three options:
+
 - **Buffer-based (Wayland model):** OS service renders content into pixel buffers, compositor just composites. Simple but puts all rendering work in the OS service.
 - **Scene-graph-based (Fuchsia Scenic, Core Animation, game engines):** OS service sends a tree of typed visual nodes, compositor renders and composites. More capable.
 - **Command-based (X11, Plan 9 draw):** OS service sends drawing commands. Historical — every modern system moved away from this.
 
 Chose scene graph because:
-- "OS renders everything" means the OS *layer* (everything in `/services` and `/libraries`), not specifically the OS service process. The compositor IS part of the OS.
+
+- "OS renders everything" means the OS _layer_ (everything in `/services` and `/libraries`), not specifically the OS service process. The compositor IS part of the OS.
 - Layout and compositing are the same pipeline: document structure → positioned visual elements → pixels. The scene graph is the intermediate representation between those two stages.
 - It naturally supports compound documents (Decision #14): the document's spatial/temporal/logical relationships compile to a scene tree.
 - It doesn't artificially prevent game-engine-level rendering later (3D, animation, transforms) — you just add node types.
 
 **3. The scene graph is NOT the document structure — it's a compiled output.**
-The document model has semantic content (logical relationships, metadata, temporal sync) that the compositor doesn't need. The screen has visual elements (chrome, cursor, selection) that aren't in any document. The OS service *compiles* document structure into a scene graph, like a compiler turns source into machine code.
+The document model has semantic content (logical relationships, metadata, temporal sync) that the compositor doesn't need. The screen has visual elements (chrome, cursor, selection) that aren't in any document. The OS service _compiles_ document structure into a scene graph, like a compiler turns source into machine code.
 
 **4. The scene graph lives in shared memory.**
 Written by the OS service, read by the compositor. The compositor is a pure function from scene graph to pixels. No scene graph state inside the compositor — if it crashes, the graph is still there, just restart and re-render. Same pattern as the existing document buffer.
@@ -99,6 +101,7 @@ The View tracks a focus path (stack) through the compound document tree. Each le
 Rejected separate types for Container, Text, Image, Path. Instead: one Node type with a rich visual base and an optional Content variant (None, Text, Image, Path). Inspired by CALayer.
 
 Rationale:
+
 - In compound documents, almost every container also needs visual properties (background, border, corner radius). Separate types force wrapper nodes everywhere.
 - Fixed-size nodes in shared memory: one flat array, one allocation strategy, indices work uniformly.
 - Core Animation proved this works at scale -- CALayer handles 95% of cases.
@@ -107,6 +110,7 @@ Rationale:
 Node carries: tree links (first_child, next_sibling as indices), geometry (x, y, width, height relative to parent), scroll_y, visual decoration (background, border, corner_radius, opacity), flags (clips_children, visible), and a content variant.
 
 Content variants:
+
 - None: pure container
 - Text: string ref (offset+len into data buffer), font_size, color
 - Image: pixel data ref (shm offset), source dimensions
@@ -191,6 +195,7 @@ Stress tested: 14,484 keys over 120 seconds (pre-Fix 17), 3000 keys at 1ms (post
 **Fix 16: Trampoline `ldr [sp, #8]` nomem removed.** 18 thread trampolines across fuzz/fuzz-helper/stress used `options(nostack, nomem)` on `ldr [sp, #8]` — a memory read falsely declared non-memory. LLVM could reorder the preceding `write_volatile` of the argument past the load.
 
 **Coverage analysis** identified critical gaps: `interrupt_register` (zero coverage), `handle_send` success path (zero), `interrupt_ack` success path (zero), `device_map` success path (zero), 9 syscalls never tested under concurrency. Addressed with 5 new fuzz phases (32–36):
+
 - Phase 32: interrupt register/ack full lifecycle (register, ack, duplicate rejection, re-register after close, multi-IRQ, poll)
 - Phase 33: handle_send success path (create channel → create child → send endpoint → child signals back via received handle)
 - Phase 34: device_map success path (map UART0 MMIO, read register, error cases)
@@ -325,7 +330,7 @@ Total: 20 scheduler state machine tests, all passing.
 
 ### How to Test
 
-```bash
+```sh
 cd system
 ./crash-test.sh 120   # Automated: 120 seconds of rapid keyboard input
 ./stress-test.sh 30   # Headless stress test (no display needed)

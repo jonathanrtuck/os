@@ -10,7 +10,7 @@ Testing surface, validation approach, and resource classification for the font r
 
 ### QEMU Testing Workflow
 
-```bash
+```sh
 # Build
 cd /Users/user/Sites/os/system && cargo build --release
 
@@ -55,12 +55,14 @@ pkill -f qemu-system-aarch64
 ```
 
 ### What's verifiable via screenshots
+
 - Text appears on screen (presence/absence)
 - No visual corruption (garbled pixels, missing regions)
 - No crash (serial output clean)
 - Basic layout sanity (text not overlapping, positioned correctly)
 
 ### What's NOT reliably verifiable via screenshots
+
 - Kerning quality (sub-pixel differences)
 - Optical sizing differences (subtle)
 - Weight correction (subtle luminance-dependent changes)

@@ -52,14 +52,14 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 ### Build
 
-```bash
+```sh
 cd system
 cargo build --release
 ```
 
 ### Run
 
-```bash
+```sh
 cd system
 cargo run --release
 ```

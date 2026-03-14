@@ -10,6 +10,7 @@ NOTE: Startup and cleanup are handled by `worker-base`. This skill defines the W
 ## When to Use This Skill
 
 All implementation features for the Document OS project:
+
 - Drawing library changes (font rendering, alpha blending, rasterizer, PNG decoder, SVG renderer)
 - Compositor changes (multi-surface, chrome, shadows, damage tracking)
 - GPU driver changes (double buffering, damage-tracked transfer, resolution)
@@ -22,6 +23,7 @@ All implementation features for the Document OS project:
 ### 1. Understand the Feature
 
 Read the feature description, preconditions, expectedBehavior, and verificationSteps carefully. Identify:
+
 - Which source files need to change (check `system/DESIGN.md` and `.factory/library/architecture.md` for component map)
 - Whether this is primarily library work (drawing, decoding) or system work (compositor, init, editor)
 - What existing tests cover adjacent functionality
@@ -29,12 +31,14 @@ Read the feature description, preconditions, expectedBehavior, and verificationS
 ### 2. Write Tests First (TDD)
 
 **For library/algorithmic features** (font rendering, PNG decoder, SVG parser, blending, damage rects):
+
 - Add test cases to the appropriate file in `system/test/tests/` (e.g., `drawing.rs`, or create new test files)
 - Tests run on the host (`aarch64-apple-darwin`) via `cd system/test && cargo test -- --test-threads=1`
 - Write the test, verify it fails (red), then implement to make it pass (green)
 - Cover the expected behaviors AND error cases from the feature description
 
 **For system/integration features** (compositor changes, init orchestration):
+
 - Write unit tests for any testable logic (damage rect calculation, surface ordering, etc.)
 - Some behaviors can only be verified visually — document what you'll check in QEMU
 
@@ -48,17 +52,18 @@ Read the feature description, preconditions, expectedBehavior, and verificationS
 
 ### 4. Run Unit Tests
 
-```bash
+```sh
 cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1
 ```
 
 ALL tests must pass. If existing tests fail, investigate whether:
+
 - Your change broke existing behavior (fix it)
 - The test was testing behavior you intentionally replaced (update the test, document in handoff)
 
 ### 5. Build
 
-```bash
+```sh
 cd /Users/user/Sites/os/system && cargo build --release
 ```
 
@@ -68,7 +73,7 @@ Must compile with zero errors and zero warnings.
 
 **Every feature that affects what appears on screen MUST be visually verified.**
 
-```bash
+```sh
 # Kill any existing QEMU
 pkill -f qemu-system-aarch64 2>/dev/null; sleep 1
 rm -f /tmp/qemu-mon.sock /tmp/qemu-serial.log /tmp/qemu-screen.ppm /tmp/qemu-screen.png
@@ -112,7 +117,7 @@ For features requiring high-resolution verification, use `xres=1920,yres=1080` i
 
 **For pointer/mouse features (milestone 3):** Add `-device virtio-tablet-device` to the QEMU launch command. Test mouse input via QEMU HMP:
 
-```bash
+```sh
 # Move mouse (relative pixel offsets)
 echo "mouse_move 500 400" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
 
@@ -129,9 +134,11 @@ echo "mouse_button 0" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
 ### 7. Run Regression Tests
 
 After visual verification:
-```bash
+
+```sh
 cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1
 ```
+
 Confirm all tests still pass.
 
 ### 8. Commit
@@ -183,12 +190,30 @@ Commit with a clear message describing what was implemented. Include test count 
       {
         "file": "system/test/tests/drawing.rs",
         "cases": [
-          {"name": "test_srgb_to_linear_boundary_values", "verifies": "gamma lookup table correctness at 0, 128, 255"},
-          {"name": "test_gamma_blend_zero_coverage_unchanged", "verifies": "zero coverage doesn't modify destination pixels"},
-          {"name": "test_gamma_blend_full_coverage_replaces", "verifies": "full coverage replaces destination completely"},
-          {"name": "test_gamma_blend_half_coverage_weight", "verifies": "50% coverage produces perceptually-correct midpoint"},
-          {"name": "test_gamma_blend_produces_heavier_strokes", "verifies": "gamma blending at 50% coverage produces higher RGB values than linear"},
-          {"name": "test_draw_coverage_uses_gamma", "verifies": "draw_coverage function applies gamma correction"}
+          {
+            "name": "test_srgb_to_linear_boundary_values",
+            "verifies": "gamma lookup table correctness at 0, 128, 255"
+          },
+          {
+            "name": "test_gamma_blend_zero_coverage_unchanged",
+            "verifies": "zero coverage doesn't modify destination pixels"
+          },
+          {
+            "name": "test_gamma_blend_full_coverage_replaces",
+            "verifies": "full coverage replaces destination completely"
+          },
+          {
+            "name": "test_gamma_blend_half_coverage_weight",
+            "verifies": "50% coverage produces perceptually-correct midpoint"
+          },
+          {
+            "name": "test_gamma_blend_produces_heavier_strokes",
+            "verifies": "gamma blending at 50% coverage produces higher RGB values than linear"
+          },
+          {
+            "name": "test_draw_coverage_uses_gamma",
+            "verifies": "draw_coverage function applies gamma correction"
+          }
         ]
       }
     ]

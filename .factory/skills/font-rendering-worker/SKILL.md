@@ -10,6 +10,7 @@ NOTE: Startup and cleanup are handled by `worker-base`. This skill defines the W
 ## When to Use This Skill
 
 All font rendering pipeline features:
+
 - Build system changes for Cargo-managed library dependencies
 - Shaping library (HarfRust integration)
 - Rasterizer adaptation (read-fonts glyph outlines)
@@ -34,6 +35,7 @@ All font rendering pipeline features:
 **Variable fonts:** Variable Nunito Sans (opsz, wght, wdth, YTLC axes, 556 KB) is available. read-fonts handles fvar/gvar/avar parsing and glyph interpolation — no custom implementation needed.
 
 **Reference documents:**
+
 - `design/research-font-rendering.md` — full research and design plan
 - `system/DESIGN.md` — system architecture, component status, dependency map
 - `.factory/library/architecture.md` — display pipeline architecture
@@ -44,6 +46,7 @@ All font rendering pipeline features:
 ### 1. Understand the Feature
 
 Read the feature description, preconditions, expectedBehavior, and verificationSteps. Check:
+
 - Which source files need changes (consult `system/DESIGN.md` §1.3 for drawing library, §2.2 for compositor)
 - Whether this is library work (host-testable) or integration work (needs QEMU)
 - What existing tests cover adjacent functionality in `system/test/tests/drawing.rs` and `system/test/tests/scene.rs`
@@ -52,6 +55,7 @@ Read the feature description, preconditions, expectedBehavior, and verificationS
 ### 2. Write Tests First (TDD)
 
 **For library features** (shaping, rasterizer, glyph cache, variable fonts, perceptual math):
+
 - Add test cases to the appropriate file in `system/test/tests/` (primarily `drawing.rs` and `scene.rs`, or create new files like `shaping.rs`)
 - Tests run on the host: `cd system/test && cargo test -- --test-threads=1`
 - Write the test, verify it FAILS (red), then implement to make it pass (green)
@@ -59,12 +63,14 @@ Read the feature description, preconditions, expectedBehavior, and verificationS
 - Font files for tests: use `include_bytes!("../../share/source-code-pro.ttf")` and similar patterns (see existing drawing.rs tests)
 
 **For integration features** (core service, compositor, end-to-end):
+
 - Write unit tests for any testable logic (shaping output verification, glyph cache behavior)
 - Document what you'll verify visually in QEMU
 
 ### 3. Implement
 
 Key conventions for this mission:
+
 - **no_std + alloc is OK.** The shaping library uses `alloc` (Vec, Box). This is acceptable — the OS has a heap allocator.
 - **Float math is OK in the shaping library.** HarfRust uses floats internally via `core_maths`. The rasterizer should continue using fixed-point (20.12) for its internal math.
 - **Kill the old way.** When HarfRust replaces custom code (cmap lookup, GPOS kerning), DELETE the old code. No parallel implementations.
@@ -74,17 +80,18 @@ Key conventions for this mission:
 
 ### 4. Run Tests
 
-```bash
+```sh
 cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1
 ```
 
 ALL tests must pass. If existing tests fail:
+
 - Your change broke existing behavior → fix it
 - The test tested behavior you intentionally replaced (e.g., old cmap lookup) → update the test, note in handoff
 
 ### 5. Build
 
-```bash
+```sh
 cd /Users/user/Sites/os/system && cargo build --release
 ```
 
@@ -94,7 +101,7 @@ Zero errors, zero warnings.
 
 **MANDATORY** when the feature affects what appears on the QEMU display (compositor, core service rendering, scene graph text path).
 
-```bash
+```sh
 pkill -f qemu-system-aarch64 2>/dev/null; sleep 1
 rm -f /tmp/qemu-mon.sock /tmp/qemu-serial.log /tmp/qemu-screen.ppm /tmp/qemu-screen.png
 
@@ -158,10 +165,22 @@ Commit with a message describing what was implemented. Include new test count if
       {
         "file": "system/test/tests/shaping.rs",
         "cases": [
-          {"name": "test_shape_hello_world", "verifies": "Basic Latin text produces correct glyph count and non-zero advances"},
-          {"name": "test_shape_ligatures_fi_fl", "verifies": "fi/fl ligatures produce fewer glyphs than input characters"},
-          {"name": "test_shape_kerning_av", "verifies": "AV kerning produces different advance than sum of individual advances"},
-          {"name": "test_shape_feature_liga_on_off", "verifies": "Enabling/disabling liga feature changes output glyphs"}
+          {
+            "name": "test_shape_hello_world",
+            "verifies": "Basic Latin text produces correct glyph count and non-zero advances"
+          },
+          {
+            "name": "test_shape_ligatures_fi_fl",
+            "verifies": "fi/fl ligatures produce fewer glyphs than input characters"
+          },
+          {
+            "name": "test_shape_kerning_av",
+            "verifies": "AV kerning produces different advance than sum of individual advances"
+          },
+          {
+            "name": "test_shape_feature_liga_on_off",
+            "verifies": "Enabling/disabling liga feature changes output glyphs"
+          }
         ]
       }
     ]
