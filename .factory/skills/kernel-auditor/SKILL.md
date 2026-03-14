@@ -55,6 +55,10 @@ For EVERY **code bug** finding:
 
 **CRITICAL: Test architecture.** Tests in `system/test/` cannot import kernel modules directly (the kernel targets `aarch64-unknown-none`, tests target the host). Tests must duplicate/stub the pure logic they need. Follow existing patterns — read similar test files first.
 
+**Model-based TDD pattern:** For kernel code not importable on host, duplicate the kernel logic into a test model. Write tests against the buggy model (must demonstrate the bug), then update the model to match the fix (must pass). This is the standard pattern — all M1 bug fixes used it successfully.
+
+**Gate/verification features:** For features that only verify existing work (e.g., regression gates), skip file reading, audit checklist, and TDD. Just run the test suite + build and report results.
+
 Run the test to confirm it fails: `cd system/test && cargo test <test_name> -- --test-threads=1`
 
 ### Step 6: Fix the Bug
