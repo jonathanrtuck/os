@@ -42,6 +42,10 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 **Why Context at offset 0:** `TPIDR_EL1` → `Thread` → `Context` with zero offset computation. Simple, fast. A compile-time assertion (`offset_of!(Thread, context) == 0`) enforces this invariant.
 
+**TPIDR_EL1 update timing (Fix 17, 2026-03-14):** `TPIDR_EL1` must be updated to the new thread's Context *before* the scheduler lock drops. Originally, exception.S set `TPIDR_EL1` after the Rust handler returned (`msr tpidr_el1, x0`). But the Rust handler drops the `IrqMutex` guard on return, which re-enables IRQs. If a pending timer IRQ fires in the ~3-instruction window between lock release and the `msr tpidr_el1`, `save_context` reads the stale TPIDR and overwrites the old thread's Context (now in the ready queue) with kernel-mode state, corrupting it. Fix: `schedule_inner` writes `msr tpidr_el1` while the lock is held. The exception.S write is now redundant but kept for defense-in-depth.
+
+**Eret validation (2026-03-14):** `validate_context_before_eret` in `main.rs` checks ELR/SPSR/SP consistency before every handler return: (1) EL1 return with user-range ELR (would crash with EC=0x21), (2) EL0 return with kernel-range ELR (privilege escalation), (3) EL1 return with non-kernel SP (stack corruption). Panics with detailed diagnostics instead of an opaque exception.
+
 ---
 
 ## 0.4 Page Tables & W^X Enforcement
@@ -177,7 +181,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 - PSCI (Power State Coordination Interface) via `hvc` to bring up secondary cores. QEMU `virt` supports PSCI. Core 0 calls `CPU_ON` for each secondary with a boot address and context ID.
 - Secondary core trampoline: enable MMU (shared TTBR1, empty TTBR0), set own kernel stack, configure `TPIDR_EL1`, init GIC CPU interface + timer, enter scheduler idle loop.
 - Per-CPU data: `[PerCpu; MAX_CORES]` array (`MAX_CORES` = 8, QEMU `virt` max). Holds current thread pointer, core ID, idle thread, local scheduling state. Indexed by MPIDR affinity.
-- `TPIDR_EL1` per-core points to that core's current thread context.
+- `TPIDR_EL1` per-core points to that core's current thread context. **Critical invariant (Fix 17):** `TPIDR_EL1` must be updated inside `schedule_inner` (under the scheduler lock, IRQs masked) when switching threads — not deferred to exception.S after the Rust handler returns.
 
 **Why PSCI over spin-table:** PSCI is the ARM-standard firmware interface. Works on QEMU, real hardware with UEFI/ATF, and most hypervisors. Spin-table is QEMU-specific.
 

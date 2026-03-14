@@ -4,6 +4,40 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Scene Scroll Fix + Kernel TPIDR Race Fix (2026-03-14)
+
+**Status:** Two bugs fixed. Both committed.
+
+### Bug 1: Text overflow + cursor misalignment in scene builder
+
+**Symptom:** Text runs extended past the viewport bottom (no scroll clipping). Cursor and selection rects positioned at absolute coordinates, misaligned when scrolled.
+
+**Root cause:** `build_editor_scene` in core's `scene_state.rs` created text runs at absolute y positions (0, 20, 40...) without applying scroll. The compositor's `node.scroll_y` only offset children as a pixel value, but the runs were already at absolute positions. Cursor/selection used absolute `line * line_height` without subtracting scroll offset.
+
+**Fix:** Extracted layout helpers from `scene_state.rs` to scene library as public functions: `layout_mono_lines`, `byte_to_line_col`, `line_bytes_for_run`, `scroll_runs`. Core now calls `scroll_runs(all_runs, scroll_lines, line_height, content_h)` to filter runs to the visible viewport and adjust y positions. Cursor y = `cursor_line * line_height - scroll_px` (viewport-relative). Selection rects clipped to viewport bounds. Compositor renders with `scroll_y = 0` and `CLIPS_CHILDREN` — core pre-applies all scrolling.
+
+**Tests:** 11 new tests: monospace layout (basic, trailing newline, soft wrap, empty), byte-to-line-col (basic, soft wrap, cursor consistency with layout), scroll filtering (no scroll, filters above viewport, cursor at bottom, empty text). 943 total pass.
+
+**Files:** `libraries/scene/lib.rs` (+125 lines), `services/core/scene_state.rs` (-19 net), `test/tests/scene.rs` (+140 lines).
+
+### Bug 2: Kernel EC=0x21 instruction abort under SMP (TPIDR_EL1 race)
+
+**Symptom:** Intermittent kernel crash — EC=0x21 (instruction abort at current EL) with ELR=FAR=0x0A003A00 (virtio MMIO physical address range, level 0 translation fault). Only manifested under concurrent load with 4 SMP cores and 5+ processes.
+
+**Root cause:** `schedule_inner` parks the old thread in the ready queue and returns the new thread's context pointer. But `TPIDR_EL1` (used by `save_context` in exception.S to locate the write target) was only updated by exception.S *after* the Rust handler returned — which is after the `IrqMutex` lock drops and re-enables IRQs. If a pending timer IRQ fires in that window (between lock release and the `msr tpidr_el1` in exception.S), `save_context` reads the stale TPIDR and overwrites the **old** thread's Context with kernel-mode state (SPSR=EL1h, ELR=kernel addr, SP from the wrong thread's stack). When the old thread is later scheduled from the ready queue, `eret` restores EL1 mode with a garbage low address as ELR, causing the instruction abort.
+
+**Why the address was `0x0A003A00`:** This is a user-range VA (low address). With SPSR=EL1h, the eret returns to EL1 which uses TTBR0 for lower-half VA walks. If TTBR0 is the empty L0 table (kernel/idle thread) or any table without a mapping at that address, the walk fails at level 0 — exactly matching ESR=0x86000004 (IFSC=4, level 0 translation fault).
+
+**Fix:** Set `TPIDR_EL1` to the new thread's Context pointer inside `schedule_inner`, while the scheduler lock is held and IRQs are masked. This ensures `save_context` always writes to the correct (current) thread's Context, even if an IRQ fires immediately after the lock drops. The `msr tpidr_el1` in exception.S is now redundant but kept as defense-in-depth. Also added `validate_context_before_eret` — checks ELR/SPSR/SP consistency before every eret return (catches EL1-to-user-VA, EL0-to-kernel-VA, and EL1-with-bad-SP).
+
+This is the same class of bug as Fix 5 (aliasing UB) and Fix 6 (nomem on DAIF) — an SMP timing window that only manifests under concurrent scheduling pressure. The window was ~3-5 instructions wide (lock release → TPIDR write in asm), but with 4 cores running 250 Hz timers, it was hittable.
+
+**Stress tested:** 3000 keys at 1ms intervals, 5 processes on 4 SMP cores. No crash. 943 tests pass.
+
+**Files:** `kernel/scheduler.rs` (+21 lines), `kernel/main.rs` (+71 lines), `kernel/exception.S` (+6 lines comments).
+
+---
+
 ## Compositor Split + Scene Graph Design (2026-03-13)
 
 **Status:** Design conversation in progress. Key architectural decisions settling.
@@ -125,7 +159,7 @@ Cursor and selection remain properties of the Text content variant for now. The 
 
 ## Kernel Bug Investigation Follow-up (2026-03-13)
 
-**Status:** Investigated. Two correctness bugs fixed, one performance issue fixed. Original crash not reproduced with the new scene graph compositor.
+**Status:** Resolved. Root cause of the EC=0x21 crash identified and fixed in 2026-03-14 session (Fix 17: TPIDR_EL1 race in `schedule_inner`). Fixes 12-16 below addressed contributing factors and separate bugs found during the same investigation.
 
 **Context:** User reported kernel crash (EC=0x21, ELR=0x0) during normal typing speed (not rapid input as in the 2026-03-11 crash). The crash signature was identical — instruction abort at EL1 with null ELR — but the trigger conditions differed. The scene graph compositor migration had changed the userspace event loop structure.
 
@@ -146,14 +180,9 @@ Added `debug_assert` checks for null context pointers in `irq_handler`, `svc_han
 
 ### Analysis
 
-The original crash (ELR=0x0 at EL1) was likely a transient issue exposed by the combination of:
-1. Stale waiter registrations causing unexpected wake patterns
-2. Full TLB flushes creating timing variability across cores
-3. High-frequency context switches with 4 SMP cores
+The original crash (ELR=0x0 at EL1) and the later variant (ELR=0x0A003A00) share the same root cause: **Fix 17 (TPIDR_EL1 race in `schedule_inner`, 2026-03-14).** When the scheduler lock drops after `schedule_inner` returns, IRQs are re-enabled. If a timer IRQ fires before exception.S updates TPIDR_EL1, `save_context` overwrites the old (parked) thread's Context with kernel-mode state. Fixes 12-14 addressed contributing factors but not the root cause. Fixes 5/6 (aliasing UB, nomem on DAIF) changed the timing enough to suppress most occurrences but didn't close the window.
 
-The stale waiter bug (Fix 12) is the most likely contributor. A spurious wakeup could cause userspace to process incorrect data, leading to unexpected syscall patterns that interact with kernel timing. The TLB fix (Fix 13) reduces cross-core interference during context switches.
-
-Stress tested: 14,484 keys over 120 seconds with full scene graph compositor running (with fonts, RTC, tablet input, 4 SMP cores). No crash. The 2026-03-11 fixes (especially Fix 5: aliasing UB and Fix 6: nomem) remain the primary crash fixes.
+Stress tested: 14,484 keys over 120 seconds (pre-Fix 17), 3000 keys at 1ms (post-Fix 17). No crash after Fix 17.
 
 ### Proactive Bug Hunting (continued, same session)
 

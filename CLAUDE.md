@@ -71,7 +71,13 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-13 (latest):** Compositor split + scene graph design. Protocol crate refactor.
+**Session 2026-03-14 (latest):** Scene scroll fix + kernel TPIDR race fix (EC=0x21 crash resolved).
+
+**Scene scroll fix (2026-03-14):** Text runs were positioned at absolute y coords without scroll adjustment — content overflowed viewport, cursor misaligned. Extracted layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) from core into scene library. Core pre-applies scroll via `scroll_runs`, positions cursor/selection viewport-relative. 11 new tests, 943 total pass.
+
+**Kernel TPIDR race fix (2026-03-14, Fix 17):** Root cause of intermittent EC=0x21 crash under SMP. `schedule_inner` returned the new thread's context, but `TPIDR_EL1` was updated by exception.S *after* the scheduler lock dropped (re-enabling IRQs). A timer IRQ in that window caused `save_context` to overwrite the old thread's Context with kernel-mode state. Fix: set `TPIDR_EL1` inside `schedule_inner` while the lock is held. Added `validate_context_before_eret` for defense-in-depth. 3000-key stress test passes, 943 tests pass.
+
+**Session 2026-03-13:** Compositor split + scene graph design. Protocol crate refactor.
 
 **Protocol crate (2026-03-13):** Created `libraries/protocol/` as single source of truth for all IPC message types and payload structs. 8 modules by protocol boundary. Zero duplicated constants or structs remain. Libraries now have proper Cargo.toml files; test crate uses normal Cargo dependencies instead of `#[path]` source includes.
 

@@ -274,7 +274,16 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - `SceneReader` — read-only access to a scene graph buffer. Provides `node()`, `nodes()`, `data()`, `data_buf()`. This is the API the compositor will use when reading from shared memory after the OS service / compositor process split.
 - `DoubleWriter` / `DoubleReader` — double-buffered wrapper over two `SCENE_SIZE` regions (`DOUBLE_SCENE_SIZE = 2 × SCENE_SIZE`). The writer writes to the back buffer (lower generation), then `swap()` atomically publishes it as the new front by bumping its generation counter. The reader always reads the front buffer (higher generation). No locks — they never access the same buffer. A release fence before the generation write and an acquire fence after the generation read ensure cross-core visibility on AArch64.
 
-**No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the buffer. 34 host-side tests.
+**Monospace text layout helpers (2026-03-14):**
+
+- `layout_mono_lines` — breaks text into visual lines using monospace line-breaking. Returns one `TextRun` per visual line with placeholder `DataRef` (offset = byte position in source text).
+- `byte_to_line_col` — converts a byte offset to (visual_line, column) with soft wrap handling. Consistent with `layout_mono_lines` line assignments.
+- `line_bytes_for_run` — extracts source text bytes for a run using its placeholder `DataRef`.
+- `scroll_runs` — filters and repositions runs for a scrolled viewport. Takes scroll_lines and viewport height, returns only visible runs with y adjusted.
+
+These live in the scene library (not core) so they're testable without the kernel. Core's `scene_state.rs` imports them. 11 tests cover layout, byte-to-line-col, and scroll filtering.
+
+**No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations (layout helpers require `alloc` for `Vec` return values). Callers provide the buffer. 47 host-side tests.
 
 ---
 

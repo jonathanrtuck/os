@@ -1,6 +1,9 @@
 // AUDIT: 2026-03-11 — 4 unsafe blocks verified, 6-category checklist applied.
 // Fix: added SAFETY comments to swap_ttbr0 and block_current_unless_woken.
 // Idle thread park fix (Fix 1) re-verified sound.
+// Fix 17 (2026-03-14): TPIDR_EL1 set in schedule_inner before lock drops.
+// 5 unsafe blocks total (swap_ttbr0, block_current_unless_woken, schedule_inner TPIDR,
+// init TPIDR, init_secondary TPIDR).
 //! SMP-aware EEVDF scheduler with scheduling contexts.
 //!
 //! Two-layer design:
