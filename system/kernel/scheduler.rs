@@ -100,6 +100,10 @@ pub struct KillInfo {
     pub handles: HandleCategories,
     /// Address space for immediate cleanup (None if deferred due to running threads).
     pub address_space: Option<Box<super::address_space::AddressSpace>>,
+    /// Internal timeout timers from threads that were blocked in `wait` with a
+    /// finite timeout. These are NOT tracked in the handle table and must be
+    /// explicitly destroyed to avoid leaking timer table slots.
+    pub timeout_timers: Vec<timer::TimerId>,
 }
 /// Handles sorted by type for cleanup outside the scheduler lock.
 pub struct HandleCategories {
@@ -950,6 +954,21 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             }
         }
     };
+    // Phase 1b: collect internal timeout timer from the exiting thread.
+    // This timer is NOT tracked in the handle table — it's an internal
+    // resource from `wait` with a finite timeout. Must be destroyed
+    // explicitly or the 32-slot timer table leaks a slot.
+    let timeout_timer = {
+        let mut s = STATE.lock();
+        let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+        thread.timeout_timer.take()
+    };
+
+    if let Some(timer_id) = timeout_timer {
+        timer::destroy(timer_id);
+    }
+
     // Phase 2: notify thread exit (acquires thread_exit lock, then scheduler lock).
     let thread_id = exit_info.thread_id();
     let process_id = exit_info.process_id();
@@ -1084,6 +1103,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     }
 
     let mut killed_threads = Vec::new();
+    let mut timeout_timers = Vec::new();
     let mut running_count: u32 = 0;
     // Remove target threads from ready queue.
     let mut i = 0;
@@ -1093,6 +1113,11 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
             let mut thread = s.queue.ready.swap_remove(i);
 
             release_thread_context_ids(&mut s, &mut thread);
+
+            // Collect internal timeout timer (not tracked in handle table).
+            if let Some(timer_id) = thread.timeout_timer.take() {
+                timeout_timers.push(timer_id);
+            }
 
             killed_threads.push(thread.id());
         } else {
@@ -1109,6 +1134,11 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
             release_thread_context_ids(&mut s, &mut thread);
 
+            // Collect internal timeout timer (not tracked in handle table).
+            if let Some(timer_id) = thread.timeout_timer.take() {
+                timeout_timers.push(timer_id);
+            }
+
             killed_threads.push(thread.id());
         } else {
             i += 1;
@@ -1124,15 +1154,21 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
             release_thread_context_ids(&mut s, &mut thread);
 
+            // Suspended threads should never have timeout timers (they haven't
+            // started running yet), but take it defensively.
+            if let Some(timer_id) = thread.timeout_timer.take() {
+                timeout_timers.push(timer_id);
+            }
+
             killed_threads.push(thread.id());
         } else {
             i += 1;
         }
     }
 
-    // Mark running threads on other cores as Exited. Collect context IDs to
-    // release after the loop (can't call release_context_inner while iterating
-    // s.cores due to borrow conflict).
+    // Mark running threads on other cores as Exited. Collect context IDs and
+    // timeout timers to release after the loop (can't call release_context_inner
+    // while iterating s.cores due to borrow conflict).
     let mut deferred_context_releases: Vec<SchedulingContextId> = Vec::new();
 
     for core_state in s.cores.iter_mut() {
@@ -1145,6 +1181,11 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
                 }
                 if let Some(id) = t.scheduling.saved_context_id.take() {
                     deferred_context_releases.push(id);
+                }
+
+                // Collect internal timeout timer from running thread.
+                if let Some(timer_id) = t.timeout_timer.take() {
+                    timeout_timers.push(timer_id);
                 }
 
                 t.mark_exited();
@@ -1190,6 +1231,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         thread_ids: killed_threads,
         handles,
         address_space,
+        timeout_timers,
     })
 }
 /// Release a scheduling context handle (decrement ref count, free if zero).

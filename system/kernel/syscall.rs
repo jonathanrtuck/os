@@ -772,6 +772,9 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
             for id in kill_info.handles.process_handles {
                 process_exit::destroy(id);
             }
+            for id in kill_info.timeout_timers {
+                timer::destroy(id);
+            }
 
             if let Some(mut addr_space) = kill_info.address_space {
                 addr_space.invalidate_tlb();
@@ -835,6 +838,13 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
     }
     for id in kill_info.handles.process_handles {
         super::process_exit::destroy(id);
+    }
+    // Phase 3a: destroy internal timeout timers that were NOT in the handle table.
+    // These are internal resources from `wait` with a finite timeout. Without this,
+    // the 32-slot global timer table leaks a slot per killed thread with an active
+    // timeout.
+    for id in kill_info.timeout_timers {
+        super::timer::destroy(id);
     }
 
     // Phase 4: free address space (immediate path — no threads were running).
