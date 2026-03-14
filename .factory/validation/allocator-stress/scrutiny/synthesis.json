@@ -1,0 +1,46 @@
+{
+  "milestone": "allocator-stress",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1", "exitCode": 0, "detail": "1324 passed, 0 failed" },
+    "typecheck": { "passed": true, "command": "cd /Users/user/Sites/os/system && cargo build --release", "exitCode": 0, "detail": "Finished release profile in 0.00s (already compiled)" },
+    "lint": { "passed": true, "command": "cd /Users/user/Sites/os/system && cargo build --release", "exitCode": 0, "detail": "No errors; only dead_code warnings from test binaries importing kernel source via #[path]" }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Added Testing Notes section to .factory/library/environment.md documenting page_allocator global state gotcha (init() accumulates, tests must use single function), slab allocator global state, xorshift64 PRNG convention, and single-threaded test requirement",
+      "sourceFeature": "stress-buddy-coalescing"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skills",
+      "suggestion": "Update kernel-auditor skill's stress test guidance: replace 'Follow patterns in existing system/user/fuzz/ and system/user/stress/' with 'Follow patterns in existing system/test/tests/stress_*.rs files for host-side stress tests.' The system/user/fuzz/ and system/user/stress/ directories contain bare-metal tests, not host-side test patterns.",
+      "evidence": "Both feature workers (stress-allocator-fragmentation, stress-buddy-coalescing) flagged this in their skillFeedback.suggestedChanges. Workers correctly placed tests in system/test/tests/ by following existing patterns rather than skill guidance.",
+      "isSystemic": true
+    },
+    {
+      "target": "skills",
+      "suggestion": "Update kernel-auditor skill's RNG guidance: replace 'Use seeded RNG (let mut rng = StdRng::seed_from_u64(42);)' with 'Use a seeded deterministic PRNG (xorshift64 Rng struct — see existing stress_*.rs files for the pattern). The project has no `rand` crate dependency.'",
+      "evidence": "The skill references StdRng from the rand crate, but Cargo.toml has no rand dependency. All 4 test files with RNG (stress_buddy_coalescing.rs, stress_alloc_fragmentation.rs, stress_sched_ctx_concurrent.rs, scheduler_state.rs) use the same custom xorshift64 struct.",
+      "isSystemic": true
+    },
+    {
+      "target": "skills",
+      "suggestion": "Add a kernel-auditor skill note about global allocator state in tests: 'Buddy allocator (PageAllocator) and slab allocator use global statics that accumulate across init() calls. Place all allocator stress tests in a single test function per binary, or use separate test binaries. See .factory/library/environment.md Testing Notes for details.'",
+      "evidence": "Worker for stress-buddy-coalescing hit this during development and had to restructure from multiple test functions to a single mega-test. Documented in handoff skillFeedback.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [],
+  "previousRound": null
+}
