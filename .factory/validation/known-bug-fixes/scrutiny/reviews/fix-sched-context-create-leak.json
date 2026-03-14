@@ -1,0 +1,7 @@
+{
+  "featureId": "fix-sched-context-create-leak",
+  "verdict": "pass",
+  "issues": [],
+  "sharedStateObservations": [],
+  "summary": "Kernel fix is correct and minimal: adds release_scheduling_context(ctx_id) on the handle-insert error path in sys_scheduling_context_create, preventing a permanent scheduling context leak (ref_count=1 never decremented) when the handle table is full. Four well-structured tests model the syscall behavior and verify cleanup, ID reuse, success-path regression, and repeated-failure resilience. No bugs, edge cases, or shared-state gaps found."
+}
