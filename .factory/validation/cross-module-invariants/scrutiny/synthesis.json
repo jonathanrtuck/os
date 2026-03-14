@@ -1,0 +1,72 @@
+{
+  "milestone": "cross-module-invariants",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1", "exitCode": 0, "details": "1054 tests passed, 0 failed across 38 test binaries" },
+    "typecheck": { "passed": true, "command": "cd /Users/user/Sites/os/system && cargo build --release", "exitCode": 0, "details": "Kernel builds clean, no errors" },
+    "lint": { "passed": true, "command": "cd /Users/user/Sites/os/system && cargo build --release", "exitCode": 0, "details": "Warnings present (dead_code in test crate due to host-side stubs) but no errors. Warnings are expected — test crate includes kernel source via #[path] and some items are only used in the kernel target." }
+  },
+  "reviewsSummary": {
+    "total": 5,
+    "passed": 5,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "verify-lock-ordering",
+      "severity": "non_blocking",
+      "description": "scheduler.rs line numbers in .factory/library/lock-ordering-dag.md already drifted by ~4 lines due to subsequent commit 5274a7f (process-exit-cleanup adding Phase 1b). Inherent to line-number documentation."
+    },
+    {
+      "featureId": "verify-tpidr-chain",
+      "severity": "non_blocking",
+      "description": "Three scheduler.rs line number references in TPIDR-CHAIN.md are off by ~20 lines. Function names and code snippets are correct."
+    },
+    {
+      "featureId": "verify-handle-lifecycle",
+      "severity": "non_blocking",
+      "description": "Test model's categorize_handles includes SchedulingContext handles as a deferred category, but the kernel releases SC handles immediately inline during categorization. The invariant (all SC refs released) is still verified correctly."
+    },
+    {
+      "featureId": "verify-process-exit-cleanup",
+      "severity": "non_blocking",
+      "description": "Phase 1b re-acquires STATE.lock() after Phase 1 drops it. The .take() race between kill_process and exit_current_from_syscall is safe but would benefit from a brief comment explaining why."
+    },
+    {
+      "featureId": "create-safety-map",
+      "severity": "non_blocking",
+      "description": "ASID free site table in SAFETY-MAP.md §6 has 2 mislabeled entries (sys_process_kill vs sys_process_create, exit_current_from_syscall vs sys_process_kill) and is missing the real exit_current_from_syscall site at scheduler.rs:1000. Safety conclusions remain correct."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skills",
+      "suggestion": "Update the kernel-auditor skill's 'Special Cases' section for cross-module invariant features to explicitly state: (1) AUDIT comments and TDD are optional for these features — the primary deliverables are documentation artifacts and verification tests. (2) However, if a real bug is discovered during invariant tracing, TDD should be used for the fix. (3) Per-file reading is optional — targeted grep/search across all files is often more efficient for cross-cutting concerns.",
+      "evidence": "All 5 features in this milestone had workers deviate from the TDD and/or AUDIT comment steps. All deviations were well-justified. Workers' skillFeedback consistently flagged this ambiguity: verify-lock-ordering, verify-tpidr-chain, verify-handle-lifecycle, and create-safety-map all noted the mismatch. verify-process-exit-cleanup demonstrated that cross-module invariant work CAN find real bugs requiring TDD.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add guidance: 'Line-number references in documentation files (.factory/library/, kernel/*.md) drift quickly as code changes. When documenting code locations, prefer function names and code pattern anchors over line numbers. If line numbers are included, treat them as hints, not authoritative references.'",
+      "evidence": "verify-lock-ordering's scheduler.rs line numbers drifted within the same milestone (commit 5274a7f shifted them by ~4). verify-tpidr-chain's line numbers were off by ~20 at HEAD. create-safety-map had mislabeled line-number attributions. This is a systemic issue across all documentation features.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add guidance: 'When audit or verification work discovers design-vs-implementation gaps (features described in DESIGN.md but not yet implemented), document them as discovered issues in the handoff rather than silently ignoring them. These represent future work opportunities.'",
+      "evidence": "create-safety-map correctly flagged that ASID lazy revalidation on context switch is designed (DESIGN.md §2.3) but not implemented. This is good practice worth codifying.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "handle-lifecycle review suggested documenting whether model-based tests should faithfully mirror kernel structure or only verify invariants",
+      "reason": "The project's test architecture constraint (kernel targets aarch64-unknown-none, tests run on host) already makes perfect structural mirroring impossible. Model-based tests are the established convention. The existing AGENTS.md guidance ('Test Architecture' section) already explains this. Additional convention documentation would be redundant."
+    }
+  ],
+  "previousRound": null
+}

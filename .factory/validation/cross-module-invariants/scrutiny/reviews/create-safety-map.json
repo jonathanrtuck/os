@@ -1,0 +1,33 @@
+{
+  "featureId": "create-safety-map",
+  "reviewedAt": "2026-03-14T18:30:00.000Z",
+  "commitId": "ccf8753",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Documentation-only commit creating system/kernel/SAFETY-MAP.md and .factory/library/safety-map.md (identical copies, verified via diff). 22 invariants across 9 sections covering all required topics: lock ordering DAG, TPIDR_EL1 chain, handle lifecycle, process exit cleanup, allocator routing, ASID lifecycle, scheduling context ref_count, and emergency stack sizing. Spot-checked 4 key claims against kernel source — 3 fully confirmed, 1 (ASID free sites) has labeling inaccuracies. Overall the document is comprehensive, well-structured, and the safety analysis is sound.",
+    "issues": [
+      {
+        "file": "system/kernel/SAFETY-MAP.md",
+        "line": 310,
+        "severity": "non_blocking",
+        "description": "ASID free site table has mislabeled entries. Row 'sys_process_kill immediate cleanup | syscall.rs:783' is actually in sys_process_create error rollback (fn starts at line 705). Row 'exit_current_from_syscall Phase 4 | syscall.rs:855' is actually in sys_process_kill (fn starts at line 794). The real exit_current_from_syscall Phase 4 ASID free at scheduler.rs:1000 is missing from the table entirely. Document claims '4 sites' but there are 5 code sites + Drop = 6 total. The invariant analysis conclusions remain correct — all sites DO have matching free calls — but the attribution/line-number accuracy is weakened."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker's skillFeedback suggests kernel-auditor skill should note that documentation-only features (like safety maps) don't need TDD or test writing — just source analysis and document creation. The skill's current procedure implies test-first for all features.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The kernel-auditor skill's cross-file invariant features special case could mention that documentation-only features don't need TDD or test writing, just source analysis and document creation.'"
+    },
+    {
+      "area": "conventions",
+      "observation": "Worker discovered a not-yet-implemented design element (ASID lazy revalidation on context switch) and correctly flagged it as a discovered issue rather than silently ignoring it. This pattern of documenting design-vs-implementation gaps during audit work is good practice that could be captured in AGENTS.md.",
+      "evidence": "Handoff discoveredIssues[0]: 'ASID lazy revalidation on context switch is designed but not yet implemented. The generation check... is documented in DESIGN.md §2.3 but not in scheduler code.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "SAFETY-MAP.md is a comprehensive 22-invariant kernel safety document synthesizing all M5 findings. Spot-checks confirmed: TPIDR_EL1 Fix 17 write location (scheduler.rs:431), emergency stack sizing (4096*8 matches MAX_CORES=8), scheduling context saturating_sub (scheduler.rs:279). One non-blocking issue: ASID free site table has 2 mislabeled entries and 1 missing site (scheduler.rs:1000). The library copy (.factory/library/safety-map.md) is byte-identical to the kernel copy. Pass."
+}

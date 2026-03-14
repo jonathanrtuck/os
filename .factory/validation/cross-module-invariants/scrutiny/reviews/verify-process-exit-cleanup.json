@@ -1,0 +1,34 @@
+{
+  "featureId": "verify-process-exit-cleanup",
+  "reviewedAt": "2026-03-14T18:15:00.000Z",
+  "commitId": "5274a7f",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The fix correctly addresses a real timer table slot leak: internal timeout timers (from `wait` with finite timeout) stored on `thread.timeout_timer` were not destroyed when threads were killed or exited. The fix adds collection of these timers in all four thread-state paths within `kill_process` (ready, blocked, suspended, running-on-other-cores), destroys them in `sys_process_kill` Phase 3a and `sys_process_create` error path, and adds Phase 1b to `exit_current_from_syscall` for the normal exit path. The `.take()` semantics on `timeout_timer` ensure no double-free if `kill_process` races with `exit_current_from_syscall` (both paths use `.take()`, so exactly one wins). The deferred cleanup path (`maybe_cleanup_killed_process`) correctly does NOT need timer cleanup because `kill_process` eagerly collects timers from running threads before marking them Exited. The 18 model-based tests follow established project conventions (kernel can't be imported on host), comprehensively cover the bug, fix, both exit paths, deferred cleanup, timer exhaustion, and edge cases. Documentation in `.factory/library/process-exit-cleanup.md` is thorough — traces all three paths step by step with every resource category.",
+    "issues": [
+      {
+        "file": "system/kernel/scheduler.rs",
+        "line": 961,
+        "severity": "non_blocking",
+        "description": "Phase 1b re-acquires STATE.lock() after Phase 1 drops it. This creates a window where kill_process from another core could race and .take() the timeout_timer first. The code is correct (both use .take(), so exactly one wins, no double-free), but the two-lock-acquisition pattern is worth a brief comment explaining why the race is safe. Currently only the timer-leak rationale is commented, not the lock re-acquisition safety."
+      },
+      {
+        "file": "system/test/tests/process_exit_cleanup.rs",
+        "line": 1,
+        "severity": "non_blocking",
+        "description": "All 18 tests are model-based (modeling kernel data structures in the test). This is the correct and required approach per project conventions, but means the tests validate cleanup logic, not the actual kernel code paths. The models faithfully reproduce the kernel's data structures and control flow. No additional kernel integration tests are feasible given the test architecture constraint."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker's skillFeedback.suggestedChanges notes that for cross-module invariant features, the kernel-auditor skill says 'skip file reading, audit checklist, and TDD' but this feature benefited from reading all files and using TDD for the bug found. The skill's Special Cases section for cross-file invariant features should be updated to note that real bugs may be found during invariant tracing, and TDD should be used when they are.",
+      "evidence": "SKILL.md Special Cases section: 'For cross-file invariant features (milestone 6): Instead of per-file audit, trace specific cross-cutting concerns... Create a document or code comments mapping the invariants.' — no mention of TDD for discovered bugs. Handoff skillFeedback.suggestedChanges confirms deviation was beneficial."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The timeout timer leak fix is correct and thorough. All four thread-state paths in kill_process collect timeout_timers, both syscall callers (sys_process_kill, sys_process_create error path) destroy them, and exit_current_from_syscall handles the normal exit case via Phase 1b. The .take() semantics prevent double-free under races. 18 model-based tests cover the bug, fix, all cleanup paths, and timer exhaustion. Documentation in .factory/library/process-exit-cleanup.md provides a complete step-by-step trace of all three exit paths with every resource category mapped."
+}
