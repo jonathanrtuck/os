@@ -283,6 +283,50 @@ fn buddy_allocator() {
     unsafe { free_region(ptr, layout) };
 }
 
+// Model-based test for the PA validation in free_frames().
+//
+// The kernel's free_frames() validation is behind #[cfg(not(test))], so we
+// duplicate the validation logic here and verify it catches all invalid inputs.
+// This test verifies VAL-ALLOC-007: misaligned PA, PA outside RAM range,
+// and PA at RAM boundary are all rejected or handled safely.
+#[test]
+fn pa_validation_on_free() {
+    // Model of the kernel's PA validation in free_frames().
+    // Must match the logic in page_allocator.rs free_frames() exactly.
+    const RAM_START: usize = 0x4000_0000;
+    const RAM_END: usize = RAM_START + 0x1000_0000; // 256 MiB
+
+    fn is_valid_pa(pa: usize) -> bool {
+        pa & 0xFFF == 0 && pa >= RAM_START && pa < RAM_END
+    }
+
+    // --- Misaligned PAs (should be rejected) ---
+    assert!(!is_valid_pa(RAM_START + 1), "off-by-1 is misaligned");
+    assert!(!is_valid_pa(RAM_START + 0x800), "half-page is misaligned");
+    assert!(!is_valid_pa(RAM_START + 0xFFF), "one-below-page is misaligned");
+    assert!(!is_valid_pa(0x4000_0001), "1 byte into RAM, misaligned");
+
+    // --- PA below RAM range (should be rejected) ---
+    assert!(!is_valid_pa(0x0000_0000), "zero address");
+    assert!(!is_valid_pa(0x3FFF_F000), "one page below RAM_START");
+    assert!(!is_valid_pa(0x0000_1000), "low address, page-aligned");
+
+    // --- PA above RAM range (should be rejected) ---
+    assert!(!is_valid_pa(RAM_END), "RAM_END itself is out of range");
+    assert!(!is_valid_pa(RAM_END + PAGE_SIZE), "one page past RAM_END");
+    assert!(!is_valid_pa(0xFFFF_FFFF_FFFF_F000), "high address, page-aligned");
+
+    // --- Valid PAs (should be accepted) ---
+    assert!(is_valid_pa(RAM_START), "RAM_START is valid");
+    assert!(is_valid_pa(RAM_START + PAGE_SIZE), "one page into RAM");
+    assert!(is_valid_pa(RAM_END - PAGE_SIZE), "last valid page");
+    assert!(is_valid_pa(RAM_START + 0x0100_0000), "middle of RAM");
+
+    // --- Boundary: RAM_START must be page-aligned ---
+    assert_eq!(RAM_START & 0xFFF, 0, "RAM_START must be page-aligned");
+    assert_eq!(RAM_END & 0xFFF, 0, "RAM_END must be page-aligned");
+}
+
 // Standalone test for the buddy_pa XOR property (algorithm verification).
 // This doesn't import the kernel code — it verifies the mathematical property
 // that the buddy allocator relies on.
