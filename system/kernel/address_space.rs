@@ -312,22 +312,6 @@ impl AddressSpace {
 
         self.freed = true;
     }
-    /// Invalidate all TLB entries for this address space's ASID.
-    pub fn invalidate_tlb(&self) {
-        // SAFETY: TLBI aside1is invalidates all TLB entries tagged with this
-        // ASID. The ASID was allocated by the address_space_id module and is valid.
-        // Barriers ensure the invalidation completes before we free pages.
-        unsafe {
-            core::arch::asm!(
-                "dsb ishst",
-                "tlbi aside1is, {v}",
-                "dsb ish",
-                "isb",
-                v = in(reg) (self.asid.0 as u64) << 48,
-                options(nostack)
-            );
-        }
-    }
     /// Handle a page fault at `va`. Returns true if the fault was resolved
     /// (page mapped), false if `va` is not covered by any VMA (kill process).
     pub fn handle_fault(&mut self, va: u64) -> bool {
@@ -379,6 +363,22 @@ impl AddressSpace {
 
         true
     }
+    /// Invalidate all TLB entries for this address space's ASID.
+    pub fn invalidate_tlb(&self) {
+        // SAFETY: TLBI aside1is invalidates all TLB entries tagged with this
+        // ASID. The ASID was allocated by the address_space_id module and is valid.
+        // Barriers ensure the invalidation completes before we free pages.
+        unsafe {
+            core::arch::asm!(
+                "dsb ishst",
+                "tlbi aside1is, {v}",
+                "dsb ish",
+                "isb",
+                v = in(reg) (self.asid.0 as u64) << 48,
+                options(nostack)
+            );
+        }
+    }
     /// Map a channel shared page into this address space.
     ///
     /// Bump-allocates VA from `CHANNEL_SHM_BASE..CHANNEL_SHM_END`. Each
@@ -399,17 +399,6 @@ impl AddressSpace {
         self.next_channel_shm_va = va + PAGE_SIZE;
 
         Some(va)
-    }
-    /// Unmap a channel shared page previously mapped by `map_channel_page`.
-    ///
-    /// Clears the L3 page table entry for `va`. Does NOT free the physical
-    /// frame (channel module retains ownership). Does NOT rewind the bump
-    /// allocator — consumed VA is lost (same as all other bump allocators).
-    ///
-    /// Used for rollback when `handle_send` partially maps channel pages into
-    /// a target process but a subsequent step fails.
-    pub fn unmap_channel_page(&mut self, va: u64) {
-        self.unmap_page_inner(va);
     }
     /// Map a device MMIO region into this address space.
     ///
@@ -570,6 +559,17 @@ impl AddressSpace {
     /// TTBR0 value: physical address of L0 table | (ASID << 48).
     pub fn ttbr0_value(&self) -> u64 {
         self.l0_pa.as_u64() | ((self.asid.0 as u64) << 48)
+    }
+    /// Unmap a channel shared page previously mapped by `map_channel_page`.
+    ///
+    /// Clears the L3 page table entry for `va`. Does NOT free the physical
+    /// frame (channel module retains ownership). Does NOT rewind the bump
+    /// allocator — consumed VA is lost (same as all other bump allocators).
+    ///
+    /// Used for rollback when `handle_send` partially maps channel pages into
+    /// a target process but a subsequent step fails.
+    pub fn unmap_channel_page(&mut self, va: u64) {
+        self.unmap_page_inner(va);
     }
     /// Unmap a DMA buffer by its VA. Clears page table entries, invalidates
     /// TLB, and removes the allocation record.

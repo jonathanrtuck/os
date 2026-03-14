@@ -8,6 +8,7 @@ scheduling context ref_count, and emergency stack sizing.
 **Created:** 2026-03-14
 **Source files:** 35 .rs + 2 .S across `system/kernel/`
 **Companion documents:**
+
 - `LOCK-ORDERING.md` — full lock acquisition site table
 - `TPIDR-CHAIN.md` — full TPIDR_EL1 write/read trace
 - `DESIGN.md` — architectural rationale for each subsystem
@@ -21,13 +22,13 @@ IRQs (DAIF.I) on acquire and restores on release. 13 instances total.
 
 ### Ordering Levels
 
-| Level | Locks | Rationale |
-|-------|-------|-----------|
-| 0 | channel, timer, interrupt, thread_exit, process_exit, futex | Event sources — release before scheduler |
-| 1 | scheduler | Coordinator — never held with level 0 |
-| 2 | page_allocator, address_space_id, slab | Resource managers — acquired under scheduler |
-| 3 | KERNEL_PT_LOCK, ALLOC_LOCK | Low-level — acquired under level 2 |
-| ∞ | serial | Output-only leaf — never nests with others |
+| Level | Locks                                                       | Rationale                                    |
+| ----- | ----------------------------------------------------------- | -------------------------------------------- |
+| 0     | channel, timer, interrupt, thread_exit, process_exit, futex | Event sources — release before scheduler     |
+| 1     | scheduler                                                   | Coordinator — never held with level 0        |
+| 2     | page_allocator, address_space_id, slab                      | Resource managers — acquired under scheduler |
+| 3     | KERNEL_PT_LOCK, ALLOC_LOCK                                  | Low-level — acquired under level 2           |
+| ∞     | serial                                                      | Output-only leaf — never nests with others   |
 
 ### DAG Edges (verified cycle-free)
 
@@ -90,29 +91,29 @@ to locate the save area on every exception entry.
 - `Thread.context` is the first field (`#[repr(C)]`), enforced by compile-time
   assertion: `offset_of!(Thread, context) == 0`.
 - All threads are `Box<Thread>` — heap-allocated with stable addresses.
-- `TPIDR_EL1` is NOT saved in Context — it points *to* the Context.
+- `TPIDR_EL1` is NOT saved in Context — it points _to_ the Context.
 
 ### Write Sites (6 total)
 
-| # | Location | When | IRQ State |
-|---|----------|------|-----------|
-| 1 | `scheduler::init()` (scheduler.rs:1047) | Core 0 boot | Disabled (no GIC yet) |
-| 2 | `scheduler::init_secondary()` (scheduler.rs:1076) | Secondary core boot | Disabled (lock held) |
-| 3 | `schedule_inner()` (scheduler.rs:431) **PRIMARY** | Every context switch | Disabled (lock held) |
-| 4 | `exception.S:347` (exc_irq) | After IRQ handler | Disabled (exception) |
-| 5 | `exception.S:372` (exc_lower_sync) | After SVC handler | Disabled (exception) |
-| 6 | `exception.S:390` (exc_user_fault) | After fault handler | Disabled (exception) |
+| #   | Location                                          | When                 | IRQ State             |
+| --- | ------------------------------------------------- | -------------------- | --------------------- |
+| 1   | `scheduler::init()` (scheduler.rs:1047)           | Core 0 boot          | Disabled (no GIC yet) |
+| 2   | `scheduler::init_secondary()` (scheduler.rs:1076) | Secondary core boot  | Disabled (lock held)  |
+| 3   | `schedule_inner()` (scheduler.rs:431) **PRIMARY** | Every context switch | Disabled (lock held)  |
+| 4   | `exception.S:347` (exc_irq)                       | After IRQ handler    | Disabled (exception)  |
+| 5   | `exception.S:372` (exc_lower_sync)                | After SVC handler    | Disabled (exception)  |
+| 6   | `exception.S:390` (exc_user_fault)                | After fault handler  | Disabled (exception)  |
 
 Write 3 is the critical one (Fix 17). Writes 4–6 are defense-in-depth (redundant).
 
 ### Read Sites (4 total)
 
-| # | Location | Purpose |
-|---|----------|---------|
-| 1 | `save_context` (exception.S:223) | Locate register save area |
-| 2 | `exc_fatal` (exception.S:193) | Diagnostic (range-validated) |
-| 3 | `handler_returned_null` (exception.S:402) | Diagnostic |
-| 4 | `kernel_fault_handler` (main.rs:541) | Diagnostic (range-validated) |
+| #   | Location                                  | Purpose                      |
+| --- | ----------------------------------------- | ---------------------------- |
+| 1   | `save_context` (exception.S:223)          | Locate register save area    |
+| 2   | `exc_fatal` (exception.S:193)             | Diagnostic (range-validated) |
+| 3   | `handler_returned_null` (exception.S:402) | Diagnostic                   |
+| 4   | `kernel_fault_handler` (main.rs:541)      | Diagnostic (range-validated) |
 
 ### Fix 17 (2026-03-14): TPIDR Race Under SMP
 
@@ -138,14 +139,14 @@ creation → transfer → close → cleanup lifecycle.
 
 ### Creation & Rollback
 
-| Handle Type | Creation Syscall | Rollback on Insert Failure |
-|-------------|------------------|---------------------------|
-| Channel | `channel_create` (#5) | Close both endpoints + free pages |
-| Timer | `timer_create` (#13) | `timer::destroy(id)` |
-| Interrupt | `interrupt_register` (#14) | `interrupt::destroy(id)` (disables IRQ) |
-| Thread | `thread_create` (#19) | `thread_exit::destroy(id)` (thread continues) |
-| Process | `process_create` (#20) | `kill_process` + `process_exit::destroy` |
-| SchedulingContext | `scheduling_context_create` (#6) | `release_scheduling_context` (ref→0, freed) |
+| Handle Type       | Creation Syscall                 | Rollback on Insert Failure                    |
+| ----------------- | -------------------------------- | --------------------------------------------- |
+| Channel           | `channel_create` (#5)            | Close both endpoints + free pages             |
+| Timer             | `timer_create` (#13)             | `timer::destroy(id)`                          |
+| Interrupt         | `interrupt_register` (#14)       | `interrupt::destroy(id)` (disables IRQ)       |
+| Thread            | `thread_create` (#19)            | `thread_exit::destroy(id)` (thread continues) |
+| Process           | `process_create` (#20)           | `kill_process` + `process_exit::destroy`      |
+| SchedulingContext | `scheduling_context_create` (#6) | `release_scheduling_context` (ref→0, freed)   |
 
 ### Transfer (`handle_send`, syscall #22)
 
@@ -156,6 +157,7 @@ re-insert source handle at original slot; unmap any channel pages from target.
 ### Close (`handle_close`, syscall #3)
 
 Each type has a specific cleanup function:
+
 - Channel → `channel::close_endpoint()` (frees pages when both endpoints close)
 - Timer → `timer::destroy()` (frees slot, wakes waiter)
 - Interrupt → `interrupt::destroy()` (disables IRQ in GIC, wakes waiter)
@@ -189,21 +191,21 @@ kill (`process_kill` + deferred cleanup for running threads on other cores).
 
 ### Resource Categories Reclaimed
 
-| Resource | Mechanism |
-|----------|-----------|
-| Handles (all 6 types) | `drain()` → `categorize_handles()` → per-type close |
+| Resource                            | Mechanism                                                   |
+| ----------------------------------- | ----------------------------------------------------------- |
+| Handles (all 6 types)               | `drain()` → `categorize_handles()` → per-type close         |
 | Scheduling context bind/borrow refs | `release_thread_context_ids()` or `release_context_inner()` |
-| Internal timeout timers | Collected and destroyed (Fix: was previously leaked) |
-| Futex wait entries | `futex::remove_thread(tid)` scans all 64 buckets |
-| DMA buffers | `free_all()` frees each `(pa, order)` |
-| Owned page frames | `free_all()` frees each frame |
-| Page table frames (L1–L3) | `free_all()` walks L0→L1→L2→L3 |
-| L0 page table | `free_all()` frees at end |
-| TLB entries | `invalidate_tlb()` → `TLBI ASIDE1IS` |
-| ASID | `address_space_id::free(asid)` |
-| Kernel stack | `Thread::Drop` → `free_frames(stack_pa, order)` |
-| Thread object | `deferred_drops` in `schedule_inner` |
-| Process slot | `.take()` sets slot to `None` |
+| Internal timeout timers             | Collected and destroyed (Fix: was previously leaked)        |
+| Futex wait entries                  | `futex::remove_thread(tid)` scans all 64 buckets            |
+| DMA buffers                         | `free_all()` frees each `(pa, order)`                       |
+| Owned page frames                   | `free_all()` frees each frame                               |
+| Page table frames (L1–L3)           | `free_all()` walks L0→L1→L2→L3                              |
+| L0 page table                       | `free_all()` frees at end                                   |
+| TLB entries                         | `invalidate_tlb()` → `TLBI ASIDE1IS`                        |
+| ASID                                | `address_space_id::free(asid)`                              |
+| Kernel stack                        | `Thread::Drop` → `free_frames(stack_pa, order)`             |
+| Thread object                       | `deferred_drops` in `schedule_inner`                        |
+| Process slot                        | `.take()` sets slot to `None`                               |
 
 ### Bug Found and Fixed
 
@@ -306,13 +308,13 @@ doesn't check generation on switch.)
 
 **Called from 4 sites:**
 
-| Site | File:Line | Context |
-|------|-----------|---------|
-| `process::create_from_user_elf` error path | process.rs:106 | L0 alloc failed after ASID alloc |
-| `sys_process_kill` immediate cleanup | syscall.rs:783 | No running threads on other cores |
-| `exit_current_from_syscall` Phase 4 | syscall.rs:855 | Last thread exit |
-| `maybe_cleanup_killed_process` | scheduler.rs:259 | Deferred cleanup (killed process) |
-| `AddressSpace::Drop` safety net | address_space.rs:640 | Error path catchall |
+| Site                                       | File:Line            | Context                           |
+| ------------------------------------------ | -------------------- | --------------------------------- |
+| `process::create_from_user_elf` error path | process.rs:106       | L0 alloc failed after ASID alloc  |
+| `sys_process_kill` immediate cleanup       | syscall.rs:783       | No running threads on other cores |
+| `exit_current_from_syscall` Phase 4        | syscall.rs:855       | Last thread exit                  |
+| `maybe_cleanup_killed_process`             | scheduler.rs:259     | Deferred cleanup (killed process) |
+| `AddressSpace::Drop` safety net            | address_space.rs:640 | Error path catchall               |
 
 **Mechanism:** Clear the ASID's bit in the bitmap. ASID 0 free is a no-op (guard).
 Double-free is harmless (clears already-clear bit).
@@ -355,24 +357,24 @@ reaches 0.
 
 ### All Increment Sites (+1)
 
-| Operation | Location | When |
-|-----------|----------|------|
-| `create_scheduling_context` | scheduler.rs:836 | Initial handle reference (ref_count=1) |
+| Operation                         | Location          | When                                        |
+| --------------------------------- | ----------------- | ------------------------------------------- |
+| `create_scheduling_context`       | scheduler.rs:836  | Initial handle reference (ref_count=1)      |
 | `scheduler::init` default context | scheduler.rs:1038 | State holds logical reference (ref_count=1) |
-| `bind_scheduling_context` | scheduler.rs:638 | Thread binds to context |
-| `borrow_scheduling_context` | scheduler.rs:717 | Thread borrows context (donation) |
-| `bind_default_context` | scheduler.rs:166 | Kernel-spawned thread gets default context |
+| `bind_scheduling_context`         | scheduler.rs:638  | Thread binds to context                     |
+| `borrow_scheduling_context`       | scheduler.rs:717  | Thread borrows context (donation)           |
+| `bind_default_context`            | scheduler.rs:166  | Kernel-spawned thread gets default context  |
 
 ### All Decrement Sites (-1)
 
-| Operation | Location | When |
-|-----------|----------|------|
-| `release_scheduling_context` | scheduler.rs:1239 | Handle close → `release_context_inner` |
-| `return_scheduling_context` | scheduler.rs:1262 | Return borrowed context |
-| `exit_current_from_syscall` Phase 1 | scheduler.rs:910,913 | Exiting thread releases bind+borrow |
-| `kill_process` ready/blocked/suspended | scheduler.rs:1115,1135,1155 | `release_thread_context_ids` per thread |
-| `kill_process` running threads | scheduler.rs:1199 | Deferred context ID release |
-| `categorize_handles` | scheduler.rs:188 | Handle drain releases SC handles immediately |
+| Operation                              | Location                    | When                                         |
+| -------------------------------------- | --------------------------- | -------------------------------------------- |
+| `release_scheduling_context`           | scheduler.rs:1239           | Handle close → `release_context_inner`       |
+| `return_scheduling_context`            | scheduler.rs:1262           | Return borrowed context                      |
+| `exit_current_from_syscall` Phase 1    | scheduler.rs:910,913        | Exiting thread releases bind+borrow          |
+| `kill_process` ready/blocked/suspended | scheduler.rs:1115,1135,1155 | `release_thread_context_ids` per thread      |
+| `kill_process` running threads         | scheduler.rs:1199           | Deferred context ID release                  |
+| `categorize_handles`                   | scheduler.rs:188            | Handle drain releases SC handles immediately |
 
 ### `release_context_inner` (the single free path)
 
@@ -438,11 +440,11 @@ pub const MAX_CORES: usize = 8;
 
 ### Verification
 
-| Source | Value | Match? |
-|--------|-------|--------|
-| `exception.S:449` | `.space 4096 * 8` (32 KiB) | ✅ |
-| `per_core.rs:14` | `MAX_CORES = 8` | ✅ |
-| `link.ld:84` comment | `4 KiB × MAX_CORES, page-aligned` | ✅ |
+| Source               | Value                             | Match? |
+| -------------------- | --------------------------------- | ------ |
+| `exception.S:449`    | `.space 4096 * 8` (32 KiB)        | ✅     |
+| `per_core.rs:14`     | `MAX_CORES = 8`                   | ✅     |
+| `link.ld:84` comment | `4 KiB × MAX_CORES, page-aligned` | ✅     |
 
 ### Stack Selection (exception.S:200,408)
 
@@ -472,27 +474,27 @@ Any change to `MAX_CORES` requires updating `exception.S` in sync.
 
 ## 9. Cross-Cutting Invariant Summary
 
-| # | Invariant | Verified By | Violation Symptom |
-|---|-----------|------------|-------------------|
-| 1 | Lock ordering is a strict DAG (no cycles) | Enumerated all ~80 `.lock()` sites | Deadlock under SMP |
-| 2 | Two-phase wake: event lock released before scheduler lock | Verified 11 wake paths | Deadlock (level-0 + level-1 held) |
-| 3 | `TPIDR_EL1` always points to current thread's Context | 6 writes, 4 reads traced | Context corruption, EC=0x21 crash |
-| 4 | `TPIDR_EL1` updated under scheduler lock (Fix 17) | Code review + stress test | Stale TPIDR race window |
-| 5 | `Context` at offset 0 of `Thread` | `#[repr(C)]` + compile-time assertions | All register offsets wrong |
-| 6 | `Box<Thread>` for stable addresses | Code convention | Use-after-free on `save_context` |
-| 7 | Every handle creation has rollback on insert failure | All 6 types verified | Resource leak |
-| 8 | `handle_send` uses move semantics | Code review | Double-close → use-after-free |
-| 9 | Process exit reclaims ALL resources | 13 resource types traced | Memory/ASID/timer leak |
-| 10 | Internal timeout timers cleaned up on kill/exit | Bug fix verified | Timer table exhaustion |
-| 11 | Allocator dealloc routes by address, not size | Code review | Cross-allocator contamination |
-| 12 | `free_frames()` validates PA alignment + range | Code review | Silent corruption |
-| 13 | Every ASID `alloc()` has matching `free()` | 4 free sites + Drop safety net | ASID exhaustion |
-| 14 | TLB invalidated before ASID free | All 4 free paths checked | Use-after-free via stale TLB |
-| 15 | Generation rollover flushes all TLB entries globally | Code review | Stale ASID → wrong address space |
-| 16 | Scheduling context ref_count: no underflow | `saturating_sub` | Premature free / slot corruption |
-| 17 | Scheduling context freed exactly when ref_count=0 | All +1/-1 sites traced | Leak or use-after-free |
-| 18 | Emergency stack sizing = 4096 × MAX_CORES | grep match (both = 8) | Stack overflow on core 4–7 |
-| 19 | No `nomem` on system register writes | Code audit (34 asm blocks) | Compiler reordering → races |
-| 20 | W^X enforcement on all user pages | `segment_attrs` in address_space.rs | Code injection |
-| 21 | Break-before-make on PTE updates | `map_inner` zeros + TLBI before write | CONSTRAINED UNPREDICTABLE |
-| 22 | `deferred_drops` prevents use-after-free on thread stacks | schedule_inner pattern | Stack corruption |
+| #   | Invariant                                                 | Verified By                            | Violation Symptom                 |
+| --- | --------------------------------------------------------- | -------------------------------------- | --------------------------------- |
+| 1   | Lock ordering is a strict DAG (no cycles)                 | Enumerated all ~80 `.lock()` sites     | Deadlock under SMP                |
+| 2   | Two-phase wake: event lock released before scheduler lock | Verified 11 wake paths                 | Deadlock (level-0 + level-1 held) |
+| 3   | `TPIDR_EL1` always points to current thread's Context     | 6 writes, 4 reads traced               | Context corruption, EC=0x21 crash |
+| 4   | `TPIDR_EL1` updated under scheduler lock (Fix 17)         | Code review + stress test              | Stale TPIDR race window           |
+| 5   | `Context` at offset 0 of `Thread`                         | `#[repr(C)]` + compile-time assertions | All register offsets wrong        |
+| 6   | `Box<Thread>` for stable addresses                        | Code convention                        | Use-after-free on `save_context`  |
+| 7   | Every handle creation has rollback on insert failure      | All 6 types verified                   | Resource leak                     |
+| 8   | `handle_send` uses move semantics                         | Code review                            | Double-close → use-after-free     |
+| 9   | Process exit reclaims ALL resources                       | 13 resource types traced               | Memory/ASID/timer leak            |
+| 10  | Internal timeout timers cleaned up on kill/exit           | Bug fix verified                       | Timer table exhaustion            |
+| 11  | Allocator dealloc routes by address, not size             | Code review                            | Cross-allocator contamination     |
+| 12  | `free_frames()` validates PA alignment + range            | Code review                            | Silent corruption                 |
+| 13  | Every ASID `alloc()` has matching `free()`                | 4 free sites + Drop safety net         | ASID exhaustion                   |
+| 14  | TLB invalidated before ASID free                          | All 4 free paths checked               | Use-after-free via stale TLB      |
+| 15  | Generation rollover flushes all TLB entries globally      | Code review                            | Stale ASID → wrong address space  |
+| 16  | Scheduling context ref_count: no underflow                | `saturating_sub`                       | Premature free / slot corruption  |
+| 17  | Scheduling context freed exactly when ref_count=0         | All +1/-1 sites traced                 | Leak or use-after-free            |
+| 18  | Emergency stack sizing = 4096 × MAX_CORES                 | grep match (both = 8)                  | Stack overflow on core 4–7        |
+| 19  | No `nomem` on system register writes                      | Code audit (34 asm blocks)             | Compiler reordering → races       |
+| 20  | W^X enforcement on all user pages                         | `segment_attrs` in address_space.rs    | Code injection                    |
+| 21  | Break-before-make on PTE updates                          | `map_inner` zeros + TLBI before write  | CONSTRAINED UNPREDICTABLE         |
+| 22  | `deferred_drops` prevents use-after-free on thread stacks | schedule_inner pattern                 | Stack corruption                  |

@@ -272,10 +272,7 @@ fn sys_channel_create() -> Result<u64, Error> {
                     }
                 };
 
-                let va_a = match process
-                    .address_space
-                    .map_channel_page(pages[0].as_u64())
-                {
+                let va_a = match process.address_space.map_channel_page(pages[0].as_u64()) {
                     Some(va) => va,
                     None => {
                         let _ = process.handles.close(handle_a);

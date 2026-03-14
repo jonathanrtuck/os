@@ -32,7 +32,7 @@ pub struct Thread {
 
 **Compile-time enforcement:** `offset_of!(Thread, context) == 0` (implicit from
 `#[repr(C)]` with `context` as the first field; the Context struct has explicit
-compile-time assertions in context.rs matching exception.S CTX_* offsets).
+compile-time assertions in context.rs matching exception.S CTX\_\* offsets).
 
 ### Context struct (context.rs:20–31)
 
@@ -40,7 +40,7 @@ All 0x330 bytes of register state saved/restored by exception.S. Offsets verifie
 by compile-time assertions matching CTX_X, CTX_SP, CTX_ELR, CTX_SPSR, CTX_SP_EL0,
 CTX_TPIDR_EL0, CTX_Q, CTX_FPCR, CTX_FPSR constants in exception.S.
 
-**Critical:** TPIDR_EL1 is NOT saved in Context — it points *to* the Context.
+**Critical:** TPIDR_EL1 is NOT saved in Context — it points _to_ the Context.
 It is a per-core register, not a per-thread value (context.rs:6).
 
 ### Pointer stability (scheduler.rs:72–73)
@@ -150,6 +150,7 @@ unsafe {
 ```
 
 **Provenance:** `result` comes from one of three paths in `schedule_inner`:
+
 1. `new_thread.context_ptr()` — EEVDF-selected thread from ready queue.
 2. `old_thread.context_ptr()` — same thread continues (no switch).
 3. `idle.context_ptr()` — idle thread fallback.
@@ -191,11 +192,11 @@ msr tpidr_el1, x0
 
 Three identical patterns:
 
-| Site | Handler          | Line |
-|------|------------------|------|
-| 4    | exc_irq          | 347  |
-| 5    | exc_lower_sync   | 372  |
-| 6    | exc_user_fault   | 390  |
+| Site | Handler        | Line |
+| ---- | -------------- | ---- |
+| 4    | exc_irq        | 347  |
+| 5    | exc_lower_sync | 372  |
+| 6    | exc_user_fault | 390  |
 
 **Provenance:** `x0` = return value from the Rust handler = `*const Context`.
 This is the same pointer that `schedule_inner` already wrote to TPIDR_EL1
@@ -210,13 +211,14 @@ maintain the invariant.
 
 **Defense-in-depth analysis:** These writes are sound even if `schedule_inner`
 did NOT set TPIDR_EL1, because:
+
 1. IRQs are disabled throughout exception handling (PSTATE.I = 1 on exception
    entry, restored by eret from SPSR).
 2. The `msr tpidr_el1, x0` executes before `restore_context_and_eret`.
 3. No nested exception can occur between the `msr` and `eret` (IRQs masked).
 4. The next `save_context` (on the next exception) will read the correct value.
 
-The only scenario where these writes would be the *sole* correctness mechanism
+The only scenario where these writes would be the _sole_ correctness mechanism
 is if a handler returns without calling `schedule_inner` (e.g., irq_handler
 returns the current context without rescheduling). In that case, TPIDR_EL1
 was already correct from the previous context switch, and the redundant write
@@ -373,6 +375,7 @@ exception.S:
 ```
 
 In the old code (before Fix 17), if a timer IRQ fired in the window:
+
 1. `save_context` reads stale TPIDR_EL1 (points to OLD thread's Context)
 2. Saves kernel-mode state (SPSR=EL1h, ELR=kernel address, SP=kernel stack)
    into the OLD thread's Context
@@ -412,13 +415,13 @@ the write past the lock release.
 
 ## 6. Invariant Violations — What Would Break
 
-| Scenario | Symptom | How prevented |
-|----------|---------|---------------|
-| TPIDR_EL1 = 0 (null) | Data abort on save_context (store to address 0) | Writes 1–2 before any timer; Write 3 on every switch |
-| TPIDR_EL1 = stale (old thread) | Old thread's Context corrupted with kernel regs | Fix 17: Write 3 under lock, no IRQ window |
-| TPIDR_EL1 = freed memory | Use-after-free on save_context | Box<Thread> guarantees stable address; deferred_drops ensures thread isn't freed while stack is in use |
-| TPIDR_EL1 = wrong core's thread | Cross-core Context corruption | Each core's init sets its own TPIDR_EL1; schedule_inner runs per-core with core-local `current` |
-| Context not at offset 0 | All register offsets wrong, total corruption | `#[repr(C)]` + first field; compile-time assertions in context.rs |
+| Scenario                        | Symptom                                         | How prevented                                                                                          |
+| ------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| TPIDR_EL1 = 0 (null)            | Data abort on save_context (store to address 0) | Writes 1–2 before any timer; Write 3 on every switch                                                   |
+| TPIDR_EL1 = stale (old thread)  | Old thread's Context corrupted with kernel regs | Fix 17: Write 3 under lock, no IRQ window                                                              |
+| TPIDR_EL1 = freed memory        | Use-after-free on save_context                  | Box<Thread> guarantees stable address; deferred_drops ensures thread isn't freed while stack is in use |
+| TPIDR_EL1 = wrong core's thread | Cross-core Context corruption                   | Each core's init sets its own TPIDR_EL1; schedule_inner runs per-core with core-local `current`        |
+| Context not at offset 0         | All register offsets wrong, total corruption    | `#[repr(C)]` + first field; compile-time assertions in context.rs                                      |
 
 ---
 
