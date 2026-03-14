@@ -86,7 +86,6 @@ impl SceneState {
     ) {
         let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
         let scene_text_color = dc(text_color);
-
         // Layout document text into visual lines (monospace line-breaking).
         let doc_width = fb_width.saturating_sub(2 * text_inset_x);
         let chars_per_line = if char_width > 0 {
@@ -102,11 +101,10 @@ impl SceneState {
             char_width as u16,
             font_size,
         );
-
         // Compute cursor line/col for positioning.
         let cursor_byte = cursor_pos as usize;
-        let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_byte, chars_per_line as usize);
-
+        let (cursor_line, cursor_col) =
+            byte_to_line_col(doc_text, cursor_byte, chars_per_line as usize);
         // Compute selection rectangles.
         let (sel_lo, sel_hi) = if sel_start <= sel_end {
             (sel_start as usize, sel_end as usize)
@@ -114,10 +112,10 @@ impl SceneState {
             (sel_end as usize, sel_start as usize)
         };
         let has_selection = sel_lo < sel_hi;
-
         let mut dw = self.double();
         {
             let mut w = dw.back();
+
             w.clear();
 
             // Push text data first (before allocating nodes).
@@ -127,47 +125,51 @@ impl SceneState {
             // Push document line glyph data into the data buffer and
             // build TextRun array with correct DataRefs.
             let mut final_runs: Vec<TextRun> = Vec::with_capacity(doc_runs.len());
+
             for mut run in doc_runs {
                 let line_text = line_bytes_for_run(doc_text, &run, chars_per_line as usize);
+
                 run.glyphs = w.push_data(line_text);
                 run.glyph_count = line_text.len() as u16;
+
                 final_runs.push(run);
             }
-            let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
 
+            let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
             // Build title/clock as single-run text.
             let title_run = TextRun {
                 glyphs: title_ref,
                 glyph_count: title_label.len() as u16,
-                x: 0, y: 0,
+                x: 0,
+                y: 0,
                 color: dc(chrome_title_color),
                 advance: char_width as u16,
                 font_size,
             };
             let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
-
             let clock_run = TextRun {
                 glyphs: clock_ref,
                 glyph_count: clock_text.len() as u16,
-                x: 0, y: 0,
+                x: 0,
+                y: 0,
                 color: dc(chrome_clock_color),
                 advance: char_width as u16,
                 font_size,
             };
             let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
-
             // Allocate well-known nodes in order (sequential IDs).
-            let _root = w.alloc_node().unwrap();       // 0
-            let _title_bar = w.alloc_node().unwrap();   // 1
-            let _title_text = w.alloc_node().unwrap();  // 2
-            let _clock_text = w.alloc_node().unwrap();  // 3
-            let _shadow = w.alloc_node().unwrap();      // 4
-            let _content = w.alloc_node().unwrap();     // 5
-            let _doc_text = w.alloc_node().unwrap();    // 6
+            let _root = w.alloc_node().unwrap(); // 0
+            let _title_bar = w.alloc_node().unwrap(); // 1
+            let _title_text = w.alloc_node().unwrap(); // 2
+            let _clock_text = w.alloc_node().unwrap(); // 3
+            let _shadow = w.alloc_node().unwrap(); // 4
+            let _content = w.alloc_node().unwrap(); // 5
+            let _doc_text = w.alloc_node().unwrap(); // 6
             let _cursor_node = w.alloc_node().unwrap(); // 7
 
             {
                 let n = w.node_mut(N_ROOT);
+
                 n.first_child = N_TITLE_BAR;
                 n.width = fb_width as u16;
                 n.height = fb_height as u16;
@@ -176,6 +178,7 @@ impl SceneState {
             }
             {
                 let n = w.node_mut(N_TITLE_BAR);
+
                 n.first_child = N_TITLE_TEXT;
                 n.next_sibling = N_SHADOW;
                 n.width = fb_width as u16;
@@ -193,6 +196,7 @@ impl SceneState {
 
             {
                 let n = w.node_mut(N_TITLE_TEXT);
+
                 n.next_sibling = N_CLOCK_TEXT;
                 n.x = 12;
                 n.y = text_y_offset as i16;
@@ -210,6 +214,7 @@ impl SceneState {
 
             {
                 let n = w.node_mut(N_CLOCK_TEXT);
+
                 n.x = clock_x;
                 n.y = text_y_offset as i16;
                 n.width = 80;
@@ -223,6 +228,7 @@ impl SceneState {
             }
             {
                 let n = w.node_mut(N_SHADOW);
+
                 n.next_sibling = N_CONTENT;
                 n.y = title_bar_h as i16;
                 n.width = fb_width as u16;
@@ -236,6 +242,7 @@ impl SceneState {
 
             {
                 let n = w.node_mut(N_CONTENT);
+
                 n.first_child = N_DOC_TEXT;
                 n.next_sibling = NULL;
                 n.y = content_y as i16;
@@ -245,6 +252,7 @@ impl SceneState {
             }
             {
                 let n = w.node_mut(N_DOC_TEXT);
+
                 n.first_child = N_CURSOR;
                 n.x = text_inset_x as i16;
                 n.y = 8;
@@ -264,6 +272,7 @@ impl SceneState {
             let cursor_y = (cursor_line as u32 * line_height) as i16;
             {
                 let n = w.node_mut(N_CURSOR);
+
                 n.x = cursor_x;
                 n.y = cursor_y;
                 n.width = 2;
@@ -284,15 +293,21 @@ impl SceneState {
                 let mut prev_sel_node: u16 = NULL;
 
                 for line in sel_start_line..=sel_end_line {
-                    let col_start = if line == sel_start_line { sel_start_col } else { 0 };
+                    let col_start = if line == sel_start_line {
+                        sel_start_col
+                    } else {
+                        0
+                    };
                     let col_end = if line == sel_end_line {
                         sel_end_col
                     } else {
                         chars_per_line as usize
                     };
+
                     if col_start >= col_end {
                         continue;
                     }
+
                     if let Some(sel_id) = w.alloc_node() {
                         let n = w.node_mut(sel_id);
                         n.x = (col_start as u32 * char_width) as i16;
@@ -309,6 +324,7 @@ impl SceneState {
                         } else {
                             w.node_mut(prev_sel_node).next_sibling = sel_id;
                         }
+
                         prev_sel_node = sel_id;
                     }
                 }
@@ -338,6 +354,31 @@ impl SceneState {
 
 // ── Text layout helpers (proto-OS-service) ──────────────────────────
 
+/// Convert a byte offset in text to (visual_line, column) using monospace wrapping.
+fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
+    let mut line: usize = 0;
+    let mut col: usize = 0;
+    let mut pos: usize = 0;
+
+    while pos < text.len() && pos < byte_offset {
+        if text[pos] == b'\n' {
+            line += 1;
+            col = 0;
+            pos += 1;
+        } else {
+            col += 1;
+            pos += 1;
+
+            if col >= chars_per_line && pos < text.len() && text[pos] != b'\n' {
+                // Soft wrap.
+                line += 1;
+                col = 0;
+            }
+        }
+    }
+
+    (line, col)
+}
 /// Break text into visual lines using monospace line-breaking.
 /// Returns TextRun per line with placeholder DataRefs (glyphs.offset
 /// stores the byte offset into doc_text; caller must push actual data).
@@ -367,7 +408,6 @@ fn layout_mono_lines(
         } else {
             pos + chars_per_line
         };
-
         let line_len = line_end - pos;
 
         runs.push(TextRun {
@@ -386,7 +426,6 @@ fn layout_mono_lines(
         });
 
         line_y = line_y.saturating_add(line_height);
-
         // Advance past the line content + newline if present.
         pos = if line_end < text.len() && text[line_end] == b'\n' {
             line_end + 1
@@ -398,7 +437,10 @@ fn layout_mono_lines(
     // Ensure at least one run for empty text (so the cursor has a home).
     if runs.is_empty() {
         runs.push(TextRun {
-            glyphs: scene::DataRef { offset: 0, length: 0 },
+            glyphs: scene::DataRef {
+                offset: 0,
+                length: 0,
+            },
             glyph_count: 0,
             x: 0,
             y: 0,
@@ -410,39 +452,14 @@ fn layout_mono_lines(
 
     runs
 }
-
 /// Extract the source text bytes for a run (using the placeholder DataRef).
 fn line_bytes_for_run<'a>(text: &'a [u8], run: &TextRun, _chars_per_line: usize) -> &'a [u8] {
     let start = run.glyphs.offset as usize;
     let len = run.glyphs.length as usize;
+
     if start + len <= text.len() {
         &text[start..start + len]
     } else {
         &[]
     }
-}
-
-/// Convert a byte offset in text to (visual_line, column) using monospace wrapping.
-fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
-    let mut line: usize = 0;
-    let mut col: usize = 0;
-    let mut pos: usize = 0;
-
-    while pos < text.len() && pos < byte_offset {
-        if text[pos] == b'\n' {
-            line += 1;
-            col = 0;
-            pos += 1;
-        } else {
-            col += 1;
-            pos += 1;
-            if col >= chars_per_line && pos < text.len() && text[pos] != b'\n' {
-                // Soft wrap.
-                line += 1;
-                col = 0;
-            }
-        }
-    }
-
-    (line, col)
 }

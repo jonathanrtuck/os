@@ -464,6 +464,28 @@ impl<'a> SceneWriter<'a> {
             length: actual as u32,
         }
     }
+    /// Push an array of `TextRun` structs into the data buffer.
+    /// Aligns the write offset to `align_of::<TextRun>()` first.
+    /// Returns a `DataRef` and the count.
+    pub fn push_text_runs(&mut self, runs: &[TextRun]) -> (DataRef, u16) {
+        // Align data_used to TextRun alignment (typically 4 bytes).
+        let align = core::mem::align_of::<TextRun>();
+        let used = self.header().data_used as usize;
+        let aligned = (used + align - 1) & !(align - 1);
+
+        if aligned > used && aligned <= DATA_BUFFER_SIZE {
+            self.header_mut().data_used = aligned as u32;
+        }
+
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                runs.as_ptr() as *const u8,
+                runs.len() * core::mem::size_of::<TextRun>(),
+            )
+        };
+
+        (self.push_data(bytes), runs.len() as u16)
+    }
     /// Append new data (old DataRef is abandoned — bump allocator).
     pub fn replace_data(&mut self, bytes: &[u8]) -> DataRef {
         self.push_data(bytes)
@@ -478,26 +500,6 @@ impl<'a> SceneWriter<'a> {
     pub fn set_root(&mut self, id: NodeId) {
         self.header_mut().root = id;
     }
-    /// Push an array of `TextRun` structs into the data buffer.
-    /// Aligns the write offset to `align_of::<TextRun>()` first.
-    /// Returns a `DataRef` and the count.
-    pub fn push_text_runs(&mut self, runs: &[TextRun]) -> (DataRef, u16) {
-        // Align data_used to TextRun alignment (typically 4 bytes).
-        let align = core::mem::align_of::<TextRun>();
-        let used = self.header().data_used as usize;
-        let aligned = (used + align - 1) & !(align - 1);
-        if aligned > used && aligned <= DATA_BUFFER_SIZE {
-            self.header_mut().data_used = aligned as u32;
-        }
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                runs.as_ptr() as *const u8,
-                runs.len() * core::mem::size_of::<TextRun>(),
-            )
-        };
-        (self.push_data(bytes), runs.len() as u16)
-    }
-
     /// Overwrite an existing DataRef in place (must be same length).
     /// Returns true on success, false if lengths don't match.
     pub fn update_data(&mut self, dref: DataRef, bytes: &[u8]) -> bool {
@@ -582,15 +584,17 @@ impl<'a> SceneReader<'a> {
     pub fn root(&self) -> NodeId {
         self.header().root
     }
-
     /// Interpret a DataRef as an array of `TextRun` structs.
     pub fn text_runs(&self, dref: DataRef) -> &[TextRun] {
         let bytes = self.data(dref);
         let run_size = core::mem::size_of::<TextRun>();
+
         if bytes.is_empty() || bytes.len() < run_size {
             return &[];
         }
+
         let count = bytes.len() / run_size;
+
         // SAFETY: TextRun is repr(C), data buffer is aligned to node size
         // which is >= alignment of TextRun.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
@@ -709,16 +713,6 @@ impl<'a> DoubleWriter<'a> {
 
         &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
     }
-    /// Interpret a DataRef from the front buffer as TextRun array.
-    pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
-        let bytes = self.front_data(dref);
-        let run_size = core::mem::size_of::<TextRun>();
-        if bytes.is_empty() || bytes.len() < run_size {
-            return &[];
-        }
-        let count = bytes.len() / run_size;
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
-    }
     /// Generation counter of the current front buffer.
     pub fn front_generation(&self) -> u32 {
         let (_, g) = front_of(self.buf);
@@ -733,6 +727,19 @@ impl<'a> DoubleWriter<'a> {
         let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
 
         unsafe { core::slice::from_raw_parts(ptr, count) }
+    }
+    /// Interpret a DataRef from the front buffer as TextRun array.
+    pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
+        let bytes = self.front_data(dref);
+        let run_size = core::mem::size_of::<TextRun>();
+
+        if bytes.is_empty() || bytes.len() < run_size {
+            return &[];
+        }
+
+        let count = bytes.len() / run_size;
+
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
     }
     /// Publish the back buffer as the new front by setting its generation
     /// above the current front's. A release fence ensures all scene data
@@ -781,16 +788,6 @@ impl<'a> DoubleReader<'a> {
 
         &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
     }
-    /// Interpret a DataRef from the front buffer as TextRun array.
-    pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
-        let bytes = self.front_data(dref);
-        let run_size = core::mem::size_of::<TextRun>();
-        if bytes.is_empty() || bytes.len() < run_size {
-            return &[];
-        }
-        let count = bytes.len() / run_size;
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
-    }
     /// Generation counter of the current front buffer.
     pub fn front_generation(&self) -> u32 {
         let (_, g) = front_of(self.buf);
@@ -810,5 +807,18 @@ impl<'a> DoubleReader<'a> {
         let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
 
         unsafe { core::slice::from_raw_parts(ptr, count) }
+    }
+    /// Interpret a DataRef from the front buffer as TextRun array.
+    pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
+        let bytes = self.front_data(dref);
+        let run_size = core::mem::size_of::<TextRun>();
+
+        if bytes.is_empty() || bytes.len() < run_size {
+            return &[];
+        }
+
+        let count = bytes.len() / run_size;
+
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
     }
 }

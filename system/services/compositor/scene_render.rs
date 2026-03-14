@@ -154,9 +154,11 @@ fn render_node(
     if node_id == ctx.icon_node && !ctx.icon_coverage.is_empty() {
         let icon_y = ny + (nh - ctx.icon_h as i32) / 2;
         fb.draw_coverage(
-            nx, icon_y,
+            nx,
+            icon_y,
             ctx.icon_coverage,
-            ctx.icon_w, ctx.icon_h,
+            ctx.icon_w,
+            ctx.icon_h,
             ctx.icon_color,
         );
         icon_advance = ctx.icon_w as i32 + 8;
@@ -165,7 +167,9 @@ fn render_node(
     // Draw content.
     match node.content {
         Content::None => {}
-        Content::Text { runs, run_count, .. } => {
+        Content::Text {
+            runs, run_count, ..
+        } => {
             let run_size = core::mem::size_of::<TextRun>();
             let runs_bytes = if runs.length > 0
                 && (runs.offset as usize + runs.length as usize) <= graph.data.len()
@@ -187,10 +191,10 @@ fn render_node(
             };
             let text_nx = nx + icon_advance;
             let max_y = (visible.y + visible.h) as u32;
+
             for run in text_runs {
                 let glyphs: &[u8] = if run.glyphs.length > 0
-                    && (run.glyphs.offset as usize + run.glyphs.length as usize)
-                        <= graph.data.len()
+                    && (run.glyphs.offset as usize + run.glyphs.length as usize) <= graph.data.len()
                 {
                     &graph.data[run.glyphs.offset as usize..][..run.glyphs.length as usize]
                 } else {
@@ -208,23 +212,21 @@ fn render_node(
                 };
                 let gx0 = text_nx + run.x as i32;
                 let gy0 = ny + run.y as i32;
+
                 if gy0 >= max_y as i32 {
                     break;
                 }
+
                 let mut cx = gx0;
+
                 for &ch in glyphs {
                     if let Some((glyph, coverage)) = cache.get(ch) {
                         let px = cx + glyph.bearing_x;
                         let py = gy0 + (cache.ascent as i32 - glyph.bearing_y);
-                        fb.draw_coverage(
-                            px,
-                            py,
-                            coverage,
-                            glyph.width,
-                            glyph.height,
-                            run_color,
-                        );
+
+                        fb.draw_coverage(px, py, coverage, glyph.width, glyph.height, run_color);
                     }
+
                     cx += advance as i32;
                 }
             }
