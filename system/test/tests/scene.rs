@@ -6,7 +6,13 @@ fn make_buf() -> Vec<u8> {
 
 /// Build a monospace Content::Text from raw UTF-8 bytes.
 /// Each byte is treated as a glyph ID with uniform advance.
-fn make_mono_text(w: &mut SceneWriter, text: &[u8], font_size: u16, color: Color, advance: u16) -> Content {
+fn make_mono_text(
+    w: &mut SceneWriter,
+    text: &[u8],
+    font_size: u16,
+    color: Color,
+    advance: u16,
+) -> Content {
     let run = TextRun {
         glyphs: w.push_data(text),
         glyph_count: text.len() as u16,
@@ -17,7 +23,11 @@ fn make_mono_text(w: &mut SceneWriter, text: &[u8], font_size: u16, color: Color
         font_size,
     };
     let (runs, run_count) = w.push_text_runs(&[run]);
-    Content::Text { runs, run_count, _pad: [0; 2] }
+    Content::Text {
+        runs,
+        run_count,
+        _pad: [0; 2],
+    }
 }
 
 // ── SceneWriter basics ──────────────────────────────────────────────
@@ -175,7 +185,9 @@ fn writer_text_node_round_trip() {
     let r = SceneReader::new(&buf);
     let node = r.node(id);
     match node.content {
-        Content::Text { runs, run_count, .. } => {
+        Content::Text {
+            runs, run_count, ..
+        } => {
             assert_eq!(run_count, 1);
             let text_runs = r.text_runs(runs);
             assert_eq!(text_runs.len(), 1);
@@ -196,14 +208,32 @@ fn writer_text_runs_multiple_lines() {
     let d1 = w.push_data(line1);
     let d2 = w.push_data(line2);
     let runs = [
-        TextRun { glyphs: d1, glyph_count: 5, x: 0, y: 0,
-                  color: Color::rgb(200, 200, 200), advance: 8, font_size: 16 },
-        TextRun { glyphs: d2, glyph_count: 5, x: 0, y: 18,
-                  color: Color::rgb(200, 200, 200), advance: 8, font_size: 16 },
+        TextRun {
+            glyphs: d1,
+            glyph_count: 5,
+            x: 0,
+            y: 0,
+            color: Color::rgb(200, 200, 200),
+            advance: 8,
+            font_size: 16,
+        },
+        TextRun {
+            glyphs: d2,
+            glyph_count: 5,
+            x: 0,
+            y: 18,
+            color: Color::rgb(200, 200, 200),
+            advance: 8,
+            font_size: 16,
+        },
     ];
     let (runs_ref, count) = w.push_text_runs(&runs);
     let id = w.alloc_node().unwrap();
-    w.node_mut(id).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
+    w.node_mut(id).content = Content::Text {
+        runs: runs_ref,
+        run_count: count,
+        _pad: [0; 2],
+    };
 
     let r = SceneReader::new(&buf);
     let text_runs = r.text_runs(runs_ref);
@@ -219,8 +249,13 @@ fn push_text_runs_round_trips_struct_fields() {
     let mut w = SceneWriter::new(&mut buf);
     let d = w.push_data(b"x");
     let run = TextRun {
-        glyphs: d, glyph_count: 1, x: -5, y: 100,
-        color: Color::rgba(10, 20, 30, 40), advance: 12, font_size: 24,
+        glyphs: d,
+        glyph_count: 1,
+        x: -5,
+        y: 100,
+        color: Color::rgba(10, 20, 30, 40),
+        advance: 12,
+        font_size: 24,
     };
     let (runs_ref, count) = w.push_text_runs(&[run]);
     assert_eq!(count, 1);
@@ -253,7 +288,11 @@ fn writer_image_node_round_trip() {
     let r = SceneReader::new(&buf);
     let node = r.node(id);
     match node.content {
-        Content::Image { data, src_width, src_height } => {
+        Content::Image {
+            data,
+            src_width,
+            src_height,
+        } => {
             assert_eq!(src_width, 4);
             assert_eq!(src_height, 4);
             assert_eq!(r.data(data).len(), 64);
@@ -275,7 +314,8 @@ fn reader_reads_writer_output() {
         w.node_mut(root).height = 600;
         w.node_mut(root).background = Color::rgb(30, 30, 30);
         w.add_child(root, child);
-        w.node_mut(child).content = make_mono_text(&mut w, b"content", 16, Color::rgb(200, 200, 200), 8);
+        w.node_mut(child).content =
+            make_mono_text(&mut w, b"content", 16, Color::rgb(200, 200, 200), 8);
         w.set_root(root);
         w.commit();
     }
@@ -286,7 +326,9 @@ fn reader_reads_writer_output() {
     assert_eq!(r.node(0).width, 800);
     assert_eq!(r.node(0).first_child, 1);
     match r.node(1).content {
-        Content::Text { runs, run_count, .. } => {
+        Content::Text {
+            runs, run_count, ..
+        } => {
             assert_eq!(run_count, 1);
             let text_runs = r.text_runs(runs);
             assert_eq!(r.data(text_runs[0].glyphs), b"content");
@@ -359,7 +401,10 @@ fn reader_data_invalid_ref_returns_empty() {
     let _ = SceneWriter::new(&mut buf);
     let r = SceneReader::new(&buf);
     // Reference beyond data_used.
-    let bad = DataRef { offset: 9999, length: 100 };
+    let bad = DataRef {
+        offset: 9999,
+        length: 100,
+    };
     assert_eq!(r.data(bad).len(), 0);
 }
 
@@ -386,7 +431,8 @@ fn writer_build_typical_editor_scene() {
     let title_text = w.alloc_node().unwrap();
     w.node_mut(title_text).x = 12;
     w.node_mut(title_text).y = 8;
-    w.node_mut(title_text).content = make_mono_text(&mut w, b"Text", 18, Color::rgb(200, 200, 200), 8);
+    w.node_mut(title_text).content =
+        make_mono_text(&mut w, b"Text", 18, Color::rgb(200, 200, 200), 8);
     w.add_child(title, title_text);
 
     // Content area.
@@ -403,7 +449,13 @@ fn writer_build_typical_editor_scene() {
     w.node_mut(doc_text).y = 8;
     w.node_mut(doc_text).width = 1000;
     w.node_mut(doc_text).height = u16::MAX;
-    w.node_mut(doc_text).content = make_mono_text(&mut w, b"Hello, world!\nThis is a test.", 18, Color::rgb(220, 220, 220), 8);
+    w.node_mut(doc_text).content = make_mono_text(
+        &mut w,
+        b"Hello, world!\nThis is a test.",
+        18,
+        Color::rgb(220, 220, 220),
+        8,
+    );
     w.add_child(content, doc_text);
 
     w.commit();
@@ -424,10 +476,15 @@ fn writer_build_typical_editor_scene() {
 
     // Verify text content.
     match r.node(4).content {
-        Content::Text { runs, run_count, .. } => {
+        Content::Text {
+            runs, run_count, ..
+        } => {
             assert_eq!(run_count, 1);
             let text_runs = r.text_runs(runs);
-            assert_eq!(r.data(text_runs[0].glyphs), b"Hello, world!\nThis is a test.");
+            assert_eq!(
+                r.data(text_runs[0].glyphs),
+                b"Hello, world!\nThis is a test."
+            );
         }
         _ => panic!("expected Text"),
     }
@@ -561,7 +618,7 @@ fn double_writer_old_front_becomes_back() {
         w.set_root(0);
     }
     dw.swap(); // buf 0 = gen 1, buf 1 = gen 0
-    // Frame 2 should write to buf 1 (gen 0 = back).
+               // Frame 2 should write to buf 1 (gen 0 = back).
     {
         let mut w = dw.back();
         w.clear();
@@ -571,7 +628,7 @@ fn double_writer_old_front_becomes_back() {
         w.add_child(n0, n1);
     }
     dw.swap(); // buf 1 = gen 2, buf 0 = gen 1
-    // Front is buf 1 with 2 nodes.
+               // Front is buf 1 with 2 nodes.
     assert_eq!(dw.front_nodes().len(), 2);
     assert_eq!(dw.front_generation(), 2);
 }
@@ -603,7 +660,8 @@ fn double_reader_reads_front() {
             let mut w = dw.back();
             w.clear();
             let n = w.alloc_node().unwrap();
-            w.node_mut(n).content = make_mono_text(&mut w, b"visible", 14, Color::rgb(200, 200, 200), 8);
+            w.node_mut(n).content =
+                make_mono_text(&mut w, b"visible", 14, Color::rgb(200, 200, 200), 8);
             w.set_root(n);
         }
         dw.swap();
@@ -699,7 +757,12 @@ fn double_writer_back_does_not_corrupt_front() {
 
 // ── Monospace layout ────────────────────────────────────────────────
 
-const WHITE: Color = Color { r: 255, g: 255, b: 255, a: 255 };
+const WHITE: Color = Color {
+    r: 255,
+    g: 255,
+    b: 255,
+    a: 255,
+};
 
 #[test]
 fn layout_mono_basic_lines() {
@@ -755,7 +818,7 @@ fn byte_to_line_col_basic() {
 #[test]
 fn byte_to_line_col_soft_wrap() {
     let text = b"abcdefgh"; // 8 chars, wrap at 4
-    // "abcd" is line 0, "efgh" is line 1
+                            // "abcd" is line 0, "efgh" is line 1
     assert_eq!(byte_to_line_col(text, 0, 4), (0, 0));
     assert_eq!(byte_to_line_col(text, 3, 4), (0, 3));
     assert_eq!(byte_to_line_col(text, 4, 4), (1, 0));
@@ -781,7 +844,9 @@ fn scroll_runs_filters_above_viewport() {
     // 10 lines of text (no trailing newline), scroll = 5, viewport = 60px.
     let mut text = Vec::new();
     for i in 0u8..10 {
-        if i > 0 { text.push(b'\n'); }
+        if i > 0 {
+            text.push(b'\n');
+        }
         text.push(b'a' + i);
     }
     let runs = layout_mono_lines(&text, 80, 20, WHITE, 8, 16);
@@ -800,13 +865,15 @@ fn scroll_runs_cursor_at_bottom_forces_scroll() {
     // 40 lines, viewport 30 lines, scroll = 6.
     let mut text = Vec::new();
     for i in 0u8..40 {
-        if i > 0 { text.push(b'\n'); }
+        if i > 0 {
+            text.push(b'\n');
+        }
         text.push(b'x');
     }
     let runs = layout_mono_lines(&text, 80, 20, WHITE, 8, 16);
     assert_eq!(runs.len(), 40);
     let visible = scroll_runs(runs, 6, 20, 600); // 600px = 30 lines
-    // First visible line should be line 6 at y=0.
+                                                 // First visible line should be line 6 at y=0.
     assert_eq!(visible[0].y, 0);
     // Last visible line should be line 35 at y = 29*20 = 580.
     let last = visible.last().unwrap();
@@ -830,9 +897,9 @@ fn byte_to_line_col_cursor_consistency_with_layout() {
     let runs = layout_mono_lines(text, 80, 20, WHITE, 8, 16);
     assert_eq!(runs.len(), 4);
     // byte_to_line_col should agree with layout_mono_lines on line assignments.
-    assert_eq!(byte_to_line_col(text, 0, 80).0, 0);   // 'a' on line 0
-    assert_eq!(byte_to_line_col(text, 4, 80).0, 1);   // 'b' on line 1
-    assert_eq!(byte_to_line_col(text, 8, 80).0, 2);   // 'c' on line 2
-    assert_eq!(byte_to_line_col(text, 12, 80).0, 3);  // 'd' on line 3
-    assert_eq!(byte_to_line_col(text, 15, 80).0, 3);  // end of text, still line 3
+    assert_eq!(byte_to_line_col(text, 0, 80).0, 0); // 'a' on line 0
+    assert_eq!(byte_to_line_col(text, 4, 80).0, 1); // 'b' on line 1
+    assert_eq!(byte_to_line_col(text, 8, 80).0, 2); // 'c' on line 2
+    assert_eq!(byte_to_line_col(text, 12, 80).0, 3); // 'd' on line 3
+    assert_eq!(byte_to_line_col(text, 15, 80).0, 3); // end of text, still line 3
 }

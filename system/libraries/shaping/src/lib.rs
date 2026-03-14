@@ -15,7 +15,10 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+
 pub use harfrust::Feature;
+
+pub mod rasterize;
 
 /// A single shaped glyph with positioning information.
 ///
@@ -58,16 +61,14 @@ pub fn shape(font_data: &[u8], text: &str, features: &[Feature]) -> Vec<ShapedGl
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
-
     let data = harfrust::ShaperData::new(&font);
-
     let mut buffer = harfrust::UnicodeBuffer::new();
+
     buffer.push_str(text);
     buffer.guess_segment_properties();
 
     let shaper = data.shaper(&font).build();
     let glyph_buffer = shaper.shape(buffer, features);
-
     let infos = glyph_buffer.glyph_infos();
     let positions = glyph_buffer.glyph_positions();
 

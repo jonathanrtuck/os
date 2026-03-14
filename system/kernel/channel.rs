@@ -40,14 +40,16 @@
 //! Channel lock is always released before acquiring the scheduler lock
 //! (via try_wake / set_wake_pending). Never hold both.
 
-use super::handle::{ChannelId, Handle, HandleError, HandleObject, Rights};
-use super::memory;
-use super::page_allocator;
-use super::process::ProcessId;
-use super::scheduler;
-use super::sync::IrqMutex;
-use super::thread::ThreadId;
 use alloc::vec::Vec;
+
+use super::{
+    handle::{ChannelId, Handle, HandleError, HandleObject, Rights},
+    memory, page_allocator,
+    process::ProcessId,
+    scheduler,
+    sync::IrqMutex,
+    thread::ThreadId,
+};
 
 struct Channel {
     /// Two shared pages: [0] = ep0→ep1 direction, [1] = ep1→ep0 direction.

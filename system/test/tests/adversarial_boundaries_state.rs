@@ -57,13 +57,25 @@ mod address_space {
     }
     impl PageAttrs {
         pub fn user_rx() -> Self {
-            Self { el0: true, writable: false, executable: true }
+            Self {
+                el0: true,
+                writable: false,
+                executable: true,
+            }
         }
         pub fn user_rw() -> Self {
-            Self { el0: true, writable: true, executable: false }
+            Self {
+                el0: true,
+                writable: true,
+                executable: false,
+            }
         }
         pub fn user_ro() -> Self {
-            Self { el0: true, writable: false, executable: false }
+            Self {
+                el0: true,
+                writable: false,
+                executable: false,
+            }
         }
     }
 }
@@ -339,7 +351,7 @@ fn simulate_process_start(
         Err(_) => return Err("invalid handle"),
     };
     if started {
-        return Err("already started")
+        return Err("already started");
     }
     Ok(())
 }
@@ -356,7 +368,7 @@ fn simulate_process_kill(
         Err(_) => return Err("invalid handle"),
     };
     if !target_alive {
-        return Err("already exited")
+        return Err("already exited");
     }
     Ok(())
 }
@@ -414,10 +426,7 @@ fn boundary_write_max_valid_len() {
 #[test]
 fn boundary_wait_u64_max_count() {
     // u64::MAX as count: exceeds MAX_WAIT_HANDLES → InvalidArgument.
-    assert_eq!(
-        validate_wait(0x1000, u64::MAX),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_wait(0x1000, u64::MAX), Err(Error::InvalidArgument));
 }
 
 #[test]
@@ -439,15 +448,9 @@ fn boundary_wait_max_valid_count() {
 #[test]
 fn boundary_wait_count_boundary_overflow() {
     // handles_ptr near USER_VA_END + large count = overflow.
-    assert_eq!(
-        validate_wait(USER_VA_END - 1, 2),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_wait(USER_VA_END - 1, 2), Err(Error::BadAddress));
     // handles_ptr + count wraps u64.
-    assert_eq!(
-        validate_wait(u64::MAX - 5, 10),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_wait(u64::MAX - 5, 10), Err(Error::BadAddress));
 }
 
 #[test]
@@ -471,18 +474,12 @@ fn boundary_dma_alloc_max_valid_order() {
 
 #[test]
 fn boundary_dma_alloc_u64_max_ptr() {
-    assert_eq!(
-        validate_dma_alloc(0, u64::MAX),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_dma_alloc(0, u64::MAX), Err(Error::BadAddress));
 }
 
 #[test]
 fn boundary_dma_free_u64_max_va() {
-    assert_eq!(
-        validate_dma_free(u64::MAX, 0),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_dma_free(u64::MAX, 0), Err(Error::InvalidArgument));
 }
 
 #[test]
@@ -541,10 +538,7 @@ fn boundary_memory_alloc_u64_max() {
 
 #[test]
 fn boundary_memory_alloc_zero() {
-    assert_eq!(
-        validate_memory_alloc(0),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_memory_alloc(0), Err(Error::InvalidArgument));
 }
 
 #[test]
@@ -622,10 +616,7 @@ fn boundary_memory_share_pa_overflow() {
     // to 2048 * PAGE_SIZE would overflow. This requires a very high PA.
     // Use a valid page_count but PA that causes end_pa > RAM_END.
     let pa = RAM_END - PAGE_SIZE;
-    assert_eq!(
-        validate_memory_share(0, pa, 2),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_memory_share(0, pa, 2), Err(Error::BadAddress));
 }
 
 #[test]
@@ -661,18 +652,12 @@ fn boundary_interrupt_register_u32_max_plus_one() {
 
 #[test]
 fn boundary_handle_nr_u64_max() {
-    assert_eq!(
-        validate_handle_nr(u64::MAX),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_handle_nr(u64::MAX), Err(Error::InvalidArgument));
 }
 
 #[test]
 fn boundary_handle_nr_256() {
-    assert_eq!(
-        validate_handle_nr(256),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_handle_nr(256), Err(Error::InvalidArgument));
 }
 
 #[test]
@@ -700,18 +685,12 @@ fn boundary_write_zero_length_null_ptr() {
 #[test]
 fn boundary_process_create_zero_length() {
     // Zero length: fails (elf_len must be > 0).
-    assert_eq!(
-        validate_process_create(0x1000, 0),
-        Err(Error::BadLength)
-    );
+    assert_eq!(validate_process_create(0x1000, 0), Err(Error::BadLength));
 }
 
 #[test]
 fn boundary_wait_zero_count() {
-    assert_eq!(
-        validate_wait(0x1000, 0),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_wait(0x1000, 0), Err(Error::InvalidArgument));
 }
 
 #[test]
@@ -724,10 +703,7 @@ fn boundary_memory_share_zero_pages() {
 
 #[test]
 fn boundary_memory_alloc_zero_pages() {
-    assert_eq!(
-        validate_memory_alloc(0),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_memory_alloc(0), Err(Error::InvalidArgument));
 }
 
 // ==========================================================================
@@ -1152,10 +1128,7 @@ fn sched_ctx_boundary_sweep_no_panic() {
 #[test]
 fn elf_empty_buffer() {
     // Zero-length buffer: process_create validation rejects before ELF parse.
-    assert_eq!(
-        validate_process_create(0x1000, 0),
-        Err(Error::BadLength)
-    );
+    assert_eq!(validate_process_create(0x1000, 0), Err(Error::BadLength));
 }
 
 #[test]
@@ -1260,7 +1233,7 @@ fn elf_segment_file_size_gt_mem_size() {
     // Valid header + segment where file_size > mem_size.
     let mut data = build_elf_with_segment();
     let phdr_off = 64usize; // segment starts at offset 64
-    // file_size at phdr_off + 32, mem_size at phdr_off + 40
+                            // file_size at phdr_off + 32, mem_size at phdr_off + 40
     write_u64_le(&mut data, phdr_off + 32, 0x2000); // file_size = 0x2000
     write_u64_le(&mut data, phdr_off + 40, 0x1000); // mem_size = 0x1000 (< file_size!)
     let header = executable::parse_header(&data).unwrap();
@@ -1278,7 +1251,9 @@ fn elf_segment_data_out_of_bounds() {
     write_u64_le(&mut data, phdr_off + 32, 100); // file_size = 100 (exceeds data)
     write_u64_le(&mut data, phdr_off + 40, 100); // mem_size >= file_size
     let header = executable::parse_header(&data).unwrap();
-    let seg = executable::load_segment(&data, &header, 0).unwrap().unwrap();
+    let seg = executable::load_segment(&data, &header, 0)
+        .unwrap()
+        .unwrap();
     assert!(executable::segment_data(&data, &seg).is_err());
 }
 
@@ -1291,7 +1266,9 @@ fn elf_segment_vaddr_in_kernel_range() {
     let phdr_off = 64usize;
     write_u64_le(&mut data, phdr_off + 16, 0xFFFF_0000_0000_0000); // vaddr = kernel range
     let header = executable::parse_header(&data).unwrap();
-    let seg = executable::load_segment(&data, &header, 0).unwrap().unwrap();
+    let seg = executable::load_segment(&data, &header, 0)
+        .unwrap()
+        .unwrap();
     assert_eq!(seg.vaddr, 0xFFFF_0000_0000_0000);
 }
 
@@ -1409,13 +1386,13 @@ fn handle_send_wrong_type_target() {
 fn handle_send_all_non_process_target_types() {
     // All non-Process handle types as target should fail.
     let mut caller = HandleTable::new();
-    caller.insert(ch(1), Rights::READ_WRITE).unwrap();       // 0: Channel
-    caller.insert(tm(1), Rights::READ_WRITE).unwrap();        // 1: Timer
-    caller.insert(int(1), Rights::READ_WRITE).unwrap();       // 2: Interrupt
-    caller.insert(sc(1), Rights::READ_WRITE).unwrap();        // 3: SchedulingContext
-    caller.insert(th(1), Rights::READ_WRITE).unwrap();        // 4: Thread
-    caller.insert(pr(1), Rights::READ_WRITE).unwrap();        // 5: Process (valid)
-    caller.insert(ch(2), Rights::READ_WRITE).unwrap();        // 6: source handle
+    caller.insert(ch(1), Rights::READ_WRITE).unwrap(); // 0: Channel
+    caller.insert(tm(1), Rights::READ_WRITE).unwrap(); // 1: Timer
+    caller.insert(int(1), Rights::READ_WRITE).unwrap(); // 2: Interrupt
+    caller.insert(sc(1), Rights::READ_WRITE).unwrap(); // 3: SchedulingContext
+    caller.insert(th(1), Rights::READ_WRITE).unwrap(); // 4: Thread
+    caller.insert(pr(1), Rights::READ_WRITE).unwrap(); // 5: Process (valid)
+    caller.insert(ch(2), Rights::READ_WRITE).unwrap(); // 6: source handle
     let target = SimProcess::new();
 
     for wrong_target in 0..5u8 {
@@ -1521,7 +1498,7 @@ fn state_signal_after_close_reinsert() {
     // Insert a Timer at the same slot (slot 0 is free now).
     let h2 = t.insert(tm(1), Rights::READ_WRITE).unwrap();
     assert_eq!(h.0, h2.0); // Same slot reused
-    // Signal should fail: slot has a Timer, not a Channel.
+                           // Signal should fail: slot has a Timer, not a Channel.
     assert_eq!(try_channel_signal(&t, h2.0), Err("wrong type"));
 }
 
@@ -1572,10 +1549,7 @@ fn state_start_already_started() {
     // First start: succeeds.
     assert!(simulate_process_start(&t, 0, false).is_ok());
     // Second start: fails (already started).
-    assert_eq!(
-        simulate_process_start(&t, 0, true),
-        Err("already started")
-    );
+    assert_eq!(simulate_process_start(&t, 0, true), Err("already started"));
 }
 
 #[test]
@@ -1593,10 +1567,7 @@ fn state_start_after_close() {
 fn state_start_wrong_type() {
     let mut t = HandleTable::new();
     t.insert(ch(1), Rights::READ_WRITE).unwrap();
-    assert_eq!(
-        simulate_process_start(&t, 0, false),
-        Err("wrong type")
-    );
+    assert_eq!(simulate_process_start(&t, 0, false), Err("wrong type"));
 }
 
 // ==========================================================================
@@ -1610,10 +1581,7 @@ fn state_kill_already_exited() {
     // Kill of a living process: succeeds.
     assert!(simulate_process_kill(&t, 0, true).is_ok());
     // Kill of an already-exited process: fails.
-    assert_eq!(
-        simulate_process_kill(&t, 0, false),
-        Err("already exited")
-    );
+    assert_eq!(simulate_process_kill(&t, 0, false), Err("already exited"));
 }
 
 #[test]
@@ -1621,20 +1589,14 @@ fn state_kill_after_close() {
     let mut t = HandleTable::new();
     let h = t.insert(pr(1), Rights::READ_WRITE).unwrap();
     t.close(h).unwrap();
-    assert_eq!(
-        simulate_process_kill(&t, h.0, true),
-        Err("invalid handle")
-    );
+    assert_eq!(simulate_process_kill(&t, h.0, true), Err("invalid handle"));
 }
 
 #[test]
 fn state_kill_wrong_type() {
     let mut t = HandleTable::new();
     t.insert(ch(1), Rights::READ_WRITE).unwrap();
-    assert_eq!(
-        simulate_process_kill(&t, 0, true),
-        Err("wrong type")
-    );
+    assert_eq!(simulate_process_kill(&t, 0, true), Err("wrong type"));
 }
 
 // ==========================================================================
@@ -1690,7 +1652,10 @@ fn state_wait_on_closed_handle() {
     // Simulate wait's handle resolution step.
     assert!(t.get(h, Rights::READ).is_ok());
     t.close(h).unwrap();
-    assert!(matches!(t.get(h, Rights::READ), Err(HandleError::InvalidHandle)));
+    assert!(matches!(
+        t.get(h, Rights::READ),
+        Err(HandleError::InvalidHandle)
+    ));
 }
 
 // ==========================================================================
@@ -1701,14 +1666,7 @@ fn state_wait_on_closed_handle() {
 /// Ensures no panic on any sequence.
 #[test]
 fn state_confusion_all_types_lifecycle() {
-    let types: &[HandleObject] = &[
-        ch(1),
-        tm(1),
-        int(1),
-        sc(1),
-        pr(1),
-        th(1),
-    ];
+    let types: &[HandleObject] = &[ch(1), tm(1), int(1), sc(1), pr(1), th(1)];
 
     for obj in types {
         let mut t = HandleTable::new();
@@ -1724,7 +1682,10 @@ fn state_confusion_all_types_lifecycle() {
         assert!(matches!(t.close(h), Err(HandleError::InvalidHandle)));
 
         // Get after close fails.
-        assert!(matches!(t.get(h, Rights::READ), Err(HandleError::InvalidHandle)));
+        assert!(matches!(
+            t.get(h, Rights::READ),
+            Err(HandleError::InvalidHandle)
+        ));
 
         // Triple-close fails.
         assert!(matches!(t.close(h), Err(HandleError::InvalidHandle)));

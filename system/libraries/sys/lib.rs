@@ -16,9 +16,11 @@
 
 #![no_std]
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 mod nr {
     pub const EXIT: u64 = 0;

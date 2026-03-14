@@ -196,10 +196,8 @@ fn ticket_lock_u32_near_overflow() {
     let lock = TicketLock::new();
 
     // Start counters near u32::MAX.
-    lock.next_ticket
-        .store(u32::MAX - 2, Ordering::Relaxed);
-    lock.now_serving
-        .store(u32::MAX - 2, Ordering::Relaxed);
+    lock.next_ticket.store(u32::MAX - 2, Ordering::Relaxed);
+    lock.now_serving.store(u32::MAX - 2, Ordering::Relaxed);
 
     // Three lock/unlock cycles spanning the u32 wrap.
     for _ in 0..3 {

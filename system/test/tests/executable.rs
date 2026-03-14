@@ -226,9 +226,7 @@ fn load_segment_file_size_exceeds_mem_size() {
     // would cause the demand pager to copy excess file data instead of zero-filling.
     let mut data = minimal_elf_header(0x400000, 64, 1);
     data.extend(pt_load_phdr(
-        0x400000,
-        120,
-        0x2000, // file_size = 8192
+        0x400000, 120, 0x2000, // file_size = 8192
         0x1000, // mem_size = 4096 (smaller!)
         5,
     ));

@@ -281,32 +281,20 @@ fn adversarial_write_kernel_range() {
 #[test]
 fn adversarial_write_at_boundary() {
     assert_eq!(validate_write(PTR_AT_BOUNDARY, 1), Err(Error::BadAddress));
-    assert_eq!(
-        validate_write(PTR_AT_BOUNDARY, 0),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_write(PTR_AT_BOUNDARY, 0), Err(Error::BadAddress));
 }
 
 #[test]
 fn adversarial_write_spans_boundary() {
     // Start in user space, end past USER_VA_END.
-    assert_eq!(
-        validate_write(USER_VA_END - 10, 20),
-        Err(Error::BadAddress)
-    );
-    assert_eq!(
-        validate_write(USER_VA_END - 1, 2),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_write(USER_VA_END - 10, 20), Err(Error::BadAddress));
+    assert_eq!(validate_write(USER_VA_END - 1, 2), Err(Error::BadAddress));
 }
 
 #[test]
 fn adversarial_write_overflow_u64() {
     // checked_add overflows u64.
-    assert_eq!(
-        validate_write(u64::MAX - 5, 10),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_write(u64::MAX - 5, 10), Err(Error::BadAddress));
     assert_eq!(validate_write(u64::MAX, 1), Err(Error::BadAddress));
 }
 
@@ -316,10 +304,7 @@ fn adversarial_write_max_length_exceeded() {
         validate_write(0x1000, MAX_WRITE_LEN + 1),
         Err(Error::BadLength)
     );
-    assert_eq!(
-        validate_write(0x1000, u64::MAX),
-        Err(Error::BadLength)
-    );
+    assert_eq!(validate_write(0x1000, u64::MAX), Err(Error::BadLength));
 }
 
 // ==========================================================================
@@ -346,27 +331,18 @@ fn adversarial_wait_at_boundary() {
 
 #[test]
 fn adversarial_wait_spans_boundary() {
-    assert_eq!(
-        validate_wait(USER_VA_END - 5, 10),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_wait(USER_VA_END - 5, 10), Err(Error::BadAddress));
 }
 
 #[test]
 fn adversarial_wait_overflow_u64() {
     assert_eq!(validate_wait(u64::MAX, 1), Err(Error::BadAddress));
-    assert_eq!(
-        validate_wait(u64::MAX - 5, 10),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_wait(u64::MAX - 5, 10), Err(Error::BadAddress));
 }
 
 #[test]
 fn adversarial_wait_zero_count() {
-    assert_eq!(
-        validate_wait(0x1000, 0),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_wait(0x1000, 0), Err(Error::InvalidArgument));
 }
 
 #[test]
@@ -375,10 +351,7 @@ fn adversarial_wait_count_exceeds_max() {
         validate_wait(0x1000, MAX_WAIT_HANDLES + 1),
         Err(Error::InvalidArgument)
     );
-    assert_eq!(
-        validate_wait(0x1000, u64::MAX),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_wait(0x1000, u64::MAX), Err(Error::InvalidArgument));
 }
 
 // ==========================================================================
@@ -394,10 +367,7 @@ fn adversarial_dma_alloc_null_ptr() {
 
 #[test]
 fn adversarial_dma_alloc_kernel_range() {
-    assert_eq!(
-        validate_dma_alloc(0, PTR_KERNEL),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_dma_alloc(0, PTR_KERNEL), Err(Error::BadAddress));
     assert_eq!(
         validate_dma_alloc(0, PTR_KERNEL_MAX),
         Err(Error::BadAddress)
@@ -419,18 +389,9 @@ fn adversarial_dma_alloc_unaligned() {
         validate_dma_alloc(0, PTR_UNALIGNED_7),
         Err(Error::BadAddress)
     );
-    assert_eq!(
-        validate_dma_alloc(0, 0x1004),
-        Err(Error::BadAddress)
-    );
-    assert_eq!(
-        validate_dma_alloc(0, 0x1002),
-        Err(Error::BadAddress)
-    );
-    assert_eq!(
-        validate_dma_alloc(0, 0x1006),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_dma_alloc(0, 0x1004), Err(Error::BadAddress));
+    assert_eq!(validate_dma_alloc(0, 0x1002), Err(Error::BadAddress));
+    assert_eq!(validate_dma_alloc(0, 0x1006), Err(Error::BadAddress));
 }
 
 #[test]
@@ -501,10 +462,7 @@ fn adversarial_process_create_overflow_u64() {
 
 #[test]
 fn adversarial_process_create_zero_length() {
-    assert_eq!(
-        validate_process_create(0x1000, 0),
-        Err(Error::BadLength)
-    );
+    assert_eq!(validate_process_create(0x1000, 0), Err(Error::BadLength));
 }
 
 #[test]
@@ -521,10 +479,7 @@ fn adversarial_process_create_exceeds_max_elf() {
 
 #[test]
 fn adversarial_memory_alloc_zero_pages() {
-    assert_eq!(
-        validate_memory_alloc(0),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_memory_alloc(0), Err(Error::InvalidArgument));
 }
 
 #[test]
@@ -622,18 +577,9 @@ fn adversarial_futex_unaligned() {
 #[test]
 fn adversarial_futex_near_boundary_unaligned() {
     // Near USER_VA_END and misaligned.
-    assert_eq!(
-        validate_futex(USER_VA_END - 1),
-        Err(Error::BadAddress)
-    );
-    assert_eq!(
-        validate_futex(USER_VA_END - 2),
-        Err(Error::BadAddress)
-    );
-    assert_eq!(
-        validate_futex(USER_VA_END - 3),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_futex(USER_VA_END - 1), Err(Error::BadAddress));
+    assert_eq!(validate_futex(USER_VA_END - 2), Err(Error::BadAddress));
+    assert_eq!(validate_futex(USER_VA_END - 3), Err(Error::BadAddress));
 }
 
 // ==========================================================================
@@ -801,20 +747,20 @@ fn adversarial_thread_create_both_kernel() {
 #[test]
 fn adversarial_pointer_sweep_no_panic() {
     let hostile_ptrs: &[u64] = &[
-        0,                           // null
-        1,                           // unaligned
-        3,                           // unaligned
-        7,                           // unaligned
-        0xF,                         // unaligned
-        0x1001,                      // unaligned
-        USER_VA_END - 1,             // near boundary
-        USER_VA_END,                 // at boundary
-        USER_VA_END + 1,             // past boundary
-        0xFFFF_0000_0000_0000,       // kernel range start
-        0xFFFF_FFFF_FFFF_FFF0,       // kernel range near max
-        u64::MAX,                    // maximum
-        0x8000_0000_0000_0000,       // high bit set
-        0x0000_FFFF_FFFF_FFFF,       // just below kernel range
+        0,                     // null
+        1,                     // unaligned
+        3,                     // unaligned
+        7,                     // unaligned
+        0xF,                   // unaligned
+        0x1001,                // unaligned
+        USER_VA_END - 1,       // near boundary
+        USER_VA_END,           // at boundary
+        USER_VA_END + 1,       // past boundary
+        0xFFFF_0000_0000_0000, // kernel range start
+        0xFFFF_FFFF_FFFF_FFF0, // kernel range near max
+        u64::MAX,              // maximum
+        0x8000_0000_0000_0000, // high bit set
+        0x0000_FFFF_FFFF_FFFF, // just below kernel range
     ];
 
     let hostile_lens: &[u64] = &[
@@ -929,12 +875,12 @@ fn adversarial_handle_out_of_range_sweep() {
 /// Helper: create a handle table with one handle of each type.
 fn table_with_all_types() -> HandleTable {
     let mut t = HandleTable::new();
-    t.insert(ch(1), Rights::READ_WRITE).unwrap();      // slot 0: Channel
-    t.insert(tm(2), Rights::READ_WRITE).unwrap();       // slot 1: Timer
-    t.insert(int(3), Rights::READ_WRITE).unwrap();      // slot 2: Interrupt
-    t.insert(sc(4), Rights::READ_WRITE).unwrap();       // slot 3: SchedulingContext
-    t.insert(pr(5), Rights::READ_WRITE).unwrap();       // slot 4: Process
-    t.insert(th(6), Rights::READ_WRITE).unwrap();       // slot 5: Thread
+    t.insert(ch(1), Rights::READ_WRITE).unwrap(); // slot 0: Channel
+    t.insert(tm(2), Rights::READ_WRITE).unwrap(); // slot 1: Timer
+    t.insert(int(3), Rights::READ_WRITE).unwrap(); // slot 2: Interrupt
+    t.insert(sc(4), Rights::READ_WRITE).unwrap(); // slot 3: SchedulingContext
+    t.insert(pr(5), Rights::READ_WRITE).unwrap(); // slot 4: Process
+    t.insert(th(6), Rights::READ_WRITE).unwrap(); // slot 5: Thread
     t
 }
 
@@ -1031,8 +977,8 @@ fn adversarial_interrupt_ack_wrong_type() {
     assert!(simulate_interrupt_ack(&t, 2).is_ok()); // Interrupt
     assert_eq!(simulate_interrupt_ack(&t, 0), Err("wrong type")); // Channel
     assert_eq!(simulate_interrupt_ack(&t, 4), Err("wrong type")); // Process
-    // Timer and Thread have READ-only in syscall, but here we check WRITE
-    // requirement. If they had WRITE, type check would still fail.
+                                                                  // Timer and Thread have READ-only in syscall, but here we check WRITE
+                                                                  // requirement. If they had WRITE, type check would still fail.
     assert_eq!(simulate_interrupt_ack(&t, 1), Err("wrong type")); // Timer
     assert_eq!(simulate_interrupt_ack(&t, 3), Err("wrong type")); // SchedulingContext
     assert_eq!(simulate_interrupt_ack(&t, 5), Err("wrong type")); // Thread
@@ -1120,7 +1066,10 @@ fn adversarial_handle_close_already_closed() {
     let h = t.insert(ch(1), Rights::READ_WRITE).unwrap();
     t.close(h).unwrap();
     // Double-close: returns InvalidHandle.
-    assert!(matches!(t.close(h).unwrap_err(), HandleError::InvalidHandle));
+    assert!(matches!(
+        t.close(h).unwrap_err(),
+        HandleError::InvalidHandle
+    ));
 }
 
 #[test]
@@ -1282,10 +1231,7 @@ fn adversarial_handle_close_reuse_cycle() {
             Err(HandleError::InvalidHandle)
         ));
         // Double close.
-        assert!(matches!(
-            t.close(h),
-            Err(HandleError::InvalidHandle)
-        ));
+        assert!(matches!(t.close(h), Err(HandleError::InvalidHandle)));
     }
 }
 
@@ -1340,44 +1286,63 @@ fn adversarial_handle_wrong_type_matrix() {
 
     // channel_signal expects Channel (slot 0).
     for &wrong in &[1u8, 2, 3, 4, 5] {
-        assert_eq!(simulate_channel_signal(&t, wrong), Err("wrong type"),
-            "channel_signal should reject handle at slot {wrong}");
+        assert_eq!(
+            simulate_channel_signal(&t, wrong),
+            Err("wrong type"),
+            "channel_signal should reject handle at slot {wrong}"
+        );
     }
 
     // interrupt_ack expects Interrupt (slot 2).
     for &wrong in &[0u8, 1, 3, 4, 5] {
-        assert_eq!(simulate_interrupt_ack(&t, wrong), Err("wrong type"),
-            "interrupt_ack should reject handle at slot {wrong}");
+        assert_eq!(
+            simulate_interrupt_ack(&t, wrong),
+            Err("wrong type"),
+            "interrupt_ack should reject handle at slot {wrong}"
+        );
     }
 
     // process_start expects Process (slot 4).
     for &wrong in &[0u8, 1, 2, 3, 5] {
-        assert_eq!(simulate_process_start(&t, wrong), Err("wrong type"),
-            "process_start should reject handle at slot {wrong}");
+        assert_eq!(
+            simulate_process_start(&t, wrong),
+            Err("wrong type"),
+            "process_start should reject handle at slot {wrong}"
+        );
     }
 
     // process_kill expects Process (slot 4).
     for &wrong in &[0u8, 1, 2, 3, 5] {
-        assert_eq!(simulate_process_kill(&t, wrong), Err("wrong type"),
-            "process_kill should reject handle at slot {wrong}");
+        assert_eq!(
+            simulate_process_kill(&t, wrong),
+            Err("wrong type"),
+            "process_kill should reject handle at slot {wrong}"
+        );
     }
 
     // scheduling_context_bind expects SchedulingContext (slot 3).
     for &wrong in &[0u8, 1, 2, 4, 5] {
-        assert!(simulate_sched_bind(&t, wrong).is_err(),
-            "sched_bind should reject handle at slot {wrong}");
+        assert!(
+            simulate_sched_bind(&t, wrong).is_err(),
+            "sched_bind should reject handle at slot {wrong}"
+        );
     }
 
     // scheduling_context_borrow expects SchedulingContext (slot 3).
     for &wrong in &[0u8, 1, 2, 4, 5] {
-        assert!(simulate_sched_borrow(&t, wrong).is_err(),
-            "sched_borrow should reject handle at slot {wrong}");
+        assert!(
+            simulate_sched_borrow(&t, wrong).is_err(),
+            "sched_borrow should reject handle at slot {wrong}"
+        );
     }
 
     // handle_send target expects Process (slot 4), source can be any type.
     for &wrong in &[0u8, 1, 2, 3, 5] {
-        assert_eq!(simulate_handle_send(&t, wrong, 0), Err("wrong target type"),
-            "handle_send should reject non-Process target at slot {wrong}");
+        assert_eq!(
+            simulate_handle_send(&t, wrong, 0),
+            Err("wrong target type"),
+            "handle_send should reject non-Process target at slot {wrong}"
+        );
     }
 }
 
@@ -1464,10 +1429,7 @@ fn adversarial_memory_share_combined() {
         Err(Error::InvalidArgument)
     );
     // Valid handle + out-of-range PA.
-    assert_eq!(
-        validate_memory_share(0, 0, 1),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_memory_share(0, 0, 1), Err(Error::BadAddress));
     // Valid handle + kernel-range PA.
     assert_eq!(
         validate_memory_share(0, PTR_KERNEL, 1),
@@ -1492,9 +1454,8 @@ fn adversarial_memory_share_combined() {
 #[test]
 fn adversarial_handle_send_out_of_range() {
     // Both handles out of range.
-    let both_fail = |target: u64, source: u64| -> bool {
-        target > u8::MAX as u64 || source > u8::MAX as u64
-    };
+    let both_fail =
+        |target: u64, source: u64| -> bool { target > u8::MAX as u64 || source > u8::MAX as u64 };
     assert!(both_fail(256, 0));
     assert!(both_fail(0, 256));
     assert!(both_fail(256, 256));

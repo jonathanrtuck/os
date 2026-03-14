@@ -9,8 +9,10 @@
 #![no_std]
 #![no_main]
 
-use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
-use protocol::fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE};
+use protocol::{
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
+};
 
 const FILE_FID: u32 = 1;
 const MSIZE: u32 = 4096;
@@ -32,7 +34,6 @@ const P9_TREAD: u8 = 116;
 const P9_RREAD: u8 = 117;
 const P9_TCLUNK: u8 = 120;
 const P9_RCLUNK: u8 = 121;
-
 
 struct MsgReader {
     buf: *const u8,

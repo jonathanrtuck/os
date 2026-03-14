@@ -10,9 +10,7 @@
 //! from concurrent cores. The `panic_` variants bypass the lock for use in
 //! the panic handler (where the lock may already be held).
 
-use super::memory::KERNEL_VA_OFFSET;
-use super::memory_mapped_io;
-use super::sync::IrqMutex;
+use super::{memory::KERNEL_VA_OFFSET, memory_mapped_io, sync::IrqMutex};
 
 const TXFF: u32 = 1 << 5;
 const UART0_BASE: usize = 0x0900_0000 + KERNEL_VA_OFFSET;

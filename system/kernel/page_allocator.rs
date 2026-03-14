@@ -12,11 +12,13 @@
 //! Existing single-page API (`alloc_frame`/`free_frame`) is preserved —
 //! callers are unaffected.
 
-use super::memory::{self, Pa};
-use super::paging;
 #[cfg(not(test))]
 use super::serial;
-use super::sync::IrqMutex;
+use super::{
+    memory::{self, Pa},
+    paging,
+    sync::IrqMutex,
+};
 
 /// Maximum order: 2^11 pages = 8 MiB.
 const MAX_ORDER: usize = 11;

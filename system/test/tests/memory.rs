@@ -139,7 +139,10 @@ fn wx_text_section_is_rx() {
     // .text: read-only (AP_RO), user-execute-never (UXN), but NOT PXN (kernel can execute)
     assert!(attrs & AP_RO != 0, ".text must be read-only");
     assert!(attrs & UXN != 0, ".text must be UXN");
-    assert!(attrs & PXN == 0, ".text must NOT be PXN (kernel executable)");
+    assert!(
+        attrs & PXN == 0,
+        ".text must NOT be PXN (kernel executable)"
+    );
     assert!(attrs & AF != 0, ".text must have access flag");
 }
 
@@ -150,8 +153,7 @@ fn wx_rodata_section_is_ro_nx() {
     let rodata_start = 0xFFFF_0000_4009_0000u64;
     let rodata_end = 0xFFFF_0000_400A_0000u64;
 
-    let attrs =
-        compute_wx_attrs(rodata_start, text_start, text_end, rodata_start, rodata_end);
+    let attrs = compute_wx_attrs(rodata_start, text_start, text_end, rodata_start, rodata_end);
 
     // .rodata: read-only, no execute at any level
     assert!(attrs & AP_RO != 0, ".rodata must be read-only");
@@ -216,9 +218,11 @@ fn wx_text_end_aligned_up_excludes_boundary() {
     let rodata_end = 0xFFFF_0000_400A_0000u64;
 
     // Page at text_end should be .rodata, not .text
-    let at_text_end =
-        compute_wx_attrs(text_end, text_start, text_end, rodata_start, rodata_end);
-    assert!(at_text_end & PXN != 0, "page at text_end should be NX (rodata or data)");
+    let at_text_end = compute_wx_attrs(text_end, text_start, text_end, rodata_start, rodata_end);
+    assert!(
+        at_text_end & PXN != 0,
+        "page at text_end should be NX (rodata or data)"
+    );
 }
 
 // ===========================================
@@ -232,7 +236,11 @@ fn l3_entry_has_page_descriptor_bits() {
     let entry = build_l3_entry(pa, attrs);
 
     // Bits [1:0] must be 0b11 (DESC_PAGE)
-    assert_eq!(entry & 0b11, 0b11, "L3 entry must have page descriptor bits");
+    assert_eq!(
+        entry & 0b11,
+        0b11,
+        "L3 entry must have page descriptor bits"
+    );
 }
 
 #[test]
@@ -289,7 +297,11 @@ fn block_attrs_strips_pa_and_type() {
     let extracted = extract_block_attrs(l2_entry);
 
     // Must not contain PA bits [47:21]
-    assert_eq!(extracted & 0x0000_FFFF_FFE0_0000, 0, "PA bits must be stripped");
+    assert_eq!(
+        extracted & 0x0000_FFFF_FFE0_0000,
+        0,
+        "PA bits must be stripped"
+    );
     // Must not contain type bits [1:0]
     assert_eq!(extracted & 0b11, 0, "type bits must be stripped");
     // Must contain attribute bits
@@ -330,7 +342,12 @@ fn replicated_l3_entries_are_valid_pages() {
 
     for i in 0..512u64 {
         let entry = build_replicated_l3_entry(block_pa, i, block_attrs);
-        assert_eq!(entry & 0b11, 0b11, "entry {} must be a valid page descriptor", i);
+        assert_eq!(
+            entry & 0b11,
+            0b11,
+            "entry {} must be a valid page descriptor",
+            i
+        );
     }
 }
 
@@ -342,7 +359,10 @@ fn replicated_l3_entries_preserve_block_attrs() {
     let entry = build_replicated_l3_entry(block_pa, 42, block_attrs);
     // Strip PA and DESC_PAGE to check attrs
     let entry_attrs = entry & !PA_MASK & !0b11u64;
-    assert_eq!(entry_attrs, block_attrs, "block attrs must be preserved in L3");
+    assert_eq!(
+        entry_attrs, block_attrs,
+        "block attrs must be preserved in L3"
+    );
 }
 
 // ===========================================
@@ -383,7 +403,11 @@ fn break_before_make_sequence_model() {
 
     // Step 1: Break — write invalid entry
     l2_entry = 0;
-    assert_eq!(l2_entry & DESC_VALID, 0, "after break, entry must be invalid");
+    assert_eq!(
+        l2_entry & DESC_VALID,
+        0,
+        "after break, entry must be invalid"
+    );
 
     // Step 2: TLB flush would happen here (modeled as a flag)
     let tlb_flushed_after_break = true;
@@ -392,7 +416,10 @@ fn break_before_make_sequence_model() {
     // Step 3: Make — write new table descriptor
     let l3_pa = 0x5000_0000u64;
     l2_entry = l3_pa | DESC_VALID | DESC_TABLE;
-    assert!(l2_entry & DESC_VALID != 0, "after make, entry must be valid");
+    assert!(
+        l2_entry & DESC_VALID != 0,
+        "after make, entry must be valid"
+    );
     assert!(
         l2_entry & DESC_TABLE != 0,
         "after make, entry must be table"
@@ -408,7 +435,8 @@ fn break_before_make_sequence_model() {
 fn guard_page_entry_is_invalid() {
     let guard_entry: u64 = 0;
     assert_eq!(
-        guard_entry & DESC_VALID, 0,
+        guard_entry & DESC_VALID,
+        0,
         "guard page L3 entry must be invalid"
     );
 }
@@ -476,7 +504,10 @@ fn l2_l3_indices_cover_2mb_block() {
 fn kernel_va_offset_is_canonical_upper() {
     // KERNEL_VA_OFFSET puts addresses in the upper canonical half (bits 63:48 all 1s).
     let va = phys_to_virt(0x4000_0000);
-    assert!(va >= 0xFFFF_0000_0000_0000, "kernel VA must be in upper half");
+    assert!(
+        va >= 0xFFFF_0000_0000_0000,
+        "kernel VA must be in upper half"
+    );
 }
 
 #[test]
@@ -520,12 +551,25 @@ fn block_attr_mask_covers_all_attribute_bits() {
 
     // Must include lower attribute bits (AF at 10, SH at 8-9, AP at 6-7, AttrIndx at 2-4)
     assert!(attr_bits & AF != 0, "mask complement must include AF bit");
-    assert!(attr_bits & SH_INNER != 0, "mask complement must include SH bits");
-    assert!(attr_bits & AP_RO != 0, "mask complement must include AP_RO bit");
-    assert!(attr_bits & (0b111 << 2) != 0, "mask complement must include AttrIndx bits");
+    assert!(
+        attr_bits & SH_INNER != 0,
+        "mask complement must include SH bits"
+    );
+    assert!(
+        attr_bits & AP_RO != 0,
+        "mask complement must include AP_RO bit"
+    );
+    assert!(
+        attr_bits & (0b111 << 2) != 0,
+        "mask complement must include AttrIndx bits"
+    );
 
     // Must NOT include PA bits
-    assert_eq!(attr_bits & 0x0000_FFFF_FFE0_0000, 0, "must not include PA bits");
+    assert_eq!(
+        attr_bits & 0x0000_FFFF_FFE0_0000,
+        0,
+        "must not include PA bits"
+    );
     // Must NOT include type bits
     assert_eq!(attr_bits & 0b11, 0, "must not include type bits");
 }

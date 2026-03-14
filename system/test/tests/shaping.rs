@@ -203,7 +203,10 @@ fn shape_source_code_pro_basic() {
     let glyphs = shape(SOURCE_CODE_PRO, "Hello", &[]);
     assert_eq!(glyphs.len(), 5, "expected 5 glyphs for 'Hello'");
     for g in &glyphs {
-        assert!(g.x_advance > 0, "monospace glyph should have positive advance");
+        assert!(
+            g.x_advance > 0,
+            "monospace glyph should have positive advance"
+        );
     }
 }
 
@@ -241,8 +244,5 @@ fn shape_invalid_font_data() {
 #[test]
 fn shape_empty_font_data() {
     let glyphs = shape(&[], "Hello", &[]);
-    assert!(
-        glyphs.is_empty(),
-        "empty font data should produce 0 glyphs"
-    );
+    assert!(glyphs.is_empty(), "empty font data should produce 0 glyphs");
 }

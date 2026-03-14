@@ -30,13 +30,15 @@
 #![no_std]
 #![no_main]
 
-use protocol::edit::{
-    CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
-    MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE,
-    MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
+use protocol::{
+    edit::{
+        CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE,
+        MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE,
+        MSG_WRITE_INSERT,
+    },
+    editor::{EditorConfig, MSG_EDITOR_CONFIG},
+    input::{KeyEvent, MSG_KEY_EVENT},
 };
-use protocol::editor::{EditorConfig, MSG_EDITOR_CONFIG};
-use protocol::input::{KeyEvent, MSG_KEY_EVENT};
 
 const DOC_HEADER_SIZE: usize = 64;
 // Keycodes (Linux evdev).

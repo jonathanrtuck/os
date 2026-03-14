@@ -13,53 +13,33 @@
 // ordering. DAIF asm correctly omits `nomem` (Fix 6 re-verified). No bugs
 // found.
 
-use super::metrics;
-use core::cell::UnsafeCell;
-use core::ops::{Deref, DerefMut};
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::{
+    cell::UnsafeCell,
+    ops::{Deref, DerefMut},
+    sync::atomic::{AtomicU32, Ordering},
+};
 
-pub struct IrqGuard<'a, T> {
-    lock: &'a IrqMutex<T>,
-    saved_daif: u64,
-}
+use super::metrics;
+
+// ---------------------------------------------------------------------------
+// IrqMutex — the lock
+// ---------------------------------------------------------------------------
+
 pub struct IrqMutex<T> {
     next_ticket: AtomicU32,
     now_serving: AtomicU32,
     data: UnsafeCell<T>,
 }
 
-impl<T> Drop for IrqGuard<'_, T> {
-    fn drop(&mut self) {
-        // Release the spinlock, then restore IRQ state.
-        self.lock.now_serving.fetch_add(1, Ordering::Release);
-
-        // SAFETY: Restoring DAIF to a value previously read from this register
-        // is always valid at EL1. `nostack` is correct (no stack manipulation).
-        // No `nomem` — the compiler must not reorder memory accesses past this
-        // IRQ state restoration (Fix 6).
-        unsafe {
-            core::arch::asm!("msr daif, {}", in(reg) self.saved_daif, options(nostack));
+impl<T> IrqMutex<T> {
+    pub const fn new(val: T) -> Self {
+        Self {
+            next_ticket: AtomicU32::new(0),
+            now_serving: AtomicU32::new(0),
+            data: UnsafeCell::new(val),
         }
     }
-}
-impl<T> Deref for IrqGuard<'_, T> {
-    type Target = T;
 
-    fn deref(&self) -> &T {
-        // SAFETY: Guard existence guarantees exclusive access (ticket spinlock
-        // + IRQ masking).
-        unsafe { &*self.lock.data.get() }
-    }
-}
-impl<T> DerefMut for IrqGuard<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: Same as Deref — exclusive access guaranteed by ticket
-        // spinlock + IRQ masking.
-        unsafe { &mut *self.lock.data.get() }
-    }
-}
-
-impl<T> IrqMutex<T> {
     pub fn lock(&self) -> IrqGuard<'_, T> {
         let saved_daif: u64;
 
@@ -91,15 +71,51 @@ impl<T> IrqMutex<T> {
             saved_daif,
         }
     }
-    pub const fn new(val: T) -> Self {
-        Self {
-            next_ticket: AtomicU32::new(0),
-            now_serving: AtomicU32::new(0),
-            data: UnsafeCell::new(val),
-        }
-    }
 }
+
 // SAFETY: IrqMutex provides mutual exclusion via ticket spinlock (multi-core
 // safe) with IRQ masking (prevents interrupt-time reentry). Only one execution
 // context can hold the guard at a time.
 unsafe impl<T> Sync for IrqMutex<T> {}
+
+// ---------------------------------------------------------------------------
+// IrqGuard — RAII lock guard
+// ---------------------------------------------------------------------------
+
+pub struct IrqGuard<'a, T> {
+    lock: &'a IrqMutex<T>,
+    saved_daif: u64,
+}
+
+impl<T> Drop for IrqGuard<'_, T> {
+    fn drop(&mut self) {
+        // Release the spinlock, then restore IRQ state.
+        self.lock.now_serving.fetch_add(1, Ordering::Release);
+
+        // SAFETY: Restoring DAIF to a value previously read from this register
+        // is always valid at EL1. `nostack` is correct (no stack manipulation).
+        // No `nomem` — the compiler must not reorder memory accesses past this
+        // IRQ state restoration (Fix 6).
+        unsafe {
+            core::arch::asm!("msr daif, {}", in(reg) self.saved_daif, options(nostack));
+        }
+    }
+}
+
+impl<T> Deref for IrqGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: Guard existence guarantees exclusive access (ticket spinlock
+        // + IRQ masking).
+        unsafe { &*self.lock.data.get() }
+    }
+}
+
+impl<T> DerefMut for IrqGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: Same as Deref — exclusive access guaranteed by ticket
+        // spinlock + IRQ masking.
+        unsafe { &mut *self.lock.data.get() }
+    }
+}

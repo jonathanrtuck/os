@@ -11,17 +11,19 @@
 //! process share these resources. A process is alive while any of its
 //! threads are alive. Last thread exit triggers full cleanup.
 
-use super::address_space::{AddressSpace, PageAttrs};
-use super::address_space_id;
-use super::executable;
-use super::handle::HandleTable;
-use super::memory;
-use super::memory_region::{Backing, Vma};
-use super::page_allocator;
-use super::paging::{PAGE_SIZE, USER_STACK_TOP, USER_STACK_VA};
-use super::scheduler;
-use super::thread::ThreadId;
 use alloc::boxed::Box;
+
+use super::{
+    address_space::{AddressSpace, PageAttrs},
+    address_space_id, executable,
+    handle::HandleTable,
+    memory,
+    memory_region::{Backing, Vma},
+    page_allocator,
+    paging::{PAGE_SIZE, USER_STACK_TOP, USER_STACK_VA},
+    scheduler,
+    thread::ThreadId,
+};
 
 /// A process — owns an address space and handle table shared by all its threads.
 pub struct Process {

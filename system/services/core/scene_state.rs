@@ -5,6 +5,7 @@
 //! The compositor reads the front buffer from the same shared memory region.
 
 use alloc::vec::Vec;
+
 use scene::{
     byte_to_line_col, layout_mono_lines, line_bytes_for_run, scroll_runs, Border, Color, Content,
     DataRef, DoubleWriter, NodeFlags, TextRun, DOUBLE_SCENE_SIZE, NULL,

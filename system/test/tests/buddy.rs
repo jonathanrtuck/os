@@ -44,8 +44,10 @@ mod memory {
 
 mod sync {
     //! Mock IrqMutex for host-side testing (no IRQ masking, no spinlock).
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
+    use core::{
+        cell::UnsafeCell,
+        ops::{Deref, DerefMut},
+    };
 
     pub struct IrqMutex<T> {
         data: UnsafeCell<T>,
@@ -303,7 +305,10 @@ fn pa_validation_on_free() {
     // --- Misaligned PAs (should be rejected) ---
     assert!(!is_valid_pa(RAM_START + 1), "off-by-1 is misaligned");
     assert!(!is_valid_pa(RAM_START + 0x800), "half-page is misaligned");
-    assert!(!is_valid_pa(RAM_START + 0xFFF), "one-below-page is misaligned");
+    assert!(
+        !is_valid_pa(RAM_START + 0xFFF),
+        "one-below-page is misaligned"
+    );
     assert!(!is_valid_pa(0x4000_0001), "1 byte into RAM, misaligned");
 
     // --- PA below RAM range (should be rejected) ---
@@ -314,7 +319,10 @@ fn pa_validation_on_free() {
     // --- PA above RAM range (should be rejected) ---
     assert!(!is_valid_pa(RAM_END), "RAM_END itself is out of range");
     assert!(!is_valid_pa(RAM_END + PAGE_SIZE), "one page past RAM_END");
-    assert!(!is_valid_pa(0xFFFF_FFFF_FFFF_F000), "high address, page-aligned");
+    assert!(
+        !is_valid_pa(0xFFFF_FFFF_FFFF_F000),
+        "high address, page-aligned"
+    );
 
     // --- Valid PAs (should be accepted) ---
     assert!(is_valid_pa(RAM_START), "RAM_START is valid");

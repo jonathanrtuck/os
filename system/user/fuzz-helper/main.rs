@@ -71,7 +71,9 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"H:04\n");
             for _ in 0..3 {
                 let stack = alloc_stack();
-                if stack == 0 { break; }
+                if stack == 0 {
+                    break;
+                }
                 let args_ptr = (stack - 8) as *mut u64;
                 unsafe { core::ptr::write_volatile(args_ptr, 0) };
                 let _ = sys::thread_create(thread_trampoline as u64, stack - 16);

@@ -6,11 +6,11 @@
 //! splits into OS service + compositor processes, the buffer becomes actual
 //! shared memory with zero structural change.
 
-use alloc::vec;
-use alloc::vec::Vec;
-use scene::{Border, Color, Content, DoubleWriter, Node, NodeFlags, TextRun, DOUBLE_SCENE_SIZE};
+use alloc::{vec, vec::Vec};
 
-use scene::NULL;
+use scene::{
+    Border, Color, Content, DoubleWriter, Node, NodeFlags, TextRun, DOUBLE_SCENE_SIZE, NULL,
+};
 
 /// Well-known node indices for direct mutation.
 pub const N_ROOT: u16 = 0;

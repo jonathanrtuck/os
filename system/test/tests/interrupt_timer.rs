@@ -347,10 +347,7 @@ enum GicOp {
 
 /// Mirrors the FIXED init_distributor: write CTLR=1, then DSB+ISB.
 fn init_distributor_fixed() -> Vec<GicOp> {
-    vec![
-        GicOp::Write("GICD_CTLR", 1),
-        GicOp::DsbIsb,
-    ]
+    vec![GicOp::Write("GICD_CTLR", 1), GicOp::DsbIsb]
 }
 
 /// Mirrors the FIXED init_cpu_interface: write PMR=0xFF, CTLR=1, then DSB+ISB.
@@ -369,10 +366,7 @@ fn init_distributor_buggy() -> Vec<GicOp> {
 
 /// Mirrors the BUGGY init_cpu_interface: write PMR=0xFF, CTLR=1, NO barrier.
 fn init_cpu_interface_buggy() -> Vec<GicOp> {
-    vec![
-        GicOp::Write("GICC_PMR", 0xFF),
-        GicOp::Write("GICC_CTLR", 1),
-    ]
+    vec![GicOp::Write("GICC_PMR", 0xFF), GicOp::Write("GICC_CTLR", 1)]
 }
 
 /// Check that the last operation in a GIC init sequence is a barrier.

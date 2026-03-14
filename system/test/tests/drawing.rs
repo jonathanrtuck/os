@@ -2157,8 +2157,7 @@ fn subpixel_fir_filter_reduces_fringing() {
 // Stem darkening — non-linear coverage boost for thin strokes
 // ---------------------------------------------------------------------------
 
-use drawing::STEM_DARKENING_BOOST;
-use drawing::STEM_DARKENING_LUT;
+use drawing::{STEM_DARKENING_BOOST, STEM_DARKENING_LUT};
 
 #[test]
 fn stem_darkening_lut_zero_stays_zero() {
@@ -3653,7 +3652,11 @@ fn png_decode_test_image_from_file() {
         let scanline_bytes = 1 + hdr.width as usize * channels;
         let raw_size = scanline_bytes * hdr.height as usize;
         let out_size = (hdr.width * hdr.height * 4) as usize;
-        let buf_size = if raw_size > out_size { raw_size } else { out_size };
+        let buf_size = if raw_size > out_size {
+            raw_size
+        } else {
+            out_size
+        };
         let mut output = vec![0u8; buf_size];
         let result = png_decode(&data, &mut output);
         assert!(
@@ -3817,7 +3820,11 @@ fn png_decode_to_surface_correct_colors() {
         let scanline_bytes = 1 + hdr.width as usize * channels;
         let raw_size = scanline_bytes * hdr.height as usize;
         let out_size = (hdr.width * hdr.height * 4) as usize;
-        let buf_size = if raw_size > out_size { raw_size } else { out_size };
+        let buf_size = if raw_size > out_size {
+            raw_size
+        } else {
+            out_size
+        };
         let mut output = vec![0u8; buf_size];
         let _ = png_decode(&data, &mut output).unwrap();
 
@@ -3843,10 +3850,7 @@ fn png_decode_to_surface_correct_colors() {
         let cy = hdr.height / 2;
         let center = (cy as usize * hdr.width as usize + cx as usize) * 4;
         let px_center_r = output[center + 2];
-        assert_ne!(
-            px00_r, px_center_r,
-            "corner and center should differ"
-        );
+        assert_ne!(px00_r, px_center_r, "corner and center should differ");
     }
 }
 

@@ -295,10 +295,7 @@ impl WaitableRegistry {
     }
 
     fn exists(&self, idx: usize) -> bool {
-        self.entries
-            .get(idx)
-            .and_then(|s| s.as_ref())
-            .is_some()
+        self.entries.get(idx).and_then(|s| s.as_ref()).is_some()
     }
 }
 
@@ -420,8 +417,12 @@ fn channel_lifecycle_create_close_cleanup() {
     let ep_b = ChannelId(1);
 
     // Create: insert both handles
-    let h_a = table.insert(HandleObject::Channel(ep_a), Rights::READ_WRITE).unwrap();
-    let h_b = table.insert(HandleObject::Channel(ep_b), Rights::READ_WRITE).unwrap();
+    let h_a = table
+        .insert(HandleObject::Channel(ep_a), Rights::READ_WRITE)
+        .unwrap();
+    let h_b = table
+        .insert(HandleObject::Channel(ep_b), Rights::READ_WRITE)
+        .unwrap();
     assert_eq!(table.count(), 2);
 
     // Close ep_a handle
@@ -452,8 +453,12 @@ fn channel_lifecycle_transfer_then_close() {
     let ep_b = ChannelId(1);
 
     // Source creates channel, gets both endpoints
-    let h_a = source_table.insert(HandleObject::Channel(ep_a), Rights::READ_WRITE).unwrap();
-    let h_b = source_table.insert(HandleObject::Channel(ep_b), Rights::READ_WRITE).unwrap();
+    let h_a = source_table
+        .insert(HandleObject::Channel(ep_a), Rights::READ_WRITE)
+        .unwrap();
+    let h_b = source_table
+        .insert(HandleObject::Channel(ep_b), Rights::READ_WRITE)
+        .unwrap();
 
     // Transfer ep_b to target (move semantics: close from source, insert into target)
     let (obj_b, rights_b) = source_table.close(h_b).unwrap();
@@ -485,7 +490,9 @@ fn channel_lifecycle_process_exit_drain() {
     let mut table = HandleTable::new();
     let ep_a = ChannelId(0);
 
-    table.insert(HandleObject::Channel(ep_a), Rights::READ_WRITE).unwrap();
+    table
+        .insert(HandleObject::Channel(ep_a), Rights::READ_WRITE)
+        .unwrap();
 
     // Process exits — drain all handles
     let drained = table.drain();
@@ -528,7 +535,9 @@ fn timer_lifecycle_create_close_cleanup() {
     let mut table = HandleTable::new();
 
     let timer_id = timers.create(1000).unwrap();
-    let h = table.insert(HandleObject::Timer(timer_id), Rights::READ).unwrap();
+    let h = table
+        .insert(HandleObject::Timer(timer_id), Rights::READ)
+        .unwrap();
 
     assert!(timers.is_allocated(timer_id));
     assert_eq!(table.count(), 1);
@@ -574,7 +583,9 @@ fn timer_create_rollback_on_handle_table_full() {
 
     // Fill table
     for i in 0..256u32 {
-        table.insert(HandleObject::Channel(ChannelId(i)), Rights::READ).unwrap();
+        table
+            .insert(HandleObject::Channel(ChannelId(i)), Rights::READ)
+            .unwrap();
     }
 
     let timer_id = timers.create(500).unwrap();
@@ -586,7 +597,10 @@ fn timer_create_rollback_on_handle_table_full() {
 
     // Rollback: destroy the timer
     timers.destroy(timer_id);
-    assert!(!timers.is_allocated(timer_id), "timer cleaned up on rollback");
+    assert!(
+        !timers.is_allocated(timer_id),
+        "timer cleaned up on rollback"
+    );
 }
 
 // ============================================================
@@ -600,7 +614,9 @@ fn interrupt_lifecycle_create_close_cleanup() {
     let mut table = HandleTable::new();
 
     let int_id = ints.register(47).unwrap();
-    let h = table.insert(HandleObject::Interrupt(int_id), Rights::READ_WRITE).unwrap();
+    let h = table
+        .insert(HandleObject::Interrupt(int_id), Rights::READ_WRITE)
+        .unwrap();
 
     assert!(ints.is_registered(int_id));
 
@@ -620,8 +636,12 @@ fn interrupt_lifecycle_process_exit_drain() {
 
     let i1 = ints.register(30).unwrap();
     let i2 = ints.register(31).unwrap();
-    table.insert(HandleObject::Interrupt(i1), Rights::READ_WRITE).unwrap();
-    table.insert(HandleObject::Interrupt(i2), Rights::READ_WRITE).unwrap();
+    table
+        .insert(HandleObject::Interrupt(i1), Rights::READ_WRITE)
+        .unwrap();
+    table
+        .insert(HandleObject::Interrupt(i2), Rights::READ_WRITE)
+        .unwrap();
 
     let drained = table.drain();
     let cats = categorize_handles(drained);
@@ -641,7 +661,9 @@ fn interrupt_create_rollback_on_handle_table_full() {
     let mut table = HandleTable::new();
 
     for i in 0..256u32 {
-        table.insert(HandleObject::Channel(ChannelId(i)), Rights::READ).unwrap();
+        table
+            .insert(HandleObject::Channel(ChannelId(i)), Rights::READ)
+            .unwrap();
     }
 
     let int_id = ints.register(42).unwrap();
@@ -668,7 +690,9 @@ fn thread_lifecycle_create_close_cleanup() {
 
     // Thread created
     exit_reg.create(tid.0 as usize);
-    let h = table.insert(HandleObject::Thread(tid), Rights::READ).unwrap();
+    let h = table
+        .insert(HandleObject::Thread(tid), Rights::READ)
+        .unwrap();
 
     assert!(exit_reg.exists(tid.0 as usize));
 
@@ -688,7 +712,9 @@ fn thread_lifecycle_exit_then_handle_close() {
     let tid = ThreadId(10);
 
     exit_reg.create(tid.0 as usize);
-    let h = table.insert(HandleObject::Thread(tid), Rights::READ).unwrap();
+    let h = table
+        .insert(HandleObject::Thread(tid), Rights::READ)
+        .unwrap();
 
     // Thread exits — notify
     let waiter = exit_reg.notify(tid.0 as usize);
@@ -713,8 +739,12 @@ fn thread_lifecycle_process_exit_drain() {
 
     exit_reg.create(tid1.0 as usize);
     exit_reg.create(tid2.0 as usize);
-    table.insert(HandleObject::Thread(tid1), Rights::READ).unwrap();
-    table.insert(HandleObject::Thread(tid2), Rights::READ).unwrap();
+    table
+        .insert(HandleObject::Thread(tid1), Rights::READ)
+        .unwrap();
+    table
+        .insert(HandleObject::Thread(tid2), Rights::READ)
+        .unwrap();
 
     let drained = table.drain();
     let cats = categorize_handles(drained);
@@ -736,7 +766,9 @@ fn thread_handle_create_rollback_on_table_full() {
     let tid = ThreadId(99);
 
     for i in 0..256u32 {
-        table.insert(HandleObject::Channel(ChannelId(i)), Rights::READ).unwrap();
+        table
+            .insert(HandleObject::Channel(ChannelId(i)), Rights::READ)
+            .unwrap();
     }
 
     exit_reg.create(tid.0 as usize);
@@ -762,7 +794,9 @@ fn process_lifecycle_create_close_cleanup() {
     let pid = ProcessId(3);
 
     exit_reg.create(pid.0 as usize);
-    let h = table.insert(HandleObject::Process(pid), Rights::READ_WRITE).unwrap();
+    let h = table
+        .insert(HandleObject::Process(pid), Rights::READ_WRITE)
+        .unwrap();
 
     assert!(exit_reg.exists(pid.0 as usize));
 
@@ -782,7 +816,9 @@ fn process_lifecycle_exit_then_handle_close() {
     let pid = ProcessId(7);
 
     exit_reg.create(pid.0 as usize);
-    let h = table.insert(HandleObject::Process(pid), Rights::READ_WRITE).unwrap();
+    let h = table
+        .insert(HandleObject::Process(pid), Rights::READ_WRITE)
+        .unwrap();
 
     // Process's last thread exits
     let waiter = exit_reg.notify(pid.0 as usize);
@@ -805,7 +841,9 @@ fn process_lifecycle_process_exit_drain() {
     let child_pid = ProcessId(5);
 
     exit_reg.create(child_pid.0 as usize);
-    table.insert(HandleObject::Process(child_pid), Rights::READ_WRITE).unwrap();
+    table
+        .insert(HandleObject::Process(child_pid), Rights::READ_WRITE)
+        .unwrap();
 
     let drained = table.drain();
     let cats = categorize_handles(drained);
@@ -831,11 +869,16 @@ fn sched_ctx_lifecycle_create_close_cleanup() {
     let ctx_id = ctx_table.create(1_000_000, 10_000_000);
     assert_eq!(ctx_table.ref_count(ctx_id), 1);
 
-    let h = table.insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE).unwrap();
+    let h = table
+        .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
+        .unwrap();
 
     // Close handle → release
     let (obj, _) = table.close(h).unwrap();
-    assert!(matches!(obj, HandleObject::SchedulingContext(SchedulingContextId(0))));
+    assert!(matches!(
+        obj,
+        HandleObject::SchedulingContext(SchedulingContextId(0))
+    ));
     ctx_table.release(ctx_id);
 
     assert_eq!(ctx_table.ref_count(ctx_id), 0);
@@ -849,7 +892,9 @@ fn sched_ctx_lifecycle_bind_then_close() {
     let mut table = HandleTable::new();
 
     let ctx_id = ctx_table.create(1_000_000, 10_000_000);
-    let h = table.insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE).unwrap();
+    let h = table
+        .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
+        .unwrap();
 
     // Bind increments ref_count
     ctx_table.increment_ref(ctx_id);
@@ -860,7 +905,10 @@ fn sched_ctx_lifecycle_bind_then_close() {
     assert!(matches!(obj, HandleObject::SchedulingContext(_)));
     ctx_table.release(ctx_id);
     assert_eq!(ctx_table.ref_count(ctx_id), 1);
-    assert!(ctx_table.is_allocated(ctx_id), "still alive — bound thread holds ref");
+    assert!(
+        ctx_table.is_allocated(ctx_id),
+        "still alive — bound thread holds ref"
+    );
 
     // Thread exits → release (ref=0)
     ctx_table.release(ctx_id);
@@ -905,7 +953,9 @@ fn sched_ctx_lifecycle_create_rollback_on_handle_table_full() {
     let mut table = HandleTable::new();
 
     for i in 0..256u32 {
-        table.insert(HandleObject::Channel(ChannelId(i)), Rights::READ).unwrap();
+        table
+            .insert(HandleObject::Channel(ChannelId(i)), Rights::READ)
+            .unwrap();
     }
 
     let ctx_id = ctx_table.create(1_000_000, 10_000_000);
@@ -927,8 +977,12 @@ fn sched_ctx_lifecycle_process_exit_drain() {
 
     let ctx1 = ctx_table.create(1_000_000, 10_000_000);
     let ctx2 = ctx_table.create(2_000_000, 20_000_000);
-    table.insert(HandleObject::SchedulingContext(ctx1), Rights::READ_WRITE).unwrap();
-    table.insert(HandleObject::SchedulingContext(ctx2), Rights::READ_WRITE).unwrap();
+    table
+        .insert(HandleObject::SchedulingContext(ctx1), Rights::READ_WRITE)
+        .unwrap();
+    table
+        .insert(HandleObject::SchedulingContext(ctx2), Rights::READ_WRITE)
+        .unwrap();
 
     let drained = table.drain();
     let cats = categorize_handles(drained);
@@ -953,15 +1007,25 @@ fn sched_ctx_lifecycle_transfer_preserves_refcount() {
     let ctx_id = ctx_table.create(1_000_000, 10_000_000);
     assert_eq!(ctx_table.ref_count(ctx_id), 1);
 
-    let h = source.insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE).unwrap();
+    let h = source
+        .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
+        .unwrap();
 
     // Move: close from source
     let (obj, rights) = source.close(h).unwrap();
-    assert_eq!(ctx_table.ref_count(ctx_id), 1, "ref_count unchanged by move");
+    assert_eq!(
+        ctx_table.ref_count(ctx_id),
+        1,
+        "ref_count unchanged by move"
+    );
 
     // Insert into target
     target.insert(obj, rights).unwrap();
-    assert_eq!(ctx_table.ref_count(ctx_id), 1, "ref_count still 1 — same logical reference");
+    assert_eq!(
+        ctx_table.ref_count(ctx_id),
+        1,
+        "ref_count still 1 — same logical reference"
+    );
 
     // Target closes
     let (obj2, _) = target.close(0).unwrap();
@@ -1000,12 +1064,27 @@ fn process_exit_drains_all_handle_types() {
     // Process holds one handle of each type — drain categorizes and cleans all
     let mut table = HandleTable::new();
 
-    table.insert(HandleObject::Channel(ChannelId(0)), Rights::READ_WRITE).unwrap();
-    table.insert(HandleObject::Timer(TimerId(0)), Rights::READ).unwrap();
-    table.insert(HandleObject::Interrupt(InterruptId(0)), Rights::READ_WRITE).unwrap();
-    table.insert(HandleObject::Thread(ThreadId(1)), Rights::READ).unwrap();
-    table.insert(HandleObject::Process(ProcessId(2)), Rights::READ_WRITE).unwrap();
-    table.insert(HandleObject::SchedulingContext(SchedulingContextId(0)), Rights::READ_WRITE).unwrap();
+    table
+        .insert(HandleObject::Channel(ChannelId(0)), Rights::READ_WRITE)
+        .unwrap();
+    table
+        .insert(HandleObject::Timer(TimerId(0)), Rights::READ)
+        .unwrap();
+    table
+        .insert(HandleObject::Interrupt(InterruptId(0)), Rights::READ_WRITE)
+        .unwrap();
+    table
+        .insert(HandleObject::Thread(ThreadId(1)), Rights::READ)
+        .unwrap();
+    table
+        .insert(HandleObject::Process(ProcessId(2)), Rights::READ_WRITE)
+        .unwrap();
+    table
+        .insert(
+            HandleObject::SchedulingContext(SchedulingContextId(0)),
+            Rights::READ_WRITE,
+        )
+        .unwrap();
 
     let drained = table.drain();
     assert_eq!(drained.len(), 6);
@@ -1029,10 +1108,14 @@ fn handle_send_rollback_restores_source() {
 
     // Fill target
     for i in 0..256u32 {
-        target.insert(HandleObject::Channel(ChannelId(i + 100)), Rights::READ).unwrap();
+        target
+            .insert(HandleObject::Channel(ChannelId(i + 100)), Rights::READ)
+            .unwrap();
     }
 
-    let h = source.insert(HandleObject::Timer(TimerId(5)), Rights::READ).unwrap();
+    let h = source
+        .insert(HandleObject::Timer(TimerId(5)), Rights::READ)
+        .unwrap();
 
     // Phase 1: move from source
     let (obj, rights) = source.close(h).unwrap();

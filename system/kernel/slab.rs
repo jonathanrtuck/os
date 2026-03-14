@@ -15,10 +15,7 @@
 //! Used by the heap allocator for small allocations (≤2048 bytes). Larger
 //! allocations fall through to the linked-list allocator.
 
-use super::memory;
-use super::page_allocator;
-use super::paging;
-use super::sync::IrqMutex;
+use super::{memory, page_allocator, paging, sync::IrqMutex};
 
 /// Number of size classes: 64, 128, 256, 512, 1024, 2048 bytes.
 const NUM_CLASSES: usize = 6;

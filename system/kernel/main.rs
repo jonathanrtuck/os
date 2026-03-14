@@ -65,8 +65,9 @@
 
 extern crate alloc;
 
-use context::Context;
 use core::panic::PanicInfo;
+
+use context::Context;
 
 core::arch::global_asm!(include_str!("boot.S"));
 core::arch::global_asm!(include_str!("exception.S"));

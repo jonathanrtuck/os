@@ -64,8 +64,10 @@ mod slab {
 }
 
 mod sync {
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
+    use core::{
+        cell::UnsafeCell,
+        ops::{Deref, DerefMut},
+    };
 
     pub struct IrqMutex<T> {
         data: UnsafeCell<T>,

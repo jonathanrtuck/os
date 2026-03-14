@@ -30,9 +30,9 @@
 // wake_pending flag is sound. swap_remove in wake loop correctly handles index
 // management. Thread cleanup (remove_thread) scans all 64 buckets. No bugs found.
 
-use super::sync::IrqMutex;
-use super::thread::ThreadId;
 use alloc::vec::Vec;
+
+use super::{sync::IrqMutex, thread::ThreadId};
 
 const BUCKET_COUNT: usize = 64;
 

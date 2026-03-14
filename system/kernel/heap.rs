@@ -34,11 +34,12 @@
 //! routing: pointers within the linked-list heap region always go back to
 //! the linked-list, preventing cross-allocator contamination.
 
-use super::paging;
-use super::slab;
-use super::sync::IrqMutex;
-use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    cell::UnsafeCell,
+};
+
+use super::{paging, slab, sync::IrqMutex};
 
 const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
 

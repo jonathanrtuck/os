@@ -49,11 +49,13 @@ use protocol::compose::{
     CompositorConfig, IconConfig, ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG,
     MSG_IMAGE_CONFIG, MSG_IMG_ICON_CONFIG, MSG_RTC_CONFIG,
 };
-use protocol::core_config::{CoreConfig, MSG_CORE_CONFIG};
-use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
-use protocol::editor::{EditorConfig, MSG_EDITOR_CONFIG};
-use protocol::fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE};
-use protocol::gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY};
+use protocol::{
+    core_config::{CoreConfig, MSG_CORE_CONFIG},
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    editor::{EditorConfig, MSG_EDITOR_CONFIG},
+    fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
+    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+};
 
 /// Bytes per pixel (BGRA8888).
 const FB_BPP: u32 = 4;

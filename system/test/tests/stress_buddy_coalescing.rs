@@ -55,8 +55,10 @@ mod memory {
 }
 
 mod sync {
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
+    use core::{
+        cell::UnsafeCell,
+        ops::{Deref, DerefMut},
+    };
 
     pub struct IrqMutex<T> {
         data: UnsafeCell<T>,
@@ -227,7 +229,10 @@ fn stress_buddy_coalescing_all_merge_paths() {
         );
 
         let big = page_allocator::alloc_frames(11);
-        assert!(big.is_some(), "s2: should yield order-11 block after reverse free");
+        assert!(
+            big.is_some(),
+            "s2: should yield order-11 block after reverse free"
+        );
         page_allocator::free_frames(big.unwrap(), 11);
     }
 
@@ -258,7 +263,10 @@ fn stress_buddy_coalescing_all_merge_paths() {
         );
 
         let big = page_allocator::alloc_frames(11);
-        assert!(big.is_some(), "s3: should yield order-11 block after random free");
+        assert!(
+            big.is_some(),
+            "s3: should yield order-11 block after random free"
+        );
         page_allocator::free_frames(big.unwrap(), 11);
     }
 
@@ -340,7 +348,10 @@ fn stress_buddy_coalescing_all_merge_paths() {
         );
 
         let big = page_allocator::alloc_frames(11);
-        assert!(big.is_some(), "s6: should yield order-11 after full coalesce");
+        assert!(
+            big.is_some(),
+            "s6: should yield order-11 after full coalesce"
+        );
         page_allocator::free_frames(big.unwrap(), 11);
     }
 
@@ -466,7 +477,10 @@ fn stress_buddy_coalescing_all_merge_paths() {
 
         // Large allocation should fail in checkerboard state.
         let big = page_allocator::alloc_frames(8);
-        assert!(big.is_none(), "s9: order-8 should fail with checkerboard fragmentation");
+        assert!(
+            big.is_none(),
+            "s9: order-8 should fail with checkerboard fragmentation"
+        );
 
         // Re-alloc the even pages we freed (to restore the fully-allocated state)
         // and then free ALL pages for clean coalescing.
@@ -491,7 +505,10 @@ fn stress_buddy_coalescing_all_merge_paths() {
         );
 
         let big2 = page_allocator::alloc_frames(11);
-        assert!(big2.is_some(), "s9: full coalescing should enable order-11 alloc");
+        assert!(
+            big2.is_some(),
+            "s9: full coalescing should enable order-11 alloc"
+        );
         page_allocator::free_frames(big2.unwrap(), 11);
     }
 
@@ -514,8 +531,18 @@ fn stress_buddy_coalescing_all_merge_paths() {
                 }
             }
 
-            assert_eq!(page_allocator::free_count(), 0, "s10 cycle {}: all allocated", cycle);
-            assert_eq!(pages.len(), buddy_pages, "s10 cycle {}: got all pages", cycle);
+            assert_eq!(
+                page_allocator::free_count(),
+                0,
+                "s10 cycle {}: all allocated",
+                cycle
+            );
+            assert_eq!(
+                pages.len(),
+                buddy_pages,
+                "s10 cycle {}: got all pages",
+                cycle
+            );
 
             rng.shuffle(&mut pages);
             for pa in &pages {
@@ -561,7 +588,11 @@ fn stress_buddy_coalescing_all_merge_paths() {
                 }
             }
 
-            assert!(!blocks.is_empty(), "s11 cycle {}: should allocate blocks", cycle);
+            assert!(
+                !blocks.is_empty(),
+                "s11 cycle {}: should allocate blocks",
+                cycle
+            );
 
             rng.shuffle(&mut blocks);
             for (pa, order) in &blocks {
@@ -634,7 +665,8 @@ fn stress_buddy_coalescing_all_merge_paths() {
                 assert!(
                     slice.iter().all(|&b| b == 0xAB),
                     "s13: corruption in order-{} block at PA 0x{:x}",
-                    order, pa.0
+                    order,
+                    pa.0
                 );
                 page_allocator::free_frames(pa, order);
             }
@@ -684,7 +716,10 @@ fn stress_buddy_coalescing_all_merge_paths() {
 
         // Large alloc should fail in fragmented state.
         let big = page_allocator::alloc_frames(2);
-        assert!(big.is_none(), "s14: order-2 should fail with every-4th fragmentation");
+        assert!(
+            big.is_none(),
+            "s14: order-2 should fail with every-4th fragmentation"
+        );
 
         // Free all remaining.
         for pa in &kept {
@@ -698,7 +733,10 @@ fn stress_buddy_coalescing_all_merge_paths() {
         );
 
         let big2 = page_allocator::alloc_frames(10);
-        assert!(big2.is_some(), "s14: full coalescing should enable order-10 alloc");
+        assert!(
+            big2.is_some(),
+            "s14: full coalescing should enable order-10 alloc"
+        );
         page_allocator::free_frames(big2.unwrap(), 10);
     }
 
@@ -725,7 +763,8 @@ fn stress_buddy_coalescing_all_merge_paths() {
                 assert!(
                     slice.iter().all(|&b| b == 0xCC),
                     "s15 op {}: corruption at PA 0x{:x}",
-                    op, pa.0
+                    op,
+                    pa.0
                 );
                 page_allocator::free_frame(pa);
             }
@@ -742,7 +781,10 @@ fn stress_buddy_coalescing_all_merge_paths() {
         );
 
         let big = page_allocator::alloc_frames(11);
-        assert!(big.is_some(), "s15: should yield order-11 after rapid cycle");
+        assert!(
+            big.is_some(),
+            "s15: should yield order-11 after rapid cycle"
+        );
         page_allocator::free_frames(big.unwrap(), 11);
     }
 

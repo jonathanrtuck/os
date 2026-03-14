@@ -250,7 +250,11 @@ fn stress_sched_ctx_concurrent_bind_close_exit() {
 
         for (exit_order, &idx) in indices.iter().enumerate() {
             let t = &mut threads[idx];
-            assert!(!t.exited, "round {} thread {}: should not be already exited", round, idx);
+            assert!(
+                !t.exited,
+                "round {} thread {}: should not be already exited",
+                round, idx
+            );
 
             // release_thread_context_ids: dec ref for context_id.
             if let Some(cid) = t.context_id.take() {
@@ -354,7 +358,12 @@ fn stress_sched_ctx_threads_exit_before_handle_close() {
 
         // Now close the handle — this should free the context.
         let rc = table.dec_ref(ctx_id);
-        assert_eq!(rc, Some(0), "round {}: handle close should free context", round);
+        assert_eq!(
+            rc,
+            Some(0),
+            "round {}: handle close should free context",
+            round
+        );
         assert!(!table.is_alive(ctx_id));
     }
 
@@ -423,7 +432,7 @@ fn stress_sched_ctx_borrow_return_concurrent() {
             let t = &mut threads[i];
             let borrowed = t.context_id;
             t.context_id = t.saved_context_id.take(); // restore A
-            // return: dec ref on borrowed (B).
+                                                      // return: dec ref on borrowed (B).
             if let Some(cid) = borrowed {
                 table.dec_ref(cid);
             }
@@ -442,8 +451,16 @@ fn stress_sched_ctx_borrow_return_concurrent() {
         table.dec_ref(ctx_a); // ctx_a: num_threads refs remain
         table.dec_ref(ctx_b); // ctx_b: 0 refs — freed
 
-        assert!(!table.is_alive(ctx_b), "round {}: ctx_b freed after handle close", round);
-        assert!(table.is_alive(ctx_a), "round {}: ctx_a alive (thread refs)", round);
+        assert!(
+            !table.is_alive(ctx_b),
+            "round {}: ctx_b freed after handle close",
+            round
+        );
+        assert!(
+            table.is_alive(ctx_a),
+            "round {}: ctx_a alive (thread refs)",
+            round
+        );
 
         // Exit all threads in random order.
         let mut indices: Vec<usize> = (0..threads.len()).collect();
@@ -460,7 +477,11 @@ fn stress_sched_ctx_borrow_return_concurrent() {
             t.exited = true;
         }
 
-        assert!(!table.is_alive(ctx_a), "round {}: ctx_a freed after all exits", round);
+        assert!(
+            !table.is_alive(ctx_a),
+            "round {}: ctx_a freed after all exits",
+            round
+        );
     }
 
     assert_eq!(table.live_count(), 0);

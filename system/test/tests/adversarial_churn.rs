@@ -293,7 +293,10 @@ impl ThreadTable {
 
     /// Exit a thread. Simulates thread cleanup.
     fn exit(&mut self, id: thread::ThreadId) -> Result<(), &'static str> {
-        let idx = self.threads.iter().position(|t| t.id == id)
+        let idx = self
+            .threads
+            .iter()
+            .position(|t| t.id == id)
             .ok_or("thread not found")?;
         let t = &mut self.threads[idx];
         match t.state {
@@ -410,7 +413,10 @@ fn churn_channel_create_close_100_cycles() {
     }
 
     // Final invariant: all pages freed.
-    assert_eq!(ct.live_pages, 0, "all pages should be freed after all cycles");
+    assert_eq!(
+        ct.live_pages, 0,
+        "all pages should be freed after all cycles"
+    );
 }
 
 /// Channel churn with close in reverse order (endpoint 1 first, then 0).
@@ -518,7 +524,9 @@ fn churn_timer_create_destroy_150_cycles() {
     for cycle in 0..150u64 {
         let baseline = tt.active_count();
 
-        let id = tt.create(cycle * 1000).expect("timer table should not be full");
+        let id = tt
+            .create(cycle * 1000)
+            .expect("timer table should not be full");
 
         assert_eq!(
             tt.active_count(),
@@ -547,8 +555,7 @@ fn churn_timer_fill_destroy_refill() {
         // Fill all 32 slots.
         let mut ids = Vec::new();
         for i in 0..MAX_TIMERS as u64 {
-            let id = tt.create(round * 1000 + i)
-                .expect("should allocate timer");
+            let id = tt.create(round * 1000 + i).expect("should allocate timer");
             ids.push(id);
         }
 
@@ -562,11 +569,7 @@ fn churn_timer_fill_destroy_refill() {
             tt.destroy(id);
         }
 
-        assert_eq!(
-            tt.active_count(),
-            0,
-            "round {round}: all timers freed"
-        );
+        assert_eq!(tt.active_count(), 0, "round {round}: all timers freed");
     }
 }
 
@@ -595,7 +598,11 @@ fn churn_timer_interleaved_create_destroy() {
         tt.destroy(id);
     }
 
-    assert_eq!(tt.active_count(), 0, "all timers freed after interleaved churn");
+    assert_eq!(
+        tt.active_count(),
+        0,
+        "all timers freed after interleaved churn"
+    );
 }
 
 /// Timer churn: create and destroy same slot repeatedly to test reuse.
@@ -637,8 +644,7 @@ fn churn_process_create_kill_150_cycles() {
         pt.kill(pid).expect("kill should succeed");
 
         assert_eq!(
-            pt.live_count,
-            baseline,
+            pt.live_count, baseline,
             "cycle {cycle}: process kill should decrement live count"
         );
     }
@@ -677,7 +683,8 @@ fn churn_process_create_kill_without_start_100_cycles() {
         let pid = pt.create();
 
         // Kill without starting.
-        pt.kill(pid).expect("kill of unstarted process should succeed");
+        pt.kill(pid)
+            .expect("kill of unstarted process should succeed");
 
         assert_eq!(
             pt.live_count, 0,
@@ -706,7 +713,10 @@ fn churn_process_batch_create_then_kill() {
         pt.kill(pid).unwrap();
     }
 
-    assert_eq!(pt.live_count, 0, "all processes cleaned up after batch kill");
+    assert_eq!(
+        pt.live_count, 0,
+        "all processes cleaned up after batch kill"
+    );
 }
 
 /// Process churn: double-kill returns error, doesn't corrupt state.
@@ -752,7 +762,10 @@ fn churn_process_interleaved_create_kill() {
         pt.kill(pid).unwrap();
     }
 
-    assert_eq!(pt.live_count, 0, "all processes cleaned up after interleaved churn");
+    assert_eq!(
+        pt.live_count, 0,
+        "all processes cleaned up after interleaved churn"
+    );
 }
 
 // ==========================================================================
@@ -779,8 +792,7 @@ fn churn_thread_create_exit_150_cycles() {
         tt.exit(tid).expect("exit should succeed");
 
         assert_eq!(
-            tt.live_count,
-            baseline,
+            tt.live_count, baseline,
             "cycle {cycle}: thread exit should decrement live count"
         );
     }
@@ -852,7 +864,10 @@ fn churn_thread_interleaved_create_exit() {
         tt.exit(tid).unwrap();
     }
 
-    assert_eq!(tt.live_count, 0, "all threads cleaned up after interleaved churn");
+    assert_eq!(
+        tt.live_count, 0,
+        "all threads cleaned up after interleaved churn"
+    );
 }
 
 /// Thread churn: many threads created simultaneously, exit in reverse order.
@@ -873,7 +888,10 @@ fn churn_thread_reverse_exit_order() {
         tt.exit(tid).unwrap();
     }
 
-    assert_eq!(tt.live_count, 0, "reverse-order exit should clean up all threads");
+    assert_eq!(
+        tt.live_count, 0,
+        "reverse-order exit should clean up all threads"
+    );
 }
 
 // ==========================================================================
@@ -902,8 +920,7 @@ fn churn_sched_ctx_create_release_150_cycles() {
         sct.release(id);
 
         assert_eq!(
-            sct.live_count,
-            baseline,
+            sct.live_count, baseline,
             "cycle {cycle}: release should decrement live count"
         );
     }
@@ -938,11 +955,7 @@ fn churn_sched_ctx_fill_release_refill() {
             sct.release(id);
         }
 
-        assert_eq!(
-            sct.live_count,
-            0,
-            "round {round}: all contexts freed"
-        );
+        assert_eq!(sct.live_count, 0, "round {round}: all contexts freed");
     }
 }
 
@@ -971,7 +984,10 @@ fn churn_sched_ctx_interleaved_create_release() {
         sct.release(id);
     }
 
-    assert_eq!(sct.live_count, 0, "all contexts freed after interleaved churn");
+    assert_eq!(
+        sct.live_count, 0,
+        "all contexts freed after interleaved churn"
+    );
 }
 
 /// Scheduling context churn: slot reuse after release.
@@ -982,10 +998,7 @@ fn churn_sched_ctx_slot_reuse_150_cycles() {
     for cycle in 0..150u32 {
         let id = sct.create(MIN_BUDGET_NS, MIN_PERIOD_NS).unwrap();
         // Should reuse slot 0 since we release immediately.
-        assert_eq!(
-            id.0, 0,
-            "cycle {cycle}: should reuse slot 0"
-        );
+        assert_eq!(id.0, 0, "cycle {cycle}: should reuse slot 0");
         sct.release(id);
     }
 
@@ -1001,7 +1014,7 @@ fn churn_sched_ctx_varying_params_100_cycles() {
         (MIN_BUDGET_NS, MIN_PERIOD_NS),
         (MIN_BUDGET_NS, MAX_PERIOD_NS),
         (MAX_PERIOD_NS, MAX_PERIOD_NS),
-        (500_000, 1_000_000),   // 500µs / 1ms
+        (500_000, 1_000_000),    // 500µs / 1ms
         (1_000_000, 10_000_000), // 1ms / 10ms
     ];
 
@@ -1012,7 +1025,10 @@ fn churn_sched_ctx_varying_params_100_cycles() {
         let entry = sct.slots[id.0 as usize].as_ref().unwrap();
         assert_eq!(entry.ctx.budget, budget, "cycle {cycle}: budget mismatch");
         assert_eq!(entry.ctx.period, period, "cycle {cycle}: period mismatch");
-        assert_eq!(entry.ctx.remaining, budget, "cycle {cycle}: remaining should equal budget");
+        assert_eq!(
+            entry.ctx.remaining, budget,
+            "cycle {cycle}: remaining should equal budget"
+        );
 
         sct.release(id);
     }
@@ -1048,10 +1064,7 @@ fn churn_handle_channel_insert_close_200_cycles() {
 
     for cycle in 0..200u32 {
         let h = t
-            .insert(
-                HandleObject::Channel(ChannelId(cycle)),
-                Rights::READ_WRITE,
-            )
+            .insert(HandleObject::Channel(ChannelId(cycle)), Rights::READ_WRITE)
             .expect("insert should succeed");
 
         // Verify we can access the handle.
@@ -1163,10 +1176,7 @@ fn churn_handle_interleaved_insert_close() {
 
     for cycle in 0..300u32 {
         // Insert.
-        if let Ok(h) = t.insert(
-            HandleObject::Channel(ChannelId(cycle)),
-            Rights::READ_WRITE,
-        ) {
+        if let Ok(h) = t.insert(HandleObject::Channel(ChannelId(cycle)), Rights::READ_WRITE) {
             live_handles.push(h);
         }
 
@@ -1231,11 +1241,17 @@ fn churn_combined_all_resources_100_cycles() {
         sched_ctxs.release(sc_id);
 
         // All back to baseline.
-        assert_eq!(channels.live_pages, 0, "cycle {cycle}: channel pages leaked");
+        assert_eq!(
+            channels.live_pages, 0,
+            "cycle {cycle}: channel pages leaked"
+        );
         assert_eq!(timers.active_count(), 0, "cycle {cycle}: timers leaked");
         assert_eq!(processes.live_count, 0, "cycle {cycle}: processes leaked");
         assert_eq!(threads.live_count, 0, "cycle {cycle}: threads leaked");
-        assert_eq!(sched_ctxs.live_count, 0, "cycle {cycle}: sched contexts leaked");
+        assert_eq!(
+            sched_ctxs.live_count, 0,
+            "cycle {cycle}: sched contexts leaked"
+        );
     }
 }
 
@@ -1314,12 +1330,22 @@ fn churn_handle_channel_full_lifecycle_100_cycles() {
         let (ep0, ep1) = ct.create();
 
         // Insert handles.
-        let h0 = ht.insert(HandleObject::Channel(ep0), Rights::READ_WRITE).unwrap();
-        let h1 = ht.insert(HandleObject::Channel(ep1), Rights::READ_WRITE).unwrap();
+        let h0 = ht
+            .insert(HandleObject::Channel(ep0), Rights::READ_WRITE)
+            .unwrap();
+        let h1 = ht
+            .insert(HandleObject::Channel(ep1), Rights::READ_WRITE)
+            .unwrap();
 
         // Verify handles are valid.
-        assert!(matches!(ht.get(h0, Rights::READ), Ok(HandleObject::Channel(_))));
-        assert!(matches!(ht.get(h1, Rights::READ), Ok(HandleObject::Channel(_))));
+        assert!(matches!(
+            ht.get(h0, Rights::READ),
+            Ok(HandleObject::Channel(_))
+        ));
+        assert!(matches!(
+            ht.get(h1, Rights::READ),
+            Ok(HandleObject::Channel(_))
+        ));
 
         // Close handles (returns the ChannelId for cleanup).
         let (obj0, _) = ht.close(h0).unwrap();
@@ -1337,9 +1363,18 @@ fn churn_handle_channel_full_lifecycle_100_cycles() {
         ct.close_endpoint(id1);
 
         // Verify resources returned to baseline.
-        assert_eq!(ct.live_pages, 0, "cycle {cycle}: channel pages should be freed");
-        assert!(matches!(ht.get(h0, Rights::READ), Err(HandleError::InvalidHandle)));
-        assert!(matches!(ht.get(h1, Rights::READ), Err(HandleError::InvalidHandle)));
+        assert_eq!(
+            ct.live_pages, 0,
+            "cycle {cycle}: channel pages should be freed"
+        );
+        assert!(matches!(
+            ht.get(h0, Rights::READ),
+            Err(HandleError::InvalidHandle)
+        ));
+        assert!(matches!(
+            ht.get(h1, Rights::READ),
+            Err(HandleError::InvalidHandle)
+        ));
     }
 }
 
@@ -1354,13 +1389,15 @@ fn churn_handle_timer_full_lifecycle_100_cycles() {
         let timer_id = tt.create(cycle * 1000).unwrap();
 
         // Insert handle.
-        let h = ht.insert(
-            HandleObject::Timer(timer_id),
-            Rights::READ_WRITE,
-        ).unwrap();
+        let h = ht
+            .insert(HandleObject::Timer(timer_id), Rights::READ_WRITE)
+            .unwrap();
 
         // Verify handle.
-        assert!(matches!(ht.get(h, Rights::READ), Ok(HandleObject::Timer(_))));
+        assert!(matches!(
+            ht.get(h, Rights::READ),
+            Ok(HandleObject::Timer(_))
+        ));
 
         // Close handle → destroy timer.
         let (obj, _) = ht.close(h).unwrap();
@@ -1386,10 +1423,9 @@ fn churn_handle_sched_ctx_full_lifecycle_100_cycles() {
         let sc_id = sct.create(MIN_BUDGET_NS, MIN_PERIOD_NS).unwrap();
 
         // Insert handle.
-        let h = ht.insert(
-            HandleObject::SchedulingContext(sc_id),
-            Rights::READ_WRITE,
-        ).unwrap();
+        let h = ht
+            .insert(HandleObject::SchedulingContext(sc_id), Rights::READ_WRITE)
+            .unwrap();
 
         // Verify handle.
         assert!(matches!(
@@ -1406,6 +1442,9 @@ fn churn_handle_sched_ctx_full_lifecycle_100_cycles() {
         sct.release(id);
 
         // Verify baseline.
-        assert_eq!(sct.live_count, 0, "cycle {cycle}: sched context should be freed");
+        assert_eq!(
+            sct.live_count, 0,
+            "cycle {cycle}: sched context should be freed"
+        );
     }
 }

@@ -35,8 +35,12 @@
 #![no_std]
 #![no_main]
 
-use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
-use protocol::input::{KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON};
+use protocol::{
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    input::{
+        KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
+    },
+};
 
 /// Linux evdev event type for key press/release.
 const EV_KEY: u16 = 1;

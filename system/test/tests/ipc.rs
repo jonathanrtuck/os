@@ -298,9 +298,7 @@ fn channel_send_recv_endpoint_0() {
     let mut page0 = alloc_page();
     let mut page1 = alloc_page();
 
-    let ch = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0)
-    };
+    let ch = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0) };
     ch.init();
 
     // Endpoint 0 sends on page0, recvs on page1.
@@ -323,9 +321,7 @@ fn channel_send_recv_endpoint_1() {
     let mut page0 = alloc_page();
     let mut page1 = alloc_page();
 
-    let ch = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1)
-    };
+    let ch = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1) };
     ch.init();
 
     // Endpoint 1 sends on page1, recvs on page0.
@@ -348,14 +344,10 @@ fn channel_bidirectional_pair() {
     let mut page1 = alloc_page();
 
     // Both endpoints share the same physical pages.
-    let ep0 = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0)
-    };
+    let ep0 = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0) };
     ep0.init();
 
-    let ep1 = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1)
-    };
+    let ep1 = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1) };
     // ep1 does NOT call init — ep0 already initialized both pages.
 
     // ep0 sends → ep1 receives.
@@ -399,9 +391,7 @@ fn channel_config_as_first_message() {
     let mut page1 = alloc_page();
 
     // Init side (endpoint 0).
-    let init_ch = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0)
-    };
+    let init_ch = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0) };
     init_ch.init();
 
     use protocol::gpu::GpuConfig;
@@ -422,9 +412,7 @@ fn channel_config_as_first_message() {
     assert!(init_ch.send(&msg));
 
     // Child side (endpoint 1) — reads config as first message.
-    let child_ch = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1)
-    };
+    let child_ch = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1) };
 
     let mut out = Message::new(0);
     assert!(child_ch.try_recv(&mut out));

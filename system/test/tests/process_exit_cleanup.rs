@@ -121,7 +121,9 @@ struct HandleTable {
 
 impl HandleTable {
     fn new() -> Self {
-        Self { entries: vec![None; 256] }
+        Self {
+            entries: vec![None; 256],
+        }
     }
 
     fn insert(&mut self, obj: HandleObject) -> Option<u8> {
@@ -216,11 +218,7 @@ fn kill_leaks_timeout_timer_from_blocked_wait() {
     if let Some(tid) = leaked_timer {
         timer_table.destroy(tid);
     }
-    assert_eq!(
-        timer_table.active_count(),
-        0,
-        "FIXED: timer slot reclaimed"
-    );
+    assert_eq!(timer_table.active_count(), 0, "FIXED: timer slot reclaimed");
 }
 
 #[test]
@@ -240,8 +238,7 @@ fn kill_leaks_timeout_timers_from_multiple_threads() {
     assert_eq!(timer_table.active_count(), 5, "5 timers active");
 
     // Kill all threads without cleanup (current bug).
-    let leaked_timers: Vec<Option<TimerId>> =
-        threads.iter().map(|t| t.timeout_timer).collect();
+    let leaked_timers: Vec<Option<TimerId>> = threads.iter().map(|t| t.timeout_timer).collect();
 
     assert_eq!(
         leaked_timers.iter().filter(|t| t.is_some()).count(),
@@ -318,10 +315,14 @@ fn normal_exit_last_thread_cleanup_sequence() {
     // Add handles of every type.
     process.handles.insert(HandleObject::Channel(ChannelId(0)));
     process.handles.insert(HandleObject::Timer(TimerId(1)));
-    process.handles.insert(HandleObject::Interrupt(InterruptId(2)));
+    process
+        .handles
+        .insert(HandleObject::Interrupt(InterruptId(2)));
     process.handles.insert(HandleObject::Thread(ThreadId(3)));
     process.handles.insert(HandleObject::Process(ProcessId(4)));
-    process.handles.insert(HandleObject::SchedulingContext(SchedulingContextId(5)));
+    process
+        .handles
+        .insert(HandleObject::SchedulingContext(SchedulingContextId(5)));
 
     // Phase 1: Scheduling context refs released (in exit_current_from_syscall).
     // Phase 1: Decrement thread_count → 0 (is_last = true).
@@ -356,7 +357,10 @@ fn normal_exit_last_thread_cleanup_sequence() {
     assert_eq!(interrupts.len(), 1, "interrupt handles categorized");
     assert_eq!(thread_handles.len(), 1, "thread handles categorized");
     assert_eq!(process_handles.len(), 1, "process handles categorized");
-    assert_eq!(sched_ctx_count, 1, "scheduling context released immediately");
+    assert_eq!(
+        sched_ctx_count, 1,
+        "scheduling context released immediately"
+    );
 
     // Phase 2: thread_exit::notify_exit, process_exit::notify_exit
     // Phase 2a: futex::remove_thread
@@ -417,7 +421,10 @@ fn kill_path_immediate_cleanup_no_running_threads() {
         process.asid_freed = true;
     }
 
-    assert!(process.address_space_freed, "immediate cleanup when no threads running");
+    assert!(
+        process.address_space_freed,
+        "immediate cleanup when no threads running"
+    );
 }
 
 #[test]
@@ -444,7 +451,10 @@ fn kill_path_deferred_cleanup_threads_on_other_cores() {
     // Simulate threads being reaped one by one by schedule_inner.
     process.thread_count -= 1;
     assert_eq!(process.thread_count, 1);
-    assert!(!process.address_space_freed, "not yet — 1 thread still running");
+    assert!(
+        !process.address_space_freed,
+        "not yet — 1 thread still running"
+    );
 
     process.thread_count -= 1;
     assert_eq!(process.thread_count, 0);
@@ -474,8 +484,16 @@ fn dma_allocations_freed_on_process_exit() {
     }
 
     let mut dma_allocs = vec![
-        DmaAlloc { va: 0x1000_0000, pa: 0x4000_0000, order: 0 },
-        DmaAlloc { va: 0x1000_1000, pa: 0x4001_0000, order: 2 },
+        DmaAlloc {
+            va: 0x1000_0000,
+            pa: 0x4000_0000,
+            order: 0,
+        },
+        DmaAlloc {
+            va: 0x1000_1000,
+            pa: 0x4001_0000,
+            order: 2,
+        },
     ];
 
     let mut freed_pas = Vec::new();
@@ -500,8 +518,14 @@ fn heap_allocations_cleared_on_process_exit() {
     }
 
     let mut heap_allocs = vec![
-        HeapAlloc { va: 0x100_0000, page_count: 4 },
-        HeapAlloc { va: 0x200_0000, page_count: 16 },
+        HeapAlloc {
+            va: 0x100_0000,
+            page_count: 4,
+        },
+        HeapAlloc {
+            va: 0x200_0000,
+            page_count: 16,
+        },
     ];
 
     // free_all() just clears the vec (frames tracked in owned_frames).
@@ -523,7 +547,9 @@ fn page_table_frames_freed_on_process_exit() {
 
     impl PageTableWalker {
         fn new() -> Self {
-            Self { frames_freed: Vec::new() }
+            Self {
+                frames_freed: Vec::new(),
+            }
         }
 
         /// Simulate walking a 3-level tree (L1→L2→L3).
@@ -543,11 +569,7 @@ fn page_table_frames_freed_on_process_exit() {
     let mut walker = PageTableWalker::new();
 
     // Simple tree: 1 L1 containing 1 L2 containing 2 L3 tables.
-    walker.walk_and_free(&[
-        (0x1000, vec![
-            (0x2000, vec![0x3000, 0x4000]),
-        ]),
-    ]);
+    walker.walk_and_free(&[(0x1000, vec![(0x2000, vec![0x3000, 0x4000])])]);
 
     // L3 tables freed first, then L2, then L1 (bottom-up).
     assert_eq!(walker.frames_freed, vec![0x3000, 0x4000, 0x2000, 0x1000]);
@@ -572,7 +594,10 @@ fn sched_context_refs_released_on_normal_exit() {
 
     // Handle close releases handle ref.
     ref_count -= 1;
-    assert_eq!(ref_count, 0, "scheduling context freed when ref_count reaches 0");
+    assert_eq!(
+        ref_count, 0,
+        "scheduling context freed when ref_count reaches 0"
+    );
 }
 
 #[test]
@@ -679,9 +704,18 @@ fn complete_resource_inventory_normal_exit() {
     assert!(t.timers_destroyed >= 1, "timers destroyed");
     assert!(t.interrupts_destroyed >= 1, "interrupts destroyed");
     assert!(t.thread_handles_destroyed >= 1, "thread handles destroyed");
-    assert!(t.process_handles_destroyed >= 1, "process handles destroyed");
-    assert!(t.sched_contexts_released >= 1, "scheduling contexts released");
-    assert_eq!(t.thread_sched_ctx_refs_released, 2, "thread sched ctx refs released");
+    assert!(
+        t.process_handles_destroyed >= 1,
+        "process handles destroyed"
+    );
+    assert!(
+        t.sched_contexts_released >= 1,
+        "scheduling contexts released"
+    );
+    assert_eq!(
+        t.thread_sched_ctx_refs_released, 2,
+        "thread sched ctx refs released"
+    );
     assert!(t.futex_entries_removed, "futex entries removed");
     assert!(t.dma_freed, "DMA buffers freed");
     assert!(t.owned_frames_freed, "owned frames freed");
@@ -729,7 +763,11 @@ fn fixed_kill_cleans_up_timeout_timers() {
         cleanup_thread_resources(thread, &mut timer_table);
     }
 
-    assert_eq!(timer_table.active_count(), 0, "all timers reclaimed after fix");
+    assert_eq!(
+        timer_table.active_count(),
+        0,
+        "all timers reclaimed after fix"
+    );
 }
 
 #[test]
@@ -748,7 +786,11 @@ fn fixed_normal_exit_cleans_up_timeout_timer() {
     // Fixed exit path: clean up timeout timer.
     cleanup_thread_resources(&mut thread, &mut timer_table);
 
-    assert_eq!(timer_table.active_count(), 0, "timeout timer cleaned up on exit");
+    assert_eq!(
+        timer_table.active_count(),
+        0,
+        "timeout timer cleaned up on exit"
+    );
 }
 
 // ============================================================
@@ -790,20 +832,16 @@ fn kill_thread_blocked_in_wait_with_timeout() {
     let mut thread = Thread::new(1, ProcessId(0));
 
     // Set up wait state.
-    thread.wait_set = vec![
-        WaitEntry {
-            object: HandleObject::Channel(ChannelId(0)),
-            user_index: 0,
-        },
-    ];
+    thread.wait_set = vec![WaitEntry {
+        object: HandleObject::Channel(ChannelId(0)),
+        user_index: 0,
+    }];
     let timer_id = timer_table.create(5000).unwrap();
     thread.timeout_timer = Some(timer_id);
-    thread.stale_waiters = vec![
-        WaitEntry {
-            object: HandleObject::Channel(ChannelId(2)),
-            user_index: 0,
-        },
-    ];
+    thread.stale_waiters = vec![WaitEntry {
+        object: HandleObject::Channel(ChannelId(2)),
+        user_index: 0,
+    }];
 
     // Kill: clean up ALL thread resources.
     cleanup_thread_resources(&mut thread, &mut timer_table);

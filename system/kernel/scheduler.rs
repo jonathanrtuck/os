@@ -18,17 +18,17 @@
 //! (one per core) are never enqueued; they run as fallback when no threads
 //! are runnable.
 
-use super::handle::HandleObject;
-use super::memory;
-use super::metrics;
-use super::per_core;
-use super::process::{Process, ProcessId};
-use super::scheduling_context::{self, SchedulingContext, SchedulingContextId};
-use super::sync::IrqMutex;
-use super::thread::{Thread, ThreadId, WaitEntry};
-use super::timer;
-use super::Context;
 use alloc::{boxed::Box, vec::Vec};
+
+use super::{
+    handle::HandleObject,
+    memory, metrics, per_core,
+    process::{Process, ProcessId},
+    scheduling_context::{self, SchedulingContext, SchedulingContextId},
+    sync::IrqMutex,
+    thread::{Thread, ThreadId, WaitEntry},
+    timer, Context,
+};
 
 /// Initialize the scheduler with core 0's boot thread.
 /// Default scheduling context: 10ms budget per 50ms period (20% of one core).
@@ -131,6 +131,19 @@ enum ExitInfo {
     },
 }
 
+impl ExitInfo {
+    fn process_id(&self) -> ProcessId {
+        match self {
+            ExitInfo::Last { process_id, .. } | ExitInfo::NonLast { process_id, .. } => *process_id,
+        }
+    }
+    fn thread_id(&self) -> ThreadId {
+        match self {
+            ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id, .. } => *thread_id,
+        }
+    }
+}
+
 /// Result of `block_current_unless_woken`.
 ///
 /// Distinguishes the two return paths so callers know whether post-block
@@ -143,19 +156,6 @@ pub enum BlockResult {
     /// Thread blocked, `schedule_inner` selected another thread.
     /// Caller must NOT run cleanup (wrong thread identity).
     Blocked(*const Context),
-}
-
-impl ExitInfo {
-    fn process_id(&self) -> ProcessId {
-        match self {
-            ExitInfo::Last { process_id, .. } | ExitInfo::NonLast { process_id, .. } => *process_id,
-        }
-    }
-    fn thread_id(&self) -> ThreadId {
-        match self {
-            ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id, .. } => *thread_id,
-        }
-    }
 }
 
 /// Bind the default scheduling context to a kernel-spawned user thread.

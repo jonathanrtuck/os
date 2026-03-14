@@ -65,8 +65,10 @@ mod memory {
 }
 
 mod sync {
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
+    use core::{
+        cell::UnsafeCell,
+        ops::{Deref, DerefMut},
+    };
 
     pub struct IrqMutex<T> {
         data: UnsafeCell<T>,
@@ -109,12 +111,12 @@ mod sync {
 }
 
 // Include all three allocator modules.
+#[path = "../../kernel/heap.rs"]
+mod heap;
 #[path = "../../kernel/page_allocator.rs"]
 mod page_allocator;
 #[path = "../../kernel/slab.rs"]
 mod slab;
-#[path = "../../kernel/heap.rs"]
-mod heap;
 
 const PAGE_SIZE: usize = 4096;
 const MIN_BLOCK: usize = 16; // size_of::<FreeBlock>() on 64-bit
@@ -177,7 +179,10 @@ fn init_heap(region: *mut u8, size: usize) {
 
         heap::ALLOCATOR.head.get().write(region as *mut _);
         heap::ALLOCATOR.region_start.get().write(region as usize);
-        heap::ALLOCATOR.region_end.get().write(region as usize + size);
+        heap::ALLOCATOR
+            .region_end
+            .get()
+            .write(region as usize + size);
     }
 }
 
@@ -205,8 +210,8 @@ fn stress_alloc_fragmentation_linked_list() {
     // --- Section 1: Many sizes, random free order ---
 
     let sizes: Vec<usize> = vec![
-        16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024,
-        1536, 2048, 3000, 4000, 4096, 5000, 6000, 8000, 8192,
+        16, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3000, 4000, 4096, 5000,
+        6000, 8000, 8192,
     ];
     let mut allocations: Vec<(*mut u8, Layout)> = Vec::new();
 
@@ -219,8 +224,11 @@ fn stress_alloc_fragmentation_linked_list() {
             let p = unsafe { alloc.alloc(l) };
             if !p.is_null() {
                 assert_eq!(
-                    p as usize % align, 0,
-                    "round {}: alloc size {} misaligned", round, size
+                    p as usize % align,
+                    0,
+                    "round {}: alloc size {} misaligned",
+                    round,
+                    size
                 );
                 unsafe { core::ptr::write_bytes(p, 0xAA, size) };
                 allocations.push((p, l));
@@ -228,15 +236,15 @@ fn stress_alloc_fragmentation_linked_list() {
         }
 
         // Free a random 30-70% subset.
-        let free_count = allocations.len() / 3
-            + rng.next_usize(allocations.len() / 3 + 1);
+        let free_count = allocations.len() / 3 + rng.next_usize(allocations.len() / 3 + 1);
         rng.shuffle(&mut allocations);
         for _ in 0..free_count.min(allocations.len()) {
             if let Some((p, l)) = allocations.pop() {
                 let slice = unsafe { core::slice::from_raw_parts(p, l.size()) };
                 assert!(
                     slice.iter().all(|&b| b == 0xAA),
-                    "corruption before free in round {}", round
+                    "corruption before free in round {}",
+                    round
                 );
                 unsafe { alloc.dealloc(p, l) };
             }
@@ -257,7 +265,10 @@ fn stress_alloc_fragmentation_linked_list() {
     // Coalescing check.
     let big_layout = Layout::from_size_align(heap_size - MIN_BLOCK * 4, MIN_BLOCK).unwrap();
     let big = unsafe { alloc.alloc(big_layout) };
-    assert!(!big.is_null(), "heap should coalesce after fragmentation stress");
+    assert!(
+        !big.is_null(),
+        "heap should coalesce after fragmentation stress"
+    );
     unsafe { alloc.dealloc(big, big_layout) };
 
     // --- Section 2: Different seed, same pattern ---
@@ -315,10 +326,14 @@ fn stress_alloc_fragmentation_linked_list() {
 
     for _ in 0..100 {
         let ps = unsafe { alloc.alloc(small) };
-        if ps.is_null() { break; }
+        if ps.is_null() {
+            break;
+        }
         smalls.push(ps);
         let pl = unsafe { alloc.alloc(large) };
-        if pl.is_null() { break; }
+        if pl.is_null() {
+            break;
+        }
         larges.push(pl);
     }
     assert!(!smalls.is_empty() && !larges.is_empty());
@@ -332,12 +347,18 @@ fn stress_alloc_fragmentation_linked_list() {
     let mut mediums = Vec::new();
     for _ in 0..50 {
         let p = unsafe { alloc.alloc(medium) };
-        if p.is_null() { break; }
+        if p.is_null() {
+            break;
+        }
         mediums.push(p);
     }
 
-    for p in mediums { unsafe { alloc.dealloc(p, medium) }; }
-    for p in larges { unsafe { alloc.dealloc(p, large) }; }
+    for p in mediums {
+        unsafe { alloc.dealloc(p, medium) };
+    }
+    for p in larges {
+        unsafe { alloc.dealloc(p, large) };
+    }
 
     let big3 = unsafe { alloc.alloc(big_layout) };
     assert!(!big3.is_null(), "worst-case coalescing check failed");
@@ -369,7 +390,9 @@ fn stress_alloc_fragmentation_linked_list() {
         }
     }
 
-    for (p, l) in live { unsafe { alloc.dealloc(p, l) }; }
+    for (p, l) in live {
+        unsafe { alloc.dealloc(p, l) };
+    }
 
     let big4 = unsafe { alloc.alloc(big_layout) };
     assert!(!big4.is_null(), "high-volume coalescing check failed");
@@ -397,7 +420,9 @@ fn stress_alloc_fragmentation_linked_list() {
         }
     }
 
-    for (p, l) in live2 { unsafe { alloc.dealloc(p, l) }; }
+    for (p, l) in live2 {
+        unsafe { alloc.dealloc(p, l) };
+    }
 
     let big5 = unsafe { alloc.alloc(big_layout) };
     assert!(!big5.is_null(), "slab-fallthrough coalescing check failed");
@@ -423,7 +448,10 @@ fn stress_alloc_slab_and_mixed() {
     // Allocate a region for the buddy allocator to back slab pages.
     let buddy_pages = 512; // 2 MiB
     let (buddy_ptr, buddy_layout) = alloc_region(buddy_pages);
-    page_allocator::init(buddy_ptr as usize, buddy_ptr as usize + buddy_pages * PAGE_SIZE);
+    page_allocator::init(
+        buddy_ptr as usize,
+        buddy_ptr as usize + buddy_pages * PAGE_SIZE,
+    );
 
     let initial_free = page_allocator::free_count();
     assert_eq!(initial_free, buddy_pages, "buddy should start fully free");
@@ -431,7 +459,12 @@ fn stress_alloc_slab_and_mixed() {
     // Size classes: 64, 128, 256, 512, 1024, 2048 bytes.
     // Objects per 4 KiB page: 64, 32, 16, 8, 4, 2.
     let size_classes: [(usize, usize); 6] = [
-        (64, 64), (128, 32), (256, 16), (512, 8), (1024, 4), (2048, 2),
+        (64, 64),
+        (128, 32),
+        (256, 16),
+        (512, 8),
+        (1024, 4),
+        (2048, 2),
     ];
 
     let mut all_ptrs: Vec<Vec<*mut u8>> = Vec::new();
@@ -443,10 +476,14 @@ fn stress_alloc_slab_and_mixed() {
 
         for _ in 0..target_objects {
             let p = slab::try_alloc(obj_size, 8);
-            if p.is_null() { break; }
+            if p.is_null() {
+                break;
+            }
             assert_eq!(
-                p as usize % obj_size, 0,
-                "slab class {} misaligned", obj_size
+                p as usize % obj_size,
+                0,
+                "slab class {} misaligned",
+                obj_size
             );
             // Write pattern — only to bytes after the FreeNode header area,
             // because slab::free() will overwrite the first 8 bytes.
@@ -457,7 +494,8 @@ fn stress_alloc_slab_and_mixed() {
 
         assert!(
             ptrs.len() >= objs_per_page,
-            "should fill at least one slab page for class {}", obj_size
+            "should fill at least one slab page for class {}",
+            obj_size
         );
 
         let pages = (ptrs.len() + objs_per_page - 1) / objs_per_page;
@@ -470,13 +508,15 @@ fn stress_alloc_slab_and_mixed() {
     assert!(
         free_after < initial_free,
         "slab should consume buddy pages: initial={}, after={}",
-        initial_free, free_after
+        initial_free,
+        free_after
     );
     let consumed = initial_free - free_after;
     assert!(
         consumed >= total_slab_pages,
         "consumed ({}) >= slab pages needed ({})",
-        consumed, total_slab_pages
+        consumed,
+        total_slab_pages
     );
 
     // Verify patterns intact.
@@ -486,7 +526,9 @@ fn stress_alloc_slab_and_mixed() {
             let slice = unsafe { core::slice::from_raw_parts(p, obj_size) };
             assert!(
                 slice.iter().all(|&b| b == 0xDD),
-                "corruption in slab class {} at {:p}", obj_size, p
+                "corruption in slab class {} at {:p}",
+                obj_size,
+                p
             );
         }
     }
@@ -507,13 +549,16 @@ fn stress_alloc_slab_and_mixed() {
         let mut realloc_ptrs = Vec::new();
         for _ in 0..objs_per_page {
             let p = slab::try_alloc(obj_size, 8);
-            if p.is_null() { break; }
+            if p.is_null() {
+                break;
+            }
             realloc_ptrs.push(p);
         }
         let free_after_realloc = page_allocator::free_count();
         assert_eq!(
             free_before, free_after_realloc,
-            "re-alloc should not consume new buddy pages (class {})", obj_size
+            "re-alloc should not consume new buddy pages (class {})",
+            obj_size
         );
         assert_eq!(realloc_ptrs.len(), objs_per_page, "class {}", obj_size);
 
@@ -535,14 +580,17 @@ fn stress_alloc_slab_and_mixed() {
     let obj_size_exhaust = 64;
     loop {
         let p = slab::try_alloc(obj_size_exhaust, 8);
-        if p.is_null() { break; }
+        if p.is_null() {
+            break;
+        }
         exhaust_ptrs.push(p);
     }
 
     // We can't assert an exact count because the slab already has free objects
     // from Part A. But buddy should be fully consumed.
     assert_eq!(
-        page_allocator::free_count(), 0,
+        page_allocator::free_count(),
+        0,
         "buddy should be exhausted after slab fills all pages"
     );
     assert!(
@@ -563,7 +611,8 @@ fn stress_alloc_slab_and_mixed() {
         unsafe { slab::try_free(p, obj_size_exhaust, 8) };
     }
     assert_eq!(
-        page_allocator::free_count(), free_before_realloc,
+        page_allocator::free_count(),
+        free_before_realloc,
         "re-alloc should not consume new buddy pages"
     );
 
@@ -615,8 +664,10 @@ fn stress_alloc_slab_and_mixed() {
                     if !p.is_null() {
                         unsafe { core::ptr::write_bytes(p, pattern, class) };
                         live.push(Allocation {
-                            ptr: p, size: class,
-                            source: AllocSource::Slab, pattern,
+                            ptr: p,
+                            size: class,
+                            source: AllocSource::Slab,
+                            pattern,
                         });
                     }
                 }
@@ -634,8 +685,10 @@ fn stress_alloc_slab_and_mixed() {
                         );
                         unsafe { core::ptr::write_bytes(p, pattern, size) };
                         live.push(Allocation {
-                            ptr: p, size,
-                            source: AllocSource::Heap, pattern,
+                            ptr: p,
+                            size,
+                            source: AllocSource::Heap,
+                            pattern,
                         });
                     }
                 }
@@ -645,8 +698,10 @@ fn stress_alloc_slab_and_mixed() {
                         let p = pa.0 as *mut u8;
                         unsafe { core::ptr::write_bytes(p, pattern, PAGE_SIZE) };
                         live.push(Allocation {
-                            ptr: p, size: PAGE_SIZE,
-                            source: AllocSource::Buddy, pattern,
+                            ptr: p,
+                            size: PAGE_SIZE,
+                            source: AllocSource::Buddy,
+                            pattern,
                         });
                     }
                 }
@@ -660,7 +715,10 @@ fn stress_alloc_slab_and_mixed() {
             assert!(
                 slice.iter().all(|&b| b == a.pattern),
                 "op {}: corruption in {:?} at {:p} (size {})",
-                op, a.source, a.ptr, a.size
+                op,
+                a.source,
+                a.ptr,
+                a.size
             );
 
             match a.source {
@@ -684,7 +742,9 @@ fn stress_alloc_slab_and_mixed() {
         let slice = unsafe { core::slice::from_raw_parts(a.ptr, a.size) };
         assert!(
             slice.iter().all(|&b| b == a.pattern),
-            "final check: corruption in {:?} at {:p}", a.source, a.ptr
+            "final check: corruption in {:?} at {:p}",
+            a.source,
+            a.ptr
         );
     }
 
@@ -735,7 +795,8 @@ fn stress_alloc_slab_and_mixed() {
             let slice = unsafe { core::slice::from_raw_parts(p, l.size()) };
             assert!(
                 slice.iter().all(|&b| b == pattern),
-                "GlobalAlloc mixed routing corruption at op {}", op
+                "GlobalAlloc mixed routing corruption at op {}",
+                op
             );
             unsafe { alloc.dealloc(p, l) };
         }

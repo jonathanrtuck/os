@@ -30,15 +30,17 @@ extern crate scene;
 #[path = "scene_state.rs"]
 mod scene_state;
 
-use protocol::compose::{ImageConfig, RtcConfig, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG};
-use protocol::core_config::{CoreConfig, MSG_CORE_CONFIG, MSG_SCENE_UPDATED};
-use protocol::edit::{
-    CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE,
-    MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE,
-    MSG_WRITE_INSERT,
-};
-use protocol::input::{
-    KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
+use protocol::{
+    compose::{ImageConfig, RtcConfig, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG},
+    core_config::{CoreConfig, MSG_CORE_CONFIG, MSG_SCENE_UPDATED},
+    edit::{
+        CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE,
+        MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE,
+        MSG_WRITE_INSERT,
+    },
+    input::{
+        KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
+    },
 };
 
 const COMPOSITOR_HANDLE: u8 = 2;

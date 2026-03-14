@@ -13,26 +13,20 @@
 //! pages for per-section W^X enforcement. Also manages kernel stack
 //! guard pages via L3 entry manipulation.
 
-use super::paging::{
-    align_up_u64, AF, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, PAGE_SIZE, PA_MASK, PXN,
-    SH_INNER, UXN,
-};
-use super::sync::IrqMutex;
 use core::cell::UnsafeCell;
+
+use super::{
+    paging::{
+        align_up_u64, AF, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, PAGE_SIZE, PA_MASK,
+        PXN, SH_INNER, UXN,
+    },
+    sync::IrqMutex,
+};
 
 const BLOCK_2MB: u64 = 2 * 1024 * 1024;
 
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
 pub const KERNEL_VA_OFFSET: usize = 0xFFFF_0000_0000_0000; // must match link.ld KERNEL_VA_OFFSET
-
-/// Empty L0 table for kernel threads' TTBR0 (no user mappings).
-static EMPTY_L0: SyncPageTable = SyncPageTable::new();
-/// Lock for kernel TTBR1 page table modifications (break-block, guard pages).
-///
-/// Lock ordering: KERNEL_PT_LOCK → page allocator lock (never the reverse).
-static KERNEL_PT_LOCK: IrqMutex<()> = IrqMutex::new(());
-/// L3 page table for the kernel's 2MB block (4KB pages, W^X).
-static TT1_L3_KERN: SyncPageTable = SyncPageTable::new();
 
 extern "C" {
     static __text_start: u8;
@@ -44,6 +38,10 @@ extern "C" {
     static boot_tt1_l2_1: u8;
 }
 
+// ---------------------------------------------------------------------------
+// Pa — physical address newtype
+// ---------------------------------------------------------------------------
+
 /// Physical address newtype. Prevents accidental PA/VA mixups at compile time.
 ///
 /// Used at all API boundaries where physical addresses flow: page allocator,
@@ -52,23 +50,31 @@ extern "C" {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct Pa(pub usize);
-#[repr(align(4096))]
-struct PageTable {
-    entries: [u64; 512],
-}
-/// Wrapper for page tables in statics. Written once during init, read-only after.
-struct SyncPageTable(UnsafeCell<PageTable>);
 
 impl Pa {
     pub const fn as_u64(self) -> u64 {
         self.0 as u64
     }
 }
+
+// ---------------------------------------------------------------------------
+// Page table types (internal)
+// ---------------------------------------------------------------------------
+
+#[repr(align(4096))]
+struct PageTable {
+    entries: [u64; 512],
+}
+
 impl PageTable {
     const fn new() -> Self {
         Self { entries: [0; 512] }
     }
 }
+
+/// Wrapper for page tables in statics. Written once during init, read-only after.
+struct SyncPageTable(UnsafeCell<PageTable>);
+
 impl SyncPageTable {
     const fn new() -> Self {
         Self(UnsafeCell::new(PageTable::new()))
@@ -78,9 +84,46 @@ impl SyncPageTable {
         self.0.get()
     }
 }
+
 // SAFETY: Page tables are written once during init (before timer/IRQs) and
 // read-only after. No concurrent access is possible.
 unsafe impl Sync for SyncPageTable {}
+
+// ---------------------------------------------------------------------------
+// Statics
+// ---------------------------------------------------------------------------
+
+/// Empty L0 table for kernel threads' TTBR0 (no user mappings).
+static EMPTY_L0: SyncPageTable = SyncPageTable::new();
+/// Lock for kernel TTBR1 page table modifications (break-block, guard pages).
+///
+/// Lock ordering: KERNEL_PT_LOCK → page allocator lock (never the reverse).
+static KERNEL_PT_LOCK: IrqMutex<()> = IrqMutex::new(());
+/// L3 page table for the kernel's 2MB block (4KB pages, W^X).
+static TT1_L3_KERN: SyncPageTable = SyncPageTable::new();
+
+// ---------------------------------------------------------------------------
+// Address translation
+// ---------------------------------------------------------------------------
+
+#[inline(always)]
+pub fn phys_to_virt(pa: Pa) -> usize {
+    pa.0.wrapping_add(KERNEL_VA_OFFSET)
+}
+
+#[inline(always)]
+pub fn virt_to_phys(va: usize) -> Pa {
+    Pa(va.wrapping_sub(KERNEL_VA_OFFSET))
+}
+
+/// Physical address of the empty L0 table (for kernel threads' TTBR0).
+pub fn empty_ttbr0() -> u64 {
+    virt_to_phys(EMPTY_L0.get() as usize).as_u64()
+}
+
+// ---------------------------------------------------------------------------
+// Initialization
+// ---------------------------------------------------------------------------
 
 /// Broadcast TLB invalidation across all cores.
 fn tlb_invalidate_all() {
@@ -97,55 +140,6 @@ fn tlb_invalidate_all() {
     }
 }
 
-/// Re-map a kernel guard page as normal memory (restore its L3 entry).
-///
-/// Called before freeing stack frames back to the buddy allocator, since
-/// `free_frames` writes a FreeBlock header at the start of the block.
-pub fn clear_kernel_guard_page(va: usize) {
-    assert!(va >= KERNEL_VA_OFFSET, "not a kernel VA");
-    assert!(va & 0xFFF == 0, "VA not page-aligned");
-
-    let _lock = KERNEL_PT_LOCK.lock();
-    let pa = virt_to_phys(va).0 as u64;
-    let l2_idx = ((pa >> 21) & 0x1FF) as usize;
-    // SAFETY: boot_tt1_l2_1 is a page-aligned L2 table defined in boot.S.
-    // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
-    // KERNEL_PT_LOCK is held, ensuring exclusive access.
-    let l2_table = unsafe { &boot_tt1_l2_1 as *const u8 as *mut u64 };
-    // SAFETY: l2_idx is masked to 0..511, within the 512-entry L2 table.
-    let l2_entry = unsafe { l2_table.add(l2_idx).read_volatile() };
-
-    // Must already be broken into L3 (set_kernel_guard_page did that).
-    assert!(
-        l2_entry & 0b11 == 0b11,
-        "clear_kernel_guard_page: L2 entry is not a table descriptor"
-    );
-
-    let l3_pa = l2_entry & PA_MASK;
-    let l3_table = phys_to_virt(Pa(l3_pa as usize)) as *mut u64;
-    let l3_idx = ((pa >> 12) & 0x1FF) as usize;
-    // Read attributes from a neighbor entry to match the original block's
-    // mapping. This preserves boot.S attributes regardless of what they are.
-    // The neighbor is guaranteed to be a valid mapped entry: guard pages are
-    // only set on stack bases, and the adjacent page is always a usable
-    // stack page.
-    let neighbor_idx = if l3_idx > 0 { l3_idx - 1 } else { l3_idx + 1 };
-    // SAFETY: neighbor_idx is in 0..511 (l3_idx is in 0..511, and the
-    // adjustment stays in range). l3_table is a valid L3 page table.
-    let neighbor = unsafe { l3_table.add(neighbor_idx).read_volatile() };
-    let attrs = neighbor & !PA_MASK;
-
-    // SAFETY: Restoring a valid L3 entry for a page the buddy allocator owns.
-    unsafe {
-        l3_table.add(l3_idx).write_volatile((pa & PA_MASK) | attrs);
-    }
-
-    tlb_invalidate_all();
-}
-/// Physical address of the empty L0 table (for kernel threads' TTBR0).
-pub fn empty_ttbr0() -> u64 {
-    virt_to_phys(EMPTY_L0.get() as usize).as_u64()
-}
 /// Refine TTBR1 with 4KB pages for the kernel's 2MB block.
 ///
 /// boot.S created coarse 2MB-block tables. This replaces the kernel's
@@ -218,10 +212,11 @@ pub fn init() {
         );
     }
 }
-#[inline(always)]
-pub fn phys_to_virt(pa: Pa) -> usize {
-    pa.0.wrapping_add(KERNEL_VA_OFFSET)
-}
+
+// ---------------------------------------------------------------------------
+// Kernel guard pages
+// ---------------------------------------------------------------------------
+
 /// Set a kernel VA page as a guard page (unmap from TTBR1).
 ///
 /// If the containing 2MB block hasn't been refined to L3 pages yet,
@@ -308,7 +303,49 @@ pub fn try_set_kernel_guard_page(va: usize) -> bool {
 
     true
 }
-#[inline(always)]
-pub fn virt_to_phys(va: usize) -> Pa {
-    Pa(va.wrapping_sub(KERNEL_VA_OFFSET))
+
+/// Re-map a kernel guard page as normal memory (restore its L3 entry).
+///
+/// Called before freeing stack frames back to the buddy allocator, since
+/// `free_frames` writes a FreeBlock header at the start of the block.
+pub fn clear_kernel_guard_page(va: usize) {
+    assert!(va >= KERNEL_VA_OFFSET, "not a kernel VA");
+    assert!(va & 0xFFF == 0, "VA not page-aligned");
+
+    let _lock = KERNEL_PT_LOCK.lock();
+    let pa = virt_to_phys(va).0 as u64;
+    let l2_idx = ((pa >> 21) & 0x1FF) as usize;
+    // SAFETY: boot_tt1_l2_1 is a page-aligned L2 table defined in boot.S.
+    // Cast to *mut u64 is valid because page table entries are 8-byte u64s.
+    // KERNEL_PT_LOCK is held, ensuring exclusive access.
+    let l2_table = unsafe { &boot_tt1_l2_1 as *const u8 as *mut u64 };
+    // SAFETY: l2_idx is masked to 0..511, within the 512-entry L2 table.
+    let l2_entry = unsafe { l2_table.add(l2_idx).read_volatile() };
+
+    // Must already be broken into L3 (set_kernel_guard_page did that).
+    assert!(
+        l2_entry & 0b11 == 0b11,
+        "clear_kernel_guard_page: L2 entry is not a table descriptor"
+    );
+
+    let l3_pa = l2_entry & PA_MASK;
+    let l3_table = phys_to_virt(Pa(l3_pa as usize)) as *mut u64;
+    let l3_idx = ((pa >> 12) & 0x1FF) as usize;
+    // Read attributes from a neighbor entry to match the original block's
+    // mapping. This preserves boot.S attributes regardless of what they are.
+    // The neighbor is guaranteed to be a valid mapped entry: guard pages are
+    // only set on stack bases, and the adjacent page is always a usable
+    // stack page.
+    let neighbor_idx = if l3_idx > 0 { l3_idx - 1 } else { l3_idx + 1 };
+    // SAFETY: neighbor_idx is in 0..511 (l3_idx is in 0..511, and the
+    // adjustment stays in range). l3_table is a valid L3 page table.
+    let neighbor = unsafe { l3_table.add(neighbor_idx).read_volatile() };
+    let attrs = neighbor & !PA_MASK;
+
+    // SAFETY: Restoring a valid L3 entry for a page the buddy allocator owns.
+    unsafe {
+        l3_table.add(l3_idx).write_volatile((pa & PA_MASK) | attrs);
+    }
+
+    tlb_invalidate_all();
 }

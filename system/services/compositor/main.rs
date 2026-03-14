@@ -18,13 +18,15 @@ extern crate scene;
 #[path = "scene_render.rs"]
 mod scene_render;
 
-use alloc::boxed::Box;
-use alloc::vec;
-use protocol::compose::{
-    CompositorConfig, IconConfig, ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG,
-    MSG_IMAGE_CONFIG, MSG_IMG_ICON_CONFIG,
+use alloc::{boxed::Box, vec};
+
+use protocol::{
+    compose::{
+        CompositorConfig, IconConfig, ImageConfig, RtcConfig, MSG_COMPOSITOR_CONFIG,
+        MSG_ICON_CONFIG, MSG_IMAGE_CONFIG, MSG_IMG_ICON_CONFIG,
+    },
+    present::{PresentPayload, MSG_PRESENT},
 };
-use protocol::present::{PresentPayload, MSG_PRESENT};
 
 const FONT_SIZE: u32 = 18;
 const CORE_HANDLE: u8 = 1;

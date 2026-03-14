@@ -236,9 +236,7 @@ impl TimerTable {
     }
 
     fn check_fired(&self, id: timer::TimerId) -> bool {
-        self.slots[id.0 as usize]
-            .as_ref()
-            .is_some_and(|e| e.fired)
+        self.slots[id.0 as usize].as_ref().is_some_and(|e| e.fired)
     }
 
     fn register_waiter(&mut self, id: timer::TimerId, waiter: thread::ThreadId) {
@@ -605,10 +603,9 @@ fn integration_stress_multi_subsystem_1500_ops() {
                 if let Some(id) = sched_ctxs.create(budget, period) {
                     live_sched_ctx_ids.push(id);
                     // Insert a handle.
-                    if let Ok(h) = handles.insert(
-                        HandleObject::SchedulingContext(id),
-                        Rights::READ_WRITE,
-                    ) {
+                    if let Ok(h) =
+                        handles.insert(HandleObject::SchedulingContext(id), Rights::READ_WRITE)
+                    {
                         live_handles.push(h);
                     }
                 }
@@ -685,10 +682,7 @@ fn integration_stress_multi_subsystem_1500_ops() {
             16 => {
                 if let Some(id) = timers.create(rng.next_u64()) {
                     live_timer_ids.push(id);
-                    if let Ok(h) = handles.insert(
-                        HandleObject::Timer(id),
-                        Rights::READ_WRITE,
-                    ) {
+                    if let Ok(h) = handles.insert(HandleObject::Timer(id), Rights::READ_WRITE) {
                         live_handles.push(h);
                     }
                 }
@@ -943,7 +937,9 @@ fn integration_stress_process_churn_with_handle_transfer_75_cycles() {
         let (ep2, ep3) = channels.create();
         let budget = MIN_BUDGET_NS * 2;
         let period = MIN_PERIOD_NS * 10;
-        let sc_id = sched_ctxs.create(budget, period).expect("should create sched ctx");
+        let sc_id = sched_ctxs
+            .create(budget, period)
+            .expect("should create sched ctx");
 
         // Step 3: Transfer handles to the process (models handle_send).
         let ht = processes.handles_mut(pid);
@@ -951,11 +947,8 @@ fn integration_stress_process_churn_with_handle_transfer_75_cycles() {
             .expect("insert ep0");
         ht.insert(HandleObject::Channel(ep2), Rights::READ_WRITE)
             .expect("insert ep2");
-        ht.insert(
-            HandleObject::SchedulingContext(sc_id),
-            Rights::READ_WRITE,
-        )
-        .expect("insert sched ctx");
+        ht.insert(HandleObject::SchedulingContext(sc_id), Rights::READ_WRITE)
+            .expect("insert sched ctx");
 
         // Verify handles are accessible.
         let ht = processes.handles_mut(pid);
@@ -973,10 +966,7 @@ fn integration_stress_process_churn_with_handle_transfer_75_cycles() {
         ));
 
         // Step 4: Start the process.
-        assert!(
-            processes.start(pid),
-            "cycle {cycle}: start should succeed"
-        );
+        assert!(processes.start(pid), "cycle {cycle}: start should succeed");
 
         // Step 5: Kill the process — drains handles and performs cleanup.
         let drained = processes.kill(pid);
@@ -1010,7 +1000,10 @@ fn integration_stress_process_churn_with_handle_transfer_75_cycles() {
         );
     }
 
-    assert_eq!(channels.live_pages, 0, "all channel pages freed after all cycles");
+    assert_eq!(
+        channels.live_pages, 0,
+        "all channel pages freed after all cycles"
+    );
     assert_eq!(sched_ctxs.live_count, 0, "all scheduling contexts freed");
     assert_eq!(processes.live_count, 0, "all processes cleaned up");
 }
@@ -1127,13 +1120,18 @@ fn integration_stress_process_churn_multi_handle_transfer_50() {
         let timer_id = timers.create(cycle as u64 * 1000).expect("timer create");
         let budget = MIN_BUDGET_NS * (1 + rng.next_usize(3) as u64);
         // Ensure period >= MIN_PERIOD_NS and period >= budget.
-        let period = (budget * (2 + rng.next_usize(5) as u64)).max(MIN_PERIOD_NS).min(MAX_PERIOD_NS);
+        let period = (budget * (2 + rng.next_usize(5) as u64))
+            .max(MIN_PERIOD_NS)
+            .min(MAX_PERIOD_NS);
         let sc_id = sched_ctxs.create(budget, period).expect("sched ctx create");
 
         let ht = processes.handles_mut(pid);
-        ht.insert(HandleObject::Channel(ep0), Rights::READ_WRITE).unwrap();
-        ht.insert(HandleObject::Timer(timer_id), Rights::READ_WRITE).unwrap();
-        ht.insert(HandleObject::SchedulingContext(sc_id), Rights::READ_WRITE).unwrap();
+        ht.insert(HandleObject::Channel(ep0), Rights::READ_WRITE)
+            .unwrap();
+        ht.insert(HandleObject::Timer(timer_id), Rights::READ_WRITE)
+            .unwrap();
+        ht.insert(HandleObject::SchedulingContext(sc_id), Rights::READ_WRITE)
+            .unwrap();
 
         processes.start(pid);
 
@@ -1144,8 +1142,12 @@ fn integration_stress_process_churn_multi_handle_transfer_50() {
         for (obj, _) in &drained {
             match obj {
                 HandleObject::Channel(id) => channels.close_endpoint(*id),
-                HandleObject::Timer(id) => { timers.destroy(*id); }
-                HandleObject::SchedulingContext(id) => { sched_ctxs.dec_ref(*id); }
+                HandleObject::Timer(id) => {
+                    timers.destroy(*id);
+                }
+                HandleObject::SchedulingContext(id) => {
+                    sched_ctxs.dec_ref(*id);
+                }
                 _ => {}
             }
         }
@@ -1190,9 +1192,18 @@ fn integration_stress_stale_waiter_cleanup_basic() {
 
     // Build wait set.
     thread.wait_set = vec![
-        WaitEntry { object: HandleObject::Channel(ch_a1), user_index: 0 },
-        WaitEntry { object: HandleObject::Channel(ch_b1), user_index: 1 },
-        WaitEntry { object: HandleObject::Channel(ch_c1), user_index: 2 },
+        WaitEntry {
+            object: HandleObject::Channel(ch_a1),
+            user_index: 0,
+        },
+        WaitEntry {
+            object: HandleObject::Channel(ch_b1),
+            user_index: 1,
+        },
+        WaitEntry {
+            object: HandleObject::Channel(ch_c1),
+            user_index: 2,
+        },
     ];
 
     // Register waiters on all channels (models sys_wait registration loop).
@@ -1210,8 +1221,14 @@ fn integration_stress_stale_waiter_cleanup_basic() {
 
     // Stale waiters should contain A and C.
     assert_eq!(thread.stale_waiters.len(), 2, "A and C are stale");
-    assert!(thread.stale_waiters.iter().any(|e| e.object == HandleObject::Channel(ch_a1)));
-    assert!(thread.stale_waiters.iter().any(|e| e.object == HandleObject::Channel(ch_c1)));
+    assert!(thread
+        .stale_waiters
+        .iter()
+        .any(|e| e.object == HandleObject::Channel(ch_a1)));
+    assert!(thread
+        .stale_waiters
+        .iter()
+        .any(|e| e.object == HandleObject::Channel(ch_c1)));
 
     // Wait set should be cleared.
     assert!(thread.wait_set.is_empty(), "wait set cleared after wake");
@@ -1241,12 +1258,21 @@ fn integration_stress_stale_waiter_cleanup_basic() {
     assert_eq!(waiter_c, None, "C's waiter should have been unregistered");
 
     // Stale list should be empty now.
-    assert!(thread.stale_waiters.is_empty(), "stale_waiters cleared after take");
+    assert!(
+        thread.stale_waiters.is_empty(),
+        "stale_waiters cleared after take"
+    );
 
     // Now perform the second wait on [ch_a1, ch_c1] (fresh registrations).
     thread.wait_set = vec![
-        WaitEntry { object: HandleObject::Channel(ch_a1), user_index: 0 },
-        WaitEntry { object: HandleObject::Channel(ch_c1), user_index: 1 },
+        WaitEntry {
+            object: HandleObject::Channel(ch_a1),
+            user_index: 0,
+        },
+        WaitEntry {
+            object: HandleObject::Channel(ch_c1),
+            user_index: 1,
+        },
     ];
 
     channels.register_waiter(ch_a1, tid);
@@ -1295,8 +1321,14 @@ fn integration_stress_stale_waiter_cleanup_mixed_types() {
 
     // Wait on [channel, timer].
     thread.wait_set = vec![
-        WaitEntry { object: HandleObject::Channel(ch1), user_index: 0 },
-        WaitEntry { object: HandleObject::Timer(timer_id), user_index: 1 },
+        WaitEntry {
+            object: HandleObject::Channel(ch1),
+            user_index: 0,
+        },
+        WaitEntry {
+            object: HandleObject::Timer(timer_id),
+            user_index: 1,
+        },
     ];
 
     channels.register_waiter(ch1, tid);
@@ -1352,8 +1384,14 @@ fn integration_stress_stale_waiter_cleanup_timeout_timer() {
 
     // Wait on [channel] + internal timeout.
     thread.wait_set = vec![
-        WaitEntry { object: HandleObject::Channel(ch1), user_index: 0 },
-        WaitEntry { object: HandleObject::Timer(timeout_timer), user_index: TIMEOUT_SENTINEL },
+        WaitEntry {
+            object: HandleObject::Channel(ch1),
+            user_index: 0,
+        },
+        WaitEntry {
+            object: HandleObject::Timer(timeout_timer),
+            user_index: TIMEOUT_SENTINEL,
+        },
     ];
 
     channels.register_waiter(ch1, tid);
@@ -1502,8 +1540,14 @@ fn integration_stress_stale_waiter_no_spurious_wakeup() {
 
     // First wait on [A, B].
     thread.wait_set = vec![
-        WaitEntry { object: HandleObject::Channel(ch_a1), user_index: 0 },
-        WaitEntry { object: HandleObject::Channel(ch_b1), user_index: 1 },
+        WaitEntry {
+            object: HandleObject::Channel(ch_a1),
+            user_index: 0,
+        },
+        WaitEntry {
+            object: HandleObject::Channel(ch_b1),
+            user_index: 1,
+        },
     ];
     channels.register_waiter(ch_a1, tid);
     channels.register_waiter(ch_b1, tid);
@@ -1526,9 +1570,10 @@ fn integration_stress_stale_waiter_no_spurious_wakeup() {
     assert_eq!(waiter, None, "B should not wake us after cleanup");
 
     // Second wait on [B] only.
-    thread.wait_set = vec![
-        WaitEntry { object: HandleObject::Channel(ch_b1), user_index: 0 },
-    ];
+    thread.wait_set = vec![WaitEntry {
+        object: HandleObject::Channel(ch_b1),
+        user_index: 0,
+    }];
     channels.register_waiter(ch_b1, tid);
 
     // Signal B — now it should work (fresh registration).
@@ -1569,13 +1614,15 @@ fn integration_stress_process_churn_with_wait_cleanup() {
         let (ep0, ep1) = channels.create();
 
         let ht = processes.handles_mut(pid);
-        ht.insert(HandleObject::Channel(ep0), Rights::READ_WRITE).unwrap();
+        ht.insert(HandleObject::Channel(ep0), Rights::READ_WRITE)
+            .unwrap();
         processes.start(pid);
 
         // Thread waits on ep1 (parent's end).
-        thread.wait_set = vec![
-            WaitEntry { object: HandleObject::Channel(ep1), user_index: 0 },
-        ];
+        thread.wait_set = vec![WaitEntry {
+            object: HandleObject::Channel(ep1),
+            user_index: 0,
+        }];
         channels.register_waiter(ep1, tid);
 
         // Kill the process — closes ep0, which wakes peer (ep1).
@@ -1603,10 +1650,7 @@ fn integration_stress_process_churn_with_wait_cleanup() {
         // Close ep1.
         channels.close_endpoint(ep1);
 
-        assert_eq!(
-            channels.live_pages, 0,
-            "cycle {cycle}: all pages freed"
-        );
+        assert_eq!(channels.live_pages, 0, "cycle {cycle}: all pages freed");
     }
 
     assert_eq!(processes.live_count, 0);

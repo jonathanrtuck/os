@@ -174,7 +174,10 @@ fn test_channel_create_leak_second_map_fails() {
 
     let result = sys_channel_create_model(&mut handles, [true, false]);
 
-    assert!(result.is_err(), "channel_create should fail when second map fails");
+    assert!(
+        result.is_err(),
+        "channel_create should fail when second map fails"
+    );
 
     let slot0 = handles.get(Handle(0), Rights::READ);
     let slot1 = handles.get(Handle(1), Rights::READ);
@@ -213,7 +216,10 @@ fn test_channel_create_success_path_unaffected() {
 
     let result = sys_channel_create_model(&mut handles, [true, true]);
 
-    assert!(result.is_ok(), "channel_create should succeed when both maps succeed");
+    assert!(
+        result.is_ok(),
+        "channel_create should succeed when both maps succeed"
+    );
 
     let (a, b) = result.unwrap();
 
@@ -233,8 +239,14 @@ fn test_channel_create_fixed_cleans_up_on_first_map_fail() {
     let result = sys_channel_create_fixed(&mut handles, [false, true]);
 
     assert!(result.is_err());
-    assert!(handles.get(Handle(0), Rights::READ).is_err(), "fixed: handle_a cleaned up");
-    assert!(handles.get(Handle(1), Rights::READ).is_err(), "fixed: handle_b cleaned up");
+    assert!(
+        handles.get(Handle(0), Rights::READ).is_err(),
+        "fixed: handle_a cleaned up"
+    );
+    assert!(
+        handles.get(Handle(1), Rights::READ).is_err(),
+        "fixed: handle_b cleaned up"
+    );
 }
 
 #[test]
@@ -245,6 +257,12 @@ fn test_channel_create_fixed_cleans_up_on_second_map_fail() {
     let result = sys_channel_create_fixed(&mut handles, [true, false]);
 
     assert!(result.is_err());
-    assert!(handles.get(Handle(0), Rights::READ).is_err(), "fixed: handle_a cleaned up");
-    assert!(handles.get(Handle(1), Rights::READ).is_err(), "fixed: handle_b cleaned up");
+    assert!(
+        handles.get(Handle(0), Rights::READ).is_err(),
+        "fixed: handle_a cleaned up"
+    );
+    assert!(
+        handles.get(Handle(1), Rights::READ).is_err(),
+        "fixed: handle_b cleaned up"
+    );
 }

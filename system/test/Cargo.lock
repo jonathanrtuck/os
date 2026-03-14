@@ -118,6 +118,7 @@ name = "shaping"
 version = "0.1.0"
 dependencies = [
  "harfrust",
+ "read-fonts",
 ]
 
 [[package]]

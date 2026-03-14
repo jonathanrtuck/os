@@ -2011,7 +2011,6 @@ pub struct DamageTracker {
     fb_height: u16,
 }
 
-
 impl DamageTracker {
     /// Create a new damage tracker for the given framebuffer dimensions.
     pub const fn new(fb_width: u16, fb_height: u16) -> Self {

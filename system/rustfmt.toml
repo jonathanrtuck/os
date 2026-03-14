@@ -1,0 +1,7 @@
+# Rust formatting — standard community style with nightly features.
+# Applied automatically via Claude Code hook and `cargo fmt`.
+edition = "2021"
+
+# Nightly features
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"

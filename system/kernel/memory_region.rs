@@ -14,6 +14,21 @@
 
 use alloc::vec::Vec;
 
+// ---------------------------------------------------------------------------
+// Backing — what fills a VMA's pages
+// ---------------------------------------------------------------------------
+
+/// What backs a VMA's pages.
+#[derive(Clone)]
+pub enum Backing {
+    /// Anonymous zero-filled pages (stack, BSS).
+    Anonymous,
+}
+
+// ---------------------------------------------------------------------------
+// Vma — a contiguous virtual address region
+// ---------------------------------------------------------------------------
+
 /// Describes a contiguous region of virtual address space.
 #[derive(Clone)]
 pub struct Vma {
@@ -23,16 +38,14 @@ pub struct Vma {
     pub executable: bool,
     pub backing: Backing,
 }
+
+// ---------------------------------------------------------------------------
+// VmaList — sorted collection of VMAs
+// ---------------------------------------------------------------------------
+
 /// Sorted list of VMAs. No overlaps allowed.
 pub struct VmaList {
     vmas: Vec<Vma>,
-}
-
-/// What backs a VMA's pages.
-#[derive(Clone)]
-pub enum Backing {
-    /// Anonymous zero-filled pages (stack, BSS).
-    Anonymous,
 }
 
 impl VmaList {
@@ -49,6 +62,7 @@ impl VmaList {
 
         self.vmas.insert(pos, vma);
     }
+
     /// Look up the VMA containing `va`. Returns None if `va` is in a gap
     /// (e.g., guard page).
     pub fn lookup(&self, va: u64) -> Option<&Vma> {
@@ -76,6 +90,7 @@ impl VmaList {
 
         Some(&self.vmas[idx])
     }
+
     /// Remove the VMA whose start address matches `start`.
     ///
     /// Returns the removed VMA, or None if no VMA starts at that address.

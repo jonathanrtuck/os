@@ -32,8 +32,9 @@ mod timer {
     pub struct TimerId(pub u8);
 }
 
-use handle::*;
 use std::collections::HashSet;
+
+use handle::*;
 
 // --- Simulated address space with channel SHM bump allocator ---
 
@@ -211,7 +212,10 @@ fn test_channel_create_pte_leak_second_map_fails_buggy() {
 
     let result = sys_channel_create_buggy(&mut handles, &mut addr_space);
 
-    assert!(result.is_err(), "channel_create should fail when second map fails");
+    assert!(
+        result.is_err(),
+        "channel_create should fail when second map fails"
+    );
 
     // BUG: one page is still mapped — the PTE leaked.
     assert_eq!(
@@ -234,7 +238,10 @@ fn test_channel_create_pte_leak_second_map_fails_fixed() {
 
     let result = sys_channel_create_fixed(&mut handles, &mut addr_space);
 
-    assert!(result.is_err(), "channel_create should fail when second map fails");
+    assert!(
+        result.is_err(),
+        "channel_create should fail when second map fails"
+    );
 
     // FIX: no leaked PTEs — first page was unmapped on rollback.
     assert_eq!(
@@ -252,7 +259,10 @@ fn test_channel_create_pte_leak_success_path_no_leak() {
 
     let result = sys_channel_create_fixed(&mut handles, &mut addr_space);
 
-    assert!(result.is_ok(), "channel_create should succeed when both maps succeed");
+    assert!(
+        result.is_ok(),
+        "channel_create should succeed when both maps succeed"
+    );
     assert_eq!(
         addr_space.mapped_count(),
         2,
@@ -271,7 +281,10 @@ fn test_channel_create_pte_leak_first_map_fails_no_leak() {
 
     let result = sys_channel_create_fixed(&mut handles, &mut addr_space);
 
-    assert!(result.is_err(), "channel_create should fail when first map fails");
+    assert!(
+        result.is_err(),
+        "channel_create should fail when first map fails"
+    );
     assert_eq!(
         addr_space.mapped_count(),
         0,

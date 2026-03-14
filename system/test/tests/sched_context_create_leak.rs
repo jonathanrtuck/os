@@ -125,10 +125,7 @@ fn sys_scheduling_context_create_model(
     let ctx_id = store.create(budget, period).ok_or(Error::InvalidArgument)?;
 
     let handle = handles
-        .insert(
-            HandleObject::SchedulingContext(ctx_id),
-            Rights::READ_WRITE,
-        )
+        .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
         .map_err(|_| {
             // FIX: release the scheduling context on handle-insert failure.
             store.release(ctx_id);
@@ -197,24 +194,19 @@ fn test_sched_context_create_leak_id_reusable_after_cleanup() {
 
     fill_handle_table(&mut handles);
 
-    let result = sys_scheduling_context_create_model(
-        &mut store,
-        &mut handles,
-        1_000_000,
-        5_000_000,
-    );
+    let result =
+        sys_scheduling_context_create_model(&mut store, &mut handles, 1_000_000, 5_000_000);
     assert!(result.is_err());
 
     // Free one handle slot so the next create can succeed.
     let _ = handles.close(Handle(0));
 
-    let result2 = sys_scheduling_context_create_model(
-        &mut store,
-        &mut handles,
-        1_000_000,
-        5_000_000,
+    let result2 =
+        sys_scheduling_context_create_model(&mut store, &mut handles, 1_000_000, 5_000_000);
+    assert!(
+        result2.is_ok(),
+        "should succeed after freeing a handle slot"
     );
-    assert!(result2.is_ok(), "should succeed after freeing a handle slot");
 
     // The context ID should have been reused from the free list.
     let ctx_id = SchedulingContextId(0);
@@ -228,12 +220,8 @@ fn test_sched_context_create_success_path_unaffected() {
     let mut store = ContextStore::new();
     let mut handles = HandleTable::new();
 
-    let result = sys_scheduling_context_create_model(
-        &mut store,
-        &mut handles,
-        1_000_000,
-        5_000_000,
-    );
+    let result =
+        sys_scheduling_context_create_model(&mut store, &mut handles, 1_000_000, 5_000_000);
 
     assert!(result.is_ok(), "should succeed with empty handle table");
     assert_eq!(result.unwrap(), 0, "first handle should be slot 0");
@@ -258,12 +246,8 @@ fn test_sched_context_create_leak_multiple_failures_dont_accumulate() {
 
     // Fail 5 times.
     for _ in 0..5 {
-        let result = sys_scheduling_context_create_model(
-            &mut store,
-            &mut handles,
-            1_000_000,
-            5_000_000,
-        );
+        let result =
+            sys_scheduling_context_create_model(&mut store, &mut handles, 1_000_000, 5_000_000);
         assert!(result.is_err());
     }
 

@@ -36,8 +36,10 @@ mod memory {
 }
 
 mod sync {
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
+    use core::{
+        cell::UnsafeCell,
+        ops::{Deref, DerefMut},
+    };
     pub struct IrqMutex<T> {
         data: UnsafeCell<T>,
     }
@@ -109,8 +111,11 @@ fn adversarial_buddy_stress() {
                 frames.push(pa);
             }
             assert_eq!(
-                frames.len(), REGION_PAGES,
-                "cycle {}: should exhaust all {} frames", cycle, REGION_PAGES
+                frames.len(),
+                REGION_PAGES,
+                "cycle {}: should exhaust all {} frames",
+                cycle,
+                REGION_PAGES
             );
             assert!(page_allocator::alloc_frame().is_none());
 
@@ -119,8 +124,10 @@ fn adversarial_buddy_stress() {
                 page_allocator::free_frame(pa);
             }
             assert_eq!(
-                page_allocator::free_count(), REGION_PAGES,
-                "cycle {}: free count must restore", cycle
+                page_allocator::free_count(),
+                REGION_PAGES,
+                "cycle {}: free count must restore",
+                cycle
             );
         }
 
@@ -147,7 +154,8 @@ fn adversarial_buddy_stress() {
                 page_allocator::free_frame(pa);
             }
             assert_eq!(
-                page_allocator::free_count(), REGION_PAGES,
+                page_allocator::free_count(),
+                REGION_PAGES,
                 "interleaved: all frames must be returned"
             );
         }
@@ -184,7 +192,8 @@ fn adversarial_buddy_stress() {
                 page_allocator::free_frames(pa, order);
             }
             assert_eq!(
-                page_allocator::free_count(), REGION_PAGES,
+                page_allocator::free_count(),
+                REGION_PAGES,
                 "scrambled free: full coalescing must restore all pages"
             );
         }
@@ -213,7 +222,8 @@ fn adversarial_buddy_stress() {
                 page_allocator::free_frame(pa);
             }
             assert_eq!(
-                page_allocator::free_count(), REGION_PAGES,
+                page_allocator::free_count(),
+                REGION_PAGES,
                 "alternating: all frames restored"
             );
         }
@@ -225,7 +235,8 @@ fn adversarial_buddy_stress() {
             while let Some(pa) = page_allocator::alloc_frame() {
                 assert!(
                     all_addrs.insert(pa.0),
-                    "duplicate address returned: 0x{:x}", pa.0
+                    "duplicate address returned: 0x{:x}",
+                    pa.0
                 );
                 frames.push(pa);
             }

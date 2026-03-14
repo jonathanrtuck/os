@@ -28,9 +28,11 @@
 #![no_std]
 #![no_main]
 
-use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
-use protocol::gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY};
-use protocol::present::{PresentPayload, MSG_PRESENT};
+use protocol::{
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    present::{PresentPayload, MSG_PRESENT},
+};
 /// Control virtqueue index.
 const VIRTQ_CONTROL: u32 = 0;
 /// Resource ID for our framebuffer (arbitrary nonzero).

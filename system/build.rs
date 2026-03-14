@@ -14,9 +14,11 @@
 //! Init is the proto-OS-service: it embeds all other ELFs so it can spawn
 //! them at runtime. The kernel spawns only init (microkernel pattern).
 
-use std::env;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 /// Output of building a Cargo-managed library for the bare-metal target.
 #[allow(dead_code)]
@@ -335,11 +337,7 @@ fn rustc_rlib(
 /// directory containing transitive dependency rlibs.
 fn cargo_lib(crate_dir: &Path) -> CargoLibOutput {
     let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let crate_name = crate_dir
-        .file_name()
-        .unwrap()
-        .to_str()
-        .unwrap();
+    let crate_name = crate_dir.file_name().unwrap().to_str().unwrap();
 
     let status = Command::new(&cargo)
         .current_dir(crate_dir)
@@ -349,20 +347,13 @@ fn cargo_lib(crate_dir: &Path) -> CargoLibOutput {
         .status()
         .unwrap_or_else(|e| panic!("failed to invoke cargo for {crate_name}: {e}"));
 
-    assert!(
-        status.success(),
-        "cargo build failed for {crate_name}"
-    );
+    assert!(status.success(), "cargo build failed for {crate_name}");
 
     let target_dir = crate_dir.join("target/aarch64-unknown-none/release");
     let rlib = target_dir.join(format!("lib{crate_name}.rlib"));
     let deps_dir = target_dir.join("deps");
 
-    assert!(
-        rlib.exists(),
-        "rlib not found at {}",
-        rlib.display()
-    );
+    assert!(rlib.exists(), "rlib not found at {}", rlib.display());
 
     CargoLibOutput { rlib, deps_dir }
 }

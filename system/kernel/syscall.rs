@@ -75,28 +75,23 @@
 //! | -13  | TableFull           | `HandleError` |
 //! | -15  | SyscallBlocked      | `Error`       |
 
-use super::channel;
-use super::futex;
-use super::handle::{ChannelId, Handle, HandleError, HandleObject, Rights};
-use super::interrupt;
-use super::interrupt::InterruptId;
-use super::memory;
-use super::metrics;
-use super::page_allocator;
-use super::paging;
-use super::paging::USER_VA_END;
-use super::process;
-use super::process::ProcessId;
-use super::process_exit;
-use super::scheduler;
-use super::serial;
-use super::thread::ThreadId;
-use super::thread::WaitEntry;
-use super::thread_exit;
-use super::timer;
-use super::timer::TimerId;
-use super::Context;
 use alloc::vec::Vec;
+
+use super::{
+    channel, futex,
+    handle::{ChannelId, Handle, HandleError, HandleObject, Rights},
+    interrupt,
+    interrupt::InterruptId,
+    memory, metrics, page_allocator, paging,
+    paging::USER_VA_END,
+    process,
+    process::ProcessId,
+    process_exit, scheduler, serial,
+    thread::{ThreadId, WaitEntry},
+    thread_exit, timer,
+    timer::TimerId,
+    Context,
+};
 
 pub mod nr {
     pub const EXIT: u64 = 0;

@@ -37,8 +37,9 @@ mod timer {
     pub struct TimerId(pub u8);
 }
 
-use handle::*;
 use std::collections::HashSet;
+
+use handle::*;
 
 // --- Simulated address space with channel SHM bump allocator ---
 
@@ -387,7 +388,11 @@ fn test_handle_send_rollback_non_channel_handle_unaffected() {
     );
 
     assert!(result.is_ok(), "non-channel send should succeed");
-    assert_eq!(target_addr.mapped_count(), 0, "no pages mapped for non-channel");
+    assert_eq!(
+        target_addr.mapped_count(),
+        0,
+        "no pages mapped for non-channel"
+    );
 }
 
 #[test]
@@ -411,5 +416,9 @@ fn test_handle_send_rollback_target_started_returns_error() {
     );
 
     assert_eq!(result, Err(Error::InvalidArgument));
-    assert_eq!(target_addr.mapped_count(), 0, "no pages mapped when target is started");
+    assert_eq!(
+        target_addr.mapped_count(),
+        0,
+        "no pages mapped when target is started"
+    );
 }
