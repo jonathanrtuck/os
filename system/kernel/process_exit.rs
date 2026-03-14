@@ -11,12 +11,10 @@
 //! exits (level-triggered). Two-phase wake: collect waiter under own lock,
 //! wake under scheduler lock.
 
-use super::handle::HandleObject;
-use super::process::ProcessId;
-use super::scheduler;
-use super::sync::IrqMutex;
-use super::thread::ThreadId;
-use super::waitable::WaitableRegistry;
+use super::{
+    handle::HandleObject, process::ProcessId, scheduler, sync::IrqMutex, thread::ThreadId,
+    waitable::WaitableRegistry,
+};
 
 static STATE: IrqMutex<WaitableRegistry<ProcessId>> = IrqMutex::new(WaitableRegistry::new());
 

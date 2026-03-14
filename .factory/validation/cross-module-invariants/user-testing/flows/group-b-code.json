@@ -1,0 +1,126 @@
+{
+  "groupId": "group-b-code",
+  "testedAt": "2026-03-14T12:00:00Z",
+  "isolation": {
+    "type": "code-review-and-documentation-verification",
+    "sourceDir": "/Users/user/Sites/os/system/kernel/",
+    "documentationDir": "/Users/user/Sites/os/.factory/library/",
+    "noQemuRequired": true
+  },
+  "toolsUsed": ["Read", "Grep", "Execute"],
+  "assertions": [
+    {
+      "id": "VAL-INVAR-006",
+      "title": "ASID lifecycle verified",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read safety-map.md Section 6 (ASID Lifecycle)",
+          "expected": "Comprehensive ASID lifecycle trace present",
+          "observed": "Section 6 covers alloc, generation rollover, free (4 sites + Drop), end-to-end trace, and 4 invariants"
+        },
+        {
+          "action": "Grep kernel source for all address_space_id alloc/free call sites",
+          "expected": "Every alloc has a matching free in process cleanup",
+          "observed": "1 alloc site (process.rs:102), 5 explicit free sites + 1 Drop safety net = 6 total free paths covering all process lifecycle scenarios"
+        },
+        {
+          "action": "Verify generation rollover path in address_space_id.rs",
+          "expected": "TLB flush before ASID reuse on exhaustion",
+          "observed": "Lines 65-75: DSB ISHST + TLBI VMALLE1IS + DSB ISH + ISB executed before generation increment and bitmap reset"
+        },
+        {
+          "action": "Verify TLB invalidation before free on all exit/kill paths",
+          "expected": "invalidate_tlb() called before address_space_id::free()",
+          "observed": "All 5 explicit free paths preceded by invalidate_tlb() call"
+        }
+      ],
+      "evidence": {
+        "documentation": "cross-module-invariants/group-b/VAL-INVAR-006-asid-lifecycle.md",
+        "safetyMapSection": "Section 6: ASID Lifecycle",
+        "sourceFiles": ["address_space_id.rs", "process.rs:102,106", "syscall.rs:783,855", "scheduler.rs:259,1000", "address_space.rs:640"]
+      },
+      "issues": [
+        {
+          "severity": "minor",
+          "description": "Safety-map free sites table has label mismatches: syscall.rs:783 labeled as sys_process_kill (actually sys_process_create rollback), syscall.rs:855 labeled as exit_current_from_syscall (actually sys_process_kill). Additionally, scheduler.rs:1000 (actual exit_current_from_syscall) is missing from the table. The safety-map says '4 free sites' but there are actually 5 explicit free call sites. Despite these labeling issues, the functional coverage is complete — every alloc has a matching free."
+        }
+      ]
+    },
+    {
+      "id": "VAL-INVAR-007",
+      "title": "Scheduling context ref_count verified",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Read safety-map.md Section 7 (Scheduling Context ref_count)",
+          "expected": "All increment/decrement sites documented",
+          "observed": "Section 7 documents 5 increment sites and 6 decrement categories with release_context_inner and release_thread_context_ids implementations"
+        },
+        {
+          "action": "Grep kernel source for all ref_count operations in scheduler.rs",
+          "expected": "All documented sites match actual code",
+          "observed": "All 5 increment sites verified: create(836), init(1038), bind(638), borrow(717), bind_default(166). All 6 decrement categories verified: release_sc(1241), return_sc(1262), exit_current(910,912), kill_process ready/blocked/suspended(~1115,1135,1155), kill running(~1199), categorize_handles(188)"
+        },
+        {
+          "action": "Verify release_context_inner implementation",
+          "expected": "saturating_sub prevents underflow, freed exactly when ref_count=0",
+          "observed": "scheduler.rs:279 uses saturating_sub(1), line 281 checks ==0 to set slot to None and push to free_context_ids"
+        },
+        {
+          "action": "Verify ref_count reaches zero iff all handles closed AND all threads exited",
+          "expected": "Correct lifecycle trace",
+          "observed": "Both exit_current_from_syscall and kill_process paths release all per-thread refs. Handle drain releases handle refs via categorize_handles. All paths converge on release_context_inner."
+        }
+      ],
+      "evidence": {
+        "documentation": "cross-module-invariants/group-b/VAL-INVAR-007-refcount.md",
+        "safetyMapSection": "Section 7: Scheduling Context ref_count",
+        "sourceFiles": ["scheduler.rs:70,166,279-285,294-300,638,717,836,910-913,1038,1115,1135,1155,1199,1241,1262", "scheduling_context.rs (pure logic, no ref_count)"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-INVAR-008",
+      "title": "Emergency stack sizing matches MAX_CORES",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Check exception.S for __exc_stacks allocation",
+          "expected": ".space 4096 * N where N matches MAX_CORES",
+          "observed": "exception.S:449: .space 4096 * 8 (32 KiB)"
+        },
+        {
+          "action": "Check per_core.rs for MAX_CORES constant",
+          "expected": "MAX_CORES defined consistently",
+          "observed": "per_core.rs:14: pub const MAX_CORES: usize = 8"
+        },
+        {
+          "action": "Verify values are consistent",
+          "expected": "4096 * 8 == 4096 * MAX_CORES",
+          "observed": "Both values are 8. Stack allocation = 4096 * 8 = 32 KiB. Match confirmed."
+        },
+        {
+          "action": "Verify documented in safety-map.md",
+          "expected": "Section on emergency stack sizing present",
+          "observed": "Section 8 documents allocation, constant, verification table, stack selection logic, historical bug, and invariant"
+        },
+        {
+          "action": "Run full test suite",
+          "expected": "All tests pass",
+          "observed": "1054 tests passed, 0 failed"
+        }
+      ],
+      "evidence": {
+        "documentation": "cross-module-invariants/group-b/VAL-INVAR-008-stack-sizing.md",
+        "safetyMapSection": "Section 8: Emergency Stack Sizing",
+        "sourceFiles": ["exception.S:449", "per_core.rs:14"],
+        "testSuite": "1054 passed, 0 failed, 0 ignored"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 3 assertions: 3 passed. VAL-INVAR-006 (ASID lifecycle) has minor documentation label mismatches in the safety-map free sites table but functional coverage is complete. VAL-INVAR-007 (ref_count) and VAL-INVAR-008 (stack sizing) fully verified with no issues. All 1054 tests pass."
+}

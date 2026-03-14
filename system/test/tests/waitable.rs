@@ -280,7 +280,10 @@ fn thread_exit_notify_returns_waiter() {
     let waiter = reg.notify(TestId(5));
 
     assert_eq!(waiter, Some(tid(10)), "waiter must be returned on exit");
-    assert!(reg.check_ready(TestId(5)), "entry must be permanently ready after exit");
+    assert!(
+        reg.check_ready(TestId(5)),
+        "entry must be permanently ready after exit"
+    );
 }
 
 /// Models handle close before thread exit: destroy removes the entry,
@@ -319,7 +322,10 @@ fn notify_without_registered_waiter() {
     // In the real thread_exit flow, sys_wait checks check_ready FIRST.
     // If already ready, it returns immediately without blocking — no
     // register_waiter needed.
-    assert!(reg.check_ready(TestId(5)), "entry permanently ready after notify");
+    assert!(
+        reg.check_ready(TestId(5)),
+        "entry permanently ready after notify"
+    );
 }
 
 /// Models multiple threads sequentially waiting on the same thread exit.
@@ -361,7 +367,11 @@ fn destroy_ready_entry_returns_waiter() {
     reg.register_waiter(TestId(1), tid(20));
 
     let waiter = reg.destroy(TestId(1));
-    assert_eq!(waiter, Some(tid(20)), "destroy must return waiter even on ready entry");
+    assert_eq!(
+        waiter,
+        Some(tid(20)),
+        "destroy must return waiter even on ready entry"
+    );
 }
 
 /// Destroy on empty entry returns None.

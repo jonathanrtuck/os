@@ -1,0 +1,33 @@
+{
+  "featureId": "verify-handle-lifecycle",
+  "reviewedAt": "2026-03-14T18:15:00.000Z",
+  "commitId": "16174b3",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Thorough per-handle-type lifecycle verification. Documentation (.factory/library/handle-lifecycle.md) is comprehensive and accurate — all 6 handle types (Channel, Timer, Interrupt, Thread, Process, SchedulingContext) have creation, transfer, close, and process exit cleanup paths traced and cross-checked against kernel source. 30 model-based tests exercise every lifecycle path including error rollbacks and edge cases (double-close, notify-after-destroy, saturating underflow). One minor modeling deviation: the test's categorize_handles returns SchedulingContext handles as a category Vec and releases them after categorization, whereas the kernel's categorize_handles (scheduler.rs:194) releases them immediately inline via release_context_inner under the scheduler lock. This doesn't affect correctness — the invariant 'all SC refs released on exit' is still verified — but the model diverges from the kernel's actual two-phase pattern where SC handles skip the deferred close_handle_categories path. No bugs found, no leak paths missed.",
+    "issues": [
+      {
+        "file": "system/test/tests/handle_lifecycle.rs",
+        "line": 370,
+        "severity": "non_blocking",
+        "description": "The test model's categorize_handles function includes a scheduling_contexts field in HandleCategories and releases SC handles after categorization. The real kernel (scheduler.rs:194) has no scheduling_contexts field in HandleCategories — it releases SC handles immediately inside categorize_handles via release_context_inner(s, id). The test still verifies the correct end state (all refs released), but the model doesn't reflect the kernel's optimization of releasing SC handles under the scheduler lock during categorization rather than in the deferred close_handle_categories phase. This is cosmetic — the invariant holds — but could mislead future readers into thinking SC handles follow the same deferred pattern as channels/timers/interrupts."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker's skill feedback correctly identifies that the kernel-auditor skill's TDD step ('Write Failing Tests First') doesn't cleanly apply to cross-module invariant verification features where the outcome is 'no bugs found, write verification tests that pass immediately.' The skill's 'Special Cases' section mentions cross-file invariant features should 'trace specific cross-cutting concerns' but doesn't explicitly state that AUDIT comments and TDD are optional for these features. The suggested skill change ('AUDIT comments are optional for cross-module invariant features') is reasonable.",
+      "evidence": "Skill SKILL.md Special Cases section says 'Instead of per-file audit, trace specific cross-cutting concerns' but doesn't relax the TDD or AUDIT requirements. Worker's deviations in handoff.skillFeedback are well-justified: all 9 files were already audited in previous milestones."
+    },
+    {
+      "area": "conventions",
+      "observation": "The handle-lifecycle.md documentation accurately captures that SchedulingContext handles are released immediately inside categorize_handles (not deferred to close_handle_categories), but the test model does not mirror this kernel optimization. If model-based tests are expected to match kernel structure faithfully, this convention should be documented — or if approximate modeling is acceptable (test verifies invariant, not implementation), that convention should be stated.",
+      "evidence": "Kernel scheduler.rs:194 releases SC handles inline during categorize_handles. Test handle_lifecycle.rs:370 returns them in a Vec for external release. Both achieve the same end state but via different paths."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The worker traced all 6 handle types across 9 kernel source files, producing accurate documentation and 30 model-based tests that cover the full lifecycle (create, transfer, close, process exit drain) with error rollback paths and edge cases. All documentation claims verified against kernel source. One non-blocking modeling deviation (SC handles categorization pattern) noted. No leak paths found. The verification is thorough and the artifacts are well-structured."
+}

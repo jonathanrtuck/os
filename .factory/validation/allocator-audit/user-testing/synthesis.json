@@ -1,0 +1,38 @@
+{
+  "milestone": "allocator-audit",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-ALLOC-001",
+    "VAL-ALLOC-002",
+    "VAL-ALLOC-003",
+    "VAL-ALLOC-004",
+    "VAL-ALLOC-005",
+    "VAL-ALLOC-006",
+    "VAL-ALLOC-007"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added 'Flow Validator Guidance: Terminal (Unit Tests + Code Review)' section with isolation rules, commands, and key source files for code audit milestones",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null,
+  "evidence": {
+    "testSuite": {
+      "totalPassed": 974,
+      "totalFailed": 0,
+      "buildClean": true
+    },
+    "flowReport": ".factory/validation/allocator-audit/user-testing/flows/alloc-assertions.json"
+  }
+}

@@ -18,9 +18,10 @@
 // register_waiter overwrites silently — acceptable given kernel usage (one
 // waiter per handle, same thread always registers itself). No bugs found.
 
-use super::thread::ThreadId;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+
+use super::thread::ThreadId;
 
 /// Trait for ID types that can be used as direct indices in `WaitableRegistry`.
 ///

@@ -6,24 +6,14 @@
 #![no_std]
 #![no_main]
 
-/// Channel shared memory base (first channel in our address space).
-const CHANNEL_SHM_BASE: usize = 0x4000_0000;
-const VIRTQ_TX: u32 = 1;
-// Protocol message type (must match init's definition).
-const MSG_DEVICE_CONFIG: u32 = 1;
+use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DeviceConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-}
+const VIRTQ_TX: u32 = 1;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Read device config from ring buffer (first message, sent by init).
-    let ch = unsafe { ipc::Channel::from_base(CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    let ch = unsafe { ipc::Channel::from_base(protocol::CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
     if !ch.try_recv(&mut msg) || msg.msg_type != MSG_DEVICE_CONFIG {

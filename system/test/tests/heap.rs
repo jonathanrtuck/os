@@ -37,8 +37,10 @@ mod slab {
 }
 
 mod sync {
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
+    use core::{
+        cell::UnsafeCell,
+        ops::{Deref, DerefMut},
+    };
 
     pub struct IrqMutex<T> {
         data: UnsafeCell<T>,
@@ -115,7 +117,10 @@ fn init_heap(region: *mut u8, size: usize) {
         // we replicate its logic.
         heap::ALLOCATOR.head.get().write(block as *mut _);
         heap::ALLOCATOR.region_start.get().write(block as usize);
-        heap::ALLOCATOR.region_end.get().write(block as usize + size);
+        heap::ALLOCATOR
+            .region_end
+            .get()
+            .write(block as usize + size);
     }
 }
 
@@ -195,11 +200,7 @@ fn heap_allocator() {
     let p = unsafe { alloc.alloc(layout_256) };
 
     assert!(!p.is_null(), "256-byte aligned alloc should succeed");
-    assert_eq!(
-        p as usize % 256,
-        0,
-        "should be 256-byte aligned"
-    );
+    assert_eq!(p as usize % 256, 0, "should be 256-byte aligned");
 
     unsafe { alloc.dealloc(p, layout_256) };
 

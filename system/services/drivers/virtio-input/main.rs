@@ -35,8 +35,13 @@
 #![no_std]
 #![no_main]
 
-/// Channel shared memory base.
-const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+use protocol::{
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    input::{
+        KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
+    },
+};
+
 /// Linux evdev event type for key press/release.
 const EV_KEY: u16 = 1;
 /// Linux evdev event type for absolute axis events (touch/tablet).
@@ -49,46 +54,9 @@ const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 /// Size of a virtio_input_event struct (8 bytes).
 const EVENT_SIZE: u32 = 8;
-/// Protocol message types (must match init/compositor definitions).
-const MSG_DEVICE_CONFIG: u32 = 1;
-const MSG_KEY_EVENT: u32 = 10;
-const MSG_POINTER_ABS: u32 = 11;
-const MSG_POINTER_BUTTON: u32 = 12;
 /// Event virtqueue index.
 const VIRTQ_EVENT: u32 = 0;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DeviceConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-}
-/// Key event sent to the compositor via IPC.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KeyEvent {
-    keycode: u16,
-    pressed: u8,
-    ascii: u8,
-}
-/// Absolute pointer position sent to the compositor via IPC.
-/// Coordinates are in the raw [0, 32767] range; the compositor scales them.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PointerAbs {
-    x: u32,
-    y: u32,
-}
-/// Pointer button event sent to the compositor via IPC.
-/// button: 0 = left, 1 = right. pressed: 1 = down, 0 = up.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PointerButton {
-    button: u8,
-    pressed: u8,
-    _pad: [u8; 2],
-}
 /// A virtio-input event (matches Linux's input_event without timeval).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -100,7 +68,7 @@ struct VirtioInputEvent {
 
 /// Compute the base VA of channel N's shared pages.
 fn channel_shm_va(idx: usize) -> usize {
-    CHANNEL_SHM_BASE + idx * 2 * 4096
+    protocol::channel_shm_va(idx)
 }
 /// Translate a Linux evdev keycode to ASCII.
 ///

@@ -149,7 +149,9 @@ struct WaitableRegistry {
 
 impl WaitableRegistry {
     fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     fn create(&mut self, idx: usize) {
@@ -251,7 +253,8 @@ impl SchedulerState {
 
     /// Check if a process slot is occupied.
     fn process_exists(&self, pid: ProcessId) -> bool {
-        self.processes.get(pid.0 as usize)
+        self.processes
+            .get(pid.0 as usize)
             .and_then(|p| p.as_ref())
             .is_some()
     }
@@ -305,7 +308,11 @@ fn close_endpoint_wakes_before_freeing_pages() {
     let (_freed1, waiter1) = ch.close_endpoint(ep0);
     let (freed2, waiter2) = ch.close_endpoint(ep1);
 
-    assert_eq!(waiter1, Some(ThreadId(99)), "waiter returned on first close");
+    assert_eq!(
+        waiter1,
+        Some(ThreadId(99)),
+        "waiter returned on first close"
+    );
     assert_eq!(waiter2, None, "no waiter on second close (already taken)");
     assert!(freed2, "pages freed on second close");
 }
@@ -413,7 +420,10 @@ fn address_space_freed_after_all_threads_exit() {
     if process.thread_count == 0 && process.killed {
         process.has_address_space = false;
     }
-    assert!(!process.has_address_space, "address space must be freed when count hits 0");
+    assert!(
+        !process.has_address_space,
+        "address space must be freed when count hits 0"
+    );
 }
 
 #[test]
@@ -427,7 +437,10 @@ fn last_thread_exit_frees_address_space_immediately() {
     // Simulate last thread exit: take the process.
     let process = s.processes[pid.0 as usize].take();
     assert!(process.is_some(), "process should be takeable");
-    assert!(!s.process_exists(pid), "process slot should be empty after take");
+    assert!(
+        !s.process_exists(pid),
+        "process slot should be empty after take"
+    );
 }
 
 // ============================================================
@@ -449,7 +462,10 @@ fn timer_fires_for_exited_thread_is_harmless() {
 
     // Fallback: set_wake_pending — harmless, flag never consumed.
     thread.wake_pending = true;
-    assert!(thread.wake_pending, "flag set but harmless — exited thread is never scheduled");
+    assert!(
+        thread.wake_pending,
+        "flag set but harmless — exited thread is never scheduled"
+    );
 }
 
 #[test]
@@ -513,10 +529,7 @@ fn process_slot_leak_on_thread_alloc_failure() {
 
     // FIX: remove the orphaned process slot on failure.
     s.remove_process(pid);
-    assert!(
-        !s.process_exists(pid),
-        "process slot cleaned up after fix"
-    );
+    assert!(!s.process_exists(pid), "process slot cleaned up after fix");
 }
 
 #[test]

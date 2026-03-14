@@ -1,0 +1,45 @@
+{
+  "featureId": "verify-lock-ordering",
+  "reviewedAt": "2026-03-14T18:15:00.000Z",
+  "commitId": "897332a",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Thorough and accurate lock ordering verification. All 13 IrqMutex instances correctly enumerated with file:line references. Two-phase wake pattern verified for all 6 waitable types (11 wake paths) by cross-referencing documentation claims against actual source code. Reverse-edge cycle-freedom claims confirmed: page_allocator.rs, address_space_id.rs contain zero references to scheduler::; scheduler.rs contains zero .lock() calls to any level-0 subsystem lock. Nested lock paths (slab→page_allocator, KERNEL_PT_LOCK→page_allocator, scheduler→page_allocator/address_space_id) confirmed by reading the actual nesting code. Complex multi-lock paths (exit_current_from_syscall, sys_wait, kill, IRQ handler) verified as sequential lock-release-lock, not nested. Line numbers accurate at commit 897332a for all 13 modules; scheduler.rs lines shifted ~4 at HEAD due to subsequent commit 5274a7f (expected drift, not a defect). The LOCK-ORDERING.md updates correctly fix stale line numbers for 10 of 13 locks. Documentation in .factory/library/lock-ordering-dag.md is comprehensive and well-structured.",
+    "issues": [
+      {
+        "file": ".factory/library/lock-ordering-dag.md",
+        "line": null,
+        "severity": "non_blocking",
+        "description": "scheduler.rs line numbers in Section 4 are already stale at HEAD (off by ~4) due to subsequent commit 5274a7f adding timeout timer cleanup. The documentation was accurate at commit 897332a. This is inherent to line-number documentation and will drift further with future changes."
+      },
+      {
+        "file": ".factory/library/lock-ordering-dag.md",
+        "line": null,
+        "severity": "non_blocking",
+        "description": "Section 4 lists 32 scheduler lock sites, but the actual count at HEAD is 33 (one new site added by 5274a7f at line 962 for timeout timer collection in exit_current_from_syscall Phase 1b). Again, accurate at time of commit."
+      },
+      {
+        "file": ".factory/library/lock-ordering-dag.md",
+        "line": null,
+        "severity": "non_blocking",
+        "description": "Summary says '~80 .lock() calls' — actual count across all 13 files at HEAD is ~86. Reasonable approximation but could be exact."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker's deviation from 'Step 3: Read Each File Thoroughly' was justified — for cross-module invariant features, targeted grep searches across all files are more efficient than reading each file top-to-bottom. The skill's 'Special Cases' section mentions cross-file invariant features but could be more explicit about the evidence standard (e.g., 'enumerate every .lock() call site with line numbers, verify reverse-edge absence').",
+      "evidence": "handoff.skillFeedback.deviations[0]: 'Used targeted grep searches across all kernel files to trace lock acquisitions and verify ordering claims, rather than reading every file top to bottom'. This deviation produced a more thorough result than sequential reading would have."
+    },
+    {
+      "area": "conventions",
+      "observation": "Line-number documentation in .factory/library/ files has an inherent staleness problem — subsequent commits in the same milestone already caused drift in scheduler.rs. Consider whether function names or code pattern anchors would be more durable references than line numbers.",
+      "evidence": "Commit 5274a7f (process-exit-cleanup) modified scheduler.rs after 897332a (lock-ordering), shifting all documented line numbers by ~4. The lock-ordering-dag.md was accurate for <1 hour before drifting."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The lock ordering DAG verification is thorough and accurate. All 13 IrqMutex instances inventoried, all ~80 acquisition sites enumerated with line numbers, all 11 two-phase wake paths verified, all 10 forward DAG edges confirmed cycle-free by checking reverse-edge absence, 3 true nested lock paths and 4 complex multi-lock paths documented with code evidence. The in-tree LOCK-ORDERING.md correctly updated with current line numbers. The .factory/library/lock-ordering-dag.md provides comprehensive cross-referenceable documentation. Only non-blocking issues: scheduler.rs line numbers already drifted at HEAD due to a subsequent commit in the same milestone."
+}

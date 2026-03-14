@@ -38,10 +38,10 @@ mod timer {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct TimerId(pub u8);
 }
-#[path = "../../kernel/scheduling_context.rs"]
-mod scheduling_context;
 #[path = "../../kernel/handle.rs"]
 mod handle;
+#[path = "../../kernel/scheduling_context.rs"]
+mod scheduling_context;
 
 use handle::*;
 
@@ -58,9 +58,7 @@ fn handle_exhaust_close_refill_cycles() {
     for cycle in 0..100 {
         let mut handles = Vec::new();
         for i in 0..256u32 {
-            let h = t
-                .insert(ch(cycle * 256 + i), Rights::READ_WRITE)
-                .unwrap();
+            let h = t.insert(ch(cycle * 256 + i), Rights::READ_WRITE).unwrap();
             handles.push(h);
         }
 
@@ -126,7 +124,10 @@ fn handle_repeated_double_close() {
     }
 
     let h2 = t.insert(ch(99), Rights::WRITE).unwrap();
-    assert_eq!(h2.0, 0, "slot 0 should be reusable after double-close storm");
+    assert_eq!(
+        h2.0, 0,
+        "slot 0 should be reusable after double-close storm"
+    );
     t.close(h2).unwrap();
 }
 
@@ -331,7 +332,10 @@ fn eevdf_charge_extreme_values() {
                 assert!(
                     charged.vruntime >= initial_vruntime,
                     "vruntime must not decrease: init={}, elapsed={}, w={}, result={}",
-                    initial_vruntime, elapsed, weight, charged.vruntime
+                    initial_vruntime,
+                    elapsed,
+                    weight,
+                    charged.vruntime
                 );
             }
         }
@@ -351,7 +355,10 @@ fn eevdf_virtual_deadline_extreme_values() {
                 assert!(
                     deadline >= eligible_at,
                     "deadline must be >= eligible_at: ea={}, slice={}, w={}, d={}",
-                    eligible_at, slice, weight, deadline
+                    eligible_at,
+                    slice,
+                    weight,
+                    deadline
                 );
             }
         }
@@ -365,7 +372,10 @@ fn eevdf_select_many_near_max_vruntimes() {
     let threads: Vec<(SchedulingState, bool)> = (0..thread_count)
         .map(|i| {
             let vruntime = u64::MAX - (i as u64 * 100);
-            (eevdf_state(vruntime, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, vruntime), true)
+            (
+                eevdf_state(vruntime, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, vruntime),
+                true,
+            )
         })
         .collect();
 
@@ -402,8 +412,9 @@ fn eevdf_fuzz_charge_and_select_no_panic() {
 /// avg_vruntime with large thread counts.
 #[test]
 fn eevdf_avg_vruntime_large_count_no_overflow() {
-    let states: Vec<SchedulingState> =
-        (0..10_000).map(|_| eevdf_state(u64::MAX, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 0)).collect();
+    let states: Vec<SchedulingState> = (0..10_000)
+        .map(|_| eevdf_state(u64::MAX, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 0))
+        .collect();
 
     let avg = avg_vruntime(&states);
     assert_eq!(avg, u64::MAX);
@@ -431,7 +442,8 @@ fn eevdf_minimum_weight_rapid_charge() {
     assert!(
         s.vruntime >= prev,
         "vruntime must not decrease (saturating): {} -> {}",
-        prev, s.vruntime
+        prev,
+        s.vruntime
     );
 
     // Eventually saturates at u64::MAX.
@@ -445,7 +457,11 @@ fn eevdf_maximum_weight_slow_charge() {
     for _ in 0..1000 {
         s = s.charge(1_000_000_000);
     }
-    assert!(s.vruntime < 1_000_000, "weight=MAX should be slow, got {}", s.vruntime);
+    assert!(
+        s.vruntime < 1_000_000,
+        "weight=MAX should be slow, got {}",
+        s.vruntime
+    );
 }
 
 /// All ineligible threads: fallback must work for all sizes.
@@ -455,13 +471,20 @@ fn eevdf_all_ineligible_fallback_pressure() {
         let threads: Vec<(SchedulingState, bool)> = (0..thread_count)
             .map(|i| {
                 let vruntime = 1000 + i as u64 * 10;
-                (eevdf_state(vruntime, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 0), true)
+                (
+                    eevdf_state(vruntime, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, 0),
+                    true,
+                )
             })
             .collect();
 
         let avg = 999; // Below all vruntimes.
         let result = select_next(&threads, avg);
-        assert!(result.is_some(), "fallback must select (n={})", thread_count);
+        assert!(
+            result.is_some(),
+            "fallback must select (n={})",
+            thread_count
+        );
         assert_eq!(result.unwrap(), 0, "fallback picks smallest vruntime");
     }
 }
@@ -527,7 +550,10 @@ impl FutexWaitTable {
 #[test]
 fn futex_hash_collision_stress() {
     let mut table = FutexWaitTable::new();
-    let colliding: Vec<u64> = (0..10_000u64).filter(|a| bucket_index(*a) == 0).take(500).collect();
+    let colliding: Vec<u64> = (0..10_000u64)
+        .filter(|a| bucket_index(*a) == 0)
+        .take(500)
+        .collect();
     assert!(colliding.len() >= 100);
 
     for (i, &pa) in colliding.iter().enumerate() {
@@ -631,7 +657,14 @@ fn timer_fuzz_deadline_extreme() {
         for &timeout_ns in &extreme_timeout {
             for &freq in &extreme_freq {
                 let deadline = compute_deadline(now, timeout_ns, freq);
-                assert!(deadline >= now, "now={}, t={}, f={}, d={}", now, timeout_ns, freq, deadline);
+                assert!(
+                    deadline >= now,
+                    "now={}, t={}, f={}, d={}",
+                    now,
+                    timeout_ns,
+                    freq,
+                    deadline
+                );
                 if timeout_ns == 0 {
                     assert_eq!(deadline, now);
                 }
@@ -700,13 +733,21 @@ fn process_fuzz_page_count_boundary() {
 
     for offset in 0..1000u64 {
         let mem_size = boundary.saturating_sub(offset + 1);
-        assert!(checked_page_count(mem_size).is_some(), "mem_size {} below boundary", mem_size);
+        assert!(
+            checked_page_count(mem_size).is_some(),
+            "mem_size {} below boundary",
+            mem_size
+        );
     }
 
     for offset in 0..1000u64 {
         let mem_size = boundary.saturating_add(offset);
         if mem_size >= boundary {
-            assert!(checked_page_count(mem_size).is_none(), "mem_size {} at/above boundary", mem_size);
+            assert!(
+                checked_page_count(mem_size).is_none(),
+                "mem_size {} at/above boundary",
+                mem_size
+            );
         }
     }
 }
@@ -714,7 +755,14 @@ fn process_fuzz_page_count_boundary() {
 /// Fuzz VMA end with extreme combos.
 #[test]
 fn process_fuzz_vma_end_extreme() {
-    let extreme = [0u64, 1, PAGE_SIZE, u64::MAX / 2, u64::MAX - PAGE_SIZE, u64::MAX];
+    let extreme = [
+        0u64,
+        1,
+        PAGE_SIZE,
+        u64::MAX / 2,
+        u64::MAX - PAGE_SIZE,
+        u64::MAX,
+    ];
     for &base_va in &extreme {
         for &page_count in &extreme {
             let result = checked_vma_end(base_va, page_count);
@@ -766,7 +814,10 @@ struct SchedThread {
 
 impl SchedThread {
     fn new(id: u64) -> Self {
-        Self { id, state: SchedThreadState::Ready }
+        Self {
+            id,
+            state: SchedThreadState::Ready,
+        }
     }
 
     fn activate(&mut self) {
@@ -943,8 +994,8 @@ fn sched_deferred_drop_lifecycle() {
         s.add_thread(SchedThread::new(i));
         s.schedule(); // Picks thread i, also drains any previous deferred_drops.
         s.exit_current(); // Marks as Exited.
-        // The thread is still in 'running' as Exited. Next schedule will
-        // move it to deferred_drops and drain the PREVIOUS deferred_drops.
+                          // The thread is still in 'running' as Exited. Next schedule will
+                          // move it to deferred_drops and drain the PREVIOUS deferred_drops.
     }
     // After loop: last exited thread is still in running slot.
     s.schedule(); // Moves last exited to deferred_drops, nothing to pick.
@@ -1006,7 +1057,10 @@ impl ProcessTable {
         for (i, slot) in self.slots.iter_mut().enumerate() {
             if slot.is_none() {
                 let pid = ProcId(i as u32);
-                *slot = Some(ProcessEntry { id: pid, threads: Vec::new() });
+                *slot = Some(ProcessEntry {
+                    id: pid,
+                    threads: Vec::new(),
+                });
                 return Some(pid);
             }
         }
@@ -1167,11 +1221,19 @@ struct WaitableRegistry {
 
 impl WaitableRegistry {
     fn new() -> Self {
-        Self { entries: HashMap::new() }
+        Self {
+            entries: HashMap::new(),
+        }
     }
 
     fn create(&mut self, id: u32) {
-        self.entries.insert(id, WaitableEntry { waiter: None, ready: false });
+        self.entries.insert(
+            id,
+            WaitableEntry {
+                waiter: None,
+                ready: false,
+            },
+        );
     }
 
     fn register_waiter(&mut self, id: u32, tid: u64) {

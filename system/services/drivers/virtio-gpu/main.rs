@@ -28,14 +28,11 @@
 #![no_std]
 #![no_main]
 
-/// Channel shared memory base (first channel in our address space).
-const CHANNEL_SHM_BASE: usize = 0x4000_0000;
-// Protocol message types (must match init/compositor definitions).
-const MSG_DEVICE_CONFIG: u32 = 1;
-const MSG_GPU_CONFIG: u32 = 2;
-const MSG_DISPLAY_INFO: u32 = 5;
-const MSG_GPU_READY: u32 = 8;
-const MSG_PRESENT: u32 = 20;
+use protocol::{
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    present::{PresentPayload, MSG_PRESENT},
+};
 /// Control virtqueue index.
 const VIRTQ_CONTROL: u32 = 0;
 /// Resource ID for our framebuffer (arbitrary nonzero).
@@ -62,22 +59,6 @@ const FORMAT_B8G8R8A8_UNORM: u32 = 1;
 // Handle 2: IRQ handle (allocated by interrupt_register)
 const INIT_HANDLE: u8 = 0;
 const PRESENT_HANDLE: u8 = 1;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DeviceConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-}
-
-/// Display dimensions queried from virtio-gpu, sent back to init.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DisplayInfoMsg {
-    width: u32,
-    height: u32,
-}
 
 #[repr(C)]
 struct AttachBacking {
@@ -109,41 +90,7 @@ struct DmaBuf {
     pa: u64,
     order: u32,
 }
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct GpuConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-    fb_pa: u64,
-    fb_pa2: u64,
-    fb_width: u32,
-    fb_height: u32,
-    fb_size: u32,
-    _pad2: u32,
-}
-/// A dirty rectangle (must match the compositor's DirtyRect layout).
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DirtyRect {
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
-}
-/// Payload for MSG_PRESENT with double-buffering and damage tracking info.
-/// Must match the compositor's PresentPayload layout exactly.
-///
-/// When rect_count == 0: full-screen transfer (initial render, etc.)
-/// When rect_count > 0: transfer only the specified dirty rects
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PresentPayload {
-    buffer_index: u32,
-    rect_count: u32,
-    rects: [DirtyRect; 6],
-    _pad: [u8; 4],
-}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct MemEntry {
@@ -285,7 +232,7 @@ fn ctrl_header(cmd_type: u32) -> CtrlHeader {
 }
 /// Compute the base VA of channel N's shared pages.
 fn channel_shm_va(idx: usize) -> usize {
-    CHANNEL_SHM_BASE + idx * 2 * 4096
+    protocol::channel_shm_va(idx)
 }
 /// Format a u32 into a buffer, returning the number of bytes written.
 fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
@@ -834,12 +781,7 @@ pub extern "C" fn _start() -> ! {
     let mut last_payload = PresentPayload {
         buffer_index: 0,
         rect_count: 0,
-        rects: [DirtyRect {
-            x: 0,
-            y: 0,
-            w: 0,
-            h: 0,
-        }; 6],
+        rects: [protocol::DirtyRect::new(0, 0, 0, 0); 6],
         _pad: [0; 4],
     };
 

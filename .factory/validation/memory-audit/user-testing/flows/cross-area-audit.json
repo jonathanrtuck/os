@@ -1,0 +1,31 @@
+{
+  "groupId": "cross-area-audit",
+  "testedAt": "2026-03-14T12:00:00Z",
+  "isolation": {
+    "surface": "Terminal (file inspection + unit tests)",
+    "workingDirectory": "/Users/user/Sites/os",
+    "testCommand": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1",
+    "buildCommand": "cd /Users/user/Sites/os/system && cargo build --release"
+  },
+  "toolsUsed": ["terminal"],
+  "assertions": {
+    "VAL-CROSS-004": {
+      "status": "pass",
+      "evidence": "All 33 .rs files in system/kernel/ have AUDIT comments. File count: 33 (address_space_id.rs, address_space.rs, channel.rs, context.rs, device_tree.rs, executable.rs, futex.rs, handle.rs, heap.rs, interrupt_controller.rs, interrupt.rs, main.rs, memory_mapped_io.rs, memory_region.rs, memory.rs, metrics.rs, page_allocator.rs, paging.rs, per_core.rs, power.rs, process_exit.rs, process.rs, scheduler.rs, scheduling_algorithm.rs, scheduling_context.rs, serial.rs, slab.rs, sync.rs, syscall.rs, thread_exit.rs, thread.rs, timer.rs, waitable.rs). 0 files missing AUDIT comments. M3 files (heap.rs, slab.rs, page_allocator.rs, memory_region.rs) audited 2026-03-14. M4 files (memory.rs, paging.rs, memory_mapped_io.rs, main.rs) audited 2026-03-14. Remaining 26 files audited 2026-03-11.",
+      "details": "grep for AUDIT in all 33 files returned 33 matches. Full listing saved to evidence/memory-audit/cross-area-audit/VAL-CROSS-004-audit-comments.txt"
+    },
+    "VAL-CROSS-005": {
+      "status": "pass",
+      "evidence": "cargo build --release succeeds (exit code 0). cargo test -- --test-threads=1 passes with 1006 tests, 0 failures (baseline was 943). Git log shows M3/M4 audit commits (audit(heap), audit(slab), audit(page_allocator), audit(memory_region), audit(memory), audit(paging-mmio)) — these were audit-only changes adding SAFETY comments and AUDIT markers. No API signatures were changed. All caller modules (address_space.rs, process.rs, thread.rs) compile and pass tests without modification.",
+      "details": "Build output saved to evidence/memory-audit/cross-area-audit/VAL-CROSS-005-build-output.txt. Test count: 1006 passed, 0 failed across all test files."
+    },
+    "VAL-CROSS-006": {
+      "status": "pass",
+      "evidence": "All three critical fixes from DESIGN.md section 11 are verified intact: (11.1) Emergency stack sizing: exception.S __exc_stacks uses .space 4096 * 8, matching per_core::MAX_CORES = 8. (11.2) Emergency stacks alignment: exception.S uses .section .bss.exc_stacks, link.ld has explicit .bss.exc_stacks (NOLOAD) with ALIGN(4096). (11.3) Virtio push_chain: intermediate descriptors correctly set both desc.flags |= DESC_F_NEXT and desc.next = next_free (line 338-339 of virtio/lib.rs).",
+      "details": "Detailed grep output saved to evidence/memory-audit/cross-area-audit/VAL-CROSS-006-critical-fixes.txt"
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 3 assertions: 3 passed, 0 failed, 0 blocked. All 33 kernel .rs files have AUDIT comments. Build succeeds and 1006 tests pass with 0 failures. All 3 critical one-line fixes (emergency stack sizing, stacks alignment, virtio push_chain next descriptor) are verified intact."
+}

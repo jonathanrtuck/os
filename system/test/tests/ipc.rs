@@ -1,15 +1,4 @@
 //! Host-side tests for the IPC ring buffer library.
-//!
-//! Includes the library directly — it has zero external dependencies (no_std,
-//! no syscalls, no hardware), making it fully testable on the host.
-//!
-//! All tests are `#[cfg_attr(miri, ignore)]` because `libraries/ipc/lib.rs:198`
-//! creates an unaligned `AtomicU32` reference (real UB, but the library is
-//! outside kernel audit scope). The UB is in `RingBuf::head_atomic` which is
-//! called by `RingBuf::init`, triggered by every test.
-
-#[path = "../../libraries/ipc/lib.rs"]
-mod ipc;
 
 use ipc::{Channel, Message, RingBuf, PAYLOAD_SIZE, SLOT_COUNT};
 
@@ -309,9 +298,7 @@ fn channel_send_recv_endpoint_0() {
     let mut page0 = alloc_page();
     let mut page1 = alloc_page();
 
-    let ch = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0)
-    };
+    let ch = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0) };
     ch.init();
 
     // Endpoint 0 sends on page0, recvs on page1.
@@ -334,9 +321,7 @@ fn channel_send_recv_endpoint_1() {
     let mut page0 = alloc_page();
     let mut page1 = alloc_page();
 
-    let ch = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1)
-    };
+    let ch = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1) };
     ch.init();
 
     // Endpoint 1 sends on page1, recvs on page0.
@@ -359,14 +344,10 @@ fn channel_bidirectional_pair() {
     let mut page1 = alloc_page();
 
     // Both endpoints share the same physical pages.
-    let ep0 = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0)
-    };
+    let ep0 = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0) };
     ep0.init();
 
-    let ep1 = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1)
-    };
+    let ep1 = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1) };
     // ep1 does NOT call init — ep0 already initialized both pages.
 
     // ep0 sends → ep1 receives.
@@ -410,24 +391,10 @@ fn channel_config_as_first_message() {
     let mut page1 = alloc_page();
 
     // Init side (endpoint 0).
-    let init_ch = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0)
-    };
+    let init_ch = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 0) };
     init_ch.init();
 
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    struct GpuConfig {
-        mmio_pa: u64,
-        irq: u32,
-        _pad: u32,
-        fb_pa: u64,
-        fb_pa2: u64,
-        fb_width: u32,
-        fb_height: u32,
-        fb_size: u32,
-        _pad2: u32,
-    }
+    use protocol::gpu::GpuConfig;
 
     let config = GpuConfig {
         mmio_pa: 0x0A00_0000,
@@ -441,18 +408,15 @@ fn channel_config_as_first_message() {
         _pad2: 0,
     };
 
-    const MSG_GPU_CONFIG: u32 = 1;
-    let msg = unsafe { Message::from_payload(MSG_GPU_CONFIG, &config) };
+    let msg = unsafe { Message::from_payload(protocol::gpu::MSG_GPU_CONFIG, &config) };
     assert!(init_ch.send(&msg));
 
     // Child side (endpoint 1) — reads config as first message.
-    let child_ch = unsafe {
-        Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1)
-    };
+    let child_ch = unsafe { Channel::from_pages(page0.as_mut_ptr(), page1.as_mut_ptr(), 1) };
 
     let mut out = Message::new(0);
     assert!(child_ch.try_recv(&mut out));
-    assert_eq!(out.msg_type, MSG_GPU_CONFIG);
+    assert_eq!(out.msg_type, protocol::gpu::MSG_GPU_CONFIG);
 
     let recovered: GpuConfig = unsafe { out.payload_as() };
     assert_eq!(recovered, config);

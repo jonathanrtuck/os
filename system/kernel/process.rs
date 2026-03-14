@@ -11,17 +11,19 @@
 //! process share these resources. A process is alive while any of its
 //! threads are alive. Last thread exit triggers full cleanup.
 
-use super::address_space::{AddressSpace, PageAttrs};
-use super::address_space_id;
-use super::executable;
-use super::handle::HandleTable;
-use super::memory;
-use super::memory_region::{Backing, Vma};
-use super::page_allocator;
-use super::paging::{PAGE_SIZE, USER_STACK_TOP, USER_STACK_VA};
-use super::scheduler;
-use super::thread::ThreadId;
 use alloc::boxed::Box;
+
+use super::{
+    address_space::{AddressSpace, PageAttrs},
+    address_space_id, executable,
+    handle::HandleTable,
+    memory,
+    memory_region::{Backing, Vma},
+    page_allocator,
+    paging::{PAGE_SIZE, USER_STACK_TOP, USER_STACK_VA},
+    scheduler,
+    thread::ThreadId,
+};
 
 /// A process — owns an address space and handle table shared by all its threads.
 pub struct Process {
@@ -34,6 +36,10 @@ pub struct Process {
     /// Set by `process_kill`. Triggers deferred address space cleanup when the
     /// last running thread is rescheduled away.
     pub(crate) killed: bool,
+    /// Per-process syscall filter bitmask. Bit N set = syscall N allowed.
+    /// Defaults to u32::MAX (all syscalls allowed). Set before process_start
+    /// via the PROCESS_SET_SYSCALL_FILTER syscall.
+    pub(crate) syscall_mask: u32,
 }
 /// Unique process identifier. Index into the scheduler's process table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +53,7 @@ impl Process {
             thread_count: 0,
             started: false,
             killed: false,
+            syscall_mask: u32::MAX,
         }
     }
 }

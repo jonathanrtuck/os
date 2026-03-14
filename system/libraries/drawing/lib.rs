@@ -21,6 +21,8 @@
 
 #![no_std]
 
+pub use protocol::DirtyRect;
+
 include!("gamma_tables.rs");
 include!("palette.rs");
 include!("png.rs");
@@ -1013,8 +1015,8 @@ impl TextLayout {
             col += 1;
         }
 
-        // Cursor at end of text.
-        if cursor_offset >= text.len() {
+        // Cursor at end of text (but not when cursor is disabled via usize::MAX).
+        if cursor_offset != usize::MAX && cursor_offset >= text.len() {
             let visual_row = row as i32 - scroll_offset as i32;
 
             if visual_row >= 0 {
@@ -1028,9 +1030,12 @@ impl TextLayout {
             }
         }
 
-        // Draw cursor: thin bar (no cursor when there's a visible selection,
-        // since the selection end *is* the cursor position).
-        if !has_selection && cursor_y >= origin_y && cursor_y <= max_y {
+        // Draw cursor: thin bar (no cursor when disabled or there's a visible selection).
+        if cursor_offset != usize::MAX
+            && !has_selection
+            && cursor_y >= origin_y
+            && cursor_y <= max_y
+        {
             fb.fill_rect(cursor_x, cursor_y, 2, cache.line_height, cursor_color);
         }
 
@@ -1152,8 +1157,8 @@ impl TextLayout {
             col += 1;
         }
 
-        // Cursor at end of text.
-        if cursor_offset >= text.len() {
+        // Cursor at end of text (not when disabled via usize::MAX).
+        if cursor_offset != usize::MAX && cursor_offset >= text.len() {
             let visual_row = row as i32 - scroll_offset as i32;
 
             if visual_row >= 0 {
@@ -1167,8 +1172,12 @@ impl TextLayout {
             }
         }
 
-        // Draw cursor only if it falls within the requested line range.
-        if !has_selection && cursor_y >= origin_y && cursor_y <= max_y {
+        // Draw cursor only if enabled and within the requested line range.
+        if cursor_offset != usize::MAX
+            && !has_selection
+            && cursor_y >= origin_y
+            && cursor_y <= max_y
+        {
             let cursor_vis_line = (cursor_y - origin_y) / self.line_height;
 
             if cursor_vis_line >= first_vis_line && cursor_vis_line <= last_vis_line {
@@ -2000,65 +2009,6 @@ pub struct DamageTracker {
     pub full_screen: bool,
     fb_width: u16,
     fb_height: u16,
-}
-/// A rectangular region of pixels that has been modified.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(C)]
-pub struct DirtyRect {
-    pub x: u16,
-    pub y: u16,
-    pub w: u16,
-    pub h: u16,
-}
-
-impl DirtyRect {
-    pub const fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
-        Self { x, y, w, h }
-    }
-
-    /// Compute the bounding box (union) of two rects.
-    pub fn union(self, other: DirtyRect) -> DirtyRect {
-        if self.w == 0 || self.h == 0 {
-            return other;
-        }
-        if other.w == 0 || other.h == 0 {
-            return self;
-        }
-
-        let x0 = if self.x < other.x { self.x } else { other.x };
-        let y0 = if self.y < other.y { self.y } else { other.y };
-        let self_x1 = self.x as u32 + self.w as u32;
-        let other_x1 = other.x as u32 + other.w as u32;
-        let x1 = if self_x1 > other_x1 {
-            self_x1
-        } else {
-            other_x1
-        };
-        let self_y1 = self.y as u32 + self.h as u32;
-        let other_y1 = other.y as u32 + other.h as u32;
-        let y1 = if self_y1 > other_y1 {
-            self_y1
-        } else {
-            other_y1
-        };
-
-        DirtyRect {
-            x: x0,
-            y: y0,
-            w: (x1 - x0 as u32) as u16,
-            h: (y1 - y0 as u32) as u16,
-        }
-    }
-    /// Compute the union of a slice of rects. Returns a zero rect if empty.
-    pub fn union_all(rects: &[DirtyRect]) -> DirtyRect {
-        let mut result = DirtyRect::new(0, 0, 0, 0);
-
-        for &r in rects {
-            result = result.union(r);
-        }
-
-        result
-    }
 }
 
 impl DamageTracker {

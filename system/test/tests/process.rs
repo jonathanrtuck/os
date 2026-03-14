@@ -9,9 +9,7 @@ const PAGE_SIZE: u64 = 4096;
 
 /// Mirrors `checked_page_count` from process.rs.
 fn checked_page_count(mem_size: u64) -> Option<u64> {
-    mem_size
-        .checked_add(PAGE_SIZE - 1)
-        .map(|n| n / PAGE_SIZE)
+    mem_size.checked_add(PAGE_SIZE - 1).map(|n| n / PAGE_SIZE)
 }
 
 /// Mirrors `checked_vma_end` from process.rs.
@@ -104,10 +102,7 @@ fn vma_end_overflow_addition() {
 
 #[test]
 fn vma_end_no_overflow_normal() {
-    assert_eq!(
-        checked_vma_end(0x400000, 256),
-        Some(0x400000 + 256 * 4096)
-    );
+    assert_eq!(checked_vma_end(0x400000, 256), Some(0x400000 + 256 * 4096));
 }
 
 #[test]

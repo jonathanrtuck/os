@@ -27,6 +27,10 @@ const PF_W: u32 = 2;
 const PF_X: u32 = 1;
 const PT_LOAD: u32 = 1;
 
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
 #[derive(Debug)]
 pub enum Error {
     TooSmall,
@@ -45,6 +49,7 @@ pub struct Header {
     pub ph_count: u16,
     pub ph_ent_size: u16,
 }
+
 pub struct LoadSegment {
     pub vaddr: u64,
     pub file_offset: u64,
@@ -53,9 +58,14 @@ pub struct LoadSegment {
     pub flags: u32,
 }
 
+// ---------------------------------------------------------------------------
+// Binary helpers
+// ---------------------------------------------------------------------------
+
 fn read_u16_le(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
 }
+
 fn read_u32_le(data: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([
         data[offset],
@@ -64,6 +74,7 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
         data[offset + 3],
     ])
 }
+
 fn read_u64_le(data: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes([
         data[offset],
@@ -75,6 +86,45 @@ fn read_u64_le(data: &[u8], offset: usize) -> u64 {
         data[offset + 6],
         data[offset + 7],
     ])
+}
+
+// ---------------------------------------------------------------------------
+// Public API — parse → load → extract
+// ---------------------------------------------------------------------------
+
+/// Parse the ELF64 header from raw bytes.
+pub fn parse_header(data: &[u8]) -> Result<Header, Error> {
+    if data.len() < 64 {
+        return Err(Error::TooSmall);
+    }
+    if data[0..4] != ELF_MAGIC {
+        return Err(Error::BadMagic);
+    }
+    if data[4] != ELFCLASS64 {
+        return Err(Error::NotElf64);
+    }
+    if data[5] != ELFDATA2LSB {
+        return Err(Error::NotLittleEndian);
+    }
+    if read_u16_le(data, 16) != ET_EXEC {
+        return Err(Error::NotExecutable);
+    }
+    if read_u16_le(data, 18) != EM_AARCH64 {
+        return Err(Error::NotAarch64);
+    }
+
+    let ph_ent_size = read_u16_le(data, 54);
+
+    if ph_ent_size < 56 {
+        return Err(Error::BadPhEntSize);
+    }
+
+    Ok(Header {
+        entry: read_u64_le(data, 24),
+        ph_offset: read_u64_le(data, 32),
+        ph_count: read_u16_le(data, 56),
+        ph_ent_size,
+    })
 }
 
 /// Returns `Some(LoadSegment)` for PT_LOAD, `None` for other types.
@@ -114,51 +164,8 @@ pub fn load_segment(
         mem_size,
     }))
 }
-pub fn parse_header(data: &[u8]) -> Result<Header, Error> {
-    if data.len() < 64 {
-        return Err(Error::TooSmall);
-    }
-    if data[0..4] != ELF_MAGIC {
-        return Err(Error::BadMagic);
-    }
-    if data[4] != ELFCLASS64 {
-        return Err(Error::NotElf64);
-    }
-    if data[5] != ELFDATA2LSB {
-        return Err(Error::NotLittleEndian);
-    }
-    if read_u16_le(data, 16) != ET_EXEC {
-        return Err(Error::NotExecutable);
-    }
-    if read_u16_le(data, 18) != EM_AARCH64 {
-        return Err(Error::NotAarch64);
-    }
 
-    let ph_ent_size = read_u16_le(data, 54);
-
-    if ph_ent_size < 56 {
-        return Err(Error::BadPhEntSize);
-    }
-
-    Ok(Header {
-        entry: read_u64_le(data, 24),
-        ph_offset: read_u64_le(data, 32),
-        ph_count: read_u16_le(data, 56),
-        ph_ent_size,
-    })
-}
-/// Map ELF segment flags to page table attributes.
-///
-/// Priority: X > W > RO. A segment with both W and X gets RX (W^X enforcement).
-pub fn segment_attrs(flags: u32) -> PageAttrs {
-    if flags & PF_X != 0 {
-        PageAttrs::user_rx()
-    } else if flags & PF_W != 0 {
-        PageAttrs::user_rw()
-    } else {
-        PageAttrs::user_ro()
-    }
-}
+/// Extract the raw file data for a segment.
 pub fn segment_data<'a>(data: &'a [u8], seg: &LoadSegment) -> Result<&'a [u8], Error> {
     let start = seg.file_offset as usize;
     let end = start
@@ -170,4 +177,17 @@ pub fn segment_data<'a>(data: &'a [u8], seg: &LoadSegment) -> Result<&'a [u8], E
     }
 
     Ok(&data[start..end])
+}
+
+/// Map ELF segment flags to page table attributes.
+///
+/// Priority: X > W > RO. A segment with both W and X gets RX (W^X enforcement).
+pub fn segment_attrs(flags: u32) -> PageAttrs {
+    if flags & PF_X != 0 {
+        PageAttrs::user_rx()
+    } else if flags & PF_W != 0 {
+        PageAttrs::user_rw()
+    } else {
+        PageAttrs::user_ro()
+    }
 }

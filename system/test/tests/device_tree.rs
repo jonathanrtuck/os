@@ -408,7 +408,7 @@ fn parse_prop_length_overflow_returns_none() {
     // FDT_BEGIN_NODE with empty name.
     structs.extend_from_slice(&1u32.to_be_bytes()); // FDT_BEGIN_NODE
     structs.push(0); // empty name null terminator
-    // Pad to 4-byte alignment.
+                     // Pad to 4-byte alignment.
     while structs.len() % 4 != 0 {
         structs.push(0);
     }
@@ -537,7 +537,10 @@ fn parse_short_interrupt_property_ignored() {
     let dt = device_tree::parse(&blob).expect("short interrupt should parse");
     let dev = dt.find_first("test,device").expect("device found");
 
-    assert!(dev.irq.is_none(), "short interrupt data should not yield an IRQ");
+    assert!(
+        dev.irq.is_none(),
+        "short interrupt data should not yield an IRQ"
+    );
 }
 
 /// Reg property with partial entry (< 16 bytes) should yield no
@@ -621,7 +624,7 @@ fn parse_struct_truncated_mid_property_returns_none() {
     structs.extend_from_slice(&3u32.to_be_bytes()); // FDT_PROP
     structs.extend_from_slice(&100u32.to_be_bytes()); // len
     structs.extend_from_slice(&0u32.to_be_bytes()); // nameoff
-    // Only 4 bytes of prop data (need 100).
+                                                    // Only 4 bytes of prop data (need 100).
     structs.extend_from_slice(&0u32.to_be_bytes());
 
     let strings = b"x\0";

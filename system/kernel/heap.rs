@@ -1,3 +1,21 @@
+// AUDIT: 2026-03-14 — 2 unsafe blocks, 3 unsafe fn, 2 unsafe impl (GlobalAlloc, Sync) verified.
+// 6-category checklist applied. No bugs found. Dealloc routing invariant (address-based, not
+// size-based) verified sound. All SAFETY comments verified accurate.
+//
+// OOM handling:
+//   - alloc() returns null on exhaustion (correct per GlobalAlloc contract).
+//   - dealloc() panics on out-of-region pointer (appropriate — bogus free is always a kernel bug).
+//   - Rust's default handle_alloc_error panics on null from alloc(). This means any Box::new(),
+//     Vec::push(), etc. in the kernel will panic on OOM. This is expected: the kernel heap (16 MiB)
+//     stores only kernel objects (threads, page tables, handles, scheduling state). User data lives
+//     in demand-paged user address spaces, not the kernel heap. A kernel-heap OOM indicates the
+//     kernel has exhausted its fixed-size internal pool — a fatal condition with no safe recovery
+//     path since kernel data structures are already at capacity. All user-controlled allocation
+//     paths (process_create, thread_create, channel_create, etc.) may trigger kernel-heap OOM;
+//     none return errors to userspace on OOM — they panic. Fixing this would require try_alloc
+//     (fallible allocation) throughout the kernel, which is a significant refactor deferred to
+//     a future hardening pass.
+
 //! Linked-list heap allocator with coalescing.
 //!
 //! Maintains a free list sorted by address. On alloc, walks the list for a
@@ -16,11 +34,12 @@
 //! routing: pointers within the linked-list heap region always go back to
 //! the linked-list, preventing cross-allocator contamination.
 
-use super::paging;
-use super::slab;
-use super::sync::IrqMutex;
-use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    cell::UnsafeCell,
+};
+
+use super::{paging, slab, sync::IrqMutex};
 
 const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
 

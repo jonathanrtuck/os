@@ -9,17 +9,17 @@
 #![no_std]
 #![no_main]
 
-const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+use protocol::{
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
+};
+
 const FILE_FID: u32 = 1;
 const MSIZE: u32 = 4096;
 const NOFID: u32 = 0xFFFF_FFFF;
 const ROOT_FID: u32 = 0;
 const TAG_NOTAG: u16 = 0xFFFF;
 const VIRTQ_REQUEST: u32 = 0;
-// IPC protocol (shared with init).
-const MSG_DEVICE_CONFIG: u32 = 1;
-const MSG_FS_READ_REQUEST: u32 = 40;
-const MSG_FS_READ_RESPONSE: u32 = 41;
 // 9P2000.L message types.
 const P9_RLERROR: u8 = 7;
 const P9_TLOPEN: u8 = 12;
@@ -35,13 +35,6 @@ const P9_RREAD: u8 = 117;
 const P9_TCLUNK: u8 = 120;
 const P9_RCLUNK: u8 = 121;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DeviceConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-}
 struct MsgReader {
     buf: *const u8,
     pos: usize,
@@ -421,7 +414,7 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"  \xF0\x9F\x93\x82 virtio-9p - starting\n");
 
     // Read device config from ring buffer (channel 0 = init).
-    let ch = unsafe { ipc::Channel::from_base(CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    let ch = unsafe { ipc::Channel::from_base(protocol::CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
     if !ch.try_recv(&mut msg) || msg.msg_type != MSG_DEVICE_CONFIG {

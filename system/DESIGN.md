@@ -134,7 +134,25 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 1.4 Linker Script (`libraries/link.ld`) 🟢
+### 1.4 Protocol Library (`libraries/protocol/`) 🟢
+
+**Goal:** Single source of truth for all IPC message types and payload structs. Every component that sends or receives IPC messages imports from here.
+
+**Status:** ~280 lines. Defines all 22 message type constants and all shared payload structs across 8 protocol modules, plus `CHANNEL_SHM_BASE` and `channel_shm_va()`.
+
+**What's foundational:**
+
+- **One module per protocol boundary.** `device` (init→drivers), `gpu` (init↔GPU), `input` (input→compositor), `edit` (compositor↔editor), `compose` (init→compositor), `editor` (init→editor), `present` (compositor→GPU), `fs` (init↔9p). The module structure mirrors the IPC topology.
+- **All payload structs are `#[repr(C)]`** and fit within the 60-byte IPC message payload. Size guards via `const _: ()` assertions where payloads approach the limit.
+- **`CHANNEL_SHM_BASE` and `channel_shm_va()`** defined once. Every userspace component imports these instead of defining local copies.
+- **Zero dependencies.** Pure `no_std` library, fully testable on the host.
+
+**No restrictions imposed.** Pure library with no opinions about transport or control flow. The `ipc` library handles ring buffer mechanics; this library defines what flows through them.
+
+---
+
+### 1.5 Linker Script (`libraries/link.ld`) 🟢
+
 
 **Goal:** Shared ELF layout for all userspace binaries.
 
@@ -224,6 +242,48 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - The kernel remains ignorant of message content. It provides shared pages and doorbells.
 
 **No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the shared memory page address. Fully testable on the host.
+
+### 1.7 Scene Graph Library (`libraries/scene/`) 🟢
+
+**Goal:** Define the scene graph data structures and shared memory layout that form the interface between the OS service (document semantics) and the compositor (pixels). The OS service builds a tree of typed visual nodes; the compositor reads the tree and renders it.
+
+**Design decisions (from 2026-03-13 session):**
+
+- One `Node` type with content variants: `None`, `Text`, `Image`, `Path` (Core Animation model — avoids wrapper nodes).
+- Tree encoded via `first_child` / `next_sibling` (left-child right-sibling representation).
+- Cursor and selection are properties of `Text` content, not separate nodes (compositor owns text layout, knows glyph positions).
+- Relative positioning with `scroll_y` for scrolling.
+- The scene graph is a **compiled output** of the document model, not the document model itself.
+
+**Shared memory layout:**
+
+```text
+┌──────────┬──────────────────────────┬──────────────────────────┐
+│  Header  │  Node array              │  Data buffer              │
+│  64 B    │  512 × sizeof(Node)      │  64 KiB                   │
+└──────────┴──────────────────────────┴──────────────────────────┘
+```
+
+- **Header (64 B):** generation counter (u32), node count (u16), root NodeId (u16), data bytes used (u32), reserved.
+- **Node array:** fixed-size entries indexed by `NodeId` (u16). Each node has geometry (x, y, width, height), visual decoration (background, border, corner radius, opacity), flags (visible, clips children), and an optional `Content` variant.
+- **Data buffer (64 KiB):** variable-length data (text strings, pixel buffers, path commands) referenced by offset+length (`DataRef`).
+
+**APIs:**
+
+- `SceneWriter` — builds/mutates a scene graph in a `&mut [u8]` buffer. Provides `alloc_node()`, `node_mut()`, `push_data()`, `add_child()`, `commit()`. Also exposes read-back via `nodes()` and `data_buf()` for single-process use.
+- `SceneReader` — read-only access to a scene graph buffer. Provides `node()`, `nodes()`, `data()`, `data_buf()`. This is the API the compositor will use when reading from shared memory after the OS service / compositor process split.
+- `DoubleWriter` / `DoubleReader` — double-buffered wrapper over two `SCENE_SIZE` regions (`DOUBLE_SCENE_SIZE = 2 × SCENE_SIZE`). The writer writes to the back buffer (lower generation), then `swap()` atomically publishes it as the new front by bumping its generation counter. The reader always reads the front buffer (higher generation). No locks — they never access the same buffer. A release fence before the generation write and an acquire fence after the generation read ensure cross-core visibility on AArch64.
+
+**Monospace text layout helpers (2026-03-14):**
+
+- `layout_mono_lines` — breaks text into visual lines using monospace line-breaking. Returns one `TextRun` per visual line with placeholder `DataRef` (offset = byte position in source text).
+- `byte_to_line_col` — converts a byte offset to (visual_line, column) with soft wrap handling. Consistent with `layout_mono_lines` line assignments.
+- `line_bytes_for_run` — extracts source text bytes for a run using its placeholder `DataRef`.
+- `scroll_runs` — filters and repositions runs for a scrolled viewport. Takes scroll_lines and viewport height, returns only visible runs with y adjusted.
+
+These live in the scene library (not core) so they're testable without the kernel. Core's `scene_state.rs` imports them. 11 tests cover layout, byte-to-line-col, and scroll filtering.
+
+**No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations (layout helpers require `alloc` for `Vec` return values). Callers provide the buffer. 47 host-side tests.
 
 ---
 
@@ -495,20 +555,27 @@ Init no longer exits — it sets up all cross-process channels, starts all proce
 ```text
 User Programs (text-editor)
   ├── sys (wait, channel_signal, exit, print)
-  └── ipc (Channel, Message — ring buffer messaging)
+  ├── ipc (Channel, Message — ring buffer messaging)
+  └── protocol (edit, editor, input — message types + payload structs)
 
 Compositor
   ├── sys (wait, channel_signal, exit)
   ├── drawing (Surface, Color, blit_blend, fonts)
-  └── ipc (Channel, Message — ring buffer messaging)
+  ├── ipc (Channel, Message — ring buffer messaging)
+  └── protocol (compose, edit, input, present — message types + payload structs)
 
 Init
-  └── sys (process_create, channel_create, handle_send, memory_share, dma_alloc, wait, ...)
+  ├── sys (process_create, channel_create, handle_send, memory_share, dma_alloc, wait, ...)
+  └── protocol (device, gpu, compose, editor, fs — message types + payload structs)
 
 Drivers (virtio-blk, virtio-gpu, virtio-input, virtio-9p, virtio-console)
   ├── sys (device_map, interrupt_register, dma_alloc, wait, ...)
   ├── virtio (MMIO transport, split virtqueue)
-  └── ipc (ring buffer messaging — for cross-process channels)
+  ├── ipc (ring buffer messaging — for cross-process channels)
+  └── protocol (device, gpu, input, present, fs — message types + payload structs)
+
+Protocol Library
+  └── (none — pure, no dependencies. Defines all IPC message types + payload structs)
 
 Drawing Library
   └── (none — pure, no dependencies)
@@ -523,7 +590,7 @@ Virtio Library
   └── (none — pure, no dependencies)
 ```
 
-**Observation:** The libraries are clean leaves with no dependencies. The platform services depend on libraries + syscalls. User programs (text-editor) depend only on `sys` + `ipc` — they don't touch `drawing` or `virtio`. This is architecturally correct: editors don't render, the OS service does. The coupling between platform services (init knows about compositor, GPU driver, editor, etc.) is all scaffolding — a real OS service would mediate these relationships.
+**Observation:** All five libraries are clean leaves with no dependencies. The `protocol` library is the single source of truth for all IPC message types and payload structs — no component defines its own message constants or wire-format structs. The platform services depend on libraries + syscalls. User programs (text-editor) depend on `sys` + `ipc` + `protocol` — they don't touch `drawing` or `virtio`. This is architecturally correct: editors don't render, the OS service does. The coupling between platform services (init knows about compositor, GPU driver, editor, etc.) is all scaffolding — a real OS service would mediate these relationships.
 
 ---
 

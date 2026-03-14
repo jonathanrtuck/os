@@ -3,8 +3,8 @@
 Cross-file analysis of every lock in the kernel. Documents all `IrqMutex` instances,
 acquisition order constraints, and interrupt-safety properties.
 
-**Audit date:** 2026-03-11
-**Scope:** All 35 source files in `system/kernel/`
+**Audit date:** 2026-03-14 (line numbers updated; structure re-verified)
+**Scope:** All 33 source files in `system/kernel/`
 **Method:** Traced every `IrqMutex` static, every `.lock()` call, and every code path
 that acquires multiple locks (directly or transitively).
 
@@ -17,18 +17,18 @@ acquire, restored on release). There are no bare `Mutex` or other lock types.
 
 | #   | Lock Name                 | File                   | Type                                    | Purpose                                                                                       |
 | --- | ------------------------- | ---------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------- |
-| 1   | `scheduler::STATE`        | scheduler.rs:127       | `IrqMutex<State>`                       | Global run queue, per-core state, process table, scheduling contexts, blocked/suspended lists |
-| 2   | `channel::STATE`          | channel.rs:64          | `IrqMutex<State>`                       | Channel table (endpoints, shared pages, pending signals, waiters)                             |
-| 3   | `timer::TIMERS`           | timer.rs:56            | `IrqMutex<TimerTable>`                  | Timer objects (deadlines, waiter registry)                                                    |
-| 4   | `interrupt::TABLE`        | interrupt.rs:55        | `IrqMutex<InterruptTable>`              | Interrupt registrations (IRQ→slot mapping, waiter registry)                                   |
+| 1   | `scheduler::STATE`        | scheduler.rs:38        | `IrqMutex<State>`                       | Global run queue, per-core state, process table, scheduling contexts, blocked/suspended lists |
+| 2   | `channel::STATE`          | channel.rs:63          | `IrqMutex<State>`                       | Channel table (endpoints, shared pages, pending signals, waiters)                             |
+| 3   | `timer::TIMERS`           | timer.rs:45            | `IrqMutex<TimerTable>`                  | Timer objects (deadlines, waiter registry)                                                    |
+| 4   | `interrupt::TABLE`        | interrupt.rs:44        | `IrqMutex<InterruptTable>`              | Interrupt registrations (IRQ→slot mapping, waiter registry)                                   |
 | 5   | `futex::WAIT_TABLE`       | futex.rs:47            | `IrqMutex<WaitTable>`                   | Futex wait queues (64 hash buckets, PA-keyed)                                                 |
 | 6   | `thread_exit::STATE`      | thread_exit.rs:42      | `IrqMutex<WaitableRegistry<ThreadId>>`  | Thread exit notification (readiness + waiters)                                                |
 | 7   | `process_exit::STATE`     | process_exit.rs:21     | `IrqMutex<WaitableRegistry<ProcessId>>` | Process exit notification (readiness + waiters)                                               |
-| 8   | `page_allocator::STATE`   | page_allocator.rs:36   | `IrqMutex<State>`                       | Buddy allocator free lists (physical page frames)                                             |
-| 9   | `slab::SLAB`              | slab.rs:32             | `IrqMutex<SlabState>`                   | Slab allocator caches (6 size classes)                                                        |
-| 10  | `heap::ALLOC_LOCK`        | heap.rs:41             | `IrqMutex<()>`                          | Linked-list allocator free list                                                               |
-| 11  | `memory::KERNEL_PT_LOCK`  | memory.rs:39           | `IrqMutex<()>`                          | Kernel TTBR1 page table modifications (break-block, guard pages)                              |
-| 12  | `serial::LOCK`            | serial.rs:22           | `IrqMutex<()>`                          | UART output serialization (prevents interleaved multi-core output)                            |
+| 8   | `page_allocator::STATE`   | page_allocator.rs:25   | `IrqMutex<State>`                       | Buddy allocator free lists (physical page frames)                                             |
+| 9   | `slab::SLAB`              | slab.rs:28             | `IrqMutex<SlabState>`                   | Slab allocator caches (6 size classes)                                                        |
+| 10  | `heap::ALLOC_LOCK`        | heap.rs:47             | `IrqMutex<()>`                          | Linked-list allocator free list                                                               |
+| 11  | `memory::KERNEL_PT_LOCK`  | memory.rs:101          | `IrqMutex<()>`                          | Kernel TTBR1 page table modifications (break-block, guard pages)                              |
+| 12  | `serial::LOCK`            | serial.rs:25           | `IrqMutex<()>`                          | UART output serialization (prevents interleaved multi-core output)                            |
 | 13  | `address_space_id::STATE` | address_space_id.rs:32 | `IrqMutex<State>`                       | ASID bitmap and generation counter                                                            |
 
 **Total: 13 distinct IrqMutex instances across 13 files.**
@@ -183,7 +183,7 @@ KERNEL_PT_LOCK.lock() (level 3)
   → page_allocator::alloc_frame() (level 2)
 ```
 
-The documented ordering comment in `memory.rs:38` says:
+The documented ordering comment in `memory.rs:100` says:
 `"Lock ordering: KERNEL_PT_LOCK → page allocator lock (never the reverse)."`
 
 Note: This is level 3 → 2, which appears to violate the level hierarchy.

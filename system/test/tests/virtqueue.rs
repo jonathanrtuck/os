@@ -42,11 +42,7 @@ impl TestVirtqueue {
                 addr: 0,
                 len: 0,
                 flags: 0,
-                next: if i + 1 < size {
-                    (i + 1) as u16
-                } else {
-                    0xFFFF
-                },
+                next: if i + 1 < size { (i + 1) as u16 } else { 0xFFFF },
             });
         }
 
@@ -175,10 +171,7 @@ fn free_chain_at_boundary() {
     // Descriptor index = size (first invalid).
     vq.free_descriptor_chain(8);
 
-    assert_eq!(
-        vq.num_free, 8,
-        "index == size should be rejected"
-    );
+    assert_eq!(vq.num_free, 8, "index == size should be rejected");
 }
 
 #[test]
@@ -188,10 +181,7 @@ fn pop_used_oob_id_skips_free() {
     let mut vq = TestVirtqueue::new(8);
     let initial_free = vq.num_free;
 
-    let elem = UsedElem {
-        id: 999,
-        len: 512,
-    };
+    let elem = UsedElem { id: 999, len: 512 };
 
     // Mirror pop_used's validation logic.
     if (elem.id as u32) < vq.size {
@@ -225,8 +215,5 @@ fn wrapping_used_idx() {
     }
 
     // Verify we wrapped around u16.
-    assert!(
-        last_used_idx < 5,
-        "should have wrapped past u16::MAX"
-    );
+    assert!(last_used_idx < 5, "should have wrapped past u16::MAX");
 }

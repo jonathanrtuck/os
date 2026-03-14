@@ -23,8 +23,7 @@
 //! - GIC interrupt encoding: 3 cells per interrupt (type, number, flags).
 //!   SPI (type=0): hardware IRQ = number + 32. PPI (type=1): IRQ = number + 16.
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 const FDT_MAGIC: u32 = 0xD00D_FEED;
 const FDT_BEGIN_NODE: u32 = 1;
@@ -33,6 +32,10 @@ const FDT_PROP: u32 = 3;
 const FDT_NOP: u32 = 4;
 const FDT_END: u32 = 9;
 const HEADER_SIZE: usize = 40;
+
+// ---------------------------------------------------------------------------
+// Device — a discovered hardware device
+// ---------------------------------------------------------------------------
 
 /// A device discovered in the device tree.
 #[derive(Clone, Debug)]
@@ -44,42 +47,56 @@ pub struct Device {
     /// Interrupt number (GIC SPI/PPI adjusted), if present.
     pub irq: Option<u32>,
 }
-/// Parsed device table — flat list of discovered devices.
-pub struct DeviceTable {
-    devices: Vec<Device>,
-}
 
 impl Device {
     /// Base address of the first region (convenience).
     pub fn base_address(&self) -> u64 {
         self.regs.first().map_or(0, |&(addr, _)| addr)
     }
+
     /// Size of the first region (used by test crate).
     #[allow(dead_code)]
     pub fn size(&self) -> u64 {
         self.regs.first().map_or(0, |&(_, size)| size)
     }
 }
+
+// ---------------------------------------------------------------------------
+// DeviceTable — flat list of discovered devices
+// ---------------------------------------------------------------------------
+
+/// Parsed device table — flat list of discovered devices.
+pub struct DeviceTable {
+    devices: Vec<Device>,
+}
+
 impl DeviceTable {
     /// Total number of discovered devices.
     pub fn device_count(&self) -> usize {
         self.devices.len()
     }
+
     /// Find all devices matching a compatible string.
     pub fn find_all<'a>(&'a self, compatible: &'a str) -> impl Iterator<Item = &'a Device> + 'a {
         self.devices
             .iter()
             .filter(move |d| d.compatible == compatible)
     }
+
     /// Find the first device matching a compatible string.
     pub fn find_first(&self, compatible: &str) -> Option<&Device> {
         self.devices.iter().find(|d| d.compatible == compatible)
     }
 }
 
+// ---------------------------------------------------------------------------
+// Binary helpers
+// ---------------------------------------------------------------------------
+
 fn align4(v: usize) -> usize {
     (v + 3) & !3
 }
+
 fn read_be_u32(data: &[u8], offset: usize) -> u32 {
     u32::from_be_bytes([
         data[offset],
@@ -88,6 +105,7 @@ fn read_be_u32(data: &[u8], offset: usize) -> u32 {
         data[offset + 3],
     ])
 }
+
 fn read_be_u64(data: &[u8], offset: usize) -> u64 {
     u64::from_be_bytes([
         data[offset],
@@ -100,6 +118,7 @@ fn read_be_u64(data: &[u8], offset: usize) -> u64 {
         data[offset + 7],
     ])
 }
+
 /// Read a null-terminated string from a byte slice at the given offset.
 fn read_cstr(data: &[u8], offset: usize) -> &str {
     if offset >= data.len() {
@@ -115,10 +134,15 @@ fn read_cstr(data: &[u8], offset: usize) -> &str {
 
     core::str::from_utf8(&data[start..end]).unwrap_or("")
 }
+
 /// Read a null-terminated string into an owned String.
 fn read_cstr_owned(data: &[u8], offset: usize) -> String {
     String::from(read_cstr(data, offset))
 }
+
+// ---------------------------------------------------------------------------
+// Parser
+// ---------------------------------------------------------------------------
 
 /// Parse a Flattened Device Tree blob.
 ///

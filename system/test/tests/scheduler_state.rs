@@ -318,7 +318,10 @@ fn exited_thread_deferred_not_dropped_immediately() {
     t.mark_exited();
     park_old(&mut s, t, 0);
 
-    assert!(s.ready.is_empty(), "exited thread must not be in ready queue");
+    assert!(
+        s.ready.is_empty(),
+        "exited thread must not be in ready queue"
+    );
     assert!(
         s.blocked.is_empty(),
         "exited thread must not be in blocked list"
@@ -774,7 +777,11 @@ fn all_threads_eventually_reaped() {
 
     // Run each thread briefly, then exit it.
     let mut exited = 0;
-    while !s.ready.is_empty() || s.cores.iter().any(|c| c.current.as_ref().map_or(false, |t| !t.is_idle())) {
+    while !s.ready.is_empty()
+        || s.cores
+            .iter()
+            .any(|c| c.current.as_ref().map_or(false, |t| !t.is_idle()))
+    {
         for core in 0..2 {
             // Deschedule + park current.
             if let Some(mut old) = s.cores[core].current.take() {
@@ -796,7 +803,10 @@ fn all_threads_eventually_reaped() {
                 idle.activate();
                 s.cores[core].current = Some(idle);
             } else {
-                let mut idle = s.cores[core].idle.take().unwrap_or_else(|| Thread::new_idle(core as u64));
+                let mut idle = s.cores[core]
+                    .idle
+                    .take()
+                    .unwrap_or_else(|| Thread::new_idle(core as u64));
                 idle.activate();
                 s.cores[core].current = Some(idle);
             }
@@ -899,7 +909,10 @@ fn deferred_drop_lifecycle_complete() {
 
     // Step 3: Next schedule_inner drains deferred drops (on different stack).
     s.deferred_drops.clear();
-    assert!(s.deferred_drops.is_empty(), "deferred drops must be empty after drain");
+    assert!(
+        s.deferred_drops.is_empty(),
+        "deferred drops must be empty after drain"
+    );
 
     // Step 4: No traces of the thread anywhere.
     assert!(s.ready.is_empty());
@@ -932,11 +945,7 @@ fn kill_then_schedule_no_duplicate_deferred() {
     park_old(&mut s, old, 0);
 
     assert!(was_exited, "thread must be detected as exited");
-    assert_eq!(
-        s.deferred_drops.len(),
-        1,
-        "exactly one deferred drop"
-    );
+    assert_eq!(s.deferred_drops.len(), 1, "exactly one deferred drop");
 
     // Drain deferred.
     s.deferred_drops.clear();
@@ -981,7 +990,10 @@ fn reap_removes_exited_from_ready_queue() {
     s.ready.retain(|t| !t.is_exited());
 
     assert_eq!(s.ready.len(), 2);
-    assert!(s.ready.iter().all(|t| t.id != 2), "exited thread not reaped");
+    assert!(
+        s.ready.iter().all(|t| t.id != 2),
+        "exited thread not reaped"
+    );
     assert!(s.ready.iter().any(|t| t.id == 1));
     assert!(s.ready.iter().any(|t| t.id == 3));
 }
@@ -1003,5 +1015,8 @@ fn reap_removes_exited_from_blocked_list() {
     // Reap.
     s.blocked.retain(|t| !t.is_exited());
 
-    assert!(s.blocked.is_empty(), "exited thread not reaped from blocked list");
+    assert!(
+        s.blocked.is_empty(),
+        "exited thread not reaped from blocked list"
+    );
 }

@@ -340,7 +340,11 @@ fn close_wakes_peer_waiter() {
 
     let peer_waiter = ch.waiter[peer_ep].take();
 
-    assert_eq!(peer_waiter, Some(ThreadId(99)), "peer waiter should be taken for waking");
+    assert_eq!(
+        peer_waiter,
+        Some(ThreadId(99)),
+        "peer waiter should be taken for waking"
+    );
 }
 
 #[test]
@@ -379,7 +383,10 @@ fn signal_after_peer_closed() {
     let waiter = ch.signal(ep1);
 
     assert_eq!(waiter, None, "closed endpoint has no waiter");
-    assert!(ch.pending_signal[0], "flag set on closed endpoint (harmless)");
+    assert!(
+        ch.pending_signal[0],
+        "flag set on closed endpoint (harmless)"
+    );
 }
 
 #[test]
@@ -393,7 +400,10 @@ fn check_pending_after_peer_closed() {
     ch.signal(ep0); // sets pending on ep1
     ch.close_endpoint(ep0);
 
-    assert!(ch.check_pending(ep1), "signal before close should be visible");
+    assert!(
+        ch.check_pending(ep1),
+        "signal before close should be visible"
+    );
 }
 
 #[test]
@@ -403,9 +413,9 @@ fn signal_and_close_interleaved() {
     let ep0 = ChannelId(0);
     let ep1 = ChannelId(1);
 
-    ch.signal(ep0);      // pending on ep1
+    ch.signal(ep0); // pending on ep1
     ch.close_endpoint(ep0); // ep0 closed, count=1
-    ch.signal(ep1);      // pending on ep0 (closed, harmless)
+    ch.signal(ep1); // pending on ep0 (closed, harmless)
     ch.close_endpoint(ep1); // ep1 closed, count=2
 
     assert_eq!(ch.closed_count, 2);
@@ -438,10 +448,7 @@ fn closed_count_saturates_at_two() {
         !freed_again,
         "third close must not trigger page free (would be double-free)"
     );
-    assert_eq!(
-        ch.closed_count, 2,
-        "closed_count should saturate at 2"
-    );
+    assert_eq!(ch.closed_count, 2, "closed_count should saturate at 2");
 }
 
 // --- Encoding edge cases (audit: channel-handle-audit) ---

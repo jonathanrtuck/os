@@ -41,10 +41,7 @@ const PNG_SIGNATURE: [u8; 8] = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 
 /// Read a big-endian u32 from a byte slice.
 fn png_read_be_u32(data: &[u8]) -> u32 {
-    ((data[0] as u32) << 24)
-        | ((data[1] as u32) << 16)
-        | ((data[2] as u32) << 8)
-        | (data[3] as u32)
+    ((data[0] as u32) << 24) | ((data[1] as u32) << 16) | ((data[2] as u32) << 8) | (data[3] as u32)
 }
 
 /// Parse PNG header only (for querying dimensions without full decode).
@@ -269,7 +266,11 @@ fn unfilter_scanlines(
                     0 // won't be used when y == 0
                 };
                 for i in 0..row_len {
-                    let a = if i >= bpp { data[ps + i - bpp] as u16 } else { 0 };
+                    let a = if i >= bpp {
+                        data[ps + i - bpp] as u16
+                    } else {
+                        0
+                    };
                     let b = if y > 0 { data[prev_ps + i] as u16 } else { 0 };
                     data[ps + i] = data[ps + i].wrapping_add(((a + b) / 2) as u8);
                 }
@@ -282,7 +283,11 @@ fn unfilter_scanlines(
                     0
                 };
                 for i in 0..row_len {
-                    let a = if i >= bpp { data[ps + i - bpp] as i32 } else { 0 };
+                    let a = if i >= bpp {
+                        data[ps + i - bpp] as i32
+                    } else {
+                        0
+                    };
                     let b = if y > 0 { data[prev_ps + i] as i32 } else { 0 };
                     let c = if y > 0 && i >= bpp {
                         data[prev_ps + i - bpp] as i32
@@ -499,8 +504,8 @@ impl HuffTable {
 
 /// Length base values for codes 257-285.
 const LEN_BASE: [u16; 29] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115,
-    131, 163, 195, 227, 258,
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
 ];
 /// Extra bits for length codes 257-285.
 const LEN_EXTRA: [u8; 29] = [
@@ -513,8 +518,8 @@ const DIST_BASE: [u16; 30] = [
 ];
 /// Extra bits for distance codes 0-29.
 const DIST_EXTRA: [u8; 30] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12,
-    13, 13,
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
 ];
 /// Code length alphabet order for dynamic Huffman.
 const CL_ORDER: [usize; 19] = [
@@ -549,10 +554,22 @@ fn inflate_stream(reader: &mut BitReader, output: &mut [u8]) -> Result<usize, Pn
                 // Fixed Huffman codes
                 let mut lit_lens = [0u8; 288];
                 let mut i = 0;
-                while i <= 143 { lit_lens[i] = 8; i += 1; }
-                while i <= 255 { lit_lens[i] = 9; i += 1; }
-                while i <= 279 { lit_lens[i] = 7; i += 1; }
-                while i <= 287 { lit_lens[i] = 8; i += 1; }
+                while i <= 143 {
+                    lit_lens[i] = 8;
+                    i += 1;
+                }
+                while i <= 255 {
+                    lit_lens[i] = 9;
+                    i += 1;
+                }
+                while i <= 279 {
+                    lit_lens[i] = 7;
+                    i += 1;
+                }
+                while i <= 287 {
+                    lit_lens[i] = 8;
+                    i += 1;
+                }
 
                 let dist_lens = [5u8; 32];
 
@@ -660,15 +677,13 @@ fn decode_codes(
             if li >= 29 {
                 return Err(PngError::InvalidData);
             }
-            let length =
-                LEN_BASE[li] as usize + reader.read_bits(LEN_EXTRA[li])? as usize;
+            let length = LEN_BASE[li] as usize + reader.read_bits(LEN_EXTRA[li])? as usize;
 
             let di = reader.decode_huffman(dist_table)? as usize;
             if di >= 30 {
                 return Err(PngError::InvalidData);
             }
-            let distance =
-                DIST_BASE[di] as usize + reader.read_bits(DIST_EXTRA[di])? as usize;
+            let distance = DIST_BASE[di] as usize + reader.read_bits(DIST_EXTRA[di])? as usize;
 
             if distance > out_pos {
                 return Err(PngError::InvalidData);

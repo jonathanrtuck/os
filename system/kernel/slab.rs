@@ -1,3 +1,10 @@
+// AUDIT: 2026-03-14 — 2 unsafe blocks + 2 unsafe fn verified, 6-category checklist applied.
+// No bugs found. Free list integrity sound: grow() writes FreeNode headers before linking,
+// alloc() pops head (O(1)), free() pushes to head (O(1)). All mutations under IrqMutex.
+// Alignment correct: obj_size is power-of-two ≥ 64, exceeds size_of::<FreeNode>() (8).
+// OOM in grow() returns early, alloc() returns null, heap falls through to linked-list.
+// No cache-line or AArch64 issues. Slab pages grow monotonically (never freed) — intentional.
+
 //! Power-of-two slab allocator for small kernel objects.
 //!
 //! Each `SlabCache` manages objects of a fixed size. Slabs are 4 KiB pages
@@ -8,10 +15,7 @@
 //! Used by the heap allocator for small allocations (≤2048 bytes). Larger
 //! allocations fall through to the linked-list allocator.
 
-use super::memory;
-use super::page_allocator;
-use super::paging;
-use super::sync::IrqMutex;
+use super::{memory, page_allocator, paging, sync::IrqMutex};
 
 /// Number of size classes: 64, 128, 256, 512, 1024, 2048 bytes.
 const NUM_CLASSES: usize = 6;

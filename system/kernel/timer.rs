@@ -23,13 +23,15 @@
 //!
 //! Waiter registration and readiness tracking are delegated to `WaitableRegistry`.
 
-use super::handle::HandleObject;
-use super::interrupt_controller;
-use super::scheduler;
-use super::sync::IrqMutex;
-use super::thread::ThreadId;
-use super::waitable::{WaitableId, WaitableRegistry};
 use core::sync::atomic::{AtomicU64, Ordering};
+
+use super::{
+    handle::HandleObject,
+    interrupt_controller, scheduler,
+    sync::IrqMutex,
+    thread::ThreadId,
+    waitable::{WaitableId, WaitableRegistry},
+};
 
 /// Maximum concurrent timer objects across all processes.
 const MAX_TIMERS: usize = 32;

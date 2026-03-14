@@ -16,9 +16,9 @@
 //! `init_distributor()` configures the shared distributor (core 0 only).
 //! `init_cpu_interface()` configures the per-core CPU interface (every core).
 
-use super::memory::KERNEL_VA_OFFSET;
-use super::memory_mapped_io;
 use core::sync::atomic::{AtomicUsize, Ordering};
+
+use super::{memory::KERNEL_VA_OFFSET, memory_mapped_io};
 
 /// GIC register offsets from distributor / CPU interface base.
 const CTLR: usize = 0x0000;

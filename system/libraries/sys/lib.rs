@@ -16,9 +16,11 @@
 
 #![no_std]
 
-use core::alloc::{GlobalAlloc, Layout};
-use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::{
+    alloc::{GlobalAlloc, Layout},
+    cell::UnsafeCell,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 mod nr {
     pub const EXIT: u64 = 0;
@@ -48,6 +50,7 @@ mod nr {
     pub const MEMORY_SHARE: u64 = 24;
     pub const MEMORY_ALLOC: u64 = 25;
     pub const MEMORY_FREE: u64 = 26;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
 }
 
 const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
@@ -87,6 +90,7 @@ pub enum SyscallError {
     InsufficientRights = -12,
     TableFull = -13,
     SlotOccupied = -14,
+    SyscallBlocked = -15,
 }
 
 #[global_allocator]
@@ -323,6 +327,7 @@ impl SyscallError {
             -12 => Self::InsufficientRights,
             -13 => Self::TableFull,
             -14 => Self::SlotOccupied,
+            -15 => Self::SyscallBlocked,
             _ => Self::UnknownSyscall,
         }
     }
@@ -443,12 +448,16 @@ pub fn channel_signal(handle: u8) -> SyscallResult<()> {
 }
 /// Read the AArch64 virtual counter (CNTVCT_EL0).
 /// Requires kernel to have enabled EL0 access via CNTKCTL_EL1.EL0VCTEN.
+///
+/// `nomem` is intentionally omitted: the counter is monotonically increasing
+/// hardware state. With `nomem`, LLVM could CSE or hoist repeated reads,
+/// returning stale values. Without it, each call reads the current counter.
 #[inline(always)]
 pub fn counter() -> u64 {
     let val: u64;
 
     unsafe {
-        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) val, options(nostack, nomem));
+        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) val, options(nostack));
     }
 
     val
@@ -640,6 +649,16 @@ pub fn process_kill(handle: u8) -> SyscallResult<()> {
     result(raw)?;
 
     Ok(())
+}
+/// Set the syscall filter mask for a suspended child process.
+///
+/// Bit N set in `mask` allows syscall number N. Bit N clear blocks it
+/// (returns `SyscallBlocked`). EXIT (nr 0) is always allowed regardless
+/// of the mask. Must be called before `process_start`.
+pub fn process_set_syscall_filter(handle: u8, mask: u32) -> SyscallResult<()> {
+    let r = unsafe { syscall2(nr::PROCESS_SET_SYSCALL_FILTER, handle as u64, mask as u64) };
+
+    result(r as i64).map(|_| ())
 }
 /// Start a suspended child process.
 ///
