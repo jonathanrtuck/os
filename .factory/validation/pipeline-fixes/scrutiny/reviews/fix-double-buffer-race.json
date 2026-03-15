@@ -1,0 +1,50 @@
+{
+  "featureId": "fix-double-buffer-race",
+  "reviewedAt": "2026-03-15T21:45:00.000Z",
+  "commitId": "40b5ac6",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The implementation correctly fixes the double-buffer race condition with a reader acknowledgement protocol. The synchronization is sound: release fence before volatile write of reader_done_gen, acquire fence after volatile read in copy_front_to_back, forming a proper release-acquire pair. DoubleReader now caches front_off/front_gen at construction (fixing a pre-existing torn-read bug where front_of() was called independently per method). All four core update methods handle the false return by skipping the update. All compositor code paths (initial frame, empty changelist, no damage, normal render) call finish_read(). The u32::MAX initialization for reader_done_gen correctly allows the writer to operate freely before a reader connects. Three well-designed tests cover concurrent read/write consistency (10K iterations), rapid swap latest-frame visibility, and the blocking mechanism. No mutexes introduced — atomics only as required.",
+    "issues": [
+      {
+        "file": "system/libraries/scene/lib.rs",
+        "line": 860,
+        "severity": "non_blocking",
+        "description": "write_reader_done_gen takes &[u8] (immutable reference) but casts to *mut u32 and writes through it. This is technically UB in Rust's memory model (mutating through a shared reference). The SAFETY comment acknowledges this as a pragmatic choice for shared memory. In the real cross-process system, both sides use raw pointers to mapped pages, not Rust references, so this won't manifest. However, this pattern would fail under Miri. Consider using a wrapper type with UnsafeCell semantics if the test harness ever runs under Miri."
+      },
+      {
+        "file": "system/libraries/scene/lib.rs",
+        "line": 936,
+        "severity": "non_blocking",
+        "description": "Generation counter wrap-around edge case: if u32 generation wraps to 0, the 'back_gen > 0' guard in copy_front_to_back() would skip the reader-ack safety check, allowing the writer to proceed without verifying the reader is done. At 60fps, wrap-around takes ~2.2 years of continuous operation — effectively a non-issue for this system. Documenting the assumption would be sufficient."
+      },
+      {
+        "file": "system/services/core/scene_state.rs",
+        "line": 330,
+        "severity": "non_blocking",
+        "description": "When copy_front_to_back() returns false, update_clock silently drops the update. The doc comment says it 'falls back to a full rebuild via build_editor_scene' for update_data failures, but the copy_front_to_back failure path just returns early with no fallback. This is functionally correct (the next timer tick retries) but the doc comment is slightly misleading — it describes a different failure path. Consider adding a brief comment noting that the dropped update is retried on the next event."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "The .factory/library/architecture.md 'Double-Buffer Protocol' section describes the original 5-step protocol but does not mention the reader acknowledgement (finish_read/reader_done_gen). After this change, the protocol has a 6th step: 'Compositor calls finish_read(gen) after reading all nodes and data. Writer checks reader_done_gen in copy_front_to_back() before overwriting the back buffer.' Future workers modifying the double-buffer protocol need to know about this constraint.",
+      "evidence": ".factory/library/architecture.md lines 34-39 describe steps 1-5 but omit the reader acknowledgement added in commit 40b5ac6"
+    },
+    {
+      "area": "knowledge",
+      "observation": "The os-worker SKILL.md Architecture Notes section states 'Scene graph is double-buffered in shared memory with generation counters (no locks)' — this should mention the reader acknowledgement protocol added by this fix, since it changes the synchronization contract. Workers implementing new scene graph consumers or producers need to know about finish_read() and the copy_front_to_back() return value.",
+      "evidence": ".factory/skills/os-worker/SKILL.md Architecture Notes: 'Scene graph is double-buffered in shared memory with generation counters (no locks)' — now also has reader_done_gen acknowledgement"
+    },
+    {
+      "area": "conventions",
+      "observation": "The write_reader_done_gen function introduces a pattern of casting &[u8] to *mut and writing through an immutable reference. This is a deliberate shared-memory pattern but could confuse future workers who see it as a bug. The SAFETY comment explains it well, but it's worth noting in library/safety-map.md as an accepted pattern for reader-owned fields in shared-memory buffers.",
+      "evidence": "system/libraries/scene/lib.rs:860 — write_reader_done_gen takes &[u8] but writes via *mut u32. SAFETY comment at line 863-868 explains the rationale."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The reader acknowledgement protocol correctly eliminates the double-buffer race condition. The fence ordering is textbook release-acquire. The pre-existing torn-read bug (DoubleReader calling front_of() per method) was correctly identified and fixed as part of this change. All compositor code paths signal read completion. All core update methods gracefully handle the 'reader busy' case by skipping the update. Three well-targeted tests cover the concurrent scenario (VAL-PIPE-007), rapid-swap latest-frame visibility (VAL-PIPE-008), and the blocking mechanism (VAL-PIPE-008). Three non-blocking issues noted: (1) write_reader_done_gen casts away const (technical UB, pragmatically correct for bare-metal shared memory), (2) u32 generation wrap-around edge case (~2.2 years at 60fps, theoretical only), (3) minor doc comment mismatch in update_clock's fallback description."
+}

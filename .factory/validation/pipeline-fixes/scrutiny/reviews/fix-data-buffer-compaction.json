@@ -1,0 +1,34 @@
+{
+  "featureId": "fix-data-buffer-compaction",
+  "reviewedAt": "2026-03-15T21:45:00.000Z",
+  "commitId": "836ef85",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The fix correctly addresses unbounded data buffer growth in update_document_content(). The approach is simple and sound: after copy_front_to_back(), reset the data buffer via reset_data() and re-push all text data (title, clock, document) from scratch. This keeps data_used proportional to visible content instead of accumulating stale glyph data across incremental updates. The 75% threshold fallback to build_editor_scene is correctly removed since compaction makes it unnecessary. All three text nodes (N_TITLE_TEXT, N_CLOCK_TEXT, N_DOC_TEXT) have their Content references updated with fresh DataRefs after the reset, ensuring downstream methods (update_clock, update_cursor, update_selection) that do copy_front_to_back() on subsequent frames see valid, compacted data. The mark_clock_changed flag correctly controls whether the compositor re-renders the clock when a timer tick coincides with a text change. 5 well-targeted tests cover all validation contract assertions (VAL-PIPE-004/005/006, VAL-CROSS-013) plus a data integrity test verifying DoubleReader can resolve all DataRefs after compaction.",
+    "issues": [
+      {
+        "file": "system/services/core/scene_state.rs",
+        "line": 499,
+        "severity": "non_blocking",
+        "description": "Five parameters are now unused and prefixed with underscore (_text_inset_top, _chrome_bg, _chrome_border, _bg_color, _cursor_color). These were used by the removed 75% fallback path that called build_editor_scene. The parameters could be removed from the function signature and all call sites for cleanliness, but this is a refactoring concern, not a correctness issue."
+      },
+      {
+        "file": "system/test/tests/scene.rs",
+        "line": 3898,
+        "severity": "non_blocking",
+        "description": "The test helper incremental_update_with_compaction() is a parallel reimplementation of the compaction logic rather than calling SceneState::update_document_content() directly. This is consistent with the project's testing pattern (tests exercise the low-level scene graph API directly since SceneState is application-level logic), and the helper correctly uses the same underlying primitives (DoubleWriter, reset_data, push_shaped_glyphs, push_text_runs). However, the test pushes TextRuns in a different order (doc→title→clock) than production code (title→clock→doc), meaning DataRef offsets differ between test and production. This does not affect correctness since all references are computed at push time, but divergence between test and production paths means a production-only bug in the ordering or reference update logic could be missed."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "Worker noted QEMU disk image locking: when the user's QEMU is running, test.img is locked, requiring a separate disk image copy for worker QEMU instances. user-testing.md mentions 'concurrent access would corrupt' and 'Max concurrent validators: 1' but doesn't document the workaround pattern of creating a separate disk image copy. This would save future workers from rediscovering the issue.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The AGENTS.md states QEMU is safe to use, but user's QEMU was still running and locking test.img. Had to create a separate disk image copy. Consider documenting the separate-disk-image pattern for worker QEMU instances.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The data buffer compaction fix is correct, simple, and well-tested. update_document_content() now resets the data buffer and re-pushes all text data on each call, keeping data_used bounded to visible content. The 75% threshold fallback is cleanly removed. 5 new tests cover all validation contract assertions. Two non-blocking observations: (1) five now-unused parameters could be cleaned up from the function signature, (2) tests use a parallel helper rather than calling the actual method, with slightly different push ordering. Neither affects correctness. Visual verification via QEMU confirms text renders correctly under sustained typing with clock advancing. 1566 total tests pass."
+}

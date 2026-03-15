@@ -28,6 +28,8 @@ Testing surface, validation approach, and resource cost classification.
 - QEMU instances share test.img disk image — concurrent access would corrupt
 - Sequential validation is the correct approach for this project
 
+**Disk image locking workaround:** If the user's QEMU is running and holding a lock on `test.img`, worker QEMU instances must create a separate copy: `cp system/test.img /tmp/worker-test.img` and use that copy in their QEMU flags. Do not attempt to use the same `test.img` concurrently.
+
 ## QEMU Test Scripts
 
 - `test-qemu.sh` — interactive display pipeline test (safe, user's QEMU is closed)
