@@ -246,3 +246,217 @@ fn shape_empty_font_data() {
     let glyphs = shape(&[], "Hello", &[]);
     assert!(glyphs.is_empty(), "empty font data should produce 0 glyphs");
 }
+
+// ---------------------------------------------------------------------------
+// Variable font files and constants
+// ---------------------------------------------------------------------------
+
+const SOURCE_CODE_PRO_VARIABLE: &[u8] =
+    include_bytes!("../../share/source-code-pro-variable.ttf");
+
+// ---------------------------------------------------------------------------
+// VAL-VARFONT-001: Variable Nunito Sans axis detection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn varfont_nunito_sans_has_four_axes() {
+    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    assert_eq!(
+        axes.len(),
+        4,
+        "variable Nunito Sans should have 4 axes, got {}",
+        axes.len()
+    );
+}
+
+#[test]
+fn varfont_nunito_sans_opsz_axis() {
+    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let opsz = axes.iter().find(|a| &a.tag == b"opsz");
+    assert!(opsz.is_some(), "should have opsz axis");
+    let opsz = opsz.unwrap();
+    assert!(
+        opsz.min_value < opsz.max_value,
+        "opsz min ({}) must be < max ({})",
+        opsz.min_value,
+        opsz.max_value
+    );
+    assert!(
+        opsz.default_value >= opsz.min_value && opsz.default_value <= opsz.max_value,
+        "opsz default ({}) must be within [{}, {}]",
+        opsz.default_value,
+        opsz.min_value,
+        opsz.max_value
+    );
+}
+
+#[test]
+fn varfont_nunito_sans_wght_axis() {
+    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let wght = axes.iter().find(|a| &a.tag == b"wght");
+    assert!(wght.is_some(), "should have wght axis");
+    let wght = wght.unwrap();
+    assert!(
+        wght.min_value < wght.max_value,
+        "wght min ({}) must be < max ({})",
+        wght.min_value,
+        wght.max_value
+    );
+    // Typical weight range: 100–900 or similar.
+    assert!(
+        wght.min_value >= 100.0 && wght.max_value <= 1000.0,
+        "wght range [{}, {}] seems unreasonable",
+        wght.min_value,
+        wght.max_value
+    );
+}
+
+#[test]
+fn varfont_nunito_sans_wdth_axis() {
+    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let wdth = axes.iter().find(|a| &a.tag == b"wdth");
+    assert!(wdth.is_some(), "should have wdth axis");
+    let wdth = wdth.unwrap();
+    assert!(
+        wdth.min_value < wdth.max_value,
+        "wdth min ({}) must be < max ({})",
+        wdth.min_value,
+        wdth.max_value
+    );
+}
+
+#[test]
+fn varfont_nunito_sans_ytlc_axis() {
+    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let ytlc = axes.iter().find(|a| &a.tag == b"YTLC");
+    assert!(ytlc.is_some(), "should have YTLC axis");
+    let ytlc = ytlc.unwrap();
+    assert!(
+        ytlc.min_value < ytlc.max_value,
+        "YTLC min ({}) must be < max ({})",
+        ytlc.min_value,
+        ytlc.max_value
+    );
+}
+
+#[test]
+fn varfont_nunito_sans_axis_tags_exact() {
+    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let tags: Vec<[u8; 4]> = axes.iter().map(|a| a.tag).collect();
+    assert!(
+        tags.contains(b"opsz"),
+        "missing opsz axis in {:?}",
+        tags
+    );
+    assert!(
+        tags.contains(b"wght"),
+        "missing wght axis in {:?}",
+        tags
+    );
+    assert!(
+        tags.contains(b"wdth"),
+        "missing wdth axis in {:?}",
+        tags
+    );
+    assert!(
+        tags.contains(b"YTLC"),
+        "missing YTLC axis in {:?}",
+        tags
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VAL-VARFONT-004: Variable Source Code Pro axis detection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn varfont_source_code_pro_has_wght_axis() {
+    let axes = shaping::rasterize::font_axes(SOURCE_CODE_PRO_VARIABLE);
+    assert!(
+        !axes.is_empty(),
+        "variable Source Code Pro should have at least one axis"
+    );
+    let wght = axes.iter().find(|a| &a.tag == b"wght");
+    assert!(wght.is_some(), "should have wght axis");
+    let wght = wght.unwrap();
+    assert!(
+        wght.min_value < wght.max_value,
+        "wght min ({}) must be < max ({})",
+        wght.min_value,
+        wght.max_value
+    );
+    assert!(
+        wght.default_value >= wght.min_value && wght.default_value <= wght.max_value,
+        "wght default ({}) must be within [{}, {}]",
+        wght.default_value,
+        wght.min_value,
+        wght.max_value
+    );
+}
+
+#[test]
+fn varfont_source_code_pro_wght_range_valid() {
+    let axes = shaping::rasterize::font_axes(SOURCE_CODE_PRO_VARIABLE);
+    let wght = axes.iter().find(|a| &a.tag == b"wght").unwrap();
+    // Source Code Pro variable has weights from ~200 to ~900.
+    assert!(
+        wght.min_value >= 100.0,
+        "wght min {} too low",
+        wght.min_value
+    );
+    assert!(
+        wght.max_value <= 1000.0,
+        "wght max {} too high",
+        wght.max_value
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Non-variable fonts return no axes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn varfont_static_font_returns_no_axes() {
+    let axes = shaping::rasterize::font_axes(SOURCE_CODE_PRO);
+    assert!(
+        axes.is_empty(),
+        "static Source Code Pro should have 0 axes, got {}",
+        axes.len()
+    );
+}
+
+#[test]
+fn varfont_empty_data_returns_no_axes() {
+    let axes = shaping::rasterize::font_axes(&[]);
+    assert!(axes.is_empty(), "empty data should have 0 axes");
+}
+
+// ---------------------------------------------------------------------------
+// Variable fonts parse via shaping library (basic shaping works)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn varfont_nunito_sans_variable_shapes_text() {
+    let glyphs = shape(NUNITO_SANS_VARIABLE, "Hello", &[]);
+    assert!(
+        glyphs.len() >= 5,
+        "variable Nunito Sans should shape 'Hello' to >= 5 glyphs, got {}",
+        glyphs.len()
+    );
+    for g in &glyphs {
+        assert!(g.x_advance > 0, "all advances should be > 0");
+    }
+}
+
+#[test]
+fn varfont_source_code_pro_variable_shapes_text() {
+    let glyphs = shape(SOURCE_CODE_PRO_VARIABLE, "Hello", &[]);
+    assert!(
+        glyphs.len() >= 5,
+        "variable Source Code Pro should shape 'Hello' to >= 5 glyphs, got {}",
+        glyphs.len()
+    );
+    for g in &glyphs {
+        assert!(g.x_advance > 0, "all advances should be > 0");
+    }
+}

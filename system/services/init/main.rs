@@ -1017,15 +1017,15 @@ pub extern "C" fn _start() -> ! {
                 }
             };
 
-            // Load monospace font (Source Code Pro) at offset 0.
-            sys::print(b"     loading source-code-pro.ttf\n");
+            // Load monospace font (Source Code Pro Variable) at offset 0.
+            sys::print(b"     loading source-code-pro-variable.ttf\n");
 
             let mono_len = read_font_file(
                 &p9_ch_obj,
                 p9_ch,
                 p9_font_va as u64,
                 font_capacity,
-                b"source-code-pro.ttf",
+                b"source-code-pro-variable.ttf",
             );
 
             if mono_len > 0 {
@@ -1049,8 +1049,8 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b"     mono font read failed\n");
             }
 
-            // Load proportional font (Nunito Sans) right after the mono font.
-            sys::print(b"     loading nunito-sans.ttf\n");
+            // Load proportional font (Nunito Sans Variable) right after the mono font.
+            sys::print(b"     loading nunito-sans-variable.ttf\n");
 
             let prop_offset = mono_len;
             let prop_capacity = font_capacity - prop_offset;
@@ -1060,7 +1060,7 @@ pub extern "C" fn _start() -> ! {
                 p9_ch,
                 prop_target_va,
                 prop_capacity,
-                b"nunito-sans.ttf",
+                b"nunito-sans-variable.ttf",
             );
 
             if prop_len > 0 {

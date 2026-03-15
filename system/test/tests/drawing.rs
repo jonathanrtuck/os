@@ -1627,7 +1627,7 @@ fn oversampled_glyph_cache_populated() {
     cache.populate(SOURCE_CODE_PRO, 16);
 
     // Check a few glyphs are cached with valid dimensions.
-    let (g_a, cov_a) = cache.get(b'A').unwrap();
+    let (g_a, cov_a) = cache.get(b'A' as u16).unwrap();
     assert!(
         g_a.width > 0 && g_a.height > 0,
         "'A' should have non-zero cached dimensions"
@@ -1640,7 +1640,7 @@ fn oversampled_glyph_cache_populated() {
         "'A' coverage should be 3 bytes per pixel (RGB subpixel)"
     );
 
-    let (g_k, cov_k) = cache.get(b'k').unwrap();
+    let (g_k, cov_k) = cache.get(b'k' as u16).unwrap();
     assert!(g_k.width > 0 && g_k.height > 0);
 
     // Check coverage has intermediate values (smooth edges).
@@ -1739,7 +1739,7 @@ fn subpixel_monospace_cache_has_3_channel_coverage() {
     let mut cache = heap_glyph_cache();
     cache.populate(SOURCE_CODE_PRO, 16);
 
-    let (g, cov) = cache.get(b'A').unwrap();
+    let (g, cov) = cache.get(b'A' as u16).unwrap();
     assert_eq!(
         cov.len(),
         (g.width * g.height * 3) as usize,
@@ -1772,7 +1772,7 @@ fn subpixel_proportional_cache_has_3_channel_coverage() {
     let mut cache = heap_glyph_cache();
     cache.populate(SOURCE_CODE_PRO, 16);
 
-    let (g, cov) = cache.get(b'A').unwrap();
+    let (g, cov) = cache.get(b'A' as u16).unwrap();
     assert_eq!(
         cov.len(),
         (g.width * g.height * 3) as usize,

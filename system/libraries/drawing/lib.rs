@@ -245,16 +245,19 @@ impl Color {
     }
 }
 impl GlyphCache {
-    /// Get cached glyph data for a character (must be 0x20..=0x7E).
+    /// Get cached glyph data for a glyph ID (must map to 0x20..=0x7E).
+    ///
+    /// Accepts a full `u16` glyph ID to avoid truncation bugs. IDs outside
+    /// the ASCII printable range return `None`.
     ///
     /// Returns 3-channel (RGB) subpixel coverage: 3 bytes per pixel
     /// (R, G, B coverage), stored row-major. Total length = width * height * 3.
-    pub fn get(&self, ch: u8) -> Option<(&CachedGlyph, &[u8])> {
-        if ch < 0x20 || ch > 0x7E {
+    pub fn get(&self, glyph_id: u16) -> Option<(&CachedGlyph, &[u8])> {
+        if glyph_id < 0x20 || glyph_id > 0x7E {
             return None;
         }
 
-        let idx = (ch - 0x20) as usize;
+        let idx = (glyph_id - 0x20) as usize;
         let g = &self.glyphs[idx];
         let len = (g.width * g.height) as usize * 3; // 3 channels (RGB)
         let cov = &self.coverage[g.buf_offset..g.buf_offset + len];
@@ -1040,7 +1043,7 @@ impl TextLayout {
                     fb.fill_rect_blend(hx, py, self.char_width, cache.line_height, sel_color);
                 }
 
-                if let Some((glyph, coverage)) = cache.get(byte) {
+                if let Some((glyph, coverage)) = cache.get(byte as u16) {
                     if glyph.width > 0 && glyph.height > 0 {
                         let gx =
                             origin_x as i32 + col as i32 * self.char_width as i32 + glyph.bearing_x;
@@ -1173,7 +1176,7 @@ impl TextLayout {
                         fb.fill_rect_blend(hx, py, self.char_width, cache.line_height, sel_color);
                     }
 
-                    if let Some((glyph, coverage)) = cache.get(byte) {
+                    if let Some((glyph, coverage)) = cache.get(byte as u16) {
                         if glyph.width > 0 && glyph.height > 0 {
                             let gx = origin_x as i32
                                 + col as i32 * self.char_width as i32

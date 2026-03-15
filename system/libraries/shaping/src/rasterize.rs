@@ -84,6 +84,49 @@ pub fn glyph_h_metrics(font_data: &[u8], glyph_id: u16) -> Option<(u16, i16)> {
 }
 
 // ---------------------------------------------------------------------------
+// Variable font axis helpers
+// ---------------------------------------------------------------------------
+
+/// Information about a single variation axis in a variable font.
+#[derive(Debug, Clone)]
+pub struct FontAxis {
+    /// 4-byte axis tag (e.g. b"wght", b"opsz", b"wdth", b"YTLC").
+    pub tag: [u8; 4],
+    /// Minimum axis value.
+    pub min_value: f32,
+    /// Default axis value.
+    pub default_value: f32,
+    /// Maximum axis value.
+    pub max_value: f32,
+}
+
+/// Parse all variation axes from a variable font.
+///
+/// Returns an empty `Vec` for non-variable fonts or parse failure.
+pub fn font_axes(font_data: &[u8]) -> alloc::vec::Vec<FontAxis> {
+    let font = match FontRef::new(font_data) {
+        Ok(f) => f,
+        Err(_) => return alloc::vec::Vec::new(),
+    };
+    let fvar = match font.fvar() {
+        Ok(f) => f,
+        Err(_) => return alloc::vec::Vec::new(),
+    };
+    let axes = match fvar.axes() {
+        Ok(a) => a,
+        Err(_) => return alloc::vec::Vec::new(),
+    };
+    axes.iter()
+        .map(|axis| FontAxis {
+            tag: axis.axis_tag().into_bytes(),
+            min_value: axis.min_value().to_f32(),
+            default_value: axis.default_value().to_f32(),
+            max_value: axis.max_value().to_f32(),
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 

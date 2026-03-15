@@ -238,9 +238,10 @@ fn render_node(
                 let mut cx = gx0;
 
                 for sg in shaped_glyphs {
-                    // Look up glyph in the cache by its ID (as ASCII byte).
+                    // Look up glyph in the cache by its full u16 ID.
                     // For monospace text, glyph_id == byte value (set by core).
-                    if let Some((glyph, coverage)) = cache.get(sg.glyph_id as u8) {
+                    // Using u16 avoids truncation that would break glyphs with ID > 255.
+                    if let Some((glyph, coverage)) = cache.get(sg.glyph_id) {
                         let px = cx + glyph.bearing_x;
                         let py = gy0 + (cache.ascent as i32 - glyph.bearing_y);
 
