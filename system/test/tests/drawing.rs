@@ -222,6 +222,328 @@ impl TextLayout {
 }
 
 // ---------------------------------------------------------------------------
+// Test-local copies of types moved out of drawing to their consumers.
+// Tests can't import from services, so we duplicate these pure
+// data/computation items here.
+// ---------------------------------------------------------------------------
+
+use protocol::DirtyRect;
+
+/// Maximum number of dirty rects that fit in a MSG_PRESENT payload.
+const MAX_DIRTY_RECTS: usize = 6;
+
+/// Collects dirty rectangles during a render pass (test-local copy).
+struct DamageTracker {
+    rects: [DirtyRect; MAX_DIRTY_RECTS],
+    count: usize,
+    full_screen: bool,
+    fb_width: u16,
+    fb_height: u16,
+}
+
+impl DamageTracker {
+    const fn new(fb_width: u16, fb_height: u16) -> Self {
+        Self {
+            rects: [DirtyRect {
+                x: 0,
+                y: 0,
+                w: 0,
+                h: 0,
+            }; MAX_DIRTY_RECTS],
+            count: 0,
+            full_screen: false,
+            fb_width,
+            fb_height,
+        }
+    }
+
+    fn add(&mut self, x: u16, y: u16, w: u16, h: u16) {
+        if self.full_screen || w == 0 || h == 0 {
+            return;
+        }
+        if self.count >= MAX_DIRTY_RECTS {
+            self.full_screen = true;
+            return;
+        }
+        self.rects[self.count] = DirtyRect::new(x, y, w, h);
+        self.count += 1;
+    }
+
+    fn bounding_box(&self) -> DirtyRect {
+        if self.full_screen || self.count == 0 {
+            DirtyRect::new(0, 0, self.fb_width, self.fb_height)
+        } else {
+            DirtyRect::union_all(&self.rects[..self.count])
+        }
+    }
+
+    fn dirty_rects(&self) -> Option<&[DirtyRect]> {
+        if self.full_screen || self.count == 0 {
+            None
+        } else {
+            Some(&self.rects[..self.count])
+        }
+    }
+
+    fn mark_full_screen(&mut self) {
+        self.full_screen = true;
+    }
+
+    fn reset(&mut self) {
+        self.count = 0;
+        self.full_screen = false;
+    }
+}
+
+/// A compositing surface (test-local copy).
+struct CompositeSurface<'a> {
+    surface: Surface<'a>,
+    x: i32,
+    y: i32,
+    z: u16,
+    visible: bool,
+}
+
+fn min_u32(a: u32, b: u32) -> u32 {
+    if a < b {
+        a
+    } else {
+        b
+    }
+}
+
+/// Composite surfaces back-to-front (test-local copy).
+fn composite_surfaces(dst: &mut Surface, surfaces: &[&CompositeSurface]) {
+    const MAX_SURFACES: usize = 16;
+    let count = if surfaces.len() > MAX_SURFACES {
+        MAX_SURFACES
+    } else {
+        surfaces.len()
+    };
+    let mut order: [usize; MAX_SURFACES] = [0; MAX_SURFACES];
+    let mut i = 0;
+    while i < count {
+        order[i] = i;
+        i += 1;
+    }
+    let mut j = 1;
+    while j < count {
+        let key = order[j];
+        let key_z = surfaces[key].z;
+        let mut k = j;
+        while k > 0 && surfaces[order[k - 1]].z > key_z {
+            order[k] = order[k - 1];
+            k -= 1;
+        }
+        order[k] = key;
+        j += 1;
+    }
+    let mut idx = 0;
+    while idx < count {
+        let s = surfaces[order[idx]];
+        idx += 1;
+        if !s.visible {
+            continue;
+        }
+        let src_x_start: u32 = if s.x < 0 { (-s.x) as u32 } else { 0 };
+        let src_y_start: u32 = if s.y < 0 { (-s.y) as u32 } else { 0 };
+        let dst_x: u32 = if s.x < 0 { 0 } else { s.x as u32 };
+        let dst_y: u32 = if s.y < 0 { 0 } else { s.y as u32 };
+        let src_w = s.surface.width;
+        let src_h = s.surface.height;
+        if src_x_start >= src_w || src_y_start >= src_h {
+            continue;
+        }
+        let visible_w = src_w - src_x_start;
+        let visible_h = src_h - src_y_start;
+        let src_offset = (src_y_start * s.surface.stride
+            + src_x_start * s.surface.format.bytes_per_pixel()) as usize;
+        if src_offset < s.surface.data.len() {
+            dst.blit_blend(
+                &s.surface.data[src_offset..],
+                visible_w,
+                visible_h,
+                s.surface.stride,
+                dst_x,
+                dst_y,
+            );
+        }
+    }
+}
+
+/// Composite surfaces to a rectangular sub-region (test-local copy).
+fn composite_surfaces_rect(
+    dst: &mut Surface,
+    surfaces: &[&CompositeSurface],
+    rx: u32,
+    ry: u32,
+    rw: u32,
+    rh: u32,
+) {
+    if rw == 0 || rh == 0 {
+        return;
+    }
+    const MAX_SURFACES: usize = 16;
+    let count = if surfaces.len() > MAX_SURFACES {
+        MAX_SURFACES
+    } else {
+        surfaces.len()
+    };
+    let mut order: [usize; MAX_SURFACES] = [0; MAX_SURFACES];
+    let mut i = 0;
+    while i < count {
+        order[i] = i;
+        i += 1;
+    }
+    let mut j = 1;
+    while j < count {
+        let key = order[j];
+        let key_z = surfaces[key].z;
+        let mut k = j;
+        while k > 0 && surfaces[order[k - 1]].z > key_z {
+            order[k] = order[k - 1];
+            k -= 1;
+        }
+        order[k] = key;
+        j += 1;
+    }
+    let rx_end = min_u32(rx + rw, dst.width);
+    let ry_end = min_u32(ry + rh, dst.height);
+    if rx >= rx_end || ry >= ry_end {
+        return;
+    }
+    let mut idx = 0;
+    while idx < count {
+        let s = surfaces[order[idx]];
+        idx += 1;
+        if !s.visible {
+            continue;
+        }
+        let surf_fb_x0 = if s.x < 0 { 0i32 } else { s.x };
+        let surf_fb_y0 = if s.y < 0 { 0i32 } else { s.y };
+        let surf_fb_x1 = s.x + s.surface.width as i32;
+        let surf_fb_y1 = s.y + s.surface.height as i32;
+        let ix0 = if surf_fb_x0 > rx as i32 {
+            surf_fb_x0
+        } else {
+            rx as i32
+        };
+        let iy0 = if surf_fb_y0 > ry as i32 {
+            surf_fb_y0
+        } else {
+            ry as i32
+        };
+        let ix1 = if surf_fb_x1 < rx_end as i32 {
+            surf_fb_x1
+        } else {
+            rx_end as i32
+        };
+        let iy1 = if surf_fb_y1 < ry_end as i32 {
+            surf_fb_y1
+        } else {
+            ry_end as i32
+        };
+        if ix0 >= ix1 || iy0 >= iy1 {
+            continue;
+        }
+        let src_x = (ix0 - s.x) as u32;
+        let src_y = (iy0 - s.y) as u32;
+        let blit_w = (ix1 - ix0) as u32;
+        let blit_h = (iy1 - iy0) as u32;
+        let src_offset =
+            (src_y * s.surface.stride + src_x * s.surface.format.bytes_per_pixel()) as usize;
+        if src_offset < s.surface.data.len() {
+            dst.blit_blend(
+                &s.surface.data[src_offset..],
+                blit_w,
+                blit_h,
+                s.surface.stride,
+                ix0 as u32,
+                iy0 as u32,
+            );
+        }
+    }
+}
+
+/// Width of the procedural arrow cursor in pixels.
+const CURSOR_W: u32 = 12;
+/// Height of the procedural arrow cursor in pixels.
+const CURSOR_H: u32 = 16;
+
+/// Procedural arrow cursor bitmap (test-local copy).
+const CURSOR_BITMAP: [u8; (CURSOR_W * CURSOR_H) as usize] = [
+    2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //  0
+    2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //  1
+    2, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, //  2
+    2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, //  3
+    2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, //  4
+    2, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, //  5
+    2, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, //  6
+    2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, //  7
+    2, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, //  8
+    2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, //  9
+    2, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 0, // 10
+    2, 1, 1, 2, 1, 1, 2, 0, 0, 0, 0, 0, // 11
+    2, 1, 2, 0, 2, 1, 1, 2, 0, 0, 0, 0, // 12
+    2, 2, 0, 0, 2, 1, 1, 2, 0, 0, 0, 0, // 13
+    2, 0, 0, 0, 0, 2, 1, 1, 2, 0, 0, 0, // 14
+    0, 0, 0, 0, 0, 2, 2, 2, 0, 0, 0, 0, // 15
+];
+
+/// Render the procedural arrow cursor (test-local copy).
+fn render_cursor(buf: &mut [u8]) {
+    let stride = CURSOR_W * 4;
+    let total = (CURSOR_W * CURSOR_H * 4) as usize;
+    if buf.len() < total {
+        return;
+    }
+    let mut i = 0;
+    while i < total {
+        buf[i] = 0;
+        buf[i + 1] = 0;
+        buf[i + 2] = 0;
+        buf[i + 3] = 0;
+        i += 4;
+    }
+    let fill = Color::rgb(255, 255, 255); // CURSOR_FILL
+    let outline = Color::rgb(40, 40, 40); // CURSOR_OUTLINE
+    let mut y = 0u32;
+    while y < CURSOR_H {
+        let mut x = 0u32;
+        while x < CURSOR_W {
+            let idx = (y * CURSOR_W + x) as usize;
+            let color = match CURSOR_BITMAP[idx] {
+                1 => fill,
+                2 => outline,
+                _ => {
+                    x += 1;
+                    continue;
+                }
+            };
+            let off = (y * stride + x * 4) as usize;
+            // BGRA8888 encoding
+            buf[off] = color.b;
+            buf[off + 1] = color.g;
+            buf[off + 2] = color.r;
+            buf[off + 3] = color.a;
+            x += 1;
+        }
+        y += 1;
+    }
+}
+
+/// Scale an absolute pointer coordinate (test-local copy).
+fn scale_pointer_coord(coord: u32, max_pixels: u32) -> u32 {
+    let result = (coord as u64 * max_pixels as u64) / 32768;
+    let r = result as u32;
+    if r >= max_pixels && max_pixels > 0 {
+        max_pixels - 1
+    } else {
+        r
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -2251,14 +2573,14 @@ fn dirty_rect_size_is_8_bytes() {
 
 #[test]
 fn damage_tracker_starts_empty() {
-    let dt = drawing::DamageTracker::new(1024, 768);
+    let dt = DamageTracker::new(1024, 768);
     assert_eq!(dt.count, 0);
     assert!(!dt.full_screen);
 }
 
 #[test]
 fn damage_tracker_add_rect() {
-    let mut dt = drawing::DamageTracker::new(1024, 768);
+    let mut dt = DamageTracker::new(1024, 768);
     dt.add(10, 20, 100, 50);
     assert_eq!(dt.count, 1);
     assert!(!dt.full_screen);
@@ -2269,7 +2591,7 @@ fn damage_tracker_add_rect() {
 
 #[test]
 fn damage_tracker_ignores_zero_size() {
-    let mut dt = drawing::DamageTracker::new(1024, 768);
+    let mut dt = DamageTracker::new(1024, 768);
     dt.add(10, 20, 0, 50);
     dt.add(10, 20, 50, 0);
     assert_eq!(dt.count, 0);
@@ -2277,12 +2599,12 @@ fn damage_tracker_ignores_zero_size() {
 
 #[test]
 fn damage_tracker_overflow_triggers_full_screen() {
-    let mut dt = drawing::DamageTracker::new(1024, 768);
-    for i in 0..drawing::MAX_DIRTY_RECTS {
+    let mut dt = DamageTracker::new(1024, 768);
+    for i in 0..MAX_DIRTY_RECTS {
         dt.add(i as u16 * 10, 0, 10, 10);
     }
     assert!(!dt.full_screen);
-    assert_eq!(dt.count, drawing::MAX_DIRTY_RECTS);
+    assert_eq!(dt.count, MAX_DIRTY_RECTS);
     // Adding one more should trigger full screen
     dt.add(200, 0, 10, 10);
     assert!(dt.full_screen);
@@ -2292,7 +2614,7 @@ fn damage_tracker_overflow_triggers_full_screen() {
 
 #[test]
 fn damage_tracker_full_screen_bounding_box() {
-    let mut dt = drawing::DamageTracker::new(1024, 768);
+    let mut dt = DamageTracker::new(1024, 768);
     dt.mark_full_screen();
     let bb = dt.bounding_box();
     assert_eq!(bb.x, 0);
@@ -2303,7 +2625,7 @@ fn damage_tracker_full_screen_bounding_box() {
 
 #[test]
 fn damage_tracker_partial_bounding_box() {
-    let mut dt = drawing::DamageTracker::new(1024, 768);
+    let mut dt = DamageTracker::new(1024, 768);
     dt.add(10, 100, 200, 30);
     dt.add(50, 700, 300, 28);
     let bb = dt.bounding_box();
@@ -2315,7 +2637,7 @@ fn damage_tracker_partial_bounding_box() {
 
 #[test]
 fn damage_tracker_reset_clears_state() {
-    let mut dt = drawing::DamageTracker::new(1024, 768);
+    let mut dt = DamageTracker::new(1024, 768);
     dt.add(10, 20, 100, 50);
     dt.add(50, 60, 200, 100);
     assert_eq!(dt.count, 2);
@@ -2328,7 +2650,7 @@ fn damage_tracker_reset_clears_state() {
 
 #[test]
 fn damage_tracker_add_after_full_screen_is_noop() {
-    let mut dt = drawing::DamageTracker::new(1024, 768);
+    let mut dt = DamageTracker::new(1024, 768);
     dt.mark_full_screen();
     dt.add(10, 20, 100, 50);
     // count stays 0 — once full_screen is set, add is a no-op
@@ -2337,13 +2659,13 @@ fn damage_tracker_add_after_full_screen_is_noop() {
 
 #[test]
 fn damage_tracker_max_rects_is_6() {
-    assert_eq!(drawing::MAX_DIRTY_RECTS, 6);
+    assert_eq!(MAX_DIRTY_RECTS, 6);
 }
 
 #[test]
 fn damage_tracker_multiple_content_and_chrome_rects() {
     // Simulates the real use case: content area change + chrome change
-    let mut dt = drawing::DamageTracker::new(1024, 768);
+    let mut dt = DamageTracker::new(1024, 768);
     // Content area: one line of text changed (approx one line_height tall)
     dt.add(13, 48, 998, 22); // text region
                              // Chrome area (e.g., title bar)
@@ -2359,7 +2681,7 @@ fn damage_tracker_multiple_content_and_chrome_rects() {
 // CompositeSurface + multi-surface compositing
 // ---------------------------------------------------------------------------
 
-use drawing::CompositeSurface;
+// CompositeSurface is now a test-local type (moved out of drawing).
 
 fn make_composite_surface<'a>(
     buf: &'a mut [u8],
@@ -2418,7 +2740,7 @@ fn composite_two_opaque_surfaces_z_order() {
 
     // Composite back-to-front.
     let surfaces: [&CompositeSurface; 2] = [&bg, &fg];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     // Outside the red overlay: should be blue.
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(0, 0, 255)));
@@ -2447,7 +2769,7 @@ fn composite_respects_z_order_not_array_order() {
 
     // Pass in wrong order (fg first, bg second).
     let surfaces: [&CompositeSurface; 2] = [&fg, &bg];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     // Red (higher z) should be on top of blue (lower z).
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(255, 0, 0)));
@@ -2471,7 +2793,7 @@ fn composite_alpha_blending() {
     fg.surface.clear(Color::rgba(255, 0, 0, 128));
 
     let surfaces: [&CompositeSurface; 2] = [&bg, &fg];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     let p = dst.get_pixel(4, 4).unwrap();
     // Gamma-correct 50% red on blue: both channels > 140.
@@ -2495,7 +2817,7 @@ fn composite_invisible_surface_skipped() {
     fg.visible = false;
 
     let surfaces: [&CompositeSurface; 2] = [&bg, &fg];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     // Red surface is invisible, should only see blue.
     assert_eq!(dst.get_pixel(4, 4), Some(Color::rgb(0, 0, 255)));
@@ -2513,7 +2835,7 @@ fn composite_surface_with_negative_offset() {
     s.surface.clear(Color::rgb(0, 255, 0));
 
     let surfaces: [&CompositeSurface; 1] = [&s];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     // Only the visible portion should be blitted.
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(0, 255, 0)));
@@ -2534,7 +2856,7 @@ fn composite_surface_partially_outside_right() {
     s.surface.clear(Color::rgb(0, 255, 0));
 
     let surfaces: [&CompositeSurface; 1] = [&s];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     // Only (6,6) and (7,7) should be green.
     assert_eq!(dst.get_pixel(6, 6), Some(Color::rgb(0, 255, 0)));
@@ -2562,7 +2884,7 @@ fn composite_three_layers() {
     chrome.surface.clear(Color::rgba(60, 60, 80, 200));
 
     let surfaces: [&CompositeSurface; 3] = [&bg, &content, &chrome];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     // Top-left pixel (0,0): bg under chrome (alpha blended).
     let p00 = dst.get_pixel(0, 0).unwrap();
@@ -2589,7 +2911,7 @@ fn composite_empty_surfaces_list() {
     dst.clear(Color::rgb(100, 100, 100));
 
     let surfaces: [&CompositeSurface; 0] = [];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     // Destination should be unchanged.
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(100, 100, 100)));
@@ -2619,7 +2941,7 @@ fn translucent_chrome_shows_content_beneath() {
     chrome.surface.clear(Color::rgba(40, 40, 60, 200));
 
     let surfaces: [&CompositeSurface; 2] = [&content, &chrome];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     // In the chrome region (row 0-3), the green content should bleed through.
     let p_chrome = dst.get_pixel(8, 2).unwrap();
@@ -2659,7 +2981,7 @@ fn translucent_chrome_is_visually_distinct_from_content() {
     chrome.surface.clear(Color::rgba(30, 30, 48, 220));
 
     let surfaces: [&CompositeSurface; 2] = [&content, &chrome];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     let p_chrome = dst.get_pixel(8, 2).unwrap();
     let p_content = dst.get_pixel(8, 8).unwrap();
@@ -2690,7 +3012,7 @@ fn chrome_alpha_200_produces_visible_translucency() {
     chrome.surface.clear(Color::rgba(30, 30, 48, 200));
 
     let surfaces: [&CompositeSurface; 2] = [&content, &chrome];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     let p = dst.get_pixel(2, 2).unwrap();
     // Red should bleed through: r > chrome_r (30) due to content contribution.
@@ -2719,7 +3041,7 @@ fn title_bar_chrome_over_content_shows_bleedthrough() {
     title.surface.clear(Color::rgba(30, 30, 48, 220));
 
     let surfaces: [&CompositeSurface; 2] = [&content, &title];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    composite_surfaces(&mut dst, &surfaces);
 
     // In the title bar region, blue from content should be partially visible.
     let p_title = dst.get_pixel(8, 1).unwrap();
@@ -2956,8 +3278,8 @@ fn shadow_surface_composites_between_content_and_chrome() {
     let mut chrome = make_composite_surface(&mut chrome_buf, 16, 4, 0, 0, 20);
     chrome.surface.clear(Color::rgba(30, 30, 48, 220));
 
-    let surfaces: [&drawing::CompositeSurface; 3] = [&content, &shadow, &chrome];
-    drawing::composite_surfaces(&mut dst, &surfaces);
+    let surfaces: [&CompositeSurface; 3] = [&content, &shadow, &chrome];
+    composite_surfaces(&mut dst, &surfaces);
 
     // In the shadow region (row 4): content should be darkened by shadow.
     let p_shadow = dst.get_pixel(8, 4).unwrap();
@@ -3974,7 +4296,7 @@ fn context_switch_composite_chrome_survives() {
             stride,
             format: PixelFormat::Bgra8888,
         };
-        let content_cs = drawing::CompositeSurface {
+        let content_cs = CompositeSurface {
             surface: Surface {
                 data: &mut content_buf_editor,
                 width: fb_w,
@@ -3987,7 +4309,7 @@ fn context_switch_composite_chrome_survives() {
             z: 10,
             visible: true,
         };
-        let chrome_cs = drawing::CompositeSurface {
+        let chrome_cs = CompositeSurface {
             surface: Surface {
                 data: &mut chrome_buf,
                 width: fb_w,
@@ -4000,7 +4322,7 @@ fn context_switch_composite_chrome_survives() {
             z: 20,
             visible: true,
         };
-        drawing::composite_surfaces(&mut fb, &[&content_cs, &chrome_cs]);
+        composite_surfaces(&mut fb, &[&content_cs, &chrome_cs]);
     }
 
     // Composite in image mode.
@@ -4013,7 +4335,7 @@ fn context_switch_composite_chrome_survives() {
             stride,
             format: PixelFormat::Bgra8888,
         };
-        let content_cs = drawing::CompositeSurface {
+        let content_cs = CompositeSurface {
             surface: Surface {
                 data: &mut content_buf_image,
                 width: fb_w,
@@ -4026,7 +4348,7 @@ fn context_switch_composite_chrome_survives() {
             z: 10,
             visible: true,
         };
-        let chrome_cs = drawing::CompositeSurface {
+        let chrome_cs = CompositeSurface {
             surface: Surface {
                 data: &mut chrome_buf,
                 width: fb_w,
@@ -4039,7 +4361,7 @@ fn context_switch_composite_chrome_survives() {
             z: 20,
             visible: true,
         };
-        drawing::composite_surfaces(&mut fb, &[&content_cs, &chrome_cs]);
+        composite_surfaces(&mut fb, &[&content_cs, &chrome_cs]);
     }
 
     // With translucent chrome (alpha=220), the chrome area blends with the
@@ -5540,7 +5862,7 @@ fn composite_rect_only_updates_target_region() {
     fg.surface.clear(Color::rgb(255, 0, 0)); // Red
 
     let surfaces: [&CompositeSurface; 1] = [&fg];
-    drawing::composite_surfaces_rect(&mut dst, &surfaces, 0, 0, 2, 2);
+    composite_surfaces_rect(&mut dst, &surfaces, 0, 0, 2, 2);
 
     // Inside the rect (0,0)-(2,2): should be red.
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(255, 0, 0)));
@@ -5569,7 +5891,7 @@ fn composite_rect_respects_z_order() {
     fg.surface.clear(Color::rgb(255, 0, 0)); // Red, higher z
 
     let surfaces: [&CompositeSurface; 2] = [&fg, &bg];
-    drawing::composite_surfaces_rect(&mut dst, &surfaces, 0, 0, 3, 3);
+    composite_surfaces_rect(&mut dst, &surfaces, 0, 0, 3, 3);
 
     // Inside rect where both surfaces overlap: red (higher z) wins.
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(255, 0, 0)));
@@ -5591,7 +5913,7 @@ fn composite_rect_with_offset_surface() {
     fg.surface.clear(Color::rgb(255, 0, 0)); // Red
 
     let surfaces: [&CompositeSurface; 1] = [&fg];
-    drawing::composite_surfaces_rect(&mut dst, &surfaces, 3, 3, 2, 2);
+    composite_surfaces_rect(&mut dst, &surfaces, 3, 3, 2, 2);
 
     // (3,3) is inside both the dirty rect and the surface. Should be red.
     assert_eq!(dst.get_pixel(3, 3), Some(Color::rgb(255, 0, 0)));
@@ -5615,7 +5937,7 @@ fn composite_rect_zero_size_is_noop() {
     fg.surface.clear(Color::rgb(255, 0, 0));
 
     let surfaces: [&CompositeSurface; 1] = [&fg];
-    drawing::composite_surfaces_rect(&mut dst, &surfaces, 0, 0, 0, 0);
+    composite_surfaces_rect(&mut dst, &surfaces, 0, 0, 0, 0);
 
     // Nothing should have changed.
     assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(0, 255, 0)));
@@ -6131,15 +6453,15 @@ fn gradient_dither_monochrome() {
 
 #[test]
 fn test_render_cursor_dimensions() {
-    let size = (drawing::CURSOR_W * drawing::CURSOR_H * 4) as usize;
+    let size = (CURSOR_W * CURSOR_H * 4) as usize;
     let mut buf = vec![0u8; size];
-    drawing::render_cursor(&mut buf);
+    render_cursor(&mut buf);
 
     // The cursor should have some non-transparent pixels (fill + outline).
     let mut opaque_count = 0;
-    for y in 0..drawing::CURSOR_H {
-        for x in 0..drawing::CURSOR_W {
-            let off = ((y * drawing::CURSOR_W + x) * 4) as usize;
+    for y in 0..CURSOR_H {
+        for x in 0..CURSOR_W {
+            let off = ((y * CURSOR_W + x) * 4) as usize;
             if buf[off + 3] > 0 {
                 opaque_count += 1;
             }
@@ -6154,9 +6476,9 @@ fn test_render_cursor_dimensions() {
 
 #[test]
 fn test_render_cursor_top_left_pixel_is_outline() {
-    let size = (drawing::CURSOR_W * drawing::CURSOR_H * 4) as usize;
+    let size = (CURSOR_W * CURSOR_H * 4) as usize;
     let mut buf = vec![0u8; size];
-    drawing::render_cursor(&mut buf);
+    render_cursor(&mut buf);
 
     // Pixel (0,0) should be the outline color (dark grey, opaque).
     // BGRA8888 encoding: B=40, G=40, R=40, A=255.
@@ -6167,12 +6489,12 @@ fn test_render_cursor_top_left_pixel_is_outline() {
 
 #[test]
 fn test_render_cursor_has_fill_pixels() {
-    let size = (drawing::CURSOR_W * drawing::CURSOR_H * 4) as usize;
+    let size = (CURSOR_W * CURSOR_H * 4) as usize;
     let mut buf = vec![0u8; size];
-    drawing::render_cursor(&mut buf);
+    render_cursor(&mut buf);
 
     // Pixel at (1,2) in the bitmap is fill (white, 255/255/255/255).
-    let off = ((2 * drawing::CURSOR_W + 1) * 4) as usize;
+    let off = ((2 * CURSOR_W + 1) * 4) as usize;
     assert_eq!(buf[off + 3], 255, "fill pixel alpha should be 255");
     assert_eq!(buf[off + 0], 255, "fill pixel B channel should be 255");
     assert_eq!(buf[off + 1], 255, "fill pixel G channel should be 255");
@@ -6181,24 +6503,24 @@ fn test_render_cursor_has_fill_pixels() {
 
 #[test]
 fn test_render_cursor_has_transparent_pixels() {
-    let size = (drawing::CURSOR_W * drawing::CURSOR_H * 4) as usize;
+    let size = (CURSOR_W * CURSOR_H * 4) as usize;
     let mut buf = vec![0u8; size];
-    drawing::render_cursor(&mut buf);
+    render_cursor(&mut buf);
 
     // Pixel at (11,0) should be transparent (outside the arrow).
-    let off = ((0 * drawing::CURSOR_W + 11) * 4) as usize;
+    let off = ((0 * CURSOR_W + 11) * 4) as usize;
     assert_eq!(buf[off + 3], 0, "pixel outside arrow should be transparent");
 }
 
 #[test]
 fn test_scale_pointer_coord_zero() {
-    assert_eq!(drawing::scale_pointer_coord(0, 1280), 0);
+    assert_eq!(scale_pointer_coord(0, 1280), 0);
 }
 
 #[test]
 fn test_scale_pointer_coord_max() {
     // 32767 * 1280 / 32768 = 1279.96... → 1279
-    let result = drawing::scale_pointer_coord(32767, 1280);
+    let result = scale_pointer_coord(32767, 1280);
     assert!(result < 1280, "result {} should be < 1280", result);
     assert_eq!(result, 1279);
 }
@@ -6206,7 +6528,7 @@ fn test_scale_pointer_coord_max() {
 #[test]
 fn test_scale_pointer_coord_midpoint() {
     // 16384 * 1280 / 32768 = 640
-    let result = drawing::scale_pointer_coord(16384, 1280);
+    let result = scale_pointer_coord(16384, 1280);
     assert_eq!(result, 640);
 }
 
@@ -6215,7 +6537,7 @@ fn test_scale_pointer_coord_never_exceeds_max() {
     // Even with coord = 32767 and max = 800, result should be < 800.
     for max in [640u32, 768, 800, 1024, 1080, 1280, 1920] {
         for coord in [0, 1, 16383, 16384, 32766, 32767] {
-            let result = drawing::scale_pointer_coord(coord, max);
+            let result = scale_pointer_coord(coord, max);
             assert!(
                 result < max,
                 "scale_pointer_coord({}, {}) = {} (should be < {})",
@@ -6231,7 +6553,7 @@ fn test_scale_pointer_coord_never_exceeds_max() {
 #[test]
 fn test_scale_pointer_coord_zero_max() {
     // Edge case: max_pixels = 0 should not panic.
-    assert_eq!(drawing::scale_pointer_coord(16384, 0), 0);
+    assert_eq!(scale_pointer_coord(16384, 0), 0);
 }
 
 // ---------------------------------------------------------------------------

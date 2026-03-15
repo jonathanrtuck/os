@@ -18,6 +18,12 @@ extern crate fonts;
 
 #[path = "scene_render.rs"]
 mod scene_render;
+#[path = "damage.rs"]
+mod damage;
+#[path = "compositing.rs"]
+mod compositing;
+#[path = "cursor.rs"]
+mod cursor;
 
 use alloc::{boxed::Box, vec};
 
@@ -397,7 +403,7 @@ pub extern "C" fn _start() -> ! {
     let initial_payload = PresentPayload {
         buffer_index: 0,
         rect_count: 0,
-        rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
+        rects: [protocol::DirtyRect::new(0, 0, 0, 0); 6],
         _pad: [0; 4],
     };
     let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &initial_payload) };
@@ -425,7 +431,7 @@ pub extern "C" fn _start() -> ! {
         let curr_count = curr_nodes.len();
 
         // Diff previous vs current scene to find dirty rects.
-        let mut damage = drawing::DamageTracker::new(fb_width as u16, fb_height as u16);
+        let mut damage = damage::DamageTracker::new(fb_width as u16, fb_height as u16);
 
         let diff_result = scene::diff_scenes(
             &prev_nodes[..prev_node_count as usize],
@@ -481,7 +487,7 @@ pub extern "C" fn _start() -> ! {
         } else if let Some(rects) = damage.dirty_rects() {
             render_buf = presented_buf;
             let mut fb = make_fb_surface(render_buf);
-            let bbox = drawing::DirtyRect::union_all(rects);
+            let bbox = protocol::DirtyRect::union_all(rects);
             scene_render::render_scene_clipped(&mut fb, &graph, &render_ctx, &bbox);
         } else {
             continue;
@@ -495,7 +501,7 @@ pub extern "C" fn _start() -> ! {
         // Build present payload with dirty rects.
         let payload = match damage.dirty_rects() {
             Some(rects) if !damage.full_screen => {
-                let mut dirty = [drawing::DirtyRect::new(0, 0, 0, 0); 6];
+                let mut dirty = [protocol::DirtyRect::new(0, 0, 0, 0); 6];
                 let n = rects.len().min(6);
                 dirty[..n].copy_from_slice(&rects[..n]);
                 PresentPayload {
@@ -508,7 +514,7 @@ pub extern "C" fn _start() -> ! {
             _ => PresentPayload {
                 buffer_index: render_buf as u32,
                 rect_count: 0,
-                rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
+                rects: [protocol::DirtyRect::new(0, 0, 0, 0); 6],
                 _pad: [0; 4],
             },
         };

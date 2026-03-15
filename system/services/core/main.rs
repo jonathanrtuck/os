@@ -695,8 +695,8 @@ pub extern "C" fn _start() -> ! {
                         let ptr: PointerAbs = unsafe { msg.payload_as() };
 
                         unsafe {
-                            MOUSE_X = drawing::scale_pointer_coord(ptr.x, fb_width);
-                            MOUSE_Y = drawing::scale_pointer_coord(ptr.y, fb_height);
+                            MOUSE_X = scale_pointer_coord(ptr.x, fb_width);
+                            MOUSE_Y = scale_pointer_coord(ptr.y, fb_height);
                         }
 
                         changed = true;
@@ -852,5 +852,20 @@ pub extern "C" fn _start() -> ! {
 
             let _ = sys::channel_signal(COMPOSITOR_HANDLE);
         }
+    }
+}
+
+/// Scale an absolute pointer coordinate from the [0, 32767] range to
+/// [0, max_pixels). Uses integer math: `coord * max_pixels / 32768`.
+/// The divisor is 32768 (not 32767) to ensure the result never equals
+/// max_pixels (stays in [0, max_pixels-1]).
+fn scale_pointer_coord(coord: u32, max_pixels: u32) -> u32 {
+    let result = (coord as u64 * max_pixels as u64) / 32768;
+    let r = result as u32;
+
+    if r >= max_pixels && max_pixels > 0 {
+        max_pixels - 1
+    } else {
+        r
     }
 }

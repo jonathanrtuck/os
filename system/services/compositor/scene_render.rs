@@ -344,7 +344,7 @@ pub fn render_scene_clipped(
     fb: &mut Surface,
     graph: &SceneGraph,
     ctx: &RenderCtx,
-    dirty: &drawing::DirtyRect,
+    dirty: &protocol::DirtyRect,
 ) {
     if graph.nodes.is_empty() || dirty.w == 0 || dirty.h == 0 {
         return;
