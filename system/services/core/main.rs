@@ -84,6 +84,7 @@ static mut TIMER_HANDLE: u8 = 0;
 struct KeyAction {
     changed: bool,
     text_changed: bool,
+    selection_changed: bool,
     context_switched: bool,
     consumed: bool,
 }
@@ -377,6 +378,7 @@ fn process_key_event(
         return KeyAction {
             changed: false,
             text_changed: false,
+            selection_changed: false,
             context_switched: false,
             consumed: true,
         };
@@ -398,6 +400,7 @@ fn process_key_event(
             return KeyAction {
                 changed: true,
                 text_changed: true,
+                selection_changed: false,
                 context_switched: true,
                 consumed: true,
             };
@@ -405,6 +408,7 @@ fn process_key_event(
         return KeyAction {
             changed: false,
             text_changed: false,
+            selection_changed: false,
             context_switched: false,
             consumed: true,
         };
@@ -419,6 +423,7 @@ fn process_key_event(
     KeyAction {
         changed: false,
         text_changed: false,
+        selection_changed: false,
         context_switched: false,
         consumed: false,
     }
@@ -646,6 +651,8 @@ pub extern "C" fn _start() -> ! {
         };
         let mut changed = false;
         let mut text_changed = false;
+        let mut selection_changed = false;
+        let mut context_switched = false;
         let mut timer_fired = false;
 
         // Check timer.
@@ -672,6 +679,12 @@ pub extern "C" fn _start() -> ! {
                 if action.text_changed {
                     text_changed = true;
                 }
+                if action.selection_changed {
+                    selection_changed = true;
+                }
+                if action.context_switched {
+                    context_switched = true;
+                }
             }
         }
 
@@ -689,6 +702,12 @@ pub extern "C" fn _start() -> ! {
                         }
                         if action.text_changed {
                             text_changed = true;
+                        }
+                        if action.selection_changed {
+                            selection_changed = true;
+                        }
+                        if action.context_switched {
+                            context_switched = true;
                         }
                     }
                     MSG_POINTER_ABS => {
@@ -739,7 +758,9 @@ pub extern "C" fn _start() -> ! {
                                 let _ = sys::channel_signal(EDITOR_HANDLE);
 
                                 changed = true;
-                                text_changed = true;
+                                // Click moves cursor, clears selection.
+                                // Treat as cursor-move + selection clear.
+                                selection_changed = true;
                             }
                         }
                     }
@@ -783,7 +804,7 @@ pub extern "C" fn _start() -> ! {
                         doc_write_header();
 
                         changed = true;
-                        text_changed = true;
+                        // Cursor-only move: no text change.
                     }
                 }
                 MSG_SELECTION_UPDATE => {
@@ -795,7 +816,7 @@ pub extern "C" fn _start() -> ! {
                     }
 
                     changed = true;
-                    text_changed = true;
+                    selection_changed = true;
                 }
                 MSG_WRITE_DELETE_RANGE => {
                     let dr: WriteDeleteRange = unsafe { msg.payload_as() };
@@ -813,39 +834,169 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        if text_changed && !unsafe { IMAGE_MODE } {
+        // Update scroll offset for cursor/text changes.
+        if (changed || text_changed) && !unsafe { IMAGE_MODE } {
+            let old_scroll = unsafe { SCROLL_OFFSET };
+
             update_scroll_offset(content_w, content_h);
+
+            // If scroll changed, we need a full document content update
+            // (visible lines changed) regardless of whether text changed.
+            let new_scroll = unsafe { SCROLL_OFFSET };
+
+            if old_scroll != new_scroll && !text_changed {
+                text_changed = true;
+            }
         }
 
-        if changed || timer_fired {
-            format_time_hms(clock_seconds(), &mut time_buf);
+        // ── Scene update dispatch ──────────────────────────────────
+        //
+        // Use targeted updates for incremental changes instead of
+        // rebuilding the entire scene graph every frame.
+        //
+        // Priority order (most-specific first):
+        // 1. context_switched → full rebuild
+        // 2. text_changed     → update_document_content (doc + cursor + sel)
+        // 3. selection_changed → update_selection
+        // 4. changed (cursor/pointer only) → update_cursor
+        // 5. timer_fired only → update_clock
+        //
+        // When timer_fired coincides with a content/cursor change, we
+        // also update the clock via update_clock after the primary update.
 
-            scene.build_editor_scene(
-                fb_width,
-                fb_height,
-                TITLE_BAR_H,
-                SHADOW_DEPTH,
-                TEXT_INSET_X,
-                TEXT_INSET_TOP,
-                drawing::CHROME_BG,
-                drawing::CHROME_BORDER,
-                drawing::CHROME_TITLE,
-                drawing::CHROME_CLOCK,
-                drawing::BG_BASE,
-                drawing::TEXT_PRIMARY,
-                drawing::TEXT_CURSOR,
-                drawing::TEXT_SELECTION,
-                FONT_SIZE as u16,
-                unsafe { CHAR_W },
-                unsafe { LINE_H },
-                doc_content(),
-                unsafe { CURSOR_POS } as u32,
-                unsafe { SEL_START } as u32,
-                unsafe { SEL_END } as u32,
-                b"Text",
-                &time_buf,
-                unsafe { SCROLL_OFFSET } as i32,
-            );
+        let needs_scene_update = changed || text_changed || selection_changed || timer_fired;
+
+        if needs_scene_update {
+            // When timer_fired coincides with input changes, we need to
+            // update both content/cursor AND clock in a single frame.
+            // Since each targeted method does its own copy_front_to_back
+            // + swap cycle, calling two methods would produce two frames
+            // where only the second's change list is visible to the
+            // compositor. Fall back to full rebuild in these cases.
+            // The timer fires once per second, so this is rare.
+            let full_rebuild = context_switched
+                || (timer_fired && (changed || text_changed || selection_changed));
+
+            if full_rebuild {
+                format_time_hms(clock_seconds(), &mut time_buf);
+
+                scene.build_editor_scene(
+                    fb_width,
+                    fb_height,
+                    TITLE_BAR_H,
+                    SHADOW_DEPTH,
+                    TEXT_INSET_X,
+                    TEXT_INSET_TOP,
+                    drawing::CHROME_BG,
+                    drawing::CHROME_BORDER,
+                    drawing::CHROME_TITLE,
+                    drawing::CHROME_CLOCK,
+                    drawing::BG_BASE,
+                    drawing::TEXT_PRIMARY,
+                    drawing::TEXT_CURSOR,
+                    drawing::TEXT_SELECTION,
+                    FONT_SIZE as u16,
+                    unsafe { CHAR_W },
+                    unsafe { LINE_H },
+                    doc_content(),
+                    unsafe { CURSOR_POS } as u32,
+                    unsafe { SEL_START } as u32,
+                    unsafe { SEL_END } as u32,
+                    b"Text",
+                    &time_buf,
+                    unsafe { SCROLL_OFFSET } as i32,
+                );
+            } else if text_changed {
+                // Document content changed (insert/delete/scroll).
+                // update_document_content handles doc text, cursor, and
+                // selection. Falls back to build_editor_scene if the
+                // data buffer exceeds 75% usage.
+                format_time_hms(clock_seconds(), &mut time_buf);
+
+                scene.update_document_content(
+                    fb_width,
+                    fb_height,
+                    TITLE_BAR_H,
+                    SHADOW_DEPTH,
+                    TEXT_INSET_X,
+                    TEXT_INSET_TOP,
+                    drawing::CHROME_BG,
+                    drawing::CHROME_BORDER,
+                    drawing::CHROME_TITLE,
+                    drawing::CHROME_CLOCK,
+                    drawing::BG_BASE,
+                    drawing::TEXT_PRIMARY,
+                    drawing::TEXT_CURSOR,
+                    drawing::TEXT_SELECTION,
+                    FONT_SIZE as u16,
+                    unsafe { CHAR_W },
+                    unsafe { LINE_H },
+                    doc_content(),
+                    unsafe { CURSOR_POS } as u32,
+                    unsafe { SEL_START } as u32,
+                    unsafe { SEL_END } as u32,
+                    b"Text",
+                    &time_buf,
+                    unsafe { SCROLL_OFFSET } as i32,
+                );
+            } else if selection_changed {
+                // Selection changed without text change (e.g., click
+                // to clear selection, shift-arrow to extend selection).
+                let content_y = TITLE_BAR_H + SHADOW_DEPTH;
+                let sel_content_h = fb_height.saturating_sub(content_y);
+                let scroll_lines = unsafe { SCROLL_OFFSET };
+                let line_h = unsafe { LINE_H };
+                let scroll_px = scroll_lines as i32 * line_h as i32;
+                let dc = |c: drawing::Color| -> scene::Color {
+                    scene::Color::rgba(c.r, c.g, c.b, c.a)
+                };
+
+                scene.update_selection(
+                    unsafe { SEL_START } as u32,
+                    unsafe { SEL_END } as u32,
+                    doc_content(),
+                    {
+                        let doc_width = fb_width.saturating_sub(2 * TEXT_INSET_X);
+
+                        if unsafe { CHAR_W } > 0 {
+                            (doc_width / unsafe { CHAR_W }).max(1)
+                        } else {
+                            80
+                        }
+                    },
+                    unsafe { CHAR_W },
+                    unsafe { LINE_H },
+                    dc(drawing::TEXT_SELECTION),
+                    sel_content_h,
+                    scroll_px,
+                );
+            } else if changed {
+                // Cursor moved without text or selection change
+                // (e.g., arrow keys producing a MSG_CURSOR_MOVE
+                // that doesn't trigger scroll change).
+                let doc_width = fb_width.saturating_sub(2 * TEXT_INSET_X);
+                let chars_per_line = if unsafe { CHAR_W } > 0 {
+                    (doc_width / unsafe { CHAR_W }).max(1)
+                } else {
+                    80
+                };
+                let scroll_lines = unsafe { SCROLL_OFFSET };
+                let line_h = unsafe { LINE_H };
+                let scroll_px = scroll_lines as i32 * line_h as i32;
+
+                scene.update_cursor(
+                    unsafe { CURSOR_POS } as u32,
+                    doc_content(),
+                    chars_per_line,
+                    unsafe { CHAR_W },
+                    unsafe { LINE_H },
+                    scroll_px,
+                );
+            } else if timer_fired {
+                // Timer only — just update the clock text.
+                format_time_hms(clock_seconds(), &mut time_buf);
+                scene.update_clock(&time_buf);
+            }
 
             // Signal compositor.
             compositor_ch.send(&scene_msg);
