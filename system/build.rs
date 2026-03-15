@@ -121,11 +121,8 @@ fn main() {
         &drawing_src,
         &drawing_rlib,
         "drawing",
-        &[
-            ("protocol", &protocol_rlib),
-            ("fonts", &fonts_output.rlib),
-        ],
-        &[&fonts_output.deps_dir, &fonts_host_deps],
+        &[("protocol", &protocol_rlib)],
+        &[],
     );
 
     // Step 2: Compile all non-init programs.

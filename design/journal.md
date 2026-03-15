@@ -4,6 +4,102 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Input Handling Architecture (2026-03-15)
+
+**Status:** Design settled. Ready to implement.
+
+### Context
+
+Text input support is minimal — only lowercase characters, no modifier handling. Designing "full" keyboard input (shift, capslock, Cmd+arrow navigation, selection, etc.) to match the macOS editing experience. This required settling where each layer of input interpretation lives in the system.
+
+### Design Decisions
+
+**1. Three-layer input pipeline: physical → logical → semantic.**
+
+- **OS: physical keycode → logical key + modifiers.** The OS tracks modifier state (Shift, Ctrl, Option, Cmd held; Caps Lock toggled) from raw evdev key-down/key-up events. It resolves physical keycodes through the active keyboard layout to produce logical keys. Output is always (logical key, modifier set) — never characters.
+- **OS → Editor: logical key + modifiers via IPC.** The OS delivers the same event format to every editor regardless of content type. The OS never interprets what a key combination means semantically.
+- **Editor: key + modifiers → characters and/or operations on OS primitives.** The editor decides what keys mean. A text editor resolves (key=A, modifiers=Shift) to character 'A' and calls write-insert. It resolves (key=Left, modifiers=Cmd) to "start of line" and calls move-cursor-to. An image editor interprets the same keys differently.
+
+**2. Character resolution lives in the editor, not the OS.**
+
+The OS does NOT resolve keys to characters. The editor is the input method. This means:
+
+- Switching from English to Japanese input is switching editors, not changing a system setting. The Japanese editor handles romaji → hiragana → kanji conversion internally.
+- Different editors can produce different characters for the same key combinations (virtual keyboards, language-specific editors).
+- The OS stays simpler — it only needs keyboard layout knowledge (physical → logical key) for its own system shortcuts.
+
+**3. Cursor and selection remain OS primitives (reinforced).**
+
+Cursor position and selection state are owned by the OS, not by editors. This was questioned during the discussion but holds for two reasons:
+
+- **View mode:** Cursor and selection exist without any editor active (text selection for copy, playhead in video). No editor means cursor can't be editor state.
+- **Editor swap continuity:** When switching from an English editor to a Japanese editor on the same document, the cursor position survives because it's OS state. The new editor picks up exactly where the old one left off.
+
+The editor computes cursor movement (it knows what "start of line" means at byte offset 247) and tells the OS where to put the cursor. The OS stores the position and renders it.
+
+**4. System-wide shortcuts are intercepted by the OS before reaching editors.**
+
+Cmd+Q, Cmd+Tab, and other system gestures are handled at the OS level. The OS needs keyboard layout resolution for this (it must know that a physical key + Cmd is "Q"), which it already has from layer 1. Editors never see system shortcuts.
+
+**5. System UI text fields use the editor framework.**
+
+The command bar, search fields, and dialogs need character input but aren't documents with editors. Rather than duplicating character resolution in the OS, these use the same editor framework — system text fields are mini-documents with an editor attached. Consistent architecture, even if it's more work initially.
+
+**6. Coarse undo via COW snapshots is sufficient.**
+
+Cmd+Z triggers OS-level undo (restore previous COW snapshot at operation boundary). No per-character undo. Editors define operation granularity via beginOperation/endOperation. This works regardless of which editor is active — no editor needs to implement undo logic.
+
+**7. macOS Emacs bindings (Ctrl+A/E/K/D/F/B/N/P) are excluded.**
+
+These legacy terminal shortcuts add complexity for no value. Cmd+arrows cover the same navigation.
+
+### Interface Summary
+
+```
+OS → Editor (IPC):
+  key_event(logical_key, modifiers)    // always this, never characters
+
+Editor → OS (IPC):
+  move_cursor_to(position)             // navigation
+  set_selection(start, end)            // selection
+  write_insert(data)                   // character/text input
+  write_delete(range)                  // backspace, forward delete, etc.
+```
+
+### Target Keybindings (text editor, first implementation)
+
+**Navigation (editor computes position, calls move_cursor_to):**
+- Arrow keys: character left/right, line up/down
+- Cmd+Left/Right: line start/end
+- Cmd+Up/Down: document start/end
+- Option+Left/Right: word boundaries
+- Page Up/Down (when scrolling views exist)
+
+**Selection (editor computes range, calls set_selection):**
+- Shift + any navigation key
+- Cmd+A: select all
+
+**Editing (editor resolves characters, calls write_insert/write_delete):**
+- Shift/Caps Lock for uppercase + symbols
+- Backspace: delete backward
+- Delete (fn+Backspace): delete forward
+- Option+Backspace: delete word backward
+- Option+Delete: delete word forward
+- Cmd+Backspace: delete to line start
+- Enter, Tab
+
+**Clipboard (OS-level):**
+- Cmd+C/X/V: copy/cut/paste
+- Cmd+Z: undo (COW snapshot restore)
+
+### Design Implications
+
+- **Word boundary detection** requires the editor to understand word segmentation for the content it's editing. For text, this means Unicode word boundaries. Since the editor already does text layout (settled 2026-03-13), it has the text content and can compute word boundaries.
+- **The "editor is the input method" model** means content-type registration metadata should declare the editor's input capabilities (what languages/scripts it supports), enabling the OS to present appropriate editor choices.
+- **Emoji input** is a future concern — likely a system-level picker that inserts via the active editor's write_insert path.
+
+---
+
 ## Boot Display via ramfb (2026-03-15)
 
 **Status:** Design settled. Ready to implement.

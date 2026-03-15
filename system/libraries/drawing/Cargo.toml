@@ -8,4 +8,3 @@ path = "lib.rs"
 
 [dependencies]
 protocol = { path = "../protocol" }
-fonts = { path = "../fonts" }

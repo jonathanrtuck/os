@@ -110,8 +110,139 @@ fn clock_seconds() -> u64 {
         (now - boot) / freq
     }
 }
-fn content_text_layout(content_w: u32) -> drawing::TextLayout {
-    drawing::TextLayout {
+/// Fixed-pitch text layout engine.
+///
+/// Computes line breaks (hard newlines + soft wrap at max width), cursor
+/// mapping (byte offset to/from pixel coordinates), and scroll management.
+/// Pure computation — no allocations, no side effects.
+struct TextLayout {
+    char_width: u32,
+    line_height: u32,
+    max_width: u32,
+}
+
+impl TextLayout {
+    fn cols(&self) -> usize {
+        if self.char_width == 0 {
+            return 0;
+        }
+
+        (self.max_width / self.char_width) as usize
+    }
+
+    /// Return the visual line number (0-based) for a given byte offset.
+    fn byte_to_visual_line(&self, text: &[u8], offset: usize) -> u32 {
+        let cols = self.cols();
+
+        if cols == 0 || text.is_empty() {
+            return 0;
+        }
+
+        let target = if offset > text.len() {
+            text.len()
+        } else {
+            offset
+        };
+        let mut col = 0usize;
+        let mut row = 0u32;
+
+        for (i, &byte) in text.iter().enumerate() {
+            if i == target {
+                return row;
+            }
+
+            if byte == b'\n' {
+                row += 1;
+                col = 0;
+
+                continue;
+            }
+
+            if col >= cols {
+                row += 1;
+                col = 0;
+            }
+
+            col += 1;
+        }
+
+        row
+    }
+
+    /// Compute the scroll offset needed to keep the cursor visible.
+    fn scroll_for_cursor(
+        &self,
+        text: &[u8],
+        cursor_offset: usize,
+        current_scroll: u32,
+        viewport_lines: u32,
+    ) -> u32 {
+        if viewport_lines == 0 {
+            return 0;
+        }
+
+        let cursor_line = self.byte_to_visual_line(text, cursor_offset);
+
+        if cursor_line < current_scroll {
+            return cursor_line;
+        }
+
+        let last_visible = current_scroll + viewport_lines - 1;
+
+        if cursor_line > last_visible {
+            return cursor_line - (viewport_lines - 1);
+        }
+
+        current_scroll
+    }
+
+    /// Map pixel coordinates to a byte offset (hit testing).
+    fn xy_to_byte(&self, text: &[u8], x: u32, y: u32) -> usize {
+        let cols = self.cols();
+
+        if cols == 0 || text.is_empty() {
+            return 0;
+        }
+
+        let target_row = y / self.line_height;
+        let half_char = self.char_width / 2;
+        let target_col = (x + half_char) / self.char_width;
+        let mut col = 0usize;
+        let mut row = 0u32;
+
+        for (i, &byte) in text.iter().enumerate() {
+            if byte == b'\n' {
+                if row == target_row {
+                    return i;
+                }
+
+                row += 1;
+                col = 0;
+
+                continue;
+            }
+
+            if col >= cols {
+                row += 1;
+                col = 0;
+            }
+
+            if row == target_row && col >= target_col as usize {
+                return i;
+            }
+            if row > target_row {
+                return i;
+            }
+
+            col += 1;
+        }
+
+        text.len()
+    }
+}
+
+fn content_text_layout(content_w: u32) -> TextLayout {
+    TextLayout {
         char_width: unsafe { CHAR_W },
         line_height: unsafe { LINE_H },
         max_width: content_w - 2 * TEXT_INSET_X,
