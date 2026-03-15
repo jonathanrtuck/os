@@ -23,6 +23,8 @@
 
 include!("gamma_tables.rs");
 include!("palette.rs");
+#[cfg(target_arch = "aarch64")]
+include!("neon.rs");
 /// A color in canonical RGBA order. Converted to the target pixel format
 /// at the point of writing — callers always work in RGBA regardless of the
 /// underlying buffer format.
@@ -296,44 +298,71 @@ impl<'a> Surface<'a> {
                 let src_row_ptr = src_data.as_ptr().add(src_row_off);
                 let dst_row_ptr = dst_ptr.add(dst_row_off);
 
-                for col in 0..copy_w {
-                    let offset = (col * bpp) as usize;
-                    let sp = src_row_ptr.add(offset);
-                    let dp = dst_row_ptr.add(offset);
+                #[cfg(target_arch = "aarch64")]
+                {
+                    // NEON path: process 4 pixels at a time for the
+                    // semi-transparent case, with per-pixel alpha handling.
+                    let chunks = copy_w / 4;
+                    let tail_start = chunks * 4;
 
-                    // Read source BGRA pixel.
-                    let src_a = core::ptr::read(sp.add(3));
+                    for chunk in 0..chunks {
+                        let base = (chunk * 4 * bpp) as usize;
+                        let sp = src_row_ptr.add(base);
+                        let dp = dst_row_ptr.add(base);
 
-                    if src_a == 0 {
-                        continue;
+                        // Check if all 4 source pixels in this chunk have
+                        // the same alpha (common fast paths).
+                        let a0 = core::ptr::read(sp.add(3));
+                        let a1 = core::ptr::read(sp.add(7));
+                        let a2 = core::ptr::read(sp.add(11));
+                        let a3 = core::ptr::read(sp.add(15));
+
+                        if a0 == 0 && a1 == 0 && a2 == 0 && a3 == 0 {
+                            // All transparent: skip.
+                            continue;
+                        }
+
+                        if a0 == 255 && a1 == 255 && a2 == 255 && a3 == 255 {
+                            // All opaque: direct copy.
+                            core::ptr::copy_nonoverlapping(sp, dp, 16);
+                            continue;
+                        }
+
+                        // Mixed alpha: use NEON blend for any semi-transparent
+                        // pixels, but handle fully opaque/transparent per-pixel.
+                        let has_semi = (a0 > 0 && a0 < 255)
+                            || (a1 > 0 && a1 < 255)
+                            || (a2 > 0 && a2 < 255)
+                            || (a3 > 0 && a3 < 255);
+
+                        if has_semi {
+                            // SAFETY: sp points to 16 readable bytes (4 src
+                            // pixels), dp points to 16 writable bytes (4 dst
+                            // pixels). Both are within the clipped bounds.
+                            neon_blend_4px(sp, dp, &SRGB_TO_LINEAR, &LINEAR_TO_SRGB);
+                        } else {
+                            // All pixels are either 0 or 255 — no semi-transparent.
+                            blit_blend_scalar_4px(sp, dp, bpp);
+                        }
                     }
 
-                    if src_a == 255 {
-                        // Opaque: direct copy (4 bytes).
-                        core::ptr::copy_nonoverlapping(sp, dp, 4);
-                        continue;
+                    // Handle tail pixels with scalar code.
+                    for col in tail_start..copy_w {
+                        let offset = (col * bpp) as usize;
+                        let sp = src_row_ptr.add(offset);
+                        let dp = dst_row_ptr.add(offset);
+                        blit_blend_scalar_1px(sp, dp, self.format);
                     }
+                }
 
-                    // Semi-transparent: read both pixels and blend.
-                    let src_color = Color {
-                        b: core::ptr::read(sp),
-                        g: core::ptr::read(sp.add(1)),
-                        r: core::ptr::read(sp.add(2)),
-                        a: src_a,
-                    };
-                    let dst_color = Color {
-                        b: core::ptr::read(dp),
-                        g: core::ptr::read(dp.add(1)),
-                        r: core::ptr::read(dp.add(2)),
-                        a: core::ptr::read(dp.add(3)),
-                    };
-                    let blended = src_color.blend_over(dst_color);
-                    let encoded = blended.encode(self.format);
-
-                    core::ptr::write(dp, encoded[0]);
-                    core::ptr::write(dp.add(1), encoded[1]);
-                    core::ptr::write(dp.add(2), encoded[2]);
-                    core::ptr::write(dp.add(3), encoded[3]);
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    for col in 0..copy_w {
+                        let offset = (col * bpp) as usize;
+                        let sp = src_row_ptr.add(offset);
+                        let dp = dst_row_ptr.add(offset);
+                        blit_blend_scalar_1px(sp, dp, self.format);
+                    }
                 }
             }
         }
@@ -583,8 +612,18 @@ impl<'a> Surface<'a> {
             unsafe {
                 let row_ptr = ptr.add(row_offset) as *mut u32;
 
-                for i in 0..pixel_count {
-                    core::ptr::write(row_ptr.add(i), pixel_u32);
+                #[cfg(target_arch = "aarch64")]
+                {
+                    // SAFETY: row_ptr points to pixel_count contiguous u32
+                    // slots within the surface buffer. Bounds verified above.
+                    neon_fill_row(row_ptr, pixel_count, pixel_u32);
+                }
+
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    for i in 0..pixel_count {
+                        core::ptr::write(row_ptr.add(i), pixel_u32);
+                    }
                 }
             }
         }
@@ -687,42 +726,44 @@ impl<'a> Surface<'a> {
             unsafe {
                 let row_ptr = ptr.add(row_offset);
 
-                for i in 0..pixel_count {
-                    let p = row_ptr.add(i * 4);
+                #[cfg(target_arch = "aarch64")]
+                {
+                    let chunks = pixel_count / 4;
+                    let tail_start = chunks * 4;
 
-                    // Read destination BGRA pixel.
-                    let dst_b = core::ptr::read(p);
-                    let dst_g = core::ptr::read(p.add(1));
-                    let dst_r = core::ptr::read(p.add(2));
-                    let dst_a = core::ptr::read(p.add(3));
-
-                    let da = dst_a as u32;
-                    let da_eff = div255(da * inv_sa);
-                    let out_a = sa + da_eff;
-
-                    if out_a == 0 {
-                        continue;
+                    for chunk in 0..chunks {
+                        let p = row_ptr.add(chunk * 16);
+                        // SAFETY: p points to 16 writable bytes (4 dst pixels)
+                        // within the clipped surface bounds.
+                        neon_blend_const_4px(
+                            p,
+                            src_r_lin as u16,
+                            src_g_lin as u16,
+                            src_b_lin as u16,
+                            sa as u16,
+                            inv_sa as u16,
+                            &SRGB_TO_LINEAR,
+                            &LINEAR_TO_SRGB,
+                        );
                     }
 
-                    // Convert destination to linear space.
-                    let dst_r_lin = SRGB_TO_LINEAR[dst_r as usize] as u32;
-                    let dst_g_lin = SRGB_TO_LINEAR[dst_g as usize] as u32;
-                    let dst_b_lin = SRGB_TO_LINEAR[dst_b as usize] as u32;
+                    // Scalar tail.
+                    for i in tail_start..pixel_count {
+                        let p = row_ptr.add(i * 4);
+                        fill_rect_blend_scalar_1px(
+                            p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa,
+                        );
+                    }
+                }
 
-                    let r_lin = (src_r_lin * sa + dst_r_lin * da_eff) / out_a;
-                    let g_lin = (src_g_lin * sa + dst_g_lin * da_eff) / out_a;
-                    let b_lin = (src_b_lin * sa + dst_b_lin * da_eff) / out_a;
-
-                    let out_r = LINEAR_TO_SRGB[linear_to_idx(r_lin)];
-                    let out_g = LINEAR_TO_SRGB[linear_to_idx(g_lin)];
-                    let out_b = LINEAR_TO_SRGB[linear_to_idx(b_lin)];
-                    let out_a_u8 = if out_a > 255 { 255u8 } else { out_a as u8 };
-
-                    // Write BGRA pixel.
-                    core::ptr::write(p, out_b);
-                    core::ptr::write(p.add(1), out_g);
-                    core::ptr::write(p.add(2), out_r);
-                    core::ptr::write(p.add(3), out_a_u8);
+                #[cfg(not(target_arch = "aarch64"))]
+                {
+                    for i in 0..pixel_count {
+                        let p = row_ptr.add(i * 4);
+                        fill_rect_blend_scalar_1px(
+                            p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa,
+                        );
+                    }
                 }
             }
         }
@@ -747,6 +788,120 @@ impl<'a> Surface<'a> {
         }
     }
 }
+/// Scalar fill_rect_blend for a single destination pixel (unsafe helper).
+///
+/// # Safety
+///
+/// `p` must point to 4 readable and writable bytes (destination BGRA pixel).
+#[inline(always)]
+unsafe fn fill_rect_blend_scalar_1px(
+    p: *mut u8,
+    src_r_lin: u32,
+    src_g_lin: u32,
+    src_b_lin: u32,
+    sa: u32,
+    inv_sa: u32,
+) {
+    // Read destination BGRA pixel.
+    let dst_b = core::ptr::read(p);
+    let dst_g = core::ptr::read(p.add(1));
+    let dst_r = core::ptr::read(p.add(2));
+    let dst_a = core::ptr::read(p.add(3));
+
+    let da = dst_a as u32;
+    let da_eff = div255(da * inv_sa);
+    let out_a = sa + da_eff;
+
+    if out_a == 0 {
+        return;
+    }
+
+    // Convert destination to linear space.
+    let dst_r_lin = SRGB_TO_LINEAR[dst_r as usize] as u32;
+    let dst_g_lin = SRGB_TO_LINEAR[dst_g as usize] as u32;
+    let dst_b_lin = SRGB_TO_LINEAR[dst_b as usize] as u32;
+
+    let r_lin = (src_r_lin * sa + dst_r_lin * da_eff) / out_a;
+    let g_lin = (src_g_lin * sa + dst_g_lin * da_eff) / out_a;
+    let b_lin = (src_b_lin * sa + dst_b_lin * da_eff) / out_a;
+
+    let out_r = LINEAR_TO_SRGB[linear_to_idx(r_lin)];
+    let out_g = LINEAR_TO_SRGB[linear_to_idx(g_lin)];
+    let out_b = LINEAR_TO_SRGB[linear_to_idx(b_lin)];
+    let out_a_u8 = if out_a > 255 { 255u8 } else { out_a as u8 };
+
+    // Write BGRA pixel.
+    core::ptr::write(p, out_b);
+    core::ptr::write(p.add(1), out_g);
+    core::ptr::write(p.add(2), out_r);
+    core::ptr::write(p.add(3), out_a_u8);
+}
+
+/// Scalar blit-blend for a single pixel (unsafe helper).
+///
+/// # Safety
+///
+/// `sp` must point to 4 readable bytes (source BGRA pixel).
+/// `dp` must point to 4 readable and writable bytes (destination BGRA pixel).
+#[inline(always)]
+unsafe fn blit_blend_scalar_1px(sp: *const u8, dp: *mut u8, format: PixelFormat) {
+    let src_a = core::ptr::read(sp.add(3));
+
+    if src_a == 0 {
+        return;
+    }
+
+    if src_a == 255 {
+        // Opaque: direct copy (4 bytes).
+        core::ptr::copy_nonoverlapping(sp, dp, 4);
+        return;
+    }
+
+    // Semi-transparent: read both pixels and blend.
+    let src_color = Color {
+        b: core::ptr::read(sp),
+        g: core::ptr::read(sp.add(1)),
+        r: core::ptr::read(sp.add(2)),
+        a: src_a,
+    };
+    let dst_color = Color {
+        b: core::ptr::read(dp),
+        g: core::ptr::read(dp.add(1)),
+        r: core::ptr::read(dp.add(2)),
+        a: core::ptr::read(dp.add(3)),
+    };
+    let blended = src_color.blend_over(dst_color);
+    let encoded = blended.encode(format);
+
+    core::ptr::write(dp, encoded[0]);
+    core::ptr::write(dp.add(1), encoded[1]);
+    core::ptr::write(dp.add(2), encoded[2]);
+    core::ptr::write(dp.add(3), encoded[3]);
+}
+
+/// Scalar blit-blend for 4 pixels where all are either fully opaque or
+/// fully transparent (no semi-transparent pixels).
+///
+/// # Safety
+///
+/// `sp` must point to 16 readable bytes (4 source BGRA pixels).
+/// `dp` must point to 16 readable and writable bytes (4 destination BGRA pixels).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn blit_blend_scalar_4px(sp: *const u8, dp: *mut u8, bpp: u32) {
+    for i in 0..4u32 {
+        let offset = (i * bpp) as usize;
+        let src_a = core::ptr::read(sp.add(offset + 3));
+
+        if src_a == 0 {
+            continue;
+        }
+
+        // Must be 255 since has_semi was false.
+        core::ptr::copy_nonoverlapping(sp.add(offset), dp.add(offset), 4);
+    }
+}
+
 fn abs(x: i32) -> i32 {
     if x < 0 {
         -x
