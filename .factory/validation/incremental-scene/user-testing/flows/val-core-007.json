@@ -1,0 +1,53 @@
+{
+  "groupId": "val-core-007",
+  "testedAt": "2026-03-15T00:00:00Z",
+  "isolation": {
+    "surface": "CLI (Execute tool) - grep, file inspection, test execution",
+    "workingDirectory": "/Users/user/Sites/os",
+    "systemDirectory": "/Users/user/Sites/os/system"
+  },
+  "toolsUsed": ["Execute", "Grep", "Read"],
+  "assertions": [
+    {
+      "id": "VAL-CORE-007",
+      "title": "Scroll change updates only visible line runs",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Grep for test function and VAL-CORE-007 label in system/test/tests/scene.rs",
+          "expected": "Test 'incremental_scroll_updates_only_doc_and_cursor' exists with VAL-CORE-007 label",
+          "observed": "Found at line 3527-3529: '// VAL-CORE-007: Scroll change updates only doc text runs and cursor' followed by #[test] fn incremental_scroll_updates_only_doc_and_cursor()"
+        },
+        {
+          "action": "Run: cd system/test && cargo test incremental_scroll_updates_only_doc_and_cursor -- --test-threads=1",
+          "expected": "Test passes (exit code 0)",
+          "observed": "test incremental_scroll_updates_only_doc_and_cursor ... ok. 1 passed; 0 failed. Exit code 0."
+        },
+        {
+          "action": "Read full test body (lines 3527-3675) to verify assertion coverage",
+          "expected": "Test builds multi-line text scene, performs scroll-only incremental update, verifies change list = [N_DOC_TEXT, N_CURSOR], verifies chrome byte-identical",
+          "observed": "Test creates 50 lines of text, builds full scene, then does incremental update with scroll_lines=5 (same text, different scroll_y). Asserts: change list has exactly 2 entries (N_DOC_TEXT, N_CURSOR), all 6 chrome nodes (root, title bar, title text, clock, shadow, content) are byte-identical, N_DOC_TEXT bytes differ (new text runs), cursor y=-100 (scroll-adjusted)."
+        },
+        {
+          "action": "Grep for scroll_runs usage in system/services/core/scene_state.rs",
+          "expected": "update_document_content uses scroll_runs to filter visible lines",
+          "observed": "Line 589: 'let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, viewport_height_px);' — confirms only visible text runs are re-laid out. scroll_runs function defined at line 843 filters and repositions runs for scrolled viewport."
+        }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "N/A (CLI testing surface)",
+        "commandOutputs": [
+          "incremental-scene/val-core-007/test-exists.txt",
+          "incremental-scene/val-core-007/test-passes.txt",
+          "incremental-scene/val-core-007/test-coverage.txt",
+          "incremental-scene/val-core-007/implementation-support.txt"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 1 assertion: 1 passed. VAL-CORE-007 has a dedicated test (incremental_scroll_updates_only_doc_and_cursor) that builds a 50-line text scene, performs a scroll-only incremental update, and verifies the change list contains exactly N_DOC_TEXT and N_CURSOR while all 6 chrome nodes remain byte-identical. Test passes. Implementation in scene_state.rs confirms scroll_runs filters to visible lines only."
+}

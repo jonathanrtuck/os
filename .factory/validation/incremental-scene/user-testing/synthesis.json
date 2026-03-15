@@ -1,11 +1,11 @@
 {
   "milestone": "incremental-scene",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "assertionsSummary": {
     "total": 20,
-    "passed": 19,
-    "failed": 1,
+    "passed": 20,
+    "failed": 0,
     "blocked": 0
   },
   "passedAssertions": [
@@ -25,17 +25,13 @@
     "VAL-CORE-004",
     "VAL-CORE-005",
     "VAL-CORE-006",
+    "VAL-CORE-007",
     "VAL-CORE-008",
     "VAL-CORE-009",
     "VAL-CORE-010"
   ],
-  "failedAssertions": [
-    {
-      "id": "VAL-CORE-007",
-      "reason": "No dedicated scroll-only incremental update test. The test labeled VAL-CORE-007 (data_buffer_exhaustion_triggers_full_rebuild) tests data buffer exhaustion fallback, not the scroll-only update path. The update_document_content method does handle scroll correctly (calls scroll_runs to filter visible lines), but there is no test specifically demonstrating this with unchanged text and changed scroll offset, verifying only doc text runs and cursor change while chrome nodes remain unchanged."
-    }
-  ],
+  "failedAssertions": [],
   "blockedAssertions": [],
   "appliedUpdates": [],
-  "previousRound": null
+  "previousRound": ".factory/validation/incremental-scene/user-testing/synthesis-round1.json"
 }
