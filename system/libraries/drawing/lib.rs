@@ -98,7 +98,9 @@ impl Color {
         let da = dst.a as u32;
         let inv_sa = 255 - sa;
         // out_a = src_a + dst_a * (1 - src_a / 255)
-        let out_a = sa + da * inv_sa / 255;
+        // div255 is exact for da * inv_sa ∈ 0..=65025.
+        let da_eff = div255(da * inv_sa);
+        let out_a = sa + da_eff;
 
         if out_a == 0 {
             return Color::TRANSPARENT;
@@ -111,11 +113,11 @@ impl Color {
         let dst_r_lin = SRGB_TO_LINEAR[dst.r as usize] as u32;
         let dst_g_lin = SRGB_TO_LINEAR[dst.g as usize] as u32;
         let dst_b_lin = SRGB_TO_LINEAR[dst.b as usize] as u32;
-        // out_c = (src_c * src_a + dst_c * dst_a * (1 - src_a / 255)) / out_a
-        // Computed in linear space.
-        let r_lin = (src_r_lin * sa + dst_r_lin * da * inv_sa / 255) / out_a;
-        let g_lin = (src_g_lin * sa + dst_g_lin * da * inv_sa / 255) / out_a;
-        let b_lin = (src_b_lin * sa + dst_b_lin * da * inv_sa / 255) / out_a;
+        // out_c = (src_c * src_a + dst_c * dst_a_eff) / out_a
+        // da_eff = div255(dst_a * inv_src_a) is precomputed above.
+        let r_lin = (src_r_lin * sa + dst_r_lin * da_eff) / out_a;
+        let g_lin = (src_g_lin * sa + dst_g_lin * da_eff) / out_a;
+        let b_lin = (src_b_lin * sa + dst_b_lin * da_eff) / out_a;
 
         // Convert back to sRGB (table is indexed by linear >> 4).
         Color {
@@ -241,20 +243,97 @@ impl<'a> Surface<'a> {
 
         let copy_w = min(src_width, self.width - dst_x);
         let copy_h = min(src_height, self.height - dst_y);
-        let bpp = self.format.bytes_per_pixel() as usize;
+
+        if copy_w == 0 || copy_h == 0 {
+            return;
+        }
+
+        let bpp = self.format.bytes_per_pixel();
+        let dst_stride = self.stride;
+        let row_bytes = (copy_w * bpp) as usize;
+        let dst_ptr = self.data.as_mut_ptr();
 
         for row in 0..copy_h {
+            let src_row_off = (row * src_stride) as usize;
+            let dst_row_off = ((dst_y + row) * dst_stride + dst_x * bpp) as usize;
+
+            // Bounds check for source row.
+            if src_row_off + row_bytes > src_data.len() {
+                continue;
+            }
+
+            // Fast-path: check if all source pixels in this row are opaque.
+            let mut all_opaque = true;
             for col in 0..copy_w {
-                let src_off = (row * src_stride + col * self.format.bytes_per_pixel()) as usize;
+                if src_data[src_row_off + (col * bpp + 3) as usize] != 255 {
+                    all_opaque = false;
+                    break;
+                }
+            }
 
-                if src_off + bpp <= src_data.len() {
-                    let src_color = Color::decode(&src_data[src_off..src_off + bpp], self.format);
+            if all_opaque {
+                // SAFETY: copy_w/copy_h clipped to min(src, dst) dimensions.
+                // src_row_off + row_bytes <= src_data.len() (checked above).
+                // dst_row_off + row_bytes = (dst_y + row) * stride + (dst_x + copy_w) * 4
+                //   <= height * stride <= data.len() because dst_y + row < height
+                //   and dst_x + copy_w <= width.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        src_data.as_ptr().add(src_row_off),
+                        dst_ptr.add(dst_row_off),
+                        row_bytes,
+                    );
+                }
+                continue;
+            }
 
-                    if src_color.a == 255 {
-                        self.set_pixel(dst_x + col, dst_y + row, src_color);
-                    } else if src_color.a > 0 {
-                        self.blend_pixel(dst_x + col, dst_y + row, src_color);
+            // SAFETY: copy_w/copy_h clipped to min(src, dst) dimensions.
+            // All pixel offsets within src_row_off..src_row_off + row_bytes
+            // (src bounds checked above) and dst_row_off..dst_row_off + row_bytes
+            // (dst bounds guaranteed by clipping: dst_y + row < height,
+            // dst_x + col < width, stride * height <= data.len()).
+            unsafe {
+                let src_row_ptr = src_data.as_ptr().add(src_row_off);
+                let dst_row_ptr = dst_ptr.add(dst_row_off);
+
+                for col in 0..copy_w {
+                    let offset = (col * bpp) as usize;
+                    let sp = src_row_ptr.add(offset);
+                    let dp = dst_row_ptr.add(offset);
+
+                    // Read source BGRA pixel.
+                    let src_a = core::ptr::read(sp.add(3));
+
+                    if src_a == 0 {
+                        continue;
                     }
+
+                    if src_a == 255 {
+                        // Opaque: direct copy (4 bytes).
+                        core::ptr::copy_nonoverlapping(sp, dp, 4);
+                        continue;
+                    }
+
+                    // Semi-transparent: read both pixels and blend.
+                    let src_color = Color {
+                        b: core::ptr::read(sp),
+                        g: core::ptr::read(sp.add(1)),
+                        r: core::ptr::read(sp.add(2)),
+                        a: src_a,
+                    };
+                    let dst_color = Color {
+                        b: core::ptr::read(dp),
+                        g: core::ptr::read(dp.add(1)),
+                        r: core::ptr::read(dp.add(2)),
+                        a: core::ptr::read(dp.add(3)),
+                    };
+                    let blended = src_color.blend_over(dst_color);
+                    let encoded = blended.encode(self.format);
+
+                    core::ptr::write(dp, encoded[0]);
+                    core::ptr::write(dp.add(1), encoded[1]);
+                    core::ptr::write(dp.add(2), encoded[2]);
+                    core::ptr::write(dp.add(3), encoded[3]);
                 }
             }
         }
@@ -285,19 +364,56 @@ impl<'a> Surface<'a> {
         cov_height: u32,
         color: Color,
     ) {
-        // Pre-convert source color to linear space.
+        if cov_width == 0 || cov_height == 0 || color.a == 0 {
+            return;
+        }
+
+        // Upfront coverage buffer size check.
+        let cov_total = (cov_width as usize) * (cov_height as usize) * 3;
+        if coverage.len() < cov_total {
+            return;
+        }
+
+        // Pre-convert source color to linear space (loop-invariant).
         let src_r_lin = SRGB_TO_LINEAR[color.r as usize] as u32;
         let src_g_lin = SRGB_TO_LINEAR[color.g as usize] as u32;
         let src_b_lin = SRGB_TO_LINEAR[color.b as usize] as u32;
+        let color_a = color.a as u32;
+        let encoded = color.encode(self.format);
+        let encoded_u32 = u32::from_ne_bytes(encoded);
 
-        for row in 0..cov_height {
-            for col in 0..cov_width {
+        // Pre-clip: compute visible range of the coverage buffer against
+        // surface bounds, handling negative x/y offsets. Uses i64 to avoid
+        // overflow when surface dimensions are added to large negative coords.
+        let xi = x as i64;
+        let yi = y as i64;
+        let surf_w = self.width as i64;
+        let surf_h = self.height as i64;
+        let cov_w = cov_width as i64;
+        let cov_h = cov_height as i64;
+
+        let start_row = if yi < 0 { -yi } else { 0 };
+        let end_row = if cov_h < surf_h - yi { cov_h } else { surf_h - yi };
+        let start_col = if xi < 0 { -xi } else { 0 };
+        let end_col = if cov_w < surf_w - xi { cov_w } else { surf_w - xi };
+
+        if start_row >= end_row || start_col >= end_col || end_row <= 0 || end_col <= 0 {
+            return;
+        }
+
+        let start_row = start_row as u32;
+        let end_row = end_row as u32;
+        let start_col = start_col as u32;
+        let end_col = end_col as u32;
+        let stride = self.stride;
+        let ptr = self.data.as_mut_ptr();
+
+        for row in start_row..end_row {
+            let py = (y + row as i32) as u32;
+            let row_base = (py * stride) as usize;
+
+            for col in start_col..end_col {
                 let base = ((row * cov_width + col) * 3) as usize;
-
-                if base + 2 >= coverage.len() {
-                    return;
-                }
-
                 let cov_r = coverage[base];
                 let cov_g = coverage[base + 1];
                 let cov_b = coverage[base + 2];
@@ -307,43 +423,56 @@ impl<'a> Surface<'a> {
                     continue;
                 }
 
-                let px = x + col as i32;
-                let py = y + row as i32;
+                let px = (x + col as i32) as u32;
+                let pixel_off = row_base + (px * 4) as usize;
 
-                if px < 0 || py < 0 {
-                    continue;
-                }
-
-                let ux = px as u32;
-                let uy = py as u32;
                 // Per-channel effective alpha: color.a * channel_coverage / 255.
-                let alpha_r = (color.a as u32 * cov_r as u32 + 127) / 255;
-                let alpha_g = (color.a as u32 * cov_g as u32 + 127) / 255;
-                let alpha_b = (color.a as u32 * cov_b as u32 + 127) / 255;
+                let alpha_r = div255(color_a * cov_r as u32 + 127);
+                let alpha_g = div255(color_a * cov_g as u32 + 127);
+                let alpha_b = div255(color_a * cov_b as u32 + 127);
 
                 // Fast path: all channels full coverage + opaque color.
                 if alpha_r >= 255 && alpha_g >= 255 && alpha_b >= 255 {
-                    self.set_pixel(ux, uy, color);
+                    // SAFETY: coords are pre-clipped to [0..width, 0..height];
+                    // pixel_off = py * stride + px * 4 where py < height and
+                    // px < width, so pixel_off + 4 <= height * stride <= data.len().
+                    unsafe {
+                        core::ptr::write((ptr.add(pixel_off)) as *mut u32, encoded_u32);
+                    }
 
                     continue;
                 }
 
-                if let Some(dst) = self.get_pixel(ux, uy) {
+                // SAFETY: coords are pre-clipped to [0..width, 0..height];
+                // pixel_off = py * stride + px * 4 where py < height and
+                // px < width, so pixel_off + 4 <= height * stride <= data.len().
+                unsafe {
+                    let p = ptr.add(pixel_off);
+
+                    // Read BGRA destination pixel.
+                    let dst_b = core::ptr::read(p);
+                    let dst_g_byte = core::ptr::read(p.add(1));
+                    let dst_r_byte = core::ptr::read(p.add(2));
+                    let dst_a_byte = core::ptr::read(p.add(3));
+
                     // Convert destination to linear space.
-                    let dst_r_lin = SRGB_TO_LINEAR[dst.r as usize] as u32;
-                    let dst_g_lin = SRGB_TO_LINEAR[dst.g as usize] as u32;
-                    let dst_b_lin = SRGB_TO_LINEAR[dst.b as usize] as u32;
+                    let dst_r_lin = SRGB_TO_LINEAR[dst_r_byte as usize] as u32;
+                    let dst_g_lin = SRGB_TO_LINEAR[dst_g_byte as usize] as u32;
+                    let dst_b_lin = SRGB_TO_LINEAR[dst_b as usize] as u32;
+
                     // Blend each channel independently in linear space.
                     let inv_r = 255 - alpha_r;
                     let inv_g = 255 - alpha_g;
                     let inv_b = 255 - alpha_b;
-                    let out_r_lin = (dst_r_lin * inv_r + src_r_lin * alpha_r + 127) / 255;
-                    let out_g_lin = (dst_g_lin * inv_g + src_g_lin * alpha_g + 127) / 255;
-                    let out_b_lin = (dst_b_lin * inv_b + src_b_lin * alpha_b + 127) / 255;
+                    let out_r_lin = div255(dst_r_lin * inv_r + src_r_lin * alpha_r + 127);
+                    let out_g_lin = div255(dst_g_lin * inv_g + src_g_lin * alpha_g + 127);
+                    let out_b_lin = div255(dst_b_lin * inv_b + src_b_lin * alpha_b + 127);
+
                     // Convert back to sRGB.
                     let out_r = LINEAR_TO_SRGB[linear_to_idx(out_r_lin)];
                     let out_g = LINEAR_TO_SRGB[linear_to_idx(out_g_lin)];
                     let out_b = LINEAR_TO_SRGB[linear_to_idx(out_b_lin)];
+
                     // Alpha: use max channel alpha for the output alpha.
                     let max_alpha = if alpha_r > alpha_g { alpha_r } else { alpha_g };
                     let max_alpha = if alpha_b > max_alpha {
@@ -351,18 +480,15 @@ impl<'a> Surface<'a> {
                     } else {
                         max_alpha
                     };
-                    let out_a = dst.a as u32 + max_alpha * (255 - dst.a as u32) / 255;
+                    let out_a = dst_a_byte as u32
+                        + div255(max_alpha * (255 - dst_a_byte as u32));
+                    let out_a = if out_a > 255 { 255u8 } else { out_a as u8 };
 
-                    self.set_pixel(
-                        ux,
-                        uy,
-                        Color {
-                            r: out_r,
-                            g: out_g,
-                            b: out_b,
-                            a: if out_a > 255 { 255 } else { out_a as u8 },
-                        },
-                    );
+                    // Write BGRA pixel.
+                    core::ptr::write(p, out_b);
+                    core::ptr::write(p.add(1), out_g);
+                    core::ptr::write(p.add(2), out_r);
+                    core::ptr::write(p.add(3), out_a);
                 }
             }
         }
@@ -537,10 +663,67 @@ impl<'a> Surface<'a> {
 
         let x2 = min(x.saturating_add(w), self.width);
         let y2 = min(y.saturating_add(h), self.height);
+        let pixel_count = (x2 - x) as usize;
+
+        if pixel_count == 0 {
+            return;
+        }
+
+        // Hoist src color linear conversion outside all loops.
+        let sa = color.a as u32;
+        let inv_sa = 255 - sa;
+        let src_r_lin = SRGB_TO_LINEAR[color.r as usize] as u32;
+        let src_g_lin = SRGB_TO_LINEAR[color.g as usize] as u32;
+        let src_b_lin = SRGB_TO_LINEAR[color.b as usize] as u32;
+        let bpp = self.format.bytes_per_pixel();
+        let stride = self.stride;
+        let ptr = self.data.as_mut_ptr();
 
         for row in y..y2 {
-            for col in x..x2 {
-                self.blend_pixel(col, row, color);
+            let row_offset = (row * stride + x * bpp) as usize;
+
+            // SAFETY: x/y clipped to surface bounds; x..x2 within width,
+            // row within y..y2 < height. stride * height <= data.len().
+            unsafe {
+                let row_ptr = ptr.add(row_offset);
+
+                for i in 0..pixel_count {
+                    let p = row_ptr.add(i * 4);
+
+                    // Read destination BGRA pixel.
+                    let dst_b = core::ptr::read(p);
+                    let dst_g = core::ptr::read(p.add(1));
+                    let dst_r = core::ptr::read(p.add(2));
+                    let dst_a = core::ptr::read(p.add(3));
+
+                    let da = dst_a as u32;
+                    let da_eff = div255(da * inv_sa);
+                    let out_a = sa + da_eff;
+
+                    if out_a == 0 {
+                        continue;
+                    }
+
+                    // Convert destination to linear space.
+                    let dst_r_lin = SRGB_TO_LINEAR[dst_r as usize] as u32;
+                    let dst_g_lin = SRGB_TO_LINEAR[dst_g as usize] as u32;
+                    let dst_b_lin = SRGB_TO_LINEAR[dst_b as usize] as u32;
+
+                    let r_lin = (src_r_lin * sa + dst_r_lin * da_eff) / out_a;
+                    let g_lin = (src_g_lin * sa + dst_g_lin * da_eff) / out_a;
+                    let b_lin = (src_b_lin * sa + dst_b_lin * da_eff) / out_a;
+
+                    let out_r = LINEAR_TO_SRGB[linear_to_idx(r_lin)];
+                    let out_g = LINEAR_TO_SRGB[linear_to_idx(g_lin)];
+                    let out_b = LINEAR_TO_SRGB[linear_to_idx(b_lin)];
+                    let out_a_u8 = if out_a > 255 { 255u8 } else { out_a as u8 };
+
+                    // Write BGRA pixel.
+                    core::ptr::write(p, out_b);
+                    core::ptr::write(p.add(1), out_g);
+                    core::ptr::write(p.add(2), out_r);
+                    core::ptr::write(p.add(3), out_a_u8);
+                }
             }
         }
     }
@@ -629,7 +812,7 @@ fn clamp_u8(v: i32) -> u8 {
 }
 /// Convert a linear light value (0–65535 u32) to a LINEAR_TO_SRGB table index.
 /// The table has 4096 entries; index is `value >> 4`, clamped to 4095.
-fn linear_to_idx(v: u32) -> usize {
+pub fn linear_to_idx(v: u32) -> usize {
     let idx = v >> 4;
 
     if idx > 4095 {
@@ -638,6 +821,16 @@ fn linear_to_idx(v: u32) -> usize {
         idx as usize
     }
 }
+/// Fast integer divide-by-255: exact for 0..=65025, ±1 for larger values.
+///
+/// Replaces the expensive `x / 255` in alpha-blending hot paths. The identity
+/// `(x + 1 + (x >> 8)) >> 8 == x / 255` holds for all u32 values in the
+/// 0..=65025 range used by alpha blending (255 × 255 = 65025).
+#[inline(always)]
+pub fn div255(x: u32) -> u32 {
+    (x + 1 + (x >> 8)) >> 8
+}
+
 fn min(a: u32, b: u32) -> u32 {
     if a < b {
         a

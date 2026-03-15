@@ -5409,3 +5409,618 @@ fn click_to_position_with_scroll_offset() {
     // Visual line 1 starts at byte 4 ('b').
     assert_eq!(result, 4);
 }
+
+// ---------------------------------------------------------------------------
+// div-by-255 elimination tests (VAL-DRAW-001)
+// ---------------------------------------------------------------------------
+
+use drawing::div255;
+
+/// Exhaustively verify div255 is exact for all values in the alpha-blending
+/// range 0..=65025 (255 × 255). This is the correctness invariant for
+/// replacing `x / 255` in blending hot paths.
+#[test]
+fn test_div255_exhaustive() {
+    for x in 0..=65025u32 {
+        let expected = x / 255;
+        let got = div255(x);
+        assert_eq!(
+            got, expected,
+            "div255({}) = {}, expected {}",
+            x, got, expected,
+        );
+    }
+}
+
+/// Verify div255 at boundary values.
+#[test]
+fn test_div255_boundaries() {
+    assert_eq!(div255(0), 0);
+    assert_eq!(div255(255), 1);
+    assert_eq!(div255(254), 0);
+    assert_eq!(div255(256), 1);
+    assert_eq!(div255(65025), 255); // 255 * 255
+    // With rounding bias (+127):
+    assert_eq!(div255(127), 0);
+    assert_eq!(div255(128), 0);
+    assert_eq!(div255(255), 1);
+    // Typical alpha computation: (255 * 128 + 127) = 32767
+    assert_eq!(div255(32767), 128);
+}
+
+// ---------------------------------------------------------------------------
+// blend_over div255 correctness (VAL-DRAW-006)
+// ---------------------------------------------------------------------------
+
+/// Verify blend_over with div255 produces correct results for representative
+/// alpha and channel combinations.
+#[test]
+fn test_blend_over_div255_alpha_combinations() {
+    let test_alphas: &[u8] = &[0, 1, 64, 127, 128, 200, 254, 255];
+    let test_channels: &[u8] = &[0, 1, 64, 128, 200, 254, 255];
+
+    for &sa in test_alphas {
+        for &sr in test_channels {
+            for &dr in test_channels {
+                let src = Color::rgba(sr, 0, 0, sa);
+                let dst = Color::rgba(dr, 0, 0, 255);
+                let result = src.blend_over(dst);
+
+                // Basic sanity: alpha should be 255 (opaque dst).
+                if sa == 0 {
+                    assert_eq!(result, dst, "transparent src should return dst");
+                } else if sa == 255 {
+                    assert_eq!(result, src, "opaque src should return src");
+                } else {
+                    assert_eq!(
+                        result.a, 255,
+                        "blending onto opaque dst gives opaque result"
+                    );
+                    // Result red should be between dst and src (in sRGB space,
+                    // not necessarily a linear interpolation).
+                    let lo = if sr < dr { sr } else { dr };
+                    let hi = if sr > dr { sr } else { dr };
+                    assert!(
+                        result.r >= lo.saturating_sub(2) && result.r <= hi.saturating_add(2),
+                        "sa={} sr={} dr={}: result.r={} not in [{}, {}]",
+                        sa,
+                        sr,
+                        dr,
+                        result.r,
+                        lo,
+                        hi,
+                    );
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pre-clipped draw_coverage tests (VAL-DRAW-002, VAL-DRAW-008)
+// ---------------------------------------------------------------------------
+
+/// draw_coverage with large negative y offset: y=-500, cov_height=520.
+/// Only the bottom 20 rows of the coverage buffer should be visible on a
+/// 100-pixel-tall surface.
+#[test]
+fn test_draw_coverage_large_negative_y() {
+    let w = 10u32;
+    let h = 100u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+    surf.clear(Color::BLACK);
+
+    let cov_w = 4u32;
+    let cov_h = 520u32;
+    let mut coverage = vec![0u8; (cov_w * cov_h * 3) as usize];
+
+    // Set full white coverage on all pixels of the coverage buffer.
+    for i in 0..coverage.len() {
+        coverage[i] = 255;
+    }
+
+    surf.draw_coverage(-1, -500, &coverage, cov_w, cov_h, Color::WHITE);
+
+    // Row 500 of coverage maps to surface y=0, col 1 maps to surface x=0.
+    // Visible coverage: rows 500..520 → surface y 0..19, cols 1..4 → surface x 0..2.
+    // (col range 1..4 exclusive: col=1→px=0, col=2→px=1, col=3→px=2)
+    let p = surf.get_pixel(0, 0).unwrap();
+    assert_eq!(p.r, 255, "visible pixel at (0,0) should be white");
+    let p = surf.get_pixel(2, 19).unwrap();
+    assert_eq!(p.r, 255, "visible pixel at (2,19) should be white");
+    // Surface y=20 should be untouched (black).
+    let p = surf.get_pixel(0, 20).unwrap();
+    assert_eq!(p.r, 0, "pixel at (0,20) should still be black");
+    // Surface x=2 is the last visible column (col 3 maps to x=2 since x=-1+3=2).
+    let p = surf.get_pixel(2, 0).unwrap();
+    assert_eq!(p.r, 255, "visible pixel at (2,0) should be white");
+    // Surface x=3 and beyond should be untouched.
+    let p = surf.get_pixel(3, 0).unwrap();
+    assert_eq!(p.r, 0, "pixel at (3,0) should still be black");
+}
+
+/// draw_coverage with large negative x offset: x=-500, cov_width=520.
+/// Only the rightmost 20 columns of the coverage buffer should be visible.
+#[test]
+fn test_draw_coverage_large_negative_x() {
+    let w = 100u32;
+    let h = 10u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut surf = make_surface(&mut buf, w, h);
+    surf.clear(Color::BLACK);
+
+    let cov_w = 520u32;
+    let cov_h = 4u32;
+    let mut coverage = vec![0u8; (cov_w * cov_h * 3) as usize];
+
+    for i in 0..coverage.len() {
+        coverage[i] = 255;
+    }
+
+    surf.draw_coverage(-500, -1, &coverage, cov_w, cov_h, Color::WHITE);
+
+    // Col 500 maps to surface x=0, row 1 maps to surface y=0.
+    let p = surf.get_pixel(0, 0).unwrap();
+    assert_eq!(p.r, 255, "visible pixel at (0,0) should be white");
+    let p = surf.get_pixel(19, 2).unwrap();
+    assert_eq!(p.r, 255, "visible pixel at (19,2) should be white");
+    // x=20 is beyond visible range.
+    let p = surf.get_pixel(20, 0).unwrap();
+    assert_eq!(p.r, 0, "pixel at (20,0) should still be black");
+}
+
+/// draw_coverage entirely off-screen should not modify any pixels.
+#[test]
+fn test_draw_coverage_fully_outside() {
+    let coverage = [255u8; 2 * 2 * 3]; // 2x2, full coverage
+
+    // Entirely to the left.
+    {
+        let mut buf = [0u8; 8 * 8 * 4];
+        let mut surf = make_surface(&mut buf, 8, 8);
+        surf.draw_coverage(-10, 0, &coverage, 2, 2, Color::WHITE);
+        drop(surf);
+        assert!(buf.iter().all(|&b| b == 0), "left: buffer should be zeroed");
+    }
+
+    // Entirely above.
+    {
+        let mut buf = [0u8; 8 * 8 * 4];
+        let mut surf = make_surface(&mut buf, 8, 8);
+        surf.draw_coverage(0, -10, &coverage, 2, 2, Color::WHITE);
+        drop(surf);
+        assert!(buf.iter().all(|&b| b == 0), "above: buffer should be zeroed");
+    }
+
+    // Entirely below.
+    {
+        let mut buf = [0u8; 8 * 8 * 4];
+        let mut surf = make_surface(&mut buf, 8, 8);
+        surf.draw_coverage(0, 10, &coverage, 2, 2, Color::WHITE);
+        drop(surf);
+        assert!(buf.iter().all(|&b| b == 0), "below: buffer should be zeroed");
+    }
+
+    // Entirely to the right.
+    {
+        let mut buf = [0u8; 8 * 8 * 4];
+        let mut surf = make_surface(&mut buf, 8, 8);
+        surf.draw_coverage(10, 0, &coverage, 2, 2, Color::WHITE);
+        drop(surf);
+        assert!(buf.iter().all(|&b| b == 0), "right: buffer should be zeroed");
+    }
+}
+
+/// draw_coverage with a single pixel at various positions.
+#[test]
+fn test_draw_coverage_single_pixel() {
+    // 1x1 coverage, full white.
+    let coverage = [255u8, 255, 255];
+
+    // At origin.
+    let mut buf = [0u8; 4 * 4 * 4];
+    let mut surf = make_surface(&mut buf, 4, 4);
+    surf.draw_coverage(0, 0, &coverage, 1, 1, Color::WHITE);
+    assert_eq!(surf.get_pixel(0, 0), Some(Color::WHITE));
+
+    // At last pixel.
+    let mut buf = [0u8; 4 * 4 * 4];
+    let mut surf = make_surface(&mut buf, 4, 4);
+    surf.draw_coverage(3, 3, &coverage, 1, 1, Color::WHITE);
+    assert_eq!(surf.get_pixel(3, 3), Some(Color::WHITE));
+
+    // Just outside right edge — should be a no-op.
+    let mut buf = [0u8; 4 * 4 * 4];
+    let mut surf = make_surface(&mut buf, 4, 4);
+    surf.draw_coverage(4, 0, &coverage, 1, 1, Color::WHITE);
+    assert!(buf.iter().all(|&b| b == 0));
+}
+
+/// draw_coverage with zero-size coverage buffer.
+#[test]
+fn test_draw_coverage_zero_size() {
+    {
+        let mut buf = [0u8; 4 * 4 * 4];
+        let mut surf = make_surface(&mut buf, 4, 4);
+        surf.draw_coverage(0, 0, &[], 0, 0, Color::WHITE);
+        drop(surf);
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+    {
+        let mut buf = [0u8; 4 * 4 * 4];
+        let mut surf = make_surface(&mut buf, 4, 4);
+        surf.draw_coverage(0, 0, &[], 10, 0, Color::WHITE);
+        drop(surf);
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+    {
+        let mut buf = [0u8; 4 * 4 * 4];
+        let mut surf = make_surface(&mut buf, 4, 4);
+        surf.draw_coverage(0, 0, &[], 0, 10, Color::WHITE);
+        drop(surf);
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unsafe draw_coverage comparison (VAL-DRAW-003)
+// ---------------------------------------------------------------------------
+
+/// Reference (safe) implementation of draw_coverage for comparison.
+/// Uses the same div255 + pre-clip algorithm but safe pixel access.
+fn draw_coverage_reference(
+    surf: &mut Surface,
+    x: i32,
+    y: i32,
+    coverage: &[u8],
+    cov_width: u32,
+    cov_height: u32,
+    color: Color,
+) {
+    if cov_width == 0 || cov_height == 0 || color.a == 0 {
+        return;
+    }
+    let cov_total = (cov_width as usize) * (cov_height as usize) * 3;
+    if coverage.len() < cov_total {
+        return;
+    }
+    let src_r_lin = drawing::SRGB_TO_LINEAR[color.r as usize] as u32;
+    let src_g_lin = drawing::SRGB_TO_LINEAR[color.g as usize] as u32;
+    let src_b_lin = drawing::SRGB_TO_LINEAR[color.b as usize] as u32;
+    let color_a = color.a as u32;
+
+    for row in 0..cov_height {
+        for col in 0..cov_width {
+            let base = ((row * cov_width + col) * 3) as usize;
+            let cov_r = coverage[base];
+            let cov_g = coverage[base + 1];
+            let cov_b = coverage[base + 2];
+            if cov_r == 0 && cov_g == 0 && cov_b == 0 {
+                continue;
+            }
+            let px = x + col as i32;
+            let py = y + row as i32;
+            if px < 0 || py < 0 {
+                continue;
+            }
+            let ux = px as u32;
+            let uy = py as u32;
+            let alpha_r = div255(color_a * cov_r as u32 + 127);
+            let alpha_g = div255(color_a * cov_g as u32 + 127);
+            let alpha_b = div255(color_a * cov_b as u32 + 127);
+            if alpha_r >= 255 && alpha_g >= 255 && alpha_b >= 255 {
+                surf.set_pixel(ux, uy, color);
+                continue;
+            }
+            if let Some(dst) = surf.get_pixel(ux, uy) {
+                let dst_r_lin = drawing::SRGB_TO_LINEAR[dst.r as usize] as u32;
+                let dst_g_lin = drawing::SRGB_TO_LINEAR[dst.g as usize] as u32;
+                let dst_b_lin = drawing::SRGB_TO_LINEAR[dst.b as usize] as u32;
+                let inv_r = 255 - alpha_r;
+                let inv_g = 255 - alpha_g;
+                let inv_b = 255 - alpha_b;
+                let out_r_lin = div255(dst_r_lin * inv_r + src_r_lin * alpha_r + 127);
+                let out_g_lin = div255(dst_g_lin * inv_g + src_g_lin * alpha_g + 127);
+                let out_b_lin = div255(dst_b_lin * inv_b + src_b_lin * alpha_b + 127);
+                let out_r = drawing::LINEAR_TO_SRGB[drawing::linear_to_idx(out_r_lin)];
+                let out_g = drawing::LINEAR_TO_SRGB[drawing::linear_to_idx(out_g_lin)];
+                let out_b = drawing::LINEAR_TO_SRGB[drawing::linear_to_idx(out_b_lin)];
+                let max_alpha = if alpha_r > alpha_g { alpha_r } else { alpha_g };
+                let max_alpha = if alpha_b > max_alpha {
+                    alpha_b
+                } else {
+                    max_alpha
+                };
+                let out_a = dst.a as u32 + div255(max_alpha * (255 - dst.a as u32));
+                surf.set_pixel(
+                    ux,
+                    uy,
+                    Color {
+                        r: out_r,
+                        g: out_g,
+                        b: out_b,
+                        a: if out_a > 255 { 255 } else { out_a as u8 },
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Compare optimized draw_coverage against safe reference for various inputs.
+#[test]
+fn test_draw_coverage_unsafe_vs_reference() {
+    let test_cases: &[(i32, i32, u32, u32)] = &[
+        (0, 0, 4, 4),     // normal
+        (-1, -1, 4, 4),   // partial negative
+        (-500, 0, 520, 4), // large negative x
+        (0, -500, 4, 520), // large negative y
+        (6, 6, 4, 4),     // partial clip right/bottom
+        (0, 0, 1, 1),     // single pixel
+        (0, 0, 8, 8),     // exact surface size
+        (7, 7, 2, 2),     // clip to 1x1
+    ];
+
+    for &(x, y, cw, ch) in test_cases {
+        let cov_len = (cw * ch * 3) as usize;
+        let mut coverage = vec![0u8; cov_len];
+        // Varying coverage values.
+        for i in 0..cov_len {
+            coverage[i] = ((i * 37 + 13) % 256) as u8;
+        }
+
+        // Reference surface.
+        let mut ref_buf = vec![0x80u8; 8 * 8 * 4]; // non-zero background
+        let mut ref_surf = make_surface(&mut ref_buf, 8, 8);
+        ref_surf.clear(Color::rgb(100, 50, 200));
+        draw_coverage_reference(&mut ref_surf, x, y, &coverage, cw, ch, Color::rgb(255, 128, 0));
+
+        // Optimized surface.
+        let mut opt_buf = vec![0x80u8; 8 * 8 * 4];
+        let mut opt_surf = make_surface(&mut opt_buf, 8, 8);
+        opt_surf.clear(Color::rgb(100, 50, 200));
+        opt_surf.draw_coverage(x, y, &coverage, cw, ch, Color::rgb(255, 128, 0));
+
+        assert_eq!(
+            ref_buf, opt_buf,
+            "draw_coverage mismatch at x={}, y={}, cw={}, ch={}",
+            x, y, cw, ch,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Unsafe blit_blend comparison (VAL-DRAW-004)
+// ---------------------------------------------------------------------------
+
+/// Reference (safe) implementation of blit_blend for comparison.
+fn blit_blend_reference(
+    surf: &mut Surface,
+    src_data: &[u8],
+    src_width: u32,
+    src_height: u32,
+    src_stride: u32,
+    dst_x: u32,
+    dst_y: u32,
+) {
+    if dst_x >= surf.width || dst_y >= surf.height {
+        return;
+    }
+    let copy_w = min_u32(src_width, surf.width - dst_x);
+    let copy_h = min_u32(src_height, surf.height - dst_y);
+    let bpp = surf.format.bytes_per_pixel() as usize;
+    for row in 0..copy_h {
+        for col in 0..copy_w {
+            let src_off = (row * src_stride + col * surf.format.bytes_per_pixel()) as usize;
+            if src_off + bpp <= src_data.len() {
+                let src_color = Color {
+                    r: src_data[src_off + 2],
+                    g: src_data[src_off + 1],
+                    b: src_data[src_off],
+                    a: src_data[src_off + 3],
+                };
+                if src_color.a == 255 {
+                    surf.set_pixel(dst_x + col, dst_y + row, src_color);
+                } else if src_color.a > 0 {
+                    surf.blend_pixel(dst_x + col, dst_y + row, src_color);
+                }
+            }
+        }
+    }
+}
+
+/// Compare optimized blit_blend against safe reference for various clip cases.
+#[test]
+fn test_blit_blend_unsafe_vs_reference() {
+    let bpp = PixelFormat::Bgra8888.bytes_per_pixel();
+
+    let test_cases: &[(u32, u32, u32, u32, u32, u32)] = &[
+        // (src_w, src_h, dst_x, dst_y, dst_w, dst_h)
+        (4, 4, 0, 0, 8, 8),   // fully inside
+        (4, 4, 6, 6, 8, 8),   // partial clip right/bottom
+        (4, 4, 0, 0, 2, 2),   // dst smaller than src
+        (1, 1, 0, 0, 8, 8),   // single pixel source
+        (8, 8, 0, 0, 8, 8),   // exact size
+        (4, 4, 7, 7, 8, 8),   // clip to 1x1
+    ];
+
+    for &(sw, sh, dx, dy, dw, dh) in test_cases {
+        let src_stride = sw * bpp;
+        let mut src_buf = vec![0u8; (src_stride * sh) as usize];
+        // Fill source with a mix of opaque, semi-transparent, and transparent.
+        for row in 0..sh {
+            for col in 0..sw {
+                let off = (row * src_stride + col * bpp) as usize;
+                let alpha = ((row * sw + col) * 60 % 256) as u8;
+                src_buf[off] = 100; // B
+                src_buf[off + 1] = 150; // G
+                src_buf[off + 2] = 200; // R
+                src_buf[off + 3] = alpha; // A
+            }
+        }
+
+        // Reference.
+        let mut ref_buf = vec![0u8; (dw * dh * 4) as usize];
+        let mut ref_surf = make_surface(&mut ref_buf, dw, dh);
+        ref_surf.clear(Color::rgb(50, 100, 150));
+        blit_blend_reference(&mut ref_surf, &src_buf, sw, sh, src_stride, dx, dy);
+
+        // Optimized.
+        let mut opt_buf = vec![0u8; (dw * dh * 4) as usize];
+        let mut opt_surf = make_surface(&mut opt_buf, dw, dh);
+        opt_surf.clear(Color::rgb(50, 100, 150));
+        opt_surf.blit_blend(&src_buf, sw, sh, src_stride, dx, dy);
+
+        assert_eq!(
+            ref_buf, opt_buf,
+            "blit_blend mismatch at sw={}, sh={}, dx={}, dy={}, dw={}, dh={}",
+            sw, sh, dx, dy, dw, dh,
+        );
+    }
+}
+
+/// blit_blend with all-opaque source uses copy_from_slice fast path.
+#[test]
+fn test_blit_blend_opaque_source() {
+    let bpp = PixelFormat::Bgra8888.bytes_per_pixel();
+    let sw = 4u32;
+    let sh = 4u32;
+    let src_stride = sw * bpp;
+    let mut src_buf = vec![0u8; (src_stride * sh) as usize];
+    // Fill entirely opaque.
+    for row in 0..sh {
+        for col in 0..sw {
+            let off = (row * src_stride + col * bpp) as usize;
+            src_buf[off] = 200; // B
+            src_buf[off + 1] = 100; // G
+            src_buf[off + 2] = 50; // R
+            src_buf[off + 3] = 255; // A (opaque)
+        }
+    }
+
+    let mut dst_buf = vec![0u8; (8 * 8 * 4) as usize];
+    let mut dst = make_surface(&mut dst_buf, 8, 8);
+    dst.clear(Color::rgb(0, 0, 255));
+    dst.blit_blend(&src_buf, sw, sh, src_stride, 2, 2);
+
+    // Opaque source should overwrite dst exactly.
+    let p = dst.get_pixel(3, 3).unwrap();
+    assert_eq!(p.r, 50);
+    assert_eq!(p.g, 100);
+    assert_eq!(p.b, 200);
+    assert_eq!(p.a, 255);
+    // Outside blit region should be original.
+    assert_eq!(dst.get_pixel(0, 0), Some(Color::rgb(0, 0, 255)));
+}
+
+// ---------------------------------------------------------------------------
+// Unsafe fill_rect_blend comparison (VAL-DRAW-005)
+// ---------------------------------------------------------------------------
+
+/// Reference (safe) implementation of fill_rect_blend for comparison.
+fn fill_rect_blend_reference(
+    surf: &mut Surface,
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+    color: Color,
+) {
+    if color.a == 255 {
+        surf.fill_rect(x, y, w, h, color);
+        return;
+    }
+    if color.a == 0 || w == 0 || h == 0 {
+        return;
+    }
+    if x >= surf.width || y >= surf.height {
+        return;
+    }
+    let x2 = min_u32(x.saturating_add(w), surf.width);
+    let y2 = min_u32(y.saturating_add(h), surf.height);
+    for row in y..y2 {
+        for col in x..x2 {
+            surf.blend_pixel(col, row, color);
+        }
+    }
+}
+
+/// Compare optimized fill_rect_blend against safe reference for various inputs.
+#[test]
+fn test_fill_rect_blend_unsafe_vs_reference() {
+    let test_colors = [
+        Color::rgba(255, 0, 0, 128),   // semi-transparent red
+        Color::rgba(0, 255, 0, 64),    // quarter green
+        Color::rgba(128, 128, 128, 1), // nearly transparent grey
+        Color::rgba(255, 255, 255, 200), // mostly opaque white
+    ];
+
+    let test_rects: &[(u32, u32, u32, u32)] = &[
+        (0, 0, 8, 8),   // full surface
+        (2, 2, 4, 4),   // interior rect
+        (6, 6, 4, 4),   // partial clip
+        (0, 0, 1, 1),   // single pixel
+        (0, 0, 0, 5),   // zero width
+        (0, 0, 5, 0),   // zero height
+        (10, 10, 2, 2), // entirely outside
+    ];
+
+    for color in test_colors {
+        for &(x, y, w, h) in test_rects {
+            // Reference.
+            let mut ref_buf = vec![0u8; (8 * 8 * 4) as usize];
+            let mut ref_surf = make_surface(&mut ref_buf, 8, 8);
+            ref_surf.clear(Color::rgb(30, 60, 90));
+            fill_rect_blend_reference(&mut ref_surf, x, y, w, h, color);
+
+            // Optimized.
+            let mut opt_buf = vec![0u8; (8 * 8 * 4) as usize];
+            let mut opt_surf = make_surface(&mut opt_buf, 8, 8);
+            opt_surf.clear(Color::rgb(30, 60, 90));
+            opt_surf.fill_rect_blend(x, y, w, h, color);
+
+            assert_eq!(
+                ref_buf, opt_buf,
+                "fill_rect_blend mismatch: color={:?}, rect=({},{},{},{})",
+                color, x, y, w, h,
+            );
+        }
+    }
+}
+
+/// fill_rect_blend with opaque color delegates to fill_rect (fast path).
+#[test]
+fn test_fill_rect_blend_opaque_delegates() {
+    let mut buf1 = vec![0u8; (8 * 8 * 4) as usize];
+    let mut surf1 = make_surface(&mut buf1, 8, 8);
+    surf1.fill_rect(2, 2, 4, 4, Color::rgb(200, 100, 50));
+
+    let mut buf2 = vec![0u8; (8 * 8 * 4) as usize];
+    let mut surf2 = make_surface(&mut buf2, 8, 8);
+    surf2.fill_rect_blend(2, 2, 4, 4, Color::rgb(200, 100, 50));
+
+    assert_eq!(buf1, buf2, "opaque fill_rect_blend should match fill_rect");
+}
+
+/// fill_rect_blend with transparent color is a no-op.
+#[test]
+fn test_fill_rect_blend_transparent_noop() {
+    let mut buf = vec![0u8; (8 * 8 * 4) as usize];
+    {
+        let mut surf = make_surface(&mut buf, 8, 8);
+        surf.clear(Color::rgb(100, 100, 100));
+    }
+    let before = buf.clone();
+    {
+        let mut surf = Surface {
+            data: &mut buf,
+            width: 8,
+            height: 8,
+            stride: 8 * 4,
+            format: PixelFormat::Bgra8888,
+        };
+        surf.fill_rect_blend(0, 0, 8, 8, Color::TRANSPARENT);
+    }
+    assert_eq!(buf, before, "transparent fill should be no-op");
+}
