@@ -1,0 +1,45 @@
+{
+  "featureId": "frame-budgeting-and-cadence",
+  "milestone": "frame-scheduler",
+  "reviewedAt": "2026-03-15T23:10:00.000Z",
+  "commitId": "c007995",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReviewIssues": [
+    {
+      "severity": "non_blocking",
+      "file": "system/services/compositor/frame_scheduler.rs",
+      "description": "Frame budgeting overrun detection (last_render_end_ns > now) may rarely trigger in practice. With one-shot timers recreated after each tick, the `now` timestamp passed to `on_timer_tick_at()` comes from `sys::counter()` at poll time (after the render loop resumes), so `now` will typically be >= `last_render_end_ns`. The one-shot timer pattern inherently limits catch-up behavior, making this defense-in-depth. The state machine logic is provably correct in the abstract model (tests verify it), but the real-world activation path is narrow. Not a bug — the protection is still valuable for edge cases."
+    },
+    {
+      "severity": "non_blocking",
+      "file": "system/services/compositor/main.rs",
+      "description": "Idle-to-active wakeup block is slightly verbose — both if/else branches call scheduler.on_scene_update(). Could be simplified to `scheduler.on_scene_update(); if scheduler.should_render_immediately(now_ns) { should_render = true; }`. Not a bug, just duplicated call."
+    },
+    {
+      "severity": "non_blocking",
+      "file": "system/services/compositor/main.rs",
+      "description": "The 'no damage rects' early-exit path (line ~720) calls scheduler.on_render_complete() (timestamp-free variant, sets last_render_end_ns=0) while the normal path calls on_render_complete_at(render_end_ns). This resets the frame budgeting baseline after a no-damage frame, which is defensible (no-damage frames are free) but inconsistent with the timestamp-aware pattern used elsewhere."
+    },
+    {
+      "severity": "suggestion",
+      "file": "system/test/tests/frame_scheduler.rs",
+      "description": "In clock_only_3_renders_in_3_seconds, the expression `tick == update_tick - update_tick` always evaluates to `tick == 0`. While correct, it's an opaque way to say 'fire at the start of each second'. A comment or simpler expression (e.g., `tick == 0`) would improve readability."
+    }
+  ],
+  "sharedStateObservations": [
+    {
+      "target": "skills",
+      "description": "Worker's skillFeedback.suggestedChanges recommends documenting the 60-byte CompositorConfig IPC payload size constraint in the os-worker skill, since adding fields may require narrowing existing fields (as was done here with scale_factor u32→u16). This is a real constraint that future workers will hit.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The skill could mention that CompositorConfig has a compile-time size assertion at 60 bytes, and that adding fields may require narrowing existing fields or packing to stay within the IPC payload limit.'"
+    },
+    {
+      "target": "AGENTS.md",
+      "description": "AGENTS.md says test count is ~1555 but the worker reports 1606 tests passing. The test count should be updated to stay accurate for future workers.",
+      "evidence": "AGENTS.md: 'cargo test -- --test-threads=1 in system/test/ must pass (all ~1555 tests)'. Handoff: '1606 tests pass across 29 test crates.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Clean implementation of frame budgeting, configurable cadence, and idle-to-active wakeup. The FrameScheduler is a well-designed pure state machine with timestamp-aware methods and backward-compatible wrappers. CompositorConfig gains a frame_rate:u16 field (scale_factor narrowed from u32 to u16 to maintain the 60-byte IPC payload constraint — safe since scale_factor is only 1 or 2). 13 new tests cover all 7 fulfills assertions. Three non-blocking observations: (1) frame budgeting overrun detection may rarely activate in practice due to one-shot timer pattern but provides valid defense-in-depth, (2) minor code duplication in idle-to-active wakeup branch, (3) no-damage path uses timestamp-free on_render_complete(). The .factory/library/architecture.md was correctly updated. PASS."
+}

@@ -1,0 +1,97 @@
+{
+  "milestone": "frame-scheduler",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1",
+      "exitCode": 0,
+      "summary": "1606 tests passed across all test crates, 0 failed"
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cd /Users/user/Sites/os/system && cargo build --release",
+      "exitCode": 0,
+      "summary": "Release build succeeded with warnings only (unused variables in fonts lib, unused imports in scene_render)"
+    },
+    "lint": {
+      "passed": true,
+      "command": "cd /Users/user/Sites/os/system && cargo build --release",
+      "exitCode": 0,
+      "summary": "No lint tool configured separately; Rust compiler warnings serve as lint. All warnings are pre-existing (unused paging constants, unused handle fields) — none introduced by frame-scheduler features."
+    }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "frame-scheduler-timer-and-loop",
+      "severity": "non_blocking",
+      "description": "frame_period_ns(0) returns 16_666_667 (hardcoded fallback) while frame_period_ns(60) returns 16_666_666 (integer division). 1ns inconsistency — functionally irrelevant but worth noting."
+    },
+    {
+      "featureId": "frame-scheduler-timer-and-loop",
+      "severity": "non_blocking",
+      "description": "Main loop performs 3 wait syscalls per iteration (1 blocking + 2 non-blocking polls). Correct but adds 2 extra syscalls per frame. Acceptable for prototype."
+    },
+    {
+      "featureId": "frame-scheduler-timer-and-loop",
+      "severity": "suggestion",
+      "description": "scheduler.on_render_complete() called at 3 dispersed locations. Consider extracting a render helper or using drop guard to ensure it's always called."
+    },
+    {
+      "featureId": "frame-budgeting-and-cadence",
+      "severity": "non_blocking",
+      "description": "Frame budgeting overrun detection may rarely activate in practice due to one-shot timer pattern. Defense-in-depth is still valuable."
+    },
+    {
+      "featureId": "frame-budgeting-and-cadence",
+      "severity": "non_blocking",
+      "description": "Idle-to-active wakeup branch has minor code duplication — both branches call scheduler.on_scene_update()."
+    },
+    {
+      "featureId": "frame-budgeting-and-cadence",
+      "severity": "non_blocking",
+      "description": "No-damage path uses timestamp-free on_render_complete() while normal path uses on_render_complete_at(). Inconsistent but defensible since no-damage frames are free."
+    },
+    {
+      "featureId": "frame-budgeting-and-cadence",
+      "severity": "suggestion",
+      "description": "In clock_only_3_renders_in_3_seconds test, expression `tick == update_tick - update_tick` always evaluates to `tick == 0`. Could use simpler expression with comment."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Update test count from ~1555 to ~1606. The test suite has grown by 51 tests through the pipeline-fixes and frame-scheduler milestones.",
+      "evidence": "Both feature reviewers flagged this independently. AGENTS.md says '~1555 tests' but actual count is 1606. Worker handoffs from both features confirm the higher count.",
+      "isSystemic": true
+    },
+    {
+      "target": "skills",
+      "suggestion": "Add to os-worker skill: 'CompositorConfig has a compile-time 60-byte size assertion matching the IPC payload limit. Adding fields may require narrowing existing fields or packing to stay within this constraint. (Example: scale_factor was narrowed from u32 to u16 to make room for frame_rate u16.)'",
+      "evidence": "frame-budgeting-and-cadence worker had to narrow scale_factor u32→u16 to fit frame_rate within the 60-byte IPC payload. This constraint is not documented in the skill and future workers will hit it.",
+      "isSystemic": true
+    },
+    {
+      "target": "skills",
+      "suggestion": "Add to os-worker skill: 'Stale QEMU instances from other workers may be running and consuming CPU, causing boot timeouts. Before launching visual tests, check for and kill stale QEMU instances by their unique disk image paths.'",
+      "evidence": "frame-scheduler-timer-and-loop worker reported QEMU boot timeouts caused by stale instances from parallel workers consuming CPU.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Library architecture.md already updated with frame scheduler documentation.",
+      "reason": "already-documented — Worker correctly updated .factory/library/architecture.md with frame scheduler pattern documentation in commit 3bfae60. No additional action needed."
+    }
+  ],
+  "previousRound": null
+}
