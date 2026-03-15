@@ -2,8 +2,15 @@
 //!
 //! Validates VAL-CTYPE-001 through VAL-CTYPE-005 and VAL-CROSS-003.
 
-use fonts::fallback::ContentType;
-use fonts::typography::{FontFamily, TypographyConfig};
+extern crate alloc;
+
+#[path = "../../services/core/fallback.rs"]
+mod fallback;
+#[path = "../../services/core/typography.rs"]
+mod typography;
+
+use fallback::ContentType;
+use typography::{FontFamily, TypographyConfig};
 use fonts::Feature;
 
 const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");

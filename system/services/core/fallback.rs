@@ -10,8 +10,8 @@
 
 use alloc::vec::Vec;
 
-use crate::rasterize::AxisValue;
-use crate::{shape, Feature, ShapedGlyph};
+use fonts::rasterize::AxisValue;
+use fonts::{shape, Feature, ShapedGlyph};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -234,7 +234,7 @@ impl<'a> FallbackChain<'a> {
 /// The `font_index` is the position in the fallback chain (0 = primary,
 /// 1 = first fallback, etc.). Axis values are hashed as before.
 pub fn font_identifier_hash(font_index: u8, axis_values: &[AxisValue]) -> u32 {
-    let axis_hash = crate::rasterize::axis_values_hash(axis_values);
+    let axis_hash = fonts::rasterize::axis_values_hash(axis_values);
 
     // Combine font_index with axis_hash using FNV-1a mixing.
     let mut h: u32 = 0x811c_9dc5;

@@ -28,6 +28,10 @@ extern crate alloc;
 extern crate scene;
 extern crate fonts;
 
+#[path = "fallback.rs"]
+mod fallback;
+#[path = "typography.rs"]
+mod typography;
 #[path = "scene_state.rs"]
 mod scene_state;
 

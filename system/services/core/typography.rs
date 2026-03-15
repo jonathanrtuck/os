@@ -15,8 +15,8 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::fallback::ContentType;
-use crate::rasterize::AxisValue;
+use super::fallback::ContentType;
+use fonts::rasterize::AxisValue;
 
 /// Font family preference for a content type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

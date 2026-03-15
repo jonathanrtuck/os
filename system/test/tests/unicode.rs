@@ -3,8 +3,14 @@
 //! Validates VAL-UNICODE-001 (Latin Extended), VAL-UNICODE-002 (scene graph
 //! round-trip), and VAL-UNICODE-003 (supplementary plane safety).
 
+extern crate alloc;
+
 use scene::*;
-use fonts::fallback::FallbackChain;
+
+#[path = "../../services/core/fallback.rs"]
+mod fallback;
+
+use fallback::FallbackChain;
 use fonts::rasterize::{self, RasterBuffer, RasterScratch};
 use fonts::shape;
 

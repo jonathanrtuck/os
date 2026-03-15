@@ -246,8 +246,6 @@ fn main() {
     );
     for fonts_src in &[
         "rasterize.rs",
-        "fallback.rs",
-        "typography.rs",
     ] {
         println!(
             "cargo:rerun-if-changed={}",

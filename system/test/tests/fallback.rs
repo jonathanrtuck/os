@@ -2,7 +2,12 @@
 //!
 //! Validates VAL-FALLBACK-001 through VAL-FALLBACK-004 and VAL-CACHE-004.
 
-use fonts::fallback::{ContentType, FallbackChain};
+extern crate alloc;
+
+#[path = "../../services/core/fallback.rs"]
+mod fallback;
+
+use fallback::{ContentType, FallbackChain};
 
 const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
 const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
@@ -275,8 +280,8 @@ fn fallback_cache_key_includes_font_identifier() {
 
     // Use font_id as part of the axis_hash parameter to distinguish fonts.
     // font_id 0 = primary font, font_id 1 = fallback font.
-    let font_a_hash = fonts::fallback::font_identifier_hash(0, &[]);
-    let font_b_hash = fonts::fallback::font_identifier_hash(1, &[]);
+    let font_a_hash = fallback::font_identifier_hash(0, &[]);
+    let font_b_hash = fallback::font_identifier_hash(1, &[]);
 
     cache.insert_with_axes(65, 18, font_a_hash, glyph_font_a);
     cache.insert_with_axes(65, 18, font_b_hash, glyph_font_b);
@@ -294,8 +299,8 @@ fn fallback_cache_key_includes_font_identifier() {
 #[test]
 fn fallback_font_identifier_hash_differs_for_different_fonts() {
     // Different font indices should produce different hashes.
-    let hash_0 = fonts::fallback::font_identifier_hash(0, &[]);
-    let hash_1 = fonts::fallback::font_identifier_hash(1, &[]);
+    let hash_0 = fallback::font_identifier_hash(0, &[]);
+    let hash_1 = fallback::font_identifier_hash(1, &[]);
 
     assert_ne!(
         hash_0, hash_1,
@@ -317,8 +322,8 @@ fn fallback_font_identifier_hash_includes_axis_values() {
         value: 700.0,
     }];
 
-    let hash_400 = fonts::fallback::font_identifier_hash(0, &axes_400);
-    let hash_700 = fonts::fallback::font_identifier_hash(0, &axes_700);
+    let hash_400 = fallback::font_identifier_hash(0, &axes_400);
+    let hash_700 = fallback::font_identifier_hash(0, &axes_700);
 
     assert_ne!(
         hash_400, hash_700,
