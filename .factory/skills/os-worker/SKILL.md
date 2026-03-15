@@ -88,13 +88,15 @@ cd /Users/user/Sites/os/system && bash test-qemu.sh
 
 Or launch QEMU manually, send keystrokes, capture framebuffer screenshots:
 ```
-# Launch QEMU
+# Launch QEMU (MUST include -fsdev/-device virtio-9p for font loading)
 qemu-system-aarch64 \
     -machine virt,gic-version=2 -cpu cortex-a53 -smp 4 -m 256M \
     -global virtio-mmio.force-legacy=false \
     -drive "file=test.img,if=none,format=raw,id=hd0" \
     -device virtio-blk-device,drive=hd0 \
     -device virtio-gpu-device -device virtio-keyboard-device \
+    -fsdev local,id=fsdev0,path=share,security_model=none \
+    -device virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare \
     -nographic \
     -serial file:/tmp/qemu-serial.log \
     -monitor unix:/tmp/qemu-mon.sock,server,nowait \
