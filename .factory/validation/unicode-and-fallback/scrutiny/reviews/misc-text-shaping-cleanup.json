@@ -1,0 +1,33 @@
+{
+  "featureId": "misc-text-shaping-cleanup",
+  "reviewedAt": "2026-03-15T03:25:00.000Z",
+  "commitId": "b0a9712",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, well-scoped tech debt cleanup across 5 files (89 insertions, 92 deletions). All four cleanup items were implemented correctly: (1) bytes_to_shaped_glyphs deduplicated into scene library as a pub function, both core and compositor now import it; (2) all unsafe blocks in scene/lib.rs have thorough SAFETY comments — verified via automated check, no missing annotations found; (3) drawing/lib.rs module doc accurately reflects alloc usage for LRU glyph cache; (4) dead types (GlyphMetrics, RasterBuffer, min_usize, scale_fu_floor) removed from truetype.rs — the canonical versions exist in shaping/src/rasterize.rs, and GlyphOutline/GlyphPoint/scale_fu/scale_fu_ceil correctly retained as they're still used. All #[allow(dead_code)] annotations removed from truetype.rs. No behavioral changes — pure refactoring with full test suite passing.",
+    "issues": [
+      {
+        "file": "system/libraries/scene/lib.rs",
+        "line": 839,
+        "severity": "non_blocking",
+        "description": "bytes_to_shaped_glyphs is documented as 'ASCII text bytes' but actually works for any byte value (maps byte → glyph_id). The function doesn't validate ASCII range. Consider updating the doc to say 'raw text bytes' to avoid implying ASCII-only semantics. Minor accuracy nit — no behavioral impact."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker correctly noted that the font-rendering-worker skill is oriented toward feature implementation with TDD and visual verification, making the TDD and QEMU steps inapplicable for pure cleanup/refactoring features. The skill has no guidance for cleanup features. skillFeedback suggests either a lightweight cleanup skill or a note in the existing skill.",
+      "evidence": "handoff.skillFeedback.suggestedChanges: 'For pure cleanup/refactoring features that don't change behavior, the TDD step and QEMU visual verification steps aren't applicable.'"
+    },
+    {
+      "area": "conventions",
+      "observation": "Worker discovered pre-existing tech debt in rasterizer.rs (extensive #[allow(dead_code)] annotations on Segment, ActiveEdge, RasterScratch, FP_SHIFT, etc.) that was outside the feature scope. This was correctly logged as a discoveredIssue rather than acted on, which is the right behavior. The observation is worth tracking for a future cleanup pass.",
+      "evidence": "handoff.discoveredIssues[0]: 'rasterizer.rs in the drawing library has extensive #[allow(dead_code)] annotations on most of its types and functions'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "All four cleanup items implemented correctly with no regressions. bytes_to_shaped_glyphs successfully deduplicated into scene library (both consumers import from there). All unsafe blocks in scene/lib.rs have SAFETY comments (verified via automated scan). drawing/lib.rs doc accurately updated. Dead types removed from truetype.rs with live types correctly retained. Clean commit, thorough verification commands in handoff. One minor non-blocking doc accuracy nit on the bytes_to_shaped_glyphs function signature."
+}

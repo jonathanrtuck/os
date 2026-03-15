@@ -1,0 +1,34 @@
+{
+  "featureId": "unicode-glyph-coverage",
+  "reviewedAt": "2026-03-15T03:15:00.000Z",
+  "commitId": "9b77da9",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Single new file (system/test/tests/unicode.rs, 652 lines) adds 22 well-structured tests covering all three VAL-UNICODE assertions plus glyph cache expansion. No implementation changes were needed — the existing pipeline already handles Unicode correctly, and these tests prove it. All 22 tests pass, all 1415 total tests pass, release build clean. Two minor non-blocking issues found.",
+    "issues": [
+      {
+        "file": "system/test/tests/unicode.rs",
+        "line": 11,
+        "severity": "non_blocking",
+        "description": "Unused constants NUNITO_SANS (line 11) and SOURCE_CODE_PRO (line 13) are defined via include_bytes! but never referenced in any test. Only the _VARIABLE variants are used. This generates 2 compiler warnings. Should be removed for clean builds."
+      },
+      {
+        "file": "system/test/tests/unicode.rs",
+        "line": 490,
+        "severity": "non_blocking",
+        "description": "Test unicode_supplementary_glyph_id_truncation_safety cannot actually detect truncation bugs. It checks `gid == 0 || gid < u16::MAX` where gid is already a u16 (truncated from u32 inside shape() at lib.rs:80). If a font had glyph ID > 65535, the truncation would silently produce a wrong u16 value that this test would accept. The test documents the concern but is technically vacuous — to truly test truncation safety, it would need access to the pre-truncation u32 value from HarfRust. Acceptable as documentation-as-test but should be noted."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md says 'Shaping tests go in shaping.rs. Drawing/rasterizer tests go in drawing.rs. Scene graph tests go in scene.rs. Create new test files when the existing ones would become unwieldy.' The worker created unicode.rs for cross-cutting tests spanning shaping, scene graph, and cache. This is a reasonable organizational choice for feature-scoped tests, but the convention in AGENTS.md doesn't mention cross-cutting test files. Consider adding guidance like: 'Cross-cutting feature tests that span multiple subsystems may use a dedicated file named for the feature (e.g., unicode.rs).'",
+      "evidence": "AGENTS.md §Testing & Validation Guidance vs system/test/tests/unicode.rs which imports from scene::*, shaping::*, and drawing::*"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. 22 tests in a single new file (unicode.rs) thoroughly cover all three VAL-UNICODE assertions and all four expected behaviors. VAL-UNICODE-001: 8 tests verify Latin Extended codepoints (é, ñ, ü, café) shape with valid glyph IDs and rasterize with non-zero coverage, including fallback chain and glyph cache paths. VAL-UNICODE-002: 3 tests verify 'naïve résumé' round-trips through scene graph (single buffer, double buffer, mixed ASCII/Extended). VAL-UNICODE-003: 8 tests verify supplementary plane codepoints (U+1F600, U+10000, U+10FFFD) don't crash and subsequent ASCII text shapes/rasterizes correctly. 3 additional glyph cache tests confirm the expanded codepoint space is handled. No implementation changes were required — the pipeline already supported Unicode. Two non-blocking issues: unused font constants generating warnings, and a truncation safety test that can't detect the bug it describes. Worker followed the skill procedure correctly and the handoff is accurate."
+}

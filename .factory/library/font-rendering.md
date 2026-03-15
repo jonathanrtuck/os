@@ -124,6 +124,18 @@ let font = read_fonts::FontRef::new(&font_data).unwrap();
 
 Variable fonts go in `system/share/`. Legacy static fonts can be removed once variable versions are wired through.
 
+## Glyph Cache Key Convention
+
+The LRU glyph cache uses a 3-tuple key: `(glyph_id: u16, font_size: u16, axis_hash: u32)`.
+
+**FNV-1a hashing** is used consistently for cache key differentiation:
+- `axis_values_hash()` in `shaping/src/rasterize.rs` — hashes variable font axis values into a u32
+- `font_identifier_hash()` in `shaping/src/fallback.rs` — hashes font index into a u32 for fallback cache separation
+
+Both use the same FNV-1a constants: basis = `0x811c_9dc5`, prime = `0x0100_0193`. The hash is composed into the `axis_hash` field of the cache key via XOR. When modifying cache keys, use the same FNV-1a pattern for consistency.
+
+**Cache key composition:** Font identifier hash and axis value hash are XOR'd into a single `axis_hash: u32` that flows through the scene graph (`TextRun.axis_hash` field) for cross-process consistency.
+
 ## Architecture: Where Shaping Lives
 
 ```

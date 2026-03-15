@@ -1,0 +1,39 @@
+{
+  "featureId": "variable-font-files",
+  "reviewedAt": "2026-03-15T03:10:00.000Z",
+  "commitId": "edf91a2",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, well-scoped implementation covering all four feature requirements: (1) variable Nunito Sans already in share/ (569KB, 4 axes), (2) variable Source Code Pro downloaded from Adobe GitHub (212KB, wght axis), (3) init font loading updated to variable filenames, (4) glyph_id u8→u16 truncation fix in GlyphCache.get(), scene_render.rs, and drawing/lib.rs callers. The font_axes() API added to shaping::rasterize is well-structured with proper error handling (returns empty Vec on parse failure). 12 new tests thoroughly cover VAL-VARFONT-001 and VAL-VARFONT-004 with good edge case coverage (static font, empty data). All callers of GlyphCache.get() were updated consistently. The glyph_id fix is correct defense-in-depth: previously sg.glyph_id as u8 would silently wrap IDs > 255, potentially rendering the wrong glyph; now the u16 path returns None for out-of-range IDs.",
+    "issues": [
+      {
+        "file": "system/share/nunito-sans.ttf",
+        "line": null,
+        "severity": "non_blocking",
+        "description": "Old static font files (nunito-sans.ttf, source-code-pro.ttf) remain in system/share/ after switching init to load the variable versions. These files are still used as test fixtures (SOURCE_CODE_PRO const in drawing.rs and shaping.rs, varfont_static_font_returns_no_axes test). Not a bug — the organizational claim 'when you build a new way, kill the old way' applies to code paths, not necessarily test fixtures. However, if the old static fonts are no longer needed for runtime, consider removing them from the 9p share directory and keeping them only in the test path, or documenting why they remain."
+      },
+      {
+        "file": "system/services/compositor/scene_render.rs",
+        "line": 241,
+        "severity": "non_blocking",
+        "description": "scene_render.rs still uses GlyphCache (ASCII 0x20-0x7E only), not LruGlyphCache. For current monospace ASCII content this is correct, but when Unicode glyphs start flowing through the scene graph, glyphs with IDs outside ASCII range will be silently skipped (return None). This is a known architectural limitation, not a regression from this change — the u16 fix is strictly better than the prior u8 truncation."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker's skillFeedback suggests the font-rendering-worker skill should mention that GlyphCache.get() signature changes require updating all callers including test files, not just the compositor. This is a valid observation — the skill's procedure section doesn't mention ripple effects from public API signature changes in shared libraries.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The skill could mention that GlyphCache.get() signature changes require updating all callers including test files, not just the compositor.' Worker had to fix 4 test call sites in drawing.rs after changing the GlyphCache.get() signature."
+    },
+    {
+      "area": "conventions",
+      "observation": "The old static font files (nunito-sans.ttf, source-code-pro.ttf) remain in system/share/ alongside the new variable versions. AGENTS.md says 'Kill the old way' for code, but doesn't address whether superseded binary assets should be removed or kept as test fixtures. A convention on asset lifecycle would clarify this for future features.",
+      "evidence": "ls system/share/*.ttf shows 4 TTF files: both old static and new variable versions. Init only loads the variable ones; tests reference both."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Feature passes review. All four requirements fully implemented: variable font files integrated (correct sizes), init updated to load variable fonts via 9p, glyph_id u8→u16 truncation bug fixed across 3 files (GlyphCache.get signature, scene_render.rs, drawing/lib.rs callers), and 12 well-structured tests cover VAL-VARFONT-001 (4-axis Nunito Sans) and VAL-VARFONT-004 (wght-axis Source Code Pro) with edge cases. Worker followed TDD procedure, performed QEMU visual verification, and all 1,366 tests pass. Two non-blocking observations: old static fonts remain as test fixtures (acceptable), and scene_render.rs still uses ASCII-only GlyphCache (known architectural limitation, not a regression). Code is clean, well-documented, and consistent with project conventions."
+}
