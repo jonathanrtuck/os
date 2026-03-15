@@ -429,6 +429,89 @@ fn zero_size_child_is_skipped() {
     assert_eq!((r, g, b), (0, 0, 0), "zero-size child should not draw anything");
 }
 
+/// VAL-PIPE-012: When render_scene_clipped re-renders a dirty region where
+/// a node moved away, the old position must show the background color, not
+/// stale pixels from the previous frame.
+///
+/// Scenario: A colored child node is at (10,10) in frame 1. In frame 2 it
+/// moves to (60,60). The dirty rect covering (10,10)-(40,40) should show
+/// the root's background, not the child's old color.
+#[test]
+fn partial_render_clears_vacated_region() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let bg = scene::Color::rgba(30, 30, 30, 255);
+    let red = scene::Color::rgba(255, 0, 0, 255);
+
+    // Frame 1: root with bg, child at (10,10).
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].background = bg;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 20;
+    nodes[1].height = 20;
+    nodes[1].background = red;
+    nodes[1].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph1 = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+
+    // Render frame 1 fully.
+    scene_render::render_scene(&mut fb, &graph1, &ctx);
+
+    let stride = 100 * 4;
+    // Pixel (20, 20) should be red.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 20, 20);
+    assert_eq!((r, g, b), (255, 0, 0), "frame 1: (20,20) should be red");
+
+    // Frame 2: child moves to (60, 60).
+    let mut nodes2 = nodes.clone();
+    nodes2[1].x = 60;
+    nodes2[1].y = 60;
+
+    let graph2 = scene_render::SceneGraph {
+        nodes: &nodes2,
+        data: &data,
+    };
+
+    // Re-render the OLD position's dirty rect — this simulates what the
+    // compositor does when it damages the old position of a moved node.
+    let dirty_old = protocol::DirtyRect::new(10, 10, 20, 20);
+    {
+        let mut fb2 = Surface {
+            data: &mut buf,
+            width: 100,
+            height: 100,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        scene_render::render_scene_clipped(&mut fb2, &graph2, &ctx, &dirty_old);
+    }
+
+    // The old position (20, 20) should now show the background color, NOT red.
+    // Because the root's background is painted over the dirty rect first,
+    // and the child is no longer at that position.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 20, 20);
+    assert_eq!(
+        (r, g, b),
+        (30, 30, 30),
+        "After child moved away, old position should show background, not stale red"
+    );
+}
+
 /// Scale factor > 1: child bounding boxes should be scaled for clip check.
 #[test]
 fn scaled_clip_skips_correctly() {

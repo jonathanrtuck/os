@@ -3691,3 +3691,207 @@ fn set_node_count_truncates() {
     assert_eq!(new_id, 8);
     assert_eq!(w.node_count(), 9);
 }
+
+// ── FULL_REPAINT sentinel tests (VAL-PIPE-001, VAL-PIPE-002) ───────
+
+/// VAL-PIPE-001: After build_editor_scene (via clear + rebuild + swap),
+/// the published front buffer's change_count must equal FULL_REPAINT.
+#[test]
+fn full_rebuild_sets_full_repaint_sentinel() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Build initial scene (like build_editor_scene: clear, alloc, swap).
+    build_test_editor_scene(&mut dw, b"hello world", b"12:34:56");
+    dw.swap();
+
+    // The front buffer should have change_count == FULL_REPAINT.
+    let dr = DoubleReader::new(&buf);
+    assert!(
+        dr.is_full_repaint(),
+        "After full rebuild (clear + write + swap), is_full_repaint() must be true"
+    );
+    assert!(
+        dr.change_list().is_none(),
+        "After full rebuild, change_list() must return None"
+    );
+}
+
+/// VAL-PIPE-001: After a second full rebuild, FULL_REPAINT is still set.
+#[test]
+fn second_full_rebuild_also_sets_full_repaint() {
+    let mut buf = make_double_buf();
+
+    // First build.
+    {
+        let mut dw = DoubleWriter::new(&mut buf);
+        build_test_editor_scene(&mut dw, b"hello world", b"12:34:56");
+        dw.swap();
+
+        // Incremental update (copy-forward + mark_changed).
+        dw.copy_front_to_back();
+        {
+            let mut w = dw.back();
+            w.node_mut(N_CURSOR).x = 10;
+            w.mark_changed(N_CURSOR);
+        }
+        dw.swap();
+    }
+
+    // After incremental update, should NOT be full repaint.
+    {
+        let dr = DoubleReader::new(&buf);
+        assert!(!dr.is_full_repaint(), "incremental update should not be FULL_REPAINT");
+    }
+
+    // Second full rebuild (simulating data buffer exhaustion fallback).
+    {
+        let mut dw = DoubleWriter::from_existing(&mut buf);
+        build_test_editor_scene(&mut dw, b"hello world again", b"12:35:00");
+        dw.swap();
+    }
+
+    // Should be full repaint again.
+    let dr = DoubleReader::new(&buf);
+    assert!(
+        dr.is_full_repaint(),
+        "Second full rebuild must also set FULL_REPAINT"
+    );
+}
+
+/// VAL-PIPE-002: Compositor decision logic — is_full_repaint returns true,
+/// change_list returns None. The compositor must never skip a full-rebuild
+/// frame via the empty-change-list early-exit.
+#[test]
+fn compositor_never_skips_full_rebuild_frame() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Full rebuild.
+    build_test_editor_scene(&mut dw, b"test text", b"00:00:00");
+    dw.swap();
+
+    let dr = DoubleReader::new(&buf);
+
+    // The compositor's decision path checks:
+    // 1. if dr.is_full_repaint() → damage.mark_full_screen() → render everything
+    // 2. else match dr.change_list() { Some([]) => skip, Some(list) => partial, None => full }
+    //
+    // After a full rebuild, path 1 fires. Verify the conditions:
+    assert!(dr.is_full_repaint());
+    assert!(dr.change_list().is_none());
+
+    // Specifically, change_list() must NOT return Some(empty_slice), which
+    // would cause the compositor to skip the frame.
+    if let Some(cl) = dr.change_list() {
+        panic!(
+            "change_list() returned Some({:?}) after full rebuild — compositor would skip frame!",
+            cl
+        );
+    }
+}
+
+// ── Timer-only update tests (VAL-PIPE-009) ──────────────────────────
+
+/// VAL-PIPE-009: Timer-only update produces change_count==1 with N_CLOCK_TEXT.
+#[test]
+fn timer_only_update_produces_change_count_1() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Initial scene build.
+    build_test_editor_scene(&mut dw, b"hello", b"12:34:56");
+    dw.swap();
+
+    // Simulate timer-only update (like update_clock in SceneState).
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+
+        // Read the clock node's glyph DataRef and update in-place.
+        let clock_node = w.node(N_CLOCK_TEXT);
+        if let Content::Text { runs, .. } = clock_node.content {
+            let data_buf = w.data_buf();
+            let run_offset = runs.offset as usize;
+            let run_size = core::mem::size_of::<TextRun>();
+            if run_offset + run_size <= data_buf.len() {
+                let run_ptr = unsafe {
+                    data_buf.as_ptr().add(run_offset) as *const TextRun
+                };
+                let text_run = unsafe { core::ptr::read(run_ptr) };
+                let new_glyphs = bytes_to_shaped_glyphs(b"12:35:00", text_run.advance);
+                let new_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        new_glyphs.as_ptr() as *const u8,
+                        new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
+                    )
+                };
+                assert!(w.update_data(text_run.glyphs, new_bytes));
+            }
+        }
+        w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(b"12:35:00");
+        w.mark_changed(N_CLOCK_TEXT);
+    }
+    dw.swap();
+
+    // Verify change_count == 1, NOT FULL_REPAINT.
+    let dr = DoubleReader::new(&buf);
+    assert!(
+        !dr.is_full_repaint(),
+        "Timer-only update must NOT set FULL_REPAINT"
+    );
+    let cl = dr.change_list().expect("Timer-only update must have a change list");
+    assert_eq!(cl.len(), 1, "Timer-only update must have exactly 1 changed node");
+    assert_eq!(cl[0], N_CLOCK_TEXT, "The changed node must be N_CLOCK_TEXT");
+}
+
+// ── PREV_BOUNDS large coordinate tests (VAL-PIPE-013) ──────────────
+
+/// VAL-PIPE-013: At scale=2, nodes near the framebuffer edge produce
+/// physical coordinates that may exceed i16 range (32767). The damage
+/// tracking types must handle this without truncation.
+///
+/// This tests the abs_bounds function output range — values can exceed
+/// i16 when multiplied by scale. PREV_BOUNDS must use a wide enough
+/// type (i32 for x/y) to avoid truncation.
+#[test]
+fn abs_bounds_large_coords_no_truncation() {
+    // Node at logical position (500, 400) with scale=2 → physical (1000, 800).
+    // These fit in i16 (max 32767). But at scale=2 with a 2048-wide display,
+    // a node at logical x=16000 would overflow i16.
+    //
+    // Test: verify abs_bounds returns correct values for large logical coords.
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = 2048;
+    w.node_mut(root).height = 1536;
+    w.set_root(root);
+
+    let child = w.alloc_node().unwrap();
+    w.node_mut(child).x = i16::MAX; // 32767
+    w.node_mut(child).y = i16::MAX;
+    w.node_mut(child).width = 100;
+    w.node_mut(child).height = 50;
+    w.add_child(root, child);
+
+    let nodes = w.nodes();
+    let parent_map = build_parent_map(nodes, 2);
+    let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
+
+    // Physical coords at scale=2 would be 32767*2 = 65534, which doesn't
+    // fit in i16 but does fit in i32/u16. The abs_bounds returns i32 values.
+    assert_eq!(ax, 32767, "abs_bounds should return full i32 values");
+    assert_eq!(ay, 32767);
+    assert_eq!(aw, 100);
+    assert_eq!(ah, 50);
+
+    // At scale=2, physical x = ax * 2 = 65534. This exceeds i16::MAX (32767).
+    // The compositor's PREV_BOUNDS must use i32 for x/y to avoid truncation.
+    let physical_x = ax * 2i32;
+    assert_eq!(physical_x, 65534);
+    assert!(physical_x > i16::MAX as i32, "physical coord exceeds i16 range");
+    // But it fits in i32 and can be safely clamped to u16 for damage rects.
+    assert!(physical_x >= 0);
+    assert!(physical_x <= u16::MAX as i32);
+}

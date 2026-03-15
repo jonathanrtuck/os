@@ -52,7 +52,10 @@ static mut ICON_W: u32 = 0;
 /// Previous frame's absolute physical-pixel bounds for each node.
 /// (x, y, w, h) — used to damage the OLD position when a node moves,
 /// preventing "ghost" pixels at the previous location.
-static mut PREV_BOUNDS: [(i16, i16, u16, u16); scene::MAX_NODES] =
+///
+/// x/y are `i32` (not `i16`) to avoid truncation at scale > 1 where
+/// physical coordinates can exceed 32767 (e.g. 1024 logical × 2 = 2048).
+static mut PREV_BOUNDS: [(i32, i32, u16, u16); scene::MAX_NODES] =
     [(0, 0, 0, 0); scene::MAX_NODES];
 
 fn append_u32(buf: &mut [u8], start: usize, val: u32) -> usize {
@@ -104,8 +107,10 @@ unsafe fn populate_prev_bounds(nodes: &[scene::Node], count: usize, scale: u32) 
     for i in 0..n {
         let (ax, ay, aw, ah) = scene::abs_bounds(nodes, &parent_map, i);
         // Scale logical bounds to physical pixel coords and clamp to non-negative.
-        let px = (ax * sf).max(0) as i16;
-        let py = (ay * sf).max(0) as i16;
+        // x/y stored as i32 to avoid truncation at high scale factors where
+        // physical coordinates can exceed i16::MAX (32767).
+        let px = (ax * sf).max(0);
+        let py = (ay * sf).max(0);
         let pw = (aw as u32 * scale) as u16;
         let ph = (ah as u32 * scale) as u16;
 
@@ -502,9 +507,9 @@ pub extern "C" fn _start() -> ! {
                         // guard above (curr_nodes.len() <= MAX_NODES).
                         let (ox, oy, ow, oh) = unsafe { PREV_BOUNDS[node_id as usize] };
 
-                        if ow > 0 && oh > 0 {
-                            let old_x = (ox as u16).min(fbw);
-                            let old_y = (oy as u16).min(fbh);
+                        if ow > 0 && oh > 0 && ox >= 0 && oy >= 0 {
+                            let old_x = (ox as u32).min(fbw as u32) as u16;
+                            let old_y = (oy as u32).min(fbh as u32) as u16;
                             let old_w = ow.min(fbw - old_x);
                             let old_h = oh.min(fbh - old_y);
 
@@ -583,8 +588,8 @@ pub extern "C" fn _start() -> ! {
 
                     let (ax, ay, aw, ah) =
                         scene::abs_bounds(curr_nodes, &parent_map, node_id as usize);
-                    let px = (ax * sf as i32).max(0) as i16;
-                    let py = (ay * sf as i32).max(0) as i16;
+                    let px = (ax * sf as i32).max(0);
+                    let py = (ay * sf as i32).max(0);
                     let pw = (aw as u32 * sf) as u16;
                     let ph = (ah as u32 * sf) as u16;
 
