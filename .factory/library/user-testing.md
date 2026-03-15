@@ -41,7 +41,7 @@ The OS boots in QEMU virt machine (aarch64, 4 SMP cores) and displays a text edi
 
 **Isolation rules:**
 - All validation is **read-only**. Do not modify any source files.
-- Do not run `cargo build` or `cargo test` — the parent validator has already confirmed build (exit 0) and tests (1462 pass, 0 fail). Your job is to verify structural assertions via grep/ls/file inspection.
+- Do not run `cargo build` or `cargo test` — the parent validator has already confirmed build (exit 0) and tests (1555 pass, 0 fail). Your job is to verify structural assertions via grep/ls/file inspection.
 - Stay within `/Users/user/Sites/os/system/` for all checks.
 
 **Evidence collection:** For each assertion, capture the command output as evidence. Write it to your flow report JSON.
@@ -59,3 +59,40 @@ The OS boots in QEMU virt machine (aarch64, 4 SMP cores) and displays a text edi
 - `system/services/core/` — Core OS service (main.rs, scene_state.rs)
 - `system/services/compositor/` — compositor service (main.rs, scene_render.rs)
 - `system/test/` — test crate (Cargo.toml, tests/*.rs)
+
+## Flow Validator Guidance: QEMU Visual
+
+**Testing surface:** QEMU framebuffer via monitor socket screendump.
+
+**Tool:** QEMU monitor socket + screendump → PPM → PNG → Read tool. No browser or TUI skill needed.
+
+**Setup:**
+The parent validator has already built the kernel (`cargo build --release`). The subagent should:
+1. Kill any stale QEMU processes: `pkill -f "qemu-system-aarch64" 2>/dev/null || true`
+2. Clean up stale sockets: `rm -f /tmp/qemu-mon.sock /tmp/qemu-serial.log`
+3. Launch QEMU using the test-qemu.sh script at `/Users/user/Sites/os/system/test-qemu.sh`
+4. Use `--boot-only` mode first to verify boot, then send keys manually via monitor socket
+5. Capture screenshots: `echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2`
+6. Convert: `python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"`
+7. View with Read tool on the PNG file
+8. Kill QEMU when done: `pkill -f "qemu-system-aarch64" 2>/dev/null || true`
+
+**Isolation rules:**
+- Only ONE QEMU instance at a time (exclusive display resources).
+- Do not modify any source files.
+- Do not run `cargo build` — already done by parent.
+- Kill QEMU before exiting.
+
+**Evidence collection:** Save screenshots as PNG files in the evidence directory. For each assertion, describe what was observed in the screenshot.
+
+**Assertion verdict criteria:**
+- `pass`: Screenshot shows expected visual output (text, cursor, clock, etc.) matching the assertion description.
+- `fail`: Screenshot does not match — missing content, visual artifacts, wrong rendering.
+- `blocked`: QEMU fails to boot or screenshot cannot be captured.
+
+**Expected visual elements:**
+- Title bar: document icon (left), "Untitled" text (center-left), clock "HH:MM" (right)
+- Shadow: horizontal gradient below title bar
+- Content area: white/light background with monospace text in black
+- Cursor: visible blinking vertical bar
+- After typing: characters appear left-to-right, cursor advances

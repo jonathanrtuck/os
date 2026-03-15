@@ -1,0 +1,93 @@
+{
+  "groupId": "visual-qemu",
+  "testedAt": "2026-03-15T13:59:50Z",
+  "isolation": {
+    "surface": "QEMU framebuffer visual verification",
+    "codebaseRoot": "/Users/user/Sites/os/system/",
+    "qemuConfig": "virt,gic-version=2, cortex-a53, 4 SMP cores, 256M RAM, virtio-gpu + keyboard + 9p"
+  },
+  "toolsUsed": ["Execute", "QEMU monitor socket (nc)", "PIL/Pillow", "Read tool (PNG viewing)"],
+  "assertions": [
+    {
+      "id": "VAL-CROSS-001",
+      "title": "End-to-end keystroke renders correctly",
+      "status": "pass",
+      "steps": [
+        { "action": "Boot QEMU and verify display pipeline running", "expected": "Title bar with icon, title, clock; cursor in content area", "observed": "Title bar shows document icon, 'Text' title, clock '13:57:32'; cursor visible at top-left of content area" },
+        { "action": "Send keystroke 'h' via QEMU monitor", "expected": "Character appears in content area, cursor advances", "observed": "Character 'h' appeared in content area, cursor positioned after it" },
+        { "action": "Check serial log for errors", "expected": "No errors", "observed": "No errors found in serial log" }
+      ],
+      "evidence": {
+        "screenshots": [
+          "pixel-optimization/visual-qemu/VAL-CROSS-001-before-keystroke.png",
+          "pixel-optimization/visual-qemu/VAL-CROSS-001-keystroke-h.png"
+        ],
+        "consoleErrors": "none",
+        "network": "N/A (bare metal OS)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-002",
+      "title": "Clock tick renders correctly with incremental path",
+      "status": "pass",
+      "steps": [
+        { "action": "Take screenshot showing clock value", "expected": "Clock time visible in title bar", "observed": "Clock shows '13:58:13'" },
+        { "action": "Wait 2 seconds, take second screenshot", "expected": "Clock shows different time value", "observed": "Clock shows '13:58:15' — advanced by 2 seconds" },
+        { "action": "Compare document content between screenshots", "expected": "Document content identical (no artifacts)", "observed": "Both screenshots show 'h' in content area — identical, no artifacts" }
+      ],
+      "evidence": {
+        "screenshots": [
+          "pixel-optimization/visual-qemu/VAL-CROSS-002-clock1-135813.png",
+          "pixel-optimization/visual-qemu/VAL-CROSS-002-clock2-135815.png"
+        ],
+        "consoleErrors": "none",
+        "network": "N/A (bare metal OS)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-005",
+      "title": "Visual rendering matches expectations",
+      "status": "pass",
+      "steps": [
+        { "action": "Type multiple characters ('elloworld') after existing 'h'", "expected": "All characters rendered in monospace", "observed": "Text 'helloworld' rendered in monospace font, evenly spaced" },
+        { "action": "Verify cursor position", "expected": "Cursor visible at end of typed text", "observed": "Cursor visible after 'd' at correct position" },
+        { "action": "Verify title bar with icon and title", "expected": "Document icon + 'Text' title visible", "observed": "Document icon (page shape) and 'Text' title visible in title bar" },
+        { "action": "Verify clock with time", "expected": "Clock showing HH:MM:SS format", "observed": "Clock showing '13:58:42'" },
+        { "action": "Verify drop shadow", "expected": "Shadow gradient below title bar", "observed": "Gradient shadow visible below title bar separating chrome from content" },
+        { "action": "Verify background color", "expected": "Correct background color", "observed": "Dark background with light text — consistent with OS design" }
+      ],
+      "evidence": {
+        "screenshots": [
+          "pixel-optimization/visual-qemu/VAL-CROSS-005-multichar-helloworld.png"
+        ],
+        "consoleErrors": "none",
+        "network": "N/A (bare metal OS)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-006",
+      "title": "Rapid typing produces no visual artifacts",
+      "status": "pass",
+      "steps": [
+        { "action": "Send Enter key to create new line", "expected": "Cursor moves to new line", "observed": "Cursor moved to second line" },
+        { "action": "Send 26 keystrokes (a-z) rapidly via QEMU monitor with no delay", "expected": "All 26 characters appear with no missing chars or artifacts", "observed": "All 26 characters 'abcdefghijklmnopqrstuvwxyz' rendered correctly on second line" },
+        { "action": "Verify no stale pixels or corruption", "expected": "Clean rendering, no artifacts", "observed": "Clean monospace rendering, no stale pixels, no corruption. Cursor at correct position after 'z'" },
+        { "action": "Check serial log for errors", "expected": "No errors", "observed": "No errors found in serial log" }
+      ],
+      "evidence": {
+        "screenshots": [
+          "pixel-optimization/visual-qemu/VAL-CROSS-006-rapid-typing-alphabet.png"
+        ],
+        "consoleErrors": "none",
+        "network": "N/A (bare metal OS)"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 4 assertions: 4 passed, 0 failed. All QEMU visual assertions verified successfully. Keystroke rendering (VAL-CROSS-001), clock incremental updates (VAL-CROSS-002), full visual rendering quality (VAL-CROSS-005), and rapid typing stress (VAL-CROSS-006) all produce correct visual output with no artifacts and no serial errors."
+}
