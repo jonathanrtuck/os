@@ -49,6 +49,12 @@ static mut ICON_COVERAGE: *const u8 = core::ptr::null();
 static mut ICON_H: u32 = 0;
 static mut ICON_W: u32 = 0;
 
+/// Previous frame's absolute physical-pixel bounds for each node.
+/// (x, y, w, h) — used to damage the OLD position when a node moves,
+/// preventing "ghost" pixels at the previous location.
+static mut PREV_BOUNDS: [(i16, i16, u16, u16); scene::MAX_NODES] =
+    [(0, 0, 0, 0); scene::MAX_NODES];
+
 fn append_u32(buf: &mut [u8], start: usize, val: u32) -> usize {
     let mut ci = start;
 
@@ -80,6 +86,36 @@ fn append_u32(buf: &mut [u8], start: usize, val: u32) -> usize {
 }
 fn channel_shm_va(idx: usize) -> usize {
     protocol::channel_shm_va(idx)
+}
+
+/// Populate PREV_BOUNDS for all live nodes from the current scene graph.
+/// Computes each node's absolute position in physical pixel coords and
+/// stores it. Called after first frame and after every full repaint.
+///
+/// # Safety
+///
+/// Writes to the `PREV_BOUNDS` static mut. Must be called from the
+/// single-threaded render loop only.
+unsafe fn populate_prev_bounds(nodes: &[scene::Node], count: usize, scale: u32) {
+    let n = count.min(nodes.len()).min(scene::MAX_NODES);
+    let parent_map = scene::build_parent_map(nodes, n);
+    let sf = scale as i32;
+
+    for i in 0..n {
+        let (ax, ay, aw, ah) = scene::abs_bounds(nodes, &parent_map, i);
+        // Scale logical bounds to physical pixel coords and clamp to non-negative.
+        let px = (ax * sf).max(0) as i16;
+        let py = (ay * sf).max(0) as i16;
+        let pw = (aw as u32 * scale) as u16;
+        let ph = (ah as u32 * scale) as u16;
+
+        PREV_BOUNDS[i] = (px, py, pw, ph);
+    }
+
+    // Zero out entries beyond live node count.
+    for i in n..scene::MAX_NODES {
+        PREV_BOUNDS[i] = (0, 0, 0, 0);
+    }
 }
 fn rasterize_svg_icon(
     svg_data: &[u8],
@@ -388,6 +424,13 @@ pub extern "C" fn _start() -> ! {
         scene_render::render_scene(&mut fb0, &graph, &render_ctx);
 
         prev_node_count = nodes.len() as u16;
+
+        // SAFETY: Single-threaded render loop; no concurrent access to
+        // PREV_BOUNDS. Populates initial positions so the next frame's
+        // change-list damage can reference old bounds.
+        unsafe {
+            populate_prev_bounds(nodes, nodes.len(), scale_factor);
+        }
     }
 
     let initial_payload = PresentPayload {
@@ -439,30 +482,54 @@ pub extern "C" fn _start() -> ! {
                 }
                 Some(changed) => {
                     // Compute dirty rects from changed node absolute positions.
+                    // For each changed node, damage BOTH the old position (from
+                    // prev_bounds) AND the new position (from current scene graph).
+                    // This prevents "ghost" pixels when a node moves — e.g., the
+                    // cursor leaving stale pixels at its previous location.
                     let parent_map = scene::build_parent_map(curr_nodes, curr_count as usize);
                     let sf = scale_factor;
+                    let fbw = fb_width as u16;
+                    let fbh = fb_height as u16;
 
                     for &node_id in changed {
                         if (node_id as usize) >= curr_nodes.len() {
                             continue;
                         }
 
+                        // Damage the OLD position (previous frame's bounds).
+                        // SAFETY: Single-threaded render loop; no concurrent
+                        // access to PREV_BOUNDS. node_id < MAX_NODES by the
+                        // guard above (curr_nodes.len() <= MAX_NODES).
+                        let (ox, oy, ow, oh) = unsafe { PREV_BOUNDS[node_id as usize] };
+
+                        if ow > 0 && oh > 0 {
+                            let old_x = (ox as u16).min(fbw);
+                            let old_y = (oy as u16).min(fbh);
+                            let old_w = ow.min(fbw - old_x);
+                            let old_h = oh.min(fbh - old_y);
+
+                            damage.add(old_x, old_y, old_w, old_h);
+                        }
+
+                        // Damage the NEW position (current frame's bounds).
                         let (ax, ay, aw, ah) =
                             scene::abs_bounds(curr_nodes, &parent_map, node_id as usize);
 
-                        // Scale logical dirty rect to physical pixels.
                         let px = (ax * sf as i32).max(0) as u16;
                         let py = (ay * sf as i32).max(0) as u16;
-                        let x = px.min(fb_width as u16);
-                        let y = py.min(fb_height as u16);
-                        let w = (aw as u16 * sf as u16).min(fb_width as u16 - x);
-                        let h = (ah as u16 * sf as u16).min(fb_height as u16 - y);
+                        let x = px.min(fbw);
+                        let y = py.min(fbh);
+                        let w = (aw as u16 * sf as u16).min(fbw - x);
+                        let h = (ah as u16 * sf as u16).min(fbh - y);
 
                         damage.add(x, y, w, h);
                     }
                 }
                 None => {
-                    // FULL_REPAINT sentinel — full repaint.
+                    // Defensive fallback: is_full_repaint() is checked above,
+                    // so this arm should only fire if the sentinel is set but
+                    // the earlier guard missed it (e.g., a race or logic gap).
+                    // Treat as full repaint for safety.
                     damage.mark_full_screen();
                 }
             }
@@ -489,11 +556,43 @@ pub extern "C" fn _start() -> ! {
             let mut fb = make_fb_surface(render_buf);
             scene_render::render_scene(&mut fb, &graph, &render_ctx);
             presented_buf = render_buf;
+
+            // Full repaint: refresh all prev_bounds from current positions.
+            // SAFETY: Single-threaded render loop; no concurrent access to
+            // PREV_BOUNDS.
+            unsafe {
+                populate_prev_bounds(curr_nodes, curr_count as usize, scale_factor);
+            }
         } else if let Some(rects) = damage.dirty_rects() {
             render_buf = presented_buf;
             let mut fb = make_fb_surface(render_buf);
             let bbox = protocol::DirtyRect::union_all(rects);
             scene_render::render_scene_clipped(&mut fb, &graph, &render_ctx, &bbox);
+
+            // Partial update: refresh prev_bounds for changed nodes only.
+            // SAFETY: Single-threaded render loop; no concurrent access to
+            // PREV_BOUNDS. node_id < MAX_NODES (bounded by curr_nodes.len()).
+            if let Some(changed) = dr.change_list() {
+                let parent_map = scene::build_parent_map(curr_nodes, curr_count as usize);
+                let sf = scale_factor;
+
+                for &node_id in changed {
+                    if (node_id as usize) >= curr_nodes.len() {
+                        continue;
+                    }
+
+                    let (ax, ay, aw, ah) =
+                        scene::abs_bounds(curr_nodes, &parent_map, node_id as usize);
+                    let px = (ax * sf as i32).max(0) as i16;
+                    let py = (ay * sf as i32).max(0) as i16;
+                    let pw = (aw as u32 * sf) as u16;
+                    let ph = (ah as u32 * sf) as u16;
+
+                    unsafe {
+                        PREV_BOUNDS[node_id as usize] = (px, py, pw, ph);
+                    }
+                }
+            }
         } else {
             continue;
         }
