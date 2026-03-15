@@ -21,10 +21,12 @@
 
 #![no_std]
 
+extern crate alloc;
 extern crate shaping;
 
 pub use protocol::DirtyRect;
 
+include!("cache.rs");
 include!("gamma_tables.rs");
 include!("palette.rs");
 include!("png.rs");
