@@ -4,6 +4,88 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Rendering Philosophy: Path-Centric, Rasterize-at-the-Leaf (2026-03-15)
+
+**Status:** Design leaning. Research needed before committing.
+
+### Context
+
+Discussion about GPU rendering support led to a broader architectural question: what should the rendering primitives API look like — the interface between the compositor and the rendering backend?
+
+Conventional approach: a vocabulary of specialized primitives (fill_rect, draw_text_run, draw_image, draw_rounded_rect, fill_gradient, blur, shadow, etc.). Each content type maps to specific primitives. The list grows as the OS supports richer content.
+
+Alternative: a path-centric API where nearly everything is a vector path. Rects are rectangular paths. Text is glyph outlines. Rounded rects, borders, shapes — all paths. Pixels only exist at the rendering backend level.
+
+### Design Leaning
+
+**Keep content as vector paths through as many layers as possible. Push rasterization (the translation to pixels) to the lowest leaf level — the rendering backend.**
+
+This aligns with the settled principle: essential complexity is conserved; push it to the edges behind simple interfaces.
+
+### Proposed Rendering API
+
+```text
+fill_path(path, paint)          -- paint = solid color, gradient, or pattern
+stroke_path(path, paint, style)
+push_clip(path)     / pop_clip
+push_transform(mat) / pop_transform
+push_opacity(alpha) / pop_opacity
+draw_image(bounds, pixels)      -- escape hatch for inherently raster content (photos, video)
+```
+
+That's the entire interface. Compare to the conventional approach which would have 15+ specialized primitives.
+
+### Pipeline With This Approach
+
+```text
+OS Service
+    │  scene graph (geometry — paths, outlines, transforms, not pixels)
+    ▼
+Compositor
+    │  path submission API (fill, stroke, clip, transform)
+    ▼
+Rendering Backend (trait — the interface boundary)
+    ├── GPU: paths → compute shader rasterization (Vello-style)
+    │         pixels never exist in main memory
+    └── CPU: paths → scanline rasterization
+              pixels in a framebuffer in RAM
+```
+
+### What This Gains
+
+- **Resolution independence is free.** Zoom, DPI changes, scale animations — just change the transform matrix, re-submit the same paths. No re-rasterization, no texture atlas invalidation.
+- **Simpler interface.** One concept (paths) instead of many specialized primitives. The rendering API grows only when a fundamentally new category appears (e.g., video frames), not every time a new shape is needed.
+- **Geometric scene graph.** The scene graph stays in the geometry domain all the way through. Pixels are the rendering backend's problem and nobody else's.
+- **Text as paths.** Glyph outlines submitted directly, enabling SDF or GPU outline rasterization without special-casing text.
+
+### Tradeoffs
+
+- **GPU path rasterization is hard.** Vello (Google/Linebender) is the state of the art and still maturing. This is an active research area.
+- **CPU path rasterization is slower than blitting pre-rasterized glyphs** (what the font library does today). The CPU backend would need a proper path rasterizer.
+- **Accepting complexity at the leaf** — the rendering backend becomes more sophisticated, but everything above it gets simpler. This matches the project's design principles.
+
+### Research Needed Before Committing
+
+- **Vello** (Google/Linebender) — GPU-native 2D rendering, everything is paths, compute shader rasterization. Raph Levien's blog posts on the architecture and tradeoffs.
+- **Signed distance fields (SDF)** — resolution-independent glyph/shape rendering. Valve's original paper, current usage in Flutter and game engines.
+- **WebGPU's abstraction model** — modern take on the GPU API layer, relevant to understanding what the rendering backend would talk to.
+- **Pathfinder** (Mozilla) — earlier GPU path rendering project, different approach than Vello. Worth understanding what it learned.
+
+### Connection to Existing Architecture
+
+The compositor currently calls the drawing library directly (CPU fill_rect, blit, draw_coverage). The rendering backend trait would sit exactly where those calls are today. The compositor would submit paths instead of pixel-level operations. The drawing library becomes one implementation of the backend trait (the CPU path).
+
+No bypass mechanism needed for specialized content (unlike conventional OSes) because the OS renders everything. If a content type needs something the primitives can't express, the answer is a new primitive or a raw-buffer scene node — not a hole in the compositing pipeline.
+
+### Open Questions
+
+1. What is Vello's actual maturity and performance profile? Is it prototype-ready or still experimental?
+2. How does SDF text rendering compare to GPU outline rasterization in quality and performance?
+3. Does the path-centric model handle video frames and other inherently raster content gracefully, or does it create awkward seams?
+4. What's the minimum viable CPU path rasterizer to replace the current drawing library's role?
+
+---
+
 ## Rendering Pipeline Optimization (2026-03-15)
 
 **Status:** Complete. Three milestones shipped and verified. 93 new tests (1462 → 1555). QEMU visual verification passes.
