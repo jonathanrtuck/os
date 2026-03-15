@@ -2990,7 +2990,7 @@ fn selection_cycle_no_node_leak() {
     }
 }
 
-// VAL-SCENE-009 / VAL-CORE-007: Data buffer exhaustion triggers full rebuild fallback
+// VAL-SCENE-009: Data buffer exhaustion triggers full rebuild fallback
 #[test]
 fn data_buffer_exhaustion_triggers_full_rebuild() {
     let mut buf = make_double_buf();
@@ -3052,46 +3052,269 @@ fn data_buffer_exhaustion_triggers_full_rebuild() {
 }
 
 // VAL-CORE-009: Repeated incremental cycles preserve scene integrity
+// Interleaves clock updates, cursor moves, text insertions, and selection
+// changes across 100 iterations to verify no state accumulation or drift.
 #[test]
 fn repeated_incremental_cycles_preserve_integrity() {
     let mut buf = make_double_buf();
     let mut dw = DoubleWriter::new(&mut buf);
 
-    let doc_text = b"hello world\nsecond line\nthird line";
-    build_test_editor_scene(&mut dw, doc_text, b"12:00:00");
+    let char_width: u16 = 8;
+    let line_height: u16 = 20;
+    let font_size: u16 = 16;
+    let text_color = Color::rgb(220, 220, 220);
+    let sel_color = Color::rgba(0, 100, 200, 80);
+    let chars_per_line: usize = 80;
+
+    // Start with initial document text.
+    let mut doc_text: Vec<u8> = b"hello world\nsecond line\nthird line".to_vec();
+    let mut cursor_pos: usize = 0;
+    let mut clock_text: Vec<u8> = b"12:00:00".to_vec();
+    let mut sel_start: usize = 0;
+    let mut sel_end: usize = 0;
+
+    build_test_editor_scene(&mut dw, &doc_text, &clock_text);
     dw.swap();
 
-    // Run 100 incremental cursor updates to different positions.
     for i in 0..100 {
-        let cursor_pos = i % (doc_text.len() + 1);
+        match i % 5 {
+            // Clock-only update (20 iterations)
+            0 => {
+                let second = i % 60;
+                clock_text = format!("12:{:02}:{:02}", i / 60 % 60, second)
+                    .into_bytes();
+                // Ensure clock_text is always 8 bytes.
+                clock_text.resize(8, b'0');
 
-        dw.copy_front_to_back();
-        {
-            let mut w = dw.back();
-            let (line, col) = byte_to_line_col(doc_text, cursor_pos, 80);
-            let n = w.node_mut(N_CURSOR);
-            n.x = (col as u32 * 8) as i16;
-            n.y = (line as i32 * 20) as i16;
-            w.mark_changed(N_CURSOR);
+                dw.copy_front_to_back();
+                {
+                    let mut w = dw.back();
+
+                    let clock_node = w.node(N_CLOCK_TEXT);
+                    if let Content::Text { runs, .. } = clock_node.content {
+                        let data_buf = w.data_buf();
+                        let run_offset = runs.offset as usize;
+                        let run_size = core::mem::size_of::<TextRun>();
+                        if run_offset + run_size <= data_buf.len() {
+                            // SAFETY: TextRun is repr(C), data buffer is aligned.
+                            let run_ptr = unsafe {
+                                data_buf.as_ptr().add(run_offset) as *const TextRun
+                            };
+                            let text_run = unsafe { core::ptr::read(run_ptr) };
+                            let glyph_dref = text_run.glyphs;
+
+                            let new_glyphs =
+                                bytes_to_shaped_glyphs(&clock_text, text_run.advance);
+                            let new_bytes = unsafe {
+                                core::slice::from_raw_parts(
+                                    new_glyphs.as_ptr() as *const u8,
+                                    new_glyphs.len()
+                                        * core::mem::size_of::<ShapedGlyph>(),
+                                )
+                            };
+                            let _ = w.update_data(glyph_dref, new_bytes);
+                        }
+                    }
+
+                    w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(&clock_text);
+                    w.mark_changed(N_CLOCK_TEXT);
+                }
+                dw.swap();
+            }
+
+            // Cursor-only move (20 iterations)
+            1 => {
+                cursor_pos = i % (doc_text.len() + 1);
+                sel_start = cursor_pos;
+                sel_end = cursor_pos;
+
+                dw.copy_front_to_back();
+                {
+                    let mut w = dw.back();
+                    let (line, col) =
+                        byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
+                    let n = w.node_mut(N_CURSOR);
+                    n.x = (col as u32 * char_width as u32) as i16;
+                    n.y = (line as i32 * line_height as i32) as i16;
+                    w.mark_changed(N_CURSOR);
+                }
+                dw.swap();
+            }
+
+            // Text insertion (20 iterations)
+            2 => {
+                let insert_pos = cursor_pos.min(doc_text.len());
+                let ch = b'a' + (i % 26) as u8;
+                doc_text.insert(insert_pos, ch);
+                cursor_pos = insert_pos + 1;
+                sel_start = cursor_pos;
+                sel_end = cursor_pos;
+
+                dw.copy_front_to_back();
+                {
+                    let mut w = dw.back();
+                    w.set_node_count(WELL_KNOWN_COUNT);
+
+                    // Re-layout doc text.
+                    let all_runs = layout_mono_lines(
+                        &doc_text,
+                        chars_per_line,
+                        line_height as i16,
+                        text_color,
+                        char_width,
+                        font_size,
+                    );
+                    let visible = scroll_runs(all_runs, 0, line_height as u32, 700);
+                    let mut final_runs: Vec<TextRun> =
+                        Vec::with_capacity(visible.len());
+                    for mut run in visible {
+                        let lt = line_bytes_for_run(&doc_text, &run);
+                        let shaped = bytes_to_shaped_glyphs(lt, char_width);
+                        run.glyphs = w.push_shaped_glyphs(&shaped);
+                        run.glyph_count = shaped.len() as u16;
+                        final_runs.push(run);
+                    }
+                    let (doc_runs_ref, doc_run_count) =
+                        w.push_text_runs(&final_runs);
+
+                    {
+                        let n = w.node_mut(N_DOC_TEXT);
+                        n.content = Content::Text {
+                            runs: doc_runs_ref,
+                            run_count: doc_run_count,
+                            _pad: [0; 2],
+                        };
+                        n.content_hash = fnv1a(&doc_text);
+                    }
+                    w.mark_changed(N_DOC_TEXT);
+
+                    // Update cursor.
+                    let (line, col) =
+                        byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
+                    let n = w.node_mut(N_CURSOR);
+                    n.x = (col as u32 * char_width as u32) as i16;
+                    n.y = (line as i32 * line_height as i32) as i16;
+                    n.next_sibling = NULL;
+                    w.mark_changed(N_CURSOR);
+                }
+                dw.swap();
+            }
+
+            // Selection change (20 iterations)
+            3 => {
+                // Select a range around current cursor.
+                sel_start = cursor_pos.saturating_sub(3).min(doc_text.len());
+                sel_end = (cursor_pos + 5).min(doc_text.len());
+
+                dw.copy_front_to_back();
+                {
+                    let mut w = dw.back();
+                    w.set_node_count(WELL_KNOWN_COUNT);
+
+                    // Update cursor.
+                    let (line, col) =
+                        byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
+                    let n = w.node_mut(N_CURSOR);
+                    n.x = (col as u32 * char_width as u32) as i16;
+                    n.y = (line as i32 * line_height as i32) as i16;
+                    n.next_sibling = NULL;
+                    w.mark_changed(N_CURSOR);
+
+                    // Add selection rects.
+                    let (sl, sh) = if sel_start <= sel_end {
+                        (sel_start, sel_end)
+                    } else {
+                        (sel_end, sel_start)
+                    };
+                    if sl < sh {
+                        let (sl_line, sl_col) =
+                            byte_to_line_col(&doc_text, sl, chars_per_line);
+                        let (sh_line, sh_col) =
+                            byte_to_line_col(&doc_text, sh, chars_per_line);
+                        let mut prev_sel: u16 = NULL;
+
+                        for line in sl_line..=sh_line {
+                            let c_start = if line == sl_line { sl_col } else { 0 };
+                            let c_end = if line == sh_line {
+                                sh_col
+                            } else {
+                                chars_per_line
+                            };
+                            if c_start >= c_end {
+                                continue;
+                            }
+                            if let Some(sid) = w.alloc_node() {
+                                let sn = w.node_mut(sid);
+                                sn.x = (c_start as u32 * char_width as u32) as i16;
+                                sn.y = (line as i32 * line_height as i32) as i16;
+                                sn.width =
+                                    ((c_end - c_start) as u32 * char_width as u32) as u16;
+                                sn.height = line_height;
+                                sn.background = sel_color;
+                                sn.flags = NodeFlags::VISIBLE;
+                                sn.next_sibling = NULL;
+                                w.mark_changed(sid);
+
+                                if prev_sel == NULL {
+                                    w.node_mut(N_CURSOR).next_sibling = sid;
+                                } else {
+                                    w.node_mut(prev_sel).next_sibling = sid;
+                                }
+                                prev_sel = sid;
+                            }
+                        }
+                    }
+                }
+                dw.swap();
+            }
+
+            // Clear selection (20 iterations) — ensures node count returns to 8
+            _ => {
+                sel_start = cursor_pos;
+                sel_end = cursor_pos;
+
+                dw.copy_front_to_back();
+                {
+                    let mut w = dw.back();
+                    w.set_node_count(WELL_KNOWN_COUNT);
+                    w.node_mut(N_CURSOR).next_sibling = NULL;
+                    w.mark_changed(N_CURSOR);
+                }
+                dw.swap();
+            }
         }
-        dw.swap();
     }
 
-    // After 100 cycles, verify the scene matches what a full rebuild
-    // would produce for cursor at position 99 % 34 = 31.
-    let final_pos = 99 % (doc_text.len() + 1);
-    let (expected_line, expected_col) = byte_to_line_col(doc_text, final_pos, 80);
-    let expected_x = (expected_col as u32 * 8) as i16;
-    let expected_y = (expected_line as i32 * 20) as i16;
+    // After 100 diverse cycles, build a reference scene from scratch with
+    // the same final state and compare key properties.
+    let (expected_line, expected_col) =
+        byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
+    let expected_cursor_x = (expected_col as u32 * char_width as u32) as i16;
+    let expected_cursor_y = (expected_line as i32 * line_height as i32) as i16;
 
     let cursor = &dw.front_nodes()[N_CURSOR as usize];
-    assert_eq!(cursor.x, expected_x, "Cursor x after 100 cycles");
-    assert_eq!(cursor.y, expected_y, "Cursor y after 100 cycles");
+    assert_eq!(cursor.x, expected_cursor_x, "Cursor x after 100 diverse cycles");
+    assert_eq!(cursor.y, expected_cursor_y, "Cursor y after 100 diverse cycles");
 
-    // All other nodes should still be intact.
-    assert_eq!(dw.front_nodes().len(), 8);
+    // Last iteration (i=99, 99%5=4) clears selection → node count should be 8.
+    assert_eq!(
+        dw.front_nodes().len(),
+        8,
+        "Node count should be 8 after selection clear"
+    );
+
+    // Chrome nodes should still be intact.
     assert_eq!(dw.front_nodes()[N_ROOT as usize].width, 1024);
     assert_eq!(dw.front_nodes()[N_TITLE_BAR as usize].height, 36);
+    assert_eq!(dw.front_nodes()[N_SHADOW as usize].height, 12);
+
+    // Clock should reflect the last clock update (i=95, 95%5=0).
+    // The clock_text was last set at iteration 95.
+    assert_ne!(
+        dw.front_nodes()[N_CLOCK_TEXT as usize].content_hash,
+        fnv1a(b"12:00:00"),
+        "Clock hash should differ from initial after updates"
+    );
 }
 
 // VAL-CORE-008: Change list populated correctly per update type
@@ -3299,6 +3522,154 @@ fn clock_update_data_used_unchanged() {
 
     // Verify data_used hasn't grown in the new front buffer.
     assert_eq!(dw.front_data_buf().len(), data_used_before);
+}
+
+// VAL-CORE-007: Scroll change updates only doc text runs and cursor
+#[test]
+fn incremental_scroll_updates_only_doc_and_cursor() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Build a scene with multi-line text (enough to scroll).
+    let mut long_text = Vec::new();
+    for i in 0..50u8 {
+        if i > 0 {
+            long_text.push(b'\n');
+        }
+        // Each line: "Line XX some padding text here!"
+        long_text.extend_from_slice(b"Line ");
+        long_text.push(b'0' + i / 10);
+        long_text.push(b'0' + i % 10);
+        long_text.extend_from_slice(b" some padding text here!");
+    }
+
+    build_test_editor_scene(&mut dw, &long_text, b"12:00:00");
+    dw.swap();
+
+    // Snapshot all nodes before the scroll update.
+    let nodes_before: Vec<Node> = dw.front_nodes().to_vec();
+    let node_size = core::mem::size_of::<Node>();
+
+    // Incremental scroll update: same text, different scroll_y.
+    // This mirrors what update_document_content does when only scroll changes.
+    let scroll_lines: u32 = 5;
+    let char_width: u16 = 8;
+    let line_height: u16 = 20;
+    let font_size: u16 = 16;
+    let text_color = Color::rgb(220, 220, 220);
+    let chars_per_line: usize = 80;
+    let scroll_px = scroll_lines as i32 * line_height as i32;
+
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+
+        // Truncate selection nodes (none in this case, but matches real code path).
+        w.set_node_count(WELL_KNOWN_COUNT);
+
+        // Re-layout visible text with new scroll offset.
+        let all_runs = layout_mono_lines(
+            &long_text,
+            chars_per_line,
+            line_height as i16,
+            text_color,
+            char_width,
+            font_size,
+        );
+        let visible_runs = scroll_runs(all_runs, scroll_lines, line_height as u32, 700);
+
+        let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
+        for mut run in visible_runs {
+            let line_text = line_bytes_for_run(&long_text, &run);
+            let shaped = bytes_to_shaped_glyphs(line_text, char_width);
+            run.glyphs = w.push_shaped_glyphs(&shaped);
+            run.glyph_count = shaped.len() as u16;
+            final_runs.push(run);
+        }
+        let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
+
+        // Update N_DOC_TEXT with new scroll-adjusted content.
+        {
+            let n = w.node_mut(N_DOC_TEXT);
+            n.content = Content::Text {
+                runs: doc_runs_ref,
+                run_count: doc_run_count,
+                _pad: [0; 2],
+            };
+            n.content_hash = fnv1a(&long_text);
+        }
+        w.mark_changed(N_DOC_TEXT);
+
+        // Update cursor position for new scroll offset.
+        // Cursor at position 0, now adjusted for scroll.
+        let (cursor_line, cursor_col) = byte_to_line_col(&long_text, 0, chars_per_line);
+        let cursor_x = (cursor_col as u32 * char_width as u32) as i16;
+        let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+        {
+            let n = w.node_mut(N_CURSOR);
+            n.x = cursor_x;
+            n.y = cursor_y;
+            n.next_sibling = NULL;
+        }
+        w.mark_changed(N_CURSOR);
+    }
+    dw.swap();
+
+    let nodes_after: Vec<Node> = dw.front_nodes().to_vec();
+    assert_eq!(nodes_after.len(), 8);
+
+    // Chrome nodes (root, title bar, title text, clock text, shadow, content)
+    // should be byte-identical — scroll only affects doc text and cursor.
+    let chrome_indices = [N_ROOT, N_TITLE_BAR, N_TITLE_TEXT, N_CLOCK_TEXT, N_SHADOW, N_CONTENT];
+    for &i in &chrome_indices {
+        let before = unsafe {
+            core::slice::from_raw_parts(
+                &nodes_before[i as usize] as *const Node as *const u8,
+                node_size,
+            )
+        };
+        let after = unsafe {
+            core::slice::from_raw_parts(
+                &nodes_after[i as usize] as *const Node as *const u8,
+                node_size,
+            )
+        };
+        assert_eq!(
+            before, after,
+            "Chrome node {} should be byte-identical after scroll-only update",
+            i
+        );
+    }
+
+    // N_DOC_TEXT should have changed (new text runs for scrolled viewport).
+    let doc_before = unsafe {
+        core::slice::from_raw_parts(
+            &nodes_before[N_DOC_TEXT as usize] as *const Node as *const u8,
+            node_size,
+        )
+    };
+    let doc_after = unsafe {
+        core::slice::from_raw_parts(
+            &nodes_after[N_DOC_TEXT as usize] as *const Node as *const u8,
+            node_size,
+        )
+    };
+    assert_ne!(
+        doc_before, doc_after,
+        "N_DOC_TEXT should have changed after scroll (new text runs)"
+    );
+
+    // N_CURSOR should have changed (y adjusted for scroll offset).
+    let cursor_after = &nodes_after[N_CURSOR as usize];
+    // Cursor at byte 0 = line 0, col 0. With scroll_lines=5, y = 0*20 - 5*20 = -100.
+    assert_eq!(cursor_after.y, -100, "Cursor y should be adjusted for scroll");
+
+    // Change list should contain exactly N_DOC_TEXT and N_CURSOR.
+    let dr = DoubleReader::new(&buf);
+    let cl = dr.change_list().unwrap();
+    assert_eq!(cl.len(), 2, "Change list should have exactly 2 entries");
+    assert!(cl.contains(&N_DOC_TEXT), "Change list should contain N_DOC_TEXT");
+    assert!(cl.contains(&N_CURSOR), "Change list should contain N_CURSOR");
 }
 
 // set_node_count unit test
