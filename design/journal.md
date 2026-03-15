@@ -4,6 +4,127 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Resolution-Independent Rendering + Dirty-Rect Optimization (2026-03-15)
+
+**Status:** Design session in progress. Breadboarding phase.
+
+### Problem
+
+The UI is noticeably laggy at host-native resolution (3456×2234 on Retina). Root cause: the compositor repaints the entire 31 MB framebuffer and the GPU driver transfers the entire 31 MB through virtio MMIO on every frame — even when only a cursor blink or single keystroke changed. The dirty rect infrastructure already exists end-to-end (DirtyRect type, DamageTracker, PresentPayload with 6 rects, GPU driver partial TRANSFER_TO_HOST_2D) but the compositor always sends `rect_count: 0` (full-screen transfer).
+
+Additionally, the scene graph uses physical pixel coordinates. The OS service receives `fb_width`/`fb_height` from init and lays out directly to those values. There is no logical/physical coordinate distinction — layout is resolution-specific.
+
+### Design Discussion
+
+**Scene graph coordinate model — logical vs physical:**
+
+Two options: (A) scene graph in logical coordinates (points), compositor applies scale factor; or (B) scene graph in physical pixels, OS service pre-applies scale.
+
+Decision: **Logical coordinates (option A).** Rationale:
+
+- Isolate uncertain decisions behind interfaces (founder claim). The OS service shouldn't know or care about the display's physical resolution. It thinks in points.
+- The scene graph is rebuilt on every state change anyway (keystroke, scroll, cursor move), so "resolution change requires a scene rebuild" isn't an extra cost.
+- Clean separation: OS service declares *what* to render (in its coordinate space), compositor decides *how* (at the physical resolution it knows).
+- Font rendering: compositor rasterizes glyphs at physical pixel size (`logical_font_size × scale_factor`). Optical sizing uses physical DPI. Both are compositor concerns.
+- Integer precision at i16 logical coordinates with 2× scale: every logical pixel maps to 2 physical pixels. Sub-pixel glyph positioning is a compositor concern (during rasterization), not a scene graph concern. macOS uses the same model.
+- Pixel-snapping for borders/dividers: compositor rounds to nearest physical pixel. Not purely multiply-by-scale — it makes snapping decisions too.
+
+The scale factor becomes compositor config (alongside DPI), received from init. The OS service never sees it.
+
+**Dirty-rect optimization — scene diffing vs damage declaration:**
+
+Two approaches: (A) compositor diffs old vs new scene graph, derives dirty rects automatically; or (B) OS service declares damage regions explicitly (Wayland model).
+
+Decision: **Scene diffing (option A).** Rationale:
+
+- The scene graph is a flat array of fixed-size repr(C) nodes — diffing is `memcmp` per slot. Cheap.
+- As the OS service grows in complexity (compound documents, multiple editors, layout engine), requiring it to perfectly track damage is a maintenance burden that compounds. Diffing absorbs that — the OS service just rebuilds the scene graph however it wants, and the compositor figures out what changed.
+- Same reasoning as React: developers stopped manually tracking DOM mutations and let the framework diff. The expensive operation is pixel rendering, not scene construction.
+- The compositor already keeps the scene in shared memory. Double-buffering the scene (keeping the previous version) adds one memcpy of the node array per frame — negligible vs the rendering cost.
+
+### Incremental Delivery
+
+Pieces chain together, each independently shippable and testable:
+
+**Piece 1 — Activate existing dirty-rect GPU transfer.**
+The compositor already repaints everything. Add a scene diff step: compositor keeps a copy of the previous scene graph, compares per-node, computes bounding rects of changed nodes, passes dirty rects in PresentPayload. The GPU driver already handles `rect_count > 0`. Highest leverage (cuts 31 MB MMIO transfer to a few KB for a keystroke), lowest risk (no interface changes, no scene graph format changes).
+
+But: the compositor also repaints the entire framebuffer from the scene graph. Even with partial GPU transfer, every frame still touches every pixel in the back buffer. Piece 2 addresses this.
+
+**Piece 2 — Dirty-rect clipped rendering.**
+Compositor clips its rendering to the dirty region. `render_scene` currently takes a full-framebuffer clip rect — narrow it to the dirty rect union. Nodes outside the dirty region are skipped. Overlapping nodes within the dirty region are repainted (back-to-front within the rect). Requires copying the previous framebuffer's clean regions to the back buffer (or using the same buffer with dirty-rect writes only).
+
+**Piece 3 — Logical coordinate model.**
+Change scene graph Node.x/y/width/height to logical coordinates. Add scale_factor to compositor config. Compositor multiplies all positions and sizes by scale_factor during rendering. OS service lays out in points. Font sizes in scene graph are logical; compositor computes `physical_px = logical_size × scale_factor` for rasterization. This is the interface/structural change.
+
+### Breadboard — Piece 1: Scene Diff + Partial GPU Transfer
+
+```
+compositor render loop (current):
+  wait for scene update
+  render_scene(back_fb, scene_graph)         ← repaints everything
+  send MSG_PRESENT(buffer_index, rect_count=0) ← full transfer
+  swap buffers
+
+compositor render loop (piece 1):
+  wait for scene update
+  diff(prev_scene_nodes, curr_scene_nodes)   ← NEW: per-node memcmp
+    → collect changed node indices
+    → compute bounding rects of changed nodes (in abs coords)
+    → union into dirty region (up to 6 DirtyRects)
+  render_scene(back_fb, scene_graph)         ← still repaints everything (piece 2 fixes this)
+  send MSG_PRESENT(buffer_index, rect_count=N, rects=[...])  ← partial transfer
+  memcpy curr_scene_nodes → prev_scene_nodes ← save for next diff
+  swap buffers
+```
+
+**Scene diff algorithm:**
+
+```
+fn diff_scenes(
+    prev: &[Node; MAX_NODES],
+    curr: &[Node; MAX_NODES],
+    node_count: usize,
+) -> DamageTracker {
+    let mut damage = DamageTracker::new(fb_width, fb_height);
+    for i in 0..node_count {
+        // Fixed-size repr(C) — byte comparison is correct and fast.
+        let prev_bytes = &prev[i] as *const Node as *const [u8; NODE_SIZE];
+        let curr_bytes = &curr[i] as *const Node as *const [u8; NODE_SIZE];
+        if prev_bytes != curr_bytes {
+            // Node changed. Compute its absolute bounding rect
+            // by walking parent chain (or: store abs coords in prev pass).
+            let rect = abs_bounds(curr, i);
+            damage.add(rect.x, rect.y, rect.w, rect.h);
+            // Also damage the OLD position if the node moved.
+            let old_rect = abs_bounds(prev, i);
+            damage.add(old_rect.x, old_rect.y, old_rect.w, old_rect.h);
+        }
+    }
+    damage
+}
+```
+
+**Pressure point — computing absolute bounds:** Nodes store positions relative to parent. To get the absolute bounding rect for a changed node, you need to walk up the parent chain. But the scene graph uses left-child/right-sibling (no parent pointer). Options:
+1. Pre-compute absolute positions during the render walk and cache them.
+2. Add a `parent: NodeId` field to Node (4 bytes, increases node size).
+3. Walk the tree once to build a parent map (array of NodeId, indexed by node index).
+
+Option 3 is cheapest — one pass over the node array building `parent[i]` from `first_child`/`next_sibling`, then `abs_bounds` walks up via `parent[]`. The parent map is the same size as the node array (512 × 2 bytes = 1 KB) and rebuilt each frame.
+
+**Pressure point — nodes added/removed:** If the node count changes between frames, new nodes have no prev entry and removed nodes leave stale prev entries. Handle by: if `curr_node_count != prev_node_count`, dirty the entire screen (fall back to full repaint). This is rare (only on document open/close, not on typing). Alternatively, diff up to `min(prev_count, curr_count)` and dirty any nodes beyond that range.
+
+**Pressure point — data buffer changes:** A node's text content can change without the node struct changing (if the text is referenced by DataRef with same offset/length but different bytes). This means struct-level memcmp can miss text edits. Fix: include a content hash in the node, or always diff data buffer contents for Text/Path nodes. The simpler approach: the OS service already writes new text at new data buffer offsets (append-only within a frame), so the DataRef offset will differ, which the memcmp catches.
+
+### What's Not Covered Yet
+
+- Piece 2 implementation details (dirty-rect clipped rendering, overlapping node handling)
+- Piece 3 implementation details (logical coordinate model, scale factor plumbing)
+- Interaction between dirty-rect rendering and subpixel font rendering (dirty rect slicing through a glyph)
+- Whether the DamageTracker's 6-rect limit is sufficient or needs a smarter merge strategy
+
+---
+
 ## Scene Scroll Fix + Kernel TPIDR Race Fix (2026-03-14)
 
 **Status:** Two bugs fixed. Both committed.

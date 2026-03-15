@@ -196,6 +196,11 @@ fn setup_display_pipeline(
     let fb_height = display_info.height;
     let fb_stride = fb_width * FB_BPP;
     let fb_size = fb_stride * fb_height;
+    // Compute integer display scale factor from physical resolution.
+    // >= 2048px wide → 2×, otherwise 1×. Matches Retina/HiDPI thresholds.
+    let scale_factor: u32 = if fb_width >= 2048 { 2 } else { 1 };
+    let logical_w = fb_width / scale_factor;
+    let logical_h = fb_height / scale_factor;
 
     {
         let mut buf = [0u8; 40];
@@ -450,8 +455,8 @@ fn setup_display_pipeline(
         doc_va: core_doc_va as u64,
         scene_va: core_scene_va as u64,
         mono_font_va: core_font_va,
-        fb_width,
-        fb_height,
+        fb_width: logical_w,
+        fb_height: logical_h,
         doc_capacity: DOC_BUF_CAPACITY,
         mono_font_len,
         prop_font_len,
@@ -551,7 +556,7 @@ fn setup_display_pipeline(
         fb_stride,
         mono_font_len,
         prop_font_len,
-        _pad: 0,
+        scale_factor,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };
 

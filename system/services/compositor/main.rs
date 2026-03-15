@@ -36,7 +36,7 @@ const SCREEN_DPI: u16 = 96;
 const CORE_HANDLE: u8 = 1;
 const GPU_HANDLE: u8 = 2;
 
-static mut BACK_BUF_IDX: usize = 0;
+
 static mut ICON_COVERAGE: *const u8 = core::ptr::null();
 static mut ICON_H: u32 = 0;
 static mut ICON_W: u32 = 0;
@@ -186,6 +186,11 @@ pub extern "C" fn _start() -> ! {
     let fb_stride = config.fb_stride;
     let fb_size = fb_stride * fb_height;
     let scene_va = config.scene_va as usize;
+    let scale_factor = if config.scale_factor > 0 {
+        config.scale_factor
+    } else {
+        1
+    };
 
     if fb_va == 0 || fb_va2 == 0 || fb_width == 0 || fb_height == 0 || scene_va == 0 {
         sys::print(b"compositor: bad config\n");
@@ -219,12 +224,14 @@ pub extern "C" fn _start() -> ! {
 
         Box::from_raw(ptr)
     };
+    // Rasterize at physical pixel size: logical FONT_SIZE × scale_factor.
+    let physical_font_size = FONT_SIZE * scale_factor;
     // Recursive Variable: MONO=1 for monospace (code content).
     let mono_axes = [shaping::rasterize::AxisValue {
         tag: *b"MONO",
         value: 1.0,
     }];
-    mono_cache.populate_with_axes(mono_font_data, FONT_SIZE, SCREEN_DPI, &mono_axes);
+    mono_cache.populate_with_axes(mono_font_data, physical_font_size, SCREEN_DPI, &mono_axes);
     let mono_cache_ptr = Box::into_raw(mono_cache);
 
     sys::print(b"     monospace font rasterized (MONO=1)\n");
@@ -260,7 +267,7 @@ pub extern "C" fn _start() -> ! {
             tag: *b"MONO",
             value: 0.0,
         }];
-        prop_cache.populate_with_axes(prop_font_data, FONT_SIZE, SCREEN_DPI, &prop_axes);
+        prop_cache.populate_with_axes(prop_font_data, physical_font_size, SCREEN_DPI, &prop_axes);
 
         prop_cache_ptr = Box::into_raw(prop_cache);
 
@@ -340,11 +347,26 @@ pub extern "C" fn _start() -> ! {
         icon_h: unsafe { ICON_H },
         icon_color: drawing::CHROME_ICON,
         icon_node: 2, // N_TITLE_TEXT — well-known index
+        scale: scale_factor,
     };
     // Channel from core (scene update notifications).
     let core_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
     // Channel to GPU driver.
     let gpu_ch = unsafe { ipc::Channel::from_base(channel_shm_va(2), ipc::PAGE_SIZE, 0) };
+
+    // Previous frame's nodes for scene diffing. Starts empty (first frame
+    // is always a full repaint). Box-allocated to avoid stack overflow.
+    let mut prev_nodes: Box<[scene::Node; scene::MAX_NODES]> =
+        unsafe {
+            let layout = alloc::alloc::Layout::new::<[scene::Node; scene::MAX_NODES]>();
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut [scene::Node; scene::MAX_NODES];
+            if ptr.is_null() {
+                sys::print(b"compositor: prev_nodes alloc failed\n");
+                sys::exit();
+            }
+            Box::from_raw(ptr)
+        };
+    let mut prev_node_count: u16 = 0;
 
     sys::print(b"     waiting for first scene\n");
 
@@ -354,16 +376,22 @@ pub extern "C" fn _start() -> ! {
     // Drain the notification.
     while core_ch.try_recv(&mut msg) {}
 
-    // Render first frame.
+    // Render first frame (always full repaint).
     {
         let dr = scene::DoubleReader::new(scene_buf);
+        let nodes = dr.front_nodes();
         let graph = scene_render::SceneGraph {
-            nodes: dr.front_nodes(),
+            nodes,
             data: dr.front_data_buf(),
         };
         let mut fb0 = make_fb_surface(0);
 
         scene_render::render_scene(&mut fb0, &graph, &render_ctx);
+
+        // Snapshot current nodes for next frame's diff.
+        let nc = nodes.len().min(scene::MAX_NODES);
+        prev_nodes[..nc].copy_from_slice(&nodes[..nc]);
+        prev_node_count = nc as u16;
     }
 
     let initial_payload = PresentPayload {
@@ -378,42 +406,116 @@ pub extern "C" fn _start() -> ! {
 
     let _ = sys::channel_signal(GPU_HANDLE);
 
-    unsafe { BACK_BUF_IDX = 1 };
+    // Track which buffer was last presented. Partial updates render
+    // directly into it (no copy, no swap). Full repaints use double
+    // buffering to avoid tearing during the full render pass.
+    let mut presented_buf: usize = 0;
 
-    sys::print(b"     entering render loop\n");
+    sys::print(b"     entering render loop (damage-tracked)\n");
 
-    // Render loop: wait for scene updates from core, render, present.
+    // Render loop: wait for scene updates from core, diff, render, present.
     loop {
         let _ = sys::wait(&[CORE_HANDLE], u64::MAX);
 
         // Drain all pending notifications (coalesce multiple updates).
         while core_ch.try_recv(&mut msg) {}
 
-        let back = unsafe { BACK_BUF_IDX };
+        let dr = scene::DoubleReader::new(scene_buf);
+        let curr_nodes = dr.front_nodes();
+        let curr_count = curr_nodes.len();
 
-        {
-            let dr = scene::DoubleReader::new(scene_buf);
-            let graph = scene_render::SceneGraph {
-                nodes: dr.front_nodes(),
-                data: dr.front_data_buf(),
-            };
-            let mut fb = make_fb_surface(back);
+        // Diff previous vs current scene to find dirty rects.
+        let mut damage = drawing::DamageTracker::new(fb_width as u16, fb_height as u16);
 
-            scene_render::render_scene(&mut fb, &graph, &render_ctx);
+        let diff_result = scene::diff_scenes(
+            &prev_nodes[..prev_node_count as usize],
+            prev_node_count as usize,
+            curr_nodes,
+            curr_count,
+        );
+        match diff_result {
+            Some(ref rects) if !rects.is_empty() => {
+                let sf = scale_factor;
+                for (rx, ry, rw, rh) in rects {
+                    // Scale logical dirty rects to physical pixels.
+                    let px = (*rx * sf as i32).max(0) as u16;
+                    let py = (*ry * sf as i32).max(0) as u16;
+                    let x = px.min(fb_width as u16);
+                    let y = py.min(fb_height as u16);
+                    let w = (*rw as u16 * sf as u16).min(fb_width as u16 - x);
+                    let h = (*rh as u16 * sf as u16).min(fb_height as u16 - y);
+                    damage.add(x, y, w, h);
+                }
+            }
+            Some(_) => {
+                // No nodes changed — skip rendering entirely.
+                continue;
+            }
+            None => {
+                // Node count changed or empty — full repaint.
+                damage.mark_full_screen();
+            }
         }
 
-        let payload = PresentPayload {
-            buffer_index: back as u32,
-            rect_count: 0,
-            rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
-            _pad: [0; 4],
+        // Choose rendering strategy based on damage extent.
+        //
+        // Partial update: render directly into the last-presented buffer.
+        //   No buffer copy, no swap. The GPU transfer sends only dirty rects
+        //   from this buffer. Safe because virtio-gpu transfers are explicit
+        //   (no hardware scanout tearing).
+        //
+        // Full repaint: render into the other buffer, then swap. This avoids
+        //   visible tearing during the full render pass (the old buffer stays
+        //   on screen until the new one is ready).
+        let render_buf;
+        let graph = scene_render::SceneGraph {
+            nodes: curr_nodes,
+            data: dr.front_data_buf(),
+        };
+
+        if damage.full_screen {
+            render_buf = 1 - presented_buf;
+            let mut fb = make_fb_surface(render_buf);
+            scene_render::render_scene(&mut fb, &graph, &render_ctx);
+            presented_buf = render_buf;
+        } else if let Some(rects) = damage.dirty_rects() {
+            render_buf = presented_buf;
+            let mut fb = make_fb_surface(render_buf);
+            let bbox = drawing::DirtyRect::union_all(rects);
+            scene_render::render_scene_clipped(&mut fb, &graph, &render_ctx, &bbox);
+        } else {
+            continue;
+        }
+
+        // Snapshot current nodes for next frame's diff.
+        let nc = curr_count.min(scene::MAX_NODES);
+        prev_nodes[..nc].copy_from_slice(&curr_nodes[..nc]);
+        prev_node_count = nc as u16;
+
+        // Build present payload with dirty rects.
+        let payload = match damage.dirty_rects() {
+            Some(rects) if !damage.full_screen => {
+                let mut dirty = [drawing::DirtyRect::new(0, 0, 0, 0); 6];
+                let n = rects.len().min(6);
+                dirty[..n].copy_from_slice(&rects[..n]);
+                PresentPayload {
+                    buffer_index: render_buf as u32,
+                    rect_count: n as u32,
+                    rects: dirty,
+                    _pad: [0; 4],
+                }
+            }
+            _ => PresentPayload {
+                buffer_index: render_buf as u32,
+                rect_count: 0,
+                rects: [drawing::DirtyRect::new(0, 0, 0, 0); 6],
+                _pad: [0; 4],
+            },
         };
         let present_msg = unsafe { ipc::Message::from_payload(MSG_PRESENT, &payload) };
 
         gpu_ch.send(&present_msg);
 
         let _ = sys::channel_signal(GPU_HANDLE);
-
-        unsafe { BACK_BUF_IDX = 1 - back };
     }
 }

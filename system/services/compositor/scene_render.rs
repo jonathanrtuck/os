@@ -29,6 +29,10 @@ pub struct RenderCtx<'a> {
     pub icon_color: Color,
     /// Node ID where the icon should be drawn (before its text).
     pub icon_node: NodeId,
+    /// Integer display scale factor (1 = 1×, 2 = Retina 2×).
+    /// Scene graph is in logical coordinates; multiply by this to get
+    /// physical pixel positions and sizes.
+    pub scale: u32,
 }
 /// Immutable scene graph data referenced during rendering.
 pub struct SceneGraph<'a> {
@@ -62,8 +66,9 @@ impl ClipRect {
 
 /// Recursively render a node and its children.
 ///
-/// `abs_x`, `abs_y` are the absolute pixel position of this node's origin
-/// in the framebuffer. `clip` is the current clipping rectangle.
+/// `abs_x`, `abs_y` are the absolute **physical** pixel position of this
+/// node's origin in the framebuffer. `clip` is in physical pixels.
+/// Scene graph coordinates are logical; scaled by `ctx.scale`.
 fn render_node(
     fb: &mut Surface,
     graph: &SceneGraph,
@@ -83,10 +88,11 @@ fn render_node(
         return;
     }
 
-    let nx = abs_x + node.x as i32;
-    let ny = abs_y + node.y as i32;
-    let nw = node.width as i32;
-    let nh = node.height as i32;
+    let s = ctx.scale as i32;
+    let nx = abs_x + node.x as i32 * s;
+    let ny = abs_y + node.y as i32 * s;
+    let nw = node.width as i32 * s;
+    let nh = node.height as i32 * s;
     let node_rect = ClipRect {
         x: nx,
         y: ny,
@@ -124,7 +130,7 @@ fn render_node(
     // Draw border.
     if node.border.width > 0 && node.border.color.a > 0 {
         let bc = scene_to_draw_color(node.border.color);
-        let bw = node.border.width as u32;
+        let bw = node.border.width as u32 * ctx.scale;
 
         // Top
         fb.fill_rect_blend(nx as u32, ny as u32, nw as u32, bw, bc);
@@ -167,7 +173,7 @@ fn render_node(
             ctx.icon_h,
             ctx.icon_color,
         );
-        icon_advance = ctx.icon_w as i32 + 8;
+        icon_advance = ctx.icon_w as i32 + 8 * s;
     }
 
     // Draw content.
@@ -218,13 +224,14 @@ fn render_node(
                 };
                 let run_color = scene_to_draw_color(run.color);
                 let cache = ctx.mono_cache;
+                let su = ctx.scale as i32;
                 let uniform_advance = if run.advance > 0 {
-                    Some(run.advance as i32)
+                    Some(run.advance as i32 * su)
                 } else {
                     None
                 };
-                let gx0 = text_nx + run.x as i32;
-                let gy0 = ny + run.y as i32;
+                let gx0 = text_nx + run.x as i32 * su;
+                let gy0 = ny + run.y as i32 * su;
 
                 if gy0 >= max_y as i32 {
                     break;
@@ -284,7 +291,7 @@ fn render_node(
         clip
     };
     let child_origin_x = nx;
-    let child_origin_y = ny - node.scroll_y;
+    let child_origin_y = ny - node.scroll_y * s;
     let mut child = node.first_child;
 
     while child != NULL {
@@ -325,6 +332,28 @@ pub fn render_scene(fb: &mut Surface, graph: &SceneGraph, ctx: &RenderCtx) {
         y: 0,
         w: fb.width as i32,
         h: fb.height as i32,
+    };
+
+    render_node(fb, graph, ctx, 0, 0, 0, clip);
+}
+
+/// Render only the region within `dirty` (absolute pixel coordinates).
+/// Nodes outside the dirty rect are clipped and skipped entirely.
+pub fn render_scene_clipped(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    ctx: &RenderCtx,
+    dirty: &drawing::DirtyRect,
+) {
+    if graph.nodes.is_empty() || dirty.w == 0 || dirty.h == 0 {
+        return;
+    }
+
+    let clip = ClipRect {
+        x: dirty.x as i32,
+        y: dirty.y as i32,
+        w: dirty.w as i32,
+        h: dirty.h as i32,
     };
 
     render_node(fb, graph, ctx, 0, 0, 0, clip);

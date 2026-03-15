@@ -100,6 +100,21 @@ pub struct DataRef {
     pub length: u32,
 }
 
+// ── Content hashing ─────────────────────────────────────────────────
+
+const FNV1A_OFFSET: u32 = 0x811c_9dc5;
+const FNV1A_PRIME: u32 = 0x0100_0193;
+
+/// FNV-1a hash of a byte slice (32-bit).
+pub fn fnv1a(data: &[u8]) -> u32 {
+    let mut h = FNV1A_OFFSET;
+    for &b in data {
+        h ^= b as u32;
+        h = h.wrapping_mul(FNV1A_PRIME);
+    }
+    h
+}
+
 bitflags! {
     /// Node flags packed into a single byte.
     pub struct NodeFlags: u8 {
@@ -248,6 +263,12 @@ pub struct Node {
     // ── flags ──
     pub flags: NodeFlags,
     pub _pad: u8,
+    // ── content hash (FNV-1a of variable-length data referenced by Content) ──
+    /// Hash of the node's variable-length data (text bytes, path commands,
+    /// image pixels). Computed by the scene writer when content is set.
+    /// The compositor uses this for scene diffing — a changed hash means
+    /// the data buffer content changed even if the DataRef is identical.
+    pub content_hash: u32,
     // ── content ──
     pub content: Content,
 }
@@ -271,6 +292,7 @@ impl Node {
         opacity: 255,
         flags: NodeFlags::VISIBLE,
         _pad: 0,
+        content_hash: 0,
         content: Content::None,
     };
 
@@ -1131,4 +1153,79 @@ impl<'a> DoubleReader<'a> {
         // The acquire fence in front_data ensures visibility.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
     }
+}
+
+// ── Scene diffing ───────────────────────────────────────────────────
+
+/// Build a parent map from the node array. `parent[i]` is the parent
+/// NodeId of node `i`, or `NULL` if it has no parent (root or unused).
+/// One pass over the tree structure.
+pub fn build_parent_map(nodes: &[Node], count: usize) -> [NodeId; MAX_NODES] {
+    let mut parent = [NULL; MAX_NODES];
+    let n = count.min(nodes.len()).min(MAX_NODES);
+    for i in 0..n {
+        let mut child = nodes[i].first_child;
+        while child != NULL && (child as usize) < n {
+            parent[child as usize] = i as NodeId;
+            child = nodes[child as usize].next_sibling;
+        }
+    }
+    parent
+}
+
+/// Compute absolute bounding rect of a node by walking up the parent chain.
+/// Returns `(x, y, width, height)` in absolute coordinates.
+pub fn abs_bounds(nodes: &[Node], parent_map: &[NodeId; MAX_NODES], id: usize) -> (i32, i32, u32, u32) {
+    let node = &nodes[id];
+    let mut ax = node.x as i32;
+    let mut ay = node.y as i32;
+    let mut cur = parent_map[id];
+    while cur != NULL && (cur as usize) < nodes.len() {
+        let p = &nodes[cur as usize];
+        ax += p.x as i32;
+        ay += p.y as i32;
+        cur = parent_map[cur as usize];
+    }
+    (ax, ay, node.width as u32, node.height as u32)
+}
+
+/// Compare two scene snapshots and return dirty rectangles.
+///
+/// `prev_nodes` / `curr_nodes` are the node arrays from the previous and
+/// current frames. If node counts differ, returns `None` (full repaint).
+/// Otherwise, returns a list of `(x, y, w, h)` absolute bounding rects
+/// for all changed nodes. The caller unions these into DirtyRects.
+pub fn diff_scenes(
+    prev_nodes: &[Node],
+    prev_count: usize,
+    curr_nodes: &[Node],
+    curr_count: usize,
+) -> Option<Vec<(i32, i32, u32, u32)>> {
+    if prev_count != curr_count || prev_count == 0 {
+        return None;
+    }
+    let n = prev_count.min(prev_nodes.len()).min(curr_nodes.len()).min(MAX_NODES);
+    let curr_parents = build_parent_map(curr_nodes, n);
+    let prev_parents = build_parent_map(prev_nodes, n);
+    let node_size = core::mem::size_of::<Node>();
+    let mut rects = Vec::new();
+    for i in 0..n {
+        // SAFETY: Node is repr(C), fixed size — byte comparison is sound.
+        let prev_bytes = unsafe {
+            core::slice::from_raw_parts(&prev_nodes[i] as *const Node as *const u8, node_size)
+        };
+        let curr_bytes = unsafe {
+            core::slice::from_raw_parts(&curr_nodes[i] as *const Node as *const u8, node_size)
+        };
+        if prev_bytes != curr_bytes {
+            // Damage both old and new positions (handles node movement).
+            let old_rect = abs_bounds(prev_nodes, &prev_parents, i);
+            let new_rect = abs_bounds(curr_nodes, &curr_parents, i);
+            rects.push(old_rect);
+            if old_rect != new_rect {
+                rects.push(new_rect);
+            }
+        }
+    }
+    Some(rects)
 }

@@ -1454,3 +1454,243 @@ fn scene_text_run_different_axis_hashes_preserved() {
     assert_eq!(text_runs[0].axis_hash, 0x1111_0000);
     assert_eq!(text_runs[1].axis_hash, 0x2222_0000);
 }
+
+// ── content_hash tests ──────────────────────────────────────────────
+
+#[test]
+fn content_hash_is_zero_for_empty_node() {
+    assert_eq!(Node::EMPTY.content_hash, 0);
+}
+
+#[test]
+fn content_hash_stored_and_readable() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content_hash = scene::fnv1a(b"hello");
+    w.set_root(id);
+    w.commit();
+    let r = SceneReader::new(&buf);
+    assert_eq!(r.node(id).content_hash, scene::fnv1a(b"hello"));
+}
+
+#[test]
+fn content_hash_differs_for_different_data() {
+    let h1 = scene::fnv1a(b"hello");
+    let h2 = scene::fnv1a(b"world");
+    assert_ne!(h1, h2);
+    assert_ne!(h1, 0);
+}
+
+#[test]
+fn content_hash_is_deterministic() {
+    assert_eq!(scene::fnv1a(b"test"), scene::fnv1a(b"test"));
+}
+
+// ── scene diffing tests ─────────────────────────────────────────────
+
+#[test]
+fn diff_identical_scenes_returns_empty() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = 100;
+    w.node_mut(root).height = 50;
+    w.node_mut(root).background = Color::rgb(30, 30, 30);
+    w.set_root(root);
+    w.commit();
+    let nodes = w.nodes();
+    let count = w.node_count() as usize;
+    let rects = scene::diff_scenes(nodes, count, nodes, count);
+    assert!(rects.is_some());
+    assert!(rects.unwrap().is_empty());
+}
+
+#[test]
+fn diff_different_node_count_returns_none() {
+    let mut buf1 = make_buf();
+    let mut w1 = SceneWriter::new(&mut buf1);
+    let _ = w1.alloc_node().unwrap();
+    w1.commit();
+
+    let mut buf2 = make_buf();
+    let mut w2 = SceneWriter::new(&mut buf2);
+    let _ = w2.alloc_node().unwrap();
+    let _ = w2.alloc_node().unwrap();
+    w2.commit();
+
+    let result = scene::diff_scenes(w1.nodes(), 1, w2.nodes(), 2);
+    assert!(result.is_none());
+}
+
+#[test]
+fn diff_changed_background_returns_dirty_rect() {
+    let mut buf1 = make_buf();
+    let mut w1 = SceneWriter::new(&mut buf1);
+    let root = w1.alloc_node().unwrap();
+    w1.node_mut(root).x = 10;
+    w1.node_mut(root).y = 20;
+    w1.node_mut(root).width = 100;
+    w1.node_mut(root).height = 50;
+    w1.node_mut(root).background = Color::rgb(30, 30, 30);
+    w1.set_root(root);
+    w1.commit();
+
+    let mut buf2 = make_buf();
+    let mut w2 = SceneWriter::new(&mut buf2);
+    let root2 = w2.alloc_node().unwrap();
+    w2.node_mut(root2).x = 10;
+    w2.node_mut(root2).y = 20;
+    w2.node_mut(root2).width = 100;
+    w2.node_mut(root2).height = 50;
+    w2.node_mut(root2).background = Color::rgb(50, 50, 50); // changed
+    w2.set_root(root2);
+    w2.commit();
+
+    let rects = scene::diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
+    assert_eq!(rects.len(), 1);
+    assert_eq!(rects[0], (10, 20, 100, 50));
+}
+
+#[test]
+fn diff_moved_node_returns_old_and_new_rects() {
+    let mut buf1 = make_buf();
+    let mut w1 = SceneWriter::new(&mut buf1);
+    let root = w1.alloc_node().unwrap();
+    w1.node_mut(root).x = 10;
+    w1.node_mut(root).y = 20;
+    w1.node_mut(root).width = 50;
+    w1.node_mut(root).height = 30;
+    w1.set_root(root);
+    w1.commit();
+
+    let mut buf2 = make_buf();
+    let mut w2 = SceneWriter::new(&mut buf2);
+    let root2 = w2.alloc_node().unwrap();
+    w2.node_mut(root2).x = 100; // moved
+    w2.node_mut(root2).y = 200; // moved
+    w2.node_mut(root2).width = 50;
+    w2.node_mut(root2).height = 30;
+    w2.set_root(root2);
+    w2.commit();
+
+    let rects = scene::diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
+    // Both old and new positions should be dirty.
+    assert_eq!(rects.len(), 2);
+    assert_eq!(rects[0], (10, 20, 50, 30));
+    assert_eq!(rects[1], (100, 200, 50, 30));
+}
+
+#[test]
+fn diff_content_hash_change_detected() {
+    let mut buf1 = make_buf();
+    let mut w1 = SceneWriter::new(&mut buf1);
+    let root = w1.alloc_node().unwrap();
+    w1.node_mut(root).width = 200;
+    w1.node_mut(root).height = 100;
+    w1.node_mut(root).content_hash = scene::fnv1a(b"hello");
+    w1.set_root(root);
+    w1.commit();
+
+    let mut buf2 = make_buf();
+    let mut w2 = SceneWriter::new(&mut buf2);
+    let root2 = w2.alloc_node().unwrap();
+    w2.node_mut(root2).width = 200;
+    w2.node_mut(root2).height = 100;
+    w2.node_mut(root2).content_hash = scene::fnv1a(b"world"); // different content
+    w2.set_root(root2);
+    w2.commit();
+
+    let rects = scene::diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
+    assert_eq!(rects.len(), 1, "content_hash change should produce a dirty rect");
+}
+
+#[test]
+fn diff_child_node_includes_parent_offset() {
+    let mut buf1 = make_buf();
+    let mut w1 = SceneWriter::new(&mut buf1);
+    let root = w1.alloc_node().unwrap();
+    w1.node_mut(root).x = 50;
+    w1.node_mut(root).y = 100;
+    w1.node_mut(root).width = 500;
+    w1.node_mut(root).height = 400;
+    let child = w1.alloc_node().unwrap();
+    w1.node_mut(child).x = 10;
+    w1.node_mut(child).y = 20;
+    w1.node_mut(child).width = 80;
+    w1.node_mut(child).height = 40;
+    w1.node_mut(child).background = Color::rgb(255, 0, 0);
+    w1.add_child(root, child);
+    w1.set_root(root);
+    w1.commit();
+
+    let mut buf2 = make_buf();
+    let mut w2 = SceneWriter::new(&mut buf2);
+    let root2 = w2.alloc_node().unwrap();
+    w2.node_mut(root2).x = 50;
+    w2.node_mut(root2).y = 100;
+    w2.node_mut(root2).width = 500;
+    w2.node_mut(root2).height = 400;
+    let child2 = w2.alloc_node().unwrap();
+    w2.node_mut(child2).x = 10;
+    w2.node_mut(child2).y = 20;
+    w2.node_mut(child2).width = 80;
+    w2.node_mut(child2).height = 40;
+    w2.node_mut(child2).background = Color::rgb(0, 255, 0); // changed
+    w2.add_child(root2, child2);
+    w2.set_root(root2);
+    w2.commit();
+
+    let rects = scene::diff_scenes(w1.nodes(), 2, w2.nodes(), 2).unwrap();
+    assert_eq!(rects.len(), 1);
+    // Child absolute position: parent(50,100) + child(10,20) = (60,120)
+    assert_eq!(rects[0], (60, 120, 80, 40));
+}
+
+#[test]
+fn build_parent_map_basic() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+    let child1 = w.alloc_node().unwrap();
+    let child2 = w.alloc_node().unwrap();
+    w.add_child(root, child1);
+    w.add_child(root, child2);
+    w.set_root(root);
+    w.commit();
+    let nodes = w.nodes();
+    let parent_map = scene::build_parent_map(nodes, 3);
+    assert_eq!(parent_map[root as usize], scene::NULL);
+    assert_eq!(parent_map[child1 as usize], root);
+    assert_eq!(parent_map[child2 as usize], root);
+}
+
+#[test]
+fn abs_bounds_nested_three_levels() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).x = 10;
+    w.node_mut(root).y = 20;
+    w.node_mut(root).width = 800;
+    w.node_mut(root).height = 600;
+    let mid = w.alloc_node().unwrap();
+    w.node_mut(mid).x = 30;
+    w.node_mut(mid).y = 40;
+    w.node_mut(mid).width = 200;
+    w.node_mut(mid).height = 150;
+    let leaf = w.alloc_node().unwrap();
+    w.node_mut(leaf).x = 5;
+    w.node_mut(leaf).y = 10;
+    w.node_mut(leaf).width = 50;
+    w.node_mut(leaf).height = 25;
+    w.add_child(root, mid);
+    w.add_child(mid, leaf);
+    w.set_root(root);
+    w.commit();
+    let nodes = w.nodes();
+    let parent_map = scene::build_parent_map(nodes, 3);
+    // leaf abs: root(10,20) + mid(30,40) + leaf(5,10) = (45, 70)
+    let (ax, ay, aw, ah) = scene::abs_bounds(nodes, &parent_map, leaf as usize);
+    assert_eq!((ax, ay, aw, ah), (45, 70, 50, 25));
+}

@@ -7,8 +7,8 @@
 use alloc::vec::Vec;
 
 use scene::{
-    byte_to_line_col, bytes_to_shaped_glyphs, layout_mono_lines, line_bytes_for_run, scroll_runs,
-    Border, Color, Content, DataRef, DoubleWriter, NodeFlags, ShapedGlyph, TextRun,
+    byte_to_line_col, bytes_to_shaped_glyphs, fnv1a, layout_mono_lines, line_bytes_for_run,
+    scroll_runs, Border, Color, Content, DataRef, DoubleWriter, NodeFlags, ShapedGlyph, TextRun,
     DOUBLE_SCENE_SIZE, NULL,
 };
 
@@ -209,6 +209,7 @@ impl SceneState {
                     run_count: title_run_count,
                     _pad: [0; 2],
                 };
+                n.content_hash = fnv1a(title_label);
                 n.flags = NodeFlags::VISIBLE;
             }
 
@@ -226,6 +227,7 @@ impl SceneState {
                     run_count: clock_run_count,
                     _pad: [0; 2],
                 };
+                n.content_hash = fnv1a(clock_text);
                 n.flags = NodeFlags::VISIBLE;
             }
             {
@@ -268,6 +270,7 @@ impl SceneState {
                     run_count: doc_run_count,
                     _pad: [0; 2],
                 };
+                n.content_hash = fnv1a(doc_text);
                 n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
             }
 

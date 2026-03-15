@@ -242,6 +242,9 @@ pub mod core_config {
     /// Core process configuration. The core owns documents, layout, input
     /// routing, and scene graph building. It writes to the scene graph in
     /// shared memory and signals the compositor when a new frame is ready.
+    ///
+    /// `fb_width` / `fb_height` are **logical** dimensions (physical / scale).
+    /// The core lays out in logical coordinates; the compositor scales to physical.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CoreConfig {
@@ -272,6 +275,11 @@ pub mod compose {
     /// Compositor configuration. The compositor owns rendering: fonts,
     /// glyph caches, framebuffers, and GPU presentation. It reads the
     /// scene graph from shared memory and renders to pixels.
+    ///
+    /// `fb_width` / `fb_height` are **physical** framebuffer dimensions.
+    /// `scale_factor` is the integer display scale (1 = 1×, 2 = Retina 2×).
+    /// The scene graph is in logical coordinates (physical / scale).
+    /// The compositor multiplies by scale_factor during rendering.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CompositorConfig {
@@ -284,7 +292,7 @@ pub mod compose {
         pub fb_stride: u32,
         pub mono_font_len: u32,
         pub prop_font_len: u32,
-        pub _pad: u32,
+        pub scale_factor: u32,
     }
 
     // Guard: must fit within the 60-byte IPC payload.
