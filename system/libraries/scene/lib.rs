@@ -519,6 +519,15 @@ impl<'a> SceneWriter<'a> {
     pub fn node_count(&self) -> u16 {
         self.header().node_count
     }
+    /// Set the node count directly.
+    ///
+    /// Used to truncate the node array (e.g., removing dynamic selection
+    /// rect nodes by resetting count to the well-known node count).
+    /// The caller must ensure `count` does not exceed the previously
+    /// allocated high-water mark within the current buffer.
+    pub fn set_node_count(&mut self, count: u16) {
+        self.header_mut().node_count = count;
+    }
     /// Get a mutable reference to a node by ID.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;

@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use scene::{
     fnv1a, Border, Color, Content, DataRef, DoubleWriter, NodeFlags, ShapedGlyph, TextRun,
-    DOUBLE_SCENE_SIZE, NULL,
+    DATA_BUFFER_SIZE, DOUBLE_SCENE_SIZE, NULL,
 };
 
 /// Well-known node indices for direct mutation.
@@ -20,6 +20,9 @@ pub const N_SHADOW: u16 = 4;
 pub const N_CONTENT: u16 = 5;
 pub const N_DOC_TEXT: u16 = 6;
 pub const N_CURSOR: u16 = 7;
+
+/// Number of well-known nodes (indices 0..7). Selection rects start at 8.
+pub const WELL_KNOWN_COUNT: u16 = 8;
 
 pub struct SceneState {
     buf: &'static mut [u8],
@@ -349,6 +352,382 @@ impl SceneState {
         }
 
         dw.swap();
+    }
+
+    // ── Targeted incremental update methods ─────────────────────────
+
+    /// Update only the clock text glyphs in-place. Zero heap allocations
+    /// for the glyph data: the old ShapedGlyph array is overwritten via
+    /// `update_data` (same length). Only N_CLOCK_TEXT is marked changed.
+    pub fn update_clock(&mut self, clock_text: &[u8]) {
+        let mut dw = self.double();
+        dw.copy_front_to_back();
+
+        {
+            let mut w = dw.back();
+
+            // Read the clock node's Content::Text to find the glyph DataRef.
+            let clock_node = w.node(N_CLOCK_TEXT);
+            if let Content::Text { runs, .. } = clock_node.content {
+                // Resolve the TextRun from the data buffer.
+                let run_size = core::mem::size_of::<TextRun>();
+                let runs_start = scene::DATA_OFFSET + runs.offset as usize;
+                let runs_end = runs_start + run_size;
+                if runs_end <= w.data_buf().len() + scene::DATA_OFFSET {
+                    // SAFETY: TextRun is repr(C) and the data buffer is
+                    // aligned to TextRun alignment by push_text_runs.
+                    let run_ptr = unsafe {
+                        (w.data_buf().as_ptr() as *const u8)
+                            .add(runs.offset as usize) as *const TextRun
+                    };
+                    let text_run = unsafe { core::ptr::read(run_ptr) };
+                    let glyph_dref = text_run.glyphs;
+
+                    // Build new glyphs from clock_text.
+                    let new_glyphs = bytes_to_shaped_glyphs(clock_text, text_run.advance);
+
+                    // SAFETY: ShapedGlyph is repr(C) with no padding.
+                    let new_bytes = unsafe {
+                        core::slice::from_raw_parts(
+                            new_glyphs.as_ptr() as *const u8,
+                            new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
+                        )
+                    };
+
+                    // In-place overwrite (same length: 8 glyphs = 64 bytes).
+                    w.update_data(glyph_dref, new_bytes);
+                }
+            }
+
+            // Update content_hash to reflect new clock text.
+            w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(clock_text);
+            w.mark_changed(N_CLOCK_TEXT);
+        }
+
+        dw.swap();
+    }
+
+    /// Update only the cursor position. Zero heap allocations.
+    /// Only N_CURSOR is marked changed.
+    pub fn update_cursor(
+        &mut self,
+        cursor_pos: u32,
+        doc_text: &[u8],
+        chars_per_line: u32,
+        char_width: u32,
+        line_height: u32,
+        scroll_px: i32,
+    ) {
+        let mut dw = self.double();
+        dw.copy_front_to_back();
+
+        {
+            let mut w = dw.back();
+
+            let (cursor_line, cursor_col) =
+                byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
+            let cursor_x = (cursor_col as u32 * char_width) as i16;
+            let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+
+            let n = w.node_mut(N_CURSOR);
+            n.x = cursor_x;
+            n.y = cursor_y;
+
+            w.mark_changed(N_CURSOR);
+        }
+
+        dw.swap();
+    }
+
+    /// Update only the selection rects. Truncates node count to
+    /// WELL_KNOWN_COUNT (removing old selection rects), then allocates
+    /// new ones. Marks N_CURSOR and all new selection nodes as changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_selection(
+        &mut self,
+        sel_start: u32,
+        sel_end: u32,
+        doc_text: &[u8],
+        chars_per_line: u32,
+        char_width: u32,
+        line_height: u32,
+        sel_color: Color,
+        content_h: u32,
+        scroll_px: i32,
+    ) {
+        let mut dw = self.double();
+        dw.copy_front_to_back();
+
+        {
+            let mut w = dw.back();
+
+            // Remove old selection rects by truncating node count.
+            w.set_node_count(WELL_KNOWN_COUNT);
+
+            // Reset cursor's next_sibling (no selection rects yet).
+            w.node_mut(N_CURSOR).next_sibling = NULL;
+            w.mark_changed(N_CURSOR);
+
+            // Build new selection rects if selection exists.
+            let (sel_lo, sel_hi) = if sel_start <= sel_end {
+                (sel_start as usize, sel_end as usize)
+            } else {
+                (sel_end as usize, sel_start as usize)
+            };
+
+            if sel_lo < sel_hi {
+                allocate_selection_rects(
+                    &mut w,
+                    doc_text,
+                    sel_lo,
+                    sel_hi,
+                    chars_per_line as usize,
+                    char_width,
+                    line_height,
+                    sel_color,
+                    content_h,
+                    scroll_px,
+                );
+            }
+        }
+
+        dw.swap();
+    }
+
+    /// Update document content (text runs + cursor + selection).
+    /// Falls back to full rebuild if data buffer exceeds 75% usage.
+    /// Marks N_DOC_TEXT, N_CURSOR, and any selection nodes as changed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_document_content(
+        &mut self,
+        fb_width: u32,
+        fb_height: u32,
+        title_bar_h: u32,
+        shadow_depth: u32,
+        text_inset_x: u32,
+        text_inset_top: u32,
+        chrome_bg: drawing::Color,
+        chrome_border: drawing::Color,
+        chrome_title_color: drawing::Color,
+        chrome_clock_color: drawing::Color,
+        bg_color: drawing::Color,
+        text_color: drawing::Color,
+        cursor_color: drawing::Color,
+        sel_color: drawing::Color,
+        font_size: u16,
+        char_width: u32,
+        line_height: u32,
+        doc_text: &[u8],
+        cursor_pos: u32,
+        sel_start: u32,
+        sel_end: u32,
+        title_label: &[u8],
+        clock_text: &[u8],
+        scroll_y: i32,
+    ) {
+        let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
+        let scene_text_color = dc(text_color);
+
+        let doc_width = fb_width.saturating_sub(2 * text_inset_x);
+        let chars_per_line = if char_width > 0 {
+            (doc_width / char_width).max(1)
+        } else {
+            80
+        };
+        let content_y = title_bar_h + shadow_depth;
+        let content_h = fb_height.saturating_sub(content_y);
+        let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
+        let scroll_px = scroll_lines as i32 * line_height as i32;
+
+        // Check data buffer usage — if >75%, fall back to full rebuild.
+        let front_data_used = {
+            let dw = self.double();
+            dw.front_data_buf().len() as u32
+        };
+
+        let threshold = (DATA_BUFFER_SIZE as u32 * 3) / 4;
+        if front_data_used > threshold {
+            self.build_editor_scene(
+                fb_width,
+                fb_height,
+                title_bar_h,
+                shadow_depth,
+                text_inset_x,
+                text_inset_top,
+                chrome_bg,
+                chrome_border,
+                chrome_title_color,
+                chrome_clock_color,
+                bg_color,
+                text_color,
+                cursor_color,
+                sel_color,
+                font_size,
+                char_width,
+                line_height,
+                doc_text,
+                cursor_pos,
+                sel_start,
+                sel_end,
+                title_label,
+                clock_text,
+                scroll_y,
+            );
+            return;
+        }
+
+        let mut dw = self.double();
+        dw.copy_front_to_back();
+
+        {
+            let mut w = dw.back();
+
+            // Remove old selection rects by truncating node count.
+            w.set_node_count(WELL_KNOWN_COUNT);
+
+            // Re-layout visible text lines.
+            let all_runs = layout_mono_lines(
+                doc_text,
+                chars_per_line as usize,
+                line_height as i16,
+                scene_text_color,
+                char_width as u16,
+                font_size,
+            );
+            let viewport_height_px = content_h as i32;
+            let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, viewport_height_px);
+
+            // Push new glyph data and text runs (replace_data = append new).
+            let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
+
+            for mut run in visible_runs {
+                let line_text = line_bytes_for_run(doc_text, &run);
+                let shaped = bytes_to_shaped_glyphs(line_text, char_width as u16);
+
+                run.glyphs = w.push_shaped_glyphs(&shaped);
+                run.glyph_count = shaped.len() as u16;
+
+                final_runs.push(run);
+            }
+
+            let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
+
+            // Update N_DOC_TEXT content.
+            {
+                let n = w.node_mut(N_DOC_TEXT);
+                n.content = Content::Text {
+                    runs: doc_runs_ref,
+                    run_count: doc_run_count,
+                    _pad: [0; 2],
+                };
+                n.content_hash = fnv1a(doc_text);
+            }
+            w.mark_changed(N_DOC_TEXT);
+
+            // Update cursor position.
+            let (cursor_line, cursor_col) =
+                byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
+            let cursor_x = (cursor_col as u32 * char_width) as i16;
+            let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+
+            {
+                let n = w.node_mut(N_CURSOR);
+                n.x = cursor_x;
+                n.y = cursor_y;
+                n.next_sibling = NULL;
+            }
+            w.mark_changed(N_CURSOR);
+
+            // Build selection rects.
+            let (sel_lo, sel_hi) = if sel_start <= sel_end {
+                (sel_start as usize, sel_end as usize)
+            } else {
+                (sel_end as usize, sel_start as usize)
+            };
+
+            if sel_lo < sel_hi {
+                allocate_selection_rects(
+                    &mut w,
+                    doc_text,
+                    sel_lo,
+                    sel_hi,
+                    chars_per_line as usize,
+                    char_width,
+                    line_height,
+                    dc(sel_color),
+                    content_h,
+                    scroll_px,
+                );
+            }
+        }
+
+        dw.swap();
+    }
+}
+
+/// Allocate selection rectangle nodes as children of N_DOC_TEXT (after
+/// the cursor node). Each line of the selection gets one rect node.
+/// Marks each new selection node as changed.
+#[allow(clippy::too_many_arguments)]
+fn allocate_selection_rects(
+    w: &mut scene::SceneWriter<'_>,
+    doc_text: &[u8],
+    sel_lo: usize,
+    sel_hi: usize,
+    chars_per_line: usize,
+    char_width: u32,
+    line_height: u32,
+    sel_color: Color,
+    content_h: u32,
+    scroll_px: i32,
+) {
+    let (sel_start_line, sel_start_col) = byte_to_line_col(doc_text, sel_lo, chars_per_line);
+    let (sel_end_line, sel_end_col) = byte_to_line_col(doc_text, sel_hi, chars_per_line);
+    let mut prev_sel_node: u16 = NULL;
+
+    for line in sel_start_line..=sel_end_line {
+        let col_start = if line == sel_start_line {
+            sel_start_col
+        } else {
+            0
+        };
+        let col_end = if line == sel_end_line {
+            sel_end_col
+        } else {
+            chars_per_line
+        };
+
+        if col_start >= col_end {
+            continue;
+        }
+
+        // Scroll-adjust selection rect y position.
+        let sel_y = line as i32 * line_height as i32 - scroll_px;
+
+        // Skip selection rects outside visible viewport.
+        if sel_y + line_height as i32 <= 0 || sel_y >= content_h as i32 {
+            continue;
+        }
+
+        if let Some(sel_id) = w.alloc_node() {
+            let n = w.node_mut(sel_id);
+            n.x = (col_start as u32 * char_width) as i16;
+            n.y = sel_y as i16;
+            n.width = ((col_end - col_start) as u32 * char_width) as u16;
+            n.height = line_height as u16;
+            n.background = sel_color;
+            n.flags = NodeFlags::VISIBLE;
+            n.next_sibling = NULL;
+
+            if prev_sel_node == NULL {
+                w.node_mut(N_CURSOR).next_sibling = sel_id;
+            } else {
+                w.node_mut(prev_sel_node).next_sibling = sel_id;
+            }
+
+            w.mark_changed(sel_id);
+            prev_sel_node = sel_id;
+        }
     }
 }
 
