@@ -909,8 +909,8 @@ pub extern "C" fn _start() -> ! {
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
                 // update_document_content handles doc text, cursor, and
-                // selection. Falls back to build_editor_scene if the
-                // data buffer exceeds 75% usage.
+                // selection. Compacts the data buffer on each call so
+                // data_used stays proportional to visible content.
                 format_time_hms(clock_seconds(), &mut time_buf);
 
                 scene.update_document_content(

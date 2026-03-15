@@ -486,7 +486,10 @@ impl SceneState {
     }
 
     /// Update document content (text runs + cursor + selection).
-    /// Falls back to full rebuild if data buffer exceeds 75% usage.
+    /// Compacts the data buffer by resetting it and re-pushing all text
+    /// data (title, clock, document). This keeps data_used proportional
+    /// to visible content regardless of how many incremental updates
+    /// have occurred — no fallback to full rebuild from data exhaustion.
     /// Marks N_DOC_TEXT, N_CURSOR, and any selection nodes as changed.
     #[allow(clippy::too_many_arguments)]
     pub fn update_document_content(
@@ -496,14 +499,14 @@ impl SceneState {
         title_bar_h: u32,
         shadow_depth: u32,
         text_inset_x: u32,
-        text_inset_top: u32,
-        chrome_bg: drawing::Color,
-        chrome_border: drawing::Color,
+        _text_inset_top: u32,
+        _chrome_bg: drawing::Color,
+        _chrome_border: drawing::Color,
         chrome_title_color: drawing::Color,
         chrome_clock_color: drawing::Color,
-        bg_color: drawing::Color,
+        _bg_color: drawing::Color,
         text_color: drawing::Color,
-        cursor_color: drawing::Color,
+        _cursor_color: drawing::Color,
         sel_color: drawing::Color,
         font_size: u16,
         char_width: u32,
@@ -530,43 +533,6 @@ impl SceneState {
         let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
         let scroll_px = scroll_lines as i32 * line_height as i32;
 
-        // Check data buffer usage — if >75%, fall back to full rebuild.
-        let front_data_used = {
-            let dw = self.double();
-            dw.front_data_buf().len() as u32
-        };
-
-        let threshold = (DATA_BUFFER_SIZE as u32 * 3) / 4;
-        if front_data_used > threshold {
-            self.build_editor_scene(
-                fb_width,
-                fb_height,
-                title_bar_h,
-                shadow_depth,
-                text_inset_x,
-                text_inset_top,
-                chrome_bg,
-                chrome_border,
-                chrome_title_color,
-                chrome_clock_color,
-                bg_color,
-                text_color,
-                cursor_color,
-                sel_color,
-                font_size,
-                char_width,
-                line_height,
-                doc_text,
-                cursor_pos,
-                sel_start,
-                sel_end,
-                title_label,
-                clock_text,
-                scroll_y,
-            );
-            return;
-        }
-
         let mut dw = self.double();
         dw.copy_front_to_back();
 
@@ -576,7 +542,44 @@ impl SceneState {
             // Remove old selection rects by truncating node count.
             w.set_node_count(WELL_KNOWN_COUNT);
 
-            // Re-layout visible text lines.
+            // ── Data buffer compaction ──────────────────────────────
+            // Reset the data buffer and re-push all text data (title,
+            // clock, document). This keeps data_used bounded to the
+            // current visible content instead of accumulating old data
+            // across incremental updates.
+            w.reset_data();
+
+            // Re-push title glyph data and TextRun.
+            let title_glyphs = bytes_to_shaped_glyphs(title_label, char_width as u16);
+            let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
+            let title_run = TextRun {
+                glyphs: title_glyph_ref,
+                glyph_count: title_glyphs.len() as u16,
+                x: 0,
+                y: 0,
+                color: dc(chrome_title_color),
+                advance: char_width as u16,
+                font_size,
+                axis_hash: 0,
+            };
+            let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
+
+            // Re-push clock glyph data and TextRun.
+            let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width as u16);
+            let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
+            let clock_run = TextRun {
+                glyphs: clock_glyph_ref,
+                glyph_count: clock_glyphs.len() as u16,
+                x: 0,
+                y: 0,
+                color: dc(chrome_clock_color),
+                advance: char_width as u16,
+                font_size,
+                axis_hash: 0,
+            };
+            let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
+
+            // Re-layout visible document text lines.
             let all_runs = layout_mono_lines(
                 doc_text,
                 chars_per_line as usize,
@@ -588,7 +591,6 @@ impl SceneState {
             let viewport_height_px = content_h as i32;
             let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, viewport_height_px);
 
-            // Push new glyph data and text runs (replace_data = append new).
             let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
 
             for mut run in visible_runs {
@@ -602,6 +604,28 @@ impl SceneState {
             }
 
             let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
+
+            // Update N_TITLE_TEXT content references (data was reset).
+            {
+                let n = w.node_mut(N_TITLE_TEXT);
+                n.content = Content::Text {
+                    runs: title_runs_ref,
+                    run_count: title_run_count,
+                    _pad: [0; 2],
+                };
+                n.content_hash = fnv1a(title_label);
+            }
+
+            // Update N_CLOCK_TEXT content references (data was reset).
+            {
+                let n = w.node_mut(N_CLOCK_TEXT);
+                n.content = Content::Text {
+                    runs: clock_runs_ref,
+                    run_count: clock_run_count,
+                    _pad: [0; 2],
+                };
+                n.content_hash = fnv1a(clock_text);
+            }
 
             // Update N_DOC_TEXT content.
             {

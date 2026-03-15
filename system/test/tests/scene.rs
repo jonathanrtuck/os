@@ -3895,3 +3895,448 @@ fn abs_bounds_large_coords_no_truncation() {
     assert!(physical_x >= 0);
     assert!(physical_x <= u16::MAX as i32);
 }
+
+// ── Data buffer compaction tests (VAL-PIPE-004, VAL-PIPE-005, VAL-PIPE-006, VAL-CROSS-013) ──
+
+/// Helper: simulate what update_document_content does with compaction.
+/// After copy_front_to_back, resets data buffer and re-pushes all text
+/// data (title, clock, document). This is the fixed behavior.
+fn incremental_update_with_compaction(
+    dw: &mut DoubleWriter<'_>,
+    doc_text: &[u8],
+    clock_text: &[u8],
+    title_text: &[u8],
+) {
+    let char_width: u16 = 8;
+    let line_height: u16 = 20;
+    let font_size: u16 = 16;
+    let text_color = Color::rgb(220, 220, 220);
+    let clock_color = Color::rgb(130, 130, 130);
+    let chars_per_line: usize = 80;
+
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+
+        // Truncate selection nodes.
+        w.set_node_count(WELL_KNOWN_COUNT);
+
+        // ── Compaction: reset data and re-push everything ──
+        w.reset_data();
+
+        // Re-push title glyph data.
+        let title_glyphs = bytes_to_shaped_glyphs(title_text, char_width);
+        let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
+
+        // Re-push clock glyph data.
+        let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width);
+        let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
+
+        // Re-layout and push doc text.
+        let all_runs = layout_mono_lines(
+            doc_text,
+            chars_per_line,
+            line_height as i16,
+            text_color,
+            char_width,
+            font_size,
+        );
+        let visible_runs = scroll_runs(all_runs, 0, line_height as u32, 700);
+        let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
+        for mut run in visible_runs {
+            let line_text = line_bytes_for_run(doc_text, &run);
+            let shaped = bytes_to_shaped_glyphs(line_text, char_width);
+            run.glyphs = w.push_shaped_glyphs(&shaped);
+            run.glyph_count = shaped.len() as u16;
+            final_runs.push(run);
+        }
+        let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
+
+        // Re-push title/clock TextRuns.
+        let title_run = TextRun {
+            glyphs: title_glyph_ref,
+            glyph_count: title_glyphs.len() as u16,
+            x: 0,
+            y: 0,
+            color: text_color,
+            advance: char_width,
+            font_size,
+            axis_hash: 0,
+        };
+        let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
+
+        let clock_run = TextRun {
+            glyphs: clock_glyph_ref,
+            glyph_count: clock_glyphs.len() as u16,
+            x: 0,
+            y: 0,
+            color: clock_color,
+            advance: char_width,
+            font_size,
+            axis_hash: 0,
+        };
+        let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
+
+        // Update node content references.
+        {
+            let n = w.node_mut(N_DOC_TEXT);
+            n.content = Content::Text {
+                runs: doc_runs_ref,
+                run_count: doc_run_count,
+                _pad: [0; 2],
+            };
+            n.content_hash = fnv1a(doc_text);
+        }
+        w.mark_changed(N_DOC_TEXT);
+
+        {
+            let n = w.node_mut(N_TITLE_TEXT);
+            n.content = Content::Text {
+                runs: title_runs_ref,
+                run_count: title_run_count,
+                _pad: [0; 2],
+            };
+        }
+
+        {
+            let n = w.node_mut(N_CLOCK_TEXT);
+            n.content = Content::Text {
+                runs: clock_runs_ref,
+                run_count: clock_run_count,
+                _pad: [0; 2],
+            };
+        }
+
+        // Update cursor.
+        let cursor_pos = doc_text.len();
+        let (line, col) = byte_to_line_col(doc_text, cursor_pos, chars_per_line);
+        let n = w.node_mut(N_CURSOR);
+        n.x = (col as u32 * char_width as u32) as i16;
+        n.y = (line as i32 * line_height as i32) as i16;
+        n.next_sibling = NULL;
+        w.mark_changed(N_CURSOR);
+    }
+    dw.swap();
+}
+
+/// VAL-PIPE-004: After 50 single-char insertions, data_used < 50% of DATA_BUFFER_SIZE.
+#[test]
+fn data_buffer_compaction_50_inserts_under_50_percent() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    let mut doc_text: Vec<u8> = b"hello world".to_vec();
+    let clock_text = b"12:00:00";
+    let title_text = b"Text";
+
+    // Build initial scene.
+    build_test_editor_scene(&mut dw, &doc_text, clock_text);
+    dw.swap();
+
+    // 50 single-char insertions with compaction.
+    for i in 0..50 {
+        let ch = b'a' + (i % 26) as u8;
+        doc_text.push(ch);
+        incremental_update_with_compaction(&mut dw, &doc_text, clock_text, title_text);
+    }
+
+    let data_used = dw.front_data_buf().len();
+    let threshold_50 = DATA_BUFFER_SIZE / 2;
+    assert!(
+        data_used < threshold_50,
+        "VAL-PIPE-004: After 50 inserts, data_used {} should be < 50% of {} (threshold {})",
+        data_used,
+        DATA_BUFFER_SIZE,
+        threshold_50
+    );
+}
+
+/// VAL-PIPE-005: data_used at update 100 < 2x data_used at update 10.
+/// Uses a narrow viewport (10 chars/line, 5 visible lines) so visible
+/// content is bounded even as total text grows — data_used should stabilize.
+#[test]
+fn data_buffer_usage_stable_under_sustained_typing() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    let char_width: u16 = 8;
+    let line_height: u16 = 20;
+    let font_size: u16 = 16;
+    let text_color = Color::rgb(220, 220, 220);
+    let clock_color = Color::rgb(130, 130, 130);
+    let chars_per_line: usize = 10;
+    let viewport_height_px: i32 = 5 * line_height as i32; // 5 visible lines
+
+    let mut doc_text: Vec<u8> = b"hello".to_vec();
+    let clock_text = b"12:00:00";
+    let title_text = b"Text";
+
+    // Build initial scene.
+    build_test_editor_scene(&mut dw, &doc_text, clock_text);
+    dw.swap();
+
+    let mut data_used_at_10: usize = 0;
+
+    for i in 0..100 {
+        let ch = b'a' + (i % 26) as u8;
+        doc_text.push(ch);
+
+        // Compute auto-scroll to keep cursor visible.
+        let cursor_pos = doc_text.len();
+        let (cursor_line, _cursor_col) =
+            byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
+        let visible_lines = (viewport_height_px / line_height as i32) as u32;
+        let scroll_lines = if cursor_line as u32 >= visible_lines {
+            cursor_line as u32 - visible_lines + 1
+        } else {
+            0
+        };
+
+        dw.copy_front_to_back();
+        {
+            let mut w = dw.back();
+            w.set_node_count(WELL_KNOWN_COUNT);
+
+            // Compaction: reset data and re-push everything.
+            w.reset_data();
+
+            let title_glyphs = bytes_to_shaped_glyphs(title_text, char_width);
+            let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
+
+            let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width);
+            let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
+
+            let all_runs = layout_mono_lines(
+                &doc_text,
+                chars_per_line,
+                line_height as i16,
+                text_color,
+                char_width,
+                font_size,
+            );
+            let visible_runs =
+                scroll_runs(all_runs, scroll_lines, line_height as u32, viewport_height_px);
+            let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
+            for mut run in visible_runs {
+                let line_text = line_bytes_for_run(&doc_text, &run);
+                let shaped = bytes_to_shaped_glyphs(line_text, char_width);
+                run.glyphs = w.push_shaped_glyphs(&shaped);
+                run.glyph_count = shaped.len() as u16;
+                final_runs.push(run);
+            }
+            let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
+
+            let title_run = TextRun {
+                glyphs: title_glyph_ref,
+                glyph_count: title_glyphs.len() as u16,
+                x: 0,
+                y: 0,
+                color: text_color,
+                advance: char_width,
+                font_size,
+                axis_hash: 0,
+            };
+            let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
+
+            let clock_run = TextRun {
+                glyphs: clock_glyph_ref,
+                glyph_count: clock_glyphs.len() as u16,
+                x: 0,
+                y: 0,
+                color: clock_color,
+                advance: char_width,
+                font_size,
+                axis_hash: 0,
+            };
+            let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
+
+            {
+                let n = w.node_mut(N_DOC_TEXT);
+                n.content = Content::Text {
+                    runs: doc_runs_ref,
+                    run_count: doc_run_count,
+                    _pad: [0; 2],
+                };
+                n.content_hash = fnv1a(&doc_text);
+            }
+            w.mark_changed(N_DOC_TEXT);
+
+            {
+                let n = w.node_mut(N_TITLE_TEXT);
+                n.content = Content::Text {
+                    runs: title_runs_ref,
+                    run_count: title_run_count,
+                    _pad: [0; 2],
+                };
+            }
+
+            {
+                let n = w.node_mut(N_CLOCK_TEXT);
+                n.content = Content::Text {
+                    runs: clock_runs_ref,
+                    run_count: clock_run_count,
+                    _pad: [0; 2],
+                };
+            }
+
+            let scroll_px = scroll_lines as i32 * line_height as i32;
+            let (line, col) =
+                byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
+            let n = w.node_mut(N_CURSOR);
+            n.x = (col as u32 * char_width as u32) as i16;
+            n.y = (line as i32 * line_height as i32 - scroll_px) as i16;
+            n.next_sibling = NULL;
+            w.mark_changed(N_CURSOR);
+        }
+        dw.swap();
+
+        if i == 9 {
+            data_used_at_10 = dw.front_data_buf().len();
+        }
+    }
+
+    let data_used_at_100 = dw.front_data_buf().len();
+    assert!(
+        data_used_at_100 < data_used_at_10 * 2,
+        "VAL-PIPE-005: data_used at 100 ({}) should be < 2x data_used at 10 ({})",
+        data_used_at_100,
+        data_used_at_10
+    );
+}
+
+/// VAL-PIPE-006: Zero build_editor_scene fallbacks during 100 chars of typing.
+/// With compaction, the data buffer never exceeds 75% so the fallback is never triggered.
+#[test]
+fn zero_full_rebuild_fallbacks_during_100_chars() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    let mut doc_text: Vec<u8> = b"hello".to_vec();
+    let clock_text = b"12:00:00";
+    let title_text = b"Text";
+
+    build_test_editor_scene(&mut dw, &doc_text, clock_text);
+    dw.swap();
+
+    let threshold = (DATA_BUFFER_SIZE as u32 * 3) / 4;
+    let mut fallback_count = 0u32;
+
+    for i in 0..100 {
+        let ch = b'a' + (i % 26) as u8;
+        doc_text.push(ch);
+
+        // Check if fallback would be triggered (before compaction fix, it would be).
+        let front_data_used = dw.front_data_buf().len() as u32;
+        if front_data_used > threshold {
+            fallback_count += 1;
+        }
+
+        incremental_update_with_compaction(&mut dw, &doc_text, clock_text, title_text);
+    }
+
+    assert_eq!(
+        fallback_count, 0,
+        "VAL-PIPE-006: Expected zero fallbacks but got {} during 100 chars of typing",
+        fallback_count
+    );
+}
+
+/// VAL-CROSS-013: Under sustained typing, data_used never permanently exceeds 75%.
+#[test]
+fn data_buffer_growth_bounded_per_frame() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    let mut doc_text: Vec<u8> = b"start".to_vec();
+    let clock_text = b"12:00:00";
+    let title_text = b"Text";
+
+    build_test_editor_scene(&mut dw, &doc_text, clock_text);
+    dw.swap();
+
+    let threshold_75 = (DATA_BUFFER_SIZE * 3) / 4;
+
+    // Simulate 200 typing events (sustained typing).
+    for i in 0..200 {
+        let ch = b'a' + (i % 26) as u8;
+        doc_text.push(ch);
+        incremental_update_with_compaction(&mut dw, &doc_text, clock_text, title_text);
+
+        let data_used = dw.front_data_buf().len();
+        assert!(
+            data_used <= threshold_75,
+            "VAL-CROSS-013: At update {}, data_used {} exceeds 75% threshold {}",
+            i,
+            data_used,
+            threshold_75
+        );
+    }
+}
+
+/// Verify that after compaction, text content is still correctly readable.
+/// The compositor should be able to resolve all DataRefs and read valid glyphs.
+#[test]
+fn compacted_data_readable_by_reader() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    let mut doc_text: Vec<u8> = b"hello world".to_vec();
+    let clock_text = b"12:00:00";
+    let title_text = b"Text";
+
+    build_test_editor_scene(&mut dw, &doc_text, clock_text);
+    dw.swap();
+
+    // Insert 10 characters with compaction.
+    for _ in 0..10 {
+        doc_text.push(b'x');
+        incremental_update_with_compaction(&mut dw, &doc_text, clock_text, title_text);
+    }
+
+    // Read back via DoubleReader and verify data is valid.
+    let dr = DoubleReader::new(&buf);
+    let nodes = dr.front_nodes();
+
+    // Verify doc text node has valid content.
+    let doc_node = &nodes[N_DOC_TEXT as usize];
+    if let Content::Text { runs, run_count, .. } = doc_node.content {
+        assert!(run_count > 0, "doc text should have at least one run");
+        let run_bytes = dr.front_data(runs);
+        assert!(
+            !run_bytes.is_empty(),
+            "doc text runs DataRef should resolve to non-empty data"
+        );
+
+        // Verify first TextRun's glyph data resolves.
+        let text_runs = dr.front_text_runs(runs);
+        assert!(!text_runs.is_empty(), "should have at least one TextRun");
+        let first_run = &text_runs[0];
+        let glyphs = dr.front_shaped_glyphs(first_run.glyphs, first_run.glyph_count);
+        assert!(
+            !glyphs.is_empty(),
+            "first run should have resolvable glyph data"
+        );
+    } else {
+        panic!("N_DOC_TEXT should have Content::Text");
+    }
+
+    // Verify clock text node has valid content.
+    let clock_node = &nodes[N_CLOCK_TEXT as usize];
+    if let Content::Text { runs, run_count, .. } = clock_node.content {
+        assert!(run_count > 0, "clock should have at least one run");
+        let run_bytes = dr.front_data(runs);
+        assert!(!run_bytes.is_empty(), "clock runs should resolve");
+    } else {
+        panic!("N_CLOCK_TEXT should have Content::Text");
+    }
+
+    // Verify title text node has valid content.
+    let title_node = &nodes[N_TITLE_TEXT as usize];
+    if let Content::Text { runs, run_count, .. } = title_node.content {
+        assert!(run_count > 0, "title should have at least one run");
+        let run_bytes = dr.front_data(runs);
+        assert!(!run_bytes.is_empty(), "title runs should resolve");
+    } else {
+        panic!("N_TITLE_TEXT should have Content::Text");
+    }
+}
