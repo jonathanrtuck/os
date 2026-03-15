@@ -1,0 +1,28 @@
+{
+  "featureId": "move-typography-policy-to-core",
+  "reviewedAt": "2026-03-15T14:30:00.000Z",
+  "commitId": "4b162aa",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean structural refactoring. typography.rs and fallback.rs moved from libraries/fonts/src/ to services/core/ via git rename (98% similarity). All crate:: imports correctly updated to fonts:: for cross-crate access. typography.rs uses super::fallback::ContentType correctly (sibling module resolution). Core main.rs adds #[path] declarations following existing scene_state.rs pattern. Three test files updated to #[path]-include from Core service location with extern crate alloc for no_std module compatibility. fonts lib.rs stripped of pub mod fallback and pub mod typography, leaving only rasterize (pure rendering pipeline). build.rs rerun-if-changed updated to remove moved files from fonts source list. No stale references (fonts::fallback, fonts::typography) remain anywhere in system/. 1462 tests pass, full build succeeds. No semantic changes to any type, function, or test assertion.",
+    "issues": [
+      {
+        "file": "system/build.rs",
+        "line": 246,
+        "severity": "non_blocking",
+        "description": "Missing rerun-if-changed for Core submodules (fallback.rs, typography.rs). If these files change but main.rs doesn't, Cargo won't trigger a rebuild of the Core ELF. However, this is a pre-existing pattern — scene_state.rs also lacks a rerun-if-changed entry. The build.rs PROGRAMS loop only watches main.rs for each program. Not introduced by this change."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "build.rs lacks cargo:rerun-if-changed directives for #[path]-included submodules of services. Core's scene_state.rs, fallback.rs, and typography.rs are all compiled by the build.rs rustc invocation but not tracked for incremental rebuilds. Editing a submodule without touching main.rs won't trigger a rebuild. This is a pre-existing gap across all services, not specific to this feature.",
+      "evidence": "system/build.rs PROGRAMS loop (line ~153-168) only emits rerun-if-changed for main.rs per program. No entries exist for services/core/scene_state.rs, services/core/fallback.rs, or services/core/typography.rs. Grep for 'rerun-if-changed.*core' and 'rerun-if-changed.*scene_state' returns 0 matches."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. typography.rs and fallback.rs correctly moved from fonts library to Core service. All imports updated (crate:: → fonts:: for cross-crate, super:: for sibling module). Three test files use #[path] includes from Core. No stale references. fonts library is now purely shaping + rasterization + metrics. 1462 tests pass, build succeeds. One non-blocking observation: build.rs doesn't track #[path] submodules for incremental rebuilds, but this is a pre-existing pattern across all services."
+}

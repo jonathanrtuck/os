@@ -1,0 +1,39 @@
+{
+  "featureId": "move-layout-helpers-to-core",
+  "reviewedAt": "2026-03-15T14:15:00.000Z",
+  "commitId": "12a0e91",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean structural refactor. All 5 layout helper functions (layout_mono_lines, byte_to_line_col, scroll_runs, line_bytes_for_run, bytes_to_shaped_glyphs) were correctly removed from libraries/scene/lib.rs and added to services/core/scene_state.rs with identical signatures and bodies (visibility changed from pub to module-private, which is correct). The compositor received a local copy of bytes_to_shaped_glyphs (the only one of the 5 it didn't already have). Test file received local copies of all 5 functions, matching the preferred approach from the feature description. Scene lib now contains only data types, serialization, and data utility functions (fnv1a, build_parent_map, abs_bounds, diff_scenes). Import statements updated correctly in all affected files. 4 files changed, 326 insertions, 161 deletions. Build succeeds, 1,462 tests pass.",
+    "issues": [
+      {
+        "file": "system/services/compositor/scene_state.rs",
+        "line": 464,
+        "severity": "non_blocking",
+        "description": "Pre-existing signature divergence: compositor's line_bytes_for_run takes an extra _chars_per_line: usize parameter (unused, prefixed with _) that the canonical version in core/scene_state.rs and the original in scene/lib.rs never had. This pre-dates the current commit but means the 'same' function exists with 2 different signatures across the codebase. Not introduced by this change, but worth noting for future cleanup when compositor's local copies are addressed."
+      },
+      {
+        "file": "system/test/tests/scene.rs",
+        "line": 3,
+        "severity": "non_blocking",
+        "description": "The 5 layout helper functions are now duplicated in 3 locations (core/scene_state.rs, test/tests/scene.rs, and partially in compositor/scene_state.rs). This was the explicitly preferred approach from the feature description to avoid creating a new shared library. The functions are small and pure, so drift risk is low, but any future bug fix would need to be applied in all locations."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "The refactor-worker SKILL.md contains an example handoff that is nearly identical to this feature's actual handoff output (same function names, same structure). This suggests the skill was written or updated with this exact feature in mind. The skill procedure was followed correctly — the worker identified source/target, grepped for callers, planned edit sequence, executed the move, and verified completeness. skillFeedback confirms followedProcedure: true with no deviations.",
+      "evidence": "Compare .factory/skills/refactor-worker/SKILL.md 'Example Handoff' section with the actual handoff at handoffs/2026-03-15T13-59-27-631Z__move-layout-helpers-to-core__169a56f4-1985-4e98-a695-4c927dfbde41.json — nearly word-for-word match."
+    },
+    {
+      "area": "conventions",
+      "observation": "The compositor maintains its own local copies of layout helpers with a slightly different signature for line_bytes_for_run (extra _chars_per_line parameter). AGENTS.md documents that functions should have identical signatures when moved, but doesn't address pre-existing divergent local copies in other services. This is a minor convention gap — when multiple services independently maintain copies of the same logic, there's no documented convention for keeping them in sync or flagging divergences.",
+      "evidence": "compositor/scene_state.rs:464 has fn line_bytes_for_run<'a>(text: &'a [u8], run: &TextRun, _chars_per_line: usize) while core/scene_state.rs:457 has fn line_bytes_for_run<'a>(text: &'a [u8], run: &TextRun) — different arity."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The move of 5 layout helpers from scene lib to Core service was executed correctly. Function signatures and bodies are identical to the originals (with appropriate pub→private visibility change). Scene lib is now clean of layout computation. All import paths updated, build succeeds, 1,462 tests pass. Two non-blocking observations: (1) pre-existing signature divergence in compositor's line_bytes_for_run, (2) function duplication across 3 sites (explicitly preferred approach). No bugs, no missed edge cases, no behavioral changes."
+}

@@ -1,0 +1,85 @@
+{
+  "milestone": "foundation-cleanup",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cd system/test && cargo test -- --test-threads=1",
+      "exitCode": 0,
+      "summary": "1462 tests passed, 0 failed, 0 ignored"
+    },
+    "build": {
+      "passed": true,
+      "command": "cd system && cargo build --release",
+      "exitCode": 0,
+      "summary": "Full release build succeeded with no errors"
+    },
+    "fmt": {
+      "passed": false,
+      "command": "cd system && cargo +nightly fmt --check",
+      "exitCode": 1,
+      "summary": "Pre-existing formatting diffs in build.rs and kernel/metrics.rs. Not introduced by this milestone's changes. Non-blocking."
+    }
+  },
+  "reviewsSummary": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "move-layout-helpers-to-core",
+      "severity": "non_blocking",
+      "description": "Pre-existing signature divergence: compositor's line_bytes_for_run has extra unused _chars_per_line parameter not present in Core's version. Will be addressed when compositor local copies are cleaned up in milestone 2."
+    },
+    {
+      "featureId": "move-layout-helpers-to-core",
+      "severity": "non_blocking",
+      "description": "Layout helper functions duplicated in 3 locations (core, test, compositor). Explicitly preferred approach per feature description to avoid creating a new shared library. Functions are small/pure, drift risk is low."
+    },
+    {
+      "featureId": "move-typography-policy-to-core",
+      "severity": "non_blocking",
+      "description": "build.rs lacks rerun-if-changed for #[path]-included submodules (fallback.rs, typography.rs, scene_state.rs). Pre-existing pattern across all services — editing a submodule without touching main.rs won't trigger rebuild."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Added build-system.md documenting the rerun-if-changed gap for #[path]-included service submodules",
+      "sourceFeature": "move-typography-policy-to-core"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add guidance: When writing feature descriptions for dead-code-removal tasks, defer to grep evidence ('grep to verify each item before removal') rather than asserting specific items to keep or remove. The codebase state may have changed since the description was written.",
+      "evidence": "Feature delete-dead-drawing-code incorrectly stated RasterScratch and GlyphOutline were 'used by SVG rasterizer' and should be kept. Worker's grep disproved this — SVG rasterizer uses its own SvgRasterScratch type. Worker correctly followed grep evidence over description.",
+      "isSystemic": false
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Consider renaming test/tests/shaping.rs to fonts.rs and updating its doc comment from 'Tests for the shaping library' to 'Tests for the fonts library' for naming consistency after the library rename.",
+      "evidence": "system/test/tests/shaping.rs:1 still reads '//! Tests for the shaping library (HarfRust integration)' despite the library being renamed to 'fonts'. This was explicitly optional per feature spec but creates a naming inconsistency.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "The refactor-worker skill was written or updated with the move-layout-helpers-to-core feature in mind (example handoff matches actual output).",
+      "reason": "Informational observation, no action needed. A well-calibrated skill example is a feature, not a gap."
+    },
+    {
+      "observation": "services.yaml was correctly updated during rename-shaping-to-fonts.",
+      "reason": "No gap — this confirms correct behavior, not an issue to address."
+    },
+    {
+      "observation": "Compositor has divergent local copy of line_bytes_for_run with extra unused parameter.",
+      "reason": "Pre-existing issue that will be addressed in milestone 2 (drawing-consolidation) when compositor local copies are cleaned up. Not actionable in this milestone."
+    }
+  ],
+  "previousRound": null
+}
