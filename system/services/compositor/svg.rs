@@ -12,6 +12,9 @@
 // to prevent overflow; final results truncated to i32. Safe for SVG
 // coordinates up to ~524,000 at 1× scale (see svg_coord_to_fp docs).
 
+/// Vertical oversampling factor for anti-aliasing.
+const OVERSAMPLE_Y: i32 = 8;
+
 /// Maximum path commands after parsing.
 const SVG_MAX_COMMANDS: usize = 512;
 /// Maximum line segments after flattening cubic Beziers.

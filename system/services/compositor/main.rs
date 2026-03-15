@@ -24,6 +24,8 @@ mod damage;
 mod compositing;
 #[path = "cursor.rs"]
 mod cursor;
+#[path = "svg.rs"]
+mod svg;
 
 use alloc::{boxed::Box, vec};
 
@@ -88,9 +90,9 @@ fn rasterize_svg_icon(
     sys::print(label);
 
     let path_ptr = unsafe {
-        let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+        let layout = alloc::alloc::Layout::new::<svg::SvgPath>();
 
-        alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgPath
+        alloc::alloc::alloc_zeroed(layout) as *mut svg::SvgPath
     };
 
     if path_ptr.is_null() {
@@ -100,16 +102,16 @@ fn rasterize_svg_icon(
     }
 
     let scratch_ptr = unsafe {
-        let layout = alloc::alloc::Layout::new::<drawing::SvgRasterScratch>();
+        let layout = alloc::alloc::Layout::new::<svg::SvgRasterScratch>();
 
-        alloc::alloc::alloc_zeroed(layout) as *mut drawing::SvgRasterScratch
+        alloc::alloc::alloc_zeroed(layout) as *mut svg::SvgRasterScratch
     };
 
     if scratch_ptr.is_null() {
         sys::print(b"compositor: SVG scratch alloc failed\n");
 
         unsafe {
-            let layout = alloc::alloc::Layout::new::<drawing::SvgPath>();
+            let layout = alloc::alloc::Layout::new::<svg::SvgPath>();
 
             alloc::alloc::dealloc(path_ptr as *mut u8, layout);
         }
@@ -117,18 +119,18 @@ fn rasterize_svg_icon(
         return None;
     }
 
-    let result = match drawing::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
+    let result = match svg::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
         Ok(()) => {
             let icon_size = (icon_w * icon_h) as usize;
             let mut icon_cov = vec![0u8; icon_size];
 
-            match drawing::svg_rasterize(
+            match svg::svg_rasterize(
                 unsafe { &*path_ptr },
                 unsafe { &mut *scratch_ptr },
                 &mut icon_cov,
                 icon_w,
                 icon_h,
-                drawing::SVG_FP_ONE,
+                svg::SVG_FP_ONE,
                 0,
                 0,
             ) {
@@ -161,11 +163,11 @@ fn rasterize_svg_icon(
     unsafe {
         alloc::alloc::dealloc(
             path_ptr as *mut u8,
-            alloc::alloc::Layout::new::<drawing::SvgPath>(),
+            alloc::alloc::Layout::new::<svg::SvgPath>(),
         );
         alloc::alloc::dealloc(
             scratch_ptr as *mut u8,
-            alloc::alloc::Layout::new::<drawing::SvgRasterScratch>(),
+            alloc::alloc::Layout::new::<svg::SvgRasterScratch>(),
         );
     }
     result

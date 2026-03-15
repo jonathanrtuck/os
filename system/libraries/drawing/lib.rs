@@ -21,14 +21,8 @@
 
 #![no_std]
 
-pub use protocol::DirtyRect;
-
 include!("gamma_tables.rs");
 include!("palette.rs");
-include!("png.rs");
-include!("rasterizer.rs");
-include!("svg.rs");
-include!("truetype.rs");
 /// A color in canonical RGBA order. Converted to the target pixel format
 /// at the point of writing — callers always work in RGBA regardless of the
 /// underlying buffer format.

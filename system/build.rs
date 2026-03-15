@@ -121,7 +121,7 @@ fn main() {
         &drawing_src,
         &drawing_rlib,
         "drawing",
-        &[("protocol", &protocol_rlib)],
+        &[],
         &[],
     );
 
@@ -228,7 +228,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", sys_src.display());
     println!("cargo:rerun-if-changed={}", virtio_src.display());
     println!("cargo:rerun-if-changed={}", drawing_src.display());
-    for inc in &["truetype.rs", "rasterizer.rs", "palette.rs", "gamma_tables.rs", "svg.rs", "png.rs"] {
+    for inc in &["palette.rs", "gamma_tables.rs"] {
         println!(
             "cargo:rerun-if-changed={}",
             manifest_dir.join("libraries/drawing").join(inc).display()
