@@ -97,17 +97,6 @@ fn main() {
 
     rustc_rlib(&rustc, &scene_src, &scene_rlib, "scene", &[]);
 
-    let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
-    let drawing_rlib = out_dir.join("libdrawing.rlib");
-
-    rustc_rlib(
-        &rustc,
-        &drawing_src,
-        &drawing_rlib,
-        "drawing",
-        &[("protocol", &protocol_rlib)],
-    );
-
     let ipc_src = manifest_dir.join("libraries/ipc/lib.rs");
     let ipc_rlib = out_dir.join("libipc.rlib");
 
@@ -117,6 +106,27 @@ fn main() {
     // These use `cargo build` to resolve dependency graphs, then we link the
     // resulting rlibs alongside hand-compiled libraries.
     let shaping_output = cargo_lib(&manifest_dir.join("libraries/shaping"));
+
+    // Drawing library depends on protocol and shaping (for rasterize API).
+    // The shaping library has transitive dependencies (read-fonts, etc.) in
+    // deps_dir (aarch64-unknown-none), plus proc-macro dependencies in the
+    // host release deps dir.
+    let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
+    let drawing_rlib = out_dir.join("libdrawing.rlib");
+    let shaping_host_deps = manifest_dir
+        .join("libraries/shaping/target/release/deps");
+
+    rustc_rlib_with_search(
+        &rustc,
+        &drawing_src,
+        &drawing_rlib,
+        "drawing",
+        &[
+            ("protocol", &protocol_rlib),
+            ("shaping", &shaping_output.rlib),
+        ],
+        &[&shaping_output.deps_dir, &shaping_host_deps],
+    );
 
     // Step 2: Compile all non-init programs.
     // fuzz-helper must be compiled before fuzz (fuzz embeds it).
@@ -136,6 +146,7 @@ fn main() {
         if needs_drawing {
             externs.push(("drawing", drawing_rlib.clone()));
             externs.push(("scene", scene_rlib.clone()));
+            externs.push(("shaping", shaping_output.rlib.clone()));
         }
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
@@ -157,10 +168,9 @@ fn main() {
             ));
         }
 
-        // Add shaping library search paths for programs that need drawing
-        // (core service and compositor will use shaping in later features).
+        // Add shaping library search paths for programs that need drawing.
         let search_paths: Vec<&Path> = if needs_drawing {
-            vec![&shaping_output.deps_dir]
+            vec![&shaping_output.deps_dir, &shaping_host_deps]
         } else {
             vec![]
         };
@@ -292,6 +302,47 @@ fn rustc_bin(
         "failed to build {}",
         output.file_name().unwrap().to_str().unwrap()
     );
+}
+/// Compile a Rust source file as an rlib with additional library search paths.
+fn rustc_rlib_with_search(
+    rustc: &str,
+    src: &PathBuf,
+    output: &PathBuf,
+    crate_name: &str,
+    externs: &[(&str, &PathBuf)],
+    search_paths: &[&Path],
+) {
+    let mut cmd = Command::new(rustc);
+
+    cmd.arg("--target=aarch64-unknown-none")
+        .arg("--edition=2021")
+        .arg("--crate-type=rlib")
+        .arg(format!("--crate-name={crate_name}"))
+        .args(["-C", "panic=abort"])
+        .args(["-C", "opt-level=s"]);
+
+    if let Some(first) = externs.first() {
+        if let Some(dir) = first.1.parent() {
+            cmd.arg(format!("-L{}", dir.display()));
+        }
+    }
+
+    for path in search_paths {
+        cmd.arg(format!("-L{}", path.display()));
+    }
+
+    for &(name, path) in externs {
+        cmd.arg(format!("--extern={name}={}", path.display()));
+    }
+
+    let status = cmd
+        .arg("-o")
+        .arg(output)
+        .arg(src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to invoke rustc for {crate_name}: {e}"));
+
+    assert!(status.success(), "failed to build {crate_name}.rlib");
 }
 /// Compile a Rust source file as an rlib.
 fn rustc_rlib(

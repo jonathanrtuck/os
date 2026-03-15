@@ -7,6 +7,81 @@
 //! All math is integer/fixed-point. No floating point in the rasterizer itself.
 
 use read_fonts::{FontRef, TableProvider};
+use read_fonts::tables::cmap::Cmap;
+
+// ---------------------------------------------------------------------------
+// Font metric helpers
+// ---------------------------------------------------------------------------
+
+/// Basic font metrics extracted from the hhea and head tables.
+pub struct FontMetrics {
+    pub units_per_em: u16,
+    /// hhea ascent (positive above baseline, in font units).
+    pub ascent: i16,
+    /// hhea descent (negative below baseline, in font units).
+    pub descent: i16,
+    /// hhea line gap (in font units).
+    pub line_gap: i16,
+}
+
+/// Extract basic font metrics from raw font data.
+pub fn font_metrics(font_data: &[u8]) -> Option<FontMetrics> {
+    let font = FontRef::new(font_data).ok()?;
+    let head = font.head().ok()?;
+    let hhea = font.hhea().ok()?;
+
+    Some(FontMetrics {
+        units_per_em: head.units_per_em(),
+        ascent: hhea.ascender().to_i16(),
+        descent: hhea.descender().to_i16(),
+        line_gap: hhea.line_gap().to_i16(),
+    })
+}
+
+/// Look up the glyph ID for a Unicode codepoint using the font's cmap table.
+pub fn glyph_id_for_char(font_data: &[u8], codepoint: char) -> Option<u16> {
+    let font = FontRef::new(font_data).ok()?;
+    let cmap = font.cmap().ok()?;
+
+    cmap_lookup(&cmap, codepoint as u32)
+}
+
+/// Look up a codepoint in the cmap table, trying all supported subtables.
+fn cmap_lookup(cmap: &Cmap, codepoint: u32) -> Option<u16> {
+    for record in cmap.encoding_records() {
+        if let Ok(subtable) = record.subtable(cmap.offset_data()) {
+            if let Some(gid) = subtable.map_codepoint(codepoint) {
+                let id = gid.to_u32() as u16;
+                if id > 0 {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Get horizontal metrics for a glyph: (advance_width, left_side_bearing).
+pub fn glyph_h_metrics(font_data: &[u8], glyph_id: u16) -> Option<(u16, i16)> {
+    let font = FontRef::new(font_data).ok()?;
+    let hmtx = font.hmtx().ok()?;
+    let hhea = font.hhea().ok()?;
+    let num_h_metrics = hhea.number_of_h_metrics();
+
+    if (glyph_id as u16) < num_h_metrics {
+        let metrics = hmtx.h_metrics();
+        let m = metrics.get(glyph_id as usize)?;
+        Some((m.advance.get(), m.side_bearing.get()))
+    } else {
+        let metrics = hmtx.h_metrics();
+        let last = metrics.get(num_h_metrics as usize - 1)?;
+        let advance = last.advance.get();
+        let lsb_data = hmtx.left_side_bearings();
+        let lsb_idx = (glyph_id as usize).checked_sub(num_h_metrics as usize)?;
+        let lsb = lsb_data.get(lsb_idx).map(|v| v.get()).unwrap_or(0);
+        Some((advance, lsb))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public types

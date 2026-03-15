@@ -26,6 +26,7 @@
 
 extern crate alloc;
 extern crate scene;
+extern crate shaping;
 
 #[path = "scene_state.rs"]
 mod scene_state;
@@ -357,11 +358,11 @@ pub extern "C" fn _start() -> ! {
                 config.mono_font_len as usize,
             )
         };
-        if let Some(ttf) = drawing::TrueTypeFont::new(font_data) {
-            let upem = ttf.units_per_em();
-            let asc = ttf.hhea_ascent() as i32;
-            let desc = ttf.hhea_descent() as i32;
-            let gap = ttf.hhea_line_gap() as i32;
+        if let Some(fm) = shaping::rasterize::font_metrics(font_data) {
+            let upem = fm.units_per_em;
+            let asc = fm.ascent as i32;
+            let desc = fm.descent as i32;
+            let gap = fm.line_gap as i32;
             let size = FONT_SIZE;
             let ascent_px = ((asc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
             let descent_px = ((-desc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
@@ -372,8 +373,8 @@ pub extern "C" fn _start() -> ! {
             };
             let line_h = ascent_px + descent_px + gap_px;
             // For monospace: use hmtx advance of space glyph.
-            let space_gid = ttf.glyph_index(' ').unwrap_or(0);
-            let (advance_fu, _) = ttf.glyph_h_metrics(space_gid).unwrap_or((0, 0));
+            let space_gid = shaping::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
+            let (advance_fu, _) = shaping::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
             let char_w = (advance_fu as u32 * size + upem as u32 / 2) / upem as u32;
 
             unsafe {

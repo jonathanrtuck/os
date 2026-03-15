@@ -21,6 +21,8 @@
 
 #![no_std]
 
+extern crate shaping;
+
 pub use protocol::DirtyRect;
 
 include!("gamma_tables.rs");
@@ -68,11 +70,10 @@ pub const STEM_DARKENING_LUT: [u8; 256] = {
     lut
 };
 
-const GLYPH_FIRST: u8 = 0x20;
-const GLYPH_LAST: u8 = 0x7E;
-const GLYPH_COUNT: usize = (GLYPH_LAST - GLYPH_FIRST + 1) as usize; // 95
 const GLYPH_MAX_W: usize = 48;
 const GLYPH_MAX_H: usize = 48;
+/// Number of printable ASCII glyphs cached (0x20..=0x7E).
+const ASCII_CACHE_COUNT: usize = 95;
 /// Per-glyph coverage buffer size. Must accommodate the intermediate
 /// oversampled raster (GLYPH_MAX_W * OVERSAMPLE_X * GLYPH_MAX_H) since
 /// rasterize() uses the same buffer for the oversampled coverage map before
@@ -110,8 +111,8 @@ pub struct Color {
 /// Each glyph buffer is GLYPH_MAX_W × OVERSAMPLE_X × GLYPH_MAX_H = 48×6×48 = 13 824 bytes
 /// to accommodate the 6× oversampled intermediate raster used by subpixel rendering.
 pub struct GlyphCache {
-    glyphs: [CachedGlyph; GLYPH_COUNT],
-    coverage: [u8; GLYPH_COUNT * GLYPH_BUF_SIZE],
+    glyphs: [CachedGlyph; ASCII_CACHE_COUNT],
+    coverage: [u8; ASCII_CACHE_COUNT * GLYPH_BUF_SIZE],
     pub line_height: u32,
     /// Distance from top of line to baseline, in pixels. Derived from hhea ascent.
     pub ascent: u32,
@@ -247,11 +248,11 @@ impl GlyphCache {
     /// Returns 3-channel (RGB) subpixel coverage: 3 bytes per pixel
     /// (R, G, B coverage), stored row-major. Total length = width * height * 3.
     pub fn get(&self, ch: u8) -> Option<(&CachedGlyph, &[u8])> {
-        if ch < GLYPH_FIRST || ch > GLYPH_LAST {
+        if ch < 0x20 || ch > 0x7E {
             return None;
         }
 
-        let idx = (ch - GLYPH_FIRST) as usize;
+        let idx = (ch - 0x20) as usize;
         let g = &self.glyphs[idx];
         let len = (g.width * g.height) as usize * 3; // 3 channels (RGB)
         let cov = &self.coverage[g.buf_offset..g.buf_offset + len];
@@ -259,23 +260,30 @@ impl GlyphCache {
         Some((g, cov))
     }
     /// Rasterize all printable ASCII glyphs into this cache in place.
-    /// Caller provides scratch space (~60 KiB) to avoid stack overflow.
+    ///
+    /// Uses the shaping library's rasterizer (read-fonts for outline extraction,
+    /// scanline algorithm for coverage generation). The `font_data` is raw font
+    /// file bytes.
     ///
     /// With subpixel rendering, the rasterizer writes 3-channel (RGB)
     /// coverage: width × height × 3 bytes per glyph. The GLYPH_BUF_SIZE
     /// accommodates the oversampled intermediate (which is always larger).
-    pub fn populate(&mut self, font: &TrueTypeFont, size_px: u32, scratch: &mut RasterScratch) {
-        let upem = font.units_per_em();
-        // Compute ascent and descent from hhea table metrics (font units → pixels).
-        let asc_fu = font.hhea_ascent() as i32;
-        let desc_fu = font.hhea_descent() as i32; // negative
-        let gap_fu = font.hhea_line_gap() as i32;
-        // Scale to pixels: ascent * size_px / units_per_em (ceil for ascent).
+    pub fn populate(&mut self, font_data: &[u8], size_px: u32) {
+        use shaping::rasterize;
+
+        // Extract font metrics via shaping's rasterize module.
+        let metrics = match rasterize::font_metrics(font_data) {
+            Some(m) => m,
+            None => return,
+        };
+
+        let upem = metrics.units_per_em;
+        let asc_fu = metrics.ascent as i32;
+        let desc_fu = metrics.descent as i32; // negative
+        let gap_fu = metrics.line_gap as i32;
         let ascent_px = scale_fu_ceil(asc_fu, size_px, upem);
-        // descent is negative in font units; negate to get positive pixel value.
         let descent_px = scale_fu_ceil(-desc_fu, size_px, upem);
         let gap_px = scale_fu(gap_fu, size_px, upem);
-        // Ensure non-negative.
         let gap_px = if gap_px < 0 { 0 } else { gap_px as u32 };
 
         self.ascent = ascent_px as u32;
@@ -283,17 +291,30 @@ impl GlyphCache {
         self.size_px = size_px;
         self.line_height = self.ascent + self.descent + gap_px;
 
-        for i in 0..GLYPH_COUNT {
-            let ch = (GLYPH_FIRST + i as u8) as char;
+        let mut scratch = rasterize::RasterScratch::zeroed();
+
+        for i in 0..ASCII_CACHE_COUNT {
+            let codepoint = (0x20u8 + i as u8) as char;
+            // Look up glyph ID for this codepoint via shaping's rasterize module.
+            let glyph_id = match rasterize::glyph_id_for_char(font_data, codepoint) {
+                Some(id) => id,
+                None => continue,
+            };
             let buf_offset = i * GLYPH_BUF_SIZE;
             let buf = &mut self.coverage[buf_offset..buf_offset + GLYPH_BUF_SIZE];
-            let mut raster = RasterBuffer {
+            let mut raster = rasterize::RasterBuffer {
                 data: buf,
                 width: GLYPH_MAX_W as u32,
                 height: GLYPH_MAX_H as u32,
             };
 
-            if let Some(m) = font.rasterize(ch, size_px, &mut raster, &mut *scratch) {
+            if let Some(m) = rasterize::rasterize(
+                font_data,
+                glyph_id,
+                size_px as u16,
+                &mut raster,
+                &mut scratch,
+            ) {
                 self.glyphs[i] = CachedGlyph {
                     width: m.width,
                     height: m.height,
@@ -316,8 +337,8 @@ impl GlyphCache {
                 bearing_y: 0,
                 advance: 0,
                 buf_offset: 0,
-            }; GLYPH_COUNT],
-            coverage: [0u8; GLYPH_COUNT * GLYPH_BUF_SIZE],
+            }; ASCII_CACHE_COUNT],
+            coverage: [0u8; ASCII_CACHE_COUNT * GLYPH_BUF_SIZE],
             line_height: 0,
             ascent: 0,
             descent: 0,
@@ -1322,99 +1343,11 @@ impl TextLayout {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Proportional text rendering
-// ---------------------------------------------------------------------------
-
 fn abs(x: i32) -> i32 {
     if x < 0 {
         -x
     } else {
         x
-    }
-}
-
-/// Draw a byte string using per-glyph advance widths from a GlyphCache.
-///
-/// Unlike the monospace `draw_string` helper in the compositor, this function
-/// uses each glyph's individual advance width for variable-pitch text layout.
-/// If a codepoint has no cached glyph (outside 0x20..=0x7E), the pen advances
-/// by the space glyph's advance width (fallback) without crashing.
-///
-/// Returns the final pen X position (total advance of all glyphs).
-pub fn draw_proportional_string(
-    fb: &mut Surface,
-    x: u32,
-    y: u32,
-    text: &[u8],
-    cache: &GlyphCache,
-    color: Color,
-) -> u32 {
-    draw_proportional_string_kerned(fb, x, y, text, cache, color, None)
-}
-/// Draw a proportional string with optional GPOS kerning from the given font.
-///
-/// If `font` is `Some`, kerning adjustments from the GPOS table are applied
-/// between each pair of adjacent glyphs, producing tighter spacing for pairs
-/// like "AV", "To", "We". If `font` is `None`, no kerning is applied.
-pub fn draw_proportional_string_kerned(
-    fb: &mut Surface,
-    x: u32,
-    y: u32,
-    text: &[u8],
-    cache: &GlyphCache,
-    color: Color,
-    font: Option<&TrueTypeFont>,
-) -> u32 {
-    let baseline_y = y as i32 + cache.ascent as i32;
-    let mut cx = x as i32;
-    // Fallback advance: use space glyph width (first cached glyph).
-    let fallback_advance = match cache.get(b' ') {
-        Some((g, _)) => g.advance,
-        None => 8, // absolute fallback
-    };
-    let mut prev_glyph_index: Option<u16> = None;
-
-    for &byte in text {
-        // Look up current glyph index for kerning.
-        let cur_glyph_index = if font.is_some() {
-            font.unwrap().glyph_index(byte as char)
-        } else {
-            None
-        };
-
-        // Apply kerning adjustment between previous and current glyphs.
-        if let (Some(f), Some(prev), Some(cur)) = (font, prev_glyph_index, cur_glyph_index) {
-            let kern_fu = f.kern_advance(prev, cur);
-
-            if kern_fu != 0 {
-                let kern_px = scale_fu(kern_fu as i32, cache.size_px, f.units_per_em());
-
-                cx += kern_px;
-            }
-        }
-
-        if let Some((glyph, coverage)) = cache.get(byte) {
-            if glyph.width > 0 && glyph.height > 0 {
-                let gx = cx + glyph.bearing_x;
-                let gy = baseline_y - glyph.bearing_y;
-
-                fb.draw_coverage(gx, gy, coverage, glyph.width, glyph.height, color);
-            }
-
-            cx += glyph.advance as i32;
-        } else {
-            // Missing glyph: advance by fallback width, don't crash.
-            cx += fallback_advance as i32;
-        }
-
-        prev_glyph_index = cur_glyph_index;
-    }
-
-    if cx < 0 {
-        0
-    } else {
-        cx as u32
     }
 }
 

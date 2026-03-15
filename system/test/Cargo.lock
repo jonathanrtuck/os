@@ -42,6 +42,7 @@ name = "drawing"
 version = "0.1.0"
 dependencies = [
  "protocol",
+ "shaping",
 ]
 
 [[package]]

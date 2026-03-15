@@ -153,6 +153,37 @@ Read these before making any design suggestions:
 - Workarounds (retry loops, defensive checks) are acceptable as defense-in-depth but do NOT close the bug. The root cause investigation continues.
 - Check for `Status: open-bug` entries in the journal at session start.
 
+## Rust Formatting Convention (MANDATORY)
+
+All `.rs` files follow standard Rust community conventions. Mechanical formatting is handled by `rustfmt` (config in `system/rustfmt.toml`); file layout is enforced by convention.
+
+### Mechanical formatting (rustfmt)
+
+A PostToolUse hook (`.claude/hooks/rustfmt-post-edit.sh`) runs `rustfmt --edition 2021` on every `.rs` file after Edit or Write. Manual runs: `rustfmt --edition 2021 <file>` or `cargo +nightly fmt` from `system/`.
+
+`system/rustfmt.toml` enables two nightly features:
+- `group_imports = "StdExternalCrate"` — separates std, external, and local imports with blank lines
+- `imports_granularity = "Crate"` — merges imports from the same crate into one `use` statement
+
+### File layout convention
+
+Every `.rs` file follows this order:
+
+1. **Module doc comment** (`//!`)
+2. **Imports** (`use` statements, grouped by rustfmt)
+3. **Constants and statics**
+4. **Types in dependency order, each co-located with its `impl` blocks** — define a type, then immediately its `impl` block(s), before the next type. Within `impl` blocks: constructors first (`new`, `from_*`), then public methods, then private methods.
+5. **Free functions**
+6. **Tests** (`#[cfg(test)]` module)
+
+**Co-located, not types-first.** Do NOT group all type definitions at the top with all `impl` blocks below (C header style). Each type lives next to its implementation. Types appear in dependency order: if type B uses type A, define A first.
+
+### What this means in practice
+
+- When creating a new file, follow the layout above.
+- When editing an existing file, match its current layout. If the file uses the old types-first pattern, re-lay it out to co-located style while you're there.
+- `rustfmt` handles all whitespace, indentation, line wrapping, trailing commas, and brace placement. Do not fight it.
+
 ## Visual Testing (MANDATORY)
 
 **Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself.

@@ -14,6 +14,7 @@
 
 extern crate alloc;
 extern crate scene;
+extern crate shaping;
 
 #[path = "scene_render.rs"]
 mod scene_render;
@@ -199,10 +200,11 @@ pub extern "C" fn _start() -> ! {
             config.mono_font_len as usize,
         )
     };
-    let mono_ttf = drawing::TrueTypeFont::new(mono_font_data).unwrap_or_else(|| {
+    // Validate font data is parseable via shaping library.
+    if shaping::rasterize::font_metrics(mono_font_data).is_none() {
         sys::print(b"compositor: font parse failed\n");
         sys::exit();
-    });
+    }
     let mut mono_cache: Box<drawing::GlyphCache> = unsafe {
         let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
         let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
@@ -214,18 +216,7 @@ pub extern "C" fn _start() -> ! {
 
         Box::from_raw(ptr)
     };
-    let mut scratch: Box<drawing::RasterScratch> = unsafe {
-        let layout = alloc::alloc::Layout::new::<drawing::RasterScratch>();
-        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::RasterScratch;
-
-        if ptr.is_null() {
-            sys::print(b"compositor: scratch alloc failed\n");
-            sys::exit();
-        }
-
-        Box::from_raw(ptr)
-    };
-    mono_cache.populate(&mono_ttf, FONT_SIZE, &mut scratch);
+    mono_cache.populate(mono_font_data, FONT_SIZE);
     let mono_cache_ptr = Box::into_raw(mono_cache);
 
     sys::print(b"     monospace font rasterized\n");
@@ -240,7 +231,7 @@ pub extern "C" fn _start() -> ! {
             core::slice::from_raw_parts(offset as *const u8, config.prop_font_len as usize)
         };
 
-        if let Some(prop_ttf) = drawing::TrueTypeFont::new(prop_font_data) {
+        if shaping::rasterize::font_metrics(prop_font_data).is_some() {
             let mut prop_cache: Box<drawing::GlyphCache> = unsafe {
                 let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
                 let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
@@ -253,7 +244,7 @@ pub extern "C" fn _start() -> ! {
                 Box::from_raw(ptr)
             };
 
-            prop_cache.populate(&prop_ttf, FONT_SIZE, &mut scratch);
+            prop_cache.populate(prop_font_data, FONT_SIZE);
 
             prop_cache_ptr = Box::into_raw(prop_cache);
 
@@ -262,8 +253,6 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"     prop font parse failed, using mono\n");
         }
     }
-    drop(scratch);
-
     // Check for image config (we don't decode it — core handles mode toggle,
     // but we may need the decoded pixels for image viewer rendering).
     // For now, skip — image viewer support can be added later via a scene

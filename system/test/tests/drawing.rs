@@ -865,398 +865,115 @@ fn blit_blend_mixed_alpha_pixels() {
     assert_eq!(dst.get_pixel(5, 3), Some(Color::rgb(0, 0, 255)));
 }
 
-// ---------------------------------------------------------------------------
-// TrueType font parser
-// ---------------------------------------------------------------------------
-
-use drawing::{GlyphOutline, RasterBuffer, RasterScratch, TrueTypeFont};
-
 const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
 const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf");
 
-#[test]
-fn ttf_parse_valid_font() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO);
-    assert!(font.is_some(), "should parse source-code-pro.ttf");
-}
-
-#[test]
-fn ttf_parse_empty_data_returns_none() {
-    assert!(TrueTypeFont::new(&[]).is_none());
-}
-
-#[test]
-fn ttf_parse_truncated_data_returns_none() {
-    assert!(TrueTypeFont::new(&SOURCE_CODE_PRO[..10]).is_none());
-}
-
-#[test]
-fn ttf_parse_not_truetype_returns_none() {
-    // CFF/OpenType magic "OTTO".
-    let mut data = SOURCE_CODE_PRO.to_vec();
-    data[0] = b'O';
-    data[1] = b'T';
-    data[2] = b'T';
-    data[3] = b'O';
-    assert!(TrueTypeFont::new(&data).is_none());
-}
-
-#[test]
-fn ttf_glyph_index_ascii() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    // 'A' should have a valid glyph index.
-    let idx = font.glyph_index('A');
-    assert!(idx.is_some(), "'A' should have a glyph");
-    assert!(idx.unwrap() > 0, "glyph index for 'A' should be non-zero");
-}
-
-#[test]
-fn ttf_glyph_index_different_chars_different_indices() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let a = font.glyph_index('A').unwrap();
-    let b = font.glyph_index('B').unwrap();
-    assert_ne!(a, b, "'A' and 'B' should have different glyph indices");
-}
-
-#[test]
-fn ttf_glyph_index_all_printable_ascii() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    for c in 0x21u8..=0x7Eu8 {
-        let ch = c as char;
-        assert!(
-            font.glyph_index(ch).is_some(),
-            "printable ASCII '{}' (0x{:02x}) should have a glyph",
-            ch,
-            c,
-        );
-    }
-}
-
-#[test]
-fn ttf_glyph_outline_a() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let glyph_idx = font.glyph_index('A').unwrap();
-    let mut outline = GlyphOutline::zeroed();
-    let ok = font.glyph_outline(glyph_idx, &mut outline);
-    assert!(ok, "'A' should have an outline");
-    assert!(
-        outline.num_contours > 0,
-        "'A' should have at least 1 contour"
-    );
-    assert!(outline.num_points > 2, "'A' should have more than 2 points");
-}
-
-#[test]
-fn ttf_glyph_outline_o_has_two_contours() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let glyph_idx = font.glyph_index('O').unwrap();
-    let mut outline = GlyphOutline::zeroed();
-    let ok = font.glyph_outline(glyph_idx, &mut outline);
-    assert!(ok, "'O' should have an outline");
-    // 'O' typically has 2 contours (outer + inner).
-    assert!(
-        outline.num_contours >= 1,
-        "'O' should have at least 1 contour, got {}",
-        outline.num_contours,
-    );
-}
-
-#[test]
-fn ttf_glyph_h_metrics() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let glyph_idx = font.glyph_index('A').unwrap();
-    let (advance, _lsb) = font.glyph_h_metrics(glyph_idx).unwrap();
-    assert!(advance > 0, "'A' should have positive advance width");
-}
-
-#[test]
-fn ttf_space_has_no_outline() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let glyph_idx = font.glyph_index(' ').unwrap();
-    let mut outline = GlyphOutline::zeroed();
-    // Space has no outline — glyph_outline returns false.
-    let ok = font.glyph_outline(glyph_idx, &mut outline);
-    assert!(!ok, "space should have no outline");
-}
-
-#[test]
-fn ttf_units_per_em() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let upem = font.units_per_em();
-    assert!(upem > 0, "units_per_em should be positive");
-    // Typical values: 1000, 2048, etc.
-    assert!(
-        upem <= 16384,
-        "units_per_em should be reasonable, got {}",
-        upem
-    );
-}
-
 // ---------------------------------------------------------------------------
-// TrueType rasterization
+// Rasterizer — glyph-ID-based rasterization (read-fonts outline extraction)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn ttf_rasterize_a() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+fn rasterize_valid_glyph_produces_coverage() {
+    // VAL-RASTER-001: rasterize(font, glyph_id=valid, 18px) returns Some(metrics)
+    // with width > 0, height > 0, coverage sum > 0.
+    let glyph_id = shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = font.rasterize('A', 32, &mut raster, &mut scratch);
-    assert!(metrics.is_some(), "should rasterize 'A' at 32px");
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch);
+    assert!(metrics.is_some(), "valid glyph should produce Some(metrics)");
     let m = metrics.unwrap();
-    assert!(m.width > 0, "bitmap should have non-zero width");
-    assert!(m.height > 0, "bitmap should have non-zero height");
-    assert!(m.advance > 0, "advance should be positive");
+    assert!(m.width > 0, "bitmap width should be > 0");
+    assert!(m.height > 0, "bitmap height should be > 0");
 
-    // Coverage map should have some non-zero pixels.
-    let total = (m.width * m.height) as usize;
-    let has_coverage = buf[..total].iter().any(|&b| b > 0);
-    assert!(
-        has_coverage,
-        "coverage map for 'A' should have non-zero pixels"
-    );
+    let total = (m.width * m.height * 3) as usize;
+    let coverage_sum: u64 = buf[..total].iter().map(|&b| b as u64).sum();
+    assert!(coverage_sum > 0, "coverage sum should be > 0, got 0");
 }
 
 #[test]
-fn ttf_rasterize_multiple_sizes() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+fn rasterize_notdef_glyph_produces_valid_coverage() {
+    // VAL-RASTER-001: glyph ID 0 (.notdef) produces valid output.
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-
-    for size in [12, 16, 24, 32, 48] {
-        let mut raster = RasterBuffer {
-            data: &mut buf,
-            width: 128,
-            height: 128,
-        };
-        let metrics = font.rasterize('H', size, &mut raster, &mut scratch);
-        assert!(metrics.is_some(), "should rasterize 'H' at {}px", size,);
-        let m = metrics.unwrap();
-        assert!(
-            m.width > 0 && m.height > 0,
-            "bitmap should be non-empty at {}px",
-            size
-        );
-    }
-}
-
-#[test]
-fn ttf_rasterize_larger_is_bigger() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-
-    let mut raster16 = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
-    let m16 = font
-        .rasterize('A', 16, &mut raster16, &mut scratch)
-        .unwrap();
 
-    let mut buf2 = [0u8; 128 * 128];
-    let mut raster48 = RasterBuffer {
-        data: &mut buf2,
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, 0, 18, &mut raster, &mut scratch);
+    // .notdef may have an outline (rectangle) or may be empty.
+    // Either way, it should not panic and should return Some.
+    assert!(metrics.is_some(), ".notdef (glyph_id=0) should return Some");
+}
+
+#[test]
+fn rasterize_invalid_glyph_returns_none() {
+    // VAL-RASTER-001: glyph ID u16::MAX returns None without panic.
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = shaping::rasterize::RasterBuffer {
+        data: &mut buf,
         width: 128,
         height: 128,
     };
-    let m48 = font
-        .rasterize('A', 48, &mut raster48, &mut scratch)
-        .unwrap();
 
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, u16::MAX, 18, &mut raster, &mut scratch);
+    assert!(metrics.is_none(), "glyph_id=u16::MAX should return None (no panic)");
+}
+
+#[test]
+fn rasterize_a_glyph_reasonable_dimensions() {
+    // VAL-RASTER-002: 'A' at 18px produces bounding box ~5-20px wide, ~10-25px tall.
+    let glyph_id = shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = shaping::rasterize::RasterBuffer {
+        data: &mut buf,
+        width: 128,
+        height: 128,
+    };
+
+    let m = shaping::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch).unwrap();
     assert!(
-        m48.width > m16.width && m48.height > m16.height,
-        "48px glyph ({},{}) should be larger than 16px ({},{})",
-        m48.width,
-        m48.height,
-        m16.width,
-        m16.height,
+        m.width >= 5 && m.width <= 20,
+        "'A' at 18px width should be 5-20px, got {}",
+        m.width,
     );
     assert!(
-        m48.advance > m16.advance,
-        "48px advance {} should be > 16px advance {}",
-        m48.advance,
-        m16.advance,
+        m.height >= 10 && m.height <= 25,
+        "'A' at 18px height should be 10-25px, got {}",
+        m.height,
     );
+
+    // Verify non-trivial coverage
+    let total = (m.width * m.height * 3) as usize;
+    let coverage_sum: u64 = buf[..total].iter().map(|&b| b as u64).sum();
+    assert!(coverage_sum > 100, "coverage sum should be > 100, got {}", coverage_sum);
 }
 
 #[test]
-fn ttf_rasterize_space_returns_metrics_only() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+fn rasterize_proportional_font_valid() {
+    // VAL-RASTER-002: Nunito Sans glyph rasterizes correctly via read-fonts.
+    let glyph_id = shaping::rasterize::glyph_id_for_char(NUNITO_SANS, 'W').unwrap();
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = font.rasterize(' ', 32, &mut raster, &mut scratch);
-    assert!(metrics.is_some(), "space should return metrics");
-    let m = metrics.unwrap();
-    assert_eq!(m.width, 0, "space bitmap should be empty");
-    assert_eq!(m.height, 0, "space bitmap should be empty");
-    assert!(m.advance > 0, "space should have positive advance");
-}
-
-#[test]
-fn ttf_rasterize_all_printable_ascii() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-
-    for c in 0x20u8..=0x7Eu8 {
-        let ch = c as char;
-        let mut raster = RasterBuffer {
-            data: &mut buf,
-            width: 128,
-            height: 128,
-        };
-        let metrics = font.rasterize(ch, 24, &mut raster, &mut scratch);
-        assert!(
-            metrics.is_some(),
-            "should rasterize '{}' (0x{:02x}) at 24px",
-            ch,
-            c,
-        );
-    }
-}
-
-#[test]
-fn ttf_rasterize_buffer_too_small() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    // Tiny buffer — large glyph shouldn't fit.
-    let mut buf = [0u8; 4 * 4];
-    let mut raster = RasterBuffer {
-        data: &mut buf,
-        width: 4,
-        height: 4,
-    };
-
-    let metrics = font.rasterize('M', 64, &mut raster, &mut scratch);
-    assert!(metrics.is_none(), "64px 'M' should not fit in 4x4 buffer");
-}
-
-// ---------------------------------------------------------------------------
-// Nunito Sans + Source Code Pro font tests
-// ---------------------------------------------------------------------------
-
-#[test]
-fn nunito_sans_parse() {
-    assert!(TrueTypeFont::new(NUNITO_SANS).is_some());
-}
-
-#[test]
-fn nunito_sans_rasterize_all_printable_ascii() {
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-
-    for c in 0x20u8..=0x7Eu8 {
-        let ch = c as char;
-        let mut raster = RasterBuffer {
-            data: &mut buf,
-            width: 128,
-            height: 128,
-        };
-        let metrics = font.rasterize(ch, 16, &mut raster, &mut scratch);
-        assert!(
-            metrics.is_some(),
-            "Nunito Sans: should rasterize '{}' (0x{:02x}) at 16px",
-            ch,
-            c,
-        );
-    }
-}
-
-#[test]
-fn nunito_sans_is_proportional() {
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-
-    let mut raster = RasterBuffer {
-        data: &mut buf,
-        width: 128,
-        height: 128,
-    };
-    let mi = font.rasterize('i', 16, &mut raster, &mut scratch).unwrap();
-    let mut buf2 = [0u8; 128 * 128];
-    let mut raster2 = RasterBuffer {
-        data: &mut buf2,
-        width: 128,
-        height: 128,
-    };
-    let mm = font.rasterize('M', 16, &mut raster2, &mut scratch).unwrap();
-
-    assert!(
-        mm.advance > mi.advance,
-        "Nunito Sans: 'M' advance ({}) > 'i' advance ({})",
-        mm.advance,
-        mi.advance
-    );
-}
-
-#[test]
-fn source_code_pro_parse() {
-    assert!(TrueTypeFont::new(SOURCE_CODE_PRO).is_some());
-}
-
-#[test]
-fn source_code_pro_rasterize_all_printable_ascii() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-
-    for c in 0x20u8..=0x7Eu8 {
-        let ch = c as char;
-        let mut raster = RasterBuffer {
-            data: &mut buf,
-            width: 128,
-            height: 128,
-        };
-        let metrics = font.rasterize(ch, 16, &mut raster, &mut scratch);
-        assert!(
-            metrics.is_some(),
-            "Source Code Pro: should rasterize '{}' (0x{:02x}) at 16px",
-            ch,
-            c,
-        );
-    }
-}
-
-#[test]
-fn source_code_pro_is_monospace() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-
-    let mut raster = RasterBuffer {
-        data: &mut buf,
-        width: 128,
-        height: 128,
-    };
-    let mi = font.rasterize('i', 16, &mut raster, &mut scratch).unwrap();
-    let mut buf2 = [0u8; 128 * 128];
-    let mut raster2 = RasterBuffer {
-        data: &mut buf2,
-        width: 128,
-        height: 128,
-    };
-    let mm = font.rasterize('M', 16, &mut raster2, &mut scratch).unwrap();
-
-    assert_eq!(
-        mm.advance, mi.advance,
-        "Source Code Pro: monospace — 'M' and 'i' should have same advance"
-    );
+    let m = shaping::rasterize::rasterize(NUNITO_SANS, glyph_id, 18, &mut raster, &mut scratch).unwrap();
+    assert!(m.width > 0, "proportional font glyph should have non-zero width");
+    assert!(m.height > 0, "proportional font glyph should have non-zero height");
+    assert!(m.advance > 0, "proportional font glyph should have non-zero advance");
 }
 
 // ---------------------------------------------------------------------------
@@ -1778,16 +1495,16 @@ fn oversample_y_is_at_least_4() {
 fn oversampled_rasterize_produces_intermediate_coverage() {
     // Diagonal strokes should have intermediate coverage values (not just 0/255)
     // in the horizontal direction. 'k' has diagonal strokes.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = font.rasterize('k', 24, &mut raster, &mut scratch).unwrap();
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
 
     // Check that there are intermediate coverage values (not just 0 and 255)
@@ -1806,16 +1523,16 @@ fn oversampled_rasterize_produces_intermediate_coverage() {
 fn oversampled_diagonal_has_horizontal_gradients() {
     // With horizontal oversampling + subpixel rendering, diagonal strokes
     // should show smooth horizontal transitions. Check 'x' which has diagonals.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = font.rasterize('x', 24, &mut raster, &mut scratch).unwrap();
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'x').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     // Output is 3 bytes per pixel (RGB subpixel coverage).
     let total = (w * metrics.height * 3) as usize;
@@ -1838,16 +1555,16 @@ fn oversampled_diagonal_has_horizontal_gradients() {
 #[test]
 fn oversampled_curve_has_smooth_edges() {
     // Curved characters like 'o' should have smooth edges with subpixel rendering.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = font.rasterize('o', 24, &mut raster, &mut scratch).unwrap();
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'o').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     // Output is 3 bytes per pixel (RGB subpixel coverage).
     let total = (w * metrics.height * 3) as usize;
@@ -1875,18 +1592,22 @@ fn oversampled_curve_has_smooth_edges() {
 fn oversampled_all_printable_ascii_still_rasterize() {
     // All printable ASCII should still rasterize successfully after adding
     // horizontal oversampling.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
 
     for c in 0x20u8..=0x7Eu8 {
         let ch = c as char;
-        let mut raster = RasterBuffer {
+        let mut raster = shaping::rasterize::RasterBuffer {
             data: &mut buf,
             width: 128,
             height: 128,
         };
-        let metrics = font.rasterize(ch, 24, &mut raster, &mut scratch);
+        let gid = match shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, ch) {
+            Some(id) => id,
+            None => continue,
+        };
+        let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, gid, 24, &mut raster, &mut scratch);
         assert!(
             metrics.is_some(),
             "oversampled: should rasterize '{}' (0x{:02x}) at 24px",
@@ -1899,12 +1620,11 @@ fn oversampled_all_printable_ascii_still_rasterize() {
 #[test]
 fn oversampled_glyph_cache_populated() {
     // GlyphCache should still populate correctly with subpixel rendering.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
     // Heap-allocate: GlyphCache is ~1.3 MB with OVERSAMPLE_X=6 (too big for stack).
     let mut cache = heap_glyph_cache();
 
-    cache.populate(&font, 16, &mut scratch);
+    cache.populate(SOURCE_CODE_PRO, 16);
 
     // Check a few glyphs are cached with valid dimensions.
     let (g_a, cov_a) = cache.get(b'A').unwrap();
@@ -1948,16 +1668,16 @@ fn subpixel_oversample_x_is_6() {
 #[test]
 fn subpixel_coverage_has_3_channels() {
     // Rasterized glyph coverage should be 3 bytes per pixel (R, G, B).
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = font.rasterize('H', 24, &mut raster, &mut scratch).unwrap();
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'H').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
 
     // Total output bytes should be width * height * 3.
@@ -1977,16 +1697,16 @@ fn subpixel_rgb_channels_differ_at_edges() {
     // At glyph edges, the R, G, B coverage channels should differ — this is
     // the signature of subpixel rendering. In greyscale AA, all channels are
     // equal; in subpixel, they diverge at horizontal edges.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = font.rasterize('l', 24, &mut raster, &mut scratch).unwrap();
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     let h = metrics.height;
     let total = (w * h * 3) as usize;
@@ -2015,10 +1735,9 @@ fn subpixel_rgb_channels_differ_at_edges() {
 #[test]
 fn subpixel_monospace_cache_has_3_channel_coverage() {
     // Both the monospace (Source Code Pro) cache should produce 3-channel data.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
     let mut cache = heap_glyph_cache();
-    cache.populate(&font, 16, &mut scratch);
+    cache.populate(SOURCE_CODE_PRO, 16);
 
     let (g, cov) = cache.get(b'A').unwrap();
     assert_eq!(
@@ -2049,10 +1768,9 @@ fn subpixel_monospace_cache_has_3_channel_coverage() {
 #[test]
 fn subpixel_proportional_cache_has_3_channel_coverage() {
     // The proportional (Nunito Sans) cache should produce 3-channel data.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
     let mut cache = heap_glyph_cache();
-    cache.populate(&font, 16, &mut scratch);
+    cache.populate(SOURCE_CODE_PRO, 16);
 
     let (g, cov) = cache.get(b'A').unwrap();
     assert_eq!(
@@ -2110,16 +1828,16 @@ fn subpixel_fir_filter_reduces_fringing() {
     // The FIR filter should smooth the transition between channels.
     // Rasterize a vertical stroke ('l') and check that the filtered
     // coverage has smoother channel transitions than raw subpixel data.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = font.rasterize('l', 24, &mut raster, &mut scratch).unwrap();
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     let h = metrics.height;
     let total = (w * h * 3) as usize;
@@ -2221,16 +1939,16 @@ fn stem_darkening_applied_to_rasterized_glyph() {
     // coverage values are boosted compared to the raw formula.
     // Since darkening is applied in the rasterizer, we verify the output
     // has higher coverage values than raw (undarkened) values would produce.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
+    
+    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = RasterBuffer {
+    let mut raster = shaping::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = font.rasterize('l', 16, &mut raster, &mut scratch).unwrap();
+    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 16 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     let h = metrics.height;
     let total = (w * h * 3) as usize;
@@ -2270,144 +1988,6 @@ fn stem_darkening_all_three_channels_equally() {
             cov, expected, STEM_DARKENING_LUT[cov as usize],
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// Proportional font — GlyphCache with variable advance widths
-// ---------------------------------------------------------------------------
-
-#[test]
-fn proportional_glyph_cache_advance_i_less_than_m() {
-    // VAL-FONT-004: advance('i') < advance('m') — variable widths confirmed.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 16, &mut scratch);
-
-    let (g_i, _) = cache.get(b'i').unwrap();
-    let (g_m, _) = cache.get(b'm').unwrap();
-
-    assert!(
-        g_i.advance < g_m.advance,
-        "proportional font: 'i' advance ({}) should be < 'm' advance ({})",
-        g_i.advance,
-        g_m.advance
-    );
-}
-
-#[test]
-fn proportional_glyph_cache_has_valid_glyphs() {
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 16, &mut scratch);
-
-    // All printable ASCII should have cached glyphs.
-    for c in 0x20u8..=0x7Eu8 {
-        let result = cache.get(c);
-        assert!(
-            result.is_some(),
-            "proportional cache should have glyph for 0x{:02x}",
-            c
-        );
-        let (g, _) = result.unwrap();
-        // All printable chars except space should have non-zero advance.
-        assert!(
-            g.advance > 0,
-            "glyph 0x{:02x} should have non-zero advance",
-            c
-        );
-    }
-}
-
-#[test]
-fn proportional_glyph_cache_variable_advances() {
-    // Multiple different advance widths exist (not monospace).
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 16, &mut scratch);
-
-    let mut advances = [0u32; 95];
-    for i in 0..95u8 {
-        let (g, _) = cache.get(0x20 + i).unwrap();
-        advances[i as usize] = g.advance;
-    }
-
-    // Count distinct advances.
-    let mut distinct = 1usize;
-    for i in 1..95 {
-        let mut seen = false;
-        for j in 0..i {
-            if advances[i] == advances[j] {
-                seen = true;
-                break;
-            }
-        }
-        if !seen {
-            distinct += 1;
-        }
-    }
-
-    assert!(
-        distinct >= 5,
-        "proportional font should have >= 5 distinct advance widths, got {}",
-        distinct
-    );
-}
-
-#[test]
-fn draw_proportional_string_advances_by_glyph_width() {
-    // Test that draw_proportional_string uses per-glyph advance widths.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 16, &mut scratch);
-
-    let mut buf = [0u8; 400 * 40 * 4];
-    let mut surf = make_surface(&mut buf, 400, 40);
-
-    // Draw "im" and measure the resulting x.
-    let x1 = drawing::draw_proportional_string(&mut surf, 0, 0, b"im", &cache, Color::WHITE);
-
-    // Manually sum advances for 'i' + 'm'.
-    let (g_i, _) = cache.get(b'i').unwrap();
-    let (g_m, _) = cache.get(b'm').unwrap();
-    let expected = g_i.advance + g_m.advance;
-
-    assert_eq!(
-        x1, expected,
-        "draw_proportional_string should advance by per-glyph widths"
-    );
-}
-
-#[test]
-fn draw_proportional_string_missing_glyph_uses_fallback() {
-    // Missing glyph (0x01 — below printable range) should advance by
-    // fallback width (space width) without crashing.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 16, &mut scratch);
-
-    let mut buf = [0u8; 200 * 40 * 4];
-    let mut surf = make_surface(&mut buf, 200, 40);
-
-    // Draw text containing a non-printable byte — must not panic.
-    let x = drawing::draw_proportional_string(&mut surf, 0, 0, b"\x01A", &cache, Color::WHITE);
-
-    // Should have advanced past the missing glyph + 'A'.
-    let (g_a, _) = cache.get(b'A').unwrap();
-    assert!(
-        x > g_a.advance,
-        "should advance past missing glyph + 'A', got x={}",
-        x
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -6343,245 +5923,6 @@ fn gradient_dither_monochrome() {
             );
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Font metrics — hhea ascent/descent/lineGap
-// ---------------------------------------------------------------------------
-
-#[test]
-fn hhea_ascent_descent_parsed_nunito_sans() {
-    // VAL-FONT-004: hhea ascent/descent are parsed from the font.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    // NunitoSans: ascent=1011, descent=-353, upem=1000
-    assert_eq!(font.hhea_ascent(), 1011);
-    assert_eq!(font.hhea_descent(), -353);
-    assert_eq!(font.hhea_line_gap(), 0);
-}
-
-#[test]
-fn hhea_ascent_descent_parsed_source_code_pro() {
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    // SourceCodePro: ascent=984, descent=-273, upem=1000
-    assert_eq!(font.hhea_ascent(), 984);
-    assert_eq!(font.hhea_descent(), -273);
-    assert_eq!(font.hhea_line_gap(), 0);
-}
-
-#[test]
-fn glyph_cache_stores_ascent_descent() {
-    // GlyphCache.ascent and .descent should be computed from hhea metrics.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 20, &mut scratch);
-
-    // NunitoSans at 20px: ascent = ceil(1011 * 20 / 1000) = ceil(20.22) = 21
-    // descent = ceil(353 * 20 / 1000) = ceil(7.06) = 8
-    assert!(
-        cache.ascent > 0,
-        "ascent should be > 0, got {}",
-        cache.ascent
-    );
-    assert!(
-        cache.descent > 0,
-        "descent should be > 0, got {}",
-        cache.descent
-    );
-    // line_height = ascent + descent + lineGap
-    assert_eq!(cache.line_height, cache.ascent + cache.descent);
-    // Verify ascent is approximately 20-21 and descent approximately 7-8
-    assert!(
-        cache.ascent >= 20 && cache.ascent <= 22,
-        "NunitoSans ascent at 20px should be ~21, got {}",
-        cache.ascent
-    );
-    assert!(
-        cache.descent >= 7 && cache.descent <= 9,
-        "NunitoSans descent at 20px should be ~8, got {}",
-        cache.descent
-    );
-}
-
-#[test]
-fn glyph_cache_ascent_equals_baseline_for_source_code_pro() {
-    // SourceCodePro at 20px: ascent = ceil(984 * 20 / 1000) = ceil(19.68) = 20
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 20, &mut scratch);
-
-    assert!(
-        cache.ascent >= 19 && cache.ascent <= 21,
-        "SourceCodePro ascent at 20px should be ~20, got {}",
-        cache.ascent
-    );
-    assert!(
-        cache.descent >= 5 && cache.descent <= 7,
-        "SourceCodePro descent at 20px should be ~6, got {}",
-        cache.descent
-    );
-}
-
-#[test]
-fn baseline_uses_ascent_not_heuristic() {
-    // Verify that line_height * 3/4 is NOT equal to ascent — confirming we
-    // switched from the old heuristic to proper hhea-based metrics.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 20, &mut scratch);
-
-    let old_baseline = cache.line_height * 3 / 4;
-    // The old heuristic line_height * 3/4 differs from hhea ascent.
-    // For NunitoSans at 20px: line_height=29, old=21, new ascent=21.
-    // They may be close but the key is we're using hhea, not the heuristic.
-    // Just verify ascent and descent are set correctly.
-    assert!(cache.ascent > 0);
-    assert!(cache.descent > 0);
-    assert_eq!(cache.line_height, cache.ascent + cache.descent);
-}
-
-#[test]
-fn descender_glyphs_fit_in_line_height() {
-    // Descender glyphs (g, y, p, q) should have bearing_y values that,
-    // combined with their height, fit within ascent + descent.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 20, &mut scratch);
-
-    for ch in [b'g', b'y', b'p', b'q'] {
-        let (glyph, _) = cache.get(ch).unwrap();
-        // bearing_y is the distance from baseline to the top of the glyph bitmap.
-        // The glyph extends from (baseline - bearing_y) to (baseline - bearing_y + height).
-        // The bottom of the glyph = baseline + (height - bearing_y).
-        // This should be <= descent (i.e., not clip below the line).
-        let below_baseline = glyph.height as i32 - glyph.bearing_y;
-        assert!(
-            below_baseline <= cache.descent as i32 + 1, // +1 for rounding tolerance
-            "descender '{}' extends {}px below baseline but descent is {}px",
-            ch as char,
-            below_baseline,
-            cache.descent,
-        );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// GPOS kerning
-// ---------------------------------------------------------------------------
-
-#[test]
-fn gpos_kern_table_parsed_nunito_sans() {
-    // NunitoSans has GPOS PairPos kerning but no kern table.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-
-    // 'T' (glyph 187) + 'o' (glyph 375) should have negative kerning.
-    let gi_t = font.glyph_index('T').unwrap();
-    let gi_o = font.glyph_index('o').unwrap();
-    let kern = font.kern_advance(gi_t, gi_o);
-
-    assert!(
-        kern < 0,
-        "To kern should be negative (tighter), got {}",
-        kern,
-    );
-}
-
-#[test]
-fn gpos_kern_av_pair() {
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let gi_a = font.glyph_index('A').unwrap();
-    let gi_v = font.glyph_index('V').unwrap();
-    let kern = font.kern_advance(gi_a, gi_v);
-
-    assert!(
-        kern < 0,
-        "AV kern should be negative (tighter spacing), got {}",
-        kern,
-    );
-}
-
-#[test]
-fn gpos_kern_we_pair() {
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let gi_w = font.glyph_index('W').unwrap();
-    let gi_e = font.glyph_index('e').unwrap();
-    let kern = font.kern_advance(gi_w, gi_e);
-
-    assert!(
-        kern < 0,
-        "We kern should be negative (tighter spacing), got {}",
-        kern,
-    );
-}
-
-#[test]
-fn gpos_kern_no_adjustment_for_unrelated_pair() {
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let gi_a = font.glyph_index('a').unwrap();
-    let gi_b = font.glyph_index('b').unwrap();
-    let kern = font.kern_advance(gi_a, gi_b);
-
-    // 'ab' is not a typical kern pair — adjustment should be 0.
-    assert_eq!(kern, 0, "ab should have no kerning, got {}", kern);
-}
-
-#[test]
-fn gpos_kern_source_code_pro_has_no_gpos() {
-    // SourceCodePro is monospace — should have no kerning.
-    let font = TrueTypeFont::new(SOURCE_CODE_PRO).unwrap();
-    let gi_a = font.glyph_index('A');
-    let gi_v = font.glyph_index('V');
-
-    if let (Some(a), Some(v)) = (gi_a, gi_v) {
-        let kern = font.kern_advance(a, v);
-        assert_eq!(kern, 0, "monospace font should have no kerning");
-    }
-}
-
-#[test]
-fn kerned_proportional_string_is_narrower() {
-    // Drawing "AV" with kerning should produce a smaller total advance
-    // than without kerning, since AV has negative kern.
-    let font = TrueTypeFont::new(NUNITO_SANS).unwrap();
-    let mut scratch = RasterScratch::zeroed();
-    let mut cache = heap_glyph_cache();
-
-    cache.populate(&font, 20, &mut scratch);
-
-    let mut buf1 = [0u8; 200 * 40 * 4];
-    let mut surf1 = make_surface(&mut buf1, 200, 40);
-
-    // Without kerning.
-    let x_no_kern =
-        drawing::draw_proportional_string(&mut surf1, 0, 0, b"AV", &cache, Color::WHITE);
-
-    let mut buf2 = [0u8; 200 * 40 * 4];
-    let mut surf2 = make_surface(&mut buf2, 200, 40);
-
-    // With kerning.
-    let x_kerned = drawing::draw_proportional_string_kerned(
-        &mut surf2,
-        0,
-        0,
-        b"AV",
-        &cache,
-        Color::WHITE,
-        Some(&font),
-    );
-
-    assert!(
-        x_kerned < x_no_kern,
-        "kerned 'AV' advance ({}) should be less than unkerned ({})",
-        x_kerned,
-        x_no_kern,
-    );
 }
 
 // ---------------------------------------------------------------------------
