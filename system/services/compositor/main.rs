@@ -237,8 +237,8 @@ pub extern "C" fn _start() -> ! {
     let fb_stride = config.fb_stride;
     let fb_size = fb_stride * fb_height;
     let scene_va = config.scene_va as usize;
-    let scale_factor = if config.scale_factor > 0 {
-        config.scale_factor
+    let scale_factor: u32 = if config.scale_factor > 0 {
+        config.scale_factor as u32
     } else {
         1
     };
@@ -472,7 +472,17 @@ pub extern "C" fn _start() -> ! {
     // - Event coalescing: multiple scene updates per frame → one render
     // - Idle optimization: no renders when nothing changed
     // - Configurable cadence: timer period controls frame rate
-    let mut scheduler = frame_scheduler::FrameScheduler::new(60);
+    // - Frame budgeting: skip overdue frames after render overrun
+    // - Idle-to-active wakeup: render immediately after idle period
+    let frame_rate: u32 = if config.frame_rate > 0 {
+        config.frame_rate as u32
+    } else {
+        60
+    };
+    let mut scheduler = frame_scheduler::FrameScheduler::new(frame_rate);
+
+    // Counter frequency for converting ticks to nanoseconds.
+    let counter_freq = sys::counter_freq();
 
     // Create the first frame timer. One-shot timers that we recreate
     // on each tick (same pattern as core's clock timer).
@@ -486,11 +496,26 @@ pub extern "C" fn _start() -> ! {
 
     sys::print(b"     entering render loop (frame-scheduled)\n");
 
+    /// Convert a hardware counter value to nanoseconds.
+    #[inline]
+    fn counter_to_ns(ticks: u64, freq: u64) -> u64 {
+        if freq == 0 {
+            return 0;
+        }
+        // Compute (ticks * 1_000_000_000) / freq avoiding overflow by
+        // splitting into seconds and remainder.
+        let secs = ticks / freq;
+        let rem = ticks % freq;
+        secs * 1_000_000_000 + rem * 1_000_000_000 / freq
+    }
+
     // Render loop: wait for scene updates OR frame timer tick.
     //
     // Two-handle wait: CORE_HANDLE (scene updates) and frame timer.
-    // - Core signal: drain messages, mark dirty, DON'T render yet.
+    // - Core signal: drain messages, mark dirty. If idle-to-active
+    //   wakeup triggers, render immediately.
     // - Timer tick: if dirty → render + present; if clean → skip.
+    //   Frame budgeting: skip overdue ticks after render overrun.
     //
     // This replaces the old pattern of rendering on every scene update.
     loop {
@@ -499,13 +524,25 @@ pub extern "C" fn _start() -> ! {
         // blocked in sys::wait when there's nothing to do.
         let _ = sys::wait(&[CORE_HANDLE, frame_timer_handle], u64::MAX);
 
+        let mut should_render = false;
+
         // Check if core signaled (scene update available).
         // Poll (timeout=0) to avoid blocking — we just want to know
         // if the core channel has a pending signal.
         if sys::wait(&[CORE_HANDLE], 0).is_ok() {
             // Drain all pending notifications (coalesce multiple updates).
             while core_ch.try_recv(&mut msg) {}
-            scheduler.on_scene_update();
+
+            // Idle-to-active wakeup: if the timer hasn't fired recently
+            // (more than half a period ago), render immediately rather
+            // than making the user wait for the next tick.
+            let now_ns = counter_to_ns(sys::counter(), counter_freq);
+            if scheduler.should_render_immediately(now_ns) {
+                scheduler.on_scene_update();
+                should_render = true;
+            } else {
+                scheduler.on_scene_update();
+            }
         }
 
         // Check if frame timer fired.
@@ -523,13 +560,14 @@ pub extern "C" fn _start() -> ! {
             };
 
             // Ask the scheduler if we should render this tick.
-            if !scheduler.on_timer_tick() {
-                // Not dirty — skip rendering, wait for next event.
-                continue;
+            // Timestamp-aware: passes current time for frame budgeting.
+            let now_ns = counter_to_ns(sys::counter(), counter_freq);
+            if scheduler.on_timer_tick_at(now_ns) {
+                should_render = true;
             }
-        } else {
-            // Timer hasn't fired yet — this was a core-only wakeup.
-            // Don't render; wait for the next timer tick.
+        }
+
+        if !should_render {
             continue;
         }
 
@@ -719,6 +757,8 @@ pub extern "C" fn _start() -> ! {
         let _ = sys::channel_signal(GPU_HANDLE);
 
         // Frame complete — clear dirty flag and update counters.
-        scheduler.on_render_complete();
+        // Timestamp-aware: records render end time for frame budgeting.
+        let render_end_ns = counter_to_ns(sys::counter(), counter_freq);
+        scheduler.on_render_complete_at(render_end_ns);
     }
 }

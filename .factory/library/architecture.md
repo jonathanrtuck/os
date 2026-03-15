@@ -46,10 +46,13 @@ The compositor maintains per-node previous-frame physical bounds (`PREV_BOUNDS` 
 The compositor uses a frame scheduler (`frame_scheduler.rs`) that replaces the old event-driven render-on-every-update pattern with configurable-cadence rendering:
 
 - **Timer-driven:** A one-shot kernel timer fires at the configured cadence (default 60fps = 16.67ms). The compositor recreates the timer after each tick (same pattern as core's clock timer).
-- **Two-handle wait:** The compositor's main loop waits on BOTH `CORE_HANDLE` (scene updates) and the frame timer handle. On core signal → set dirty flag. On timer tick → render if dirty, skip if clean.
+- **Two-handle wait:** The compositor's main loop waits on BOTH `CORE_HANDLE` (scene updates) and the frame timer handle. On core signal → set dirty flag (+ check idle-to-active wakeup). On timer tick → render if dirty, skip if clean.
 - **Event coalescing:** Multiple scene updates between timer ticks produce a single render reading the latest scene state.
 - **Idle optimization:** When nothing changes, the frame timer fires but the compositor skips rendering entirely (no wasted GPU transfers).
-- **Pure state machine:** `FrameScheduler` struct tracks dirty flag, tick/render/present counts. Testable on the host without kernel syscalls.
+- **Frame budgeting:** If rendering takes >2× frame period, the scheduler skips overdue timer ticks (where `last_render_end_ns > tick_time`) — no back-to-back catch-up renders. Uses `sys::counter()` timestamps converted to nanoseconds.
+- **Idle-to-active wakeup:** When a scene update arrives after idle (last timer tick was >half-period ago), the compositor renders immediately instead of waiting for the next tick. Reduces perceived input latency after idle periods.
+- **Configurable cadence:** `CompositorConfig.frame_rate` (u16, default 60) controls the frame timer period. Supports 30fps, 60fps, 120fps, and arbitrary values. `FrameScheduler::set_cadence()` allows runtime changes.
+- **Pure state machine:** `FrameScheduler` struct tracks dirty flag, timestamps (last_tick_ns, last_render_end_ns), and tick/render/present/overrun counters. Testable on the host without kernel syscalls via `on_timer_tick_at(now)` and `on_render_complete_at(now)`.
 
 The initial frame is rendered outside the scheduler loop (before it starts) to ensure immediate display on boot.
 

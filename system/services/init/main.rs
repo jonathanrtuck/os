@@ -556,7 +556,8 @@ fn setup_display_pipeline(
         fb_stride,
         mono_font_len,
         prop_font_len,
-        scale_factor,
+        scale_factor: scale_factor as u16,
+        frame_rate: 60,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };
 

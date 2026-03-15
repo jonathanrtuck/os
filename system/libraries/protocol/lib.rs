@@ -280,6 +280,10 @@ pub mod compose {
     /// `scale_factor` is the integer display scale (1 = 1×, 2 = Retina 2×).
     /// The scene graph is in logical coordinates (physical / scale).
     /// The compositor multiplies by scale_factor during rendering.
+    /// `frame_rate` is the target frames per second (0 = default 60fps).
+    /// Both `scale_factor` and `frame_rate` are u16 to fit within the
+    /// 60-byte IPC payload limit (u32 would add 4 bytes of tail padding
+    /// due to u64 alignment).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CompositorConfig {
@@ -292,7 +296,8 @@ pub mod compose {
         pub fb_stride: u32,
         pub mono_font_len: u32,
         pub prop_font_len: u32,
-        pub scale_factor: u32,
+        pub scale_factor: u16,
+        pub frame_rate: u16,
     }
 
     // Guard: must fit within the 60-byte IPC payload.

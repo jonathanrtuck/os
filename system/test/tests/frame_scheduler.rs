@@ -364,3 +364,296 @@ fn initial_state_clean() {
     assert_eq!(sched.render_count, 0);
     assert_eq!(sched.gpu_present_count, 0);
 }
+
+// ── VAL-FRAME-004: Frame budgeting — skip overdue frames ────────────
+
+/// If rendering takes >2x frame period, the scheduler skips the missed
+/// deadline and renders at the next cadence tick. No back-to-back renders.
+#[test]
+fn frame_budgeting_skip_overdue() {
+    let period = frame_scheduler::frame_period_ns(60);
+    let mut sched = FrameScheduler::new(60);
+
+    // Frame 1: normal render at t=period.
+    sched.on_scene_update();
+    sched.on_timer_tick_at(period); // tick at t=period
+    // Rendering takes 3x period (overrun).
+    sched.on_render_complete_at(period + 3 * period);
+
+    // Scene is still dirty (new update during render).
+    sched.on_scene_update();
+
+    // Next timer tick at t=2*period — this was MISSED (render ended at t=4*period).
+    // The scheduler should detect overrun and skip it.
+    let should = sched.on_timer_tick_at(2 * period);
+    assert!(
+        !should,
+        "should skip overdue tick after render overrun"
+    );
+    assert_eq!(sched.overrun_skip_count, 1);
+
+    // Next timer tick at t=5*period — past the overrun window, should render.
+    let should = sched.on_timer_tick_at(5 * period);
+    assert!(should, "should render at tick after overrun window");
+    sched.on_render_complete_at(5 * period + period / 2);
+
+    assert_eq!(sched.render_count, 2);
+}
+
+/// No back-to-back catch-up renders after an overrun.
+#[test]
+fn no_catchup_renders_after_overrun() {
+    let period = frame_scheduler::frame_period_ns(60);
+    let mut sched = FrameScheduler::new(60);
+
+    // Normal render at t=period.
+    sched.on_scene_update();
+    sched.on_timer_tick_at(period);
+    sched.on_render_complete_at(period + period / 2);
+
+    // Scene update arrives continuously.
+    sched.on_scene_update();
+
+    // Render that takes >2x period.
+    sched.on_timer_tick_at(2 * period);
+    // Render ends well past the next tick time.
+    sched.on_render_complete_at(2 * period + 3 * period);
+
+    sched.on_scene_update();
+
+    // Two quick ticks that arrive during or after overrun:
+    let r1 = sched.on_timer_tick_at(3 * period);
+    let r2 = sched.on_timer_tick_at(4 * period);
+
+    // At least one of these should be skipped (overrun detection).
+    let total_skipped = (!r1 as u32) + (!r2 as u32);
+    assert!(
+        total_skipped >= 1,
+        "at least one tick skipped during overrun, got {total_skipped} skips"
+    );
+
+    // Next tick well past overrun should render.
+    sched.on_scene_update();
+    let should = sched.on_timer_tick_at(6 * period);
+    assert!(should, "should resume rendering after overrun");
+}
+
+// ── VAL-FRAME-007: Configurable cadence — 30fps ────────────────────
+
+/// At 30fps, period is 33.3ms, and 30 consecutive dirty ticks produce 30 renders.
+#[test]
+fn configurable_cadence_30fps() {
+    let mut sched = FrameScheduler::new(30);
+    assert_eq!(sched.period_ns(), frame_scheduler::frame_period_ns(30));
+
+    let period = sched.period_ns();
+    for i in 0..30 {
+        sched.on_scene_update();
+        let t = (i + 1) as u64 * period;
+        assert!(sched.on_timer_tick_at(t));
+        sched.on_render_complete_at(t + period / 2);
+    }
+    assert_eq!(sched.render_count, 30, "30 renders at 30fps");
+}
+
+// ── VAL-FRAME-008: Configurable cadence — 120fps ───────────────────
+
+/// At 120fps, period is 8.3ms, and 120 consecutive dirty ticks produce 120 renders.
+#[test]
+fn configurable_cadence_120fps() {
+    let mut sched = FrameScheduler::new(120);
+    assert_eq!(sched.period_ns(), frame_scheduler::frame_period_ns(120));
+
+    let period = sched.period_ns();
+    for i in 0..120 {
+        sched.on_scene_update();
+        let t = (i + 1) as u64 * period;
+        assert!(sched.on_timer_tick_at(t));
+        sched.on_render_complete_at(t + period / 2);
+    }
+    assert_eq!(sched.render_count, 120, "120 renders at 120fps");
+}
+
+/// Arbitrary cadence (e.g. 75fps) works.
+#[test]
+fn configurable_cadence_arbitrary() {
+    let sched = FrameScheduler::new(75);
+    assert_eq!(sched.period_ns(), 1_000_000_000 / 75);
+}
+
+/// set_cadence changes the period.
+#[test]
+fn set_cadence_updates_period() {
+    let mut sched = FrameScheduler::new(60);
+    assert_eq!(sched.period_ns(), frame_scheduler::frame_period_ns(60));
+
+    sched.set_cadence(30);
+    assert_eq!(sched.period_ns(), frame_scheduler::frame_period_ns(30));
+
+    sched.set_cadence(120);
+    assert_eq!(sched.period_ns(), frame_scheduler::frame_period_ns(120));
+}
+
+// ── VAL-FRAME-006: Idle-to-active wakeup — immediate render ────────
+
+/// After 500ms idle (30 ticks at 60fps), a scene update renders
+/// immediately if the timer hasn't fired within the last half-period.
+#[test]
+fn idle_to_active_immediate_wakeup() {
+    let period = frame_scheduler::frame_period_ns(60);
+    let mut sched = FrameScheduler::new(60);
+
+    // Simulate idle: 30 timer ticks with no scene updates.
+    for i in 0..30 {
+        sched.on_timer_tick_at((i + 1) as u64 * period);
+    }
+    let last_tick_time = 30 * period;
+    assert_eq!(sched.render_count, 0);
+
+    // Scene update arrives well after the last tick (>half period).
+    let update_time = last_tick_time + period; // one full period after last tick
+    assert!(
+        sched.should_render_immediately(update_time),
+        "should render immediately when timer hasn't fired recently"
+    );
+
+    sched.on_scene_update();
+    // Compositor renders immediately (doesn't wait for next tick).
+    sched.on_render_complete_at(update_time + 1_000_000);
+
+    assert_eq!(sched.render_count, 1);
+}
+
+/// Scene update shortly after a timer tick does NOT render immediately.
+#[test]
+fn no_immediate_render_right_after_tick() {
+    let period = frame_scheduler::frame_period_ns(60);
+    let mut sched = FrameScheduler::new(60);
+
+    // Timer tick just fired.
+    sched.on_timer_tick_at(period);
+
+    // Scene update arrives shortly after (within half-period).
+    let update_time = period + period / 4;
+    assert!(
+        !sched.should_render_immediately(update_time),
+        "should NOT render immediately when timer just fired"
+    );
+}
+
+// ── VAL-FRAME-010: Clock-only updates between idle periods ──────────
+
+/// With no user input for 3 seconds, exactly 3 renders occur
+/// (one per clock tick). Zero renders between ticks.
+#[test]
+fn clock_only_3_renders_in_3_seconds() {
+    let period = frame_scheduler::frame_period_ns(60);
+    let mut sched = FrameScheduler::new(60);
+    let ticks_per_second = 60;
+
+    // Simulate 3 seconds: each second, the clock produces one scene update.
+    for second in 0..3 {
+        // The clock update arrives once per second.
+        let update_tick = second * ticks_per_second;
+
+        for tick in 0..ticks_per_second {
+            let abs_tick = second * ticks_per_second + tick;
+            let t = (abs_tick + 1) as u64 * period;
+
+            if tick == update_tick - update_tick {
+                // Clock fires at the start of each second.
+                sched.on_scene_update();
+            }
+
+            if sched.on_timer_tick_at(t) {
+                sched.on_render_complete_at(t + period / 4);
+            }
+        }
+    }
+
+    assert_eq!(
+        sched.render_count, 3,
+        "exactly 3 renders for 3 clock ticks"
+    );
+}
+
+// ── VAL-FRAME-009: Frame scheduler coexists with damage tracking ────
+
+/// With frame scheduler active, a cursor-only update produces dirty rects
+/// (not full-screen) in the GPU present payload.
+///
+/// NOTE: This test validates the contract at the scheduler level.
+/// The actual dirty rect production is tested in scene_render.rs.
+/// Here we verify the scheduler doesn't interfere with partial updates.
+#[test]
+fn scheduler_preserves_partial_update_path() {
+    let period = frame_scheduler::frame_period_ns(60);
+    let mut sched = FrameScheduler::new(60);
+
+    // Single scene update (e.g., cursor blink).
+    sched.on_scene_update();
+
+    // Timer fires → should render.
+    assert!(sched.on_timer_tick_at(period));
+
+    // Compositor renders and presents (partial update with dirty rects).
+    // The scheduler just says "render" or "don't render" — it doesn't
+    // control the damage tracking path. After render, mark complete.
+    sched.on_render_complete_at(period + period / 2);
+
+    assert_eq!(sched.render_count, 1);
+    assert_eq!(sched.gpu_present_count, 1);
+}
+
+// ── Timestamp-aware tests for backward compatibility ────────────────
+
+/// on_timer_tick still works (delegates to on_timer_tick_at with now=0).
+#[test]
+fn timer_tick_without_timestamp_still_works() {
+    let mut sched = FrameScheduler::new(60);
+    sched.on_scene_update();
+    assert!(sched.on_timer_tick());
+    sched.on_render_complete();
+    assert_eq!(sched.render_count, 1);
+}
+
+/// on_render_complete still works (delegates to on_render_complete_at with now=0).
+#[test]
+fn render_complete_without_timestamp_still_works() {
+    let mut sched = FrameScheduler::new(60);
+    sched.on_scene_update();
+    sched.on_timer_tick();
+    sched.on_render_complete();
+    assert_eq!(sched.render_count, 1);
+    assert_eq!(sched.gpu_present_count, 1);
+}
+
+/// Overrun counter tracks skipped frames.
+#[test]
+fn overrun_skip_counter() {
+    let period = frame_scheduler::frame_period_ns(60);
+    let mut sched = FrameScheduler::new(60);
+
+    // Normal frame.
+    sched.on_scene_update();
+    sched.on_timer_tick_at(period);
+    sched.on_render_complete_at(period + period / 2);
+
+    // Overrun frame: render takes 3x period.
+    sched.on_scene_update();
+    sched.on_timer_tick_at(2 * period);
+    sched.on_render_complete_at(2 * period + 3 * period);
+
+    // Next tick is overdue.
+    sched.on_scene_update();
+    sched.on_timer_tick_at(3 * period);
+
+    assert!(
+        sched.overrun_skip_count >= 1,
+        "should have at least one overrun skip"
+    );
+
+    // Reset clears the counter.
+    sched.reset_counters();
+    assert_eq!(sched.overrun_skip_count, 0);
+}
