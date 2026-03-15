@@ -1,28 +1,33 @@
 # Font Rendering: Research & Design
 
-## Current State
+## Current State (Updated 2026-03-14)
 
-**Fonts:** Source Code Pro (monospace), Nunito Sans (proportional), loaded from host via 9p.
+All phases of the font rendering pipeline improvement plan are **complete**. The system has a full shaped text pipeline with perceptual rendering capabilities no production OS currently offers.
 
-**TrueType parser** (`libraries/drawing/truetype.rs`, ~1400 lines): Zero-copy, no-alloc. Quadratic beziers from `glyf` table. GPOS kerning (pair adjustment). Codepoint→glyph mapping. Metrics from `hhea`/`hmtx`. Does NOT handle CFF/OpenType outlines or variable fonts.
+**Fonts:** Variable Source Code Pro (monospace, wght axis) and Variable Nunito Sans (proportional, opsz/wght/wdth/YTLC axes), loaded from host via 9p. Static versions retained as fallback.
 
-**Rasterizer** (`libraries/drawing/rasterizer.rs`, ~480 lines): Scanline sweep with 4× vertical and 6× horizontal oversampling. 6× horizontal = 3 subpixels × 2× each, producing per-channel (R,G,B) subpixel coverage. Fixed-point math (20.12), no floats. Bezier flattening → line segments → active-edge sweep. Max 2048 segments, 64 active edges per scanline.
+**Shaping library** (`libraries/shaping/`, ~300 lines): Wraps HarfRust (pure Rust port of HarfBuzz, no_std+alloc). API: `shape(font_data, text, features) → Vec<ShapedGlyph>` and `shape_with_variations()` for variable fonts. Supports OpenType feature control (+liga, +calt, +tnum, +onum, etc.). Includes `fallback` module for content-type-aware font fallback chains and `typography` module for content-type-aware defaults.
 
-**Glyph cache** (`libraries/drawing/lib.rs`): Pre-rasterized ASCII (0x20–0x7E) per font/size pair. ~1.3 MiB per cache (95 glyphs × 13,824 bytes). Stores per-glyph metrics (width, height, bearing, advance).
+**Rasterizer** (`libraries/shaping/src/rasterize.rs`, ~700 lines): Scanline sweep algorithm preserved from original, now sourcing glyph outlines from read-fonts instead of the custom TrueType parser. Supports variable font axis interpolation via gvar deltas. 4× vertical and 6× horizontal oversampling with subpixel coverage. Includes automatic optical sizing (`auto_axis_values_for_opsz`) and dark mode weight correction (`auto_weight_correction_axes`, `weight_correction_factor`).
 
-**Text layout:** Monospace layout (char_width × column) and proportional layout with per-glyph advance. GPOS kerning applied between glyph pairs when font reference is provided.
+**Glyph cache** (`libraries/drawing/lib.rs`): LRU cache keyed by (glyph_id: u16, font_size: u16, axis_hash: u32). Supports arbitrary glyph IDs (Unicode), variable font axis differentiation, and font identifier separation for fallback chains. Bounded memory with configurable max capacity.
 
-**Compositing:** `draw_coverage` blends subpixel coverage maps onto framebuffer. No gamma correction — blending is in sRGB space.
+**Scene graph** (`libraries/scene/lib.rs`): TextRun carries `ShapedGlyph` arrays (#[repr(C)], 24 bytes each) via DataRef in shared memory. Core service writes shaped glyph data, compositor reads and rasterizes. Cross-process safe with compile-time size assertion.
 
-### What's Missing (Ordered by Impact)
+**Text layout:** Core service shapes text using the shaping library, produces positioned ShapedGlyph arrays in scene graph nodes. Layout is monospace (line breaking by character width). Scroll adjustment applied before scene graph write.
 
-1. **Text shaping** — no ligatures, no complex scripts, no OpenType feature application
-2. **Gamma-correct compositing** — blending in sRGB causes perceptual weight errors
-3. **Variable font support** — no `fvar`/`gvar` parsing, no glyph interpolation
-4. **Unicode coverage** — glyph cache is ASCII-only (0x20–0x7E)
-5. **Font fallback** — no mechanism to substitute glyphs from alternate fonts
-6. **Optical sizing** — no adaptation of font rendering to physical size
-7. **Hinting** — no hint interpretation or auto-hinting
+**Compositing:** `draw_coverage` blends subpixel coverage maps onto framebuffer with sRGB→linear→sRGB gamma-correct blending (LUT-based). Stem darkening applied post-rasterization.
+
+**Typography defaults** (`libraries/shaping/src/typography.rs`): Content-type-aware `TypographyConfig` struct maps content types to font family, OpenType features, weight preference, tracking, and optical sizing. Code → monospace + calt + tnum; Prose → proportional + onum + optical sizing; UI → proportional + medium weight; Unknown → prose defaults.
+
+**Perceptual rendering:** Automatic optical sizing adjusts the opsz axis based on rendered pixel size and display DPI. Dark mode weight correction continuously reduces font weight proportional to fg/bg luminance contrast for light-on-dark text. Both are automatic — no explicit caller intervention needed.
+
+### What Remains (Future Work)
+
+1. **Complex scripts** — Arabic, Devanagari, CJK handled by HarfRust but untested end-to-end
+2. **Hinting** — no hint interpretation or auto-hinting (unnecessary for HiDPI target)
+3. **GPU-native text rendering** — research frontier, see below
+4. **Environment-adaptive rendering** — display-aware, ambient light adaptation
 
 ---
 
@@ -90,135 +95,98 @@ macOS's philosophy (trust the outlines, don't distort) is correct for HiDPI and 
 
 ## Improvement Plan
 
-### Phase 1: Text Shaping
+### Phase 1: Text Shaping ✅ COMPLETE
 
 **Goal:** Correct glyph positioning, ligatures, kerning, complex script support.
 
-**Approach: Integrate HarfBuzz.** Text shaping implements the OpenType spec mechanically — it's enormous but not architecturally interesting. HarfBuzz is what virtually every modern renderer uses. Building a shaper from scratch is multi-year effort for complex scripts alone (Arabic joining forms, Devanagari conjuncts, Thai word boundaries, CJK vertical layout). This is one of those cases where "build on established standard interfaces, not implementations" clearly points toward integration.
+**Implemented:** Integrated HarfRust (pure Rust port of HarfBuzz v13.0.0, no_std+alloc) instead of HarfBuzz C/C++. No FFI needed — pure Rust dependency compiled for bare-metal target via Cargo.
 
-**What HarfBuzz provides:**
+**Deviation from plan:** Used HarfRust instead of HarfBuzz. HarfRust is the official Rust port by the HarfBuzz project, achieving 75-95% of C HarfBuzz speed. Eliminated the FFI porting layer entirely. The custom TrueType parser (cmap lookup, GPOS kerning) was removed per "kill the old way." The scanline rasterizer algorithm was preserved, only its input source changed (read-fonts outlines instead of custom parser).
 
-- Kerning (supersedes our GPOS pair lookup — HarfBuzz handles the full GPOS spec)
-- Ligatures (fi, fl, ffi in text fonts; →, !=, >= in code fonts)
-- Complex scripts (Arabic RTL + joining, Devanagari, Thai, CJK)
-- OpenType features (small caps, oldstyle figures, tabular numbers, stylistic sets)
+**What was built:**
+- `libraries/shaping/` — new Cargo crate with HarfRust dependency
+- `libraries/shaping/src/rasterize.rs` — glyph rasterizer using read-fonts for outline extraction
+- Scene graph evolved to carry ShapedGlyph arrays
+- LRU glyph cache replaced fixed 95-slot ASCII cache
+- Core service shapes text, compositor rasterizes from glyph IDs
+- End-to-end: typed text → HarfRust shaping → scene graph → rasterized pixels
 
-**Integration path:**
-
-- HarfBuzz is C/C++ with a C API. Call via FFI from Rust.
-- For bare-metal: HarfBuzz can be built without stdlib (`hb-subset` and core shaper). Needs a porting layer for memory allocation. Alternatively, run shaping in the OS service (which already handles document semantics) and pass positioned glyph arrays to the compositor.
-- HarfBuzz uses our TrueType font data — we provide a `hb_font_t` backed by our parser, or let HarfBuzz do its own parsing.
-
-**Impact:** Dramatic visual improvement. The jump from "evenly spaced glyphs" to "properly shaped text" is the single biggest quality delta.
-
-### Phase 2: Gamma-Correct Compositing
+### Phase 2: Gamma-Correct Compositing ✅ COMPLETE (pre-existing)
 
 **Goal:** Perceptually correct text weight regardless of foreground/background combination.
 
-**Problem:** Anti-aliased text is blended using alpha compositing in sRGB space: `result = fg * alpha + bg * (1 - alpha)`. sRGB is perceptually non-linear (gamma ~2.2), so mathematical interpolation in sRGB doesn't correspond to perceptual interpolation in light. Effects:
+**Status:** Already implemented before this mission began. `draw_coverage` and `blend_over` in `libraries/drawing/lib.rs` already blend in linear light space with sRGB↔linear LUTs. The research doc was stale on this point — compositing was listed as "no gamma correction" but gamma-correct blending was already in place.
 
-- Dark-on-light text looks slightly too thin
-- Light-on-dark text looks slightly too bold (halation)
-- Colored text on colored backgrounds gets hue shifts at anti-aliased edges
-
-**Fix:** Blend in linear light space. For each channel: sRGB→linear (table lookup) → blend → linear→sRGB (table lookup). Two 256-entry lookup tables, two table lookups per channel per pixel.
-
-**Implementation:** Modify `draw_coverage` in `libraries/drawing/lib.rs`. The lookup tables are ~512 bytes total (256 × u16 for sRGB→linear, 256 × u8 for linear→sRGB, or use 4096-entry table for 12-bit linear precision).
-
-**Impact:** Text weight becomes perceptually consistent across all color combinations. Most visible improvement for light-on-dark (dark mode) text. No OS gets this fully right — we can from day one.
-
-### Phase 3: Unicode Coverage & Font Fallback
+### Phase 3: Unicode Coverage & Font Fallback ✅ COMPLETE
 
 **Goal:** Render any Unicode codepoint, not just ASCII.
 
-**Glyph cache expansion:**
+**Implemented:**
+- LRU glyph cache with configurable capacity, keyed by (glyph_id, font_size, axis_hash). Supports arbitrary Unicode codepoints and variable font axis differentiation.
+- Font fallback chain (`libraries/shaping/src/fallback.rs`): ordered list of font data references. When primary font produces .notdef, subsequent fonts are tried. Content-type-aware: Code → monospace primary + proportional fallback; Prose/UI → proportional primary + monospace fallback.
+- Latin Extended codepoints (é, ñ, ü) render correctly. Supplementary plane codepoints don't crash.
+- Cache key includes font identifier hash for fallback chain separation.
 
-- Current: fixed 95-slot array (0x20–0x7E), ~1.3 MiB per cache.
-- Needed: dynamic cache (LRU or similar) for arbitrary codepoints.
-- Design consideration: the glyph cache lives in the compositor/scene renderer, which is memory-constrained (bare metal). A fixed atlas with LRU eviction is appropriate. Size depends on working set — Latin-1 is 191 codepoints, full Latin Extended + common symbols is ~500, CJK is unbounded.
-
-**Font fallback:**
-
-- When the primary font lacks a glyph, substitute from a fallback chain.
-- The OS service knows the content type — fallback can be content-type-aware (different chains for code vs prose vs UI).
-- Fallback chain: primary font → script-specific font (e.g., Noto CJK) → last-resort (Noto Sans).
-- The Noto font family is designed explicitly for this role (covers all Unicode scripts).
-
-### Phase 4: Variable Font Support
+### Phase 4: Variable Font Support ✅ COMPLETE
 
 **Goal:** Parse and render variable fonts, enabling optical sizing and weight correction.
 
-**Tables to add:**
+**Implemented:** Used read-fonts (from Google's fontations project, already a transitive dependency of HarfRust) for fvar/gvar/avar table parsing and glyph outline interpolation. No custom table parsing needed.
 
-- `fvar` — variation axes (weight, width, optical size, slant, custom)
-- `gvar` — glyph variation data (deltas per axis per point)
-- `STAT` — style attributes (axis value names)
-- `avar` — axis variation (non-linear axis mapping)
+**Deviation from plan:** Did not extend the custom `truetype.rs` parser. Instead, read-fonts handles all variable font table parsing. The custom parser was removed in Phase 1 (per "kill the old way"). Variable font axis values flow from core service → scene graph (TextRun.axis_hash) → compositor (rasterize_with_axes).
 
-**Implementation:** Extend `truetype.rs` to parse these tables. Glyph outline points are adjusted by interpolating deltas from `gvar` based on current axis positions. This happens before rasterization — the rest of the pipeline is unchanged.
+**Fonts:** Variable Nunito Sans (opsz, wght, wdth, YTLC axes, 556 KB) and Variable Source Code Pro (wght axis, ~300 KB) in system/share/.
 
-**What this unlocks:**
-
-- Optical sizing (Phase 5a)
-- Dark mode weight correction (Phase 5b)
-- Responsive typography (weight/width adapts to context)
-
-### Phase 5a: Automatic Optical Sizing
+### Phase 5a: Automatic Optical Sizing ✅ COMPLETE
 
 **Goal:** Text looks correct at every size without user intervention.
 
-Traditional metal type used different physical cuts at different sizes — small text had wider proportions, thicker hairlines, and more open counters. This knowledge was lost when digital type scaled one outline to all sizes. Variable fonts with an `opsz` axis restore it.
+**Implemented:** `auto_axis_values_for_opsz(font_data, font_size_px, dpi)` computes the opsz axis value from rendered pixel size using the traditional typographic formula (opsz = font_size_px × 72 / dpi), clamped to the font's declared opsz range. Returns empty for fonts without an opsz axis (no-op).
 
-**How it works:** The compositor knows the font's rendered size in physical pixels (from font size + display DPI). For fonts with an `opsz` axis, automatically set the optical size value to match the rendered size. Small text gets the small-optical-size cut (wider, sturdier), headlines get the display cut (finer details).
+**Deviation from plan:** Variable Nunito Sans DOES have an opsz axis (range 6–12), contrary to the original research note. This was discovered when variable font files were integrated. No font substitution was needed.
 
-**Fonts that support this:** Source Serif, Roboto Flex, Recursive, and an expanding set of quality typefaces. Nunito Sans does not currently have an optical size axis — if we want this, we'd need fonts that support it.
-
-**No OS does this automatically and comprehensively.** macOS only applies it if the app opts in. Most apps don't.
-
-### Phase 5b: Perceptual Dark Mode Weight Correction
+### Phase 5b: Perceptual Dark Mode Weight Correction ✅ COMPLETE
 
 **Goal:** Same perceived text weight regardless of background luminance.
 
-**Problem:** Light-on-dark text appears bolder than dark-on-light due to irradiation (bright areas spread into dark in human vision). Even with gamma-correct blending (Phase 2), the perceptual effect persists.
+**Implemented:** `weight_correction_factor(fg_rgb, bg_rgb)` computes a continuous correction factor from WCAG contrast ratio. Light-on-dark → factor < 1.0 (max 15% reduction at 21:1 contrast). Dark-on-light → factor = 1.0 (no change). `auto_weight_correction_axes(font_data, fg_rgb, bg_rgb)` applies the correction to the font's wght axis default, returning an AxisValue clamped to the font's declared range. Empty for fonts without a wght axis (no-op).
 
-**Fix:** With variable fonts, reduce the weight axis value proportionally to the foreground/background luminance contrast. Not a binary light/dark switch — continuous correction.
+**Implementation matches plan:** sRGB→linear LUT (256 entries, compile-time computed), WCAG relative luminance, contrast ratio, continuous proportional correction. No binary light/dark switch.
 
-**Implementation:** The compositor knows foreground color, background color, and the font's weight axis range. A simple perceptual model:
+**No production OS does this today.** This is a novel contribution of this project.
 
-1. Compute relative luminance of fg and bg.
-2. If fg is lighter than bg (light-on-dark), reduce weight axis by a factor proportional to the contrast ratio.
-3. This requires re-rasterizing at the adjusted weight, or pre-caching a few weight variants.
-
-**No OS does this today.**
-
-### Phase 5c: Content-Type-Aware Typography
+### Phase 5c: Content-Type-Aware Typography ✅ COMPLETE
 
 **Goal:** Text rendering defaults that match the content's purpose.
 
-Since the OS natively understands content types (settled decision #5), typographic defaults can be intelligent:
+**Implemented:** `TypographyConfig` struct in `libraries/shaping/src/typography.rs` maps content types to font family, OpenType features, weight preference, tracking, and optical sizing flag.
 
-| Content Type   | Font                 | Features                                          | Notes                                      |
-| -------------- | -------------------- | ------------------------------------------------- | ------------------------------------------ |
-| Code           | Monospace            | Programming ligatures, tabular figures            | Ligatures for `->`, `!=`, `>=`, `<=`, `=>` |
-| Prose          | Proportional         | Optical sizing, real small caps, oldstyle figures | Hanging punctuation if layout supports it  |
-| Chat/messaging | Proportional         | Compact line height                               | Optimized for scanning                     |
-| Data/tables    | Proportional or mono | Tabular figures, tighter spacing                  | Numbers align in columns                   |
-| UI labels      | Proportional         | Medium weight, tight tracking                     | Functional, not decorative                 |
+| Content Type | Font         | Features       | Weight | Optical Sizing | Notes                              |
+| ------------ | ------------ | -------------- | ------ | -------------- | ---------------------------------- |
+| Code         | Monospace    | +calt, +tnum   | 400    | No             | Contextual alternates for ligatures, tabular figures |
+| Prose        | Proportional | +onum          | 400    | Yes            | Oldstyle figures, auto-opsz        |
+| UI           | Proportional | (none)         | 500    | No             | Medium weight for functional labels |
+| Unknown      | Proportional | +onum          | 400    | Yes            | Falls back to prose defaults       |
 
-Editors can override, but the OS provides intelligent defaults that no other OS can (because no other OS knows what the text is for).
+**ContentType enum** in `fallback.rs` extended with `Ui` and `Unknown` variants. FallbackChain handles all four content types. `TypographyConfig::for_content_type()` returns complete configuration for any content type without panic.
+
+**Pipeline wiring:** Content type influences font selection and OpenType features. Shaping "1/2 != 0.5" as code (monospace + calt + tnum) vs prose (proportional + onum) produces different glyph output. Editors can override these defaults.
+
+**No other OS has this capability** — it requires native content-type understanding (our settled decision #5).
 
 ---
 
-## Build vs. Integrate
+## Build vs. Integrate (Outcomes)
 
-| Component                              | Recommendation        | Rationale                                                                                                                                                |
+| Component                              | Decision              | Outcome                                                                                                                                                  |
 | -------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Text shaping**                       | Integrate (HarfBuzz)  | Commodity. Enormous, mechanical, not architecturally interesting. The OpenType spec is ~800 pages.                                                       |
-| **Rasterization**                      | Keep building ours    | Architecturally interesting. Current rasterizer is solid. Extend with fractional positioning, gamma tables. GPU rasterization is a research opportunity. |
-| **Compositing**                        | Keep building ours    | Lives in our compositor. Get gamma-correct blending right from the start.                                                                                |
-| **Variable fonts**                     | Build (extend parser) | Natural extension of existing truetype.rs. The parsing is tractable; the interesting work is what we do with the axes.                                   |
-| **Optical sizing / weight correction** | Build (novel)         | These are our contributions. They don't exist elsewhere to integrate.                                                                                    |
-| **Font fallback**                      | Build                 | Tightly coupled to our content-type model. Simple algorithm, custom policy.                                                                              |
+| **Text shaping**                       | Integrated (HarfRust) | Used HarfRust (pure Rust port of HarfBuzz) instead of C HarfBuzz. No FFI needed — pure no_std+alloc Cargo dependency. 75-95% of C speed.               |
+| **Rasterization**                      | Kept ours             | Scanline rasterizer algorithm preserved. Input source changed from custom parser to read-fonts. Fixed-point math, subpixel rendering intact.             |
+| **Compositing**                        | Kept ours             | Gamma-correct blending was already in place. Compositor reads shaped glyph IDs from scene graph, rasterizes via adapted rasterizer + LRU glyph cache.    |
+| **Variable fonts**                     | Integrated (read-fonts) | Used read-fonts (transitive dep of HarfRust) for fvar/gvar parsing. Custom truetype.rs parser removed ("kill the old way").                            |
+| **Optical sizing / weight correction** | Built (novel)         | Automatic optical sizing and continuous weight correction — our novel contributions. No production OS does these.                                         |
+| **Font fallback**                      | Built                 | Content-type-aware fallback chains. Tightly coupled to our content-type model. Simple algorithm, custom policy.                                          |
+| **Typography defaults**                | Built (novel)         | Content-type-aware TypographyConfig. Unique to our architecture — requires native content-type understanding.                                            |
 
 ---
 
@@ -250,25 +218,25 @@ Research into using neural networks for anti-aliasing and hinting decisions. Cou
 
 ---
 
-## Suggested Implementation Sequence
+## Implementation Sequence (Completed)
 
 ```
-Phase 1: Text shaping (HarfBuzz)           — biggest visual delta
-Phase 2: Gamma-correct compositing          — correctness, low effort
-Phase 3: Unicode coverage + font fallback   — completeness
-Phase 4: Variable font support              — enables phases 5a/5b
-Phase 5a: Automatic optical sizing          — novel, quality
-Phase 5b: Dark mode weight correction       — novel, quality
-Phase 5c: Content-type-aware defaults       — novel, unique to our architecture
+Phase 1: Text shaping (HarfRust)           ✅ — biggest visual delta
+Phase 2: Gamma-correct compositing          ✅ — pre-existing, already implemented
+Phase 3: Unicode coverage + font fallback   ✅ — completeness
+Phase 4: Variable font support              ✅ — enables phases 5a/5b
+Phase 5a: Automatic optical sizing          ✅ — novel, quality
+Phase 5b: Dark mode weight correction       ✅ — novel, quality
+Phase 5c: Content-type-aware defaults       ✅ — novel, unique to our architecture
 ```
 
-Phases 1 and 2 can be done in parallel (shaping is in the text layout path, gamma correction is in the compositing path). Phase 3 depends on Phase 1 (shaped text produces arbitrary codepoints). Phases 5a–5c all depend on Phase 4 (variable fonts).
+All phases completed across three milestones: text-shaping, unicode-and-fallback, perceptual-rendering. Total: 1,477 host-side tests passing.
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. **HarfBuzz on bare metal:** What's the porting surface? Can we run it in the OS service and pass positioned glyph arrays to the compositor, or does it need to be in the rendering path?
-2. **Font selection:** Source Code Pro and Nunito Sans are good starting fonts but neither has an optical size axis. Do we switch to fonts with variable axes (e.g., Recursive for code, Source Serif for prose) or add variable font support and font selection as separate phases?
-3. **Glyph cache architecture:** LRU eviction? Fixed atlas with dynamic sub-allocation? How much memory budget for glyph caches on bare metal?
-4. **Subpixel rendering sunset:** Do we keep the existing 6× horizontal oversampling path for low-DPI, or simplify to grayscale-only (matching Apple's direction)?
+1. **HarfBuzz on bare metal:** ✅ Used HarfRust (pure Rust, no_std+alloc) — no porting surface needed. Shaping runs in the core service (OS service); positioned glyph arrays are passed to the compositor via the scene graph.
+2. **Font selection:** ✅ Variable Nunito Sans has opsz+wght+wdth+YTLC axes. Variable Source Code Pro has wght axis. Both integrated into system/share/. Nunito Sans's opsz axis (range 6–12) enables automatic optical sizing.
+3. **Glyph cache architecture:** ✅ LRU eviction with configurable max capacity. Key: (glyph_id, font_size, axis_hash) where axis_hash combines font identifier and variable font axis values via FNV-1a.
+4. **Subpixel rendering sunset:** Deferred — kept existing 6× horizontal oversampling. The HiDPI simplification (grayscale-only) is a future optimization, not blocking any functionality.

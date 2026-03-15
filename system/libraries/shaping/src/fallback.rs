@@ -17,13 +17,17 @@ use crate::{shape, Feature, ShapedGlyph};
 // Public types
 // ---------------------------------------------------------------------------
 
-/// Content type for content-type-aware font selection.
+/// Content type for content-type-aware font selection and typography defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentType {
     /// Code content — primary=monospace, fallback=proportional.
     Code,
     /// Prose content — primary=proportional, fallback=monospace.
     Prose,
+    /// UI labels — primary=proportional, medium weight, tight tracking.
+    Ui,
+    /// Unknown / unrecognized content type — falls back to prose defaults.
+    Unknown,
 }
 
 /// A shaped glyph with metadata about which font in the fallback chain
@@ -73,7 +77,7 @@ impl<'a> FallbackChain<'a> {
             ContentType::Code => FallbackChain {
                 fonts: alloc::vec![mono_font, prop_font],
             },
-            ContentType::Prose => FallbackChain {
+            ContentType::Prose | ContentType::Ui | ContentType::Unknown => FallbackChain {
                 fonts: alloc::vec![prop_font, mono_font],
             },
         }

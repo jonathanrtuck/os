@@ -20,6 +20,7 @@ pub use harfrust::Feature;
 
 pub mod fallback;
 pub mod rasterize;
+pub mod typography;
 
 /// A single shaped glyph with positioning information.
 ///
