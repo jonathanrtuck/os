@@ -115,7 +115,7 @@ Read these before making any design suggestions:
 
 **Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, unblocked by prototype-on-host strategy). GUI track: input + event loops done → editor process separation done → **read-only document mapping next** (give editor zero-copy read access) → text layout. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: Files prototype complete → integrate with OS service when document pipeline reaches that point.
 
-**System code:** `system/kernel/` (35 source files), `system/services/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu,virtio-input}}/`, `system/libraries/{sys,virtio,drawing,ipc}/`, `system/user/{echo,text-editor}/`, `system/test/` (83 drawing + 221 kernel = 304 tests across 16 files). `prototype/files/` (21 tests). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with editor process separation. 27 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (33 .rs files + 2 .S + link.ld), `system/services/{init,core,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,scene,ipc,protocol}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/` (1,462 tests across 54 files). `prototype/files/` (21 tests). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with scene graph. 28 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 
@@ -139,7 +139,7 @@ Read these before making any design suggestions:
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~1,351 tests).
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~1,462 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
@@ -162,6 +162,7 @@ All `.rs` files follow standard Rust community conventions. Mechanical formattin
 A PostToolUse hook (`.claude/hooks/rustfmt-post-edit.sh`) runs `rustfmt --edition 2021` on every `.rs` file after Edit or Write. Manual runs: `rustfmt --edition 2021 <file>` or `cargo +nightly fmt` from `system/`.
 
 `system/rustfmt.toml` enables two nightly features:
+
 - `group_imports = "StdExternalCrate"` — separates std, external, and local imports with blank lines
 - `imports_granularity = "Crate"` — merges imports from the same crate into one `use` statement
 

@@ -24,15 +24,21 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 ## What's Implemented
 
-**Kernel** — Bare-metal aarch64 microkernel. 27 syscalls, EEVDF scheduler, 4 SMP cores, demand-paged memory, channel-based IPC with shared memory.
+**Kernel** — Bare-metal aarch64 microkernel. 28 syscalls, EEVDF scheduler, 4 SMP cores, demand-paged memory, channel-based IPC with shared memory.
 
-**Display pipeline** — Four-process architecture: virtio-input driver → compositor → text editor → virtio-gpu driver. Dirty-rectangle GPU transfers (only changed regions sent, not the full framebuffer) and incremental content rendering (only changed text lines re-rendered).
+**Display pipeline** — Five-process architecture: virtio-input driver → core (OS service) → compositor → text editor → virtio-gpu driver. Scene graph in shared memory connects core (document semantics) to compositor (pixels). Dirty-rectangle GPU transfers (only changed regions sent, not the full framebuffer) and incremental content rendering (only changed text lines re-rendered).
 
-**Compositor** — Z-ordered surface compositing with translucent chrome (alpha ~170) and drop shadows (12px depth). Radial gradient background with noise texture. Title bar with context-aware document/image icons and hardware RTC wall-clock (PL031, UTC). Pure monochrome palette. Sole writer to document state — editors are read-only consumers. Procedural arrow cursor rendered at top z-order.
+**Core (OS service)** — Sole writer to document state. Builds a scene graph describing the visual structure of the document. Routes input to the active editor. Editors are read-only consumers that send write requests via IPC.
 
-**Drawing library** — TrueType font rasterizer with LCD subpixel rendering (per-channel RGB coverage, 6× horizontal oversampling), stem darkening for heavier strokes, GPOS kerning, and proper hhea baseline metrics. PNG decoder (DEFLATE, all filter types). SVG path parser and rasterizer. Porter-Duff compositing. Two fonts: Source Code Pro (monospace, editor) and Nunito Sans (proportional, chrome) at 20px.
+**Compositor** — Reads the scene graph and renders it to pixels. Z-ordered surface compositing with translucent chrome (alpha ~170) and drop shadows (12px depth). Radial gradient background with noise texture. Title bar with context-aware document/image icons and hardware RTC wall-clock (PL031, UTC). Pure monochrome palette. Procedural arrow cursor rendered at top z-order. SVG icon rasterization. Damage tracking for incremental re-rendering.
 
-**Text editor** — Cursor movement, text selection (shift+arrow), scrolling, mouse click-to-position, insert and delete. Communicates with compositor via IPC write requests.
+**Drawing library** — Surfaces, colors, Porter-Duff compositing, gamma-correct sRGB blending. PNG decoder (DEFLATE, all filter types). Monochrome palette system.
+
+**Font library** — TrueType font rasterizer with LCD subpixel rendering (per-channel RGB coverage, 6× horizontal oversampling), stem darkening for heavier strokes, GPOS kerning, proper hhea baseline metrics, and glyph cache. Two fonts: Source Code Pro (monospace, editor) and Nunito Sans (proportional, chrome) at 20px.
+
+**Scene graph library** — Typed visual node tree in shared memory. Double-buffered for lock-free producer/consumer across processes. Monospace text layout helpers.
+
+**Text editor** — Cursor movement, text selection (shift+arrow), scrolling, mouse click-to-position, insert and delete. Communicates with core via IPC write requests.
 
 **Image viewer** — Decodes and displays a PNG image. Toggle between editor and viewer with Ctrl+Tab (title bar icon updates to reflect current mode).
 
@@ -40,7 +46,7 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Assets via 9P** — Fonts, images, and icons loaded at boot from the host filesystem via virtio-9p passthrough.
 
-**Tests** — 921 tests (900 system + 21 prototype).
+**Tests** — 1,483 tests (1,462 system + 21 prototype).
 
 ## Running the Demo
 
@@ -87,10 +93,11 @@ os/
 │   ├── journal.md                   # Open threads, insights, research spikes
 │   └── architecture.mermaid         # System architecture diagram
 ├── system/                          # OS implementation (Rust, no_std)
-│   ├── kernel/                      # Microkernel (27 syscalls, EEVDF, SMP)
+│   ├── kernel/                      # Microkernel (28 syscalls, EEVDF, SMP)
 │   ├── services/
 │   │   ├── init/                    # Root task — spawns everything, wires IPC
-│   │   ├── compositor/              # Sole writer, renderer, input router
+│   │   ├── core/                    # OS service — sole writer, scene graph builder, input router
+│   │   ├── compositor/              # Scene graph renderer, surface compositing, damage tracking
 │   │   └── drivers/
 │   │       ├── virtio-gpu/          # Display output (2D commands, present loop)
 │   │       ├── virtio-input/        # Keyboard + tablet input (evdev translation)
@@ -98,15 +105,21 @@ os/
 │   │       ├── virtio-9p/           # Host filesystem passthrough
 │   │       └── virtio-console/      # Serial console (minimal)
 │   ├── libraries/
-│   │   ├── drawing/                 # Surfaces, fonts, PNG, SVG, compositing
+│   │   ├── drawing/                 # Surfaces, colors, PNG, compositing, palette
+│   │   ├── fonts/                   # TrueType rasterizer, subpixel rendering, glyph cache
+│   │   ├── scene/                   # Scene graph nodes, shared memory layout, text layout
 │   │   ├── ipc/                     # Lock-free SPSC ring buffers
+│   │   ├── protocol/                # IPC message types + payload structs (all protocols)
 │   │   ├── sys/                     # Syscall wrappers + userspace allocator
 │   │   ├── virtio/                  # MMIO transport + split virtqueue
 │   │   └── link.ld                  # Shared userspace linker script
 │   ├── user/
 │   │   ├── text-editor/             # Editor process (input → write requests)
-│   │   └── echo/                    # IPC test program
-│   ├── test/                        # Integration + stress tests
+│   │   ├── echo/                    # IPC test program
+│   │   ├── stress/                  # IPC stress test program
+│   │   ├── fuzz/                    # Fuzzing harness
+│   │   └── fuzz-helper/             # Fuzzing helper
+│   ├── test/                        # Host-side unit + integration tests (54 files)
 │   └── share/                       # Runtime assets (fonts, images, icons)
 ├── prototype/
 │   └── files/                       # Files interface prototype (macOS-backed)

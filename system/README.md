@@ -23,7 +23,7 @@ A single `cargo build -r` compiles the full system: shared libraries (sys, virti
 ## Testing
 
 ```shell
-# Host-side unit tests (632 tests across 30 files):
+# Host-side unit tests (1,462 tests across 54 files):
 cd system/test && cargo test -- --test-threads=1
 
 # QEMU smoke test (builds, boots, checks expected output):
@@ -86,7 +86,7 @@ system/
   rust-toolchain.toml        — pins Rust nightly + aarch64-unknown-none target
   DESIGN.md                  — userspace architecture record
 
-  kernel/                    — bare-metal aarch64 microkernel (35 source files)
+  kernel/                    — bare-metal aarch64 microkernel (33 .rs files + 2 .S + link.ld)
     main.rs                  — kernel entry, IRQ/SVC dispatch, boot logging
     boot.S                   — boot trampoline, page tables, EL2→EL1, secondary entry
     exception.S              — exception vectors, context save/restore
@@ -96,22 +96,33 @@ system/
     ...                      — scheduler, memory, processes, IPC, devices (see kernel/README.md)
 
   services/                  — trusted userspace (EL0, blue layer)
-    init/main.rs             — proto-OS-service (embeds ELFs, spawns drivers, display pipeline)
-    compositor/main.rs       — composites surfaces with alpha blending + TrueType demo
+    init/main.rs             — root task (embeds ELFs, spawns drivers, wires IPC)
+    core/                    — OS service (sole writer, scene graph builder, input router)
+    compositor/              — scene graph renderer, surface compositing, damage tracking
     drivers/
       virtio-blk/main.rs     — virtio block driver (interrupt-driven, reads sectors)
       virtio-console/main.rs — virtio console driver (TX, interrupt-driven)
       virtio-gpu/main.rs     — virtio-gpu 2D driver (6 commands, presents framebuffer)
+      virtio-input/main.rs   — keyboard + tablet input (evdev translation, IPC forwarding)
+      virtio-9p/main.rs      — host filesystem passthrough (9P2000.L protocol)
 
   libraries/                 — shared libraries, used by services and user programs (compiled as rlibs)
     sys/lib.rs               — syscall wrappers + GlobalAlloc + panic handler
     virtio/lib.rs            — virtio MMIO transport + split virtqueue
-    drawing/lib.rs           — drawing primitives, bitmap font, TrueType rasterizer
+    drawing/                 — surfaces, colors, PNG decoder, compositing, palette
+    fonts/                   — TrueType rasterizer, subpixel rendering, glyph cache
+    scene/lib.rs             — scene graph nodes, shared memory layout, text layout
+    ipc/lib.rs               — lock-free SPSC ring buffers on shared memory
+    protocol/lib.rs          — IPC message types + payload structs (all 9 protocol modules)
     link.ld                  — shared userspace linker script (base VA 0x400000)
 
   user/                      — untrusted userspace
+    text-editor/main.rs      — editor process (input → write requests via IPC)
     echo/main.rs             — echo process (IPC demo)
+    stress/main.rs           — IPC stress test program
+    fuzz/main.rs             — fuzzing harness
+    fuzz-helper/main.rs      — fuzzing helper
 
-  test/                      — host-side unit tests (304 tests across 16 files)
+  test/                      — host-side unit tests (1,462 tests across 54 files)
     tests/                   — test files (include kernel/library source via #[path])
 ```
