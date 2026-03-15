@@ -4,6 +4,53 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Boot Display via ramfb (2026-03-15)
+
+**Status:** Design settled. Ready to implement.
+
+### Context
+
+Currently the OS outputs diagnostic text to the host terminal (serial) and renders the UI in the QEMU window (virtio-gpu). The QEMU window is blank during boot because virtio-gpu requires userspace driver initialization. On real ARM hardware with UEFI, firmware provides an immediate framebuffer (EFI GOP) that the kernel can write to from its first instruction — boot text on the physical display is the natural default.
+
+### Design Decisions
+
+**1. Use QEMU's `ramfb` device for early boot display.**
+Add `-device ramfb` to QEMU. The kernel writes a framebuffer config to QEMU's `fw_cfg` memory-mapped interface early in boot, then writes pixels directly to a memory region. No virtio negotiation required. This mirrors the real-hardware pattern of firmware framebuffer → GPU driver handoff.
+
+**2. Serial and ramfb are independent, simultaneous channels.**
+They serve different audiences. Both are active during boot; neither suppresses the other.
+
+- **Serial (host terminal):** Full structured diagnostic log. Everything verbose — memory map, page table setup, SMP core bringup, interrupt controller init, subsystem lifecycle, timing data, warnings/errors with full context. The developer/operator channel. Survives display driver crashes.
+- **ramfb (QEMU window / physical display):** Curated user-facing narrative. A small number of milestone messages conveying boot progress at a human-meaningful level. Not implementation details.
+
+**3. Curated milestone messages (not wall-of-text, not just a logo).**
+Each message corresponds to a phase where, if it hangs, the user knows _where_ it hung. That's the practical utility beyond aesthetics. Approximate milestones:
+
+1. "Starting up" — kernel entry, MMU, memory
+2. "Starting processors" — SMP bringup (perceptible latency on real multi-core hardware)
+3. "Connecting devices" — virtio probing, storage, input (can stall on missing/slow hardware)
+4. "Loading fonts" — font file I/O; signals "about to show you something"
+5. "Preparing your workspace" — OS service, compositor init, document pipeline ready
+6. UI appears (compositor takes over via virtio-gpu)
+
+**4. Growing list with visual dimming.**
+Messages accumulate as a list. The current (most recent) message renders bright; previous messages dim to grey. This provides:
+
+- Forward-motion feel without explicit animation — contrast shift as each new line appears
+- "Where did it stop" diagnostic value — the full list is visible if boot hangs
+- Visual weight stays on the current phase, not the history
+
+**5. Hard cut to compositor.**
+When virtio-gpu takes over, the ramfb content is simply replaced. No fade, no transition. This matches what real hardware does (GPU driver takes over the display). Revisit later only if it feels wrong in practice.
+
+### Implementation Notes
+
+- The font rasterizer and drawing library already exist — rendering text to the ramfb is straightforward.
+- ramfb initialization is a kernel-level concern (fw_cfg write). The milestone messages could be driven by kernel or early userspace — TBD during implementation.
+- The milestone list should be easy to update as the boot sequence evolves.
+
+---
+
 ## Resolution-Independent Rendering + Dirty-Rect Optimization (2026-03-15)
 
 **Status:** Design session in progress. Breadboarding phase.
@@ -24,7 +71,7 @@ Decision: **Logical coordinates (option A).** Rationale:
 
 - Isolate uncertain decisions behind interfaces (founder claim). The OS service shouldn't know or care about the display's physical resolution. It thinks in points.
 - The scene graph is rebuilt on every state change anyway (keystroke, scroll, cursor move), so "resolution change requires a scene rebuild" isn't an extra cost.
-- Clean separation: OS service declares *what* to render (in its coordinate space), compositor decides *how* (at the physical resolution it knows).
+- Clean separation: OS service declares _what_ to render (in its coordinate space), compositor decides _how_ (at the physical resolution it knows).
 - Font rendering: compositor rasterizes glyphs at physical pixel size (`logical_font_size × scale_factor`). Optical sizing uses physical DPI. Both are compositor concerns.
 - Integer precision at i16 logical coordinates with 2× scale: every logical pixel maps to 2 physical pixels. Sub-pixel glyph positioning is a compositor concern (during rasterization), not a scene graph concern. macOS uses the same model.
 - Pixel-snapping for borders/dividers: compositor rounds to nearest physical pixel. Not purely multiply-by-scale — it makes snapping decisions too.
@@ -59,7 +106,7 @@ Change scene graph Node.x/y/width/height to logical coordinates. Add scale_facto
 
 ### Breadboard — Piece 1: Scene Diff + Partial GPU Transfer
 
-```
+```text
 compositor render loop (current):
   wait for scene update
   render_scene(back_fb, scene_graph)         ← repaints everything
@@ -106,6 +153,7 @@ fn diff_scenes(
 ```
 
 **Pressure point — computing absolute bounds:** Nodes store positions relative to parent. To get the absolute bounding rect for a changed node, you need to walk up the parent chain. But the scene graph uses left-child/right-sibling (no parent pointer). Options:
+
 1. Pre-compute absolute positions during the render walk and cache them.
 2. Add a `parent: NodeId` field to Node (4 bytes, increases node size).
 3. Walk the tree once to build a parent map (array of NodeId, indexed by node index).
