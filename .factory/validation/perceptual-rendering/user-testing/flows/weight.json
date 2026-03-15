@@ -1,0 +1,150 @@
+{
+  "groupId": "weight",
+  "testedAt": "2026-03-14T00:00:00Z",
+  "isolation": {
+    "testingTool": "cargo test with specific filters",
+    "workingDirectory": "/Users/user/Sites/os/system/test",
+    "fontFiles": "system/share/ (read-only)",
+    "testSources": "system/test/tests/shaping.rs (read-only)"
+  },
+  "toolsUsed": ["cargo test"],
+  "assertions": [
+    {
+      "id": "VAL-WEIGHT-001",
+      "title": "Weight correction calculation",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Search test codebase for VAL-WEIGHT-001 tests",
+          "expected": "Tests verifying correction_factor for white-on-black and black-on-white",
+          "observed": "Found 3 tests in shaping.rs: weight_correction_white_on_black_reduces_weight (line 992), weight_correction_black_on_white_no_reduction (line 1006), weight_correction_same_color_no_reduction (line 1020)"
+        },
+        {
+          "action": "Run: cargo test --test shaping weight_correction_white_on_black_reduces_weight -- --test-threads=1",
+          "expected": "Test passes — correction_factor(white_fg, black_bg) < 1.0",
+          "observed": "test weight_correction_white_on_black_reduces_weight ... ok"
+        },
+        {
+          "action": "Run: cargo test --test shaping weight_correction_black_on_white_no_reduction -- --test-threads=1",
+          "expected": "Test passes — correction_factor(black_fg, white_bg) >= 1.0",
+          "observed": "test weight_correction_black_on_white_no_reduction ... ok"
+        },
+        {
+          "action": "Run: cargo test --test shaping weight_correction_same_color_no_reduction -- --test-threads=1",
+          "expected": "Test passes — same fg/bg produces factor ~1.0",
+          "observed": "test weight_correction_same_color_no_reduction ... ok"
+        }
+      ],
+      "evidence": {
+        "testOutput": "perceptual-rendering/weight/cargo-test-output.txt",
+        "testsRun": [
+          "weight_correction_white_on_black_reduces_weight",
+          "weight_correction_black_on_white_no_reduction",
+          "weight_correction_same_color_no_reduction"
+        ],
+        "sourceLocation": "system/test/tests/shaping.rs lines 992-1030",
+        "implementationLocation": "system/libraries/shaping/src/rasterize.rs — weight_correction_factor()"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-WEIGHT-002",
+      "title": "Continuous weight correction",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Search test codebase for VAL-WEIGHT-002 tests",
+          "expected": "Tests with 3+ contrast levels verifying monotonically decreasing correction factor",
+          "observed": "Found 2 tests in shaping.rs: weight_correction_monotonically_decreasing_with_contrast (line 1037, 3 levels), weight_correction_five_contrast_levels_monotonic (line 1070, 5 levels)"
+        },
+        {
+          "action": "Run: cargo test --test shaping weight_correction_monotonically_decreasing_with_contrast -- --test-threads=1",
+          "expected": "Test passes — 3 contrast levels produce monotonically decreasing factors",
+          "observed": "test weight_correction_monotonically_decreasing_with_contrast ... ok"
+        },
+        {
+          "action": "Run: cargo test --test shaping weight_correction_five_contrast_levels_monotonic -- --test-threads=1",
+          "expected": "Test passes — 5 contrast levels produce monotonically decreasing factors",
+          "observed": "test weight_correction_five_contrast_levels_monotonic ... ok"
+        }
+      ],
+      "evidence": {
+        "testOutput": "perceptual-rendering/weight/cargo-test-output.txt",
+        "testsRun": [
+          "weight_correction_monotonically_decreasing_with_contrast",
+          "weight_correction_five_contrast_levels_monotonic"
+        ],
+        "sourceLocation": "system/test/tests/shaping.rs lines 1032-1100",
+        "implementationLocation": "system/libraries/shaping/src/rasterize.rs — weight_correction_factor()"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-WEIGHT-003",
+      "title": "Weight correction affects rendering",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Search test codebase for VAL-WEIGHT-003 tests",
+          "expected": "Test comparing sum of coverage values with and without weight correction",
+          "observed": "Found test weight_correction_reduces_coverage_white_on_black (line 1104) — renders glyph 'H' at base weight 400 vs corrected weight for white-on-black, asserts corrected coverage sum < base coverage sum"
+        },
+        {
+          "action": "Run: cargo test --test shaping weight_correction_reduces_coverage_white_on_black -- --test-threads=1",
+          "expected": "Test passes — corrected glyph coverage sum < uncorrected sum",
+          "observed": "test weight_correction_reduces_coverage_white_on_black ... ok"
+        }
+      ],
+      "evidence": {
+        "testOutput": "perceptual-rendering/weight/cargo-test-output.txt",
+        "testsRun": [
+          "weight_correction_reduces_coverage_white_on_black"
+        ],
+        "sourceLocation": "system/test/tests/shaping.rs lines 1102-1210",
+        "implementationLocation": "system/libraries/shaping/src/rasterize.rs — weight_correction_factor(), rasterize_with_axes()"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-WEIGHT-004",
+      "title": "Fonts without wght axis are unaffected",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Search test codebase for VAL-WEIGHT-004 tests",
+          "expected": "Tests applying weight correction to non-variable font, asserting identical output",
+          "observed": "Found 3 tests: weight_correction_no_op_for_non_variable_font (line 1215, asserts auto_weight_correction_axes returns empty), weight_correction_no_op_for_font_without_wght (line 1237, empty font data returns empty), weight_correction_no_op_rendering_identical_for_static_font (line 1260, byte-identical coverage with and without correction)"
+        },
+        {
+          "action": "Run: cargo test --test shaping weight_correction_no_op_for_non_variable_font -- --test-threads=1",
+          "expected": "Test passes — non-variable font returns empty correction axes",
+          "observed": "test weight_correction_no_op_for_non_variable_font ... ok"
+        },
+        {
+          "action": "Run: cargo test --test shaping weight_correction_no_op_for_font_without_wght -- --test-threads=1",
+          "expected": "Test passes — empty font data returns empty correction axes",
+          "observed": "test weight_correction_no_op_for_font_without_wght ... ok"
+        },
+        {
+          "action": "Run: cargo test --test shaping weight_correction_no_op_rendering_identical_for_static_font -- --test-threads=1",
+          "expected": "Test passes — rendering byte-identical with and without correction for static font",
+          "observed": "test weight_correction_no_op_rendering_identical_for_static_font ... ok"
+        }
+      ],
+      "evidence": {
+        "testOutput": "perceptual-rendering/weight/cargo-test-output.txt",
+        "testsRun": [
+          "weight_correction_no_op_for_non_variable_font",
+          "weight_correction_no_op_for_font_without_wght",
+          "weight_correction_no_op_rendering_identical_for_static_font"
+        ],
+        "sourceLocation": "system/test/tests/shaping.rs lines 1213-1318",
+        "implementationLocation": "system/libraries/shaping/src/rasterize.rs — auto_weight_correction_axes()"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 4 assertions: 4 passed, 0 failed. All 10 weight correction unit tests in shaping.rs pass. VAL-WEIGHT-001 verified via 3 tests (white-on-black < 1.0, black-on-white >= 1.0, same-color == 1.0). VAL-WEIGHT-002 verified via 2 tests (3-level and 5-level monotonic decrease). VAL-WEIGHT-003 verified via coverage sum comparison (corrected < uncorrected for white-on-black). VAL-WEIGHT-004 verified via 3 tests (empty axes for static font, empty font data, byte-identical rendering)."
+}
