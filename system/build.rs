@@ -113,17 +113,9 @@ fn main() {
     // host release deps dir.
     let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
     let drawing_rlib = out_dir.join("libdrawing.rlib");
-    let fonts_host_deps = manifest_dir
-        .join("libraries/fonts/target/release/deps");
+    let fonts_host_deps = manifest_dir.join("libraries/fonts/target/release/deps");
 
-    rustc_rlib_with_search(
-        &rustc,
-        &drawing_src,
-        &drawing_rlib,
-        "drawing",
-        &[],
-        &[],
-    );
+    rustc_rlib_with_search(&rustc, &drawing_src, &drawing_rlib, "drawing", &[], &[]);
 
     // Step 2: Compile all non-init programs.
     // fuzz-helper must be compiled before fuzz (fuzz embeds it).
@@ -241,10 +233,7 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("libraries/fonts/src/lib.rs").display()
     );
-    for fonts_src in &[
-        "rasterize.rs",
-        "cache.rs",
-    ] {
+    for fonts_src in &["rasterize.rs", "cache.rs"] {
         println!(
             "cargo:rerun-if-changed={}",
             manifest_dir

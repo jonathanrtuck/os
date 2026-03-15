@@ -15,7 +15,10 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::{per_core::{self, MAX_CORES}, serial};
+use super::{
+    per_core::{self, MAX_CORES},
+    serial,
+};
 
 // ---------------------------------------------------------------------------
 // Per-core metrics

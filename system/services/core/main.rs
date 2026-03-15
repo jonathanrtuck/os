@@ -942,6 +942,8 @@ pub extern "C" fn _start() -> ! {
             } else if selection_changed {
                 // Selection changed without text change (e.g., click
                 // to clear selection, shift-arrow to extend selection).
+                // Also updates cursor position in the scene graph so
+                // that click-to-reposition is immediately visible.
                 let content_y = TITLE_BAR_H + SHADOW_DEPTH;
                 let sel_content_h = fb_height.saturating_sub(content_y);
                 let scroll_lines = unsafe { SCROLL_OFFSET };
@@ -952,6 +954,7 @@ pub extern "C" fn _start() -> ! {
                 };
 
                 scene.update_selection(
+                    unsafe { CURSOR_POS } as u32,
                     unsafe { SEL_START } as u32,
                     unsafe { SEL_END } as u32,
                     doc_content(),

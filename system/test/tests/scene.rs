@@ -2473,7 +2473,6 @@ fn update_data_does_not_grow_data_used() {
     }
     dw.swap();
 
-    let data_used_before = dw.front_nodes().len(); // just to read front
     let front_data_before = dw.front_data_buf().len();
 
     // Copy forward and update in-place 10 times.
