@@ -362,18 +362,9 @@ pub extern "C" fn _start() -> ! {
     // Channel to GPU driver.
     let gpu_ch = unsafe { ipc::Channel::from_base(channel_shm_va(2), ipc::PAGE_SIZE, 0) };
 
-    // Previous frame's nodes for scene diffing. Starts empty (first frame
-    // is always a full repaint). Box-allocated to avoid stack overflow.
-    let mut prev_nodes: Box<[scene::Node; scene::MAX_NODES]> =
-        unsafe {
-            let layout = alloc::alloc::Layout::new::<[scene::Node; scene::MAX_NODES]>();
-            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut [scene::Node; scene::MAX_NODES];
-            if ptr.is_null() {
-                sys::print(b"compositor: prev_nodes alloc failed\n");
-                sys::exit();
-            }
-            Box::from_raw(ptr)
-        };
+    // Previous frame's node count — used to detect structural changes
+    // (selection rects added/removed). Starts at 0 so first frame is
+    // always a full repaint.
     let mut prev_node_count: u16 = 0;
 
     sys::print(b"     waiting for first scene\n");
@@ -396,10 +387,7 @@ pub extern "C" fn _start() -> ! {
 
         scene_render::render_scene(&mut fb0, &graph, &render_ctx);
 
-        // Snapshot current nodes for next frame's diff.
-        let nc = nodes.len().min(scene::MAX_NODES);
-        prev_nodes[..nc].copy_from_slice(&nodes[..nc]);
-        prev_node_count = nc as u16;
+        prev_node_count = nodes.len() as u16;
     }
 
     let initial_payload = PresentPayload {
@@ -430,38 +418,53 @@ pub extern "C" fn _start() -> ! {
 
         let dr = scene::DoubleReader::new(scene_buf);
         let curr_nodes = dr.front_nodes();
-        let curr_count = curr_nodes.len();
+        let curr_count = curr_nodes.len() as u16;
 
-        // Diff previous vs current scene to find dirty rects.
+        // Change-list-driven damage tracking: read which nodes changed
+        // from the scene header instead of byte-comparing all nodes.
         let mut damage = damage::DamageTracker::new(fb_width as u16, fb_height as u16);
 
-        let diff_result = scene::diff_scenes(
-            &prev_nodes[..prev_node_count as usize],
-            prev_node_count as usize,
-            curr_nodes,
-            curr_count,
-        );
-        match diff_result {
-            Some(ref rects) if !rects.is_empty() => {
-                let sf = scale_factor;
-                for (rx, ry, rw, rh) in rects {
-                    // Scale logical dirty rects to physical pixels.
-                    let px = (*rx * sf as i32).max(0) as u16;
-                    let py = (*ry * sf as i32).max(0) as u16;
-                    let x = px.min(fb_width as u16);
-                    let y = py.min(fb_height as u16);
-                    let w = (*rw as u16 * sf as u16).min(fb_width as u16 - x);
-                    let h = (*rh as u16 * sf as u16).min(fb_height as u16 - y);
-                    damage.add(x, y, w, h);
+        if curr_count != prev_node_count {
+            // Node count changed (selection rects added/removed) — full repaint.
+            damage.mark_full_screen();
+        } else if dr.is_full_repaint() {
+            // Full rebuild or change list overflow — full repaint.
+            damage.mark_full_screen();
+        } else {
+            match dr.change_list() {
+                Some(changed) if changed.is_empty() => {
+                    // No nodes changed — skip rendering entirely.
+                    prev_node_count = curr_count;
+                    continue;
                 }
-            }
-            Some(_) => {
-                // No nodes changed — skip rendering entirely.
-                continue;
-            }
-            None => {
-                // Node count changed or empty — full repaint.
-                damage.mark_full_screen();
+                Some(changed) => {
+                    // Compute dirty rects from changed node absolute positions.
+                    let parent_map = scene::build_parent_map(curr_nodes, curr_count as usize);
+                    let sf = scale_factor;
+
+                    for &node_id in changed {
+                        if (node_id as usize) >= curr_nodes.len() {
+                            continue;
+                        }
+
+                        let (ax, ay, aw, ah) =
+                            scene::abs_bounds(curr_nodes, &parent_map, node_id as usize);
+
+                        // Scale logical dirty rect to physical pixels.
+                        let px = (ax * sf as i32).max(0) as u16;
+                        let py = (ay * sf as i32).max(0) as u16;
+                        let x = px.min(fb_width as u16);
+                        let y = py.min(fb_height as u16);
+                        let w = (aw as u16 * sf as u16).min(fb_width as u16 - x);
+                        let h = (ah as u16 * sf as u16).min(fb_height as u16 - y);
+
+                        damage.add(x, y, w, h);
+                    }
+                }
+                None => {
+                    // FULL_REPAINT sentinel — full repaint.
+                    damage.mark_full_screen();
+                }
             }
         }
 
@@ -495,10 +498,8 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
-        // Snapshot current nodes for next frame's diff.
-        let nc = curr_count.min(scene::MAX_NODES);
-        prev_nodes[..nc].copy_from_slice(&curr_nodes[..nc]);
-        prev_node_count = nc as u16;
+        // Track node count for next frame's structural change detection.
+        prev_node_count = curr_count;
 
         // Build present payload with dirty rects.
         let payload = match damage.dirty_rects() {
