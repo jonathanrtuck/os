@@ -600,7 +600,7 @@ fn varfont_wght_2000_equals_max() {
 #[test]
 fn varfont_cache_axis_values_separate_entries() {
     // Same glyph at wght=400 and wght=700 should be cached as separate entries.
-    use drawing::{LruCachedGlyph, LruGlyphCache};
+    use fonts::cache::{LruCachedGlyph, LruGlyphCache};
 
     let mut cache = LruGlyphCache::new(64);
     // Simulate caching with axis hash included in the key.
@@ -631,8 +631,8 @@ fn varfont_cache_axis_values_separate_entries() {
         value: 700.0,
     }];
 
-    let hash_400 = drawing::axis_values_hash(axes_400);
-    let hash_700 = drawing::axis_values_hash(axes_700);
+    let hash_400 = fonts::cache::axis_values_hash(axes_400);
+    let hash_700 = fonts::cache::axis_values_hash(axes_700);
 
     cache.insert_with_axes(65, 18, hash_400, glyph_400.clone());
     cache.insert_with_axes(65, 18, hash_700, glyph_700.clone());
@@ -650,7 +650,7 @@ fn varfont_cache_axis_values_separate_entries() {
 #[test]
 fn varfont_cache_no_axes_vs_with_axes() {
     // Glyph cached without axis values should be different from with axis values.
-    use drawing::{LruCachedGlyph, LruGlyphCache};
+    use fonts::cache::{LruCachedGlyph, LruGlyphCache};
 
     let mut cache = LruGlyphCache::new(64);
     let glyph_default = LruCachedGlyph {
@@ -676,7 +676,7 @@ fn varfont_cache_no_axes_vs_with_axes() {
         tag: *b"wght",
         value: 700.0,
     }];
-    let hash_700 = drawing::axis_values_hash(axes_700);
+    let hash_700 = fonts::cache::axis_values_hash(axes_700);
     cache.insert_with_axes(65, 18, hash_700, glyph_heavy.clone());
 
     let r_default = cache.get_with_axes(65, 18, 0);

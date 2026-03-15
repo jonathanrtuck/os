@@ -464,11 +464,11 @@ fn extract_outline(
 // Coordinate scaling helpers (integer only)
 // ---------------------------------------------------------------------------
 
-fn scale_fu(val: i32, size_px: u32, upem: u16) -> i32 {
+pub(crate) fn scale_fu(val: i32, size_px: u32, upem: u16) -> i32 {
     ((val as i64 * size_px as i64) / upem as i64) as i32
 }
 
-fn scale_fu_ceil(val: i32, size_px: u32, upem: u16) -> i32 {
+pub(crate) fn scale_fu_ceil(val: i32, size_px: u32, upem: u16) -> i32 {
     let n = val as i64 * size_px as i64;
     let d = upem as i64;
     if n > 0 {

@@ -1,6 +1,6 @@
 //! Tests for the LRU glyph cache.
 
-use drawing::{LruGlyphCache, LruCachedGlyph};
+use fonts::cache::{LruCachedGlyph, LruGlyphCache};
 
 // ---------------------------------------------------------------------------
 // Helpers

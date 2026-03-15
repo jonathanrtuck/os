@@ -213,9 +213,9 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"compositor: font parse failed\n");
         sys::exit();
     }
-    let mut mono_cache: Box<drawing::GlyphCache> = unsafe {
-        let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
-        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
+    let mut mono_cache: Box<fonts::cache::GlyphCache> = unsafe {
+        let layout = alloc::alloc::Layout::new::<fonts::cache::GlyphCache>();
+        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut fonts::cache::GlyphCache;
 
         if ptr.is_null() {
             sys::print(b"compositor: glyph cache alloc failed\n");
@@ -237,7 +237,7 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"     monospace font rasterized (MONO=1)\n");
 
     // Proportional cache: same font data, MONO=0 for sans-serif (prose/UI).
-    let mut prop_cache_ptr: *const drawing::GlyphCache = mono_cache_ptr;
+    let mut prop_cache_ptr: *const fonts::cache::GlyphCache = mono_cache_ptr;
 
     // When no separate prop font, use the same font data with MONO=0.
     let prop_font_data = if config.prop_font_len > 0 {
@@ -250,9 +250,9 @@ pub extern "C" fn _start() -> ! {
     };
 
     if fonts::rasterize::font_metrics(prop_font_data).is_some() {
-        let mut prop_cache: Box<drawing::GlyphCache> = unsafe {
-            let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
-            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
+        let mut prop_cache: Box<fonts::cache::GlyphCache> = unsafe {
+            let layout = alloc::alloc::Layout::new::<fonts::cache::GlyphCache>();
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut fonts::cache::GlyphCache;
 
             if ptr.is_null() {
                 sys::print(b"compositor: prop cache alloc failed\n");

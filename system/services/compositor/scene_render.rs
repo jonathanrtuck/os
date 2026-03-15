@@ -6,7 +6,8 @@
 //! monospace ASCII, on-demand via LRU for other glyphs), and composites via
 //! `draw_coverage`.
 
-use drawing::{Color, GlyphCache, Surface};
+use drawing::{Color, Surface};
+use fonts::cache::GlyphCache;
 use scene::{Content, Node, NodeFlags, NodeId, ShapedGlyph, TextRun, NULL};
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.

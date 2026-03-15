@@ -177,7 +177,7 @@ fn unicode_latin_extended_via_fallback_chain() {
 #[test]
 fn unicode_glyph_cache_handles_non_ascii_ids() {
     // The LRU glyph cache must handle glyph IDs from non-ASCII codepoints.
-    use drawing::{LruCachedGlyph, LruGlyphCache};
+    use fonts::cache::{LruCachedGlyph, LruGlyphCache};
 
     let mut cache = LruGlyphCache::new(64);
 
@@ -589,7 +589,7 @@ fn unicode_supplementary_followed_by_ascii_rasterize() {
 #[test]
 fn unicode_glyph_cache_latin_extended_and_ascii_coexist() {
     // Cache entries for both ASCII and Latin Extended glyph IDs coexist.
-    use drawing::{LruCachedGlyph, LruGlyphCache};
+    use fonts::cache::{LruCachedGlyph, LruGlyphCache};
 
     let mut cache = LruGlyphCache::new(128);
 
@@ -623,7 +623,7 @@ fn unicode_glyph_cache_latin_extended_and_ascii_coexist() {
 fn unicode_glyph_cache_stress_many_codepoints() {
     // Insert glyphs for many different codepoints into the cache.
     // The cache should handle the expanded codepoint space without issues.
-    use drawing::{LruCachedGlyph, LruGlyphCache};
+    use fonts::cache::{LruCachedGlyph, LruGlyphCache};
 
     let max_cap = 64;
     let mut cache = LruGlyphCache::new(max_cap);

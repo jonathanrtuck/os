@@ -12,10 +12,10 @@ use drawing::{Color, PixelFormat, Surface, TextLayout};
 /// stacks if allocated via `Box::new(GlyphCache::zeroed())` (the value is
 /// constructed on stack before moving to heap). This uses `Box::new_uninit`
 /// + zero-fill to avoid that.
-fn heap_glyph_cache() -> Box<drawing::GlyphCache> {
+fn heap_glyph_cache() -> Box<fonts::cache::GlyphCache> {
     unsafe {
-        let layout = std::alloc::Layout::new::<drawing::GlyphCache>();
-        let ptr = std::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
+        let layout = std::alloc::Layout::new::<fonts::cache::GlyphCache>();
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut fonts::cache::GlyphCache;
         if ptr.is_null() {
             std::alloc::handle_alloc_error(layout);
         }
@@ -1856,7 +1856,7 @@ fn subpixel_fir_filter_reduces_fringing() {
 // Stem darkening — non-linear coverage boost for thin strokes
 // ---------------------------------------------------------------------------
 
-use drawing::{STEM_DARKENING_BOOST, STEM_DARKENING_LUT};
+use fonts::cache::{STEM_DARKENING_BOOST, STEM_DARKENING_LUT};
 
 #[test]
 fn stem_darkening_lut_zero_stays_zero() {

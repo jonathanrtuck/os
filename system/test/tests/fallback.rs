@@ -254,7 +254,7 @@ fn fallback_subsequent_chars_after_exhaustion() {
 fn fallback_cache_key_includes_font_identifier() {
     // The cache key must include a font identifier so that the same glyph ID
     // from different fonts produces independent cache entries.
-    use drawing::{LruCachedGlyph, LruGlyphCache};
+    use fonts::cache::{LruCachedGlyph, LruGlyphCache};
 
     let mut cache = LruGlyphCache::new(64);
 
