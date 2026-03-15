@@ -1,0 +1,46 @@
+{
+  "featureId": "fractional-scale-fonts-and-damage",
+  "reviewedAt": "2026-03-15T23:35:00.000Z",
+  "commitId": "18cf777",
+  "fixCommitId": "e1d2080",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Implementation is correct and complete across all four described changes. (1) abs_bounds scroll_y fix: properly subtracts each parent's scroll_y when walking the parent chain, with clear documentation. (2) SVG rasterization: correctly converts f32 display scale to 20.12 fixed-point via f32_to_svg_fp(), scales icon dimensions to physical pixels, and threads display_scale through rasterize_svg_icon(). (3) New-position damage i32→u16 truncation fix: converts to u32 and clamps to framebuffer bounds before u16 cast, matching the old-position damage path exactly. (4) Font rasterization was correctly verified as already using physical pixel size from the precondition feature. Nine well-structured tests cover all expectedBehavior items. The fix feature (e1d2080) correctly addresses the stack overflow by replacing GlyphCache::zeroed() with the existing zeroed_glyph_cache() heap-allocation helper, consistent with all other tests in the file.",
+    "issues": [
+      {
+        "file": "system/test/tests/scene_render.rs",
+        "line": 1110,
+        "severity": "non_blocking",
+        "description": "glyph_cache_keyed_on_physical_pixel_size test's first half allocates two full GlyphCache structs (~1.3 MiB each) just to set and compare a u32 size_px field (asserting 24 != 32). The heap allocation (fixed by e1d2080) makes it safe, but the first half of the test is over-engineered — it doesn't prove the cache is keyed by physical pixel size in production, only that a field can hold different values. The second half (LruGlyphCache) is more meaningful. Not blocking because the test does exercise the LRU cache keying correctly."
+      },
+      {
+        "file": "system/test/tests/scene_render.rs",
+        "line": 1084,
+        "severity": "non_blocking",
+        "description": "font_physical_pixel_size_at_fractional_scale defines its own inline round_f32() rather than importing the compositor's. If the compositor's rounding implementation ever changes, this test would not catch the drift. Standard pattern for unit tests (testing the math, not the function), but worth noting."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The zeroed_glyph_cache() helper pattern (heap-allocating ~1.3 MiB GlyphCache via alloc_zeroed) is critical for any test in scene_render.rs that needs a GlyphCache. The original worker used GlyphCache::zeroed() (stack allocation), causing a stack overflow. This pattern IS used by all other tests in the file but is not documented anywhere. The fix worker found the pattern quickly via the synthesis.json hint, but a future worker without that context could repeat the mistake.",
+      "evidence": "scene_render.rs zeroed_glyph_cache() helper at top of file; original commit 18cf777 used GlyphCache::zeroed() at line 1115/1123; fix commit e1d2080 corrected to zeroed_glyph_cache()"
+    },
+    {
+      "area": "conventions",
+      "observation": "Worker transcripts for both sessions have 0 steps recorded, making it impossible to verify TDD compliance or review the actual work process. The handoffs report followedProcedure: true, but there is no transcript evidence to corroborate.",
+      "evidence": "worker-transcripts.jsonl entries for sessions c007bcf7 and 211541d8 both have empty steps arrays"
+    }
+  ],
+  "addressesFailureFrom": "/Users/user/Sites/os/.factory/validation/coordinate-model/scrutiny/synthesis.json",
+  "fixFeatureReview": {
+    "featureId": "fix-glyph-cache-stack-overflow",
+    "commitId": "e1d2080",
+    "status": "pass",
+    "summary": "Minimal, correct fix. Changed two GlyphCache::zeroed() calls to zeroed_glyph_cache() in glyph_cache_keyed_on_physical_pixel_size test. Matches the existing pattern used by all other tests in the file. All 1624 tests pass."
+  },
+  "summary": "Feature passes review. All four described changes are correctly implemented: abs_bounds scroll_y subtraction, SVG fixed-point scale conversion with physical pixel dimensions, new-position damage path i32→u16 truncation fix, and font rasterization verification. Nine tests cover the expectedBehavior items well (abs_bounds single/nested scroll, font physical pixel size, glyph cache keying, scroll offset rendering, dirty rect fractional coverage, SVG fixed-point conversion). The stack overflow fix (e1d2080) correctly addresses the round 1 blocking failure by using heap allocation. Two non-blocking issues noted: the glyph cache test's first half is over-engineered for what it proves, and inline round_f32 in tests could drift from production. Neither affects correctness."
+}

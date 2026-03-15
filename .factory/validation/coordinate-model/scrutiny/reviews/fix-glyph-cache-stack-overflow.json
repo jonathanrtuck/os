@@ -1,0 +1,26 @@
+{
+  "featureId": "fix-glyph-cache-stack-overflow",
+  "reviewedAt": "2026-03-15T23:30:00.000Z",
+  "commitId": "e1d2080",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Minimal, correct fix. The diff is exactly 2 lines changed: both `GlyphCache::zeroed()` calls in the `glyph_cache_keyed_on_physical_pixel_size` test replaced with `zeroed_glyph_cache()`. The `zeroed_glyph_cache()` helper (line 21) uses `alloc_zeroed` to allocate the ~1.3 MiB struct directly on the heap, bypassing the stack entirely. This matches the pattern used by every other test in scene_render.rs that needs a GlyphCache. The worker correctly identified that `Box::new(GlyphCache::zeroed())` would NOT fix the issue (the stack allocation happens before the Box move), tried it first, saw it still failed, then switched to the existing helper — good debugging discipline. The test logic is preserved: it still verifies that size_px=24 != size_px=32 via GlyphCache structs, and the LRU cache half is unchanged. All 1624 tests pass, kernel builds clean.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The `zeroed_glyph_cache()` helper pattern is critical knowledge for anyone writing tests that use GlyphCache — stack allocation of this struct will always overflow. The AGENTS.md mentions the test command and general conventions but does not document this specific pitfall. Future workers writing new GlyphCache tests could repeat this mistake.",
+      "evidence": "scene_render.rs:21 zeroed_glyph_cache() helper with comment 'GlyphCache is large (~1.3 MiB), so we Box + zero it'. The worker's first attempt used Box::new(GlyphCache::zeroed()) which still overflowed — this is a non-obvious Rust footgun where the value is constructed on the stack before being moved into the Box."
+    },
+    {
+      "area": "conventions",
+      "observation": "The original test was introduced by the fractional-scale-fonts-and-damage feature in a prior worker session but was not caught during that session's testing. This suggests that session may not have run the full test suite successfully, or the stack overflow was non-deterministic at that point. The scrutiny round 1 validator caught it.",
+      "evidence": "synthesis.json round 1 shows test exit code 101 with SIGABRT on this specific test. The fix feature was created as a remediation."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/coordinate-model/scrutiny/synthesis.json",
+  "summary": "Clean 2-line fix that correctly addresses the round 1 blocking issue. The stack overflow was caused by two ~1.3 MiB GlyphCache structs allocated on the stack (exceeding the 2 MiB thread stack limit). The fix uses the existing zeroed_glyph_cache() helper that heap-allocates via alloc_zeroed, matching the established pattern in all other tests. The worker showed good debugging process — tried Box::new() first, observed it still failed (Rust constructs on stack before moving to heap), then correctly used the alloc_zeroed helper. All 1624 tests pass, kernel builds clean. No blocking issues."
+}

@@ -207,3 +207,12 @@ The bare-metal build (`system/build.rs`) compiles libraries via direct `rustc` i
 - `system/libraries/shaping/Cargo.toml` — new, with harfrust dependency
 - `system/libraries/shaping/src/lib.rs` — new, shaping API
 - `system/test/Cargo.toml` — add shaping as dev-dependency for host tests
+
+## Testing Pitfall: GlyphCache Heap Allocation
+
+`GlyphCache` is ~1.3 MiB. It **MUST** be heap-allocated in tests using the `zeroed_glyph_cache()` helper in `system/test/tests/scene_render.rs`. Do NOT:
+
+- `GlyphCache::zeroed()` — allocates on stack, overflows the default 2 MiB thread stack
+- `Box::new(GlyphCache::zeroed())` — Rust constructs the value on stack before moving to the Box, still overflows
+
+The `zeroed_glyph_cache()` helper uses `alloc::alloc::alloc_zeroed` to allocate directly on the heap, bypassing stack entirely. All tests in `scene_render.rs` that need a GlyphCache use this pattern.
