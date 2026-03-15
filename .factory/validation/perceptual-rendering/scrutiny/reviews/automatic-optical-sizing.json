@@ -1,0 +1,41 @@
+{
+  "featureId": "automatic-optical-sizing",
+  "milestone": "perceptual-rendering",
+  "reviewer": "scrutiny-validator (inline)",
+  "verdict": "pass",
+  "summary": "Clean implementation of automatic optical sizing. Two well-documented public functions (compute_optical_size, auto_axis_values_for_opsz) with correct typographic formula (px × 72 / dpi). Proper clamping to font's declared opsz range. Graceful no-op for non-opsz fonts. Pipeline wiring through GlyphCache::populate_with_dpi() is minimal and correct. SCREEN_DPI constant in compositor is appropriately documented as hardcoded for QEMU. 8 tests cover all validation assertions.",
+  "codeQuality": {
+    "score": "good",
+    "observations": [
+      "Functions are pure and well-documented with doc comments explaining the typographic formula",
+      "Edge case handling is correct: dpi=0 fallback, empty font data returns empty Vec",
+      "The populate_with_dpi method correctly delegates to populate for backward compatibility",
+      "SCREEN_DPI is hardcoded but documented as configurable in principle — appropriate for prototype stage"
+    ]
+  },
+  "correctness": {
+    "score": "good",
+    "observations": [
+      "The formula opsz = font_size_px × 72 / dpi correctly converts pixel size to point size",
+      "Clamping to font's opsz axis range prevents invalid axis values",
+      "rasterize_with_axes correctly delegates to standard rasterize() when axes are empty",
+      "Auto-opsz axes are computed once per populate call, not per-glyph — efficient"
+    ]
+  },
+  "testCoverage": {
+    "score": "good",
+    "observations": [
+      "VAL-OPSZ-001: 3 size/DPI combos produce distinct values — verified",
+      "VAL-OPSZ-002: 10px vs 48px produce different coverage with real font — verified",
+      "VAL-OPSZ-003: No-op for non-opsz fonts with byte-identical output — verified",
+      "Additional edge cases: DPI=72 identity, empty font data, static fonts"
+    ]
+  },
+  "security": {
+    "score": "not-applicable",
+    "observations": ["No user input, no IPC changes, no security-sensitive code"]
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [],
+  "sharedStateObservations": []
+}
