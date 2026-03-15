@@ -1258,7 +1258,12 @@ pub fn build_parent_map(nodes: &[Node], count: usize) -> [NodeId; MAX_NODES] {
 }
 
 /// Compute absolute bounding rect of a node by walking up the parent chain.
-/// Returns `(x, y, width, height)` in absolute coordinates.
+/// Returns `(x, y, width, height)` in absolute logical coordinates.
+///
+/// Each parent's `scroll_y` is subtracted from the y accumulator because
+/// scroll offsets its *children* upward by `scroll_y` pixels. Without this,
+/// damage tracking would compute incorrect dirty rects for nodes inside
+/// scrolled containers.
 pub fn abs_bounds(nodes: &[Node], parent_map: &[NodeId; MAX_NODES], id: usize) -> (i32, i32, u32, u32) {
     let node = &nodes[id];
     let mut ax = node.x as i32;
@@ -1267,7 +1272,8 @@ pub fn abs_bounds(nodes: &[Node], parent_map: &[NodeId; MAX_NODES], id: usize) -
     while cur != NULL && (cur as usize) < nodes.len() {
         let p = &nodes[cur as usize];
         ax += p.x as i32;
-        ay += p.y as i32;
+        // Subtract scroll_y: a parent's scroll offsets its children upward.
+        ay += p.y as i32 - p.scroll_y;
         cur = parent_map[cur as usize];
     }
     (ax, ay, node.width as u32, node.height as u32)

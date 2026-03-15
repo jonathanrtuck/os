@@ -5018,3 +5018,97 @@ fn incremental_update_with_compaction_and_clock(
     }
     dw.swap();
 }
+
+// ── VAL-COORD-013: abs_bounds accounts for scroll_y from ancestor nodes ──
+
+/// abs_bounds must subtract parent scroll_y when computing a child's absolute
+/// position. A child inside a scrolled container has its effective y position
+/// offset by -scroll_y.
+#[test]
+fn abs_bounds_accounts_for_scroll_y() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // Root at (0, 0)
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = 800;
+    w.node_mut(root).height = 600;
+    w.set_root(root);
+
+    // Scrollable container at (0, 50) with scroll_y = 10
+    let container = w.alloc_node().unwrap();
+    w.node_mut(container).y = 50;
+    w.node_mut(container).width = 800;
+    w.node_mut(container).height = 500;
+    w.node_mut(container).scroll_y = 10;
+    w.add_child(root, container);
+
+    // Child inside the scrolled container at (20, 30)
+    let child = w.alloc_node().unwrap();
+    w.node_mut(child).x = 20;
+    w.node_mut(child).y = 30;
+    w.node_mut(child).width = 100;
+    w.node_mut(child).height = 40;
+    w.add_child(container, child);
+
+    let nodes = w.nodes();
+    let parent_map = build_parent_map(nodes, 3);
+    let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
+
+    // Expected: child.x(20) + container.x(0) + root.x(0) = 20
+    assert_eq!(ax, 20, "abs_bounds x should sum parent x values");
+    // Expected: child.y(30) + container.y(50) - container.scroll_y(10) + root.y(0) = 70
+    // NOT 80 (which would be the result without scroll_y subtraction)
+    assert_eq!(ay, 70, "abs_bounds y must subtract parent scroll_y");
+    assert_eq!(aw, 100);
+    assert_eq!(ah, 40);
+}
+
+/// abs_bounds with deeply nested scroll containers: scroll_y accumulates.
+#[test]
+fn abs_bounds_nested_scroll_containers() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = 800;
+    w.node_mut(root).height = 600;
+    w.set_root(root);
+
+    // Outer container scrolled by 5
+    let outer = w.alloc_node().unwrap();
+    w.node_mut(outer).y = 100;
+    w.node_mut(outer).width = 800;
+    w.node_mut(outer).height = 400;
+    w.node_mut(outer).scroll_y = 5;
+    w.add_child(root, outer);
+
+    // Inner container scrolled by 15
+    let inner = w.alloc_node().unwrap();
+    w.node_mut(inner).y = 20;
+    w.node_mut(inner).width = 800;
+    w.node_mut(inner).height = 300;
+    w.node_mut(inner).scroll_y = 15;
+    w.add_child(outer, inner);
+
+    // Leaf at y=10 inside inner
+    let leaf = w.alloc_node().unwrap();
+    w.node_mut(leaf).x = 5;
+    w.node_mut(leaf).y = 10;
+    w.node_mut(leaf).width = 50;
+    w.node_mut(leaf).height = 20;
+    w.add_child(inner, leaf);
+
+    let nodes = w.nodes();
+    let parent_map = build_parent_map(nodes, 4);
+    let (ax, ay, _aw, _ah) = abs_bounds(nodes, &parent_map, leaf as usize);
+
+    // x: leaf(5) + inner(0) + outer(0) + root(0) = 5
+    assert_eq!(ax, 5);
+    // y: scroll_y on a node offsets its CHILDREN. So:
+    //   leaf.y(10) is offset by inner.scroll_y(15) → 10 - 15 = -5 (relative to inner)
+    //   inner.y(20) is offset by outer.scroll_y(5) → 20 - 5 = 15 (relative to outer)
+    //   outer.y(100) → 100 (relative to root, no scroll)
+    //   Total: -5 + 15 + 100 = 110
+    assert_eq!(ay, 110, "abs_bounds must subtract each ancestor's scroll_y");
+}

@@ -148,13 +148,27 @@ unsafe fn populate_prev_bounds(nodes: &[scene::Node], count: usize, scale: f32) 
         PREV_BOUNDS[i] = (0, 0, 0, 0);
     }
 }
+/// Convert an f32 display scale factor to the SVG rasterizer's 20.12
+/// fixed-point format. SVG_FP_ONE (4096) represents 1.0.
+#[inline]
+fn f32_to_svg_fp(scale: f32) -> i32 {
+    round_f32(scale * svg::SVG_FP_ONE as f32)
+}
+
 fn rasterize_svg_icon(
     svg_data: &[u8],
     label: &[u8],
     icon_w: u32,
     icon_h: u32,
+    display_scale: f32,
 ) -> Option<(*const u8, u32, u32)> {
     sys::print(label);
+
+    // Scale icon dimensions to physical pixels.
+    let phys_w = round_f32(icon_w as f32 * display_scale).max(1) as u32;
+    let phys_h = round_f32(icon_h as f32 * display_scale).max(1) as u32;
+    // Convert f32 scale to 20.12 fixed-point for the SVG rasterizer.
+    let svg_scale = f32_to_svg_fp(display_scale);
 
     let path_ptr = unsafe {
         let layout = alloc::alloc::Layout::new::<svg::SvgPath>();
@@ -188,16 +202,16 @@ fn rasterize_svg_icon(
 
     let result = match svg::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
         Ok(()) => {
-            let icon_size = (icon_w * icon_h) as usize;
+            let icon_size = (phys_w * phys_h) as usize;
             let mut icon_cov = vec![0u8; icon_size];
 
             match svg::svg_rasterize(
                 unsafe { &*path_ptr },
                 unsafe { &mut *scratch_ptr },
                 &mut icon_cov,
-                icon_w,
-                icon_h,
-                svg::SVG_FP_ONE,
+                phys_w,
+                phys_h,
+                svg_scale,
                 0,
                 0,
             ) {
@@ -214,7 +228,7 @@ fn rasterize_svg_icon(
 
                     let leaked = rgb_cov.leak();
 
-                    Some((leaked.as_ptr(), icon_w, icon_h))
+                    Some((leaked.as_ptr(), phys_w, phys_h))
                 }
                 Err(_) => {
                     sys::print(b"     SVG rasterize failed\n");
@@ -377,7 +391,7 @@ pub extern "C" fn _start() -> ! {
             };
 
             if let Some((ptr, w, h)) =
-                rasterize_svg_icon(svg_data, b"     parsing SVG doc icon\n", 20, 24)
+                rasterize_svg_icon(svg_data, b"     parsing SVG doc icon\n", 20, 24, scale_factor)
             {
                 sys::print(b"     SVG icon rasterized\n");
                 unsafe {
@@ -667,17 +681,18 @@ pub extern "C" fn _start() -> ! {
                         }
 
                         // Damage the NEW position (current frame's bounds).
+                        // Clamp physical coords to framebuffer before u16 cast
+                        // to prevent i32→u16 truncation on large displays
+                        // (same clamping as the old-position damage path).
                         let (ax, ay, aw, ah) =
                             scene::abs_bounds(curr_nodes, &parent_map, node_id as usize);
 
-                        let px = scale_coord(ax, sf).max(0) as u16;
-                        let py = scale_coord(ay, sf).max(0) as u16;
-                        let x = px.min(fbw);
-                        let y = py.min(fbh);
-                        let w = scale_size_u16(ax, aw, sf).min(fbw - x);
-                        let h = scale_size_u16(ay, ah, sf).min(fbh - y);
+                        let px = (scale_coord(ax, sf).max(0) as u32).min(fbw as u32) as u16;
+                        let py = (scale_coord(ay, sf).max(0) as u32).min(fbh as u32) as u16;
+                        let w = scale_size_u16(ax, aw, sf).min(fbw - px);
+                        let h = scale_size_u16(ay, ah, sf).min(fbh - py);
 
-                        damage.add(x, y, w, h);
+                        damage.add(px, py, w, h);
                     }
                 }
                 None => {
