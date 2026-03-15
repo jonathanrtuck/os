@@ -903,3 +903,327 @@ fn byte_to_line_col_cursor_consistency_with_layout() {
     assert_eq!(byte_to_line_col(text, 12, 80).0, 3); // 'd' on line 3
     assert_eq!(byte_to_line_col(text, 15, 80).0, 3); // end of text, still line 3
 }
+
+// ── ShapedGlyph struct layout (VAL-SCENE-004) ───────────────────────
+
+#[test]
+fn shaped_glyph_is_repr_c_with_size_assertion() {
+    // ShapedGlyph must be #[repr(C)] with a compile-time size assertion.
+    // The compile-time assertion is in scene/lib.rs itself; this test
+    // verifies the runtime size matches expectations.
+    let size = core::mem::size_of::<ShapedGlyph>();
+    assert_eq!(size, 8, "ShapedGlyph should be 8 bytes: u16 + i16 + i16 + i16");
+}
+
+#[test]
+fn shaped_glyph_field_access() {
+    let g = ShapedGlyph {
+        glyph_id: 42,
+        x_advance: 600,
+        x_offset: -10,
+        y_offset: 5,
+    };
+    assert_eq!(g.glyph_id, 42);
+    assert_eq!(g.x_advance, 600);
+    assert_eq!(g.x_offset, -10);
+    assert_eq!(g.y_offset, 5);
+}
+
+// ── ShapedGlyph round-trip via SceneWriter/SceneReader (VAL-SCENE-001) ──
+
+#[test]
+fn shaped_glyph_single_run_round_trip() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let glyphs = [
+        ShapedGlyph { glyph_id: 72, x_advance: 600, x_offset: 0, y_offset: 0 },
+        ShapedGlyph { glyph_id: 101, x_advance: 550, x_offset: 0, y_offset: 0 },
+        ShapedGlyph { glyph_id: 108, x_advance: 250, x_offset: 0, y_offset: 0 },
+        ShapedGlyph { glyph_id: 108, x_advance: 250, x_offset: 0, y_offset: 0 },
+        ShapedGlyph { glyph_id: 111, x_advance: 560, x_offset: 0, y_offset: 0 },
+    ];
+    let dref = w.push_shaped_glyphs(&glyphs);
+
+    let run = TextRun {
+        glyphs: dref,
+        glyph_count: glyphs.len() as u16,
+        x: 10,
+        y: 20,
+        color: Color::rgb(220, 220, 220),
+        advance: 0, // 0 means per-glyph advances in ShapedGlyph
+        font_size: 18,
+    };
+    let (runs_ref, count) = w.push_text_runs(&[run]);
+
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
+    w.set_root(id);
+    w.commit();
+
+    // Read back
+    let r = SceneReader::new(&buf);
+    let text_runs = r.text_runs(runs_ref);
+    assert_eq!(text_runs.len(), 1);
+    assert_eq!(text_runs[0].glyph_count, 5);
+    assert_eq!(text_runs[0].advance, 0);
+
+    let read_glyphs = r.shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
+    assert_eq!(read_glyphs.len(), 5);
+    for (orig, read) in glyphs.iter().zip(read_glyphs.iter()) {
+        assert_eq!(orig.glyph_id, read.glyph_id);
+        assert_eq!(orig.x_advance, read.x_advance);
+        assert_eq!(orig.x_offset, read.x_offset);
+        assert_eq!(orig.y_offset, read.y_offset);
+    }
+}
+
+// ── Multiple text nodes with varying glyph counts (VAL-SCENE-002) ──
+
+#[test]
+fn shaped_glyph_five_nodes_varying_counts_round_trip() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // 5 text nodes with varying glyph counts: 1, 3, 7, 12, 20
+    let glyph_counts = [1, 3, 7, 12, 20];
+    let mut node_ids = Vec::new();
+    let mut expected: Vec<Vec<ShapedGlyph>> = Vec::new();
+
+    let root = w.alloc_node().unwrap();
+    w.set_root(root);
+
+    for (idx, &count) in glyph_counts.iter().enumerate() {
+        let glyphs: Vec<ShapedGlyph> = (0..count).map(|i| ShapedGlyph {
+            glyph_id: (idx as u16 * 100) + i as u16,
+            x_advance: 500 + (i as i16 * 10),
+            x_offset: if i % 2 == 0 { 0 } else { -(i as i16) },
+            y_offset: if i % 3 == 0 { 2 } else { 0 },
+        }).collect();
+
+        let dref = w.push_shaped_glyphs(&glyphs);
+        let run = TextRun {
+            glyphs: dref,
+            glyph_count: count as u16,
+            x: 0,
+            y: (idx as i16) * 20,
+            color: Color::rgb(200, 200, 200),
+            advance: 0,
+            font_size: 16,
+        };
+        let (runs_ref, run_count) = w.push_text_runs(&[run]);
+        let nid = w.alloc_node().unwrap();
+        w.node_mut(nid).content = Content::Text { runs: runs_ref, run_count, _pad: [0; 2] };
+        w.add_child(root, nid);
+        node_ids.push(nid);
+        expected.push(glyphs);
+    }
+    w.commit();
+
+    // Read back all 5 nodes
+    let r = SceneReader::new(&buf);
+    for (idx, &nid) in node_ids.iter().enumerate() {
+        match r.node(nid).content {
+            Content::Text { runs, run_count, .. } => {
+                assert_eq!(run_count, 1);
+                let text_runs = r.text_runs(runs);
+                let read_glyphs = r.shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
+                assert_eq!(read_glyphs.len(), expected[idx].len(),
+                    "Node {} glyph count mismatch", idx);
+                for (j, (orig, read)) in expected[idx].iter().zip(read_glyphs.iter()).enumerate() {
+                    assert_eq!(orig.glyph_id, read.glyph_id,
+                        "Node {} glyph {} glyph_id mismatch", idx, j);
+                    assert_eq!(orig.x_advance, read.x_advance,
+                        "Node {} glyph {} x_advance mismatch", idx, j);
+                    assert_eq!(orig.x_offset, read.x_offset,
+                        "Node {} glyph {} x_offset mismatch", idx, j);
+                    assert_eq!(orig.y_offset, read.y_offset,
+                        "Node {} glyph {} y_offset mismatch", idx, j);
+                }
+            }
+            _ => panic!("Node {} expected Text content", idx),
+        }
+    }
+}
+
+// ── Boundary glyph IDs (VAL-SCENE-002, VAL-CROSS-005) ──────────────
+
+#[test]
+fn shaped_glyph_boundary_ids_round_trip() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let glyphs = [
+        ShapedGlyph { glyph_id: 0, x_advance: 100, x_offset: 0, y_offset: 0 },      // .notdef
+        ShapedGlyph { glyph_id: 1, x_advance: 200, x_offset: -5, y_offset: 3 },      // first real glyph
+        ShapedGlyph { glyph_id: 65534, x_advance: 300, x_offset: 10, y_offset: -10 }, // near max u16
+    ];
+    let dref = w.push_shaped_glyphs(&glyphs);
+    let run = TextRun {
+        glyphs: dref,
+        glyph_count: 3,
+        x: 0, y: 0,
+        color: Color::rgb(255, 255, 255),
+        advance: 0,
+        font_size: 18,
+    };
+    let (runs_ref, count) = w.push_text_runs(&[run]);
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
+    w.commit();
+
+    let r = SceneReader::new(&buf);
+    let text_runs = r.text_runs(runs_ref);
+    let read_glyphs = r.shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
+
+    assert_eq!(read_glyphs.len(), 3);
+    assert_eq!(read_glyphs[0].glyph_id, 0);
+    assert_eq!(read_glyphs[0].x_advance, 100);
+    assert_eq!(read_glyphs[1].glyph_id, 1);
+    assert_eq!(read_glyphs[1].x_offset, -5);
+    assert_eq!(read_glyphs[1].y_offset, 3);
+    assert_eq!(read_glyphs[2].glyph_id, 65534);
+    assert_eq!(read_glyphs[2].x_advance, 300);
+    assert_eq!(read_glyphs[2].x_offset, 10);
+    assert_eq!(read_glyphs[2].y_offset, -10);
+}
+
+// ── Data buffer capacity (VAL-SCENE-003) ────────────────────────────
+
+#[test]
+fn shaped_glyph_2000_entries_fit_in_64k_data_buffer() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // Create 2000+ glyphs across multiple runs
+    let total_glyphs = 2100;
+    let glyphs_per_run = 100;
+    let num_runs = total_glyphs / glyphs_per_run;
+    let mut total_pushed = 0u32;
+
+    let root = w.alloc_node().unwrap();
+    w.set_root(root);
+
+    for run_idx in 0..num_runs {
+        let glyphs: Vec<ShapedGlyph> = (0..glyphs_per_run).map(|i| ShapedGlyph {
+            glyph_id: ((run_idx * glyphs_per_run + i) % 65535) as u16,
+            x_advance: 500,
+            x_offset: 0,
+            y_offset: 0,
+        }).collect();
+
+        let dref = w.push_shaped_glyphs(&glyphs);
+        // Verify push_shaped_glyphs succeeded with full data
+        assert_eq!(
+            dref.length as usize,
+            glyphs_per_run * core::mem::size_of::<ShapedGlyph>(),
+            "Run {} data truncated — buffer overflow", run_idx
+        );
+        total_pushed += dref.length;
+
+        let run = TextRun {
+            glyphs: dref,
+            glyph_count: glyphs_per_run as u16,
+            x: 0,
+            y: (run_idx as i16) * 20,
+            color: Color::rgb(200, 200, 200),
+            advance: 0,
+            font_size: 16,
+        };
+        let (runs_ref, count) = w.push_text_runs(&[run]);
+        let nid = w.alloc_node().unwrap();
+        w.node_mut(nid).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
+        w.add_child(root, nid);
+    }
+
+    // Verify total data fits within 64 KiB
+    assert!(w.data_used() <= DATA_BUFFER_SIZE as u32,
+        "Data used {} exceeds buffer size {}", w.data_used(), DATA_BUFFER_SIZE);
+    // At 8 bytes per glyph, 2100 glyphs = 16800 bytes, well within 64 KiB
+    assert!(total_pushed >= (total_glyphs * core::mem::size_of::<ShapedGlyph>()) as u32,
+        "Not all glyph data was pushed");
+}
+
+// ── Byte-exact equality round-trip ──────────────────────────────────
+
+#[test]
+fn shaped_glyph_byte_exact_round_trip() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let glyphs = [
+        ShapedGlyph { glyph_id: 0xABCD, x_advance: -32000, x_offset: 32000, y_offset: -1 },
+        ShapedGlyph { glyph_id: 0x0001, x_advance: 1, x_offset: -1, y_offset: 0 },
+        ShapedGlyph { glyph_id: 0xFFFE, x_advance: 0, x_offset: 0, y_offset: 0 },
+    ];
+
+    // Get raw bytes of the input
+    let input_bytes = unsafe {
+        core::slice::from_raw_parts(
+            glyphs.as_ptr() as *const u8,
+            glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
+        )
+    };
+
+    let dref = w.push_shaped_glyphs(&glyphs);
+
+    // Read raw bytes back from data buffer
+    let r = SceneReader::new(&buf);
+    let output_bytes = r.data(dref);
+
+    assert_eq!(input_bytes, output_bytes, "Byte-exact round-trip failed");
+}
+
+// ── Monospace text still works alongside shaped text ────────────────
+
+#[test]
+fn mono_and_shaped_text_coexist() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // Monospace text run (advance > 0, raw bytes)
+    let mono_text = b"Hello";
+    let mono_data = w.push_data(mono_text);
+    let mono_run = TextRun {
+        glyphs: mono_data,
+        glyph_count: 5,
+        x: 0, y: 0,
+        color: Color::rgb(200, 200, 200),
+        advance: 8, // > 0 means monospace
+        font_size: 16,
+    };
+
+    // Shaped text run (advance == 0, ShapedGlyph array)
+    let shaped = [
+        ShapedGlyph { glyph_id: 72, x_advance: 600, x_offset: 0, y_offset: 0 },
+        ShapedGlyph { glyph_id: 101, x_advance: 550, x_offset: 0, y_offset: 0 },
+    ];
+    let shaped_ref = w.push_shaped_glyphs(&shaped);
+    let shaped_run = TextRun {
+        glyphs: shaped_ref,
+        glyph_count: 2,
+        x: 0, y: 20,
+        color: Color::rgb(200, 200, 200),
+        advance: 0, // shaped
+        font_size: 18,
+    };
+
+    let (runs_ref, count) = w.push_text_runs(&[mono_run, shaped_run]);
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
+
+    let r = SceneReader::new(&buf);
+    let text_runs = r.text_runs(runs_ref);
+    assert_eq!(text_runs.len(), 2);
+
+    // Mono run: raw bytes
+    assert_eq!(text_runs[0].advance, 8);
+    assert_eq!(r.data(text_runs[0].glyphs), b"Hello");
+
+    // Shaped run: ShapedGlyph array
+    assert_eq!(text_runs[1].advance, 0);
+    let glyphs = r.shaped_glyphs(text_runs[1].glyphs, text_runs[1].glyph_count);
+    assert_eq!(glyphs.len(), 2);
+    assert_eq!(glyphs[0].glyph_id, 72);
+    assert_eq!(glyphs[1].glyph_id, 101);
+}

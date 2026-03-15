@@ -152,13 +152,27 @@ pub struct TextRun {
     pub font_size: u16,
 }
 
-/// A shaped glyph with individual advance (proportional/shaped text).
+/// A shaped glyph with individual positioning (proportional/shaped text).
+///
+/// Written by the OS service (via shaping library), stored in the scene
+/// graph data buffer, and read by the compositor for rasterization.
+/// All advance/offset values are in scaled pixel units (not font units).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct ShapedGlyph {
+    /// Glyph ID in the font (0 = .notdef).
     pub glyph_id: u16,
-    pub advance: u16,
+    /// Horizontal advance width in scaled units.
+    pub x_advance: i16,
+    /// Horizontal offset from default position.
+    pub x_offset: i16,
+    /// Vertical offset from default position.
+    pub y_offset: i16,
 }
+
+// Compile-time size assertion: ShapedGlyph must be exactly 8 bytes
+// (4 × u16/i16 fields, #[repr(C)], no padding needed).
+const _: () = assert!(core::mem::size_of::<ShapedGlyph>() == 8);
 
 // ── Content variant ─────────────────────────────────────────────────
 
@@ -468,6 +482,30 @@ impl<'a> SceneWriter<'a> {
             length: actual as u32,
         }
     }
+    /// Push an array of `ShapedGlyph` structs into the data buffer.
+    /// Aligns the write offset to `align_of::<ShapedGlyph>()` first.
+    /// Returns a `DataRef` covering the glyph data.
+    pub fn push_shaped_glyphs(&mut self, glyphs: &[ShapedGlyph]) -> DataRef {
+        // Align data_used to ShapedGlyph alignment (2 bytes for i16/u16).
+        let align = core::mem::align_of::<ShapedGlyph>();
+        let used = self.header().data_used as usize;
+        let aligned = (used + align - 1) & !(align - 1);
+
+        if aligned > used && aligned <= DATA_BUFFER_SIZE {
+            self.header_mut().data_used = aligned as u32;
+        }
+
+        // SAFETY: ShapedGlyph is #[repr(C)] with no padding, so
+        // transmuting to bytes is safe for serialization.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                glyphs.as_ptr() as *const u8,
+                glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
+            )
+        };
+
+        self.push_data(bytes)
+    }
     /// Push an array of `TextRun` structs into the data buffer.
     /// Aligns the write offset to `align_of::<TextRun>()` first.
     /// Returns a `DataRef` and the count.
@@ -587,6 +625,26 @@ impl<'a> SceneReader<'a> {
     }
     pub fn root(&self) -> NodeId {
         self.header().root
+    }
+    /// Interpret a DataRef as an array of `ShapedGlyph` structs.
+    ///
+    /// `glyph_count` is the number of glyphs expected (from `TextRun::glyph_count`).
+    /// Returns a slice of up to `glyph_count` glyphs, or fewer if the data
+    /// buffer doesn't contain enough bytes.
+    pub fn shaped_glyphs(&self, dref: DataRef, glyph_count: u16) -> &[ShapedGlyph] {
+        let bytes = self.data(dref);
+        let glyph_size = core::mem::size_of::<ShapedGlyph>();
+
+        if bytes.is_empty() || bytes.len() < glyph_size {
+            return &[];
+        }
+
+        let available = bytes.len() / glyph_size;
+        let count = (glyph_count as usize).min(available);
+
+        // SAFETY: ShapedGlyph is #[repr(C)], data buffer is aligned by
+        // push_shaped_glyphs to ShapedGlyph alignment.
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
     /// Interpret a DataRef as an array of `TextRun` structs.
     pub fn text_runs(&self, dref: DataRef) -> &[TextRun] {
@@ -871,6 +929,20 @@ impl<'a> DoubleWriter<'a> {
 
         unsafe { core::slice::from_raw_parts(ptr, count) }
     }
+    /// Interpret a DataRef from the front buffer as ShapedGlyph array.
+    pub fn front_shaped_glyphs(&self, dref: DataRef, glyph_count: u16) -> &[ShapedGlyph] {
+        let bytes = self.front_data(dref);
+        let glyph_size = core::mem::size_of::<ShapedGlyph>();
+
+        if bytes.is_empty() || bytes.len() < glyph_size {
+            return &[];
+        }
+
+        let available = bytes.len() / glyph_size;
+        let count = (glyph_count as usize).min(available);
+
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
+    }
     /// Interpret a DataRef from the front buffer as TextRun array.
     pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
         let bytes = self.front_data(dref);
@@ -950,6 +1022,20 @@ impl<'a> DoubleReader<'a> {
         let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
 
         unsafe { core::slice::from_raw_parts(ptr, count) }
+    }
+    /// Interpret a DataRef from the front buffer as ShapedGlyph array.
+    pub fn front_shaped_glyphs(&self, dref: DataRef, glyph_count: u16) -> &[ShapedGlyph] {
+        let bytes = self.front_data(dref);
+        let glyph_size = core::mem::size_of::<ShapedGlyph>();
+
+        if bytes.is_empty() || bytes.len() < glyph_size {
+            return &[];
+        }
+
+        let available = bytes.len() / glyph_size;
+        let count = (glyph_count as usize).min(available);
+
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
     /// Interpret a DataRef from the front buffer as TextRun array.
     pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
