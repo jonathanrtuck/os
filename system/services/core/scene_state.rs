@@ -7,8 +7,9 @@
 use alloc::vec::Vec;
 
 use scene::{
-    byte_to_line_col, layout_mono_lines, line_bytes_for_run, scroll_runs, Border, Color, Content,
-    DataRef, DoubleWriter, NodeFlags, ShapedGlyph, TextRun, DOUBLE_SCENE_SIZE, NULL,
+    byte_to_line_col, bytes_to_shaped_glyphs, layout_mono_lines, line_bytes_for_run, scroll_runs,
+    Border, Color, Content, DataRef, DoubleWriter, NodeFlags, ShapedGlyph, TextRun,
+    DOUBLE_SCENE_SIZE, NULL,
 };
 
 /// Well-known node indices for direct mutation.
@@ -20,22 +21,6 @@ pub const N_SHADOW: u16 = 4;
 pub const N_CONTENT: u16 = 5;
 pub const N_DOC_TEXT: u16 = 6;
 pub const N_CURSOR: u16 = 7;
-
-/// Convert raw ASCII text bytes into ShapedGlyph arrays for monospace rendering.
-///
-/// Each byte becomes a glyph with glyph_id = byte value (the compositor will
-/// map these via cmap). The advance is uniform (monospace). This bridges the
-/// old byte-based path to the new shaped glyph scene graph format.
-fn bytes_to_shaped_glyphs(text: &[u8], advance: u16) -> Vec<ShapedGlyph> {
-    text.iter()
-        .map(|&ch| ShapedGlyph {
-            glyph_id: ch as u16,
-            x_advance: advance as i16,
-            x_offset: 0,
-            y_offset: 0,
-        })
-        .collect()
-}
 
 pub struct SceneState {
     buf: &'static mut [u8],

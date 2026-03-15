@@ -1,8 +1,8 @@
 //! Drawing primitives for pixel buffers.
 //!
-//! Pure library — no allocations, no syscalls, no hardware access. Operates on
-//! borrowed pixel buffers. All drawing operations clip to surface bounds; out-of-
-//! range coordinates are silently ignored (no panics).
+//! Pure library — no syscalls, no hardware access. Uses `alloc` for the LRU
+//! glyph cache. Operates on borrowed pixel buffers. All drawing operations clip
+//! to surface bounds; out-of-range coordinates are silently ignored (no panics).
 //!
 //! # Usage
 //!

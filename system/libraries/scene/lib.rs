@@ -343,7 +343,9 @@ impl<'a> SceneWriter<'a> {
     pub fn new(buf: &'a mut [u8]) -> Self {
         assert!(buf.len() >= SCENE_SIZE);
 
-        // Zero the header to establish initial state.
+        // SAFETY: buf is at least SCENE_SIZE bytes (asserted above).
+        // SceneHeader is repr(C) at offset 0 with size <= SCENE_SIZE.
+        // Exclusive &mut borrow prevents aliasing.
         let hdr = unsafe { &mut *(buf.as_mut_ptr() as *mut SceneHeader) };
 
         hdr.generation = 0;
@@ -355,9 +357,13 @@ impl<'a> SceneWriter<'a> {
     }
 
     fn header(&self) -> &SceneHeader {
+        // SAFETY: SceneHeader is repr(C) at offset 0 within the SCENE_SIZE
+        // buffer. The shared borrow on `self` prevents concurrent mutation.
         unsafe { &*(self.buf.as_ptr() as *const SceneHeader) }
     }
     fn header_mut(&mut self) -> &mut SceneHeader {
+        // SAFETY: SceneHeader is repr(C) at offset 0 within the SCENE_SIZE
+        // buffer. The exclusive borrow on `self` prevents aliasing.
         unsafe { &mut *(self.buf.as_mut_ptr() as *mut SceneHeader) }
     }
 
@@ -443,6 +449,9 @@ impl<'a> SceneWriter<'a> {
     pub fn node(&self, id: NodeId) -> &Node {
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
+        // SAFETY: `id` is a NodeId returned by `alloc_node` (bounded by
+        // MAX_NODES), so `offset` is within the SCENE_SIZE buffer. Node is
+        // repr(C) with size NODE_SIZE. Shared borrow prevents mutation.
         unsafe { &*(self.buf.as_ptr().add(offset) as *const Node) }
     }
     pub fn node_count(&self) -> u16 {
@@ -452,13 +461,19 @@ impl<'a> SceneWriter<'a> {
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
+        // SAFETY: Same bounds reasoning as `node()`. Exclusive borrow on
+        // `self` prevents aliasing.
         unsafe { &mut *(self.buf.as_mut_ptr().add(offset) as *mut Node) }
     }
     /// Get all live nodes as a read-only slice.
     pub fn nodes(&self) -> &[Node] {
         let count = self.node_count() as usize;
+        // SAFETY: NODES_OFFSET is within the SCENE_SIZE buffer. Node is
+        // repr(C) with size NODE_SIZE. `count` <= MAX_NODES.
         let ptr = unsafe { self.buf.as_ptr().add(NODES_OFFSET) as *const Node };
 
+        // SAFETY: `ptr` points to `count` contiguous Node-sized entries.
+        // Shared borrow on `self` prevents concurrent mutation.
         unsafe { core::slice::from_raw_parts(ptr, count) }
     }
     /// Append bytes to the data buffer. Returns a `DataRef`.
@@ -522,6 +537,8 @@ impl<'a> SceneWriter<'a> {
             self.header_mut().data_used = aligned as u32;
         }
 
+        // SAFETY: TextRun is #[repr(C)] with no padding, so
+        // transmuting to bytes is safe for serialization.
         let bytes = unsafe {
             core::slice::from_raw_parts(
                 runs.as_ptr() as *const u8,
@@ -583,6 +600,8 @@ impl<'a> SceneReader<'a> {
     }
 
     fn header(&self) -> &SceneHeader {
+        // SAFETY: SceneHeader is repr(C) at offset 0 within the SCENE_SIZE
+        // buffer (asserted in `new`). Shared borrow prevents mutation.
         unsafe { &*(self.buf.as_ptr() as *const SceneHeader) }
     }
 
@@ -614,13 +633,19 @@ impl<'a> SceneReader<'a> {
     pub fn node(&self, id: NodeId) -> &Node {
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
+        // SAFETY: `id` is a valid NodeId (bounded by node_count <= MAX_NODES),
+        // so `offset` is within the SCENE_SIZE buffer. Node is repr(C).
         unsafe { &*(self.buf.as_ptr().add(offset) as *const Node) }
     }
     /// Get all live nodes as a slice.
     pub fn nodes(&self) -> &[Node] {
         let count = self.node_count() as usize;
+        // SAFETY: NODES_OFFSET is within the SCENE_SIZE buffer. Node is
+        // repr(C) with size NODE_SIZE. `count` <= MAX_NODES.
         let ptr = unsafe { self.buf.as_ptr().add(NODES_OFFSET) as *const Node };
 
+        // SAFETY: `ptr` points to `count` contiguous Node-sized entries.
+        // Shared borrow on `self` prevents concurrent mutation.
         unsafe { core::slice::from_raw_parts(ptr, count) }
     }
     pub fn node_count(&self) -> u16 {
@@ -807,6 +832,22 @@ pub fn scroll_runs(
         .collect()
 }
 
+/// Convert raw ASCII text bytes into ShapedGlyph arrays for monospace rendering.
+///
+/// Each byte becomes a glyph with `glyph_id` = byte value (the compositor maps
+/// these via cmap). The advance is uniform (monospace). This bridges the old
+/// byte-based path to the new shaped glyph scene graph format.
+pub fn bytes_to_shaped_glyphs(text: &[u8], advance: u16) -> Vec<ShapedGlyph> {
+    text.iter()
+        .map(|&ch| ShapedGlyph {
+            glyph_id: ch as u16,
+            x_advance: advance as i16,
+            x_offset: 0,
+            y_offset: 0,
+        })
+        .collect()
+}
+
 // ── Double-buffered scene graph ─────────────────────────────────────
 
 /// Total size for a double-buffered scene graph: two full scene buffers
@@ -901,6 +942,9 @@ impl<'a> DoubleWriter<'a> {
     /// Resolve a `DataRef` against the current front buffer.
     pub fn front_data(&self, dref: DataRef) -> &[u8] {
         let (off, _) = front_of(self.buf);
+        // SAFETY: `off` is 0 or SCENE_SIZE (from `front_of`), both within
+        // the DOUBLE_SCENE_SIZE buffer. SceneHeader is repr(C) at the start
+        // of each scene buffer, so the cast is correctly aligned and in-bounds.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
         let start = off + DATA_OFFSET + dref.offset as usize;
         let end = start + dref.length as usize;
@@ -914,6 +958,8 @@ impl<'a> DoubleWriter<'a> {
     /// Data buffer slice from the current front buffer.
     pub fn front_data_buf(&self) -> &[u8] {
         let (off, _) = front_of(self.buf);
+        // SAFETY: Same as front_data — `off` is a valid scene buffer offset,
+        // SceneHeader is repr(C) at the start of each scene buffer.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
         let used = hdr.data_used as usize;
 
@@ -928,10 +974,16 @@ impl<'a> DoubleWriter<'a> {
     /// Node slice from the current front buffer.
     pub fn front_nodes(&self) -> &[Node] {
         let (off, _) = front_of(self.buf);
+        // SAFETY: `off` is a valid scene buffer offset. SceneHeader is repr(C)
+        // at the buffer start; reading node_count is in-bounds.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
         let count = hdr.node_count as usize;
+        // SAFETY: NODES_OFFSET is within each SCENE_SIZE buffer. Node is repr(C)
+        // with size NODE_SIZE. `count` is bounded by MAX_NODES (checked at alloc).
         let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
 
+        // SAFETY: `ptr` points to `count` contiguous Node-sized entries within
+        // the buffer. The slice borrows `self`, preventing concurrent mutation.
         unsafe { core::slice::from_raw_parts(ptr, count) }
     }
     /// Interpret a DataRef from the front buffer as ShapedGlyph array.
@@ -946,6 +998,9 @@ impl<'a> DoubleWriter<'a> {
         let available = bytes.len() / glyph_size;
         let count = (glyph_count as usize).min(available);
 
+        // SAFETY: ShapedGlyph is #[repr(C)] with no padding. push_shaped_glyphs
+        // aligns the data buffer to ShapedGlyph alignment. `count` is bounded by
+        // available bytes. The slice borrows `self`, preventing concurrent mutation.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
     /// Interpret a DataRef from the front buffer as TextRun array.
@@ -959,6 +1014,9 @@ impl<'a> DoubleWriter<'a> {
 
         let count = bytes.len() / run_size;
 
+        // SAFETY: TextRun is #[repr(C)]. Data buffer is aligned to NODE_SIZE
+        // (>= TextRun alignment). `count` is bounded by available bytes.
+        // The slice borrows `self`, preventing concurrent mutation.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
     }
     /// Publish the back buffer as the new front by setting its generation
@@ -987,6 +1045,10 @@ impl<'a> DoubleReader<'a> {
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 
+        // SAFETY: `off` is 0 or SCENE_SIZE (from `front_of`), within the
+        // DOUBLE_SCENE_SIZE buffer. SceneHeader is repr(C) at the start of
+        // each scene buffer. The acquire fence above ensures we see the
+        // writer's data after the generation counter update.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
         let start = off + DATA_OFFSET + dref.offset as usize;
         let end = start + dref.length as usize;
@@ -1003,6 +1065,8 @@ impl<'a> DoubleReader<'a> {
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 
+        // SAFETY: Same as front_data — `off` is a valid scene buffer offset,
+        // acquire fence ensures visibility of writer's data.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
         let used = hdr.data_used as usize;
 
@@ -1022,10 +1086,16 @@ impl<'a> DoubleReader<'a> {
 
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
 
+        // SAFETY: `off` is a valid scene buffer offset. SceneHeader is repr(C)
+        // at the buffer start. Acquire fence ensures visibility.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
         let count = hdr.node_count as usize;
+        // SAFETY: NODES_OFFSET is within each SCENE_SIZE buffer. Node is repr(C)
+        // with size NODE_SIZE. `count` is bounded by MAX_NODES (checked at alloc).
         let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
 
+        // SAFETY: `ptr` points to `count` contiguous Node-sized entries within
+        // the buffer. The slice borrows `self`, preventing concurrent mutation.
         unsafe { core::slice::from_raw_parts(ptr, count) }
     }
     /// Interpret a DataRef from the front buffer as ShapedGlyph array.
@@ -1040,6 +1110,9 @@ impl<'a> DoubleReader<'a> {
         let available = bytes.len() / glyph_size;
         let count = (glyph_count as usize).min(available);
 
+        // SAFETY: ShapedGlyph is #[repr(C)] with no padding. push_shaped_glyphs
+        // aligns the data buffer to ShapedGlyph alignment. `count` is bounded by
+        // available bytes. The acquire fence in front_data ensures visibility.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
     /// Interpret a DataRef from the front buffer as TextRun array.
@@ -1053,6 +1126,9 @@ impl<'a> DoubleReader<'a> {
 
         let count = bytes.len() / run_size;
 
+        // SAFETY: TextRun is #[repr(C)]. Data buffer is aligned to NODE_SIZE
+        // (>= TextRun alignment). `count` is bounded by available bytes.
+        // The acquire fence in front_data ensures visibility.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
     }
 }
