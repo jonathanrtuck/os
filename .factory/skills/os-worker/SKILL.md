@@ -57,6 +57,8 @@ Implement the feature to make tests pass (green).
 
 **Critical conventions:**
 - All `#[repr(C)]` structs in scene/lib.rs: if you add or change fields on Node, update the compile-time size assertion and verify both core and compositor agree on layout.
+- `CompositorConfig` in protocol/src/lib.rs must fit in 60 bytes (IPC payload limit). There is a compile-time assertion. If adding fields, check the size.
+- Before running QEMU visual tests, kill any stale QEMU instances from previous worker runs: `pkill -f "qemu-system-aarch64.*test-" 2>/dev/null || true`
 - sRGB gamma-correct blending for ALL alpha compositing — use the existing `SRGB_TO_LINEAR` / `LINEAR_TO_SRGB` LUTs in drawing/lib.rs.
 - NEON SIMD paths: write scalar reference first, then NEON optimization. Both must produce identical output.
 - `unsafe` blocks require `// SAFETY:` comments. Inline asm: never use `nomem` without explicit ARM manual justification.
