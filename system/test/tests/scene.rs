@@ -1841,3 +1841,654 @@ fn abs_bounds_nested_three_levels() {
     let (ax, ay, aw, ah) = scene::abs_bounds(nodes, &parent_map, leaf as usize);
     assert_eq!((ax, ay, aw, ah), (45, 70, 50, 25));
 }
+
+// ── Change list and copy-forward tests ──────────────────────────────
+
+// VAL-SCENE-001: copy_front_to_back preserves scene state
+#[test]
+fn copy_front_to_back_preserves_nodes_and_data() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Build a scene with multiple nodes and data.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.node_mut(root).width = 1024;
+        w.node_mut(root).height = 768;
+        w.node_mut(root).background = Color::rgb(30, 30, 30);
+        w.set_root(root);
+
+        let child = w.alloc_node().unwrap();
+        w.node_mut(child).x = 10;
+        w.node_mut(child).y = 20;
+        w.node_mut(child).width = 200;
+        w.node_mut(child).height = 100;
+        w.node_mut(child).content =
+            make_mono_text(&mut w, b"Hello, world!", 16, Color::rgb(220, 220, 220), 8);
+        w.add_child(root, child);
+    }
+    dw.swap(); // front is now gen 1
+
+    // Copy front to back.
+    dw.copy_front_to_back();
+
+    // Verify the back buffer matches the front byte-for-byte (nodes + data).
+    let front_nodes = dw.front_nodes().to_vec();
+    let front_data = dw.front_data_buf().to_vec();
+
+    let back = dw.back();
+    let back_nodes = back.nodes();
+    let back_data = back.data_buf();
+
+    assert_eq!(front_nodes.len(), back_nodes.len());
+    assert_eq!(front_data, back_data);
+
+    let node_size = core::mem::size_of::<Node>();
+    for (i, (f, b)) in front_nodes.iter().zip(back_nodes.iter()).enumerate() {
+        // SAFETY: Node is repr(C), byte comparison is sound for equality.
+        let f_bytes = unsafe {
+            core::slice::from_raw_parts(f as *const Node as *const u8, node_size)
+        };
+        let b_bytes = unsafe {
+            core::slice::from_raw_parts(b as *const Node as *const u8, node_size)
+        };
+        assert_eq!(f_bytes, b_bytes, "Node {} differs after copy_front_to_back", i);
+    }
+}
+
+// VAL-SCENE-010: Generation counter NOT copied by copy_front_to_back
+#[test]
+fn copy_front_to_back_preserves_back_generation() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1: write and swap.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n = w.alloc_node().unwrap();
+        w.node_mut(n).width = 100;
+        w.set_root(n);
+    }
+    dw.swap(); // buf 0 = gen 1, buf 1 = gen 0
+
+    // Front is gen 1. Back is gen 0.
+    let front_gen_before = dw.front_generation();
+    assert_eq!(front_gen_before, 1);
+
+    // Copy front to back. Back should still have its original generation.
+    dw.copy_front_to_back();
+
+    // The front generation should not have changed.
+    assert_eq!(dw.front_generation(), 1);
+
+    // The back buffer's generation should be less than the front's (0 < 1).
+    // Verify by checking that front is still the same buffer.
+    let back = dw.back();
+    let back_gen = back.generation();
+    assert!(
+        back_gen < front_gen_before,
+        "back gen {} should be < front gen {}",
+        back_gen,
+        front_gen_before
+    );
+}
+
+// VAL-SCENE-004: Change list cleared on new frame (copy_front_to_back)
+#[test]
+fn copy_front_to_back_resets_change_list() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1: build scene with marks.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n = w.alloc_node().unwrap();
+        w.set_root(n);
+        w.mark_changed(0);
+    }
+    dw.swap();
+
+    // Copy front to back — change list should be empty in back.
+    dw.copy_front_to_back();
+    {
+        let back = dw.back();
+        // Back header should have change_count = 0.
+        assert_eq!(back.generation(), 0); // back gen preserved
+    }
+    // Now swap to make back the new front, then verify change list is empty.
+    dw.swap();
+    let dr = DoubleReader::new(&buf);
+    let cl = dr.change_list();
+    assert!(cl.is_some(), "change list should not be FULL_REPAINT");
+    assert_eq!(cl.unwrap().len(), 0, "change list should be empty after copy_front_to_back");
+}
+
+// VAL-SCENE-002: Change list records changed node IDs
+#[test]
+fn mark_changed_records_node_ids() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1: initial scene.
+    {
+        let mut w = dw.back();
+        w.clear();
+        for _ in 0..8 {
+            w.alloc_node().unwrap();
+        }
+        w.set_root(0);
+    }
+    dw.swap();
+
+    // Frame 2: copy forward, mark specific nodes.
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+        w.mark_changed(3); // clock
+        w.mark_changed(7); // cursor
+    }
+    dw.swap();
+
+    // Read the change list from the new front.
+    let dr = DoubleReader::new(&buf);
+    let cl = dr.change_list();
+    assert!(cl.is_some());
+    let changes = cl.unwrap();
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0], 3);
+    assert_eq!(changes[1], 7);
+    assert!(!dr.is_full_repaint());
+}
+
+// VAL-SCENE-003: Change list is readable by DoubleReader
+#[test]
+fn double_reader_reads_change_list_from_front() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.set_root(root);
+    }
+    dw.swap();
+
+    // Frame 2: copy-forward + mark one node.
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+        w.node_mut(0).background = Color::rgb(255, 0, 0);
+        w.mark_changed(0);
+    }
+    dw.swap();
+
+    // Now DoubleReader on the same buffer should see the change list.
+    let dr = DoubleReader::new(&buf);
+    assert!(!dr.is_full_repaint());
+    let cl = dr.change_list().unwrap();
+    assert_eq!(cl.len(), 1);
+    assert_eq!(cl[0], 0);
+}
+
+// VAL-SCENE-008: Change list capacity handles full screen update (overflow)
+#[test]
+fn mark_changed_overflow_sets_full_repaint() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // Allocate enough nodes.
+    for _ in 0..30 {
+        w.alloc_node().unwrap();
+    }
+    w.set_root(0);
+
+    // Mark more nodes than CHANGE_LIST_CAPACITY (24).
+    for i in 0..25 {
+        w.mark_changed(i as NodeId);
+    }
+
+    // 25th mark should have caused overflow → FULL_REPAINT sentinel.
+    let r = SceneReader::new(&buf);
+    let hdr = r.node_count(); // just verifying reader works
+    assert_eq!(hdr, 30);
+
+    // Read the header directly to check change_count.
+    // We need DoubleWriter to test DoubleReader, but we can also verify
+    // via the raw header.
+    let hdr_ptr = buf.as_ptr() as *const scene::SceneHeader;
+    let hdr = unsafe { &*hdr_ptr };
+    assert_eq!(hdr.change_count, scene::FULL_REPAINT);
+}
+
+// VAL-SCENE-008: overflow via DoubleReader
+#[test]
+fn double_reader_full_repaint_on_overflow() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1: scene with 30 nodes.
+    {
+        let mut w = dw.back();
+        w.clear();
+        for _ in 0..30 {
+            w.alloc_node().unwrap();
+        }
+        w.set_root(0);
+    }
+    dw.swap();
+
+    // Frame 2: copy-forward, mark 25 nodes (overflow).
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+        for i in 0..25 {
+            w.mark_changed(i as NodeId);
+        }
+    }
+    dw.swap();
+
+    let dr = DoubleReader::new(&buf);
+    assert!(dr.is_full_repaint());
+    assert!(dr.change_list().is_none());
+}
+
+// SceneWriter::clear sets FULL_REPAINT sentinel
+#[test]
+fn clear_sets_full_repaint() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n = w.alloc_node().unwrap();
+        w.set_root(n);
+    }
+    dw.swap();
+
+    // Frame 2: clear (full rebuild) should signal full repaint.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let n = w.alloc_node().unwrap();
+        w.set_root(n);
+    }
+    dw.swap();
+
+    let dr = DoubleReader::new(&buf);
+    assert!(dr.is_full_repaint());
+    assert!(dr.change_list().is_none());
+}
+
+// Already-overflowed mark_changed is a no-op
+#[test]
+fn mark_changed_after_overflow_is_noop() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    for _ in 0..30 {
+        w.alloc_node().unwrap();
+    }
+
+    // Overflow the change list.
+    for i in 0..25 {
+        w.mark_changed(i as NodeId);
+    }
+
+    // Further marks should be a no-op (still FULL_REPAINT, no crash).
+    w.mark_changed(29);
+    w.mark_changed(0);
+
+    let hdr = unsafe { &*(buf.as_ptr() as *const scene::SceneHeader) };
+    assert_eq!(hdr.change_count, scene::FULL_REPAINT);
+}
+
+// VAL-SCENE-007: Node mutation via copy-then-mutate preserves tree structure
+#[test]
+fn copy_then_mutate_preserves_other_nodes() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1: build a tree with 8 well-known nodes.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let root = w.alloc_node().unwrap(); // 0
+        w.node_mut(root).width = 1024;
+        w.node_mut(root).height = 768;
+        w.node_mut(root).background = Color::rgb(30, 30, 30);
+        w.set_root(root);
+
+        let title_bar = w.alloc_node().unwrap(); // 1
+        w.node_mut(title_bar).width = 1024;
+        w.node_mut(title_bar).height = 36;
+        w.node_mut(title_bar).background = Color::rgba(20, 20, 20, 200);
+        w.add_child(root, title_bar);
+
+        let title_text = w.alloc_node().unwrap(); // 2
+        w.node_mut(title_text).x = 12;
+        w.node_mut(title_text).y = 8;
+        w.add_child(title_bar, title_text);
+
+        let clock_text = w.alloc_node().unwrap(); // 3
+        w.node_mut(clock_text).x = 900;
+        w.node_mut(clock_text).y = 8;
+        w.add_child(title_bar, clock_text);
+
+        let shadow = w.alloc_node().unwrap(); // 4
+        w.node_mut(shadow).y = 36;
+        w.node_mut(shadow).height = 4;
+        w.node_mut(shadow).background = Color::rgba(0, 0, 0, 80);
+        w.add_child(root, shadow);
+
+        let content = w.alloc_node().unwrap(); // 5
+        w.node_mut(content).y = 40;
+        w.node_mut(content).width = 1024;
+        w.node_mut(content).height = 728;
+        w.add_child(root, content);
+
+        let doc_text = w.alloc_node().unwrap(); // 6
+        w.node_mut(doc_text).x = 12;
+        w.node_mut(doc_text).y = 8;
+        w.add_child(content, doc_text);
+
+        let cursor = w.alloc_node().unwrap(); // 7
+        w.node_mut(cursor).x = 12;
+        w.node_mut(cursor).y = 8;
+        w.node_mut(cursor).width = 2;
+        w.node_mut(cursor).height = 20;
+        w.node_mut(cursor).background = Color::rgb(200, 200, 200);
+        w.add_child(content, cursor);
+    }
+    dw.swap();
+
+    // Snapshot the front nodes before mutation.
+    let front_nodes_before: Vec<Node> = dw.front_nodes().to_vec();
+
+    // Frame 2: copy forward, mutate only cursor (node 7) position.
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+        w.node_mut(7).x = 100; // moved cursor
+        w.node_mut(7).y = 48;  // moved cursor
+        w.mark_changed(7);
+    }
+    dw.swap();
+
+    // Verify all non-mutated nodes are identical.
+    let front_nodes_after: Vec<Node> = dw.front_nodes().to_vec();
+    assert_eq!(front_nodes_after.len(), 8);
+
+    let node_size = core::mem::size_of::<Node>();
+    for i in 0..8 {
+        if i == 7 {
+            // Cursor should have changed.
+            assert_eq!(front_nodes_after[i].x, 100);
+            assert_eq!(front_nodes_after[i].y, 48);
+            // But tree structure preserved.
+            assert_eq!(
+                front_nodes_after[i].first_child,
+                front_nodes_before[i].first_child
+            );
+            assert_eq!(
+                front_nodes_after[i].next_sibling,
+                front_nodes_before[i].next_sibling
+            );
+            assert_eq!(
+                front_nodes_after[i].width,
+                front_nodes_before[i].width
+            );
+            assert_eq!(
+                front_nodes_after[i].background,
+                front_nodes_before[i].background
+            );
+        } else {
+            // All other nodes unchanged byte-for-byte.
+            let before_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &front_nodes_before[i] as *const Node as *const u8,
+                    node_size,
+                )
+            };
+            let after_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    &front_nodes_after[i] as *const Node as *const u8,
+                    node_size,
+                )
+            };
+            assert_eq!(
+                before_bytes, after_bytes,
+                "Node {} should be unchanged after mutating only cursor",
+                i
+            );
+        }
+    }
+
+    // Verify change list only has cursor.
+    let dr = DoubleReader::new(&buf);
+    let cl = dr.change_list().unwrap();
+    assert_eq!(cl.len(), 1);
+    assert_eq!(cl[0], 7);
+}
+
+// VAL-SCENE-009: Data buffer exhaustion detection
+#[test]
+fn data_buffer_exhaustion_detectable() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1: fill data buffer to >75%.
+    {
+        let mut w = dw.back();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.set_root(root);
+        // Push enough data to exceed 75% of DATA_BUFFER_SIZE.
+        let threshold = (DATA_BUFFER_SIZE as u32 * 3) / 4;
+        let chunk = vec![0xABu8; threshold as usize + 100];
+        w.push_data(&chunk);
+    }
+    dw.swap();
+
+    // After copy-forward, the back buffer inherits the high data_used.
+    dw.copy_front_to_back();
+    {
+        let back = dw.back();
+        let used = back.data_used();
+        let threshold = (DATA_BUFFER_SIZE as u32 * 3) / 4;
+        assert!(
+            used > threshold,
+            "data_used {} should exceed 75% threshold {}",
+            used,
+            threshold
+        );
+        // This is where core would detect exhaustion and fall back to
+        // full rebuild via clear() + reset_data().
+    }
+}
+
+// VAL-SCENE-005: update_data with matching and mismatching lengths
+#[test]
+fn update_data_in_place_after_copy_forward() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1: scene with data.
+    let mut clock_dref = DataRef { offset: 0, length: 0 };
+    {
+        let mut w = dw.back();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.set_root(root);
+        clock_dref = w.push_data(b"12:34:56");
+    }
+    dw.swap();
+
+    // Frame 2: copy forward, update clock data in-place.
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+        assert!(w.update_data(clock_dref, b"12:35:00"));
+        // Wrong length should fail.
+        assert!(!w.update_data(clock_dref, b"ABC"));
+        w.mark_changed(0); // mark root changed (for demo)
+    }
+    dw.swap();
+
+    // Verify the updated data is readable.
+    let dr = DoubleReader::new(&buf);
+    let data = dr.front_data(clock_dref);
+    assert_eq!(data, b"12:35:00");
+}
+
+// Verify mark_changed at exact capacity (24 entries)
+#[test]
+fn mark_changed_exact_capacity() {
+    let mut buf = make_buf();
+    {
+        let mut w = SceneWriter::new(&mut buf);
+
+        for _ in 0..30 {
+            w.alloc_node().unwrap();
+        }
+
+        // Mark exactly CHANGE_LIST_CAPACITY nodes.
+        for i in 0..scene::CHANGE_LIST_CAPACITY {
+            w.mark_changed(i as NodeId);
+        }
+    }
+
+    let hdr = unsafe { &*(buf.as_ptr() as *const scene::SceneHeader) };
+    assert_eq!(hdr.change_count, scene::CHANGE_LIST_CAPACITY as u16);
+
+    // Verify all entries.
+    for i in 0..scene::CHANGE_LIST_CAPACITY {
+        assert_eq!(hdr.changed_nodes[i], i as NodeId);
+    }
+
+    // One more should overflow.
+    {
+        let mut w = SceneWriter::from_existing(&mut buf);
+        w.mark_changed(24);
+    }
+    let hdr = unsafe { &*(buf.as_ptr() as *const scene::SceneHeader) };
+    assert_eq!(hdr.change_count, scene::FULL_REPAINT);
+}
+
+// Empty change list after initial DoubleWriter::new (both buffers empty)
+#[test]
+fn double_reader_initial_change_list_empty() {
+    let mut buf = make_double_buf();
+    {
+        let _dw = DoubleWriter::new(&mut buf);
+    }
+
+    let dr = DoubleReader::new(&buf);
+    // Initial state: change_count = 0 (set by SceneWriter::new).
+    assert!(!dr.is_full_repaint());
+    let cl = dr.change_list().unwrap();
+    assert_eq!(cl.len(), 0);
+}
+
+// Multiple frames of copy-forward + selective mutation
+#[test]
+fn multiple_copy_forward_frames() {
+    let mut buf = make_double_buf();
+
+    // Frame 1: initial build.
+    {
+        let mut dw = DoubleWriter::new(&mut buf);
+        {
+            let mut w = dw.back();
+            w.clear();
+            for i in 0..8u16 {
+                let n = w.alloc_node().unwrap();
+                w.node_mut(n).width = (i + 1) * 10;
+            }
+            w.set_root(0);
+        }
+        dw.swap();
+    }
+
+    // Frames 2-5: copy-forward with different mutations.
+    for frame in 0..4u16 {
+        {
+            let mut dw = DoubleWriter::from_existing(&mut buf);
+            dw.copy_front_to_back();
+            {
+                let mut w = dw.back();
+                // Mutate a different node each frame.
+                let target = (frame + 1) as NodeId; // nodes 1, 2, 3, 4
+                w.node_mut(target).height = (frame + 1) * 100;
+                w.mark_changed(target);
+            }
+            dw.swap();
+        }
+
+        // Verify change list has exactly one entry.
+        let dr = DoubleReader::new(&buf);
+        let cl = dr.change_list().unwrap();
+        assert_eq!(cl.len(), 1, "Frame {}: expected 1 change", frame + 2);
+        assert_eq!(cl[0], (frame + 1) as NodeId);
+
+        // Verify the mutation stuck.
+        assert_eq!(
+            dr.front_nodes()[(frame + 1) as usize].height,
+            (frame + 1) * 100
+        );
+
+        // Verify other nodes' widths are preserved from frame 1.
+        for i in 0..8usize {
+            assert_eq!(
+                dr.front_nodes()[i].width,
+                ((i as u16) + 1) * 10,
+                "Frame {}: node {} width changed unexpectedly",
+                frame + 2,
+                i
+            );
+        }
+    }
+}
+
+// VAL-SCENE-009: update_data doesn't grow data_used (same-length overwrite)
+#[test]
+fn update_data_does_not_grow_data_used() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    let mut dref = DataRef { offset: 0, length: 0 };
+    {
+        let mut w = dw.back();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.set_root(root);
+        dref = w.push_data(b"AAAAAAAA");
+    }
+    dw.swap();
+
+    let data_used_before = dw.front_nodes().len(); // just to read front
+    let front_data_before = dw.front_data_buf().len();
+
+    // Copy forward and update in-place 10 times.
+    for i in 0..10u8 {
+        dw.copy_front_to_back();
+        {
+            let mut w = dw.back();
+            let new_data = [b'A' + i; 8];
+            assert!(w.update_data(dref, &new_data));
+            assert_eq!(w.data_used() as usize, front_data_before);
+        }
+        dw.swap();
+    }
+
+    // data_used should be unchanged.
+    let dr = DoubleReader::new(&buf);
+    assert_eq!(dr.front_data_buf().len(), front_data_before);
+}

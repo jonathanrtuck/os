@@ -314,6 +314,16 @@ pub const SCENE_SIZE: usize = DATA_OFFSET + DATA_BUFFER_SIZE;
 
 const _: () = assert!(core::mem::size_of::<SceneHeader>() == 64);
 
+/// Maximum number of changed node IDs that fit in the scene header's
+/// change list. Sized to fill the 52-byte reserved area alongside
+/// `change_count` (u16) and 2 bytes padding: (52 - 2 - 2) / 2 = 24.
+pub const CHANGE_LIST_CAPACITY: usize = 24;
+
+/// Sentinel value for `SceneHeader::change_count` indicating that the
+/// change list overflowed (or a full rebuild occurred) and the compositor
+/// must repaint the entire screen.
+pub const FULL_REPAINT: u16 = u16::MAX;
+
 /// Header at the start of the shared memory region.
 #[derive(Clone, Copy, Debug)]
 #[repr(C)]
@@ -326,7 +336,11 @@ pub struct SceneHeader {
     pub root: NodeId,
     /// Bytes used in the data buffer.
     pub data_used: u32,
-    pub _reserved: [u8; 52],
+    /// Number of entries in `changed_nodes`, or `FULL_REPAINT` sentinel.
+    pub change_count: u16,
+    /// Node IDs that changed this frame (valid entries: `0..change_count`).
+    pub changed_nodes: [NodeId; CHANGE_LIST_CAPACITY],
+    pub _reserved2: [u8; 2],
 }
 
 // ── Path commands ───────────────────────────────────────────────────
@@ -374,6 +388,8 @@ impl<'a> SceneWriter<'a> {
         hdr.node_count = 0;
         hdr.root = NULL;
         hdr.data_used = 0;
+        hdr.change_count = 0;
+        hdr.changed_nodes = [NULL; CHANGE_LIST_CAPACITY];
 
         Self { buf }
     }
@@ -438,10 +454,13 @@ impl<'a> SceneWriter<'a> {
         Some(id)
     }
     /// Reset node count and data usage. Preserves generation.
+    /// Sets change_count to FULL_REPAINT — a full rebuild means the
+    /// compositor must repaint the entire screen.
     pub fn clear(&mut self) {
         self.header_mut().node_count = 0;
         self.header_mut().data_used = 0;
         self.header_mut().root = NULL;
+        self.header_mut().change_count = FULL_REPAINT;
     }
     /// Increment the generation counter (signals a complete update).
     pub fn commit(&mut self) {
@@ -466,6 +485,27 @@ impl<'a> SceneWriter<'a> {
     }
     pub fn generation(&self) -> u32 {
         self.header().generation
+    }
+    /// Record a node ID in the change list. If the list is already at
+    /// capacity, sets the FULL_REPAINT sentinel instead. Duplicate IDs
+    /// are stored as-is (the compositor treats them as a set).
+    pub fn mark_changed(&mut self, node_id: NodeId) {
+        let hdr = self.header_mut();
+
+        if hdr.change_count == FULL_REPAINT {
+            return; // already overflowed
+        }
+
+        let idx = hdr.change_count as usize;
+
+        if idx >= CHANGE_LIST_CAPACITY {
+            hdr.change_count = FULL_REPAINT;
+
+            return;
+        }
+
+        hdr.changed_nodes[idx] = node_id;
+        hdr.change_count = (idx + 1) as u16;
     }
     /// Get a shared reference to a node by ID.
     pub fn node(&self, id: NodeId) -> &Node {
@@ -798,6 +838,76 @@ impl<'a> DoubleWriter<'a> {
 
         SceneWriter::from_existing(&mut self.buf[off..off + SCENE_SIZE])
     }
+    /// Copy the front buffer's node array and data buffer to the back
+    /// buffer, preserving the back buffer's generation counter. Resets
+    /// the back buffer's change list to empty. After this call, `back()`
+    /// returns a writer whose scene matches the current front — the
+    /// caller can then mutate individual nodes and call `swap()`.
+    pub fn copy_front_to_back(&mut self) {
+        let front_off = front_of(self.buf).0;
+        let back_off = back_offset_of(self.buf);
+
+        // Read front header to determine how much to copy.
+        // SAFETY: front_off is 0 or SCENE_SIZE, within the DOUBLE_SCENE_SIZE
+        // buffer. SceneHeader is repr(C) at the start of each scene buffer.
+        let front_hdr =
+            unsafe { core::ptr::read(self.buf.as_ptr().add(front_off) as *const SceneHeader) };
+
+        let node_count = front_hdr.node_count;
+        let data_used = front_hdr.data_used;
+
+        // Save back buffer's generation before overwriting.
+        let back_gen = read_generation(self.buf, back_off);
+
+        // Copy node array (only the live nodes).
+        let node_bytes = node_count as usize * NODE_SIZE;
+
+        if node_bytes > 0 {
+            // SAFETY: Both front_off and back_off are valid scene buffer
+            // offsets (0 or SCENE_SIZE). NODES_OFFSET + node_bytes is within
+            // SCENE_SIZE (bounded by MAX_NODES * NODE_SIZE). src and dst do
+            // not overlap because front_off != back_off (one is 0, the other
+            // is SCENE_SIZE). Using copy_nonoverlapping for performance.
+            unsafe {
+                let src = self.buf.as_ptr().add(front_off + NODES_OFFSET);
+                let dst = self.buf.as_mut_ptr().add(back_off + NODES_OFFSET);
+
+                core::ptr::copy_nonoverlapping(src, dst, node_bytes);
+            }
+        }
+
+        // Copy data buffer (only the used portion).
+        let data_bytes = data_used as usize;
+
+        if data_bytes > 0 {
+            // SAFETY: Same reasoning — DATA_OFFSET + data_bytes is within
+            // SCENE_SIZE (bounded by DATA_BUFFER_SIZE). Non-overlapping
+            // because front and back buffers are SCENE_SIZE apart.
+            unsafe {
+                let src = self.buf.as_ptr().add(front_off + DATA_OFFSET);
+                let dst = self.buf.as_mut_ptr().add(back_off + DATA_OFFSET);
+
+                core::ptr::copy_nonoverlapping(src, dst, data_bytes);
+            }
+        }
+
+        // Write back header: copy front's metadata but preserve generation
+        // and reset change list.
+        // SAFETY: back_off is a valid scene buffer offset. SceneHeader is
+        // repr(C) at offset 0 of each scene buffer. Exclusive &mut borrow
+        // on self prevents aliasing.
+        let back_hdr =
+            unsafe { &mut *(self.buf.as_mut_ptr().add(back_off) as *mut SceneHeader) };
+
+        back_hdr.node_count = node_count;
+        back_hdr.root = front_hdr.root;
+        back_hdr.data_used = data_used;
+        back_hdr.change_count = 0;
+        back_hdr.changed_nodes = [NULL; CHANGE_LIST_CAPACITY];
+
+        // Restore back buffer's generation (do NOT copy front's generation).
+        write_generation(self.buf, back_off, back_gen);
+    }
     /// Wrap a previously initialized double buffer without resetting.
     pub fn from_existing(buf: &'a mut [u8]) -> Self {
         assert!(buf.len() >= DOUBLE_SCENE_SIZE);
@@ -995,6 +1105,38 @@ impl<'a> DoubleReader<'a> {
         // (>= TextRun alignment). `count` is bounded by available bytes.
         // The acquire fence in front_data ensures visibility.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
+    }
+    /// Returns the change list from the front buffer, or `None` if the
+    /// FULL_REPAINT sentinel is set (overflow or full rebuild).
+    pub fn change_list(&self) -> Option<&[NodeId]> {
+        let (off, _) = front_of(self.buf);
+
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+
+        // SAFETY: `off` is a valid scene buffer offset (0 or SCENE_SIZE).
+        // SceneHeader is repr(C) at offset 0 of each scene buffer. Acquire
+        // fence ensures visibility of the writer's change list data.
+        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
+
+        if hdr.change_count == FULL_REPAINT {
+            return None;
+        }
+
+        let count = (hdr.change_count as usize).min(CHANGE_LIST_CAPACITY);
+
+        Some(&hdr.changed_nodes[..count])
+    }
+    /// Returns `true` if the front buffer's change list indicates a full
+    /// repaint is needed (FULL_REPAINT sentinel or clear() was called).
+    pub fn is_full_repaint(&self) -> bool {
+        let (off, _) = front_of(self.buf);
+
+        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+
+        // SAFETY: Same as change_list — valid offset, repr(C) header.
+        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
+
+        hdr.change_count == FULL_REPAINT
     }
 }
 
