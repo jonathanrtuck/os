@@ -293,7 +293,23 @@ impl GlyphCache {
         self.size_px = size_px;
         self.line_height = self.ascent + self.descent + gap_px;
 
-        let mut scratch = rasterize::RasterScratch::zeroed();
+        // Heap-allocate the rasterization scratch space (~39 KiB) to avoid
+        // stack overflow — userspace stacks are only 16 KiB. We use
+        // alloc_zeroed + Box::from_raw to avoid placing the struct on the
+        // stack first (Box::new would construct on-stack then move to heap).
+        let mut scratch: alloc::boxed::Box<rasterize::RasterScratch> = unsafe {
+            let layout = alloc::alloc::Layout::new::<rasterize::RasterScratch>();
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut rasterize::RasterScratch;
+
+            if ptr.is_null() {
+                return; // Allocation failed — leave cache empty.
+            }
+
+            // SAFETY: alloc_zeroed returns a valid, zero-initialized pointer
+            // with the correct size and alignment. RasterScratch::zeroed() is
+            // all-zeros, so the zero-initialized memory is a valid instance.
+            alloc::boxed::Box::from_raw(ptr)
+        };
 
         for i in 0..ASCII_CACHE_COUNT {
             let codepoint = (0x20u8 + i as u8) as char;
