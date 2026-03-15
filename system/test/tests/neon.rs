@@ -937,3 +937,102 @@ fn neon_intrinsics_available() {
         assert!(true, "scalar fallback on non-aarch64");
     }
 }
+
+// ---------------------------------------------------------------------------
+// NEON rounded rect tests — VAL-PRIM-005
+// ---------------------------------------------------------------------------
+
+/// VAL-PRIM-005: NEON path for rounded rect interior matches scalar fill_rect.
+/// The interior rows of a rounded rect (between top and bottom arcs) should
+/// use the existing fill_rect NEON fast path and produce identical output.
+#[test]
+fn neon_rounded_rect_interior_matches_fill_rect() {
+    // Use a wide surface to exercise the NEON 4-pixel chunks.
+    let width = 200u32;
+    let height = 100u32;
+    let radius = 16u32;
+    let color = Color::rgb(42, 128, 200);
+
+    let mut rr_buf = vec![0u8; (width * height * 4) as usize];
+    {
+        let mut surf = make_surface(&mut rr_buf, width, height);
+        surf.fill_rounded_rect(0, 0, width, height, radius, color);
+    }
+
+    let mut fr_buf = vec![0u8; (width * height * 4) as usize];
+    {
+        let mut surf = make_surface(&mut fr_buf, width, height);
+        surf.fill_rect(0, radius, width, height - 2 * radius, color);
+    }
+
+    // Compare interior rows (y=radius..height-radius).
+    let stride = (width * 4) as usize;
+    for row in radius..(height - radius) {
+        let off = (row * width * 4) as usize;
+        assert_eq!(
+            &rr_buf[off..off + stride],
+            &fr_buf[off..off + stride],
+            "NEON rounded rect interior row {row} should match fill_rect exactly"
+        );
+    }
+}
+
+/// NEON rounded rect blend: interior rows match fill_rect_blend.
+#[test]
+fn neon_rounded_rect_blend_interior_matches_fill_rect_blend() {
+    let width = 200u32;
+    let height = 100u32;
+    let radius = 16u32;
+    let fg = Color::rgba(200, 100, 50, 180);
+    let bg = Color::rgb(30, 60, 90);
+
+    let mut rr_buf = vec![0u8; (width * height * 4) as usize];
+    {
+        let mut surf = make_surface(&mut rr_buf, width, height);
+        surf.clear(bg);
+        surf.fill_rounded_rect_blend(0, 0, width, height, radius, fg);
+    }
+
+    let mut fr_buf = vec![0u8; (width * height * 4) as usize];
+    {
+        let mut surf = make_surface(&mut fr_buf, width, height);
+        surf.clear(bg);
+        surf.fill_rect_blend(0, radius, width, height - 2 * radius, fg);
+    }
+
+    let stride = (width * 4) as usize;
+    for row in radius..(height - radius) {
+        let off = (row * width * 4) as usize;
+        assert_eq!(
+            &rr_buf[off..off + stride],
+            &fr_buf[off..off + stride],
+            "NEON rounded rect blend interior row {row} should match fill_rect_blend exactly"
+        );
+    }
+}
+
+/// NEON rounded rect: various widths exercise aligned and unaligned paths.
+#[test]
+fn neon_rounded_rect_various_widths() {
+    let color = Color::rgb(200, 100, 50);
+    // Test widths that exercise: 1 pixel tail, 2, 3, exactly 4 (one NEON chunk),
+    // 5 (1 chunk + 1 tail), 7, 8, 100.
+    let widths = [5, 6, 7, 8, 9, 13, 16, 17, 100];
+
+    for &width in &widths {
+        let height = width; // square
+        let radius = if width >= 8 { 4 } else { width / 2 };
+        let mut buf = vec![0u8; (width * height * 4) as usize];
+        let mut surf = make_surface(&mut buf, width, height);
+        surf.fill_rounded_rect(0, 0, width, height, radius, color);
+
+        // Interior center pixel should be fully solid.
+        let cx = width / 2;
+        let cy = height / 2;
+        assert_eq!(
+            surf.get_pixel(cx, cy),
+            Some(color),
+            "center pixel at width={width}"
+        );
+    }
+}

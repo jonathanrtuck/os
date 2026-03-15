@@ -768,6 +768,313 @@ impl<'a> Surface<'a> {
             }
         }
     }
+    /// Fill a rounded rectangle with a solid opaque color. Clips to surface bounds.
+    ///
+    /// Uses SDF-based approach: for each pixel in the corner arc regions,
+    /// computes signed distance to the rounded corner and derives coverage
+    /// (0.0–1.0) for anti-aliasing. Interior rows use `fill_rect` for speed.
+    ///
+    /// `radius` is clamped to `min(w, h) / 2`. Zero radius delegates to `fill_rect`.
+    /// Anti-aliased edge pixels use gamma-correct sRGB blending.
+    pub fn fill_rounded_rect(
+        &mut self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if w == 0 || h == 0 {
+            return;
+        }
+
+        // Clamp radius to half the smallest dimension.
+        let max_r = min(w, h) / 2;
+        let r = min(radius, max_r);
+
+        // Zero radius: delegate to fill_rect (no overhead).
+        if r == 0 {
+            self.fill_rect(x, y, w, h, color);
+            return;
+        }
+
+        // Interior rows (between top and bottom arcs): fill_rect fast path.
+        if h > 2 * r {
+            self.fill_rect(x, y + r, w, h - 2 * r, color);
+        }
+
+        // Corner arc rows: top r rows and bottom r rows.
+        // For each row in the arc region, compute the horizontal extent
+        // of the rounded rect and fill with per-pixel AA at the edges.
+        let encoded = color.encode(self.format);
+        let pixel_u32 = u32::from_ne_bytes(encoded);
+        let bpp = self.format.bytes_per_pixel();
+        let stride = self.stride;
+        let surf_w = self.width;
+        let surf_h = self.height;
+        let ptr = self.data.as_mut_ptr();
+
+        // Pre-convert color to linear for AA blending.
+        let src_r_lin = SRGB_TO_LINEAR[color.r as usize] as u32;
+        let src_g_lin = SRGB_TO_LINEAR[color.g as usize] as u32;
+        let src_b_lin = SRGB_TO_LINEAR[color.b as usize] as u32;
+
+        // Process top and bottom arc rows.
+        for arc_row in 0..r {
+            // Distance from arc row center to the circle center (at radius r from edge).
+            // dy = r - arc_row - 0.5 (distance from pixel center to circle center y).
+            // We use fixed-point: dy_fp = (r * 256) - (arc_row * 256) - 128
+            let dy_fp: i64 = (r as i64 * 256) - (arc_row as i64 * 256) - 128;
+            let dy_sq = (dy_fp * dy_fp) as u64;
+            let r_sq = (r as u64 * 256) * (r as u64 * 256);
+
+            // The arc at this row defines x extent: x_arc = sqrt(r² - dy²)
+            // This tells us how far the arc extends horizontally from the corner center.
+            let x_arc_sq = if r_sq > dy_sq { r_sq - dy_sq } else { 0 };
+            let x_arc_fp = isqrt_fp(x_arc_sq); // in 8.8 fixed point
+
+            // Process both top row and bottom row.
+            let rows: [u32; 2] = [y + arc_row, y + h - 1 - arc_row];
+            for &py in &rows {
+                if py >= surf_h {
+                    continue;
+                }
+
+                // Left corner: center is at (x + r, py_center). Arc extends x_arc left.
+                // The solid interior starts at x + r - floor(x_arc) and extends to x + w - r + floor(x_arc).
+                let x_arc_int = (x_arc_fp >> 8) as u32;
+                let x_arc_frac = (x_arc_fp & 0xFF) as u32; // 0..255
+
+                // Left edge pixel: partial coverage.
+                let left_solid = x + r - x_arc_int;
+                let right_solid = x + w - r + x_arc_int;
+
+                // Left AA pixel (if in bounds).
+                if left_solid > 0 && x_arc_frac > 0 {
+                    let lx = left_solid - 1;
+                    if lx >= x && lx < surf_w {
+                        // Coverage is x_arc_frac / 256.
+                        let cov = x_arc_frac;
+                        // SAFETY: lx < surf_w and py < surf_h (checked above).
+                        // Pixel offset is within the surface data bounds.
+                        unsafe {
+                            rounded_rect_write_aa_pixel(
+                                ptr, lx, py, stride, bpp,
+                                src_r_lin, src_g_lin, src_b_lin, color.a as u32, cov,
+                            );
+                        }
+                    }
+                }
+
+                // Right AA pixel (if in bounds).
+                if right_solid < x + w && x_arc_frac > 0 {
+                    let rx = right_solid;
+                    if rx < surf_w {
+                        let cov = x_arc_frac;
+                        // SAFETY: rx < surf_w and py < surf_h (checked above).
+                        unsafe {
+                            rounded_rect_write_aa_pixel(
+                                ptr, rx, py, stride, bpp,
+                                src_r_lin, src_g_lin, src_b_lin, color.a as u32, cov,
+                            );
+                        }
+                    }
+                }
+
+                // Solid interior pixels for this arc row.
+                let fill_x0 = if left_solid < x { x } else { left_solid };
+                let fill_x1 = if right_solid > x + w { x + w } else { right_solid };
+
+                if fill_x0 < fill_x1 {
+                    let clipped_x0 = if fill_x0 >= surf_w { continue } else { fill_x0 };
+                    let clipped_x1 = min(fill_x1, surf_w);
+                    let count = (clipped_x1 - clipped_x0) as usize;
+
+                    if count > 0 {
+                        let row_offset = (py * stride + clipped_x0 * bpp) as usize;
+                        // SAFETY: py < surf_h, clipped_x0..clipped_x1 within [0, surf_w).
+                        // row_offset + count * 4 <= surf_h * stride <= data.len().
+                        unsafe {
+                            let row_ptr = ptr.add(row_offset) as *mut u32;
+                            #[cfg(target_arch = "aarch64")]
+                            {
+                                neon_fill_row(row_ptr, count, pixel_u32);
+                            }
+                            #[cfg(not(target_arch = "aarch64"))]
+                            {
+                                for i in 0..count {
+                                    core::ptr::write(row_ptr.add(i), pixel_u32);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Fill a rounded rectangle with alpha-blended color. Clips to surface bounds.
+    ///
+    /// Each destination pixel is blended using source-over. Corner pixels use
+    /// per-pixel coverage derived from the SDF for anti-aliasing, combined with
+    /// the source alpha. Interior rows use `fill_rect_blend` fast path.
+    ///
+    /// `radius` is clamped to `min(w, h) / 2`. Zero radius delegates to
+    /// `fill_rect_blend`. Opaque colors fast-path to `fill_rounded_rect`.
+    pub fn fill_rounded_rect_blend(
+        &mut self,
+        x: u32,
+        y: u32,
+        w: u32,
+        h: u32,
+        radius: u32,
+        color: Color,
+    ) {
+        if color.a == 255 {
+            self.fill_rounded_rect(x, y, w, h, radius, color);
+            return;
+        }
+        if color.a == 0 || w == 0 || h == 0 {
+            return;
+        }
+
+        // Clamp radius.
+        let max_r = min(w, h) / 2;
+        let r = min(radius, max_r);
+
+        if r == 0 {
+            self.fill_rect_blend(x, y, w, h, color);
+            return;
+        }
+
+        // Interior rows: fill_rect_blend fast path.
+        if h > 2 * r {
+            self.fill_rect_blend(x, y + r, w, h - 2 * r, color);
+        }
+
+        // Pre-convert source color for blending.
+        let sa = color.a as u32;
+        let inv_sa = 255 - sa;
+        let src_r_lin = SRGB_TO_LINEAR[color.r as usize] as u32;
+        let src_g_lin = SRGB_TO_LINEAR[color.g as usize] as u32;
+        let src_b_lin = SRGB_TO_LINEAR[color.b as usize] as u32;
+        let bpp = self.format.bytes_per_pixel();
+        let stride = self.stride;
+        let surf_w = self.width;
+        let surf_h = self.height;
+        let ptr = self.data.as_mut_ptr();
+
+        for arc_row in 0..r {
+            let dy_fp: i64 = (r as i64 * 256) - (arc_row as i64 * 256) - 128;
+            let dy_sq = (dy_fp * dy_fp) as u64;
+            let r_sq = (r as u64 * 256) * (r as u64 * 256);
+            let x_arc_sq = if r_sq > dy_sq { r_sq - dy_sq } else { 0 };
+            let x_arc_fp = isqrt_fp(x_arc_sq);
+
+            let rows: [u32; 2] = [y + arc_row, y + h - 1 - arc_row];
+            for &py in &rows {
+                if py >= surf_h {
+                    continue;
+                }
+
+                let x_arc_int = (x_arc_fp >> 8) as u32;
+                let x_arc_frac = (x_arc_fp & 0xFF) as u32;
+
+                let left_solid = x + r - x_arc_int;
+                let right_solid = x + w - r + x_arc_int;
+
+                // Left AA pixel.
+                if left_solid > 0 && x_arc_frac > 0 {
+                    let lx = left_solid - 1;
+                    if lx >= x && lx < surf_w {
+                        // Effective alpha = color.a * coverage / 256.
+                        let eff_a = (sa * x_arc_frac) >> 8;
+                        if eff_a > 0 {
+                            let eff_inv_a = 255 - eff_a;
+                            // SAFETY: lx < surf_w, py < surf_h.
+                            unsafe {
+                                let p = ptr.add((py * stride + lx * bpp) as usize);
+                                fill_rect_blend_scalar_1px(
+                                    p, src_r_lin, src_g_lin, src_b_lin, eff_a, eff_inv_a,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Right AA pixel.
+                if right_solid < x + w && x_arc_frac > 0 {
+                    let rx = right_solid;
+                    if rx < surf_w {
+                        let eff_a = (sa * x_arc_frac) >> 8;
+                        if eff_a > 0 {
+                            let eff_inv_a = 255 - eff_a;
+                            // SAFETY: rx < surf_w, py < surf_h.
+                            unsafe {
+                                let p = ptr.add((py * stride + rx * bpp) as usize);
+                                fill_rect_blend_scalar_1px(
+                                    p, src_r_lin, src_g_lin, src_b_lin, eff_a, eff_inv_a,
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Solid interior pixels — blend with full source alpha.
+                let fill_x0 = if left_solid < x { x } else { left_solid };
+                let fill_x1 = if right_solid > x + w { x + w } else { right_solid };
+
+                if fill_x0 < fill_x1 {
+                    let clipped_x0 = if fill_x0 >= surf_w { continue } else { fill_x0 };
+                    let clipped_x1 = min(fill_x1, surf_w);
+                    let count = (clipped_x1 - clipped_x0) as usize;
+
+                    if count > 0 {
+                        let row_offset = (py * stride + clipped_x0 * bpp) as usize;
+                        // SAFETY: py < surf_h, clipped_x0..clipped_x1 within [0, surf_w).
+                        unsafe {
+                            let row_ptr = ptr.add(row_offset);
+                            #[cfg(target_arch = "aarch64")]
+                            {
+                                let chunks = count / 4;
+                                let tail_start = chunks * 4;
+                                for chunk in 0..chunks {
+                                    let p = row_ptr.add(chunk * 16);
+                                    neon_blend_const_4px(
+                                        p,
+                                        src_r_lin as u16,
+                                        src_g_lin as u16,
+                                        src_b_lin as u16,
+                                        sa as u16,
+                                        inv_sa as u16,
+                                        &SRGB_TO_LINEAR,
+                                        &LINEAR_TO_SRGB,
+                                    );
+                                }
+                                for i in tail_start..count {
+                                    let p = row_ptr.add(i * 4);
+                                    fill_rect_blend_scalar_1px(
+                                        p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa,
+                                    );
+                                }
+                            }
+                            #[cfg(not(target_arch = "aarch64"))]
+                            {
+                                for i in 0..count {
+                                    let p = row_ptr.add(i * 4);
+                                    fill_rect_blend_scalar_1px(
+                                        p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Read a single pixel. Returns `None` if out of bounds.
     pub fn get_pixel(&self, x: u32, y: u32) -> Option<Color> {
         if let Some(offset) = self.pixel_offset(x, y) {
@@ -992,6 +1299,83 @@ fn min(a: u32, b: u32) -> u32 {
     } else {
         b
     }
+}
+
+/// Integer square root of a 64-bit value in 8.8 fixed-point.
+///
+/// Given `x` in 16.16 fixed-point (i.e., the value `n * 256 * n * 256` where
+/// `n` is in 8.8 fixed-point), returns `sqrt(x)` in 8.8 fixed-point.
+/// Uses binary search with bit-at-a-time refinement. Never panics.
+fn isqrt_fp(x: u64) -> u64 {
+    if x == 0 {
+        return 0;
+    }
+    let mut result: u64 = 0;
+    let mut bit: u64 = 1u64 << 30; // Start from highest reasonable bit.
+
+    // Find the highest bit position for square root.
+    while bit > x {
+        bit >>= 2;
+    }
+
+    while bit != 0 {
+        let candidate = result + bit;
+        if x >= candidate * candidate {
+            result = candidate;
+        }
+        bit >>= 1;
+    }
+
+    result
+}
+
+/// Write a single anti-aliased pixel for a rounded rectangle corner.
+///
+/// Blends the shape color onto the existing destination using coverage-weighted
+/// gamma-correct sRGB blending.
+///
+/// `cov` is coverage in 0..256 (8-bit fraction, where 256 = fully covered).
+///
+/// # Safety
+///
+/// The pixel at (px, py) must be within the surface bounds. `ptr` is the
+/// surface data pointer, and `py * stride + px * bpp` must be a valid offset.
+#[inline(always)]
+unsafe fn rounded_rect_write_aa_pixel(
+    ptr: *mut u8,
+    px: u32,
+    py: u32,
+    stride: u32,
+    bpp: u32,
+    src_r_lin: u32,
+    src_g_lin: u32,
+    src_b_lin: u32,
+    src_a: u32,
+    cov: u32,
+) {
+    let offset = (py * stride + px * bpp) as usize;
+    let p = ptr.add(offset);
+
+    // Effective alpha = src_a * cov / 256.
+    let eff_a = (src_a * cov) >> 8;
+    if eff_a == 0 {
+        return;
+    }
+    if eff_a >= 255 {
+        // Fully covered and fully opaque: write solid pixel.
+        let color = Color {
+            r: LINEAR_TO_SRGB[linear_to_idx(src_r_lin)],
+            g: LINEAR_TO_SRGB[linear_to_idx(src_g_lin)],
+            b: LINEAR_TO_SRGB[linear_to_idx(src_b_lin)],
+            a: 255,
+        };
+        let encoded = color.encode(PixelFormat::Bgra8888);
+        core::ptr::write(p as *mut u32, u32::from_ne_bytes(encoded));
+        return;
+    }
+
+    let eff_inv_a = 255 - eff_a;
+    fill_rect_blend_scalar_1px(p, src_r_lin, src_g_lin, src_b_lin, eff_a, eff_inv_a);
 }
 
 /// 4×4 Bayer ordered-dither threshold matrix (0–15).
