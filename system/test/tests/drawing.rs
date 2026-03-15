@@ -876,16 +876,16 @@ const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf")
 fn rasterize_valid_glyph_produces_coverage() {
     // VAL-RASTER-001: rasterize(font, glyph_id=valid, 18px) returns Some(metrics)
     // with width > 0, height > 0, coverage sum > 0.
-    let glyph_id = shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let glyph_id = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch);
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch);
     assert!(metrics.is_some(), "valid glyph should produce Some(metrics)");
     let m = metrics.unwrap();
     assert!(m.width > 0, "bitmap width should be > 0");
@@ -899,15 +899,15 @@ fn rasterize_valid_glyph_produces_coverage() {
 #[test]
 fn rasterize_notdef_glyph_produces_valid_coverage() {
     // VAL-RASTER-001: glyph ID 0 (.notdef) produces valid output.
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, 0, 18, &mut raster, &mut scratch);
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, 0, 18, &mut raster, &mut scratch);
     // .notdef may have an outline (rectangle) or may be empty.
     // Either way, it should not panic and should return Some.
     assert!(metrics.is_some(), ".notdef (glyph_id=0) should return Some");
@@ -916,31 +916,31 @@ fn rasterize_notdef_glyph_produces_valid_coverage() {
 #[test]
 fn rasterize_invalid_glyph_returns_none() {
     // VAL-RASTER-001: glyph ID u16::MAX returns None without panic.
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, u16::MAX, 18, &mut raster, &mut scratch);
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, u16::MAX, 18, &mut raster, &mut scratch);
     assert!(metrics.is_none(), "glyph_id=u16::MAX should return None (no panic)");
 }
 
 #[test]
 fn rasterize_a_glyph_reasonable_dimensions() {
     // VAL-RASTER-002: 'A' at 18px produces bounding box ~5-20px wide, ~10-25px tall.
-    let glyph_id = shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let glyph_id = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let m = shaping::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch).unwrap();
+    let m = fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch).unwrap();
     assert!(
         m.width >= 5 && m.width <= 20,
         "'A' at 18px width should be 5-20px, got {}",
@@ -961,16 +961,16 @@ fn rasterize_a_glyph_reasonable_dimensions() {
 #[test]
 fn rasterize_proportional_font_valid() {
     // VAL-RASTER-002: Nunito Sans glyph rasterizes correctly via read-fonts.
-    let glyph_id = shaping::rasterize::glyph_id_for_char(NUNITO_SANS, 'W').unwrap();
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let glyph_id = fonts::rasterize::glyph_id_for_char(NUNITO_SANS, 'W').unwrap();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let m = shaping::rasterize::rasterize(NUNITO_SANS, glyph_id, 18, &mut raster, &mut scratch).unwrap();
+    let m = fonts::rasterize::rasterize(NUNITO_SANS, glyph_id, 18, &mut raster, &mut scratch).unwrap();
     assert!(m.width > 0, "proportional font glyph should have non-zero width");
     assert!(m.height > 0, "proportional font glyph should have non-zero height");
     assert!(m.advance > 0, "proportional font glyph should have non-zero advance");
@@ -1496,15 +1496,15 @@ fn oversampled_rasterize_produces_intermediate_coverage() {
     // Diagonal strokes should have intermediate coverage values (not just 0/255)
     // in the horizontal direction. 'k' has diagonal strokes.
     
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
 
     // Check that there are intermediate coverage values (not just 0 and 255)
@@ -1524,15 +1524,15 @@ fn oversampled_diagonal_has_horizontal_gradients() {
     // With horizontal oversampling + subpixel rendering, diagonal strokes
     // should show smooth horizontal transitions. Check 'x' which has diagonals.
     
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'x').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'x').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     // Output is 3 bytes per pixel (RGB subpixel coverage).
     let total = (w * metrics.height * 3) as usize;
@@ -1556,15 +1556,15 @@ fn oversampled_diagonal_has_horizontal_gradients() {
 fn oversampled_curve_has_smooth_edges() {
     // Curved characters like 'o' should have smooth edges with subpixel rendering.
     
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'o').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'o').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     // Output is 3 bytes per pixel (RGB subpixel coverage).
     let total = (w * metrics.height * 3) as usize;
@@ -1593,21 +1593,21 @@ fn oversampled_all_printable_ascii_still_rasterize() {
     // All printable ASCII should still rasterize successfully after adding
     // horizontal oversampling.
     
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
 
     for c in 0x20u8..=0x7Eu8 {
         let ch = c as char;
-        let mut raster = shaping::rasterize::RasterBuffer {
+        let mut raster = fonts::rasterize::RasterBuffer {
             data: &mut buf,
             width: 128,
             height: 128,
         };
-        let gid = match shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, ch) {
+        let gid = match fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, ch) {
             Some(id) => id,
             None => continue,
         };
-        let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, gid, 24, &mut raster, &mut scratch);
+        let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, gid, 24, &mut raster, &mut scratch);
         assert!(
             metrics.is_some(),
             "oversampled: should rasterize '{}' (0x{:02x}) at 24px",
@@ -1669,15 +1669,15 @@ fn subpixel_oversample_x_is_6() {
 fn subpixel_coverage_has_3_channels() {
     // Rasterized glyph coverage should be 3 bytes per pixel (R, G, B).
     
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'H').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'H').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
 
     // Total output bytes should be width * height * 3.
@@ -1697,15 +1697,15 @@ fn subpixel_rgb_channels_differ_at_edges() {
     // When GREYSCALE_AA is true, all RGB channels are equal (no color fringing).
     // When false, R/G/B differ at glyph edges (subpixel rendering signature).
 
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     let h = metrics.height;
     let total = (w * h * 3) as usize;
@@ -1723,7 +1723,7 @@ fn subpixel_rgb_channels_differ_at_edges() {
         }
     }
 
-    if shaping::rasterize::GREYSCALE_AA {
+    if fonts::rasterize::GREYSCALE_AA {
         assert_eq!(
             rgb_differ_count, 0,
             "greyscale AA mode: all RGB channels should be equal"
@@ -1810,15 +1810,15 @@ fn subpixel_fir_filter_reduces_fringing() {
     // Rasterize a vertical stroke ('l') and check that the filtered
     // coverage has smoother channel transitions than raw subpixel data.
     
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     let h = metrics.height;
     let total = (w * h * 3) as usize;
@@ -1921,15 +1921,15 @@ fn stem_darkening_applied_to_rasterized_glyph() {
     // Since darkening is applied in the rasterizer, we verify the output
     // has higher coverage values than raw (undarkened) values would produce.
     
-    let mut scratch = shaping::rasterize::RasterScratch::zeroed();
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
-    let mut raster = shaping::rasterize::RasterBuffer {
+    let mut raster = fonts::rasterize::RasterBuffer {
         data: &mut buf,
         width: 128,
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize(SOURCE_CODE_PRO, shaping::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 16 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 16 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     let h = metrics.height;
     let total = (w * h * 3) as usize;

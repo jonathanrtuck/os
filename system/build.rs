@@ -5,7 +5,7 @@
 //! # Build order
 //!
 //! 1. Shared libraries: sys, virtio, drawing (rlibs)
-//! 1b. Cargo-managed libraries: shaping (with harfrust dependency tree)
+//! 1b. Cargo-managed libraries: fonts (with harfrust dependency tree)
 //! 2. All user/driver/compositor programs (ELFs)
 //! 3. Generate `init_embedded.rs` with `include_bytes!` for ELFs init needs
 //! 4. Compile init last (depends on all other ELFs via init_embedded.rs)
@@ -105,16 +105,16 @@ fn main() {
     // Step 1b: Build Cargo-managed libraries (libraries with external deps).
     // These use `cargo build` to resolve dependency graphs, then we link the
     // resulting rlibs alongside hand-compiled libraries.
-    let shaping_output = cargo_lib(&manifest_dir.join("libraries/shaping"));
+    let fonts_output = cargo_lib(&manifest_dir.join("libraries/fonts"));
 
-    // Drawing library depends on protocol and shaping (for rasterize API).
-    // The shaping library has transitive dependencies (read-fonts, etc.) in
+    // Drawing library depends on protocol and fonts (for rasterize API).
+    // The fonts library has transitive dependencies (read-fonts, etc.) in
     // deps_dir (aarch64-unknown-none), plus proc-macro dependencies in the
     // host release deps dir.
     let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
     let drawing_rlib = out_dir.join("libdrawing.rlib");
-    let shaping_host_deps = manifest_dir
-        .join("libraries/shaping/target/release/deps");
+    let fonts_host_deps = manifest_dir
+        .join("libraries/fonts/target/release/deps");
 
     rustc_rlib_with_search(
         &rustc,
@@ -123,9 +123,9 @@ fn main() {
         "drawing",
         &[
             ("protocol", &protocol_rlib),
-            ("shaping", &shaping_output.rlib),
+            ("fonts", &fonts_output.rlib),
         ],
-        &[&shaping_output.deps_dir, &shaping_host_deps],
+        &[&fonts_output.deps_dir, &fonts_host_deps],
     );
 
     // Step 2: Compile all non-init programs.
@@ -146,7 +146,7 @@ fn main() {
         if needs_drawing {
             externs.push(("drawing", drawing_rlib.clone()));
             externs.push(("scene", scene_rlib.clone()));
-            externs.push(("shaping", shaping_output.rlib.clone()));
+            externs.push(("fonts", fonts_output.rlib.clone()));
         }
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
@@ -168,9 +168,9 @@ fn main() {
             ));
         }
 
-        // Add shaping library search paths for programs that need drawing.
+        // Add fonts library search paths for programs that need drawing.
         let search_paths: Vec<&Path> = if needs_drawing {
-            vec![&shaping_output.deps_dir, &shaping_host_deps]
+            vec![&fonts_output.deps_dir, &fonts_host_deps]
         } else {
             vec![]
         };
@@ -242,9 +242,9 @@ fn main() {
     println!("cargo:rerun-if-changed={}", scene_src.display());
     println!(
         "cargo:rerun-if-changed={}",
-        manifest_dir.join("libraries/shaping/src/lib.rs").display()
+        manifest_dir.join("libraries/fonts/src/lib.rs").display()
     );
-    for shaping_src in &[
+    for fonts_src in &[
         "rasterize.rs",
         "fallback.rs",
         "typography.rs",
@@ -252,14 +252,14 @@ fn main() {
         println!(
             "cargo:rerun-if-changed={}",
             manifest_dir
-                .join("libraries/shaping/src")
-                .join(shaping_src)
+                .join("libraries/fonts/src")
+                .join(fonts_src)
                 .display()
         );
     }
     println!(
         "cargo:rerun-if-changed={}",
-        manifest_dir.join("libraries/shaping/Cargo.toml").display()
+        manifest_dir.join("libraries/fonts/Cargo.toml").display()
     );
 }
 /// Compile a Rust source file as a binary ELF.

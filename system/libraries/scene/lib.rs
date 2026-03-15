@@ -172,7 +172,7 @@ pub struct TextRun {
 
 /// A shaped glyph with individual positioning (proportional/shaped text).
 ///
-/// Written by the OS service (via shaping library), stored in the scene
+/// Written by the OS service (via fonts library), stored in the scene
 /// graph data buffer, and read by the compositor for rasterization.
 /// All advance/offset values are in scaled pixel units (not font units).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

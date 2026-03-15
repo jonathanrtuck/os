@@ -41,8 +41,8 @@ dependencies = [
 name = "drawing"
 version = "0.1.0"
 dependencies = [
+ "fonts",
  "protocol",
- "shaping",
 ]
 
 [[package]]
@@ -52,6 +52,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1e4d2d0cf79d38430cc9dc9aadec84774bff2e1ba30ae2bf6c16cfce9385a23"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "fonts"
+version = "0.1.0"
+dependencies = [
+ "harfrust",
+ "read-fonts",
 ]
 
 [[package]]
@@ -115,14 +123,6 @@ name = "scene"
 version = "0.1.0"
 
 [[package]]
-name = "shaping"
-version = "0.1.0"
-dependencies = [
- "harfrust",
- "read-fonts",
-]
-
-[[package]]
 name = "smallvec"
 version = "1.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -144,10 +144,10 @@ name = "test"
 version = "0.1.0"
 dependencies = [
  "drawing",
+ "fonts",
  "ipc",
  "protocol",
  "scene",
- "shaping",
 ]
 
 [[package]]

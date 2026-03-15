@@ -14,7 +14,7 @@
 
 extern crate alloc;
 extern crate scene;
-extern crate shaping;
+extern crate fonts;
 
 #[path = "scene_render.rs"]
 mod scene_render;
@@ -208,8 +208,8 @@ pub extern "C" fn _start() -> ! {
             config.mono_font_len as usize,
         )
     };
-    // Validate font data is parseable via shaping library.
-    if shaping::rasterize::font_metrics(mono_font_data).is_none() {
+    // Validate font data is parseable via fonts library.
+    if fonts::rasterize::font_metrics(mono_font_data).is_none() {
         sys::print(b"compositor: font parse failed\n");
         sys::exit();
     }
@@ -227,7 +227,7 @@ pub extern "C" fn _start() -> ! {
     // Rasterize at physical pixel size: logical FONT_SIZE × scale_factor.
     let physical_font_size = FONT_SIZE * scale_factor;
     // Recursive Variable: MONO=1 for monospace (code content).
-    let mono_axes = [shaping::rasterize::AxisValue {
+    let mono_axes = [fonts::rasterize::AxisValue {
         tag: *b"MONO",
         value: 1.0,
     }];
@@ -249,7 +249,7 @@ pub extern "C" fn _start() -> ! {
         mono_font_data
     };
 
-    if shaping::rasterize::font_metrics(prop_font_data).is_some() {
+    if fonts::rasterize::font_metrics(prop_font_data).is_some() {
         let mut prop_cache: Box<drawing::GlyphCache> = unsafe {
             let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
@@ -263,7 +263,7 @@ pub extern "C" fn _start() -> ! {
         };
 
         // Recursive Variable: MONO=0 for proportional (prose/UI content).
-        let prop_axes = [shaping::rasterize::AxisValue {
+        let prop_axes = [fonts::rasterize::AxisValue {
             tag: *b"MONO",
             value: 0.0,
         }];

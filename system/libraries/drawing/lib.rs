@@ -22,16 +22,16 @@
 #![no_std]
 
 extern crate alloc;
-extern crate shaping;
+extern crate fonts;
 
 pub use protocol::DirtyRect;
 
 /// Compute a deterministic hash of axis values for use as a glyph cache key component.
 ///
 /// The hash is computed from the axis tags and values. An empty slice produces hash 0.
-/// This delegates to `shaping::rasterize::axis_values_hash`.
-pub fn axis_values_hash(axis_values: &[shaping::rasterize::AxisValue]) -> u32 {
-    shaping::rasterize::axis_values_hash(axis_values)
+/// This delegates to `fonts::rasterize::axis_values_hash`.
+pub fn axis_values_hash(axis_values: &[fonts::rasterize::AxisValue]) -> u32 {
+    fonts::rasterize::axis_values_hash(axis_values)
 }
 
 include!("cache.rs");
@@ -272,7 +272,7 @@ impl GlyphCache {
     }
     /// Rasterize all printable ASCII glyphs into this cache in place.
     ///
-    /// Uses the shaping library's rasterizer (read-fonts for outline extraction,
+    /// Uses the fonts library's rasterizer (read-fonts for outline extraction,
     /// scanline algorithm for coverage generation). The `font_data` is raw font
     /// file bytes.
     ///
@@ -304,9 +304,9 @@ impl GlyphCache {
         font_data: &[u8],
         size_px: u32,
         dpi: u16,
-        extra_axes: &[shaping::rasterize::AxisValue],
+        extra_axes: &[fonts::rasterize::AxisValue],
     ) {
-        use shaping::rasterize;
+        use fonts::rasterize;
 
         let metrics = match rasterize::font_metrics(font_data) {
             Some(m) => m,

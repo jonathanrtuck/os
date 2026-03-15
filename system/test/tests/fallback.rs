@@ -2,7 +2,7 @@
 //!
 //! Validates VAL-FALLBACK-001 through VAL-FALLBACK-004 and VAL-CACHE-004.
 
-use shaping::fallback::{ContentType, FallbackChain};
+use fonts::fallback::{ContentType, FallbackChain};
 
 const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
 const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
@@ -32,7 +32,7 @@ fn fallback_primary_font_used_for_ascii() {
     }
 
     // Should produce the same glyph IDs as shaping with primary font alone.
-    let primary_only = shaping::shape(NUNITO_SANS_VARIABLE, "Hello", &[]);
+    let primary_only = fonts::shape(NUNITO_SANS_VARIABLE, "Hello", &[]);
     assert_eq!(result.len(), primary_only.len());
     for (fb, primary) in result.iter().zip(primary_only.iter()) {
         assert_eq!(
@@ -275,8 +275,8 @@ fn fallback_cache_key_includes_font_identifier() {
 
     // Use font_id as part of the axis_hash parameter to distinguish fonts.
     // font_id 0 = primary font, font_id 1 = fallback font.
-    let font_a_hash = shaping::fallback::font_identifier_hash(0, &[]);
-    let font_b_hash = shaping::fallback::font_identifier_hash(1, &[]);
+    let font_a_hash = fonts::fallback::font_identifier_hash(0, &[]);
+    let font_b_hash = fonts::fallback::font_identifier_hash(1, &[]);
 
     cache.insert_with_axes(65, 18, font_a_hash, glyph_font_a);
     cache.insert_with_axes(65, 18, font_b_hash, glyph_font_b);
@@ -294,8 +294,8 @@ fn fallback_cache_key_includes_font_identifier() {
 #[test]
 fn fallback_font_identifier_hash_differs_for_different_fonts() {
     // Different font indices should produce different hashes.
-    let hash_0 = shaping::fallback::font_identifier_hash(0, &[]);
-    let hash_1 = shaping::fallback::font_identifier_hash(1, &[]);
+    let hash_0 = fonts::fallback::font_identifier_hash(0, &[]);
+    let hash_1 = fonts::fallback::font_identifier_hash(1, &[]);
 
     assert_ne!(
         hash_0, hash_1,
@@ -306,7 +306,7 @@ fn fallback_font_identifier_hash_differs_for_different_fonts() {
 #[test]
 fn fallback_font_identifier_hash_includes_axis_values() {
     // Same font index with different axis values should produce different hashes.
-    use shaping::rasterize::AxisValue;
+    use fonts::rasterize::AxisValue;
 
     let axes_400 = [AxisValue {
         tag: *b"wght",
@@ -317,8 +317,8 @@ fn fallback_font_identifier_hash_includes_axis_values() {
         value: 700.0,
     }];
 
-    let hash_400 = shaping::fallback::font_identifier_hash(0, &axes_400);
-    let hash_700 = shaping::fallback::font_identifier_hash(0, &axes_700);
+    let hash_400 = fonts::fallback::font_identifier_hash(0, &axes_400);
+    let hash_700 = fonts::fallback::font_identifier_hash(0, &axes_700);
 
     assert_ne!(
         hash_400, hash_700,

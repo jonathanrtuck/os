@@ -1473,8 +1473,8 @@ fn proportional_shaped_glyphs_different_advances() {
     let mono_font = include_bytes!("../../share/source-code-pro.ttf");
 
     // Shape 'W' and 'i' separately to verify mono font gives same advance
-    let w_shaped = shaping::shape(mono_font, "W", &[]);
-    let i_shaped = shaping::shape(mono_font, "i", &[]);
+    let w_shaped = fonts::shape(mono_font, "W", &[]);
+    let i_shaped = fonts::shape(mono_font, "i", &[]);
 
     assert!(!w_shaped.is_empty(), "W should produce glyphs");
     assert!(!i_shaped.is_empty(), "i should produce glyphs");
@@ -1487,8 +1487,8 @@ fn proportional_shaped_glyphs_different_advances() {
 
     // For a proportional font (if available), they'd differ
     let prop_font = include_bytes!("../../share/nunito-sans.ttf");
-    let w_prop = shaping::shape(prop_font, "W", &[]);
-    let i_prop = shaping::shape(prop_font, "i", &[]);
+    let w_prop = fonts::shape(prop_font, "W", &[]);
+    let i_prop = fonts::shape(prop_font, "i", &[]);
 
     if !w_prop.is_empty() && !i_prop.is_empty() {
         // Proportional font: W should have a wider advance than i

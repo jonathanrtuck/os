@@ -26,7 +26,7 @@
 
 extern crate alloc;
 extern crate scene;
-extern crate shaping;
+extern crate fonts;
 
 #[path = "scene_state.rs"]
 mod scene_state;
@@ -358,7 +358,7 @@ pub extern "C" fn _start() -> ! {
                 config.mono_font_len as usize,
             )
         };
-        if let Some(fm) = shaping::rasterize::font_metrics(font_data) {
+        if let Some(fm) = fonts::rasterize::font_metrics(font_data) {
             let upem = fm.units_per_em;
             let asc = fm.ascent as i32;
             let desc = fm.descent as i32;
@@ -373,12 +373,12 @@ pub extern "C" fn _start() -> ! {
             };
             let line_h = ascent_px + descent_px + gap_px;
             // For monospace: use axis-adjusted advance of space glyph (MONO=1).
-            let space_gid = shaping::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
-            let mono_axes = [shaping::rasterize::AxisValue {
+            let space_gid = fonts::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
+            let mono_axes = [fonts::rasterize::AxisValue {
                 tag: *b"MONO",
                 value: 1.0,
             }];
-            let char_w = shaping::rasterize::glyph_advance_with_axes(
+            let char_w = fonts::rasterize::glyph_advance_with_axes(
                 font_data,
                 space_gid,
                 size as u16,
@@ -386,7 +386,7 @@ pub extern "C" fn _start() -> ! {
             )
             .unwrap_or_else(|| {
                 let (advance_fu, _) =
-                    shaping::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
+                    fonts::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
                 (advance_fu as u32 * size + upem as u32 / 2) / upem as u32
             });
 

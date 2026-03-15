@@ -2,9 +2,9 @@
 //!
 //! Validates VAL-CTYPE-001 through VAL-CTYPE-005 and VAL-CROSS-003.
 
-use shaping::fallback::ContentType;
-use shaping::typography::{FontFamily, TypographyConfig};
-use shaping::Feature;
+use fonts::fallback::ContentType;
+use fonts::typography::{FontFamily, TypographyConfig};
+use fonts::Feature;
 
 const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
 const SOURCE_CODE_PRO_VARIABLE: &[u8] = include_bytes!("../../share/source-code-pro-variable.ttf");
@@ -143,8 +143,8 @@ fn ctype_code_vs_prose_different_shaped_output() {
         .filter_map(|s| s.parse::<Feature>().ok())
         .collect();
 
-    let code_glyphs = shaping::shape(code_font, text, &code_features);
-    let prose_glyphs = shaping::shape(prose_font, text, &prose_features);
+    let code_glyphs = fonts::shape(code_font, text, &code_features);
+    let prose_glyphs = fonts::shape(prose_font, text, &prose_features);
 
     // Different fonts should produce different glyph IDs.
     let code_ids: Vec<u16> = code_glyphs.iter().map(|g| g.glyph_id).collect();
@@ -178,7 +178,7 @@ fn ctype_code_features_are_parseable_and_applied() {
 
     // Shaping with features should not crash and should produce output.
     let text = "1/2 != 0.5";
-    let glyphs = shaping::shape(SOURCE_CODE_PRO_VARIABLE, text, &code_features);
+    let glyphs = fonts::shape(SOURCE_CODE_PRO_VARIABLE, text, &code_features);
     assert!(
         !glyphs.is_empty(),
         "shaping with code features should produce glyphs"
@@ -226,11 +226,11 @@ fn ctype_unknown_no_panic() {
 #[test]
 fn cross_003_auto_opsz_produces_different_rendering_than_fixed() {
     // Auto-opsz produces different rendering than fixed defaults (no opsz axis).
-    use shaping::rasterize::{
+    use fonts::rasterize::{
         auto_axis_values_for_opsz, rasterize, rasterize_with_axes, RasterBuffer, RasterScratch,
     };
 
-    let gid = shaping::rasterize::glyph_id_for_char(NUNITO_SANS_VARIABLE, 'e').unwrap();
+    let gid = fonts::rasterize::glyph_id_for_char(NUNITO_SANS_VARIABLE, 'e').unwrap();
 
     // Render without auto-opsz (default axis values = no variation).
     let mut buf_default = vec![0u8; 128 * 6 * 128];
@@ -290,12 +290,12 @@ fn cross_003_auto_weight_correction_produces_different_rendering_than_fixed() {
     // We compare rendering at a base weight (400) vs the auto-corrected weight.
     // The auto function computes a reduced weight for white-on-black, which
     // should produce measurably thinner glyph coverage.
-    use shaping::rasterize::{
+    use fonts::rasterize::{
         auto_weight_correction_axes, rasterize_with_axes, weight_correction_factor, AxisValue,
         RasterBuffer, RasterScratch,
     };
 
-    let gid = shaping::rasterize::glyph_id_for_char(NUNITO_SANS_VARIABLE, 'H').unwrap();
+    let gid = fonts::rasterize::glyph_id_for_char(NUNITO_SANS_VARIABLE, 'H').unwrap();
 
     // Render at base weight (400) — the "uncorrected" rendering.
     let base_axes = [AxisValue {
@@ -372,12 +372,12 @@ fn cross_003_auto_weight_correction_produces_different_rendering_than_fixed() {
 fn cross_003_auto_perceptual_combined_differs_from_fixed() {
     // Both auto-opsz AND auto-weight-correction together produce different
     // rendering than fixed defaults, without explicit caller intervention.
-    use shaping::rasterize::{
+    use fonts::rasterize::{
         auto_axis_values_for_opsz, auto_weight_correction_axes, rasterize, rasterize_with_axes,
         AxisValue, RasterBuffer, RasterScratch,
     };
 
-    let gid = shaping::rasterize::glyph_id_for_char(NUNITO_SANS_VARIABLE, 'g').unwrap();
+    let gid = fonts::rasterize::glyph_id_for_char(NUNITO_SANS_VARIABLE, 'g').unwrap();
 
     // Render with fixed defaults (no perceptual adjustments).
     let mut buf_fixed = vec![0u8; 128 * 6 * 128];

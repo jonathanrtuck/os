@@ -3,7 +3,7 @@
 //! Validates that text shaping works correctly: glyph production, ligatures,
 //! kerning, and OpenType feature control.
 
-use shaping::{shape, Feature, ShapedGlyph};
+use fonts::{shape, Feature, ShapedGlyph};
 
 const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
 const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
@@ -259,7 +259,7 @@ const SOURCE_CODE_PRO_VARIABLE: &[u8] = include_bytes!("../../share/source-code-
 
 #[test]
 fn varfont_nunito_sans_has_four_axes() {
-    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
     assert_eq!(
         axes.len(),
         4,
@@ -270,7 +270,7 @@ fn varfont_nunito_sans_has_four_axes() {
 
 #[test]
 fn varfont_nunito_sans_opsz_axis() {
-    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
     let opsz = axes.iter().find(|a| &a.tag == b"opsz");
     assert!(opsz.is_some(), "should have opsz axis");
     let opsz = opsz.unwrap();
@@ -291,7 +291,7 @@ fn varfont_nunito_sans_opsz_axis() {
 
 #[test]
 fn varfont_nunito_sans_wght_axis() {
-    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
     let wght = axes.iter().find(|a| &a.tag == b"wght");
     assert!(wght.is_some(), "should have wght axis");
     let wght = wght.unwrap();
@@ -312,7 +312,7 @@ fn varfont_nunito_sans_wght_axis() {
 
 #[test]
 fn varfont_nunito_sans_wdth_axis() {
-    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
     let wdth = axes.iter().find(|a| &a.tag == b"wdth");
     assert!(wdth.is_some(), "should have wdth axis");
     let wdth = wdth.unwrap();
@@ -326,7 +326,7 @@ fn varfont_nunito_sans_wdth_axis() {
 
 #[test]
 fn varfont_nunito_sans_ytlc_axis() {
-    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
     let ytlc = axes.iter().find(|a| &a.tag == b"YTLC");
     assert!(ytlc.is_some(), "should have YTLC axis");
     let ytlc = ytlc.unwrap();
@@ -340,7 +340,7 @@ fn varfont_nunito_sans_ytlc_axis() {
 
 #[test]
 fn varfont_nunito_sans_axis_tags_exact() {
-    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
     let tags: Vec<[u8; 4]> = axes.iter().map(|a| a.tag).collect();
     assert!(tags.contains(b"opsz"), "missing opsz axis in {:?}", tags);
     assert!(tags.contains(b"wght"), "missing wght axis in {:?}", tags);
@@ -354,7 +354,7 @@ fn varfont_nunito_sans_axis_tags_exact() {
 
 #[test]
 fn varfont_source_code_pro_has_wght_axis() {
-    let axes = shaping::rasterize::font_axes(SOURCE_CODE_PRO_VARIABLE);
+    let axes = fonts::rasterize::font_axes(SOURCE_CODE_PRO_VARIABLE);
     assert!(
         !axes.is_empty(),
         "variable Source Code Pro should have at least one axis"
@@ -379,7 +379,7 @@ fn varfont_source_code_pro_has_wght_axis() {
 
 #[test]
 fn varfont_source_code_pro_wght_range_valid() {
-    let axes = shaping::rasterize::font_axes(SOURCE_CODE_PRO_VARIABLE);
+    let axes = fonts::rasterize::font_axes(SOURCE_CODE_PRO_VARIABLE);
     let wght = axes.iter().find(|a| &a.tag == b"wght").unwrap();
     // Source Code Pro variable has weights from ~200 to ~900.
     assert!(
@@ -400,7 +400,7 @@ fn varfont_source_code_pro_wght_range_valid() {
 
 #[test]
 fn varfont_static_font_returns_no_axes() {
-    let axes = shaping::rasterize::font_axes(SOURCE_CODE_PRO);
+    let axes = fonts::rasterize::font_axes(SOURCE_CODE_PRO);
     assert!(
         axes.is_empty(),
         "static Source Code Pro should have 0 axes, got {}",
@@ -410,7 +410,7 @@ fn varfont_static_font_returns_no_axes() {
 
 #[test]
 fn varfont_empty_data_returns_no_axes() {
-    let axes = shaping::rasterize::font_axes(&[]);
+    let axes = fonts::rasterize::font_axes(&[]);
     assert!(axes.is_empty(), "empty data should have 0 axes");
 }
 
@@ -450,7 +450,7 @@ fn varfont_source_code_pro_variable_shapes_text() {
 
 /// Helper: rasterize a glyph at a given weight and return total coverage sum.
 fn rasterize_at_weight(font_data: &[u8], glyph_id: u16, size_px: u16, weight: f32) -> u32 {
-    use shaping::rasterize::{AxisValue, RasterBuffer, RasterScratch};
+    use fonts::rasterize::{AxisValue, RasterBuffer, RasterScratch};
 
     let mut buf = vec![0u8; 48 * 6 * 48];
     let mut scratch = Box::new(RasterScratch::zeroed());
@@ -463,7 +463,7 @@ fn rasterize_at_weight(font_data: &[u8], glyph_id: u16, size_px: u16, weight: f3
         tag: *b"wght",
         value: weight,
     }];
-    let metrics = shaping::rasterize::rasterize_with_axes(
+    let metrics = fonts::rasterize::rasterize_with_axes(
         font_data,
         glyph_id,
         size_px,
@@ -479,7 +479,7 @@ fn rasterize_at_weight(font_data: &[u8], glyph_id: u16, size_px: u16, weight: f3
 
 /// Helper: look up glyph ID for a character.
 fn glyph_for_char(font_data: &[u8], ch: char) -> u16 {
-    shaping::rasterize::glyph_id_for_char(font_data, ch).expect("should find glyph for character")
+    fonts::rasterize::glyph_id_for_char(font_data, ch).expect("should find glyph for character")
 }
 
 #[test]
@@ -582,7 +582,7 @@ fn varfont_out_of_range_wght_clamped_no_panic() {
 fn varfont_wght_2000_equals_max() {
     // Out-of-range wght=2000 should produce same result as max weight.
     let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
-    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
     let wght = axes.iter().find(|a| &a.tag == b"wght").unwrap();
     let cov_2000 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, 2000.0);
     let cov_max = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, wght.max_value);
@@ -622,11 +622,11 @@ fn varfont_cache_axis_values_separate_entries() {
     };
 
     // Use the new axis-aware cache API.
-    let axes_400: &[shaping::rasterize::AxisValue] = &[shaping::rasterize::AxisValue {
+    let axes_400: &[fonts::rasterize::AxisValue] = &[fonts::rasterize::AxisValue {
         tag: *b"wght",
         value: 400.0,
     }];
-    let axes_700: &[shaping::rasterize::AxisValue] = &[shaping::rasterize::AxisValue {
+    let axes_700: &[fonts::rasterize::AxisValue] = &[fonts::rasterize::AxisValue {
         tag: *b"wght",
         value: 700.0,
     }];
@@ -672,7 +672,7 @@ fn varfont_cache_no_axes_vs_with_axes() {
 
     // No axes = hash of 0.
     cache.insert_with_axes(65, 18, 0, glyph_default.clone());
-    let axes_700: &[shaping::rasterize::AxisValue] = &[shaping::rasterize::AxisValue {
+    let axes_700: &[fonts::rasterize::AxisValue] = &[fonts::rasterize::AxisValue {
         tag: *b"wght",
         value: 700.0,
     }];
@@ -692,13 +692,13 @@ fn varfont_cache_no_axes_vs_with_axes() {
 
 #[test]
 fn varfont_shape_with_variations_produces_output() {
-    use shaping::rasterize::AxisValue;
+    use fonts::rasterize::AxisValue;
 
     let axes = [AxisValue {
         tag: *b"wght",
         value: 700.0,
     }];
-    let glyphs = shaping::shape_with_variations(NUNITO_SANS_VARIABLE, "Hello", &[], &axes);
+    let glyphs = fonts::shape_with_variations(NUNITO_SANS_VARIABLE, "Hello", &[], &axes);
     assert!(
         glyphs.len() >= 5,
         "shape_with_variations should produce glyphs"
@@ -712,7 +712,7 @@ fn varfont_shape_with_variations_produces_output() {
 fn varfont_shape_with_no_variations_same_as_default() {
     // Shaping with empty axis values should match regular shape().
     let glyphs_default = shape(NUNITO_SANS_VARIABLE, "Hello", &[]);
-    let glyphs_empty = shaping::shape_with_variations(NUNITO_SANS_VARIABLE, "Hello", &[], &[]);
+    let glyphs_empty = fonts::shape_with_variations(NUNITO_SANS_VARIABLE, "Hello", &[], &[]);
 
     assert_eq!(
         glyphs_default.len(),
@@ -732,7 +732,7 @@ fn varfont_shape_with_no_variations_same_as_default() {
 fn opsz_calculation_three_size_dpi_combos_distinct() {
     // VAL-OPSZ-001: Optical size calculation produces different opsz values
     // for different size/DPI combinations: (10px,144dpi), (18px,96dpi), (48px,192dpi).
-    use shaping::rasterize::compute_optical_size;
+    use fonts::rasterize::compute_optical_size;
 
     let opsz_a = compute_optical_size(10, 144);
     let opsz_b = compute_optical_size(18, 96);
@@ -758,7 +758,7 @@ fn opsz_calculation_three_size_dpi_combos_distinct() {
 #[test]
 fn opsz_calculation_larger_size_produces_larger_opsz() {
     // Larger rendered sizes should produce larger optical size values.
-    use shaping::rasterize::compute_optical_size;
+    use fonts::rasterize::compute_optical_size;
 
     let opsz_small = compute_optical_size(10, 96);
     let opsz_large = compute_optical_size(48, 96);
@@ -775,7 +775,7 @@ fn opsz_calculation_larger_size_produces_larger_opsz() {
 fn opsz_calculation_is_point_size_based() {
     // The computation is: opsz = font_size_px * 72.0 / dpi.
     // At 72dpi, opsz == font_size_px (1:1 mapping).
-    use shaping::rasterize::compute_optical_size;
+    use fonts::rasterize::compute_optical_size;
 
     let opsz = compute_optical_size(12, 72);
     // At 72 DPI, 12px == 12pt.
@@ -794,7 +794,7 @@ fn opsz_calculation_is_point_size_based() {
 
 /// Helper: rasterize a glyph with automatic optical sizing at a given font size.
 fn rasterize_with_auto_opsz(font_data: &[u8], glyph_id: u16, size_px: u16) -> Vec<u8> {
-    use shaping::rasterize::{auto_axis_values_for_opsz, RasterBuffer, RasterScratch};
+    use fonts::rasterize::{auto_axis_values_for_opsz, RasterBuffer, RasterScratch};
 
     let dpi = 96; // standard screen DPI
     let auto_axes = auto_axis_values_for_opsz(font_data, size_px, dpi);
@@ -806,7 +806,7 @@ fn rasterize_with_auto_opsz(font_data: &[u8], glyph_id: u16, size_px: u16) -> Ve
         height: 128,
     };
 
-    let metrics = shaping::rasterize::rasterize_with_axes(
+    let metrics = fonts::rasterize::rasterize_with_axes(
         font_data,
         glyph_id,
         size_px,
@@ -866,7 +866,7 @@ fn opsz_auto_10px_vs_48px_different_coverage() {
 #[test]
 fn opsz_auto_returns_opsz_axis_value() {
     // The auto function should return an AxisValue with tag "opsz".
-    use shaping::rasterize::auto_axis_values_for_opsz;
+    use fonts::rasterize::auto_axis_values_for_opsz;
 
     let axes = auto_axis_values_for_opsz(NUNITO_SANS_VARIABLE, 18, 96);
     assert!(
@@ -878,7 +878,7 @@ fn opsz_auto_returns_opsz_axis_value() {
     let opsz_val = opsz_av.unwrap().value;
     // At 18px, 96dpi: opsz = 18 * 72 / 96 = 13.5. Nunito Sans opsz range is
     // 6–12, so it should be clamped to the max (12.0).
-    let font_axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let font_axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
     let opsz_axis = font_axes.iter().find(|a| &a.tag == b"opsz").unwrap();
     assert!(
         opsz_val >= opsz_axis.min_value && opsz_val <= opsz_axis.max_value,
@@ -898,7 +898,7 @@ fn opsz_no_op_for_non_opsz_font() {
     // VAL-OPSZ-003: When auto optical sizing is applied to a font without an
     // opsz axis (e.g., Source Code Pro variable), rendering is unchanged
     // compared to rendering without auto-opsz. No error or crash.
-    use shaping::rasterize::{auto_axis_values_for_opsz, RasterBuffer, RasterScratch};
+    use fonts::rasterize::{auto_axis_values_for_opsz, RasterBuffer, RasterScratch};
 
     let gid = glyph_for_char(SOURCE_CODE_PRO_VARIABLE, 'H');
 
@@ -911,7 +911,7 @@ fn opsz_no_op_for_non_opsz_font() {
         height: 48,
     };
     let metrics_without =
-        shaping::rasterize::rasterize(SOURCE_CODE_PRO_VARIABLE, gid, 18, &mut rb, &mut scratch)
+        fonts::rasterize::rasterize(SOURCE_CODE_PRO_VARIABLE, gid, 18, &mut rb, &mut scratch)
             .expect("rasterization without opsz should succeed");
 
     let total_without = (metrics_without.width * metrics_without.height * 3) as usize;
@@ -937,7 +937,7 @@ fn opsz_no_op_for_non_opsz_font() {
         width: 48,
         height: 48,
     };
-    let metrics_with = shaping::rasterize::rasterize_with_axes(
+    let metrics_with = fonts::rasterize::rasterize_with_axes(
         SOURCE_CODE_PRO_VARIABLE,
         gid,
         18,
@@ -963,7 +963,7 @@ fn opsz_no_op_for_non_opsz_font() {
 #[test]
 fn opsz_auto_empty_for_static_font() {
     // Static (non-variable) fonts should also return empty axes.
-    use shaping::rasterize::auto_axis_values_for_opsz;
+    use fonts::rasterize::auto_axis_values_for_opsz;
 
     let axes = auto_axis_values_for_opsz(SOURCE_CODE_PRO, 18, 96);
     assert!(
@@ -975,7 +975,7 @@ fn opsz_auto_empty_for_static_font() {
 #[test]
 fn opsz_auto_empty_for_empty_data() {
     // Empty font data should return empty without panic.
-    use shaping::rasterize::auto_axis_values_for_opsz;
+    use fonts::rasterize::auto_axis_values_for_opsz;
 
     let axes = auto_axis_values_for_opsz(&[], 18, 96);
     assert!(
@@ -992,7 +992,7 @@ fn opsz_auto_empty_for_empty_data() {
 fn weight_correction_white_on_black_reduces_weight() {
     // VAL-WEIGHT-001: Light-on-dark (white on black) should produce a
     // correction factor < 1.0 (weight reduction to compensate for irradiation).
-    use shaping::rasterize::weight_correction_factor;
+    use fonts::rasterize::weight_correction_factor;
 
     let factor = weight_correction_factor(255, 255, 255, 0, 0, 0);
     assert!(
@@ -1006,7 +1006,7 @@ fn weight_correction_white_on_black_reduces_weight() {
 fn weight_correction_black_on_white_no_reduction() {
     // VAL-WEIGHT-001: Dark-on-light (black on white) should produce a
     // correction factor >= 1.0 (no weight reduction needed).
-    use shaping::rasterize::weight_correction_factor;
+    use fonts::rasterize::weight_correction_factor;
 
     let factor = weight_correction_factor(0, 0, 0, 255, 255, 255);
     assert!(
@@ -1019,7 +1019,7 @@ fn weight_correction_black_on_white_no_reduction() {
 #[test]
 fn weight_correction_same_color_no_reduction() {
     // Same foreground and background → no contrast → no weight change.
-    use shaping::rasterize::weight_correction_factor;
+    use fonts::rasterize::weight_correction_factor;
 
     let factor = weight_correction_factor(128, 128, 128, 128, 128, 128);
     assert!(
@@ -1038,7 +1038,7 @@ fn weight_correction_monotonically_decreasing_with_contrast() {
     // VAL-WEIGHT-002: Weight correction is proportional to luminance contrast,
     // not a binary switch. 3+ contrast levels with lighter fg than bg produce
     // monotonically decreasing correction factor as contrast increases.
-    use shaping::rasterize::weight_correction_factor;
+    use fonts::rasterize::weight_correction_factor;
 
     // Low contrast: light gray on dark gray.
     let factor_low = weight_correction_factor(160, 160, 160, 80, 80, 80);
@@ -1069,7 +1069,7 @@ fn weight_correction_monotonically_decreasing_with_contrast() {
 #[test]
 fn weight_correction_five_contrast_levels_monotonic() {
     // Additional granularity: 5 levels from minimal to maximal contrast.
-    use shaping::rasterize::weight_correction_factor;
+    use fonts::rasterize::weight_correction_factor;
 
     let levels: [(u8, u8); 5] = [
         (140, 100), // minimal contrast
@@ -1109,7 +1109,7 @@ fn weight_correction_reduces_coverage_white_on_black() {
     // We use wght=400 (Regular) as the base weight because the font's default
     // may be at the axis minimum (200 for Nunito Sans), where a reduction would
     // clamp to the minimum and show no difference.
-    use shaping::rasterize::{
+    use fonts::rasterize::{
         font_axes, rasterize_with_axes, weight_correction_factor, AxisValue, RasterBuffer,
         RasterScratch,
     };
@@ -1215,7 +1215,7 @@ fn weight_correction_reduces_coverage_white_on_black() {
 fn weight_correction_no_op_for_non_variable_font() {
     // VAL-WEIGHT-004: Weight correction on a non-variable font produces
     // no change and no error.
-    use shaping::rasterize::auto_weight_correction_axes;
+    use fonts::rasterize::auto_weight_correction_axes;
 
     let axes = auto_weight_correction_axes(
         SOURCE_CODE_PRO,
@@ -1239,7 +1239,7 @@ fn weight_correction_no_op_for_font_without_wght() {
     // Source Code Pro variable has only wght, so we can't easily test this
     // without a custom font. Instead, verify that the function handles
     // empty font data gracefully.
-    use shaping::rasterize::auto_weight_correction_axes;
+    use fonts::rasterize::auto_weight_correction_axes;
 
     let axes = auto_weight_correction_axes(
         &[],
@@ -1260,7 +1260,7 @@ fn weight_correction_no_op_for_font_without_wght() {
 fn weight_correction_no_op_rendering_identical_for_static_font() {
     // VAL-WEIGHT-004: Applying weight correction to a static font
     // (or a font without wght axis) produces identical rendering.
-    use shaping::rasterize::{
+    use fonts::rasterize::{
         auto_weight_correction_axes, rasterize, rasterize_with_axes, RasterBuffer, RasterScratch,
     };
 
@@ -1321,7 +1321,7 @@ fn weight_correction_no_op_rendering_identical_for_static_font() {
 fn weight_correction_dark_on_light_no_change() {
     // When foreground is darker than background, no weight reduction occurs.
     // The auto function should still return a wght axis value, but at default.
-    use shaping::rasterize::{auto_weight_correction_axes, font_axes};
+    use fonts::rasterize::{auto_weight_correction_axes, font_axes};
 
     let axes_result = auto_weight_correction_axes(
         NUNITO_SANS_VARIABLE,

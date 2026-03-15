@@ -19,7 +19,7 @@ system/
     scene/              — Scene graph data types (rustc-compiled rlib)
     ipc/                — Ring buffer IPC (rustc-compiled rlib)
     drawing/            — Pixel primitives (rustc-compiled rlib, depends on protocol+fonts)
-    shaping/            — Font pipeline (cargo-managed, has external deps)
+    fonts/              — Font pipeline (cargo-managed, has external deps)
     link.ld             — Userspace linker script
   services/
     init/               — Proto-OS-service, process spawner
@@ -34,7 +34,7 @@ system/
 
 - Full build: `cd system && cargo build --release`
 - Tests: `cd system/test && cargo test -- --test-threads=1`
-- Fonts library standalone: `cd system/libraries/shaping && cargo build --target=aarch64-unknown-none --release`
+- Fonts library standalone: `cd system/libraries/fonts && cargo build --target=aarch64-unknown-none --release`
 
 ## Key Files for This Mission
 
@@ -42,6 +42,6 @@ system/
 - `system/test/Cargo.toml` — Must be updated for library renames
 - `system/libraries/drawing/lib.rs` — The 2000+ line file being slimmed down (uses include!() pattern)
 - `system/libraries/drawing/*.rs` — Sub-files included into lib.rs
-- `system/libraries/shaping/src/*.rs` — Being renamed to fonts
+- `system/libraries/fonts/src/*.rs` — Font rendering pipeline (shaping, rasterization, fallback, typography)
 - `system/services/core/{main.rs,scene_state.rs}` — Absorbing layout logic
 - `system/services/compositor/{main.rs,scene_render.rs,scene_state.rs}` — Absorbing compositor concerns

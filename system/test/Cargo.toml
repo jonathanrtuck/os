@@ -13,4 +13,4 @@ protocol = { path = "../libraries/protocol" }
 ipc = { path = "../libraries/ipc" }
 drawing = { path = "../libraries/drawing" }
 scene = { path = "../libraries/scene" }
-shaping = { path = "../libraries/shaping" }
+fonts = { path = "../libraries/fonts" }

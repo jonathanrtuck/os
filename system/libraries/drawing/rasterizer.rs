@@ -1,6 +1,6 @@
 // Oversampling constants for glyph rasterization.
 //
-// Glyph rasterization now happens via shaping::rasterize which has its own
+// Glyph rasterization now happens via fonts::rasterize which has its own
 // scanline rasterizer using read-fonts for outline extraction. This file
 // retains only the oversampling constants used by GLYPH_BUF_SIZE (in lib.rs)
 // and by the SVG rasterizer (svg.rs).

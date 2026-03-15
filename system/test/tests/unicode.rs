@@ -4,9 +4,9 @@
 //! round-trip), and VAL-UNICODE-003 (supplementary plane safety).
 
 use scene::*;
-use shaping::fallback::FallbackChain;
-use shaping::rasterize::{self, RasterBuffer, RasterScratch};
-use shaping::shape;
+use fonts::fallback::FallbackChain;
+use fonts::rasterize::{self, RasterBuffer, RasterScratch};
+use fonts::shape;
 
 const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
 const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
