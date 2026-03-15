@@ -1,52 +1,39 @@
 # Architecture
 
+Architectural decisions, patterns, and constraints for the rendering pipeline.
+
+---
+
 ## Rendering Pipeline
 
-One-way data flow, five layers:
-
 ```
-Core (OS Service) -> Scene Graph (shared memory) -> Compositor -> GPU Driver -> Display
+Core (OS service) → Scene Graph (shared memory) → Compositor (pixel pump) → GPU Driver → Display
 ```
 
-- **Core:** Content understanding, text layout, input routing, scene graph building. Sole writer to document state.
-- **Scene Graph:** Pure data in shared memory. Tree of Node values with geometry, decoration, content variants.
-- **Compositor:** Content-agnostic pixel pump. Walks scene graph, rasterizes glyphs, composites layers.
-- **GPU Driver:** Transfers pixel buffers to display hardware.
+- **Core:** Owns document state, text layout, scene graph construction. Builds scene in logical coordinates.
+- **Scene Graph:** Double-buffered shared memory. Flat array of fixed-size repr(C) Nodes + 64KB data buffer. Change list (24 entries) for incremental updates.
+- **Compositor:** Reads scene graph, renders to framebuffer. Applies scale factor (logical→physical). Owns glyph cache and SVG rasterizer. Damage-tracked partial rendering.
+- **GPU Driver:** Transfers dirty rects from guest framebuffer to host display via virtio-gpu MMIO.
 
-## Library Responsibilities (TARGET STATE)
+## Key Types
 
-| Library | Owns | Does NOT own |
-|---------|------|-------------|
-| `drawing` | Surface, Color, PixelFormat, blend_over, fill_rect, draw_coverage, blit, draw_line, gradients, gamma tables | Layout, caching, decoders, compositing, damage tracking |
-| `fonts` | Shaping (HarfRust), rasterization (scanline + subpixel), font metrics, glyph cache (GlyphCache, LruGlyphCache), variable font axes, stem darkening | Typography policy, font selection policy, layout |
-| `scene` | Node, Content, TextRun, ShapedGlyph, SceneWriter/Reader, DoubleWriter/Reader, diff_scenes | Layout computation, glyph data, content understanding |
-| `protocol` | IPC message types, payload structs | Everything else |
+- `scene::Node` — 72 bytes (verify with compile-time assertion). Fields: tree links, geometry (i16/u16 logical), scroll_y (i32), background (Color), border (Border), corner_radius (u8), opacity (u8), flags, content_hash, content variant.
+- `scene::Content` — None | Text{runs, run_count} | Image{data, src_w, src_h} | Path{commands, fill, stroke, stroke_width}
+- `drawing::Surface` — borrowed pixel buffer with BGRA8888 format
+- `drawing::Color` — RGBA u8×4 with sRGB gamma-correct blend_over
 
-## Build System
+## Double-Buffer Protocol
 
-Custom `build.rs` at system/build.rs. Two compilation paths:
-1. Direct `rustc --crate-type=rlib` for: sys, protocol, virtio, scene, ipc, drawing
-2. `cargo build` for: fonts (because of harfrust/read-fonts dependency tree)
+1. Core calls `copy_front_to_back()` — copies current front to back, resets change list
+2. Core mutates specific nodes in back buffer, calls `mark_changed(node_id)` for each
+3. Core calls `swap()` — bumps generation counter, back becomes new front
+4. Compositor reads front buffer via `DoubleReader` (acquire fence on generation)
+5. Generation counter determines which buffer is front (higher gen = front)
 
-Compilation order matters (DAG): sys -> protocol, virtio(sys), scene, ipc, fonts(cargo), drawing(protocol+fonts) -> all programs.
+## Scale Factor Flow
 
-## Incremental Scene Graph (rendering-pipeline-optimization mission)
-
-**Before:** Core calls `build_editor_scene()` on every event, clearing and rebuilding the entire scene graph. Compositor byte-diffs all 512 nodes to find changes.
-
-**After:** Core uses copy_front_to_back + selective mutation. Four update paths:
-- `update_clock()`: In-place overwrite of 8-byte clock glyph data. 0 heap allocs.
-- `update_cursor()`: Mutate N_CURSOR x,y fields. 0 heap allocs.
-- `update_document_content()`: Re-layout visible text runs, update doc text + cursor. O(visible_lines) allocs.
-- `update_selection()`: Rebuild selection rect nodes. Truncate node count to 8 first.
-
-Each path records changed node IDs in the scene header's change list. Compositor reads the change list instead of diffing. Dirty rects derived from changed node positions.
-
-**Data buffer management:** update_data() for same-length overwrites (clock, title). replace_data() for new-length data (doc text). Fallback to full rebuild when data_used > 75% of DATA_BUFFER_SIZE.
-
-## QEMU/virtio Constraints
-
-1. virtio-gpu 2D is copy-based (guest->host on every present). No zero-copy scanout.
-2. No GPU-accelerated compositing. All blending is CPU.
-3. Display resolution fixed at init time.
-4. These constraints stay in the driver layer and never leak above.
+1. Init computes scale from framebuffer resolution
+2. Sent to compositor via CompositorConfig IPC message
+3. Compositor stores in RenderCtx.scale
+4. render_node multiplies logical coords by scale for all positions/sizes
+5. Font sizes: physical_px = logical_size × scale_factor

@@ -1,47 +1,24 @@
 # Environment
 
-## System
+Environment variables, external dependencies, and setup notes.
 
-- macOS (darwin 25.3.0), 48GB RAM, 14 CPU cores
-- Rust toolchain with aarch64-unknown-none target
-- QEMU for visual verification (optional per-feature, required at milestone boundaries)
+**What belongs here:** Required env vars, external API keys/services, dependency quirks, platform-specific notes.
+**What does NOT belong here:** Service ports/commands (use `.factory/services.yaml`).
+
+---
+
+## Build Environment
+
+- **Host:** macOS aarch64 (Apple Silicon)
+- **Rust target:** `aarch64-unknown-none` (bare-metal) for kernel, `aarch64-apple-darwin` for tests
+- **NEON SIMD:** Available natively on host (aarch64 macOS) — NEON tests run on host without cross-compilation
+- **Python3 PIL:** Available for PPM→PNG screenshot conversion
+- **QEMU:** v10.2.1 at `/opt/homebrew/bin/qemu-system-aarch64`
 
 ## Project Structure
 
-```
-system/
-  build.rs              — Custom build orchestration (rlibs + ELFs)
-  Cargo.toml            — Kernel crate (builds via cargo, triggers build.rs)
-  libraries/
-    sys/                — Syscall wrappers (rustc-compiled rlib)
-    protocol/           — IPC message types (rustc-compiled rlib)
-    virtio/             — Virtio MMIO transport (rustc-compiled rlib)
-    scene/              — Scene graph data types (rustc-compiled rlib)
-    ipc/                — Ring buffer IPC (rustc-compiled rlib)
-    drawing/            — Pixel primitives (rustc-compiled rlib, depends on protocol+fonts)
-    fonts/              — Font pipeline (cargo-managed, has external deps)
-    link.ld             — Userspace linker script
-  services/
-    init/               — Proto-OS-service, process spawner
-    core/               — OS service: documents, layout, scene graph building
-    compositor/         — Pixel pump: scene rendering, damage tracking
-    drivers/            — virtio-{blk,gpu,input,9p,console}
-  test/                 — Host-side test crate (1,462+ tests)
-  user/                 — User programs (text-editor, echo, stress, fuzz)
-```
-
-## Build Commands
-
-- Full build: `cd system && cargo build --release`
-- Tests: `cd system/test && cargo test -- --test-threads=1`
-- Fonts library standalone: `cd system/libraries/fonts && cargo build --target=aarch64-unknown-none --release`
-
-## Key Files for This Mission
-
-- `system/build.rs` — Must be updated for library renames/moves
-- `system/test/Cargo.toml` — Must be updated for library renames
-- `system/libraries/drawing/lib.rs` — The 2000+ line file being slimmed down (uses include!() pattern)
-- `system/libraries/drawing/*.rs` — Sub-files included into lib.rs
-- `system/libraries/fonts/src/*.rs` — Font rendering pipeline (shaping, rasterization, fallback, typography)
-- `system/services/core/{main.rs,scene_state.rs}` — Absorbing layout logic
-- `system/services/compositor/{main.rs,scene_render.rs,scene_state.rs}` — Absorbing compositor concerns
+- `system/` — all OS source (kernel, services, libraries, test crate)
+- `system/test/` — host-side test crate with own .cargo/config.toml overriding target to darwin
+- `system/share/` — fonts and assets loaded via 9P passthrough
+- `prototype/` — macOS-hosted prototypes (Files interface)
+- `design/` — design documents and journal

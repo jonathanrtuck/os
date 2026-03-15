@@ -1,6 +1,6 @@
 ---
 name: os-worker
-description: Implements features for the bare-metal Document OS — drawing library, compositor, drivers, editor, and content decoders. TDD + QEMU visual verification.
+description: Implements rendering pipeline features for the bare-metal AArch64 OS — drawing library, scene graph, compositor, core service, and kernel changes.
 ---
 
 # OS Worker
@@ -9,230 +9,164 @@ NOTE: Startup and cleanup are handled by `worker-base`. This skill defines the W
 
 ## When to Use This Skill
 
-All implementation features for the Document OS project:
-
-- Drawing library changes (font rendering, alpha blending, rasterizer, PNG decoder, SVG renderer)
-- Compositor changes (multi-surface, chrome, shadows, damage tracking)
-- GPU driver changes (double buffering, damage-tracked transfer, resolution)
-- Text editor changes (selection, scrolling)
-- Init changes (process orchestration, memory allocation, asset loading)
-- Polish/refinement work
+Features involving:
+- Drawing library primitives (rounded rects, blur, transforms, anti-aliased lines, resampling)
+- Scene graph types and double-buffer protocol (Node fields, Content variants, change list)
+- Compositor rendering logic (render_node, damage tracking, frame scheduling, offscreen compositing)
+- Core (OS service) scene building and event loop changes
+- GPU driver transfer path changes
+- Protocol/IPC message changes
+- Kernel timer or syscall changes related to the rendering pipeline
 
 ## Work Procedure
 
 ### 1. Understand the Feature
 
-Read the feature description, preconditions, expectedBehavior, and verificationSteps carefully. Identify:
+Read the feature description, preconditions, expectedBehavior, and verificationSteps carefully.
 
-- Which source files need to change (check `system/DESIGN.md` and `.factory/library/architecture.md` for component map)
-- Whether this is primarily library work (drawing, decoding) or system work (compositor, init, editor)
-- What existing tests cover adjacent functionality
+Read the relevant source files. The rendering pipeline code lives in:
+- `system/libraries/drawing/lib.rs` (+ `neon.rs`, `gamma_tables.rs`) — drawing primitives
+- `system/libraries/scene/lib.rs` — scene graph types, double-buffer protocol
+- `system/libraries/fonts/src/` — font rasterizer, glyph cache, shaping
+- `system/services/compositor/` — renderer, damage tracking, compositing, SVG
+- `system/services/core/` — OS service, scene building, event loop
+- `system/services/drivers/virtio-gpu/` — GPU transfer
+- `system/services/init/` — startup, config
+- `system/libraries/protocol/` — IPC message types
+- `system/kernel/` — syscalls, timer, scheduler (only if feature touches kernel)
+
+Read `.factory/library/architecture.md` for the rendering pipeline overview and key types.
 
 ### 2. Write Tests First (TDD)
 
-**For library/algorithmic features** (font rendering, PNG decoder, SVG parser, blending, damage rects):
+**Before writing any implementation code**, write failing tests in the appropriate test file:
+- Drawing primitives → `system/test/tests/drawing.rs`
+- NEON SIMD → `system/test/tests/neon.rs`
+- Scene graph → `system/test/tests/scene.rs`
+- Compositor rendering → `system/test/tests/scene_render.rs`
+- Font/glyph → `system/test/tests/cache.rs` or `shaping.rs`
+- SVG → `system/test/tests/svg.rs`
 
-- Add test cases to the appropriate file in `system/test/tests/` (e.g., `drawing.rs`, or create new test files)
-- Tests run on the host (`aarch64-apple-darwin`) via `cd system/test && cargo test -- --test-threads=1`
-- Write the test, verify it fails (red), then implement to make it pass (green)
-- Cover the expected behaviors AND error cases from the feature description
+Run `cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1` to verify tests FAIL (red).
 
-**For system/integration features** (compositor changes, init orchestration):
-
-- Write unit tests for any testable logic (damage rect calculation, surface ordering, etc.)
-- Some behaviors can only be verified visually — document what you'll check in QEMU
+Follow existing test patterns in each file. Tests import library types directly via Cargo dependencies. For kernel code, tests use `#[path]` includes with stub dependencies.
 
 ### 3. Implement
 
-- Match the existing code style (Rust, bare-metal idioms, no_std, no external crates)
-- All code runs on `aarch64-unknown-none` target — no standard library, no heap allocator beyond the kernel's
-- Check `.factory/library/architecture.md` for the display pipeline architecture
-- When modifying IPC messages, update both sender and receiver
-- When modifying init's process setup, ensure handle numbering is consistent
+Implement the feature to make tests pass (green).
 
-### 4. Run Unit Tests
+**Critical conventions:**
+- All `#[repr(C)]` structs in scene/lib.rs: if you add or change fields on Node, update the compile-time size assertion and verify both core and compositor agree on layout.
+- sRGB gamma-correct blending for ALL alpha compositing — use the existing `SRGB_TO_LINEAR` / `LINEAR_TO_SRGB` LUTs in drawing/lib.rs.
+- NEON SIMD paths: write scalar reference first, then NEON optimization. Both must produce identical output.
+- `unsafe` blocks require `// SAFETY:` comments. Inline asm: never use `nomem` without explicit ARM manual justification.
+- Drawing library functions take `u32` or `i32` for physical coordinates. The compositor translates from logical (i16/u16 from scene graph) × scale factor.
 
-```sh
+### 4. Run Full Test Suite
+
+```
 cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1
 ```
 
-ALL tests must pass. If existing tests fail, investigate whether:
+All tests must pass — both your new tests and all existing ones. Fix any regressions before proceeding.
 
-- Your change broke existing behavior (fix it)
-- The test was testing behavior you intentionally replaced (update the test, document in handoff)
+### 5. Build the Kernel
 
-### 5. Build
-
-```sh
+```
 cd /Users/user/Sites/os/system && cargo build --release
 ```
 
-Must compile with zero errors and zero warnings.
+Must compile cleanly. The kernel binary includes all services and libraries.
 
-### 6. Visual Verification (MANDATORY for display pipeline changes)
+### 6. Visual Verification (if display pipeline changed)
 
-**Every feature that affects what appears on screen MUST be visually verified.**
+If your feature affects anything visible on screen (compositor, drawing, core scene building):
 
-```sh
-# Kill any existing QEMU
-pkill -f qemu-system-aarch64 2>/dev/null; sleep 1
-rm -f /tmp/qemu-mon.sock /tmp/qemu-serial.log /tmp/qemu-screen.ppm /tmp/qemu-screen.png
+```
+cd /Users/user/Sites/os/system && bash test-qemu.sh
+```
 
-# Launch QEMU headless
-cd /Users/user/Sites/os/system && qemu-system-aarch64 \
-    -machine virt,gic-version=2 \
-    -cpu cortex-a53 -smp 4 -m 256M \
-    -rtc base=localtime \
+Or launch QEMU manually, send keystrokes, capture framebuffer screenshots:
+```
+# Launch QEMU
+qemu-system-aarch64 \
+    -machine virt,gic-version=2 -cpu cortex-a53 -smp 4 -m 256M \
     -global virtio-mmio.force-legacy=false \
     -drive "file=test.img,if=none,format=raw,id=hd0" \
     -device virtio-blk-device,drive=hd0 \
     -device virtio-gpu-device -device virtio-keyboard-device \
-    -fsdev "local,id=fsdev0,path=share,security_model=none" \
-    -device "virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare" \
     -nographic \
     -serial file:/tmp/qemu-serial.log \
     -monitor unix:/tmp/qemu-mon.sock,server,nowait \
     -device "loader,file=virt.dtb,addr=0x40000000,force-raw=on" \
     -kernel target/aarch64-unknown-none/release/kernel &
+QPID=$!
+sleep 5
 
-# Wait for boot
-sleep 8
-
-# Check serial log for errors
-cat /tmp/qemu-serial.log
-
-# Send keystrokes to exercise the feature
+# Send keys and screenshot
 echo "sendkey h" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
 sleep 1
-
-# Take screenshot
 echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2 >/dev/null 2>&1
-sleep 2
+sleep 1
 python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"
+# View with Read tool
+
+# Cleanup
+kill $QPID 2>/dev/null
 ```
 
-Then use the **Read tool** on `/tmp/qemu-screen.png` to VIEW the screenshot. You MUST see the result yourself. Do not declare visual changes done without viewing the screenshot.
+**View the screenshot with the Read tool.** Do not declare visual changes correct without seeing the pixels yourself.
 
-For features requiring high-resolution verification, use `xres=1920,yres=1080` in the virtio-gpu-device flags.
+### 7. Stress Test (if timing/scheduling/IPC changed)
 
-**For pointer/mouse features (milestone 3):** Add `-device virtio-tablet-device` to the QEMU launch command. Test mouse input via QEMU HMP:
-
-```sh
-# Move mouse (relative pixel offsets)
-echo "mouse_move 500 400" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
-
-# Click left button (1=left, 2=middle, 4=right; 0=release)
-echo "mouse_button 1" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
-sleep 0.5
-echo "mouse_button 0" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
+For frame scheduler, timer, or double-buffer changes:
+```
+cd /Users/user/Sites/os/system/test && bash stress.sh
 ```
 
-**For Ctrl+Tab context switching:** Send `sendkey ctrl-tab` via QEMU monitor.
-
-**Always kill QEMU when done:** `pkill -f qemu-system-aarch64`
-
-### 7. Run Regression Tests
-
-After visual verification:
-
-```sh
-cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1
-```
-
-Confirm all tests still pass.
-
-### 8. Commit
-
-Commit with a clear message describing what was implemented. Include test count in the message if new tests were added.
-
-## Important Constraints
-
-- **no_std**: No standard library. No `alloc` crate beyond the kernel's bump allocator. No external crate dependencies.
-- **Integer math only**: The drawing library uses integer arithmetic throughout. No floating point (the target has no FPU guarantee). Use fixed-point (20.12 format is established).
-- **Single-threaded userspace**: Each process is single-threaded. `static mut` is used for globals (technically UB but accepted pattern in this codebase).
-- **IPC messages are 64 bytes**: 4-byte type + 60-byte payload. Messages larger than 60 bytes need a shared-memory reference pattern.
-- **Font assets via 9p**: Put font files, PNG images, and SVG files in `system/share/`. They're loaded at runtime via the virtio-9p host filesystem passthrough.
-- **Build embeds userspace**: `build.rs` compiles all userspace programs. Adding a new source file to an existing program just requires editing the `build.rs` compile command for that program. Adding a new library requires adding it to the rlib compilation list.
+Verify no crash in serial output. Run for at least 60 seconds.
 
 ## Example Handoff
 
 ```json
 {
-  "salientSummary": "Implemented gamma-correct sRGB blending in the drawing library. Added srgb_to_linear/linear_to_srgb lookup tables and modified draw_coverage to blend in linear space. 6 new tests added (gamma curve accuracy, zero-coverage preservation, visual weight comparison). All 612 tests pass. QEMU screenshot confirms text strokes are visibly heavier and more legible than before.",
-  "whatWasImplemented": "sRGB gamma correction in draw_coverage(): coverage values are now converted to linear space before blending, then converted back to sRGB for storage. Two 256-entry lookup tables (srgb_to_linear, linear_to_srgb) are computed at compile time. Zero-coverage fast path preserved. Also fixed a bug where the dirty rect calculation was off by one line height.",
+  "salientSummary": "Implemented separable Gaussian blur in drawing library with NEON SIMD inner loop. Two-pass horizontal/vertical, capped at radius 16. Added blur_surface() function and BlurStrategy trait for future GPU path. 14 new tests in drawing.rs, all 1569 tests pass. QEMU screenshot confirms blurred shadow behind content panel.",
+  "whatWasImplemented": "drawing::blur_surface(surface, radius, sigma) with scalar and NEON paths. BlurStrategy trait with CpuBlur implementation. Temporary buffer allocation via alloc::vec for the intermediate pass. Edge clamping at surface boundaries. Radius capped at 16 with graceful clamp for larger values.",
   "whatWasLeftUndone": "",
   "verification": {
     "commandsRun": [
-      {
-        "command": "cd system/test && cargo test -- --test-threads=1",
-        "exitCode": 0,
-        "observation": "612 tests passed, 0 failed (6 new gamma tests + 606 existing)"
-      },
-      {
-        "command": "cd system && cargo build --release",
-        "exitCode": 0,
-        "observation": "Clean build, no warnings"
-      }
+      {"command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1", "exitCode": 0, "observation": "1569 tests pass (14 new blur tests + 1555 existing)"},
+      {"command": "cd /Users/user/Sites/os/system && cargo build --release", "exitCode": 0, "observation": "kernel builds cleanly"},
+      {"command": "cd /Users/user/Sites/os/system && bash test-qemu.sh", "exitCode": 0, "observation": "QEMU boots, display pipeline functional, shadow visible behind panel"}
     ],
     "interactiveChecks": [
-      {
-        "action": "Booted QEMU, typed 'hello world' on two lines, took screenshot",
-        "observed": "Text strokes are visibly heavier than pre-mission screenshots. Both lines have identical stroke weight. Thin stems in 'l' and 'i' are clearly visible. No artifacts around glyphs."
-      },
-      {
-        "action": "Sent 30 rapid keystrokes, took screenshot",
-        "observed": "All 30 characters present. No flicker visible in screenshot. Status bar shows correct count."
-      }
+      {"action": "QEMU screenshot after boot", "observed": "Content panel has soft shadow with Gaussian falloff behind it. Shadow opacity decreases smoothly with distance. No hard edges."},
+      {"action": "Typed 50 characters rapidly", "observed": "No visual glitches, text renders correctly, shadow stays in place during typing"}
     ]
   },
   "tests": {
     "added": [
-      {
-        "file": "system/test/tests/drawing.rs",
-        "cases": [
-          {
-            "name": "test_srgb_to_linear_boundary_values",
-            "verifies": "gamma lookup table correctness at 0, 128, 255"
-          },
-          {
-            "name": "test_gamma_blend_zero_coverage_unchanged",
-            "verifies": "zero coverage doesn't modify destination pixels"
-          },
-          {
-            "name": "test_gamma_blend_full_coverage_replaces",
-            "verifies": "full coverage replaces destination completely"
-          },
-          {
-            "name": "test_gamma_blend_half_coverage_weight",
-            "verifies": "50% coverage produces perceptually-correct midpoint"
-          },
-          {
-            "name": "test_gamma_blend_produces_heavier_strokes",
-            "verifies": "gamma blending at 50% coverage produces higher RGB values than linear"
-          },
-          {
-            "name": "test_draw_coverage_uses_gamma",
-            "verifies": "draw_coverage function applies gamma correction"
-          }
-        ]
-      }
+      {"file": "system/test/tests/drawing.rs", "cases": [
+        {"name": "blur_single_pixel_symmetric", "verifies": "VAL-BLUR-001"},
+        {"name": "blur_matches_reference_2d", "verifies": "VAL-BLUR-002"},
+        {"name": "blur_radius_zero_identity", "verifies": "VAL-BLUR-003"},
+        {"name": "blur_edge_clamping_small_surface", "verifies": "VAL-BLUR-004"},
+        {"name": "blur_large_radius_capped", "verifies": "VAL-BLUR-005"},
+        {"name": "blur_neon_matches_scalar", "verifies": "VAL-BLUR-006"},
+        {"name": "blur_sigma_varies_spread", "verifies": "VAL-BLUR-007"},
+        {"name": "blur_preserves_alpha", "verifies": "VAL-BLUR-014"}
+      ]}
     ]
   },
-  "discoveredIssues": [
-    {
-      "severity": "low",
-      "description": "The GlyphCache allocates 95 * 48 * 48 = ~220KB for ASCII coverage maps. Adding a second font (proportional) will double this. May want to consider lazy glyph caching for the proportional font.",
-      "suggestedFix": "Allocate proportional font cache lazily or with smaller max glyph dimensions since proportional fonts often have narrower glyphs."
-    }
-  ]
+  "discoveredIssues": []
 }
 ```
 
 ## When to Return to Orchestrator
 
-- A feature requires changes to the IPC message protocol that affect multiple processes not listed in this feature's scope
-- The document buffer (4 KiB shared page) is too small for the feature and needs to be enlarged (requires init + kernel changes)
-- An existing bug unrelated to this feature is causing test failures
-- The feature's preconditions are not met (e.g., a dependency feature hasn't been implemented yet)
-- QEMU won't boot or crashes during testing in ways unrelated to this feature's changes
-- The feature description is ambiguous about a design decision that could go multiple ways
+- Feature requires changes to the kernel timer or syscall interface that aren't specified
+- Scene graph Node size change breaks IPC payload constraints (CompositorConfig > 60 bytes)
+- QEMU visual test shows unexpected behavior not explained by the feature's changes
+- Existing test failures unrelated to the feature's changes
+- Feature depends on code from a previous milestone that hasn't been implemented yet
+- Memory allocation in compositor exceeds 32 MiB heap budget
