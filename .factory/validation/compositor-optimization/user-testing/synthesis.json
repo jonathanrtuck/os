@@ -1,0 +1,36 @@
+{
+  "milestone": "compositor-optimization",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 7,
+    "passed": 7,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-COMP-001",
+    "VAL-COMP-002",
+    "VAL-COMP-003",
+    "VAL-COMP-004",
+    "VAL-COMP-005",
+    "VAL-COMP-006",
+    "VAL-COMP-007"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "flowReports": [
+    ".factory/validation/compositor-optimization/user-testing/flows/cli-code-inspection.json",
+    ".factory/validation/compositor-optimization/user-testing/flows/qemu-visual.json"
+  ],
+  "testSuiteResults": {
+    "command": "cd system/test && cargo test -- --test-threads=1",
+    "result": "all passed, 0 failures"
+  },
+  "buildResults": {
+    "command": "cd system && cargo build --release",
+    "result": "exit 0, no errors"
+  }
+}
