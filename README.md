@@ -18,7 +18,7 @@ This project explores inverting that: **OS → Document → Tool.** Documents ha
 
 ## Status
 
-The project has a working interactive demo running on a bare-metal aarch64 microkernel in QEMU. The display pipeline renders text with LCD subpixel anti-aliasing and stem darkening, composites z-ordered surfaces with translucent chrome and drop shadows over a radial gradient background, decodes PNG images, rasterizes SVG paths, and supports a text editor with selection, scrolling, and mouse click-to-position plus an image viewer — switchable at runtime with context-aware icons. A hardware RTC clock ticks in the title bar. Only dirty screen regions are transferred to the GPU.
+The project has a working interactive demo running on a bare-metal aarch64 microkernel in QEMU. The display pipeline renders text with LCD subpixel anti-aliasing and stem darkening, composites z-ordered surfaces with translucent chrome and drop shadows over a radial gradient background, decodes PNG images, rasterizes SVG paths, and supports a text editor with selection, scrolling, and mouse click-to-position plus an image viewer — switchable at runtime with context-aware icons. A hardware RTC clock ticks in the title bar. The rendering pipeline uses incremental scene graph updates with change-list-driven damage tracking — only dirty screen regions are re-rendered and transferred to the GPU.
 
 For the full design landscape, see the [decision register](design/decisions.md) and the [exploration journal](design/journal.md).
 
@@ -26,17 +26,17 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Kernel** — Bare-metal aarch64 microkernel. 28 syscalls, EEVDF scheduler, 4 SMP cores, demand-paged memory, channel-based IPC with shared memory.
 
-**Display pipeline** — Five-process architecture: virtio-input driver → core (OS service) → compositor → text editor → virtio-gpu driver. Scene graph in shared memory connects core (document semantics) to compositor (pixels). Dirty-rectangle GPU transfers (only changed regions sent, not the full framebuffer) and incremental content rendering (only changed text lines re-rendered).
+**Display pipeline** — Five-process architecture: virtio-input driver → core (OS service) → compositor → text editor → virtio-gpu driver. Scene graph in shared memory connects core (document semantics) to compositor (pixels). Incremental scene graph updates — clock ticks and cursor moves are zero-allocation mutations; only changed nodes are recorded in a change list. Change-list-driven damage tracking replaces byte-level scene diffing. Subtree clip skipping avoids visiting nodes outside dirty regions. Dirty-rectangle GPU transfers (only changed regions sent to the host).
 
 **Core (OS service)** — Sole writer to document state. Builds a scene graph describing the visual structure of the document. Routes input to the active editor. Editors are read-only consumers that send write requests via IPC.
 
 **Compositor** — Reads the scene graph and renders it to pixels. Z-ordered surface compositing with translucent chrome (alpha ~170) and drop shadows (12px depth). Radial gradient background with noise texture. Title bar with context-aware document/image icons and hardware RTC wall-clock (PL031, UTC). Pure monochrome palette. Procedural arrow cursor rendered at top z-order. SVG icon rasterization. Damage tracking for incremental re-rendering.
 
-**Drawing library** — Surfaces, colors, Porter-Duff compositing, gamma-correct sRGB blending. PNG decoder (DEFLATE, all filter types). Monochrome palette system.
+**Drawing library** — Surfaces, colors, Porter-Duff compositing, gamma-correct sRGB blending. NEON SIMD acceleration for fill and blend operations. PNG decoder (DEFLATE, all filter types). Monochrome palette system.
 
 **Font library** — TrueType font rasterizer with LCD subpixel rendering (per-channel RGB coverage, 6× horizontal oversampling), stem darkening for heavier strokes, GPOS kerning, proper hhea baseline metrics, and glyph cache. Two fonts: Source Code Pro (monospace, editor) and Nunito Sans (proportional, chrome) at 20px.
 
-**Scene graph library** — Typed visual node tree in shared memory. Double-buffered for lock-free producer/consumer across processes. Monospace text layout helpers.
+**Scene graph library** — Typed visual node tree in shared memory. Double-buffered for lock-free producer/consumer across processes. Change list for incremental damage tracking. Copy-forward with selective mutation for zero-allocation updates. Monospace text layout helpers.
 
 **Text editor** — Cursor movement, text selection (shift+arrow), scrolling, mouse click-to-position, insert and delete. Communicates with core via IPC write requests.
 
@@ -46,7 +46,7 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Assets via 9P** — Fonts, images, and icons loaded at boot from the host filesystem via virtio-9p passthrough.
 
-**Tests** — 1,483 tests (1,462 system + 21 prototype).
+**Tests** — 1,576 tests (1,555 system + 21 prototype).
 
 ## Running the Demo
 
