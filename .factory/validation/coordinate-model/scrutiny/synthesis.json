@@ -1,0 +1,36 @@
+{
+  "milestone": "coordinate-model",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "build": {
+      "passed": true,
+      "command": "cd /Users/user/Sites/os/system && cargo build --release",
+      "exitCode": 0
+    },
+    "test": {
+      "passed": false,
+      "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1",
+      "exitCode": 101,
+      "failureDetail": "Test 'glyph_cache_keyed_on_physical_pixel_size' in scene_render.rs:1110 causes stack overflow (SIGABRT). GlyphCache::zeroed() returns a ~1.3 MiB struct by value and the test allocates two on the stack, exceeding the default ~2 MiB thread stack. Other tests in the file use zeroed_glyph_cache() helper which Box-allocates. All other 1554 tests pass."
+    }
+  },
+  "reviewsSummary": {
+    "total": 0,
+    "passed": 0,
+    "failed": 0,
+    "failedFeatures": [],
+    "note": "Feature review not performed due to test failure"
+  },
+  "blockingIssues": [
+    {
+      "featureId": "fractional-scale-fonts-and-damage",
+      "severity": "blocking",
+      "description": "Test 'glyph_cache_keyed_on_physical_pixel_size' (scene_render.rs:1110) stack overflows: GlyphCache::zeroed() returns ~1.3 MiB by value, test creates two on the stack (~2.6 MiB total), exceeding default thread stack size. Fix: the first half of the test only checks size_px field values (24 != 32) — it doesn't need a full GlyphCache at all. Remove the GlyphCache::zeroed() calls and just assert 24 != 32 directly, OR use Box allocation like the zeroed_glyph_cache() helper used by all other tests in the file."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [],
+  "rejectedObservations": [],
+  "previousRound": null
+}
