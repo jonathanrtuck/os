@@ -30,6 +30,67 @@ Testing surface, validation approach, and resource cost classification.
 
 **Disk image locking workaround:** If the user's QEMU is running and holding a lock on `test.img`, worker QEMU instances must create a separate copy: `cp system/test.img /tmp/worker-test.img` and use that copy in their QEMU flags. Do not attempt to use the same `test.img` concurrently.
 
+## Flow Validator Guidance: Unit Tests
+
+**Surface:** Host-side Rust unit tests (macOS aarch64)
+**Testing tool:** Direct `cargo test` invocation
+**Isolation:** Each validator runs cargo test with specific test name filters. No shared mutable state — tests are pure functions operating on in-memory structures.
+
+**How to verify assertions:**
+1. Run the full test suite: `cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1`
+2. For specific assertions, identify the relevant test names by searching the test source files
+3. Confirm test passes (exit code 0, "ok" in output)
+4. For assertions about specific behavior, read the test source to confirm it verifies the claimed property
+
+**Key test files for pipeline-fixes:**
+- `system/test/tests/scene.rs` — scene graph, SceneWriter, SceneReader, double-buffer tests
+- `system/test/tests/scene_render.rs` — compositor rendering, damage tracking, clipped rendering
+- `system/test/tests/core.rs` — core OS service logic, document updates, clock updates
+
+**Note:** Test source files live in `system/test/tests/*.rs`, NOT `system/test/src/*.rs`.
+
+**Shared state:** None. Tests create their own in-memory buffers. No file I/O, no network.
+**Boundaries:** Do not modify any source files. Do not run QEMU. Only observe test results.
+
+## Flow Validator Guidance: QEMU Visual
+
+**Surface:** QEMU framebuffer screenshots
+**Testing tool:** QEMU monitor socket + Python PIL for image conversion + Read tool for visual inspection
+**Isolation:** Launch a separate QEMU instance with unique socket paths. Copy test.img to /tmp/ to avoid disk conflicts.
+
+**How to verify assertions:**
+1. Build: `cd /Users/user/Sites/os/system && cargo build --release`
+2. Copy disk image: `cp /Users/user/Sites/os/system/test.img /tmp/val-test.img`
+3. Launch QEMU with unique paths (IMPORTANT — include 9p and rtc flags for font loading and clock):
+   ```sh
+   cd /Users/user/Sites/os/system && qemu-system-aarch64 \
+     -machine virt,gic-version=2 -cpu cortex-a53 -smp 4 -m 256M \
+     -global virtio-mmio.force-legacy=false \
+     -drive "file=/tmp/val-test.img,if=none,format=raw,id=hd0" \
+     -device virtio-blk-device,drive=hd0 \
+     -device virtio-gpu-device -device virtio-keyboard-device \
+     -device virtio-tablet-device \
+     -fsdev local,id=fsdev0,path=share,security_model=none \
+     -device virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare \
+     -rtc base=localtime \
+     -nographic \
+     -serial file:/tmp/val-serial.log \
+     -monitor unix:/tmp/val-mon.sock,server,nowait \
+     -device "loader,file=virt.dtb,addr=0x40000000,force-raw=on" \
+     -kernel target/aarch64-unknown-none/release/kernel &
+   ```
+   **Without 9p flags:** Compositor will report 'no font data' and crash.
+   **Without -rtc:** Clock will not show correct time.
+   **Keystroke delay:** Use ≥0.05s between keystrokes. Faster rates (0.02s) may trigger pre-existing kernel crashes.
+4. Wait for boot (5-8s), send keystrokes via `echo "sendkey h" | nc -U /tmp/val-mon.sock -w 1`
+5. Capture screenshot: `echo "screendump /tmp/val-screen.ppm" | nc -U /tmp/val-mon.sock -w 2`
+6. Convert: `python3 -c "from PIL import Image; Image.open('/tmp/val-screen.ppm').save('/tmp/val-screen.png')"`
+7. View with Read tool to verify pixels
+8. Kill QEMU when done
+
+**Shared state:** Uses /tmp/ for all temporary files with `val-` prefix. Do not use `system/test.img` directly.
+**Boundaries:** Do not modify source files. Do not interfere with user's QEMU (PID check before kill).
+
 ## QEMU Test Scripts
 
 - `test-qemu.sh` — interactive display pipeline test (safe, user's QEMU is closed)
