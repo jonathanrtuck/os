@@ -44,7 +44,7 @@ let glyph_buffer = shaper.shape(buffer, &[]);
 for (info, pos) in glyph_buffer.glyph_infos().iter()
     .zip(glyph_buffer.glyph_positions().iter())
 {
-    let glyph_id = info.as_glyph();   // u16 glyph ID
+    let glyph_id = info.glyph_id;      // u32 glyph ID (cast to u16 for ShapedGlyph)
     let cluster = info.cluster;         // original character cluster index
     let x_advance = pos.x_advance;     // i32, in FONT UNITS (not pixels!)
     let y_advance = pos.y_advance;     // i32
@@ -62,11 +62,11 @@ for (info, pos) in glyph_buffer.glyph_infos().iter()
 use harfrust::Feature;
 
 let features = vec![
-    Feature::from_str("+liga").unwrap(),    // Enable ligatures
-    Feature::from_str("-kern").unwrap(),    // Disable kerning
-    Feature::from_str("+tnum").unwrap(),    // Tabular numbers
-    Feature::from_str("+onum").unwrap(),    // Oldstyle figures
-    Feature::from_str("+smcp").unwrap(),    // Small caps
+    "+liga".parse::<Feature>().unwrap(),    // Enable ligatures
+    "-kern".parse::<Feature>().unwrap(),    // Disable kerning
+    "+tnum".parse::<Feature>().unwrap(),    // Tabular numbers
+    "+onum".parse::<Feature>().unwrap(),    // Oldstyle figures
+    "+smcp".parse::<Feature>().unwrap(),    // Small caps
 ];
 let glyph_buffer = shaper.shape(buffer, &features);
 ```

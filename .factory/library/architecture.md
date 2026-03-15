@@ -120,5 +120,5 @@ The tablet device appears as a second virtio-input device (device ID 18) in the 
 - `svg_parse_path()` / `svg_parse_path_into()`: SVG path data parser (M/L/C/Z, absolute + relative), returns `SvgPath` segments
 - `svg_rasterize()`: Rasterizes parsed SVG paths into coverage maps using scanline/non-zero winding rule (same approach as TrueType rasterizer)
 - `palette` module: 14 named color constants (pure monochrome grey theme, R=G=B for all colors) — all UI colors centralized here
-- **SVG struct sizes**: `SvgPath` (~16 KiB) and `SvgRasterScratch` (~64 KiB) exceed the 16 KiB userspace stack — must be heap-allocated via `alloc_zeroed` in bare-metal code
+- **Large struct sizes**: `SvgPath` (~16 KiB), `SvgRasterScratch` (~64 KiB), and `RasterScratch` (~39 KiB, from shaping library) all exceed the 16 KiB userspace stack — must be heap-allocated via `alloc_zeroed` + `Box::from_raw` in bare-metal code (never `Box::new()`, which constructs on stack first)
 - No rounded rects, no blur yet
