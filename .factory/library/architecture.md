@@ -41,6 +41,18 @@ The compositor maintains per-node previous-frame physical bounds (`PREV_BOUNDS` 
 - **On partial update:** Damage BOTH the old position (from PREV_BOUNDS) AND the new position
 - **Type constraint:** Physical coordinates = logical × scale_factor. At scale≥2, logical i16 values produce physical coordinates exceeding i16::MAX (32767). PREV_BOUNDS uses i32 for x/y to avoid truncation. The new-position damage path clamps i32→u16 with `.min(fbw)` guards.
 
+## Frame Scheduler
+
+The compositor uses a frame scheduler (`frame_scheduler.rs`) that replaces the old event-driven render-on-every-update pattern with configurable-cadence rendering:
+
+- **Timer-driven:** A one-shot kernel timer fires at the configured cadence (default 60fps = 16.67ms). The compositor recreates the timer after each tick (same pattern as core's clock timer).
+- **Two-handle wait:** The compositor's main loop waits on BOTH `CORE_HANDLE` (scene updates) and the frame timer handle. On core signal → set dirty flag. On timer tick → render if dirty, skip if clean.
+- **Event coalescing:** Multiple scene updates between timer ticks produce a single render reading the latest scene state.
+- **Idle optimization:** When nothing changes, the frame timer fires but the compositor skips rendering entirely (no wasted GPU transfers).
+- **Pure state machine:** `FrameScheduler` struct tracks dirty flag, tick/render/present counts. Testable on the host without kernel syscalls.
+
+The initial frame is rendered outside the scheduler loop (before it starts) to ensure immediate display on boot.
+
 ## Scale Factor Flow
 
 1. Init computes scale from framebuffer resolution

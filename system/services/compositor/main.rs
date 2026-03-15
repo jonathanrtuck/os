@@ -26,6 +26,8 @@ mod compositing;
 mod cursor;
 #[path = "svg.rs"]
 mod svg;
+#[path = "frame_scheduler.rs"]
+mod frame_scheduler;
 
 use alloc::{boxed::Box, vec};
 
@@ -459,14 +461,79 @@ pub extern "C" fn _start() -> ! {
     // buffering to avoid tearing during the full render pass.
     let mut presented_buf: usize = 0;
 
-    sys::print(b"     entering render loop (damage-tracked)\n");
+    // ── Frame scheduler ─────────────────────────────────────────────
+    //
+    // Instead of rendering immediately on every scene update, the
+    // compositor renders at a fixed cadence (default 60fps). Between
+    // ticks, scene updates set a dirty flag. On each tick, the
+    // compositor checks the flag: if dirty, render + present; if
+    // clean, skip (idle optimization). This provides:
+    //
+    // - Event coalescing: multiple scene updates per frame → one render
+    // - Idle optimization: no renders when nothing changed
+    // - Configurable cadence: timer period controls frame rate
+    let mut scheduler = frame_scheduler::FrameScheduler::new(60);
 
-    // Render loop: wait for scene updates from core, diff, render, present.
+    // Create the first frame timer. One-shot timers that we recreate
+    // on each tick (same pattern as core's clock timer).
+    let mut frame_timer_handle: u8 = match sys::timer_create(scheduler.period_ns()) {
+        Ok(h) => h,
+        Err(_) => {
+            sys::print(b"compositor: frame timer create failed\n");
+            sys::exit();
+        }
+    };
+
+    sys::print(b"     entering render loop (frame-scheduled)\n");
+
+    // Render loop: wait for scene updates OR frame timer tick.
+    //
+    // Two-handle wait: CORE_HANDLE (scene updates) and frame timer.
+    // - Core signal: drain messages, mark dirty, DON'T render yet.
+    // - Timer tick: if dirty → render + present; if clean → skip.
+    //
+    // This replaces the old pattern of rendering on every scene update.
     loop {
-        let _ = sys::wait(&[CORE_HANDLE], u64::MAX);
+        // Block until either core signals a scene update or the frame
+        // timer fires. The compositor never busy-spins — it's always
+        // blocked in sys::wait when there's nothing to do.
+        let _ = sys::wait(&[CORE_HANDLE, frame_timer_handle], u64::MAX);
 
-        // Drain all pending notifications (coalesce multiple updates).
-        while core_ch.try_recv(&mut msg) {}
+        // Check if core signaled (scene update available).
+        // Poll (timeout=0) to avoid blocking — we just want to know
+        // if the core channel has a pending signal.
+        if sys::wait(&[CORE_HANDLE], 0).is_ok() {
+            // Drain all pending notifications (coalesce multiple updates).
+            while core_ch.try_recv(&mut msg) {}
+            scheduler.on_scene_update();
+        }
+
+        // Check if frame timer fired.
+        if sys::wait(&[frame_timer_handle], 0).is_ok() {
+            // Timer is one-shot and level-triggered — close and recreate.
+            let _ = sys::handle_close(frame_timer_handle);
+            frame_timer_handle = match sys::timer_create(scheduler.period_ns()) {
+                Ok(h) => h,
+                Err(_) => {
+                    // Timer creation failed — fall back to rendering on
+                    // every scene update to avoid a frozen display.
+                    sys::print(b"compositor: frame timer recreate failed\n");
+                    sys::exit();
+                }
+            };
+
+            // Ask the scheduler if we should render this tick.
+            if !scheduler.on_timer_tick() {
+                // Not dirty — skip rendering, wait for next event.
+                continue;
+            }
+        } else {
+            // Timer hasn't fired yet — this was a core-only wakeup.
+            // Don't render; wait for the next timer tick.
+            continue;
+        }
+
+        // ── Render phase (only reached when timer fired AND scene is dirty) ──
 
         let dr = scene::DoubleReader::new(scene_buf);
         let read_gen = dr.front_generation();
@@ -491,6 +558,10 @@ pub extern "C" fn _start() -> ! {
                     // safely reuse this buffer.
                     dr.finish_read(read_gen);
                     prev_node_count = curr_count;
+                    // Scene was marked dirty but change list is empty
+                    // (possible if core swapped without real changes).
+                    // Still count as render complete to clear dirty flag.
+                    scheduler.on_render_complete();
                     continue;
                 }
                 Some(changed) => {
@@ -609,6 +680,7 @@ pub extern "C" fn _start() -> ! {
         } else {
             // No damage rects — nothing to render. Acknowledge the read.
             dr.finish_read(read_gen);
+            scheduler.on_render_complete();
             continue;
         }
 
@@ -645,5 +717,8 @@ pub extern "C" fn _start() -> ! {
         gpu_ch.send(&present_msg);
 
         let _ = sys::channel_signal(GPU_HANDLE);
+
+        // Frame complete — clear dirty flag and update counters.
+        scheduler.on_render_complete();
     }
 }
