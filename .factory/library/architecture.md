@@ -58,8 +58,14 @@ The initial frame is rendered outside the scheduler loop (before it starts) to e
 
 ## Scale Factor Flow
 
-1. Init computes scale from framebuffer resolution
-2. Sent to compositor via CompositorConfig IPC message
-3. Compositor stores in RenderCtx.scale
-4. render_node multiplies logical coords by scale for all positions/sizes
-5. Font sizes: physical_px = logical_size × scale_factor
+Scale factor is **f32** (fractional) throughout the pipeline, supporting 1.0, 1.25, 1.5, 1.75, 2.0 etc.
+
+1. Init computes scale as f32 from framebuffer resolution (≥2048px → 2.0, else 1.0)
+2. Sent to compositor via CompositorConfig.scale_factor (f32)
+3. Compositor validates: 0.0/negative/NaN → 1.0, >4.0 → clamped to 4.0
+4. Compositor stores in RenderCtx.scale (f32)
+5. render_node uses gap-free rounding: position = round(logical × scale), size = round((pos+size) × scale) - round(pos × scale)
+6. Borders snap to whole physical pixels (minimum 1px)
+7. Font sizes: physical_px = round(logical_size × scale_factor)
+8. fb_stride is NOT in CompositorConfig — derived as fb_width × 4 (BGRA8888)
+9. Manual `round_f32()` used instead of `f32::round()` for no_std compatibility

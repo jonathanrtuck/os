@@ -30,10 +30,11 @@ pub struct RenderCtx<'a> {
     pub icon_color: Color,
     /// Node ID where the icon should be drawn (before its text).
     pub icon_node: NodeId,
-    /// Integer display scale factor (1 = 1×, 2 = Retina 2×).
+    /// Fractional display scale factor (1.0, 1.25, 1.5, 2.0, etc.).
     /// Scene graph is in logical coordinates; multiply by this to get
-    /// physical pixel positions and sizes.
-    pub scale: u32,
+    /// physical pixel positions and sizes. Borders snap to whole physical
+    /// pixels (round to nearest).
+    pub scale: f32,
 }
 /// Immutable scene graph data referenced during rendering.
 pub struct SceneGraph<'a> {
@@ -65,11 +66,59 @@ impl ClipRect {
     }
 }
 
+/// Round a float to the nearest integer (round-half-away-from-zero).
+/// Manual implementation for `no_std` (where `f32::round()` isn't available
+/// without `core_maths`).
+#[inline]
+fn round_f32(x: f32) -> i32 {
+    if x >= 0.0 {
+        (x + 0.5) as i32
+    } else {
+        (x - 0.5) as i32
+    }
+}
+
+/// Scale a logical coordinate to physical pixels using fractional scale.
+///
+/// Uses rounding to nearest pixel. This ensures that for integer scale
+/// factors (1.0, 2.0), the result is identical to the old integer multiply.
+/// For fractional scales, rounding minimises visual error.
+#[inline]
+fn scale_coord(logical: i32, scale: f32) -> i32 {
+    round_f32(logical as f32 * scale)
+}
+
+/// Compute the physical pixel size for a logical extent starting at a
+/// given logical position, using the gap-free rounding scheme.
+///
+/// Physical size = round((pos + size) * scale) - round(pos * scale)
+///
+/// This guarantees that two adjacent nodes at (x, w) and (x+w, w2) share
+/// the same physical boundary — no gaps and no overlaps.
+#[inline]
+fn scale_size(logical_pos: i32, logical_size: i32, scale: f32) -> i32 {
+    let phys_start = round_f32(logical_pos as f32 * scale);
+    let phys_end = round_f32((logical_pos + logical_size) as f32 * scale);
+    phys_end - phys_start
+}
+
+/// Snap a logical border width to a whole number of physical pixels.
+/// Borders must always be at least 1 physical pixel when the logical
+/// width is > 0. Uses round-to-nearest, with a floor of 1.
+#[inline]
+fn snap_border(logical_width: u32, scale: f32) -> u32 {
+    if logical_width == 0 {
+        return 0;
+    }
+    let phys = round_f32(logical_width as f32 * scale);
+    if phys <= 0 { 1 } else { phys as u32 }
+}
+
 /// Recursively render a node and its children.
 ///
 /// `abs_x`, `abs_y` are the absolute **physical** pixel position of this
 /// node's origin in the framebuffer. `clip` is in physical pixels.
-/// Scene graph coordinates are logical; scaled by `ctx.scale`.
+/// Scene graph coordinates are logical; scaled by `ctx.scale` (f32).
 fn render_node(
     fb: &mut Surface,
     graph: &SceneGraph,
@@ -89,11 +138,11 @@ fn render_node(
         return;
     }
 
-    let s = ctx.scale as i32;
-    let nx = abs_x + node.x as i32 * s;
-    let ny = abs_y + node.y as i32 * s;
-    let nw = node.width as i32 * s;
-    let nh = node.height as i32 * s;
+    let s = ctx.scale;
+    let nx = abs_x + scale_coord(node.x as i32, s);
+    let ny = abs_y + scale_coord(node.y as i32, s);
+    let nw = scale_size(node.x as i32, node.width as i32, s);
+    let nh = scale_size(node.y as i32, node.height as i32, s);
     let node_rect = ClipRect {
         x: nx,
         y: ny,
@@ -128,10 +177,10 @@ fn render_node(
         }
     }
 
-    // Draw border.
+    // Draw border (pixel-snapped to whole physical pixels).
     if node.border.width > 0 && node.border.color.a > 0 {
         let bc = scene_to_draw_color(node.border.color);
-        let bw = node.border.width as u32 * ctx.scale;
+        let bw = snap_border(node.border.width as u32, s);
 
         // Top
         fb.fill_rect_blend(nx as u32, ny as u32, nw as u32, bw, bc);
@@ -174,7 +223,7 @@ fn render_node(
             ctx.icon_h,
             ctx.icon_color,
         );
-        icon_advance = ctx.icon_w as i32 + 8 * s;
+        icon_advance = ctx.icon_w as i32 + scale_coord(8, s);
     }
 
     // Draw content.
@@ -225,14 +274,13 @@ fn render_node(
                 };
                 let run_color = scene_to_draw_color(run.color);
                 let cache = ctx.mono_cache;
-                let su = ctx.scale as i32;
                 let uniform_advance = if run.advance > 0 {
-                    Some(run.advance as i32 * su)
+                    Some(scale_coord(run.advance as i32, s))
                 } else {
                     None
                 };
-                let gx0 = text_nx + run.x as i32 * su;
-                let gy0 = ny + run.y as i32 * su;
+                let gx0 = text_nx + scale_coord(run.x as i32, s);
+                let gy0 = ny + scale_coord(run.y as i32, s);
 
                 if gy0 >= max_y as i32 {
                     break;
@@ -251,7 +299,7 @@ fn render_node(
                         fb.draw_coverage(px, py, coverage, glyph.width, glyph.height, run_color);
                     }
 
-                    cx += uniform_advance.unwrap_or(sg.x_advance as i32);
+                    cx += uniform_advance.unwrap_or(scale_coord(sg.x_advance as i32, s));
                 }
             }
         }
@@ -292,7 +340,7 @@ fn render_node(
         clip
     };
     let child_origin_x = nx;
-    let child_origin_y = ny - node.scroll_y * s;
+    let child_origin_y = ny - scale_coord(node.scroll_y, s);
     let mut child = node.first_child;
 
     while child != NULL {
@@ -304,10 +352,10 @@ fn render_node(
         // Skip subtrees whose bounding box doesn't intersect the clip rect.
         // This avoids visiting entire subtrees (and their glyph cache lookups)
         // when the dirty region covers only a small portion of the screen.
-        let cx = child_origin_x + child_node.x as i32 * s;
-        let cy = child_origin_y + child_node.y as i32 * s;
-        let cw = child_node.width as i32 * s;
-        let ch = child_node.height as i32 * s;
+        let cx = child_origin_x + scale_coord(child_node.x as i32, s);
+        let cy = child_origin_y + scale_coord(child_node.y as i32, s);
+        let cw = scale_size(child_node.x as i32, child_node.width as i32, s);
+        let ch = scale_size(child_node.y as i32, child_node.height as i32, s);
         let child_rect = ClipRect {
             x: cx,
             y: cy,

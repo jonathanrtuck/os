@@ -93,6 +93,31 @@ fn channel_shm_va(idx: usize) -> usize {
     protocol::channel_shm_va(idx)
 }
 
+/// Round a float to the nearest integer (round-half-away-from-zero).
+/// Manual implementation for `no_std`.
+#[inline]
+fn round_f32(x: f32) -> i32 {
+    if x >= 0.0 {
+        (x + 0.5) as i32
+    } else {
+        (x - 0.5) as i32
+    }
+}
+
+/// Scale a logical coordinate to physical pixels (rounding).
+#[inline]
+fn scale_coord(logical: i32, scale: f32) -> i32 {
+    round_f32(logical as f32 * scale)
+}
+
+/// Compute gap-free physical size from logical position and size.
+#[inline]
+fn scale_size_u16(logical_pos: i32, logical_size: u32, scale: f32) -> u16 {
+    let phys_start = round_f32(logical_pos as f32 * scale);
+    let phys_end = round_f32((logical_pos as f32 + logical_size as f32) * scale);
+    (phys_end - phys_start).max(0) as u16
+}
+
 /// Populate PREV_BOUNDS for all live nodes from the current scene graph.
 /// Computes each node's absolute position in physical pixel coords and
 /// stores it. Called after first frame and after every full repaint.
@@ -101,20 +126,19 @@ fn channel_shm_va(idx: usize) -> usize {
 ///
 /// Writes to the `PREV_BOUNDS` static mut. Must be called from the
 /// single-threaded render loop only.
-unsafe fn populate_prev_bounds(nodes: &[scene::Node], count: usize, scale: u32) {
+unsafe fn populate_prev_bounds(nodes: &[scene::Node], count: usize, scale: f32) {
     let n = count.min(nodes.len()).min(scene::MAX_NODES);
     let parent_map = scene::build_parent_map(nodes, n);
-    let sf = scale as i32;
 
     for i in 0..n {
         let (ax, ay, aw, ah) = scene::abs_bounds(nodes, &parent_map, i);
         // Scale logical bounds to physical pixel coords and clamp to non-negative.
         // x/y stored as i32 to avoid truncation at high scale factors where
         // physical coordinates can exceed i16::MAX (32767).
-        let px = (ax * sf).max(0);
-        let py = (ay * sf).max(0);
-        let pw = (aw as u32 * scale) as u16;
-        let ph = (ah as u32 * scale) as u16;
+        let px = scale_coord(ax, scale).max(0);
+        let py = scale_coord(ay, scale).max(0);
+        let pw = scale_size_u16(ax, aw, scale);
+        let ph = scale_size_u16(ay, ah, scale);
 
         PREV_BOUNDS[i] = (px, py, pw, ph);
     }
@@ -234,13 +258,22 @@ pub extern "C" fn _start() -> ! {
     let fb_va2 = config.fb_va2 as usize;
     let fb_width = config.fb_width;
     let fb_height = config.fb_height;
-    let fb_stride = config.fb_stride;
+    // fb_stride is always fb_width * 4 (BGRA8888) — derived, not in config.
+    let fb_stride = fb_width * 4;
     let fb_size = fb_stride * fb_height;
     let scene_va = config.scene_va as usize;
-    let scale_factor: u32 = if config.scale_factor > 0 {
-        config.scale_factor as u32
-    } else {
-        1
+    // Validate and clamp fractional scale factor.
+    // - Negative or zero → default to 1.0
+    // - > 4.0 → clamp to 4.0 (extreme scales would overflow u16 coordinates)
+    let scale_factor: f32 = {
+        let raw = config.scale_factor;
+        if raw <= 0.0 || raw.is_nan() {
+            1.0
+        } else if raw > 4.0 {
+            4.0
+        } else {
+            raw
+        }
     };
 
     if fb_va == 0 || fb_va2 == 0 || fb_width == 0 || fb_height == 0 || scene_va == 0 {
@@ -276,7 +309,7 @@ pub extern "C" fn _start() -> ! {
         Box::from_raw(ptr)
     };
     // Rasterize at physical pixel size: logical FONT_SIZE × scale_factor.
-    let physical_font_size = FONT_SIZE * scale_factor;
+    let physical_font_size = round_f32(FONT_SIZE as f32 * scale_factor).max(1) as u32;
     // Recursive Variable: MONO=1 for monospace (code content).
     let mono_axes = [fonts::rasterize::AxisValue {
         tag: *b"MONO",
@@ -398,7 +431,7 @@ pub extern "C" fn _start() -> ! {
         icon_h: unsafe { ICON_H },
         icon_color: drawing::CHROME_ICON,
         icon_node: 2, // N_TITLE_TEXT — well-known index
-        scale: scale_factor,
+        scale: scale_factor, // f32 fractional scale
     };
     // Channel from core (scene update notifications).
     let core_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
@@ -637,12 +670,12 @@ pub extern "C" fn _start() -> ! {
                         let (ax, ay, aw, ah) =
                             scene::abs_bounds(curr_nodes, &parent_map, node_id as usize);
 
-                        let px = (ax * sf as i32).max(0) as u16;
-                        let py = (ay * sf as i32).max(0) as u16;
+                        let px = scale_coord(ax, sf).max(0) as u16;
+                        let py = scale_coord(ay, sf).max(0) as u16;
                         let x = px.min(fbw);
                         let y = py.min(fbh);
-                        let w = (aw as u16 * sf as u16).min(fbw - x);
-                        let h = (ah as u16 * sf as u16).min(fbh - y);
+                        let w = scale_size_u16(ax, aw, sf).min(fbw - x);
+                        let h = scale_size_u16(ay, ah, sf).min(fbh - y);
 
                         damage.add(x, y, w, h);
                     }
@@ -705,10 +738,10 @@ pub extern "C" fn _start() -> ! {
 
                     let (ax, ay, aw, ah) =
                         scene::abs_bounds(curr_nodes, &parent_map, node_id as usize);
-                    let px = (ax * sf as i32).max(0);
-                    let py = (ay * sf as i32).max(0);
-                    let pw = (aw as u32 * sf) as u16;
-                    let ph = (ah as u32 * sf) as u16;
+                    let px = scale_coord(ax, sf).max(0);
+                    let py = scale_coord(ay, sf).max(0);
+                    let pw = scale_size_u16(ax, aw, sf);
+                    let ph = scale_size_u16(ay, ah, sf);
 
                     unsafe {
                         PREV_BOUNDS[node_id as usize] = (px, py, pw, ph);
