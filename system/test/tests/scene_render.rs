@@ -1112,7 +1112,7 @@ fn glyph_cache_keyed_on_physical_pixel_size() {
     // populated at different physical sizes should have different metrics.
     // We verify this by checking that the cache's size_px field differs.
     let cache_24 = {
-        let mut c = fonts::cache::GlyphCache::zeroed();
+        let mut c = zeroed_glyph_cache();
         // We can't actually populate without font data, but we can verify
         // that after populate(), size_px reflects the physical size.
         // For now, verify the field is stored correctly.
@@ -1120,7 +1120,7 @@ fn glyph_cache_keyed_on_physical_pixel_size() {
         c.size_px
     };
     let cache_32 = {
-        let mut c = fonts::cache::GlyphCache::zeroed();
+        let mut c = zeroed_glyph_cache();
         c.size_px = 32; // Would be set by populate(font_data, 32)
         c.size_px
     };
