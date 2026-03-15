@@ -296,21 +296,38 @@ fn render_node(
     let mut child = node.first_child;
 
     while child != NULL {
-        render_node(
-            fb,
-            graph,
-            ctx,
-            child,
-            child_origin_x,
-            child_origin_y,
-            child_clip,
-        );
-
-        if (child as usize) < graph.nodes.len() {
-            child = graph.nodes[child as usize].next_sibling;
-        } else {
+        if (child as usize) >= graph.nodes.len() {
             break;
         }
+        let child_node = &graph.nodes[child as usize];
+
+        // Skip subtrees whose bounding box doesn't intersect the clip rect.
+        // This avoids visiting entire subtrees (and their glyph cache lookups)
+        // when the dirty region covers only a small portion of the screen.
+        let cx = child_origin_x + child_node.x as i32 * s;
+        let cy = child_origin_y + child_node.y as i32 * s;
+        let cw = child_node.width as i32 * s;
+        let ch = child_node.height as i32 * s;
+        let child_rect = ClipRect {
+            x: cx,
+            y: cy,
+            w: cw,
+            h: ch,
+        };
+
+        if child_clip.intersect(child_rect).is_some() {
+            render_node(
+                fb,
+                graph,
+                ctx,
+                child,
+                child_origin_x,
+                child_origin_y,
+                child_clip,
+            );
+        }
+
+        child = child_node.next_sibling;
     }
 }
 fn scene_to_draw_color(c: scene::Color) -> Color {
