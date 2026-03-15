@@ -54,14 +54,14 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 ```sh
 cd system
-cargo build --release
+cargo build -r
 ```
 
 ### Run
 
 ```sh
 cd system
-cargo run --release
+cargo run -r
 ```
 
 This builds the kernel and launches QEMU with the correct device configuration (see `run-qemu.sh` for details). `Ctrl-A X` to exit QEMU.

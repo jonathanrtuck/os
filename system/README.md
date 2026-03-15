@@ -13,12 +13,12 @@ Boots with 4 SMP cores, spawns a single init process (proto-OS-service) which re
 
 ```shell
 cd system
-cargo run --release   # builds everything, then launches QEMU
+cargo run -r   # builds everything, then launches QEMU
 ```
 
 `Ctrl-A X` to exit QEMU.
 
-A single `cargo build --release` compiles the full system: shared libraries (sys, virtio, drawing), all userspace programs, init (which embeds them), and the kernel (which embeds init). See `build.rs` for the build order.
+A single `cargo build -r` compiles the full system: shared libraries (sys, virtio, drawing), all userspace programs, init (which embeds them), and the kernel (which embeds init). See `build.rs` for the build order.
 
 ## Testing
 
