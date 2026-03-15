@@ -1,0 +1,39 @@
+{
+  "featureId": "fix-compositor-old-position-damage",
+  "reviewedAt": "2026-03-15T18:30:00.000Z",
+  "commitId": "f823707",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "The fix correctly addresses the blocking issue from the original compositor-change-list-damage review. A PREV_BOUNDS static array of (i16, i16, u16, u16) × MAX_NODES (4 KiB in BSS) tracks each node's absolute physical-pixel bounds from the previous frame. The change-list damage computation now damages BOTH old bounds (from PREV_BOUNDS) and new bounds (from current scene graph) for every changed node, preventing ghost pixels when nodes move. Three update paths are handled: (1) first frame populates PREV_BOUNDS from initial positions, (2) full repaint refreshes all entries via populate_prev_bounds(), (3) partial update refreshes only changed nodes' entries. The implementation matches the suggested fix option (a) from the original review. Visual verification was thorough — worker tested arrow key cursor movement in both directions and rapid bidirectional movement, confirming no ghost artifacts. All 1498 tests pass. The defensive comment on the None arm of change_list() match was also added as requested.",
+    "issues": [
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 570,
+        "severity": "non_blocking",
+        "description": "Redundant build_parent_map + abs_bounds computation. In the partial update path, build_parent_map is called twice and abs_bounds is called twice per changed node: once during damage computation (~line 495) and once during PREV_BOUNDS update (~line 570). Since the scene graph front buffer is stable during processing, the results are identical. The PREV_BOUNDS update for changed nodes could be folded into the damage computation loop to avoid the redundant O(N) parent map build and per-node abs_bounds walks. For MAX_NODES=512 and typical change lists of 1-3 nodes, the overhead is negligible, but it's unnecessary work."
+      },
+      {
+        "file": "system/services/compositor/main.rs",
+        "line": 100,
+        "severity": "non_blocking",
+        "description": "Lossy i32-to-i16 cast for coordinates. populate_prev_bounds casts scaled absolute coordinates from i32 to i16 via .max(0) as i16. For coordinates within typical framebuffer dimensions (up to ~4K = 3840 pixels), i16 (max 32767) is sufficient. However, a defensive .min(i16::MAX as i32) before the cast would prevent silent truncation if abs_bounds ever returns unexpectedly large values due to a bug upstream. Minor robustness concern, not a correctness issue for current usage."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The original review's observation about abs_bounds ignoring Node::scroll_y still applies to this fix — the PREV_BOUNDS computation also uses abs_bounds and assumes scroll_y=0 for all incremental update nodes. This implicit invariant (core pre-applies scroll to viewport-relative coordinates) is still undocumented in AGENTS.md.",
+      "evidence": "populate_prev_bounds() at line 98 calls scene::abs_bounds() which sums x,y up the parent chain but ignores scroll_y. core/scene_state.rs:267-269 sets scroll_y=0 with comment 'core pre-applies scroll to run positions'. This invariant was flagged in the original review but not yet documented."
+    },
+    {
+      "area": "knowledge",
+      "observation": "The fix uses the compact tuple (i16, i16, u16, u16) = 8 bytes per node for PREV_BOUNDS, totaling 4 KiB for MAX_NODES=512. This is half the size the original review estimated (~8 KiB for [i32;4]). This space-efficient choice could be noted in the architecture docs as the established pattern for storing per-node metadata in compositor statics.",
+      "evidence": "PREV_BOUNDS at line 54: [(i16, i16, u16, u16); scene::MAX_NODES] = 512 * 8 = 4096 bytes in BSS. Original review suggested ~8 KiB for [i32;4] × MAX_NODES."
+    }
+  ],
+  "addressesFailureFrom": ".factory/validation/compositor-optimization/scrutiny/reviews/compositor-change-list-damage.json",
+  "summary": "The fix fully addresses the blocking issue (missing old-position damage for moved nodes). PREV_BOUNDS array tracks previous frame bounds; damage computation now covers both old and new positions. Visual verification confirmed no cursor ghosts during arrow key navigation in both directions and under rapid bidirectional movement. Two non-blocking observations: redundant build_parent_map in partial update path, and defensive i16 truncation guard could be added. The original review's non-blocking issue (defensive comment on None arm) was also addressed. Pass."
+}

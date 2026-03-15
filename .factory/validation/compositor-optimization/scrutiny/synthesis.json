@@ -1,71 +1,51 @@
 {
   "milestone": "compositor-optimization",
-  "round": 1,
-  "status": "fail",
+  "round": 2,
+  "status": "pass",
   "validatorsRun": {
     "test": { "passed": true, "command": "cd system/test && cargo test -- --test-threads=1", "exitCode": 0 },
     "typecheck": { "passed": true, "command": "cd system && cargo build --release", "exitCode": 0 },
     "lint": { "passed": true, "command": "cd system && cargo +nightly fmt -- --check", "exitCode": 0 }
   },
   "reviewsSummary": {
-    "total": 2,
+    "total": 1,
     "passed": 1,
-    "failed": 1,
-    "failedFeatures": ["compositor-change-list-damage"]
+    "failed": 0,
+    "failedFeatures": []
   },
-  "blockingIssues": [
-    {
-      "featureId": "compositor-change-list-damage",
-      "severity": "blocking",
-      "description": "Missing old-position damage for moved nodes. When a node moves between frames (e.g., cursor repositioned via arrow key), the change-list approach only damages the NEW position. The OLD position retains stale pixels ('cursor ghost'). The previous diff_scenes approach (scene/lib.rs lines 1215-1221) explicitly damaged both old and new positions by maintaining prev_nodes. Fix: the compositor should store previous bounds per-node (~8 KiB for [i32;4] × MAX_NODES) and damage BOTH the old and new bounds for each changed node. On node count change or full repaint, skip old-bounds lookup and just do full screen damage as currently done.",
-      "suggestedFix": "In compositor/main.rs, add a `prev_bounds: [(i32, i32, u32, u32); MAX_NODES]` array (~8 KiB). After computing dirty rects from the change list, also add the previous bounds for each changed node as a dirty rect. After rendering, update prev_bounds for all changed nodes. On first frame or full repaint, populate prev_bounds from the current frame's node positions."
-    }
-  ],
+  "blockingIssues": [],
   "nonBlockingIssues": [
     {
-      "featureId": "compositor-change-list-damage",
+      "featureId": "fix-compositor-old-position-damage",
       "severity": "non_blocking",
-      "description": "The None arm in dr.change_list() match (compositor/main.rs) is unreachable after the is_full_repaint() guard. Add a comment noting this is a defensive fallback."
+      "description": "Redundant build_parent_map + abs_bounds computation in partial update path. The PREV_BOUNDS update for changed nodes could be folded into the damage computation loop to avoid a redundant O(N) parent map build."
     },
     {
-      "featureId": "compositor-subtree-clip-skip",
+      "featureId": "fix-compositor-old-position-damage",
       "severity": "non_blocking",
-      "description": "No test exercises scroll_y != 0 combined with clip skipping. All test nodes have default scroll_y=0. A test with a scrolled parent + clip exclusion would strengthen confidence."
-    },
-    {
-      "featureId": "compositor-subtree-clip-skip",
-      "severity": "non_blocking",
-      "description": "Each scene_render test allocates ~2.6 MiB for two zeroed GlyphCaches. With 8 tests this is ~20 MiB. Not a problem today but worth noting if test count grows."
+      "description": "Lossy i32-to-i16 cast for coordinates uses .max(0) but no .min(i16::MAX as i32) guard. Not a correctness issue for current framebuffer sizes but a minor defensive improvement."
     }
   ],
   "appliedUpdates": [],
   "suggestedGuidanceUpdates": [
     {
       "target": "AGENTS.md",
-      "suggestion": "Add to Architecture Context: 'abs_bounds assumes scroll_y=0 for all nodes during damage rect computation. Core must pre-apply scroll to viewport-relative coordinates before publishing the scene. If a future change sets scroll_y != 0 for incremental updates, abs_bounds (and compositor damage) would produce incorrect results.'",
-      "evidence": "scene/lib.rs abs_bounds() walks parent chain summing x,y but ignores scroll_y. core/scene_state.rs:267-269 pre-applies scroll. This implicit coupling is undocumented.",
+      "suggestion": "Add to Architecture Context: 'abs_bounds assumes scroll_y=0 for all nodes during damage rect computation. Core must pre-apply scroll to viewport-relative coordinates before publishing the scene. If a future change sets scroll_y != 0 for incremental updates, abs_bounds (and compositor damage via PREV_BOUNDS) would produce incorrect results.'",
+      "evidence": "scene/lib.rs abs_bounds() walks parent chain summing x,y but ignores scroll_y. core/scene_state.rs pre-applies scroll. populate_prev_bounds() also uses abs_bounds. This implicit coupling was flagged in both round 1 and round 2 reviews.",
       "isSystemic": false
     },
     {
       "target": "AGENTS.md",
       "suggestion": "Add to Testing & Validation Guidance: 'For damage-tracking changes, verify cursor-only moves (arrow keys) and node movement in general do not leave ghost artifacts. Damage tracking must dirty both old AND new positions of moved nodes.'",
-      "evidence": "The compositor-change-list-damage feature's visual verification only tested typing and clock updates but not arrow-key cursor movement. The old-position ghost regression was not caught by the worker's verification steps.",
+      "evidence": "The original compositor-change-list-damage feature's visual verification only tested typing and clock updates but not arrow-key cursor movement. The old-position ghost regression was not caught until scrutiny review. The fix worker then properly verified with arrow keys in both directions.",
       "isSystemic": true
     }
   ],
   "rejectedObservations": [
     {
-      "observation": "The test file uses #[path = ...] mod inclusion to test private functions — matches established pattern but isn't documented in AGENTS.md.",
-      "reason": "already-documented — this is the standard test pattern visible across all test files and is implicitly understood. Documenting it would add noise without value."
-    },
-    {
-      "observation": "Worker transcript for compositor-subtree-clip-skip had 0 turns, suggesting transcript capture may not have recorded the breakdown.",
-      "reason": "ambiguous — this could be a transcript capture issue but the handoff contains complete verification evidence. Not actionable for AGENTS.md or skills."
-    },
-    {
-      "observation": "diff_scenes function is no longer called by compositor but is still used by 6 tests in scene.rs. May be useful as reference/oracle.",
-      "reason": "already-documented — diff_scenes being test-only is evident from the code. No guidance change needed; it can serve as a correctness oracle."
+      "observation": "PREV_BOUNDS uses compact (i16, i16, u16, u16) = 4 KiB instead of the originally suggested 8 KiB [i32;4]. Could be noted as an established pattern for per-node metadata in compositor statics.",
+      "reason": "Too granular for library entry — this is a single implementation detail visible directly in the code."
     }
   ],
-  "previousRound": null
+  "previousRound": ".factory/validation/compositor-optimization/scrutiny/synthesis.json (round 1)"
 }
