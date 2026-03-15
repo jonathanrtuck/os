@@ -3,3 +3,4 @@ commands:
   test: cd system/test && cargo test -- --test-threads=1
   test_fonts: cd system/libraries/fonts && cargo build --target=aarch64-unknown-none --release
   fmt: cd system && cargo +nightly fmt
+  integration: cd system/test && ./integration.sh 20

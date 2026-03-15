@@ -27,9 +27,11 @@ The OS boots in QEMU virt machine (aarch64, 4 SMP cores) and displays a text edi
 
 ## Testing Notes
 
-- This is a refactoring mission. The primary validation is "does it still compile, pass tests, and produce identical visual output."
-- Visual verification (QEMU boot + screenshot) is needed only at milestone boundaries, not per-feature.
+- This is a refactoring/optimization mission. The primary validation is "does it still compile, pass tests, and produce identical visual output."
+- Visual verification (QEMU boot + screenshot) is needed for features that change display output and at milestone boundaries.
 - Per-feature validation is compilation + test suite passing.
+- For drawing optimizations: pixel-identical comparison tests (reference output from safe implementation vs optimized output).
+- NEON SIMD: ±1 LSB tolerance for alpha blending, exact match for fill_rect.
 
 ## Flow Validator Guidance: CLI
 

@@ -30,6 +30,20 @@ Custom `build.rs` at system/build.rs. Two compilation paths:
 
 Compilation order matters (DAG): sys -> protocol, virtio(sys), scene, ipc, fonts(cargo), drawing(protocol+fonts) -> all programs.
 
+## Incremental Scene Graph (rendering-pipeline-optimization mission)
+
+**Before:** Core calls `build_editor_scene()` on every event, clearing and rebuilding the entire scene graph. Compositor byte-diffs all 512 nodes to find changes.
+
+**After:** Core uses copy_front_to_back + selective mutation. Four update paths:
+- `update_clock()`: In-place overwrite of 8-byte clock glyph data. 0 heap allocs.
+- `update_cursor()`: Mutate N_CURSOR x,y fields. 0 heap allocs.
+- `update_document_content()`: Re-layout visible text runs, update doc text + cursor. O(visible_lines) allocs.
+- `update_selection()`: Rebuild selection rect nodes. Truncate node count to 8 first.
+
+Each path records changed node IDs in the scene header's change list. Compositor reads the change list instead of diffing. Dirty rects derived from changed node positions.
+
+**Data buffer management:** update_data() for same-length overwrites (clock, title). replace_data() for new-length data (doc text). Fallback to full rebuild when data_used > 75% of DATA_BUFFER_SIZE.
+
 ## QEMU/virtio Constraints
 
 1. virtio-gpu 2D is copy-based (guest->host on every present). No zero-copy scanout.
