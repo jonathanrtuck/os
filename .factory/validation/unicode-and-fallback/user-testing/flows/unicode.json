@@ -1,0 +1,62 @@
+{
+  "groupId": "unicode",
+  "testedAt": "2026-03-14T00:00:00Z",
+  "isolation": {
+    "testingTool": "Direct shell commands (cargo test, grep)",
+    "workingDirectoryTests": "/Users/user/Sites/os/system/test",
+    "workingDirectoryBuilds": "/Users/user/Sites/os/system",
+    "fontFiles": "/Users/user/Sites/os/system/share/ (read-only)"
+  },
+  "toolsUsed": ["cargo test", "grep"],
+  "assertions": {
+    "VAL-UNICODE-001": {
+      "status": "pass",
+      "evidence": "unicode-and-fallback/unicode/VAL-UNICODE-001-cafe-tests.txt",
+      "details": "7 tests cover this assertion. (1) unicode_latin_extended_cafe_shapes_four_glyphs: shapes 'café' and asserts 4 glyphs with non-zero glyph_ids and non-zero x_advance. (2) unicode_latin_extended_cafe_rasterizes_with_nonzero_coverage: shapes 'café', rasterizes all 4 glyphs, asserts non-zero coverage maps with non-zero dimensions. (3) unicode_latin_e_acute_shapes_correctly: shapes U+00E9 (é) individually, verifies valid glyph_id and advance. (4) unicode_latin_n_tilde_shapes_correctly: shapes U+00F1 (ñ) individually, verifies valid glyph_id and advance. (5) unicode_latin_u_diaeresis_shapes_correctly: shapes U+00FC (ü) individually, verifies valid glyph_id and advance. (6) unicode_latin_extended_rasterize_individual_accented: rasterizes individual é, ñ, ü glyphs, asserts valid dimensions and coverage. (7) unicode_latin_extended_via_fallback_chain: shapes 'café' through fallback chain, asserts 4 valid glyphs from primary font. All 7 tests pass.",
+      "testsRun": [
+        "unicode_latin_extended_cafe_shapes_four_glyphs",
+        "unicode_latin_extended_cafe_rasterizes_with_nonzero_coverage",
+        "unicode_latin_e_acute_shapes_correctly",
+        "unicode_latin_n_tilde_shapes_correctly",
+        "unicode_latin_u_diaeresis_shapes_correctly",
+        "unicode_latin_extended_rasterize_individual_accented",
+        "unicode_latin_extended_via_fallback_chain"
+      ],
+      "testsPass": 7,
+      "testsFail": 0
+    },
+    "VAL-UNICODE-002": {
+      "status": "pass",
+      "evidence": "unicode-and-fallback/unicode/VAL-UNICODE-002-scene-graph-tests.txt",
+      "details": "3 tests cover this assertion. (1) unicode_scene_graph_naive_resume_round_trip: shapes 'naïve résumé', writes ShapedGlyph arrays to scene graph via SceneWriter, reads back via SceneReader, asserts all glyph IDs and x_advance values preserved exactly. (2) unicode_scene_graph_double_buffer_round_trip: same text through double-buffered scene graph writer/reader, asserts round-trip fidelity. (3) unicode_scene_graph_mixed_ascii_and_extended_latin: shapes 'Hello café naïve', writes to scene graph, reads back, verifies all glyph data preserved. All 3 tests pass.",
+      "testsRun": [
+        "unicode_scene_graph_naive_resume_round_trip",
+        "unicode_scene_graph_double_buffer_round_trip",
+        "unicode_scene_graph_mixed_ascii_and_extended_latin"
+      ],
+      "testsPass": 3,
+      "testsFail": 0
+    },
+    "VAL-UNICODE-003": {
+      "status": "pass",
+      "evidence": "unicode-and-fallback/unicode/VAL-UNICODE-003-supplementary-tests.txt",
+      "details": "9 tests cover this assertion. (1) unicode_supplementary_plane_no_panic: shapes U+1F600 (😀), asserts no panic, at least 1 glyph produced. (2) unicode_supplementary_plane_followed_by_ascii: shapes '😀Hello', asserts >= 6 glyphs, ASCII glyphs after supplementary have valid non-zero glyph_ids and advances. (3) unicode_supplementary_plane_via_fallback_chain: same through fallback chain, verifies ASCII glyphs valid. (4) unicode_supplementary_plane_u10000_no_crash: shapes U+10000 (first supplementary plane codepoint), no crash. (5) unicode_supplementary_mixed_string_no_crash: shapes 'A\\u{10000}B\\u{1F600}C', verifies >= 5 glyphs, all BMP chars have valid glyph_ids. (6) unicode_supplementary_u10fffd_produces_notdef_or_valid: shapes U+10FFFD, verifies produces glyph without crash. (7) unicode_supplementary_glyph_id_truncation_safety: verifies supplementary plane glyph IDs are within valid range (no truncation bugs). (8) unicode_supplementary_rasterize_notdef_no_crash: rasterizes .notdef glyph from supplementary plane, no crash. (9) unicode_supplementary_followed_by_ascii_rasterize: shapes '😀W', rasterizes W glyph after supplementary, verifies valid coverage. All 9 tests pass.",
+      "testsRun": [
+        "unicode_supplementary_plane_no_panic",
+        "unicode_supplementary_plane_followed_by_ascii",
+        "unicode_supplementary_plane_via_fallback_chain",
+        "unicode_supplementary_plane_u10000_no_crash",
+        "unicode_supplementary_mixed_string_no_crash",
+        "unicode_supplementary_u10fffd_produces_notdef_or_valid",
+        "unicode_supplementary_glyph_id_truncation_safety",
+        "unicode_supplementary_rasterize_notdef_no_crash",
+        "unicode_supplementary_followed_by_ascii_rasterize"
+      ],
+      "testsPass": 9,
+      "testsFail": 0
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 3 assertions: 3 passed, 0 failed, 0 blocked. VAL-UNICODE-001 verified by 7 tests covering café shaping/rasterization and individual Latin Extended codepoints (é, ñ, ü). VAL-UNICODE-002 verified by 3 tests covering scene graph round-trip of 'naïve résumé' and mixed ASCII/extended Latin text. VAL-UNICODE-003 verified by 9 tests covering supplementary plane codepoints (U+1F600, U+10000, U+10FFFD) with no panics and correct subsequent ASCII rendering."
+}
