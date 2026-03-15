@@ -91,6 +91,39 @@ Testing surface, validation approach, and resource cost classification.
 **Shared state:** Uses /tmp/ for all temporary files with `val-` prefix. Do not use `system/test.img` directly.
 **Boundaries:** Do not modify source files. Do not interfere with user's QEMU (PID check before kill).
 
+## Flow Validator Guidance: Coordinate Model (Unit Tests)
+
+**Surface:** Host-side Rust unit tests (macOS aarch64)
+**Testing tool:** Direct `cargo test` invocation with name filters
+**Isolation:** No shared mutable state — tests are pure functions on in-memory buffers.
+**Max concurrency:** 1 (cargo build lock contention)
+
+**Assertion → Test mapping:**
+
+| Assertion | Test name(s) | File |
+|-----------|-------------|------|
+| VAL-COORD-001 | `fractional_scale_1_0_matches_integer_scale_1` | scene_render.rs |
+| VAL-COORD-001 | `fractional_scale_2_0_matches_integer_scale_2` | scene_render.rs |
+| VAL-COORD-002 | `fractional_scale_1_5_correct_physical_dimensions` | scene_render.rs |
+| VAL-COORD-003 | `fractional_scale_no_gap_between_adjacent_nodes` | scene_render.rs |
+| VAL-COORD-004 | `fractional_scale_border_pixel_snapped` | scene_render.rs |
+| VAL-COORD-005 | `font_physical_pixel_size_at_fractional_scale` | scene_render.rs |
+| VAL-COORD-006 | `glyph_cache_keyed_on_physical_pixel_size` | scene_render.rs |
+| VAL-COORD-007 | `f32_scale_factor_exact_representation` | scene_render.rs |
+| VAL-COORD-008 | `compositor_config_fits_ipc_payload` | scene_render.rs |
+| VAL-COORD-009 | `scroll_offset_fractional_scale` | scene_render.rs |
+| VAL-COORD-010 | `dirty_rect_fractional_scale_full_coverage` | scene_render.rs |
+| VAL-COORD-011 | `fractional_scale_zero_no_panic`, `fractional_scale_negative_treated_as_safe`, `fractional_scale_extreme_clamped` | scene_render.rs |
+| VAL-COORD-012 | `scene_graph_node_struct_unchanged` + full test suite pass | scene_render.rs |
+| VAL-COORD-013 | `abs_bounds_accounts_for_scroll_y`, `abs_bounds_nested_scroll_containers` | scene.rs |
+| VAL-CROSS-009 | `fractional_scale_1_0_matches_integer_scale_1`, `fractional_scale_2_0_matches_integer_scale_2` (byte-for-byte comparison confirms text rendering unchanged) | scene_render.rs |
+
+**Verification approach:**
+1. Run `cargo test -- --test-threads=1` to confirm all tests pass
+2. For each assertion, confirm the mapped test(s) verify the claimed property by reading test source
+3. Run specific test filters to confirm individual assertion coverage
+4. Record pass/fail per assertion
+
 ## QEMU Test Scripts
 
 - `test-qemu.sh` — interactive display pipeline test (safe, user's QEMU is closed)
