@@ -304,6 +304,11 @@ impl Node {
     }
 }
 
+// Compile-time size assertion: Node must be exactly 60 bytes.
+// This prevents silent shared-memory layout drift between core and compositor.
+// If you add a field, update this assertion and verify both sides agree.
+const _: () = assert!(core::mem::size_of::<Node>() == 60);
+
 // ── Shared memory layout ────────────────────────────────────────────
 
 pub const MAX_NODES: usize = 512;

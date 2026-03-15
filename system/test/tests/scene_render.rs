@@ -1283,3 +1283,391 @@ fn svg_f32_to_fixed_point_scale_conversion() {
     // 1.25 → 5120
     assert_eq!(f32_to_svg_fp(1.25), 5120, "scale 1.25 → 5120");
 }
+
+// ── Corner-radius compositor wiring tests ───────────────────────────
+
+/// Node with corner_radius=8 renders with rounded corners — corner pixels
+/// are anti-aliased (not fully opaque) while interior is fully filled.
+#[test]
+fn corner_radius_renders_rounded_background() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 1];
+    nodes[0].width = 100;
+    nodes[0].height = 60;
+    nodes[0].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes[0].corner_radius = 8;
+    nodes[0].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let mut buf = vec![0u8; 100 * 60 * 4];
+    let mut fb = black_surface_wh(&mut buf, 100, 60);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100 * 4;
+
+    // Interior center: fully red.
+    let (r, g, b, a) = read_pixel(&buf, stride, 50, 30);
+    assert_eq!((r, g, b, a), (255, 0, 0, 255), "interior center should be red");
+
+    // The top-left corner pixel (0,0) should NOT be fully red — it's
+    // outside the rounded corner arc, so it should be black or have
+    // anti-aliased coverage (not fully red).
+    let (r, _g, _b, _a) = read_pixel(&buf, stride, 0, 0);
+    assert_ne!(r, 255, "top-left corner (0,0) should not be fully red (rounded)");
+
+    // A pixel just inside the arc (e.g., at (8, 8)) should be red.
+    let (r, _g, _b, _a) = read_pixel(&buf, stride, 8, 8);
+    assert_eq!(r, 255, "pixel (8,8) inside arc should be red");
+}
+
+/// corner_radius=0 falls back to rect — no overhead, pixel-identical output.
+#[test]
+fn corner_radius_zero_falls_back_to_rect() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let green = scene::Color::rgba(0, 200, 0, 255);
+
+    // Scene with corner_radius = 0
+    let mut nodes_sharp = vec![Node::EMPTY; 1];
+    nodes_sharp[0].width = 60;
+    nodes_sharp[0].height = 40;
+    nodes_sharp[0].background = green;
+    nodes_sharp[0].corner_radius = 0;
+    nodes_sharp[0].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph_sharp = scene_render::SceneGraph {
+        nodes: &nodes_sharp,
+        data: &data,
+    };
+
+    let mut buf_sharp = vec![0u8; 60 * 40 * 4];
+    {
+        let mut fb = black_surface_wh(&mut buf_sharp, 60, 40);
+        scene_render::render_scene(&mut fb, &graph_sharp, &ctx);
+    }
+
+    // The corner pixel (0,0) must be fully green (no rounding).
+    let (r, g, b, _a) = read_pixel(&buf_sharp, 60 * 4, 0, 0);
+    assert_eq!((r, g, b), (0, 200, 0), "corner_radius=0: corner should be sharp (full green)");
+}
+
+/// VAL-PRIM-006: Corner-radius-aware clipping.
+/// Parent with corner_radius=20, clips_children=true: child pixels
+/// outside rounded boundary are clipped.
+#[test]
+fn corner_radius_clips_children_to_rounded_boundary() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 2];
+
+    // Parent: 100×100, corner_radius=20, clips children
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].corner_radius = 20;
+    nodes[0].background = scene::Color::rgba(100, 100, 100, 255);
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    // Child: fills entire parent, bright green
+    nodes[1].width = 100;
+    nodes[1].height = 100;
+    nodes[1].background = scene::Color::rgba(0, 255, 0, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface_wh(&mut buf, 100, 100);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100 * 4;
+
+    // Interior: should be green (child fills parent interior).
+    let (r, g, b, _a) = read_pixel(&buf, stride, 50, 50);
+    assert_eq!(
+        (r, g, b),
+        (0, 255, 0),
+        "VAL-PRIM-006: interior should be green (child visible)"
+    );
+
+    // Corner (0,0): outside the rounded boundary. The child should be
+    // clipped here, so we should see black (the framebuffer background),
+    // NOT green. An anti-aliased parent bg pixel is acceptable.
+    let (_r, g, _b, _a) = read_pixel(&buf, stride, 0, 0);
+    assert_ne!(
+        g, 255,
+        "VAL-PRIM-006: corner (0,0) should not show child green (clipped by rounded parent)"
+    );
+
+    // Also check (1,1) — still well outside a radius=20 arc.
+    let (_r, g, _b, _a) = read_pixel(&buf, stride, 1, 1);
+    assert_ne!(
+        g, 255,
+        "VAL-PRIM-006: corner (1,1) should not show child green"
+    );
+}
+
+/// corner_radius=0 + clips_children falls back to existing rect clip (no overhead).
+#[test]
+fn corner_radius_zero_clips_children_uses_rect_clip() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 2];
+
+    // Parent: 60×40, corner_radius=0, clips children
+    nodes[0].width = 60;
+    nodes[0].height = 40;
+    nodes[0].corner_radius = 0;
+    nodes[0].background = scene::Color::rgba(100, 100, 100, 255);
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    // Child: extends beyond parent (80×60)
+    nodes[1].width = 80;
+    nodes[1].height = 60;
+    nodes[1].background = scene::Color::rgba(0, 255, 0, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface_wh(&mut buf, 100, 100);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100 * 4;
+
+    // Inside parent: child is green.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 30, 20);
+    assert_eq!((r, g, b), (0, 255, 0), "inside parent: child green");
+
+    // The corner (0,0) should be green too (no rounding with radius=0).
+    let (r, g, b, _a) = read_pixel(&buf, stride, 0, 0);
+    assert_eq!((r, g, b), (0, 255, 0), "corner_radius=0: corner should show child green (rect clip)");
+
+    // Outside parent (65, 25): should be black, not green.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 65, 25);
+    assert_eq!((r, g, b), (0, 0, 0), "outside parent: should be black (clipped)");
+}
+
+/// VAL-PRIM-015: Border follows rounded contour.
+/// Border with corner_radius > 0 follows the arc, not straight-line.
+#[test]
+fn rounded_border_follows_corner_contour() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 1];
+    nodes[0].width = 80;
+    nodes[0].height = 60;
+    nodes[0].background = scene::Color::rgba(50, 50, 50, 255);
+    nodes[0].corner_radius = 12;
+    nodes[0].border = scene::Border {
+        width: 3,
+        color: scene::Color::rgba(255, 0, 0, 255),
+        _pad: [0; 3],
+    };
+    nodes[0].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let mut buf = vec![0u8; 80 * 60 * 4];
+    let mut fb = black_surface_wh(&mut buf, 80, 60);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 80 * 4;
+
+    // Top-center border pixel: should be red (border).
+    let (r, _g, _b, _a) = read_pixel(&buf, stride, 40, 1);
+    assert_eq!(r, 255, "VAL-PRIM-015: top-center border should be red");
+
+    // Interior (well inside border): should be background color.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 40, 30);
+    assert_eq!((r, g, b), (50, 50, 50), "interior should be background color");
+
+    // Corner (0,0): outside the rounded border. Should be black (framebuffer bg),
+    // not the border color.
+    let (r, _g, _b, _a) = read_pixel(&buf, stride, 0, 0);
+    assert_ne!(
+        r, 255,
+        "VAL-PRIM-015: corner (0,0) should not be border red (border follows arc)"
+    );
+}
+
+/// VAL-PRIM-017: Rounded rect with corner_radius at fractional scale.
+/// corner_radius=8 at 1.5x → 12px physical radius.
+#[test]
+fn corner_radius_at_fractional_scale() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx_f32(&mono, &prop, 1.5);
+
+    let mut nodes = vec![Node::EMPTY; 1];
+    nodes[0].width = 80;
+    nodes[0].height = 60;
+    nodes[0].background = scene::Color::rgba(0, 0, 255, 255);
+    nodes[0].corner_radius = 8;
+    nodes[0].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    // Physical: 120×90
+    let w = 120u32;
+    let h = 90u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut fb = black_surface_wh(&mut buf, w, h);
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // Physical radius should be round(8 * 1.5) = 12.
+    // Interior pixel: blue.
+    let (_r, _g, b, _a) = read_pixel(&buf, stride, 60, 45);
+    assert_eq!(b, 255, "VAL-PRIM-017: interior should be blue at 1.5x");
+
+    // Corner (0,0) should NOT be blue (outside rounded arc at radius 12).
+    let (_r, _g, b, _a) = read_pixel(&buf, stride, 0, 0);
+    assert_ne!(b, 255, "VAL-PRIM-017: corner (0,0) should not be blue at 1.5x");
+
+    // Pixel (12, 12) should be blue (inside arc).
+    let (_r, _g, b, _a) = read_pixel(&buf, stride, 12, 12);
+    assert_eq!(b, 255, "VAL-PRIM-017: pixel (12,12) should be blue (inside physical arc)");
+}
+
+/// VAL-CROSS-003: Fractional scale preserves rounded corner symmetry.
+/// All four corners have identical physical radius.
+#[test]
+fn fractional_scale_rounded_corner_symmetry() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx_f32(&mono, &prop, 1.5);
+
+    let mut nodes = vec![Node::EMPTY; 1];
+    nodes[0].width = 60;
+    nodes[0].height = 60;
+    nodes[0].background = scene::Color::rgba(200, 0, 0, 255);
+    nodes[0].corner_radius = 10;
+    nodes[0].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    // Physical: 90×90
+    let w = 90u32;
+    let h = 90u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut fb = black_surface_wh(&mut buf, w, h);
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // Physical radius = round(10 * 1.5) = 15.
+    // Sample a pixel at the same relative distance from each corner.
+    // (1,1) from each corner: should all be the same.
+    let tl = read_pixel(&buf, stride, 1, 1);
+    let tr = read_pixel(&buf, stride, w - 2, 1);
+    let bl = read_pixel(&buf, stride, 1, h - 2);
+    let br = read_pixel(&buf, stride, w - 2, h - 2);
+
+    // All four corners should have the same color (symmetry).
+    assert_eq!(tl, tr, "VAL-CROSS-003: top-left and top-right corners must match");
+    assert_eq!(tl, bl, "VAL-CROSS-003: top-left and bottom-left corners must match");
+    assert_eq!(tl, br, "VAL-CROSS-003: top-left and bottom-right corners must match");
+}
+
+/// Rounded rect with semi-transparent background blends correctly.
+#[test]
+fn rounded_rect_semi_transparent_blends() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 1];
+    nodes[0].width = 60;
+    nodes[0].height = 40;
+    nodes[0].background = scene::Color::rgba(255, 0, 0, 128);
+    nodes[0].corner_radius = 8;
+    nodes[0].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    // Framebuffer starts white
+    let w = 60u32;
+    let h = 40u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut fb = Surface {
+            data: &mut buf,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        fb.clear(Color::WHITE);
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // Interior center: red @ 128 alpha over white.
+    // The blended result should be reddish-pink, not pure red.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 30, 20);
+    // With sRGB blending: r > 128, g < 255, b < 255.
+    assert!(r > 128, "blended interior r should be > 128, got {}", r);
+    assert!(g < 255, "blended interior g should be < 255, got {}", g);
+    assert!(b < 255, "blended interior b should be < 255, got {}", b);
+}
+
+/// VAL-CROSS-012: Node size compile-time assertion.
+/// Adding a compile-time assertion ensures shared-memory layout stability.
+#[test]
+fn node_size_compile_time_assertion_exists() {
+    // The compile-time assertion is in scene/lib.rs:
+    //   const _: () = assert!(size_of::<Node>() == 72);
+    // If the Node layout changes, the build will fail.
+    // At runtime, verify the size matches.
+    let size = core::mem::size_of::<Node>();
+    assert_eq!(
+        size, 60,
+        "VAL-CROSS-012: Node must be exactly 60 bytes for shared-memory layout stability"
+    );
+}
