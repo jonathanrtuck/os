@@ -1,0 +1,39 @@
+{
+  "featureId": "drawing-neon-simd",
+  "reviewedAt": "2026-03-15T19:05:00.000Z",
+  "commitId": "2b4cf65",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid NEON SIMD implementation with correct intrinsic usage, thorough safety documentation, and comprehensive test coverage. The implementation adds three NEON functions (neon_fill_row, neon_blend_4px, neon_blend_const_4px) in a new neon.rs module included via include!(). All public drawing functions (fill_rect, blit_blend, fill_rect_blend) have cfg-gated NEON paths with scalar fallback. The NEON blend approach is well-designed: scalar sRGB table lookups for the 256-entry gamma tables (correctly noting VTBL limitation), vectorized multiply/accumulate for the linear-space blend math, and scalar linear-to-sRGB conversion for output. The div255 NEON helper uses the same proven approximation as the scalar path. Edge cases (tail pixels for non-4-aligned widths, zero-size, single pixel) are all handled. All 43 new tests pass with appropriate tolerances (exact for fill_rect, ±1 LSB for blending). Five f64 reference tests verify gamma correctness against the IEC 61966-2-1 standard. No blocking issues found.",
+    "issues": [
+      {
+        "file": "system/libraries/drawing/neon.rs",
+        "line": 322,
+        "severity": "non_blocking",
+        "description": "linear_to_idx_inline duplicates linear_to_idx from lib.rs. Since neon.rs is include!()-ed into lib.rs (same compilation unit), the NEON module could call linear_to_idx directly. The duplicate adds #[inline(always)] for guaranteed inlining in the hot path, which is a valid defensive choice, but the original pub fn is small enough that LLVM would inline it regardless. Minor duplication."
+      },
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 254,
+        "severity": "non_blocking",
+        "description": "In blit_blend's NEON path, when a 4-pixel chunk has mixed alpha (has_semi=true), neon_blend_4px processes ALL 4 pixels including any fully opaque (alpha=255) ones. The scalar path would skip blending for opaque pixels and do a direct copy. For opaque pixels with mid-range channel values (e.g., rgb(128,64,200)), the sRGB→linear→sRGB round-trip through the 4096-entry table could introduce ±1 LSB vs a direct copy. This is within the documented ±1 tolerance for NEON blending, but differs from the scalar path which preserves opaque pixels exactly. The existing mixed_alpha_row test uses extreme values (255,0,0) that round-trip exactly, so it doesn't expose this. Not a correctness bug — it's within spec — but worth noting for future reference."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "AGENTS.md documents 'NEON tolerance: NEON alpha blending is allowed ±1 LSB per channel vs scalar. All other NEON operations (fill_rect) must be exact.' This convention was followed correctly. The worker also added the ±1 tolerance specification for gamma correctness vs f64 reference (VAL-NEON-005). The tolerance convention is well-documented.",
+      "evidence": "AGENTS.md last section 'NEON tolerance' matches implementation behavior."
+    },
+    {
+      "area": "skills",
+      "observation": "The os-worker skill says to do visual verification (step 6) for display pipeline changes. The worker skipped visual verification, which is appropriate since NEON SIMD is a drawing library optimization that doesn't change visual output (it produces identical or ±1 LSB results). The skill could clarify that pure library optimizations with comprehensive unit test coverage don't require QEMU visual verification.",
+      "evidence": "Handoff has no interactiveChecks. Feature is internal drawing library optimization verified by 43 unit tests comparing NEON output against scalar and f64 references."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The NEON SIMD implementation is correct, well-documented, and comprehensively tested. All 5 VAL-NEON assertions are satisfied: VAL-NEON-001 (exact fill_rect match via 12 tests), VAL-NEON-002 (±1 LSB blend tolerance via 20+ tests), VAL-NEON-003 (compiles for aarch64-unknown-none), VAL-NEON-004 (edge cases: zero-size, single pixel, non-4-aligned widths, transparent/opaque fast paths), VAL-NEON-005 (gamma correctness vs f64 reference via 5 dedicated tests). Two non-blocking observations: minor code duplication of linear_to_idx helper, and opaque pixels in mixed-alpha chunks going through sRGB round-trip (within spec but differs from scalar behavior). 1555 tests pass including 43 new NEON tests."
+}
