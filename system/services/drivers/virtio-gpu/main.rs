@@ -30,7 +30,10 @@
 
 use protocol::{
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
-    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    gpu::{
+        DisplayInfoMsg, FbPaChunk, GpuConfig, MSG_DISPLAY_INFO, MSG_FB_PA_CHUNK, MSG_GPU_CONFIG,
+        MSG_GPU_READY,
+    },
     present::{PresentPayload, MSG_PRESENT},
 };
 /// Control virtqueue index.
@@ -155,68 +158,73 @@ impl DmaBuf {
     }
 }
 
-fn attach_backing(
+fn attach_backing_sg(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
     irq_handle: u8,
     resource_id: u32,
-    fb_pa: u64,
-    fb_pa2: u64,
-    fb_size: u32,
+    pa_table: &[u64],
+    chunk_bytes: u32,
 ) -> bool {
-    let cmd = DmaBuf::alloc(0);
+    let nr_entries = pa_table.len() as u32;
+    let header_size = core::mem::size_of::<AttachBacking>();
+    let entry_size = core::mem::size_of::<MemEntry>();
+    let total_bytes = header_size + (nr_entries as usize) * entry_size;
+    // Allocate enough contiguous DMA pages for the command.
+    let cmd_pages = (total_bytes + 4095) / 4096;
+    let cmd_order = (cmd_pages.next_power_of_two().trailing_zeros()) as u32;
+    let cmd = DmaBuf::alloc(cmd_order);
     let ptr = cmd.va as *mut u8;
 
-    // Two memory entries for double buffering: the GPU sees them as one
-    // contiguous backing (buffer 0 at offset 0, buffer 1 at offset fb_size).
     unsafe {
         core::ptr::write(
             ptr as *mut AttachBacking,
             AttachBacking {
                 header: ctrl_header(CMD_RESOURCE_ATTACH_BACKING),
                 resource_id,
-                nr_entries: 2,
+                nr_entries,
             },
         );
     }
 
-    let entry_offset = core::mem::size_of::<AttachBacking>();
-    let entry_size = core::mem::size_of::<MemEntry>();
-
-    unsafe {
-        core::ptr::write(
-            ptr.add(entry_offset) as *mut MemEntry,
-            MemEntry {
-                addr: fb_pa,
-                length: fb_size,
-                _padding: 0,
-            },
-        );
-        core::ptr::write(
-            ptr.add(entry_offset + entry_size) as *mut MemEntry,
-            MemEntry {
-                addr: fb_pa2,
-                length: fb_size,
-                _padding: 0,
-            },
-        );
+    for (i, &pa) in pa_table.iter().enumerate() {
+        unsafe {
+            core::ptr::write(
+                ptr.add(header_size + i * entry_size) as *mut MemEntry,
+                MemEntry {
+                    addr: pa,
+                    length: chunk_bytes,
+                    _padding: 0,
+                },
+            );
+        }
     }
 
-    let cmd_len = (entry_offset + 2 * entry_size) as u32;
-    let resp_pa = cmd.pa + 512;
-    let resp_va = cmd.va + 512;
+    // Response goes after the command data (page-aligned for safety).
+    let resp_offset = ((total_bytes + 4095) / 4096) * 4096;
+    // If response doesn't fit in cmd buffer, use a separate DMA page.
+    let (resp_pa, resp_va, resp_buf) = if resp_offset + 64 <= (1 << cmd_order) * 4096 {
+        (cmd.pa + resp_offset as u64, cmd.va + resp_offset, None)
+    } else {
+        let rb = DmaBuf::alloc(0);
+        (rb.pa, rb.va, Some(rb))
+    };
+
     let resp_type = gpu_command(
         device,
         vq,
         irq_handle,
         cmd.pa,
-        cmd_len,
+        total_bytes as u32,
         resp_pa,
         resp_va,
         core::mem::size_of::<CtrlHeader>() as u32,
     );
     let ok = resp_type == RESP_OK_NODATA;
 
+    if let Some(rb) = resp_buf {
+        rb.free();
+    }
     cmd.free();
 
     ok
@@ -715,9 +723,39 @@ pub extern "C" fn _start() -> ! {
     }
 
     let config: GpuConfig = unsafe { msg.payload_as() };
-    let fb_pa = config.fb_pa;
-    let fb_pa2 = config.fb_pa2;
     let fb_size = config.fb_size;
+    let chunks_per_buf = config.chunks_per_buf as usize;
+    let chunk_order = config.chunk_order as usize;
+    let chunk_bytes = (1u32 << chunk_order) * 4096;
+    let total_entries = chunks_per_buf * 2;
+
+    // Receive scatter-gather PA table from init via IPC messages.
+    // All PA chunk messages were sent before the signal, so drain first
+    // without waiting. Only wait if the ring is empty (shouldn't happen).
+    // Uses static to avoid blowing the 16 KiB stack (1024 × 8 = 8 KiB).
+    static mut PA_TABLE: [u64; 1024] = [0u64; 1024];
+    let pa_table = unsafe { &mut PA_TABLE };
+    let mut received = 0;
+    while received < total_entries {
+        // Drain all available messages first.
+        let mut got_any = false;
+        while received < total_entries && ch.try_recv(&mut msg) {
+            got_any = true;
+            if msg.msg_type == MSG_FB_PA_CHUNK {
+                let chunk: FbPaChunk = unsafe { msg.payload_as() };
+                let count = (chunk.count as usize).min(6);
+                for j in 0..count {
+                    if received + j < total_entries {
+                        pa_table[received + j] = chunk.pas[j];
+                    }
+                }
+                received += count;
+            }
+        }
+        if received < total_entries && !got_any {
+            let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
+        }
+    }
 
     // -----------------------------------------------------------------------
     // One-time device setup: create resource, attach backing, set scanout.
@@ -726,16 +764,15 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"virtio-gpu: resource_create_2d failed\n");
         sys::exit();
     }
-    // Attach double-buffer backing (two separate physical regions, seen as one
-    // contiguous buffer by the GPU: buffer 0 at offset 0, buffer 1 at offset fb_size).
-    if !attach_backing(
+    // Attach scatter-gather backing: each chunk is a separate MemEntry.
+    // The GPU sees them as one contiguous buffer (buf0 chunks then buf1 chunks).
+    if !attach_backing_sg(
         &device,
         &mut vq,
         irq_handle,
         FB_RESOURCE_ID,
-        fb_pa,
-        fb_pa2,
-        fb_size,
+        &pa_table[..total_entries],
+        chunk_bytes,
     ) {
         sys::print(b"virtio-gpu: attach_backing failed\n");
         sys::exit();
@@ -797,7 +834,8 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Compute byte offset into the double-buffer backing memory.
-        let base_offset = (last_payload.buffer_index as u64) * (fb_size as u64);
+        let buf_stride = (chunks_per_buf as u64) * (chunk_bytes as u64);
+        let base_offset = (last_payload.buffer_index as u64) * buf_stride;
         let rc = last_payload.rect_count;
 
         if rc == 0 || rc > 6 {

@@ -119,6 +119,9 @@ pub mod gpu {
     pub const MSG_GPU_CONFIG: u32 = 2;
     pub const MSG_DISPLAY_INFO: u32 = 5;
     pub const MSG_GPU_READY: u32 = 8;
+    /// Scatter-gather PA table entries. Sent as a burst of messages after
+    /// MSG_GPU_CONFIG. Each message carries up to 7 physical addresses.
+    pub const MSG_FB_PA_CHUNK: u32 = 13;
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -126,13 +129,26 @@ pub mod gpu {
         pub mmio_pa: u64,
         pub irq: u32,
         pub _pad: u32,
-        pub fb_pa: u64,
-        pub fb_pa2: u64,
         pub fb_width: u32,
         pub fb_height: u32,
         pub fb_size: u32,
-        pub _pad2: u32,
+        /// Number of chunks per buffer (total entries = chunks_per_buf * 2).
+        pub chunks_per_buf: u16,
+        /// Each chunk is 2^chunk_order pages.
+        pub chunk_order: u8,
+        pub _pad2: u8,
     }
+
+    /// Payload for MSG_FB_PA_CHUNK: up to 6 physical addresses per message.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct FbPaChunk {
+        /// Number of valid entries in `pas` (1..=6).
+        pub count: u32,
+        pub _pad: u32,
+        pub pas: [u64; 6],
+    }
+    const _: () = assert!(core::mem::size_of::<FbPaChunk>() <= 60);
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]

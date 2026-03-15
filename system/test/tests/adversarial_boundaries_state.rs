@@ -108,7 +108,7 @@ enum Error {
 
 // --- Duplicated constants from syscall.rs ---
 
-const MAX_DMA_ORDER: u64 = 11;
+const MAX_DMA_ORDER: u64 = (RAM_SIZE / PAGE_SIZE).ilog2() as u64;
 const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -237,7 +237,8 @@ fn validate_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Res
     if target_handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
-    if page_count == 0 || page_count > 2048 {
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
     if pa & (PAGE_SIZE - 1) != 0 {
@@ -588,7 +589,7 @@ fn boundary_futex_u64_max_aligned() {
 
 #[test]
 fn boundary_memory_share_u64_max_page_count() {
-    // page_count > 2048 → InvalidArgument.
+    // page_count > MAX_SHARE_PAGES → InvalidArgument.
     assert_eq!(
         validate_memory_share(0, RAM_START, u64::MAX),
         Err(Error::InvalidArgument)
@@ -597,13 +598,12 @@ fn boundary_memory_share_u64_max_page_count() {
 
 #[test]
 fn boundary_memory_share_max_page_count() {
-    // 2048 is the max valid page count.
-    // Whether the range fits in RAM depends on RAM size.
-    // With 256 MiB RAM (65536 pages), 2048 pages easily fits.
-    assert!(validate_memory_share(0, RAM_START, 2048).is_ok());
-    // 2049 is invalid.
+    // MAX_SHARE_PAGES = RAM_SIZE / PAGE_SIZE / 2 (half of RAM).
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    assert!(validate_memory_share(0, RAM_START, MAX_SHARE_PAGES).is_ok());
+    // One more is invalid.
     assert_eq!(
-        validate_memory_share(0, RAM_START, 2049),
+        validate_memory_share(0, RAM_START, MAX_SHARE_PAGES + 1),
         Err(Error::InvalidArgument)
     );
 }

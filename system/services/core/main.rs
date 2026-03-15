@@ -372,10 +372,23 @@ pub extern "C" fn _start() -> ! {
                 0
             };
             let line_h = ascent_px + descent_px + gap_px;
-            // For monospace: use hmtx advance of space glyph.
+            // For monospace: use axis-adjusted advance of space glyph (MONO=1).
             let space_gid = shaping::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
-            let (advance_fu, _) = shaping::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
-            let char_w = (advance_fu as u32 * size + upem as u32 / 2) / upem as u32;
+            let mono_axes = [shaping::rasterize::AxisValue {
+                tag: *b"MONO",
+                value: 1.0,
+            }];
+            let char_w = shaping::rasterize::glyph_advance_with_axes(
+                font_data,
+                space_gid,
+                size as u16,
+                &mono_axes,
+            )
+            .unwrap_or_else(|| {
+                let (advance_fu, _) =
+                    shaping::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
+                (advance_fu as u32 * size + upem as u32 / 2) / upem as u32
+            });
 
             unsafe {
                 CHAR_W = if char_w > 0 { char_w } else { 8 };

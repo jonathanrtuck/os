@@ -1,24 +1,29 @@
 //! Content-type-aware typography defaults.
 //!
 //! Maps content types (code, prose, UI, unknown) to typographic settings:
-//! font family, OpenType feature flags, weight preference, tracking, and
-//! whether automatic optical sizing should be applied.
+//! font family, OpenType feature flags, weight preference, tracking,
+//! optical sizing, and variable font axis overrides.
 //!
 //! The OS natively understands content types (settled decision #5). These
 //! defaults let the rendering pipeline produce intelligent typographic
 //! output without explicit configuration from editors.
+//!
+//! Primary font: **Recursive Variable** — a single font with MONO axis
+//! (0=proportional sans, 1=monospace) and CASL axis (0=linear, 1=casual).
+//! Content type drives axis values, not font selection.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::fallback::ContentType;
+use crate::rasterize::AxisValue;
 
 /// Font family preference for a content type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontFamily {
-    /// Fixed-width font (e.g., Source Code Pro).
+    /// Fixed-width font (Recursive MONO=1).
     Monospace,
-    /// Variable-width font (e.g., Nunito Sans).
+    /// Variable-width font (Recursive MONO=0).
     Proportional,
 }
 
@@ -32,9 +37,6 @@ pub struct TypographyConfig {
     pub font_family: FontFamily,
 
     /// OpenType feature flags to enable during shaping.
-    ///
-    /// Stored as parseable strings (e.g., "+calt", "+tnum", "+onum").
-    /// The shaping pipeline parses these into `Feature` structs.
     pub features: Vec<String>,
 
     /// Preferred font weight (in CSS-like units: 100–900).
@@ -45,22 +47,21 @@ pub struct TypographyConfig {
     pub weight_preference: f32,
 
     /// Letter-spacing adjustment in font units (0.0 = standard tracking).
-    ///
-    /// Positive values increase spacing, negative values tighten.
     pub tracking: f32,
 
     /// Whether automatic optical sizing should be applied.
-    ///
-    /// When true, the pipeline automatically sets the `opsz` axis value
-    /// to match the rendered pixel size (for fonts with an opsz axis).
     pub optical_sizing: bool,
+
+    /// Explicit variable font axis overrides for this content type.
+    ///
+    /// For Recursive: MONO=1 for code, MONO=0 for prose/UI, CASL for
+    /// casual vs linear style. These are passed to the rasterizer and
+    /// merged with any automatic axis values (opsz, wght correction).
+    pub axis_overrides: Vec<AxisValue>,
 }
 
 impl TypographyConfig {
     /// Get typography defaults for a content type.
-    ///
-    /// Returns a fully populated `TypographyConfig` with sane defaults.
-    /// Unknown content types fall back to prose defaults without panic.
     pub fn for_content_type(content_type: ContentType) -> Self {
         match content_type {
             ContentType::Code => Self::code_defaults(),
@@ -70,41 +71,54 @@ impl TypographyConfig {
         }
     }
 
-    /// Code typography: monospace, programming ligatures, tabular figures.
+    /// Code typography: monospace (MONO=1), linear (CASL=0), programming
+    /// ligatures, tabular figures.
     fn code_defaults() -> Self {
         TypographyConfig {
             font_family: FontFamily::Monospace,
             features: alloc::vec![
-                String::from("+calt"), // contextual alternates (programming ligatures: !=, =>, ->)
-                String::from("+tnum"), // tabular figures (aligned number columns)
+                String::from("+calt"), // contextual alternates (!=, =>, ->)
+                String::from("+tnum"), // tabular figures
             ],
-            weight_preference: 400.0, // Regular weight
-            tracking: 0.0,            // Standard tracking for monospace
-            optical_sizing: false,     // Monospace fonts rarely have opsz axis
+            weight_preference: 400.0,
+            tracking: 0.0,
+            optical_sizing: false,
+            axis_overrides: alloc::vec![
+                AxisValue { tag: *b"MONO", value: 1.0 }, // monospace
+                AxisValue { tag: *b"CASL", value: 0.0 }, // linear (clean)
+            ],
         }
     }
 
-    /// Prose typography: proportional, optical sizing, oldstyle figures.
+    /// Prose typography: proportional (MONO=0), linear (CASL=0).
     fn prose_defaults() -> Self {
         TypographyConfig {
             font_family: FontFamily::Proportional,
             features: alloc::vec![
-                String::from("+onum"), // oldstyle figures (harmonize with lowercase text)
+                String::from("+onum"), // oldstyle figures
             ],
-            weight_preference: 400.0, // Regular weight
-            tracking: 0.0,            // Standard tracking
-            optical_sizing: true,     // Auto-adjust opsz for rendered size
+            weight_preference: 400.0,
+            tracking: 0.0,
+            optical_sizing: false, // Recursive has no opsz axis
+            axis_overrides: alloc::vec![
+                AxisValue { tag: *b"MONO", value: 0.0 }, // proportional sans
+                AxisValue { tag: *b"CASL", value: 0.0 }, // linear
+            ],
         }
     }
 
-    /// UI label typography: proportional, medium weight, standard tracking.
+    /// UI label typography: proportional, medium weight.
     fn ui_defaults() -> Self {
         TypographyConfig {
             font_family: FontFamily::Proportional,
             features: alloc::vec![],
-            weight_preference: 500.0, // Medium weight (functional, not decorative)
-            tracking: 0.0,            // Standard tracking for UI
-            optical_sizing: false,    // UI labels are typically fixed-size
+            weight_preference: 500.0,
+            tracking: 0.0,
+            optical_sizing: false,
+            axis_overrides: alloc::vec![
+                AxisValue { tag: *b"MONO", value: 0.0 }, // proportional sans
+                AxisValue { tag: *b"CASL", value: 0.0 }, // linear
+            ],
         }
     }
 }

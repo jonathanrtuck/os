@@ -73,9 +73,11 @@ fn ctype_prose_has_onum_feature() {
 #[test]
 fn ctype_prose_has_optical_sizing() {
     let config = TypographyConfig::for_content_type(ContentType::Prose);
+    // Recursive Variable has no opsz axis, so optical_sizing is false.
+    // The MONO axis drives the mono/proportional distinction instead.
     assert!(
-        config.optical_sizing,
-        "prose content type should enable optical sizing"
+        !config.optical_sizing,
+        "prose content type should not enable optical sizing (Recursive has no opsz axis)"
     );
 }
 

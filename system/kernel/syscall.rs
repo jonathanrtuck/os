@@ -124,10 +124,9 @@ pub mod nr {
     pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
 }
 
-/// Maximum DMA allocation order (2^11 pages = 8 MiB).
-/// Must match page_allocator::MAX_ORDER. Needed for GPU framebuffers
-/// (1920×1080×4 = ~7.9 MiB requires order 11).
-const MAX_DMA_ORDER: u64 = 11;
+/// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
+/// Derived from RAM geometry so resolution changes never require kernel updates.
+const MAX_DMA_ORDER: u64 = (paging::RAM_SIZE / paging::PAGE_SIZE).ilog2() as u64;
 /// Maximum ELF size for process_create (2 MiB).
 /// ELF files include debug info and symbol tables beyond loadable segments.
 const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
@@ -658,7 +657,8 @@ fn sys_memory_share(
     if target_handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
-    if page_count == 0 || page_count > 2048 {
+    const MAX_SHARE_PAGES: u64 = paging::RAM_SIZE / paging::PAGE_SIZE / 2;
+    if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
     if pa & (paging::PAGE_SIZE - 1) != 0 {

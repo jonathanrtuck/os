@@ -16,6 +16,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DTB_FILE="${SCRIPT_DIR}/virt.dtb"
 DISK_IMG="${SCRIPT_DIR}/test.img"
 
+# Detect host display resolution (physical pixels) for Retina rendering.
+# Falls back to 1280x800 if detection fails.
+if RES=$(system_profiler SPDisplaysDataType 2>/dev/null | grep "Resolution:" | head -1); then
+    SCREEN_W=$(echo "$RES" | sed 's/.*: \([0-9]*\) x .*/\1/')
+    SCREEN_H=$(echo "$RES" | sed 's/.* x \([0-9]*\).*/\1/')
+fi
+SCREEN_W="${SCREEN_W:-1280}"
+SCREEN_H="${SCREEN_H:-800}"
+
 # Kill any lingering QEMU that holds our disk image lock.
 pkill -f "qemu-system-aarch64.*${DISK_IMG}" 2>/dev/null && sleep 0.2
 
@@ -36,7 +45,7 @@ QEMU_COMMON=(
     -global virtio-mmio.force-legacy=false
     -drive "file=$DISK_IMG,if=none,format=raw,id=hd0"
     -device virtio-blk-device,drive=hd0
-    -device virtio-gpu-device
+    -device "virtio-gpu-device,xres=${SCREEN_W},yres=${SCREEN_H}"
     -device virtio-keyboard-device
     -device virtio-tablet-device
     -fsdev "local,id=fsdev0,path=$SHARE_DIR,security_model=none"
@@ -70,6 +79,7 @@ else
     exec qemu-system-aarch64 \
         -machine "$QEMU_MACHINE" \
         "${QEMU_COMMON[@]}" \
+        -display cocoa,full-screen=on,zoom-to-fit=on \
         -serial mon:stdio \
         -device "loader,file=$DTB_FILE,addr=0x40000000,force-raw=on" \
         -kernel "$KERNEL"

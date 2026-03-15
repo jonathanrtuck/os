@@ -400,11 +400,11 @@ fn channel_config_as_first_message() {
         mmio_pa: 0x0A00_0000,
         irq: 48,
         _pad: 0,
-        fb_pa: 0x4000_0000,
-        fb_pa2: 0x4040_0000,
         fb_width: 1024,
         fb_height: 768,
         fb_size: 1024 * 768 * 4,
+        chunks_per_buf: 48,
+        chunk_order: 4,
         _pad2: 0,
     };
 

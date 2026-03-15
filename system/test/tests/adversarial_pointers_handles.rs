@@ -68,7 +68,7 @@ enum Error {
 
 // --- Duplicated constants from syscall.rs ---
 
-const MAX_DMA_ORDER: u64 = 11;
+const MAX_DMA_ORDER: u64 = (RAM_SIZE / PAGE_SIZE).ilog2() as u64;
 const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -183,13 +183,14 @@ fn validate_futex(addr: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// sys_memory_share validation: target_handle in u8 range, page_count in [1, 2048],
+/// sys_memory_share validation: target_handle in u8 range, page_count in [1, 8192],
 /// pa page-aligned and within RAM.
 fn validate_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Result<(), Error> {
     if target_handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
-    if page_count == 0 || page_count > 2048 {
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
     if pa & (PAGE_SIZE - 1) != 0 {
@@ -621,7 +622,7 @@ fn adversarial_memory_share_overflow_pa() {
     // page_count * PAGE_SIZE overflows when added to pa.
     assert_eq!(
         validate_memory_share(0, RAM_START, u64::MAX / PAGE_SIZE + 1),
-        Err(Error::InvalidArgument) // > 2048 triggers this first
+        Err(Error::InvalidArgument) // > 8192 triggers this first
     );
 }
 

@@ -28,10 +28,11 @@ use super::{
     },
 };
 
-/// Default per-process DMA page budget (8192 pages = 32 MiB).
-const DEFAULT_DMA_PAGE_LIMIT: u64 = 8192;
-/// Default per-process heap page budget (8192 pages = 32 MiB).
-const DEFAULT_HEAP_PAGE_LIMIT: u64 = 8192;
+/// Per-process DMA page budget: quarter of RAM pages.
+/// Derived from RAM geometry so resolution changes never require kernel updates.
+const DEFAULT_DMA_PAGE_LIMIT: u64 = paging::RAM_SIZE / paging::PAGE_SIZE / 4;
+/// Per-process heap page budget: quarter of RAM pages.
+const DEFAULT_HEAP_PAGE_LIMIT: u64 = paging::RAM_SIZE / paging::PAGE_SIZE / 4;
 
 // ---------------------------------------------------------------------------
 // PageAttrs — page table attribute builder

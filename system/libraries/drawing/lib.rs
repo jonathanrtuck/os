@@ -49,7 +49,7 @@ include!("truetype.rs");
 /// Tunable boost constant for stem darkening. Higher values produce heavier
 /// strokes. Reasonable range: 40–120. Applied after rasterization and subpixel
 /// downsampling via a 256-entry lookup table.
-pub const STEM_DARKENING_BOOST: u32 = 70;
+pub const STEM_DARKENING_BOOST: u32 = 90;
 /// Pre-computed lookup table for stem darkening.
 ///
 /// Formula: `darkened = cov + STEM_DARKENING_BOOST * (255 - cov) / 255`
@@ -80,8 +80,8 @@ pub const STEM_DARKENING_LUT: [u8; 256] = {
     lut
 };
 
-const GLYPH_MAX_W: usize = 48;
-const GLYPH_MAX_H: usize = 48;
+const GLYPH_MAX_W: usize = 50;
+const GLYPH_MAX_H: usize = 50;
 /// Number of printable ASCII glyphs cached (0x20..=0x7E).
 const ASCII_CACHE_COUNT: usize = 95;
 /// Per-glyph coverage buffer size. Must accommodate the intermediate
@@ -90,9 +90,7 @@ const ASCII_CACHE_COUNT: usize = 95;
 /// downsampling in-place. With subpixel rendering, the final coverage is
 /// 3 bytes per pixel (RGB), so GLYPH_MAX_W * 3 * GLYPH_MAX_H for the output.
 /// We need the max of (oversampled intermediate, 3-channel output).
-/// Oversampled = GLYPH_MAX_W * 6 * GLYPH_MAX_H = 48*6*48 = 13824.
-/// 3-channel output = GLYPH_MAX_W * 3 * GLYPH_MAX_H = 48*3*48 = 6912.
-/// So the oversampled intermediate is always larger.
+/// The oversampled intermediate is always larger.
 const GLYPH_BUF_SIZE: usize = GLYPH_MAX_W * OVERSAMPLE_X as usize * GLYPH_MAX_H;
 
 /// Pre-rasterized metrics for one cached glyph.
@@ -118,7 +116,7 @@ pub struct Color {
 /// Fixed-size glyph cache for printable ASCII (0x20–0x7E).
 /// Coverage maps are stored in a single contiguous buffer.
 /// Total size: ~1.3 MiB (95 glyphs × 13 824 bytes coverage + metadata).
-/// Each glyph buffer is GLYPH_MAX_W × OVERSAMPLE_X × GLYPH_MAX_H = 48×6×48 = 13 824 bytes
+/// Each glyph buffer is GLYPH_MAX_W × OVERSAMPLE_X × GLYPH_MAX_H bytes
 /// to accommodate the 6× oversampled intermediate raster used by subpixel rendering.
 pub struct GlyphCache {
     glyphs: [CachedGlyph; ASCII_CACHE_COUNT],
@@ -292,9 +290,24 @@ impl GlyphCache {
     /// the font's opsz range). For fonts without an opsz axis, this
     /// behaves identically to `populate()`.
     pub fn populate_with_dpi(&mut self, font_data: &[u8], size_px: u32, dpi: u16) {
+        self.populate_with_axes(font_data, size_px, dpi, &[]);
+    }
+    /// Rasterize all printable ASCII glyphs with explicit axis values.
+    ///
+    /// `extra_axes` provides explicit variation axis values (e.g., MONO=1
+    /// for monospace, MONO=0 for proportional from a single variable font
+    /// like Recursive). These are merged with any automatic axis values
+    /// (opsz, wght correction). Explicit values take precedence over
+    /// automatic ones when the same axis tag appears in both.
+    pub fn populate_with_axes(
+        &mut self,
+        font_data: &[u8],
+        size_px: u32,
+        dpi: u16,
+        extra_axes: &[shaping::rasterize::AxisValue],
+    ) {
         use shaping::rasterize;
 
-        // Extract font metrics via shaping's rasterize module.
         let metrics = match rasterize::font_metrics(font_data) {
             Some(m) => m,
             None => return,
@@ -302,7 +315,7 @@ impl GlyphCache {
 
         let upem = metrics.units_per_em;
         let asc_fu = metrics.ascent as i32;
-        let desc_fu = metrics.descent as i32; // negative
+        let desc_fu = metrics.descent as i32;
         let gap_fu = metrics.line_gap as i32;
         let ascent_px = scale_fu_ceil(asc_fu, size_px, upem);
         let descent_px = scale_fu_ceil(-desc_fu, size_px, upem);
@@ -314,21 +327,24 @@ impl GlyphCache {
         self.size_px = size_px;
         self.line_height = self.ascent + self.descent + gap_px;
 
-        // Compute automatic optical sizing axis values. For fonts with an
-        // opsz axis, this returns a single AxisValue with the computed opsz.
-        // For fonts without opsz, this returns an empty Vec (no-op).
-        let auto_opsz_axes = rasterize::auto_axis_values_for_opsz(font_data, size_px as u16, dpi);
+        // Merge automatic axes (opsz) with caller-provided explicit axes.
+        // Explicit axes take precedence over auto-computed ones.
+        let auto_opsz = rasterize::auto_axis_values_for_opsz(font_data, size_px as u16, dpi);
+        let mut axes: alloc::vec::Vec<rasterize::AxisValue> = alloc::vec::Vec::new();
+        for av in &auto_opsz {
+            if !extra_axes.iter().any(|e| e.tag == av.tag) {
+                axes.push(*av);
+            }
+        }
+        axes.extend_from_slice(extra_axes);
 
-        // Heap-allocate the rasterization scratch space (~39 KiB) to avoid
-        // stack overflow — userspace stacks are only 16 KiB. We use
-        // alloc_zeroed + Box::from_raw to avoid placing the struct on the
-        // stack first (Box::new would construct on-stack then move to heap).
+        // Heap-allocate rasterization scratch space (~39 KiB).
         let mut scratch: alloc::boxed::Box<rasterize::RasterScratch> = unsafe {
             let layout = alloc::alloc::Layout::new::<rasterize::RasterScratch>();
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut rasterize::RasterScratch;
 
             if ptr.is_null() {
-                return; // Allocation failed — leave cache empty.
+                return;
             }
 
             // SAFETY: alloc_zeroed returns a valid, zero-initialized pointer
@@ -339,7 +355,6 @@ impl GlyphCache {
 
         for i in 0..ASCII_CACHE_COUNT {
             let codepoint = (0x20u8 + i as u8) as char;
-            // Look up glyph ID for this codepoint via shaping's rasterize module.
             let glyph_id = match rasterize::glyph_id_for_char(font_data, codepoint) {
                 Some(id) => id,
                 None => continue,
@@ -352,17 +367,13 @@ impl GlyphCache {
                 height: GLYPH_MAX_H as u32,
             };
 
-            // Use rasterize_with_axes when auto-opsz axes are present.
-            // This automatically applies optical sizing for variable fonts.
-            // For non-opsz fonts, auto_opsz_axes is empty, which delegates
-            // to the standard rasterize() path internally.
             if let Some(m) = rasterize::rasterize_with_axes(
                 font_data,
                 glyph_id,
                 size_px as u16,
                 &mut raster,
                 &mut scratch,
-                &auto_opsz_axes,
+                &axes,
             ) {
                 self.glyphs[i] = CachedGlyph {
                     width: m.width,

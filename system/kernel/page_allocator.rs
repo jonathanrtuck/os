@@ -7,7 +7,7 @@
 //!
 //! Manages physical memory above the kernel heap. Supports single-page
 //! allocation (order 0, 4 KiB) and multi-page contiguous allocation (up to
-//! order MAX_ORDER = 8 MiB). Buddy coalescing on free keeps fragmentation low.
+//! order MAX_ORDER). Buddy coalescing on free keeps fragmentation low.
 //!
 //! Existing single-page API (`alloc_frame`/`free_frame`) is preserved —
 //! callers are unaffected.
@@ -20,8 +20,11 @@ use super::{
     sync::IrqMutex,
 };
 
-/// Maximum order: 2^11 pages = 8 MiB.
-const MAX_ORDER: usize = 11;
+/// Maximum order: log2(RAM pages) so the allocator can coalesce up to the
+/// full physical memory range. With 256 MiB RAM: 65536 pages = 2^16 → order 16.
+/// Derived from RAM geometry, not from any single allocation's needs.
+const RAM_PAGES: usize = (paging::RAM_SIZE / paging::PAGE_SIZE) as usize;
+const MAX_ORDER: usize = RAM_PAGES.ilog2() as usize;
 const PAGE_SIZE: usize = paging::PAGE_SIZE as usize;
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {

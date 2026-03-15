@@ -219,42 +219,54 @@ pub extern "C" fn _start() -> ! {
 
         Box::from_raw(ptr)
     };
-    mono_cache.populate_with_dpi(mono_font_data, FONT_SIZE, SCREEN_DPI);
+    // Recursive Variable: MONO=1 for monospace (code content).
+    let mono_axes = [shaping::rasterize::AxisValue {
+        tag: *b"MONO",
+        value: 1.0,
+    }];
+    mono_cache.populate_with_axes(mono_font_data, FONT_SIZE, SCREEN_DPI, &mono_axes);
     let mono_cache_ptr = Box::into_raw(mono_cache);
 
-    sys::print(b"     monospace font rasterized\n");
+    sys::print(b"     monospace font rasterized (MONO=1)\n");
 
-    // Load proportional font for chrome text.
+    // Proportional cache: same font data, MONO=0 for sans-serif (prose/UI).
     let mut prop_cache_ptr: *const drawing::GlyphCache = mono_cache_ptr;
 
-    if config.prop_font_len > 0 {
-        let prop_font_data = unsafe {
+    // When no separate prop font, use the same font data with MONO=0.
+    let prop_font_data = if config.prop_font_len > 0 {
+        unsafe {
             let offset = config.mono_font_va as usize + config.mono_font_len as usize;
-
             core::slice::from_raw_parts(offset as *const u8, config.prop_font_len as usize)
+        }
+    } else {
+        mono_font_data
+    };
+
+    if shaping::rasterize::font_metrics(prop_font_data).is_some() {
+        let mut prop_cache: Box<drawing::GlyphCache> = unsafe {
+            let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
+
+            if ptr.is_null() {
+                sys::print(b"compositor: prop cache alloc failed\n");
+                sys::exit();
+            }
+
+            Box::from_raw(ptr)
         };
 
-        if shaping::rasterize::font_metrics(prop_font_data).is_some() {
-            let mut prop_cache: Box<drawing::GlyphCache> = unsafe {
-                let layout = alloc::alloc::Layout::new::<drawing::GlyphCache>();
-                let ptr = alloc::alloc::alloc_zeroed(layout) as *mut drawing::GlyphCache;
+        // Recursive Variable: MONO=0 for proportional (prose/UI content).
+        let prop_axes = [shaping::rasterize::AxisValue {
+            tag: *b"MONO",
+            value: 0.0,
+        }];
+        prop_cache.populate_with_axes(prop_font_data, FONT_SIZE, SCREEN_DPI, &prop_axes);
 
-                if ptr.is_null() {
-                    sys::print(b"compositor: prop cache alloc failed\n");
-                    sys::exit();
-                }
+        prop_cache_ptr = Box::into_raw(prop_cache);
 
-                Box::from_raw(ptr)
-            };
-
-            prop_cache.populate_with_dpi(prop_font_data, FONT_SIZE, SCREEN_DPI);
-
-            prop_cache_ptr = Box::into_raw(prop_cache);
-
-            sys::print(b"     proportional font rasterized\n");
-        } else {
-            sys::print(b"     prop font parse failed, using mono\n");
-        }
+        sys::print(b"     proportional font rasterized (MONO=0)\n");
+    } else {
+        sys::print(b"     prop font parse failed, using mono\n");
     }
     // Check for image config (we don't decode it — core handles mode toggle,
     // but we may need the decoded pixels for image viewer rendering).

@@ -27,7 +27,7 @@ const FP_HALF: i32 = FP_ONE / 2;
 /// (R, G, B) subpixel coverage. 6 = 3 subpixels × 2× oversampling each.
 pub const OVERSAMPLE_X: i32 = 6;
 /// Vertical oversampling factor for anti-aliasing.
-pub const OVERSAMPLE_Y: i32 = 4;
+pub const OVERSAMPLE_Y: i32 = 8;
 
 /// A line segment in pixel-space fixed-point coordinates.
 #[derive(Clone, Copy, Default)]

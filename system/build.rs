@@ -231,7 +231,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", sys_src.display());
     println!("cargo:rerun-if-changed={}", virtio_src.display());
     println!("cargo:rerun-if-changed={}", drawing_src.display());
-    for inc in &["truetype.rs", "rasterizer.rs"] {
+    for inc in &["truetype.rs", "rasterizer.rs", "cache.rs", "palette.rs", "gamma_tables.rs", "svg.rs", "png.rs"] {
         println!(
             "cargo:rerun-if-changed={}",
             manifest_dir.join("libraries/drawing").join(inc).display()
@@ -244,6 +244,19 @@ fn main() {
         "cargo:rerun-if-changed={}",
         manifest_dir.join("libraries/shaping/src/lib.rs").display()
     );
+    for shaping_src in &[
+        "rasterize.rs",
+        "fallback.rs",
+        "typography.rs",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir
+                .join("libraries/shaping/src")
+                .join(shaping_src)
+                .display()
+        );
+    }
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("libraries/shaping/Cargo.toml").display()

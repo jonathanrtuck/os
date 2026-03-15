@@ -54,7 +54,10 @@ use protocol::{
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
     editor::{EditorConfig, MSG_EDITOR_CONFIG},
     fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
-    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    gpu::{
+        DisplayInfoMsg, FbPaChunk, GpuConfig, MSG_DISPLAY_INFO, MSG_FB_PA_CHUNK, MSG_GPU_CONFIG,
+        MSG_GPU_READY,
+    },
 };
 
 /// Bytes per pixel (BGRA8888).
@@ -213,32 +216,60 @@ fn setup_display_pipeline(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 3: Allocate double framebuffer using queried dimensions.
+    // Phase 3: Allocate double framebuffer using scatter-gather.
+    //
+    // Each buffer is allocated as many small chunks (order CHUNK_ORDER) instead
+    // of one huge contiguous block. The DMA bump allocator gives contiguous VA
+    // even when PAs are scattered. The GPU driver uses the PA table to build a
+    // scatter-gather attach_backing command.
     // -----------------------------------------------------------------------
+    const CHUNK_ORDER: u32 = 6; // 64 pages = 256 KiB per chunk
+    const CHUNK_PAGES: usize = 1 << CHUNK_ORDER;
+    const CHUNK_BYTES: usize = CHUNK_PAGES * 4096;
+
     let fb_bytes = fb_size as usize;
-    let fb_pages = (fb_bytes + 4095) / 4096;
-    let fb_order = (fb_pages.next_power_of_two().trailing_zeros()) as u32;
-    let fb_alloc_bytes = (1usize << fb_order) * 4096;
-    // Front buffer (buffer 0).
-    let mut fb_pa0: u64 = 0;
-    let fb_va0 = sys::dma_alloc(fb_order, &mut fb_pa0).unwrap_or_else(|_| {
-        sys::print(b"init: dma_alloc (framebuffer 0) failed\n");
-        sys::exit();
-    });
+    let chunks_per_buf = (fb_bytes + CHUNK_BYTES - 1) / CHUNK_BYTES;
+    let fb_alloc_bytes = chunks_per_buf * CHUNK_BYTES;
 
-    unsafe { core::ptr::write_bytes(fb_va0 as *mut u8, 0, fb_alloc_bytes) };
+    // PA table: tracks chunk PAs for GPU scatter-gather and compositor sharing.
+    // Max 512 chunks per buffer (64 KiB × 512 = 32 MiB, covers up to 8K).
+    // Uses static to avoid blowing the 16 KiB stack (1024 × 8 = 8 KiB).
+    const MAX_CHUNKS: usize = 512;
+    static mut PA_TABLE_BUF: [u64; MAX_CHUNKS * 2] = [0u64; MAX_CHUNKS * 2];
+    let pa_table = unsafe { &mut PA_TABLE_BUF };
 
-    // Back buffer (buffer 1).
-    let mut fb_pa1: u64 = 0;
-    let fb_va1 = sys::dma_alloc(fb_order, &mut fb_pa1).unwrap_or_else(|_| {
-        sys::print(b"init: dma_alloc (framebuffer 1) failed\n");
-        sys::exit();
-    });
+    // Front buffer (buffer 0): allocate chunks, record PAs.
+    let mut fb_va0: usize = 0;
+    for i in 0..chunks_per_buf {
+        let mut chunk_pa: u64 = 0;
+        let chunk_va = sys::dma_alloc(CHUNK_ORDER, &mut chunk_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (fb0 chunk) failed\n");
+            sys::exit();
+        });
+        if i == 0 {
+            fb_va0 = chunk_va;
+        }
+        pa_table[i] = chunk_pa;
+        unsafe { core::ptr::write_bytes(chunk_va as *mut u8, 0, CHUNK_BYTES) };
+    }
 
-    unsafe { core::ptr::write_bytes(fb_va1 as *mut u8, 0, fb_alloc_bytes) };
+    // Back buffer (buffer 1): allocate chunks, record PAs.
+    let mut fb_va1: usize = 0;
+    for i in 0..chunks_per_buf {
+        let mut chunk_pa: u64 = 0;
+        let chunk_va = sys::dma_alloc(CHUNK_ORDER, &mut chunk_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (fb1 chunk) failed\n");
+            sys::exit();
+        });
+        if i == 0 {
+            fb_va1 = chunk_va;
+        }
+        pa_table[chunks_per_buf + i] = chunk_pa;
+        unsafe { core::ptr::write_bytes(chunk_va as *mut u8, 0, CHUNK_BYTES) };
+    }
 
     {
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; 80];
         let prefix = b"     double framebuffer: ";
 
         buf[..prefix.len()].copy_from_slice(prefix);
@@ -257,7 +288,14 @@ fn setup_display_pipeline(
         pos += mid.len();
         pos += format_u32((fb_alloc_bytes * 2) as u32 / 1024, &mut buf[pos..]);
 
-        let suffix = b" KiB)\n";
+        let mid2 = b" KiB, ";
+
+        buf[pos..pos + mid2.len()].copy_from_slice(mid2);
+
+        pos += mid2.len();
+        pos += format_u32(chunks_per_buf as u32, &mut buf[pos..]);
+
+        let suffix = b" chunks)\n";
 
         buf[pos..pos + suffix.len()].copy_from_slice(suffix);
 
@@ -273,16 +311,35 @@ fn setup_display_pipeline(
         mmio_pa: gpu_pa,
         irq: gpu_irq,
         _pad: 0,
-        fb_pa: fb_pa0,
-        fb_pa2: fb_pa1,
         fb_width,
         fb_height,
         fb_size,
+        chunks_per_buf: chunks_per_buf as u16,
+        chunk_order: CHUNK_ORDER as u8,
         _pad2: 0,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_GPU_CONFIG, &gpu_config) };
 
     gpu_ch.send(&msg);
+
+    // Send scatter-gather PA table entries (both buffers, 6 PAs per message).
+    let total_entries = chunks_per_buf * 2;
+    let mut sent = 0;
+    while sent < total_entries {
+        let remaining = total_entries - sent;
+        let count = if remaining > 6 { 6 } else { remaining };
+        let mut chunk = FbPaChunk {
+            count: count as u32,
+            _pad: 0,
+            pas: [0u64; 6],
+        };
+        for j in 0..count {
+            chunk.pas[j] = pa_table[sent + j];
+        }
+        let pa_msg = unsafe { ipc::Message::from_payload(MSG_FB_PA_CHUNK, &chunk) };
+        gpu_ch.send(&pa_msg);
+        sent += count;
+    }
 
     let _ = sys::channel_signal(gpu_ch_handle);
 
@@ -438,18 +495,35 @@ fn setup_display_pipeline(
                 sys::exit();
             }
         };
-    // Share framebuffers with compositor.
-    let fb_page_count = fb_alloc_bytes as u64 / 4096;
-    let comp_fb_va0 =
-        sys::memory_share(comp_proc, fb_pa0, fb_page_count, false).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (comp fb0) failed\n");
-            sys::exit();
-        });
-    let comp_fb_va1 =
-        sys::memory_share(comp_proc, fb_pa1, fb_page_count, false).unwrap_or_else(|_| {
+    // Share framebuffers with compositor (chunk by chunk, scatter-gather).
+    let mut comp_fb_va0: usize = 0;
+    for i in 0..chunks_per_buf {
+        let va =
+            sys::memory_share(comp_proc, pa_table[i], CHUNK_PAGES as u64, false)
+                .unwrap_or_else(|_| {
+                    sys::print(b"init: memory_share (comp fb0) failed\n");
+                    sys::exit();
+                });
+        if i == 0 {
+            comp_fb_va0 = va;
+        }
+    }
+    let mut comp_fb_va1: usize = 0;
+    for i in 0..chunks_per_buf {
+        let va = sys::memory_share(
+            comp_proc,
+            pa_table[chunks_per_buf + i],
+            CHUNK_PAGES as u64,
+            false,
+        )
+        .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (comp fb1) failed\n");
             sys::exit();
         });
+        if i == 0 {
+            comp_fb_va1 = va;
+        }
+    }
     // Share scene graph with compositor (read-only for rendering).
     let comp_scene_va = sys::memory_share(comp_proc, scene_pa, scene_page_count, false)
         .unwrap_or_else(|_| {
@@ -932,9 +1006,9 @@ pub extern "C" fn _start() -> ! {
         if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
             sys::print(b"     loading fonts from host filesystem\n");
 
-            // Allocate font buffer (1 MiB = order 8 = 256 pages).
-            // Holds fonts, PNG image, and SVG icons.
-            let font_order: u32 = 8;
+            // Allocate font buffer (4 MiB = order 10 = 1024 pages).
+            // Holds Recursive variable font (~2.3 MiB), PNG image, and SVG icons.
+            let font_order: u32 = 10;
             let font_page_count: u64 = 1u64 << font_order;
             let mut font_pa: u64 = 0;
             let _font_va = sys::dma_alloc(font_order, &mut font_pa).unwrap_or_else(|_| {
@@ -1017,15 +1091,16 @@ pub extern "C" fn _start() -> ! {
                 }
             };
 
-            // Load monospace font (Source Code Pro Variable) at offset 0.
-            sys::print(b"     loading source-code-pro-variable.ttf\n");
+            // Load Recursive Variable — one font for both mono and proportional.
+            // Content type drives axis values (MONO=1 for code, MONO=0 for prose).
+            sys::print(b"     loading recursive-variable.ttf\n");
 
             let mono_len = read_font_file(
                 &p9_ch_obj,
                 p9_ch,
                 p9_font_va as u64,
                 font_capacity,
-                b"source-code-pro-variable.ttf",
+                b"recursive-variable.ttf",
             );
 
             if mono_len > 0 {
@@ -1049,40 +1124,9 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b"     mono font read failed\n");
             }
 
-            // Load proportional font (Nunito Sans Variable) right after the mono font.
-            sys::print(b"     loading nunito-sans-variable.ttf\n");
-
-            let prop_offset = mono_len;
-            let prop_capacity = font_capacity - prop_offset;
-            let prop_target_va = p9_font_va as u64 + prop_offset as u64;
-            let prop_len = read_font_file(
-                &p9_ch_obj,
-                p9_ch,
-                prop_target_va,
-                prop_capacity,
-                b"nunito-sans-variable.ttf",
-            );
-
-            if prop_len > 0 {
-                let mut buf = [0u8; 48];
-                let prefix = b"     prop font loaded: ";
-
-                buf[..prefix.len()].copy_from_slice(prefix);
-
-                let mut pos = prefix.len();
-
-                pos += format_u32(prop_len, &mut buf[pos..]);
-
-                let suffix = b" bytes\n";
-
-                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-
-                pos += suffix.len();
-
-                sys::print(&buf[..pos]);
-            } else {
-                sys::print(b"     prop font read failed\n");
-            }
+            // Recursive Variable serves both mono and proportional via axis values.
+            // No separate prop font needed — compositor uses MONO=0 on same data.
+            let prop_len: u32 = 0;
 
             // Load PNG image (test.png) right after the proportional font.
             sys::print(b"     loading test.png\n");

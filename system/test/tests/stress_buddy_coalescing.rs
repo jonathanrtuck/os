@@ -20,6 +20,7 @@
 mod paging {
     #[allow(dead_code)]
     pub const PAGE_SIZE: u64 = 4096;
+    pub const RAM_SIZE: u64 = 256 * 1024 * 1024;
 
     pub const fn align_up(addr: usize, align: usize) -> usize {
         (addr + align - 1) & !(align - 1)
