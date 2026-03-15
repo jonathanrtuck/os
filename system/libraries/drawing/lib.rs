@@ -282,6 +282,16 @@ impl GlyphCache {
     /// coverage: width × height × 3 bytes per glyph. The GLYPH_BUF_SIZE
     /// accommodates the oversampled intermediate (which is always larger).
     pub fn populate(&mut self, font_data: &[u8], size_px: u32) {
+        self.populate_with_dpi(font_data, size_px, 96);
+    }
+    /// Rasterize all printable ASCII glyphs with automatic optical sizing.
+    ///
+    /// `dpi` is the display DPI (hardcoded for QEMU, configurable in
+    /// principle). For fonts with an `opsz` axis, the optical size is
+    /// automatically set to match the rendered pixel size (clamped to
+    /// the font's opsz range). For fonts without an opsz axis, this
+    /// behaves identically to `populate()`.
+    pub fn populate_with_dpi(&mut self, font_data: &[u8], size_px: u32, dpi: u16) {
         use shaping::rasterize;
 
         // Extract font metrics via shaping's rasterize module.
@@ -303,6 +313,11 @@ impl GlyphCache {
         self.descent = descent_px as u32;
         self.size_px = size_px;
         self.line_height = self.ascent + self.descent + gap_px;
+
+        // Compute automatic optical sizing axis values. For fonts with an
+        // opsz axis, this returns a single AxisValue with the computed opsz.
+        // For fonts without opsz, this returns an empty Vec (no-op).
+        let auto_opsz_axes = rasterize::auto_axis_values_for_opsz(font_data, size_px as u16, dpi);
 
         // Heap-allocate the rasterization scratch space (~39 KiB) to avoid
         // stack overflow — userspace stacks are only 16 KiB. We use
@@ -337,12 +352,17 @@ impl GlyphCache {
                 height: GLYPH_MAX_H as u32,
             };
 
-            if let Some(m) = rasterize::rasterize(
+            // Use rasterize_with_axes when auto-opsz axes are present.
+            // This automatically applies optical sizing for variable fonts.
+            // For non-opsz fonts, auto_opsz_axes is empty, which delegates
+            // to the standard rasterize() path internally.
+            if let Some(m) = rasterize::rasterize_with_axes(
                 font_data,
                 glyph_id,
                 size_px as u16,
                 &mut raster,
                 &mut scratch,
+                &auto_opsz_axes,
             ) {
                 self.glyphs[i] = CachedGlyph {
                     width: m.width,

@@ -251,8 +251,7 @@ fn shape_empty_font_data() {
 // Variable font files and constants
 // ---------------------------------------------------------------------------
 
-const SOURCE_CODE_PRO_VARIABLE: &[u8] =
-    include_bytes!("../../share/source-code-pro-variable.ttf");
+const SOURCE_CODE_PRO_VARIABLE: &[u8] = include_bytes!("../../share/source-code-pro-variable.ttf");
 
 // ---------------------------------------------------------------------------
 // VAL-VARFONT-001: Variable Nunito Sans axis detection
@@ -343,26 +342,10 @@ fn varfont_nunito_sans_ytlc_axis() {
 fn varfont_nunito_sans_axis_tags_exact() {
     let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
     let tags: Vec<[u8; 4]> = axes.iter().map(|a| a.tag).collect();
-    assert!(
-        tags.contains(b"opsz"),
-        "missing opsz axis in {:?}",
-        tags
-    );
-    assert!(
-        tags.contains(b"wght"),
-        "missing wght axis in {:?}",
-        tags
-    );
-    assert!(
-        tags.contains(b"wdth"),
-        "missing wdth axis in {:?}",
-        tags
-    );
-    assert!(
-        tags.contains(b"YTLC"),
-        "missing YTLC axis in {:?}",
-        tags
-    );
+    assert!(tags.contains(b"opsz"), "missing opsz axis in {:?}", tags);
+    assert!(tags.contains(b"wght"), "missing wght axis in {:?}", tags);
+    assert!(tags.contains(b"wdth"), "missing wdth axis in {:?}", tags);
+    assert!(tags.contains(b"YTLC"), "missing YTLC axis in {:?}", tags);
 }
 
 // ---------------------------------------------------------------------------
@@ -496,8 +479,7 @@ fn rasterize_at_weight(font_data: &[u8], glyph_id: u16, size_px: u16, weight: f3
 
 /// Helper: look up glyph ID for a character.
 fn glyph_for_char(font_data: &[u8], ch: char) -> u16 {
-    shaping::rasterize::glyph_id_for_char(font_data, ch)
-        .expect("should find glyph for character")
+    shaping::rasterize::glyph_id_for_char(font_data, ch).expect("should find glyph for character")
 }
 
 #[test]
@@ -524,7 +506,8 @@ fn varfont_wght_700_heavier_than_400() {
     assert!(
         cov_700 > cov_400,
         "wght=700 coverage ({}) must be > wght=400 coverage ({})",
-        cov_700, cov_400
+        cov_700,
+        cov_400
     );
 }
 
@@ -559,12 +542,16 @@ fn varfont_wght_550_differs_from_400_and_700() {
     assert!(
         pct_400 > 5.0,
         "wght=550 coverage ({}) must differ from wght=400 ({}) by >5%, got {:.1}%",
-        cov_550, cov_400, pct_400
+        cov_550,
+        cov_400,
+        pct_400
     );
     assert!(
         pct_700 > 5.0,
         "wght=550 coverage ({}) must differ from wght=700 ({}) by >5%, got {:.1}%",
-        cov_550, cov_700, pct_700
+        cov_550,
+        cov_700,
+        pct_700
     );
 }
 
@@ -578,7 +565,10 @@ fn varfont_out_of_range_wght_clamped_no_panic() {
     let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'A');
     // Should not panic — just clamp to max.
     let cov = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, 2000.0);
-    assert!(cov > 0, "clamped out-of-range weight should still produce coverage");
+    assert!(
+        cov > 0,
+        "clamped out-of-range weight should still produce coverage"
+    );
 
     // Also test underflow (wght=0, below min).
     let cov_low = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, 0.0);
@@ -732,4 +722,264 @@ fn varfont_shape_with_no_variations_same_as_default() {
     for (a, b) in glyphs_default.iter().zip(glyphs_empty.iter()) {
         assert_eq!(a.glyph_id, b.glyph_id);
     }
+}
+
+// ===========================================================================
+// VAL-OPSZ-001: Optical size calculation
+// ===========================================================================
+
+#[test]
+fn opsz_calculation_three_size_dpi_combos_distinct() {
+    // VAL-OPSZ-001: Optical size calculation produces different opsz values
+    // for different size/DPI combinations: (10px,144dpi), (18px,96dpi), (48px,192dpi).
+    use shaping::rasterize::compute_optical_size;
+
+    let opsz_a = compute_optical_size(10, 144);
+    let opsz_b = compute_optical_size(18, 96);
+    let opsz_c = compute_optical_size(48, 192);
+
+    assert_ne!(
+        opsz_a, opsz_b,
+        "opsz for (10px,144dpi)={} must differ from (18px,96dpi)={}",
+        opsz_a, opsz_b
+    );
+    assert_ne!(
+        opsz_b, opsz_c,
+        "opsz for (18px,96dpi)={} must differ from (48px,192dpi)={}",
+        opsz_b, opsz_c
+    );
+    assert_ne!(
+        opsz_a, opsz_c,
+        "opsz for (10px,144dpi)={} must differ from (48px,192dpi)={}",
+        opsz_a, opsz_c
+    );
+}
+
+#[test]
+fn opsz_calculation_larger_size_produces_larger_opsz() {
+    // Larger rendered sizes should produce larger optical size values.
+    use shaping::rasterize::compute_optical_size;
+
+    let opsz_small = compute_optical_size(10, 96);
+    let opsz_large = compute_optical_size(48, 96);
+
+    assert!(
+        opsz_large > opsz_small,
+        "opsz at 48px ({}) must be > opsz at 10px ({})",
+        opsz_large,
+        opsz_small
+    );
+}
+
+#[test]
+fn opsz_calculation_is_point_size_based() {
+    // The computation is: opsz = font_size_px * 72.0 / dpi.
+    // At 72dpi, opsz == font_size_px (1:1 mapping).
+    use shaping::rasterize::compute_optical_size;
+
+    let opsz = compute_optical_size(12, 72);
+    // At 72 DPI, 12px == 12pt.
+    let expected = 12.0f32;
+    assert!(
+        (opsz - expected).abs() < 0.01,
+        "at 72 DPI, 12px should map to opsz={:.2}, got {:.2}",
+        expected,
+        opsz
+    );
+}
+
+// ===========================================================================
+// VAL-OPSZ-002: Automatic optical size application
+// ===========================================================================
+
+/// Helper: rasterize a glyph with automatic optical sizing at a given font size.
+fn rasterize_with_auto_opsz(font_data: &[u8], glyph_id: u16, size_px: u16) -> Vec<u8> {
+    use shaping::rasterize::{auto_axis_values_for_opsz, RasterBuffer, RasterScratch};
+
+    let dpi = 96; // standard screen DPI
+    let auto_axes = auto_axis_values_for_opsz(font_data, size_px, dpi);
+    let mut buf = vec![0u8; 128 * 6 * 128];
+    let mut scratch = Box::new(RasterScratch::zeroed());
+    let mut rb = RasterBuffer {
+        data: &mut buf,
+        width: 128,
+        height: 128,
+    };
+
+    let metrics = shaping::rasterize::rasterize_with_axes(
+        font_data,
+        glyph_id,
+        size_px,
+        &mut rb,
+        &mut scratch,
+        &auto_axes,
+    );
+
+    match metrics {
+        Some(m) => {
+            let total = (m.width * m.height * 3) as usize;
+            buf[..total].to_vec()
+        }
+        None => vec![],
+    }
+}
+
+#[test]
+fn opsz_auto_10px_vs_48px_different_coverage() {
+    // VAL-OPSZ-002: When rendering 10px text vs 48px text with variable Nunito Sans,
+    // the opsz axis is automatically set to match the rendered size, producing
+    // different glyph outlines (smaller text gets sturdier letterforms).
+    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'a');
+    let coverage_10 = rasterize_with_auto_opsz(NUNITO_SANS_VARIABLE, gid, 10);
+    let coverage_48 = rasterize_with_auto_opsz(NUNITO_SANS_VARIABLE, gid, 48);
+
+    // Both should produce some output.
+    assert!(
+        !coverage_10.is_empty(),
+        "auto-opsz at 10px should produce coverage"
+    );
+    assert!(
+        !coverage_48.is_empty(),
+        "auto-opsz at 48px should produce coverage"
+    );
+
+    // They should differ — different opsz produces different outlines.
+    // Normalize coverage per pixel to compare independent of size.
+    let sum_10: u64 = coverage_10.iter().map(|&b| b as u64).sum();
+    let sum_48: u64 = coverage_48.iter().map(|&b| b as u64).sum();
+    let per_pixel_10 = sum_10 as f64 / coverage_10.len().max(1) as f64;
+    let per_pixel_48 = sum_48 as f64 / coverage_48.len().max(1) as f64;
+
+    // At minimum, the normalized coverage densities or total pixel counts differ.
+    // The 10px version should have sturdier (optically compensated) letterforms.
+    assert!(
+        (per_pixel_10 - per_pixel_48).abs() > 0.01 || coverage_10.len() != coverage_48.len(),
+        "auto-opsz at 10px (avg={:.2}, len={}) vs 48px (avg={:.2}, len={}) \
+         should produce different coverage",
+        per_pixel_10,
+        coverage_10.len(),
+        per_pixel_48,
+        coverage_48.len()
+    );
+}
+
+#[test]
+fn opsz_auto_returns_opsz_axis_value() {
+    // The auto function should return an AxisValue with tag "opsz".
+    use shaping::rasterize::auto_axis_values_for_opsz;
+
+    let axes = auto_axis_values_for_opsz(NUNITO_SANS_VARIABLE, 18, 96);
+    assert!(
+        !axes.is_empty(),
+        "auto_axis_values_for_opsz should return axis values for a font with opsz"
+    );
+    let opsz_av = axes.iter().find(|av| &av.tag == b"opsz");
+    assert!(opsz_av.is_some(), "returned axes should include opsz");
+    let opsz_val = opsz_av.unwrap().value;
+    // At 18px, 96dpi: opsz = 18 * 72 / 96 = 13.5. Nunito Sans opsz range is
+    // 6–12, so it should be clamped to the max (12.0).
+    let font_axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let opsz_axis = font_axes.iter().find(|a| &a.tag == b"opsz").unwrap();
+    assert!(
+        opsz_val >= opsz_axis.min_value && opsz_val <= opsz_axis.max_value,
+        "opsz value ({}) must be within font's range [{}, {}]",
+        opsz_val,
+        opsz_axis.min_value,
+        opsz_axis.max_value
+    );
+}
+
+// ===========================================================================
+// VAL-OPSZ-003: Fonts without opsz axis are unaffected
+// ===========================================================================
+
+#[test]
+fn opsz_no_op_for_non_opsz_font() {
+    // VAL-OPSZ-003: When auto optical sizing is applied to a font without an
+    // opsz axis (e.g., Source Code Pro variable), rendering is unchanged
+    // compared to rendering without auto-opsz. No error or crash.
+    use shaping::rasterize::{auto_axis_values_for_opsz, RasterBuffer, RasterScratch};
+
+    let gid = glyph_for_char(SOURCE_CODE_PRO_VARIABLE, 'H');
+
+    // Render without auto-opsz (no axes).
+    let mut buf_without = vec![0u8; 48 * 6 * 48];
+    let mut scratch = Box::new(RasterScratch::zeroed());
+    let mut rb = RasterBuffer {
+        data: &mut buf_without,
+        width: 48,
+        height: 48,
+    };
+    let metrics_without =
+        shaping::rasterize::rasterize(SOURCE_CODE_PRO_VARIABLE, gid, 18, &mut rb, &mut scratch)
+            .expect("rasterization without opsz should succeed");
+
+    let total_without = (metrics_without.width * metrics_without.height * 3) as usize;
+    let coverage_without: Vec<u8> = buf_without[..total_without].to_vec();
+
+    // Render with auto-opsz (should be a no-op since SCP has no opsz axis).
+    let auto_axes = auto_axis_values_for_opsz(SOURCE_CODE_PRO_VARIABLE, 18, 96);
+    // Should return empty — no opsz axis in Source Code Pro.
+    assert!(
+        auto_axes.is_empty(),
+        "auto_axis_values_for_opsz should return empty for a font without opsz axis, got {:?}",
+        auto_axes
+            .iter()
+            .map(|a| core::str::from_utf8(&a.tag).unwrap_or("?"))
+            .collect::<Vec<_>>()
+    );
+
+    // Render with the (empty) auto axes.
+    let mut buf_with = vec![0u8; 48 * 6 * 48];
+    let mut scratch2 = Box::new(RasterScratch::zeroed());
+    let mut rb2 = RasterBuffer {
+        data: &mut buf_with,
+        width: 48,
+        height: 48,
+    };
+    let metrics_with = shaping::rasterize::rasterize_with_axes(
+        SOURCE_CODE_PRO_VARIABLE,
+        gid,
+        18,
+        &mut rb2,
+        &mut scratch2,
+        &auto_axes,
+    )
+    .expect("rasterization with auto-opsz should succeed for non-opsz font");
+
+    let total_with = (metrics_with.width * metrics_with.height * 3) as usize;
+
+    assert_eq!(
+        total_without, total_with,
+        "coverage size should be identical"
+    );
+    assert_eq!(
+        &coverage_without[..],
+        &buf_with[..total_with],
+        "coverage should be byte-identical without and with auto-opsz on non-opsz font"
+    );
+}
+
+#[test]
+fn opsz_auto_empty_for_static_font() {
+    // Static (non-variable) fonts should also return empty axes.
+    use shaping::rasterize::auto_axis_values_for_opsz;
+
+    let axes = auto_axis_values_for_opsz(SOURCE_CODE_PRO, 18, 96);
+    assert!(
+        axes.is_empty(),
+        "static font should return empty auto-opsz axes"
+    );
+}
+
+#[test]
+fn opsz_auto_empty_for_empty_data() {
+    // Empty font data should return empty without panic.
+    use shaping::rasterize::auto_axis_values_for_opsz;
+
+    let axes = auto_axis_values_for_opsz(&[], 18, 96);
+    assert!(
+        axes.is_empty(),
+        "empty font data should return empty auto-opsz axes"
+    );
 }

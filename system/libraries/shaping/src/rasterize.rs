@@ -6,8 +6,7 @@
 //!
 //! All math is integer/fixed-point. No floating point in the rasterizer itself.
 
-use read_fonts::{FontRef, TableProvider};
-use read_fonts::tables::cmap::Cmap;
+use read_fonts::{tables::cmap::Cmap, FontRef, TableProvider};
 
 // ---------------------------------------------------------------------------
 // Font metric helpers
@@ -1322,6 +1321,65 @@ pub fn rasterize_with_axes(
         bearing_y,
         advance,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Automatic optical sizing
+// ---------------------------------------------------------------------------
+
+/// Compute the optical size value from a rendered pixel size and display DPI.
+///
+/// Uses the traditional typographic formula: `opsz = font_size_px × 72 / dpi`,
+/// converting the rendered pixel size to an equivalent point size. This maps
+/// display pixels to the font's optical size axis, so small text gets the
+/// small-optical-size cut (wider, sturdier letterforms) and large text gets
+/// the display cut.
+///
+/// The result is NOT clamped to any font's opsz axis range — the caller
+/// should clamp to the font's declared min/max.
+pub fn compute_optical_size(font_size_px: u16, dpi: u16) -> f32 {
+    if dpi == 0 {
+        return font_size_px as f32;
+    }
+    font_size_px as f32 * 72.0 / dpi as f32
+}
+
+/// Compute automatic optical size axis values for a font.
+///
+/// If the font has an `opsz` variation axis, returns an `AxisValue` array
+/// with the optical size set to the computed value (clamped to the font's
+/// declared opsz range). If the font has no `opsz` axis (e.g., Source Code
+/// Pro variable), returns an empty Vec — a no-op for the rendering pipeline.
+///
+/// This function is the main entry point for automatic optical sizing.
+/// Callers pass the result directly to `rasterize_with_axes` or
+/// `shape_with_variations` — no explicit opsz parameter needed.
+pub fn auto_axis_values_for_opsz(
+    font_data: &[u8],
+    font_size_px: u16,
+    dpi: u16,
+) -> alloc::vec::Vec<AxisValue> {
+    let axes = font_axes(font_data);
+    let opsz_axis = match axes.iter().find(|a| &a.tag == b"opsz") {
+        Some(a) => a,
+        None => return alloc::vec::Vec::new(), // No opsz axis — no-op.
+    };
+
+    let raw_opsz = compute_optical_size(font_size_px, dpi);
+
+    // Clamp to the font's declared opsz range.
+    let clamped = if raw_opsz < opsz_axis.min_value {
+        opsz_axis.min_value
+    } else if raw_opsz > opsz_axis.max_value {
+        opsz_axis.max_value
+    } else {
+        raw_opsz
+    };
+
+    alloc::vec![AxisValue {
+        tag: *b"opsz",
+        value: clamped,
+    }]
 }
 
 /// Compute a deterministic hash of axis values for use as a glyph cache key component.

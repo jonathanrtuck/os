@@ -202,21 +202,16 @@ fn render_node(
                 // Read ShapedGlyph array from the data buffer.
                 let glyph_size = core::mem::size_of::<ShapedGlyph>();
                 let shaped_glyphs: &[ShapedGlyph] = if run.glyphs.length > 0
-                    && (run.glyphs.offset as usize + run.glyphs.length as usize)
-                        <= graph.data.len()
+                    && (run.glyphs.offset as usize + run.glyphs.length as usize) <= graph.data.len()
                     && run.glyphs.length as usize >= glyph_size
                 {
-                    let bytes = &graph.data
-                        [run.glyphs.offset as usize..][..run.glyphs.length as usize];
-                    let count = (run.glyph_count as usize)
-                        .min(bytes.len() / glyph_size);
+                    let bytes =
+                        &graph.data[run.glyphs.offset as usize..][..run.glyphs.length as usize];
+                    let count = (run.glyph_count as usize).min(bytes.len() / glyph_size);
                     // SAFETY: ShapedGlyph is #[repr(C)], data buffer is aligned
                     // by push_shaped_glyphs to ShapedGlyph alignment.
                     unsafe {
-                        core::slice::from_raw_parts(
-                            bytes.as_ptr() as *const ShapedGlyph,
-                            count,
-                        )
+                        core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count)
                     }
                 } else {
                     &[]

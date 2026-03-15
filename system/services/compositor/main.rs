@@ -30,6 +30,9 @@ use protocol::{
 };
 
 const FONT_SIZE: u32 = 18;
+/// Display DPI. Hardcoded for QEMU's standard virtual display; configurable
+/// in principle (e.g., from GPU/display driver capabilities).
+const SCREEN_DPI: u16 = 96;
 const CORE_HANDLE: u8 = 1;
 const GPU_HANDLE: u8 = 2;
 
@@ -216,7 +219,7 @@ pub extern "C" fn _start() -> ! {
 
         Box::from_raw(ptr)
     };
-    mono_cache.populate(mono_font_data, FONT_SIZE);
+    mono_cache.populate_with_dpi(mono_font_data, FONT_SIZE, SCREEN_DPI);
     let mono_cache_ptr = Box::into_raw(mono_cache);
 
     sys::print(b"     monospace font rasterized\n");
@@ -244,7 +247,7 @@ pub extern "C" fn _start() -> ! {
                 Box::from_raw(ptr)
             };
 
-            prop_cache.populate(prop_font_data, FONT_SIZE);
+            prop_cache.populate_with_dpi(prop_font_data, FONT_SIZE, SCREEN_DPI);
 
             prop_cache_ptr = Box::into_raw(prop_cache);
 
