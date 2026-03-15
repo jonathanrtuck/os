@@ -1,0 +1,21 @@
+{
+  "featureId": "remove-textlayout-from-drawing",
+  "reviewedAt": "2026-03-15T15:30:00.000Z",
+  "commitId": "19164c5",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, complete removal of TextLayout and all draw_tt* methods from drawing/lib.rs. 592 lines removed. The fonts dependency was correctly stripped from drawing (extern crate, Cargo.toml, build.rs externs). Core defines a local TextLayout with exactly the 3 methods it uses (byte_to_visual_line, scroll_for_cursor, xy_to_byte) plus the private cols() helper — no unnecessary code carried forward. The test file defines a full local TextLayout with all 7 pure-computation layout methods so existing tests continue to exercise them. No tests were removed or weakened. The draw_tt* methods (which depended on GlyphCache/fonts) were NOT duplicated, which is correct — the scene graph rendering path has replaced them. draw_coverage and fill_rect_blend (pixel primitives the draw_tt* methods used internally) remain in drawing at the correct abstraction level. No dead code left behind.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The test file (system/test/tests/drawing.rs) is accumulating multiple 'test-local copy' duplications: TextLayout, DamageTracker, CompositeSurface, cursor functions, scale_pointer_coord — all because tests can't import from services. This pattern is architecturally forced but creates maintenance risk where test copies could silently diverge from their canonical sources in Core/compositor. AGENTS.md doesn't document this pattern or provide guidance on keeping test-local copies in sync.",
+      "evidence": "system/test/tests/drawing.rs lines 5-8 ('test-local copy' comment), lines 226, 235, 298, 315, 374, 473, 493, 535 — at least 7 distinct test-local copies accumulated across the refactoring mission"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. TextLayout struct and all 10 associated methods fully removed from drawing/lib.rs. fonts dependency cleanly stripped from drawing's Cargo.toml, lib.rs, and build.rs. Core defines only the 3 layout methods it actually uses. Test file preserves all 7 pure-computation layout methods as local copies so no test coverage was lost. Build succeeds, all tests pass. No dead code, no missing callers, no behavioral changes."
+}

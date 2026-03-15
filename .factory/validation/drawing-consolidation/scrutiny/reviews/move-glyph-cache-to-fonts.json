@@ -1,0 +1,21 @@
+{
+  "featureId": "move-glyph-cache-to-fonts",
+  "reviewedAt": "2026-03-15T15:02:00.000Z",
+  "commitId": "34e4e5b",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, complete refactoring. All types (GlyphCache, CachedGlyph, LruGlyphCache, LruCachedGlyph, Slot, CacheKey), constants (STEM_DARKENING_BOOST, STEM_DARKENING_LUT, GLYPH_MAX_W, GLYPH_MAX_H, GLYPH_BUF_SIZE, ASCII_CACHE_COUNT, NONE), and functions (axis_values_hash, populate, populate_with_dpi, populate_with_axes, get, zeroed, LRU methods) were moved from drawing to fonts/src/cache.rs with signatures fully preserved. drawing/cache.rs was deleted, include!(\"cache.rs\") removed from drawing/lib.rs. The `extern crate alloc` was correctly removed from drawing (no longer needed after cache removal). scale_fu and scale_fu_ceil were promoted to pub(crate) in rasterize.rs so cache.rs can call them — correct minimal visibility change. OVERSAMPLE_X is imported via crate::rasterize within the fonts crate. axis_values_hash in cache.rs delegates to rasterize::axis_values_hash (already pub in rasterize.rs). build.rs rerun-if-changed updated: cache.rs removed from drawing list, added to fonts list. All 13 files touched, 7 callers updated (compositor/main.rs, compositor/scene_render.rs, test/tests/cache.rs, drawing.rs, fallback.rs, shaping.rs, unicode.rs) — all now import from fonts::cache::. Grep confirms zero stale drawing:: references to any moved type across the entire codebase. 1462 tests pass, full build succeeds.",
+    "issues": []
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The worker correctly kept `extern crate fonts` in drawing/lib.rs at commit time because TextLayout (still in drawing at that point) needed fonts::cache types. This was cleaned up by the subsequent move-text-layout feature. The AGENTS.md include!() pattern guidance worked well here — worker removed the include!(\"cache.rs\") correctly.",
+      "evidence": "git diff 34e4e5b shows drawing/lib.rs kept `extern crate fonts;` with a private `use fonts::cache::{CachedGlyph, GlyphCache}` for TextLayout methods. Later commit 19164c5 removed TextLayout and this dependency entirely."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. All glyph cache types, constants, and functions were correctly moved from drawing to fonts/src/cache.rs. Signatures preserved exactly. All 13 files updated atomically — callers, build.rs, tests. No stale references, no dead code, no include!() remnants. The worker followed the refactor-worker skill procedure precisely: understood the move, grepped for all callers, executed cleanly, verified with build + full test suite (1462 tests). The only non-trivial decision — making scale_fu/scale_fu_ceil pub(crate) rather than duplicating them — was the correct minimal-change approach."
+}

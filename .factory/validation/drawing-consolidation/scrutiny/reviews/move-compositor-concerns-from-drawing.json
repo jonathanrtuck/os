@@ -1,0 +1,34 @@
+{
+  "featureId": "move-compositor-concerns-from-drawing",
+  "reviewedAt": "2026-03-15T15:30:00.000Z",
+  "commitId": "0560b88",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean refactoring. All six items (DamageTracker, CompositeSurface+compositing functions, cursor rendering, scale_pointer_coord) fully removed from drawing/lib.rs and placed in appropriate consumers. Compositor gets damage.rs, compositing.rs, cursor.rs as new modules via #[path] include. Core gets scale_pointer_coord as a local function. palette.rs correctly remains in drawing as a shared dependency. All callers updated: compositor/main.rs switches from drawing::DamageTracker to damage::DamageTracker, drawing::DirtyRect to protocol::DirtyRect; compositor/scene_render.rs switches to protocol::DirtyRect; core/main.rs switches to local scale_pointer_coord. Tests use local copies of moved types (established codebase pattern). No stale references remain in any library. Cursor.rs uses manual BGRA byte encoding instead of Color::encode(PixelFormat::Bgra8888) — functionally equivalent for Bgra8888 format. 1,462 tests pass, full clean build succeeds.",
+    "issues": [
+      {
+        "file": "system/services/compositor/cursor.rs",
+        "line": 3,
+        "severity": "non_blocking",
+        "description": "Unused import: `use drawing::Color;` is imported but never used as a bare name. All color references use fully-qualified `drawing::CURSOR_FILL` and `drawing::CURSOR_OUTLINE`. Dead import; no compile warning fires in the direct-rustc build context but it's unnecessary."
+      },
+      {
+        "file": "system/libraries/drawing/lib.rs",
+        "line": 810,
+        "severity": "non_blocking",
+        "description": "Extra trailing blank lines (3 blank lines) at end of file after code removal. Cosmetic only."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker's skillFeedback.suggestedChanges recommends documenting the test-local-copy pattern in the refactor-worker skill: when moving types from libraries to services, tests need local copies since they can't import from services. This is a recurring pattern in this codebase (also used for TextLayout). The skill's SKILL.md doesn't mention this pattern.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The refactor-worker skill could mention the pattern of creating test-local copies when moving types from libraries to services (since tests can't import from services). This is a common pattern in this codebase.' Also visible in system/test/tests/drawing.rs where both TextLayout (prior move) and DamageTracker/CompositeSurface (this move) are duplicated as test-local types."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. All compositor concerns (DamageTracker, CompositeSurface, cursor, scale_pointer_coord) cleanly removed from drawing library and placed in their consumers. Palette stays in drawing as shared dependency. All callers updated, no stale references, 1,462 tests pass. Two non-blocking cosmetic issues: unused Color import in cursor.rs and trailing blank lines in drawing/lib.rs."
+}

@@ -1,0 +1,65 @@
+{
+  "milestone": "drawing-consolidation",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "cd system/test && cargo test -- --test-threads=1", "exitCode": 0, "details": "1462 passed, 0 failed, 0 ignored" },
+    "typecheck": { "passed": true, "command": "cd system && cargo build --release", "exitCode": 0, "details": "Full build pipeline succeeds with no errors" },
+    "lint": { "passed": true, "command": "cd system && cargo build --release 2>&1 | grep 'unused import'", "exitCode": 1, "details": "No unused import warnings (exit 1 from grep = no matches found)" },
+    "fonts_build": { "passed": true, "command": "cd system/libraries/fonts && cargo build --target=aarch64-unknown-none --release", "exitCode": 0, "details": "Fonts library builds under aarch64 target. 2 pre-existing unused variable warnings (lsb_fu) not from this milestone." }
+  },
+  "reviewsSummary": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "move-compositor-concerns-from-drawing",
+      "severity": "non_blocking",
+      "description": "Unused `use drawing::Color;` import in compositor/cursor.rs (line 3). No compile warning in direct-rustc context but the import is unnecessary."
+    },
+    {
+      "featureId": "move-compositor-concerns-from-drawing",
+      "severity": "non_blocking",
+      "description": "3 trailing blank lines at end of drawing/lib.rs after code removal. Cosmetic."
+    },
+    {
+      "featureId": "extract-decoders-from-drawing",
+      "severity": "non_blocking",
+      "description": "system/DESIGN.md line 108 still references removed files (truetype.rs, rasterizer.rs, font_data.rs). Documentation is stale after this milestone's changes to drawing's contents."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Updated .factory/library/build-system.md: compositor submodule list now includes damage.rs, compositing.rs, cursor.rs, svg.rs (added by move-compositor-concerns-from-drawing and extract-decoders-from-drawing features). Removed stale scene_state.rs reference.",
+      "sourceFeature": "move-compositor-concerns-from-drawing, extract-decoders-from-drawing"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md or refactor-worker skill",
+      "suggestion": "Document the test-local-copy pattern: when refactoring moves types from libraries to services, tests can't import from services, so pure-computation types/functions must be duplicated as test-local copies. Add guidance on: (1) marking copies with '// test-local copy of <service>::<type>' comments, (2) keeping copies minimal (only the subset needed for testing), (3) risk that copies can silently diverge from their canonical sources.",
+      "evidence": "Features remove-textlayout-from-drawing and move-compositor-concerns-from-drawing both used this pattern. system/test/tests/drawing.rs now has 7+ test-local copies. Both feature reviewers flagged this as an undocumented emerging pattern. The refactor-worker skill doesn't mention it.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "PNG decoder was placed in test crate rather than a service consumer, deviating from feature description wording.",
+      "reason": "Correct decision — no service currently consumes PNG. The description was imprecise, not the implementation. Not an actionable shared state change."
+    },
+    {
+      "observation": "Inter-feature dependency between move-glyph-cache-to-fonts and remove-textlayout (fonts dependency kept in drawing temporarily).",
+      "reason": "Informational. The dependency was correctly managed by workers. No shared state change needed."
+    },
+    {
+      "observation": "system/DESIGN.md line 108 is stale after drawing refactoring.",
+      "reason": "Documentation staleness is a non-blocking issue already captured above. Not a shared-state concern requiring library/services.yaml/AGENTS.md changes. The orchestrator or user can update DESIGN.md at their discretion."
+    }
+  ],
+  "previousRound": null
+}

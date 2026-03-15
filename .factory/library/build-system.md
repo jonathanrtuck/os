@@ -8,6 +8,6 @@ Services that use `#[path = "..."]` to include submodules (e.g., Core includes `
 
 **Workaround:** After editing a service submodule, touch its `main.rs` or run `cargo build --release` with a clean build (`cargo clean` first).
 
-**Scope:** Affects all services with `#[path]` submodules. Currently known:
+**Scope:** Affects all services with submodules. Currently known:
 - `services/core/main.rs` includes: `scene_state.rs`, `fallback.rs`, `typography.rs`
-- `services/compositor/main.rs` includes: `scene_render.rs`, `scene_state.rs`
+- `services/compositor/main.rs` includes: `scene_render.rs`, `damage.rs`, `compositing.rs`, `cursor.rs`, `svg.rs`
