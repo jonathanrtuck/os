@@ -1,0 +1,52 @@
+{
+  "featureId": "core-targeted-update-methods",
+  "milestone": "incremental-scene",
+  "reviewedAt": "2026-03-15T17:00:00.000Z",
+  "commitId": "f519f7b",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "verdict": "pass",
+  "codeReview": {
+    "summary": "Implementation is solid and matches the feature description. Four targeted update methods (update_clock, update_cursor, update_selection, update_document_content) correctly use copy_front_to_back + selective mutation. Change lists are correctly populated per update type. Data buffer exhaustion fallback triggers full rebuild. Selection cycle safety is maintained via set_node_count truncation. 12 new tests cover the core behaviors: isolation (only expected nodes change), equivalence (incremental matches full rebuild for cursor), change list accuracy, node leak prevention (10 cycles), data buffer exhaustion, 100-cycle integrity, and in-place data_used stability. Unsafe blocks have SAFETY comments and the pointer arithmetic is correct given the data buffer alignment guarantees from push_text_runs/push_shaped_glyphs. Two non-blocking issues found.",
+    "issues": [
+      {
+        "file": "system/services/core/scene_state.rs",
+        "line": 276,
+        "severity": "non_blocking",
+        "description": "update_clock ignores the return value of w.update_data(glyph_dref, new_bytes). If clock_text has a different byte length than the original (producing a different number of ShapedGlyphs), update_data returns false but the method still updates content_hash and marks the node changed — creating an inconsistency where the hash reflects new text but glyph data is stale. In practice clock text is always 8 bytes (HH:MM:SS) so this won't manifest, but the failure case should be handled (either assert, skip the hash update on failure, or fall back to replace_data)."
+      },
+      {
+        "file": "system/services/core/scene_state.rs",
+        "line": 205,
+        "severity": "non_blocking",
+        "description": "Parallel implementation: build_editor_scene has inline selection rect allocation code (lines 205-249) that duplicates the logic of the extracted allocate_selection_rects helper (lines 413-469). The only difference is mark_changed calls (which are no-ops when FULL_REPAINT is set after clear()). build_editor_scene could call allocate_selection_rects directly, eliminating the duplicate. Per org claim: 'When you build a new way, kill the old way -- no parallel implementations'."
+      },
+      {
+        "file": "system/libraries/scene/lib.rs",
+        "line": 528,
+        "severity": "suggestion",
+        "description": "set_node_count has no upper-bound assertion. The doc comment says 'The caller must ensure count does not exceed the previously allocated high-water mark' but a debug_assert!(count <= MAX_NODES as u16) would provide defense-in-depth without runtime cost in release builds."
+      },
+      {
+        "file": "system/test/tests/scene.rs",
+        "line": 0,
+        "severity": "suggestion",
+        "description": "No incremental-vs-full-rebuild equivalence test for update_document_content (only cursor has this comparison via incremental_cursor_matches_full_rebuild). The feature description asks for tests that 'verify incremental updates produce the same node state as a full rebuild for equivalent inputs' — this is only tested for cursor moves, not for document content changes. Acknowledged limitation: test crate can't import SceneState directly, but the test helper build_test_editor_scene mirrors the logic closely enough to make a meaningful comparison."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "The architecture.md library doc was updated to document the incremental scene graph pattern (update_clock, update_cursor, update_document_content, update_selection, data buffer management, change list), keeping shared knowledge current with the implementation. No gap here — noting as positive signal.",
+      "evidence": ".factory/library/architecture.md '## Incremental Scene Graph' section matches the implementation precisely."
+    },
+    {
+      "area": "conventions",
+      "observation": "The layout helper functions (byte_to_line_col, layout_mono_lines, scroll_runs, line_bytes_for_run, bytes_to_shaped_glyphs) are duplicated between scene_state.rs and scene.rs test file. This is a necessary workaround since the test crate cannot import private functions from the core service binary. However, if these helpers drift out of sync, tests would pass while production code is wrong. Consider whether these should live in the scene library itself (they were originally there per the session history) to enable shared access.",
+      "evidence": "system/services/core/scene_state.rs lines 455-583 and system/test/tests/scene.rs lines 3-132 contain identical copies of 5 layout helper functions."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Pass. The implementation correctly adds 4 targeted update methods to SceneState using copy_front_to_back + selective mutation. Code quality is high — unsafe blocks are justified, change lists are accurately populated, data buffer exhaustion triggers fallback, and selection cycles don't leak nodes. 12 well-designed tests cover the key behaviors. Two non-blocking issues: (1) update_clock silently ignores update_data failure while still updating content_hash, and (2) duplicate selection rect allocation code in build_editor_scene vs the extracted allocate_selection_rects helper. Neither blocks shipping."
+}

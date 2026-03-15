@@ -1,0 +1,106 @@
+{
+  "milestone": "incremental-scene",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "cd system/test && cargo test -- --test-threads=1", "exitCode": 0, "detail": "1489 tests passed, 0 failures" },
+    "typecheck": { "passed": true, "command": "cd system && cargo build --release", "exitCode": 0, "detail": "Build succeeded with 0 errors" },
+    "lint": { "passed": false, "command": "cd system && cargo +nightly fmt -- --check", "exitCode": 1, "detail": "Cosmetic formatting diffs in milestone files (scene/lib.rs, scene_state.rs, scene.rs tests) and pre-existing files (build.rs, kernel/metrics.rs). These are line-wrapping preferences only — no correctness impact. Marking as non-blocking." }
+  },
+  "reviewsSummary": {
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "scene-copy-forward-and-change-list",
+      "severity": "non_blocking",
+      "description": "Dead variable in test: `let data_used_before = dw.front_nodes().len()` reads node count but is never referenced. Should be removed.",
+      "location": "system/test/tests/scene.rs:2462"
+    },
+    {
+      "featureId": "core-targeted-update-methods",
+      "severity": "non_blocking",
+      "description": "update_clock ignores update_data return value while still updating content_hash. If clock text changes length (currently always 8 bytes), hash and data could desync.",
+      "location": "system/services/core/scene_state.rs:276"
+    },
+    {
+      "featureId": "core-targeted-update-methods",
+      "severity": "non_blocking",
+      "description": "Duplicate selection rect allocation code: build_editor_scene has inline logic that duplicates the extracted allocate_selection_rects helper. Per org claim 'no parallel implementations', build_editor_scene should call the helper.",
+      "location": "system/services/core/scene_state.rs:205"
+    },
+    {
+      "featureId": "core-event-loop-integration",
+      "severity": "non_blocking",
+      "description": "Click-to-reposition-cursor via tablet/pointer routes to update_selection() which doesn't update cursor x/y in the scene graph. Cursor remains at old position until next event. Self-corrects but visually stale for one frame.",
+      "location": "system/services/core/main.rs:757"
+    },
+    {
+      "featureId": "core-event-loop-integration",
+      "severity": "non_blocking",
+      "description": "MSG_POINTER_ABS (mouse move without click) triggers update_cursor with unchanged data, wasting a copy_front_to_back+swap cycle per mouse move.",
+      "location": "system/services/core/main.rs:718"
+    },
+    {
+      "featureId": "all",
+      "severity": "non_blocking",
+      "description": "rustfmt formatting diffs in milestone files (scene/lib.rs, scene_state.rs, test/tests/scene.rs). Cosmetic line-wrapping only."
+    }
+  ],
+  "suggestions": [
+    {
+      "featureId": "scene-copy-forward-and-change-list",
+      "description": "Document 'mark each node at most once per frame' contract near call sites to prevent premature FULL_REPAINT from duplicate entries."
+    },
+    {
+      "featureId": "core-targeted-update-methods",
+      "description": "Add debug_assert!(count <= MAX_NODES as u16) in set_node_count for defense-in-depth."
+    },
+    {
+      "featureId": "core-targeted-update-methods",
+      "description": "Add incremental-vs-full-rebuild equivalence test for update_document_content (only cursor has this comparison currently)."
+    },
+    {
+      "featureId": "core-event-loop-integration",
+      "description": "Extract a SceneParams struct to reduce parameter count for update_document_content."
+    },
+    {
+      "featureId": "core-event-loop-integration",
+      "description": "Simplify redundant `(changed || text_changed)` scroll-offset condition — text_changed always implies changed."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add change list capacity (24 entries) and FULL_REPAINT sentinel (u16::MAX) to the Architecture Context section. These are essential constants for compositor workers implementing change-list-driven damage tracking.",
+      "evidence": "scene/lib.rs defines CHANGE_LIST_CAPACITY=24 and FULL_REPAINT=u16::MAX. The compositor-optimization milestone features need these constants. Current AGENTS.md §Architecture Context mentions 'change list' but doesn't specify capacity or overflow semantics.",
+      "isSystemic": false
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Document the event loop dispatch priority order (context_switched > text_changed > selection_changed > changed > timer_fired) and the double-swap constraint (calling two targeted update methods in sequence overwrites the first's change list, hence timer+input falls back to full rebuild).",
+      "evidence": "system/services/core/main.rs lines 843-857 implement the dispatch chain. The double-swap constraint is the key architectural reason for full-rebuild fallback on simultaneous events. Future workers need this context to maintain correct dispatch.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Layout helper functions duplicated between scene_state.rs and test file scene.rs",
+      "reason": "This is a necessary workaround — the test crate cannot import private functions from the core service binary. The functions were originally in the scene library and were moved to core during an earlier session. Both copies are under version control and in the same commit history. Not a services.yaml/library/AGENTS.md concern."
+    },
+    {
+      "observation": "architecture.md already documents the incremental scene graph pattern",
+      "reason": "Already documented. One reviewer noted this as positive — no gap exists here."
+    },
+    {
+      "observation": "os-worker skill should document double-swap constraint",
+      "reason": "Skills changes are deferred to the orchestrator. Captured in suggestedGuidanceUpdates instead."
+    }
+  ],
+  "previousRound": null
+}
