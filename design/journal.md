@@ -55,7 +55,7 @@ These legacy terminal shortcuts add complexity for no value. Cmd+arrows cover th
 
 ### Interface Summary
 
-```
+```text
 OS → Editor (IPC):
   key_event(logical_key, modifiers)    // always this, never characters
 
@@ -69,6 +69,7 @@ Editor → OS (IPC):
 ### Target Keybindings (text editor, first implementation)
 
 **Navigation (editor computes position, calls move_cursor_to):**
+
 - Arrow keys: character left/right, line up/down
 - Cmd+Left/Right: line start/end
 - Cmd+Up/Down: document start/end
@@ -76,10 +77,12 @@ Editor → OS (IPC):
 - Page Up/Down (when scrolling views exist)
 
 **Selection (editor computes range, calls set_selection):**
+
 - Shift + any navigation key
 - Cmd+A: select all
 
 **Editing (editor resolves characters, calls write_insert/write_delete):**
+
 - Shift/Caps Lock for uppercase + symbols
 - Backspace: delete backward
 - Delete (fn+Backspace): delete forward
@@ -89,6 +92,7 @@ Editor → OS (IPC):
 - Enter, Tab
 
 **Clipboard (OS-level):**
+
 - Cmd+C/X/V: copy/cut/paste
 - Cmd+Z: undo (COW snapshot restore)
 
