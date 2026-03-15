@@ -70,6 +70,50 @@ pkill -f qemu-system-aarch64
 
 These subtle behaviors are verified via host-side unit tests instead.
 
+## Flow Validator Guidance: Host-side tests
+
+**Testing tool:** Direct shell commands (`cargo test`, `cargo build`, `grep`).
+
+**Isolation rules:**
+- Each validator can freely run `cargo build --release` and grep commands (read-only, no conflicts).
+- Only ONE validator at a time should run `cargo test -- --test-threads=1` to avoid Cargo lock contention.
+- If a validator needs to run cargo test, it should use specific test name filters (e.g., `cargo test shaping -- --test-threads=1`) to minimize runtime.
+- Font files in `system/share/` are read-only test fixtures — do not modify them.
+- Test source files in `system/test/tests/` are read-only — do not modify them.
+
+**What to check for each assertion:**
+- Unit test assertions: Run `cargo test <filter> -- --test-threads=1` and verify the named test(s) pass.
+- Grep assertions: Run grep/rg commands to verify code migration (presence/absence of patterns).
+- Build assertions: Run `cargo build --release` and verify exit code 0.
+
+**Working directory:** `/Users/user/Sites/os/system` for builds, `/Users/user/Sites/os/system/test` for tests.
+
+## Flow Validator Guidance: QEMU framebuffer
+
+**Testing tool:** QEMU monitor socket + screenshots. No browser automation needed.
+
+**Isolation rules:**
+- Only ONE QEMU instance at a time (uses fixed socket paths `/tmp/qemu-mon.sock`, `/tmp/qemu-serial.log`).
+- Kill any existing QEMU before starting: `pkill -f qemu-system-aarch64 2>/dev/null; sleep 1`
+- Clean up socket/log files before each test: `rm -f /tmp/qemu-mon.sock /tmp/qemu-serial.log /tmp/qemu-screen.ppm /tmp/qemu-screen.png`
+- Always kill QEMU after testing: `pkill -f qemu-system-aarch64`
+
+**QEMU launch command:** Use the `qemu` service definition in `.factory/services.yaml`.
+
+**Screenshot workflow:**
+1. Build: `cd /Users/user/Sites/os/system && cargo build --release`
+2. Launch QEMU (see services.yaml `qemu.start`)
+3. Wait 8-10 seconds for boot
+4. Check serial log: `cat /tmp/qemu-serial.log`
+5. Send keystrokes: `echo "sendkey h" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1`
+6. Wait 1-2s between keystrokes
+7. Capture screenshot: `echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2 >/dev/null 2>&1`
+8. Wait 2s, convert: `python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"`
+9. View with Read tool on `/tmp/qemu-screen.png`
+10. Kill QEMU: `pkill -f qemu-system-aarch64`
+
+**Evidence:** Save screenshots as PNG files to the evidence directory. Save serial output snippets as text files.
+
 ## Validation Concurrency
 
 **Machine:** 48 GB RAM, 14 CPU cores (Apple Silicon)
