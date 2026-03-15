@@ -4,6 +4,68 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Rendering Pipeline Optimization (2026-03-15)
+
+**Status:** Complete. Three milestones shipped and verified. 93 new tests (1462 → 1555). QEMU visual verification passes.
+
+### Context
+
+The rendering pipeline rebuilt the entire scene graph and repainted the full framebuffer on every event — keystroke, cursor blink, clock tick. At high resolution this produced visible lag. The optimization was delivered in three incremental milestones, each independently shippable and testable, following the design breadboarded in the "Resolution-Independent Rendering + Dirty-Rect Optimization" journal entry.
+
+### Milestone 1 — Incremental Scene Graph Updates (OS service)
+
+**Problem:** Core rebuilt the entire scene graph (~500 nodes, 64 KiB data buffer) on every event, even when only a clock digit or cursor position changed.
+
+**Solution:** Copy-forward pattern + targeted update dispatch.
+
+- `SceneHeader` extended with a **change list**: 24-entry array of changed `NodeId`s plus a `FULL_REPAINT` sentinel (0xFFFF) for overflow.
+- `DoubleWriter::copy_front_to_back()` copies the current front buffer to back before mutation, enabling incremental edits instead of full rebuilds.
+- `SceneWriter::mark_changed(node_id)` records which nodes were modified for the compositor to read.
+- `SceneState` gained targeted update methods: `update_clock` (0 allocations — modifies clock text node in-place), `update_cursor` (0 allocations — repositions cursor node), `update_document_content` (rebuilds text runs after edits), `update_selection` (updates selection overlay).
+- Core's event loop classifies each event and dispatches to the narrowest method. Timer ticks → `update_clock`. Cursor blink → `update_cursor`. Keypresses → `update_document_content`.
+- **Data buffer exhaustion fallback:** when data buffer exceeds 75% capacity, triggers a full rebuild to compact references.
+
+### Milestone 2 — Compositor Damage Tracking
+
+**Problem:** Compositor repainted the entire framebuffer from the scene graph on every frame, even when only one node changed.
+
+**Solution:** Change-list-driven damage + subtree clip skipping.
+
+- Compositor reads the change list from the scene header instead of diffing the full scene.
+- **PREV_BOUNDS tracking:** stores each node's previous bounding rect. Damage includes both old and new positions, preventing ghost artifacts when nodes move (e.g., cursor repositioning leaves no trail).
+- `render_node` checks each child's bounds against the clip rect before recursing — children outside the clip region are skipped entirely.
+- **Empty change list → skip rendering entirely.** No wasted work when nothing changed.
+- Removed the old `diff_scenes` byte comparison from the render loop (replaced by change list).
+
+### Milestone 3 — Pixel-Level SIMD and Unsafe Optimization (Drawing Library)
+
+**Problem:** Per-pixel blending operations were the remaining bottleneck for damage-clipped rendering of large regions.
+
+**Solution:** Three tiers of optimization, all behind unchanged public interfaces.
+
+1. **Scalar optimizations:** `x / 255` replaced with `(x + 1 + (x >> 8)) >> 8` (exact for all u16 inputs). Pre-clipped iteration ranges computed up front in `draw_coverage`, `blit_blend`, `fill_rect_blend` — handles negative coordinates and large offsets without per-pixel bounds checks.
+2. **Unsafe inner loops:** `draw_coverage`, `blit_blend`, `fill_rect_blend` use raw pointer access after row-level bounds verification. Eliminates redundant bounds checks.
+3. **NEON SIMD (aarch64):** `fill_rect` writes 4 pixels per instruction via `vst1q_u32`. Alpha blending uses scalar sRGB gamma table lookups combined with NEON vector operations for linear-space blend math. Constant-color blends use a dedicated NEON fast path. All SIMD paths have scalar fallbacks and are validated against reference implementations.
+
+### Results
+
+- **93 new tests** across all three milestones (1462 → 1555 total). All pass.
+- **QEMU integration test** passes (19/19 visual checks).
+- **Pressure points §5.1 (NEON blending) and §5.2 (damage tracking)** in DESIGN.md resolved.
+- The public interfaces (`blit_blend`, `fill_rect`, `draw_coverage`, `SceneWriter`, `SceneReader`) are unchanged — all optimization is internal to leaf nodes, as the design predicted.
+
+### Files Changed
+
+- `libraries/scene/lib.rs` — change list in header, `copy_front_to_back`, `mark_changed`, targeted update types
+- `services/core/scene_state.rs` — `update_clock`, `update_cursor`, `update_document_content`, `update_selection`, event dispatch
+- `services/core/main.rs` — event loop wired to targeted dispatch
+- `services/compositor/damage.rs` — change-list reader, PREV_BOUNDS tracking
+- `services/compositor/scene_render.rs` — subtree clip skipping, damage-clipped rendering
+- `libraries/drawing/lib.rs` — div255, pre-clipped iteration, unsafe inner loops, NEON SIMD paths
+- `test/tests/` — 93 new tests across scene, compositor, and drawing test files
+
+---
+
 ## Input Handling Architecture (2026-03-15)
 
 **Status:** Design settled. Ready to implement.

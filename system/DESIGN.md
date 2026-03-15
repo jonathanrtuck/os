@@ -120,6 +120,13 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - `Palette` — monochrome palette system for consistent UI theming.
 - All operations clip silently (no panics). Safe to call with any coordinates.
 
+**Optimized paths (2026-03-15 rendering pipeline optimization):**
+
+- **div-by-255 fast path:** Alpha blending replaced `x / 255` with `(x + 1 + (x >> 8)) >> 8` — exact for all u16 inputs, eliminates hardware divide.
+- **Pre-clipped iteration:** `draw_coverage`, `blit_blend`, and `fill_rect_blend` compute clipped row/column ranges up front, handling negative coordinates and oversized offsets without per-pixel bounds checks.
+- **Unsafe inner loops:** `draw_coverage`, `blit_blend`, and `fill_rect_blend` use raw pointer access (`unsafe { *ptr }`) in hot inner loops after bounds are verified at the row level. Eliminates redundant bounds checks for ~2× throughput on large surfaces.
+- **NEON SIMD (aarch64):** `fill_rect` uses `vst1q_u32` to write 4 pixels per instruction for opaque fills. Alpha blending uses scalar sRGB gamma lookups combined with NEON vector operations for the linear-space blend math. Constant-color blends use a dedicated NEON path. All SIMD paths have scalar fallbacks and are tested against reference implementations.
+
 **What's scaffolding:**
 
 - `PixelFormat` enum has only `Bgra8888`. Trivial to extend (add variant + match arms), but currently untested with other formats.
@@ -301,6 +308,14 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 These live in the scene library so they're testable without the kernel.
 
+**Incremental update support (2026-03-15 rendering pipeline optimization):**
+
+- **Change list in SceneHeader:** 24-entry array of changed `NodeId`s plus a `FULL_REPAINT` sentinel (0xFFFF) for when the list overflows or a full rebuild is needed. The OS service records which nodes changed; the compositor reads the list to drive damage tracking.
+- `DoubleWriter::copy_front_to_back()` — copies the current front buffer to the back buffer before mutation (copy-forward pattern). Enables incremental updates: the OS service copies the previous frame, modifies only changed nodes, and swaps. Avoids rebuilding the entire scene graph on every event.
+- `SceneWriter::mark_changed(node_id)` — appends a node to the change list. If the list is full (>24 entries), sets the `FULL_REPAINT` sentinel so the compositor falls back to full-frame rendering.
+- **SceneState targeted update methods:** `update_clock` (updates clock text, 0 allocations), `update_cursor` (updates cursor position/blink, 0 allocations), `update_document_content` (rebuilds text runs and selection after edits), `update_selection` (updates selection overlay). Each method uses `copy_front_to_back()` → modify specific nodes → `mark_changed()` → `swap()`.
+- **Data buffer exhaustion fallback:** When the data buffer exceeds 75% capacity, the scene triggers a full rebuild to compact data references.
+
 **No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations (layout helpers require `alloc` for `Vec` return values). Callers provide the buffer. ~1074 lines, host-side tests in `system/test/`.
 
 ---
@@ -346,6 +361,11 @@ These live in the scene library so they're testable without the kernel.
 - **Input routing.** Keyboard/mouse events from the input driver are forwarded to the editor via core's IPC channels.
 - **Typography.** Monospace text layout with line-breaking, cursor positioning, selection rendering.
 
+**Incremental scene updates (2026-03-15 rendering pipeline optimization):**
+
+- **Targeted update dispatch.** The event loop classifies each event and dispatches to the narrowest possible update method: timer ticks → `update_clock` (clock text only), cursor blink → `update_cursor` (cursor node only), keypresses/edits → `update_document_content` (text runs + selection), selection changes → `update_selection`. Each method uses copy-forward (copy front buffer to back), mutates only affected nodes, marks them changed, and swaps.
+- **Zero-allocation clock and cursor updates.** `update_clock` and `update_cursor` modify existing nodes in-place without touching the data buffer or allocating. These fire at high frequency (250 Hz timer, cursor blink) and must be cheap.
+
 **What's scaffolding (the implementation):**
 
 - **Static text buffer in BSS.** Real OS service reads document content from a Files-backed memory mapping.
@@ -364,7 +384,8 @@ These live in the scene library so they're testable without the kernel.
 
 - **Scene graph consumer.** Reads the double-buffered scene graph from shared memory and renders each node (text runs, images, rectangles, paths) to pixel surfaces.
 - **Z-ordered compositing.** Surfaces composited back-to-front with Porter-Duff source-over blending.
-- **Damage tracking.** Only re-renders and re-transfers changed regions, not the full framebuffer.
+- **Change-list-driven damage tracking (2026-03-15).** Reads the change list from the scene header to identify which nodes changed. Computes damage rects from both old (`PREV_BOUNDS`) and new node positions — the old-position damage prevents ghost artifacts when nodes move (e.g., cursor repositioning). Empty change lists skip rendering entirely (no wasted work). Falls back to full repaint on `FULL_REPAINT` sentinel.
+- **Subtree clip skipping.** `render_node` checks whether each child's bounds intersect the clip rect before recursing. Children entirely outside the clip region are not visited, reducing work proportional to off-screen content (benefits scrolled documents).
 - **SVG rasterization.** Parses and renders SVG paths for UI icons.
 - **Procedural cursor.** Arrow cursor rendered at top z-order.
 
@@ -648,17 +669,13 @@ Virtio Library
 
 Places where the clean abstraction will eventually face tension. Documented so the cost of opting in is understood before it's paid. None of these need to be solved now — the happy path works without them.
 
-### 5.1 Drawing Library: Per-pixel blending is slow for large surfaces
+### ~~5.1 Drawing Library: Per-pixel blending is slow for large surfaces~~ ✅ Resolved (2026-03-15)
 
-`blit_blend` reads and writes every pixel individually. For full-screen compositing at 60fps (1280×800 = ~1M pixels × 4 bytes × 60 = 245 MB/s), this is tight on real hardware. The clean path (per-pixel blend_over) is correct but not fast.
+**Resolved:** NEON SIMD acceleration for `fill_rect` (4 pixels/instruction via `vst1q_u32`), `blit_blend` (scalar sRGB lookups + NEON vector blend), and `fill_rect_blend` (const-color NEON path). Unsafe inner loops with pre-clipped bounds for all blending operations. div-by-255 replaced with multiply-shift. The interfaces (`blit_blend`, `fill_rect`, `draw_coverage`) are unchanged — optimization is internal to the leaf node, as predicted.
 
-**Escape hatch:** SIMD (NEON on aarch64) can blend 4 pixels at a time. GPU-accelerated compositing bypasses the CPU entirely. Both are leaf-node optimizations — the interface (`blit_blend`) stays the same.
+### ~~5.2 Compositor: Full recomposite every frame~~ ✅ Resolved (2026-03-15)
 
-### 5.2 Compositor: Full recomposite every frame
-
-Currently redraws the entire framebuffer. With 3-4 surfaces this is fine. With complex documents (many nested content parts), damage tracking becomes necessary — only recomposite the changed region.
-
-**Escape hatch:** Dirty rectangles or tile-based damage. The compositor's interface to the rest of the system doesn't change — surfaces still go in, pixels still come out. The optimization is internal.
+**Resolved:** Change-list-driven damage tracking. The OS service records changed nodes in the scene header; the compositor reads the change list and computes damage rects (old + new bounds). Empty change lists skip rendering entirely. Subtree clip skipping avoids visiting children outside the damage region. The compositor's external interface is unchanged — scene graph in, pixels out. Combined with incremental scene updates in the OS service (targeted update methods for clock, cursor, text, selection), most frames touch only a small fraction of the scene and framebuffer.
 
 ### 5.3 Font rasterization: Glyph caching
 
