@@ -1,0 +1,71 @@
+{
+  "milestone": "compositor-optimization",
+  "round": 1,
+  "status": "fail",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "cd system/test && cargo test -- --test-threads=1", "exitCode": 0 },
+    "typecheck": { "passed": true, "command": "cd system && cargo build --release", "exitCode": 0 },
+    "lint": { "passed": true, "command": "cd system && cargo +nightly fmt -- --check", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 2,
+    "passed": 1,
+    "failed": 1,
+    "failedFeatures": ["compositor-change-list-damage"]
+  },
+  "blockingIssues": [
+    {
+      "featureId": "compositor-change-list-damage",
+      "severity": "blocking",
+      "description": "Missing old-position damage for moved nodes. When a node moves between frames (e.g., cursor repositioned via arrow key), the change-list approach only damages the NEW position. The OLD position retains stale pixels ('cursor ghost'). The previous diff_scenes approach (scene/lib.rs lines 1215-1221) explicitly damaged both old and new positions by maintaining prev_nodes. Fix: the compositor should store previous bounds per-node (~8 KiB for [i32;4] × MAX_NODES) and damage BOTH the old and new bounds for each changed node. On node count change or full repaint, skip old-bounds lookup and just do full screen damage as currently done.",
+      "suggestedFix": "In compositor/main.rs, add a `prev_bounds: [(i32, i32, u32, u32); MAX_NODES]` array (~8 KiB). After computing dirty rects from the change list, also add the previous bounds for each changed node as a dirty rect. After rendering, update prev_bounds for all changed nodes. On first frame or full repaint, populate prev_bounds from the current frame's node positions."
+    }
+  ],
+  "nonBlockingIssues": [
+    {
+      "featureId": "compositor-change-list-damage",
+      "severity": "non_blocking",
+      "description": "The None arm in dr.change_list() match (compositor/main.rs) is unreachable after the is_full_repaint() guard. Add a comment noting this is a defensive fallback."
+    },
+    {
+      "featureId": "compositor-subtree-clip-skip",
+      "severity": "non_blocking",
+      "description": "No test exercises scroll_y != 0 combined with clip skipping. All test nodes have default scroll_y=0. A test with a scrolled parent + clip exclusion would strengthen confidence."
+    },
+    {
+      "featureId": "compositor-subtree-clip-skip",
+      "severity": "non_blocking",
+      "description": "Each scene_render test allocates ~2.6 MiB for two zeroed GlyphCaches. With 8 tests this is ~20 MiB. Not a problem today but worth noting if test count grows."
+    }
+  ],
+  "appliedUpdates": [],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add to Architecture Context: 'abs_bounds assumes scroll_y=0 for all nodes during damage rect computation. Core must pre-apply scroll to viewport-relative coordinates before publishing the scene. If a future change sets scroll_y != 0 for incremental updates, abs_bounds (and compositor damage) would produce incorrect results.'",
+      "evidence": "scene/lib.rs abs_bounds() walks parent chain summing x,y but ignores scroll_y. core/scene_state.rs:267-269 pre-applies scroll. This implicit coupling is undocumented.",
+      "isSystemic": false
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add to Testing & Validation Guidance: 'For damage-tracking changes, verify cursor-only moves (arrow keys) and node movement in general do not leave ghost artifacts. Damage tracking must dirty both old AND new positions of moved nodes.'",
+      "evidence": "The compositor-change-list-damage feature's visual verification only tested typing and clock updates but not arrow-key cursor movement. The old-position ghost regression was not caught by the worker's verification steps.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "The test file uses #[path = ...] mod inclusion to test private functions — matches established pattern but isn't documented in AGENTS.md.",
+      "reason": "already-documented — this is the standard test pattern visible across all test files and is implicitly understood. Documenting it would add noise without value."
+    },
+    {
+      "observation": "Worker transcript for compositor-subtree-clip-skip had 0 turns, suggesting transcript capture may not have recorded the breakdown.",
+      "reason": "ambiguous — this could be a transcript capture issue but the handoff contains complete verification evidence. Not actionable for AGENTS.md or skills."
+    },
+    {
+      "observation": "diff_scenes function is no longer called by compositor but is still used by 6 tests in scene.rs. May be useful as reference/oracle.",
+      "reason": "already-documented — diff_scenes being test-only is evident from the code. No guidance change needed; it can serve as a correctness oracle."
+    }
+  ],
+  "previousRound": null
+}
