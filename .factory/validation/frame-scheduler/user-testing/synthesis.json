@@ -1,0 +1,32 @@
+{
+  "milestone": "frame-scheduler",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 15,
+    "passed": 15,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-FRAME-001",
+    "VAL-FRAME-002",
+    "VAL-FRAME-003",
+    "VAL-FRAME-004",
+    "VAL-FRAME-005",
+    "VAL-FRAME-006",
+    "VAL-FRAME-007",
+    "VAL-FRAME-008",
+    "VAL-FRAME-009",
+    "VAL-FRAME-010",
+    "VAL-FRAME-011",
+    "VAL-FRAME-012",
+    "VAL-FRAME-013",
+    "VAL-CROSS-001",
+    "VAL-CROSS-002"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}
