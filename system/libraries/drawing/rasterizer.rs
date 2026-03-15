@@ -4,16 +4,21 @@
 // sweep with 4× vertical oversampling → coverage map (0–255 per pixel).
 //
 // All math is integer/fixed-point. No floating point, no allocations.
+//
+// NOTE: Rasterization now happens via shaping::rasterize which has its own
+// copy of this algorithm using read-fonts for outline extraction. This copy
+// is retained for the OVERSAMPLE_X/Y constants (used by GLYPH_BUF_SIZE)
+// and the RasterScratch type (used by SVG rasterizer). Types that are not
+// currently called are suppressed as dead code.
 
-/// Maximum line segments after bezier flattening.
+#[allow(dead_code)]
 const MAX_SEGMENTS: usize = 2048;
-/// Maximum edges active on a single scanline.
+#[allow(dead_code)]
 const MAX_ACTIVE_EDGES: usize = 64;
-/// Fixed-point 20.12 format for sub-pixel precision.
-/// 12 fractional bits gives 1/4096 pixel resolution — more than enough.
+#[allow(dead_code)]
 const FP_SHIFT: i32 = 12;
+#[allow(dead_code)]
 const FP_ONE: i32 = 1 << FP_SHIFT;
-// FP_HALF available for future use (e.g., rounding).
 #[allow(dead_code)]
 const FP_HALF: i32 = FP_ONE / 2;
 
@@ -26,6 +31,7 @@ pub const OVERSAMPLE_Y: i32 = 4;
 
 /// A line segment in pixel-space fixed-point coordinates.
 #[derive(Clone, Copy, Default)]
+#[allow(dead_code)]
 struct Segment {
     x0: i32, // fixed-point
     y0: i32,
@@ -46,6 +52,7 @@ struct ActiveEdge {
 ///
 /// Contains the glyph outline, segment array, and edge working space.
 /// About 60 KiB total — negligible compared to surface buffers.
+#[allow(dead_code)]
 pub struct RasterScratch {
     pub outline: GlyphOutline,
     segments: [Segment; MAX_SEGMENTS],
@@ -74,6 +81,7 @@ impl RasterScratch {
 /// Convert font units to fixed-point pixel coordinates.
 /// `origin` is the origin offset (x_min or y_max of bounding box, in pixels)
 /// that maps glyph coordinates to the coverage map's [0, 0] corner.
+#[allow(dead_code)]
 fn fu_to_fp(val: i32, size_px: u32, upem: u16, origin: i32) -> i32 {
     let px = (val as i64 * size_px as i64 * FP_ONE as i64) / upem as i64;
 
@@ -84,6 +92,7 @@ fn fu_to_fp(val: i32, size_px: u32, upem: u16, origin: i32) -> i32 {
 // Bezier flattening
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn emit_segment(x0: i32, y0: i32, x1: i32, y1: i32, scratch: &mut RasterScratch) {
     if scratch.num_segments < MAX_SEGMENTS && y0 != y1 {
         scratch.segments[scratch.num_segments] = Segment { x0, y0, x1, y1 };
@@ -91,6 +100,7 @@ fn emit_segment(x0: i32, y0: i32, x1: i32, y1: i32, scratch: &mut RasterScratch)
     }
 }
 /// Flatten one contour of the outline (index-based to avoid borrow conflict).
+#[allow(dead_code)]
 fn flatten_contour_from_scratch(
     scratch: &mut RasterScratch,
     start: usize,
@@ -187,6 +197,7 @@ fn flatten_contour_from_scratch(
 ///
 /// Uses index-based access to avoid borrow conflicts (outline and segments
 /// live in the same RasterScratch struct).
+#[allow(dead_code)]
 fn flatten_outline_from_scratch(
     scratch: &mut RasterScratch,
     size_px: u32,
@@ -215,6 +226,7 @@ fn flatten_outline_from_scratch(
 ///
 /// Uses De Casteljau subdivision. Stops when the control point is close
 /// enough to the chord midpoint (flatness test) or at max recursion depth.
+#[allow(dead_code)]
 fn flatten_quadratic(
     x0: i32,
     y0: i32,
@@ -258,6 +270,7 @@ fn flatten_quadratic(
 }
 /// Convert an outline point to fixed-point pixel coordinates.
 /// Reads directly from scratch.outline.points[i].
+#[allow(dead_code)]
 fn outline_point_to_fp(
     scratch: &RasterScratch,
     i: usize,
@@ -279,6 +292,7 @@ fn outline_point_to_fp(
 // ---------------------------------------------------------------------------
 
 /// Add coverage for a horizontal span within one sub-scanline.
+#[allow(dead_code)]
 fn fill_coverage_span(
     coverage: &mut [u8],
     width: u32,
@@ -340,6 +354,7 @@ fn fill_coverage_span(
 /// Rasterize line segments into a coverage map using scanline sweep.
 ///
 /// Uses non-zero winding rule with 4× vertical oversampling.
+#[allow(dead_code)]
 fn rasterize_segments(scratch: &RasterScratch, coverage: &mut [u8], width: u32, height: u32) {
     let nseg = scratch.num_segments;
 

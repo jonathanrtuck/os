@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 
 use scene::{
     byte_to_line_col, layout_mono_lines, line_bytes_for_run, scroll_runs, Border, Color, Content,
-    DataRef, DoubleWriter, NodeFlags, TextRun, DOUBLE_SCENE_SIZE, NULL,
+    DataRef, DoubleWriter, NodeFlags, ShapedGlyph, TextRun, DOUBLE_SCENE_SIZE, NULL,
 };
 
 /// Well-known node indices for direct mutation.
@@ -20,6 +20,22 @@ pub const N_SHADOW: u16 = 4;
 pub const N_CONTENT: u16 = 5;
 pub const N_DOC_TEXT: u16 = 6;
 pub const N_CURSOR: u16 = 7;
+
+/// Convert raw ASCII text bytes into ShapedGlyph arrays for monospace rendering.
+///
+/// Each byte becomes a glyph with glyph_id = byte value (the compositor will
+/// map these via cmap). The advance is uniform (monospace). This bridges the
+/// old byte-based path to the new shaped glyph scene graph format.
+fn bytes_to_shaped_glyphs(text: &[u8], advance: u16) -> Vec<ShapedGlyph> {
+    text.iter()
+        .map(|&ch| ShapedGlyph {
+            glyph_id: ch as u16,
+            x_advance: advance as i16,
+            x_offset: 0,
+            y_offset: 0,
+        })
+        .collect()
+}
 
 pub struct SceneState {
     buf: &'static mut [u8],
@@ -116,16 +132,20 @@ impl SceneState {
 
             w.clear();
 
-            let title_ref = w.push_data(title_label);
-            let clock_ref = w.push_data(clock_text);
+            // Push shaped glyph arrays for title and clock.
+            let title_glyphs = bytes_to_shaped_glyphs(title_label, char_width as u16);
+            let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
+            let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width as u16);
+            let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
             // Push only visible line glyph data (scroll-filtered).
             let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
 
             for mut run in visible_runs {
                 let line_text = line_bytes_for_run(doc_text, &run);
+                let shaped = bytes_to_shaped_glyphs(line_text, char_width as u16);
 
-                run.glyphs = w.push_data(line_text);
-                run.glyph_count = line_text.len() as u16;
+                run.glyphs = w.push_shaped_glyphs(&shaped);
+                run.glyph_count = shaped.len() as u16;
 
                 final_runs.push(run);
             }
@@ -133,8 +153,8 @@ impl SceneState {
             let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
             // Build title/clock as single-run text.
             let title_run = TextRun {
-                glyphs: title_ref,
-                glyph_count: title_label.len() as u16,
+                glyphs: title_glyph_ref,
+                glyph_count: title_glyphs.len() as u16,
                 x: 0,
                 y: 0,
                 color: dc(chrome_title_color),
@@ -143,8 +163,8 @@ impl SceneState {
             };
             let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
             let clock_run = TextRun {
-                glyphs: clock_ref,
-                glyph_count: clock_text.len() as u16,
+                glyphs: clock_glyph_ref,
+                glyph_count: clock_glyphs.len() as u16,
                 x: 0,
                 y: 0,
                 color: dc(chrome_clock_color),

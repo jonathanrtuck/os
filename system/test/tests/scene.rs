@@ -1227,3 +1227,114 @@ fn mono_and_shaped_text_coexist() {
     assert_eq!(glyphs[0].glyph_id, 72);
     assert_eq!(glyphs[1].glyph_id, 101);
 }
+
+// ── Glyph ID boundary values survive scene graph round-trip ─────────
+
+#[test]
+fn shaped_glyph_boundary_ids_roundtrip() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // Boundary glyph IDs: 0 (.notdef), 1 (first real glyph), 65534 (near u16::MAX)
+    let glyphs = [
+        ShapedGlyph { glyph_id: 0, x_advance: 100, x_offset: 0, y_offset: 0 },
+        ShapedGlyph { glyph_id: 1, x_advance: 200, x_offset: -5, y_offset: 10 },
+        ShapedGlyph { glyph_id: 65534, x_advance: 300, x_offset: 50, y_offset: -20 },
+    ];
+    let dref = w.push_shaped_glyphs(&glyphs);
+    let run = TextRun {
+        glyphs: dref,
+        glyph_count: 3,
+        x: 0, y: 0,
+        color: Color::rgb(255, 255, 255),
+        advance: 0,
+        font_size: 18,
+    };
+    let (runs_ref, _count) = w.push_text_runs(&[run]);
+
+    let r = SceneReader::new(&buf);
+    let text_runs = r.text_runs(runs_ref);
+    assert_eq!(text_runs.len(), 1);
+
+    let read_glyphs = r.shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
+    assert_eq!(read_glyphs.len(), 3);
+
+    // Verify each boundary glyph ID survives exactly
+    assert_eq!(read_glyphs[0].glyph_id, 0);
+    assert_eq!(read_glyphs[0].x_advance, 100);
+    assert_eq!(read_glyphs[1].glyph_id, 1);
+    assert_eq!(read_glyphs[1].x_advance, 200);
+    assert_eq!(read_glyphs[1].x_offset, -5);
+    assert_eq!(read_glyphs[1].y_offset, 10);
+    assert_eq!(read_glyphs[2].glyph_id, 65534);
+    assert_eq!(read_glyphs[2].x_advance, 300);
+    assert_eq!(read_glyphs[2].x_offset, 50);
+    assert_eq!(read_glyphs[2].y_offset, -20);
+}
+
+// ── Monospace shaping: identical x_advance for all glyphs ───────────
+
+#[test]
+fn monospace_shaped_glyphs_uniform_advance() {
+    // Simulate what bytes_to_shaped_glyphs does in core: each byte becomes
+    // a ShapedGlyph with glyph_id = byte value and uniform advance.
+    let text = b"iiiWWW";
+    let advance: i16 = 10; // monospace uniform advance
+    let glyphs: Vec<ShapedGlyph> = text.iter().map(|&ch| ShapedGlyph {
+        glyph_id: ch as u16,
+        x_advance: advance,
+        x_offset: 0,
+        y_offset: 0,
+    }).collect();
+
+    // All 6 glyphs should have identical x_advance
+    assert_eq!(glyphs.len(), 6);
+    for g in &glyphs {
+        assert_eq!(g.x_advance, advance, "Monospace glyphs must have uniform advance");
+    }
+
+    // Push through scene graph and verify round-trip
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let dref = w.push_shaped_glyphs(&glyphs);
+
+    let r = SceneReader::new(&buf);
+    let read = r.shaped_glyphs(dref, glyphs.len() as u16);
+    assert_eq!(read.len(), 6);
+    for g in read {
+        assert_eq!(g.x_advance, advance);
+    }
+}
+
+// ── Proportional advance: W != i ────────────────────────────────────
+
+#[test]
+fn proportional_shaped_glyphs_different_advances() {
+    let mono_font = include_bytes!("../../share/source-code-pro.ttf");
+
+    // Shape 'W' and 'i' separately to verify mono font gives same advance
+    let w_shaped = shaping::shape(mono_font, "W", &[]);
+    let i_shaped = shaping::shape(mono_font, "i", &[]);
+
+    assert!(!w_shaped.is_empty(), "W should produce glyphs");
+    assert!(!i_shaped.is_empty(), "i should produce glyphs");
+
+    // For a monospace font, W and i should have the same advance
+    assert_eq!(
+        w_shaped[0].x_advance, i_shaped[0].x_advance,
+        "Monospace font: W and i must have same advance"
+    );
+
+    // For a proportional font (if available), they'd differ
+    let prop_font = include_bytes!("../../share/nunito-sans.ttf");
+    let w_prop = shaping::shape(prop_font, "W", &[]);
+    let i_prop = shaping::shape(prop_font, "i", &[]);
+
+    if !w_prop.is_empty() && !i_prop.is_empty() {
+        // Proportional font: W should have a wider advance than i
+        assert_ne!(
+            w_prop[0].x_advance, i_prop[0].x_advance,
+            "Proportional font: advance('W') != advance('i')"
+        );
+    }
+}

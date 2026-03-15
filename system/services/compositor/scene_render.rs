@@ -1,7 +1,13 @@
 //! Scene graph renderer: walks a tree of `scene::Node` and draws to a Surface.
+//!
+//! Text rendering uses shaped glyph arrays from the scene graph. Each TextRun
+//! stores an array of `ShapedGlyph` in the data buffer. The compositor reads
+//! glyph IDs and advances, rasterizes via the glyph cache (pre-populated for
+//! monospace ASCII, on-demand via LRU for other glyphs), and composites via
+//! `draw_coverage`.
 
 use drawing::{Color, GlyphCache, Surface};
-use scene::{Content, Node, NodeFlags, NodeId, TextRun, NULL};
+use scene::{Content, Node, NodeFlags, NodeId, ShapedGlyph, TextRun, NULL};
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.
 #[derive(Clone, Copy)]
@@ -193,22 +199,34 @@ fn render_node(
             let max_y = (visible.y + visible.h) as u32;
 
             for run in text_runs {
-                let glyphs: &[u8] = if run.glyphs.length > 0
-                    && (run.glyphs.offset as usize + run.glyphs.length as usize) <= graph.data.len()
+                // Read ShapedGlyph array from the data buffer.
+                let glyph_size = core::mem::size_of::<ShapedGlyph>();
+                let shaped_glyphs: &[ShapedGlyph] = if run.glyphs.length > 0
+                    && (run.glyphs.offset as usize + run.glyphs.length as usize)
+                        <= graph.data.len()
+                    && run.glyphs.length as usize >= glyph_size
                 {
-                    &graph.data[run.glyphs.offset as usize..][..run.glyphs.length as usize]
+                    let bytes = &graph.data
+                        [run.glyphs.offset as usize..][..run.glyphs.length as usize];
+                    let count = (run.glyph_count as usize)
+                        .min(bytes.len() / glyph_size);
+                    // SAFETY: ShapedGlyph is #[repr(C)], data buffer is aligned
+                    // by push_shaped_glyphs to ShapedGlyph alignment.
+                    unsafe {
+                        core::slice::from_raw_parts(
+                            bytes.as_ptr() as *const ShapedGlyph,
+                            count,
+                        )
+                    }
                 } else {
                     &[]
                 };
                 let run_color = scene_to_draw_color(run.color);
                 let cache = ctx.mono_cache;
-                let advance = if run.advance > 0 {
-                    run.advance as u32
+                let uniform_advance = if run.advance > 0 {
+                    Some(run.advance as i32)
                 } else {
-                    match cache.get(b' ') {
-                        Some((g, _)) => g.advance,
-                        None => 8,
-                    }
+                    None
                 };
                 let gx0 = text_nx + run.x as i32;
                 let gy0 = ny + run.y as i32;
@@ -219,15 +237,17 @@ fn render_node(
 
                 let mut cx = gx0;
 
-                for &ch in glyphs {
-                    if let Some((glyph, coverage)) = cache.get(ch) {
+                for sg in shaped_glyphs {
+                    // Look up glyph in the cache by its ID (as ASCII byte).
+                    // For monospace text, glyph_id == byte value (set by core).
+                    if let Some((glyph, coverage)) = cache.get(sg.glyph_id as u8) {
                         let px = cx + glyph.bearing_x;
                         let py = gy0 + (cache.ascent as i32 - glyph.bearing_y);
 
                         fb.draw_coverage(px, py, coverage, glyph.width, glyph.height, run_color);
                     }
 
-                    cx += advance as i32;
+                    cx += uniform_advance.unwrap_or(sg.x_advance as i32);
                 }
             }
         }

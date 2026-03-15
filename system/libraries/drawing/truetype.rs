@@ -2,6 +2,9 @@
 //
 // Shared types used by the scanline rasterizer (rasterizer.rs). All custom
 // font table parsing has been replaced by read-fonts (via the shaping library).
+//
+// NOTE: These types are retained for structural completeness but are no longer
+// called directly — rasterization goes through shaping::rasterize.
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -9,6 +12,7 @@
 
 /// Metrics for a single rasterized glyph.
 #[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
 pub struct GlyphMetrics {
     /// Bitmap width in pixels.
     pub width: u32,
@@ -22,6 +26,7 @@ pub struct GlyphMetrics {
     pub advance: u32,
 }
 /// Caller-provided buffer for rasterization output (1 byte per pixel coverage).
+#[allow(dead_code)]
 pub struct RasterBuffer<'a> {
     pub data: &'a mut [u8],
     pub width: u32,
@@ -38,6 +43,7 @@ const MAX_GLYPH_POINTS: usize = 512;
 const MAX_CONTOURS: usize = 64;
 
 /// Decoded glyph outline — contours of on-curve and off-curve points.
+#[allow(dead_code)]
 pub struct GlyphOutline {
     pub points: [GlyphPoint; MAX_GLYPH_POINTS],
     pub num_points: u16,
@@ -79,6 +85,7 @@ impl GlyphOutline {
 // Coordinate scaling helpers (integer only)
 // ---------------------------------------------------------------------------
 
+#[allow(dead_code)]
 fn min_usize(a: usize, b: usize) -> usize {
     if a < b {
         a
@@ -87,10 +94,12 @@ fn min_usize(a: usize, b: usize) -> usize {
     }
 }
 /// Scale a value in font units to pixels: `val * size_px / units_per_em`.
+#[allow(dead_code)]
 fn scale_fu(val: i32, size_px: u32, upem: u16) -> i32 {
     ((val as i64 * size_px as i64) / upem as i64) as i32
 }
 /// Scale and round toward positive infinity (ceil).
+#[allow(dead_code)]
 fn scale_fu_ceil(val: i32, size_px: u32, upem: u16) -> i32 {
     let n = val as i64 * size_px as i64;
     let d = upem as i64;
@@ -102,6 +111,7 @@ fn scale_fu_ceil(val: i32, size_px: u32, upem: u16) -> i32 {
     }
 }
 /// Scale and round toward negative infinity (floor).
+#[allow(dead_code)]
 fn scale_fu_floor(val: i32, size_px: u32, upem: u16) -> i32 {
     let n = val as i64 * size_px as i64;
     let d = upem as i64;
