@@ -1,8 +1,10 @@
 // LRU glyph cache — bounded, glyph-ID-keyed cache for pre-rasterized glyphs.
 //
 // Replaces the fixed 95-slot ASCII GlyphCache with a configurable-capacity
-// LRU cache keyed by (glyph_id, font_size). Supports arbitrary glyph IDs
-// (including > 127) and evicts the least-recently-used entry when full.
+// LRU cache keyed by (glyph_id, font_size, axis_hash). Supports arbitrary
+// glyph IDs (including > 127) and evicts the least-recently-used entry when
+// full. The axis_hash component ensures that different variable font axis
+// settings (e.g., wght=400 vs wght=700) are cached as separate entries.
 //
 // Implementation: entries live in a Vec with an intrusive doubly-linked list
 // for LRU ordering (head = MRU, tail = LRU). A BTreeMap provides O(log n)
@@ -11,8 +13,9 @@
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
-/// Cache key: (glyph_id, font_size).
-type CacheKey = (u16, u16);
+/// Cache key: (glyph_id, font_size, axis_hash).
+/// The axis_hash is 0 for default axis values (no variation).
+type CacheKey = (u16, u16, u32);
 
 /// Sentinel value meaning "no linked-list neighbor."
 const NONE: usize = usize::MAX;
@@ -85,25 +88,52 @@ impl LruGlyphCache {
         self.index.len()
     }
 
-    /// Look up a cached glyph by `(glyph_id, font_size)`.
+    /// Look up a cached glyph by `(glyph_id, font_size)` at default axis values.
     ///
     /// Returns a reference to the cached glyph data if present, and promotes
     /// the entry to most-recently-used. Returns `None` on cache miss.
     pub fn get(&mut self, glyph_id: u16, font_size: u16) -> Option<&LruCachedGlyph> {
-        let key = (glyph_id, font_size);
+        self.get_with_axes(glyph_id, font_size, 0)
+    }
+
+    /// Look up a cached glyph by `(glyph_id, font_size, axis_hash)`.
+    ///
+    /// The `axis_hash` distinguishes glyphs rasterized at different variable
+    /// font axis positions. Use 0 for default axis values.
+    pub fn get_with_axes(
+        &mut self,
+        glyph_id: u16,
+        font_size: u16,
+        axis_hash: u32,
+    ) -> Option<&LruCachedGlyph> {
+        let key = (glyph_id, font_size, axis_hash);
         let &idx = self.index.get(&key)?;
         self.move_to_head(idx);
         Some(&self.entries[idx].glyph)
     }
 
-    /// Insert a glyph into the cache.
+    /// Insert a glyph into the cache at default axis values.
     ///
     /// If an entry with the same `(glyph_id, font_size)` already exists, it is
     /// updated with the new data and promoted to most-recently-used. If the
     /// cache is at capacity and the key is new, the least-recently-used entry
     /// is evicted first.
     pub fn insert(&mut self, glyph_id: u16, font_size: u16, glyph: LruCachedGlyph) {
-        let key = (glyph_id, font_size);
+        self.insert_with_axes(glyph_id, font_size, 0, glyph);
+    }
+
+    /// Insert a glyph into the cache with axis value hash.
+    ///
+    /// The `axis_hash` distinguishes glyphs rasterized at different variable
+    /// font axis positions. Use 0 for default axis values.
+    pub fn insert_with_axes(
+        &mut self,
+        glyph_id: u16,
+        font_size: u16,
+        axis_hash: u32,
+        glyph: LruCachedGlyph,
+    ) {
+        let key = (glyph_id, font_size, axis_hash);
 
         // Update existing entry.
         if let Some(&idx) = self.index.get(&key) {

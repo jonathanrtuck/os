@@ -21,6 +21,7 @@ fn make_mono_text(
         color,
         advance,
         font_size,
+        axis_hash: 0,
     };
     let (runs, run_count) = w.push_text_runs(&[run]);
     Content::Text {
@@ -192,6 +193,7 @@ fn writer_text_node_round_trip() {
             let text_runs = r.text_runs(runs);
             assert_eq!(text_runs.len(), 1);
             assert_eq!(text_runs[0].font_size, 18);
+            assert_eq!(text_runs[0].axis_hash, 0);
             assert_eq!(text_runs[0].advance, 8);
             assert_eq!(r.data(text_runs[0].glyphs), text_data);
         }
@@ -216,6 +218,7 @@ fn writer_text_runs_multiple_lines() {
             color: Color::rgb(200, 200, 200),
             advance: 8,
             font_size: 16,
+            axis_hash: 0,
         },
         TextRun {
             glyphs: d2,
@@ -225,6 +228,7 @@ fn writer_text_runs_multiple_lines() {
             color: Color::rgb(200, 200, 200),
             advance: 8,
             font_size: 16,
+            axis_hash: 0,
         },
     ];
     let (runs_ref, count) = w.push_text_runs(&runs);
@@ -256,6 +260,7 @@ fn push_text_runs_round_trips_struct_fields() {
         color: Color::rgba(10, 20, 30, 40),
         advance: 12,
         font_size: 24,
+        axis_hash: 0,
     };
     let (runs_ref, count) = w.push_text_runs(&[run]);
     assert_eq!(count, 1);
@@ -266,6 +271,7 @@ fn push_text_runs_round_trips_struct_fields() {
     assert_eq!(read_runs[0].color, Color::rgba(10, 20, 30, 40));
     assert_eq!(read_runs[0].advance, 12);
     assert_eq!(read_runs[0].font_size, 24);
+    assert_eq!(read_runs[0].axis_hash, 0);
 }
 
 // ── Image content ───────────────────────────────────────────────────
@@ -953,6 +959,7 @@ fn shaped_glyph_single_run_round_trip() {
         color: Color::rgb(220, 220, 220),
         advance: 0, // 0 means per-glyph advances in ShapedGlyph
         font_size: 18,
+        axis_hash: 0,
     };
     let (runs_ref, count) = w.push_text_runs(&[run]);
 
@@ -1010,6 +1017,7 @@ fn shaped_glyph_five_nodes_varying_counts_round_trip() {
             color: Color::rgb(200, 200, 200),
             advance: 0,
             font_size: 16,
+            axis_hash: 0,
         };
         let (runs_ref, run_count) = w.push_text_runs(&[run]);
         let nid = w.alloc_node().unwrap();
@@ -1066,6 +1074,7 @@ fn shaped_glyph_boundary_ids_round_trip() {
         color: Color::rgb(255, 255, 255),
         advance: 0,
         font_size: 18,
+        axis_hash: 0,
     };
     let (runs_ref, count) = w.push_text_runs(&[run]);
     let id = w.alloc_node().unwrap();
@@ -1129,6 +1138,7 @@ fn shaped_glyph_2000_entries_fit_in_64k_data_buffer() {
             color: Color::rgb(200, 200, 200),
             advance: 0,
             font_size: 16,
+            axis_hash: 0,
         };
         let (runs_ref, count) = w.push_text_runs(&[run]);
         let nid = w.alloc_node().unwrap();
@@ -1191,6 +1201,7 @@ fn mono_and_shaped_text_coexist() {
         color: Color::rgb(200, 200, 200),
         advance: 8, // > 0 means monospace
         font_size: 16,
+        axis_hash: 0,
     };
 
     // Shaped text run (advance == 0, ShapedGlyph array)
@@ -1206,6 +1217,7 @@ fn mono_and_shaped_text_coexist() {
         color: Color::rgb(200, 200, 200),
         advance: 0, // shaped
         font_size: 18,
+        axis_hash: 0,
     };
 
     let (runs_ref, count) = w.push_text_runs(&[mono_run, shaped_run]);
@@ -1249,6 +1261,7 @@ fn shaped_glyph_boundary_ids_roundtrip() {
         color: Color::rgb(255, 255, 255),
         advance: 0,
         font_size: 18,
+        axis_hash: 0,
     };
     let (runs_ref, _count) = w.push_text_runs(&[run]);
 
@@ -1337,4 +1350,107 @@ fn proportional_shaped_glyphs_different_advances() {
             "Proportional font: advance('W') != advance('i')"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// VAL-CROSS-002: Axis values flow through scene graph (axis_hash round-trip)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn scene_text_run_axis_hash_round_trip() {
+    let mut buf = vec![0u8; SCENE_SIZE];
+    let mut w = SceneWriter::new(&mut buf);
+
+    let glyphs = [ShapedGlyph {
+        glyph_id: 72,
+        x_advance: 10,
+        x_offset: 0,
+        y_offset: 0,
+    }];
+    let glyph_ref = w.push_shaped_glyphs(&glyphs);
+
+    // Create a TextRun with non-zero axis_hash (simulating wght=700).
+    let axis_hash_700 = 0xABCD_1234u32;
+    let run = TextRun {
+        glyphs: glyph_ref,
+        glyph_count: 1,
+        x: 0,
+        y: 0,
+        color: Color::rgb(255, 255, 255),
+        advance: 10,
+        font_size: 18,
+        axis_hash: axis_hash_700,
+    };
+    let (runs_ref, count) = w.push_text_runs(&[run]);
+
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Text {
+        runs: runs_ref,
+        run_count: count,
+        _pad: [0; 2],
+    };
+    w.set_root(id);
+    w.commit();
+
+    let r = SceneReader::new(&buf);
+    let text_runs = r.text_runs(runs_ref);
+    assert_eq!(text_runs.len(), 1);
+    assert_eq!(
+        text_runs[0].axis_hash, axis_hash_700,
+        "axis_hash must round-trip through scene graph"
+    );
+}
+
+#[test]
+fn scene_text_run_different_axis_hashes_preserved() {
+    let mut buf = vec![0u8; SCENE_SIZE];
+    let mut w = SceneWriter::new(&mut buf);
+
+    let glyphs = [ShapedGlyph {
+        glyph_id: 65,
+        x_advance: 10,
+        x_offset: 0,
+        y_offset: 0,
+    }];
+
+    // Two runs with different axis hashes.
+    let glyph_ref1 = w.push_shaped_glyphs(&glyphs);
+    let glyph_ref2 = w.push_shaped_glyphs(&glyphs);
+
+    let run_400 = TextRun {
+        glyphs: glyph_ref1,
+        glyph_count: 1,
+        x: 0,
+        y: 0,
+        color: Color::rgb(255, 255, 255),
+        advance: 10,
+        font_size: 18,
+        axis_hash: 0x1111_0000,
+    };
+    let run_700 = TextRun {
+        glyphs: glyph_ref2,
+        glyph_count: 1,
+        x: 0,
+        y: 20,
+        color: Color::rgb(255, 255, 255),
+        advance: 10,
+        font_size: 18,
+        axis_hash: 0x2222_0000,
+    };
+    let (runs_ref, count) = w.push_text_runs(&[run_400, run_700]);
+
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Text {
+        runs: runs_ref,
+        run_count: count,
+        _pad: [0; 2],
+    };
+    w.set_root(id);
+    w.commit();
+
+    let r = SceneReader::new(&buf);
+    let text_runs = r.text_runs(runs_ref);
+    assert_eq!(text_runs.len(), 2);
+    assert_eq!(text_runs[0].axis_hash, 0x1111_0000);
+    assert_eq!(text_runs[1].axis_hash, 0x2222_0000);
 }

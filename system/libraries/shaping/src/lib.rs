@@ -85,3 +85,108 @@ pub fn shape(font_data: &[u8], text: &str, features: &[Feature]) -> Vec<ShapedGl
         })
         .collect()
 }
+
+/// Shape text with variable font axis settings.
+///
+/// Like `shape()`, but also applies axis variations (e.g., wght=700) via
+/// HarfRust's `Variation`/`ShaperInstance` API. Axis values are specified
+/// as `AxisValue` structs from the rasterize module.
+///
+/// # Arguments
+///
+/// * `font_data` — raw font file bytes (TrueType/OpenType variable font)
+/// * `text` — input text to shape
+/// * `features` — OpenType feature settings
+/// * `axis_values` — variable font axis settings (e.g., wght=700)
+///
+/// Returns an empty vec for empty input, unparseable fonts, or if axis
+/// values are empty (delegates to `shape()` for efficiency).
+pub fn shape_with_variations(
+    font_data: &[u8],
+    text: &str,
+    features: &[Feature],
+    axis_values: &[rasterize::AxisValue],
+) -> Vec<ShapedGlyph> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if axis_values.is_empty() {
+        return shape(font_data, text, features);
+    }
+
+    let font = match harfrust::FontRef::from_index(font_data, 0) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+
+    // Build variation strings for HarfRust.
+    let variations: Vec<harfrust::Variation> = axis_values
+        .iter()
+        .filter_map(|av| {
+            // Format as "tag=value" string and parse.
+            let tag_str = core::str::from_utf8(&av.tag).ok()?;
+            let mut buf = [0u8; 32];
+            let s = format_axis_setting(&mut buf, tag_str, av.value)?;
+            s.parse::<harfrust::Variation>().ok()
+        })
+        .collect();
+
+    let data = harfrust::ShaperData::new(&font);
+    let instance = harfrust::ShaperInstance::from_variations(&font, &variations);
+    let mut buffer = harfrust::UnicodeBuffer::new();
+
+    buffer.push_str(text);
+    buffer.guess_segment_properties();
+
+    let shaper = data.shaper(&font).instance(Some(&instance)).build();
+    let glyph_buffer = shaper.shape(buffer, features);
+    let infos = glyph_buffer.glyph_infos();
+    let positions = glyph_buffer.glyph_positions();
+
+    infos
+        .iter()
+        .zip(positions.iter())
+        .map(|(info, pos)| ShapedGlyph {
+            glyph_id: info.glyph_id as u16,
+            x_advance: pos.x_advance,
+            y_advance: pos.y_advance,
+            x_offset: pos.x_offset,
+            y_offset: pos.y_offset,
+            cluster: info.cluster,
+        })
+        .collect()
+}
+
+/// Format an axis setting as "tag=value" into a stack buffer.
+/// Returns `Some(&str)` on success, `None` if the buffer is too small.
+fn format_axis_setting<'a>(buf: &'a mut [u8], tag: &str, value: f32) -> Option<&'a str> {
+    use core::fmt::Write;
+
+    struct BufWriter<'b> {
+        buf: &'b mut [u8],
+        pos: usize,
+    }
+
+    impl<'b> Write for BufWriter<'b> {
+        fn write_str(&mut self, s: &str) -> core::fmt::Result {
+            let bytes = s.as_bytes();
+            if self.pos + bytes.len() > self.buf.len() {
+                return Err(core::fmt::Error);
+            }
+            self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
+            self.pos += bytes.len();
+            Ok(())
+        }
+    }
+
+    let mut w = BufWriter { buf, pos: 0 };
+    // Format as integer if value is a whole number, otherwise as decimal.
+    // Check if value is a whole number without using f32::floor (not available in no_std).
+    let truncated = value as i32;
+    if value == truncated as f32 {
+        write!(w, "{}={}", tag, truncated).ok()?;
+    } else {
+        write!(w, "{}={}", tag, value).ok()?;
+    }
+    core::str::from_utf8(&w.buf[..w.pos]).ok()
+}

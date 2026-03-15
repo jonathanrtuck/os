@@ -150,6 +150,9 @@ pub struct TextRun {
     pub advance: u16,
     /// Font size in pixels (selects the glyph cache).
     pub font_size: u16,
+    /// Hash of variable font axis values used for rasterization (0 = default).
+    /// Flows from core service → scene graph → compositor for glyph cache key.
+    pub axis_hash: u32,
 }
 
 /// A shaped glyph with individual positioning (proportional/shaped text).
@@ -733,6 +736,7 @@ pub fn layout_mono_lines(
             color,
             advance,
             font_size,
+            axis_hash: 0,
         });
 
         line_y = line_y.saturating_add(line_height);
@@ -755,6 +759,7 @@ pub fn layout_mono_lines(
             color,
             advance,
             font_size,
+            axis_hash: 0,
         });
     }
 

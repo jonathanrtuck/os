@@ -26,6 +26,14 @@ extern crate shaping;
 
 pub use protocol::DirtyRect;
 
+/// Compute a deterministic hash of axis values for use as a glyph cache key component.
+///
+/// The hash is computed from the axis tags and values. An empty slice produces hash 0.
+/// This delegates to `shaping::rasterize::axis_values_hash`.
+pub fn axis_values_hash(axis_values: &[shaping::rasterize::AxisValue]) -> u32 {
+    shaping::rasterize::axis_values_hash(axis_values)
+}
+
 include!("cache.rs");
 include!("gamma_tables.rs");
 include!("palette.rs");

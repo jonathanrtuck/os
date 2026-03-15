@@ -100,6 +100,15 @@ pub struct FontAxis {
     pub max_value: f32,
 }
 
+/// A user-specified axis value for variable font rendering (e.g., wght=700).
+#[derive(Debug, Clone, Copy)]
+pub struct AxisValue {
+    /// 4-byte axis tag (e.g. b"wght", b"opsz").
+    pub tag: [u8; 4],
+    /// Desired axis value in design-space units.
+    pub value: f32,
+}
+
 /// Parse all variation axes from a variable font.
 ///
 /// Returns an empty `Vec` for non-variable fonts or parse failure.
@@ -958,4 +967,383 @@ pub fn rasterize(
         bearing_y,
         advance,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Variable font axis support: rasterize with gvar deltas
+// ---------------------------------------------------------------------------
+
+/// Normalize a user-space axis value to the F2Dot14 range (-1.0 to ~+1.0)
+/// using the font's axis min/default/max.
+///
+/// - value == default → 0.0
+/// - value < default → (value - default) / (default - min)  (range [-1, 0])
+/// - value > default → (value - default) / (max - default)  (range [0, 1])
+/// - Out-of-range values are clamped to the font's axis range first.
+fn normalize_axis_value(value: f32, min: f32, default: f32, max: f32) -> f32 {
+    // Clamp to font's valid range.
+    let clamped = if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    };
+
+    if (clamped - default).abs() < f32::EPSILON {
+        0.0
+    } else if clamped < default {
+        let range = default - min;
+        if range.abs() < f32::EPSILON {
+            0.0
+        } else {
+            (clamped - default) / range
+        }
+    } else {
+        let range = max - default;
+        if range.abs() < f32::EPSILON {
+            0.0
+        } else {
+            (clamped - default) / range
+        }
+    }
+}
+
+/// Build normalized F2Dot14 coordinate array from user-space axis values.
+///
+/// Returns a Vec of F2Dot14 values, one per axis in the font's fvar table.
+/// Axes not specified in `axis_values` use the default (0.0).
+fn build_normalized_coords(
+    font_data: &[u8],
+    axis_values: &[AxisValue],
+) -> alloc::vec::Vec<read_fonts::types::F2Dot14> {
+    let font_axes = font_axes(font_data);
+    font_axes
+        .iter()
+        .map(|axis| {
+            let user_val = axis_values
+                .iter()
+                .find(|av| av.tag == axis.tag)
+                .map(|av| av.value)
+                .unwrap_or(axis.default_value);
+            let norm =
+                normalize_axis_value(user_val, axis.min_value, axis.default_value, axis.max_value);
+            read_fonts::types::F2Dot14::from_f32(norm)
+        })
+        .collect()
+}
+
+/// Extract glyph outline from a variable font at specific axis values.
+///
+/// Populates `outline` with contour points interpolated at the given axis
+/// positions using gvar deltas. Falls back to the default outline if gvar
+/// is not available.
+///
+/// Returns `(advance_width_fu, lsb_fu, upem)` on success.
+fn extract_outline_with_axes(
+    font_data: &[u8],
+    glyph_id: u16,
+    axis_values: &[AxisValue],
+    outline: &mut GlyphOutline,
+) -> Option<(u16, i16, u16)> {
+    // First, extract the default outline.
+    let (advance_fu, lsb_fu, upem) = extract_outline(font_data, glyph_id, outline)?;
+
+    if axis_values.is_empty() {
+        return Some((advance_fu, lsb_fu, upem));
+    }
+
+    let coords = build_normalized_coords(font_data, axis_values);
+    if coords.is_empty() || coords.iter().all(|c| c.to_f32().abs() < f32::EPSILON) {
+        // All at defaults — no variation needed.
+        return Some((advance_fu, lsb_fu, upem));
+    }
+
+    // Apply gvar deltas to outline points.
+    let font = FontRef::new(font_data).ok()?;
+    let gvar = match font.gvar() {
+        Ok(g) => g,
+        Err(_) => return Some((advance_fu, lsb_fu, upem)), // No gvar — use default.
+    };
+
+    let gid = read_fonts::types::GlyphId::new(glyph_id as u32);
+    let var_data = match gvar.glyph_variation_data(gid) {
+        Ok(Some(vd)) => vd,
+        _ => return Some((advance_fu, lsb_fu, upem)), // No variation data for this glyph.
+    };
+
+    let num_points = outline.num_points as usize;
+    // Accumulate deltas for each point + 4 phantom points.
+    // Phantom points: [lsb, rsb(=advance), tsb, bsb].
+    let total_points = num_points + 4;
+    let mut delta_x = alloc::vec![0i32; total_points];
+    let mut delta_y = alloc::vec![0i32; total_points];
+
+    for (tuple, scalar) in var_data.active_tuples_at(&coords) {
+        // scalar is Fixed (16.16 fixed-point). Convert to i32 bits for multiplication.
+        let scalar_bits = scalar.to_bits() as i64; // 16.16 fixed-point value
+        for td in tuple.deltas() {
+            let ix = td.position as usize;
+            if ix < total_points {
+                // Multiply delta by scalar (16.16 fixed-point), round to integer.
+                let sx = ((td.x_delta as i64 * scalar_bits + 0x8000) >> 16) as i32;
+                let sy = ((td.y_delta as i64 * scalar_bits + 0x8000) >> 16) as i32;
+                delta_x[ix] += sx;
+                delta_y[ix] += sy;
+            }
+        }
+    }
+
+    // Apply accumulated deltas to outline points.
+    for i in 0..num_points {
+        outline.points[i].x += delta_x[i];
+        outline.points[i].y += delta_y[i];
+    }
+
+    // Recompute bounding box from modified points.
+    if num_points > 0 {
+        let mut x_min = outline.points[0].x;
+        let mut y_min = outline.points[0].y;
+        let mut x_max = outline.points[0].x;
+        let mut y_max = outline.points[0].y;
+        for i in 1..num_points {
+            let p = &outline.points[i];
+            if p.x < x_min {
+                x_min = p.x;
+            }
+            if p.x > x_max {
+                x_max = p.x;
+            }
+            if p.y < y_min {
+                y_min = p.y;
+            }
+            if p.y > y_max {
+                y_max = p.y;
+            }
+        }
+        outline.x_min = x_min as i16;
+        outline.y_min = y_min as i16;
+        outline.x_max = x_max as i16;
+        outline.y_max = y_max as i16;
+    }
+
+    // Adjust advance width from phantom point deltas.
+    // Phantom point 0 (index num_points) = origin (lsb adjustment).
+    // Phantom point 1 (index num_points+1) = advance width adjustment.
+    let new_advance = advance_fu as i32 + delta_x[num_points + 1] - delta_x[num_points];
+    let new_lsb = lsb_fu as i32 + delta_x[num_points];
+
+    Some((new_advance.max(0) as u16, new_lsb as i16, upem))
+}
+
+/// Rasterize a glyph from a variable font at specific axis positions.
+///
+/// Like `rasterize()`, but applies variation (gvar) deltas for the given
+/// axis values before rasterization. Axis values are clamped to the font's
+/// declared range. Non-variable fonts or fonts without gvar data fall back
+/// to the default outline.
+///
+/// `axis_values` is a slice of `AxisValue` structs specifying design-space
+/// axis values (e.g., `AxisValue { tag: *b"wght", value: 700.0 }`).
+pub fn rasterize_with_axes(
+    font_data: &[u8],
+    glyph_id: u16,
+    size_px: u16,
+    buffer: &mut RasterBuffer,
+    scratch: &mut RasterScratch,
+    axis_values: &[AxisValue],
+) -> Option<GlyphMetrics> {
+    if axis_values.is_empty() {
+        return rasterize(font_data, glyph_id, size_px, buffer, scratch);
+    }
+
+    let size_px_u32 = size_px as u32;
+
+    let (advance_fu, lsb_fu, upem) =
+        match extract_outline_with_axes(font_data, glyph_id, axis_values, &mut scratch.outline) {
+            Some(v) => v,
+            None => {
+                // Try to get metrics even if outline is empty (space-like glyphs).
+                let font = FontRef::new(font_data).ok()?;
+                let head = font.head().ok()?;
+                let upem = head.units_per_em();
+                let hmtx = font.hmtx().ok()?;
+                let hhea = font.hhea().ok()?;
+                let num_h_metrics = hhea.number_of_h_metrics();
+
+                if glyph_id >= font.maxp().ok()?.num_glyphs() {
+                    return None;
+                }
+
+                let advance_fu = if (glyph_id as u16) < num_h_metrics {
+                    let metrics = hmtx.h_metrics();
+                    metrics.get(glyph_id as usize)?.advance.get()
+                } else {
+                    let metrics = hmtx.h_metrics();
+                    metrics.get(num_h_metrics as usize - 1)?.advance.get()
+                };
+
+                let loca = font.loca(None).ok()?;
+                let glyf = font.glyf().ok()?;
+                let gid = read_fonts::types::GlyphId::new(glyph_id as u32);
+                match loca.get_glyf(gid, &glyf) {
+                    Ok(None) => {
+                        let advance = scale_fu(advance_fu as i32, size_px_u32, upem) as u32;
+                        return Some(GlyphMetrics {
+                            width: 0,
+                            height: 0,
+                            bearing_x: 0,
+                            bearing_y: 0,
+                            advance,
+                        });
+                    }
+                    Ok(Some(_)) => return None,
+                    Err(_) => return None,
+                }
+            }
+        };
+
+    // The rest is identical to rasterize() — use the outline from scratch.
+    let x_min_fu = scratch.outline.x_min;
+    let y_min_fu = scratch.outline.y_min;
+    let x_max_fu = scratch.outline.x_max;
+    let y_max_fu = scratch.outline.y_max;
+
+    let x_min_px = scale_fu_floor(x_min_fu as i32, size_px_u32, upem);
+    let y_min_px = scale_fu_floor(y_min_fu as i32, size_px_u32, upem);
+    let x_max_px = scale_fu_ceil(x_max_fu as i32, size_px_u32, upem);
+    let y_max_px = scale_fu_ceil(y_max_fu as i32, size_px_u32, upem);
+    let _ = y_min_px;
+    let bmp_w = (x_max_px - x_min_px) as u32;
+    let bmp_h = (y_max_px - y_min_px) as u32;
+
+    if bmp_w == 0 || bmp_h == 0 {
+        let advance = scale_fu(advance_fu as i32, size_px_u32, upem) as u32;
+        return Some(GlyphMetrics {
+            width: 0,
+            height: 0,
+            bearing_x: 0,
+            bearing_y: 0,
+            advance,
+        });
+    }
+
+    if bmp_w > buffer.width || bmp_h > buffer.height {
+        return None;
+    }
+
+    let over_w = bmp_w * OVERSAMPLE_X as u32;
+    let over_total = (over_w * bmp_h) as usize;
+    let out_total = (bmp_w * bmp_h * 3) as usize;
+
+    if over_total > buffer.data.len() {
+        return None;
+    }
+
+    for b in buffer.data[..over_total].iter_mut() {
+        *b = 0;
+    }
+
+    scratch.num_segments = 0;
+    flatten_outline_from_scratch(scratch, size_px_u32, upem, x_min_px, y_max_px);
+
+    for i in 0..scratch.num_segments {
+        scratch.segments[i].x0 *= OVERSAMPLE_X;
+        scratch.segments[i].x1 *= OVERSAMPLE_X;
+    }
+
+    rasterize_segments(scratch, &mut buffer.data[..over_total], over_w, bmp_h);
+
+    // Downsample into 3-channel (RGB) subpixel coverage.
+    let samples_per_channel = (OVERSAMPLE_X / 3) as u32;
+    for row in 0..bmp_h {
+        for col in 0..bmp_w {
+            let src_base = (row * over_w + col * OVERSAMPLE_X as u32) as usize;
+            let dst_base = (row * bmp_w * 3 + col * 3) as usize;
+            let mut sum_r = 0u32;
+            for s in 0..samples_per_channel {
+                sum_r += buffer.data[src_base + s as usize] as u32;
+            }
+            let mut sum_g = 0u32;
+            for s in 0..samples_per_channel {
+                sum_g += buffer.data[src_base + samples_per_channel as usize + s as usize] as u32;
+            }
+            let mut sum_b = 0u32;
+            for s in 0..samples_per_channel {
+                sum_b +=
+                    buffer.data[src_base + 2 * samples_per_channel as usize + s as usize] as u32;
+            }
+            buffer.data[dst_base] = (sum_r / samples_per_channel) as u8;
+            buffer.data[dst_base + 1] = (sum_g / samples_per_channel) as u8;
+            buffer.data[dst_base + 2] = (sum_b / samples_per_channel) as u8;
+        }
+    }
+
+    // FIR color-fringe filter [1/4, 1/2, 1/4].
+    {
+        let stride3 = (bmp_w * 3) as usize;
+        let mut tmp = [0u8; GLYPH_MAX_W * 3];
+        for row in 0..bmp_h {
+            let row_start = (row * bmp_w * 3) as usize;
+            for i in 0..stride3 {
+                tmp[i] = buffer.data[row_start + i];
+            }
+            for i in 0..stride3 {
+                let prev = if i > 0 {
+                    tmp[i - 1] as u32
+                } else {
+                    tmp[0] as u32
+                };
+                let curr = tmp[i] as u32;
+                let next = if i + 1 < stride3 {
+                    tmp[i + 1] as u32
+                } else {
+                    tmp[stride3 - 1] as u32
+                };
+                let filtered = (prev + 2 * curr + next + 2) / 4;
+                buffer.data[row_start + i] = if filtered > 255 { 255 } else { filtered as u8 };
+            }
+        }
+    }
+
+    // Stem darkening.
+    for i in 0..out_total {
+        buffer.data[i] = STEM_DARKENING_LUT[buffer.data[i] as usize];
+    }
+
+    let advance = scale_fu(advance_fu as i32, size_px_u32, upem) as u32;
+    let bearing_x = scale_fu(lsb_fu as i32, size_px_u32, upem);
+    let bearing_y = y_max_px;
+
+    Some(GlyphMetrics {
+        width: bmp_w,
+        height: bmp_h,
+        bearing_x,
+        bearing_y,
+        advance,
+    })
+}
+
+/// Compute a deterministic hash of axis values for use as a glyph cache key component.
+///
+/// The hash is computed from the axis tags and values. An empty axis values
+/// slice produces hash 0.
+pub fn axis_values_hash(axis_values: &[AxisValue]) -> u32 {
+    if axis_values.is_empty() {
+        return 0;
+    }
+    // Simple FNV-1a-like hash.
+    let mut h: u32 = 0x811c_9dc5;
+    for av in axis_values {
+        for &b in &av.tag {
+            h ^= b as u32;
+            h = h.wrapping_mul(0x0100_0193);
+        }
+        let bits = av.value.to_bits();
+        for shift in [0, 8, 16, 24] {
+            h ^= (bits >> shift) as u32 & 0xFF;
+            h = h.wrapping_mul(0x0100_0193);
+        }
+    }
+    h
 }

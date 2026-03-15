@@ -160,6 +160,7 @@ impl SceneState {
                 color: dc(chrome_title_color),
                 advance: char_width as u16,
                 font_size,
+                axis_hash: 0,
             };
             let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
             let clock_run = TextRun {
@@ -170,6 +171,7 @@ impl SceneState {
                 color: dc(chrome_clock_color),
                 advance: char_width as u16,
                 font_size,
+                axis_hash: 0,
             };
             let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
             // Allocate well-known nodes in order (sequential IDs).

@@ -460,3 +460,276 @@ fn varfont_source_code_pro_variable_shapes_text() {
         assert!(g.x_advance > 0, "all advances should be > 0");
     }
 }
+
+// ---------------------------------------------------------------------------
+// VAL-VARFONT-002: Axis value affects glyph outlines
+// ---------------------------------------------------------------------------
+
+/// Helper: rasterize a glyph at a given weight and return total coverage sum.
+fn rasterize_at_weight(font_data: &[u8], glyph_id: u16, size_px: u16, weight: f32) -> u32 {
+    use shaping::rasterize::{AxisValue, RasterBuffer, RasterScratch};
+
+    let mut buf = vec![0u8; 48 * 6 * 48];
+    let mut scratch = Box::new(RasterScratch::zeroed());
+    let mut rb = RasterBuffer {
+        data: &mut buf,
+        width: 48,
+        height: 48,
+    };
+    let axes = [AxisValue {
+        tag: *b"wght",
+        value: weight,
+    }];
+    let metrics = shaping::rasterize::rasterize_with_axes(
+        font_data,
+        glyph_id,
+        size_px,
+        &mut rb,
+        &mut scratch,
+        &axes,
+    )
+    .expect("rasterization should succeed");
+
+    let total = (metrics.width * metrics.height * 3) as usize;
+    buf[..total].iter().map(|&b| b as u32).sum()
+}
+
+/// Helper: look up glyph ID for a character.
+fn glyph_for_char(font_data: &[u8], ch: char) -> u16 {
+    shaping::rasterize::glyph_id_for_char(font_data, ch)
+        .expect("should find glyph for character")
+}
+
+#[test]
+fn varfont_wght_400_vs_700_different_coverage() {
+    // VAL-VARFONT-002: wght=400 vs wght=700 produces measurably different coverage.
+    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
+    let cov_400 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 400.0);
+    let cov_700 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 700.0);
+
+    assert_ne!(
+        cov_400, cov_700,
+        "coverage at wght=400 ({}) must differ from wght=700 ({})",
+        cov_400, cov_700
+    );
+}
+
+#[test]
+fn varfont_wght_700_heavier_than_400() {
+    // VAL-CROSS-002: Coverage sum at wght=700 > coverage sum at wght=400.
+    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
+    let cov_400 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 400.0);
+    let cov_700 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 700.0);
+
+    assert!(
+        cov_700 > cov_400,
+        "wght=700 coverage ({}) must be > wght=400 coverage ({})",
+        cov_700, cov_400
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VAL-VARFONT-003: Interpolation at intermediate axis values
+// ---------------------------------------------------------------------------
+
+#[test]
+fn varfont_wght_550_differs_from_400_and_700() {
+    // VAL-VARFONT-003: wght=550 differs from both 400 and 700 by >5% of pixels.
+    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
+    let cov_400 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 400.0);
+    let cov_550 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 550.0);
+    let cov_700 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 700.0);
+
+    // Difference from 400.
+    let diff_400 = if cov_550 > cov_400 {
+        cov_550 - cov_400
+    } else {
+        cov_400 - cov_550
+    };
+    let pct_400 = diff_400 as f64 / cov_400.max(1) as f64 * 100.0;
+
+    // Difference from 700.
+    let diff_700 = if cov_550 > cov_700 {
+        cov_550 - cov_700
+    } else {
+        cov_700 - cov_550
+    };
+    let pct_700 = diff_700 as f64 / cov_700.max(1) as f64 * 100.0;
+
+    assert!(
+        pct_400 > 5.0,
+        "wght=550 coverage ({}) must differ from wght=400 ({}) by >5%, got {:.1}%",
+        cov_550, cov_400, pct_400
+    );
+    assert!(
+        pct_700 > 5.0,
+        "wght=550 coverage ({}) must differ from wght=700 ({}) by >5%, got {:.1}%",
+        cov_550, cov_700, pct_700
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VAL-VARFONT-002: Out-of-range axis value clamped without panic
+// ---------------------------------------------------------------------------
+
+#[test]
+fn varfont_out_of_range_wght_clamped_no_panic() {
+    // Out-of-range axis value (wght=2000) is clamped to font's max without panic.
+    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'A');
+    // Should not panic — just clamp to max.
+    let cov = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, 2000.0);
+    assert!(cov > 0, "clamped out-of-range weight should still produce coverage");
+
+    // Also test underflow (wght=0, below min).
+    let cov_low = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, 0.0);
+    assert!(
+        cov_low > 0,
+        "clamped underflow weight should still produce coverage"
+    );
+}
+
+#[test]
+fn varfont_wght_2000_equals_max() {
+    // Out-of-range wght=2000 should produce same result as max weight.
+    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
+    let axes = shaping::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let wght = axes.iter().find(|a| &a.tag == b"wght").unwrap();
+    let cov_2000 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, 2000.0);
+    let cov_max = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, wght.max_value);
+    assert_eq!(
+        cov_2000, cov_max,
+        "wght=2000 should produce same result as wght={} (font max)",
+        wght.max_value
+    );
+}
+
+// ---------------------------------------------------------------------------
+// VAL-CACHE-005: Glyph cache key includes axis values
+// ---------------------------------------------------------------------------
+
+#[test]
+fn varfont_cache_axis_values_separate_entries() {
+    // Same glyph at wght=400 and wght=700 should be cached as separate entries.
+    use drawing::{LruCachedGlyph, LruGlyphCache};
+
+    let mut cache = LruGlyphCache::new(64);
+    // Simulate caching with axis hash included in the key.
+    let glyph_400 = LruCachedGlyph {
+        width: 10,
+        height: 12,
+        bearing_x: 1,
+        bearing_y: 10,
+        advance: 8,
+        coverage: vec![100; 30],
+    };
+    let glyph_700 = LruCachedGlyph {
+        width: 12,
+        height: 14,
+        bearing_x: 1,
+        bearing_y: 12,
+        advance: 9,
+        coverage: vec![200; 30],
+    };
+
+    // Use the new axis-aware cache API.
+    let axes_400: &[shaping::rasterize::AxisValue] = &[shaping::rasterize::AxisValue {
+        tag: *b"wght",
+        value: 400.0,
+    }];
+    let axes_700: &[shaping::rasterize::AxisValue] = &[shaping::rasterize::AxisValue {
+        tag: *b"wght",
+        value: 700.0,
+    }];
+
+    let hash_400 = drawing::axis_values_hash(axes_400);
+    let hash_700 = drawing::axis_values_hash(axes_700);
+
+    cache.insert_with_axes(65, 18, hash_400, glyph_400.clone());
+    cache.insert_with_axes(65, 18, hash_700, glyph_700.clone());
+
+    // Both should be retrievable independently.
+    let r400 = cache.get_with_axes(65, 18, hash_400);
+    assert!(r400.is_some(), "wght=400 entry must be retrievable");
+    assert_eq!(r400.unwrap().coverage, vec![100u8; 30]);
+
+    let r700 = cache.get_with_axes(65, 18, hash_700);
+    assert!(r700.is_some(), "wght=700 entry must be retrievable");
+    assert_eq!(r700.unwrap().coverage, vec![200u8; 30]);
+}
+
+#[test]
+fn varfont_cache_no_axes_vs_with_axes() {
+    // Glyph cached without axis values should be different from with axis values.
+    use drawing::{LruCachedGlyph, LruGlyphCache};
+
+    let mut cache = LruGlyphCache::new(64);
+    let glyph_default = LruCachedGlyph {
+        width: 10,
+        height: 12,
+        bearing_x: 1,
+        bearing_y: 10,
+        advance: 8,
+        coverage: vec![50; 30],
+    };
+    let glyph_heavy = LruCachedGlyph {
+        width: 12,
+        height: 14,
+        bearing_x: 1,
+        bearing_y: 12,
+        advance: 9,
+        coverage: vec![150; 30],
+    };
+
+    // No axes = hash of 0.
+    cache.insert_with_axes(65, 18, 0, glyph_default.clone());
+    let axes_700: &[shaping::rasterize::AxisValue] = &[shaping::rasterize::AxisValue {
+        tag: *b"wght",
+        value: 700.0,
+    }];
+    let hash_700 = drawing::axis_values_hash(axes_700);
+    cache.insert_with_axes(65, 18, hash_700, glyph_heavy.clone());
+
+    let r_default = cache.get_with_axes(65, 18, 0);
+    assert_eq!(r_default.unwrap().coverage, vec![50u8; 30]);
+
+    let r_heavy = cache.get_with_axes(65, 18, hash_700);
+    assert_eq!(r_heavy.unwrap().coverage, vec![150u8; 30]);
+}
+
+// ---------------------------------------------------------------------------
+// Shaping with axis values (HarfRust Variation/ShaperInstance)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn varfont_shape_with_variations_produces_output() {
+    use shaping::rasterize::AxisValue;
+
+    let axes = [AxisValue {
+        tag: *b"wght",
+        value: 700.0,
+    }];
+    let glyphs = shaping::shape_with_variations(NUNITO_SANS_VARIABLE, "Hello", &[], &axes);
+    assert!(
+        glyphs.len() >= 5,
+        "shape_with_variations should produce glyphs"
+    );
+    for g in &glyphs {
+        assert!(g.x_advance > 0, "advances should be > 0");
+    }
+}
+
+#[test]
+fn varfont_shape_with_no_variations_same_as_default() {
+    // Shaping with empty axis values should match regular shape().
+    let glyphs_default = shape(NUNITO_SANS_VARIABLE, "Hello", &[]);
+    let glyphs_empty = shaping::shape_with_variations(NUNITO_SANS_VARIABLE, "Hello", &[], &[]);
+
+    assert_eq!(
+        glyphs_default.len(),
+        glyphs_empty.len(),
+        "empty variations should match default shaping"
+    );
+    for (a, b) in glyphs_default.iter().zip(glyphs_empty.iter()) {
+        assert_eq!(a.glyph_id, b.glyph_id);
+    }
+}
