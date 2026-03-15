@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 
 pub use harfrust::Feature;
 
+pub mod fallback;
 pub mod rasterize;
 
 /// A single shaped glyph with positioning information.
