@@ -856,29 +856,30 @@ pub extern "C" fn _start() -> ! {
         //
         // Priority order (most-specific first):
         // 1. context_switched → full rebuild
-        // 2. text_changed     → update_document_content (doc + cursor + sel)
-        // 3. selection_changed → update_selection
-        // 4. changed (cursor/pointer only) → update_cursor
+        // 2. text_changed     → update_document_content (+ clock if timer)
+        // 3. selection_changed → update_selection (+ clock if timer)
+        // 4. changed (cursor/pointer only) → update_cursor (+ clock if timer)
         // 5. timer_fired only → update_clock
         //
-        // When timer_fired coincides with a content/cursor change, we
-        // also update the clock via update_clock after the primary update.
+        // When timer_fired coincides with an input change, the clock
+        // is updated alongside the primary change within the same
+        // copy/swap cycle — no full rebuild needed. The clock is just
+        // another node to mark_changed alongside the document nodes.
 
         let needs_scene_update = changed || text_changed || selection_changed || timer_fired;
 
         if needs_scene_update {
-            // When timer_fired coincides with input changes, we need to
-            // update both content/cursor AND clock in a single frame.
-            // Since each targeted method does its own copy_front_to_back
-            // + swap cycle, calling two methods would produce two frames
-            // where only the second's change list is visible to the
-            // compositor. Fall back to full rebuild in these cases.
-            // The timer fires once per second, so this is rare.
-            let full_rebuild = context_switched
-                || (timer_fired && (changed || text_changed || selection_changed));
-
-            if full_rebuild {
+            // Prepare clock text if timer fired (needed by any path).
+            if timer_fired {
                 format_time_hms(clock_seconds(), &mut time_buf);
+            }
+
+            // Only context_switched requires a full rebuild. Timer+input
+            // coincidence is handled incrementally by each targeted method.
+            if context_switched {
+                if !timer_fired {
+                    format_time_hms(clock_seconds(), &mut time_buf);
+                }
 
                 scene.build_editor_scene(
                     fb_width,
@@ -911,7 +912,11 @@ pub extern "C" fn _start() -> ! {
                 // update_document_content handles doc text, cursor, and
                 // selection. Compacts the data buffer on each call so
                 // data_used stays proportional to visible content.
-                format_time_hms(clock_seconds(), &mut time_buf);
+                // When timer_fired, also marks N_CLOCK_TEXT changed so
+                // both document and clock update in one frame.
+                if !timer_fired {
+                    format_time_hms(clock_seconds(), &mut time_buf);
+                }
 
                 scene.update_document_content(
                     fb_width,
@@ -938,12 +943,14 @@ pub extern "C" fn _start() -> ! {
                     b"Text",
                     &time_buf,
                     unsafe { SCROLL_OFFSET } as i32,
+                    timer_fired,
                 );
             } else if selection_changed {
                 // Selection changed without text change (e.g., click
                 // to clear selection, shift-arrow to extend selection).
                 // Also updates cursor position in the scene graph so
                 // that click-to-reposition is immediately visible.
+                // When timer_fired, also updates clock in-place.
                 let content_y = TITLE_BAR_H + SHADOW_DEPTH;
                 let sel_content_h = fb_height.saturating_sub(content_y);
                 let scroll_lines = unsafe { SCROLL_OFFSET };
@@ -972,11 +979,17 @@ pub extern "C" fn _start() -> ! {
                     dc(drawing::TEXT_SELECTION),
                     sel_content_h,
                     scroll_px,
+                    if timer_fired {
+                        Some(&time_buf)
+                    } else {
+                        None
+                    },
                 );
             } else if changed {
                 // Cursor moved without text or selection change
                 // (e.g., arrow keys producing a MSG_CURSOR_MOVE
                 // that doesn't trigger scroll change).
+                // When timer_fired, also updates clock in-place.
                 let doc_width = fb_width.saturating_sub(2 * TEXT_INSET_X);
                 let chars_per_line = if unsafe { CHAR_W } > 0 {
                     (doc_width / unsafe { CHAR_W }).max(1)
@@ -994,10 +1007,14 @@ pub extern "C" fn _start() -> ! {
                     unsafe { CHAR_W },
                     unsafe { LINE_H },
                     scroll_px,
+                    if timer_fired {
+                        Some(&time_buf)
+                    } else {
+                        None
+                    },
                 );
             } else if timer_fired {
                 // Timer only — just update the clock text.
-                format_time_hms(clock_seconds(), &mut time_buf);
                 scene.update_clock(&time_buf);
             }
 

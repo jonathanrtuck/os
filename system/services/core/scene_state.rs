@@ -390,6 +390,10 @@ impl SceneState {
 
     /// Update only the cursor position. Zero heap allocations.
     /// Only N_CURSOR is marked changed.
+    ///
+    /// When `clock_text` is `Some`, also updates the clock glyph data
+    /// in-place and marks N_CLOCK_TEXT changed — used when a timer tick
+    /// coincides with a cursor-only change so both are updated in one frame.
     pub fn update_cursor(
         &mut self,
         cursor_pos: u32,
@@ -398,6 +402,7 @@ impl SceneState {
         char_width: u32,
         line_height: u32,
         scroll_px: i32,
+        clock_text: Option<&[u8]>,
     ) {
         let mut dw = self.double();
         if !dw.copy_front_to_back() {
@@ -417,6 +422,11 @@ impl SceneState {
             n.y = cursor_y;
 
             w.mark_changed(N_CURSOR);
+
+            // Update clock in-place if timer fired simultaneously.
+            if let Some(ct) = clock_text {
+                update_clock_inline(&mut w, ct);
+            }
         }
 
         dw.swap();
@@ -426,6 +436,10 @@ impl SceneState {
     /// to WELL_KNOWN_COUNT (removing old selection rects), updates the
     /// cursor's x/y, then allocates new selection rects. Marks N_CURSOR
     /// and all new selection nodes as changed.
+    ///
+    /// When `clock_text` is `Some`, also updates the clock glyph data
+    /// in-place and marks N_CLOCK_TEXT changed — used when a timer tick
+    /// coincides with a selection change so both are updated in one frame.
     #[allow(clippy::too_many_arguments)]
     pub fn update_selection(
         &mut self,
@@ -439,6 +453,7 @@ impl SceneState {
         sel_color: Color,
         content_h: u32,
         scroll_px: i32,
+        clock_text: Option<&[u8]>,
     ) {
         let mut dw = self.double();
         if !dw.copy_front_to_back() {
@@ -464,6 +479,11 @@ impl SceneState {
                 n.next_sibling = NULL;
             }
             w.mark_changed(N_CURSOR);
+
+            // Update clock in-place if timer fired simultaneously.
+            if let Some(ct) = clock_text {
+                update_clock_inline(&mut w, ct);
+            }
 
             // Build new selection rects if selection exists.
             let (sel_lo, sel_hi) = if sel_start <= sel_end {
@@ -497,6 +517,9 @@ impl SceneState {
     /// to visible content regardless of how many incremental updates
     /// have occurred — no fallback to full rebuild from data exhaustion.
     /// Marks N_DOC_TEXT, N_CURSOR, and any selection nodes as changed.
+    /// When `mark_clock_changed` is true, also marks N_CLOCK_TEXT as
+    /// changed — used when a timer tick coincides with a text change so
+    /// both the document and clock are updated in a single frame.
     #[allow(clippy::too_many_arguments)]
     pub fn update_document_content(
         &mut self,
@@ -524,6 +547,7 @@ impl SceneState {
         title_label: &[u8],
         clock_text: &[u8],
         scroll_y: i32,
+        mark_clock_changed: bool,
     ) {
         let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
         let scene_text_color = dc(text_color);
@@ -634,6 +658,9 @@ impl SceneState {
                 };
                 n.content_hash = fnv1a(clock_text);
             }
+            if mark_clock_changed {
+                w.mark_changed(N_CLOCK_TEXT);
+            }
 
             // Update N_DOC_TEXT content.
             {
@@ -685,6 +712,49 @@ impl SceneState {
         }
 
         dw.swap();
+    }
+}
+
+/// Update the clock text in-place within an already-open back buffer.
+/// Uses the same technique as `SceneState::update_clock`: reads the
+/// glyph DataRef from N_CLOCK_TEXT's TextRun, overwrites the shaped
+/// glyph array with new clock text bytes, and marks N_CLOCK_TEXT changed.
+///
+/// This is a building block for combining clock updates with other
+/// incremental updates (cursor, selection) in a single copy/swap cycle,
+/// avoiding the full rebuild that would otherwise be needed when a
+/// timer tick coincides with an input change.
+fn update_clock_inline(w: &mut scene::SceneWriter<'_>, clock_text: &[u8]) {
+    let clock_node = w.node(N_CLOCK_TEXT);
+    if let Content::Text { runs, .. } = clock_node.content {
+        let run_size = core::mem::size_of::<TextRun>();
+        let runs_offset = runs.offset as usize;
+        if runs_offset + run_size <= w.data_buf().len() {
+            // SAFETY: TextRun is repr(C) and the data buffer is aligned
+            // to TextRun alignment by push_text_runs.
+            let run_ptr =
+                unsafe { (w.data_buf().as_ptr() as *const u8).add(runs_offset) as *const TextRun };
+            let text_run = unsafe { core::ptr::read(run_ptr) };
+            let glyph_dref = text_run.glyphs;
+
+            // Build new glyphs from clock_text.
+            let new_glyphs = bytes_to_shaped_glyphs(clock_text, text_run.advance);
+
+            // SAFETY: ShapedGlyph is repr(C) with no padding. Clock text
+            // is always exactly 8 bytes ("HH:MM:SS"), producing 8 glyphs
+            // = 64 bytes — matching the original glyph data length.
+            let new_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    new_glyphs.as_ptr() as *const u8,
+                    new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
+                )
+            };
+
+            if w.update_data(glyph_dref, new_bytes) {
+                w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(clock_text);
+                w.mark_changed(N_CLOCK_TEXT);
+            }
+        }
     }
 }
 

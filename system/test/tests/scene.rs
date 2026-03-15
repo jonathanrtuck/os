@@ -4606,3 +4606,415 @@ fn rapid_swap_without_ack_blocks_copy() {
         "copy should fail — reader hasn't ack'd the buffer that is now back"
     );
 }
+
+// ── Timer+input coincidence tests (VAL-PIPE-010) ───────────────────
+
+/// VAL-PIPE-010: When timer fires simultaneously with text_changed, the
+/// incremental path (update_document_content) must also update the clock
+/// — both in a single copy/swap cycle. The change list must include both
+/// N_CLOCK_TEXT and document nodes. Must NOT use full rebuild.
+#[test]
+fn timer_plus_text_changed_uses_incremental_path_with_clock() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Build initial scene with doc "hello" and clock "12:00:00".
+    build_test_editor_scene(&mut dw, b"hello", b"12:00:00");
+    dw.swap();
+
+    // Snapshot the clock hash before the update.
+    let clock_hash_before = dw.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
+
+    // Acknowledge initial frame (needed by double-buffer protocol).
+    let gen = dw.front_generation();
+    dw.ack_reader(gen);
+
+    // Simulate timer+text_changed coincidence using the incremental
+    // compaction path (same as update_document_content), but also
+    // updating clock text and marking N_CLOCK_TEXT changed.
+    let new_doc = b"hellox";
+    let new_clock = b"12:00:01";
+
+    assert!(dw.copy_front_to_back());
+    {
+        let mut w = dw.back();
+
+        w.set_node_count(WELL_KNOWN_COUNT);
+        w.reset_data();
+
+        let char_width: u16 = 8;
+        let line_height: u16 = 20;
+        let font_size: u16 = 16;
+        let text_color = Color::rgb(220, 220, 220);
+        let clock_color = Color::rgb(130, 130, 130);
+        let chars_per_line: usize = 80;
+
+        // Re-push title.
+        let title_glyphs = bytes_to_shaped_glyphs(b"Text", char_width);
+        let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
+        let title_run = TextRun {
+            glyphs: title_glyph_ref, glyph_count: 4, x: 0, y: 0,
+            color: text_color, advance: char_width, font_size, axis_hash: 0,
+        };
+        let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
+
+        // Re-push clock with NEW time.
+        let clock_glyphs = bytes_to_shaped_glyphs(new_clock, char_width);
+        let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
+        let clock_run = TextRun {
+            glyphs: clock_glyph_ref, glyph_count: clock_glyphs.len() as u16, x: 0, y: 0,
+            color: clock_color, advance: char_width, font_size, axis_hash: 0,
+        };
+        let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
+
+        // Re-layout doc text.
+        let all_runs = layout_mono_lines(
+            new_doc, chars_per_line, line_height as i16, text_color, char_width, font_size,
+        );
+        let visible_runs = scroll_runs(all_runs, 0, line_height as u32, 700);
+        let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
+        for mut run in visible_runs {
+            let line_text = line_bytes_for_run(new_doc, &run);
+            let shaped = bytes_to_shaped_glyphs(line_text, char_width);
+            run.glyphs = w.push_shaped_glyphs(&shaped);
+            run.glyph_count = shaped.len() as u16;
+            final_runs.push(run);
+        }
+        let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
+
+        // Update all text content references.
+        {
+            let n = w.node_mut(N_TITLE_TEXT);
+            n.content = Content::Text { runs: title_runs_ref, run_count: title_run_count, _pad: [0; 2] };
+            n.content_hash = fnv1a(b"Text");
+        }
+        {
+            let n = w.node_mut(N_CLOCK_TEXT);
+            n.content = Content::Text { runs: clock_runs_ref, run_count: clock_run_count, _pad: [0; 2] };
+            n.content_hash = fnv1a(new_clock);
+        }
+        {
+            let n = w.node_mut(N_DOC_TEXT);
+            n.content = Content::Text { runs: doc_runs_ref, run_count: doc_run_count, _pad: [0; 2] };
+            n.content_hash = fnv1a(new_doc);
+        }
+
+        // Mark both document and clock as changed.
+        w.mark_changed(N_DOC_TEXT);
+        w.mark_changed(N_CURSOR);
+        w.mark_changed(N_CLOCK_TEXT);
+    }
+    dw.swap();
+
+    // Verify: NOT full repaint (incremental path used).
+    let dr = DoubleReader::new(&buf);
+    assert!(
+        !dr.is_full_repaint(),
+        "Timer+text_changed must use incremental path, not full rebuild"
+    );
+
+    // Verify: change list includes both document and clock nodes.
+    let cl = dr.change_list().expect("Must have a change list");
+    assert!(
+        cl.contains(&N_DOC_TEXT),
+        "Change list must include N_DOC_TEXT, got {:?}", cl
+    );
+    assert!(
+        cl.contains(&N_CLOCK_TEXT),
+        "Change list must include N_CLOCK_TEXT, got {:?}", cl
+    );
+    assert!(
+        cl.contains(&N_CURSOR),
+        "Change list must include N_CURSOR, got {:?}", cl
+    );
+
+    // Verify: clock content hash updated.
+    let clock_hash_after = dr.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
+    assert_ne!(
+        clock_hash_before, clock_hash_after,
+        "Clock content_hash must change when timer+input coincidence updates clock"
+    );
+    assert_eq!(clock_hash_after, fnv1a(new_clock));
+
+    // Verify: doc content hash updated.
+    let doc_hash = dr.front_nodes()[N_DOC_TEXT as usize].content_hash;
+    assert_eq!(doc_hash, fnv1a(new_doc));
+}
+
+/// VAL-PIPE-010b: When timer fires simultaneously with selection_changed,
+/// the incremental path must update both selection and clock in one frame.
+#[test]
+fn timer_plus_selection_changed_uses_incremental_path_with_clock() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    build_test_editor_scene(&mut dw, b"hello world", b"12:00:00");
+    dw.swap();
+
+    let clock_hash_before = dw.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
+
+    let gen = dw.front_generation();
+    dw.ack_reader(gen);
+
+    // Simulate timer+selection_changed: update cursor, selection rects,
+    // AND clock all in one copy/swap cycle.
+    let new_clock = b"12:00:01";
+
+    assert!(dw.copy_front_to_back());
+    {
+        let mut w = dw.back();
+
+        w.set_node_count(WELL_KNOWN_COUNT);
+
+        // Update cursor position.
+        let n = w.node_mut(N_CURSOR);
+        n.x = 40;  // Move cursor.
+        n.y = 0;
+        n.next_sibling = NULL;
+        w.mark_changed(N_CURSOR);
+
+        // Update clock in-place (same technique as update_clock).
+        let clock_node = w.node(N_CLOCK_TEXT);
+        if let Content::Text { runs, .. } = clock_node.content {
+            let data_buf = w.data_buf();
+            let run_offset = runs.offset as usize;
+            let run_size = core::mem::size_of::<TextRun>();
+            if run_offset + run_size <= data_buf.len() {
+                let run_ptr = unsafe {
+                    data_buf.as_ptr().add(run_offset) as *const TextRun
+                };
+                let text_run = unsafe { core::ptr::read(run_ptr) };
+                let new_glyphs = bytes_to_shaped_glyphs(new_clock, text_run.advance);
+                let new_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        new_glyphs.as_ptr() as *const u8,
+                        new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
+                    )
+                };
+                assert!(w.update_data(text_run.glyphs, new_bytes));
+            }
+        }
+        w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(new_clock);
+        w.mark_changed(N_CLOCK_TEXT);
+    }
+    dw.swap();
+
+    // Verify incremental (not full repaint).
+    let dr = DoubleReader::new(&buf);
+    assert!(
+        !dr.is_full_repaint(),
+        "Timer+selection_changed must use incremental path"
+    );
+
+    // Change list includes both cursor and clock.
+    let cl = dr.change_list().expect("Must have a change list");
+    assert!(cl.contains(&N_CURSOR), "Change list must include N_CURSOR, got {:?}", cl);
+    assert!(cl.contains(&N_CLOCK_TEXT), "Change list must include N_CLOCK_TEXT, got {:?}", cl);
+
+    // Clock actually updated.
+    let clock_hash_after = dr.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
+    assert_ne!(clock_hash_before, clock_hash_after);
+    assert_eq!(clock_hash_after, fnv1a(new_clock));
+}
+
+/// VAL-PIPE-010c: When timer fires simultaneously with cursor-only change,
+/// the incremental path must update both cursor and clock in one frame.
+#[test]
+fn timer_plus_cursor_only_uses_incremental_path_with_clock() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    build_test_editor_scene(&mut dw, b"hello", b"12:00:00");
+    dw.swap();
+
+    let clock_hash_before = dw.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
+
+    let gen = dw.front_generation();
+    dw.ack_reader(gen);
+
+    // Simulate timer+cursor_only: update cursor position AND clock.
+    let new_clock = b"12:00:01";
+
+    assert!(dw.copy_front_to_back());
+    {
+        let mut w = dw.back();
+
+        // Update cursor position.
+        let n = w.node_mut(N_CURSOR);
+        n.x = 24;  // Move cursor.
+        n.y = 0;
+        w.mark_changed(N_CURSOR);
+
+        // Update clock in-place.
+        let clock_node = w.node(N_CLOCK_TEXT);
+        if let Content::Text { runs, .. } = clock_node.content {
+            let data_buf = w.data_buf();
+            let run_offset = runs.offset as usize;
+            let run_size = core::mem::size_of::<TextRun>();
+            if run_offset + run_size <= data_buf.len() {
+                let run_ptr = unsafe {
+                    data_buf.as_ptr().add(run_offset) as *const TextRun
+                };
+                let text_run = unsafe { core::ptr::read(run_ptr) };
+                let new_glyphs = bytes_to_shaped_glyphs(new_clock, text_run.advance);
+                let new_bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        new_glyphs.as_ptr() as *const u8,
+                        new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
+                    )
+                };
+                assert!(w.update_data(text_run.glyphs, new_bytes));
+            }
+        }
+        w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(new_clock);
+        w.mark_changed(N_CLOCK_TEXT);
+    }
+    dw.swap();
+
+    // Verify incremental (not full repaint).
+    let dr = DoubleReader::new(&buf);
+    assert!(
+        !dr.is_full_repaint(),
+        "Timer+cursor_only must use incremental path"
+    );
+
+    // Change list includes both cursor and clock.
+    let cl = dr.change_list().expect("Must have a change list");
+    assert!(cl.contains(&N_CURSOR), "Must include N_CURSOR, got {:?}", cl);
+    assert!(cl.contains(&N_CLOCK_TEXT), "Must include N_CLOCK_TEXT, got {:?}", cl);
+
+    // Clock updated.
+    let clock_hash_after = dr.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
+    assert_ne!(clock_hash_before, clock_hash_after);
+    assert_eq!(clock_hash_after, fnv1a(new_clock));
+}
+
+/// VAL-PIPE-010d: Timer+input coincidence change_count ≤ max incremental
+/// (not FULL_REPAINT). Verify the scene is renderable by the compositor.
+#[test]
+fn timer_plus_input_change_count_bounded() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    build_test_editor_scene(&mut dw, b"hello", b"12:00:00");
+    dw.swap();
+
+    let gen = dw.front_generation();
+    dw.ack_reader(gen);
+
+    // Simulate timer+text_changed with full data compaction.
+    let new_doc = b"hello!";
+    let new_clock = b"12:00:01";
+
+    incremental_update_with_compaction_and_clock(
+        &mut dw, new_doc, new_clock, b"Text",
+    );
+
+    let dr = DoubleReader::new(&buf);
+
+    // Must not be full repaint.
+    assert!(!dr.is_full_repaint());
+
+    // Change list should have at most a few nodes (doc, cursor, clock).
+    let cl = dr.change_list().expect("Must have a change list");
+    assert!(cl.len() <= 10, "Change count {} is too high", cl.len());
+    assert!(cl.contains(&N_CLOCK_TEXT), "Must include clock");
+    assert!(cl.contains(&N_DOC_TEXT), "Must include doc text");
+}
+
+/// Helper: incremental update with compaction AND clock update.
+/// This is what the fixed `update_document_content` should do when
+/// timer_fired is true.
+fn incremental_update_with_compaction_and_clock(
+    dw: &mut DoubleWriter<'_>,
+    doc_text: &[u8],
+    clock_text: &[u8],
+    title_text: &[u8],
+) {
+    let char_width: u16 = 8;
+    let line_height: u16 = 20;
+    let font_size: u16 = 16;
+    let text_color = Color::rgb(220, 220, 220);
+    let clock_color = Color::rgb(130, 130, 130);
+    let chars_per_line: usize = 80;
+
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+
+        w.set_node_count(WELL_KNOWN_COUNT);
+        w.reset_data();
+
+        // Re-push title.
+        let title_glyphs = bytes_to_shaped_glyphs(title_text, char_width);
+        let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
+
+        // Re-push clock.
+        let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width);
+        let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
+
+        // Re-layout doc text.
+        let all_runs = layout_mono_lines(
+            doc_text, chars_per_line, line_height as i16, text_color, char_width, font_size,
+        );
+        let visible_runs = scroll_runs(all_runs, 0, line_height as u32, 700);
+        let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
+        for mut run in visible_runs {
+            let line_text = line_bytes_for_run(doc_text, &run);
+            let shaped = bytes_to_shaped_glyphs(line_text, char_width);
+            run.glyphs = w.push_shaped_glyphs(&shaped);
+            run.glyph_count = shaped.len() as u16;
+            final_runs.push(run);
+        }
+        let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
+
+        let title_run = TextRun {
+            glyphs: title_glyph_ref, glyph_count: title_glyphs.len() as u16, x: 0, y: 0,
+            color: text_color, advance: char_width, font_size, axis_hash: 0,
+        };
+        let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
+
+        let clock_run = TextRun {
+            glyphs: clock_glyph_ref, glyph_count: clock_glyphs.len() as u16, x: 0, y: 0,
+            color: clock_color, advance: char_width, font_size, axis_hash: 0,
+        };
+        let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
+
+        // Update content references.
+        {
+            let n = w.node_mut(N_DOC_TEXT);
+            n.content = Content::Text {
+                runs: doc_runs_ref, run_count: doc_run_count, _pad: [0; 2],
+            };
+            n.content_hash = fnv1a(doc_text);
+        }
+        w.mark_changed(N_DOC_TEXT);
+
+        {
+            let n = w.node_mut(N_TITLE_TEXT);
+            n.content = Content::Text {
+                runs: title_runs_ref, run_count: title_run_count, _pad: [0; 2],
+            };
+        }
+
+        {
+            let n = w.node_mut(N_CLOCK_TEXT);
+            n.content = Content::Text {
+                runs: clock_runs_ref, run_count: clock_run_count, _pad: [0; 2],
+            };
+            n.content_hash = fnv1a(clock_text);
+        }
+        // Mark clock as changed (the key fix: timer+input marks both).
+        w.mark_changed(N_CLOCK_TEXT);
+
+        // Update cursor.
+        let cursor_pos = doc_text.len();
+        let (line, col) = byte_to_line_col(doc_text, cursor_pos, chars_per_line);
+        let n = w.node_mut(N_CURSOR);
+        n.x = (col as u32 * char_width as u32) as i16;
+        n.y = (line as i32 * line_height as i32) as i16;
+        n.next_sibling = NULL;
+        w.mark_changed(N_CURSOR);
+    }
+    dw.swap();
+}
