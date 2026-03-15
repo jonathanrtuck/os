@@ -983,3 +983,367 @@ fn opsz_auto_empty_for_empty_data() {
         "empty font data should return empty auto-opsz axes"
     );
 }
+
+// ===========================================================================
+// VAL-WEIGHT-001: Weight correction calculation
+// ===========================================================================
+
+#[test]
+fn weight_correction_white_on_black_reduces_weight() {
+    // VAL-WEIGHT-001: Light-on-dark (white on black) should produce a
+    // correction factor < 1.0 (weight reduction to compensate for irradiation).
+    use shaping::rasterize::weight_correction_factor;
+
+    let factor = weight_correction_factor(255, 255, 255, 0, 0, 0);
+    assert!(
+        factor < 1.0,
+        "white-on-black correction factor ({:.4}) should be < 1.0",
+        factor
+    );
+}
+
+#[test]
+fn weight_correction_black_on_white_no_reduction() {
+    // VAL-WEIGHT-001: Dark-on-light (black on white) should produce a
+    // correction factor >= 1.0 (no weight reduction needed).
+    use shaping::rasterize::weight_correction_factor;
+
+    let factor = weight_correction_factor(0, 0, 0, 255, 255, 255);
+    assert!(
+        factor >= 1.0,
+        "black-on-white correction factor ({:.4}) should be >= 1.0",
+        factor
+    );
+}
+
+#[test]
+fn weight_correction_same_color_no_reduction() {
+    // Same foreground and background → no contrast → no weight change.
+    use shaping::rasterize::weight_correction_factor;
+
+    let factor = weight_correction_factor(128, 128, 128, 128, 128, 128);
+    assert!(
+        (factor - 1.0).abs() < f32::EPSILON,
+        "same fg/bg correction factor ({:.4}) should be 1.0",
+        factor
+    );
+}
+
+// ===========================================================================
+// VAL-WEIGHT-002: Continuous weight correction
+// ===========================================================================
+
+#[test]
+fn weight_correction_monotonically_decreasing_with_contrast() {
+    // VAL-WEIGHT-002: Weight correction is proportional to luminance contrast,
+    // not a binary switch. 3+ contrast levels with lighter fg than bg produce
+    // monotonically decreasing correction factor as contrast increases.
+    use shaping::rasterize::weight_correction_factor;
+
+    // Low contrast: light gray on dark gray.
+    let factor_low = weight_correction_factor(160, 160, 160, 80, 80, 80);
+    // Medium contrast: lighter gray on darker gray.
+    let factor_mid = weight_correction_factor(200, 200, 200, 40, 40, 40);
+    // High contrast: white on black.
+    let factor_high = weight_correction_factor(255, 255, 255, 0, 0, 0);
+
+    assert!(
+        factor_low < 1.0,
+        "low-contrast light-on-dark factor ({:.4}) should be < 1.0",
+        factor_low
+    );
+    assert!(
+        factor_mid < factor_low,
+        "medium-contrast factor ({:.4}) should be < low-contrast factor ({:.4})",
+        factor_mid,
+        factor_low
+    );
+    assert!(
+        factor_high < factor_mid,
+        "high-contrast factor ({:.4}) should be < medium-contrast factor ({:.4})",
+        factor_high,
+        factor_mid
+    );
+}
+
+#[test]
+fn weight_correction_five_contrast_levels_monotonic() {
+    // Additional granularity: 5 levels from minimal to maximal contrast.
+    use shaping::rasterize::weight_correction_factor;
+
+    let levels: [(u8, u8); 5] = [
+        (140, 100), // minimal contrast
+        (160, 80),  // low contrast
+        (200, 40),  // medium contrast
+        (230, 15),  // high contrast
+        (255, 0),   // maximum contrast
+    ];
+
+    let factors: Vec<f32> = levels
+        .iter()
+        .map(|&(fg, bg)| weight_correction_factor(fg, fg, fg, bg, bg, bg))
+        .collect();
+
+    for i in 1..factors.len() {
+        assert!(
+            factors[i] < factors[i - 1],
+            "factor[{}]={:.4} should be < factor[{}]={:.4} (higher contrast → more reduction)",
+            i,
+            factors[i],
+            i - 1,
+            factors[i - 1]
+        );
+    }
+}
+
+// ===========================================================================
+// VAL-WEIGHT-003: Weight correction affects rendering
+// ===========================================================================
+
+#[test]
+fn weight_correction_reduces_coverage_white_on_black() {
+    // VAL-WEIGHT-003: Rendering white-on-black text with a variable weight font
+    // and weight correction enabled produces measurably thinner glyph coverage
+    // (lower total coverage sum) than rendering without correction.
+    //
+    // We use wght=400 (Regular) as the base weight because the font's default
+    // may be at the axis minimum (200 for Nunito Sans), where a reduction would
+    // clamp to the minimum and show no difference.
+    use shaping::rasterize::{
+        font_axes, rasterize_with_axes, weight_correction_factor, AxisValue, RasterBuffer,
+        RasterScratch,
+    };
+
+    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
+
+    // Use Regular weight (400) as base weight — high enough that correction
+    // can reduce it without clamping to the axis minimum.
+    let base_weight = 400.0f32;
+
+    // Render at base weight (uncorrected).
+    let axes_base = vec![AxisValue {
+        tag: *b"wght",
+        value: base_weight,
+    }];
+    let mut buf_base = vec![0u8; 128 * 6 * 128];
+    let mut scratch_base = Box::new(RasterScratch::zeroed());
+    let mut rb_base = RasterBuffer {
+        data: &mut buf_base,
+        width: 128,
+        height: 128,
+    };
+    let metrics_base = rasterize_with_axes(
+        NUNITO_SANS_VARIABLE,
+        gid,
+        24,
+        &mut rb_base,
+        &mut scratch_base,
+        &axes_base,
+    )
+    .expect("rasterization at base weight should succeed");
+    let total_base = (metrics_base.width * metrics_base.height * 3) as usize;
+    let sum_base: u64 = buf_base[..total_base].iter().map(|&b| b as u64).sum();
+
+    // Compute corrected weight (white fg on black bg).
+    let factor = weight_correction_factor(255, 255, 255, 0, 0, 0);
+    assert!(
+        factor < 1.0,
+        "white-on-black factor ({:.4}) should be < 1.0",
+        factor
+    );
+    let corrected_weight = base_weight * factor;
+
+    // Verify corrected weight is within the font's wght axis range.
+    let axes = font_axes(NUNITO_SANS_VARIABLE);
+    let wght_axis = axes.iter().find(|a| &a.tag == b"wght").unwrap();
+    let clamped_weight = if corrected_weight < wght_axis.min_value {
+        wght_axis.min_value
+    } else if corrected_weight > wght_axis.max_value {
+        wght_axis.max_value
+    } else {
+        corrected_weight
+    };
+
+    assert!(
+        clamped_weight < base_weight,
+        "corrected weight ({:.1}) should be < base weight ({:.1})",
+        clamped_weight,
+        base_weight
+    );
+
+    // Render at corrected weight.
+    let axes_corrected = vec![AxisValue {
+        tag: *b"wght",
+        value: clamped_weight,
+    }];
+    let mut buf_corrected = vec![0u8; 128 * 6 * 128];
+    let mut scratch_corrected = Box::new(RasterScratch::zeroed());
+    let mut rb_corrected = RasterBuffer {
+        data: &mut buf_corrected,
+        width: 128,
+        height: 128,
+    };
+    let metrics_corrected = rasterize_with_axes(
+        NUNITO_SANS_VARIABLE,
+        gid,
+        24,
+        &mut rb_corrected,
+        &mut scratch_corrected,
+        &axes_corrected,
+    )
+    .expect("rasterization at corrected weight should succeed");
+    let total_corrected = (metrics_corrected.width * metrics_corrected.height * 3) as usize;
+    let sum_corrected: u64 = buf_corrected[..total_corrected]
+        .iter()
+        .map(|&b| b as u64)
+        .sum();
+
+    assert!(
+        sum_corrected < sum_base,
+        "corrected coverage sum ({}) should be < base coverage sum ({}) \
+         for white-on-black text (lighter weight = thinner strokes)",
+        sum_corrected,
+        sum_base
+    );
+}
+
+// ===========================================================================
+// VAL-WEIGHT-004: Fonts without wght axis are unaffected
+// ===========================================================================
+
+#[test]
+fn weight_correction_no_op_for_non_variable_font() {
+    // VAL-WEIGHT-004: Weight correction on a non-variable font produces
+    // no change and no error.
+    use shaping::rasterize::auto_weight_correction_axes;
+
+    let axes = auto_weight_correction_axes(
+        SOURCE_CODE_PRO,
+        255,
+        255,
+        255, // white fg
+        0,
+        0,
+        0, // black bg
+    );
+    assert!(
+        axes.is_empty(),
+        "non-variable font should return empty weight correction axes, got {} axes",
+        axes.len()
+    );
+}
+
+#[test]
+fn weight_correction_no_op_for_font_without_wght() {
+    // A font that is variable but lacks a wght axis should also be unaffected.
+    // Source Code Pro variable has only wght, so we can't easily test this
+    // without a custom font. Instead, verify that the function handles
+    // empty font data gracefully.
+    use shaping::rasterize::auto_weight_correction_axes;
+
+    let axes = auto_weight_correction_axes(
+        &[],
+        255,
+        255,
+        255, // white fg
+        0,
+        0,
+        0, // black bg
+    );
+    assert!(
+        axes.is_empty(),
+        "empty font data should return empty weight correction axes"
+    );
+}
+
+#[test]
+fn weight_correction_no_op_rendering_identical_for_static_font() {
+    // VAL-WEIGHT-004: Applying weight correction to a static font
+    // (or a font without wght axis) produces identical rendering.
+    use shaping::rasterize::{
+        auto_weight_correction_axes, rasterize, rasterize_with_axes, RasterBuffer, RasterScratch,
+    };
+
+    let gid = glyph_for_char(SOURCE_CODE_PRO, 'A');
+
+    // Render without weight correction.
+    let mut buf_without = vec![0u8; 48 * 6 * 48];
+    let mut scratch = Box::new(RasterScratch::zeroed());
+    let mut rb = RasterBuffer {
+        data: &mut buf_without,
+        width: 48,
+        height: 48,
+    };
+    let metrics_without = rasterize(SOURCE_CODE_PRO, gid, 18, &mut rb, &mut scratch)
+        .expect("rasterization without weight correction should succeed");
+    let total_without = (metrics_without.width * metrics_without.height * 3) as usize;
+    let coverage_without: Vec<u8> = buf_without[..total_without].to_vec();
+
+    // Attempt weight correction — should return empty for static font.
+    let corrected_axes =
+        auto_weight_correction_axes(SOURCE_CODE_PRO, 255, 255, 255, 0, 0, 0);
+    assert!(
+        corrected_axes.is_empty(),
+        "static font should produce empty correction axes"
+    );
+
+    // Render with (empty) correction axes.
+    let mut buf_with = vec![0u8; 48 * 6 * 48];
+    let mut scratch2 = Box::new(RasterScratch::zeroed());
+    let mut rb2 = RasterBuffer {
+        data: &mut buf_with,
+        width: 48,
+        height: 48,
+    };
+    let metrics_with = rasterize_with_axes(
+        SOURCE_CODE_PRO,
+        gid,
+        18,
+        &mut rb2,
+        &mut scratch2,
+        &corrected_axes,
+    )
+    .expect("rasterization with empty correction axes should succeed");
+    let total_with = (metrics_with.width * metrics_with.height * 3) as usize;
+
+    assert_eq!(
+        total_without, total_with,
+        "coverage size should be identical"
+    );
+    assert_eq!(
+        &coverage_without[..],
+        &buf_with[..total_with],
+        "coverage should be byte-identical for static font with and without weight correction"
+    );
+}
+
+#[test]
+fn weight_correction_dark_on_light_no_change() {
+    // When foreground is darker than background, no weight reduction occurs.
+    // The auto function should still return a wght axis value, but at default.
+    use shaping::rasterize::{auto_weight_correction_axes, font_axes};
+
+    let axes_result = auto_weight_correction_axes(
+        NUNITO_SANS_VARIABLE,
+        0,
+        0,
+        0,     // black fg
+        255,
+        255,
+        255, // white bg
+    );
+    // For dark-on-light, correction factor >= 1.0, so weight stays at default.
+    // The function may return empty (no adjustment needed) or the default weight.
+    if !axes_result.is_empty() {
+        let font_ax = font_axes(NUNITO_SANS_VARIABLE);
+        let wght = font_ax.iter().find(|a| &a.tag == b"wght").unwrap();
+        let returned_wght = axes_result.iter().find(|a| &a.tag == b"wght").unwrap();
+        assert!(
+            returned_wght.value >= wght.default_value - 0.1,
+            "dark-on-light weight ({:.1}) should be >= default ({:.1})",
+            returned_wght.value,
+            wght.default_value
+        );
+    }
+    // Either way: no error, no panic.
+}
