@@ -1,0 +1,212 @@
+{
+  "groupId": "cli-fonts-comp",
+  "testedAt": "2026-03-15T00:00:00Z",
+  "isolation": {
+    "surface": "CLI (grep, ls, file inspection)",
+    "mode": "read-only",
+    "directory": "/Users/user/Sites/os/system/"
+  },
+  "toolsUsed": ["Execute"],
+  "assertions": [
+    {
+      "id": "VAL-FONTS-004",
+      "title": "GlyphCache and LruGlyphCache in fonts after milestone 2",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -c 'pub struct GlyphCache' system/libraries/drawing/lib.rs",
+          "expected": "0 matches (not in drawing)",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -c 'pub struct LruGlyphCache' system/libraries/drawing/lib.rs",
+          "expected": "0 matches",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -c 'pub struct LruCachedGlyph' system/libraries/drawing/lib.rs",
+          "expected": "0 matches",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -c 'pub struct CachedGlyph' system/libraries/drawing/lib.rs",
+          "expected": "0 matches",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -c 'STEM_DARKENING_BOOST|STEM_DARKENING_LUT' system/libraries/drawing/lib.rs",
+          "expected": "0 matches",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -rn 'pub struct GlyphCache' system/libraries/fonts/src/",
+          "expected": "Match in fonts/src/cache.rs",
+          "observed": "fonts/src/cache.rs:92:pub struct GlyphCache {"
+        },
+        {
+          "action": "grep -rn 'pub struct LruGlyphCache' system/libraries/fonts/src/",
+          "expected": "Match in fonts/src/cache.rs",
+          "observed": "fonts/src/cache.rs:302:pub struct LruGlyphCache {"
+        },
+        {
+          "action": "grep -rn 'pub struct LruCachedGlyph' system/libraries/fonts/src/",
+          "expected": "Match in fonts/src/cache.rs",
+          "observed": "fonts/src/cache.rs:277:pub struct LruCachedGlyph {"
+        },
+        {
+          "action": "grep -rn 'pub struct CachedGlyph' system/libraries/fonts/src/",
+          "expected": "Match in fonts/src/cache.rs",
+          "observed": "fonts/src/cache.rs:78:pub struct CachedGlyph {"
+        },
+        {
+          "action": "grep -rn 'STEM_DARKENING_BOOST|STEM_DARKENING_LUT' system/libraries/fonts/src/",
+          "expected": "Matches in fonts/src/",
+          "observed": "cache.rs:17:pub const STEM_DARKENING_BOOST: u32 = 90; cache.rs:31:pub const STEM_DARKENING_LUT: [u8; 256]; rasterize.rs:241 and 244 also have copies"
+        }
+      ],
+      "evidence": {
+        "files": [
+          "drawing-consolidation/cli-fonts-comp/VAL-FONTS-004-negative.txt",
+          "drawing-consolidation/cli-fonts-comp/VAL-FONTS-004-positive.txt"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-FONTS-005",
+      "title": "Cache constants preserved",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -n 'const GLYPH_MAX_W|const GLYPH_MAX_H|const GLYPH_BUF_SIZE|const ASCII_CACHE_COUNT' system/libraries/fonts/src/cache.rs",
+          "expected": "All 4 constants present with correct values (50, 50, 95, computed)",
+          "observed": "GLYPH_MAX_W=50, GLYPH_MAX_H=50, ASCII_CACHE_COUNT=95, GLYPH_BUF_SIZE=GLYPH_MAX_W*OVERSAMPLE_X*GLYPH_MAX_H"
+        }
+      ],
+      "evidence": {
+        "files": [
+          "drawing-consolidation/cli-fonts-comp/VAL-FONTS-005.txt"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-001",
+      "title": "DamageTracker in compositor after milestone 2",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -n 'drawing::DamageTracker' system/services/compositor/*.rs",
+          "expected": "0 matches (not from drawing)",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -rn 'DamageTracker' system/services/compositor/*.rs",
+          "expected": "DamageTracker defined/used in compositor",
+          "observed": "damage.rs:14:pub struct DamageTracker; damage.rs:22:impl DamageTracker; main.rs:436:damage::DamageTracker::new(...)"
+        }
+      ],
+      "evidence": {
+        "files": [
+          "drawing-consolidation/cli-fonts-comp/VAL-COMP-001.txt"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-002",
+      "title": "CompositeSurface in compositor after milestone 2",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -n 'drawing::CompositeSurface' system/services/compositor/*.rs",
+          "expected": "0 matches (not from drawing)",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -rn 'CompositeSurface|composite_surfaces' system/services/compositor/*.rs",
+          "expected": "Defined/used in compositor",
+          "observed": "compositing.rs:15:pub struct CompositeSurface; compositing.rs:43:pub fn composite_surfaces(...); compositing.rs:128:pub fn composite_surfaces_rect(...)"
+        }
+      ],
+      "evidence": {
+        "files": [
+          "drawing-consolidation/cli-fonts-comp/VAL-COMP-002.txt"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-003",
+      "title": "Cursor/pointer utilities moved out of drawing",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -n 'drawing::render_cursor|drawing::scale_pointer_coord' system/services/compositor/*.rs system/services/core/*.rs",
+          "expected": "0 matches (not from drawing)",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -rn 'render_cursor|scale_pointer_coord' system/services/compositor/*.rs system/services/core/*.rs",
+          "expected": "Functions accessible from their consumers",
+          "observed": "compositor/cursor.rs:38:pub fn render_cursor(...); core/main.rs:862:fn scale_pointer_coord(...)"
+        }
+      ],
+      "evidence": {
+        "files": [
+          "drawing-consolidation/cli-fonts-comp/VAL-COMP-003.txt"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-004",
+      "title": "SVG types accessible without drawing",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -n 'drawing::svg_|drawing::SvgPath|drawing::SVG_FP_ONE' system/services/compositor/*.rs",
+          "expected": "0 matches (not from drawing)",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -rn 'SvgPath|svg_parse_path_into|svg_rasterize|SVG_FP_ONE' system/services/compositor/*.rs",
+          "expected": "SVG types defined/used in compositor",
+          "observed": "compositor/svg.rs defines SvgPath, svg_parse_path_into, svg_rasterize, SVG_FP_ONE; main.rs uses svg::SvgPath, svg::svg_parse_path_into, svg::svg_rasterize, svg::SVG_FP_ONE"
+        }
+      ],
+      "evidence": {
+        "files": [
+          "drawing-consolidation/cli-fonts-comp/VAL-COMP-004.txt"
+        ]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-006",
+      "title": "GlyphCache consumed from fonts not drawing",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -n 'drawing::GlyphCache' system/services/compositor/*.rs",
+          "expected": "0 matches (not from drawing)",
+          "observed": "0 matches (exit 1)"
+        },
+        {
+          "action": "grep -rn 'fonts::.*GlyphCache|GlyphCache' system/services/compositor/*.rs",
+          "expected": "GlyphCache references fonts library",
+          "observed": "main.rs uses fonts::cache::GlyphCache (lines 224-263); scene_render.rs:10 use fonts::cache::GlyphCache"
+        }
+      ],
+      "evidence": {
+        "files": [
+          "drawing-consolidation/cli-fonts-comp/VAL-COMP-006.txt"
+        ]
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 7 assertions: 7 passed, 0 failed, 0 blocked. All types successfully moved from drawing to their new locations (fonts/cache.rs, compositor/damage.rs, compositor/compositing.rs, compositor/cursor.rs, compositor/svg.rs, core/main.rs). No stale drawing:: imports remain."
+}

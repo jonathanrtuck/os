@@ -1,0 +1,154 @@
+{
+  "groupId": "cli-drawing",
+  "testedAt": "2026-03-15T10:30:00Z",
+  "isolation": {
+    "surface": "CLI (shell commands: grep, ls, file inspection)",
+    "mode": "read-only",
+    "scope": "/Users/user/Sites/os/system/"
+  },
+  "toolsUsed": ["Execute"],
+  "assertions": [
+    {
+      "id": "VAL-DRAW-002",
+      "title": "No GlyphCache types in drawing after milestone 2",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -c 'GlyphCache|LruGlyphCache|CachedGlyph|STEM_DARKENING|cache\\.rs' system/libraries/drawing/lib.rs",
+          "expected": "0 matches (exit code 1)",
+          "observed": "0 matches (exit code 1)"
+        }
+      ],
+      "evidence": {
+        "files": ["drawing-consolidation/cli-drawing/VAL-DRAW-002-grep-output.txt"],
+        "commandOutput": "grep returned 0 matches, exit code 1. No GlyphCache, LruGlyphCache, CachedGlyph, STEM_DARKENING, or cache.rs references remain in drawing/lib.rs."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-DRAW-003",
+      "title": "No TextLayout or draw_tt methods in drawing after milestone 2",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -c 'struct TextLayout|fn draw_tt' system/libraries/drawing/lib.rs",
+          "expected": "0 matches (exit code 1)",
+          "observed": "0 matches (exit code 1)"
+        }
+      ],
+      "evidence": {
+        "files": ["drawing-consolidation/cli-drawing/VAL-DRAW-003-grep-output.txt"],
+        "commandOutput": "grep returned 0 matches, exit code 1. No TextLayout struct or draw_tt* methods remain in drawing/lib.rs."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-DRAW-004",
+      "title": "No DamageTracker or CompositeSurface in drawing after milestone 2",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -c 'DamageTracker|CompositeSurface|composite_surfaces|MAX_DIRTY_RECTS' system/libraries/drawing/lib.rs",
+          "expected": "0 matches (exit code 1)",
+          "observed": "0 matches (exit code 1)"
+        }
+      ],
+      "evidence": {
+        "files": ["drawing-consolidation/cli-drawing/VAL-DRAW-004-grep-output.txt"],
+        "commandOutput": "grep returned 0 matches, exit code 1. No DamageTracker, CompositeSurface, composite_surfaces, or MAX_DIRTY_RECTS remain in drawing/lib.rs."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-DRAW-005",
+      "title": "No cursor/pointer utilities in drawing after milestone 2",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -c 'render_cursor|scale_pointer_coord|CURSOR_W|CURSOR_H' system/libraries/drawing/lib.rs",
+          "expected": "0 matches (exit code 1)",
+          "observed": "0 matches (exit code 1)"
+        }
+      ],
+      "evidence": {
+        "files": ["drawing-consolidation/cli-drawing/VAL-DRAW-005-grep-output.txt"],
+        "commandOutput": "grep returned 0 matches, exit code 1. No render_cursor, scale_pointer_coord, CURSOR_W, or CURSOR_H remain in drawing/lib.rs."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-DRAW-006",
+      "title": "No SVG or PNG decoders in drawing after milestone 2",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "ls -la system/libraries/drawing/svg.rs",
+          "expected": "No such file or directory",
+          "observed": "ls: No such file or directory"
+        },
+        {
+          "action": "ls -la system/libraries/drawing/png.rs",
+          "expected": "No such file or directory",
+          "observed": "ls: No such file or directory"
+        },
+        {
+          "action": "grep -c 'include.*svg|include.*png' system/libraries/drawing/lib.rs",
+          "expected": "0 matches (exit code 1)",
+          "observed": "0 matches (exit code 1)"
+        }
+      ],
+      "evidence": {
+        "files": ["drawing-consolidation/cli-drawing/VAL-DRAW-006-ls-output.txt"],
+        "commandOutput": "svg.rs and png.rs do not exist in drawing directory. No include! directives for svg or png in lib.rs. Only include! directives are gamma_tables.rs and palette.rs."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-DRAW-007",
+      "title": "Drawing retains only pixel primitives",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -n 'pub struct|pub enum|pub fn|pub const|pub type' system/libraries/drawing/lib.rs",
+          "expected": "Only pixel-level types: Surface, Color, PixelFormat, pixel drawing methods, gradients",
+          "observed": "Color (struct + blend_over, decode_from_bgra, rgb, rgba, WHITE/BLACK/TRANSPARENT), Surface (struct + blit, blit_blend, clear, draw_coverage, draw_hline, draw_line, draw_rect, draw_vline, fill_rect, fill_gradient_v, fill_rect_blend, get_pixel, set_pixel, blend_pixel), PixelFormat (enum + bytes_per_pixel), Xorshift32 (PRNG for gradient noise), fill_radial_gradient_noise, fill_radial_gradient_rows"
+        },
+        {
+          "action": "grep -n 'include!' system/libraries/drawing/lib.rs",
+          "expected": "Only gamma_tables.rs and palette.rs",
+          "observed": "Line 24: include!(\"gamma_tables.rs\"); Line 25: include!(\"palette.rs\");"
+        },
+        {
+          "action": "ls system/libraries/drawing/",
+          "expected": "Only lib.rs, gamma_tables.rs, palette.rs, Cargo.toml",
+          "observed": "Cargo.toml, gamma_tables.rs, lib.rs, palette.rs (4 files total)"
+        }
+      ],
+      "evidence": {
+        "files": ["drawing-consolidation/cli-drawing/VAL-DRAW-007-pub-declarations.txt"],
+        "commandOutput": "All public declarations are pixel-level primitives. No layout, caching, decoding, compositing, text, cursor, SVG, PNG, or damage tracking types present. Directory contains only 4 files: Cargo.toml, gamma_tables.rs, lib.rs, palette.rs."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-DRAW-008",
+      "title": "Drawing extern crate dependencies minimized",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "grep -n 'extern crate' system/libraries/drawing/lib.rs",
+          "expected": "Minimal or no extern crate declarations",
+          "observed": "No output (exit code 1) — zero extern crate declarations"
+        }
+      ],
+      "evidence": {
+        "files": ["drawing-consolidation/cli-drawing/VAL-DRAW-008-extern-crate.txt"],
+        "commandOutput": "Drawing library has zero extern crate declarations. Fully self-contained with no external dependencies."
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 7 assertions: 7 passed, 0 failed, 0 blocked. Drawing library has been successfully stripped to pixel-only primitives with no layout, caching, text, compositing, cursor, SVG/PNG decoder, or external dependency remnants."
+}

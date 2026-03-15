@@ -17,6 +17,8 @@ The OS boots in QEMU virt machine (aarch64, 4 SMP cores) and displays a text edi
 
 **Limitation:** QEMU's QMP sendkey does NOT route to virtio-keyboard. For input testing, must type into the QEMU display window (macOS only via AppleScript in crash.sh).
 
+**Critical:** QEMU boot requires 9p filesystem share (`-fsdev` + `virtio-9p-device`) for font loading. Without it, compositor reports 'no font data' and display is blank. Always reference `system/test-qemu.sh` for the full QEMU command with all required flags.
+
 ## Validation Concurrency
 
 **Max concurrent validators:** 5

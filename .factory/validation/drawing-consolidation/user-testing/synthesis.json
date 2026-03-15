@@ -1,0 +1,51 @@
+{
+  "milestone": "drawing-consolidation",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 28,
+    "passed": 28,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-BUILD-001",
+    "VAL-TEST-001",
+    "VAL-TEST-002",
+    "VAL-FONTS-004",
+    "VAL-FONTS-005",
+    "VAL-DRAW-002",
+    "VAL-DRAW-003",
+    "VAL-DRAW-004",
+    "VAL-DRAW-005",
+    "VAL-DRAW-006",
+    "VAL-DRAW-007",
+    "VAL-DRAW-008",
+    "VAL-CORE-005",
+    "VAL-COMP-001",
+    "VAL-COMP-002",
+    "VAL-COMP-003",
+    "VAL-COMP-004",
+    "VAL-COMP-006",
+    "VAL-VIS-001",
+    "VAL-VIS-002",
+    "VAL-VIS-003",
+    "VAL-VIS-004",
+    "VAL-VIS-005",
+    "VAL-DEAD-001",
+    "VAL-DEAD-002",
+    "VAL-DEAD-003",
+    "VAL-DEAD-004",
+    "VAL-DEAD-005"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added note about QEMU 9p share requirement for font loading in visual testing (discovered by visual flow validator)",
+      "source": "flow-report"
+    }
+  ],
+  "previousRound": null
+}
