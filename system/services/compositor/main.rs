@@ -419,6 +419,7 @@ pub extern "C" fn _start() -> ! {
     // Render first frame (always full repaint).
     {
         let dr = scene::DoubleReader::new(scene_buf);
+        let read_gen = dr.front_generation();
         let nodes = dr.front_nodes();
         let graph = scene_render::SceneGraph {
             nodes,
@@ -436,6 +437,9 @@ pub extern "C" fn _start() -> ! {
         unsafe {
             populate_prev_bounds(nodes, nodes.len(), scale_factor);
         }
+
+        // Signal that we're done reading the initial frame.
+        dr.finish_read(read_gen);
     }
 
     let initial_payload = PresentPayload {
@@ -465,6 +469,7 @@ pub extern "C" fn _start() -> ! {
         while core_ch.try_recv(&mut msg) {}
 
         let dr = scene::DoubleReader::new(scene_buf);
+        let read_gen = dr.front_generation();
         let curr_nodes = dr.front_nodes();
         let curr_count = curr_nodes.len() as u16;
 
@@ -482,6 +487,9 @@ pub extern "C" fn _start() -> ! {
             match dr.change_list() {
                 Some(changed) if changed.is_empty() => {
                     // No nodes changed — skip rendering entirely.
+                    // Signal that we're done reading so the writer can
+                    // safely reuse this buffer.
+                    dr.finish_read(read_gen);
                     prev_node_count = curr_count;
                     continue;
                 }
@@ -599,8 +607,15 @@ pub extern "C" fn _start() -> ! {
                 }
             }
         } else {
+            // No damage rects — nothing to render. Acknowledge the read.
+            dr.finish_read(read_gen);
             continue;
         }
+
+        // Done reading scene data — signal the writer that this buffer
+        // is safe to reuse. This must happen after all reads from
+        // curr_nodes and dr.front_data_buf() are complete.
+        dr.finish_read(read_gen);
 
         // Track node count for next frame's structural change detection.
         prev_node_count = curr_count;

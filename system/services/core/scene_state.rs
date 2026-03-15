@@ -326,7 +326,9 @@ impl SceneState {
     /// `build_editor_scene`.
     pub fn update_clock(&mut self, clock_text: &[u8]) {
         let mut dw = self.double();
-        dw.copy_front_to_back();
+        if !dw.copy_front_to_back() {
+            return; // Reader still on back buffer — skip update.
+        }
 
         let mut updated_ok = false;
 
@@ -398,7 +400,9 @@ impl SceneState {
         scroll_px: i32,
     ) {
         let mut dw = self.double();
-        dw.copy_front_to_back();
+        if !dw.copy_front_to_back() {
+            return; // Reader still on back buffer — skip update.
+        }
 
         {
             let mut w = dw.back();
@@ -437,7 +441,9 @@ impl SceneState {
         scroll_px: i32,
     ) {
         let mut dw = self.double();
-        dw.copy_front_to_back();
+        if !dw.copy_front_to_back() {
+            return; // Reader still on back buffer — skip update.
+        }
 
         {
             let mut w = dw.back();
@@ -534,7 +540,9 @@ impl SceneState {
         let scroll_px = scroll_lines as i32 * line_height as i32;
 
         let mut dw = self.double();
-        dw.copy_front_to_back();
+        if !dw.copy_front_to_back() {
+            return; // Reader still on back buffer — skip update.
+        }
 
         {
             let mut w = dw.back();
