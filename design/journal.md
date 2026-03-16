@@ -130,6 +130,47 @@ Adopting Vello's **architectural principles** and **API shape**, not its impleme
 4. Color emoji — would use Image content type, or OpenType COLR/CPAL layered glyphs (same pipeline).
 5. Wide gamut color (Display P3) — render backend concern, additive.
 
+### Implementation Plan — Three Phases
+
+Each phase is independently shippable and testable. No big-bang rewrite.
+
+**Phase 1: Extract** — Create render backend as wrapper around existing code. _(Mission-scale)_
+
+Goal: Decouple the compositor from rendering without changing any behavior. Pure extract-and-encapsulate refactor.
+
+- [ ] Create `libraries/render/` with `trait RenderBackend { fn render(&mut self, scene: &SceneReader, target: &mut Surface); fn dirty_rects(&self) -> ...; }`
+- [ ] Implement `CpuBackend` by **moving** tree walk, compositing, glyph rasterization, damage tracking, and transform/clip stack code from compositor into it
+- [ ] Compositor calls `backend.render()` instead of doing rendering inline
+- [ ] Scene graph format UNCHANGED. Content types UNCHANGED. Behavior UNCHANGED.
+- [ ] All existing tests pass identically. QEMU visual verification unchanged.
+
+What moves: `scene_render.rs` (~1807 lines), `damage.rs` (~81 lines), `compositing.rs` (~242 lines), `cursor.rs` (~85 lines), `svg.rs` (~795 lines), glyph cache setup. What stays in compositor: event loop (~30 lines), frame scheduler, config handling, present signaling.
+
+**Phase 2: Redesign** — Change the scene graph interface to geometric content types. _(Mission-scale)_
+
+Goal: Replace semantic content types with geometric ones. This is the real architectural change.
+
+- [ ] Change scene `Content` from `{Text, Image, Path}` to `{FillRect, Glyphs, Image}`
+- [ ] Update `CpuBackend` to handle the new content types
+- [ ] Update Core's scene builder to produce the new content types
+- [ ] Update scene library: node structure, writer/reader APIs
+- [ ] Update all scene tests. QEMU visual verification unchanged.
+
+Phase 1 means only three things change in coordination: scene library (interface), core (producer), render backend (consumer). The compositor is already decoupled.
+
+**Phase 3: Clean up** — Eliminate dead code and boundary violations. _(Smaller, may not need a full mission)_
+
+Goal: Harvest the architectural benefits. Remove everything that doesn't belong.
+
+- [ ] Remove SVG parser (icons become Glyphs via icon font)
+- [ ] Move text layout helpers out of scene library (they know about monospace — content knowledge)
+- [ ] Remove dead compositor code (should be ~30 lines after Phase 1)
+- [ ] Consolidate font handling: one parse path, core for shaping + metrics, backend for rasterization
+- [ ] Clean up surface pool, frame scheduler — decide what stays, what moves to backend
+- [ ] Final test pass, QEMU visual verification
+
+**Current status: Ready to begin Phase 1.**
+
 ---
 
 ## Rendering Pipeline Optimization (2026-03-15)
