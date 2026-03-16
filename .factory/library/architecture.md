@@ -24,13 +24,13 @@ Core (OS service) → Scene Graph (shared memory) → Compositor (pixel pump) �
 
 - **Core:** Owns document state, text layout, scene graph construction. Builds scene in logical coordinates.
 - **Scene Graph:** Double-buffered shared memory. Flat array of fixed-size repr(C) Nodes + 64KB data buffer. Change list (24 entries) for incremental updates.
-- **Compositor:** Reads scene graph, renders to framebuffer. Applies scale factor (logical→physical). Owns glyph cache and SVG rasterizer. Damage-tracked partial rendering.
+- **Compositor:** Reads scene graph, calls render backend to produce framebuffer. Content-agnostic thin event loop — no font knowledge, no content dispatch, no SVG. Owns the render backend instance.
 - **GPU Driver:** Transfers dirty rects from guest framebuffer to host display via virtio-gpu MMIO.
 
 ## Key Types
 
 - `scene::Node` — 72 bytes (verified with compile-time assertion in scene/lib.rs). Fields: tree links, geometry (i16/u16 logical), scroll_y (i32), background (Color), border (Border), corner_radius (u8), opacity (u8), shadow fields (shadow_color, shadow_offset_x/y, shadow_blur_radius, shadow_spread), flags, content_hash, content variant.
-- `scene::Content` — None | Text{runs, run_count} | Image{data, src_w, src_h} | Path{commands, fill, stroke, stroke_width}
+- `scene::Content` — None | FillRect{color} | Image{data, src_w, src_h} | Glyphs{color, glyphs DataRef, glyph_count, font_size, axis_hash}
 - `drawing::Surface` — borrowed pixel buffer with BGRA8888 format
 - `drawing::Color` — RGBA u8×4 with sRGB gamma-correct blend_over
 

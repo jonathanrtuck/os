@@ -1,0 +1,37 @@
+{
+  "featureId": "render-new-content-types",
+  "status": "pass",
+  "codeReviewIssues": [
+    {
+      "severity": "non_blocking",
+      "description": "Content::Glyphs rendering always uses ctx.mono_cache (hardcoded) and ignores the font_size and axis_hash fields (destructured with `..`). This is correct for the current single-font-size prototype but will need updating when proportional fonts or variable font sizes are introduced. The feature description says 'single-run glyph cache lookup + draw_coverage, using color/font_size/axis_hash from the Glyphs content' — font_size and axis_hash are not actually used for cache selection.",
+      "file": "system/libraries/render/scene_render.rs",
+      "line": 822
+    },
+    {
+      "severity": "non_blocking",
+      "description": "Content::FillRect renders to the full node bounds (draw_x, draw_y, nw, nh) rather than the clipped visible rect. The background fill for opaque non-rounded rects uses visible.x/visible.y/visible.w/visible.h for efficiency. FillRect should do the same to avoid overdraw. Not a correctness issue (fill_rect/fill_rect_blend clip to surface bounds internally), but a minor performance inconsistency.",
+      "file": "system/libraries/render/scene_render.rs",
+      "line": 785
+    },
+    {
+      "severity": "suggestion",
+      "description": "ShapedGlyph.x_advance comment says 'in scaled units' but the renderer applies scale_coord() which multiplies by the display scale factor. The actual meaning is 'logical pixel units' (scaled from font design units, but not yet scaled to physical pixels). The comment could be clearer to prevent confusion for future contributors.",
+      "file": "system/libraries/scene/lib.rs",
+      "line": 155
+    }
+  ],
+  "sharedStateObservations": [
+    {
+      "target": "skills",
+      "observation": "The os-worker skill (SKILL.md) still lists 'SVG → system/test/tests/svg.rs' as a test file destination under section '2. Write Tests First (TDD)'. This file was deleted as part of this feature. The skill also references 'Compositor rendering logic (render_node, damage tracking, frame scheduling, offscreen compositing)' under compositor path but the render code now lives in system/libraries/render/, not system/services/compositor/. The source file reference list says 'system/services/compositor/ — renderer, damage tracking, compositing, SVG' which is stale — SVG is gone and rendering logic is in the render library.",
+      "sourceFeature": "render-new-content-types"
+    },
+    {
+      "target": "AGENTS.md",
+      "observation": "AGENTS.md mentions 'MSG_ICON_CONFIG / MSG_IMG_ICON_CONFIG in protocol crate — may need removal or update' under IPC/Protocol Considerations. The worker's handoff doesn't mention addressing these protocol messages. If the icon rendering path is removed, these message types may be dead code in the protocol crate. This is likely out of scope for the render feature (it's a protocol/compositor boundary concern), but the AGENTS.md guidance suggests checking it.",
+      "sourceFeature": "render-new-content-types"
+    }
+  ],
+  "summary": "Clean pass. The feature correctly removes all icon fields (icon_coverage, icon_w, icon_h, icon_color, icon_node) from RenderCtx and CpuBackend, deletes svg.rs (796 lines), removes the special-case icon rendering block and icon_advance variable, and cleans stale references. The diff is purely subtractive (880 deletions, 8 insertions). FillRect and Glyphs content rendering was already implemented by the prior scene-content-types feature — the worker correctly identified this and focused on the removal work. All deletions verified: no SVG/icon/path identifiers remain anywhere in the render library or broader system. The one unsafe block has a proper SAFETY comment. Two non-blocking issues noted: (1) Glyphs rendering ignores font_size/axis_hash fields, acceptable for current single-font prototype; (2) FillRect doesn't use clipped visible rect for minor overdraw optimization. The os-worker skill has stale SVG references that should be updated."
+}
