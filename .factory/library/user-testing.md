@@ -8,7 +8,7 @@ Testing surface, validation approach, and resource cost classification.
 
 **Primary surface:** Host-side unit tests
 - Command: `cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1`
-- 1555 tests across 56 files, all on macOS aarch64
+- 1764+ tests across 56 files, all on macOS aarch64
 - Tests cover: drawing primitives, scene graph, font shaping/caching, compositor rendering, kernel modules
 
 **Secondary surface:** QEMU framebuffer screenshots
