@@ -4,6 +4,15 @@ Testing surface, validation approach, and resource cost classification.
 
 ---
 
+## Current Mission: Geometric Scene Content Types & Architecture Cleanup
+
+This mission replaces Content::{Text, Image, Path} with Content::{FillRect, Glyphs, Image} and cleans up the architecture. Key testing considerations:
+- Content type tests in scene.rs and scene_render.rs are heavily rewritten
+- SVG tests (tests/svg.rs) are removed entirely
+- QEMU visual verification must confirm pixel-identical rendering before/after
+
+---
+
 ## Validation Surface
 
 **Primary surface:** Host-side unit tests

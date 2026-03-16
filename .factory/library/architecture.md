@@ -1,5 +1,17 @@
 # Architecture
 
+## Current Mission: Geometric Scene Content Types
+
+The rendering pipeline is being redesigned. Content types change from semantic (Text, Image, Path) to geometric (FillRect, Glyphs, Image).
+
+### Content Type Field Layout
+- **FillRect:** Color (4B). Position/size from Node geometry.
+- **Glyphs:** color(4B) + DataRef(8B) + glyph_count(u16, 2B) + font_size(u16, 2B) + axis_hash(u32, 4B) = 20B. Single run per node.
+- **Image:** DataRef(8B) + src_width(u16) + src_height(u16) = 12B. Unchanged.
+
+### Node Child Ordering (N_DOC_TEXT)
+Per-line Glyphs nodes first, then N_CURSOR (FillRect), then selection rects (FillRect). set_node_count truncates both line nodes and selection rects.
+
 Architectural decisions, patterns, and constraints for the rendering pipeline.
 
 ---
