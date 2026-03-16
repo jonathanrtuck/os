@@ -166,3 +166,45 @@ Testing surface, validation approach, and resource cost classification.
 - `test/stress.sh` — headless stress test, 180s timeout
 - `test/integration.sh` — full device pipeline, 15s timeout
 - `test/crash.sh` — rapid input via AppleScript, 30s timeout
+
+## Flow Validator Guidance: Blur and Shadows (Unit Tests)
+
+**Surface:** Host-side Rust unit tests (macOS aarch64)
+**Testing tool:** Direct `cargo test` invocation with name filters
+**Isolation:** No shared mutable state — tests are pure functions on in-memory buffers.
+**Max concurrency:** 1 (cargo build lock contention)
+
+**Key test files:**
+- `system/test/tests/drawing.rs` — blur primitives, shadow compositing (VAL-BLUR-001 through VAL-BLUR-015)
+- `system/test/tests/neon.rs` — NEON SIMD blur tests (VAL-BLUR-006)
+- `system/test/tests/scene_render.rs` — compositor shadow rendering, cross-area tests (VAL-CROSS-004, VAL-CROSS-006, VAL-CROSS-011)
+- `system/test/tests/scene.rs` — shadow field preservation in double-buffer (VAL-BLUR-012 partial)
+
+**Assertion → Test mapping:**
+
+| Assertion | Test name(s) | File |
+|-----------|-------------|------|
+| VAL-BLUR-001 | `blur_single_pixel_symmetric` | drawing.rs |
+| VAL-BLUR-002 | `blur_two_pass_matches_2d_reference` | drawing.rs |
+| VAL-BLUR-003 | `blur_radius_zero_identity` | drawing.rs |
+| VAL-BLUR-004 | `blur_edge_clamping_small_surface` | drawing.rs |
+| VAL-BLUR-005 | `blur_large_radius_capped` | drawing.rs |
+| VAL-BLUR-006 | `neon_blur_matches_scalar` | neon.rs |
+| VAL-BLUR-007 | `blur_sigma_varies_spread` | drawing.rs |
+| VAL-BLUR-008 | `shadow_renders_behind_source_with_offset` | scene_render.rs |
+| VAL-BLUR-009 | `shadow_spread_expands_footprint` | scene_render.rs |
+| VAL-BLUR-010 | `shadow_zero_blur_is_hard_shadow` | scene_render.rs |
+| VAL-BLUR-011 | `shadow_color_applied_correctly` | scene_render.rs |
+| VAL-BLUR-012 | `default_shadow_fields_no_shadow` | scene_render.rs |
+| VAL-BLUR-013 | `blur_trait_defined_cpublur_implements` | drawing.rs |
+| VAL-BLUR-014 | `blur_preserves_alpha_channel` | drawing.rs |
+| VAL-BLUR-015 | `shadow_falloff_is_smooth_gradient` | scene_render.rs |
+| VAL-CROSS-004 | `fractional_scale_preserves_blur_radius` | scene_render.rs |
+| VAL-CROSS-006 | `layer_opacity_applies_to_shadow` | scene_render.rs |
+| VAL-CROSS-011 | `shadow_overflow_in_damage_rects` | scene_render.rs |
+
+**Verification approach:**
+1. Run full test suite to confirm all tests pass
+2. For each assertion, run the specific test(s) with name filter
+3. Read test source to confirm it verifies the claimed property
+4. Record pass/fail per assertion
