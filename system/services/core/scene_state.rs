@@ -327,7 +327,9 @@ impl SceneState {
                 n.y = cursor_y;
                 n.width = 2;
                 n.height = line_height as u16;
-                n.background = dc(cursor_color);
+                n.content = Content::FillRect {
+                    color: dc(cursor_color),
+                };
                 n.flags = NodeFlags::VISIBLE;
                 n.next_sibling = NULL;
             }
@@ -462,7 +464,18 @@ impl SceneState {
         {
             let mut w = dw.back();
 
-            w.set_node_count(WELL_KNOWN_COUNT);
+            // Count per-line Glyphs children under N_DOC_TEXT (stop at
+            // N_CURSOR). These must be preserved — only selection rects
+            // (allocated after cursor) are truncated.
+            let mut line_count: u16 = 0;
+            let mut child = w.node(N_DOC_TEXT).first_child;
+            while child != NULL && child != N_CURSOR {
+                line_count += 1;
+                child = w.node(child).next_sibling;
+            }
+
+            // Truncate selection rects only, keeping well-known + line nodes.
+            w.set_node_count(WELL_KNOWN_COUNT + line_count);
 
             let (cursor_line, cursor_col) =
                 byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
@@ -775,7 +788,7 @@ fn allocate_selection_rects(
             n.y = sel_y as i16;
             n.width = ((col_end - col_start) as u32 * char_width) as u16;
             n.height = line_height as u16;
-            n.background = sel_color;
+            n.content = Content::FillRect { color: sel_color };
             n.flags = NodeFlags::VISIBLE;
             n.next_sibling = NULL;
 

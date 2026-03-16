@@ -3082,3 +3082,696 @@ fn make_mono_glyphs_produces_correct_content() {
         _ => panic!("expected Glyphs content"),
     }
 }
+
+// ── Core Scene Migration Tests (VAL-CORE) ───────────────────────────
+//
+// These tests verify the scene graph structure that the core's SceneState
+// produces. Since core is a bare-metal binary (not importable), we
+// replicate the scene building logic here. The scene graph is the contract
+// between core and compositor — these tests verify that contract.
+
+/// Well-known node indices (mirroring core/scene_state.rs).
+const CORE_N_ROOT: u16 = 0;
+const CORE_N_TITLE_BAR: u16 = 1;
+const CORE_N_TITLE_TEXT: u16 = 2;
+const CORE_N_CLOCK_TEXT: u16 = 3;
+const CORE_N_SHADOW: u16 = 4;
+const CORE_N_CONTENT: u16 = 5;
+const CORE_N_DOC_TEXT: u16 = 6;
+const CORE_N_CURSOR: u16 = 7;
+const CORE_WELL_KNOWN_COUNT: u16 = 8;
+
+/// Convert raw bytes to ShapedGlyph arrays (monospace).
+fn bytes_to_shaped_glyphs_test(text: &[u8], advance: u16) -> Vec<ShapedGlyph> {
+    text.iter()
+        .map(|&ch| ShapedGlyph {
+            glyph_id: ch as u16,
+            x_advance: advance as i16,
+            x_offset: 0,
+            y_offset: 0,
+        })
+        .collect()
+}
+
+/// Build a minimal editor scene (core pattern) with per-line Glyphs,
+/// FillRect cursor, and FillRect selection rects.
+#[allow(clippy::too_many_arguments)]
+fn build_test_editor_scene(
+    w: &mut SceneWriter,
+    fb_width: u32,
+    fb_height: u32,
+    doc_text: &[u8],
+    cursor_pos: u32,
+    sel_start: u32,
+    sel_end: u32,
+    char_width: u32,
+    line_height: u32,
+    font_size: u16,
+    scroll_y: i32,
+) {
+    let text_color = Color::rgb(220, 220, 220);
+    let cursor_color = Color::rgb(200, 200, 200);
+    let sel_color = Color::rgba(80, 120, 200, 100);
+    let title_bar_h: u32 = 36;
+    let shadow_depth: u32 = 12;
+    let text_inset_x: u32 = 12;
+    let doc_width = fb_width.saturating_sub(2 * text_inset_x);
+    let chars_per_line = if char_width > 0 {
+        (doc_width / char_width).max(1) as usize
+    } else {
+        80
+    };
+
+    w.clear();
+
+    // Push glyph data for title and clock.
+    let title_glyphs = bytes_to_shaped_glyphs_test(b"Text", char_width as u16);
+    let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
+    let clock_glyphs = bytes_to_shaped_glyphs_test(b"12:34:56", char_width as u16);
+    let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
+
+    // Layout visible document lines.
+    let all_runs = layout_mono_lines(
+        doc_text,
+        chars_per_line,
+        line_height as i16,
+        text_color,
+        char_width as u16,
+        font_size,
+    );
+    let content_y = title_bar_h + shadow_depth;
+    let content_h = fb_height.saturating_sub(content_y);
+    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
+    let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, content_h as i32);
+    let scroll_px = scroll_lines as i32 * line_height as i32;
+
+    // Push line glyph data.
+    let mut line_glyph_refs: Vec<(DataRef, u16, i16)> = Vec::with_capacity(visible_runs.len());
+    for run in &visible_runs {
+        let line_text = line_bytes_for_run(doc_text, &run);
+        let shaped = bytes_to_shaped_glyphs_test(line_text, char_width as u16);
+        let glyph_ref = w.push_shaped_glyphs(&shaped);
+        line_glyph_refs.push((glyph_ref, shaped.len() as u16, run.y));
+    }
+
+    // Allocate well-known nodes.
+    for _ in 0..8 {
+        w.alloc_node().unwrap();
+    }
+
+    // N_ROOT
+    {
+        let n = w.node_mut(CORE_N_ROOT);
+        n.first_child = CORE_N_TITLE_BAR;
+        n.width = fb_width as u16;
+        n.height = fb_height as u16;
+        n.background = Color::rgb(30, 30, 30);
+        n.flags = NodeFlags::VISIBLE;
+    }
+    // N_TITLE_BAR
+    {
+        let n = w.node_mut(CORE_N_TITLE_BAR);
+        n.first_child = CORE_N_TITLE_TEXT;
+        n.next_sibling = CORE_N_SHADOW;
+        n.width = fb_width as u16;
+        n.height = title_bar_h as u16;
+        n.background = Color::rgba(20, 20, 20, 200);
+        n.flags = NodeFlags::VISIBLE;
+    }
+    // N_TITLE_TEXT — Content::Glyphs
+    {
+        let n = w.node_mut(CORE_N_TITLE_TEXT);
+        n.next_sibling = CORE_N_CLOCK_TEXT;
+        n.x = 12;
+        n.y = 8;
+        n.width = (fb_width / 2) as u16;
+        n.height = line_height as u16;
+        n.content = Content::Glyphs {
+            color: Color::rgb(180, 180, 180),
+            glyphs: title_glyph_ref,
+            glyph_count: title_glyphs.len() as u16,
+            font_size,
+            axis_hash: 0,
+        };
+        n.content_hash = fnv1a(b"Text");
+        n.flags = NodeFlags::VISIBLE;
+    }
+    // N_CLOCK_TEXT — Content::Glyphs
+    {
+        let n = w.node_mut(CORE_N_CLOCK_TEXT);
+        n.x = (fb_width - 12 - 80) as i16;
+        n.y = 8;
+        n.width = 80;
+        n.height = line_height as u16;
+        n.content = Content::Glyphs {
+            color: Color::rgb(120, 120, 120),
+            glyphs: clock_glyph_ref,
+            glyph_count: clock_glyphs.len() as u16,
+            font_size,
+            axis_hash: 0,
+        };
+        n.content_hash = fnv1a(b"12:34:56");
+        n.flags = NodeFlags::VISIBLE;
+    }
+    // N_SHADOW (placeholder)
+    {
+        let n = w.node_mut(CORE_N_SHADOW);
+        n.next_sibling = CORE_N_CONTENT;
+        n.y = title_bar_h as i16;
+        n.width = fb_width as u16;
+        n.flags = NodeFlags::VISIBLE;
+    }
+    // N_CONTENT
+    {
+        let n = w.node_mut(CORE_N_CONTENT);
+        n.first_child = CORE_N_DOC_TEXT;
+        n.next_sibling = NULL;
+        n.y = content_y as i16;
+        n.width = fb_width as u16;
+        n.height = content_h as u16;
+        n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    }
+    // N_DOC_TEXT — Content::None (pure container)
+    {
+        let n = w.node_mut(CORE_N_DOC_TEXT);
+        n.x = text_inset_x as i16;
+        n.y = 8;
+        n.width = doc_width as u16;
+        n.height = content_h as u16;
+        n.content = Content::None;
+        n.content_hash = fnv1a(doc_text);
+        n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    }
+
+    // Allocate per-line Glyphs children under N_DOC_TEXT.
+    w.node_mut(CORE_N_DOC_TEXT).first_child = NULL;
+    let mut prev_line_node: u16 = NULL;
+    for &(glyph_ref, glyph_count, y) in &line_glyph_refs {
+        if let Some(line_id) = w.alloc_node() {
+            let n = w.node_mut(line_id);
+            n.y = y;
+            n.width = doc_width as u16;
+            n.height = line_height as u16;
+            n.content = Content::Glyphs {
+                color: text_color,
+                glyphs: glyph_ref,
+                glyph_count,
+                font_size,
+                axis_hash: 0,
+            };
+            n.content_hash = fnv1a(&glyph_ref.offset.to_le_bytes());
+            n.flags = NodeFlags::VISIBLE;
+            n.next_sibling = NULL;
+            if prev_line_node == NULL {
+                w.node_mut(CORE_N_DOC_TEXT).first_child = line_id;
+            } else {
+                w.node_mut(prev_line_node).next_sibling = line_id;
+            }
+            prev_line_node = line_id;
+        }
+    }
+
+    // Link cursor after line nodes.
+    if prev_line_node == NULL {
+        w.node_mut(CORE_N_DOC_TEXT).first_child = CORE_N_CURSOR;
+    } else {
+        w.node_mut(prev_line_node).next_sibling = CORE_N_CURSOR;
+    }
+
+    // N_CURSOR — Content::FillRect
+    let (cursor_line, cursor_col) =
+        byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line);
+    let cursor_x = (cursor_col as u32 * char_width) as i16;
+    let cursor_y_px = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+    {
+        let n = w.node_mut(CORE_N_CURSOR);
+        n.x = cursor_x;
+        n.y = cursor_y_px;
+        n.width = 2;
+        n.height = line_height as u16;
+        n.content = Content::FillRect { color: cursor_color };
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = NULL;
+    }
+
+    // Selection rects (Content::FillRect).
+    let (sel_lo, sel_hi) = if sel_start <= sel_end {
+        (sel_start as usize, sel_end as usize)
+    } else {
+        (sel_end as usize, sel_start as usize)
+    };
+    if sel_lo < sel_hi {
+        let (sel_start_line, sel_start_col) = byte_to_line_col(doc_text, sel_lo, chars_per_line);
+        let (sel_end_line, sel_end_col) = byte_to_line_col(doc_text, sel_hi, chars_per_line);
+        let mut prev_sel: u16 = NULL;
+        for line in sel_start_line..=sel_end_line {
+            let col_start = if line == sel_start_line { sel_start_col } else { 0 };
+            let col_end = if line == sel_end_line { sel_end_col } else { chars_per_line };
+            if col_start >= col_end { continue; }
+            let sel_y = line as i32 * line_height as i32 - scroll_px;
+            if sel_y + line_height as i32 <= 0 || sel_y >= content_h as i32 { continue; }
+            if let Some(sel_id) = w.alloc_node() {
+                let n = w.node_mut(sel_id);
+                n.x = (col_start as u32 * char_width) as i16;
+                n.y = sel_y as i16;
+                n.width = ((col_end - col_start) as u32 * char_width) as u16;
+                n.height = line_height as u16;
+                n.content = Content::FillRect { color: sel_color };
+                n.flags = NodeFlags::VISIBLE;
+                n.next_sibling = NULL;
+                if prev_sel == NULL {
+                    w.node_mut(CORE_N_CURSOR).next_sibling = sel_id;
+                } else {
+                    w.node_mut(prev_sel).next_sibling = sel_id;
+                }
+                w.mark_changed(sel_id);
+                prev_sel = sel_id;
+            }
+        }
+    }
+
+    w.set_root(CORE_N_ROOT);
+}
+
+/// Collect child node IDs of a parent.
+fn collect_children(w: &SceneWriter, parent: u16) -> Vec<u16> {
+    let mut children = Vec::new();
+    let mut child = w.node(parent).first_child;
+    while child != NULL {
+        children.push(child);
+        child = w.node(child).next_sibling;
+    }
+    children
+}
+
+// ── VAL-CORE-001: Cursor uses Content::FillRect ─────────────────────
+
+#[test]
+fn core_cursor_uses_fillrect() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0);
+
+    let cursor = w.node(CORE_N_CURSOR);
+    match cursor.content {
+        Content::FillRect { color } => {
+            assert!(color.a > 0, "cursor color should be visible");
+        }
+        _ => panic!("N_CURSOR should have Content::FillRect, got {:?}", cursor.content),
+    }
+    assert_eq!(cursor.width, 2, "cursor width should be 2px");
+    assert_eq!(cursor.height, 20, "cursor height should be line_height");
+}
+
+// ── VAL-CORE-002: Selection rects use Content::FillRect ─────────────
+
+#[test]
+fn core_selection_rects_use_fillrect() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    // Select "ell" in "Hello\nWorld"
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 1, 4, 8, 20, 16, 0);
+
+    // Selection rects are allocated after well-known + line nodes.
+    let total = w.node_count();
+    assert!(total > CORE_WELL_KNOWN_COUNT, "should have dynamic nodes");
+
+    // Find selection rects: they follow N_CURSOR in the sibling chain.
+    let cursor = w.node(CORE_N_CURSOR);
+    let mut sel_id = cursor.next_sibling;
+    let mut sel_count = 0;
+    while sel_id != NULL {
+        let sel = w.node(sel_id);
+        match sel.content {
+            Content::FillRect { color } => {
+                assert!(color.a > 0, "selection color should be visible");
+            }
+            _ => panic!(
+                "Selection rect node {} should have Content::FillRect, got {:?}",
+                sel_id, sel.content
+            ),
+        }
+        sel_count += 1;
+        sel_id = sel.next_sibling;
+    }
+    assert!(sel_count > 0, "should have at least one selection rect");
+}
+
+#[test]
+fn core_multiline_selection_all_fillrect() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    // Select across two lines: "llo\nWor"
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 2, 9, 8, 20, 16, 0);
+
+    let mut sel_id = w.node(CORE_N_CURSOR).next_sibling;
+    let mut sel_count = 0;
+    while sel_id != NULL {
+        assert!(
+            matches!(w.node(sel_id).content, Content::FillRect { .. }),
+            "selection node {} must be FillRect",
+            sel_id
+        );
+        sel_count += 1;
+        sel_id = w.node(sel_id).next_sibling;
+    }
+    // "llo" on line 0, "Wor" on line 1 → 2 selection rects
+    assert_eq!(sel_count, 2, "should have 2 selection rects for 2-line selection");
+}
+
+// ── VAL-CORE-003: Per-line Glyphs children under N_DOC_TEXT ─────────
+
+#[test]
+fn core_doc_text_is_pure_container() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 0, 0, 8, 20, 16, 0);
+
+    let doc = w.node(CORE_N_DOC_TEXT);
+    assert!(
+        matches!(doc.content, Content::None),
+        "N_DOC_TEXT should have Content::None (pure container), got {:?}",
+        doc.content
+    );
+}
+
+#[test]
+fn core_per_line_glyphs_children() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 0, 0, 8, 20, 16, 0);
+
+    // N_DOC_TEXT children: line0, line1, then N_CURSOR
+    let children = collect_children(&w, CORE_N_DOC_TEXT);
+    // 2 lines + cursor = 3 children minimum
+    assert!(children.len() >= 3, "expected at least 3 children, got {}", children.len());
+
+    // First two should be Glyphs (one per line).
+    for &child_id in &children[..2] {
+        let n = w.node(child_id);
+        assert!(
+            matches!(n.content, Content::Glyphs { .. }),
+            "line child {} should be Content::Glyphs, got {:?}",
+            child_id, n.content
+        );
+    }
+
+    // Last well-known child should be N_CURSOR
+    assert!(
+        children.contains(&CORE_N_CURSOR),
+        "N_CURSOR should be in children list"
+    );
+}
+
+#[test]
+fn core_child_ordering_glyphs_then_cursor_then_selection() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    // "Hello\nWorld" with selection on first line
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 1, 4, 8, 20, 16, 0);
+
+    let children = collect_children(&w, CORE_N_DOC_TEXT);
+    // Expected: line0, line1, N_CURSOR, sel_rect(s)
+    assert!(children.len() >= 4, "expected at least 4 children (2 lines + cursor + selection)");
+
+    // Lines come first (before N_CURSOR).
+    let cursor_idx = children.iter().position(|&id| id == CORE_N_CURSOR).unwrap();
+    for &child_id in &children[..cursor_idx] {
+        assert!(
+            matches!(w.node(child_id).content, Content::Glyphs { .. }),
+            "children before cursor should be Glyphs"
+        );
+    }
+
+    // Selection rects come after cursor.
+    for &child_id in &children[cursor_idx + 1..] {
+        assert!(
+            matches!(w.node(child_id).content, Content::FillRect { .. }),
+            "children after cursor should be FillRect (selection)"
+        );
+    }
+}
+
+// ── VAL-CORE-004: Title and clock use Content::Glyphs ───────────────
+
+#[test]
+fn core_title_uses_glyphs() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0);
+
+    let title = w.node(CORE_N_TITLE_TEXT);
+    match title.content {
+        Content::Glyphs { glyph_count, font_size, .. } => {
+            assert_eq!(glyph_count, 4, "title 'Text' has 4 glyphs");
+            assert_eq!(font_size, 16);
+        }
+        _ => panic!("N_TITLE_TEXT should have Content::Glyphs"),
+    }
+}
+
+#[test]
+fn core_clock_uses_glyphs() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0);
+
+    let clock = w.node(CORE_N_CLOCK_TEXT);
+    match clock.content {
+        Content::Glyphs { glyph_count, font_size, .. } => {
+            assert_eq!(glyph_count, 8, "clock 'HH:MM:SS' has 8 glyphs");
+            assert_eq!(font_size, 16);
+        }
+        _ => panic!("N_CLOCK_TEXT should have Content::Glyphs"),
+    }
+}
+
+// ── VAL-CORE-006: Node budget within MAX_NODES ─────────────────────
+
+#[test]
+fn core_node_budget_extreme_content() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    // 50 visible lines + full selection: worst case scenario
+    let mut text = Vec::new();
+    for i in 0u8..50 {
+        if i > 0 { text.push(b'\n'); }
+        text.extend_from_slice(b"x");
+    }
+    // Select all text
+    let text_len = text.len() as u32;
+    build_test_editor_scene(&mut w, 1024, 768, &text, 0, 0, text_len, 8, 20, 16, 0);
+
+    let total = w.node_count();
+    assert!(
+        (total as usize) <= MAX_NODES,
+        "total nodes {} must be <= MAX_NODES ({})",
+        total, MAX_NODES
+    );
+    // Rough check: 8 well-known + ~50 line nodes + ~50 sel rects ≈ 108
+    assert!(
+        total <= 200,
+        "total nodes {} should be well under 200 for 50 lines",
+        total
+    );
+}
+
+// ── VAL-CORE-006: Empty document produces at least one Glyphs child ─
+
+#[test]
+fn core_empty_document_has_glyphs_child() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    build_test_editor_scene(&mut w, 1024, 768, b"", 0, 0, 0, 8, 20, 16, 0);
+
+    // N_DOC_TEXT should have at least one child (empty Glyphs).
+    let children = collect_children(&w, CORE_N_DOC_TEXT);
+    // At minimum: empty line Glyphs + cursor
+    assert!(children.len() >= 2, "empty doc should have at least line + cursor children");
+
+    // First child should be a Glyphs node (even if empty).
+    let first = children[0];
+    assert!(
+        matches!(w.node(first).content, Content::Glyphs { glyph_count: 0, .. }),
+        "empty doc's first line should be Glyphs with glyph_count=0"
+    );
+}
+
+// ── VAL-CORE-007: Per-line Glyphs positions and glyph data ──────────
+
+#[test]
+fn core_per_line_glyphs_correct_y_positions() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let line_h: u32 = 20;
+    build_test_editor_scene(&mut w, 1024, 768, b"aaa\nbbb\nccc", 0, 0, 0, 8, line_h, 16, 0);
+
+    let children = collect_children(&w, CORE_N_DOC_TEXT);
+    // 3 lines + cursor
+    assert!(children.len() >= 4, "3 lines + cursor");
+
+    // Check y positions: 0, 20, 40
+    assert_eq!(w.node(children[0]).y, 0);
+    assert_eq!(w.node(children[1]).y, line_h as i16);
+    assert_eq!(w.node(children[2]).y, (2 * line_h) as i16);
+}
+
+#[test]
+fn core_per_line_glyphs_correct_glyph_data() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    build_test_editor_scene(&mut w, 1024, 768, b"AB\nCD", 0, 0, 0, 8, 20, 16, 0);
+
+    let children = collect_children(&w, CORE_N_DOC_TEXT);
+    assert!(children.len() >= 3); // 2 lines + cursor
+
+    // Verify glyph data via SceneReader
+    let r = SceneReader::new(&buf);
+
+    // Line 0: "AB"
+    match r.node(children[0]).content {
+        Content::Glyphs { glyphs, glyph_count, .. } => {
+            assert_eq!(glyph_count, 2);
+            let shaped = r.shaped_glyphs(glyphs, glyph_count);
+            assert_eq!(shaped[0].glyph_id, b'A' as u16);
+            assert_eq!(shaped[1].glyph_id, b'B' as u16);
+        }
+        _ => panic!("expected Glyphs"),
+    }
+
+    // Line 1: "CD"
+    match r.node(children[1]).content {
+        Content::Glyphs { glyphs, glyph_count, .. } => {
+            assert_eq!(glyph_count, 2);
+            let shaped = r.shaped_glyphs(glyphs, glyph_count);
+            assert_eq!(shaped[0].glyph_id, b'C' as u16);
+            assert_eq!(shaped[1].glyph_id, b'D' as u16);
+        }
+        _ => panic!("expected Glyphs"),
+    }
+}
+
+#[test]
+fn core_scroll_filters_lines_correctly() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    // 10 lines, scroll down by 5, viewport ~400px = ~20 visible lines
+    let mut text = Vec::new();
+    for i in 0u8..10 {
+        if i > 0 { text.push(b'\n'); }
+        text.push(b'a' + i);
+    }
+    build_test_editor_scene(&mut w, 1024, 768, &text, 0, 0, 0, 8, 20, 16, 5);
+
+    let children = collect_children(&w, CORE_N_DOC_TEXT);
+    // With scroll=5, only lines 5-9 visible (5 lines + cursor)
+    let line_count = children.iter().take_while(|&&id| id != CORE_N_CURSOR).count();
+    assert_eq!(line_count, 5, "with scroll=5, 5 out of 10 lines visible");
+
+    // First visible line should have y=0 (scroll-adjusted)
+    assert_eq!(w.node(children[0]).y, 0, "first visible line at y=0 after scroll");
+}
+
+// ── VAL-CORE-005: Incremental update patterns ───────────────────────
+
+#[test]
+fn core_update_clock_in_place_glyph_overwrite() {
+    // Verify clock update pattern: copy forward, update data in place, mark changed
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1: build scene with clock
+    {
+        let mut w = dw.back();
+        w.clear();
+        for _ in 0..8 { w.alloc_node().unwrap(); }
+        let clock_glyphs = bytes_to_shaped_glyphs_test(b"12:34:56", 8);
+        let clock_ref = w.push_shaped_glyphs(&clock_glyphs);
+        w.node_mut(CORE_N_CLOCK_TEXT).content = Content::Glyphs {
+            color: Color::rgb(120, 120, 120),
+            glyphs: clock_ref,
+            glyph_count: 8,
+            font_size: 16,
+            axis_hash: 0,
+        };
+        w.node_mut(CORE_N_CLOCK_TEXT).content_hash = fnv1a(b"12:34:56");
+        w.set_root(CORE_N_ROOT);
+    }
+    dw.swap();
+
+    // Frame 2: copy forward, in-place clock update
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+        let clock_node = w.node(CORE_N_CLOCK_TEXT);
+        if let Content::Glyphs { glyphs, .. } = clock_node.content {
+            let new_glyphs = bytes_to_shaped_glyphs_test(b"12:35:00", 8);
+            let new_bytes = unsafe {
+                core::slice::from_raw_parts(
+                    new_glyphs.as_ptr() as *const u8,
+                    new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
+                )
+            };
+            assert!(w.update_data(glyphs, new_bytes), "clock in-place update should succeed");
+            w.node_mut(CORE_N_CLOCK_TEXT).content_hash = fnv1a(b"12:35:00");
+            w.mark_changed(CORE_N_CLOCK_TEXT);
+        } else {
+            panic!("clock should have Glyphs content");
+        }
+    }
+    dw.swap();
+
+    // Verify updated clock data.
+    let dr = DoubleReader::new(&buf);
+    let clock = &dr.front_nodes()[CORE_N_CLOCK_TEXT as usize];
+    assert_eq!(clock.content_hash, fnv1a(b"12:35:00"));
+    let cl = dr.change_list().unwrap();
+    assert!(cl.contains(&CORE_N_CLOCK_TEXT), "clock should be in change list");
+}
+
+#[test]
+fn core_update_cursor_position_only() {
+    // Verify cursor update pattern: copy forward, move cursor, mark changed
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    // Frame 1: build scene with cursor at (0,0)
+    {
+        let mut w = dw.back();
+        w.clear();
+        for _ in 0..8 { w.alloc_node().unwrap(); }
+        w.node_mut(CORE_N_CURSOR).x = 0;
+        w.node_mut(CORE_N_CURSOR).y = 0;
+        w.node_mut(CORE_N_CURSOR).width = 2;
+        w.node_mut(CORE_N_CURSOR).height = 20;
+        w.node_mut(CORE_N_CURSOR).content = Content::FillRect {
+            color: Color::rgb(200, 200, 200),
+        };
+        w.set_root(CORE_N_ROOT);
+    }
+    dw.swap();
+
+    // Frame 2: copy forward, move cursor to (40, 20)
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+        w.node_mut(CORE_N_CURSOR).x = 40;
+        w.node_mut(CORE_N_CURSOR).y = 20;
+        w.mark_changed(CORE_N_CURSOR);
+    }
+    dw.swap();
+
+    // Verify cursor position and content preserved.
+    let dr = DoubleReader::new(&buf);
+    let cursor = &dr.front_nodes()[CORE_N_CURSOR as usize];
+    assert_eq!(cursor.x, 40);
+    assert_eq!(cursor.y, 20);
+    assert!(
+        matches!(cursor.content, Content::FillRect { .. }),
+        "cursor should still be FillRect after position update"
+    );
+    let cl = dr.change_list().unwrap();
+    assert!(cl.contains(&CORE_N_CURSOR), "cursor should be in change list");
+    // Only cursor should be changed (no line nodes affected).
+    assert_eq!(cl.len(), 1, "only cursor should be in change list");
+}
