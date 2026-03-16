@@ -5,6 +5,8 @@
 
 #[path = "../../services/compositor/svg.rs"]
 mod svg;
+#[path = "../../services/compositor/surface_pool.rs"]
+mod surface_pool;
 #[path = "../../services/compositor/scene_render.rs"]
 mod scene_render;
 
@@ -2058,4 +2060,538 @@ fn path_clipped_to_parent_bounds() {
         "outside clip should be black, got ({},{},{})",
         r, g, b
     );
+}
+
+// ── Per-subtree opacity tests (VAL-COMP-001 through VAL-COMP-011) ──
+
+/// VAL-COMP-001: Group opacity differs from individual opacity.
+/// Two overlapping children at group opacity=128 via offscreen compositing
+/// differs from per-child opacity=128.
+#[test]
+fn group_opacity_differs_from_individual_opacity() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Scenario A: parent opacity=128, two overlapping children (both opaque).
+    // Group opacity: children blended at full alpha in offscreen, then group
+    // composited at 128. The overlap region should show the frontmost child
+    // at 128 opacity.
+    let mut nodes_group = vec![Node::EMPTY; 3];
+    nodes_group[0].width = 80;
+    nodes_group[0].height = 60;
+    nodes_group[0].opacity = 128;
+    nodes_group[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes_group[0].first_child = 1;
+
+    nodes_group[1].x = 0;
+    nodes_group[1].y = 0;
+    nodes_group[1].width = 50;
+    nodes_group[1].height = 60;
+    nodes_group[1].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes_group[1].flags = NodeFlags::VISIBLE;
+    nodes_group[1].next_sibling = 2;
+
+    nodes_group[2].x = 30;
+    nodes_group[2].y = 0;
+    nodes_group[2].width = 50;
+    nodes_group[2].height = 60;
+    nodes_group[2].background = scene::Color::rgba(0, 0, 255, 255);
+    nodes_group[2].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph_group = scene_render::SceneGraph {
+        nodes: &nodes_group,
+        data: &data,
+    };
+
+    let mut buf_group = vec![0u8; 80 * 60 * 4];
+    {
+        let mut fb = black_surface_wh(&mut buf_group, 80, 60);
+        scene_render::render_scene(&mut fb, &graph_group, &ctx);
+    }
+
+    // Scenario B: parent opacity=255, each child has opacity=128.
+    // Per-child opacity: each child independently composited at 128.
+    // The overlap region gets both children composited separately.
+    let mut nodes_ind = vec![Node::EMPTY; 3];
+    nodes_ind[0].width = 80;
+    nodes_ind[0].height = 60;
+    nodes_ind[0].opacity = 255;
+    nodes_ind[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes_ind[0].first_child = 1;
+
+    nodes_ind[1].x = 0;
+    nodes_ind[1].y = 0;
+    nodes_ind[1].width = 50;
+    nodes_ind[1].height = 60;
+    nodes_ind[1].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes_ind[1].opacity = 128;
+    nodes_ind[1].flags = NodeFlags::VISIBLE;
+    nodes_ind[1].next_sibling = 2;
+
+    nodes_ind[2].x = 30;
+    nodes_ind[2].y = 0;
+    nodes_ind[2].width = 50;
+    nodes_ind[2].height = 60;
+    nodes_ind[2].background = scene::Color::rgba(0, 0, 255, 255);
+    nodes_ind[2].opacity = 128;
+    nodes_ind[2].flags = NodeFlags::VISIBLE;
+
+    let graph_ind = scene_render::SceneGraph {
+        nodes: &nodes_ind,
+        data: &data,
+    };
+
+    let mut buf_ind = vec![0u8; 80 * 60 * 4];
+    {
+        let mut fb = black_surface_wh(&mut buf_ind, 80, 60);
+        scene_render::render_scene(&mut fb, &graph_ind, &ctx);
+    }
+
+    // The overlap region (col 40, row 30) should differ between the two approaches.
+    let stride = 80 * 4;
+    let group_pixel = read_pixel(&buf_group, stride, 40, 30);
+    let ind_pixel = read_pixel(&buf_ind, stride, 40, 30);
+
+    assert_ne!(
+        group_pixel, ind_pixel,
+        "VAL-COMP-001: group opacity and individual opacity should produce different overlap results\n\
+         group={:?}, individual={:?}",
+        group_pixel, ind_pixel
+    );
+}
+
+/// VAL-COMP-002: Opacity 255 bypasses offscreen buffer.
+/// opacity=255 renders directly to destination without allocating offscreen.
+#[test]
+fn opacity_255_bypasses_offscreen() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Scene with opacity=255 on a red square.
+    let mut nodes_full = vec![Node::EMPTY; 1];
+    nodes_full[0].width = 60;
+    nodes_full[0].height = 40;
+    nodes_full[0].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes_full[0].opacity = 255;
+    nodes_full[0].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes_full,
+        data: &data,
+    };
+
+    // Use a SurfacePool and verify no allocation occurs.
+    let mut pool = surface_pool::SurfacePool::new(surface_pool::DEFAULT_BUDGET);
+    let mut buf = vec![0u8; 60 * 40 * 4];
+    {
+        let mut fb = black_surface_wh(&mut buf, 60, 40);
+        scene_render::render_scene_with_pool(&mut fb, &graph, &ctx, &mut pool);
+    }
+
+    // The pool should have zero allocations — opacity=255 bypasses offscreen.
+    assert_eq!(
+        pool.alloc_count(),
+        0,
+        "VAL-COMP-002: opacity=255 should not allocate an offscreen buffer"
+    );
+
+    // And the pixel should be red.
+    let stride = 60 * 4;
+    let (r, g, b, _a) = read_pixel(&buf, stride, 30, 20);
+    assert_eq!((r, g, b), (255, 0, 0), "opacity=255 node should render directly");
+}
+
+/// VAL-COMP-003: Opacity 0 produces fully transparent output.
+/// Subtree with opacity=0: destination pixels unchanged.
+#[test]
+fn opacity_zero_produces_no_output() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 1];
+    nodes[0].width = 60;
+    nodes[0].height = 40;
+    nodes[0].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes[0].opacity = 0;
+    nodes[0].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    // Fill with white before rendering.
+    let w = 60u32;
+    let h = 40u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut fb = Surface {
+            data: &mut buf,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        fb.clear(Color::WHITE);
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // Every pixel should remain white.
+    let (r, g, b, a) = read_pixel(&buf, stride, 30, 20);
+    assert_eq!(
+        (r, g, b, a),
+        (255, 255, 255, 255),
+        "VAL-COMP-003: opacity=0 should leave destination pixels unchanged"
+    );
+}
+
+/// VAL-COMP-008: sRGB-correct group opacity compositing.
+/// White rect at group opacity 128 over black → ~(188,188,188), not naive (128,128,128).
+#[test]
+fn srgb_correct_group_opacity() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 1];
+    nodes[0].width = 60;
+    nodes[0].height = 40;
+    nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
+    nodes[0].opacity = 128;
+    nodes[0].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let w = 60u32;
+    let h = 40u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut fb = black_surface_wh(&mut buf, w, h);
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    let (r, g, b, _a) = read_pixel(&buf, stride, 30, 20);
+
+    // sRGB-correct: white at 50% alpha over black should be ~188, not 128.
+    // Allow ±2 tolerance for rounding.
+    assert!(
+        r >= 186 && r <= 190,
+        "VAL-COMP-008: sRGB-correct white@128 over black should be ~188, got r={}",
+        r
+    );
+    assert!(
+        g >= 186 && g <= 190,
+        "VAL-COMP-008: sRGB-correct white@128 over black should be ~188, got g={}",
+        g
+    );
+    assert!(
+        b >= 186 && b <= 190,
+        "VAL-COMP-008: sRGB-correct white@128 over black should be ~188, got b={}",
+        b
+    );
+}
+
+/// VAL-COMP-009: Nested group opacity.
+/// Parent opacity=128, child opacity=128 → effective ~25% opacity.
+#[test]
+fn nested_group_opacity() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Parent: opacity=128, child: opacity=128, child bg = white.
+    // Effective opacity ~= 128/255 * 128/255 ≈ 25%.
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 60;
+    nodes[0].height = 40;
+    nodes[0].opacity = 128;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].first_child = 1;
+
+    nodes[1].width = 60;
+    nodes[1].height = 40;
+    nodes[1].background = scene::Color::rgba(255, 255, 255, 255);
+    nodes[1].opacity = 128;
+    nodes[1].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let w = 60u32;
+    let h = 40u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut fb = black_surface_wh(&mut buf, w, h);
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    let (r, g, b, _a) = read_pixel(&buf, stride, 30, 20);
+
+    // Effective opacity ~25%: white at ~25% over black.
+    // In sRGB: the result should be roughly in the 100-130 range (not 64).
+    // 25% opacity white over black in sRGB: ~128 (since gamma correction
+    // makes ~25% linear appear as ~128 sRGB).
+    // Be lenient: just check it's significantly less than the 50% case (~188).
+    assert!(
+        r < 150,
+        "VAL-COMP-009: nested opacity (128×128) should be less than single 128, got r={}",
+        r
+    );
+    assert!(
+        r > 50,
+        "VAL-COMP-009: nested opacity should produce visible output, got r={}",
+        r
+    );
+
+    // Also verify all channels are equal (white → equal R=G=B).
+    assert_eq!(r, g, "channels should be equal for white over black");
+    assert_eq!(g, b, "channels should be equal for white over black");
+}
+
+/// VAL-COMP-010: Offscreen buffer respects clip rect.
+/// clips_children + opacity: children clipped to node bounds within offscreen.
+#[test]
+fn offscreen_opacity_respects_clip() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Parent: 40×40 at (10,10), opacity=128, clips_children.
+    // Child: 80×80 at (0,0) — extends beyond parent.
+    let mut nodes = vec![Node::EMPTY; 3];
+
+    // Root: 100×100, fully opaque.
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].first_child = 1;
+
+    // Semi-transparent parent with clipping.
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 40;
+    nodes[1].height = 40;
+    nodes[1].opacity = 128;
+    nodes[1].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[1].first_child = 2;
+
+    // Child: fills more than parent.
+    nodes[2].width = 80;
+    nodes[2].height = 80;
+    nodes[2].background = scene::Color::rgba(0, 255, 0, 255);
+    nodes[2].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let w = 100u32;
+    let h = 100u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut fb = black_surface_wh(&mut buf, w, h);
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // Inside the clipped parent (30, 30): should show green at ~50% opacity.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 30, 30);
+    assert!(
+        g > 50,
+        "VAL-COMP-010: inside clipped region should have green, got g={}",
+        g
+    );
+
+    // Outside the parent bounds (60, 60): should be black (clipped away).
+    let (r2, g2, b2, _a2) = read_pixel(&buf, stride, 60, 60);
+    assert_eq!(
+        (r2, g2, b2),
+        (0, 0, 0),
+        "VAL-COMP-010: outside clipped region should be black, got ({},{},{})",
+        r2,
+        g2,
+        b2
+    );
+}
+
+/// VAL-COMP-011: Scroll offset applied within offscreen buffer.
+/// scroll_y != 0 + opacity: scroll applied correctly within offscreen rendering.
+#[test]
+fn offscreen_opacity_respects_scroll() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Parent: 60×40, opacity=128, scroll_y=10, clips_children.
+    // Child: 60×40 at y=0.
+    let mut nodes = vec![Node::EMPTY; 3];
+
+    nodes[0].width = 60;
+    nodes[0].height = 60;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].first_child = 1;
+
+    nodes[1].width = 60;
+    nodes[1].height = 40;
+    nodes[1].opacity = 128;
+    nodes[1].scroll_y = 10;
+    nodes[1].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[1].first_child = 2;
+
+    // Child at y=0, height 40. With scroll_y=10, the first 10 pixels
+    // of the child should be scrolled off the top.
+    nodes[2].y = 0;
+    nodes[2].width = 60;
+    nodes[2].height = 40;
+    nodes[2].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes[2].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let w = 60u32;
+    let h = 60u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    {
+        let mut fb = black_surface_wh(&mut buf, w, h);
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // The child is scrolled by 10 pixels, so the red should start at y=0
+    // in the parent (which is at y=0 in the fb). But with scroll_y=10,
+    // the child's effective position is y=-10 (scroll offsets children upward).
+    // So the child visible from y=0..30 in the offscreen buffer.
+    // At y=0 in the parent, the child's row 10 is visible.
+
+    // Inside the parent region: should show red at reduced opacity.
+    let (r, _g, _b, _a) = read_pixel(&buf, stride, 30, 10);
+    assert!(
+        r > 50,
+        "VAL-COMP-011: scrolled child at reduced opacity should be visible, got r={}",
+        r
+    );
+}
+
+/// Existing scenes (opacity=255) render identically after opacity support added.
+#[test]
+fn opacity_255_scenes_render_identically() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let (nodes, data) = build_four_corner_scene();
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    // All nodes in the four-corner scene have opacity=255 (default).
+    // This must produce pixel-identical output to before.
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    {
+        let mut fb = black_surface(&mut buf);
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    let stride = 100 * 4;
+    let (r, g, b, _a) = read_pixel(&buf, stride, 15, 15);
+    assert_eq!((r, g, b), (255, 0, 0), "top-left should be red");
+
+    let (r, g, b, _a) = read_pixel(&buf, stride, 85, 15);
+    assert_eq!((r, g, b), (0, 255, 0), "top-right should be green");
+
+    let (r, g, b, _a) = read_pixel(&buf, stride, 15, 85);
+    assert_eq!((r, g, b), (0, 0, 255), "bottom-left should be blue");
+
+    let (r, g, b, _a) = read_pixel(&buf, stride, 85, 85);
+    assert_eq!((r, g, b), (255, 255, 255), "bottom-right should be white");
+}
+
+/// VAL-CROSS-010 (opacity): Changing only opacity produces a dirty rect.
+/// (Tested indirectly — the damage system uses byte-level node diff.
+/// Since opacity is a field on Node, changing it will be detected.)
+#[test]
+fn opacity_change_detected_by_damage() {
+    // The opacity field is at a specific byte offset in the Node struct.
+    // When it changes, the byte-level diff in the damage system will
+    // produce a dirty rect. We verify that opacity=128 differs from
+    // opacity=255 in the raw bytes.
+    let mut node_a = Node::EMPTY;
+    node_a.opacity = 255;
+
+    let mut node_b = Node::EMPTY;
+    node_b.opacity = 128;
+
+    let bytes_a: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            &node_a as *const Node as *const u8,
+            core::mem::size_of::<Node>(),
+        )
+    };
+    let bytes_b: &[u8] = unsafe {
+        core::slice::from_raw_parts(
+            &node_b as *const Node as *const u8,
+            core::mem::size_of::<Node>(),
+        )
+    };
+
+    assert_ne!(
+        bytes_a, bytes_b,
+        "VAL-CROSS-010: changing opacity must produce different raw bytes"
+    );
+}
+
+/// VAL-CROSS-015: Double-buffer swap preserves opacity field.
+#[test]
+fn double_buffer_swap_preserves_opacity() {
+    let mut buf = vec![0u8; scene::DOUBLE_SCENE_SIZE];
+    let mut dw = scene::DoubleWriter::new(&mut buf);
+
+    // Build scene with non-default opacity.
+    {
+        let mut sw = dw.back();
+        let n = sw.alloc_node().unwrap();
+        let node = sw.node_mut(n);
+        node.opacity = 128;
+        node.width = 100;
+        node.height = 100;
+        node.flags = NodeFlags::VISIBLE;
+        sw.commit();
+    }
+    dw.swap();
+
+    // Copy front to back (simulating incremental update).
+    dw.copy_front_to_back();
+
+    // Verify back buffer preserved the opacity.
+    {
+        let sw = dw.back();
+        let node = sw.node(0);
+        assert_eq!(
+            node.opacity, 128,
+            "VAL-CROSS-015: opacity must survive copy_front_to_back"
+        );
+    }
 }

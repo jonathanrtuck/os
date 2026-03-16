@@ -1235,6 +1235,114 @@ impl<'a> Surface<'a> {
             self.data[offset..offset + bpp].copy_from_slice(&encoded[..bpp]);
         }
     }
+
+    /// Blit source pixels onto this surface with per-pixel alpha blending,
+    /// modulated by a global opacity (0–255).
+    ///
+    /// Each source pixel's alpha is multiplied by `opacity / 255` before
+    /// compositing over the destination. This implements group opacity:
+    /// the source buffer contains a fully-composited subtree, and we
+    /// composite the entire buffer at a reduced opacity.
+    ///
+    /// sRGB gamma-correct blending is used throughout, matching the
+    /// existing `blit_blend` and `blend_over` behaviour.
+    ///
+    /// `opacity == 255` is equivalent to `blit_blend`.
+    /// `opacity == 0` is a no-op (no pixels modified).
+    pub fn blit_blend_with_opacity(
+        &mut self,
+        src_data: &[u8],
+        src_width: u32,
+        src_height: u32,
+        src_stride: u32,
+        dst_x: u32,
+        dst_y: u32,
+        opacity: u8,
+    ) {
+        if opacity == 0 {
+            return;
+        }
+        if opacity == 255 {
+            self.blit_blend(src_data, src_width, src_height, src_stride, dst_x, dst_y);
+            return;
+        }
+        if dst_x >= self.width || dst_y >= self.height {
+            return;
+        }
+
+        let copy_w = min(src_width, self.width - dst_x);
+        let copy_h = min(src_height, self.height - dst_y);
+
+        if copy_w == 0 || copy_h == 0 {
+            return;
+        }
+
+        let bpp = self.format.bytes_per_pixel();
+        let dst_stride = self.stride;
+        let opa = opacity as u32;
+
+        for row in 0..copy_h {
+            let src_row_off = (row * src_stride) as usize;
+            let dst_row_off = ((dst_y + row) * dst_stride + dst_x * bpp) as usize;
+            let row_bytes = (copy_w * bpp) as usize;
+
+            if src_row_off + row_bytes > src_data.len() {
+                continue;
+            }
+
+            for col in 0..copy_w {
+                let src_off = src_row_off + (col * bpp) as usize;
+                let dst_off = dst_row_off + (col * bpp) as usize;
+
+                if dst_off + 4 > self.data.len() {
+                    continue;
+                }
+
+                // Source pixel (BGRA).
+                let src_b = src_data[src_off];
+                let src_g = src_data[src_off + 1];
+                let src_r = src_data[src_off + 2];
+                let src_a = src_data[src_off + 3];
+
+                if src_a == 0 {
+                    continue;
+                }
+
+                // Modulate source alpha by group opacity.
+                let effective_a = div255(src_a as u32 * opa) as u8;
+                if effective_a == 0 {
+                    continue;
+                }
+
+                let src_color = Color {
+                    r: src_r,
+                    g: src_g,
+                    b: src_b,
+                    a: effective_a,
+                };
+
+                // Read destination pixel.
+                let dst_b = self.data[dst_off];
+                let dst_g = self.data[dst_off + 1];
+                let dst_r = self.data[dst_off + 2];
+                let dst_a = self.data[dst_off + 3];
+                let dst_color = Color {
+                    r: dst_r,
+                    g: dst_g,
+                    b: dst_b,
+                    a: dst_a,
+                };
+
+                // sRGB-correct blend.
+                let blended = src_color.blend_over(dst_color);
+
+                self.data[dst_off] = blended.b;
+                self.data[dst_off + 1] = blended.g;
+                self.data[dst_off + 2] = blended.r;
+                self.data[dst_off + 3] = blended.a;
+            }
+        }
+    }
 }
 /// Scalar fill_rect_blend for a single destination pixel (unsafe helper).
 ///

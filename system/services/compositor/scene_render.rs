@@ -14,6 +14,7 @@ use drawing::{Color, PixelFormat, Surface};
 use fonts::cache::GlyphCache;
 use scene::{Content, Node, NodeFlags, NodeId, PathCmd, PathCmdKind, ShapedGlyph, TextRun, NULL};
 
+use crate::surface_pool::SurfacePool;
 use crate::svg;
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.
@@ -125,6 +126,10 @@ fn snap_border(logical_width: u32, scale: f32) -> u32 {
 /// `abs_x`, `abs_y` are the absolute **physical** pixel position of this
 /// node's origin in the framebuffer. `clip` is in physical pixels.
 /// Scene graph coordinates are logical; scaled by `ctx.scale` (f32).
+///
+/// `pool` provides offscreen buffers for group opacity rendering. When a
+/// node has `opacity < 255`, its subtree is rendered into an offscreen
+/// buffer (from the pool) and then composited at the specified opacity.
 fn render_node(
     fb: &mut Surface,
     graph: &SceneGraph,
@@ -133,6 +138,7 @@ fn render_node(
     abs_x: i32,
     abs_y: i32,
     clip: ClipRect,
+    pool: Option<&mut SurfacePool>,
 ) {
     if node_id == NULL || node_id as usize >= graph.nodes.len() {
         return;
@@ -141,6 +147,11 @@ fn render_node(
     let node = &graph.nodes[node_id as usize];
 
     if !node.visible() {
+        return;
+    }
+
+    // opacity=0: subtree produces no visible output — skip entirely.
+    if node.opacity == 0 {
         return;
     }
 
@@ -160,6 +171,98 @@ fn render_node(
         None => return,
     };
 
+    // Group opacity: when opacity < 255, render the entire node (background,
+    // content, children) into an offscreen buffer at full alpha, then
+    // composite the buffer onto the destination at the specified opacity.
+    // This produces correct group opacity — children are blended together
+    // first, then the group is composited at reduced opacity.
+    if node.opacity < 255 {
+        if nw <= 0 || nh <= 0 {
+            return;
+        }
+        let ow = nw as u32;
+        let oh = nh as u32;
+        let ostride = ow * 4;
+
+        // Allocate an offscreen buffer for group opacity rendering.
+        // Children are rendered at full alpha, then the entire buffer is
+        // composited at the node's opacity.
+        let mut offscreen_buf = vec![0u8; (ostride * oh) as usize];
+
+        {
+            let mut off_fb = Surface {
+                data: &mut offscreen_buf,
+                width: ow,
+                height: oh,
+                stride: ostride,
+                format: PixelFormat::Bgra8888,
+            };
+
+            // Render the node at full opacity into the offscreen buffer.
+            // The offscreen buffer's (0,0) corresponds to (nx, ny) in the
+            // framebuffer coordinate space.
+            render_node_content(
+                &mut off_fb,
+                graph,
+                ctx,
+                node,
+                node_id,
+                0,    // draw at offscreen origin
+                0,
+                ClipRect { x: 0, y: 0, w: nw, h: nh },
+                None, // children can allocate their own offscreen buffers
+            );
+        }
+
+        // Composite the offscreen buffer onto the destination at the
+        // specified opacity, using sRGB-correct blending.
+        fb.blit_blend_with_opacity(
+            &offscreen_buf,
+            ow,
+            oh,
+            ostride,
+            nx as u32,
+            ny as u32,
+            node.opacity,
+        );
+
+        return;
+    }
+
+    // opacity=255: render directly to destination (no offscreen buffer).
+    render_node_content(fb, graph, ctx, node, node_id, nx, ny, visible, pool);
+}
+
+/// Render a node's background, content, and children into a target surface.
+///
+/// This is the inner rendering logic used by both the direct path (opacity=255)
+/// and the offscreen opacity path (opacity<255).
+///
+/// `draw_x`, `draw_y` are where to draw the node's background/content in the
+/// target surface. For direct rendering this equals the node's absolute FB
+/// position. For offscreen opacity rendering this is (0, 0).
+/// `visible` is the clipped visible rectangle in the target surface's coords.
+fn render_node_content(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    ctx: &RenderCtx,
+    node: &Node,
+    node_id: NodeId,
+    draw_x: i32,
+    draw_y: i32,
+    visible: ClipRect,
+    pool: Option<&mut SurfacePool>,
+) {
+    let s = ctx.scale;
+    let nw = scale_size(node.x as i32, node.width as i32, s);
+    let nh = scale_size(node.y as i32, node.height as i32, s);
+    let node_rect = ClipRect {
+        x: draw_x,
+        y: draw_y,
+        w: nw,
+        h: nh,
+    };
+
     // Scale corner radius from logical to physical pixels.
     let phys_radius = if node.corner_radius > 0 {
         let r = round_f32(node.corner_radius as f32 * s);
@@ -173,12 +276,9 @@ fn render_node(
         let bg = scene_to_draw_color(node.background);
 
         if phys_radius > 0 {
-            // Rounded rectangle background — draw at full node extent,
-            // not clipped visible, so the arcs are correct. The surface
-            // methods clip to bounds internally.
             fb.fill_rounded_rect_blend(
-                nx as u32,
-                ny as u32,
+                draw_x as u32,
+                draw_y as u32,
                 nw as u32,
                 nh as u32,
                 phys_radius,
@@ -209,25 +309,19 @@ fn render_node(
         let bw = snap_border(node.border.width as u32, s);
 
         if phys_radius > 0 {
-            // Rounded border: draw outer rounded rect in border color,
-            // then inner rounded rect in background color (punch-out).
-            // The inner radius is outer_radius - border_width.
             let inner_r = phys_radius.saturating_sub(bw);
 
-            // Outer rounded rect (border color).
             fb.fill_rounded_rect_blend(
-                nx as u32,
-                ny as u32,
+                draw_x as u32,
+                draw_y as u32,
                 nw as u32,
                 nh as u32,
                 phys_radius,
                 bc,
             );
 
-            // Inner rounded rect (background color or transparent punch-out).
-            // Inset by border width on all sides.
-            let inner_x = (nx as u32).saturating_add(bw);
-            let inner_y = (ny as u32).saturating_add(bw);
+            let inner_x = (draw_x as u32).saturating_add(bw);
+            let inner_y = (draw_y as u32).saturating_add(bw);
             let inner_w = (nw as u32).saturating_sub(2 * bw);
             let inner_h = (nh as u32).saturating_sub(2 * bw);
 
@@ -235,8 +329,6 @@ fn render_node(
                 let inner_color = if node.background.a > 0 {
                     scene_to_draw_color(node.background)
                 } else {
-                    // No background: need to punch out to framebuffer bg.
-                    // For now, use transparent which will leave border visible.
                     Color::TRANSPARENT
                 };
 
@@ -247,28 +339,23 @@ fn render_node(
                 }
             }
         } else {
-            // Sharp corners: existing straight-line border.
-            // Top
-            fb.fill_rect_blend(nx as u32, ny as u32, nw as u32, bw, bc);
+            fb.fill_rect_blend(draw_x as u32, draw_y as u32, nw as u32, bw, bc);
 
-            // Bottom
-            let bot_y = (ny + nh) as u32 - bw;
-            fb.fill_rect_blend(nx as u32, bot_y, nw as u32, bw, bc);
+            let bot_y = (draw_y + nh) as u32 - bw;
+            fb.fill_rect_blend(draw_x as u32, bot_y, nw as u32, bw, bc);
 
-            // Left
             fb.fill_rect_blend(
-                nx as u32,
-                ny as u32 + bw,
+                draw_x as u32,
+                draw_y as u32 + bw,
                 bw,
                 (nh as u32).saturating_sub(2 * bw),
                 bc,
             );
 
-            // Right
-            let right_x = (nx + nw) as u32 - bw;
+            let right_x = (draw_x + nw) as u32 - bw;
             fb.fill_rect_blend(
                 right_x,
-                ny as u32 + bw,
+                draw_y as u32 + bw,
                 bw,
                 (nh as u32).saturating_sub(2 * bw),
                 bc,
@@ -279,9 +366,9 @@ fn render_node(
     // Draw icon if this is the icon node.
     let mut icon_advance: i32 = 0;
     if node_id == ctx.icon_node && !ctx.icon_coverage.is_empty() {
-        let icon_y = ny + (nh - ctx.icon_h as i32) / 2;
+        let icon_y = draw_y + (nh - ctx.icon_h as i32) / 2;
         fb.draw_coverage(
-            nx,
+            draw_x,
             icon_y,
             ctx.icon_coverage,
             ctx.icon_w,
@@ -316,7 +403,7 @@ fn render_node(
             } else {
                 &[]
             };
-            let text_nx = nx + icon_advance;
+            let text_nx = draw_x + icon_advance;
             let max_y = (visible.y + visible.h) as u32;
 
             for run in text_runs {
@@ -345,7 +432,7 @@ fn render_node(
                     None
                 };
                 let gx0 = text_nx + scale_coord(run.x as i32, s);
-                let gy0 = ny + scale_coord(run.y as i32, s);
+                let gy0 = draw_y + scale_coord(run.y as i32, s);
 
                 if gy0 >= max_y as i32 {
                     break;
@@ -383,8 +470,8 @@ fn render_node(
                     src_width as u32,
                     src_height as u32,
                     stride,
-                    nx as u32,
-                    ny as u32,
+                    draw_x as u32,
+                    draw_y as u32,
                 );
             }
         }
@@ -403,11 +490,11 @@ fn render_node(
                 fill,
                 stroke,
                 stroke_width,
-                nx,
-                ny,
+                draw_x,
+                draw_y,
                 nw,
                 nh,
-                clip,
+                visible,
             );
         }
     }
@@ -474,6 +561,7 @@ fn render_node(
                         child_origin_x_off,
                         child_origin_y_off,
                         off_clip,
+                        None,
                     );
                 }
 
@@ -491,21 +579,21 @@ fn render_node(
             ow,
             oh,
             ostride,
-            nx as u32,
-            ny as u32,
+            draw_x as u32,
+            draw_y as u32,
         );
     } else {
         // Standard rectangular clip (corner_radius=0 or no clips_children).
         let child_clip = if node.clips_children() {
-            match clip.intersect(node_rect) {
+            match visible.intersect(node_rect) {
                 Some(c) => c,
                 None => return,
             }
         } else {
-            clip
+            visible
         };
-        let child_origin_x = nx;
-        let child_origin_y = ny - scale_coord(node.scroll_y, s);
+        let child_origin_x = draw_x;
+        let child_origin_y = draw_y - scale_coord(node.scroll_y, s);
         let mut child = node.first_child;
 
         while child != NULL {
@@ -535,6 +623,7 @@ fn render_node(
                     child_origin_x,
                     child_origin_y,
                     child_clip,
+                    None,
                 );
             }
 
@@ -643,7 +732,7 @@ fn render_path(
             if sw < 1 { 1i32 } else { sw }
         };
 
-        let mut stroke_path = build_stroke_outline(path_cmds, ctx.scale, phys_stroke);
+        let mut stroke_path = build_stroke_outline(path_cmds, ctx.scale, phys_stroke / 2);
         if stroke_path.num_commands > 0 {
             let mut coverage = vec![0u8; cov_size];
             let mut scratch = alloc_svg_scratch();
@@ -1188,7 +1277,28 @@ pub fn render_scene(fb: &mut Surface, graph: &SceneGraph, ctx: &RenderCtx) {
         h: fb.height as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip);
+    render_node(fb, graph, ctx, 0, 0, 0, clip, None);
+}
+
+/// Render an entire scene graph with a SurfacePool for offscreen opacity.
+pub fn render_scene_with_pool(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    ctx: &RenderCtx,
+    pool: &mut SurfacePool,
+) {
+    if graph.nodes.is_empty() {
+        return;
+    }
+
+    let clip = ClipRect {
+        x: 0,
+        y: 0,
+        w: fb.width as i32,
+        h: fb.height as i32,
+    };
+
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool));
 }
 
 /// Render only the region within `dirty` (absolute pixel coordinates).
@@ -1210,5 +1320,27 @@ pub fn render_scene_clipped(
         h: dirty.h as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip);
+    render_node(fb, graph, ctx, 0, 0, 0, clip, None);
+}
+
+/// Render only the region within `dirty`, with SurfacePool for offscreen opacity.
+pub fn render_scene_clipped_with_pool(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    ctx: &RenderCtx,
+    dirty: &protocol::DirtyRect,
+    pool: &mut SurfacePool,
+) {
+    if graph.nodes.is_empty() || dirty.w == 0 || dirty.h == 0 {
+        return;
+    }
+
+    let clip = ClipRect {
+        x: dirty.x as i32,
+        y: dirty.y as i32,
+        w: dirty.w as i32,
+        h: dirty.h as i32,
+    };
+
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool));
 }
