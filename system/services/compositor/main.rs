@@ -28,6 +28,8 @@ mod cursor;
 mod svg;
 #[path = "frame_scheduler.rs"]
 mod frame_scheduler;
+#[path = "surface_pool.rs"]
+mod surface_pool;
 
 use alloc::{boxed::Box, vec};
 
