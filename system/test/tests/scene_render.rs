@@ -7,7 +7,7 @@ use render::scene_render;
 use render::surface_pool;
 
 use drawing::{Color, PixelFormat, Surface};
-use scene::{Node, NULL};
+use scene::Node;
 
 // NodeFlags is already imported by the scene_render module and its
 // #[path] inclusion makes it available. Use a direct re-import from scene.
@@ -31,7 +31,7 @@ fn zeroed_glyph_cache() -> Box<fonts::cache::GlyphCache> {
     }
 }
 
-/// Build a RenderCtx with zeroed glyph caches and no icon.
+/// Build a RenderCtx with zeroed glyph caches.
 fn test_ctx<'a>(
     mono: &'a fonts::cache::GlyphCache,
     prop: &'a fonts::cache::GlyphCache,
@@ -39,16 +39,6 @@ fn test_ctx<'a>(
     scene_render::RenderCtx {
         mono_cache: mono,
         prop_cache: prop,
-        icon_coverage: &[],
-        icon_w: 0,
-        icon_h: 0,
-        icon_color: Color {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 0,
-        },
-        icon_node: NULL,
         scale: 1.0,
     }
 }
@@ -609,17 +599,7 @@ fn test_ctx_f32<'a>(
     scene_render::RenderCtx {
         mono_cache: mono,
         prop_cache: prop,
-        icon_coverage: &[],
-        icon_w: 0,
-        icon_h: 0,
-        icon_color: Color {
-            r: 0,
-            g: 0,
-            b: 0,
-            a: 0,
-        },
-        icon_node: NULL,
-        scale: scale,
+        scale,
     }
 }
 
@@ -1272,8 +1252,6 @@ fn dirty_rect_fractional_scale_full_coverage() {
     assert!(pw > 0 && ph > 0, "dirty rect must have non-zero extent");
 }
 
-// ── SVG fixed-point scale conversion ──
-
 // ── Corner-radius compositor wiring tests ───────────────────────────
 
 /// Node with corner_radius=8 renders with rounded corners — corner pixels
@@ -1661,9 +1639,6 @@ fn node_size_compile_time_assertion_exists() {
         "VAL-CROSS-012: Node must be exactly 96 bytes for shared-memory layout stability"
     );
 }
-
-// Path rendering tests removed — Content::Path and SVG code deleted
-// in the geometric scene content types redesign.
 
 // ── Per-subtree opacity tests (VAL-COMP-001 through VAL-COMP-011) ──
 
@@ -2926,11 +2901,6 @@ fn child_transform_composes_with_parent() {
     let ctx_scaled = scene_render::RenderCtx {
         mono_cache: &mono,
         prop_cache: &prop,
-        icon_coverage: &[],
-        icon_w: 0,
-        icon_h: 0,
-        icon_color: Color { r: 0, g: 0, b: 0, a: 0 },
-        icon_node: NULL,
         scale: 1.0,
     };
 
@@ -3451,11 +3421,6 @@ fn dpi_scale_composes_with_affine_as_single_matrix() {
     let ctx_a = scene_render::RenderCtx {
         mono_cache: &mono,
         prop_cache: &prop,
-        icon_coverage: &[],
-        icon_w: 0,
-        icon_h: 0,
-        icon_color: Color { r: 0, g: 0, b: 0, a: 0 },
-        icon_node: NULL,
         scale: 1.5,
     };
 
@@ -3589,11 +3554,6 @@ fn full_feature_composition() {
     let ctx = scene_render::RenderCtx {
         mono_cache: &mono,
         prop_cache: &prop,
-        icon_coverage: &[],
-        icon_w: 0,
-        icon_h: 0,
-        icon_color: Color { r: 0, g: 0, b: 0, a: 0 },
-        icon_node: NULL,
         scale: 1.5,
     };
 

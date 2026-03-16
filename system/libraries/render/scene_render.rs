@@ -27,13 +27,6 @@ struct ClipRect {
 pub struct RenderCtx<'a> {
     pub mono_cache: &'a GlyphCache,
     pub prop_cache: &'a GlyphCache,
-    /// Pre-rasterized icon coverage map (3-channel RGB, or empty).
-    pub icon_coverage: &'a [u8],
-    pub icon_w: u32,
-    pub icon_h: u32,
-    pub icon_color: Color,
-    /// Node ID where the icon should be drawn (before its text).
-    pub icon_node: NodeId,
     /// Fractional display scale factor (1.0, 1.25, 1.5, 2.0, etc.).
     /// Scene graph is in logical coordinates; multiply by this to get
     /// physical pixel positions and sizes. Borders snap to whole physical
@@ -779,21 +772,6 @@ fn render_node_content_translated(
         }
     }
 
-    // Draw icon if this is the icon node.
-    let mut icon_advance: i32 = 0;
-    if node_id == ctx.icon_node && !ctx.icon_coverage.is_empty() {
-        let icon_y = draw_y + (nh - ctx.icon_h as i32) / 2;
-        fb.draw_coverage(
-            draw_x,
-            icon_y,
-            ctx.icon_coverage,
-            ctx.icon_w,
-            ctx.icon_h,
-            ctx.icon_color,
-        );
-        icon_advance = ctx.icon_w as i32 + scale_coord(8, s);
-    }
-
     // Draw content.
     match node.content {
         Content::None => {}
@@ -842,7 +820,7 @@ fn render_node_content_translated(
             };
             let glyph_color = scene_to_draw_color(color);
             let cache = ctx.mono_cache;
-            let gx0 = draw_x + icon_advance;
+            let gx0 = draw_x;
             let gy0 = draw_y;
 
             let mut cx = gx0;
@@ -1047,8 +1025,6 @@ fn render_node_content_translated(
         }
     }
 }
-/// Convert scene `PathCmd` array to SVG commands and rasterize.
-
 
 /// Mask an BGRA pixel buffer to a rounded rectangle shape.
 ///

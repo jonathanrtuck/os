@@ -28,7 +28,7 @@ use alloc::{boxed::Box, vec};
 
 use protocol::{
     compose::{
-        CompositorConfig, IconConfig, MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG, MSG_IMAGE_CONFIG,
+        CompositorConfig, MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG, MSG_IMAGE_CONFIG,
         MSG_IMG_ICON_CONFIG,
     },
     present::{PresentPayload, MSG_PRESENT},
@@ -188,11 +188,6 @@ pub extern "C" fn _start() -> ! {
     let mut backend = render::CpuBackend {
         mono_cache,
         prop_cache,
-        icon_coverage: alloc::vec::Vec::new(),
-        icon_w: 0,
-        icon_h: 0,
-        icon_color: drawing::Color { r: 0, g: 0, b: 0, a: 0 },
-        icon_node: 0,
         scale: scale_factor,
         pool: render::surface_pool::SurfacePool::new(render::surface_pool::DEFAULT_BUDGET),
         damage: render::damage::DamageTracker::new(fb_width as u16, fb_height as u16),

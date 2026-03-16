@@ -254,7 +254,6 @@ fn main() {
     println!("cargo:rerun-if-changed={}", render_src.display());
     for render_mod in &[
         "scene_render.rs",
-        "svg.rs",
         "compositing.rs",
         "surface_pool.rs",
         "damage.rs",

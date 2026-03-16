@@ -1,5 +1,5 @@
-//! Render library: scene graph rendering, compositing, SVG rasterization,
-//! damage tracking, and offscreen buffer management.
+//! Render library: scene graph rendering, compositing, damage tracking,
+//! and offscreen buffer management.
 //!
 //! This library is the render backend for the compositor. It has NO
 //! dependency on `sys` or `ipc` crates — it is a pure rendering library.
@@ -63,17 +63,12 @@ pub trait RenderBackend {
 
 /// CPU-based software renderer implementing `RenderBackend`.
 ///
-/// Encapsulates all rendering state: glyph caches, icon data, scale factor,
+/// Encapsulates all rendering state: glyph caches, scale factor,
 /// offscreen buffer pool, damage tracker, and previous-frame bounds for
 /// move-based damage detection.
 pub struct CpuBackend {
     pub mono_cache: alloc::boxed::Box<fonts::cache::GlyphCache>,
     pub prop_cache: alloc::boxed::Box<fonts::cache::GlyphCache>,
-    pub icon_coverage: alloc::vec::Vec<u8>,
-    pub icon_w: u32,
-    pub icon_h: u32,
-    pub icon_color: drawing::Color,
-    pub icon_node: scene::NodeId,
     pub scale: f32,
     pub pool: surface_pool::SurfacePool,
     pub damage: damage::DamageTracker,
@@ -223,11 +218,6 @@ impl CpuBackend {
         scene_render::RenderCtx {
             mono_cache: &self.mono_cache,
             prop_cache: &self.prop_cache,
-            icon_coverage: &self.icon_coverage,
-            icon_w: self.icon_w,
-            icon_h: self.icon_h,
-            icon_color: self.icon_color,
-            icon_node: self.icon_node,
             scale: self.scale,
         }
     }
@@ -240,11 +230,6 @@ impl RenderBackend for CpuBackend {
         let ctx = scene_render::RenderCtx {
             mono_cache: &self.mono_cache,
             prop_cache: &self.prop_cache,
-            icon_coverage: &self.icon_coverage,
-            icon_w: self.icon_w,
-            icon_h: self.icon_h,
-            icon_color: self.icon_color,
-            icon_node: self.icon_node,
             scale: self.scale,
         };
         if self.damage.full_screen {
