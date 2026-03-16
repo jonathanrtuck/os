@@ -1,0 +1,55 @@
+{
+  "groupId": "qemu-visual",
+  "testedAt": "2026-03-16T14:01:20Z",
+  "isolation": {
+    "repoRoot": "/Users/user/Sites/os",
+    "systemRoot": "/Users/user/Sites/os/system",
+    "diskImage": "/tmp/val-test.img",
+    "monitorSocket": "/tmp/val-mon.sock",
+    "serialLog": "/tmp/val-serial.log",
+    "screenshot": "/tmp/val-screen.png"
+  },
+  "toolsUsed": ["qemu-system-aarch64", "nc", "python3-PIL", "Read-tool"],
+  "assertions": [
+    {
+      "id": "VAL-VIS-001",
+      "title": "QEMU display renders correctly after refactoring",
+      "status": "pass",
+      "steps": [
+        { "action": "Copy test.img to /tmp/val-test.img", "expected": "Disk image copied", "observed": "Disk image copied successfully" },
+        { "action": "Launch QEMU with virtio devices, 9p filesystem, RTC", "expected": "QEMU boots kernel successfully", "observed": "QEMU booted, all 5 virtio devices discovered, 4 SMP cores online, display pipeline running" },
+        { "action": "Wait 8s for full boot and display pipeline initialization", "expected": "Serial log shows 'entering render loop'", "observed": "Serial log shows 'entering render loop (frame-scheduled)'" },
+        { "action": "Send keystrokes: h, e, l, l, o via monitor socket", "expected": "Keystrokes accepted", "observed": "Keystrokes sent with 0.1s delays, all accepted" },
+        { "action": "Capture framebuffer screenshot via screendump", "expected": "PPM screenshot file created", "observed": "3,072,016 byte PPM file created at /tmp/val-screen.ppm" },
+        { "action": "Convert PPM to PNG and view with Read tool", "expected": "Title bar with document name and clock, typed text with cursor, proper font rendering", "observed": "Title bar shows document icon + 'Text' label, clock shows '14:01:13', typed text 'hello' visible with cursor after it, clean monospace font rendering for content, proportional font for title bar" }
+      ],
+      "evidence": {
+        "screenshots": ["extract-render-backend/visual/VAL-VIS-001-display-after-typing.png"],
+        "consoleErrors": "none — serial log shows clean boot with no panics, errors, or warnings",
+        "network": "N/A — bare metal OS"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-001",
+      "title": "End-to-end rendering pipeline functional",
+      "status": "pass",
+      "steps": [
+        { "action": "Boot kernel in QEMU with full display pipeline", "expected": "All pipeline components start: input driver, text editor, core, compositor, GPU driver", "observed": "Serial log confirms: virtio-input ready (x2), text-editor starting, compositor starting, core starting, font rasterized, SVG icon rasterized, display pipeline running, entering render loop" },
+        { "action": "Type 'hello' via QEMU monitor sendkey commands", "expected": "Characters flow through pipeline: input → editor → core → scene graph → render backend → framebuffer → GPU → display", "observed": "Typed characters 'hello' appear on screen in correct order with proper font rendering" },
+        { "action": "Capture and verify framebuffer screenshot", "expected": "Screenshot shows typed characters on display", "observed": "Screenshot shows 'hello' with cursor, title bar, clock — full display pipeline functional" },
+        { "action": "Check serial log for panics or errors", "expected": "No panics, no errors, no crashes", "observed": "Serial log is clean: boot sequence completed normally, all components initialized, no error messages, no panics" }
+      ],
+      "evidence": {
+        "screenshots": ["extract-render-backend/visual/VAL-CROSS-001-typed-characters.png"],
+        "consoleErrors": "none — full serial log reviewed, no panics or errors found",
+        "serialLog": "extract-render-backend/visual/VAL-CROSS-001-serial-log.txt",
+        "network": "N/A — bare metal OS"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 2 assertions: 2 passed. QEMU display renders correctly with title bar (document icon + 'Text'), clock (14:01:13), typed text ('hello'), cursor, and proper font rendering. Serial log confirms clean boot with all pipeline components operational. End-to-end rendering pipeline (input → editor → core → scene graph → render backend → framebuffer → GPU → display) is fully functional after refactoring."
+}

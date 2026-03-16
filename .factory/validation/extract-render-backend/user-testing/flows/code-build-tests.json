@@ -1,0 +1,166 @@
+{
+  "groupId": "code-build-tests",
+  "testedAt": "2026-03-16T00:00:00Z",
+  "isolation": {
+    "repoRoot": "/Users/user/Sites/os",
+    "systemRoot": "/Users/user/Sites/os/system",
+    "testCommand": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1",
+    "buildCommand": "cd /Users/user/Sites/os/system && cargo build --release",
+    "qemuRequired": false,
+    "servicesRequired": false
+  },
+  "toolsUsed": ["grep", "ls", "cargo test", "cargo build"],
+  "assertions": [
+    {
+      "id": "VAL-LIB-001",
+      "title": "RenderBackend trait exists with correct signature",
+      "status": "pass",
+      "steps": [
+        { "action": "grep for `pub trait RenderBackend` in libraries/render/", "expected": "Trait definition found with render() and dirty_rects() methods", "observed": "Found at lib.rs:54 — `pub trait RenderBackend` with `fn render(&mut self, scene: &SceneGraph, target: &mut Surface)` and `fn dirty_rects(&self) -> &[DirtyRect]`" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "grepOutput": "lib.rs:54:pub trait RenderBackend { ... fn render(&mut self, scene: &scene_render::SceneGraph, target: &mut Surface); ... fn dirty_rects(&self) -> &[DirtyRect]; }",
+        "files": ["extract-render-backend/code-structure/VAL-LIB-001-trait.txt"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-LIB-002",
+      "title": "CpuBackend implements RenderBackend",
+      "status": "pass",
+      "steps": [
+        { "action": "grep for `impl RenderBackend for CpuBackend` in libraries/render/", "expected": "Implementation found", "observed": "Found at lib.rs:237 — `impl RenderBackend for CpuBackend`" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "grepOutput": "lib.rs:237:impl RenderBackend for CpuBackend {",
+        "files": ["extract-render-backend/code-structure/VAL-LIB-002-impl.txt"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-LIB-003",
+      "title": "Render library compiles as standalone rlib",
+      "status": "pass",
+      "steps": [
+        { "action": "grep build.rs for render rlib compilation", "expected": "rustc_rlib call for libraries/render/lib.rs found", "observed": "build.rs:122-128 shows render_src = libraries/render/lib.rs, render_rlib = librender.rlib, compiled via rustc_rlib_with_search with drawing, scene, protocol, fonts deps" },
+        { "action": "cargo build --release", "expected": "Exit code 0", "observed": "Finished release profile in 0.00s, exit code 0" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "buildOutput": "Finished `release` profile [optimized] target(s) in 0.00s, exit code 0",
+        "grepOutput": "build.rs:122: let render_src = manifest_dir.join(\"libraries/render/lib.rs\"); build.rs:123: let render_rlib = out_dir.join(\"librender.rlib\"); build.rs:125: rustc_rlib_with_search(...)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-LIB-004",
+      "title": "Render library has no syscall or IPC dependencies",
+      "status": "pass",
+      "steps": [
+        { "action": "grep libraries/render/ for `use sys::` and `use ipc::`", "expected": "No matches found", "observed": "No matches found — render library has zero sys/ipc imports" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "grepOutput": "No matches found"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-LIB-005",
+      "title": "All rendering code moved from compositor to render library",
+      "status": "pass",
+      "steps": [
+        { "action": "ls services/compositor/ to verify removed files", "expected": "scene_render.rs, svg.rs, compositing.rs, surface_pool.rs, damage.rs, cursor.rs are GONE", "observed": "Compositor directory contains only main.rs and frame_scheduler.rs — all 6 rendering files are gone" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "lsOutput": "services/compositor/ contains: frame_scheduler.rs, main.rs (only 2 files)",
+        "files": ["extract-render-backend/code-structure/VAL-LIB-005-compositor-listing.txt"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-TEST-001",
+      "title": "All host tests pass with zero regression",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test -- --test-threads=1 in system/test/", "expected": "1764+ tests pass, 0 failures", "observed": "1764 tests passed, 0 failed, 0 ignored across all test binaries" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "testOutput": "Total: 1764 passed, 0 failed, 0 ignored across all test result lines",
+        "files": ["extract-render-backend/code-structure/VAL-TEST-001-results.txt"]
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-TEST-002",
+      "title": "Test crate uses render library instead of path includes",
+      "status": "pass",
+      "steps": [
+        { "action": "grep test crate for #[path references to compositor rendering files", "expected": "No #[path references to compositor rendering files", "observed": "Only #[path reference found is frame_scheduler.rs (not a rendering file): tests/frame_scheduler.rs:7:#[path = \"../../services/compositor/frame_scheduler.rs\"]" },
+        { "action": "grep test crate for render:: imports", "expected": "render:: imports found", "observed": "Found extensive use of render:: imports across svg.rs, surface_pool.rs, scene_render.rs (e.g., use render::svg::*, use render::surface_pool::*, use render::scene_render)" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "grepOutput": "Only #[path to compositor is frame_scheduler.rs (non-rendering). Tests use render:: imports: use render::svg::*, use render::surface_pool::*, use render::scene_render, etc."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-001",
+      "title": "Compositor uses CpuBackend via RenderBackend trait",
+      "status": "pass",
+      "steps": [
+        { "action": "grep services/compositor/main.rs for CpuBackend construction and render() calls", "expected": "CpuBackend constructed and backend.render() called", "observed": "main.rs:36 imports render::{round_f32, FrameAction, RenderBackend}; main.rs:304 constructs render::CpuBackend; main.rs:371,541,547 calls backend.render(&graph, &mut fb)" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "grepOutput": "main.rs:7: Rendering is delegated to render library via CpuBackend; main.rs:36: use render::{round_f32, FrameAction, RenderBackend}; main.rs:304: let mut backend = render::CpuBackend {...}; main.rs:371,541,547: backend.render(&graph, &mut fb)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-BUILD-001",
+      "title": "build.rs compiles render library in rlib chain",
+      "status": "pass",
+      "steps": [
+        { "action": "grep build.rs for render rlib compilation", "expected": "rustc_rlib call for render library found with extern dependencies", "observed": "build.rs:122-128 compiles libraries/render/lib.rs as librender.rlib via rustc_rlib_with_search with externs: drawing, scene, protocol, fonts" },
+        { "action": "grep build.rs for compositor --extern render", "expected": "Compositor binary gets --extern render flag", "observed": "build.rs:159-160: compositor binary receives externs.push((\"render\", render_rlib.clone()))" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "grepOutput": "build.rs:123: let render_rlib = out_dir.join(\"librender.rlib\"); build.rs:125: rustc_rlib_with_search(..., &render_rlib, \"render\", ...); build.rs:160: externs.push((\"render\", render_rlib.clone()))"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-BUILD-002",
+      "title": "Kernel binary builds successfully",
+      "status": "pass",
+      "steps": [
+        { "action": "cargo build --release in system/", "expected": "Exit code 0, kernel binary at target/aarch64-unknown-none/release/kernel", "observed": "Build succeeded with exit code 0. Kernel binary exists at target/aarch64-unknown-none/release/kernel (8,688,176 bytes)" }
+      ],
+      "evidence": {
+        "screenshots": [],
+        "consoleErrors": "none",
+        "buildOutput": "Finished `release` profile [optimized] target(s) in 0.00s, exit code 0. Kernel binary: 8,688,176 bytes"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 10 assertions: 10 passed, 0 failed, 0 blocked. RenderBackend trait exists at lib.rs:54 with correct signature. CpuBackend implements it at lib.rs:237. Render library compiles as standalone rlib with no sys/ipc dependencies. All 6 rendering files removed from compositor (only main.rs and frame_scheduler.rs remain). All 1764 tests pass with 0 failures. Test crate imports from render:: library. Compositor constructs CpuBackend and calls backend.render(). build.rs correctly compiles render rlib and links it to compositor. Kernel binary builds successfully."
+}
