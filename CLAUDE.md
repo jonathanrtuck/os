@@ -71,7 +71,11 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-14 (latest):** Scene scroll fix + kernel TPIDR race fix (EC=0x21 crash resolved).
+**Session 2026-03-16 (latest):** Rendering architecture redesign — path-centric pipeline SETTLED.
+
+**Rendering architecture (2026-03-16):** Top-down audit of the rendering stack revealed the compositor is not content-agnostic (has font knowledge, SVG parsing, content-type dispatch). Two incompatible rendering visions coexisted. Researched Vello (Raph Levien / Google Linebender). Committed to path-centric rendering: the pipeline is a series of data shape transformations (Hardware Events → Key Events → Write Requests → Scene Tree → Pixel Buffer → Display Signal) with four translators (Input Driver, Editor, Core, Render Backend). Key decisions: (1) glyph rasterization in the render backend, (2) tree-structured scene graph with geometric content types (Container, FillRect, Glyphs, Image), (3) explicit `RenderBackend` trait with `fn render(scene, surface)` — backend owns tree walk, rasterization, compositing, (4) multi-core rasterization internal to backend, (5) Glyphs type serves both text and monochrome icons (eliminates SVG parser), (6) compositor becomes ~30 lines (event loop + `backend.render()` + present). See `design/rendering-pipeline.mermaid` and full journal entry. **Next:** implement the rendering architecture rebuild.
+
+**Session 2026-03-14:** Scene scroll fix + kernel TPIDR race fix (EC=0x21 crash resolved).
 
 **Scene scroll fix (2026-03-14):** Text runs were positioned at absolute y coords without scroll adjustment — content overflowed viewport, cursor misaligned. Extracted layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) from core into scene library. Core pre-applies scroll via `scroll_runs`, positions cursor/selection viewport-relative. 11 new tests, 943 total pass.
 

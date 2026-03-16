@@ -1,0 +1,30 @@
+%% Rendering Pipeline — Data Shapes and Translators
+%%
+%% The rendering pipeline is a series of data transformations. Each data shape
+%% (rounded box) is an interface — the contract between two components. Each
+%% translator (label on the arrow) is a black box that converts one shape to
+%% the next. The logic is fully encapsulated inside each translator.
+%%
+%% One-way data flow. Each translator only knows its input and output shapes.
+%%
+%% Design decisions (2026-03-16):
+%%   - Path-centric rendering: everything is geometric (paths, rects, glyphs, images)
+%%   - Glyph rasterization in the render backend (core shapes + lays out, backend rasterizes)
+%%   - Tree-structured scene graph with geometric content types
+%%   - Explicit RenderBackend trait: fn render(scene, surface)
+%%   - Render backend owns tree walk, transform/clip stack, compositing
+%%   - Multi-core rasterization is internal to the render backend
+
+graph LR
+    HW(["Hardware Events\n(evdev interrupts:\ntype, code, value)"])
+    KE(["Key Events\n(logical key +\nmodifier set)"])
+    WR(["Write Requests\n(insert, delete,\nmove_cursor,\nset_selection)"])
+    ST(["Scene Tree\n(containers, rects,\nglyphs, images —\nlogical coordinates)"])
+    PX(["Pixel Buffer\n(BGRA8888\nframebuffer)"])
+    DS(["Display Signal\n(present +\ndirty rects)"])
+
+    HW -->|"Input Driver"| KE
+    KE -->|"Editor"| WR
+    WR -->|"Core"| ST
+    ST -->|"Render Backend"| PX
+    PX -->|"GPU Driver"| DS

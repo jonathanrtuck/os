@@ -4,85 +4,131 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
-## Rendering Philosophy: Path-Centric, Rasterize-at-the-Leaf (2026-03-15)
+## Rendering Architecture: Path-Centric Pipeline (2026-03-16)
 
-**Status:** Design leaning. Research needed before committing.
+**Status:** SETTLED. All sub-decisions committed. Implementation next.
 
 ### Context
 
-Discussion about GPU rendering support led to a broader architectural question: what should the rendering primitives API look like — the interface between the compositor and the rendering backend?
+Systematic top-down audit of the rendering stack revealed architectural problems that can't be fixed incrementally. The compositor (~4,800 lines) is not the "content-agnostic pixel pump" the architecture document describes — it has font knowledge, SVG parsing, content-type dispatch, and glyph rasterization. Two incompatible rendering visions (path-centric and content-type-dispatching) coexist. Responsibilities leak across boundaries. Optimization complexity (change lists, PREV_BOUNDS, copy-forward) compensates for missing structural simplicity.
 
-Conventional approach: a vocabulary of specialized primitives (fill_rect, draw_text_run, draw_image, draw_rounded_rect, fill_gradient, blur, shadow, etc.). Each content type maps to specific primitives. The list grows as the OS supports richer content.
+Researched Vello (Google/Linebender) — Raph Levien's GPU-compute-centric 2D renderer. Key findings: (1) Vello's Scene API matches the path-centric interface proposed here. (2) Vello now has three backends — GPU compute (production), CPU "sparse strips" (alpha), and hybrid CPU/GPU (experimental). (3) Raph's March 2025 blog post reveals frustration with GPU bounded-memory limitations. (4) Vello's implementation assumes host-OS infrastructure (wgpu, multithreading, std) incompatible with bare metal. (5) The architectural _principles_ and _API shape_ are proven and adoptable without the implementation.
 
-Alternative: a path-centric API where nearly everything is a vector path. Rects are rectangular paths. Text is glyph outlines. Rounded rects, borders, shapes — all paths. Pixels only exist at the rendering backend level.
+### Decision: Path-Centric Rendering
 
-### Design Leaning
-
-**Keep content as vector paths through as many layers as possible. Push rasterization (the translation to pixels) to the lowest leaf level — the rendering backend.**
-
-This aligns with the settled principle: essential complexity is conserved; push it to the edges behind simple interfaces.
-
-### Proposed Rendering API
+**The rendering pipeline is a series of data shape transformations. Each component is a translator — data of one shape goes in, data of another shape goes out. The logic is fully encapsulated.**
 
 ```text
-fill_path(path, paint)          -- paint = solid color, gradient, or pattern
-stroke_path(path, paint, style)
-push_clip(path)     / pop_clip
-push_transform(mat) / pop_transform
-push_opacity(alpha) / pop_opacity
-draw_image(bounds, pixels)      -- escape hatch for inherently raster content (photos, video)
+Hardware Events → Input Driver → Key Events → Editor → Write Requests
+→ Core → Scene Tree → Render Backend → Pixel Buffer → GPU Driver → Display
 ```
 
-That's the entire interface. Compare to the conventional approach which would have 15+ specialized primitives.
+Five data shapes (interfaces):
 
-### Pipeline With This Approach
+1. **Hardware Events** — evdev interrupts (type, code, value)
+2. **Key Events** — logical key + modifier set
+3. **Write Requests** — insert(pos, data), delete(pos, len), move_cursor(pos), set_selection(start, end)
+4. **Scene Tree** — tree of containers, rects, glyphs, images in logical coordinates
+5. **Pixel Buffer** — BGRA8888 framebuffer
 
-```text
-OS Service
-    │  scene graph (geometry — paths, outlines, transforms, not pixels)
-    ▼
-Compositor
-    │  path submission API (fill, stroke, clip, transform)
-    ▼
-Rendering Backend (trait — the interface boundary)
-    ├── GPU: paths → compute shader rasterization (Vello-style)
-    │         pixels never exist in main memory
-    └── CPU: paths → scanline rasterization
-              pixels in a framebuffer in RAM
+Four translators (black boxes):
+
+1. **Input Driver** — Hardware Events → Key Events
+2. **Editor** — Key Events → Write Requests (with read-only document access)
+3. **Core** — Write Requests → Scene Tree (owns document state, text shaping, layout)
+4. **Render Backend** — Scene Tree → Pixel Buffer (owns tree walk, rasterization, compositing)
+
+See `design/rendering-pipeline.mermaid` for the visual diagram.
+
+### Sub-Decisions
+
+**1. Glyph rasterization lives in the render backend, not core.**
+Core does shaping (harfrust) and layout (line breaking, wrapping, cursor positioning). Core knows what text says and where it goes. The render backend knows what text looks like — it rasterizes glyph outlines, manages the glyph cache, handles subpixel rendering. Core submits glyph IDs + positions + font reference. This preserves the logical-coordinate model (core doesn't know the scale factor) and allows a future GPU backend to do SDF or outline rendering directly.
+
+**2. Scene tree with geometric content types.**
+The tree structure is retained (not a flat command stream) because: damage tracking needs stable node IDs, the tree maps naturally to document structure, and bare-metal CPU rendering isn't fast enough to repaint every pixel every frame at Retina resolution. The tree walk moves from the compositor into the render backend — push complexity to the leaf.
+
+Node types:
+
+- **Container** — geometry (x, y, w, h), decoration (background, border, corner_radius, opacity), flags (clips_children, visible), children (first_child, next_sibling). Like SVG `<g>`.
+- **FillRect** — positioned rectangle with color. Optimization of a rectangular path.
+- **Glyphs** — font reference + array of (glyph_id, x, y) + paint. "Cached vector shapes looked up by ID." Text is the common case, but monochrome icons are the same — an icon set is structurally identical to a font. This eliminates the 795-line SVG parser in the current compositor.
+- **Image** — pixel data reference + bounds. Escape hatch for inherently raster content (photos, video frames).
+
+The compositor doesn't dispatch on content type to _interpret_ data — it calls `backend.render(scene, surface)` and the backend handles everything.
+
+**3. Explicit `RenderBackend` trait.**
+
+```rust
+trait RenderBackend {
+    fn render(&mut self, scene: &SceneReader, target: &mut Surface);
+    fn dirty_rects(&self) -> &[DirtyRect];
+}
 ```
 
-### What This Gains
+One call — the backend owns the tree walk, transform/clip stack, glyph cache, rasterization, compositing, and damage tracking. The compositor becomes ~30 lines: event loop, scene read, `backend.render()`, present.
 
-- **Resolution independence is free.** Zoom, DPI changes, scale animations — just change the transform matrix, re-submit the same paths. No re-rasterization, no texture atlas invalidation.
-- **Simpler interface.** One concept (paths) instead of many specialized primitives. The rendering API grows only when a fundamentally new category appears (e.g., video frames), not every time a new shape is needed.
-- **Geometric scene graph.** The scene graph stays in the geometry domain all the way through. Pixels are the rendering backend's problem and nobody else's.
-- **Text as paths.** Glyph outlines submitted directly, enabling SDF or GPU outline rasterization without special-casing text.
+**4. Multi-core rasterization is internal to the render backend.**
+The kernel supports 4 SMP cores. The render backend can divide the framebuffer into horizontal strips and rasterize in parallel. This is an implementation detail of the leaf node — no interface changes, nothing above it knows or cares.
 
-### Tradeoffs
+### What Changes From Today
 
-- **GPU path rasterization is hard.** Vello (Google/Linebender) is the state of the art and still maturing. This is an active research area.
-- **CPU path rasterization is slower than blitting pre-rasterized glyphs** (what the font library does today). The CPU backend would need a proper path rasterizer.
-- **Accepting complexity at the leaf** — the rendering backend becomes more sophisticated, but everything above it gets simpler. This matches the project's design principles.
+| Responsibility              | Current location                             | New location                                   |
+| --------------------------- | -------------------------------------------- | ---------------------------------------------- |
+| Tree walk + compositing     | Compositor (scene_render.rs, 1807 lines)     | Render backend                                 |
+| Glyph rasterization + cache | Compositor (scene_render.rs)                 | Render backend                                 |
+| SVG parsing                 | Compositor (svg.rs, 795 lines)               | Eliminated — icons become Glyphs               |
+| Damage tracking             | Compositor (damage.rs) + Core (change lists) | Render backend (internal)                      |
+| Transform/clip stack        | Compositor (scene_render.rs)                 | Render backend                                 |
+| Font metrics for layout     | Core (typography.rs)                         | Core (unchanged)                               |
+| Text shaping                | Core (harfrust)                              | Core (unchanged)                               |
+| Scene graph content types   | Text, Image, Path (semantic)                 | Container, FillRect, Glyphs, Image (geometric) |
 
-### Research Needed Before Committing
+### What the Compositor Becomes
 
-- **Vello** (Google/Linebender) — GPU-native 2D rendering, everything is paths, compute shader rasterization. Raph Levien's blog posts on the architecture and tradeoffs.
-- **Signed distance fields (SDF)** — resolution-independent glyph/shape rendering. Valve's original paper, current usage in Flutter and game engines.
-- **WebGPU's abstraction model** — modern take on the GPU API layer, relevant to understanding what the rendering backend would talk to.
-- **Pathfinder** (Mozilla) — earlier GPU path rendering project, different approach than Vello. Worth understanding what it learned.
+```rust
+fn main() {
+    let backend = CpuBackend::new(scale_factor, fonts);
+    let scene = DoubleReader::from_buf(scene_shm);
+    let mut fb = Surface::from_buf(fb_shm, w, h, stride, format);
+    loop {
+        wait(&[core_handle, timer_handle]);
+        if frame_scheduler.should_render() {
+            backend.render(&scene.read(), &mut fb);
+            send_present(gpu_handle, backend.dirty_rects());
+        }
+    }
+}
+```
 
-### Connection to Existing Architecture
+### Connection to Vello
 
-The compositor currently calls the drawing library directly (CPU fill_rect, blit, draw_coverage). The rendering backend trait would sit exactly where those calls are today. The compositor would submit paths instead of pixel-level operations. The drawing library becomes one implementation of the backend trait (the CPU path).
+Adopting Vello's **architectural principles** and **API shape**, not its implementation. Vello assumes host-OS infrastructure (wgpu, multithreading, std) that doesn't exist on bare metal. What transfers:
 
-No bypass mechanism needed for specialized content (unlike conventional OSes) because the OS renders everything. If a content type needs something the primitives can't express, the answer is a new primitive or a raw-buffer scene node — not a hole in the compositing pipeline.
+- Vello's Scene API design validates the path-centric interface
+- Vello's `vello_cpu` sparse strips algorithm is worth studying for the CPU backend
+- Vello's three-backend architecture validates the explicit trait approach
+- Existing code (NEON SIMD, scanline rasterizer, gamma-correct blending, glyph cache) becomes the CPU backend implementation
 
-### Open Questions
+### Research Findings: Vello (Raph Levien / Google Linebender)
 
-1. What is Vello's actual maturity and performance profile? Is it prototype-ready or still experimental?
-2. How does SDF text rendering compare to GPU outline rasterization in quality and performance?
-3. Does the path-centric model handle video frames and other inherently raster content gracefully, or does it create awkward seams?
-4. What's the minimum viable CPU path rasterizer to replace the current drawing library's role?
+**Architecture:** GPU-compute-centric. CPU uploads scene in binary SVG-like format, compute shader pipeline handles everything: path flattening → binning → coarse rasterization → fine rasterization. Sort-middle architecture — paths stay sorted for compositing order, segments within paths are unsorted (winding number is commutative).
+
+**Scene API:** `fill(shape, brush)`, `stroke(shape, brush, style)`, `push_layer(blend, clip)` / `pop_layer()`, `draw_image(image, transform)`, `draw_glyphs(font, glyphs)`. No specialized primitives — rectangles are rectangular paths, everything goes through the same pipeline.
+
+**Three backends (as of late 2025):** GPU (production, requires WebGPU compute), CPU "sparse strips" (alpha, SIMD-oriented), Hybrid (experimental, CPU path processing + GPU fine rasterization for WebGL2).
+
+**Limitations relevant to us:** Unbounded memory usage (intermediate buffers depend on scene complexity in unpredictable ways). Raph is frustrated with the GPU execution model's inability to use bounded queues between stages. GPU backend requires WebGPU — not available on bare-metal aarch64 with virtio-gpu 2D. CPU backend is alpha and designed for multithreaded host CPUs with wide SIMD.
+
+**Performance:** GPU rendering is 10-100x faster than CPU for complex scenes. Intel HD 630 renders dense vector text at 7.6ms (60fps viable). The performance gap is the virtio-gpu VM boundary (guest→host copy), not our architecture — real hardware with DMA scanout eliminates this.
+
+### Open Questions (deferred, don't block implementation)
+
+1. Hinting — unnecessary at 2x Retina (~220 PPI). Additive later, no architectural impact.
+2. Subpixel positioning (fractional x-advances for proportional text) — additive, render backend concern.
+3. Complex script support (Arabic, Devanagari, CJK) — harfrust handles shaping, render backend needs compound glyph support.
+4. Color emoji — would use Image content type, or OpenType COLR/CPAL layered glyphs (same pipeline).
+5. Wide gamut color (Display P3) — render backend concern, additive.
 
 ---
 
@@ -961,6 +1007,14 @@ Topics to explore, roughly prioritized by which unsettled decisions they'd infor
 ## Insights Log
 
 Non-obvious realizations worth preserving. These are the "aha moments" that should inform future design thinking.
+
+### The architecture is the interfaces, not the components (2026-03-16)
+
+A rendering pipeline is a series of data shape transformations. Each data shape (Hardware Events, Key Events, Write Requests, Scene Tree, Pixel Buffer) is an interface — the contract between two components. The "components" (Input Driver, Editor, Core, Render Backend) are just translation layers between interfaces. Data of one shape goes in, data of another shape goes out, the logic is fully encapsulated. This framing eliminates confusion about "where does X live?" — if it transforms the data shape, it's inside the translator. If it changes the shape itself, it's an interface redesign. Thinking in interfaces rather than components also makes it obvious when a component is doing too much: the compositor was translating Scene Tree → Pixels while also understanding text, parsing SVG, and managing font caches. That's not one translation — it's several, jammed into one box.
+
+### Glyphs are cached vector shapes, not text (2026-03-16)
+
+The `Glyphs` scene graph content type isn't "text" — it's "cached vector shapes looked up by ID from a collection." Text is the most common use case, but monochrome icons are structurally identical: a collection of vector outlines indexed by ID. An icon set goes through the exact same pipeline as a font — same glyph cache, same rasterization, same compositing. This eliminated the 795-line SVG parser in the compositor. When an abstraction naturally absorbs use cases you didn't explicitly design for, the boundary is probably in the right place.
 
 ### Decomposition is a spectrum, not a binary (2026-03-05)
 
