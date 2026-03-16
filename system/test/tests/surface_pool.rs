@@ -1,10 +1,7 @@
 //! Tests for the compositor's SurfacePool — offscreen buffer allocation,
 //! caching, reuse, clearing, and memory budget enforcement.
 
-#[path = "../../services/compositor/surface_pool.rs"]
-mod surface_pool;
-
-use surface_pool::{SurfacePool, DEFAULT_BUDGET};
+use render::surface_pool::{SurfacePool, DEFAULT_BUDGET};
 
 // ── Basic allocation tests ──────────────────────────────────────────
 

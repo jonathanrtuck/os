@@ -1,0 +1,13 @@
+[package]
+name = "render"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+drawing = { path = "../drawing" }
+scene = { path = "../scene" }
+protocol = { path = "../protocol" }
+fonts = { path = "../fonts" }

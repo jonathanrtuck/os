@@ -115,6 +115,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "render"
+version = "0.1.0"
+dependencies = [
+ "drawing",
+ "fonts",
+ "protocol",
+ "scene",
+]
+
+[[package]]
 name = "scene"
 version = "0.1.0"
 
@@ -143,6 +153,7 @@ dependencies = [
  "fonts",
  "ipc",
  "protocol",
+ "render",
  "scene",
 ]
 

@@ -117,6 +117,25 @@ fn main() {
 
     rustc_rlib_with_search(&rustc, &drawing_src, &drawing_rlib, "drawing", &[], &[]);
 
+    // Render library: scene graph rendering, compositing, SVG rasterization.
+    // Depends on drawing, scene, protocol, fonts (no sys, no ipc).
+    let render_src = manifest_dir.join("libraries/render/lib.rs");
+    let render_rlib = out_dir.join("librender.rlib");
+
+    rustc_rlib_with_search(
+        &rustc,
+        &render_src,
+        &render_rlib,
+        "render",
+        &[
+            ("drawing", &drawing_rlib),
+            ("scene", &scene_rlib),
+            ("protocol", &protocol_rlib),
+            ("fonts", &fonts_output.rlib),
+        ],
+        &[&fonts_output.deps_dir, &fonts_host_deps],
+    );
+
     // Step 2: Compile all non-init programs.
     // fuzz-helper must be compiled before fuzz (fuzz embeds it).
     for &(name, dir, needs_virtio, needs_drawing) in PROGRAMS {
@@ -229,6 +248,23 @@ fn main() {
     println!("cargo:rerun-if-changed={}", ipc_src.display());
     println!("cargo:rerun-if-changed={}", protocol_src.display());
     println!("cargo:rerun-if-changed={}", scene_src.display());
+    println!("cargo:rerun-if-changed={}", render_src.display());
+    for render_mod in &[
+        "scene_render.rs",
+        "svg.rs",
+        "compositing.rs",
+        "surface_pool.rs",
+        "damage.rs",
+        "cursor.rs",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir
+                .join("libraries/render")
+                .join(render_mod)
+                .display()
+        );
+    }
     println!(
         "cargo:rerun-if-changed={}",
         manifest_dir.join("libraries/fonts/src/lib.rs").display()

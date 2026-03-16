@@ -3,12 +3,8 @@
 //! Verifies that render_node's child clip-skip check produces
 //! pixel-identical output to rendering without the optimisation.
 
-#[path = "../../services/compositor/svg.rs"]
-mod svg;
-#[path = "../../services/compositor/surface_pool.rs"]
-mod surface_pool;
-#[path = "../../services/compositor/scene_render.rs"]
-mod scene_render;
+use render::scene_render;
+use render::surface_pool;
 
 use drawing::{Color, PixelFormat, Surface};
 use scene::{Node, NULL};
