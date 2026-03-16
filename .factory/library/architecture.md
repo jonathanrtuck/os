@@ -69,3 +69,8 @@ Scale factor is **f32** (fractional) throughout the pipeline, supporting 1.0, 1.
 7. Font sizes: physical_px = round(logical_size × scale_factor)
 8. fb_stride is NOT in CompositorConfig — derived as fb_width × 4 (BGRA8888)
 9. Manual `round_f32()` used instead of `f32::round()` for no_std compatibility
+
+## Drawing Library Constraints
+
+- **Pixel format:** The drawing library exclusively assumes **Bgra8888** (Blue, Green, Red, Alpha byte order). All blending functions (`fill_rect_blend_scalar_1px`, `neon_blend_const_4px`, `rounded_rect_write_aa_pixel`, `blend_pixel`) hard-code this byte order. If a second pixel format is ever needed, all blending functions must be audited.
+- **Stroke width convention:** In `build_stroke_outline()` / `stroke_subpath()`, the parameter is a **half-width** (offset from center to each edge). Callers must pass `stroke_width / 2`, not the full stroke width. Note: as of the visual-primitives milestone, `render_path()` incorrectly passes the full width — a known non-blocking bug producing strokes at 2× specified width.

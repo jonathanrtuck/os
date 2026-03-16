@@ -1,0 +1,57 @@
+{
+  "featureId": "corner-radius-compositor-wiring",
+  "reviewedAt": "2026-03-16T00:45:00.000Z",
+  "commitId": "b0207c3",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Solid implementation covering all six feature requirements. Rounded backgrounds use fill_rounded_rect_blend with proper logical-to-physical radius scaling. Border rendering via outer/inner rounded rect pair works correctly for the common opaque case. Corner-radius-aware child clipping uses offscreen buffer + SDF mask approach with anti-aliased edges. The corner_radius=0 fast path branches cleanly to existing fill_rect code with zero overhead. Compile-time Node size assertion (60 bytes) prevents shared-memory layout drift. 9 well-structured tests cover all VAL assertions with clear traceability. Three non-blocking edge-case issues identified.",
+    "issues": [
+      {
+        "file": "system/services/compositor/scene_render.rs",
+        "line": 197,
+        "severity": "non_blocking",
+        "description": "Rounded border with transparent background (node.background.a == 0) renders as solid filled rounded rect, not a hollow border. When the background is transparent, inner_color is set to Color::TRANSPARENT (a=0), so the inner punch-out is skipped entirely. The code comment acknowledges this ('For now, use transparent which will leave border visible') but no test exercises this case. In practice, transparent-background nodes with rounded borders would show the border color filling the entire interior."
+      },
+      {
+        "file": "system/services/compositor/scene_render.rs",
+        "line": 164,
+        "severity": "non_blocking",
+        "description": "Negative coordinate u32 cast for rounded rects: fill_rounded_rect_blend receives 'nx as u32' which wraps to a huge value if nx < 0 (node partially off-screen at negative origin). The drawing library clips to surface bounds, so the node would be entirely invisible rather than partially drawn. The non-rounded path uses the 'visible' intersection (always non-negative), but the rounded path intentionally uses full node coordinates for correct arc drawing. Edge case — only matters for nodes partially overlapping the viewport at negative coordinates, which is uncommon in the current scene graph."
+      },
+      {
+        "file": "system/services/compositor/scene_render.rs",
+        "line": 155,
+        "severity": "non_blocking",
+        "description": "Semi-transparent background + rounded border produces triple-blend artifacts. When both background is semi-transparent AND border is present with corner_radius > 0, interior pixels are blended three times: (1) background fill, (2) border outer rect overwrite, (3) border inner rect overwrite. For opaque colors this is correct. For semi-transparent backgrounds, the accumulation produces incorrectly darker/more opaque interior pixels. The test 'rounded_rect_semi_transparent_blends' only exercises semi-transparent background WITHOUT a border, so this case is untested."
+      },
+      {
+        "file": "system/test/tests/scene_render.rs",
+        "line": 2053,
+        "severity": "non_blocking",
+        "description": "Stale comment in node_size_compile_time_assertion_exists test: says 'const _: () = assert!(size_of::<Node>() == 72)' but the actual compile-time assertion in scene/lib.rs is '== 60'. The runtime assertion correctly checks 60. Only the comment is wrong."
+      },
+      {
+        "file": "system/services/compositor/scene_render.rs",
+        "line": 629,
+        "severity": "non_blocking",
+        "description": "isqrt_fp_mask is a copy-paste duplicate of drawing::isqrt_fp. Both functions are identical (binary search integer square root). The drawing library's version is private, so scene_render can't reuse it. Minor code duplication — could be resolved by making drawing::isqrt_fp pub or extracting to a shared utility."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "skills",
+      "observation": "Worker noted in skillFeedback.suggestedChanges that test.img may be locked by the user's running QEMU instance, suggesting the skill mention using a temporary disk image for visual testing. This is a valid improvement — the worker had to work around this during visual verification.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'The skill could mention that test.img may be locked by the user's running QEMU instance and suggest using a temporary disk image for visual testing.'"
+    },
+    {
+      "area": "conventions",
+      "observation": "architecture.md already documents Node as 60 bytes and includes corner_radius in the Node fields list, so the compile-time assertion aligns with documented architecture. The handoff noted a pre-existing discrepancy ('architecture.md states Node is 72 bytes') but the current architecture.md correctly says 60 bytes — this appears to have been fixed.",
+      "evidence": ".factory/library/architecture.md Key Types section: 'scene::Node — 60 bytes (verified with compile-time assertion in scene/lib.rs)'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "PASS. The corner-radius compositor wiring is well-implemented with clean separation between rounded and non-rounded code paths. All six feature requirements are met: rounded backgrounds, rounded borders via outer/inner rect pair, corner-radius-aware child clipping via offscreen mask, zero-radius fast path, border contour following arcs, and compile-time Node size assertion. 9 new tests cover all 5 validation assertions (VAL-PRIM-006, VAL-PRIM-015, VAL-PRIM-017, VAL-CROSS-003, VAL-CROSS-012). Five non-blocking issues found: transparent-background border rendering (acknowledged in code), negative-coordinate u32 wrapping edge case, semi-transparent-background-plus-border triple blend, a stale test comment, and isqrt_fp_mask code duplication. None are blocking — all affect uncommon edge cases or are cosmetic."
+}
