@@ -257,7 +257,16 @@ fn render_node_transformed(
         render_node_content_translated(fb, graph, ctx, node, node_id, nx, ny, visible, pool, world_xform);
     } else {
         // Non-trivial transform (rotation, scale, skew):
-        // 1. Compute original (untransformed) node rect in physical pixels.
+        //
+        // Strategy: render the node's content (background, text, images,
+        // children) axis-aligned into a temporary offscreen buffer sized
+        // to the node's untransformed physical dimensions. Then blit the
+        // offscreen buffer to the framebuffer using bilinear interpolation
+        // with the world transform applied. This avoids re-rasterizing
+        // glyphs at rotated angles — the glyph cache works as-is.
+        //
+        // For paths: transform coordinates before rasterization (matrix × vertex).
+
         let base_nx = abs_x + scale_coord(node.x as i32, s);
         let base_ny = abs_y + scale_coord(node.y as i32, s);
         let nw = scale_size(node.x as i32, node.width as i32, s);
@@ -266,8 +275,7 @@ fn render_node_transformed(
             return;
         }
 
-        // 2. Compute AABB of the transformed node bounds.
-        // Build a transform that excludes the base position (we apply that separately).
+        // Compute AABB of the transformed node bounds for culling.
         let (aabb_x, aabb_y, aabb_w, aabb_h) = world_xform.transform_aabb(0.0, 0.0, nw as f32, nh as f32);
         let aabb_xi = round_f32(aabb_x) + base_nx;
         let aabb_yi = round_f32(aabb_y) + base_ny;
@@ -278,31 +286,42 @@ fn render_node_transformed(
             return; // Degenerate transform (e.g., scale(0,0)).
         }
 
+        // Also account for shadow overflow in the AABB.
+        let has_shadow = node.has_shadow();
+        let (sh_left, sh_top, sh_right, sh_bottom) = if has_shadow {
+            shadow_overflow(node, s)
+        } else {
+            (0i32, 0i32, 0i32, 0i32)
+        };
+
+        // Expanded AABB includes shadow.
+        let exp_aabb_xi = aabb_xi - sh_left;
+        let exp_aabb_yi = aabb_yi - sh_top;
+        let exp_aabb_wi = aabb_wi + sh_left + sh_right;
+        let exp_aabb_hi = aabb_hi + sh_top + sh_bottom;
+
         let aabb_rect = ClipRect {
-            x: aabb_xi,
-            y: aabb_yi,
-            w: aabb_wi,
-            h: aabb_hi,
+            x: exp_aabb_xi,
+            y: exp_aabb_yi,
+            w: exp_aabb_wi,
+            h: exp_aabb_hi,
         };
 
         // Cull if the AABB doesn't intersect the clip rect.
-        let _visible_aabb = match clip.intersect(aabb_rect) {
-            Some(v) => v,
+        let clipped_aabb = match clip.intersect(aabb_rect) {
+            Some(c) => c,
             None => return,
         };
 
-        // 3. Render node content to a temporary offscreen buffer at the
-        // original (untransformed) size, then blit it with the transform.
-        // For this feature, we render the background fill using the AABB
-        // as a simple approximation. Full transformed rendering (bilinear
-        // resampling) is a later feature (transformed-rendering-and-text).
-        //
-        // For now: render node background into an axis-aligned buffer of
-        // AABB size and blit it to the framebuffer.
-        let render_w = aabb_wi as u32;
-        let render_h = aabb_hi as u32;
-        let render_stride = render_w * 4;
-        let render_size = (render_stride * render_h) as usize;
+        // Render the node's content axis-aligned to a temporary buffer.
+        let render_w = nw as u32;
+        let render_h = nh as u32;
+
+        // Account for shadow in the offscreen buffer size.
+        let total_w = (sh_left + nw + sh_right).max(nw) as u32;
+        let total_h = (sh_top + nh + sh_bottom).max(nh) as u32;
+        let render_stride = total_w * 4;
+        let render_size = (render_stride * total_h) as usize;
 
         // Cap allocation to prevent OOM.
         if render_size > 4 * 1024 * 1024 {
@@ -313,118 +332,161 @@ fn render_node_transformed(
         {
             let mut render_fb = Surface {
                 data: &mut render_buf,
-                width: render_w,
-                height: render_h,
+                width: total_w,
+                height: total_h,
                 stride: render_stride,
                 format: PixelFormat::Bgra8888,
             };
 
-            // Render the node's background fill into the AABB-sized buffer.
-            // The background covers the AABB for now (solid fill).
-            if node.background.a > 0 {
-                let bg = scene_to_draw_color(node.background);
-                if bg.a == 255 {
-                    render_fb.fill_rect(0, 0, render_w, render_h, bg);
-                } else {
-                    render_fb.fill_rect_blend(0, 0, render_w, render_h, bg);
-                }
+            // Render shadow into the offscreen buffer.
+            if has_shadow {
+                render_shadow(&mut render_fb, node, sh_left, sh_top, nw, nh, s);
             }
 
-            // Render children into the offscreen buffer with their transforms.
-            // Children are positioned relative to the node's local coordinate
-            // system, which is now the offscreen buffer.
-            let child_clip = ClipRect {
+            // Render node content at offset (sh_left, sh_top) within the buffer.
+            let content_clip = ClipRect {
                 x: 0,
                 y: 0,
-                w: render_w as i32,
-                h: render_h as i32,
+                w: total_w as i32,
+                h: total_h as i32,
             };
-            let mut child = node.first_child;
-            // In the offscreen buffer, the node's origin maps to a position
-            // offset by the AABB min relative to the node origin.
-            let child_origin_x = -round_f32(aabb_x);
-            let child_origin_y = -round_f32(aabb_y) - scale_coord(node.scroll_y, s);
-            while child != NULL {
-                if (child as usize) >= graph.nodes.len() {
-                    break;
-                }
-                render_node_transformed(
-                    &mut render_fb, graph, ctx, child,
-                    child_origin_x, child_origin_y,
-                    child_clip, None,
-                    scene::AffineTransform::identity(), // children get their own local transforms
-                );
-                let child_node = &graph.nodes[child as usize];
-                child = child_node.next_sibling;
-            }
+            render_node_content_translated(
+                &mut render_fb, graph, ctx, node, node_id,
+                sh_left, sh_top,
+                content_clip,
+                None,
+                scene::AffineTransform::identity(), // children rendered axis-aligned
+            );
         }
 
-        // Blit the offscreen buffer at the AABB position, clipped to the
-        // parent clip rect. This ensures CLIPS_CHILDREN works with transforms.
-        let blit_rect = ClipRect {
-            x: aabb_xi,
-            y: aabb_yi,
-            w: render_w as i32,
-            h: render_h as i32,
-        };
-        let clipped_blit = match clip.intersect(blit_rect) {
-            Some(v) => v,
-            None => return,
+        // Compute the inverse of the world transform for bilinear resampling.
+        // The inverse maps destination pixels back to source (offscreen buffer)
+        // coordinates.
+        let inv = match world_xform.inverse() {
+            Some(inv) => inv,
+            None => return, // Singular transform — nothing to render.
         };
 
-        // Compute the source offset within the offscreen buffer.
-        let src_x = (clipped_blit.x - aabb_xi).max(0) as u32;
-        let src_y = (clipped_blit.y - aabb_yi).max(0) as u32;
-        let dst_x = clipped_blit.x.max(0) as u32;
-        let dst_y = clipped_blit.y.max(0) as u32;
-        let blit_w = clipped_blit.w as u32;
-        let blit_h = clipped_blit.h as u32;
+        // The offscreen buffer's coordinate system:
+        // - (sh_left, sh_top) in the buffer corresponds to node origin (0, 0)
+        //   in the node's local physical space.
+        // - The world transform maps node-local (0, 0) to (aabb_x, aabb_y)
+        //   relative to (base_nx, base_ny).
+        //
+        // For the bilinear blit, we iterate over destination pixels in the AABB
+        // region. For each dest pixel (dx, dy) relative to (exp_aabb_xi, exp_aabb_yi):
+        //   1. Map to node-local space using the inverse transform
+        //   2. Add (sh_left, sh_top) to get offscreen buffer coordinates
+        //
+        // Combine these offsets into the inverse transform's translation.
+        let inv_tx_adj = inv.tx + sh_left as f32;
+        let inv_ty_adj = inv.ty + sh_top as f32;
 
-        // Blit only the clipped region.
-        for row in 0..blit_h {
-            let src_row = src_y + row;
-            let dst_row = dst_y + row;
-            if src_row >= render_h || dst_row >= fb.height {
-                continue;
-            }
-            for col in 0..blit_w {
-                let src_col = src_x + col;
-                let dst_col = dst_x + col;
-                if src_col >= render_w || dst_col >= fb.width {
-                    continue;
-                }
-                let src_off = (src_row * render_stride + src_col * 4) as usize;
-                let dst_off = (dst_row * fb.stride + dst_col * 4) as usize;
-                if src_off + 4 > render_buf.len() || dst_off + 4 > fb.data.len() {
-                    continue;
-                }
-                let sb = render_buf[src_off];
-                let sg = render_buf[src_off + 1];
-                let sr = render_buf[src_off + 2];
-                let mut sa = render_buf[src_off + 3];
-                if sa == 0 {
-                    continue;
-                }
-                // Apply group opacity if needed.
-                if node.opacity < 255 {
-                    sa = ((sa as u32 * node.opacity as u32) / 255) as u8;
-                    if sa == 0 {
-                        continue;
-                    }
-                }
-                let src_color = Color { r: sr, g: sg, b: sb, a: sa };
-                let dst_b = fb.data[dst_off];
-                let dst_g = fb.data[dst_off + 1];
-                let dst_r = fb.data[dst_off + 2];
-                let dst_a = fb.data[dst_off + 3];
-                let dst_color = Color { r: dst_r, g: dst_g, b: dst_b, a: dst_a };
-                let blended = src_color.blend_over(dst_color);
-                fb.data[dst_off] = blended.b;
-                fb.data[dst_off + 1] = blended.g;
-                fb.data[dst_off + 2] = blended.r;
-                fb.data[dst_off + 3] = blended.a;
-            }
-        }
+        // The destination region in framebuffer coords is the AABB, but the
+        // inverse transform expects coordinates relative to the AABB origin.
+        // We need to account for (aabb_x, aabb_y) offset: the dest pixel
+        // at (exp_aabb_xi, exp_aabb_yi) should map to (0 - sh_left, 0 - sh_top)
+        // in node-local space, which is (-sh_left, -sh_top) + (sh_left, sh_top)
+        // = (0, 0) in buffer space.
+        //
+        // Since aabb_x/aabb_y are the AABB min of the transform, and we want
+        // dest pixel 0 to map to the top-left of the shadow-expanded area:
+        // The mapping for dest pixel (col, row) relative to (exp_aabb_xi, exp_aabb_yi):
+        //   src_x = inv.a * (col - sh_left) + inv.c * (row - sh_top) + inv.tx + sh_left
+        //   where (col - sh_left, row - sh_top) is the offset from the node AABB origin.
+        // But the AABB already includes the transform offset (aabb_x, aabb_y are from
+        // the transform), so dest (0,0) of the expanded AABB corresponds to
+        // (-sh_left, -sh_top) relative to the AABB origin.
+        //
+        // Simpler approach: for dest pixel at (col, row) in expanded AABB space:
+        //   - Offset to AABB-local: (col - sh_left, row - sh_top)
+        //   - These are in "post-transform" space relative to node origin
+        //   - Apply inverse to get node-local: inv × (col - sh_left, row - sh_top)
+        //   - Add (sh_left, sh_top) to get buffer coords
+
+        // For the shadow-expanded area, we need pixels outside the transform
+        // AABB too. Use a simpler mapping that directly maps:
+        //   buffer_x = inv.a * (col - sh_left) + inv.c * (row - sh_top) + inv.tx + sh_left
+        //   buffer_y = inv.b * (col - sh_left) + inv.d * (row - sh_top) + inv.ty + sh_top
+        // But this only works for the node content, not the shadow (which is
+        // already rendered at the correct position in the buffer).
+        //
+        // For shadow: shadow is pre-rendered in the buffer at its correct
+        // offset. We want to blit the ENTIRE buffer with the transform.
+        // But shadow should not be transformed (it's already positioned).
+        //
+        // Actually: render shadow to a separate buffer and blit it axis-aligned,
+        // then render the node content to the offscreen buffer and blit with
+        // the transform. This way shadow is not resampled.
+        //
+        // Simpler approach for this feature: render shadow + content to one
+        // buffer, and blit the whole thing with the transform. The shadow
+        // will be slightly rotated, but this is visually acceptable and
+        // matches how CSS transforms work (shadow is part of the element's
+        // visual, and both rotate together).
+
+        // For the bilinear blit: destination covers the expanded AABB.
+        // Each dest pixel (col, row) maps to buffer coords:
+        //   - (col, row) is the position within the expanded AABB
+        //   - For pixels in the shadow region, they're already at the right place
+        //   - For pixels in the node content, we need the inverse transform
+        //
+        // Since the shadow is rendered in the buffer aligned to the node, and
+        // the node content is also aligned, we apply the SAME transform to
+        // the whole buffer. The shadow position in the buffer is correct
+        // relative to the node content; after transform, both rotate together.
+
+        // Effective inverse mapping from expanded-AABB-local coords to buffer:
+        //   buf_x = inv.a * col + inv.c * row + inv.tx + sh_left
+        //   buf_y = inv.b * col + inv.d * row + inv.ty + sh_top
+        // where (col, row) are relative to the start of the expanded AABB.
+
+        // Compute the adjusted inverse translation that maps from
+        // expanded-AABB-local pixel coords (col, row) to buffer coords:
+        //   AABB-local (col, row) → post-transform space: (aabb_x + col, aabb_y + row)
+        //     where aabb_x, aabb_y are the AABB min in post-transform space.
+        //   post-transform → pre-transform (node-local): inv × (aabb_x + col, aabb_y + row)
+        //   node-local → buffer: + (sh_left, sh_top)
+        //
+        //   buf_x = inv.a * col + inv.c * row + (inv.a * aabb_x + inv.c * aabb_y + inv.tx + sh_left)
+        //   buf_y = inv.b * col + inv.d * row + (inv.b * aabb_x + inv.d * aabb_y + inv.ty + sh_top)
+        //
+        // Note: aabb_x, aabb_y are from transform_aabb (before adding base_nx/base_ny).
+        // The expanded AABB adds shadow margins, so for the shadow region we also
+        // offset by (-sh_left, -sh_top) in AABB space:
+        //   adj_aabb_x = aabb_x - sh_left_f
+        //   adj_aabb_y = aabb_y - sh_top_f
+        let adj_aabb_x = aabb_x - sh_left as f32;
+        let adj_aabb_y = aabb_y - sh_top as f32;
+
+        // The clipped AABB may be smaller than the expanded AABB.
+        // Adjust the inverse translation to account for the clip offset:
+        // col=0 in the clipped region corresponds to (clipped_aabb.x - exp_aabb_xi)
+        // in the expanded AABB. We offset accordingly.
+        let clip_dx = (clipped_aabb.x - exp_aabb_xi) as f32;
+        let clip_dy = (clipped_aabb.y - exp_aabb_yi) as f32;
+        let adj_inv_tx = inv.a * (adj_aabb_x + clip_dx) + inv.c * (adj_aabb_y + clip_dy) + inv.tx + sh_left as f32;
+        let adj_inv_ty = inv.b * (adj_aabb_x + clip_dx) + inv.d * (adj_aabb_y + clip_dy) + inv.ty + sh_top as f32;
+
+        let eff_opacity = node.opacity;
+
+        fb.blit_transformed_bilinear(
+            &render_buf,
+            total_w,
+            total_h,
+            render_stride,
+            clipped_aabb.x,
+            clipped_aabb.y,
+            clipped_aabb.w as u32,
+            clipped_aabb.h as u32,
+            inv.a,
+            inv.b,
+            inv.c,
+            inv.d,
+            adj_inv_tx,
+            adj_inv_ty,
+            eff_opacity,
+        );
     }
 }
 

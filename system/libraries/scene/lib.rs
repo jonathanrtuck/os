@@ -349,6 +349,24 @@ impl AffineTransform {
         }
     }
 
+    /// Compute the inverse of this affine transform.
+    /// Returns `None` if the matrix is singular (determinant ≈ 0).
+    pub fn inverse(&self) -> Option<Self> {
+        let det = self.a * self.d - self.b * self.c;
+        if det > -1e-10 && det < 1e-10 {
+            return None; // Singular matrix.
+        }
+        let inv_det = 1.0 / det;
+        Some(Self {
+            a: self.d * inv_det,
+            b: -self.b * inv_det,
+            c: -self.c * inv_det,
+            d: self.a * inv_det,
+            tx: (self.c * self.ty - self.d * self.tx) * inv_det,
+            ty: (self.b * self.tx - self.a * self.ty) * inv_det,
+        })
+    }
+
     /// Returns `true` if this is the identity transform.
     pub fn is_identity(&self) -> bool {
         self.a == 1.0
