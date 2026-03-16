@@ -127,6 +127,9 @@ fn snap_border(logical_width: u32, scale: f32) -> u32 {
 /// node's origin in the framebuffer. `clip` is in physical pixels.
 /// Scene graph coordinates are logical; scaled by `ctx.scale` (f32).
 ///
+/// `world_transform` is the accumulated transform from all ancestors.
+/// Each node's world transform = parent_world × node_local.
+///
 /// `pool` provides offscreen buffers for group opacity rendering. When a
 /// node has `opacity < 255`, its subtree is rendered into an offscreen
 /// buffer (from the pool) and then composited at the specified opacity.
@@ -139,6 +142,21 @@ fn render_node(
     abs_y: i32,
     clip: ClipRect,
     pool: Option<&mut SurfacePool>,
+) {
+    render_node_transformed(fb, graph, ctx, node_id, abs_x, abs_y, clip, pool, scene::AffineTransform::identity());
+}
+
+/// Inner render function that carries the accumulated world transform.
+fn render_node_transformed(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    ctx: &RenderCtx,
+    node_id: NodeId,
+    abs_x: i32,
+    abs_y: i32,
+    clip: ClipRect,
+    pool: Option<&mut SurfacePool>,
+    parent_world: scene::AffineTransform,
 ) {
     if node_id == NULL || node_id as usize >= graph.nodes.len() {
         return;
@@ -156,121 +174,258 @@ fn render_node(
     }
 
     let s = ctx.scale;
-    let nx = abs_x + scale_coord(node.x as i32, s);
-    let ny = abs_y + scale_coord(node.y as i32, s);
-    let nw = scale_size(node.x as i32, node.width as i32, s);
-    let nh = scale_size(node.y as i32, node.height as i32, s);
-    let node_rect = ClipRect {
-        x: nx,
-        y: ny,
-        w: nw,
-        h: nh,
-    };
-    let visible = match clip.intersect(node_rect) {
-        Some(v) => v,
-        None => return,
-    };
 
-    // Compute shadow geometry for damage/overflow. Shadow is rendered
-    // before the node content (behind it in z-order).
-    let has_shadow = node.has_shadow();
+    // Compose the world transform: parent × local.
+    let local_xform = node.transform;
+    let world_xform = parent_world.compose(local_xform);
 
-    // Group opacity: when opacity < 255, render the entire node (background,
-    // content, children) into an offscreen buffer at full alpha, then
-    // composite the buffer onto the destination at the specified opacity.
-    // This produces correct group opacity — children are blended together
-    // first, then the group is composited at reduced opacity.
-    if node.opacity < 255 {
+    // If the world transform is a pure translation (no rotation, scale, or
+    // skew), apply it as a simple pixel offset. Otherwise, compute the AABB
+    // of the transformed node and render into an offscreen buffer.
+    let is_simple_translation = world_xform.a == 1.0
+        && world_xform.b == 0.0
+        && world_xform.c == 0.0
+        && world_xform.d == 1.0;
+    if is_simple_translation {
+        // Pure translation: shift the node's position by the transform's tx, ty.
+        let tx_px = round_f32(world_xform.tx * s);
+        let ty_px = round_f32(world_xform.ty * s);
+        let nx = abs_x + scale_coord(node.x as i32, s) + tx_px;
+        let ny = abs_y + scale_coord(node.y as i32, s) + ty_px;
+        let nw = scale_size(node.x as i32, node.width as i32, s);
+        let nh = scale_size(node.y as i32, node.height as i32, s);
+        let node_rect = ClipRect {
+            x: nx,
+            y: ny,
+            w: nw,
+            h: nh,
+        };
+        let visible = match clip.intersect(node_rect) {
+            Some(v) => v,
+            None => return,
+        };
+
+        // Compute shadow geometry for damage/overflow.
+        let has_shadow = node.has_shadow();
+
+        // Group opacity path.
+        if node.opacity < 255 {
+            if nw <= 0 || nh <= 0 {
+                return;
+            }
+            let (sh_left, sh_top, sh_right, sh_bottom) = if has_shadow {
+                shadow_overflow(node, s)
+            } else {
+                (0i32, 0i32, 0i32, 0i32)
+            };
+            let total_w = (sh_left + nw + sh_right).max(nw) as u32;
+            let total_h = (sh_top + nh + sh_bottom).max(nh) as u32;
+            let ostride = total_w * 4;
+            let mut offscreen_buf = vec![0u8; (ostride * total_h) as usize];
+            {
+                let mut off_fb = Surface {
+                    data: &mut offscreen_buf,
+                    width: total_w,
+                    height: total_h,
+                    stride: ostride,
+                    format: PixelFormat::Bgra8888,
+                };
+                if has_shadow {
+                    render_shadow(&mut off_fb, node, sh_left, sh_top, nw, nh, s);
+                }
+                render_node_content_translated(
+                    &mut off_fb, graph, ctx, node, node_id,
+                    sh_left, sh_top,
+                    ClipRect { x: 0, y: 0, w: total_w as i32, h: total_h as i32 },
+                    None,
+                    world_xform,
+                );
+            }
+            let blit_x = (nx - sh_left).max(0) as u32;
+            let blit_y = (ny - sh_top).max(0) as u32;
+            fb.blit_blend_with_opacity(
+                &offscreen_buf, total_w, total_h, ostride,
+                blit_x, blit_y, node.opacity,
+            );
+            return;
+        }
+
+        // opacity=255: render directly.
+        if has_shadow {
+            render_shadow(fb, node, nx, ny, nw, nh, s);
+        }
+        render_node_content_translated(fb, graph, ctx, node, node_id, nx, ny, visible, pool, world_xform);
+    } else {
+        // Non-trivial transform (rotation, scale, skew):
+        // 1. Compute original (untransformed) node rect in physical pixels.
+        let base_nx = abs_x + scale_coord(node.x as i32, s);
+        let base_ny = abs_y + scale_coord(node.y as i32, s);
+        let nw = scale_size(node.x as i32, node.width as i32, s);
+        let nh = scale_size(node.y as i32, node.height as i32, s);
         if nw <= 0 || nh <= 0 {
             return;
         }
 
-        // Compute the total area needed including shadow overflow.
-        let (sh_left, sh_top, sh_right, sh_bottom) = if has_shadow {
-            shadow_overflow(node, s)
-        } else {
-            (0i32, 0i32, 0i32, 0i32)
+        // 2. Compute AABB of the transformed node bounds.
+        // Build a transform that excludes the base position (we apply that separately).
+        let (aabb_x, aabb_y, aabb_w, aabb_h) = world_xform.transform_aabb(0.0, 0.0, nw as f32, nh as f32);
+        let aabb_xi = round_f32(aabb_x) + base_nx;
+        let aabb_yi = round_f32(aabb_y) + base_ny;
+        let aabb_wi = round_f32(aabb_w).max(0);
+        let aabb_hi = round_f32(aabb_h).max(0);
+
+        if aabb_wi == 0 || aabb_hi == 0 {
+            return; // Degenerate transform (e.g., scale(0,0)).
+        }
+
+        let aabb_rect = ClipRect {
+            x: aabb_xi,
+            y: aabb_yi,
+            w: aabb_wi,
+            h: aabb_hi,
         };
 
-        let total_w = (sh_left + nw + sh_right).max(nw) as u32;
-        let total_h = (sh_top + nh + sh_bottom).max(nh) as u32;
-        let ostride = total_w * 4;
+        // Cull if the AABB doesn't intersect the clip rect.
+        let _visible_aabb = match clip.intersect(aabb_rect) {
+            Some(v) => v,
+            None => return,
+        };
 
-        // Allocate an offscreen buffer for group opacity rendering.
-        // Children are rendered at full alpha, then the entire buffer is
-        // composited at the node's opacity.
-        let mut offscreen_buf = vec![0u8; (ostride * total_h) as usize];
+        // 3. Render node content to a temporary offscreen buffer at the
+        // original (untransformed) size, then blit it with the transform.
+        // For this feature, we render the background fill using the AABB
+        // as a simple approximation. Full transformed rendering (bilinear
+        // resampling) is a later feature (transformed-rendering-and-text).
+        //
+        // For now: render node background into an axis-aligned buffer of
+        // AABB size and blit it to the framebuffer.
+        let render_w = aabb_wi as u32;
+        let render_h = aabb_hi as u32;
+        let render_stride = render_w * 4;
+        let render_size = (render_stride * render_h) as usize;
 
+        // Cap allocation to prevent OOM.
+        if render_size > 4 * 1024 * 1024 {
+            return;
+        }
+
+        let mut render_buf = vec![0u8; render_size];
         {
-            let mut off_fb = Surface {
-                data: &mut offscreen_buf,
-                width: total_w,
-                height: total_h,
-                stride: ostride,
+            let mut render_fb = Surface {
+                data: &mut render_buf,
+                width: render_w,
+                height: render_h,
+                stride: render_stride,
                 format: PixelFormat::Bgra8888,
             };
 
-            // Shadow is rendered first (behind content).
-            if has_shadow {
-                render_shadow(
-                    &mut off_fb,
-                    node,
-                    sh_left,
-                    sh_top,
-                    nw,
-                    nh,
-                    s,
-                );
+            // Render the node's background fill into the AABB-sized buffer.
+            // The background covers the AABB for now (solid fill).
+            if node.background.a > 0 {
+                let bg = scene_to_draw_color(node.background);
+                if bg.a == 255 {
+                    render_fb.fill_rect(0, 0, render_w, render_h, bg);
+                } else {
+                    render_fb.fill_rect_blend(0, 0, render_w, render_h, bg);
+                }
             }
 
-            // Render the node at full opacity into the offscreen buffer.
-            // The offscreen buffer's (sh_left, sh_top) corresponds to (nx, ny)
-            // in the framebuffer coordinate space.
-            render_node_content(
-                &mut off_fb,
-                graph,
-                ctx,
-                node,
-                node_id,
-                sh_left,
-                sh_top,
-                ClipRect { x: 0, y: 0, w: total_w as i32, h: total_h as i32 },
-                None, // children can allocate their own offscreen buffers
-            );
+            // Render children into the offscreen buffer with their transforms.
+            // Children are positioned relative to the node's local coordinate
+            // system, which is now the offscreen buffer.
+            let child_clip = ClipRect {
+                x: 0,
+                y: 0,
+                w: render_w as i32,
+                h: render_h as i32,
+            };
+            let mut child = node.first_child;
+            // In the offscreen buffer, the node's origin maps to a position
+            // offset by the AABB min relative to the node origin.
+            let child_origin_x = -round_f32(aabb_x);
+            let child_origin_y = -round_f32(aabb_y) - scale_coord(node.scroll_y, s);
+            while child != NULL {
+                if (child as usize) >= graph.nodes.len() {
+                    break;
+                }
+                render_node_transformed(
+                    &mut render_fb, graph, ctx, child,
+                    child_origin_x, child_origin_y,
+                    child_clip, None,
+                    scene::AffineTransform::identity(), // children get their own local transforms
+                );
+                let child_node = &graph.nodes[child as usize];
+                child = child_node.next_sibling;
+            }
         }
 
-        // Composite the offscreen buffer onto the destination at the
-        // specified opacity, using sRGB-correct blending.
-        let blit_x = (nx - sh_left).max(0) as u32;
-        let blit_y = (ny - sh_top).max(0) as u32;
+        // Blit the offscreen buffer at the AABB position, clipped to the
+        // parent clip rect. This ensures CLIPS_CHILDREN works with transforms.
+        let blit_rect = ClipRect {
+            x: aabb_xi,
+            y: aabb_yi,
+            w: render_w as i32,
+            h: render_h as i32,
+        };
+        let clipped_blit = match clip.intersect(blit_rect) {
+            Some(v) => v,
+            None => return,
+        };
 
-        fb.blit_blend_with_opacity(
-            &offscreen_buf,
-            total_w,
-            total_h,
-            ostride,
-            blit_x,
-            blit_y,
-            node.opacity,
-        );
+        // Compute the source offset within the offscreen buffer.
+        let src_x = (clipped_blit.x - aabb_xi).max(0) as u32;
+        let src_y = (clipped_blit.y - aabb_yi).max(0) as u32;
+        let dst_x = clipped_blit.x.max(0) as u32;
+        let dst_y = clipped_blit.y.max(0) as u32;
+        let blit_w = clipped_blit.w as u32;
+        let blit_h = clipped_blit.h as u32;
 
-        return;
+        // Blit only the clipped region.
+        for row in 0..blit_h {
+            let src_row = src_y + row;
+            let dst_row = dst_y + row;
+            if src_row >= render_h || dst_row >= fb.height {
+                continue;
+            }
+            for col in 0..blit_w {
+                let src_col = src_x + col;
+                let dst_col = dst_x + col;
+                if src_col >= render_w || dst_col >= fb.width {
+                    continue;
+                }
+                let src_off = (src_row * render_stride + src_col * 4) as usize;
+                let dst_off = (dst_row * fb.stride + dst_col * 4) as usize;
+                if src_off + 4 > render_buf.len() || dst_off + 4 > fb.data.len() {
+                    continue;
+                }
+                let sb = render_buf[src_off];
+                let sg = render_buf[src_off + 1];
+                let sr = render_buf[src_off + 2];
+                let mut sa = render_buf[src_off + 3];
+                if sa == 0 {
+                    continue;
+                }
+                // Apply group opacity if needed.
+                if node.opacity < 255 {
+                    sa = ((sa as u32 * node.opacity as u32) / 255) as u8;
+                    if sa == 0 {
+                        continue;
+                    }
+                }
+                let src_color = Color { r: sr, g: sg, b: sb, a: sa };
+                let dst_b = fb.data[dst_off];
+                let dst_g = fb.data[dst_off + 1];
+                let dst_r = fb.data[dst_off + 2];
+                let dst_a = fb.data[dst_off + 3];
+                let dst_color = Color { r: dst_r, g: dst_g, b: dst_b, a: dst_a };
+                let blended = src_color.blend_over(dst_color);
+                fb.data[dst_off] = blended.b;
+                fb.data[dst_off + 1] = blended.g;
+                fb.data[dst_off + 2] = blended.r;
+                fb.data[dst_off + 3] = blended.a;
+            }
+        }
     }
-
-    // opacity=255: render shadow directly to destination, then node content.
-    if has_shadow {
-        render_shadow(
-            fb,
-            node,
-            nx,
-            ny,
-            nw,
-            nh,
-            s,
-        );
-    }
-
-    render_node_content(fb, graph, ctx, node, node_id, nx, ny, visible, pool);
 }
 
 /// Compute the shadow overflow on each side of the node bounds in physical pixels.
@@ -442,7 +597,8 @@ fn render_shadow(
 /// target surface. For direct rendering this equals the node's absolute FB
 /// position. For offscreen opacity rendering this is (0, 0).
 /// `visible` is the clipped visible rectangle in the target surface's coords.
-fn render_node_content(
+/// `world_xform` is the accumulated world transform for this node's subtree.
+fn render_node_content_translated(
     fb: &mut Surface,
     graph: &SceneGraph,
     ctx: &RenderCtx,
@@ -452,6 +608,7 @@ fn render_node_content(
     draw_y: i32,
     visible: ClipRect,
     pool: Option<&mut SurfacePool>,
+    world_xform: scene::AffineTransform,
 ) {
     let s = ctx.scale;
     let nw = scale_size(node.x as i32, node.width as i32, s);
@@ -753,7 +910,7 @@ fn render_node_content(
                 };
 
                 if off_clip.intersect(child_rect).is_some() {
-                    render_node(
+                    render_node_transformed(
                         &mut off_fb,
                         graph,
                         ctx,
@@ -762,6 +919,7 @@ fn render_node_content(
                         child_origin_y_off,
                         off_clip,
                         None,
+                        scene::AffineTransform::identity(),
                     );
                 }
 
@@ -815,7 +973,7 @@ fn render_node_content(
             };
 
             if child_clip.intersect(child_rect).is_some() {
-                render_node(
+                render_node_transformed(
                     fb,
                     graph,
                     ctx,
@@ -824,6 +982,7 @@ fn render_node_content(
                     child_origin_y,
                     child_clip,
                     None,
+                    scene::AffineTransform::identity(),
                 );
             }
 

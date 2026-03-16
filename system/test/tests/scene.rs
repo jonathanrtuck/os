@@ -5149,3 +5149,233 @@ fn path_cmd_empty_returns_empty_slice() {
 fn path_cmd_size_is_14_bytes() {
     assert_eq!(core::mem::size_of::<PathCmd>(), 14);
 }
+
+// ── AffineTransform tests ───────────────────────────────────────────
+
+#[test]
+fn affine_transform_identity_is_default() {
+    let t = AffineTransform::identity();
+    assert_eq!(t.a, 1.0);
+    assert_eq!(t.b, 0.0);
+    assert_eq!(t.c, 0.0);
+    assert_eq!(t.d, 1.0);
+    assert_eq!(t.tx, 0.0);
+    assert_eq!(t.ty, 0.0);
+}
+
+#[test]
+fn affine_transform_is_repr_c() {
+    // AffineTransform is repr(C) with 6 × f32 = 24 bytes.
+    assert_eq!(core::mem::size_of::<AffineTransform>(), 24);
+}
+
+#[test]
+fn affine_transform_translate() {
+    let t = AffineTransform::translate(10.0, 5.0);
+    assert_eq!(t.tx, 10.0);
+    assert_eq!(t.ty, 5.0);
+    assert_eq!(t.a, 1.0);
+    assert_eq!(t.d, 1.0);
+    assert_eq!(t.b, 0.0);
+    assert_eq!(t.c, 0.0);
+}
+
+#[test]
+fn affine_transform_scale() {
+    let t = AffineTransform::scale(2.0, 3.0);
+    assert_eq!(t.a, 2.0);
+    assert_eq!(t.d, 3.0);
+    assert_eq!(t.tx, 0.0);
+    assert_eq!(t.ty, 0.0);
+}
+
+#[test]
+fn affine_transform_rotate_90() {
+    let t = AffineTransform::rotate(core::f32::consts::FRAC_PI_2);
+    // cos(90°) ≈ 0, sin(90°) ≈ 1
+    assert!((t.a - 0.0).abs() < 1e-5, "a should be ~0, got {}", t.a);
+    assert!((t.b - 1.0).abs() < 1e-5, "b should be ~1, got {}", t.b);
+    assert!((t.c - (-1.0)).abs() < 1e-5, "c should be ~-1, got {}", t.c);
+    assert!((t.d - 0.0).abs() < 1e-5, "d should be ~0, got {}", t.d);
+}
+
+#[test]
+fn affine_transform_rotate_180() {
+    let t = AffineTransform::rotate(core::f32::consts::PI);
+    // cos(180°) ≈ -1, sin(180°) ≈ 0
+    assert!((t.a - (-1.0)).abs() < 1e-5, "a should be ~-1, got {}", t.a);
+    assert!((t.b - 0.0).abs() < 1e-4, "b should be ~0, got {}", t.b);
+    assert!((t.c - 0.0).abs() < 1e-4, "c should be ~0, got {}", t.c);
+    assert!((t.d - (-1.0)).abs() < 1e-5, "d should be ~-1, got {}", t.d);
+}
+
+#[test]
+fn affine_transform_skew_x() {
+    let angle = 0.5_f32; // ~26.6 degrees
+    let t = AffineTransform::skew_x(angle);
+    assert_eq!(t.a, 1.0);
+    assert_eq!(t.d, 1.0);
+    // c = tan(angle) ≈ 0.5463
+    let expected_c = angle.tan();
+    assert!((t.c - expected_c).abs() < 1e-5, "c should be tan(0.5), got {}", t.c);
+    assert_eq!(t.b, 0.0);
+}
+
+#[test]
+fn affine_transform_compose_translations() {
+    let t1 = AffineTransform::translate(100.0, 50.0);
+    let t2 = AffineTransform::translate(10.0, 5.0);
+    let composed = t1.compose(t2);
+    assert!((composed.tx - 110.0).abs() < 1e-5, "tx should be 110, got {}", composed.tx);
+    assert!((composed.ty - 55.0).abs() < 1e-5, "ty should be 55, got {}", composed.ty);
+}
+
+#[test]
+fn affine_transform_compose_scale_then_translate() {
+    // Scale(2,2) then translate(10,5):
+    // Result: point (x,y) → scale → (2x, 2y) → translate → (2x+10, 2y+5)
+    // Matrix: parent × child = translate × scale
+    // [1 0 10]   [2 0 0]   [2 0 10]
+    // [0 1  5] × [0 2 0] = [0 2  5]
+    // [0 0  1]   [0 0 1]   [0 0  1]
+    let parent = AffineTransform::translate(10.0, 5.0);
+    let child = AffineTransform::scale(2.0, 2.0);
+    let composed = parent.compose(child);
+    assert!((composed.a - 2.0).abs() < 1e-5);
+    assert!((composed.d - 2.0).abs() < 1e-5);
+    assert!((composed.tx - 10.0).abs() < 1e-5);
+    assert!((composed.ty - 5.0).abs() < 1e-5);
+}
+
+#[test]
+fn affine_transform_compose_three_levels() {
+    // VAL-XFORM-008: Three-level nesting composes correctly.
+    let level1 = AffineTransform::translate(100.0, 100.0);
+    let level2 = AffineTransform::scale(2.0, 2.0);
+    let level3 = AffineTransform::translate(5.0, 5.0);
+    // world = level1 × level2 × level3
+    let mid = level1.compose(level2);
+    let world = mid.compose(level3);
+    // Point (0,0) → level3.translate → (5,5) → level2.scale → (10,10) → level1.translate → (110, 110)
+    let (rx, ry) = world.transform_point(0.0, 0.0);
+    assert!((rx - 110.0).abs() < 1e-4, "x should be 110, got {}", rx);
+    assert!((ry - 110.0).abs() < 1e-4, "y should be 110, got {}", ry);
+}
+
+#[test]
+fn affine_transform_identity_is_identity() {
+    let t = AffineTransform::identity();
+    assert!(t.is_identity());
+    let t2 = AffineTransform::translate(1.0, 0.0);
+    assert!(!t2.is_identity());
+}
+
+#[test]
+fn affine_transform_transform_point() {
+    let t = AffineTransform::translate(10.0, 20.0);
+    let (x, y) = t.transform_point(5.0, 3.0);
+    assert!((x - 15.0).abs() < 1e-5);
+    assert!((y - 23.0).abs() < 1e-5);
+}
+
+#[test]
+fn affine_transform_aabb_identity() {
+    let t = AffineTransform::identity();
+    let (x, y, w, h) = t.transform_aabb(10.0, 20.0, 30.0, 40.0);
+    assert!((x - 10.0).abs() < 1e-5);
+    assert!((y - 20.0).abs() < 1e-5);
+    assert!((w - 30.0).abs() < 1e-5);
+    assert!((h - 40.0).abs() < 1e-5);
+}
+
+#[test]
+fn affine_transform_aabb_90_rotation() {
+    // VAL-XFORM-003: 40x20 node rotated 90° → bounding box ~20x40
+    let t = AffineTransform::rotate(core::f32::consts::FRAC_PI_2);
+    let (_, _, w, h) = t.transform_aabb(0.0, 0.0, 40.0, 20.0);
+    // After 90° rotation of a 40×20 rect, AABB should be ~20×40.
+    assert!((w - 20.0).abs() < 1.0, "AABB width should be ~20, got {}", w);
+    assert!((h - 40.0).abs() < 1.0, "AABB height should be ~40, got {}", h);
+}
+
+#[test]
+fn affine_transform_aabb_45_rotation() {
+    // VAL-XFORM-009: 100x100 node rotated 45° has AABB ~141x141
+    let t = AffineTransform::rotate(core::f32::consts::FRAC_PI_4);
+    let (_, _, w, h) = t.transform_aabb(0.0, 0.0, 100.0, 100.0);
+    // sqrt(2) * 100 ≈ 141.42
+    assert!((w - 141.42).abs() < 1.0, "AABB width should be ~141, got {}", w);
+    assert!((h - 141.42).abs() < 1.0, "AABB height should be ~141, got {}", h);
+}
+
+#[test]
+fn affine_transform_scale_zero_no_panic() {
+    // VAL-XFORM-018: scale(0,0) produces degenerate but no panic.
+    let t = AffineTransform::scale(0.0, 0.0);
+    let (_, _, w, h) = t.transform_aabb(0.0, 0.0, 10.0, 10.0);
+    assert_eq!(w, 0.0);
+    assert_eq!(h, 0.0);
+}
+
+#[test]
+fn affine_transform_negative_scale_mirror() {
+    // VAL-XFORM-019: scale(-1,1) produces horizontal mirror.
+    let t = AffineTransform::scale(-1.0, 1.0);
+    let (px, py) = t.transform_point(10.0, 5.0);
+    assert!((px - (-10.0)).abs() < 1e-5);
+    assert!((py - 5.0).abs() < 1e-5);
+}
+
+#[test]
+fn affine_transform_skew_x_parallelogram() {
+    // VAL-XFORM-011: skew_x(0.5) on 40x40: bottom edge shifts 20px right.
+    let t = AffineTransform::skew_x(0.5_f32.atan()); // tan(angle) = 0.5
+    // Bottom-left corner (0, 40): x' = 0 + 0.5*40 = 20, y' = 40
+    let (px, _py) = t.transform_point(0.0, 40.0);
+    assert!((px - 20.0).abs() < 1e-4, "bottom-left x should shift to ~20, got {}", px);
+}
+
+#[test]
+fn node_has_transform_field() {
+    let node = Node::EMPTY;
+    assert!(node.transform.is_identity());
+}
+
+#[test]
+fn node_size_assertion_with_transform() {
+    // VAL-XFORM-022: Node size compile-time assertion.
+    // After adding 24-byte AffineTransform, Node should be 96 bytes.
+    let size = core::mem::size_of::<Node>();
+    assert_eq!(size, 96, "Node size should be 96 bytes with transform field, got {}", size);
+}
+
+#[test]
+fn double_buffer_swap_preserves_transform_fields() {
+    // VAL-CROSS-015: copy_front_to_back preserves transform fields.
+    let mut buf = vec![0u8; DOUBLE_SCENE_SIZE];
+    let mut dw = DoubleWriter::new(&mut buf);
+
+    {
+        let mut sw = dw.back();
+        let n = sw.alloc_node().unwrap();
+        let node = sw.node_mut(n);
+        node.width = 50;
+        node.height = 50;
+        node.flags = NodeFlags::VISIBLE;
+        node.transform = AffineTransform::translate(10.0, 20.0);
+        sw.commit();
+    }
+    dw.swap();
+    dw.copy_front_to_back();
+
+    {
+        let sw = dw.back();
+        let node = sw.node(0);
+        assert!((node.transform.tx - 10.0).abs() < 1e-5,
+            "transform.tx must survive copy_front_to_back, got {}", node.transform.tx);
+        assert!((node.transform.ty - 20.0).abs() < 1e-5,
+            "transform.ty must survive copy_front_to_back, got {}", node.transform.ty);
+        assert!((node.transform.a - 1.0).abs() < 1e-5,
+            "transform.a must survive copy_front_to_back, got {}", node.transform.a);
+    }
+}

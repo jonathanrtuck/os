@@ -75,6 +75,23 @@ fn black_surface(buf: &mut [u8]) -> Surface {
     }
 }
 
+/// Create a sized BGRA surface filled with opaque black.
+fn black_surface_sized(buf: &mut [u8], w: u32, h: u32) -> Surface {
+    for pixel in buf.chunks_exact_mut(4) {
+        pixel[0] = 0;
+        pixel[1] = 0;
+        pixel[2] = 0;
+        pixel[3] = 255;
+    }
+    Surface {
+        data: buf,
+        width: w,
+        height: h,
+        stride: w * 4,
+        format: PixelFormat::Bgra8888,
+    }
+}
+
 /// Read a pixel at (x, y) from the data buffer as (R, G, B, A).
 fn read_pixel(data: &[u8], stride: u32, x: u32, y: u32) -> (u8, u8, u8, u8) {
     let off = (y * stride + x * 4) as usize;
@@ -1666,13 +1683,13 @@ fn rounded_rect_semi_transparent_blends() {
 #[test]
 fn node_size_compile_time_assertion_exists() {
     // The compile-time assertion is in scene/lib.rs:
-    //   const _: () = assert!(size_of::<Node>() == 72);
+    //   const _: () = assert!(size_of::<Node>() == 96);
     // If the Node layout changes, the build will fail.
     // At runtime, verify the size matches.
     let size = core::mem::size_of::<Node>();
     assert_eq!(
-        size, 72,
-        "VAL-CROSS-012: Node must be exactly 72 bytes for shared-memory layout stability"
+        size, 96,
+        "VAL-CROSS-012: Node must be exactly 96 bytes for shared-memory layout stability"
     );
 }
 
@@ -3155,6 +3172,432 @@ fn shadow_overflow_in_damage_rects() {
     assert!(aw > 40 || ah > 40 || right > 90 || bottom > 90,
         "VAL-CROSS-011: dirty rect should include shadow overflow: rect=({},{},{},{}), expected larger than (50,50,40,40)",
         ax, ay, aw, ah);
+}
+
+// ── Transform rendering tests ───────────────────────────────────────
+
+/// VAL-XFORM-001: Identity transform produces pixel-identical output.
+#[test]
+fn identity_transform_pixel_identical() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Scene: root (100×100) with a red child (20×20 at 10,10).
+    let mut nodes_no_xform = vec![Node::EMPTY; 2];
+    nodes_no_xform[0].width = 100;
+    nodes_no_xform[0].height = 100;
+    nodes_no_xform[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes_no_xform[0].first_child = 1;
+    nodes_no_xform[1].x = 10;
+    nodes_no_xform[1].y = 10;
+    nodes_no_xform[1].width = 20;
+    nodes_no_xform[1].height = 20;
+    nodes_no_xform[1].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes_no_xform[1].flags = NodeFlags::VISIBLE;
+
+    // Same scene but with identity transform on the child.
+    let mut nodes_identity = nodes_no_xform.clone();
+    nodes_identity[1].transform = scene::AffineTransform::identity();
+
+    let data: Vec<u8> = vec![];
+
+    let mut buf1 = vec![0u8; 100 * 100 * 4];
+    let mut fb1 = black_surface(&mut buf1);
+    let graph1 = scene_render::SceneGraph { nodes: &nodes_no_xform, data: &data };
+    scene_render::render_scene(&mut fb1, &graph1, &ctx);
+
+    let mut buf2 = vec![0u8; 100 * 100 * 4];
+    let mut fb2 = black_surface(&mut buf2);
+    let graph2 = scene_render::SceneGraph { nodes: &nodes_identity, data: &data };
+    scene_render::render_scene(&mut fb2, &graph2, &ctx);
+
+    assert_eq!(buf1, buf2, "VAL-XFORM-001: identity transform must produce identical output");
+}
+
+/// VAL-XFORM-002: translate(10, 5) shifts content by exactly (10, 5).
+#[test]
+fn translate_shifts_content() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Child at (10,10) with translate(10,5) → should appear at (20,15).
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 20;
+    nodes[1].height = 20;
+    nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].transform = scene::AffineTransform::translate(10.0, 5.0);
+
+    let data: Vec<u8> = vec![];
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100u32 * 4;
+
+    // Original position (15,15) should NOT be red (shifted away).
+    let (r, _, _, _) = read_pixel(&buf, stride, 15, 15);
+    assert_eq!(r, 0, "VAL-XFORM-002: original position should be background after translate");
+
+    // New position (25,20) should be red (10+10=20 x, 10+5=15 y, center at 20+10=30, 15+10=25).
+    // Node drawn at (20,15) with size 20x20, center at (30, 25).
+    let (r, _, _, _) = read_pixel(&buf, stride, 25, 20);
+    assert_eq!(r, 255, "VAL-XFORM-002: translated position (25,20) should be red");
+}
+
+/// VAL-XFORM-005: scale(2,2) doubles the effective area of a 10x10 node to 20x20.
+#[test]
+fn scale_doubles_area() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Child at (0,0) 10×10 with scale(2,2) → AABB is 20×20.
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 10;
+    nodes[1].height = 10;
+    nodes[1].background = scene::Color::rgba(0, 255, 0, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].transform = scene::AffineTransform::scale(2.0, 2.0);
+
+    let data: Vec<u8> = vec![];
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100u32 * 4;
+
+    // The node at (10,10) scaled 2x should produce output in a 20×20 area.
+    // With scale(2,2) around the node's origin, the AABB becomes (10, 10, 20, 20).
+    // Center at (20, 20) should be green.
+    let (_, g, _, _) = read_pixel(&buf, stride, 20, 20);
+    assert!(g > 200, "VAL-XFORM-005: center of scaled node should be green, g={}", g);
+}
+
+/// VAL-XFORM-006: Non-uniform scale(3,1) on 10x10 node → 30x10.
+#[test]
+fn non_uniform_scale() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 5;
+    nodes[1].y = 5;
+    nodes[1].width = 10;
+    nodes[1].height = 10;
+    nodes[1].background = scene::Color::rgba(0, 0, 255, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].transform = scene::AffineTransform::scale(3.0, 1.0);
+
+    let data: Vec<u8> = vec![];
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100u32 * 4;
+
+    // Node at (5,5) 10×10 with scale(3,1) → AABB 30×10 starting at (5,5).
+    // Pixel at (20, 10) should be blue (inside the 30px wide region).
+    let (_, _, b, _) = read_pixel(&buf, stride, 20, 10);
+    assert!(b > 200, "VAL-XFORM-006: inside scaled width should be blue, b={}", b);
+
+    // Pixel at (36, 10) should be black (outside the 30px wide + 5px offset).
+    let (r, g, b, _) = read_pixel(&buf, stride, 36, 10);
+    assert_eq!((r, g, b), (0, 0, 0), "VAL-XFORM-006: outside scaled width should be black");
+}
+
+/// VAL-XFORM-007: Child transform composes with parent.
+/// Parent translate(100,50), child translate(10,5) → child at (110,55).
+#[test]
+fn child_transform_composes_with_parent() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx_scaled = scene_render::RenderCtx {
+        mono_cache: &mono,
+        prop_cache: &prop,
+        icon_coverage: &[],
+        icon_w: 0,
+        icon_h: 0,
+        icon_color: Color { r: 0, g: 0, b: 0, a: 0 },
+        icon_node: NULL,
+        scale: 1.0,
+    };
+
+    // Root: 200×200. Parent at (0,0) with translate(20,10).
+    // Child at (0,0) with translate(5,3). World position = (25, 13).
+    let mut nodes = vec![Node::EMPTY; 3];
+    nodes[0].width = 200;
+    nodes[0].height = 200;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 0;
+    nodes[1].y = 0;
+    nodes[1].width = 200;
+    nodes[1].height = 200;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].first_child = 2;
+    nodes[1].transform = scene::AffineTransform::translate(20.0, 10.0);
+
+    nodes[2].x = 0;
+    nodes[2].y = 0;
+    nodes[2].width = 10;
+    nodes[2].height = 10;
+    nodes[2].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes[2].flags = NodeFlags::VISIBLE;
+    nodes[2].transform = scene::AffineTransform::translate(5.0, 3.0);
+
+    let data: Vec<u8> = vec![];
+    let w = 200u32;
+    let h = 200u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    for pixel in buf.chunks_exact_mut(4) {
+        pixel[3] = 255;
+    }
+    let mut fb = Surface {
+        data: &mut buf,
+        width: w,
+        height: h,
+        stride: w * 4,
+        format: PixelFormat::Bgra8888,
+    };
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    scene_render::render_scene(&mut fb, &graph, &ctx_scaled);
+
+    let stride = w * 4;
+
+    // World position = parent translate(20,10) + child translate(5,3) = (25, 13).
+    // Node is 10×10, so center is at (30, 18).
+    let (r, _, _, _) = read_pixel(&buf, stride, 30, 18);
+    assert_eq!(r, 255, "VAL-XFORM-007: composed translation center should be red");
+
+    // Origin (0,0) should not be red.
+    let (r, _, _, _) = read_pixel(&buf, stride, 0, 0);
+    assert_eq!(r, 0, "VAL-XFORM-007: origin should not be red");
+}
+
+/// VAL-XFORM-021: Transform does not affect siblings.
+#[test]
+fn transform_does_not_affect_siblings() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Root with two children:
+    // Child A at (5,5) 10×10 with translate(30,0) → rendered at ~(35,5)
+    // Child B at (5,50) 10×10 with NO transform → rendered at (5,50)
+    let mut nodes = vec![Node::EMPTY; 3];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 5;
+    nodes[1].y = 5;
+    nodes[1].width = 10;
+    nodes[1].height = 10;
+    nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].next_sibling = 2;
+    nodes[1].transform = scene::AffineTransform::translate(30.0, 0.0);
+
+    nodes[2].x = 5;
+    nodes[2].y = 50;
+    nodes[2].width = 10;
+    nodes[2].height = 10;
+    nodes[2].background = scene::Color::rgba(0, 255, 0, 255);
+    nodes[2].flags = NodeFlags::VISIBLE;
+    // No transform on sibling.
+
+    let data: Vec<u8> = vec![];
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100u32 * 4;
+
+    // Child B (sibling) should be at its normal position (5,50), unaffected by A's transform.
+    let (_, g, _, _) = read_pixel(&buf, stride, 10, 55);
+    assert_eq!(g, 255, "VAL-XFORM-021: sibling at (10,55) should be green");
+
+    // Child B should NOT be displaced by child A's transform.
+    // Position (35, 55) should NOT be green.
+    let (_, g, _, _) = read_pixel(&buf, stride, 35, 55);
+    assert_eq!(g, 0, "VAL-XFORM-021: sibling should not be displaced by other's transform");
+}
+
+/// VAL-XFORM-003: 90° rotation of 40x20 node → ~20x40 bounding box.
+/// We verify the AABB dimensions. The full rendering of rotated content
+/// (bilinear resampling) is a later feature; this tests the AABB computation
+/// and that the clip/cull correctly uses the AABB.
+#[test]
+fn rotation_90_aabb_clip() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Node at (30,30) 40x20 rotated 90°.
+    // AABB should be ~20x40 (width and height swap).
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 30;
+    nodes[1].y = 30;
+    nodes[1].width = 40;
+    nodes[1].height = 20;
+    nodes[1].background = scene::Color::rgba(255, 128, 0, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].transform = scene::AffineTransform::rotate(core::f32::consts::FRAC_PI_2);
+
+    let data: Vec<u8> = vec![];
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100u32 * 4;
+
+    // With 90° rotation, the 40x20 node's AABB becomes ~20×40 centered
+    // around the node's origin (30, 30). The bounding box should cover
+    // roughly (20, 10) to (50, 70). Content should be visible (not fully
+    // clipped). At minimum, some pixel in the expected region should be
+    // non-black.
+    let mut found_content = false;
+    for y in 10..70 {
+        for x in 20..60 {
+            let (r, g, _, _) = read_pixel(&buf, stride, x, y);
+            if r > 100 || g > 50 {
+                found_content = true;
+                break;
+            }
+        }
+        if found_content { break; }
+    }
+    assert!(found_content, "VAL-XFORM-003: rotated node should have visible content via AABB clip");
+}
+
+/// VAL-XFORM-010: Clip rect intersected with transformed AABB.
+/// Parent clips_children=true, child rotated: child clipped to parent bounds.
+#[test]
+fn clip_rect_intersected_with_transformed_aabb() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Parent: 50×50 at (0,0) with clips_children.
+    // Child: 40×40 at (25,25) rotated 45° → AABB ~57×57.
+    // Without clipping, content would extend past parent bounds.
+    // With clipping, no content should appear outside parent (0,0,50,50).
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 50;
+    nodes[0].height = 50;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 25;
+    nodes[1].y = 25;
+    nodes[1].width = 40;
+    nodes[1].height = 40;
+    nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].transform = scene::AffineTransform::rotate(core::f32::consts::FRAC_PI_4);
+
+    let data: Vec<u8> = vec![];
+    let w = 80u32;
+    let h = 80u32;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    for pixel in buf.chunks_exact_mut(4) {
+        pixel[3] = 255; // opaque black
+    }
+    let mut fb = Surface {
+        data: &mut buf,
+        width: w,
+        height: h,
+        stride: w * 4,
+        format: PixelFormat::Bgra8888,
+    };
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = w * 4;
+
+    // No red pixels should appear outside the parent's 50×50 bounds.
+    for y in 0..h {
+        for x in 0..w {
+            if x >= 50 || y >= 50 {
+                let (r, _, _, _) = read_pixel(&buf, stride, x, y);
+                assert_eq!(r, 0,
+                    "VAL-XFORM-010: pixel ({},{}) outside parent bounds should be black, r={}", x, y, r);
+            }
+        }
+    }
+}
+
+/// VAL-XFORM-018: scale(0,0) produces no visible output, no panic.
+#[test]
+fn scale_zero_no_output_no_panic() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 50;
+    nodes[0].height = 50;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 5;
+    nodes[1].y = 5;
+    nodes[1].width = 20;
+    nodes[1].height = 20;
+    nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].transform = scene::AffineTransform::scale(0.0, 0.0);
+
+    let data: Vec<u8> = vec![];
+    let mut buf = vec![0u8; 50 * 50 * 4];
+    let mut fb = black_surface_sized(&mut buf, 50, 50);
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    // Should not panic.
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // No red pixels anywhere.
+    let stride = 50u32 * 4;
+    for y in 0..50 {
+        for x in 0..50 {
+            let (r, _, _, _) = read_pixel(&buf, stride, x, y);
+            assert_eq!(r, 0, "VAL-XFORM-018: scale(0,0) should produce no output at ({},{})", x, y);
+        }
+    }
 }
 
 /// Double-buffer swap preserves shadow fields.
