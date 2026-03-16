@@ -268,8 +268,6 @@ pub mod core_config {
 pub mod compose {
     pub const MSG_COMPOSITOR_CONFIG: u32 = 3;
     pub const MSG_IMAGE_CONFIG: u32 = 6;
-    pub const MSG_ICON_CONFIG: u32 = 7;
-    pub const MSG_IMG_ICON_CONFIG: u32 = 9;
     pub const MSG_RTC_CONFIG: u32 = 15;
 
     /// Compositor configuration. The compositor owns rendering: fonts,
@@ -309,14 +307,6 @@ pub mod compose {
     pub struct ImageConfig {
         pub image_va: u64,
         pub image_len: u32,
-        pub _pad: u32,
-    }
-
-    #[repr(C)]
-    #[derive(Clone, Copy, Debug, PartialEq)]
-    pub struct IconConfig {
-        pub icon_va: u64,
-        pub icon_len: u32,
         pub _pad: u32,
     }
 

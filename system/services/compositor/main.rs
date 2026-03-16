@@ -27,10 +27,7 @@ mod frame_scheduler;
 use alloc::{boxed::Box, vec};
 
 use protocol::{
-    compose::{
-        CompositorConfig, MSG_COMPOSITOR_CONFIG, MSG_ICON_CONFIG, MSG_IMAGE_CONFIG,
-        MSG_IMG_ICON_CONFIG,
-    },
+    compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG, MSG_IMAGE_CONFIG},
     present::{PresentPayload, MSG_PRESENT},
 };
 use render::{round_f32, FrameAction, RenderBackend};
@@ -174,15 +171,7 @@ pub extern "C" fn _start() -> ! {
         // Consumed but not used by compositor.
     }
 
-    // SVG icon loading removed — icons use glyph cache in the new
-    // geometric content type model. Consume icon messages for
-    // protocol compatibility.
-    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_ICON_CONFIG {
-        // Consumed — SVG rasterization removed.
-    }
-    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_IMG_ICON_CONFIG {
-        // Image icon — consumed.
-    }
+
 
     // ── Construct CpuBackend ────────────────────────────────────────
     let mut backend = render::CpuBackend {
