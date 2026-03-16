@@ -78,6 +78,101 @@ pub struct CpuBackend {
 }
 
 impl CpuBackend {
+    /// Construct a `CpuBackend` with pre-populated glyph caches.
+    ///
+    /// `mono_font_data` — raw font file bytes for the monospace face.
+    /// `prop_font_data` — optional raw font file bytes for the proportional
+    ///   face. When `None`, the monospace font is reused with `MONO=0`.
+    /// `font_size` — logical font size in pixels (before scale).
+    /// `dpi` — display DPI for optical sizing.
+    /// `scale` — fractional display scale factor (1.0, 1.5, 2.0, etc.).
+    /// `fb_width`, `fb_height` — physical framebuffer dimensions (for
+    ///   damage tracker initialization).
+    ///
+    /// Returns `None` if allocation fails or the monospace font is invalid.
+    /// The returned `Box` avoids placing the large `prev_bounds` array on
+    /// the caller's stack.
+    pub fn new(
+        mono_font_data: &[u8],
+        prop_font_data: Option<&[u8]>,
+        font_size: u32,
+        dpi: u16,
+        scale: f32,
+        fb_width: u16,
+        fb_height: u16,
+    ) -> Option<alloc::boxed::Box<Self>> {
+        use alloc::boxed::Box;
+
+        // Validate mono font before allocating.
+        if fonts::rasterize::font_metrics(mono_font_data).is_none() {
+            return None;
+        }
+
+        // Physical pixel size: logical font_size × scale.
+        let physical_size = round_f32(font_size as f32 * scale).max(1) as u32;
+
+        // Allocate and populate monospace glyph cache (MONO=1).
+        let mut mono_cache: Box<fonts::cache::GlyphCache> = unsafe {
+            let layout = alloc::alloc::Layout::new::<fonts::cache::GlyphCache>();
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut fonts::cache::GlyphCache;
+            if ptr.is_null() {
+                return None;
+            }
+            Box::from_raw(ptr)
+        };
+        let mono_axes = [fonts::rasterize::AxisValue {
+            tag: *b"MONO",
+            value: 1.0,
+        }];
+        mono_cache.populate_with_axes(mono_font_data, physical_size, dpi, &mono_axes);
+
+        // Allocate and populate proportional glyph cache (MONO=0).
+        let mut prop_cache: Box<fonts::cache::GlyphCache> = unsafe {
+            let layout = alloc::alloc::Layout::new::<fonts::cache::GlyphCache>();
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut fonts::cache::GlyphCache;
+            if ptr.is_null() {
+                return None;
+            }
+            Box::from_raw(ptr)
+        };
+        let prop_data = prop_font_data.unwrap_or(mono_font_data);
+        if fonts::rasterize::font_metrics(prop_data).is_some() {
+            let prop_axes = [fonts::rasterize::AxisValue {
+                tag: *b"MONO",
+                value: 0.0,
+            }];
+            prop_cache.populate_with_axes(prop_data, physical_size, dpi, &prop_axes);
+        } else {
+            // Fallback: use mono font with MONO=1 axes.
+            prop_cache.populate_with_axes(mono_font_data, physical_size, dpi, &mono_axes);
+        }
+
+        // Heap-allocate the CpuBackend to avoid placing the 6 KiB
+        // prev_bounds array on the caller's stack.
+        unsafe {
+            let layout = alloc::alloc::Layout::new::<CpuBackend>();
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut CpuBackend;
+            if ptr.is_null() {
+                return None;
+            }
+            // Write fields into the heap allocation in-place.
+            core::ptr::write(&mut (*ptr).mono_cache, mono_cache);
+            core::ptr::write(&mut (*ptr).prop_cache, prop_cache);
+            (*ptr).scale = scale;
+            core::ptr::write(
+                &mut (*ptr).pool,
+                surface_pool::SurfacePool::new(surface_pool::DEFAULT_BUDGET),
+            );
+            core::ptr::write(
+                &mut (*ptr).damage,
+                damage::DamageTracker::new(fb_width, fb_height),
+            );
+            // prev_bounds is already zeroed by alloc_zeroed — (0,0,0,0) for all entries.
+            (*ptr).prev_node_count = 0;
+            Some(Box::from_raw(ptr))
+        }
+    }
+
     /// Analyse the scene graph's change information and compute damage.
     ///
     /// Call this before `render()` each frame. Returns a `FrameAction`
