@@ -86,11 +86,11 @@ Scale factor is **f32** (fractional) throughout the pipeline, supporting 1.0, 1.
 ## Drawing Library Constraints
 
 - **Pixel format:** The drawing library exclusively assumes **Bgra8888** (Blue, Green, Red, Alpha byte order). All blending functions (`fill_rect_blend_scalar_1px`, `neon_blend_const_4px`, `rounded_rect_write_aa_pixel`, `blend_pixel`) hard-code this byte order. If a second pixel format is ever needed, all blending functions must be audited.
-- **Stroke width convention:** In `build_stroke_outline()` / `stroke_subpath()`, the parameter is a **half-width** (offset from center to each edge). Callers must pass `stroke_width / 2`, not the full stroke width. Fixed in compositing-model milestone (commit 1f0ac31). Note: stroke_width=1 at scale=1.0 produces half_width=0 (invisible) — minimum visible stroke is stroke_width=2 at scale=1.0.
+
 
 ## SurfacePool (Offscreen Buffer Management)
 
-`compositor/surface_pool.rs` provides pool-based allocation of temporary `Surface` objects for offscreen rendering (group opacity, future blur/shadow).
+`libraries/render/surface_pool.rs` provides pool-based allocation of temporary `Surface` objects for offscreen rendering (group opacity, future blur/shadow).
 
 **Lifecycle contract:**
 1. `pool.acquire(width, height)` → returns `PoolHandle` + clears buffer to transparent
@@ -118,7 +118,7 @@ Scale factor is **f32** (fractional) throughout the pipeline, supporting 1.0, 1.
 
 ## Shadow Rendering
 
-`compositor/scene_render.rs::render_shadow()` renders box shadows:
+`libraries/render/scene_render.rs::render_shadow()` renders box shadows:
 
 1. **Hard shadow** (blur_radius=0): Direct `fill_rect_blend` or `fill_rounded_rect_blend` at shadow offset
 2. **Blurred shadow:** Allocate offscreen buffer (node size + spread + blur padding on each side), fill shape in shadow color, apply `blur_surface`, blit result at shadow offset

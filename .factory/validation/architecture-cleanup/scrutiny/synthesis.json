@@ -1,0 +1,57 @@
+{
+  "milestone": "architecture-cleanup",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1", "exitCode": 0, "detail": "1,698 tests passed across all test binaries" },
+    "typecheck": { "passed": true, "command": "cd /Users/user/Sites/os/system && cargo build --release", "exitCode": 0, "detail": "aarch64-unknown-none release build succeeded with no errors (warnings only)" },
+    "lint": { "passed": true, "command": "included in cargo build/test", "exitCode": 0, "detail": "Warnings present (unused variables in render/scene_render.rs, unused imports in render/cursor.rs, dead code in test files) but no errors. These are pre-existing and not introduced by this milestone." }
+  },
+  "reviewsSummary": {
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Fixed stale file paths in .factory/library/architecture.md: compositor/surface_pool.rs → libraries/render/surface_pool.rs, compositor/scene_render.rs → libraries/render/scene_render.rs. Also removed stale reference to build_stroke_outline()/stroke_subpath() which were deleted during the content-type-redesign milestone.",
+      "sourceFeature": "cleanup-documentation"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add reminder: 'All new unsafe blocks must have // SAFETY: comments — this applies during refactors and new code equally.' The existing rule is stated but was not followed for 3 new unsafe blocks in CpuBackend::new(). Reinforcing in AGENTS.md for this mission may help future workers.",
+      "evidence": "cleanup-compositor-minimize review found 3 new unsafe blocks in system/libraries/render/lib.rs (lines 115, 130, 152) without SAFETY comments. These are heap allocation patterns (alloc_zeroed + Box::from_raw) that are correct but undocumented per project conventions.",
+      "isSystemic": false
+    },
+    {
+      "target": "skills",
+      "suggestion": "Add bare-metal stack awareness to the refactor-worker skill: 'When moving large structs in no_std/bare-metal environments, verify the struct fits on the target stack (typically 16 KB in this project). Use heap allocation (Box) for structs >4 KB.'",
+      "evidence": "cleanup-compositor-minimize worker hit stack overflow from CpuBackend's 6 KiB prev_bounds array on the compositor's 16 KB stack. Solved correctly with Box<CpuBackend> but the skill had no guidance about this constraint.",
+      "isSystemic": false
+    },
+    {
+      "target": "skills",
+      "suggestion": "Add verification-only pathway to the refactor-worker skill: 'If the feature description indicates a verification/audit task (no code changes expected), skip the Execute the Move step and proceed directly to verification.'",
+      "evidence": "cleanup-layout-helpers was a verification-only task. The refactor-worker skill's Step 3 'Execute the Move' didn't apply. Worker adapted correctly but flagged the gap.",
+      "isSystemic": false
+    },
+    {
+      "target": "skills",
+      "suggestion": "Add documentation-only exemption to the os-worker skill's TDD step: 'For pure documentation features (no behavioral changes), TDD is not applicable. Skip to verification.'",
+      "evidence": "cleanup-documentation worker noted the os-worker skill assumes all features involve code changes requiring TDD, but documentation-only features have no testable behavior changes.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Worker cleanup-layout-helpers reported a stale TextRun::glyph_count comment at scene/lib.rs:967",
+      "reason": "Does not exist in current codebase. Line 967 correctly references Content::Glyphs. Likely already fixed by cleanup-documentation feature running in parallel. Handoff inaccuracy, not a real issue."
+    }
+  ],
+  "previousRound": null
+}
