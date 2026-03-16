@@ -17,7 +17,7 @@ Core (OS service) → Scene Graph (shared memory) → Compositor (pixel pump) �
 
 ## Key Types
 
-- `scene::Node` — 60 bytes (verified with compile-time assertion in scene/lib.rs). Fields: tree links, geometry (i16/u16 logical), scroll_y (i32), background (Color), border (Border), corner_radius (u8), opacity (u8), flags, content_hash, content variant.
+- `scene::Node` — 72 bytes (verified with compile-time assertion in scene/lib.rs). Fields: tree links, geometry (i16/u16 logical), scroll_y (i32), background (Color), border (Border), corner_radius (u8), opacity (u8), shadow fields (shadow_color, shadow_offset_x/y, shadow_blur_radius, shadow_spread), flags, content_hash, content variant.
 - `scene::Content` — None | Text{runs, run_count} | Image{data, src_w, src_h} | Path{commands, fill, stroke, stroke_width}
 - `drawing::Surface` — borrowed pixel buffer with BGRA8888 format
 - `drawing::Color` — RGBA u8×4 with sRGB gamma-correct blend_over
@@ -92,3 +92,24 @@ Scale factor is **f32** (fractional) throughout the pipeline, supporting 1.0, 1.
 - Dimensions = node logical size × scale factor (physical pixels).
 
 **Current status (compositing-model milestone):** SurfacePool exists and is tested (16 tests), but the opacity rendering path allocates via `vec![0u8; ...]` instead of pool. This is a deliberate simplification — the borrow checker prevents passing `&mut pool` while a buffer acquired from it is in use. Integration is a future follow-up.
+
+## Gaussian Blur
+
+`drawing::blur_surface()` implements separable Gaussian blur (two-pass: horizontal then vertical).
+
+- **Trait interface:** `blur_surface` is the standard entry point. A scalar fallback `blur_surface_scalar` exists for testing NEON paths.
+- **NEON acceleration:** The vertical pass uses actual NEON SIMD intrinsics (`vmlaq_u32`, `vld1q_u8`, etc.). The horizontal pass uses scalar `[u64; 4]` arrays despite the `_neon` suffix.
+- **Radius cap:** CPU blur radius capped at 16px. Larger radii silently clamped.
+- **Kernel:** Padé[0/3] approximation of `exp(-t)` for weight computation. Weights are normalized, so the effective kernel is slightly wider than true Gaussian. Acceptable for visual blur.
+- **Scratch buffer:** Callers must provide a tmp buffer ≥ dst_stride × height. Undersized buffers cause silent no-op.
+
+## Shadow Rendering
+
+`compositor/scene_render.rs::render_shadow()` renders box shadows:
+
+1. **Hard shadow** (blur_radius=0): Direct `fill_rect_blend` or `fill_rounded_rect_blend` at shadow offset
+2. **Blurred shadow:** Allocate offscreen buffer (node size + spread + blur padding on each side), fill shape in shadow color, apply `blur_surface`, blit result at shadow offset
+3. **4 MiB cap** per shadow buffer prevents OOM — falls back to hard shadow if exceeded
+4. **Damage tracking:** `abs_bounds()` in scene/lib.rs expands logical bounds by shadow overflow (offset + blur_radius + spread). `shadow_overflow()` in scene_render.rs computes physical overflow at current scale.
+5. **Opacity interaction:** Group opacity applies to shadow output — if parent has opacity < 255, shadow is rendered into the offscreen opacity buffer along with content, then both composited at group opacity.
+6. **Shadow fields on Node:** shadow_color (Color), shadow_offset_x/y (i16), shadow_blur_radius (u8), shadow_spread (i8). Default = transparent color, all zeros = no shadow.
