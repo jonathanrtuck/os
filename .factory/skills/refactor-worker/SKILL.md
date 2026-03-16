@@ -65,6 +65,7 @@ Commit all changes with a descriptive message. The commit should be atomic -- th
 4. **Grep thoroughly.** When moving type `Foo` from crate `bar`, search for: `bar::Foo`, `use bar::Foo`, `bar::Foo::`, and bare `Foo` in files that have `use bar::*` or `use bar::Foo`.
 5. **The include!() pattern:** Drawing uses `include!("file.rs")` to pull sub-files into lib.rs. When removing a file from drawing, remove both the file AND the include!() line. When the included file defines types used elsewhere, those callers must be updated first.
 6. **build.rs is critical:** This custom build script compiles libraries via direct rustc invocation. When renaming a library, you must update: the cargo_lib/rustc_rlib call, the --extern flags for downstream crates, the rerun-if-changed directives, and the PROGRAMS extern list.
+7. **Cargo.toml for new libraries:** When creating a new library used by the test crate (system/test/), you must also create a Cargo.toml for that library with path dependencies to its own deps. The test crate resolves dependencies via Cargo, not build.rs — so the new library needs a valid Cargo.toml even though the kernel build uses direct rustc invocation.
 
 ## Example Handoff
 

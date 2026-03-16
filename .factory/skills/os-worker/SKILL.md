@@ -39,7 +39,9 @@ Read `.factory/library/architecture.md` for the rendering pipeline overview and 
 
 ### 2. Write Tests First (TDD)
 
-**Before writing any implementation code**, write failing tests in the appropriate test file:
+**For pure refactoring features** (where existing tests define the behavioral contract and the feature description says no new tests are needed), skip writing new tests. Instead, verify the baseline: run the full test suite to confirm all existing tests pass before making changes. The existing tests ARE your specification.
+
+**For implementation features**, write failing tests before any implementation code in the appropriate test file:
 - Drawing primitives → `system/test/tests/drawing.rs`
 - NEON SIMD → `system/test/tests/neon.rs`
 - Scene graph → `system/test/tests/scene.rs`
