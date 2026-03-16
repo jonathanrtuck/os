@@ -208,3 +208,51 @@ Testing surface, validation approach, and resource cost classification.
 2. For each assertion, run the specific test(s) with name filter
 3. Read test source to confirm it verifies the claimed property
 4. Record pass/fail per assertion
+
+## Flow Validator Guidance: Transforms and Resampling (Unit Tests)
+
+**Surface:** Host-side Rust unit tests (macOS aarch64)
+**Testing tool:** Direct `cargo test` invocation with name filters
+**Isolation:** No shared mutable state — tests are pure functions on in-memory buffers.
+**Max concurrency:** 1 (cargo build lock contention)
+
+**Key test files:**
+- `system/test/tests/scene.rs` — AffineTransform type, composition, AABB, Node fields, double-buffer preservation
+- `system/test/tests/scene_render.rs` — transform rendering, clipping, text, opacity+transform, DPI composition, damage tracking
+- `system/test/tests/drawing.rs` — bilinear resampling, ResamplingMethod enum
+
+**Assertion → Test mapping:**
+
+| Assertion | Test name(s) | File |
+|-----------|-------------|------|
+| VAL-XFORM-001 | `identity_transform_pixel_identical` | scene_render.rs |
+| VAL-XFORM-002 | `translate_shifts_content` | scene_render.rs |
+| VAL-XFORM-003 | `affine_transform_aabb_90_rotation`, `rotation_90_aabb_clip` | scene.rs, scene_render.rs |
+| VAL-XFORM-004 | `affine_transform_rotate_180` | scene.rs |
+| VAL-XFORM-005 | `scale_doubles_area` | scene_render.rs |
+| VAL-XFORM-006 | `non_uniform_scale` | scene_render.rs |
+| VAL-XFORM-007 | `child_transform_composes_with_parent`, `affine_transform_compose_translations` | scene_render.rs, scene.rs |
+| VAL-XFORM-008 | `affine_transform_compose_three_levels` | scene.rs |
+| VAL-XFORM-009 | `affine_transform_aabb_45_rotation` | scene.rs |
+| VAL-XFORM-010 | `clip_rect_intersected_with_transformed_aabb` | scene_render.rs |
+| VAL-XFORM-011 | `affine_transform_skew_x`, `affine_transform_skew_x_parallelogram` | scene.rs |
+| VAL-XFORM-012 | `transformed_text_uses_axis_aligned_glyph_rendering` | scene_render.rs |
+| VAL-XFORM-013 | `bilinear_resampling_for_rotated_content` | scene_render.rs |
+| VAL-XFORM-014 | `bilinear_downscale_checkerboard_produces_gray`, `bilinear_downscale_checkerboard_no_aliased_pixels` | drawing.rs |
+| VAL-XFORM-015 | `resampling_method_enum_exists` | drawing.rs |
+| VAL-XFORM-016 | `diff_scenes_rotated_node_aabb_damage` | scene_render.rs |
+| VAL-XFORM-017 | `diff_scenes_compound_transform_aabb` | scene_render.rs |
+| VAL-XFORM-018 | `affine_transform_scale_zero_no_panic`, `scale_zero_no_output_no_panic` | scene.rs, scene_render.rs |
+| VAL-XFORM-019 | `affine_transform_negative_scale_mirror` | scene.rs |
+| VAL-XFORM-020 | `transform_plus_opacity_no_double_application` | scene_render.rs |
+| VAL-XFORM-021 | `transform_does_not_affect_siblings` | scene_render.rs |
+| VAL-XFORM-022 | `node_size_assertion_with_transform`, `node_size_compile_time_assertion_exists` | scene.rs, scene_render.rs |
+| VAL-CROSS-005 | `dpi_scale_composes_with_affine_as_single_matrix` | scene_render.rs |
+| VAL-CROSS-007 | `group_opacity_on_rotated_content` | scene_render.rs |
+| VAL-CROSS-008 | `full_feature_composition` | scene_render.rs |
+
+**Verification approach:**
+1. Run full test suite to confirm all tests pass
+2. For each assertion, run the specific test(s) with name filter
+3. Read test source to confirm it verifies the claimed property
+4. Record pass/fail per assertion
