@@ -350,20 +350,63 @@ pub struct SceneHeader {
 
 // ── Path commands ───────────────────────────────────────────────────
 
+/// A single path command in the scene graph data buffer.
+///
+/// For `MoveTo`, `LineTo`, and `Close`: only `x` and `y` are used
+/// (control point fields are ignored).
+///
+/// For `CurveTo` (cubic Bézier): `x1`,`y1` and `x2`,`y2` are the two
+/// control points; `x`,`y` is the endpoint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct PathCmd {
     pub kind: PathCmdKind,
+    pub _pad: u8,
+    /// Endpoint x coordinate (or unused for Close).
     pub x: i16,
+    /// Endpoint y coordinate (or unused for Close).
     pub y: i16,
-    pub _pad: [u8; 1],
+    /// First control point x (CurveTo only).
+    pub x1: i16,
+    /// First control point y (CurveTo only).
+    pub y1: i16,
+    /// Second control point x (CurveTo only).
+    pub x2: i16,
+    /// Second control point y (CurveTo only).
+    pub y2: i16,
 }
+
+// Compile-time size assertion: PathCmd must be exactly 14 bytes
+// (kind:1 + pad:1 + x:2 + y:2 + x1:2 + y1:2 + x2:2 + y2:2 = 14).
+const _: () = assert!(core::mem::size_of::<PathCmd>() == 14);
+
+impl PathCmd {
+    /// Create a MoveTo command.
+    pub const fn move_to(x: i16, y: i16) -> Self {
+        Self { kind: PathCmdKind::MoveTo, _pad: 0, x, y, x1: 0, y1: 0, x2: 0, y2: 0 }
+    }
+    /// Create a LineTo command.
+    pub const fn line_to(x: i16, y: i16) -> Self {
+        Self { kind: PathCmdKind::LineTo, _pad: 0, x, y, x1: 0, y1: 0, x2: 0, y2: 0 }
+    }
+    /// Create a CurveTo command (cubic Bézier).
+    /// `(x1,y1)` and `(x2,y2)` are control points, `(x,y)` is the endpoint.
+    pub const fn curve_to(x1: i16, y1: i16, x2: i16, y2: i16, x: i16, y: i16) -> Self {
+        Self { kind: PathCmdKind::CurveTo, _pad: 0, x, y, x1, y1, x2, y2 }
+    }
+    /// Create a Close command.
+    pub const fn close() -> Self {
+        Self { kind: PathCmdKind::Close, _pad: 0, x: 0, y: 0, x1: 0, y1: 0, x2: 0, y2: 0 }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PathCmdKind {
     MoveTo = 0,
     LineTo = 1,
     Close = 2,
+    CurveTo = 3,
 }
 
 // ── SceneWriter ─────────────────────────────────────────────────────
@@ -624,6 +667,28 @@ impl<'a> SceneWriter<'a> {
 
         (self.push_data(bytes), runs.len() as u16)
     }
+    /// Push an array of `PathCmd` structs into the data buffer.
+    /// Aligns the write offset to `align_of::<PathCmd>()` first.
+    /// Returns a `DataRef` covering the path command data.
+    pub fn push_path_cmds(&mut self, cmds: &[PathCmd]) -> DataRef {
+        let align = core::mem::align_of::<PathCmd>();
+        let used = self.header().data_used as usize;
+        let aligned = (used + align - 1) & !(align - 1);
+
+        if aligned > used && aligned <= DATA_BUFFER_SIZE {
+            self.header_mut().data_used = aligned as u32;
+        }
+
+        // SAFETY: PathCmd is #[repr(C)] — transmuting to bytes is safe.
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                cmds.as_ptr() as *const u8,
+                cmds.len() * core::mem::size_of::<PathCmd>(),
+            )
+        };
+
+        self.push_data(bytes)
+    }
     /// Append new data (old DataRef is abandoned — bump allocator).
     pub fn replace_data(&mut self, bytes: &[u8]) -> DataRef {
         self.push_data(bytes)
@@ -764,6 +829,21 @@ impl<'a> SceneReader<'a> {
         // SAFETY: TextRun is repr(C), data buffer is aligned to node size
         // which is >= alignment of TextRun.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
+    }
+    /// Interpret a DataRef as an array of `PathCmd` structs.
+    pub fn path_cmds(&self, dref: DataRef) -> &[PathCmd] {
+        let bytes = self.data(dref);
+        let cmd_size = core::mem::size_of::<PathCmd>();
+
+        if bytes.is_empty() || bytes.len() < cmd_size {
+            return &[];
+        }
+
+        let count = bytes.len() / cmd_size;
+
+        // SAFETY: PathCmd is #[repr(C)], data buffer is aligned by
+        // push_path_cmds to PathCmd alignment.
+        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const PathCmd, count) }
     }
 }
 

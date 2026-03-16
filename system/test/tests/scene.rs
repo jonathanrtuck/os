@@ -5067,3 +5067,74 @@ fn abs_bounds_nested_scroll_containers() {
     //   Total: -5 + 15 + 100 = 110
     assert_eq!(ay, 110, "abs_bounds must subtract each ancestor's scroll_y");
 }
+
+// ── PathCmd round-trip tests ────────────────────────────────────────
+
+#[test]
+fn path_cmd_round_trips_through_scene_writer_reader() {
+    let mut buf = vec![0u8; SCENE_SIZE];
+    let mut writer = SceneWriter::new(&mut buf);
+
+    let cmds = [
+        PathCmd::move_to(10, 20),
+        PathCmd::line_to(50, 20),
+        PathCmd::line_to(30, 50),
+        PathCmd::close(),
+    ];
+    let dref = writer.push_path_cmds(&cmds);
+
+    let reader = SceneReader::new(&buf);
+    let read_cmds = reader.path_cmds(dref);
+
+    assert_eq!(read_cmds.len(), 4);
+    assert_eq!(read_cmds[0], PathCmd::move_to(10, 20));
+    assert_eq!(read_cmds[1], PathCmd::line_to(50, 20));
+    assert_eq!(read_cmds[2], PathCmd::line_to(30, 50));
+    assert_eq!(read_cmds[3], PathCmd::close());
+}
+
+#[test]
+fn path_cmd_curve_to_round_trips() {
+    let mut buf = vec![0u8; SCENE_SIZE];
+    let mut writer = SceneWriter::new(&mut buf);
+
+    let cmds = [
+        PathCmd::move_to(0, 0),
+        PathCmd::curve_to(10, 0, 20, 10, 20, 20),
+        PathCmd::close(),
+    ];
+    let dref = writer.push_path_cmds(&cmds);
+
+    let reader = SceneReader::new(&buf);
+    let read_cmds = reader.path_cmds(dref);
+
+    assert_eq!(read_cmds.len(), 3);
+    assert_eq!(read_cmds[0].kind, PathCmdKind::MoveTo);
+    assert_eq!(read_cmds[1].kind, PathCmdKind::CurveTo);
+    assert_eq!(read_cmds[1].x1, 10);
+    assert_eq!(read_cmds[1].y1, 0);
+    assert_eq!(read_cmds[1].x2, 20);
+    assert_eq!(read_cmds[1].y2, 10);
+    assert_eq!(read_cmds[1].x, 20);
+    assert_eq!(read_cmds[1].y, 20);
+    assert_eq!(read_cmds[2].kind, PathCmdKind::Close);
+}
+
+#[test]
+fn path_cmd_empty_returns_empty_slice() {
+    let mut buf = vec![0u8; SCENE_SIZE];
+    let _writer = SceneWriter::new(&mut buf);
+
+    let reader = SceneReader::new(&buf);
+    let dref = DataRef {
+        offset: 0,
+        length: 0,
+    };
+    let cmds = reader.path_cmds(dref);
+    assert!(cmds.is_empty());
+}
+
+#[test]
+fn path_cmd_size_is_14_bytes() {
+    assert_eq!(core::mem::size_of::<PathCmd>(), 14);
+}

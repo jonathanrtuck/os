@@ -3,6 +3,8 @@
 //! Verifies that render_node's child clip-skip check produces
 //! pixel-identical output to rendering without the optimisation.
 
+#[path = "../../services/compositor/svg.rs"]
+mod svg;
 #[path = "../../services/compositor/scene_render.rs"]
 mod scene_render;
 
@@ -1669,5 +1671,391 @@ fn node_size_compile_time_assertion_exists() {
     assert_eq!(
         size, 60,
         "VAL-CROSS-012: Node must be exactly 60 bytes for shared-memory layout stability"
+    );
+}
+
+// ── Path rendering tests (VAL-PRIM-007 through VAL-PRIM-014) ───────
+
+/// Helper: build a scene with a single path node at (0,0) 100×100.
+/// The root is transparent and clips children.
+fn build_path_scene(
+    path_cmds: &[scene::PathCmd],
+    fill: scene::Color,
+    stroke: scene::Color,
+    stroke_width: u8,
+) -> (Vec<Node>, Vec<u8>) {
+    let cmd_size = core::mem::size_of::<scene::PathCmd>();
+    let total_bytes = path_cmds.len() * cmd_size;
+    let mut data = vec![0u8; total_bytes];
+
+    // SAFETY: PathCmd is repr(C) — copying to byte buffer is safe.
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            path_cmds.as_ptr() as *const u8,
+            data.as_mut_ptr(),
+            total_bytes,
+        );
+    }
+
+    let mut nodes = vec![Node::EMPTY; 2];
+
+    // Root: 100×100 transparent, clips children
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = scene::NodeFlags::VISIBLE | scene::NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    // Path node: 100×100 at (0,0)
+    nodes[1].width = 100;
+    nodes[1].height = 100;
+    nodes[1].flags = scene::NodeFlags::VISIBLE;
+    nodes[1].content = scene::Content::Path {
+        commands: scene::DataRef {
+            offset: 0,
+            length: total_bytes as u32,
+        },
+        fill,
+        stroke,
+        stroke_width,
+        _pad: [0; 3],
+    };
+
+    (nodes, data)
+}
+
+/// VAL-PRIM-007: Content::Path with MoveTo/LineTo/Close renders filled triangle.
+#[test]
+fn path_renders_filled_triangle() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let cmds = [
+        scene::PathCmd::move_to(10, 80),
+        scene::PathCmd::line_to(50, 10),
+        scene::PathCmd::line_to(90, 80),
+        scene::PathCmd::close(),
+    ];
+    let fill = scene::Color::rgba(255, 0, 0, 255);
+    let (nodes, data) = build_path_scene(&cmds, fill, scene::Color::TRANSPARENT, 0);
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let stride = 100u32 * 4;
+    let mut buf = vec![0u8; (stride * 100) as usize];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // Interior: center of the triangle (~50, 50) should have red fill.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 50, 50);
+    assert!(r > 200, "triangle interior should be red, got r={}", r);
+    assert!(g < 50, "triangle interior g should be low, got g={}", g);
+    assert!(b < 50, "triangle interior b should be low, got b={}", b);
+
+    // Exterior: well outside the triangle (5, 5) should be black.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 5, 5);
+    assert!(r < 10, "exterior should be black, got r={}", r);
+    assert!(g < 10, "exterior should be black, got g={}", g);
+    assert!(b < 10, "exterior should be black, got b={}", b);
+}
+
+/// VAL-PRIM-008: CurveTo cubic bezier renders smooth curves.
+#[test]
+fn path_renders_cubic_bezier() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // A quarter-circle-like curve in the top-left quadrant.
+    let cmds = [
+        scene::PathCmd::move_to(10, 90),
+        scene::PathCmd::curve_to(10, 10, 90, 10, 90, 90),
+        scene::PathCmd::close(),
+    ];
+    let fill = scene::Color::rgba(0, 255, 0, 255);
+    let (nodes, data) = build_path_scene(&cmds, fill, scene::Color::TRANSPARENT, 0);
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let stride = 100u32 * 4;
+    let mut buf = vec![0u8; (stride * 100) as usize];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // The curve from (10,90) via controls (10,10) and (90,10) to (90,90)
+    // with Close forms a shape. The cubic bulges upward (control points
+    // at y=10), and the closing line goes from (90,90) back to (10,90).
+    // The filled area is inside the closed path.
+
+    // A point inside the closed shape: (50, 70) should be green.
+    let (_r, g, _b, _a) = read_pixel(&buf, stride, 50, 70);
+    assert!(g > 200, "curve interior at (50,70) should be green, got g={}", g);
+
+    // Another interior point near the bottom: (50, 88) should be green
+    // (between the closing line at y=90 and the curve).
+    let (_r2, g2, _b2, _a) = read_pixel(&buf, stride, 50, 88);
+    assert!(g2 > 100, "curve interior at (50,88) should be green, got g={}", g2);
+}
+
+/// VAL-PRIM-011: Path stroke rendering.
+#[test]
+fn path_renders_stroke_outline() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Large triangle: fill transparent, blue stroke.
+    let cmds = [
+        scene::PathCmd::move_to(10, 90),
+        scene::PathCmd::line_to(50, 10),
+        scene::PathCmd::line_to(90, 90),
+        scene::PathCmd::close(),
+    ];
+    let stroke = scene::Color::rgba(0, 0, 255, 255);
+    let (nodes, data) =
+        build_path_scene(&cmds, scene::Color::TRANSPARENT, stroke, 3);
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let stride = 100u32 * 4;
+    let mut buf = vec![0u8; (stride * 100) as usize];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // On the edge of the triangle — near the bottom edge (50, 89) should
+    // have some blue from the stroke.
+    let (_r, _g, b, _a) = read_pixel(&buf, stride, 50, 89);
+    assert!(b > 100, "stroke should be blue near bottom edge, got b={}", b);
+
+    // Interior center (50, 50) — no fill (transparent), so should be black
+    // unless stroke leaks. With a thin stroke on a large triangle, center
+    // should be mostly black.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 50, 50);
+    assert!(
+        r < 50 && g < 50 && b < 50,
+        "interior of stroke-only triangle should be dark, got ({},{},{})",
+        r, g, b
+    );
+}
+
+/// VAL-PRIM-012: Path with both fill and stroke — fill renders first,
+/// stroke on top.
+#[test]
+fn path_fill_and_stroke_layered() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let cmds = [
+        scene::PathCmd::move_to(10, 80),
+        scene::PathCmd::line_to(50, 10),
+        scene::PathCmd::line_to(90, 80),
+        scene::PathCmd::close(),
+    ];
+    let fill = scene::Color::rgba(255, 0, 0, 255);
+    let stroke = scene::Color::rgba(0, 0, 255, 255);
+    let (nodes, data) = build_path_scene(&cmds, fill, stroke, 3);
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let stride = 100u32 * 4;
+    let mut buf = vec![0u8; (stride * 100) as usize];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // Interior (50, 50) should be red (fill).
+    let (r, _g, _b, _a) = read_pixel(&buf, stride, 50, 50);
+    assert!(r > 200, "fill interior should be red, got r={}", r);
+
+    // On the edge (bottom edge, 50, ~79) should show blue stroke.
+    let (_r, _g, b, _a) = read_pixel(&buf, stride, 50, 79);
+    assert!(b > 50, "edge should show blue stroke, got b={}", b);
+}
+
+/// VAL-PRIM-013: Empty and degenerate paths — no crash, no stray pixels.
+#[test]
+fn path_empty_no_crash() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Empty path (0 commands).
+    let (nodes, data) = build_path_scene(
+        &[],
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::Color::TRANSPARENT,
+        0,
+    );
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let stride = 100u32 * 4;
+    let mut buf = vec![0u8; (stride * 100) as usize];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // No pixels changed — everything should remain black.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 50, 50);
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "empty path should leave framebuffer untouched"
+    );
+}
+
+#[test]
+fn path_only_moveto_no_crash() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let cmds = [scene::PathCmd::move_to(50, 50)];
+    let (nodes, data) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::Color::TRANSPARENT,
+        0,
+    );
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let stride = 100u32 * 4;
+    let mut buf = vec![0u8; (stride * 100) as usize];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // No segments generated — framebuffer untouched.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 50, 50);
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "only-MoveTo path should leave framebuffer untouched"
+    );
+}
+
+#[test]
+fn path_lineto_without_moveto_no_crash() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let cmds = [
+        scene::PathCmd::line_to(50, 50),
+        scene::PathCmd::line_to(80, 80),
+    ];
+    let (nodes, data) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::Color::TRANSPARENT,
+        0,
+    );
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let stride = 100u32 * 4;
+    let mut buf = vec![0u8; (stride * 100) as usize];
+    let mut fb = black_surface(&mut buf);
+    // This should not crash — implicit moveto at (0,0).
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+}
+
+/// VAL-PRIM-014: Path rendering respects node clipping (CLIPS_CHILDREN).
+#[test]
+fn path_clipped_to_parent_bounds() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Path that extends beyond a small parent node.
+    let cmds = [
+        scene::PathCmd::move_to(0, 0),
+        scene::PathCmd::line_to(100, 0),
+        scene::PathCmd::line_to(100, 100),
+        scene::PathCmd::line_to(0, 100),
+        scene::PathCmd::close(),
+    ];
+    let fill = scene::Color::rgba(255, 0, 0, 255);
+
+    let cmd_size = core::mem::size_of::<scene::PathCmd>();
+    let total_bytes = cmds.len() * cmd_size;
+    let mut data = vec![0u8; total_bytes];
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            cmds.as_ptr() as *const u8,
+            data.as_mut_ptr(),
+            total_bytes,
+        );
+    }
+
+    let mut nodes = vec![Node::EMPTY; 2];
+
+    // Root: 50×50, clips children — smaller than the path
+    nodes[0].width = 50;
+    nodes[0].height = 50;
+    nodes[0].flags = scene::NodeFlags::VISIBLE | scene::NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    // Path node: 100×100 (extends beyond parent)
+    nodes[1].width = 100;
+    nodes[1].height = 100;
+    nodes[1].flags = scene::NodeFlags::VISIBLE;
+    nodes[1].content = scene::Content::Path {
+        commands: scene::DataRef {
+            offset: 0,
+            length: total_bytes as u32,
+        },
+        fill,
+        stroke: scene::Color::TRANSPARENT,
+        stroke_width: 0,
+        _pad: [0; 3],
+    };
+
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let stride = 100u32 * 4;
+    let mut buf = vec![0u8; (stride * 100) as usize];
+    let mut fb = Surface {
+        data: &mut buf,
+        width: 100,
+        height: 100,
+        stride,
+        format: drawing::PixelFormat::Bgra8888,
+    };
+    // Fill with black first.
+    for pixel in fb.data.chunks_exact_mut(4) {
+        pixel[0] = 0;
+        pixel[1] = 0;
+        pixel[2] = 0;
+        pixel[3] = 255;
+    }
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // Inside parent (25, 25) — should be red.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 25, 25);
+    assert!(r > 200, "inside clip should be red, got r={}", r);
+
+    // Outside parent (75, 75) — should be black (clipped).
+    let (r, g, b, _a) = read_pixel(&buf, stride, 75, 75);
+    assert!(
+        r < 10 && g < 10 && b < 10,
+        "outside clip should be black, got ({},{},{})",
+        r, g, b
     );
 }
