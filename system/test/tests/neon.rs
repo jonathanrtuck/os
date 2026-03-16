@@ -1036,3 +1036,76 @@ fn neon_rounded_rect_various_widths() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// NEON Gaussian blur tests
+// ---------------------------------------------------------------------------
+
+/// Helper to create a read-only surface.
+fn make_readonly_surface(buf: &[u8], width: u32, height: u32) -> drawing::ReadSurface<'_> {
+    let bpp = PixelFormat::Bgra8888.bytes_per_pixel();
+    let stride = width * bpp;
+    assert!(buf.len() >= (stride * height) as usize);
+    drawing::ReadSurface {
+        data: buf,
+        width,
+        height,
+        stride,
+        format: PixelFormat::Bgra8888,
+    }
+}
+
+/// VAL-BLUR-006: NEON-accelerated blur matches scalar reference within ±1.
+#[test]
+fn neon_blur_matches_scalar() {
+    let w = 32u32;
+    let h = 32u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+    let radius = 6u32;
+    let sigma_fp = 384u32; // sigma=1.5
+
+    // Create a colorful test pattern.
+    let mut src_buf = vec![0u8; size];
+    for y in 0..h {
+        for x in 0..w {
+            let off = (y * stride + x * bpp) as usize;
+            src_buf[off] = ((x * 8) % 256) as u8;       // B
+            src_buf[off + 1] = ((y * 8) % 256) as u8;   // G
+            src_buf[off + 2] = (((x + y) * 4) % 256) as u8; // R
+            src_buf[off + 3] = 255;                       // A
+        }
+    }
+
+    // NEON-accelerated blur (the default path on aarch64).
+    let mut dst_neon_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+    {
+        let src = make_readonly_surface(&src_buf, w, h);
+        let mut dst = make_surface(&mut dst_neon_buf, w, h);
+        drawing::blur_surface(&src, &mut dst, &mut tmp_buf, radius, sigma_fp);
+    }
+
+    // Scalar-only blur.
+    let mut dst_scalar_buf = vec![0u8; size];
+    {
+        let src = make_readonly_surface(&src_buf, w, h);
+        let mut dst = make_surface(&mut dst_scalar_buf, w, h);
+        drawing::blur_surface_scalar(&src, &mut dst, &mut tmp_buf, radius, sigma_fp);
+    }
+
+    // Max per-channel difference should be ≤ 1.
+    let mut max_diff = 0u8;
+    for i in 0..size {
+        let diff = (dst_neon_buf[i] as i16 - dst_scalar_buf[i] as i16).unsigned_abs() as u8;
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+
+    assert!(
+        max_diff <= 1,
+        "NEON blur vs scalar blur: max channel diff = {max_diff}, expected ≤ 1"
+    );
+}

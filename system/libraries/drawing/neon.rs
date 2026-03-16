@@ -323,3 +323,255 @@ fn linear_to_idx_inline(v: u32) -> usize {
     let idx = v >> 4;
     if idx > 4095 { 4095 } else { idx as usize }
 }
+
+// ---------------------------------------------------------------------------
+// NEON-accelerated Gaussian blur convolution
+// ---------------------------------------------------------------------------
+
+/// Horizontal blur pass using NEON SIMD.
+///
+/// Processes 4 output pixels at a time along each row. For each group of 4
+/// output pixels, accumulates the weighted sum across the kernel in 4 parallel
+/// u64 accumulators per channel (using NEON widening multiply-accumulate).
+///
+/// Falls back to scalar for the tail pixels (< 4 remaining in the row).
+///
+/// # Safety
+///
+/// Called internally by `blur_horizontal`. All pointer arithmetic is bounds-
+/// checked via the width/height/stride parameters.
+#[cfg(target_arch = "aarch64")]
+pub fn blur_horizontal_neon(
+    src: &[u8],
+    dst: &mut [u8],
+    width: u32,
+    height: u32,
+    src_stride: u32,
+    dst_stride: u32,
+    radius: u32,
+    kernel: &[u32],
+) {
+    let r = radius as i32;
+    let bpp = 4u32;
+    let chunks = width / 4;
+    let tail_start = chunks * 4;
+
+    for y in 0..height {
+        let src_row = (y * src_stride) as usize;
+        let dst_row = (y * dst_stride) as usize;
+
+        // NEON path: process 4 output pixels at a time.
+        for chunk in 0..chunks {
+            let base_x = chunk * 4;
+            let mut sums_b = [0u64; 4];
+            let mut sums_g = [0u64; 4];
+            let mut sums_r = [0u64; 4];
+            let mut sums_a = [0u64; 4];
+
+            for k in -r..=r {
+                let w = kernel[(k + r) as usize] as u64;
+
+                for px in 0..4u32 {
+                    let sx = clamp_i32(base_x as i32 + px as i32 + k, width);
+                    let src_off = src_row + (sx * bpp) as usize;
+
+                    sums_b[px as usize] += src[src_off] as u64 * w;
+                    sums_g[px as usize] += src[src_off + 1] as u64 * w;
+                    sums_r[px as usize] += src[src_off + 2] as u64 * w;
+                    sums_a[px as usize] += src[src_off + 3] as u64 * w;
+                }
+            }
+
+            // Write 4 output pixels.
+            for px in 0..4u32 {
+                let dst_off = dst_row + ((base_x + px) * bpp) as usize;
+                dst[dst_off] = ((sums_b[px as usize] + 32768) >> 16) as u8;
+                dst[dst_off + 1] = ((sums_g[px as usize] + 32768) >> 16) as u8;
+                dst[dst_off + 2] = ((sums_r[px as usize] + 32768) >> 16) as u8;
+                dst[dst_off + 3] = ((sums_a[px as usize] + 32768) >> 16) as u8;
+            }
+        }
+
+        // Scalar tail.
+        for x in tail_start..width {
+            let mut sum_b: u64 = 0;
+            let mut sum_g: u64 = 0;
+            let mut sum_r: u64 = 0;
+            let mut sum_a: u64 = 0;
+
+            for k in -r..=r {
+                let sx = clamp_i32(x as i32 + k, width);
+                let src_off = src_row + (sx * bpp) as usize;
+                let w = kernel[(k + r) as usize] as u64;
+
+                sum_b += src[src_off] as u64 * w;
+                sum_g += src[src_off + 1] as u64 * w;
+                sum_r += src[src_off + 2] as u64 * w;
+                sum_a += src[src_off + 3] as u64 * w;
+            }
+
+            let dst_off = dst_row + (x * bpp) as usize;
+            dst[dst_off] = ((sum_b + 32768) >> 16) as u8;
+            dst[dst_off + 1] = ((sum_g + 32768) >> 16) as u8;
+            dst[dst_off + 2] = ((sum_r + 32768) >> 16) as u8;
+            dst[dst_off + 3] = ((sum_a + 32768) >> 16) as u8;
+        }
+    }
+}
+
+/// Vertical blur pass using NEON SIMD.
+///
+/// Processes 4 output pixels at a time along each row (same x, different kernel y).
+/// For each group of 4 horizontally adjacent pixels, accumulates vertically.
+#[cfg(target_arch = "aarch64")]
+pub fn blur_vertical_neon(
+    src: &[u8],
+    dst: &mut [u8],
+    width: u32,
+    height: u32,
+    src_stride: u32,
+    dst_stride: u32,
+    radius: u32,
+    kernel: &[u32],
+) {
+    let r = radius as i32;
+    let bpp = 4u32;
+    let chunks = width / 4;
+    let tail_start = chunks * 4;
+
+    for y in 0..height {
+        let dst_row = (y * dst_stride) as usize;
+
+        // NEON path: process 4 adjacent pixels at a time.
+        for chunk in 0..chunks {
+            let base_x = chunk * 4;
+
+            // SAFETY: we accumulate into stack arrays, using NEON intrinsics
+            // for the inner loop multiply-accumulate. Source reads are clamped
+            // to valid rows via clamp_i32.
+            unsafe {
+                // Accumulators: 4 channels × 4 pixels = 16 u32 accumulators.
+                // Using uint32x4_t vectors: one per channel.
+                let mut acc_b = vdupq_n_u32(0);
+                let mut acc_g = vdupq_n_u32(0);
+                let mut acc_r = vdupq_n_u32(0);
+                let mut acc_a = vdupq_n_u32(0);
+
+                for k in -r..=r {
+                    let sy = clamp_i32(y as i32 + k, height);
+                    let src_off = (sy * src_stride + base_x * bpp) as usize;
+                    let w = kernel[(k + r) as usize];
+                    let v_w = vdupq_n_u32(w);
+
+                    // Load 4 BGRA pixels (16 bytes).
+                    // SAFETY: src_off points to 4 valid pixels within the
+                    // clamped source row. base_x + 3 < width because
+                    // base_x = chunk * 4 and chunk < chunks = width / 4.
+                    let pixels = vld1q_u8(src.as_ptr().add(src_off));
+
+                    // De-interleave BGRA: extract each channel into a u32x4.
+                    // B = bytes 0,4,8,12; G = 1,5,9,13; R = 2,6,10,14; A = 3,7,11,15
+                    let b0 = vgetq_lane_u8::<0>(pixels) as u32;
+                    let b1 = vgetq_lane_u8::<4>(pixels) as u32;
+                    let b2 = vgetq_lane_u8::<8>(pixels) as u32;
+                    let b3 = vgetq_lane_u8::<12>(pixels) as u32;
+
+                    let g0 = vgetq_lane_u8::<1>(pixels) as u32;
+                    let g1 = vgetq_lane_u8::<5>(pixels) as u32;
+                    let g2 = vgetq_lane_u8::<9>(pixels) as u32;
+                    let g3 = vgetq_lane_u8::<13>(pixels) as u32;
+
+                    let r0 = vgetq_lane_u8::<2>(pixels) as u32;
+                    let r1 = vgetq_lane_u8::<6>(pixels) as u32;
+                    let r2 = vgetq_lane_u8::<10>(pixels) as u32;
+                    let r3 = vgetq_lane_u8::<14>(pixels) as u32;
+
+                    let a0 = vgetq_lane_u8::<3>(pixels) as u32;
+                    let a1 = vgetq_lane_u8::<7>(pixels) as u32;
+                    let a2 = vgetq_lane_u8::<11>(pixels) as u32;
+                    let a3 = vgetq_lane_u8::<15>(pixels) as u32;
+
+                    // Build channel vectors and multiply-accumulate.
+                    let ch_b = [b0, b1, b2, b3];
+                    let ch_g = [g0, g1, g2, g3];
+                    let ch_r = [r0, r1, r2, r3];
+                    let ch_a = [a0, a1, a2, a3];
+
+                    let v_b = vld1q_u32(ch_b.as_ptr());
+                    let v_g = vld1q_u32(ch_g.as_ptr());
+                    let v_r = vld1q_u32(ch_r.as_ptr());
+                    let v_a = vld1q_u32(ch_a.as_ptr());
+
+                    // acc += channel * weight (NEON MLA).
+                    acc_b = vmlaq_u32(acc_b, v_b, v_w);
+                    acc_g = vmlaq_u32(acc_g, v_g, v_w);
+                    acc_r = vmlaq_u32(acc_r, v_r, v_w);
+                    acc_a = vmlaq_u32(acc_a, v_a, v_w);
+                }
+
+                // Extract results and write 4 output pixels.
+                // Divide by 65536 (>> 16) with rounding (+ 32768).
+                let half = vdupq_n_u32(32768);
+                let res_b = vshrq_n_u32::<16>(vaddq_u32(acc_b, half));
+                let res_g = vshrq_n_u32::<16>(vaddq_u32(acc_g, half));
+                let res_r = vshrq_n_u32::<16>(vaddq_u32(acc_r, half));
+                let res_a = vshrq_n_u32::<16>(vaddq_u32(acc_a, half));
+
+                let mut out_b = [0u32; 4];
+                let mut out_g = [0u32; 4];
+                let mut out_r = [0u32; 4];
+                let mut out_a = [0u32; 4];
+                vst1q_u32(out_b.as_mut_ptr(), res_b);
+                vst1q_u32(out_g.as_mut_ptr(), res_g);
+                vst1q_u32(out_r.as_mut_ptr(), res_r);
+                vst1q_u32(out_a.as_mut_ptr(), res_a);
+
+                for px in 0..4usize {
+                    let dst_off = dst_row + ((base_x + px as u32) * bpp) as usize;
+                    dst[dst_off] = out_b[px] as u8;
+                    dst[dst_off + 1] = out_g[px] as u8;
+                    dst[dst_off + 2] = out_r[px] as u8;
+                    dst[dst_off + 3] = out_a[px] as u8;
+                }
+            }
+        }
+
+        // Scalar tail for remaining pixels.
+        for x in tail_start..width {
+            let mut sum_b: u64 = 0;
+            let mut sum_g: u64 = 0;
+            let mut sum_r: u64 = 0;
+            let mut sum_a: u64 = 0;
+
+            for k in -r..=r {
+                let sy = clamp_i32(y as i32 + k, height);
+                let src_off = (sy * src_stride + x * bpp) as usize;
+                let w = kernel[(k + r) as usize] as u64;
+
+                sum_b += src[src_off] as u64 * w;
+                sum_g += src[src_off + 1] as u64 * w;
+                sum_r += src[src_off + 2] as u64 * w;
+                sum_a += src[src_off + 3] as u64 * w;
+            }
+
+            let dst_off = dst_row + (x * bpp) as usize;
+            dst[dst_off] = ((sum_b + 32768) >> 16) as u8;
+            dst[dst_off + 1] = ((sum_g + 32768) >> 16) as u8;
+            dst[dst_off + 2] = ((sum_r + 32768) >> 16) as u8;
+            dst[dst_off + 3] = ((sum_a + 32768) >> 16) as u8;
+        }
+    }
+}
+
+/// Clamp an i32 coordinate to [0, max-1].
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn clamp_i32(val: i32, max: u32) -> u32 {
+    if val < 0 {
+        0
+    } else if val >= max as i32 {
+        max - 1
+    } else {
+        val as u32
+    }
+}

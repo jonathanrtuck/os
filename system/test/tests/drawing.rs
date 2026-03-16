@@ -6648,3 +6648,465 @@ fn rounded_rect_four_corner_symmetry() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Gaussian blur tests
+// ---------------------------------------------------------------------------
+
+/// Helper: create a read-only surface (no mutable borrow of buffer).
+fn make_readonly_surface(buf: &[u8], width: u32, height: u32) -> drawing::ReadSurface<'_> {
+    let bpp = PixelFormat::Bgra8888.bytes_per_pixel();
+    let stride = width * bpp;
+    assert!(buf.len() >= (stride * height) as usize);
+    drawing::ReadSurface {
+        data: buf,
+        width,
+        height,
+        stride,
+        format: PixelFormat::Bgra8888,
+    }
+}
+
+/// Helper: brute-force 2D Gaussian convolution reference implementation.
+/// Uses the SAME kernel weights as the library (via `drawing::compute_kernel`)
+/// so the only error source is the separable decomposition rounding.
+fn reference_2d_gaussian_blur(
+    src: &[u8],
+    dst: &mut [u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    radius: u32,
+    sigma_fp: u32,
+) {
+    let mut kernel_arr = [0u32; drawing::MAX_KERNEL_DIAMETER];
+    let diameter = drawing::compute_kernel(&mut kernel_arr, radius, sigma_fp);
+    let kernel = &kernel_arr[..diameter];
+    let r = radius as i32;
+    let bpp = 4u32;
+
+    for y in 0..height {
+        for x in 0..width {
+            let mut sum_r: u64 = 0;
+            let mut sum_g: u64 = 0;
+            let mut sum_b: u64 = 0;
+            let mut sum_a: u64 = 0;
+            let mut weight_sum: u64 = 0;
+
+            for ky in -r..=r {
+                for kx in -r..=r {
+                    let sx = clamp_coord(x as i32 + kx, width);
+                    let sy = clamp_coord(y as i32 + ky, height);
+                    let offset = (sy * stride + sx * bpp) as usize;
+
+                    // Kernel weight = kernel_x[kx+r] * kernel_y[ky+r]
+                    let wx = kernel[(kx + r) as usize] as u64;
+                    let wy = kernel[(ky + r) as usize] as u64;
+                    let w = wx * wy;
+
+                    // BGRA format
+                    sum_b += src[offset] as u64 * w;
+                    sum_g += src[offset + 1] as u64 * w;
+                    sum_r += src[offset + 2] as u64 * w;
+                    sum_a += src[offset + 3] as u64 * w;
+                    weight_sum += w;
+                }
+            }
+
+            let dst_offset = (y * stride + x * bpp) as usize;
+            if weight_sum > 0 {
+                dst[dst_offset] = ((sum_b + weight_sum / 2) / weight_sum) as u8;
+                dst[dst_offset + 1] = ((sum_g + weight_sum / 2) / weight_sum) as u8;
+                dst[dst_offset + 2] = ((sum_r + weight_sum / 2) / weight_sum) as u8;
+                dst[dst_offset + 3] = ((sum_a + weight_sum / 2) / weight_sum) as u8;
+            }
+        }
+    }
+}
+
+/// Helper: clamp coordinate to surface bounds.
+fn clamp_coord(val: i32, max: u32) -> u32 {
+    if val < 0 {
+        0
+    } else if val >= max as i32 {
+        max - 1
+    } else {
+        val as u32
+    }
+}
+
+/// VAL-BLUR-001: Single white pixel blurred produces symmetric output.
+#[test]
+fn blur_single_pixel_symmetric() {
+    let w = 32u32;
+    let h = 32u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+    let radius = 4u32;
+    let sigma_fp = 512u32; // sigma=2.0 in 8.8 FP
+
+    // Source: single white pixel at center.
+    let mut src_buf = vec![0u8; size];
+    {
+        let cx = w / 2;
+        let cy = h / 2;
+        let off = (cy * stride + cx * bpp) as usize;
+        src_buf[off] = 255;     // B
+        src_buf[off + 1] = 255; // G
+        src_buf[off + 2] = 255; // R
+        src_buf[off + 3] = 255; // A
+    }
+
+    let mut dst_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+
+    let src = make_readonly_surface(&src_buf, w, h);
+    let mut dst = make_surface(&mut dst_buf, w, h);
+
+    drawing::blur_surface(&src, &mut dst, &mut tmp_buf, radius, sigma_fp);
+
+    // Check symmetry: pixel at (cx+d, cy) == pixel at (cx-d, cy)
+    let cx = w / 2;
+    let cy = h / 2;
+    for d in 1..=radius {
+        let left = dst.get_pixel(cx - d, cy).unwrap();
+        let right = dst.get_pixel(cx + d, cy).unwrap();
+        assert_eq!(left, right, "horizontal symmetry at distance {d}");
+
+        let top = dst.get_pixel(cx, cy - d).unwrap();
+        let bottom = dst.get_pixel(cx, cy + d).unwrap();
+        assert_eq!(top, bottom, "vertical symmetry at distance {d}");
+    }
+
+    // Center should have highest value.
+    let center = dst.get_pixel(cx, cy).unwrap();
+    let neighbor = dst.get_pixel(cx + 1, cy).unwrap();
+    assert!(center.r >= neighbor.r, "center should be >= neighbor");
+}
+
+/// VAL-BLUR-002: Two-pass separable blur matches brute-force 2D reference within ±1.
+#[test]
+fn blur_two_pass_matches_2d_reference() {
+    let w = 32u32;
+    let h = 32u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+    let radius = 4u32;
+    let sigma_fp = 256u32; // sigma=1.0
+
+    // Create a test pattern: checkerboard-ish.
+    let mut src_buf = vec![0u8; size];
+    for y in 0..h {
+        for x in 0..w {
+            let off = (y * stride + x * bpp) as usize;
+            let val = if (x + y) % 3 == 0 { 200u8 } else { 50u8 };
+            src_buf[off] = val;
+            src_buf[off + 1] = val;
+            src_buf[off + 2] = val;
+            src_buf[off + 3] = 255;
+        }
+    }
+
+    // Two-pass separable blur.
+    let mut dst_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+    let src = make_readonly_surface(&src_buf, w, h);
+    let mut dst = make_surface(&mut dst_buf, w, h);
+    drawing::blur_surface(&src, &mut dst, &mut tmp_buf, radius, sigma_fp);
+
+    // Brute-force 2D reference.
+    let mut ref_buf = vec![0u8; size];
+    reference_2d_gaussian_blur(&src_buf, &mut ref_buf, w, h, stride, radius, sigma_fp);
+
+    // Compare: max difference per channel ≤ 1.
+    let mut max_diff = 0u8;
+    for i in 0..size {
+        let diff = (dst_buf[i] as i16 - ref_buf[i] as i16).unsigned_abs() as u8;
+        if diff > max_diff {
+            max_diff = diff;
+        }
+    }
+    assert!(
+        max_diff <= 1,
+        "two-pass vs 2D reference: max channel diff = {max_diff}, expected ≤ 1"
+    );
+}
+
+/// VAL-BLUR-003: radius=0 is identity.
+#[test]
+fn blur_radius_zero_identity() {
+    let w = 16u32;
+    let h = 16u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+
+    // Fill source with a pattern.
+    let mut src_buf = vec![0u8; size];
+    for (i, b) in src_buf.iter_mut().enumerate() {
+        *b = (i % 256) as u8;
+    }
+
+    let mut dst_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+
+    let src = make_readonly_surface(&src_buf, w, h);
+    let mut dst = make_surface(&mut dst_buf, w, h);
+
+    drawing::blur_surface(&src, &mut dst, &mut tmp_buf, 0, 256);
+
+    assert_eq!(dst_buf, src_buf, "radius=0 should produce identical output");
+}
+
+/// VAL-BLUR-004: Blur respects surface bounds — no OOB reads.
+#[test]
+fn blur_edge_clamping_small_surface() {
+    let w = 16u32;
+    let h = 16u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+    let radius = 8u32;
+    let sigma_fp = 512u32; // sigma=2.0
+
+    // Fill source with white.
+    let mut src_buf = vec![255u8; size];
+    let mut dst_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+
+    let src = make_readonly_surface(&src_buf, w, h);
+    let mut dst = make_surface(&mut dst_buf, w, h);
+
+    // Should not panic, all output pixels valid.
+    drawing::blur_surface(&src, &mut dst, &mut tmp_buf, radius, sigma_fp);
+
+    // All pixels should be white (blurring a uniform surface = same surface).
+    for y in 0..h {
+        for x in 0..w {
+            let p = dst.get_pixel(x, y).unwrap();
+            assert_eq!(p, Color::WHITE, "uniform white blur at ({x},{y})");
+        }
+    }
+}
+
+/// VAL-BLUR-005: CPU cap enforced for large radii — radius=64 clamped to 16.
+#[test]
+fn blur_large_radius_capped() {
+    let w = 16u32;
+    let h = 16u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+
+    // Single white pixel.
+    let mut src_buf = vec![0u8; size];
+    {
+        let cx = w / 2;
+        let cy = h / 2;
+        let off = (cy * stride + cx * bpp) as usize;
+        src_buf[off] = 255;
+        src_buf[off + 1] = 255;
+        src_buf[off + 2] = 255;
+        src_buf[off + 3] = 255;
+    }
+
+    // Blur with radius=64 (should be clamped to MAX_CPU_BLUR_RADIUS=16).
+    let mut dst_64_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+    {
+        let src = make_readonly_surface(&src_buf, w, h);
+        let mut dst = make_surface(&mut dst_64_buf, w, h);
+        drawing::blur_surface(&src, &mut dst, &mut tmp_buf, 64, 512);
+    }
+
+    // Blur with radius=16 (explicit max).
+    let mut dst_16_buf = vec![0u8; size];
+    {
+        let src = make_readonly_surface(&src_buf, w, h);
+        let mut dst = make_surface(&mut dst_16_buf, w, h);
+        drawing::blur_surface(&src, &mut dst, &mut tmp_buf, 16, 512);
+    }
+
+    // Both should produce the same result (clamped to same effective radius).
+    assert_eq!(dst_64_buf, dst_16_buf, "radius=64 should produce same result as radius=16 (clamped)");
+}
+
+/// VAL-BLUR-007: sigma=4.0 produces wider spread than sigma=1.0.
+#[test]
+fn blur_sigma_varies_spread() {
+    let w = 64u32;
+    let h = 64u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+    let radius = 16u32;
+
+    // Single white pixel at center.
+    let mut src_buf = vec![0u8; size];
+    {
+        let cx = w / 2;
+        let cy = h / 2;
+        let off = (cy * stride + cx * bpp) as usize;
+        src_buf[off] = 255;
+        src_buf[off + 1] = 255;
+        src_buf[off + 2] = 255;
+        src_buf[off + 3] = 255;
+    }
+
+    // Blur with sigma=1.0 (256 in 8.8 FP).
+    let mut dst_s1_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+    {
+        let src = make_readonly_surface(&src_buf, w, h);
+        let mut dst = make_surface(&mut dst_s1_buf, w, h);
+        drawing::blur_surface(&src, &mut dst, &mut tmp_buf, radius, 256);
+    }
+
+    // Blur with sigma=4.0 (1024 in 8.8 FP).
+    let mut dst_s4_buf = vec![0u8; size];
+    {
+        let src = make_readonly_surface(&src_buf, w, h);
+        let mut dst = make_surface(&mut dst_s4_buf, w, h);
+        drawing::blur_surface(&src, &mut dst, &mut tmp_buf, radius, 1024);
+    }
+
+    // Measure energy at distance > 4 pixels from center.
+    // sigma=4.0 should have more energy far from center.
+    let cx = w / 2;
+    let cy = h / 2;
+    let mut energy_s1: u64 = 0;
+    let mut energy_s4: u64 = 0;
+    for d in 5..=radius {
+        // Sample along horizontal axis.
+        let off_s1 = (cy * stride + (cx + d) * bpp) as usize;
+        let off_s4 = (cy * stride + (cx + d) * bpp) as usize;
+        energy_s1 += dst_s1_buf[off_s1 + 2] as u64; // R channel
+        energy_s4 += dst_s4_buf[off_s4 + 2] as u64;
+    }
+
+    assert!(
+        energy_s4 > energy_s1,
+        "sigma=4.0 should have wider spread (more energy at distance > 4): s4={energy_s4}, s1={energy_s1}"
+    );
+}
+
+/// VAL-BLUR-013: BlurStrategy trait defined, CpuBlur implements it.
+#[test]
+fn blur_trait_defined_cpublur_implements() {
+    // Verify that CpuBlur implements BlurStrategy by calling it through the trait.
+    let blur: &dyn drawing::BlurStrategy = &drawing::CpuBlur;
+
+    let w = 8u32;
+    let h = 8u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+
+    let mut src_buf = vec![128u8; size];
+    let mut dst_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+
+    let src = make_readonly_surface(&src_buf, w, h);
+    let mut dst = make_surface(&mut dst_buf, w, h);
+
+    blur.blur(&src, &mut dst, &mut tmp_buf, 2, 256);
+    // Should complete without panic — uniform input stays uniform.
+    for y in 0..h {
+        for x in 0..w {
+            let p = dst.get_pixel(x, y).unwrap();
+            assert_eq!(p.r, 128, "uniform blur through trait at ({x},{y})");
+        }
+    }
+}
+
+/// VAL-BLUR-014: Blur preserves alpha channel (blurred, not clamped).
+#[test]
+fn blur_preserves_alpha_channel() {
+    let w = 32u32;
+    let h = 32u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+    let radius = 4u32;
+    let sigma_fp = 256u32; // sigma=1.0
+
+    // Create source with alpha gradient: left half fully transparent, right half fully opaque.
+    let mut src_buf = vec![0u8; size];
+    for y in 0..h {
+        for x in 0..w {
+            let off = (y * stride + x * bpp) as usize;
+            src_buf[off] = 255;     // B
+            src_buf[off + 1] = 255; // G
+            src_buf[off + 2] = 255; // R
+            src_buf[off + 3] = if x >= w / 2 { 255 } else { 0 }; // A: step function
+        }
+    }
+
+    let mut dst_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+
+    let src = make_readonly_surface(&src_buf, w, h);
+    let mut dst = make_surface(&mut dst_buf, w, h);
+
+    drawing::blur_surface(&src, &mut dst, &mut tmp_buf, radius, sigma_fp);
+
+    // At the alpha boundary (x=w/2), alpha should be blurred — intermediate values.
+    let border_x = w / 2;
+    let mid_y = h / 2;
+    let border_alpha = dst.get_pixel(border_x, mid_y).unwrap().a;
+    assert!(
+        border_alpha > 1 && border_alpha < 254,
+        "alpha at boundary should be intermediate (blurred), got {border_alpha}"
+    );
+}
+
+/// Additional: blur of uniform surface should produce identical output.
+#[test]
+fn blur_uniform_surface_unchanged() {
+    let w = 24u32;
+    let h = 24u32;
+    let bpp = 4u32;
+    let stride = w * bpp;
+    let size = (stride * h) as usize;
+    let radius = 8u32;
+    let sigma_fp = 512u32; // sigma=2.0
+
+    let color = Color::rgba(100, 150, 200, 180);
+    let mut src_buf = vec![0u8; size];
+    for y in 0..h {
+        for x in 0..w {
+            let off = (y * stride + x * bpp) as usize;
+            // BGRA encoding
+            src_buf[off] = color.b;
+            src_buf[off + 1] = color.g;
+            src_buf[off + 2] = color.r;
+            src_buf[off + 3] = color.a;
+        }
+    }
+
+    let mut dst_buf = vec![0u8; size];
+    let mut tmp_buf = vec![0u8; size];
+
+    let src = make_readonly_surface(&src_buf, w, h);
+    let mut dst = make_surface(&mut dst_buf, w, h);
+
+    drawing::blur_surface(&src, &mut dst, &mut tmp_buf, radius, sigma_fp);
+
+    // All pixels should match the uniform color (within ±1 for rounding).
+    for y in 0..h {
+        for x in 0..w {
+            let p = dst.get_pixel(x, y).unwrap();
+            let dr = (p.r as i16 - color.r as i16).unsigned_abs();
+            let dg = (p.g as i16 - color.g as i16).unsigned_abs();
+            let db = (p.b as i16 - color.b as i16).unsigned_abs();
+            let da = (p.a as i16 - color.a as i16).unsigned_abs();
+            assert!(
+                dr <= 1 && dg <= 1 && db <= 1 && da <= 1,
+                "uniform blur at ({x},{y}): got {:?}, expected {:?}, diff=({dr},{dg},{db},{da})",
+                p, color
+            );
+        }
+    }
+}
