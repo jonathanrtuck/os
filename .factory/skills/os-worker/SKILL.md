@@ -17,6 +17,8 @@ Features involving:
 - GPU driver transfer path changes
 - Protocol/IPC message changes
 - Kernel timer or syscall changes related to the rendering pipeline
+- Interrupt controller changes (GICv3 migration, IPI, tickless idle)
+- Scheduler changes (per-core idle tracking, IPI-driven wakeup)
 
 ## Work Procedure
 
@@ -33,7 +35,7 @@ Read the relevant source files. The rendering pipeline code lives in:
 - `system/services/drivers/virtio-gpu/` — GPU transfer
 - `system/services/init/` — startup, config
 - `system/libraries/protocol/` — IPC message types
-- `system/kernel/` — syscalls, timer, scheduler (only if feature touches kernel)
+- `system/kernel/` — syscalls, timer, scheduler, interrupt controller, per-core state
 
 Read `.factory/library/architecture.md` for the rendering pipeline overview and key types.
 
@@ -48,6 +50,8 @@ Read `.factory/library/architecture.md` for the rendering pipeline overview and 
 - Compositor rendering → `system/test/tests/scene_render.rs`
 - Font/glyph → `system/test/tests/cache.rs` or `shaping.rs`
 - Render backend → `system/test/tests/scene_render.rs`
+- Interrupt controller → `system/test/tests/interrupt_controller.rs` (create if needed)
+- Timer/scheduler → `system/test/tests/interrupt_timer.rs` or `scheduler_state.rs`
 
 Run `cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1` to verify tests FAIL (red).
 
@@ -94,7 +98,7 @@ Or launch QEMU manually, send keystrokes, capture framebuffer screenshots:
 ```
 # Launch QEMU (MUST include -fsdev/-device virtio-9p for font loading)
 qemu-system-aarch64 \
-    -machine virt,gic-version=2 -cpu cortex-a53 -smp 4 -m 256M \
+    -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 256M \
     -global virtio-mmio.force-legacy=false \
     -drive "file=test.img,if=none,format=raw,id=hd0" \
     -device virtio-blk-device,drive=hd0 \

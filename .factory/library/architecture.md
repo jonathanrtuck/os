@@ -1,8 +1,8 @@
 # Architecture
 
-## Current Mission: Geometric Scene Content Types
+## Current Mission: Tickless Idle + Inter-Processor Interrupts
 
-The rendering pipeline is being redesigned. Content types change from semantic (Text, Image, Path) to geometric (FillRect, Glyphs, Image).
+Replacing GICv2 with GICv3, adding IPI-driven wakeup, and converting fixed 250Hz tick to tickless idle.
 
 ### Content Type Field Layout
 - **FillRect:** Color (4B). Position/size from Node geometry.

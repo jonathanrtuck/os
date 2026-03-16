@@ -4,12 +4,13 @@ Testing surface, validation approach, and resource cost classification.
 
 ---
 
-## Current Mission: Geometric Scene Content Types & Architecture Cleanup
+## Current Mission: Tickless Idle + Inter-Processor Interrupts
 
-This mission replaces Content::{Text, Image, Path} with Content::{FillRect, Glyphs, Image} and cleans up the architecture. Key testing considerations:
-- Content type tests in scene.rs and scene_render.rs are heavily rewritten
-- SVG tests (tests/svg.rs) are removed entirely
-- QEMU visual verification must confirm pixel-identical rendering before/after
+This mission replaces GICv2 with GICv3, adds IPI-driven wakeup, and converts the fixed 250Hz tick to tickless idle. Key testing considerations:
+- After GICv3 migration, ALL QEMU scripts use gic-version=3
+- Stress testing is critical — SMP timing changes may surface latent bugs
+- Timer behavior changes require verifying deadline accuracy (not just "fires eventually")
+- IPI delivery must be verified across all 4 SMP cores
 
 ---
 
@@ -73,7 +74,7 @@ This mission replaces Content::{Text, Image, Path} with Content::{FillRect, Glyp
 3. Launch QEMU with unique paths (IMPORTANT — include 9p and rtc flags for font loading and clock):
    ```sh
    cd /Users/user/Sites/os/system && qemu-system-aarch64 \
-     -machine virt,gic-version=2 -cpu cortex-a53 -smp 4 -m 256M \
+     -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 256M \
      -global virtio-mmio.force-legacy=false \
      -drive "file=/tmp/val-test.img,if=none,format=raw,id=hd0" \
      -device virtio-blk-device,drive=hd0 \

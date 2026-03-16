@@ -5,3 +5,4 @@ commands:
   smoke-test: cd /Users/user/Sites/os/system/test && bash smoke.sh
   stress-test: cd /Users/user/Sites/os/system/test && bash stress.sh
   integration-test: cd /Users/user/Sites/os/system/test && bash integration.sh
+  crash-test: cd /Users/user/Sites/os/system/test && bash crash.sh
