@@ -171,6 +171,10 @@ fn render_node(
         None => return,
     };
 
+    // Compute shadow geometry for damage/overflow. Shadow is rendered
+    // before the node content (behind it in z-order).
+    let has_shadow = node.has_shadow();
+
     // Group opacity: when opacity < 255, render the entire node (background,
     // content, children) into an offscreen buffer at full alpha, then
     // composite the buffer onto the destination at the specified opacity.
@@ -180,57 +184,253 @@ fn render_node(
         if nw <= 0 || nh <= 0 {
             return;
         }
-        let ow = nw as u32;
-        let oh = nh as u32;
-        let ostride = ow * 4;
+
+        // Compute the total area needed including shadow overflow.
+        let (sh_left, sh_top, sh_right, sh_bottom) = if has_shadow {
+            shadow_overflow(node, s)
+        } else {
+            (0i32, 0i32, 0i32, 0i32)
+        };
+
+        let total_w = (sh_left + nw + sh_right).max(nw) as u32;
+        let total_h = (sh_top + nh + sh_bottom).max(nh) as u32;
+        let ostride = total_w * 4;
 
         // Allocate an offscreen buffer for group opacity rendering.
         // Children are rendered at full alpha, then the entire buffer is
         // composited at the node's opacity.
-        let mut offscreen_buf = vec![0u8; (ostride * oh) as usize];
+        let mut offscreen_buf = vec![0u8; (ostride * total_h) as usize];
 
         {
             let mut off_fb = Surface {
                 data: &mut offscreen_buf,
-                width: ow,
-                height: oh,
+                width: total_w,
+                height: total_h,
                 stride: ostride,
                 format: PixelFormat::Bgra8888,
             };
 
+            // Shadow is rendered first (behind content).
+            if has_shadow {
+                render_shadow(
+                    &mut off_fb,
+                    node,
+                    sh_left,
+                    sh_top,
+                    nw,
+                    nh,
+                    s,
+                );
+            }
+
             // Render the node at full opacity into the offscreen buffer.
-            // The offscreen buffer's (0,0) corresponds to (nx, ny) in the
-            // framebuffer coordinate space.
+            // The offscreen buffer's (sh_left, sh_top) corresponds to (nx, ny)
+            // in the framebuffer coordinate space.
             render_node_content(
                 &mut off_fb,
                 graph,
                 ctx,
                 node,
                 node_id,
-                0,    // draw at offscreen origin
-                0,
-                ClipRect { x: 0, y: 0, w: nw, h: nh },
+                sh_left,
+                sh_top,
+                ClipRect { x: 0, y: 0, w: total_w as i32, h: total_h as i32 },
                 None, // children can allocate their own offscreen buffers
             );
         }
 
         // Composite the offscreen buffer onto the destination at the
         // specified opacity, using sRGB-correct blending.
+        let blit_x = (nx - sh_left).max(0) as u32;
+        let blit_y = (ny - sh_top).max(0) as u32;
+
         fb.blit_blend_with_opacity(
             &offscreen_buf,
-            ow,
-            oh,
+            total_w,
+            total_h,
             ostride,
-            nx as u32,
-            ny as u32,
+            blit_x,
+            blit_y,
             node.opacity,
         );
 
         return;
     }
 
-    // opacity=255: render directly to destination (no offscreen buffer).
+    // opacity=255: render shadow directly to destination, then node content.
+    if has_shadow {
+        render_shadow(
+            fb,
+            node,
+            nx,
+            ny,
+            nw,
+            nh,
+            s,
+        );
+    }
+
     render_node_content(fb, graph, ctx, node, node_id, nx, ny, visible, pool);
+}
+
+/// Compute the shadow overflow on each side of the node bounds in physical pixels.
+///
+/// Returns `(left, top, right, bottom)` — the number of physical pixels the
+/// shadow extends beyond the node's bounds on each side. Used for both damage
+/// tracking and offscreen buffer sizing.
+fn shadow_overflow(node: &Node, scale: f32) -> (i32, i32, i32, i32) {
+    let blur = round_f32(node.shadow_blur_radius as f32 * scale).max(0);
+    let spread = round_f32(node.shadow_spread as f32 * scale);
+    let off_x = round_f32(node.shadow_offset_x as f32 * scale);
+    let off_y = round_f32(node.shadow_offset_y as f32 * scale);
+
+    // Shadow extends by spread + blur on each side, shifted by offset.
+    let extent = spread + blur;
+    let left = (extent - off_x).max(0);
+    let top = (extent - off_y).max(0);
+    let right = (extent + off_x).max(0);
+    let bottom = (extent + off_y).max(0);
+
+    (left, top, right, bottom)
+}
+
+/// Render a box shadow behind a node.
+///
+/// When rendering directly to the framebuffer (opacity=255), `draw_x`/`draw_y`
+/// are the node's absolute physical position. When rendering to an offscreen
+/// buffer for group opacity, they are the node's offset within the buffer.
+///
+/// The shadow is a rounded rect (matching node's corner_radius) filled with
+/// shadow_color, optionally Gaussian-blurred, offset by shadow_offset, and
+/// expanded by shadow_spread.
+fn render_shadow(
+    fb: &mut Surface,
+    node: &Node,
+    draw_x: i32,
+    draw_y: i32,
+    nw: i32,
+    nh: i32,
+    scale: f32,
+) {
+    let blur_radius = round_f32(node.shadow_blur_radius as f32 * scale).max(0) as u32;
+    let spread = round_f32(node.shadow_spread as f32 * scale);
+    let off_x = round_f32(node.shadow_offset_x as f32 * scale);
+    let off_y = round_f32(node.shadow_offset_y as f32 * scale);
+
+    // Shadow rect: node bounds expanded by spread, shifted by offset.
+    let sw = (nw as i32 + 2 * spread).max(0) as u32;
+    let sh = (nh as i32 + 2 * spread).max(0) as u32;
+    if sw == 0 || sh == 0 {
+        return;
+    }
+
+    let sx = draw_x + off_x - spread;
+    let sy = draw_y + off_y - spread;
+
+    let shadow_color = scene_to_draw_color(node.shadow_color);
+
+    // Physical corner radius for the shadow shape.
+    let phys_radius = if node.corner_radius > 0 {
+        let r = round_f32(node.corner_radius as f32 * scale);
+        let max_r = (sw.min(sh) / 2) as i32;
+        let sr = r + spread; // Spread expands the radius too.
+        if sr < 0 { 0u32 } else { (sr as u32).min(max_r as u32) }
+    } else {
+        0u32
+    };
+
+    if blur_radius == 0 {
+        // Hard shadow: just fill a rectangle (or rounded rect) at the offset.
+        if phys_radius > 0 {
+            fb.fill_rounded_rect_blend(sx as u32, sy as u32, sw, sh, phys_radius, shadow_color);
+        } else if shadow_color.a == 255 {
+            fb.fill_rect(sx as u32, sy as u32, sw, sh, shadow_color);
+        } else {
+            fb.fill_rect_blend(sx as u32, sy as u32, sw, sh, shadow_color);
+        }
+    } else {
+        // Blurred shadow: render the shadow shape to a temporary surface,
+        // apply Gaussian blur, then composite onto the destination.
+        let pad = blur_radius;
+        let buf_w = sw + 2 * pad;
+        let buf_h = sh + 2 * pad;
+        let buf_stride = buf_w * 4;
+        let buf_size = (buf_stride * buf_h) as usize;
+
+        // Cap allocation to avoid OOM (4 MiB per buffer × 3 = 12 MiB).
+        if buf_size > 4 * 1024 * 1024 {
+            // Fallback to hard shadow for very large blur.
+            if phys_radius > 0 {
+                fb.fill_rounded_rect_blend(sx as u32, sy as u32, sw, sh, phys_radius, shadow_color);
+            } else {
+                fb.fill_rect_blend(sx as u32, sy as u32, sw, sh, shadow_color);
+            }
+            return;
+        }
+
+        // Source buffer: fill the shadow shape.
+        let mut src_buf = vec![0u8; buf_size];
+        {
+            let mut src_fb = Surface {
+                data: &mut src_buf,
+                width: buf_w,
+                height: buf_h,
+                stride: buf_stride,
+                format: PixelFormat::Bgra8888,
+            };
+            // Draw the shadow shape centered in the padded buffer.
+            if phys_radius > 0 {
+                src_fb.fill_rounded_rect_blend(pad, pad, sw, sh, phys_radius, shadow_color);
+            } else if shadow_color.a == 255 {
+                src_fb.fill_rect(pad, pad, sw, sh, shadow_color);
+            } else {
+                src_fb.fill_rect_blend(pad, pad, sw, sh, shadow_color);
+            }
+        }
+
+        // Apply Gaussian blur.
+        let mut tmp_buf = vec![0u8; buf_size];
+        let mut dst_buf = vec![0u8; buf_size];
+
+        // Use sigma proportional to radius (CSS convention: sigma ≈ radius/2).
+        let sigma_fp = if blur_radius > 0 {
+            // 8.8 fixed-point: sigma = radius / 2, fp = sigma * 256.
+            ((blur_radius as u32) * 256 / 2).max(128)
+        } else {
+            256
+        };
+
+        let src_read = drawing::ReadSurface {
+            data: &src_buf,
+            width: buf_w,
+            height: buf_h,
+            stride: buf_stride,
+            format: PixelFormat::Bgra8888,
+        };
+        let mut dst_surface = Surface {
+            data: &mut dst_buf,
+            width: buf_w,
+            height: buf_h,
+            stride: buf_stride,
+            format: PixelFormat::Bgra8888,
+        };
+
+        drawing::blur_surface(&src_read, &mut dst_surface, &mut tmp_buf, blur_radius, sigma_fp);
+
+        // Composite the blurred shadow onto the destination.
+        // The shadow buffer's (pad, pad) corresponds to (sx, sy) in the dest.
+        let blit_x = (sx - pad as i32).max(0) as u32;
+        let blit_y = (sy - pad as i32).max(0) as u32;
+
+        fb.blit_blend(
+            &dst_buf,
+            buf_w,
+            buf_h,
+            buf_stride,
+            blit_x,
+            blit_y,
+        );
+    }
 }
 
 /// Render a node's background, content, and children into a target surface.

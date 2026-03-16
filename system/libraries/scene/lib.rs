@@ -263,6 +263,18 @@ pub struct Node {
     // ── flags ──
     pub flags: NodeFlags,
     pub _pad: u8,
+    // ── shadow ──
+    /// Shadow color (TRANSPARENT = no shadow).
+    pub shadow_color: Color,
+    /// Horizontal shadow offset in logical pixels.
+    pub shadow_offset_x: i16,
+    /// Vertical shadow offset in logical pixels.
+    pub shadow_offset_y: i16,
+    /// Shadow blur radius in logical pixels (0 = hard shadow).
+    pub shadow_blur_radius: u8,
+    /// Shadow spread in logical pixels (positive expands, negative shrinks).
+    pub shadow_spread: i8,
+    pub _shadow_pad: [u8; 2],
     // ── content hash (FNV-1a of variable-length data referenced by Content) ──
     /// Hash of the node's variable-length data (text bytes, path commands,
     /// image pixels). Computed by the scene writer when content is set.
@@ -292,9 +304,25 @@ impl Node {
         opacity: 255,
         flags: NodeFlags::VISIBLE,
         _pad: 0,
+        shadow_color: Color::TRANSPARENT,
+        shadow_offset_x: 0,
+        shadow_offset_y: 0,
+        shadow_blur_radius: 0,
+        shadow_spread: 0,
+        _shadow_pad: [0; 2],
         content_hash: 0,
         content: Content::None,
     };
+
+    /// Returns true if this node has a non-default shadow (any shadow
+    /// field is non-zero/non-transparent).
+    pub fn has_shadow(&self) -> bool {
+        self.shadow_color.a > 0
+            && (self.shadow_blur_radius > 0
+                || self.shadow_offset_x != 0
+                || self.shadow_offset_y != 0
+                || self.shadow_spread != 0)
+    }
 
     pub fn clips_children(&self) -> bool {
         self.flags.contains(NodeFlags::CLIPS_CHILDREN)
@@ -304,10 +332,10 @@ impl Node {
     }
 }
 
-// Compile-time size assertion: Node must be exactly 60 bytes.
+// Compile-time size assertion: Node must be exactly 72 bytes.
 // This prevents silent shared-memory layout drift between core and compositor.
 // If you add a field, update this assertion and verify both sides agree.
-const _: () = assert!(core::mem::size_of::<Node>() == 60);
+const _: () = assert!(core::mem::size_of::<Node>() == 72);
 
 // ── Shared memory layout ────────────────────────────────────────────
 
@@ -1361,6 +1389,29 @@ pub fn abs_bounds(nodes: &[Node], parent_map: &[NodeId; MAX_NODES], id: usize) -
         ay += p.y as i32 - p.scroll_y;
         cur = parent_map[cur as usize];
     }
+
+    // Expand bounds by shadow overflow if the node has a shadow.
+    if node.has_shadow() {
+        let blur = node.shadow_blur_radius as i32;
+        let spread = node.shadow_spread as i32;
+        let off_x = node.shadow_offset_x as i32;
+        let off_y = node.shadow_offset_y as i32;
+
+        // Shadow extends by spread + blur on each side, shifted by offset.
+        let extent = spread + blur;
+        let left = (extent - off_x).max(0);
+        let top = (extent - off_y).max(0);
+        let right = (extent + off_x).max(0);
+        let bottom = (extent + off_y).max(0);
+
+        let new_x = ax - left;
+        let new_y = ay - top;
+        let new_w = (node.width as i32 + left + right).max(0) as u32;
+        let new_h = (node.height as i32 + top + bottom).max(0) as u32;
+
+        return (new_x, new_y, new_w, new_h);
+    }
+
     (ax, ay, node.width as u32, node.height as u32)
 }
 

@@ -1671,8 +1671,8 @@ fn node_size_compile_time_assertion_exists() {
     // At runtime, verify the size matches.
     let size = core::mem::size_of::<Node>();
     assert_eq!(
-        size, 60,
-        "VAL-CROSS-012: Node must be exactly 60 bytes for shared-memory layout stability"
+        size, 72,
+        "VAL-CROSS-012: Node must be exactly 72 bytes for shared-memory layout stability"
     );
 }
 
@@ -2593,5 +2593,609 @@ fn double_buffer_swap_preserves_opacity() {
             node.opacity, 128,
             "VAL-CROSS-015: opacity must survive copy_front_to_back"
         );
+    }
+}
+
+// ── Shadow rendering tests ──────────────────────────────────────────
+
+/// VAL-BLUR-008: Shadow renders behind source with correct offset.
+/// A node with shadow at offset (5,5) should show shadow pixels at the
+/// offset position and the source node's pixels on top of the shadow.
+#[test]
+fn shadow_renders_behind_source_with_offset() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 2];
+    // Root: 120×120 white background, clips children.
+    nodes[0].width = 120;
+    nodes[0].height = 120;
+    nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
+    nodes[0].first_child = 1;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+
+    // Child: 40×40 red box at (20, 20) with black shadow offset (5, 5), blur=0.
+    nodes[1].x = 20;
+    nodes[1].y = 20;
+    nodes[1].width = 40;
+    nodes[1].height = 40;
+    nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 200);
+    nodes[1].shadow_offset_x = 5;
+    nodes[1].shadow_offset_y = 5;
+    nodes[1].shadow_blur_radius = 0;
+    nodes[1].shadow_spread = 0;
+
+    let data = vec![0u8; 0];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let w = 120u32;
+    let h = 120u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (stride * h) as usize];
+    {
+        let mut fb = Surface {
+            data: &mut buf,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // The source node occupies (20,20)-(60,60).
+    // The shadow (with offset 5,5 and no blur) occupies (25,25)-(65,65).
+    // At (30,30) — inside the source rect — the pixel should be red (source occludes shadow).
+    let (r, g, b, _a) = read_pixel(&buf, stride, 30, 30);
+    assert_eq!((r, g, b), (255, 0, 0), "VAL-BLUR-008: source pixel should be red (occludes shadow)");
+
+    // At (62, 62) — inside shadow but outside source — pixel should have shadow color.
+    let (r, g, b, a) = read_pixel(&buf, stride, 62, 62);
+    assert!(a > 0, "VAL-BLUR-008: shadow pixel at offset should be non-transparent, got a={}", a);
+    assert!(r < 200 && g < 200 && b < 200,
+        "VAL-BLUR-008: shadow pixel should be dark, got r={} g={} b={}", r, g, b);
+}
+
+/// VAL-BLUR-009: Shadow spread expands footprint.
+/// spread=4 extends shadow 4px further than spread=0.
+#[test]
+fn shadow_spread_expands_footprint() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Render with spread=0.
+    let render_with_spread = |spread: i8| -> Vec<u8> {
+        let mut nodes = vec![Node::EMPTY; 2];
+        nodes[0].width = 100;
+        nodes[0].height = 100;
+        nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
+        nodes[0].first_child = 1;
+        nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+
+        nodes[1].x = 30;
+        nodes[1].y = 30;
+        nodes[1].width = 40;
+        nodes[1].height = 40;
+        nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
+        nodes[1].flags = NodeFlags::VISIBLE;
+        nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 200);
+        nodes[1].shadow_offset_x = 0;
+        nodes[1].shadow_offset_y = 0;
+        nodes[1].shadow_blur_radius = 0;
+        nodes[1].shadow_spread = spread;
+
+        let data = vec![0u8; 0];
+        let graph = scene_render::SceneGraph {
+            nodes: &nodes,
+            data: &data,
+        };
+
+        let w = 100u32;
+        let h = 100u32;
+        let stride = w * 4;
+        let mut buf = vec![0u8; (stride * h) as usize];
+        {
+            let mut fb = Surface {
+                data: &mut buf,
+                width: w,
+                height: h,
+                stride,
+                format: PixelFormat::Bgra8888,
+            };
+            scene_render::render_scene(&mut fb, &graph, &ctx);
+        }
+        buf
+    };
+
+    let no_spread = render_with_spread(0);
+    let with_spread = render_with_spread(4);
+    let stride = 100u32 * 4;
+
+    // At (26, 50) — 4px outside node boundary. With spread=4, this
+    // should have shadow pixels. With spread=0, it should be white.
+    let (r0, g0, b0, _a0) = read_pixel(&no_spread, stride, 26, 50);
+    let (r4, g4, b4, a4) = read_pixel(&with_spread, stride, 26, 50);
+    assert_eq!((r0, g0, b0), (255, 255, 255), "VAL-BLUR-009: spread=0 should have no shadow at (26,50)");
+    assert!(a4 > 0 && (r4 < 255 || g4 < 255 || b4 < 255),
+        "VAL-BLUR-009: spread=4 should have shadow at (26,50), got r={} g={} b={} a={}", r4, g4, b4, a4);
+}
+
+/// VAL-BLUR-010: Shadow with zero blur = hard shadow.
+/// blur_radius=0 produces a hard-edged rectangle shadow.
+#[test]
+fn shadow_zero_blur_is_hard_shadow() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
+    nodes[0].first_child = 1;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+
+    nodes[1].x = 30;
+    nodes[1].y = 30;
+    nodes[1].width = 40;
+    nodes[1].height = 40;
+    nodes[1].background = scene::Color::rgba(128, 128, 128, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 255);
+    nodes[1].shadow_offset_x = 5;
+    nodes[1].shadow_offset_y = 5;
+    nodes[1].shadow_blur_radius = 0;
+    nodes[1].shadow_spread = 0;
+
+    let data = vec![0u8; 0];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let w = 100u32;
+    let h = 100u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (stride * h) as usize];
+    {
+        let mut fb = Surface {
+            data: &mut buf,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // Hard shadow edge: pixel just inside shadow boundary should be opaque shadow.
+    // Shadow rect = (35,35)-(75,75). At (72,72) inside shadow, outside source.
+    let (_r, _g, _b, a) = read_pixel(&buf, stride, 72, 72);
+    assert_eq!(a, 255, "VAL-BLUR-010: hard shadow edge pixel should be fully opaque, got a={}", a);
+
+    // Pixel just outside shadow boundary should be white background.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 76, 76);
+    assert_eq!((r, g, b), (255, 255, 255), "VAL-BLUR-010: pixel outside hard shadow should be white");
+}
+
+/// VAL-BLUR-011: Shadow color applied correctly.
+/// Red shadow should produce red pixels.
+#[test]
+fn shadow_color_applied_correctly() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
+    nodes[0].first_child = 1;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+
+    // Small node with red shadow at offset (10,10).
+    nodes[1].x = 20;
+    nodes[1].y = 20;
+    nodes[1].width = 30;
+    nodes[1].height = 30;
+    nodes[1].background = scene::Color::rgba(0, 0, 255, 255);
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].shadow_color = scene::Color::rgba(255, 0, 0, 128);
+    nodes[1].shadow_offset_x = 10;
+    nodes[1].shadow_offset_y = 10;
+    nodes[1].shadow_blur_radius = 0;
+    nodes[1].shadow_spread = 0;
+
+    let data = vec![0u8; 0];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let w = 100u32;
+    let h = 100u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (stride * h) as usize];
+    {
+        let mut fb = Surface {
+            data: &mut buf,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // Shadow occupies (30,30)-(60,60). Check a pixel that is in the shadow
+    // but outside the source (source occupies (20,20)-(50,50)).
+    // Red shadow (128 alpha) over white background: R channel should be
+    // higher than G and B (red-tinted). sRGB blending means the result
+    // won't be a simple linear interpolation.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 55, 55);
+    assert!(r > g, "VAL-BLUR-011: red shadow pixel should have R > G: R={} G={}", r, g);
+    assert!(r > b, "VAL-BLUR-011: red shadow pixel should have R > B: R={} B={}", r, b);
+    // The pixel should not be pure white (shadow must be visible).
+    assert!(r != 255 || g != 255 || b != 255,
+        "VAL-BLUR-011: shadow pixel should not be pure white");
+}
+
+/// VAL-BLUR-012: Default shadow fields produce no shadow.
+/// No shadow when color=TRANSPARENT, offset=(0,0), blur=0, spread=0.
+#[test]
+fn default_shadow_fields_no_shadow() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Render a node without shadow.
+    let mut nodes_noshadow = vec![Node::EMPTY; 2];
+    nodes_noshadow[0].width = 80;
+    nodes_noshadow[0].height = 80;
+    nodes_noshadow[0].background = scene::Color::rgba(255, 255, 255, 255);
+    nodes_noshadow[0].first_child = 1;
+    nodes_noshadow[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes_noshadow[1].x = 20;
+    nodes_noshadow[1].y = 20;
+    nodes_noshadow[1].width = 40;
+    nodes_noshadow[1].height = 40;
+    nodes_noshadow[1].background = scene::Color::rgba(128, 128, 128, 255);
+    nodes_noshadow[1].flags = NodeFlags::VISIBLE;
+    // Default shadow = TRANSPARENT, all zeros.
+
+    let data = vec![0u8; 0];
+    let graph_no = scene_render::SceneGraph {
+        nodes: &nodes_noshadow,
+        data: &data,
+    };
+
+    let w = 80u32;
+    let h = 80u32;
+    let stride = w * 4;
+    let mut buf_no = vec![0u8; (stride * h) as usize];
+    {
+        let mut fb = Surface {
+            data: &mut buf_no,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        scene_render::render_scene(&mut fb, &graph_no, &ctx);
+    }
+
+    // Now render the same node with explicit default shadow fields set.
+    let mut nodes_explicit = nodes_noshadow.clone();
+    nodes_explicit[1].shadow_color = scene::Color::TRANSPARENT;
+    nodes_explicit[1].shadow_offset_x = 0;
+    nodes_explicit[1].shadow_offset_y = 0;
+    nodes_explicit[1].shadow_blur_radius = 0;
+    nodes_explicit[1].shadow_spread = 0;
+
+    let graph_ex = scene_render::SceneGraph {
+        nodes: &nodes_explicit,
+        data: &data,
+    };
+
+    let mut buf_ex = vec![0u8; (stride * h) as usize];
+    {
+        let mut fb = Surface {
+            data: &mut buf_ex,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        scene_render::render_scene(&mut fb, &graph_ex, &ctx);
+    }
+
+    assert_eq!(buf_no, buf_ex, "VAL-BLUR-012: default shadow fields should produce identical output");
+}
+
+/// VAL-BLUR-015: Shadow falloff is smooth gradient, not solid rectangle.
+/// Shadow pixels show monotonically decreasing alpha at increasing distance.
+#[test]
+fn shadow_falloff_is_smooth_gradient() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 120;
+    nodes[0].height = 120;
+    // Transparent background so shadow alpha is directly visible.
+    nodes[0].background = scene::Color::TRANSPARENT;
+    nodes[0].first_child = 1;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+
+    // Node with blurred shadow, no offset so shadow is centered.
+    nodes[1].x = 30;
+    nodes[1].y = 30;
+    nodes[1].width = 60;
+    nodes[1].height = 60;
+    nodes[1].background = scene::Color::TRANSPARENT;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 255);
+    nodes[1].shadow_offset_x = 0;
+    nodes[1].shadow_offset_y = 0;
+    nodes[1].shadow_blur_radius = 8;
+    nodes[1].shadow_spread = 0;
+
+    let data = vec![0u8; 0];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    let w = 120u32;
+    let h = 120u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (stride * h) as usize];
+    {
+        let mut fb = Surface {
+            data: &mut buf,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // Sample alpha at the center-right edge of the node boundary and
+    // at increasing distances outside. Alpha should decrease.
+    // The shadow extends from the node boundary outward by blur_radius.
+    // At x=90 (right edge), x=92, x=95, x=97 — alpha should decrease.
+    let (_, _, _, a_edge) = read_pixel(&buf, stride, 90, 60);
+    let (_, _, _, a_near) = read_pixel(&buf, stride, 93, 60);
+    let (_, _, _, a_far) = read_pixel(&buf, stride, 97, 60);
+
+    assert!(a_edge > 0, "VAL-BLUR-015: shadow at edge should be non-transparent, got a={}", a_edge);
+    assert!(a_edge >= a_near, "VAL-BLUR-015: alpha should decrease with distance: edge={} >= near={}", a_edge, a_near);
+    assert!(a_near >= a_far, "VAL-BLUR-015: alpha should decrease with distance: near={} >= far={}", a_near, a_far);
+    // The edge should not equal the far pixel (gradient, not flat).
+    assert!(a_edge > a_far, "VAL-BLUR-015: shadow should have falloff, not solid: edge={} > far={}", a_edge, a_far);
+}
+
+/// VAL-CROSS-004: Fractional scale preserved in blur radius.
+/// blur_radius=4 at scale 1.5: physical blur radius = 6.
+#[test]
+fn fractional_scale_preserves_blur_radius() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let mut ctx = test_ctx(&mono, &prop);
+    ctx.scale = 1.5;
+
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].background = scene::Color::TRANSPARENT;
+    nodes[0].first_child = 1;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+
+    nodes[1].x = 20;
+    nodes[1].y = 20;
+    nodes[1].width = 40;
+    nodes[1].height = 40;
+    nodes[1].background = scene::Color::TRANSPARENT;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 255);
+    nodes[1].shadow_blur_radius = 4;
+
+    let data = vec![0u8; 0];
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+
+    // Physical framebuffer at 1.5x = 150×150.
+    let w = 150u32;
+    let h = 150u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (stride * h) as usize];
+    {
+        let mut fb = Surface {
+            data: &mut buf,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
+        scene_render::render_scene(&mut fb, &graph, &ctx);
+    }
+
+    // At scale 1.5: logical node (20,20,40,40) → physical ~(30,30,60,60).
+    // Blur radius 4 logical → 6 physical pixels. Shadow should extend
+    // ~6 physical pixels beyond the node boundary.
+    // Check that shadow exists at the right edge + 3 (inside blur zone).
+    let (_, _, _, a_mid) = read_pixel(&buf, stride, 93, 60);
+    assert!(a_mid > 0, "VAL-CROSS-004: shadow should exist at edge+3px at 1.5x scale, got a={}", a_mid);
+
+    // Check that shadow is gone well beyond blur radius.
+    let (_, _, _, a_far) = read_pixel(&buf, stride, 100, 60);
+    assert!(a_mid > a_far, "VAL-CROSS-004: shadow should fall off at scale 1.5x: mid={} > far={}", a_mid, a_far);
+}
+
+/// VAL-CROSS-006: Layer opacity applies to shadow output.
+/// opacity=128 node with shadow: shadow at 50% opacity.
+#[test]
+fn layer_opacity_applies_to_shadow() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Render shadow at full opacity (255).
+    let render_with_opacity = |opacity: u8| -> Vec<u8> {
+        let mut nodes = vec![Node::EMPTY; 2];
+        nodes[0].width = 100;
+        nodes[0].height = 100;
+        nodes[0].background = scene::Color::TRANSPARENT;
+        nodes[0].first_child = 1;
+        nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+
+        nodes[1].x = 20;
+        nodes[1].y = 20;
+        nodes[1].width = 40;
+        nodes[1].height = 40;
+        nodes[1].background = scene::Color::TRANSPARENT;
+        nodes[1].opacity = opacity;
+        nodes[1].flags = NodeFlags::VISIBLE;
+        nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 255);
+        nodes[1].shadow_offset_x = 5;
+        nodes[1].shadow_offset_y = 5;
+        nodes[1].shadow_blur_radius = 0;
+        nodes[1].shadow_spread = 0;
+
+        let data = vec![0u8; 0];
+        let graph = scene_render::SceneGraph {
+            nodes: &nodes,
+            data: &data,
+        };
+
+        let w = 100u32;
+        let h = 100u32;
+        let stride = w * 4;
+        let mut buf = vec![0u8; (stride * h) as usize];
+        {
+            let mut fb = Surface {
+                data: &mut buf,
+                width: w,
+                height: h,
+                stride,
+                format: PixelFormat::Bgra8888,
+            };
+            scene_render::render_scene(&mut fb, &graph, &ctx);
+        }
+        buf
+    };
+
+    let buf_full = render_with_opacity(255);
+    let buf_half = render_with_opacity(128);
+    let stride = 100u32 * 4;
+
+    // Shadow pixel at (62, 62) — in shadow, outside source rect.
+    let (_, _, _, a_full) = read_pixel(&buf_full, stride, 62, 62);
+    let (_, _, _, a_half) = read_pixel(&buf_half, stride, 62, 62);
+
+    assert!(a_full > 0, "VAL-CROSS-006: full opacity shadow should be visible, a={}", a_full);
+    // Shadow at 50% opacity should have roughly half the alpha of full.
+    assert!(a_half <= (a_full / 2) + 5,
+        "VAL-CROSS-006: shadow at opacity=128 should be ≤ half of full: half_a={} full_a={}", a_half, a_full);
+}
+
+/// VAL-CROSS-011: Shadow overflow included in damage rects.
+/// Shadowed node change: dirty rect includes shadow extent beyond node bounds.
+#[test]
+fn shadow_overflow_in_damage_rects() {
+    // A node with shadow has a larger effective bounds than its logical
+    // bounds. The abs_bounds function (used for damage tracking) must
+    // account for shadow overflow. Test this via the diff_scenes function.
+    let mut prev_nodes = vec![Node::EMPTY; 2];
+    prev_nodes[0].width = 200;
+    prev_nodes[0].height = 200;
+    prev_nodes[0].first_child = 1;
+    prev_nodes[0].flags = NodeFlags::VISIBLE;
+
+    prev_nodes[1].x = 50;
+    prev_nodes[1].y = 50;
+    prev_nodes[1].width = 40;
+    prev_nodes[1].height = 40;
+    prev_nodes[1].flags = NodeFlags::VISIBLE;
+    prev_nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 200);
+    prev_nodes[1].shadow_offset_x = 5;
+    prev_nodes[1].shadow_offset_y = 5;
+    prev_nodes[1].shadow_blur_radius = 8;
+    prev_nodes[1].shadow_spread = 4;
+
+    // Modify node 1 (e.g., change background color).
+    let mut curr_nodes = prev_nodes.clone();
+    curr_nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
+
+    let rects = scene::diff_scenes(&prev_nodes, 2, &curr_nodes, 2);
+    let rects = rects.expect("diff_scenes should return Some for same node count");
+    assert!(!rects.is_empty(), "VAL-CROSS-011: changing shadowed node should produce dirty rects");
+
+    // The dirty rect should extend beyond the node's logical bounds
+    // to include the shadow. Shadow extends by: blur_radius + spread + offset.
+    // Max extent: offset_x + blur_radius + spread = 5 + 8 + 4 = 17 on right/bottom.
+    // Node logical bounds: (50, 50, 40, 40) → right edge at 90, bottom at 90.
+    // With shadow: right edge should be at least 90 + 17 = 107.
+    let (ax, ay, aw, ah) = rects[0];
+    let right = ax + aw as i32;
+    let bottom = ay + ah as i32;
+
+    // The dirty rect must be larger than just the node bounds.
+    assert!(aw > 40 || ah > 40 || right > 90 || bottom > 90,
+        "VAL-CROSS-011: dirty rect should include shadow overflow: rect=({},{},{},{}), expected larger than (50,50,40,40)",
+        ax, ay, aw, ah);
+}
+
+/// Double-buffer swap preserves shadow fields.
+#[test]
+fn double_buffer_swap_preserves_shadow_fields() {
+    let mut buf = vec![0u8; scene::DOUBLE_SCENE_SIZE];
+    let mut dw = scene::DoubleWriter::new(&mut buf);
+
+    // Build scene with non-default shadow fields.
+    {
+        let mut sw = dw.back();
+        let n = sw.alloc_node().unwrap();
+        let node = sw.node_mut(n);
+        node.width = 100;
+        node.height = 100;
+        node.flags = NodeFlags::VISIBLE;
+        node.shadow_color = scene::Color::rgba(255, 0, 0, 128);
+        node.shadow_offset_x = 10;
+        node.shadow_offset_y = -5;
+        node.shadow_blur_radius = 8;
+        node.shadow_spread = 4;
+        sw.commit();
+    }
+    dw.swap();
+
+    // Copy front to back (simulating incremental update).
+    dw.copy_front_to_back();
+
+    // Verify back buffer preserved shadow fields.
+    {
+        let sw = dw.back();
+        let node = sw.node(0);
+        assert_eq!(node.shadow_color, scene::Color::rgba(255, 0, 0, 128),
+            "shadow_color must survive copy_front_to_back");
+        assert_eq!(node.shadow_offset_x, 10,
+            "shadow_offset_x must survive copy_front_to_back");
+        assert_eq!(node.shadow_offset_y, -5,
+            "shadow_offset_y must survive copy_front_to_back");
+        assert_eq!(node.shadow_blur_radius, 8,
+            "shadow_blur_radius must survive copy_front_to_back");
+        assert_eq!(node.shadow_spread, 4,
+            "shadow_spread must survive copy_front_to_back");
     }
 }

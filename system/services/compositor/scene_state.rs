@@ -196,6 +196,12 @@ impl SceneState {
                     _pad: [0; 3],
                 };
                 n.flags = NodeFlags::VISIBLE;
+                // Real blurred shadow below the title bar.
+                n.shadow_color = Color::rgba(0, 0, 0, 60);
+                n.shadow_offset_x = 0;
+                n.shadow_offset_y = shadow_depth as i16;
+                n.shadow_blur_radius = (shadow_depth as u8).min(8);
+                n.shadow_spread = 0;
             }
 
             let text_y_offset = (title_bar_h.saturating_sub(line_height)) / 2;
@@ -233,13 +239,16 @@ impl SceneState {
                 n.flags = NodeFlags::VISIBLE;
             }
             {
+                // N_SHADOW is kept as a structural placeholder for
+                // well-known node index stability. The real shadow is
+                // now rendered by the title bar's shadow fields.
                 let n = w.node_mut(N_SHADOW);
 
                 n.next_sibling = N_CONTENT;
                 n.y = title_bar_h as i16;
                 n.width = fb_width as u16;
-                n.height = shadow_depth as u16;
-                n.background = Color::rgba(0, 0, 0, 40);
+                n.height = 0;
+                n.background = Color::TRANSPARENT;
                 n.flags = NodeFlags::VISIBLE;
             }
 

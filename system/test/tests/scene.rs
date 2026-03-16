@@ -2608,15 +2608,24 @@ fn build_test_editor_scene(dw: &mut DoubleWriter<'_>, doc_text: &[u8], clock_tex
         n.content_hash = fnv1a(clock_text);
         n.flags = NodeFlags::VISIBLE;
     }
-    // Shadow.
+    // Shadow: structural placeholder (real shadow on title bar).
     {
         let n = w.node_mut(N_SHADOW);
         n.next_sibling = N_CONTENT;
         n.y = 36;
         n.width = 1024;
-        n.height = 12;
-        n.background = Color::rgba(0, 0, 0, 40);
+        n.height = 0;
+        n.background = Color::TRANSPARENT;
         n.flags = NodeFlags::VISIBLE;
+    }
+    // Real shadow on title bar.
+    {
+        let n = w.node_mut(N_TITLE_BAR);
+        n.shadow_color = Color::rgba(0, 0, 0, 60);
+        n.shadow_offset_x = 0;
+        n.shadow_offset_y = 12;
+        n.shadow_blur_radius = 8;
+        n.shadow_spread = 0;
     }
     // Content.
     {
@@ -3306,7 +3315,9 @@ fn repeated_incremental_cycles_preserve_integrity() {
     // Chrome nodes should still be intact.
     assert_eq!(dw.front_nodes()[N_ROOT as usize].width, 1024);
     assert_eq!(dw.front_nodes()[N_TITLE_BAR as usize].height, 36);
-    assert_eq!(dw.front_nodes()[N_SHADOW as usize].height, 12);
+    // N_SHADOW is now a 0-height placeholder — real shadow rendered via
+    // title bar's shadow fields.
+    assert_eq!(dw.front_nodes()[N_SHADOW as usize].height, 0);
 
     // Clock should reflect the last clock update (i=95, 95%5=0).
     // The clock_text was last set at iteration 95.
