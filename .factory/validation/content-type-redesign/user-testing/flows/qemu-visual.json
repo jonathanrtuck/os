@@ -1,0 +1,66 @@
+{
+  "groupId": "qemu-visual",
+  "testedAt": "2026-03-16T16:36:00Z",
+  "isolation": {
+    "projectRoot": "/Users/user/Sites/os",
+    "diskImage": "/tmp/val-test.img (copy of system/test.img)",
+    "monitorSocket": "/tmp/val-mon.sock",
+    "serialLog": "/tmp/val-serial.log",
+    "screenshotPath": "/tmp/val-screen.png"
+  },
+  "toolsUsed": ["qemu-system-aarch64", "nc (monitor socket)", "python3 PIL", "Read tool (visual inspection)"],
+  "assertions": [
+    {
+      "id": "VAL-CROSS-001",
+      "title": "End-to-end rendering identical (QEMU)",
+      "status": "pass",
+      "steps": [
+        {
+          "action": "Copy disk image to /tmp/val-test.img",
+          "expected": "Disk image copied successfully",
+          "observed": "Disk image copied (1048576 bytes)"
+        },
+        {
+          "action": "Launch QEMU with 9p filesystem, keyboard, GPU, RTC",
+          "expected": "QEMU boots without crash",
+          "observed": "QEMU booted successfully — all services started (init, core, compositor, text-editor, GPU driver, input drivers)"
+        },
+        {
+          "action": "Wait 8 seconds for boot",
+          "expected": "Boot completes, display pipeline running",
+          "observed": "Serial log confirms: 'display pipeline running', 'entering render loop (frame-scheduled)'"
+        },
+        {
+          "action": "Send keystrokes h-e-l-l-o via monitor socket with 0.15s delay",
+          "expected": "Keystrokes accepted without errors",
+          "observed": "All 5 keystrokes sent successfully via nc"
+        },
+        {
+          "action": "Wait 1 second for rendering, then capture screendump",
+          "expected": "PPM screenshot captured",
+          "observed": "PPM file captured (3072016 bytes), converted to PNG (7642 bytes)"
+        },
+        {
+          "action": "Visually verify screenshot with Read tool",
+          "expected": "Title bar 'Text' visible, clock visible, 'hello' text visible, cursor visible, no artifacts",
+          "observed": "Title bar shows 'Text' (top-left). Clock shows '16:36:34' (top-right). Document area shows 'hello' text below title bar. Thin vertical cursor visible immediately after 'hello'. Dark background is clean with no visual artifacts or corruption."
+        },
+        {
+          "action": "Check serial log for panics or errors",
+          "expected": "No panics, crashes, or errors",
+          "observed": "grep for panic/crash/error/fault/abort returned zero matches — clean boot and operation"
+        }
+      ],
+      "evidence": {
+        "screenshots": ["content-type-redesign/qemu-visual/qemu-screenshot.png"],
+        "serialLog": "content-type-redesign/qemu-visual/serial-log.txt",
+        "consoleErrors": "none — grep for panic/crash/error/fault/abort found zero matches in serial output",
+        "network": "N/A (bare-metal OS, no network)"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 1 assertion: 1 passed. VAL-CROSS-001 confirmed: QEMU boots cleanly, title bar ('Text'), clock ('16:36:34'), typed text ('hello'), and cursor all render correctly with no visual artifacts. Serial log shows no panics or errors."
+}

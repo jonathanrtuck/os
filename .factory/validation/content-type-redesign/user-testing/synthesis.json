@@ -1,0 +1,36 @@
+{
+  "milestone": "content-type-redesign",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 30,
+    "passed": 30,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-SCENE-001", "VAL-SCENE-002", "VAL-SCENE-003", "VAL-SCENE-004",
+    "VAL-SCENE-005", "VAL-SCENE-006", "VAL-SCENE-007", "VAL-SCENE-008",
+    "VAL-RENDER-001", "VAL-RENDER-002", "VAL-RENDER-003", "VAL-RENDER-004",
+    "VAL-RENDER-006", "VAL-RENDER-007", "VAL-RENDER-008",
+    "VAL-CORE-001", "VAL-CORE-002", "VAL-CORE-003", "VAL-CORE-004",
+    "VAL-CORE-005", "VAL-CORE-006", "VAL-CORE-007",
+    "VAL-COMP-001", "VAL-COMP-002",
+    "VAL-CROSS-001", "VAL-CROSS-002", "VAL-CROSS-003", "VAL-CROSS-004",
+    "VAL-CROSS-005", "VAL-CROSS-006"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null,
+  "frictions": [
+    {
+      "description": "Stale doc comment referencing TextRun::glyph_count on line 967 of scene/lib.rs — cosmetic, does not affect compilation or behavior",
+      "source": "flow-report/unit-tests"
+    },
+    {
+      "description": "Test count decreased from 1764 (documented in CLAUDE.md) to 1698 due to SVG test removal — documentation not yet updated (scheduled for architecture-cleanup milestone)",
+      "source": "flow-report/unit-tests"
+    }
+  ]
+}
