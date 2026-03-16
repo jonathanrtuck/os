@@ -1,0 +1,36 @@
+{
+  "milestone": "visual-primitives",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 19,
+    "passed": 19,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-PRIM-001",
+    "VAL-PRIM-002",
+    "VAL-PRIM-003",
+    "VAL-PRIM-004",
+    "VAL-PRIM-005",
+    "VAL-PRIM-006",
+    "VAL-PRIM-007",
+    "VAL-PRIM-008",
+    "VAL-PRIM-009",
+    "VAL-PRIM-010",
+    "VAL-PRIM-011",
+    "VAL-PRIM-012",
+    "VAL-PRIM-013",
+    "VAL-PRIM-014",
+    "VAL-PRIM-015",
+    "VAL-PRIM-016",
+    "VAL-PRIM-017",
+    "VAL-CROSS-003",
+    "VAL-CROSS-012"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}

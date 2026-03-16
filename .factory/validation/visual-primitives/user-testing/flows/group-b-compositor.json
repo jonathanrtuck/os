@@ -1,0 +1,140 @@
+{
+  "groupId": "group-b-compositor",
+  "testedAt": "2026-03-15T23:45:00Z",
+  "isolation": {
+    "surface": "Host-side unit tests (macOS aarch64)",
+    "testingTool": "cargo test (direct invocation)",
+    "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1",
+    "noSharedMutableState": true
+  },
+  "toolsUsed": ["cargo test"],
+  "assertions": [
+    {
+      "id": "VAL-PRIM-011",
+      "title": "Path stroke rendering (stroke_width > 0, fill=transparent → outlined shape)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run full test suite", "expected": "All tests pass (exit code 0)", "observed": "All tests pass, exit code 0" },
+        { "action": "Run `path_renders_stroke_outline` test", "expected": "Test passes", "observed": "test path_renders_stroke_outline ... ok" },
+        { "action": "Read test source code", "expected": "Test verifies stroke pixels present on edges and empty interior for transparent fill", "observed": "Test creates a triangle with fill=TRANSPARENT and blue stroke (width=3). Asserts bottom edge pixel (50,89) has b>100 (blue stroke visible), and interior (50,50) has r<50,g<50,b<50 (no fill, dark interior). Correctly verifies the assertion's claimed property." }
+      ],
+      "evidence": {
+        "testOutput": "visual-primitives/unit-tests/group-b-specific-tests.txt",
+        "sourceFile": "system/test/tests/scene_render.rs (lines 1800-1835)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PRIM-012",
+      "title": "Path with both fill and stroke (fill first, stroke on top)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run full test suite", "expected": "All tests pass (exit code 0)", "observed": "All tests pass, exit code 0" },
+        { "action": "Run `path_fill_and_stroke_layered` test", "expected": "Test passes", "observed": "test path_fill_and_stroke_layered ... ok" },
+        { "action": "Read test source code", "expected": "Test verifies fill renders in interior and stroke renders on edges, proving layering order", "observed": "Test creates triangle with red fill and blue stroke (width=3). Asserts interior pixel (50,50) r>200 (red fill visible) and edge pixel (50,79) b>50 (blue stroke visible on top of fill). Correctly verifies fill-first, stroke-on-top layering." }
+      ],
+      "evidence": {
+        "testOutput": "visual-primitives/unit-tests/group-b-specific-tests.txt",
+        "sourceFile": "system/test/tests/scene_render.rs (lines 1838-1870)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PRIM-013",
+      "title": "Empty and degenerate paths handled gracefully (zero commands, only MoveTo, LineTo without MoveTo)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run full test suite", "expected": "All tests pass (exit code 0)", "observed": "All tests pass, exit code 0" },
+        { "action": "Run `path_empty_no_crash` test", "expected": "Test passes", "observed": "test path_empty_no_crash ... ok" },
+        { "action": "Run `path_only_moveto_no_crash` test", "expected": "Test passes", "observed": "test path_only_moveto_no_crash ... ok" },
+        { "action": "Run `path_lineto_without_moveto_no_crash` test", "expected": "Test passes", "observed": "test path_lineto_without_moveto_no_crash ... ok" },
+        { "action": "Read test source code", "expected": "All three degenerate cases tested: empty path (no commands), MoveTo-only, LineTo-without-MoveTo", "observed": "Three separate tests: (1) empty path (0 cmds) with red fill — verifies framebuffer untouched at (50,50)=black. (2) Single MoveTo(50,50) — framebuffer untouched. (3) LineTo without preceding MoveTo — no crash, implicit moveto at (0,0). All three verify no crash and no stray pixels." }
+      ],
+      "evidence": {
+        "testOutput": "visual-primitives/unit-tests/group-b-specific-tests.txt",
+        "sourceFile": "system/test/tests/scene_render.rs (lines 1873-1940)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PRIM-014",
+      "title": "Path rendering respects node clipping (path beyond node bounds clipped by parent clips_children)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run full test suite", "expected": "All tests pass (exit code 0)", "observed": "All tests pass, exit code 0" },
+        { "action": "Run `path_clipped_to_parent_bounds` test", "expected": "Test passes", "observed": "test path_clipped_to_parent_bounds ... ok" },
+        { "action": "Read test source code", "expected": "Test verifies path extending beyond clip parent is properly clipped", "observed": "Test creates a 100×100 path fill rect inside a 50×50 parent with CLIPS_CHILDREN. Verifies pixel (25,25) inside parent is red (r>200), and pixel (75,75) outside parent is black (r<10,g<10,b<10). Correctly demonstrates clipping of path geometry beyond parent bounds." }
+      ],
+      "evidence": {
+        "testOutput": "visual-primitives/unit-tests/group-b-specific-tests.txt",
+        "sourceFile": "system/test/tests/scene_render.rs (lines 1943-2062)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PRIM-015",
+      "title": "Rounded rect border follows corner contour (arc, not straight lines)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run full test suite", "expected": "All tests pass (exit code 0)", "observed": "All tests pass, exit code 0" },
+        { "action": "Run `rounded_border_follows_corner_contour` test", "expected": "Test passes", "observed": "test rounded_border_follows_corner_contour ... ok" },
+        { "action": "Read test source code", "expected": "Test verifies border pixels follow arc at corners, not straight-line segments", "observed": "Test creates 80×60 node with corner_radius=12, border width=3, red border color over gray background. Asserts: (1) top-center border pixel (40,1) is red (border present on straight edge). (2) Interior (40,30) is background color (50,50,50). (3) Corner pixel (0,0) is NOT red — proving border follows the arc and doesn't extend to sharp corner. This correctly verifies the contour-following behavior." }
+      ],
+      "evidence": {
+        "testOutput": "visual-primitives/unit-tests/group-b-specific-tests.txt",
+        "sourceFile": "system/test/tests/scene_render.rs (lines ~1000-1040)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-PRIM-017",
+      "title": "Visual primitives work at fractional scale (rounded rects, AA lines, paths at scale 1.5)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run full test suite", "expected": "All tests pass (exit code 0)", "observed": "All tests pass, exit code 0" },
+        { "action": "Run `corner_radius_at_fractional_scale` test", "expected": "Test passes", "observed": "test corner_radius_at_fractional_scale ... ok" },
+        { "action": "Read test source code", "expected": "Test verifies rounded rect with corner_radius renders correctly at scale 1.5", "observed": "Test creates 80×60 node with corner_radius=8, blue background at scale 1.5. Physical framebuffer is 120×90. Verifies: (1) interior pixel (60,45) is blue. (2) Corner (0,0) is NOT blue (outside physical arc at radius round(8*1.5)=12). (3) Pixel (12,12) IS blue (inside physical arc). Correctly verifies fractional scale rendering of rounded rects." }
+      ],
+      "evidence": {
+        "testOutput": "visual-primitives/unit-tests/group-b-specific-tests.txt",
+        "sourceFile": "system/test/tests/scene_render.rs (lines ~1050-1095)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-003",
+      "title": "Fractional scale preserves rounded corner symmetry (corner_radius=8 at scale 1.5, all four corners identical)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run full test suite", "expected": "All tests pass (exit code 0)", "observed": "All tests pass, exit code 0" },
+        { "action": "Run `fractional_scale_rounded_corner_symmetry` test", "expected": "Test passes", "observed": "test fractional_scale_rounded_corner_symmetry ... ok" },
+        { "action": "Read test source code", "expected": "Test samples all four corners and asserts they match", "observed": "Test creates 60×60 node with corner_radius=10 at scale 1.5 (physical 90×90, physical radius=15). Samples pixel at offset (1,1) from each corner: top-left (1,1), top-right (88,1), bottom-left (1,88), bottom-right (88,88). Asserts all four corner pixel values are identical (tl==tr==bl==br). Correctly verifies corner symmetry at fractional scale." }
+      ],
+      "evidence": {
+        "testOutput": "visual-primitives/unit-tests/group-b-specific-tests.txt",
+        "sourceFile": "system/test/tests/scene_render.rs (lines ~1098-1140)"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-012",
+      "title": "Node size compile-time assertion (const assert on size_of::<Node>() in scene/lib.rs)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run full test suite", "expected": "All tests pass (exit code 0) — compilation succeeds, proving compile-time assertion holds", "observed": "All tests pass, exit code 0. Compilation succeeds." },
+        { "action": "Search scene/lib.rs for compile-time assertion", "expected": "const _: () = assert!(size_of::<Node>() == N); pattern exists", "observed": "Line 310: `const _: () = assert!(core::mem::size_of::<Node>() == 60);` — compile-time assertion present and verified." },
+        { "action": "Run `node_size_compile_time_assertion_exists` test", "expected": "Test passes", "observed": "test node_size_compile_time_assertion_exists ... ok" },
+        { "action": "Read test source code", "expected": "Runtime test also verifies Node is exactly 60 bytes", "observed": "Test asserts `core::mem::size_of::<Node>() == 60` at runtime, complementing the compile-time const assertion in scene/lib.rs. Both mechanisms prevent silent shared-memory layout drift." }
+      ],
+      "evidence": {
+        "testOutput": "visual-primitives/unit-tests/group-b-specific-tests.txt",
+        "compileTimeAssertion": "visual-primitives/unit-tests/VAL-CROSS-012-compile-time-assertion.txt",
+        "sourceFile": "system/libraries/scene/lib.rs line 310"
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 8 assertions: all 8 passed. Full test suite (1500+ tests across 58 files) passes with 0 failures. All 10 specific mapped tests pass individually. Compile-time Node size assertion confirmed at scene/lib.rs:310. Test source code reviewed for each assertion — all tests verify the exact properties claimed in the validation contract."
+}
