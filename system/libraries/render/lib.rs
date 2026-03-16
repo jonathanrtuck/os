@@ -112,6 +112,12 @@ impl CpuBackend {
         let physical_size = round_f32(font_size as f32 * scale).max(1) as u32;
 
         // Allocate and populate monospace glyph cache (MONO=1).
+        // SAFETY: Layout::new::<GlyphCache>() produces a correctly sized and
+        // aligned layout for the type. alloc_zeroed returns a valid, zeroed
+        // allocation (or null, which we check). All GlyphCache fields are
+        // integer/array types where all-zeroes is a valid bit pattern (no
+        // Drop-bearing fields requiring ptr::write). Box::from_raw takes
+        // ownership with the matching global allocator layout.
         let mut mono_cache: Box<fonts::cache::GlyphCache> = unsafe {
             let layout = alloc::alloc::Layout::new::<fonts::cache::GlyphCache>();
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut fonts::cache::GlyphCache;
@@ -127,6 +133,10 @@ impl CpuBackend {
         mono_cache.populate_with_axes(mono_font_data, physical_size, dpi, &mono_axes);
 
         // Allocate and populate proportional glyph cache (MONO=0).
+        // SAFETY: Same rationale as mono_cache above — Layout::new produces
+        // correct size/alignment for GlyphCache, alloc_zeroed returns valid
+        // zeroed memory (null-checked), all-zeroes is a valid GlyphCache,
+        // and Box::from_raw takes ownership with matching layout.
         let mut prop_cache: Box<fonts::cache::GlyphCache> = unsafe {
             let layout = alloc::alloc::Layout::new::<fonts::cache::GlyphCache>();
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut fonts::cache::GlyphCache;
@@ -149,6 +159,16 @@ impl CpuBackend {
 
         // Heap-allocate the CpuBackend to avoid placing the 6 KiB
         // prev_bounds array on the caller's stack.
+        //
+        // SAFETY: Layout::new::<CpuBackend>() produces correct size and
+        // alignment. alloc_zeroed returns valid zeroed memory (null-checked).
+        // ptr::write is used for Drop-bearing fields (mono_cache, prop_cache,
+        // pool, damage) — these are Box/Vec/struct types whose drop glue
+        // must not run on the zeroed memory, so ptr::write overwrites them
+        // without dropping the destination. Primitive fields (scale,
+        // prev_node_count) and the prev_bounds array of tuples are safe to
+        // leave zeroed or assign directly (no Drop). Box::from_raw takes
+        // ownership of the fully-initialized CpuBackend with matching layout.
         unsafe {
             let layout = alloc::alloc::Layout::new::<CpuBackend>();
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut CpuBackend;
