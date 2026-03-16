@@ -433,10 +433,16 @@ Option 3 is cheapest — one pass over the node array building `parent[i]` from 
 
 **Pressure point — data buffer changes:** A node's text content can change without the node struct changing (if the text is referenced by DataRef with same offset/length but different bytes). This means struct-level memcmp can miss text edits. Fix: include a content hash in the node, or always diff data buffer contents for Text/Path nodes. The simpler approach: the OS service already writes new text at new data buffer offsets (append-only within a frame), so the DataRef offset will differ, which the memcmp catches.
 
-### What's Not Covered Yet
+### Implementation Status
 
-- Piece 2 implementation details (dirty-rect clipped rendering, overlapping node handling)
-- Piece 3 implementation details (logical coordinate model, scale factor plumbing)
+All three pieces are implemented and running:
+
+- **Piece 1 (scene diff + partial GPU transfer):** `diff_scenes()` in scene library, `DamageTracker` in compositor (`damage.rs`), change-list-driven damage in render loop, partial `MSG_PRESENT` with dirty rects. Uses `content_hash` (FNV-1a) in nodes to catch text edits where DataRef metadata is identical.
+- **Piece 2 (dirty-rect clipped rendering):** Compositor renders only within dirty rects when `damage.dirty_rects()` returns `Some`. Full-screen fallback when node count changes between frames.
+- **Piece 3 (logical coordinate model):** `scale_factor` flows from init → `CompositorConfig` → compositor. Scene graph is in logical coordinates; compositor multiplies by `scale_factor` during rendering. Font rasterization uses `physical_font_size = round(logical_size × scale_factor)`. Init auto-detects scale: ≥2048px wide → 2.0×, otherwise 1.0×.
+
+### Remaining Open Questions
+
 - Interaction between dirty-rect rendering and subpixel font rendering (dirty rect slicing through a glyph)
 - Whether the DamageTracker's 6-rect limit is sufficient or needs a smarter merge strategy
 
@@ -571,13 +577,13 @@ Prior art is unanimous: Core Animation, Wayland, Fuchsia Scenic, web browsers, g
 
 Cursor and selection remain properties of the Text content variant for now. The OS service knows glyph positions (it did the layout) so it can position cursor and selection rects directly. The compositor renders them without understanding what they mean.
 
-**TODO:** Redesign the Text content variant to carry positioned/pre-laid-out text instead of raw strings + width constraints. The cursor and selection may become positioned rects (Path nodes) rather than byte offsets, since the OS service can compute their pixel positions.
+~~**TODO:** Redesign the Text content variant to carry positioned/pre-laid-out text instead of raw strings + width constraints.~~ **Done.** `TextRun` struct carries positioned runs with (x, y), `DataRef` to glyph data, `glyph_count`, `advance` width, `font_size`, and `axis_hash`. `Content::Text` holds a `DataRef` to an array of `TextRun`s plus `run_count`. `ShapedGlyph` struct supports per-glyph advances for proportional text (future). Cursor and selection are positioned pixel-coordinate rects (regular scene graph nodes with backgrounds). `push_text_runs()` / `text_runs()` / `front_text_runs()` APIs on `SceneWriter` / `SceneReader` / `DoubleReader`.
 
 **TODO:** Better name for "View" (the thing that holds document + focus path + overlays).
 
 ### Scene Graph TODOs
 
-- **Ctrl+Tab image viewer**: Scene graph only builds text editor view. Need Image content node support or hybrid approach for image mode. Medium effort (~1hr).
+- ~~**Ctrl+Tab image viewer**: Scene graph only builds text editor view. Need Image content node support or hybrid approach for image mode.~~ **Done.** `Content::Image` variant in scene graph with `DataRef` to pixel data and source dimensions.
 - **Text editor keystrokes**: Up/Down arrows (line navigation), Cmd+arrow (start/end of line/document), Shift+key (uppercase), Delete (forward delete). ~100-150 lines in text-editor/main.rs. All mechanical — patterns established.
 
 ### Open Questions
@@ -585,11 +591,7 @@ Cursor and selection remain properties of the Text content variant for now. The 
 1. **How do typed channels work?** `Channel<P>` API design, multiplexing across different protocol types with `wait()`.
 2. ~~**Shared memory double-buffering.**~~ **Done (2026-03-14).** `DoubleWriter`/`DoubleReader` in scene library. Two `SCENE_SIZE` regions, generation-counter-based swap with release/acquire fences. Compositor `SceneState` migrated.
 3. ~~**Scene graph shared memory layout.**~~ **Done (2026-03-14).** `SceneWriter`/`SceneReader` in scene library. Header (64 B) + node array (512 × Node) + data buffer (64 KiB). 34 host-side tests.
-4. **Text content variant redesign — settled on A' (positioned text runs).** The OS service sends runs of text with a starting (x, y) and pre-computed per-character advance widths. Each run is a contiguous sequence of characters on one line. The compositor walks the run, rasterizing each glyph at `x + sum(advances[0..i])`. The OS service has the font metrics (advance widths, kerning — small data). The compositor has the glyph cache (rasterized coverage maps — big data). Layout lives entirely in the OS service. Rasterization lives entirely in the compositor. Cursor and selection become positioned pixel-coordinate rects (regular scene graph nodes with backgrounds), not byte offsets.
-
-   For monospace text (current prototype), per-character advances are uniform, so a single `char_advance: u16` value suffices. For proportional text (future), the OS service sends a `DataRef` to an array of per-glyph u16 advances in the data buffer.
-
-   **Implementation sequence:** Redesign Content::Text first (with tests), then proceed to the process split. The current Content::Text with byte-offset cursor/selection bakes layout into the compositor — changing the representation first makes the split clean.
+4. ~~**Text content variant redesign — settled on A' (positioned text runs).**~~ **Done.** `TextRun` struct with (x, y), glyph DataRef, advance width, font_size, axis_hash. `Content::Text` holds DataRef to TextRun array + run_count. `ShapedGlyph` for per-glyph advances (proportional future). Cursor/selection are positioned rects. Both core and compositor scene builders use the new representation.
 
 ### Implications for Existing Decisions
 
