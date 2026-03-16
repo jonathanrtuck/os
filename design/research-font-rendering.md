@@ -104,6 +104,7 @@ macOS's philosophy (trust the outlines, don't distort) is correct for HiDPI and 
 **Deviation from plan:** Used HarfRust instead of HarfBuzz. HarfRust is the official Rust port by the HarfBuzz project, achieving 75-95% of C HarfBuzz speed. Eliminated the FFI porting layer entirely. The custom TrueType parser (cmap lookup, GPOS kerning) was removed per "kill the old way." The scanline rasterizer algorithm was preserved, only its input source changed (read-fonts outlines instead of custom parser).
 
 **What was built:**
+
 - `libraries/shaping/` — new Cargo crate with HarfRust dependency
 - `libraries/shaping/src/rasterize.rs` — glyph rasterizer using read-fonts for outline extraction
 - Scene graph evolved to carry ShapedGlyph arrays
@@ -122,6 +123,7 @@ macOS's philosophy (trust the outlines, don't distort) is correct for HiDPI and 
 **Goal:** Render any Unicode codepoint, not just ASCII.
 
 **Implemented:**
+
 - LRU glyph cache with configurable capacity, keyed by (glyph_id, font_size, axis_hash). Supports arbitrary Unicode codepoints and variable font axis differentiation.
 - Font fallback chain (`libraries/shaping/src/fallback.rs`): ordered list of font data references. When primary font produces .notdef, subsequent fonts are tried. Content-type-aware: Code → monospace primary + proportional fallback; Prose/UI → proportional primary + monospace fallback.
 - Latin Extended codepoints (é, ñ, ü) render correctly. Supplementary plane codepoints don't crash.
@@ -161,12 +163,12 @@ macOS's philosophy (trust the outlines, don't distort) is correct for HiDPI and 
 
 **Implemented:** `TypographyConfig` struct in `libraries/shaping/src/typography.rs` maps content types to font family, OpenType features, weight preference, tracking, and optical sizing flag.
 
-| Content Type | Font         | Features       | Weight | Optical Sizing | Notes                              |
-| ------------ | ------------ | -------------- | ------ | -------------- | ---------------------------------- |
-| Code         | Monospace    | +calt, +tnum   | 400    | No             | Contextual alternates for ligatures, tabular figures |
-| Prose        | Proportional | +onum          | 400    | Yes            | Oldstyle figures, auto-opsz        |
-| UI           | Proportional | (none)         | 500    | No             | Medium weight for functional labels |
-| Unknown      | Proportional | +onum          | 400    | Yes            | Falls back to prose defaults       |
+| Content Type | Font         | Features     | Weight | Optical Sizing | Notes                                                |
+| ------------ | ------------ | ------------ | ------ | -------------- | ---------------------------------------------------- |
+| Code         | Monospace    | +calt, +tnum | 400    | No             | Contextual alternates for ligatures, tabular figures |
+| Prose        | Proportional | +onum        | 400    | Yes            | Oldstyle figures, auto-opsz                          |
+| UI           | Proportional | (none)       | 500    | No             | Medium weight for functional labels                  |
+| Unknown      | Proportional | +onum        | 400    | Yes            | Falls back to prose defaults                         |
 
 **ContentType enum** in `fallback.rs` extended with `Ui` and `Unknown` variants. FallbackChain handles all four content types. `TypographyConfig::for_content_type()` returns complete configuration for any content type without panic.
 
@@ -178,15 +180,15 @@ macOS's philosophy (trust the outlines, don't distort) is correct for HiDPI and 
 
 ## Build vs. Integrate (Outcomes)
 
-| Component                              | Decision              | Outcome                                                                                                                                                  |
-| -------------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Text shaping**                       | Integrated (HarfRust) | Used HarfRust (pure Rust port of HarfBuzz) instead of C HarfBuzz. No FFI needed — pure no_std+alloc Cargo dependency. 75-95% of C speed.               |
-| **Rasterization**                      | Kept ours             | Scanline rasterizer algorithm preserved. Input source changed from custom parser to read-fonts. Fixed-point math, subpixel rendering intact.             |
-| **Compositing**                        | Kept ours             | Gamma-correct blending was already in place. Compositor reads shaped glyph IDs from scene graph, rasterizes via adapted rasterizer + LRU glyph cache.    |
-| **Variable fonts**                     | Integrated (read-fonts) | Used read-fonts (transitive dep of HarfRust) for fvar/gvar parsing. Custom truetype.rs parser removed ("kill the old way").                            |
-| **Optical sizing / weight correction** | Built (novel)         | Automatic optical sizing and continuous weight correction — our novel contributions. No production OS does these.                                         |
-| **Font fallback**                      | Built                 | Content-type-aware fallback chains. Tightly coupled to our content-type model. Simple algorithm, custom policy.                                          |
-| **Typography defaults**                | Built (novel)         | Content-type-aware TypographyConfig. Unique to our architecture — requires native content-type understanding.                                            |
+| Component                              | Decision                | Outcome                                                                                                                                               |
+| -------------------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Text shaping**                       | Integrated (HarfRust)   | Used HarfRust (pure Rust port of HarfBuzz) instead of C HarfBuzz. No FFI needed — pure no_std+alloc Cargo dependency. 75-95% of C speed.              |
+| **Rasterization**                      | Kept ours               | Scanline rasterizer algorithm preserved. Input source changed from custom parser to read-fonts. Fixed-point math, subpixel rendering intact.          |
+| **Compositing**                        | Kept ours               | Gamma-correct blending was already in place. Compositor reads shaped glyph IDs from scene graph, rasterizes via adapted rasterizer + LRU glyph cache. |
+| **Variable fonts**                     | Integrated (read-fonts) | Used read-fonts (transitive dep of HarfRust) for fvar/gvar parsing. Custom truetype.rs parser removed ("kill the old way").                           |
+| **Optical sizing / weight correction** | Built (novel)           | Automatic optical sizing and continuous weight correction — our novel contributions. No production OS does these.                                     |
+| **Font fallback**                      | Built                   | Content-type-aware fallback chains. Tightly coupled to our content-type model. Simple algorithm, custom policy.                                       |
+| **Typography defaults**                | Built (novel)           | Content-type-aware TypographyConfig. Unique to our architecture — requires native content-type understanding.                                         |
 
 ---
 
@@ -220,8 +222,8 @@ Research into using neural networks for anti-aliasing and hinting decisions. Cou
 
 ## Implementation Sequence (Completed)
 
-```
-Phase 1: Text shaping (HarfRust)           ✅ — biggest visual delta
+```text
+Phase 1: Text shaping (HarfRust)            ✅ — biggest visual delta
 Phase 2: Gamma-correct compositing          ✅ — pre-existing, already implemented
 Phase 3: Unicode coverage + font fallback   ✅ — completeness
 Phase 4: Variable font support              ✅ — enables phases 5a/5b

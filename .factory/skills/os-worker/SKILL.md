@@ -28,7 +28,7 @@ Read the relevant source files. The rendering pipeline code lives in:
 - `system/libraries/drawing/lib.rs` (+ `neon.rs`, `gamma_tables.rs`) — drawing primitives
 - `system/libraries/scene/lib.rs` — scene graph types, double-buffer protocol
 - `system/libraries/fonts/src/` — font rasterizer, glyph cache, shaping
-- `system/services/compositor/` — renderer, damage tracking, compositing, SVG
+- `system/services/compositor/` — thin event loop, frame scheduler, present signaling
 - `system/services/core/` — OS service, scene building, event loop
 - `system/services/drivers/virtio-gpu/` — GPU transfer
 - `system/services/init/` — startup, config
@@ -47,7 +47,7 @@ Read `.factory/library/architecture.md` for the rendering pipeline overview and 
 - Scene graph → `system/test/tests/scene.rs`
 - Compositor rendering → `system/test/tests/scene_render.rs`
 - Font/glyph → `system/test/tests/cache.rs` or `shaping.rs`
-- SVG → `system/test/tests/svg.rs`
+- Render backend → `system/test/tests/scene_render.rs`
 
 Run `cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1` to verify tests FAIL (red).
 

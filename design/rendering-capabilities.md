@@ -82,7 +82,7 @@ No geometry pipeline, no vertex/fragment shaders, no depth buffer, no projection
 
 **Implication for the OS:** 3D games, CAD software, WebGL-style content, and GPU-accelerated video decode are not possible. This is consistent with the project's document-centric focus — documents are 2D.
 
-### No smooth animation *(partially addressed)*
+### No smooth animation _(partially addressed)_
 
 The frame scheduler now provides configurable-cadence rendering (60/30/120fps) with event coalescing and frame budgeting. However, there is no animation timeline, no easing functions, no property interpolation between states.
 
@@ -126,7 +126,7 @@ Separable Gaussian blur (two-pass horizontal/vertical) with NEON SIMD accelerati
 
 **Remaining gaps:** No frosted-glass / backdrop blur (blurring content behind a surface). No drop shadows on arbitrary shapes (shadows are rectangular). Large blur radii are CPU-expensive without GPU compute.
 
-### Non-rectangular clipping *(partially implemented)*
+### Non-rectangular clipping _(partially implemented)_
 
 Corner-radius-aware clipping is now supported — child content is clipped to the parent's rounded rectangle. This covers the most common UI case (content inside rounded cards/panels).
 
@@ -181,27 +181,27 @@ Single framebuffer, single resolution, configured at init. No display hotplug, n
 
 ## Performance envelope
 
-| Metric                 | Current state                                              | Bottleneck                                                       | Practical ceiling                                                                           |
-| ---------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Resolution             | 1024×768 (hardcoded)                                       | CPU compositing bandwidth; virtio-gpu copy cost                  | ~4K at low refresh with NEON SIMD. CPU-bound without GPU compositing                        |
-| Compositing throughput | Scalar per-pixel blend_over                                | 1280×800 @ 60fps full recomposite = ~245 MB/s                    | NEON could do ~4× (4 pixels/cycle). Still CPU-bound for full-screen recomposite at high res |
-| Text rendering         | Cache hit = memcpy. Miss = bezier flatten + scanline sweep | Cache misses are expensive. LRU eviction under font-size variety | Adequate for document editing. Would struggle with many font sizes or rapid font switching  |
-| Scene graph            | 512 nodes max, 64 KB data buffer                           | Fixed. Selection rects and text runs consume capacity            | Sufficient for single-document text editing. Complex compound documents would hit limits    |
+| Metric                 | Current state                                              | Bottleneck                                                       | Practical ceiling                                                                            |
+| ---------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Resolution             | 1024×768 (hardcoded)                                       | CPU compositing bandwidth; virtio-gpu copy cost                  | ~4K at low refresh with NEON SIMD. CPU-bound without GPU compositing                         |
+| Compositing throughput | Scalar per-pixel blend_over                                | 1280×800 @ 60fps full recomposite = ~245 MB/s                    | NEON could do ~4× (4 pixels/cycle). Still CPU-bound for full-screen recomposite at high res  |
+| Text rendering         | Cache hit = memcpy. Miss = bezier flatten + scanline sweep | Cache misses are expensive. LRU eviction under font-size variety | Adequate for document editing. Would struggle with many font sizes or rapid font switching   |
+| Scene graph            | 512 nodes max, 64 KB data buffer                           | Fixed. Selection rects and text runs consume capacity            | Sufficient for single-document text editing. Complex compound documents would hit limits     |
 | Frame cadence          | Configurable (60/30/120fps) with event coalescing          | Frame budget enforcement. Heavy layout can miss deadline         | 60fps = 16ms budget. Event coalescing prevents redundant frames. Idle optimization saves CPU |
-| Damage tracking        | Per-node change list (24 entries) + dirty rects            | Falls back to full repaint on overflow                           | Effective for typical editor interactions. Large multi-region updates may overflow          |
+| Damage tracking        | Per-node change list (24 entries) + dirty rects            | Falls back to full repaint on overflow                           | Effective for typical editor interactions. Large multi-region updates may overflow           |
 
 ---
 
 ## Comparison to real systems
 
-| System                                    | Model                                                               | Similarity                                                                          | Key difference                                                                 |
-| ----------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| **macOS Quartz / Core Animation**         | GPU-composited layer tree, hardware blur/shadow, implicit animation | Same scene-graph→compositor split                                                   | macOS has GPU compositing, per-layer transforms, implicit animation, blur      |
-| **Fuchsia Scenic**                        | Scene graph in shared memory, GPU-composited                        | Closest architectural prior art                                                     | Scenic has GPU rendering, 3D node types, view embedding                        |
-| **Wayland compositors**                   | Client renders to buffer, compositor composites via EGL/Vulkan      | Different: your compositor is the sole renderer, not a compositor of client buffers | Wayland clients own their rendering; your editors don't render at all          |
-| **Plan 9 rio**                            | CPU-rasterized, rectangular windows, no compositing                 | Similar simplicity                                                                  | Your pipeline has alpha blending, subpixel text, scene graph, damage tracking  |
+| System                                    | Model                                                               | Similarity                                                                          | Key difference                                                                |
+| ----------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| **macOS Quartz / Core Animation**         | GPU-composited layer tree, hardware blur/shadow, implicit animation | Same scene-graph→compositor split                                                   | macOS has GPU compositing, per-layer transforms, implicit animation, blur     |
+| **Fuchsia Scenic**                        | Scene graph in shared memory, GPU-composited                        | Closest architectural prior art                                                     | Scenic has GPU rendering, 3D node types, view embedding                       |
+| **Wayland compositors**                   | Client renders to buffer, compositor composites via EGL/Vulkan      | Different: your compositor is the sole renderer, not a compositor of client buffers | Wayland clients own their rendering; your editors don't render at all         |
+| **Plan 9 rio**                            | CPU-rasterized, rectangular windows, no compositing                 | Similar simplicity                                                                  | Your pipeline has alpha blending, subpixel text, scene graph, damage tracking |
 | **Game engines (2D)**                     | Frame-driven render loop, GPU batched draws, animation system       | Frame scheduler now provides similar cadence                                        | Game engines have GPU batching, animation timelines, and continuous rendering |
-| **Terminal emulators (kitty, alacritty)** | Fixed-width glyph grid, GPU-accelerated text, damage tracking       | Closest functional analog today                                                     | Your compositor is a very good terminal renderer with chrome and SVG icons     |
+| **Terminal emulators (kitty, alacritty)** | Fixed-width glyph grid, GPU-accelerated text, damage tracking       | Closest functional analog today                                                     | Your compositor is a very good terminal renderer with chrome and SVG icons    |
 
 ---
 

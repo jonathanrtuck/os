@@ -8,18 +8,18 @@ How to think about this system. Read this before touching any code.
 
 The system is a one-way pipeline with five stages. Data flows in one direction — from the user's intent to pixels on screen. No stage reaches back into a previous stage.
 
-```
+```text
 User Input → Editor → OS Service → Scene Graph → Compositor → Pixels
 ```
 
 Each stage has one job:
 
-| Stage | Job | Knows about |
-|-------|-----|-------------|
-| **Editor** | Translate user intent into write requests | Its content type |
-| **OS Service** | Apply writes, maintain document state, lay out content | Documents, content types, layout |
+| Stage           | Job                                                     | Knows about                        |
+| --------------- | ------------------------------------------------------- | ---------------------------------- |
+| **Editor**      | Translate user intent into write requests               | Its content type                   |
+| **OS Service**  | Apply writes, maintain document state, lay out content  | Documents, content types, layout   |
 | **Scene Graph** | Intermediate representation: positioned visual elements | Nothing — it's data, not a process |
-| **Compositor** | Render positioned elements to pixels | Geometry, color, blending |
+| **Compositor**  | Render positioned elements to pixels                    | Geometry, color, blending          |
 
 The scene graph is not a process — it's the data boundary between the OS service and compositor. The OS service writes it. The compositor reads it. They never communicate any other way.
 
@@ -44,6 +44,7 @@ Editors are the adaptation layer between human creative intent and the edit prot
 The OS service is the center of the system. It is the **sole writer** to document state. All content flows through it.
 
 Its responsibilities:
+
 - **Document state:** Owns the document buffer. Applies write requests from editors. Manages snapshots for undo.
 - **Content understanding:** Knows what content types are. Knows that text has lines, that images have dimensions, that compound documents have parts with relationships.
 - **Layout:** Computes where content elements are positioned. For text: line breaking, wrapping, glyph positioning. For compound documents: spatial/temporal/logical arrangement of parts. For all content types: this is where "understanding the content" translates into "knowing where everything goes on screen."
@@ -75,14 +76,15 @@ The compositor is a **content-agnostic pixel pump.** It walks the scene graph an
 - Compositing layers back-to-front
 
 It does **not** know about:
+
 - Documents, mimetypes, or content types
 - Text layout (line breaking, wrapping, where lines start)
 - Cursors, selections, or editing state
-- What any visual element *means*
+- What any visual element _means_
 
 If you find yourself adding content-type awareness to the compositor, the responsibility is in the wrong place. Move it to the OS service.
 
-**How text reaches pixels:** The OS service sends *positioned text runs* in the scene graph — each run is a (x, y, text, advances) tuple for one line of text. The compositor walks each run, rasterizing glyphs at the given positions. The OS service has font metrics (advance widths — small data). The compositor has the glyph cache (rasterized coverage maps — big data). Layout in the OS service, rasterization in the compositor. Cursor and selection are regular positioned rectangles — the compositor doesn't know they relate to text.
+**How text reaches pixels:** The OS service sends _positioned text runs_ in the scene graph — each run is a (x, y, text, advances) tuple for one line of text. The compositor walks each run, rasterizing glyphs at the given positions. The OS service has font metrics (advance widths — small data). The compositor has the glyph cache (rasterized coverage maps — big data). Layout in the OS service, rasterization in the compositor. Cursor and selection are regular positioned rectangles — the compositor doesn't know they relate to text.
 
 ### The GPU Driver
 
@@ -94,7 +96,7 @@ The GPU driver transfers pixel buffers from the compositor to the display. It kn
 
 This is the system's most important structural property. Trace any piece of data and it flows in one direction:
 
-```
+```text
 Keystroke → Input driver → OS Service → Editor → OS Service → Scene Graph → Compositor → GPU → Display
 ```
 
@@ -103,6 +105,7 @@ The only apparent loop is input → OS service → editor → OS service. But th
 **Why this matters:** One-way flow means no component needs to synchronize with or wait on a downstream component. The OS service never asks the compositor "where is byte 45 on screen?" because the OS service did the layout and already knows. The compositor never asks the OS service "what content type is this?" because the compositor doesn't need to know. Each component has all the information it needs to do its job.
 
 **Click hit testing** illustrates this. When the user clicks at pixel (x, y):
+
 1. The input driver sends the pointer event to the OS service.
 2. The OS service knows the layout (it computed it). It maps (x, y) to a byte offset in the document.
 3. The OS service updates the cursor position in document state.
@@ -117,14 +120,14 @@ At no point does data flow backward. The OS service doesn't ask the compositor f
 
 The system has a clean core (OS service) surrounded by adapters on all sides:
 
-| Direction | Adapter | Translates |
-|-----------|---------|------------|
-| Below | Drivers | Device registers → OS primitives |
-| Above | Editors | Human creative intent → write requests |
-| Above | Shell | Human navigational intent → document lifecycle ops |
-| Inward | Translators | External formats (.docx, .html) → manifests + content files |
-| Outward | Translators | Manifests + content files → external formats |
-| Below | Compositor | Scene graph → pixels |
+| Direction | Adapter     | Translates                                                  |
+| --------- | ----------- | ----------------------------------------------------------- |
+| Below     | Drivers     | Device registers → OS primitives                            |
+| Above     | Editors     | Human creative intent → write requests                      |
+| Above     | Shell       | Human navigational intent → document lifecycle ops          |
+| Inward    | Translators | External formats (.docx, .html) → manifests + content files |
+| Outward   | Translators | Manifests + content files → external formats                |
+| Below     | Compositor  | Scene graph → pixels                                        |
 
 Drivers and editors are structural mirrors. Both are untrusted, restartable, leaf nodes that translate between an unpredictable external reality and the OS service's clean internal model. A driver's external reality is hardware. An editor's external reality is a human.
 
@@ -141,7 +144,7 @@ The OS service understands content types at the mimetype level. This means:
 - It knows compound documents have parts with spatial/temporal/logical relationships.
 - It does **not** know about codec internals, compression algorithms, or format-specific structures. Those are leaf-node concerns handled by decoders inside the adaptation layer.
 
-**Layout is content understanding.** Computing where text lines break, where an image sits within a flow layout, how slides are sequenced — all of this requires understanding what the content *is*. That's why layout belongs in the OS service, not the compositor. The compositor renders the *result* of layout (positioned elements). It doesn't participate in the layout process.
+**Layout is content understanding.** Computing where text lines break, where an image sits within a flow layout, how slides are sequenced — all of this requires understanding what the content _is_. That's why layout belongs in the OS service, not the compositor. The compositor renders the _result_ of layout (positioned elements). It doesn't participate in the layout process.
 
 Every content type the OS natively understands gets a layout handler in the OS service. Text gets line breaking and wrapping. Images get dimension-aware placement. Compound documents get the three-axis layout engine. A content type without a layout handler falls back to "opaque rectangle" — the OS can still display it (via a decoder that produces pixels), it just can't flow text around it intelligently.
 
@@ -149,10 +152,10 @@ Every content type the OS natively understands gets a layout handler in the OS s
 
 ## Process Boundaries
 
-```
+```text
 ┌─────────────────────────────────────────────────┐
-│                    Kernel (EL1)                  │
-│   Memory, scheduling, IPC, interrupts            │
+│                    Kernel (EL1)                 │
+│   Memory, scheduling, IPC, interrupts           │
 └─────────────────────────────────────────────────┘
         ▲               ▲               ▲
         │               │               │
@@ -185,7 +188,7 @@ The scene graph lives in shared memory. The OS service writes to the back buffer
 
 When adding a new capability, ask:
 
-1. **Does it require understanding what content *is*?** → OS service.
+1. **Does it require understanding what content _is_?** → OS service.
 2. **Does it translate between a user and the OS service?** → Editor or shell.
 3. **Does it translate between hardware and the OS service?** → Driver.
 4. **Does it translate between an external format and the OS model?** → Translator.
