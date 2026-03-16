@@ -28,23 +28,23 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  User Programs     (text-editor, echo)                 │  🟡/🔴
 ├────────────────────────────────────────────────────────┤
 │  Platform Services                                     │
-│  ┌────────┐ ┌──────┐ ┌────────────┐ ┌──────────────┐  │
-│  │  Init  │ │ Core │ │ Compositor │ │   Drivers    │  │  🟡/🟢
-│  │ (root  │ │ (OS  │ │  (scene    │ │ (virtio-blk/ │  │
-│  │  task) │ │  svc,│ │   graph    │ │  gpu/input/  │  │
-│  │        │ │ sole │ │   render,  │ │  9p/console) │  │
-│  │        │ │writer│ │  compose)  │ │              │  │
-│  └────────┘ └──┬───┘ └─────┬──────┘ └──────┬───────┘  │
+│  ┌────────┐ ┌──────┐ ┌────────────┐ ┌──────────────┐   │
+│  │  Init  │ │ Core │ │ Compositor │ │   Drivers    │   │  🟡/🟢
+│  │ (root  │ │ (OS  │ │  (scene    │ │ (virtio-blk/ │   │
+│  │  task) │ │  svc,│ │   graph    │ │  gpu/input/  │   │
+│  │        │ │ sole │ │   render,  │ │  9p/console) │   │
+│  │        │ │writer│ │  compose)  │ │              │   │
+│  └────────┘ └──┬───┘ └─────┬──────┘ └──────┬───────┘   │
 │       input→core│  core→comp│(scene)  comp→gpu│        │
 │        editor↔core  (shared mem)       (IPC)           │
 ├────────────────────────────────────────────────────────┤
 │  Libraries                                             │
-│  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐  │  🟢 foundational
-│  │ sys │ │ virtio │ │ drawing │ │ fonts │ │ scene │  │
-│  └─────┘ └────────┘ └─────────┘ └───────┘ └───────┘  │
-│  ┌─────┐ ┌──────────┐ ┌─────┐                         │
-│  │ ipc │ │ protocol │ │ l.d │                         │
-│  └─────┘ └──────────┘ └─────┘                         │
+│  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐    │  🟢 foundational
+│  │ sys │ │ virtio │ │ drawing │ │ fonts │ │ scene │    │
+│  └─────┘ └────────┘ └─────────┘ └───────┘ └───────┘    │
+│  ┌─────┐ ┌──────────┐ ┌─────┐                          │
+│  │ ipc │ │ protocol │ │ l.d │                          │
+│  └─────┘ └──────────┘ └─────┘                          │
 ├────────────────────────────────────────────────────────┤
 │  Kernel (28 syscalls, see kernel/DESIGN.md)            │  🟢 production
 └────────────────────────────────────────────────────────┘
@@ -284,8 +284,8 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ```text
 ┌──────────┬──────────────────────────┬──────────────────────────┐
-│  Header  │  Node array              │  Data buffer              │
-│  64 B    │  512 × sizeof(Node)      │  64 KiB                   │
+│  Header  │  Node array              │  Data buffer             │
+│  64 B    │  512 × sizeof(Node)      │  64 KiB                  │
 └──────────┴──────────────────────────┴──────────────────────────┘
 ```
 
