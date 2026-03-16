@@ -150,7 +150,7 @@ The rendering pipeline rebuilt the entire scene graph and repainted the full fra
 
 ## Input Handling Architecture (2026-03-15)
 
-**Status:** Design settled. Ready to implement.
+**Status:** Complete. Core architecture implemented and validated. The three-layer input pipeline (physical → logical → semantic) is proven end-to-end: core tracks modifier state and delivers logical key + modifiers via IPC, editors resolve characters and compute cursor positions, cursor/selection are OS primitives. Demonstrated through text editor with shift+arrow selection, mouse click-to-position, and Ctrl+Tab system shortcuts. Remaining keybindings (Cmd+arrows, Option+word-boundaries, clipboard) are incremental implementation work on settled patterns.
 
 ### Context
 
@@ -250,22 +250,22 @@ Editor → OS (IPC):
 
 ## Boot Display via ramfb (2026-03-15)
 
-**Status:** Design settled. Ready to implement.
+**Status:** Design validated, implementation deferred. See findings below.
 
 ### Context
 
 Currently the OS outputs diagnostic text to the host terminal (serial) and renders the UI in the QEMU window (virtio-gpu). The QEMU window is blank during boot because virtio-gpu requires userspace driver initialization. On real ARM hardware with UEFI, firmware provides an immediate framebuffer (EFI GOP) that the kernel can write to from its first instruction — boot text on the physical display is the natural default.
 
-### Design Decisions
+### Design Decisions (Validated)
 
-**1. Use QEMU's `ramfb` device for early boot display.**
-Add `-device ramfb` to QEMU. The kernel writes a framebuffer config to QEMU's `fw_cfg` memory-mapped interface early in boot, then writes pixels directly to a memory region. No virtio negotiation required. This mirrors the real-hardware pattern of firmware framebuffer → GPU driver handoff.
+**1. Firmware framebuffer for early boot display.**
+The kernel writes to a pre-GPU framebuffer early in boot, then the GPU driver takes over. No virtio negotiation required. This mirrors the real-hardware pattern of firmware framebuffer → GPU driver handoff.
 
-**2. Serial and ramfb are independent, simultaneous channels.**
+**2. Serial and boot display are independent, simultaneous channels.**
 They serve different audiences. Both are active during boot; neither suppresses the other.
 
 - **Serial (host terminal):** Full structured diagnostic log. Everything verbose — memory map, page table setup, SMP core bringup, interrupt controller init, subsystem lifecycle, timing data, warnings/errors with full context. The developer/operator channel. Survives display driver crashes.
-- **ramfb (QEMU window / physical display):** Curated user-facing narrative. A small number of milestone messages conveying boot progress at a human-meaningful level. Not implementation details.
+- **Boot display (physical display):** Curated user-facing narrative. A small number of milestone messages conveying boot progress at a human-meaningful level. Not implementation details.
 
 **3. Curated milestone messages (not wall-of-text, not just a logo).**
 Each message corresponds to a phase where, if it hangs, the user knows _where_ it hung. That's the practical utility beyond aesthetics. Approximate milestones:
@@ -285,19 +285,44 @@ Messages accumulate as a list. The current (most recent) message renders bright;
 - Visual weight stays on the current phase, not the history
 
 **5. Hard cut to compositor.**
-When virtio-gpu takes over, the ramfb content is simply replaced. No fade, no transition. This matches what real hardware does (GPU driver takes over the display). Revisit later only if it feels wrong in practice.
+When the GPU driver takes over, the boot display content is simply replaced. No fade, no transition. This matches what real hardware does (GPU driver takes over the display). Revisit later only if it feels wrong in practice.
 
-### Implementation Notes
+### Implementation Spike — ramfb on QEMU (2026-03-15)
 
-- The font rasterizer and drawing library already exist — rendering text to the ramfb is straightforward.
-- ramfb initialization is a kernel-level concern (fw_cfg write). The milestone messages could be driven by kernel or early userspace — TBD during implementation.
-- The milestone list should be easy to update as the boot sequence evolves.
+Fully implemented and working: fw_cfg MMIO driver, DMA-based ramfb initialization, 8x16 bitmap font, milestone display with dimming. Three milestones visible on screen, correct visual hierarchy. **Then discarded** — the QEMU display model makes this unusable in practice.
+
+#### What worked
+
+- **fw_cfg MMIO protocol:** Selector register (16-bit BE write at base+0x08), data register (byte reads at base+0x00), DMA register (two 32-bit BE writes at base+0x10). Signature verification ("QEMU"), feature bitmap check (DMA bit), file directory enumeration to find "etc/ramfb".
+- **DMA descriptor construction:** 16-byte descriptor (control u32 BE, length u32 BE, address u64 BE) + 28-byte RAMFBCfg payload (addr u64 BE, fourcc u32 BE, flags u32 BE, width u32 BE, height u32 BE, stride u32 BE). Must be in a stable allocated page — stack-based descriptors fail. Trigger via two 32-bit writes to DMA register; each write independently `.to_be()`.
+- **Bitmap font:** 8x16 VGA font (95 printable ASCII glyphs, 1520 bytes). `draw_char`/`draw_string` writing BGRA8888 directly to framebuffer memory.
+- **Milestone display:** IrqMutex-protected state, redraw on each milestone with bright current / grey previous.
+
+#### What broke (and fixes)
+
+1. **Data abort (EC=0x25):** fw_cfg selector register requires exactly 2-byte access. QEMU enforces `max_access_size=2`; a 4-byte write triggers a bus abort. Fix: `write16` MMIO helper.
+2. **DMA error (ctl=0x01):** Stack-based DMA descriptor instability. Fix: allocate dedicated 4KB page, build descriptor with `copy_nonoverlapping` at known offsets.
+3. **DMA timeout:** Endianness on DMA trigger — each of the two 32-bit writes needs independent `.to_be()`, not a single `.to_be()` on the 64-bit value.
+
+#### Why it was discarded
+
+**QEMU's `-device ramfb` and `-device virtio-gpu-device` register as two independent display consoles.** ramfb is console 0, virtio-gpu is console 1. QEMU's display window shows console 0 by default. When virtio-gpu calls `set_scanout` and flushes its first frame, it updates console 1 — but the user still sees console 0 (ramfb) unless they manually switch (Ctrl+Alt+2 in GTK).
+
+There is no guest-accessible mechanism to disable ramfb's console or switch the active display from inside the kernel. A combined `virtio-ramfb` device exists in QEMU (shares one console, handles the handoff internally) but it's PCI-only — not available on the `virt` machine with virtio-mmio transport.
+
+**On real hardware this problem doesn't exist.** There's one physical display. The firmware framebuffer (EFI GOP, simplefb, etc.) occupies it. When the GPU driver does modesetting, the GPU's output replaces the firmware framebuffer on the same physical display. One output, one screen — the handoff is automatic.
+
+#### Decision
+
+Defer boot display until either: (a) targeting real hardware with EFI GOP / simplefb, or (b) QEMU adds `virtio-ramfb` support for the `virt` machine / virtio-mmio transport. The design is validated, the protocol details are documented above, and the implementation was proven to work. ramfb is a QEMU-only device that doesn't work well on QEMU — not worth the UX cost of requiring manual console switching.
+
+Waiting for virtio-gpu to be ready before showing boot milestones defeats the purpose — by the time the GPU pipeline is live, boot is already over.
 
 ---
 
 ## Resolution-Independent Rendering + Dirty-Rect Optimization (2026-03-15)
 
-**Status:** Design session in progress. Breadboarding phase.
+**Status:** Pieces 1-2 shipped (see "Rendering Pipeline Optimization" entry). Piece 3 (logical coordinate model) remains open.
 
 ### Problem
 
@@ -371,7 +396,7 @@ compositor render loop (piece 1):
 
 **Scene diff algorithm:**
 
-```
+```rust
 fn diff_scenes(
     prev: &[Node; MAX_NODES],
     curr: &[Node; MAX_NODES],
