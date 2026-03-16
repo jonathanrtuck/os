@@ -35,11 +35,12 @@ Core (OS service) → Scene Graph (shared memory) → Compositor (pixel pump) �
 
 ## Damage Tracking — PREV_BOUNDS
 
-The compositor maintains per-node previous-frame physical bounds (`PREV_BOUNDS` array, stored as `(i32, i32, u16, u16)`) to damage old positions when nodes move:
+The `CpuBackend` (in `libraries/render/`) maintains per-node previous-frame physical bounds (`prev_bounds` field, stored as `(i32, i32, u16, u16)`) to damage old positions when nodes move:
 
-- **On render:** After rendering a node, store its physical (x, y, w, h) in PREV_BOUNDS[node_id]
-- **On partial update:** Damage BOTH the old position (from PREV_BOUNDS) AND the new position
-- **Type constraint:** Physical coordinates = logical × scale_factor. At scale≥2, logical i16 values produce physical coordinates exceeding i16::MAX (32767). PREV_BOUNDS uses i32 for x/y to avoid truncation. The new-position damage path clamps i32→u16 with `.min(fbw)` guards.
+- **On render:** After rendering a node, store its physical (x, y, w, h) in prev_bounds[node_id]
+- **On partial update:** Damage BOTH the old position (from prev_bounds) AND the new position
+- **Type constraint:** Physical coordinates = logical × scale_factor. At scale≥2, logical i16 values produce physical coordinates exceeding i16::MAX (32767). prev_bounds uses i32 for x/y to avoid truncation. The new-position damage path clamps i32→u16 with `.min(fbw)` guards.
+- **Ownership:** Formerly a compositor static mut; now encapsulated inside `render::CpuBackend` as part of the Phase 1 render backend extraction.
 
 ## Frame Scheduler
 
