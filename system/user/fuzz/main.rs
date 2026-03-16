@@ -128,7 +128,7 @@ fn assert_err_code(result: sys::SyscallResult<u64>, expected: sys::SyscallError,
 // Phase 1: Invalid syscall numbers
 // -----------------------------------------------------------------------
 fn phase_1_invalid_syscall_numbers() {
-    let bad_nrs: [u64; 8] = [27, 28, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
+    let bad_nrs: [u64; 8] = [28, 29, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
 
     for &nr in &bad_nrs {
         let ret = unsafe { raw_syscall0(nr) } as i64;
