@@ -156,6 +156,9 @@ fn main() {
             externs.push(("scene", scene_rlib.clone()));
             externs.push(("fonts", fonts_output.rlib.clone()));
         }
+        if name == "compositor" {
+            externs.push(("render", render_rlib.clone()));
+        }
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
         let mut env_vars = Vec::new();

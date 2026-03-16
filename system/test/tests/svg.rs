@@ -1,10 +1,9 @@
 //! SVG path parser and rasterizer tests.
 //!
-//! The SVG decoder lives in the compositor service. Since tests can't import
-//! from services, we include the module source directly. This ensures tests
-//! exercise the exact same code the compositor uses.
+//! The SVG decoder lives in the render library. Tests import from the render
+//! crate via the Cargo dependency.
 
-include!("../../services/compositor/svg.rs");
+use render::svg::*;
 
 // ---------------------------------------------------------------------------
 // Parser: absolute commands

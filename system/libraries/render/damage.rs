@@ -78,4 +78,14 @@ impl DamageTracker {
         self.count = 0;
         self.full_screen = false;
     }
+
+    /// Framebuffer width this tracker was created with.
+    pub fn fb_width(&self) -> u16 {
+        self.fb_width
+    }
+
+    /// Framebuffer height this tracker was created with.
+    pub fn fb_height(&self) -> u16 {
+        self.fb_height
+    }
 }
