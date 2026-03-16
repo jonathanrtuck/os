@@ -17,7 +17,7 @@ Core (OS service) → Scene Graph (shared memory) → Compositor (pixel pump) �
 
 ## Key Types
 
-- `scene::Node` — 72 bytes (verify with compile-time assertion). Fields: tree links, geometry (i16/u16 logical), scroll_y (i32), background (Color), border (Border), corner_radius (u8), opacity (u8), flags, content_hash, content variant.
+- `scene::Node` — 60 bytes (verified with compile-time assertion in scene/lib.rs). Fields: tree links, geometry (i16/u16 logical), scroll_y (i32), background (Color), border (Border), corner_radius (u8), opacity (u8), flags, content_hash, content variant.
 - `scene::Content` — None | Text{runs, run_count} | Image{data, src_w, src_h} | Path{commands, fill, stroke, stroke_width}
 - `drawing::Surface` — borrowed pixel buffer with BGRA8888 format
 - `drawing::Color` — RGBA u8×4 with sRGB gamma-correct blend_over

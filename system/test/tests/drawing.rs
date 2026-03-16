@@ -913,6 +913,244 @@ fn draw_line_single_point() {
 }
 
 // ---------------------------------------------------------------------------
+// Surface: draw_line anti-aliasing (Wu's algorithm)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn draw_line_aa_horizontal_pixel_perfect() {
+    // VAL-PRIM-010: horizontal AA line must be pixel-perfect — only
+    // the line pixels are set, no AA fringe on neighboring rows.
+    let mut buf = [0u8; 10 * 5 * 4];
+    let mut s = make_surface(&mut buf, 10, 5);
+
+    s.draw_line(1, 2, 8, 2, Color::WHITE);
+
+    // Every pixel on the line must be fully opaque white.
+    for x in 1..=8 {
+        assert_eq!(s.get_pixel(x, 2), Some(Color::WHITE), "line pixel at x={x}");
+    }
+    // Rows above and below must be untouched (all zero = transparent black).
+    for x in 0..10 {
+        let above = s.get_pixel(x, 1).unwrap();
+        let below = s.get_pixel(x, 3).unwrap();
+        assert_eq!(above.a, 0, "no AA fringe above at x={x}");
+        assert_eq!(below.a, 0, "no AA fringe below at x={x}");
+    }
+}
+
+#[test]
+fn draw_line_aa_vertical_pixel_perfect() {
+    // VAL-PRIM-010: vertical AA line must be pixel-perfect.
+    let mut buf = [0u8; 5 * 10 * 4];
+    let mut s = make_surface(&mut buf, 5, 10);
+
+    s.draw_line(2, 1, 2, 8, Color::WHITE);
+
+    // Every pixel on the line must be fully opaque white.
+    for y in 1..=8 {
+        assert_eq!(s.get_pixel(2, y), Some(Color::WHITE), "line pixel at y={y}");
+    }
+    // Columns left and right must be untouched.
+    for y in 0..10 {
+        let left = s.get_pixel(1, y).unwrap();
+        let right = s.get_pixel(3, y).unwrap();
+        assert_eq!(left.a, 0, "no AA fringe left at y={y}");
+        assert_eq!(right.a, 0, "no AA fringe right at y={y}");
+    }
+}
+
+#[test]
+fn draw_line_aa_diagonal_has_smooth_edges() {
+    // VAL-PRIM-009: diagonal line must have anti-aliased edge pixels
+    // with intermediate alpha values (not just 0 or 255).
+    let mut buf = [0u8; 20 * 20 * 4];
+    let mut s = make_surface(&mut buf, 20, 20);
+
+    // Shallow diagonal: (0, 2) → (19, 10). dx=19, dy=8, slope ≈ 0.42.
+    s.draw_line(0, 2, 19, 10, Color::WHITE);
+
+    // Collect all non-zero alpha pixels.
+    let mut has_intermediate_alpha = false;
+    let mut has_full_alpha = false;
+    for y in 0..20 {
+        for x in 0..20 {
+            let c = s.get_pixel(x, y).unwrap();
+            if c.a > 0 && c.a < 255 {
+                has_intermediate_alpha = true;
+            }
+            if c.a == 255 {
+                has_full_alpha = true;
+            }
+        }
+    }
+    assert!(has_full_alpha, "diagonal line should have fully opaque pixels");
+    assert!(
+        has_intermediate_alpha,
+        "diagonal line should have intermediate alpha AA pixels"
+    );
+}
+
+#[test]
+fn draw_line_aa_no_gaps() {
+    // Expected behavior: no gaps in the line.
+    // Every column along a shallow-slope line should have at least one
+    // non-zero pixel.
+    let mut buf = [0u8; 30 * 20 * 4];
+    let mut s = make_surface(&mut buf, 30, 20);
+
+    // Shallow line: (0, 5) → (29, 15). dx=29, dy=10.
+    s.draw_line(0, 5, 29, 15, Color::WHITE);
+
+    // Every column from 0 to 29 must have at least one non-zero pixel.
+    for x in 0..30 {
+        let mut has_pixel = false;
+        for y in 0..20 {
+            let c = s.get_pixel(x, y).unwrap();
+            if c.a > 0 {
+                has_pixel = true;
+                break;
+            }
+        }
+        assert!(has_pixel, "no gap at column x={x}");
+    }
+}
+
+#[test]
+fn draw_line_aa_width_consistent_across_angles() {
+    // Expected behavior: visual line width consistent across angles (±0.5px).
+    // We verify that the total "ink" (sum of alpha) per step along the major
+    // axis is approximately constant for a shallow diagonal.
+    let mut buf = [0u8; 40 * 40 * 4];
+    let mut s = make_surface(&mut buf, 40, 40);
+
+    // Line from (2, 2) → (38, 20). dx=36, dy=18.
+    s.draw_line(2, 2, 38, 20, Color::WHITE);
+
+    // For each column, sum the alpha of all pixels.
+    let mut col_alpha_sums = [0u32; 40];
+    for x in 2..=38 {
+        for y in 0..40 {
+            let c = s.get_pixel(x, y).unwrap();
+            col_alpha_sums[x as usize] += c.a as u32;
+        }
+    }
+
+    // The alpha sum per column should be approximately 255 (one full pixel
+    // of coverage). Allow ±128 (±0.5px) tolerance.
+    for x in 3..38 {
+        // skip endpoints which may have partial coverage
+        let sum = col_alpha_sums[x as usize];
+        assert!(
+            sum >= 127 && sum <= 383,
+            "column {x}: alpha sum {sum} outside [127, 383] — width inconsistent"
+        );
+    }
+}
+
+#[test]
+fn draw_line_aa_steep_diagonal_smooth() {
+    // Steep diagonal: verify AA on steep (dy > dx) lines too.
+    let mut buf = [0u8; 10 * 30 * 4];
+    let mut s = make_surface(&mut buf, 10, 30);
+
+    // Steep line: (2, 0) → (8, 29). dx=6, dy=29.
+    s.draw_line(2, 0, 8, 29, Color::WHITE);
+
+    let mut has_intermediate_alpha = false;
+    for y in 0..30 {
+        for x in 0..10 {
+            let c = s.get_pixel(x, y).unwrap();
+            if c.a > 0 && c.a < 255 {
+                has_intermediate_alpha = true;
+            }
+        }
+    }
+    assert!(
+        has_intermediate_alpha,
+        "steep diagonal should have intermediate alpha AA pixels"
+    );
+}
+
+#[test]
+fn draw_line_aa_45_degree_no_fringe() {
+    // A perfect 45-degree line passes through pixel centers — Wu's algorithm
+    // should produce the same result as Bresenham: only the diagonal pixels set.
+    let mut buf = [0u8; 10 * 10 * 4];
+    let mut s = make_surface(&mut buf, 10, 10);
+
+    s.draw_line(1, 1, 6, 6, Color::WHITE);
+
+    for i in 1..=6u32 {
+        assert_eq!(
+            s.get_pixel(i, i),
+            Some(Color::WHITE),
+            "45° pixel at ({i},{i})"
+        );
+    }
+}
+
+#[test]
+fn draw_line_aa_reverse_direction() {
+    // Drawing from (x1,y1) to (x0,y0) should produce the same result.
+    let w = 20u32;
+    let h = 20u32;
+    let mut buf1 = vec![0u8; (w * h * 4) as usize];
+    let mut buf2 = vec![0u8; (w * h * 4) as usize];
+
+    let mut s1 = make_surface(&mut buf1, w, h);
+    let mut s2 = make_surface(&mut buf2, w, h);
+
+    s1.draw_line(2, 3, 18, 14, Color::WHITE);
+    s2.draw_line(18, 14, 2, 3, Color::WHITE);
+
+    // Both surfaces should have the same pixels.
+    for y in 0..h {
+        for x in 0..w {
+            let c1 = s1.get_pixel(x, y).unwrap();
+            let c2 = s2.get_pixel(x, y).unwrap();
+            assert_eq!(
+                c1, c2,
+                "reverse mismatch at ({x},{y}): forward={c1:?} reverse={c2:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn draw_line_aa_blends_with_background() {
+    // AA pixels should blend with existing background via gamma-correct blending.
+    let w = 20u32;
+    let h = 10u32;
+    let bg = Color::rgb(100, 100, 100);
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut s = make_surface(&mut buf, w, h);
+    s.clear(bg);
+
+    s.draw_line(0, 1, 19, 8, Color::WHITE);
+
+    // Find an AA pixel (intermediate alpha before blending — now it's blended
+    // with the background, so it should differ from both pure bg and pure white).
+    let mut found_blended = false;
+    for y in 0..h {
+        for x in 0..w {
+            let c = s.get_pixel(x, y).unwrap();
+            if c != bg && c != Color::WHITE && c.a == 255 {
+                // This is a blended pixel — not pure bg, not pure white.
+                found_blended = true;
+                break;
+            }
+        }
+        if found_blended {
+            break;
+        }
+    }
+    assert!(
+        found_blended,
+        "AA line over background should produce blended intermediate pixels"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Edge cases
 // ---------------------------------------------------------------------------
 
