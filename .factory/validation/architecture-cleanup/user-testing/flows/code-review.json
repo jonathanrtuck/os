@@ -1,0 +1,35 @@
+{
+  "flowId": "code-review",
+  "testedAt": "2026-03-16T17:30:00Z",
+  "assertions": {
+    "VAL-CLEAN-001": {
+      "status": "pass",
+      "evidence": "grep scene library for layout_mono_lines, byte_to_line_col, scroll_runs, bytes_to_shaped_glyphs, line_bytes_for_run returns zero matches. grep core/scene_state.rs confirms all 5 functions defined (lines 810, 835, 897, 909, 936) with ~20 call sites. Scene library has no content-aware code: no references to monospace, chars_per_line, or line breaking. Test-side copies confirmed in test/tests/scene.rs (canonical bare-metal testing pattern).",
+      "details": "All layout helpers are in core/scene_state.rs. Scene library is purely geometric. Test crate has independent copies for testing since core is a bare-metal binary."
+    },
+    "VAL-CLEAN-002": {
+      "status": "pass",
+      "evidence": "Compositor main.rs is 174 lines (<=200). grep for fonts:: returns zero (zero font imports). grep for Content:: returns zero (zero content dispatch). grep for svg/SVG returns zero (no SVG). Core render loop logic (DoubleReader through present) is ~28 lines (<=30).",
+      "details": "Compositor is a minimal content-agnostic pixel pump. Only font-related code is a FONT_SIZE constant and passing raw bytes to CpuBackend::new."
+    },
+    "VAL-CLEAN-003": {
+      "status": "pass",
+      "evidence": "Core (services/core/) calls fonts::shape, font_metrics, glyph_id_for_char, glyph_advance_with_axes, glyph_h_metrics — owns shaping + metrics. Render backend (libraries/render/) uses fonts::cache::GlyphCache for rasterization + font_metrics only for init validation. Compositor has zero font function calls. No fonts::shape or harfrust in render library. Font data flows one direction: init → compositor → CpuBackend.",
+      "details": "Clean boundary: core = shaping + metrics, render = rasterization + caching, compositor = zero font knowledge. No duplication across boundaries."
+    },
+    "VAL-CLEAN-004": {
+      "status": "pass",
+      "evidence": "cargo test -- --test-threads=1: 1698 passed, 0 failed, exit code 0. cargo build --release: exit code 0. Layout helper tests preserved in test/tests/scene.rs with identical behavior (byte_to_line_col, layout_mono_lines, scroll_runs, line_bytes_for_run, bytes_to_shaped_glyphs all tested).",
+      "details": "Full test suite passes. Build succeeds. All layout helper tests present and passing."
+    },
+    "VAL-CLEAN-006": {
+      "status": "pass",
+      "evidence": "CLAUDE.md 'Where We Left Off' documents all 3 phases as COMPLETE with post-cleanup architecture. design/journal.md has completion entries for Phase 1/2/3 (all marked ✅ Complete 2026-03-16) plus 'All three phases complete' summary. system/DESIGN.md reflects updated status: scene library (purely geometric), render library (~2194 lines, CpuBackend), compositor (174 lines, zero font knowledge), core (owns shaping + metrics). No stale references to Content::Text, Content::Path, or old architecture in current-state descriptions.",
+      "details": "All three documentation files accurately reflect the completed architecture. Historical entries are correctly dated and describe past state."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "toolsUsed": ["grep", "cargo test", "cargo build", "read", "wc"],
+  "summary": "Tested 5 assertions: all 5 passed. Architecture cleanup is verified: layout helpers in core (not scene), compositor minimal at 174 lines with zero font/content/SVG knowledge, font boundary clean (core=shaping+metrics, render=rasterization+caching), 1698 tests pass with build succeeding, documentation accurately reflects completed state."
+}

@@ -1,0 +1,21 @@
+{
+  "flowId": "qemu-visual",
+  "testedAt": "2026-03-16T17:28:00Z",
+  "isolation": {
+    "diskImage": "/tmp/val-cleanup-test.img",
+    "monitorSocket": "/tmp/val-cleanup-mon.sock",
+    "serialLog": "/tmp/val-cleanup-serial.log",
+    "screenshotDir": "/tmp/"
+  },
+  "toolsUsed": ["qemu", "python3", "read"],
+  "assertions": {
+    "VAL-CLEAN-005": {
+      "status": "pass",
+      "evidence": "QEMU screenshot shows correct end-to-end rendering after architecture cleanup: title bar displays 'Text' heading (top-left), clock displays '17:28:02' (top-right), typed text 'hello' rendered correctly at expected document area position, thin vertical cursor visible immediately after last character. Dark background is clean with no artifacts, missing elements, or visual corruption. Serial log confirms full display pipeline boot: font loading, GPU init (1280x800), scene graph allocation, compositor start, core start, text editor start — all without errors.",
+      "details": "Verified: (1) Title bar shows 'Text' — PASS. (2) Clock displayed '17:28:02' — PASS. (3) Typed text 'hello' appears correctly — PASS. (4) Cursor visible as thin vertical bar after 'hello' — PASS. (5) No rendering artifacts — PASS. (6) Serial output shows clean boot with all pipeline components started successfully. Architecture cleanup (Phase 3: compositor minimized to 174 lines, zero font knowledge, zero content dispatch, no SVG) did not break the end-to-end visual pipeline."
+    }
+  },
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 1 assertion: 1 passed. VAL-CLEAN-005 confirms QEMU visual rendering is correct after the architecture cleanup — title bar, clock, typed text, and cursor all render correctly with no artifacts."
+}
