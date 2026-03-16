@@ -4859,7 +4859,6 @@ fn scroll_offset_preserved_across_context_switch() {
     assert_eq!(restored, 7);
 }
 
-// (SVG tests moved to test/tests/svg.rs)
 // composite_surfaces_rect — partial framebuffer compositing
 // ---------------------------------------------------------------------------
 

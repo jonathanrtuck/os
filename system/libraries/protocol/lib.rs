@@ -270,9 +270,10 @@ pub mod compose {
     pub const MSG_IMAGE_CONFIG: u32 = 6;
     pub const MSG_RTC_CONFIG: u32 = 15;
 
-    /// Compositor configuration. The compositor owns rendering: fonts,
-    /// glyph caches, framebuffers, and GPU presentation. It reads the
-    /// scene graph from shared memory and renders to pixels.
+    /// Compositor configuration. The compositor delegates all rendering to
+    /// the render backend (CpuBackend), which owns glyph caches and
+    /// rasterization. The compositor reads the scene graph from shared
+    /// memory and calls backend.render() to produce pixels.
     ///
     /// `fb_width` / `fb_height` are **physical** framebuffer dimensions.
     /// `fb_stride` is always `fb_width * 4` (BGRA8888) — derived by

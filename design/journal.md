@@ -4,9 +4,154 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Tickless Idle + Inter-Processor Interrupts (2026-03-16)
+
+**Status:** Design discussion complete. Ready to implement when desired.
+
+### Context
+
+While evaluating what it would take to run the OS on real M1 hardware, the interrupt controller abstraction and cross-core wakeup model came into focus. The current kernel has zero IPI usage — cross-core wakeups are indirect: `try_wake` moves a thread from `blocked` to `ready` in shared scheduler state, and the destination core discovers it on its next 250 Hz timer tick (worst case 4ms). This works but leaves two gaps:
+
+1. **Idle power waste** — all 4 cores burn cycles on 250 Hz ticks even when they have no runnable threads.
+2. **Wakeup latency** — 4ms worst case is fine for interactive text editing but blocks future low-latency IPC or real-time audio.
+
+IPIs (Inter-Processor Interrupts) are the mechanism: one core writes to a hardware register, the target core gets an interrupt immediately. On GICv3 these are system register writes to ICC_SGI1R_EL1 (no MMIO, fast). On Apple AIC (M1) they're dedicated IPI trigger registers delivered as FIQs. Different mechanism, same concept.
+
+IPIs alone are pointless without tickless idle — if the 250 Hz tick is still running, it does the wakeup work. The real scope is tickless + IPIs together.
+
+### GICv2 → GICv3 migration (decided)
+
+The kernel currently uses GICv2, inherited from the reference project (`bahree/rust-microkernel`) and QEMU virt's default. There's no reason to stay on it:
+
+- **GICv2 is a dead end.** No modern AArch64 SoC ships it. Every non-Apple ARM chip (RPi 4/5, Qualcomm, server ARM) uses GICv3. The GICv2 code has zero future utility.
+- **GICv3 is strictly better.** CPU interface via system registers (`mrs`/`msr`) instead of MMIO loads/stores — faster acknowledge/EOI on the hot path. Affinity routing scales beyond 8 cores. MSI/LPI support needed for PCIe on real hardware.
+- **QEMU supports it trivially.** Change `gic-version=2` to `gic-version=3`.
+- **"When you build a new way, kill the old way."** Write the trait, implement `GicV3` as the only GIC backend, drop GICv2 entirely.
+
+Key implementation differences from GICv2:
+
+| Operation         | GICv2 (current)                 | GICv3 (target)                                                          |
+| ----------------- | ------------------------------- | ----------------------------------------------------------------------- |
+| Acknowledge       | MMIO read from GICC+IAR         | `mrs x0, ICC_IAR1_EL1`                                                  |
+| End of interrupt  | MMIO write to GICC+EOIR         | `msr ICC_EOIR1_EL1, x0`                                                 |
+| Per-core init     | MMIO writes to GICC (PMR, CTLR) | System registers: ICC_SRE_EL1, ICC_PMR_EL1, ICC_CTLR_EL1, ICC_IGRP1_EL1 |
+| IRQ routing       | 8-bit CPU mask (ITARGETSR)      | 32-bit affinity (IROUTER) per SPI                                       |
+| Send IPI          | MMIO write to GICD_SGIR         | `msr ICC_SGI1R_EL1, x0` (affinity encoding)                             |
+| Distributor       | GICD MMIO (same base layout)    | GICD MMIO (extended) + per-core Redistributor (GICR)                    |
+| DTB compat string | `arm,cortex-a15-gic`            | `arm,gic-v3`                                                            |
+| MSI/LPI support   | No                              | Yes (important for PCIe — future)                                       |
+
+The Redistributor (GICR) is the main new concept: each core has a 128 KiB MMIO region for per-core configuration (PPIs, SGIs, LPIs). Replaces what GICv2 did through banked registers.
+
+### Design
+
+**Tickless idle:** When a core has no runnable threads and no pending timers, it enters WFI (Wait For Interrupt) instead of spinning on a fixed tick. The timer is reprogrammed per-core to fire at the next deadline (nearest timer object or scheduler quantum expiry) rather than at a fixed 250 Hz interval.
+
+**IPI-driven wakeup:** When `try_wake` makes a thread runnable and the target core is idle (in WFI), it sends an IPI to kick that core out of sleep. The core re-evaluates its run queue and picks up the newly-ready thread with sub-microsecond latency instead of waiting up to 4ms.
+
+**InterruptController trait:** Abstract the GIC-specific free functions behind a trait so the kernel can target both GIC (QEMU) and AIC (M1) without conditional compilation in the scheduler/timer/interrupt forwarding code.
+
+```rust
+pub trait InterruptController {
+    fn init_distributor(&self);
+    fn init_per_core(&self);
+    fn acknowledge(&self) -> Option<u32>;
+    fn end_of_interrupt(&self, token: u32);
+    fn enable_irq(&self, id: u32);
+    fn disable_irq(&self, id: u32);
+    fn send_ipi(&self, target_core: u32);
+}
+```
+
+The current `interrupt_controller.rs` is already this shape — free functions that map 1:1 to trait methods. The refactor is mechanical.
+
+### Current kernel state (reference)
+
+- `interrupt_controller.rs` — GICv2 only. Free functions: `acknowledge`, `end_of_interrupt`, `enable_irq`, `disable_irq`, `init_distributor`, `init_cpu_interface`, `set_base_addresses`. No SGI/IPI support. All MMIO-based.
+- `timer.rs` — Fixed 250 Hz tick (`TICKS_PER_SEC = 250`). `reprogram()` always writes `freq / 250` to CNTP_TVAL. `check_expired()` scans all timer objects on every tick. Timer PPI is IRQ 30 (per-core, doesn't route through distributor).
+- `scheduler.rs` — `try_wake` / `try_wake_for_handle` move threads from blocked to ready. No IPI send. No per-core idle state tracking. `set_wake_pending` handles the case where the target thread hasn't blocked yet.
+- `interrupt.rs` — Forwards device IRQs to userspace via waitable handles. Mask-on-fire, unmask-on-ack. Not affected by tickless (device IRQs are independent of the tick).
+- `main.rs` — DTB parsing looks for `arm,cortex-a15-gic` (GICv2). `irq_handler` dispatches on IRQ ID (30 = timer, else forward to userspace).
+- QEMU scripts (`run-qemu.sh`, `test-qemu.sh`, `test/smoke.sh`, `test/stress.sh`, `test/crash.sh`, `test/integration.sh`) — all hardcode `gic-version=2`.
+
+### Implementation plan
+
+**Phase 1: InterruptController trait + GICv3 (replace GICv2)**
+
+- Define `InterruptController` trait
+- Implement `GicV3` — system register CPU interface, GICD+GICR MMIO for distributor/redistributor
+- Delete `interrupt_controller.rs` (GICv2 code) entirely — no parallel implementations
+- Update DTB parsing in `main.rs`: look for `arm,gic-v3`, extract GICD + GICR base addresses
+- Update all QEMU scripts: `gic-version=2` → `gic-version=3`
+- Kernel references the trait via static dispatch
+- All existing tests pass on GICv3 — functional equivalence verified
+
+**Phase 2: Per-core idle tracking**
+
+- Add `is_idle: bool` to per-core scheduler state
+- Set `is_idle = true` when a core has no runnable threads (before WFI)
+- Clear on timer tick or any interrupt that makes a thread runnable
+- No behavioral change yet — just bookkeeping
+
+**Phase 3: IPI send on wake**
+
+- Implement `send_ipi` on GicV3 (`msr ICC_SGI1R_EL1` with target affinity encoding)
+- `try_wake_impl`: after moving thread to ready queue, if target core is idle, send IPI
+- Handle SGI 0 in `irq_handler` — just acknowledge it, the scheduler re-evaluation happens naturally on return from interrupt
+- This alone improves wakeup latency even with the fixed tick still running
+
+**Phase 4: Tickless idle**
+
+- Replace fixed `reprogram(freq)` with `reprogram_next_deadline(core_id)` — computes earliest of: next timer object deadline, scheduler quantum expiry, or "no timer" (infinite sleep)
+- When no deadline exists, skip timer programming entirely → core enters WFI after EOI
+- WFI exit: either IPI (new work), device IRQ (forwarded normally), or timer (deadline expired)
+- Remove `TICKS_PER_SEC` constant and `TICKS` counter (or keep TICKS as a debug diagnostic)
+
+### Risks
+
+- **SMP timing bugs.** The kernel's history includes TPIDR races, use-after-free in thread drops, and aliasing UB in syscall dispatch — all surfaced only under concurrent load. Tickless changes the timing profile and may surface latent bugs. Stress testing is mandatory at every phase.
+- **Lock ordering.** IPI delivery in `try_wake_impl` happens while the scheduler lock is held. The IPI handler on the target core must NOT acquire the scheduler lock (it just returns from interrupt and re-evaluates). If the handler tried to lock, deadlock.
+- **Timer reprogramming correctness.** Off-by-one in deadline calculation → missed wakeups or busy-spinning. The fixed tick is self-correcting (fires again in 4ms); tickless has no safety net.
+
+### Interrupt controller landscape (AArch64)
+
+Three interrupt controllers exist in the AArch64 world. The trait must support all three, but only GICv3 and AIC need implementations:
+
+|               | GICv2 (legacy, dropping) | GICv3 (target)                | Apple AIC (M1, future)                   |
+| ------------- | ------------------------ | ----------------------------- | ---------------------------------------- |
+| CPU interface | MMIO                     | System registers (fast)       | MMIO                                     |
+| IPI mechanism | MMIO write to GICD_SGIR  | Sysreg write to ICC_SGI1R_EL1 | Dedicated register, delivered as FIQ     |
+| IRQ routing   | 8-bit CPU mask           | 32-bit affinity (IROUTER)     | Hardware decides (not software-routable) |
+| Max cores     | 8                        | Thousands                     | ~dozens                                  |
+| MSI/LPI       | No                       | Yes (PCIe)                    | Own mechanism                            |
+| Per-core init | CPU interface MMIO       | Redistributor + sysregs       | Single init                              |
+| Shipped on    | Nothing modern           | Every non-Apple ARM SoC       | Apple Silicon                            |
+
+Apple AIC specifics:
+
+- Centralized controller, one MMIO register block (not per-core distributed)
+- IRQs delivered to a single core chosen by hardware
+- IPIs use dedicated registers, delivered as FIQ (faster entry than IRQ). Asahi Linux found this slightly faster than GIC SGIs.
+- Timer interrupts also delivered as FIQ on M1
+- The `InterruptController` trait gets an `AppleAic` implementation when M1 work begins
+
+MSI/LPI note: GICv3's LPI (Locality-specific Peripheral Interrupt) support is needed for PCIe devices. This is a separate concern from the core trait — it would be a trait extension or separate trait when PCIe support is added (storage, USB, networking on real hardware all come through PCIe).
+
+### Connection to M1 bare metal (broader)
+
+Full M1 support requires replacing every driver (AIC, UART, SPI keyboard, ANS storage, DCP/AGX display). The interrupt controller trait is the first piece and has standalone value (cleaner kernel code, testability). See session discussion 2026-03-16 for the full M1 gap analysis:
+
+- **MVP (boots, shows pixels, takes input):** 2-4 months. m1n1 framebuffer, AIC, UART, USB/SPI keyboard.
+- **Feature parity with QEMU demo:** 4-8 months. Add ANS storage, proper display, reliable input.
+- **Usable (networking, power, Thunderbolt):** 1+ year.
+
+The kernel core (scheduler, syscalls, memory management, IPC), all of userspace, and the entire rendering pipeline are unchanged — they sit above the driver layer.
+
+---
+
 ## Rendering Architecture: Path-Centric Pipeline (2026-03-16)
 
-**Status:** SETTLED. All sub-decisions committed. Implementation next.
+**Status:** COMPLETE. All three implementation phases shipped (2026-03-16). Design settled, implemented, and verified.
 
 ### Context
 
@@ -134,42 +279,41 @@ Adopting Vello's **architectural principles** and **API shape**, not its impleme
 
 Each phase is independently shippable and testable. No big-bang rewrite.
 
-**Phase 1: Extract** — Create render backend as wrapper around existing code. _(Mission-scale)_
+**Phase 1: Extract** — Create render backend as wrapper around existing code. _(Mission-scale)_ ✅ Complete (2026-03-16)
 
 Goal: Decouple the compositor from rendering without changing any behavior. Pure extract-and-encapsulate refactor.
 
-- [ ] Create `libraries/render/` with `trait RenderBackend { fn render(&mut self, scene: &SceneReader, target: &mut Surface); fn dirty_rects(&self) -> ...; }`
-- [ ] Implement `CpuBackend` by **moving** tree walk, compositing, glyph rasterization, damage tracking, and transform/clip stack code from compositor into it
-- [ ] Compositor calls `backend.render()` instead of doing rendering inline
-- [ ] Scene graph format UNCHANGED. Content types UNCHANGED. Behavior UNCHANGED.
-- [ ] All existing tests pass identically. QEMU visual verification unchanged.
+- [x] Create `libraries/render/` with `trait RenderBackend { fn render(&mut self, scene: &SceneReader, target: &mut Surface); fn dirty_rects(&self) -> ...; }`
+- [x] Implement `CpuBackend` by **moving** tree walk, compositing, glyph rasterization, damage tracking, and transform/clip stack code from compositor into it
+- [x] Compositor calls `backend.render()` instead of doing rendering inline
+- [x] Scene graph format UNCHANGED. Content types UNCHANGED. Behavior UNCHANGED.
+- [x] All existing tests pass identically. QEMU visual verification unchanged.
 
-What moves: `scene_render.rs` (~1807 lines), `damage.rs` (~81 lines), `compositing.rs` (~242 lines), `cursor.rs` (~85 lines), `svg.rs` (~795 lines), glyph cache setup. What stays in compositor: event loop (~30 lines), frame scheduler, config handling, present signaling.
+What moved: `scene_render.rs` (~1807 lines), `damage.rs` (~81 lines), `compositing.rs` (~242 lines), `cursor.rs` (~85 lines), `svg.rs` (~795 lines), glyph cache setup. What stayed in compositor: event loop (~30 lines), frame scheduler, config handling, present signaling.
 
-**Phase 2: Redesign** — Change the scene graph interface to geometric content types. _(Mission-scale)_
+**Phase 2: Redesign** — Change the scene graph interface to geometric content types. _(Mission-scale)_ ✅ Complete (2026-03-16)
 
 Goal: Replace semantic content types with geometric ones. This is the real architectural change.
 
-- [ ] Change scene `Content` from `{Text, Image, Path}` to `{FillRect, Glyphs, Image}`
-- [ ] Update `CpuBackend` to handle the new content types
-- [ ] Update Core's scene builder to produce the new content types
-- [ ] Update scene library: node structure, writer/reader APIs
-- [ ] Update all scene tests. QEMU visual verification unchanged.
+- [x] Change scene `Content` from `{Text, Image, Path}` to `{FillRect, Glyphs, Image}`
+- [x] Update `CpuBackend` to handle the new content types
+- [x] Update Core's scene builder to produce the new content types
+- [x] Update scene library: node structure, writer/reader APIs
+- [x] Update all scene tests. QEMU visual verification unchanged.
 
-Phase 1 means only three things change in coordination: scene library (interface), core (producer), render backend (consumer). The compositor is already decoupled.
+Phase 1 meant only three things changed in coordination: scene library (interface), core (producer), render backend (consumer). The compositor was already decoupled. SVG parser and all path rendering code eliminated atomically. Core emits one `Glyphs` node per visible text line, `FillRect` for cursor and selection. Icons use the glyph cache.
 
-**Phase 3: Clean up** — Eliminate dead code and boundary violations. _(Smaller, may not need a full mission)_
+**Phase 3: Clean up** — Eliminate dead code and boundary violations. ✅ Complete (2026-03-16)
 
 Goal: Harvest the architectural benefits. Remove everything that doesn't belong.
 
-- [ ] Remove SVG parser (icons become Glyphs via icon font)
-- [ ] Move text layout helpers out of scene library (they know about monospace — content knowledge)
-- [ ] Remove dead compositor code (should be ~30 lines after Phase 1)
-- [ ] Consolidate font handling: one parse path, core for shaping + metrics, backend for rasterization
-- [ ] Clean up surface pool, frame scheduler — decide what stays, what moves to backend
-- [ ] Final test pass, QEMU visual verification
+- [x] Remove SVG parser (icons become Glyphs via icon font) — eliminated in Phase 2
+- [x] Verify layout helpers in core, not scene library — `layout_mono_lines`, `byte_to_line_col`, `scroll_runs` confirmed in `core/scene_state.rs`
+- [x] Minimize compositor — 174 lines, zero font knowledge, zero content dispatch, no SVG
+- [x] Consolidate font handling: core owns shaping + metrics, render backend owns rasterization + glyph caching
+- [x] Final test pass, QEMU visual verification — all tests pass, visual output identical
 
-**Current status: Ready to begin Phase 1.**
+**All three phases complete.** The rendering pipeline now achieves the settled architecture: Core produces geometric scene trees, the render backend consumes them, and no component above the render backend has content-type knowledge.
 
 ---
 

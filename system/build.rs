@@ -117,7 +117,7 @@ fn main() {
 
     rustc_rlib_with_search(&rustc, &drawing_src, &drawing_rlib, "drawing", &[], &[]);
 
-    // Render library: scene graph rendering, compositing, SVG rasterization.
+    // Render library: scene graph rendering, compositing, glyph rasterization.
     // Depends on drawing, scene, protocol, fonts (no sys, no ipc).
     let render_src = manifest_dir.join("libraries/render/lib.rs");
     let render_rlib = out_dir.join("librender.rlib");

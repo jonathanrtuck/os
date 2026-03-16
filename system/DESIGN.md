@@ -30,10 +30,10 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  Platform Services                                     │
 │  ┌────────┐ ┌──────┐ ┌────────────┐ ┌──────────────┐   │
 │  │  Init  │ │ Core │ │ Compositor │ │   Drivers    │   │  🟡/🟢
-│  │ (root  │ │ (OS  │ │  (scene    │ │ (virtio-blk/ │   │
-│  │  task) │ │  svc,│ │   graph    │ │  gpu/input/  │   │
-│  │        │ │ sole │ │   render,  │ │  9p/console) │   │
-│  │        │ │writer│ │  compose)  │ │              │   │
+│  │ (root  │ │ (OS  │ │  (event    │ │ (virtio-blk/ │   │
+│  │  task) │ │  svc,│ │   loop,    │ │  gpu/input/  │   │
+│  │        │ │ sole │ │   pixel    │ │  9p/console) │   │
+│  │        │ │writer│ │   pump)    │ │              │   │
 │  └────────┘ └──┬───┘ └─────┬──────┘ └──────┬───────┘   │
 │       input→core│  core→comp│(scene)  comp→gpu│        │
 │        editor↔core  (shared mem)       (IPC)           │
@@ -42,9 +42,9 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐    │  🟢 foundational
 │  │ sys │ │ virtio │ │ drawing │ │ fonts │ │ scene │    │
 │  └─────┘ └────────┘ └─────────┘ └───────┘ └───────┘    │
-│  ┌─────┐ ┌──────────┐ ┌─────┐                          │
-│  │ ipc │ │ protocol │ │ l.d │                          │
-│  └─────┘ └──────────┘ └─────┘                          │
+│  ┌─────┐ ┌──────────┐ ┌────────┐ ┌─────┐               │
+│  │ ipc │ │ protocol │ │ render │ │ l.d │               │
+│  └─────┘ └──────────┘ └────────┘ └─────┘               │
 ├────────────────────────────────────────────────────────┤
 │  Kernel (28 syscalls, see kernel/DESIGN.md)            │  🟢 production
 └────────────────────────────────────────────────────────┘
@@ -154,7 +154,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **What's missing:**
 
 - **Compound glyph support.** TrueType compound glyphs (accented characters built from components) not yet handled. Only simple glyphs (positive contour count) are parsed.
-- **Text layout.** Layout lives in the scene library (monospace) and core service, not here.
+- **Text layout.** Layout lives in the core service (`scene_state.rs`), not here.
 
 **No restrictions imposed.** Pure library with `alloc` dependency (for cache). Callers provide font data as byte slices.
 
@@ -272,11 +272,11 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Define the scene graph data structures and shared memory layout that form the interface between the OS service (document semantics) and the compositor (pixels). The OS service builds a tree of typed visual nodes; the compositor reads the tree and renders it.
 
-**Design decisions (from 2026-03-13 session):**
+**Design decisions (from 2026-03-13 session, updated 2026-03-16):**
 
-- One `Node` type with content variants: `None`, `Text`, `Image`, `Path` (Core Animation model — avoids wrapper nodes).
+- One `Node` type with geometric content variants: `None`, `FillRect`, `Glyphs`, `Image` (no semantic content types — the scene graph is purely geometric).
 - Tree encoded via `first_child` / `next_sibling` (left-child right-sibling representation).
-- Cursor and selection are properties of `Text` content, not separate nodes (compositor owns text layout, knows glyph positions).
+- Cursor and selection are `FillRect` content nodes (explicit geometry, not implicit text properties).
 - Relative positioning with `scroll_y` for scrolling.
 - The scene graph is a **compiled output** of the document model, not the document model itself.
 
@@ -291,22 +291,13 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 - **Header (64 B):** generation counter (u32), node count (u16), root NodeId (u16), data bytes used (u32), reserved.
 - **Node array:** fixed-size entries indexed by `NodeId` (u16). Each node has geometry (x, y, width, height), visual decoration (background, border, corner radius, opacity), flags (visible, clips children), and an optional `Content` variant.
-- **Data buffer (64 KiB):** variable-length data (text strings, pixel buffers, path commands) referenced by offset+length (`DataRef`).
+- **Data buffer (64 KiB):** variable-length data (shaped glyph arrays, pixel buffers) referenced by offset+length (`DataRef`).
 
 **APIs:**
 
 - `SceneWriter` — builds/mutates a scene graph in a `&mut [u8]` buffer. Provides `alloc_node()`, `node_mut()`, `push_data()`, `add_child()`, `commit()`. Also exposes read-back via `nodes()` and `data_buf()` for single-process use.
 - `SceneReader` — read-only access to a scene graph buffer. Provides `node()`, `nodes()`, `data()`, `data_buf()`. This is the API the compositor will use when reading from shared memory after the OS service / compositor process split.
 - `DoubleWriter` / `DoubleReader` — double-buffered wrapper over two `SCENE_SIZE` regions (`DOUBLE_SCENE_SIZE = 2 × SCENE_SIZE`). The writer writes to the back buffer (lower generation), then `swap()` atomically publishes it as the new front by bumping its generation counter. The reader always reads the front buffer (higher generation). No locks — they never access the same buffer. A release fence before the generation write and an acquire fence after the generation read ensure cross-core visibility on AArch64.
-
-**Monospace text layout helpers (2026-03-14):**
-
-- `layout_mono_lines` — breaks text into visual lines using monospace line-breaking. Returns one `TextRun` per visual line with placeholder `DataRef` (offset = byte position in source text).
-- `byte_to_line_col` — converts a byte offset to (visual_line, column) with soft wrap handling. Consistent with `layout_mono_lines` line assignments.
-- `line_bytes_for_run` — extracts source text bytes for a run using its placeholder `DataRef`.
-- `scroll_runs` — filters and repositions runs for a scrolled viewport. Takes scroll_lines and viewport height, returns only visible runs with y adjusted.
-
-These live in the scene library so they're testable without the kernel.
 
 **Incremental update support (2026-03-15 rendering pipeline optimization):**
 
@@ -316,7 +307,29 @@ These live in the scene library so they're testable without the kernel.
 - **SceneState targeted update methods:** `update_clock` (updates clock text, 0 allocations), `update_cursor` (updates cursor position/blink, 0 allocations), `update_document_content` (rebuilds text runs and selection after edits), `update_selection` (updates selection overlay). Each method uses `copy_front_to_back()` → modify specific nodes → `mark_changed()` → `swap()`.
 - **Data buffer exhaustion fallback:** When the data buffer exceeds 75% capacity, the scene triggers a full rebuild to compact data references.
 
-**No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations (layout helpers require `alloc` for `Vec` return values). Callers provide the buffer. ~1074 lines, host-side tests in `system/test/`.
+**No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the buffer. ~1584 lines, host-side tests in `system/test/`. The scene library is purely geometric — no content-aware code (no monospace assumptions, no line breaking, no character encoding knowledge). Content-aware layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) live in core where they belong.
+
+### 1.8 Render Library (`libraries/render/`) 🟢
+
+**Goal:** Render backend that transforms a scene graph into pixels. Owns the tree walk, rasterization, compositing, damage tracking, glyph caching, and all pixel-level work. The compositor delegates all rendering to this library via the `RenderBackend` trait.
+
+**Status:** ~2,194 lines across 6 files (lib.rs, scene_render.rs, compositing.rs, surface_pool.rs, damage.rs, cursor.rs). Extracted from the compositor in Phase 1 of the rendering architecture redesign (2026-03-16).
+
+**What's foundational:**
+
+- **`RenderBackend` trait.** `fn render(&mut self, scene, target)` + `fn dirty_rects()`. One call — the backend owns tree walk, transform/clip stack, glyph cache, rasterization, compositing, and damage tracking. The compositor becomes a thin event loop that calls this.
+- **`CpuBackend` implementation.** Takes font data at construction, builds internal glyph caches, handles all content types (`FillRect`, `Glyphs`, `Image`). Encapsulates rendering state: glyph caches, damage tracker, surface pool, per-node previous-frame bounds (PREV_BOUNDS).
+- **Content-type rendering.** `FillRect` → solid/blended rectangle fill. `Glyphs` → glyph cache lookup + coverage drawing. `Image` → bilinear resampling blit. No content-type dispatch above this layer.
+- **Damage tracking.** Change-list-driven + PREV_BOUNDS for old-position damage. Supports incremental rendering (only repaint dirty rects) and full repaints.
+- **Compositing.** Group opacity via offscreen buffers (SurfacePool), shadows, transforms, clip-skip optimization, rounded corner clipping.
+- **Procedural cursor.** Arrow cursor rendered at top z-order.
+- **Font handling boundary.** The render backend owns glyph rasterization and caching. Core owns text shaping (harfrust) and metrics. The compositor has zero font knowledge — it passes font data to `CpuBackend::new()` and never touches it again.
+
+**What's scaffolding:**
+
+- **Single-threaded tree walk.** Multi-core rasterization (horizontal strip parallelism) is an internal optimization — no interface changes needed.
+
+**No restrictions imposed.** Pure `no_std` library with `alloc` dependency. Depends on drawing, scene, fonts, protocol. Host-side tests in `system/test/tests/scene_render.rs`.
 
 ---
 
@@ -359,7 +372,8 @@ These live in the scene library so they're testable without the kernel.
 - **Sole writer to document state.** Core owns the text buffer — the editor never touches it. Write requests (MSG_WRITE_INSERT, MSG_WRITE_DELETE) arrive via IPC and are applied sequentially. This is Decision #9: "editors are read-only consumers, OS service is sole writer."
 - **Scene graph output.** Core compiles document structure into a scene graph (typed visual node tree) and publishes it via double-buffered shared memory. The compositor reads the scene graph and renders it — separation of document semantics from pixels.
 - **Input routing.** Keyboard/mouse events from the input driver are forwarded to the editor via core's IPC channels.
-- **Typography.** Monospace text layout with line-breaking, cursor positioning, selection rendering.
+- **Typography and layout.** Monospace text layout with line-breaking, cursor positioning, selection rendering. Layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) live here in `scene_state.rs` — they encode monospace content knowledge that doesn't belong in the scene library.
+- **Font handling boundary.** Core owns text shaping (harfrust) and font metrics. The render backend (in `libraries/render/`) owns glyph rasterization and caching. Core produces `Glyphs` scene nodes (glyph IDs + positions); the render backend turns them into pixels.
 
 **Incremental scene updates (2026-03-15 rendering pipeline optimization):**
 
@@ -370,33 +384,26 @@ These live in the scene library so they're testable without the kernel.
 
 - **Static text buffer in BSS.** Real OS service reads document content from a Files-backed memory mapping.
 - **No operation boundary detection.** Every write is applied immediately without snapshot/undo tracking.
-- **Fallback font rendering.** Uses font library for TrueType rendering with glyph cache.
+- **Single font path.** Uses font library for shaping; render backend handles rasterization via glyph cache.
 
 ---
 
-### 2.2b Compositor (`services/compositor/`) 🟡
+### 2.2b Compositor (`services/compositor/`) 🟢
 
-**Goal:** Render the scene graph to pixels. Read the visual node tree from shared memory and composite it into the framebuffer.
+**Goal:** Content-agnostic pixel pump. Read the scene graph from shared memory and delegate all rendering to the render backend.
 
-**Status:** ~2580 lines across 7 files (main.rs, scene_state.rs, scene_render.rs, compositing.rs, cursor.rs, damage.rs, svg.rs). Reads scene graph, renders surfaces, composites with alpha blending, presents to GPU.
+**Status:** 174 lines, 2 files (main.rs, frame_scheduler.rs). Minimal event loop that calls `backend.render()` and presents dirty rects to the GPU driver. Zero font knowledge, zero content-type dispatch, no SVG. Achieves the settled architecture design (2026-03-16).
 
 **What's foundational (the approach):**
 
-- **Scene graph consumer.** Reads the double-buffered scene graph from shared memory and renders each node (text runs, images, rectangles, paths) to pixel surfaces.
-- **Z-ordered compositing.** Surfaces composited back-to-front with Porter-Duff source-over blending.
-- **Change-list-driven damage tracking (2026-03-15).** Reads the change list from the scene header to identify which nodes changed. Computes damage rects from both old (`PREV_BOUNDS`) and new node positions — the old-position damage prevents ghost artifacts when nodes move (e.g., cursor repositioning). Empty change lists skip rendering entirely (no wasted work). Falls back to full repaint on `FULL_REPAINT` sentinel.
-- **Subtree clip skipping.** `render_node` checks whether each child's bounds intersect the clip rect before recursing. Children entirely outside the clip region are not visited, reducing work proportional to off-screen content (benefits scrolled documents).
-- **SVG rasterization.** Parses and renders SVG paths for UI icons.
-- **Procedural cursor.** Arrow cursor rendered at top z-order.
+- **Pure event loop.** Wait for scene updates or frame timer → call `backend.render()` → present dirty rects. No rendering logic in the compositor itself.
+- **Render backend delegation.** All pixel work (tree walk, rasterization, compositing, damage tracking, glyph caching) lives in `libraries/render/`. The compositor constructs a `CpuBackend`, passes font data, and calls it.
+- **Frame scheduler.** Timer-driven rendering at configurable cadence (default 60fps). Event coalescing, idle optimization, frame budgeting (skip overdue ticks), idle-to-active wakeup for low-latency response after idle periods.
+- **Double-buffered framebuffer.** Two framebuffer regions, swaps on full repaints. Incremental updates render into the presented buffer.
 
 **What's scaffolding (the implementation):**
 
-- **Chrome layout is hardcoded.** Title bar, background, drop shadows all manually positioned.
-- **No dynamic surface management.** Surface count and layout are static.
-
-**What's missing:**
-
-- **Connection to layout engine.** Layout produces the surface tree; compositor renders it.
+- **Hardcoded font size and DPI** (18px, 96 DPI). Should come from system configuration.
 
 ---
 
@@ -616,18 +623,23 @@ User Programs (text-editor)
 Core (OS Service)
   ├── sys (wait, channel_signal, exit)
   ├── drawing (Surface, Color, blit_blend)
-  ├── fonts (TrueTypeFont, glyph cache)
-  ├── scene (SceneWriter, node types, text layout)
+  ├── fonts (TrueTypeFont — shaping + metrics only)
+  ├── scene (SceneWriter, node types)
   ├── ipc (Channel, Message — ring buffer messaging)
   └── protocol (core_config, edit, input — message types + payload structs)
 
 Compositor
   ├── sys (wait, channel_signal, exit)
-  ├── drawing (Surface, Color, blit_blend, PNG)
-  ├── fonts (TrueTypeFont, glyph cache)
-  ├── scene (SceneReader, node types)
+  ├── render (CpuBackend, RenderBackend — all pixel work)
+  ├── scene (DoubleReader — reads scene graph from shared memory)
   ├── ipc (Channel, Message — ring buffer messaging)
   └── protocol (compose, present — message types + payload structs)
+
+Render Library
+  ├── drawing (Surface, Color, blit_blend, fill_rect, draw_coverage)
+  ├── fonts (TrueTypeFont, glyph cache — rasterization)
+  ├── scene (SceneReader, node types, Content variants)
+  └── protocol (DirtyRect, CompositorConfig)
 
 Init
   ├── sys (process_create, channel_create, handle_send, memory_share, dma_alloc, wait, ...)
@@ -648,6 +660,12 @@ Drawing Library
 Font Library
   └── drawing (for coverage map compositing)
 
+Render Library
+  ├── drawing (pixel operations)
+  ├── fonts (glyph rasterization + caching)
+  ├── scene (node types, Content variants)
+  └── protocol (DirtyRect)
+
 Scene Library
   └── (none — pure, no dependencies. Uses core::sync::atomic for double-buffering)
 
@@ -661,7 +679,7 @@ Virtio Library
   └── (none — pure, no dependencies)
 ```
 
-**Observation:** All libraries are clean leaves with minimal dependencies (only `fonts` depends on `drawing`). The `protocol` library is the single source of truth for all IPC message types and payload structs — no component defines its own message constants or wire-format structs. The platform services depend on libraries + syscalls. User programs (text-editor) depend on `sys` + `ipc` + `protocol` — they don't touch `drawing`, `fonts`, or `virtio`. This is architecturally correct: editors don't render, the OS service does. Core (OS service) owns document semantics and scene graph construction; the compositor owns pixel rendering. The coupling between platform services (init knows about core, compositor, GPU driver, editor, etc.) is all scaffolding — the real OS service would mediate these relationships.
+**Observation:** Libraries form a clean DAG: `render` depends on `drawing` + `fonts` + `scene` + `protocol`; `fonts` depends on `drawing`; all others are independent leaves. The `protocol` library is the single source of truth for all IPC message types and payload structs. User programs (text-editor) depend on `sys` + `ipc` + `protocol` — they don't touch `drawing`, `fonts`, `render`, or `virtio`. This is architecturally correct: editors don't render, the OS service does. Core (OS service) owns document semantics, text shaping, and scene graph construction. The compositor is a content-agnostic pixel pump that delegates all rendering to the render library. The render library owns the tree walk, glyph rasterization/caching, compositing, and damage tracking. Font handling has a clean boundary: core for shaping + metrics, render backend for rasterization + caching.
 
 ---
 
@@ -701,7 +719,7 @@ Ring buffer messages are fixed at 64 bytes (4-byte type + 60-byte payload). All 
 
 Ordered by what unblocks the most, building the happy path first:
 
-1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the font library (`libraries/fonts/`). Zero-copy parser, scanline rasterizer with LCD subpixel rendering (6× horizontal oversampling), stem darkening, glyph cache. Running on bare metal in core and compositor.
+1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the font library (`libraries/fonts/`). Zero-copy parser, scanline rasterizer with LCD subpixel rendering (6× horizontal oversampling), stem darkening, glyph cache. Running on bare metal: core for shaping + metrics, render backend for rasterization + caching.
 2. ~~**Syscall error types**~~ — **Done.** `SyscallError` enum (13 variants) + `SyscallResult<T>` on all 25 syscalls + `print()` convenience. All 6 userspace binaries migrated. Eliminated raw `i64` returns and ad-hoc `< 0` checks.
 3. ~~**Userspace memory allocation**~~ (§3.1) — **Done.** `memory_alloc`/`memory_free` (#25/#26) + `GlobalAlloc` in `sys` library. `Vec`/`String`/`Box` available to all userspace programs.
 4. ~~**Structured IPC**~~ (§3.5) — **Done.** Ring buffer library implemented (`libraries/ipc/`). Kernel allocates two pages per channel. All services migrated to ring buffer messages.
@@ -709,6 +727,6 @@ Ordered by what unblocks the most, building the happy path first:
 6. ~~**Event loop**~~ (§3.4) — **Done.** Compositor, GPU driver, and input driver all run continuous event loops. Init stays alive.
 7. ~~**Editor process separation**~~ — **Done.** Text editor process (`user/text-editor/`) receives input events from core, sends write requests back. Core is sole writer to document state. Demonstrates Decision #9 (editors as read-only consumers). Five processes in the display pipeline: GPU driver, input driver, text editor, core, compositor.
 8. ~~**Read-only document mapping**~~ — **Done.** Text editor has a hardware-enforced read-only shared memory mapping of the document buffer. Reads content for cursor positioning and context-aware editing. All writes go through IPC to core (sole writer).
-9. **Text layout** — connective tissue between fonts, drawing, and the compositor. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about.
+9. **Text layout** — connective tissue between fonts, drawing, and the rendering pipeline. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about. Currently monospace-only layout helpers live in core's `scene_state.rs`.
 10. **Filesystem service** (§3.2) — blocked on Decision #16. Files interface designed (12 operations), macOS prototype validated at `prototype/files/` with 21 passing tests. **Partially unblocked:** virtio-9p driver (§2.6) provides runtime file loading from host filesystem during prototyping. Font loading working end-to-end.
 11. ~~**Wait timeout**~~ — **Done.** For finite timeouts (0 < timeout < u64::MAX), `sys_wait` creates an internal timer, adds it to the wait set with a sentinel index. If the timer fires first, returns `WouldBlock`. Timer cleanup: immediate on non-blocked paths; deferred to next `wait` call for the blocked→woken path (stored on thread struct).

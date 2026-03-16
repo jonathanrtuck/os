@@ -42,8 +42,6 @@ pub const CHROME_STATUS: Color = Color::rgb(140, 140, 140);
 /// Chrome clock text — slightly brighter than status text (R=G=B=200)
 /// to draw the eye toward the time display.
 pub const CHROME_CLOCK: Color = Color::rgb(200, 200, 200);
-/// SVG icon tint in the title bar — neutral light grey (R=G=B=190).
-pub const CHROME_ICON: Color = Color::rgb(190, 190, 190);
 /// Drop shadow peak opacity — used for the gradient shadows between
 /// chrome and content. Pure black with alpha 160 for visible darkening.
 pub const SHADOW_PEAK: Color = Color::rgba(0, 0, 0, 160);

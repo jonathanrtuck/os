@@ -964,7 +964,7 @@ impl<'a> SceneReader<'a> {
     }
     /// Interpret a DataRef as an array of `ShapedGlyph` structs.
     ///
-    /// `glyph_count` is the number of glyphs expected (from `TextRun::glyph_count`).
+    /// `glyph_count` is the number of glyphs expected (from `Content::Glyphs`).
     /// Returns a slice of up to `glyph_count` glyphs, or fewer if the data
     /// buffer doesn't contain enough bytes.
     pub fn shaped_glyphs(&self, dref: DataRef, glyph_count: u16) -> &[ShapedGlyph] {

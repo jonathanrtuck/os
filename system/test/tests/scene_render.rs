@@ -1075,11 +1075,11 @@ fn scene_graph_node_struct_unchanged() {
 // ── VAL-COORD-005 / VAL-COORD-006: Font rasterization at physical pixel size ──
 
 /// VAL-COORD-005: At scale 1.5 with logical font_size=16, glyphs are
-/// rasterized at 24 physical pixels. The compositor computes physical_font_size
+/// rasterized at 24 physical pixels. The render backend computes physical_font_size
 /// as round(logical_font_size * scale_factor).
 #[test]
 fn font_physical_pixel_size_at_fractional_scale() {
-    // Simulate the compositor's computation.
+    // Simulate the render backend's computation.
     fn round_f32(x: f32) -> i32 {
         if x >= 0.0 { (x + 0.5) as i32 } else { (x - 0.5) as i32 }
     }

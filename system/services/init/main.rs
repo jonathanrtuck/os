@@ -525,7 +525,7 @@ fn setup_display_pipeline(
             sys::print(b"init: memory_share (comp scene) failed\n");
             sys::exit();
         });
-    // Share font data with compositor (for glyph rasterization).
+    // Share font data with compositor (passed to render backend for glyph rasterization).
     let comp_font_va = if font_pages > 0 {
         sys::memory_share(comp_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (comp font) failed\n");
