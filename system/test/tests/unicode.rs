@@ -253,33 +253,27 @@ fn unicode_scene_graph_naive_resume_round_trip() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     let dref = w.push_shaped_glyphs(&scene_glyphs);
-    let run = TextRun {
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Glyphs {
+        color: Color::rgb(220, 220, 220),
         glyphs: dref,
         glyph_count: scene_glyphs.len() as u16,
-        x: 0,
-        y: 0,
-        color: Color::rgb(220, 220, 220),
-        advance: 0, // shaped text
         font_size: 18,
         axis_hash: 0,
-    };
-    let (runs_ref, count) = w.push_text_runs(&[run]);
-    let id = w.alloc_node().unwrap();
-    w.node_mut(id).content = Content::Text {
-        runs: runs_ref,
-        run_count: count,
-        _pad: [0; 2],
     };
     w.set_root(id);
     w.commit();
 
     // Read back from scene graph.
     let r = SceneReader::new(&buf);
-    let text_runs = r.text_runs(runs_ref);
-    assert_eq!(text_runs.len(), 1);
-    assert_eq!(text_runs[0].glyph_count, scene_glyphs.len() as u16);
+    let node = r.node(id);
+    let (read_glyph_ref, read_glyph_count) = match node.content {
+        Content::Glyphs { glyphs, glyph_count, .. } => (glyphs, glyph_count),
+        _ => panic!("expected Glyphs content"),
+    };
+    assert_eq!(read_glyph_count, scene_glyphs.len() as u16);
 
-    let read_glyphs = r.shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
+    let read_glyphs = r.shaped_glyphs(read_glyph_ref, read_glyph_count);
     assert_eq!(
         read_glyphs.len(),
         scene_glyphs.len(),
@@ -325,22 +319,13 @@ fn unicode_scene_graph_double_buffer_round_trip() {
         let mut w = dw.back();
         w.clear();
         let dref = w.push_shaped_glyphs(&scene_glyphs);
-        let run = TextRun {
+        let id = w.alloc_node().unwrap();
+        w.node_mut(id).content = Content::Glyphs {
+            color: Color::rgb(220, 220, 220),
             glyphs: dref,
             glyph_count: scene_glyphs.len() as u16,
-            x: 10,
-            y: 20,
-            color: Color::rgb(220, 220, 220),
-            advance: 0,
             font_size: 18,
             axis_hash: 0,
-        };
-        let (runs_ref, count) = w.push_text_runs(&[run]);
-        let id = w.alloc_node().unwrap();
-        w.node_mut(id).content = Content::Text {
-            runs: runs_ref,
-            run_count: count,
-            _pad: [0; 2],
         };
         w.set_root(id);
     }
@@ -352,12 +337,9 @@ fn unicode_scene_graph_double_buffer_round_trip() {
     assert_eq!(nodes.len(), 1);
 
     match nodes[0].content {
-        Content::Text { runs, run_count, .. } => {
-            assert_eq!(run_count, 1);
-            let text_runs = dr.front_text_runs(runs);
-            assert_eq!(text_runs[0].glyph_count, scene_glyphs.len() as u16);
-            let read_glyphs =
-                dr.front_shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
+        Content::Glyphs { glyphs, glyph_count, .. } => {
+            assert_eq!(glyph_count, scene_glyphs.len() as u16);
+            let read_glyphs = dr.front_shaped_glyphs(glyphs, glyph_count);
             assert_eq!(read_glyphs.len(), scene_glyphs.len());
             for (i, (orig, read)) in scene_glyphs.iter().zip(read_glyphs.iter()).enumerate() {
                 assert_eq!(
@@ -367,7 +349,7 @@ fn unicode_scene_graph_double_buffer_round_trip() {
                 );
             }
         }
-        _ => panic!("expected Text content in front buffer"),
+        _ => panic!("expected Glyphs content in front buffer"),
     }
 }
 

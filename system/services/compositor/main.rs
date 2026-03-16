@@ -46,104 +46,7 @@ fn channel_shm_va(idx: usize) -> usize {
     protocol::channel_shm_va(idx)
 }
 
-/// Convert an f32 display scale factor to the SVG rasterizer's 20.12
-/// fixed-point format. SVG_FP_ONE (4096) represents 1.0.
-#[inline]
-fn f32_to_svg_fp(scale: f32) -> i32 {
-    round_f32(scale * render::svg::SVG_FP_ONE as f32)
-}
 
-fn rasterize_svg_icon(
-    svg_data: &[u8],
-    label: &[u8],
-    icon_w: u32,
-    icon_h: u32,
-    display_scale: f32,
-) -> Option<alloc::vec::Vec<u8>> {
-    sys::print(label);
-
-    // Scale icon dimensions to physical pixels.
-    let phys_w = round_f32(icon_w as f32 * display_scale).max(1) as u32;
-    let phys_h = round_f32(icon_h as f32 * display_scale).max(1) as u32;
-    // Convert f32 scale to 20.12 fixed-point for the SVG rasterizer.
-    let svg_scale = f32_to_svg_fp(display_scale);
-
-    let path_ptr = unsafe {
-        let layout = alloc::alloc::Layout::new::<render::svg::SvgPath>();
-        alloc::alloc::alloc_zeroed(layout) as *mut render::svg::SvgPath
-    };
-
-    if path_ptr.is_null() {
-        sys::print(b"compositor: SVG path alloc failed\n");
-        return None;
-    }
-
-    let scratch_ptr = unsafe {
-        let layout = alloc::alloc::Layout::new::<render::svg::SvgRasterScratch>();
-        alloc::alloc::alloc_zeroed(layout) as *mut render::svg::SvgRasterScratch
-    };
-
-    if scratch_ptr.is_null() {
-        sys::print(b"compositor: SVG scratch alloc failed\n");
-        unsafe {
-            let layout = alloc::alloc::Layout::new::<render::svg::SvgPath>();
-            alloc::alloc::dealloc(path_ptr as *mut u8, layout);
-        }
-        return None;
-    }
-
-    let result = match render::svg::svg_parse_path_into(svg_data, unsafe { &mut *path_ptr }) {
-        Ok(()) => {
-            let icon_size = (phys_w * phys_h) as usize;
-            let mut icon_cov = vec![0u8; icon_size];
-
-            match render::svg::svg_rasterize(
-                unsafe { &*path_ptr },
-                unsafe { &mut *scratch_ptr },
-                &mut icon_cov,
-                phys_w,
-                phys_h,
-                svg_scale,
-                0,
-                0,
-            ) {
-                Ok(()) => {
-                    let mut rgb_cov = vec![0u8; icon_size * 3];
-
-                    for i in 0..icon_size {
-                        let c = icon_cov[i];
-                        rgb_cov[i * 3] = c;
-                        rgb_cov[i * 3 + 1] = c;
-                        rgb_cov[i * 3 + 2] = c;
-                    }
-
-                    Some(rgb_cov)
-                }
-                Err(_) => {
-                    sys::print(b"     SVG rasterize failed\n");
-                    None
-                }
-            }
-        }
-        Err(_) => {
-            sys::print(b"     SVG parse failed\n");
-            None
-        }
-    };
-
-    unsafe {
-        alloc::alloc::dealloc(
-            path_ptr as *mut u8,
-            alloc::alloc::Layout::new::<render::svg::SvgPath>(),
-        );
-        alloc::alloc::dealloc(
-            scratch_ptr as *mut u8,
-            alloc::alloc::Layout::new::<render::svg::SvgRasterScratch>(),
-        );
-    }
-
-    result
-}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -271,44 +174,25 @@ pub extern "C" fn _start() -> ! {
         // Consumed but not used by compositor.
     }
 
-    // Load SVG icons.
-    let mut icon_coverage: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
-    let mut icon_w: u32 = 0;
-    let mut icon_h: u32 = 0;
-
+    // SVG icon loading removed — icons use glyph cache in the new
+    // geometric content type model. Consume icon messages for
+    // protocol compatibility.
     if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_ICON_CONFIG {
-        let icn: IconConfig = unsafe { msg.payload_as() };
-
-        if icn.icon_va != 0 && icn.icon_len > 0 {
-            let svg_data = unsafe {
-                core::slice::from_raw_parts(icn.icon_va as *const u8, icn.icon_len as usize)
-            };
-
-            if let Some(cov) =
-                rasterize_svg_icon(svg_data, b"     parsing SVG doc icon\n", 20, 24, scale_factor)
-            {
-                sys::print(b"     SVG icon rasterized\n");
-                let phys_w = round_f32(20.0 * scale_factor).max(1) as u32;
-                let phys_h = round_f32(24.0 * scale_factor).max(1) as u32;
-                icon_w = phys_w;
-                icon_h = phys_h;
-                icon_coverage = cov;
-            }
-        }
+        // Consumed — SVG rasterization removed.
     }
     if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_IMG_ICON_CONFIG {
-        // Image icon — consumed. Could store for future use.
+        // Image icon — consumed.
     }
 
     // ── Construct CpuBackend ────────────────────────────────────────
     let mut backend = render::CpuBackend {
         mono_cache,
         prop_cache,
-        icon_coverage,
-        icon_w,
-        icon_h,
-        icon_color: drawing::CHROME_ICON,
-        icon_node: 2, // N_TITLE_TEXT — well-known index
+        icon_coverage: alloc::vec::Vec::new(),
+        icon_w: 0,
+        icon_h: 0,
+        icon_color: drawing::Color { r: 0, g: 0, b: 0, a: 0 },
+        icon_node: 0,
         scale: scale_factor,
         pool: render::surface_pool::SurfacePool::new(render::surface_pool::DEFAULT_BUDGET),
         damage: render::damage::DamageTracker::new(fb_width as u16, fb_height as u16),

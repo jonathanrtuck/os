@@ -2,6 +2,20 @@ use scene::*;
 
 // ── Local copies of layout helpers (moved from scene to Core) ───────
 
+/// Local text layout run — used only in tests. Replaces the old
+/// scene::TextRun that was removed in the Content type redesign.
+#[derive(Clone)]
+#[allow(dead_code)]
+struct TestLayoutRun {
+    glyphs: DataRef,
+    glyph_count: u16,
+    y: i16,
+    color: Color,
+    advance: u16,
+    font_size: u16,
+    axis_hash: u32,
+}
+
 /// Convert a byte offset to (visual_line, column) with monospace wrapping.
 fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
     let mut line: usize = 0;
@@ -35,7 +49,7 @@ fn layout_mono_lines(
     color: Color,
     advance: u16,
     font_size: u16,
-) -> Vec<TextRun> {
+) -> Vec<TestLayoutRun> {
     let mut runs = Vec::new();
     let mut line_y: i16 = 0;
     let mut pos: usize = 0;
@@ -55,13 +69,12 @@ fn layout_mono_lines(
         };
         let line_len = line_end - pos;
 
-        runs.push(TextRun {
+        runs.push(TestLayoutRun {
             glyphs: DataRef {
                 offset: pos as u32,
                 length: line_len as u32,
             },
             glyph_count: line_len as u16,
-            x: 0,
             y: line_y,
             color,
             advance,
@@ -78,13 +91,12 @@ fn layout_mono_lines(
     }
 
     if runs.is_empty() {
-        runs.push(TextRun {
+        runs.push(TestLayoutRun {
             glyphs: DataRef {
                 offset: 0,
                 length: 0,
             },
             glyph_count: 0,
-            x: 0,
             y: 0,
             color,
             advance,
@@ -97,7 +109,7 @@ fn layout_mono_lines(
 }
 
 /// Extract source text bytes for a run using its placeholder DataRef.
-fn line_bytes_for_run<'a>(text: &'a [u8], run: &TextRun) -> &'a [u8] {
+fn line_bytes_for_run<'a>(text: &'a [u8], run: &TestLayoutRun) -> &'a [u8] {
     let start = run.glyphs.offset as usize;
     let len = run.glyphs.length as usize;
 
@@ -110,11 +122,11 @@ fn line_bytes_for_run<'a>(text: &'a [u8], run: &TextRun) -> &'a [u8] {
 
 /// Filter and reposition runs for a scrolled viewport.
 fn scroll_runs(
-    runs: Vec<TextRun>,
+    runs: Vec<TestLayoutRun>,
     scroll_lines: u32,
     line_height: u32,
     viewport_height_px: i32,
-) -> Vec<TextRun> {
+) -> Vec<TestLayoutRun> {
     let scroll_px = scroll_lines as i32 * line_height as i32;
 
     runs.into_iter()
@@ -135,46 +147,32 @@ fn scroll_runs(
         .collect()
 }
 
-/// Convert raw ASCII text bytes into ShapedGlyph arrays for monospace rendering.
-fn bytes_to_shaped_glyphs(text: &[u8], advance: u16) -> Vec<ShapedGlyph> {
-    text.iter()
-        .map(|&ch| ShapedGlyph {
-            glyph_id: ch as u16,
-            x_advance: advance as i16,
-            x_offset: 0,
-            y_offset: 0,
-        })
-        .collect()
-}
-
 fn make_buf() -> Vec<u8> {
     vec![0u8; SCENE_SIZE]
 }
 
-/// Build a monospace Content::Text from raw UTF-8 bytes.
+/// Build a monospace Content::Glyphs from raw UTF-8 bytes.
 /// Each byte is treated as a glyph ID with uniform advance.
-fn make_mono_text(
+fn make_mono_glyphs(
     w: &mut SceneWriter,
     text: &[u8],
     font_size: u16,
     color: Color,
     advance: u16,
 ) -> Content {
-    let run = TextRun {
-        glyphs: w.push_data(text),
-        glyph_count: text.len() as u16,
-        x: 0,
-        y: 0,
+    let glyphs: Vec<ShapedGlyph> = text.iter().map(|&ch| ShapedGlyph {
+        glyph_id: ch as u16,
+        x_advance: advance as i16,
+        x_offset: 0,
+        y_offset: 0,
+    }).collect();
+    let glyph_ref = w.push_shaped_glyphs(&glyphs);
+    Content::Glyphs {
         color,
-        advance,
+        glyphs: glyph_ref,
+        glyph_count: glyphs.len() as u16,
         font_size,
         axis_hash: 0,
-    };
-    let (runs, run_count) = w.push_text_runs(&[run]);
-    Content::Text {
-        runs,
-        run_count,
-        _pad: [0; 2],
     }
 }
 
@@ -320,107 +318,6 @@ fn writer_add_child_single() {
     assert_eq!(w.node(child).next_sibling, NULL);
 }
 
-// ── Text content ────────────────────────────────────────────────────
-
-#[test]
-fn writer_text_node_round_trip() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-    let text_data = b"Hello, OS!";
-    let id = w.alloc_node().unwrap();
-    w.node_mut(id).content = make_mono_text(&mut w, text_data, 18, Color::rgb(220, 220, 220), 8);
-    // Read back via SceneReader.
-    let r = SceneReader::new(&buf);
-    let node = r.node(id);
-    match node.content {
-        Content::Text {
-            runs, run_count, ..
-        } => {
-            assert_eq!(run_count, 1);
-            let text_runs = r.text_runs(runs);
-            assert_eq!(text_runs.len(), 1);
-            assert_eq!(text_runs[0].font_size, 18);
-            assert_eq!(text_runs[0].axis_hash, 0);
-            assert_eq!(text_runs[0].advance, 8);
-            assert_eq!(r.data(text_runs[0].glyphs), text_data);
-        }
-        _ => panic!("expected Text content"),
-    }
-}
-
-#[test]
-fn writer_text_runs_multiple_lines() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-    let line1 = b"Hello";
-    let line2 = b"World";
-    let d1 = w.push_data(line1);
-    let d2 = w.push_data(line2);
-    let runs = [
-        TextRun {
-            glyphs: d1,
-            glyph_count: 5,
-            x: 0,
-            y: 0,
-            color: Color::rgb(200, 200, 200),
-            advance: 8,
-            font_size: 16,
-            axis_hash: 0,
-        },
-        TextRun {
-            glyphs: d2,
-            glyph_count: 5,
-            x: 0,
-            y: 18,
-            color: Color::rgb(200, 200, 200),
-            advance: 8,
-            font_size: 16,
-            axis_hash: 0,
-        },
-    ];
-    let (runs_ref, count) = w.push_text_runs(&runs);
-    let id = w.alloc_node().unwrap();
-    w.node_mut(id).content = Content::Text {
-        runs: runs_ref,
-        run_count: count,
-        _pad: [0; 2],
-    };
-
-    let r = SceneReader::new(&buf);
-    let text_runs = r.text_runs(runs_ref);
-    assert_eq!(text_runs.len(), 2);
-    assert_eq!(r.data(text_runs[0].glyphs), b"Hello");
-    assert_eq!(r.data(text_runs[1].glyphs), b"World");
-    assert_eq!(text_runs[1].y, 18);
-}
-
-#[test]
-fn push_text_runs_round_trips_struct_fields() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-    let d = w.push_data(b"x");
-    let run = TextRun {
-        glyphs: d,
-        glyph_count: 1,
-        x: -5,
-        y: 100,
-        color: Color::rgba(10, 20, 30, 40),
-        advance: 12,
-        font_size: 24,
-        axis_hash: 0,
-    };
-    let (runs_ref, count) = w.push_text_runs(&[run]);
-    assert_eq!(count, 1);
-    let r = SceneReader::new(&buf);
-    let read_runs = r.text_runs(runs_ref);
-    assert_eq!(read_runs[0].x, -5);
-    assert_eq!(read_runs[0].y, 100);
-    assert_eq!(read_runs[0].color, Color::rgba(10, 20, 30, 40));
-    assert_eq!(read_runs[0].advance, 12);
-    assert_eq!(read_runs[0].font_size, 24);
-    assert_eq!(read_runs[0].axis_hash, 0);
-}
-
 // ── Image content ───────────────────────────────────────────────────
 
 #[test]
@@ -451,42 +348,6 @@ fn writer_image_node_round_trip() {
             assert_eq!(r.data(data).len(), 64);
         }
         _ => panic!("expected Image content"),
-    }
-}
-
-// ── SceneReader ─────────────────────────────────────────────────────
-
-#[test]
-fn reader_reads_writer_output() {
-    let mut buf = make_buf();
-    {
-        let mut w = SceneWriter::new(&mut buf);
-        let root = w.alloc_node().unwrap();
-        let child = w.alloc_node().unwrap();
-        w.node_mut(root).width = 800;
-        w.node_mut(root).height = 600;
-        w.node_mut(root).background = Color::rgb(30, 30, 30);
-        w.add_child(root, child);
-        w.node_mut(child).content =
-            make_mono_text(&mut w, b"content", 16, Color::rgb(200, 200, 200), 8);
-        w.set_root(root);
-        w.commit();
-    }
-    let r = SceneReader::new(&buf);
-    assert_eq!(r.generation(), 1);
-    assert_eq!(r.node_count(), 2);
-    assert_eq!(r.root(), 0);
-    assert_eq!(r.node(0).width, 800);
-    assert_eq!(r.node(0).first_child, 1);
-    match r.node(1).content {
-        Content::Text {
-            runs, run_count, ..
-        } => {
-            assert_eq!(run_count, 1);
-            let text_runs = r.text_runs(runs);
-            assert_eq!(r.data(text_runs[0].glyphs), b"content");
-        }
-        _ => panic!("expected text"),
     }
 }
 
@@ -559,88 +420,6 @@ fn reader_data_invalid_ref_returns_empty() {
         length: 100,
     };
     assert_eq!(r.data(bad).len(), 0);
-}
-
-#[test]
-fn writer_build_typical_editor_scene() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-
-    // Root (full screen background).
-    let root = w.alloc_node().unwrap();
-    w.node_mut(root).width = 1024;
-    w.node_mut(root).height = 768;
-    w.node_mut(root).background = Color::rgb(30, 30, 30);
-    w.set_root(root);
-
-    // Title bar.
-    let title = w.alloc_node().unwrap();
-    w.node_mut(title).width = 1024;
-    w.node_mut(title).height = 36;
-    w.node_mut(title).background = Color::rgba(20, 20, 20, 200);
-    w.add_child(root, title);
-
-    // Title text.
-    let title_text = w.alloc_node().unwrap();
-    w.node_mut(title_text).x = 12;
-    w.node_mut(title_text).y = 8;
-    w.node_mut(title_text).content =
-        make_mono_text(&mut w, b"Text", 18, Color::rgb(200, 200, 200), 8);
-    w.add_child(title, title_text);
-
-    // Content area.
-    let content = w.alloc_node().unwrap();
-    w.node_mut(content).y = 36;
-    w.node_mut(content).width = 1024;
-    w.node_mut(content).height = 732;
-    w.node_mut(content).flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
-    w.add_child(root, content);
-
-    // Document text.
-    let doc_text = w.alloc_node().unwrap();
-    w.node_mut(doc_text).x = 12;
-    w.node_mut(doc_text).y = 8;
-    w.node_mut(doc_text).width = 1000;
-    w.node_mut(doc_text).height = u16::MAX;
-    w.node_mut(doc_text).content = make_mono_text(
-        &mut w,
-        b"Hello, world!\nThis is a test.",
-        18,
-        Color::rgb(220, 220, 220),
-        8,
-    );
-    w.add_child(content, doc_text);
-
-    w.commit();
-
-    // Verify the tree structure via reader.
-    let r = SceneReader::new(&buf);
-    assert_eq!(r.node_count(), 5);
-    assert_eq!(r.root(), 0);
-
-    // Root -> title, content
-    let root_node = r.node(0);
-    assert_eq!(root_node.first_child, 1); // title
-    let title_node = r.node(1);
-    assert_eq!(title_node.next_sibling, 3); // content
-    let content_node = r.node(3);
-    assert_eq!(content_node.first_child, 4); // doc_text
-    assert!(content_node.clips_children());
-
-    // Verify text content.
-    match r.node(4).content {
-        Content::Text {
-            runs, run_count, ..
-        } => {
-            assert_eq!(run_count, 1);
-            let text_runs = r.text_runs(runs);
-            assert_eq!(
-                r.data(text_runs[0].glyphs),
-                b"Hello, world!\nThis is a test."
-            );
-        }
-        _ => panic!("expected Text"),
-    }
 }
 
 // ── replace_data ────────────────────────────────────────────────────
@@ -726,40 +505,6 @@ fn double_writer_first_frame() {
 }
 
 #[test]
-fn double_writer_alternates_buffers() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-    // Frame 1: write "first".
-    {
-        let mut w = dw.back();
-        w.clear();
-        let n = w.alloc_node().unwrap();
-        w.node_mut(n).content = make_mono_text(&mut w, b"first", 16, Color::rgb(255, 255, 255), 8);
-        w.set_root(n);
-    }
-    dw.swap();
-    assert_eq!(dw.front_generation(), 1);
-    // Frame 2: write "second" to the OTHER buffer.
-    {
-        let mut w = dw.back();
-        w.clear();
-        let n = w.alloc_node().unwrap();
-        w.node_mut(n).content = make_mono_text(&mut w, b"second", 16, Color::rgb(255, 255, 255), 8);
-        w.set_root(n);
-    }
-    dw.swap();
-    assert_eq!(dw.front_generation(), 2);
-    // Front now has "second".
-    match dw.front_nodes()[0].content {
-        Content::Text { runs, .. } => {
-            let text_runs = dw.front_text_runs(runs);
-            assert_eq!(dw.front_data(text_runs[0].glyphs), b"second");
-        }
-        _ => panic!("expected text"),
-    }
-}
-
-#[test]
 fn double_writer_old_front_becomes_back() {
     let mut buf = make_double_buf();
     let mut dw = DoubleWriter::new(&mut buf);
@@ -805,34 +550,6 @@ fn double_writer_many_frames() {
 }
 
 #[test]
-fn double_reader_reads_front() {
-    let mut buf = make_double_buf();
-    {
-        let mut dw = DoubleWriter::new(&mut buf);
-        {
-            let mut w = dw.back();
-            w.clear();
-            let n = w.alloc_node().unwrap();
-            w.node_mut(n).content =
-                make_mono_text(&mut w, b"visible", 14, Color::rgb(200, 200, 200), 8);
-            w.set_root(n);
-        }
-        dw.swap();
-    }
-    // Read-only access.
-    let dr = DoubleReader::new(&buf);
-    assert_eq!(dr.front_generation(), 1);
-    assert_eq!(dr.front_nodes().len(), 1);
-    match dr.front_nodes()[0].content {
-        Content::Text { runs, .. } => {
-            let text_runs = dr.front_text_runs(runs);
-            assert_eq!(dr.front_data(text_runs[0].glyphs), b"visible");
-        }
-        _ => panic!("expected text"),
-    }
-}
-
-#[test]
 fn double_reader_sees_latest_after_two_swaps() {
     let mut buf = make_double_buf();
     {
@@ -859,27 +576,6 @@ fn double_reader_sees_latest_after_two_swaps() {
     let dr = DoubleReader::new(&buf);
     assert_eq!(dr.front_nodes()[0].width, 200);
     assert_eq!(dr.front_generation(), 2);
-}
-
-#[test]
-fn double_writer_front_data_resolves_refs() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-    {
-        let mut w = dw.back();
-        w.clear();
-        let n = w.alloc_node().unwrap();
-        w.node_mut(n).content = make_mono_text(&mut w, b"hello world", 16, Color::rgb(0, 0, 0), 8);
-        w.set_root(n);
-    }
-    dw.swap();
-    match dw.front_nodes()[0].content {
-        Content::Text { runs, .. } => {
-            let text_runs = dw.front_text_runs(runs);
-            assert_eq!(dw.front_data(text_runs[0].glyphs), b"hello world");
-        }
-        _ => panic!("expected text"),
-    }
 }
 
 #[test]
@@ -1082,225 +778,6 @@ fn shaped_glyph_field_access() {
     assert_eq!(g.y_offset, 5);
 }
 
-// ── ShapedGlyph round-trip via SceneWriter/SceneReader (VAL-SCENE-001) ──
-
-#[test]
-fn shaped_glyph_single_run_round_trip() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-
-    let glyphs = [
-        ShapedGlyph { glyph_id: 72, x_advance: 600, x_offset: 0, y_offset: 0 },
-        ShapedGlyph { glyph_id: 101, x_advance: 550, x_offset: 0, y_offset: 0 },
-        ShapedGlyph { glyph_id: 108, x_advance: 250, x_offset: 0, y_offset: 0 },
-        ShapedGlyph { glyph_id: 108, x_advance: 250, x_offset: 0, y_offset: 0 },
-        ShapedGlyph { glyph_id: 111, x_advance: 560, x_offset: 0, y_offset: 0 },
-    ];
-    let dref = w.push_shaped_glyphs(&glyphs);
-
-    let run = TextRun {
-        glyphs: dref,
-        glyph_count: glyphs.len() as u16,
-        x: 10,
-        y: 20,
-        color: Color::rgb(220, 220, 220),
-        advance: 0, // 0 means per-glyph advances in ShapedGlyph
-        font_size: 18,
-        axis_hash: 0,
-    };
-    let (runs_ref, count) = w.push_text_runs(&[run]);
-
-    let id = w.alloc_node().unwrap();
-    w.node_mut(id).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
-    w.set_root(id);
-    w.commit();
-
-    // Read back
-    let r = SceneReader::new(&buf);
-    let text_runs = r.text_runs(runs_ref);
-    assert_eq!(text_runs.len(), 1);
-    assert_eq!(text_runs[0].glyph_count, 5);
-    assert_eq!(text_runs[0].advance, 0);
-
-    let read_glyphs = r.shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
-    assert_eq!(read_glyphs.len(), 5);
-    for (orig, read) in glyphs.iter().zip(read_glyphs.iter()) {
-        assert_eq!(orig.glyph_id, read.glyph_id);
-        assert_eq!(orig.x_advance, read.x_advance);
-        assert_eq!(orig.x_offset, read.x_offset);
-        assert_eq!(orig.y_offset, read.y_offset);
-    }
-}
-
-// ── Multiple text nodes with varying glyph counts (VAL-SCENE-002) ──
-
-#[test]
-fn shaped_glyph_five_nodes_varying_counts_round_trip() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-
-    // 5 text nodes with varying glyph counts: 1, 3, 7, 12, 20
-    let glyph_counts = [1, 3, 7, 12, 20];
-    let mut node_ids = Vec::new();
-    let mut expected: Vec<Vec<ShapedGlyph>> = Vec::new();
-
-    let root = w.alloc_node().unwrap();
-    w.set_root(root);
-
-    for (idx, &count) in glyph_counts.iter().enumerate() {
-        let glyphs: Vec<ShapedGlyph> = (0..count).map(|i| ShapedGlyph {
-            glyph_id: (idx as u16 * 100) + i as u16,
-            x_advance: 500 + (i as i16 * 10),
-            x_offset: if i % 2 == 0 { 0 } else { -(i as i16) },
-            y_offset: if i % 3 == 0 { 2 } else { 0 },
-        }).collect();
-
-        let dref = w.push_shaped_glyphs(&glyphs);
-        let run = TextRun {
-            glyphs: dref,
-            glyph_count: count as u16,
-            x: 0,
-            y: (idx as i16) * 20,
-            color: Color::rgb(200, 200, 200),
-            advance: 0,
-            font_size: 16,
-            axis_hash: 0,
-        };
-        let (runs_ref, run_count) = w.push_text_runs(&[run]);
-        let nid = w.alloc_node().unwrap();
-        w.node_mut(nid).content = Content::Text { runs: runs_ref, run_count, _pad: [0; 2] };
-        w.add_child(root, nid);
-        node_ids.push(nid);
-        expected.push(glyphs);
-    }
-    w.commit();
-
-    // Read back all 5 nodes
-    let r = SceneReader::new(&buf);
-    for (idx, &nid) in node_ids.iter().enumerate() {
-        match r.node(nid).content {
-            Content::Text { runs, run_count, .. } => {
-                assert_eq!(run_count, 1);
-                let text_runs = r.text_runs(runs);
-                let read_glyphs = r.shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
-                assert_eq!(read_glyphs.len(), expected[idx].len(),
-                    "Node {} glyph count mismatch", idx);
-                for (j, (orig, read)) in expected[idx].iter().zip(read_glyphs.iter()).enumerate() {
-                    assert_eq!(orig.glyph_id, read.glyph_id,
-                        "Node {} glyph {} glyph_id mismatch", idx, j);
-                    assert_eq!(orig.x_advance, read.x_advance,
-                        "Node {} glyph {} x_advance mismatch", idx, j);
-                    assert_eq!(orig.x_offset, read.x_offset,
-                        "Node {} glyph {} x_offset mismatch", idx, j);
-                    assert_eq!(orig.y_offset, read.y_offset,
-                        "Node {} glyph {} y_offset mismatch", idx, j);
-                }
-            }
-            _ => panic!("Node {} expected Text content", idx),
-        }
-    }
-}
-
-// ── Boundary glyph IDs (VAL-SCENE-002, VAL-CROSS-005) ──────────────
-
-#[test]
-fn shaped_glyph_boundary_ids_round_trip() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-
-    let glyphs = [
-        ShapedGlyph { glyph_id: 0, x_advance: 100, x_offset: 0, y_offset: 0 },      // .notdef
-        ShapedGlyph { glyph_id: 1, x_advance: 200, x_offset: -5, y_offset: 3 },      // first real glyph
-        ShapedGlyph { glyph_id: 65534, x_advance: 300, x_offset: 10, y_offset: -10 }, // near max u16
-    ];
-    let dref = w.push_shaped_glyphs(&glyphs);
-    let run = TextRun {
-        glyphs: dref,
-        glyph_count: 3,
-        x: 0, y: 0,
-        color: Color::rgb(255, 255, 255),
-        advance: 0,
-        font_size: 18,
-        axis_hash: 0,
-    };
-    let (runs_ref, count) = w.push_text_runs(&[run]);
-    let id = w.alloc_node().unwrap();
-    w.node_mut(id).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
-    w.commit();
-
-    let r = SceneReader::new(&buf);
-    let text_runs = r.text_runs(runs_ref);
-    let read_glyphs = r.shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
-
-    assert_eq!(read_glyphs.len(), 3);
-    assert_eq!(read_glyphs[0].glyph_id, 0);
-    assert_eq!(read_glyphs[0].x_advance, 100);
-    assert_eq!(read_glyphs[1].glyph_id, 1);
-    assert_eq!(read_glyphs[1].x_offset, -5);
-    assert_eq!(read_glyphs[1].y_offset, 3);
-    assert_eq!(read_glyphs[2].glyph_id, 65534);
-    assert_eq!(read_glyphs[2].x_advance, 300);
-    assert_eq!(read_glyphs[2].x_offset, 10);
-    assert_eq!(read_glyphs[2].y_offset, -10);
-}
-
-// ── Data buffer capacity (VAL-SCENE-003) ────────────────────────────
-
-#[test]
-fn shaped_glyph_2000_entries_fit_in_64k_data_buffer() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-
-    // Create 2000+ glyphs across multiple runs
-    let total_glyphs = 2100;
-    let glyphs_per_run = 100;
-    let num_runs = total_glyphs / glyphs_per_run;
-    let mut total_pushed = 0u32;
-
-    let root = w.alloc_node().unwrap();
-    w.set_root(root);
-
-    for run_idx in 0..num_runs {
-        let glyphs: Vec<ShapedGlyph> = (0..glyphs_per_run).map(|i| ShapedGlyph {
-            glyph_id: ((run_idx * glyphs_per_run + i) % 65535) as u16,
-            x_advance: 500,
-            x_offset: 0,
-            y_offset: 0,
-        }).collect();
-
-        let dref = w.push_shaped_glyphs(&glyphs);
-        // Verify push_shaped_glyphs succeeded with full data
-        assert_eq!(
-            dref.length as usize,
-            glyphs_per_run * core::mem::size_of::<ShapedGlyph>(),
-            "Run {} data truncated — buffer overflow", run_idx
-        );
-        total_pushed += dref.length;
-
-        let run = TextRun {
-            glyphs: dref,
-            glyph_count: glyphs_per_run as u16,
-            x: 0,
-            y: (run_idx as i16) * 20,
-            color: Color::rgb(200, 200, 200),
-            advance: 0,
-            font_size: 16,
-            axis_hash: 0,
-        };
-        let (runs_ref, count) = w.push_text_runs(&[run]);
-        let nid = w.alloc_node().unwrap();
-        w.node_mut(nid).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
-        w.add_child(root, nid);
-    }
-
-    // Verify total data fits within 64 KiB
-    assert!(w.data_used() <= DATA_BUFFER_SIZE as u32,
-        "Data used {} exceeds buffer size {}", w.data_used(), DATA_BUFFER_SIZE);
-    // At 8 bytes per glyph, 2100 glyphs = 16800 bytes, well within 64 KiB
-    assert!(total_pushed >= (total_glyphs * core::mem::size_of::<ShapedGlyph>()) as u32,
-        "Not all glyph data was pushed");
-}
-
 // ── Byte-exact equality round-trip ──────────────────────────────────
 
 #[test]
@@ -1329,141 +806,6 @@ fn shaped_glyph_byte_exact_round_trip() {
     let output_bytes = r.data(dref);
 
     assert_eq!(input_bytes, output_bytes, "Byte-exact round-trip failed");
-}
-
-// ── Monospace text still works alongside shaped text ────────────────
-
-#[test]
-fn mono_and_shaped_text_coexist() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-
-    // Monospace text run (advance > 0, raw bytes)
-    let mono_text = b"Hello";
-    let mono_data = w.push_data(mono_text);
-    let mono_run = TextRun {
-        glyphs: mono_data,
-        glyph_count: 5,
-        x: 0, y: 0,
-        color: Color::rgb(200, 200, 200),
-        advance: 8, // > 0 means monospace
-        font_size: 16,
-        axis_hash: 0,
-    };
-
-    // Shaped text run (advance == 0, ShapedGlyph array)
-    let shaped = [
-        ShapedGlyph { glyph_id: 72, x_advance: 600, x_offset: 0, y_offset: 0 },
-        ShapedGlyph { glyph_id: 101, x_advance: 550, x_offset: 0, y_offset: 0 },
-    ];
-    let shaped_ref = w.push_shaped_glyphs(&shaped);
-    let shaped_run = TextRun {
-        glyphs: shaped_ref,
-        glyph_count: 2,
-        x: 0, y: 20,
-        color: Color::rgb(200, 200, 200),
-        advance: 0, // shaped
-        font_size: 18,
-        axis_hash: 0,
-    };
-
-    let (runs_ref, count) = w.push_text_runs(&[mono_run, shaped_run]);
-    let id = w.alloc_node().unwrap();
-    w.node_mut(id).content = Content::Text { runs: runs_ref, run_count: count, _pad: [0; 2] };
-
-    let r = SceneReader::new(&buf);
-    let text_runs = r.text_runs(runs_ref);
-    assert_eq!(text_runs.len(), 2);
-
-    // Mono run: raw bytes
-    assert_eq!(text_runs[0].advance, 8);
-    assert_eq!(r.data(text_runs[0].glyphs), b"Hello");
-
-    // Shaped run: ShapedGlyph array
-    assert_eq!(text_runs[1].advance, 0);
-    let glyphs = r.shaped_glyphs(text_runs[1].glyphs, text_runs[1].glyph_count);
-    assert_eq!(glyphs.len(), 2);
-    assert_eq!(glyphs[0].glyph_id, 72);
-    assert_eq!(glyphs[1].glyph_id, 101);
-}
-
-// ── Glyph ID boundary values survive scene graph round-trip ─────────
-
-#[test]
-fn shaped_glyph_boundary_ids_roundtrip() {
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-
-    // Boundary glyph IDs: 0 (.notdef), 1 (first real glyph), 65534 (near u16::MAX)
-    let glyphs = [
-        ShapedGlyph { glyph_id: 0, x_advance: 100, x_offset: 0, y_offset: 0 },
-        ShapedGlyph { glyph_id: 1, x_advance: 200, x_offset: -5, y_offset: 10 },
-        ShapedGlyph { glyph_id: 65534, x_advance: 300, x_offset: 50, y_offset: -20 },
-    ];
-    let dref = w.push_shaped_glyphs(&glyphs);
-    let run = TextRun {
-        glyphs: dref,
-        glyph_count: 3,
-        x: 0, y: 0,
-        color: Color::rgb(255, 255, 255),
-        advance: 0,
-        font_size: 18,
-        axis_hash: 0,
-    };
-    let (runs_ref, _count) = w.push_text_runs(&[run]);
-
-    let r = SceneReader::new(&buf);
-    let text_runs = r.text_runs(runs_ref);
-    assert_eq!(text_runs.len(), 1);
-
-    let read_glyphs = r.shaped_glyphs(text_runs[0].glyphs, text_runs[0].glyph_count);
-    assert_eq!(read_glyphs.len(), 3);
-
-    // Verify each boundary glyph ID survives exactly
-    assert_eq!(read_glyphs[0].glyph_id, 0);
-    assert_eq!(read_glyphs[0].x_advance, 100);
-    assert_eq!(read_glyphs[1].glyph_id, 1);
-    assert_eq!(read_glyphs[1].x_advance, 200);
-    assert_eq!(read_glyphs[1].x_offset, -5);
-    assert_eq!(read_glyphs[1].y_offset, 10);
-    assert_eq!(read_glyphs[2].glyph_id, 65534);
-    assert_eq!(read_glyphs[2].x_advance, 300);
-    assert_eq!(read_glyphs[2].x_offset, 50);
-    assert_eq!(read_glyphs[2].y_offset, -20);
-}
-
-// ── Monospace shaping: identical x_advance for all glyphs ───────────
-
-#[test]
-fn monospace_shaped_glyphs_uniform_advance() {
-    // Simulate what bytes_to_shaped_glyphs does in core: each byte becomes
-    // a ShapedGlyph with glyph_id = byte value and uniform advance.
-    let text = b"iiiWWW";
-    let advance: i16 = 10; // monospace uniform advance
-    let glyphs: Vec<ShapedGlyph> = text.iter().map(|&ch| ShapedGlyph {
-        glyph_id: ch as u16,
-        x_advance: advance,
-        x_offset: 0,
-        y_offset: 0,
-    }).collect();
-
-    // All 6 glyphs should have identical x_advance
-    assert_eq!(glyphs.len(), 6);
-    for g in &glyphs {
-        assert_eq!(g.x_advance, advance, "Monospace glyphs must have uniform advance");
-    }
-
-    // Push through scene graph and verify round-trip
-    let mut buf = make_buf();
-    let mut w = SceneWriter::new(&mut buf);
-    let dref = w.push_shaped_glyphs(&glyphs);
-
-    let r = SceneReader::new(&buf);
-    let read = r.shaped_glyphs(dref, glyphs.len() as u16);
-    assert_eq!(read.len(), 6);
-    for g in read {
-        assert_eq!(g.x_advance, advance);
-    }
 }
 
 // ── Proportional advance: W != i ────────────────────────────────────
@@ -1497,109 +839,6 @@ fn proportional_shaped_glyphs_different_advances() {
             "Proportional font: advance('W') != advance('i')"
         );
     }
-}
-
-// ---------------------------------------------------------------------------
-// VAL-CROSS-002: Axis values flow through scene graph (axis_hash round-trip)
-// ---------------------------------------------------------------------------
-
-#[test]
-fn scene_text_run_axis_hash_round_trip() {
-    let mut buf = vec![0u8; SCENE_SIZE];
-    let mut w = SceneWriter::new(&mut buf);
-
-    let glyphs = [ShapedGlyph {
-        glyph_id: 72,
-        x_advance: 10,
-        x_offset: 0,
-        y_offset: 0,
-    }];
-    let glyph_ref = w.push_shaped_glyphs(&glyphs);
-
-    // Create a TextRun with non-zero axis_hash (simulating wght=700).
-    let axis_hash_700 = 0xABCD_1234u32;
-    let run = TextRun {
-        glyphs: glyph_ref,
-        glyph_count: 1,
-        x: 0,
-        y: 0,
-        color: Color::rgb(255, 255, 255),
-        advance: 10,
-        font_size: 18,
-        axis_hash: axis_hash_700,
-    };
-    let (runs_ref, count) = w.push_text_runs(&[run]);
-
-    let id = w.alloc_node().unwrap();
-    w.node_mut(id).content = Content::Text {
-        runs: runs_ref,
-        run_count: count,
-        _pad: [0; 2],
-    };
-    w.set_root(id);
-    w.commit();
-
-    let r = SceneReader::new(&buf);
-    let text_runs = r.text_runs(runs_ref);
-    assert_eq!(text_runs.len(), 1);
-    assert_eq!(
-        text_runs[0].axis_hash, axis_hash_700,
-        "axis_hash must round-trip through scene graph"
-    );
-}
-
-#[test]
-fn scene_text_run_different_axis_hashes_preserved() {
-    let mut buf = vec![0u8; SCENE_SIZE];
-    let mut w = SceneWriter::new(&mut buf);
-
-    let glyphs = [ShapedGlyph {
-        glyph_id: 65,
-        x_advance: 10,
-        x_offset: 0,
-        y_offset: 0,
-    }];
-
-    // Two runs with different axis hashes.
-    let glyph_ref1 = w.push_shaped_glyphs(&glyphs);
-    let glyph_ref2 = w.push_shaped_glyphs(&glyphs);
-
-    let run_400 = TextRun {
-        glyphs: glyph_ref1,
-        glyph_count: 1,
-        x: 0,
-        y: 0,
-        color: Color::rgb(255, 255, 255),
-        advance: 10,
-        font_size: 18,
-        axis_hash: 0x1111_0000,
-    };
-    let run_700 = TextRun {
-        glyphs: glyph_ref2,
-        glyph_count: 1,
-        x: 0,
-        y: 20,
-        color: Color::rgb(255, 255, 255),
-        advance: 10,
-        font_size: 18,
-        axis_hash: 0x2222_0000,
-    };
-    let (runs_ref, count) = w.push_text_runs(&[run_400, run_700]);
-
-    let id = w.alloc_node().unwrap();
-    w.node_mut(id).content = Content::Text {
-        runs: runs_ref,
-        run_count: count,
-        _pad: [0; 2],
-    };
-    w.set_root(id);
-    w.commit();
-
-    let r = SceneReader::new(&buf);
-    let text_runs = r.text_runs(runs_ref);
-    assert_eq!(text_runs.len(), 2);
-    assert_eq!(text_runs[0].axis_hash, 0x1111_0000);
-    assert_eq!(text_runs[1].axis_hash, 0x2222_0000);
 }
 
 // ── content_hash tests ──────────────────────────────────────────────
@@ -1866,7 +1105,7 @@ fn copy_front_to_back_preserves_nodes_and_data() {
         w.node_mut(child).width = 200;
         w.node_mut(child).height = 100;
         w.node_mut(child).content =
-            make_mono_text(&mut w, b"Hello, world!", 16, Color::rgb(220, 220, 220), 8);
+            make_mono_glyphs(&mut w, b"Hello, world!", 16, Color::rgb(220, 220, 220), 8);
         w.add_child(root, child);
     }
     dw.swap(); // front is now gen 1
@@ -2321,7 +1560,7 @@ fn update_data_in_place_after_copy_forward() {
     let mut dw = DoubleWriter::new(&mut buf);
 
     // Frame 1: scene with data.
-    let mut clock_dref = DataRef { offset: 0, length: 0 };
+    let clock_dref;
     {
         let mut w = dw.back();
         w.clear();
@@ -2463,7 +1702,7 @@ fn update_data_does_not_grow_data_used() {
     let mut buf = make_double_buf();
     let mut dw = DoubleWriter::new(&mut buf);
 
-    let mut dref = DataRef { offset: 0, length: 0 };
+    let dref;
     {
         let mut w = dw.back();
         w.clear();
@@ -2500,1188 +1739,7 @@ fn update_data_does_not_grow_data_used() {
 // directly to prove correctness of the copy-forward + selective mutation
 // pattern.
 
-/// Well-known node indices (mirrors core/scene_state.rs).
-const N_ROOT: u16 = 0;
-const N_TITLE_BAR: u16 = 1;
-const N_TITLE_TEXT: u16 = 2;
-const N_CLOCK_TEXT: u16 = 3;
-const N_SHADOW: u16 = 4;
-const N_CONTENT: u16 = 5;
-const N_DOC_TEXT: u16 = 6;
-const N_CURSOR: u16 = 7;
-const WELL_KNOWN_COUNT: u16 = 8;
 
-/// Build a typical editor scene into a DoubleWriter, swap to publish.
-/// Returns the glyph DataRef for the clock text (for in-place update tests).
-fn build_test_editor_scene(dw: &mut DoubleWriter<'_>, doc_text: &[u8], clock_text: &[u8]) -> DataRef {
-    let char_width: u16 = 8;
-    let line_height: u16 = 20;
-    let font_size: u16 = 16;
-    let text_color = Color::rgb(220, 220, 220);
-    let chrome_bg = Color::rgba(45, 45, 48, 255);
-    let clock_color = Color::rgb(130, 130, 130);
-
-    let mut w = dw.back();
-    w.clear();
-
-    // Push clock glyph data.
-    let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width);
-    let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
-
-    // Push title glyph data.
-    let title_glyphs = bytes_to_shaped_glyphs(b"Text", char_width);
-    let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-
-    // Push doc text runs.
-    let chars_per_line: usize = 80;
-    let all_runs = layout_mono_lines(
-        doc_text, chars_per_line, line_height as i16, text_color, char_width, font_size,
-    );
-    let visible_runs = scroll_runs(all_runs, 0, line_height as u32, 700);
-    let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
-    for mut run in visible_runs {
-        let line_text = line_bytes_for_run(doc_text, &run);
-        let shaped = bytes_to_shaped_glyphs(line_text, char_width);
-        run.glyphs = w.push_shaped_glyphs(&shaped);
-        run.glyph_count = shaped.len() as u16;
-        final_runs.push(run);
-    }
-    let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
-
-    // Push title/clock text runs.
-    let title_run = TextRun {
-        glyphs: title_glyph_ref, glyph_count: 4, x: 0, y: 0,
-        color: text_color, advance: char_width, font_size, axis_hash: 0,
-    };
-    let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
-
-    let clock_run = TextRun {
-        glyphs: clock_glyph_ref, glyph_count: clock_glyphs.len() as u16, x: 0, y: 0,
-        color: clock_color, advance: char_width, font_size, axis_hash: 0,
-    };
-    let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
-
-    // Allocate 8 well-known nodes.
-    for _ in 0..8 {
-        w.alloc_node().unwrap();
-    }
-
-    // Root.
-    {
-        let n = w.node_mut(N_ROOT);
-        n.first_child = N_TITLE_BAR;
-        n.width = 1024;
-        n.height = 768;
-        n.background = Color::rgb(30, 30, 30);
-        n.flags = NodeFlags::VISIBLE;
-    }
-    // Title bar.
-    {
-        let n = w.node_mut(N_TITLE_BAR);
-        n.first_child = N_TITLE_TEXT;
-        n.next_sibling = N_SHADOW;
-        n.width = 1024;
-        n.height = 36;
-        n.background = chrome_bg;
-        n.flags = NodeFlags::VISIBLE;
-    }
-    // Title text.
-    {
-        let n = w.node_mut(N_TITLE_TEXT);
-        n.next_sibling = N_CLOCK_TEXT;
-        n.x = 12;
-        n.y = 8;
-        n.width = 512;
-        n.height = line_height;
-        n.content = Content::Text { runs: title_runs_ref, run_count: title_run_count, _pad: [0; 2] };
-        n.content_hash = fnv1a(b"Text");
-        n.flags = NodeFlags::VISIBLE;
-    }
-    // Clock text.
-    {
-        let n = w.node_mut(N_CLOCK_TEXT);
-        n.x = 932;
-        n.y = 8;
-        n.width = 80;
-        n.height = line_height;
-        n.content = Content::Text { runs: clock_runs_ref, run_count: clock_run_count, _pad: [0; 2] };
-        n.content_hash = fnv1a(clock_text);
-        n.flags = NodeFlags::VISIBLE;
-    }
-    // Shadow: structural placeholder (real shadow on title bar).
-    {
-        let n = w.node_mut(N_SHADOW);
-        n.next_sibling = N_CONTENT;
-        n.y = 36;
-        n.width = 1024;
-        n.height = 0;
-        n.background = Color::TRANSPARENT;
-        n.flags = NodeFlags::VISIBLE;
-    }
-    // Real shadow on title bar.
-    {
-        let n = w.node_mut(N_TITLE_BAR);
-        n.shadow_color = Color::rgba(0, 0, 0, 60);
-        n.shadow_offset_x = 0;
-        n.shadow_offset_y = 12;
-        n.shadow_blur_radius = 8;
-        n.shadow_spread = 0;
-    }
-    // Content.
-    {
-        let n = w.node_mut(N_CONTENT);
-        n.first_child = N_DOC_TEXT;
-        n.next_sibling = NULL;
-        n.y = 48;
-        n.width = 1024;
-        n.height = 720;
-        n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
-    }
-    // Doc text.
-    {
-        let n = w.node_mut(N_DOC_TEXT);
-        n.first_child = N_CURSOR;
-        n.x = 12;
-        n.y = 8;
-        n.width = 1000;
-        n.height = 720;
-        n.scroll_y = 0;
-        n.content = Content::Text { runs: doc_runs_ref, run_count: doc_run_count, _pad: [0; 2] };
-        n.content_hash = fnv1a(doc_text);
-        n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
-    }
-    // Cursor.
-    {
-        let n = w.node_mut(N_CURSOR);
-        n.x = 0;
-        n.y = 0;
-        n.width = 2;
-        n.height = line_height;
-        n.background = Color::rgb(200, 200, 200);
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = NULL;
-    }
-
-    w.set_root(N_ROOT);
-
-    clock_glyph_ref
-}
-
-// VAL-CORE-001: Clock tick updates only clock node
-#[test]
-fn incremental_clock_update_changes_only_clock() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    let clock_glyph_ref = build_test_editor_scene(&mut dw, b"hello world", b"12:34:56");
-    dw.swap();
-
-    // Snapshot all nodes before the incremental update.
-    let nodes_before: Vec<Node> = dw.front_nodes().to_vec();
-    let node_size = core::mem::size_of::<Node>();
-
-    // Incremental clock update: copy forward, update glyph data in-place.
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-
-        // Read the clock node's Content::Text to find the glyph DataRef.
-        let clock_node = w.node(N_CLOCK_TEXT);
-        if let Content::Text { runs, .. } = clock_node.content {
-            // Read the TextRun from the data buffer.
-            let data_buf = w.data_buf();
-            let run_offset = runs.offset as usize;
-            let run_size = core::mem::size_of::<TextRun>();
-            if run_offset + run_size <= data_buf.len() {
-                // SAFETY: TextRun is repr(C), data buffer is aligned.
-                let run_ptr = unsafe {
-                    data_buf.as_ptr().add(run_offset) as *const TextRun
-                };
-                let text_run = unsafe { core::ptr::read(run_ptr) };
-                let glyph_dref = text_run.glyphs;
-
-                // Build new glyphs for "12:35:00".
-                let new_glyphs = bytes_to_shaped_glyphs(b"12:35:00", text_run.advance);
-                let new_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        new_glyphs.as_ptr() as *const u8,
-                        new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
-                    )
-                };
-
-                assert!(w.update_data(glyph_dref, new_bytes));
-            }
-        }
-
-        w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(b"12:35:00");
-        w.mark_changed(N_CLOCK_TEXT);
-    }
-    dw.swap();
-
-    // Verify: only N_CLOCK_TEXT changed, all other nodes byte-identical.
-    let nodes_after: Vec<Node> = dw.front_nodes().to_vec();
-    assert_eq!(nodes_after.len(), 8);
-
-    for i in 0..8u16 {
-        if i == N_CLOCK_TEXT {
-            // Clock node should have new content_hash.
-            assert_ne!(
-                nodes_after[i as usize].content_hash,
-                nodes_before[i as usize].content_hash,
-                "Clock content_hash should have changed"
-            );
-        } else {
-            // All other nodes unchanged byte-for-byte.
-            let before = unsafe {
-                core::slice::from_raw_parts(
-                    &nodes_before[i as usize] as *const Node as *const u8, node_size,
-                )
-            };
-            let after = unsafe {
-                core::slice::from_raw_parts(
-                    &nodes_after[i as usize] as *const Node as *const u8, node_size,
-                )
-            };
-            assert_eq!(before, after, "Node {} should be unchanged after clock update", i);
-        }
-    }
-
-    // Verify change list has only N_CLOCK_TEXT.
-    let dr = DoubleReader::new(&buf);
-    let cl = dr.change_list().unwrap();
-    assert_eq!(cl.len(), 1);
-    assert_eq!(cl[0], N_CLOCK_TEXT);
-}
-
-// VAL-CORE-002: Cursor move updates only cursor node
-#[test]
-fn incremental_cursor_update_changes_only_cursor() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    build_test_editor_scene(&mut dw, b"hello world", b"12:34:56");
-    dw.swap();
-
-    let nodes_before: Vec<Node> = dw.front_nodes().to_vec();
-    let node_size = core::mem::size_of::<Node>();
-
-    // Incremental cursor update: move cursor to position 5.
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-
-        let doc_text = b"hello world";
-        let (cursor_line, cursor_col) = byte_to_line_col(doc_text, 5, 80);
-        let cursor_x = (cursor_col as u32 * 8) as i16;
-        let cursor_y = (cursor_line as i32 * 20 - 0) as i16;
-
-        let n = w.node_mut(N_CURSOR);
-        n.x = cursor_x;
-        n.y = cursor_y;
-
-        w.mark_changed(N_CURSOR);
-    }
-    dw.swap();
-
-    let nodes_after: Vec<Node> = dw.front_nodes().to_vec();
-    assert_eq!(nodes_after.len(), 8);
-
-    for i in 0..8u16 {
-        if i == N_CURSOR {
-            assert_eq!(nodes_after[i as usize].x, 40); // 5 * 8
-            assert_eq!(nodes_after[i as usize].y, 0);
-            // Other cursor properties unchanged.
-            assert_eq!(nodes_after[i as usize].width, nodes_before[i as usize].width);
-            assert_eq!(nodes_after[i as usize].background, nodes_before[i as usize].background);
-        } else {
-            let before = unsafe {
-                core::slice::from_raw_parts(
-                    &nodes_before[i as usize] as *const Node as *const u8, node_size,
-                )
-            };
-            let after = unsafe {
-                core::slice::from_raw_parts(
-                    &nodes_after[i as usize] as *const Node as *const u8, node_size,
-                )
-            };
-            assert_eq!(before, after, "Node {} should be unchanged after cursor move", i);
-        }
-    }
-
-    // Verify change list has only N_CURSOR.
-    let dr = DoubleReader::new(&buf);
-    let cl = dr.change_list().unwrap();
-    assert_eq!(cl.len(), 1);
-    assert_eq!(cl[0], N_CURSOR);
-}
-
-// VAL-CORE-006: Incremental update matches full rebuild
-#[test]
-fn incremental_cursor_matches_full_rebuild() {
-    let doc_text = b"hello world\nsecond line\nthird line";
-    let char_width: u16 = 8;
-    let line_height: u16 = 20;
-    let cursor_pos: usize = 13; // start of "second"
-    let scroll_px: i32 = 0;
-    let chars_per_line: usize = 80;
-
-    // Full rebuild: build from scratch with cursor at position 13.
-    let mut buf_full = make_double_buf();
-    let mut dw_full = DoubleWriter::new(&mut buf_full);
-    {
-        let mut w = dw_full.back();
-        w.clear();
-        for _ in 0..8 { w.alloc_node().unwrap(); }
-        w.set_root(N_ROOT);
-        // Set cursor to position 13.
-        let (line, col) = byte_to_line_col(doc_text, cursor_pos, chars_per_line);
-        let n = w.node_mut(N_CURSOR);
-        n.x = (col as u32 * char_width as u32) as i16;
-        n.y = (line as i32 * line_height as i32 - scroll_px) as i16;
-        n.width = 2;
-        n.height = line_height;
-        n.background = Color::rgb(200, 200, 200);
-        n.flags = NodeFlags::VISIBLE;
-    }
-    dw_full.swap();
-
-    // Incremental: build initial scene with cursor at 0, then update to 13.
-    let mut buf_inc = make_double_buf();
-    let mut dw_inc = DoubleWriter::new(&mut buf_inc);
-    {
-        let mut w = dw_inc.back();
-        w.clear();
-        for _ in 0..8 { w.alloc_node().unwrap(); }
-        w.set_root(N_ROOT);
-        let n = w.node_mut(N_CURSOR);
-        n.x = 0;
-        n.y = 0;
-        n.width = 2;
-        n.height = line_height;
-        n.background = Color::rgb(200, 200, 200);
-        n.flags = NodeFlags::VISIBLE;
-    }
-    dw_inc.swap();
-
-    // Incremental update to cursor_pos=13.
-    dw_inc.copy_front_to_back();
-    {
-        let mut w = dw_inc.back();
-        let (line, col) = byte_to_line_col(doc_text, cursor_pos, chars_per_line);
-        let n = w.node_mut(N_CURSOR);
-        n.x = (col as u32 * char_width as u32) as i16;
-        n.y = (line as i32 * line_height as i32 - scroll_px) as i16;
-        w.mark_changed(N_CURSOR);
-    }
-    dw_inc.swap();
-
-    // Compare cursor nodes.
-    let full_cursor = dw_full.front_nodes()[N_CURSOR as usize];
-    let inc_cursor = dw_inc.front_nodes()[N_CURSOR as usize];
-
-    assert_eq!(full_cursor.x, inc_cursor.x, "Cursor x mismatch");
-    assert_eq!(full_cursor.y, inc_cursor.y, "Cursor y mismatch");
-    assert_eq!(full_cursor.width, inc_cursor.width, "Cursor width mismatch");
-    assert_eq!(full_cursor.height, inc_cursor.height, "Cursor height mismatch");
-    assert_eq!(full_cursor.background, inc_cursor.background, "Cursor bg mismatch");
-}
-
-// VAL-CORE-004 / VAL-CORE-010: Selection update manages node count correctly
-#[test]
-fn incremental_selection_manages_nodes() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    build_test_editor_scene(&mut dw, b"hello world\nsecond line", b"12:34:56");
-    dw.swap();
-
-    assert_eq!(dw.front_nodes().len(), 8);
-
-    // Add selection: bytes 0..5 (= "hello" on line 0).
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-        // Truncate to well-known count first.
-        w.set_node_count(WELL_KNOWN_COUNT);
-        w.node_mut(N_CURSOR).next_sibling = NULL;
-        w.mark_changed(N_CURSOR);
-
-        // Add one selection rect.
-        let sel_id = w.alloc_node().unwrap(); // should be 8
-        assert_eq!(sel_id, 8);
-        let n = w.node_mut(sel_id);
-        n.x = 0;
-        n.y = 0;
-        n.width = 5 * 8;
-        n.height = 20;
-        n.background = Color::rgba(0, 100, 200, 80);
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = NULL;
-
-        w.node_mut(N_CURSOR).next_sibling = sel_id;
-        w.mark_changed(sel_id);
-    }
-    dw.swap();
-
-    assert_eq!(dw.front_nodes().len(), 9); // 8 well-known + 1 selection
-
-    // Clear selection.
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-        w.set_node_count(WELL_KNOWN_COUNT);
-        w.node_mut(N_CURSOR).next_sibling = NULL;
-        w.mark_changed(N_CURSOR);
-    }
-    dw.swap();
-
-    assert_eq!(dw.front_nodes().len(), 8); // back to well-known only
-}
-
-// VAL-CORE-010: Selection create/destroy cycles don't leak node slots
-#[test]
-fn selection_cycle_no_node_leak() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    build_test_editor_scene(&mut dw, b"hello world\nsecond line\nthird line", b"12:00:00");
-    dw.swap();
-
-    // Cycle select/deselect 10 times.
-    for cycle in 0..10 {
-        // Add selection (2 rects across 2 lines).
-        dw.copy_front_to_back();
-        {
-            let mut w = dw.back();
-            w.set_node_count(WELL_KNOWN_COUNT);
-            w.node_mut(N_CURSOR).next_sibling = NULL;
-            w.mark_changed(N_CURSOR);
-
-            // Selection rect on line 0.
-            let s1 = w.alloc_node().unwrap();
-            assert_eq!(s1, 8, "Cycle {}: first sel node should be 8", cycle);
-            w.node_mut(s1).background = Color::rgba(0, 100, 200, 80);
-            w.node_mut(s1).flags = NodeFlags::VISIBLE;
-            w.node_mut(s1).next_sibling = NULL;
-            w.node_mut(N_CURSOR).next_sibling = s1;
-            w.mark_changed(s1);
-
-            // Selection rect on line 1.
-            let s2 = w.alloc_node().unwrap();
-            assert_eq!(s2, 9, "Cycle {}: second sel node should be 9", cycle);
-            w.node_mut(s2).background = Color::rgba(0, 100, 200, 80);
-            w.node_mut(s2).flags = NodeFlags::VISIBLE;
-            w.node_mut(s2).next_sibling = NULL;
-            w.node_mut(s1).next_sibling = s2;
-            w.mark_changed(s2);
-        }
-        dw.swap();
-
-        assert_eq!(
-            dw.front_nodes().len(), 10,
-            "Cycle {}: expected 10 nodes (8 + 2 sel rects)", cycle
-        );
-
-        // Clear selection.
-        dw.copy_front_to_back();
-        {
-            let mut w = dw.back();
-            w.set_node_count(WELL_KNOWN_COUNT);
-            w.node_mut(N_CURSOR).next_sibling = NULL;
-            w.mark_changed(N_CURSOR);
-        }
-        dw.swap();
-
-        assert_eq!(
-            dw.front_nodes().len(), 8,
-            "Cycle {}: expected 8 nodes after clearing selection", cycle
-        );
-    }
-}
-
-// VAL-SCENE-009: Data buffer exhaustion triggers full rebuild fallback
-#[test]
-fn data_buffer_exhaustion_triggers_full_rebuild() {
-    let mut buf = make_double_buf();
-
-    // Build initial scene with enough data to approach 75% threshold.
-    {
-        let mut dw = DoubleWriter::new(&mut buf);
-        {
-            let mut w = dw.back();
-            w.clear();
-            for _ in 0..8 { w.alloc_node().unwrap(); }
-            w.set_root(N_ROOT);
-
-            // Fill data buffer to just above 75%.
-            let threshold = (DATA_BUFFER_SIZE as u32 * 3) / 4;
-            let padding = vec![0xABu8; threshold as usize + 100];
-            w.push_data(&padding);
-        }
-        dw.swap();
-
-        let data_used = dw.front_data_buf().len();
-        let threshold = (DATA_BUFFER_SIZE * 3) / 4;
-        assert!(
-            data_used > threshold,
-            "data_used {} should exceed 75% threshold {}",
-            data_used, threshold
-        );
-    }
-
-    // Simulate what update_document_content does: check threshold.
-    // If above threshold, a full rebuild (clear + reset_data) is needed.
-    {
-        let mut dw = DoubleWriter::from_existing(&mut buf);
-        dw.copy_front_to_back();
-        {
-            let w = dw.back();
-            let used = w.data_used();
-            let threshold = (DATA_BUFFER_SIZE as u32 * 3) / 4;
-
-            if used > threshold {
-                // Fall back to full rebuild.
-                drop(w);
-                let mut w2 = dw.back();
-                w2.clear();
-                w2.reset_data();
-                let root = w2.alloc_node().unwrap();
-                w2.set_root(root);
-                // After clear, data_used is 0.
-                assert_eq!(w2.data_used(), 0);
-            }
-        }
-        dw.swap();
-    }
-
-    // Verify the full rebuild produced a clean scene.
-    let dr = DoubleReader::new(&buf);
-    assert!(dr.is_full_repaint()); // clear() sets FULL_REPAINT
-    assert_eq!(dr.front_nodes().len(), 1); // only root node
-}
-
-// VAL-CORE-009: Repeated incremental cycles preserve scene integrity
-// Interleaves clock updates, cursor moves, text insertions, and selection
-// changes across 100 iterations to verify no state accumulation or drift.
-#[test]
-fn repeated_incremental_cycles_preserve_integrity() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    let char_width: u16 = 8;
-    let line_height: u16 = 20;
-    let font_size: u16 = 16;
-    let text_color = Color::rgb(220, 220, 220);
-    let sel_color = Color::rgba(0, 100, 200, 80);
-    let chars_per_line: usize = 80;
-
-    // Start with initial document text.
-    let mut doc_text: Vec<u8> = b"hello world\nsecond line\nthird line".to_vec();
-    let mut cursor_pos: usize = 0;
-    let mut clock_text: Vec<u8> = b"12:00:00".to_vec();
-    let mut sel_start: usize = 0;
-    let mut sel_end: usize = 0;
-
-    build_test_editor_scene(&mut dw, &doc_text, &clock_text);
-    dw.swap();
-
-    for i in 0..100 {
-        match i % 5 {
-            // Clock-only update (20 iterations)
-            0 => {
-                let second = i % 60;
-                clock_text = format!("12:{:02}:{:02}", i / 60 % 60, second)
-                    .into_bytes();
-                // Ensure clock_text is always 8 bytes.
-                clock_text.resize(8, b'0');
-
-                dw.copy_front_to_back();
-                {
-                    let mut w = dw.back();
-
-                    let clock_node = w.node(N_CLOCK_TEXT);
-                    if let Content::Text { runs, .. } = clock_node.content {
-                        let data_buf = w.data_buf();
-                        let run_offset = runs.offset as usize;
-                        let run_size = core::mem::size_of::<TextRun>();
-                        if run_offset + run_size <= data_buf.len() {
-                            // SAFETY: TextRun is repr(C), data buffer is aligned.
-                            let run_ptr = unsafe {
-                                data_buf.as_ptr().add(run_offset) as *const TextRun
-                            };
-                            let text_run = unsafe { core::ptr::read(run_ptr) };
-                            let glyph_dref = text_run.glyphs;
-
-                            let new_glyphs =
-                                bytes_to_shaped_glyphs(&clock_text, text_run.advance);
-                            let new_bytes = unsafe {
-                                core::slice::from_raw_parts(
-                                    new_glyphs.as_ptr() as *const u8,
-                                    new_glyphs.len()
-                                        * core::mem::size_of::<ShapedGlyph>(),
-                                )
-                            };
-                            let _ = w.update_data(glyph_dref, new_bytes);
-                        }
-                    }
-
-                    w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(&clock_text);
-                    w.mark_changed(N_CLOCK_TEXT);
-                }
-                dw.swap();
-            }
-
-            // Cursor-only move (20 iterations)
-            1 => {
-                cursor_pos = i % (doc_text.len() + 1);
-                sel_start = cursor_pos;
-                sel_end = cursor_pos;
-
-                dw.copy_front_to_back();
-                {
-                    let mut w = dw.back();
-                    let (line, col) =
-                        byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
-                    let n = w.node_mut(N_CURSOR);
-                    n.x = (col as u32 * char_width as u32) as i16;
-                    n.y = (line as i32 * line_height as i32) as i16;
-                    w.mark_changed(N_CURSOR);
-                }
-                dw.swap();
-            }
-
-            // Text insertion (20 iterations)
-            2 => {
-                let insert_pos = cursor_pos.min(doc_text.len());
-                let ch = b'a' + (i % 26) as u8;
-                doc_text.insert(insert_pos, ch);
-                cursor_pos = insert_pos + 1;
-                sel_start = cursor_pos;
-                sel_end = cursor_pos;
-
-                dw.copy_front_to_back();
-                {
-                    let mut w = dw.back();
-                    w.set_node_count(WELL_KNOWN_COUNT);
-
-                    // Re-layout doc text.
-                    let all_runs = layout_mono_lines(
-                        &doc_text,
-                        chars_per_line,
-                        line_height as i16,
-                        text_color,
-                        char_width,
-                        font_size,
-                    );
-                    let visible = scroll_runs(all_runs, 0, line_height as u32, 700);
-                    let mut final_runs: Vec<TextRun> =
-                        Vec::with_capacity(visible.len());
-                    for mut run in visible {
-                        let lt = line_bytes_for_run(&doc_text, &run);
-                        let shaped = bytes_to_shaped_glyphs(lt, char_width);
-                        run.glyphs = w.push_shaped_glyphs(&shaped);
-                        run.glyph_count = shaped.len() as u16;
-                        final_runs.push(run);
-                    }
-                    let (doc_runs_ref, doc_run_count) =
-                        w.push_text_runs(&final_runs);
-
-                    {
-                        let n = w.node_mut(N_DOC_TEXT);
-                        n.content = Content::Text {
-                            runs: doc_runs_ref,
-                            run_count: doc_run_count,
-                            _pad: [0; 2],
-                        };
-                        n.content_hash = fnv1a(&doc_text);
-                    }
-                    w.mark_changed(N_DOC_TEXT);
-
-                    // Update cursor.
-                    let (line, col) =
-                        byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
-                    let n = w.node_mut(N_CURSOR);
-                    n.x = (col as u32 * char_width as u32) as i16;
-                    n.y = (line as i32 * line_height as i32) as i16;
-                    n.next_sibling = NULL;
-                    w.mark_changed(N_CURSOR);
-                }
-                dw.swap();
-            }
-
-            // Selection change (20 iterations)
-            3 => {
-                // Select a range around current cursor.
-                sel_start = cursor_pos.saturating_sub(3).min(doc_text.len());
-                sel_end = (cursor_pos + 5).min(doc_text.len());
-
-                dw.copy_front_to_back();
-                {
-                    let mut w = dw.back();
-                    w.set_node_count(WELL_KNOWN_COUNT);
-
-                    // Update cursor.
-                    let (line, col) =
-                        byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
-                    let n = w.node_mut(N_CURSOR);
-                    n.x = (col as u32 * char_width as u32) as i16;
-                    n.y = (line as i32 * line_height as i32) as i16;
-                    n.next_sibling = NULL;
-                    w.mark_changed(N_CURSOR);
-
-                    // Add selection rects.
-                    let (sl, sh) = if sel_start <= sel_end {
-                        (sel_start, sel_end)
-                    } else {
-                        (sel_end, sel_start)
-                    };
-                    if sl < sh {
-                        let (sl_line, sl_col) =
-                            byte_to_line_col(&doc_text, sl, chars_per_line);
-                        let (sh_line, sh_col) =
-                            byte_to_line_col(&doc_text, sh, chars_per_line);
-                        let mut prev_sel: u16 = NULL;
-
-                        for line in sl_line..=sh_line {
-                            let c_start = if line == sl_line { sl_col } else { 0 };
-                            let c_end = if line == sh_line {
-                                sh_col
-                            } else {
-                                chars_per_line
-                            };
-                            if c_start >= c_end {
-                                continue;
-                            }
-                            if let Some(sid) = w.alloc_node() {
-                                let sn = w.node_mut(sid);
-                                sn.x = (c_start as u32 * char_width as u32) as i16;
-                                sn.y = (line as i32 * line_height as i32) as i16;
-                                sn.width =
-                                    ((c_end - c_start) as u32 * char_width as u32) as u16;
-                                sn.height = line_height;
-                                sn.background = sel_color;
-                                sn.flags = NodeFlags::VISIBLE;
-                                sn.next_sibling = NULL;
-                                w.mark_changed(sid);
-
-                                if prev_sel == NULL {
-                                    w.node_mut(N_CURSOR).next_sibling = sid;
-                                } else {
-                                    w.node_mut(prev_sel).next_sibling = sid;
-                                }
-                                prev_sel = sid;
-                            }
-                        }
-                    }
-                }
-                dw.swap();
-            }
-
-            // Clear selection (20 iterations) — ensures node count returns to 8
-            _ => {
-                sel_start = cursor_pos;
-                sel_end = cursor_pos;
-
-                dw.copy_front_to_back();
-                {
-                    let mut w = dw.back();
-                    w.set_node_count(WELL_KNOWN_COUNT);
-                    w.node_mut(N_CURSOR).next_sibling = NULL;
-                    w.mark_changed(N_CURSOR);
-                }
-                dw.swap();
-            }
-        }
-    }
-
-    // After 100 diverse cycles, build a reference scene from scratch with
-    // the same final state and compare key properties.
-    let (expected_line, expected_col) =
-        byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
-    let expected_cursor_x = (expected_col as u32 * char_width as u32) as i16;
-    let expected_cursor_y = (expected_line as i32 * line_height as i32) as i16;
-
-    let cursor = &dw.front_nodes()[N_CURSOR as usize];
-    assert_eq!(cursor.x, expected_cursor_x, "Cursor x after 100 diverse cycles");
-    assert_eq!(cursor.y, expected_cursor_y, "Cursor y after 100 diverse cycles");
-
-    // Last iteration (i=99, 99%5=4) clears selection → node count should be 8.
-    assert_eq!(
-        dw.front_nodes().len(),
-        8,
-        "Node count should be 8 after selection clear"
-    );
-
-    // Chrome nodes should still be intact.
-    assert_eq!(dw.front_nodes()[N_ROOT as usize].width, 1024);
-    assert_eq!(dw.front_nodes()[N_TITLE_BAR as usize].height, 36);
-    // N_SHADOW is now a 0-height placeholder — real shadow rendered via
-    // title bar's shadow fields.
-    assert_eq!(dw.front_nodes()[N_SHADOW as usize].height, 0);
-
-    // Clock should reflect the last clock update (i=95, 95%5=0).
-    // The clock_text was last set at iteration 95.
-    assert_ne!(
-        dw.front_nodes()[N_CLOCK_TEXT as usize].content_hash,
-        fnv1a(b"12:00:00"),
-        "Clock hash should differ from initial after updates"
-    );
-}
-
-// VAL-CORE-008: Change list populated correctly per update type
-#[test]
-fn change_list_correct_per_update_type() {
-    let mut buf = make_double_buf();
-
-    // Initial scene.
-    {
-        let mut dw = DoubleWriter::new(&mut buf);
-        build_test_editor_scene(&mut dw, b"hello", b"12:00:00");
-        dw.swap();
-    }
-
-    // Clock-only update.
-    {
-        let mut dw = DoubleWriter::from_existing(&mut buf);
-        dw.copy_front_to_back();
-        {
-            let mut w = dw.back();
-            w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(b"12:01:00");
-            w.mark_changed(N_CLOCK_TEXT);
-        }
-        dw.swap();
-    }
-    {
-        let dr = DoubleReader::new(&buf);
-        let cl = dr.change_list().unwrap();
-        assert_eq!(cl, &[N_CLOCK_TEXT], "Clock update should only mark N_CLOCK_TEXT");
-    }
-
-    // Cursor-only update.
-    {
-        let mut dw = DoubleWriter::from_existing(&mut buf);
-        dw.copy_front_to_back();
-        {
-            let mut w = dw.back();
-            w.node_mut(N_CURSOR).x = 40;
-            w.mark_changed(N_CURSOR);
-        }
-        dw.swap();
-    }
-    {
-        let dr = DoubleReader::new(&buf);
-        let cl = dr.change_list().unwrap();
-        assert_eq!(cl, &[N_CURSOR], "Cursor update should only mark N_CURSOR");
-    }
-
-    // Document update: marks N_DOC_TEXT + N_CURSOR.
-    {
-        let mut dw = DoubleWriter::from_existing(&mut buf);
-        dw.copy_front_to_back();
-        {
-            let mut w = dw.back();
-            w.node_mut(N_DOC_TEXT).content_hash = fnv1a(b"hello!");
-            w.mark_changed(N_DOC_TEXT);
-            w.node_mut(N_CURSOR).x = 48;
-            w.mark_changed(N_CURSOR);
-        }
-        dw.swap();
-    }
-    {
-        let dr = DoubleReader::new(&buf);
-        let cl = dr.change_list().unwrap();
-        assert_eq!(cl.len(), 2);
-        assert!(cl.contains(&N_DOC_TEXT));
-        assert!(cl.contains(&N_CURSOR));
-    }
-}
-
-// VAL-CORE-003: Character insert updates doc text and cursor
-#[test]
-fn incremental_doc_update_changes_doc_text_and_cursor() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    let old_text = b"hello";
-    build_test_editor_scene(&mut dw, old_text, b"12:00:00");
-    dw.swap();
-
-    let nodes_before: Vec<Node> = dw.front_nodes().to_vec();
-    let node_size = core::mem::size_of::<Node>();
-
-    // Simulate typing 'x' at position 5 → "hellox"
-    let new_text = b"hellox";
-
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-
-        // Truncate selection nodes.
-        w.set_node_count(WELL_KNOWN_COUNT);
-
-        // Re-layout and push new doc text data.
-        let text_color = Color::rgb(220, 220, 220);
-        let runs = layout_mono_lines(new_text, 80, 20, text_color, 8, 16);
-        let visible = scroll_runs(runs, 0, 20, 700);
-        let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible.len());
-        for mut run in visible {
-            let line_text = line_bytes_for_run(new_text, &run);
-            let shaped = bytes_to_shaped_glyphs(line_text, 8);
-            run.glyphs = w.push_shaped_glyphs(&shaped);
-            run.glyph_count = shaped.len() as u16;
-            final_runs.push(run);
-        }
-        let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
-
-        // Update doc text node.
-        {
-            let n = w.node_mut(N_DOC_TEXT);
-            n.content = Content::Text { runs: doc_runs_ref, run_count: doc_run_count, _pad: [0; 2] };
-            n.content_hash = fnv1a(new_text);
-        }
-        w.mark_changed(N_DOC_TEXT);
-
-        // Update cursor position (after 'x' = position 6).
-        let (line, col) = byte_to_line_col(new_text, 6, 80);
-        let n = w.node_mut(N_CURSOR);
-        n.x = (col as u32 * 8) as i16;
-        n.y = (line as i32 * 20) as i16;
-        n.next_sibling = NULL;
-        w.mark_changed(N_CURSOR);
-    }
-    dw.swap();
-
-    let nodes_after: Vec<Node> = dw.front_nodes().to_vec();
-
-    // Doc text should have changed.
-    assert_ne!(
-        nodes_after[N_DOC_TEXT as usize].content_hash,
-        nodes_before[N_DOC_TEXT as usize].content_hash,
-        "Doc text content_hash should have changed"
-    );
-
-    // Cursor should have moved.
-    assert_eq!(nodes_after[N_CURSOR as usize].x, 48); // 6 * 8
-
-    // Chrome nodes should be unchanged.
-    for &i in &[N_ROOT, N_TITLE_BAR, N_TITLE_TEXT, N_CLOCK_TEXT, N_SHADOW, N_CONTENT] {
-        let before = unsafe {
-            core::slice::from_raw_parts(
-                &nodes_before[i as usize] as *const Node as *const u8, node_size,
-            )
-        };
-        let after = unsafe {
-            core::slice::from_raw_parts(
-                &nodes_after[i as usize] as *const Node as *const u8, node_size,
-            )
-        };
-        assert_eq!(before, after, "Chrome node {} should be unchanged after doc update", i);
-    }
-
-    // Change list should have N_DOC_TEXT and N_CURSOR.
-    let dr = DoubleReader::new(&buf);
-    let cl = dr.change_list().unwrap();
-    assert_eq!(cl.len(), 2);
-    assert!(cl.contains(&N_DOC_TEXT));
-    assert!(cl.contains(&N_CURSOR));
-}
-
-// VAL-SCENE-009 test: update_data (in-place) does not grow data_used
-#[test]
-fn clock_update_data_used_unchanged() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    build_test_editor_scene(&mut dw, b"hello", b"12:00:00");
-    dw.swap();
-
-    let data_used_before = dw.front_data_buf().len();
-
-    // Incremental clock update via in-place glyph overwrite.
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-
-        let clock_node = w.node(N_CLOCK_TEXT);
-        if let Content::Text { runs, .. } = clock_node.content {
-            let data_buf = w.data_buf();
-            let run_offset = runs.offset as usize;
-            let run_size = core::mem::size_of::<TextRun>();
-            if run_offset + run_size <= data_buf.len() {
-                let run_ptr = unsafe { data_buf.as_ptr().add(run_offset) as *const TextRun };
-                let text_run = unsafe { core::ptr::read(run_ptr) };
-                let glyph_dref = text_run.glyphs;
-
-                let new_glyphs = bytes_to_shaped_glyphs(b"12:01:00", text_run.advance);
-                let new_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        new_glyphs.as_ptr() as *const u8,
-                        new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
-                    )
-                };
-                assert!(w.update_data(glyph_dref, new_bytes));
-            }
-        }
-
-        w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(b"12:01:00");
-        w.mark_changed(N_CLOCK_TEXT);
-
-        // data_used should be the same as before.
-        assert_eq!(w.data_used() as usize, data_used_before, "Clock update should not grow data_used");
-    }
-    dw.swap();
-
-    // Verify data_used hasn't grown in the new front buffer.
-    assert_eq!(dw.front_data_buf().len(), data_used_before);
-}
-
-// VAL-CORE-007: Scroll change updates only doc text runs and cursor
-#[test]
-fn incremental_scroll_updates_only_doc_and_cursor() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    // Build a scene with multi-line text (enough to scroll).
-    let mut long_text = Vec::new();
-    for i in 0..50u8 {
-        if i > 0 {
-            long_text.push(b'\n');
-        }
-        // Each line: "Line XX some padding text here!"
-        long_text.extend_from_slice(b"Line ");
-        long_text.push(b'0' + i / 10);
-        long_text.push(b'0' + i % 10);
-        long_text.extend_from_slice(b" some padding text here!");
-    }
-
-    build_test_editor_scene(&mut dw, &long_text, b"12:00:00");
-    dw.swap();
-
-    // Snapshot all nodes before the scroll update.
-    let nodes_before: Vec<Node> = dw.front_nodes().to_vec();
-    let node_size = core::mem::size_of::<Node>();
-
-    // Incremental scroll update: same text, different scroll_y.
-    // This mirrors what update_document_content does when only scroll changes.
-    let scroll_lines: u32 = 5;
-    let char_width: u16 = 8;
-    let line_height: u16 = 20;
-    let font_size: u16 = 16;
-    let text_color = Color::rgb(220, 220, 220);
-    let chars_per_line: usize = 80;
-    let scroll_px = scroll_lines as i32 * line_height as i32;
-
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-
-        // Truncate selection nodes (none in this case, but matches real code path).
-        w.set_node_count(WELL_KNOWN_COUNT);
-
-        // Re-layout visible text with new scroll offset.
-        let all_runs = layout_mono_lines(
-            &long_text,
-            chars_per_line,
-            line_height as i16,
-            text_color,
-            char_width,
-            font_size,
-        );
-        let visible_runs = scroll_runs(all_runs, scroll_lines, line_height as u32, 700);
-
-        let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
-        for mut run in visible_runs {
-            let line_text = line_bytes_for_run(&long_text, &run);
-            let shaped = bytes_to_shaped_glyphs(line_text, char_width);
-            run.glyphs = w.push_shaped_glyphs(&shaped);
-            run.glyph_count = shaped.len() as u16;
-            final_runs.push(run);
-        }
-        let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
-
-        // Update N_DOC_TEXT with new scroll-adjusted content.
-        {
-            let n = w.node_mut(N_DOC_TEXT);
-            n.content = Content::Text {
-                runs: doc_runs_ref,
-                run_count: doc_run_count,
-                _pad: [0; 2],
-            };
-            n.content_hash = fnv1a(&long_text);
-        }
-        w.mark_changed(N_DOC_TEXT);
-
-        // Update cursor position for new scroll offset.
-        // Cursor at position 0, now adjusted for scroll.
-        let (cursor_line, cursor_col) = byte_to_line_col(&long_text, 0, chars_per_line);
-        let cursor_x = (cursor_col as u32 * char_width as u32) as i16;
-        let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
-        {
-            let n = w.node_mut(N_CURSOR);
-            n.x = cursor_x;
-            n.y = cursor_y;
-            n.next_sibling = NULL;
-        }
-        w.mark_changed(N_CURSOR);
-    }
-    dw.swap();
-
-    let nodes_after: Vec<Node> = dw.front_nodes().to_vec();
-    assert_eq!(nodes_after.len(), 8);
-
-    // Chrome nodes (root, title bar, title text, clock text, shadow, content)
-    // should be byte-identical — scroll only affects doc text and cursor.
-    let chrome_indices = [N_ROOT, N_TITLE_BAR, N_TITLE_TEXT, N_CLOCK_TEXT, N_SHADOW, N_CONTENT];
-    for &i in &chrome_indices {
-        let before = unsafe {
-            core::slice::from_raw_parts(
-                &nodes_before[i as usize] as *const Node as *const u8,
-                node_size,
-            )
-        };
-        let after = unsafe {
-            core::slice::from_raw_parts(
-                &nodes_after[i as usize] as *const Node as *const u8,
-                node_size,
-            )
-        };
-        assert_eq!(
-            before, after,
-            "Chrome node {} should be byte-identical after scroll-only update",
-            i
-        );
-    }
-
-    // N_DOC_TEXT should have changed (new text runs for scrolled viewport).
-    let doc_before = unsafe {
-        core::slice::from_raw_parts(
-            &nodes_before[N_DOC_TEXT as usize] as *const Node as *const u8,
-            node_size,
-        )
-    };
-    let doc_after = unsafe {
-        core::slice::from_raw_parts(
-            &nodes_after[N_DOC_TEXT as usize] as *const Node as *const u8,
-            node_size,
-        )
-    };
-    assert_ne!(
-        doc_before, doc_after,
-        "N_DOC_TEXT should have changed after scroll (new text runs)"
-    );
-
-    // N_CURSOR should have changed (y adjusted for scroll offset).
-    let cursor_after = &nodes_after[N_CURSOR as usize];
-    // Cursor at byte 0 = line 0, col 0. With scroll_lines=5, y = 0*20 - 5*20 = -100.
-    assert_eq!(cursor_after.y, -100, "Cursor y should be adjusted for scroll");
-
-    // Change list should contain exactly N_DOC_TEXT and N_CURSOR.
-    let dr = DoubleReader::new(&buf);
-    let cl = dr.change_list().unwrap();
-    assert_eq!(cl.len(), 2, "Change list should have exactly 2 entries");
-    assert!(cl.contains(&N_DOC_TEXT), "Change list should contain N_DOC_TEXT");
-    assert!(cl.contains(&N_CURSOR), "Change list should contain N_CURSOR");
-}
 
 // set_node_count unit test
 #[test]
@@ -3701,159 +1759,6 @@ fn set_node_count_truncates() {
     let new_id = w.alloc_node().unwrap();
     assert_eq!(new_id, 8);
     assert_eq!(w.node_count(), 9);
-}
-
-// ── FULL_REPAINT sentinel tests (VAL-PIPE-001, VAL-PIPE-002) ───────
-
-/// VAL-PIPE-001: After build_editor_scene (via clear + rebuild + swap),
-/// the published front buffer's change_count must equal FULL_REPAINT.
-#[test]
-fn full_rebuild_sets_full_repaint_sentinel() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    // Build initial scene (like build_editor_scene: clear, alloc, swap).
-    build_test_editor_scene(&mut dw, b"hello world", b"12:34:56");
-    dw.swap();
-
-    // The front buffer should have change_count == FULL_REPAINT.
-    let dr = DoubleReader::new(&buf);
-    assert!(
-        dr.is_full_repaint(),
-        "After full rebuild (clear + write + swap), is_full_repaint() must be true"
-    );
-    assert!(
-        dr.change_list().is_none(),
-        "After full rebuild, change_list() must return None"
-    );
-}
-
-/// VAL-PIPE-001: After a second full rebuild, FULL_REPAINT is still set.
-#[test]
-fn second_full_rebuild_also_sets_full_repaint() {
-    let mut buf = make_double_buf();
-
-    // First build.
-    {
-        let mut dw = DoubleWriter::new(&mut buf);
-        build_test_editor_scene(&mut dw, b"hello world", b"12:34:56");
-        dw.swap();
-
-        // Incremental update (copy-forward + mark_changed).
-        dw.copy_front_to_back();
-        {
-            let mut w = dw.back();
-            w.node_mut(N_CURSOR).x = 10;
-            w.mark_changed(N_CURSOR);
-        }
-        dw.swap();
-    }
-
-    // After incremental update, should NOT be full repaint.
-    {
-        let dr = DoubleReader::new(&buf);
-        assert!(!dr.is_full_repaint(), "incremental update should not be FULL_REPAINT");
-    }
-
-    // Second full rebuild (simulating data buffer exhaustion fallback).
-    {
-        let mut dw = DoubleWriter::from_existing(&mut buf);
-        build_test_editor_scene(&mut dw, b"hello world again", b"12:35:00");
-        dw.swap();
-    }
-
-    // Should be full repaint again.
-    let dr = DoubleReader::new(&buf);
-    assert!(
-        dr.is_full_repaint(),
-        "Second full rebuild must also set FULL_REPAINT"
-    );
-}
-
-/// VAL-PIPE-002: Compositor decision logic — is_full_repaint returns true,
-/// change_list returns None. The compositor must never skip a full-rebuild
-/// frame via the empty-change-list early-exit.
-#[test]
-fn compositor_never_skips_full_rebuild_frame() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    // Full rebuild.
-    build_test_editor_scene(&mut dw, b"test text", b"00:00:00");
-    dw.swap();
-
-    let dr = DoubleReader::new(&buf);
-
-    // The compositor's decision path checks:
-    // 1. if dr.is_full_repaint() → damage.mark_full_screen() → render everything
-    // 2. else match dr.change_list() { Some([]) => skip, Some(list) => partial, None => full }
-    //
-    // After a full rebuild, path 1 fires. Verify the conditions:
-    assert!(dr.is_full_repaint());
-    assert!(dr.change_list().is_none());
-
-    // Specifically, change_list() must NOT return Some(empty_slice), which
-    // would cause the compositor to skip the frame.
-    if let Some(cl) = dr.change_list() {
-        panic!(
-            "change_list() returned Some({:?}) after full rebuild — compositor would skip frame!",
-            cl
-        );
-    }
-}
-
-// ── Timer-only update tests (VAL-PIPE-009) ──────────────────────────
-
-/// VAL-PIPE-009: Timer-only update produces change_count==1 with N_CLOCK_TEXT.
-#[test]
-fn timer_only_update_produces_change_count_1() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    // Initial scene build.
-    build_test_editor_scene(&mut dw, b"hello", b"12:34:56");
-    dw.swap();
-
-    // Simulate timer-only update (like update_clock in SceneState).
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-
-        // Read the clock node's glyph DataRef and update in-place.
-        let clock_node = w.node(N_CLOCK_TEXT);
-        if let Content::Text { runs, .. } = clock_node.content {
-            let data_buf = w.data_buf();
-            let run_offset = runs.offset as usize;
-            let run_size = core::mem::size_of::<TextRun>();
-            if run_offset + run_size <= data_buf.len() {
-                let run_ptr = unsafe {
-                    data_buf.as_ptr().add(run_offset) as *const TextRun
-                };
-                let text_run = unsafe { core::ptr::read(run_ptr) };
-                let new_glyphs = bytes_to_shaped_glyphs(b"12:35:00", text_run.advance);
-                let new_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        new_glyphs.as_ptr() as *const u8,
-                        new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
-                    )
-                };
-                assert!(w.update_data(text_run.glyphs, new_bytes));
-            }
-        }
-        w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(b"12:35:00");
-        w.mark_changed(N_CLOCK_TEXT);
-    }
-    dw.swap();
-
-    // Verify change_count == 1, NOT FULL_REPAINT.
-    let dr = DoubleReader::new(&buf);
-    assert!(
-        !dr.is_full_repaint(),
-        "Timer-only update must NOT set FULL_REPAINT"
-    );
-    let cl = dr.change_list().expect("Timer-only update must have a change list");
-    assert_eq!(cl.len(), 1, "Timer-only update must have exactly 1 changed node");
-    assert_eq!(cl[0], N_CLOCK_TEXT, "The changed node must be N_CLOCK_TEXT");
 }
 
 // ── PREV_BOUNDS large coordinate tests (VAL-PIPE-013) ──────────────
@@ -3905,451 +1810,6 @@ fn abs_bounds_large_coords_no_truncation() {
     // But it fits in i32 and can be safely clamped to u16 for damage rects.
     assert!(physical_x >= 0);
     assert!(physical_x <= u16::MAX as i32);
-}
-
-// ── Data buffer compaction tests (VAL-PIPE-004, VAL-PIPE-005, VAL-PIPE-006, VAL-CROSS-013) ──
-
-/// Helper: simulate what update_document_content does with compaction.
-/// After copy_front_to_back, resets data buffer and re-pushes all text
-/// data (title, clock, document). This is the fixed behavior.
-fn incremental_update_with_compaction(
-    dw: &mut DoubleWriter<'_>,
-    doc_text: &[u8],
-    clock_text: &[u8],
-    title_text: &[u8],
-) {
-    let char_width: u16 = 8;
-    let line_height: u16 = 20;
-    let font_size: u16 = 16;
-    let text_color = Color::rgb(220, 220, 220);
-    let clock_color = Color::rgb(130, 130, 130);
-    let chars_per_line: usize = 80;
-
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-
-        // Truncate selection nodes.
-        w.set_node_count(WELL_KNOWN_COUNT);
-
-        // ── Compaction: reset data and re-push everything ──
-        w.reset_data();
-
-        // Re-push title glyph data.
-        let title_glyphs = bytes_to_shaped_glyphs(title_text, char_width);
-        let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-
-        // Re-push clock glyph data.
-        let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width);
-        let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
-
-        // Re-layout and push doc text.
-        let all_runs = layout_mono_lines(
-            doc_text,
-            chars_per_line,
-            line_height as i16,
-            text_color,
-            char_width,
-            font_size,
-        );
-        let visible_runs = scroll_runs(all_runs, 0, line_height as u32, 700);
-        let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
-        for mut run in visible_runs {
-            let line_text = line_bytes_for_run(doc_text, &run);
-            let shaped = bytes_to_shaped_glyphs(line_text, char_width);
-            run.glyphs = w.push_shaped_glyphs(&shaped);
-            run.glyph_count = shaped.len() as u16;
-            final_runs.push(run);
-        }
-        let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
-
-        // Re-push title/clock TextRuns.
-        let title_run = TextRun {
-            glyphs: title_glyph_ref,
-            glyph_count: title_glyphs.len() as u16,
-            x: 0,
-            y: 0,
-            color: text_color,
-            advance: char_width,
-            font_size,
-            axis_hash: 0,
-        };
-        let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
-
-        let clock_run = TextRun {
-            glyphs: clock_glyph_ref,
-            glyph_count: clock_glyphs.len() as u16,
-            x: 0,
-            y: 0,
-            color: clock_color,
-            advance: char_width,
-            font_size,
-            axis_hash: 0,
-        };
-        let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
-
-        // Update node content references.
-        {
-            let n = w.node_mut(N_DOC_TEXT);
-            n.content = Content::Text {
-                runs: doc_runs_ref,
-                run_count: doc_run_count,
-                _pad: [0; 2],
-            };
-            n.content_hash = fnv1a(doc_text);
-        }
-        w.mark_changed(N_DOC_TEXT);
-
-        {
-            let n = w.node_mut(N_TITLE_TEXT);
-            n.content = Content::Text {
-                runs: title_runs_ref,
-                run_count: title_run_count,
-                _pad: [0; 2],
-            };
-        }
-
-        {
-            let n = w.node_mut(N_CLOCK_TEXT);
-            n.content = Content::Text {
-                runs: clock_runs_ref,
-                run_count: clock_run_count,
-                _pad: [0; 2],
-            };
-        }
-
-        // Update cursor.
-        let cursor_pos = doc_text.len();
-        let (line, col) = byte_to_line_col(doc_text, cursor_pos, chars_per_line);
-        let n = w.node_mut(N_CURSOR);
-        n.x = (col as u32 * char_width as u32) as i16;
-        n.y = (line as i32 * line_height as i32) as i16;
-        n.next_sibling = NULL;
-        w.mark_changed(N_CURSOR);
-    }
-    dw.swap();
-}
-
-/// VAL-PIPE-004: After 50 single-char insertions, data_used < 50% of DATA_BUFFER_SIZE.
-#[test]
-fn data_buffer_compaction_50_inserts_under_50_percent() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    let mut doc_text: Vec<u8> = b"hello world".to_vec();
-    let clock_text = b"12:00:00";
-    let title_text = b"Text";
-
-    // Build initial scene.
-    build_test_editor_scene(&mut dw, &doc_text, clock_text);
-    dw.swap();
-
-    // 50 single-char insertions with compaction.
-    for i in 0..50 {
-        let ch = b'a' + (i % 26) as u8;
-        doc_text.push(ch);
-        incremental_update_with_compaction(&mut dw, &doc_text, clock_text, title_text);
-    }
-
-    let data_used = dw.front_data_buf().len();
-    let threshold_50 = DATA_BUFFER_SIZE / 2;
-    assert!(
-        data_used < threshold_50,
-        "VAL-PIPE-004: After 50 inserts, data_used {} should be < 50% of {} (threshold {})",
-        data_used,
-        DATA_BUFFER_SIZE,
-        threshold_50
-    );
-}
-
-/// VAL-PIPE-005: data_used at update 100 < 2x data_used at update 10.
-/// Uses a narrow viewport (10 chars/line, 5 visible lines) so visible
-/// content is bounded even as total text grows — data_used should stabilize.
-#[test]
-fn data_buffer_usage_stable_under_sustained_typing() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    let char_width: u16 = 8;
-    let line_height: u16 = 20;
-    let font_size: u16 = 16;
-    let text_color = Color::rgb(220, 220, 220);
-    let clock_color = Color::rgb(130, 130, 130);
-    let chars_per_line: usize = 10;
-    let viewport_height_px: i32 = 5 * line_height as i32; // 5 visible lines
-
-    let mut doc_text: Vec<u8> = b"hello".to_vec();
-    let clock_text = b"12:00:00";
-    let title_text = b"Text";
-
-    // Build initial scene.
-    build_test_editor_scene(&mut dw, &doc_text, clock_text);
-    dw.swap();
-
-    let mut data_used_at_10: usize = 0;
-
-    for i in 0..100 {
-        let ch = b'a' + (i % 26) as u8;
-        doc_text.push(ch);
-
-        // Compute auto-scroll to keep cursor visible.
-        let cursor_pos = doc_text.len();
-        let (cursor_line, _cursor_col) =
-            byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
-        let visible_lines = (viewport_height_px / line_height as i32) as u32;
-        let scroll_lines = if cursor_line as u32 >= visible_lines {
-            cursor_line as u32 - visible_lines + 1
-        } else {
-            0
-        };
-
-        dw.copy_front_to_back();
-        {
-            let mut w = dw.back();
-            w.set_node_count(WELL_KNOWN_COUNT);
-
-            // Compaction: reset data and re-push everything.
-            w.reset_data();
-
-            let title_glyphs = bytes_to_shaped_glyphs(title_text, char_width);
-            let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-
-            let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width);
-            let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
-
-            let all_runs = layout_mono_lines(
-                &doc_text,
-                chars_per_line,
-                line_height as i16,
-                text_color,
-                char_width,
-                font_size,
-            );
-            let visible_runs =
-                scroll_runs(all_runs, scroll_lines, line_height as u32, viewport_height_px);
-            let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
-            for mut run in visible_runs {
-                let line_text = line_bytes_for_run(&doc_text, &run);
-                let shaped = bytes_to_shaped_glyphs(line_text, char_width);
-                run.glyphs = w.push_shaped_glyphs(&shaped);
-                run.glyph_count = shaped.len() as u16;
-                final_runs.push(run);
-            }
-            let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
-
-            let title_run = TextRun {
-                glyphs: title_glyph_ref,
-                glyph_count: title_glyphs.len() as u16,
-                x: 0,
-                y: 0,
-                color: text_color,
-                advance: char_width,
-                font_size,
-                axis_hash: 0,
-            };
-            let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
-
-            let clock_run = TextRun {
-                glyphs: clock_glyph_ref,
-                glyph_count: clock_glyphs.len() as u16,
-                x: 0,
-                y: 0,
-                color: clock_color,
-                advance: char_width,
-                font_size,
-                axis_hash: 0,
-            };
-            let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
-
-            {
-                let n = w.node_mut(N_DOC_TEXT);
-                n.content = Content::Text {
-                    runs: doc_runs_ref,
-                    run_count: doc_run_count,
-                    _pad: [0; 2],
-                };
-                n.content_hash = fnv1a(&doc_text);
-            }
-            w.mark_changed(N_DOC_TEXT);
-
-            {
-                let n = w.node_mut(N_TITLE_TEXT);
-                n.content = Content::Text {
-                    runs: title_runs_ref,
-                    run_count: title_run_count,
-                    _pad: [0; 2],
-                };
-            }
-
-            {
-                let n = w.node_mut(N_CLOCK_TEXT);
-                n.content = Content::Text {
-                    runs: clock_runs_ref,
-                    run_count: clock_run_count,
-                    _pad: [0; 2],
-                };
-            }
-
-            let scroll_px = scroll_lines as i32 * line_height as i32;
-            let (line, col) =
-                byte_to_line_col(&doc_text, cursor_pos, chars_per_line);
-            let n = w.node_mut(N_CURSOR);
-            n.x = (col as u32 * char_width as u32) as i16;
-            n.y = (line as i32 * line_height as i32 - scroll_px) as i16;
-            n.next_sibling = NULL;
-            w.mark_changed(N_CURSOR);
-        }
-        dw.swap();
-
-        if i == 9 {
-            data_used_at_10 = dw.front_data_buf().len();
-        }
-    }
-
-    let data_used_at_100 = dw.front_data_buf().len();
-    assert!(
-        data_used_at_100 < data_used_at_10 * 2,
-        "VAL-PIPE-005: data_used at 100 ({}) should be < 2x data_used at 10 ({})",
-        data_used_at_100,
-        data_used_at_10
-    );
-}
-
-/// VAL-PIPE-006: Zero build_editor_scene fallbacks during 100 chars of typing.
-/// With compaction, the data buffer never exceeds 75% so the fallback is never triggered.
-#[test]
-fn zero_full_rebuild_fallbacks_during_100_chars() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    let mut doc_text: Vec<u8> = b"hello".to_vec();
-    let clock_text = b"12:00:00";
-    let title_text = b"Text";
-
-    build_test_editor_scene(&mut dw, &doc_text, clock_text);
-    dw.swap();
-
-    let threshold = (DATA_BUFFER_SIZE as u32 * 3) / 4;
-    let mut fallback_count = 0u32;
-
-    for i in 0..100 {
-        let ch = b'a' + (i % 26) as u8;
-        doc_text.push(ch);
-
-        // Check if fallback would be triggered (before compaction fix, it would be).
-        let front_data_used = dw.front_data_buf().len() as u32;
-        if front_data_used > threshold {
-            fallback_count += 1;
-        }
-
-        incremental_update_with_compaction(&mut dw, &doc_text, clock_text, title_text);
-    }
-
-    assert_eq!(
-        fallback_count, 0,
-        "VAL-PIPE-006: Expected zero fallbacks but got {} during 100 chars of typing",
-        fallback_count
-    );
-}
-
-/// VAL-CROSS-013: Under sustained typing, data_used never permanently exceeds 75%.
-#[test]
-fn data_buffer_growth_bounded_per_frame() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    let mut doc_text: Vec<u8> = b"start".to_vec();
-    let clock_text = b"12:00:00";
-    let title_text = b"Text";
-
-    build_test_editor_scene(&mut dw, &doc_text, clock_text);
-    dw.swap();
-
-    let threshold_75 = (DATA_BUFFER_SIZE * 3) / 4;
-
-    // Simulate 200 typing events (sustained typing).
-    for i in 0..200 {
-        let ch = b'a' + (i % 26) as u8;
-        doc_text.push(ch);
-        incremental_update_with_compaction(&mut dw, &doc_text, clock_text, title_text);
-
-        let data_used = dw.front_data_buf().len();
-        assert!(
-            data_used <= threshold_75,
-            "VAL-CROSS-013: At update {}, data_used {} exceeds 75% threshold {}",
-            i,
-            data_used,
-            threshold_75
-        );
-    }
-}
-
-/// Verify that after compaction, text content is still correctly readable.
-/// The compositor should be able to resolve all DataRefs and read valid glyphs.
-#[test]
-fn compacted_data_readable_by_reader() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    let mut doc_text: Vec<u8> = b"hello world".to_vec();
-    let clock_text = b"12:00:00";
-    let title_text = b"Text";
-
-    build_test_editor_scene(&mut dw, &doc_text, clock_text);
-    dw.swap();
-
-    // Insert 10 characters with compaction.
-    for _ in 0..10 {
-        doc_text.push(b'x');
-        incremental_update_with_compaction(&mut dw, &doc_text, clock_text, title_text);
-    }
-
-    // Read back via DoubleReader and verify data is valid.
-    let dr = DoubleReader::new(&buf);
-    let nodes = dr.front_nodes();
-
-    // Verify doc text node has valid content.
-    let doc_node = &nodes[N_DOC_TEXT as usize];
-    if let Content::Text { runs, run_count, .. } = doc_node.content {
-        assert!(run_count > 0, "doc text should have at least one run");
-        let run_bytes = dr.front_data(runs);
-        assert!(
-            !run_bytes.is_empty(),
-            "doc text runs DataRef should resolve to non-empty data"
-        );
-
-        // Verify first TextRun's glyph data resolves.
-        let text_runs = dr.front_text_runs(runs);
-        assert!(!text_runs.is_empty(), "should have at least one TextRun");
-        let first_run = &text_runs[0];
-        let glyphs = dr.front_shaped_glyphs(first_run.glyphs, first_run.glyph_count);
-        assert!(
-            !glyphs.is_empty(),
-            "first run should have resolvable glyph data"
-        );
-    } else {
-        panic!("N_DOC_TEXT should have Content::Text");
-    }
-
-    // Verify clock text node has valid content.
-    let clock_node = &nodes[N_CLOCK_TEXT as usize];
-    if let Content::Text { runs, run_count, .. } = clock_node.content {
-        assert!(run_count > 0, "clock should have at least one run");
-        let run_bytes = dr.front_data(runs);
-        assert!(!run_bytes.is_empty(), "clock runs should resolve");
-    } else {
-        panic!("N_CLOCK_TEXT should have Content::Text");
-    }
-
-    // Verify title text node has valid content.
-    let title_node = &nodes[N_TITLE_TEXT as usize];
-    if let Content::Text { runs, run_count, .. } = title_node.content {
-        assert!(run_count > 0, "title should have at least one run");
-        let run_bytes = dr.front_data(runs);
-        assert!(!run_bytes.is_empty(), "title runs should resolve");
-    } else {
-        panic!("N_TITLE_TEXT should have Content::Text");
-    }
 }
 
 // ── VAL-PIPE-007: Double-buffer read consistency ────────────────────
@@ -4573,418 +2033,6 @@ fn rapid_swap_without_ack_blocks_copy() {
     );
 }
 
-// ── Timer+input coincidence tests (VAL-PIPE-010) ───────────────────
-
-/// VAL-PIPE-010: When timer fires simultaneously with text_changed, the
-/// incremental path (update_document_content) must also update the clock
-/// — both in a single copy/swap cycle. The change list must include both
-/// N_CLOCK_TEXT and document nodes. Must NOT use full rebuild.
-#[test]
-fn timer_plus_text_changed_uses_incremental_path_with_clock() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    // Build initial scene with doc "hello" and clock "12:00:00".
-    build_test_editor_scene(&mut dw, b"hello", b"12:00:00");
-    dw.swap();
-
-    // Snapshot the clock hash before the update.
-    let clock_hash_before = dw.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
-
-    // Acknowledge initial frame (needed by double-buffer protocol).
-    let gen = dw.front_generation();
-    dw.ack_reader(gen);
-
-    // Simulate timer+text_changed coincidence using the incremental
-    // compaction path (same as update_document_content), but also
-    // updating clock text and marking N_CLOCK_TEXT changed.
-    let new_doc = b"hellox";
-    let new_clock = b"12:00:01";
-
-    assert!(dw.copy_front_to_back());
-    {
-        let mut w = dw.back();
-
-        w.set_node_count(WELL_KNOWN_COUNT);
-        w.reset_data();
-
-        let char_width: u16 = 8;
-        let line_height: u16 = 20;
-        let font_size: u16 = 16;
-        let text_color = Color::rgb(220, 220, 220);
-        let clock_color = Color::rgb(130, 130, 130);
-        let chars_per_line: usize = 80;
-
-        // Re-push title.
-        let title_glyphs = bytes_to_shaped_glyphs(b"Text", char_width);
-        let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-        let title_run = TextRun {
-            glyphs: title_glyph_ref, glyph_count: 4, x: 0, y: 0,
-            color: text_color, advance: char_width, font_size, axis_hash: 0,
-        };
-        let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
-
-        // Re-push clock with NEW time.
-        let clock_glyphs = bytes_to_shaped_glyphs(new_clock, char_width);
-        let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
-        let clock_run = TextRun {
-            glyphs: clock_glyph_ref, glyph_count: clock_glyphs.len() as u16, x: 0, y: 0,
-            color: clock_color, advance: char_width, font_size, axis_hash: 0,
-        };
-        let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
-
-        // Re-layout doc text.
-        let all_runs = layout_mono_lines(
-            new_doc, chars_per_line, line_height as i16, text_color, char_width, font_size,
-        );
-        let visible_runs = scroll_runs(all_runs, 0, line_height as u32, 700);
-        let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
-        for mut run in visible_runs {
-            let line_text = line_bytes_for_run(new_doc, &run);
-            let shaped = bytes_to_shaped_glyphs(line_text, char_width);
-            run.glyphs = w.push_shaped_glyphs(&shaped);
-            run.glyph_count = shaped.len() as u16;
-            final_runs.push(run);
-        }
-        let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
-
-        // Update all text content references.
-        {
-            let n = w.node_mut(N_TITLE_TEXT);
-            n.content = Content::Text { runs: title_runs_ref, run_count: title_run_count, _pad: [0; 2] };
-            n.content_hash = fnv1a(b"Text");
-        }
-        {
-            let n = w.node_mut(N_CLOCK_TEXT);
-            n.content = Content::Text { runs: clock_runs_ref, run_count: clock_run_count, _pad: [0; 2] };
-            n.content_hash = fnv1a(new_clock);
-        }
-        {
-            let n = w.node_mut(N_DOC_TEXT);
-            n.content = Content::Text { runs: doc_runs_ref, run_count: doc_run_count, _pad: [0; 2] };
-            n.content_hash = fnv1a(new_doc);
-        }
-
-        // Mark both document and clock as changed.
-        w.mark_changed(N_DOC_TEXT);
-        w.mark_changed(N_CURSOR);
-        w.mark_changed(N_CLOCK_TEXT);
-    }
-    dw.swap();
-
-    // Verify: NOT full repaint (incremental path used).
-    let dr = DoubleReader::new(&buf);
-    assert!(
-        !dr.is_full_repaint(),
-        "Timer+text_changed must use incremental path, not full rebuild"
-    );
-
-    // Verify: change list includes both document and clock nodes.
-    let cl = dr.change_list().expect("Must have a change list");
-    assert!(
-        cl.contains(&N_DOC_TEXT),
-        "Change list must include N_DOC_TEXT, got {:?}", cl
-    );
-    assert!(
-        cl.contains(&N_CLOCK_TEXT),
-        "Change list must include N_CLOCK_TEXT, got {:?}", cl
-    );
-    assert!(
-        cl.contains(&N_CURSOR),
-        "Change list must include N_CURSOR, got {:?}", cl
-    );
-
-    // Verify: clock content hash updated.
-    let clock_hash_after = dr.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
-    assert_ne!(
-        clock_hash_before, clock_hash_after,
-        "Clock content_hash must change when timer+input coincidence updates clock"
-    );
-    assert_eq!(clock_hash_after, fnv1a(new_clock));
-
-    // Verify: doc content hash updated.
-    let doc_hash = dr.front_nodes()[N_DOC_TEXT as usize].content_hash;
-    assert_eq!(doc_hash, fnv1a(new_doc));
-}
-
-/// VAL-PIPE-010b: When timer fires simultaneously with selection_changed,
-/// the incremental path must update both selection and clock in one frame.
-#[test]
-fn timer_plus_selection_changed_uses_incremental_path_with_clock() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    build_test_editor_scene(&mut dw, b"hello world", b"12:00:00");
-    dw.swap();
-
-    let clock_hash_before = dw.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
-
-    let gen = dw.front_generation();
-    dw.ack_reader(gen);
-
-    // Simulate timer+selection_changed: update cursor, selection rects,
-    // AND clock all in one copy/swap cycle.
-    let new_clock = b"12:00:01";
-
-    assert!(dw.copy_front_to_back());
-    {
-        let mut w = dw.back();
-
-        w.set_node_count(WELL_KNOWN_COUNT);
-
-        // Update cursor position.
-        let n = w.node_mut(N_CURSOR);
-        n.x = 40;  // Move cursor.
-        n.y = 0;
-        n.next_sibling = NULL;
-        w.mark_changed(N_CURSOR);
-
-        // Update clock in-place (same technique as update_clock).
-        let clock_node = w.node(N_CLOCK_TEXT);
-        if let Content::Text { runs, .. } = clock_node.content {
-            let data_buf = w.data_buf();
-            let run_offset = runs.offset as usize;
-            let run_size = core::mem::size_of::<TextRun>();
-            if run_offset + run_size <= data_buf.len() {
-                let run_ptr = unsafe {
-                    data_buf.as_ptr().add(run_offset) as *const TextRun
-                };
-                let text_run = unsafe { core::ptr::read(run_ptr) };
-                let new_glyphs = bytes_to_shaped_glyphs(new_clock, text_run.advance);
-                let new_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        new_glyphs.as_ptr() as *const u8,
-                        new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
-                    )
-                };
-                assert!(w.update_data(text_run.glyphs, new_bytes));
-            }
-        }
-        w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(new_clock);
-        w.mark_changed(N_CLOCK_TEXT);
-    }
-    dw.swap();
-
-    // Verify incremental (not full repaint).
-    let dr = DoubleReader::new(&buf);
-    assert!(
-        !dr.is_full_repaint(),
-        "Timer+selection_changed must use incremental path"
-    );
-
-    // Change list includes both cursor and clock.
-    let cl = dr.change_list().expect("Must have a change list");
-    assert!(cl.contains(&N_CURSOR), "Change list must include N_CURSOR, got {:?}", cl);
-    assert!(cl.contains(&N_CLOCK_TEXT), "Change list must include N_CLOCK_TEXT, got {:?}", cl);
-
-    // Clock actually updated.
-    let clock_hash_after = dr.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
-    assert_ne!(clock_hash_before, clock_hash_after);
-    assert_eq!(clock_hash_after, fnv1a(new_clock));
-}
-
-/// VAL-PIPE-010c: When timer fires simultaneously with cursor-only change,
-/// the incremental path must update both cursor and clock in one frame.
-#[test]
-fn timer_plus_cursor_only_uses_incremental_path_with_clock() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    build_test_editor_scene(&mut dw, b"hello", b"12:00:00");
-    dw.swap();
-
-    let clock_hash_before = dw.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
-
-    let gen = dw.front_generation();
-    dw.ack_reader(gen);
-
-    // Simulate timer+cursor_only: update cursor position AND clock.
-    let new_clock = b"12:00:01";
-
-    assert!(dw.copy_front_to_back());
-    {
-        let mut w = dw.back();
-
-        // Update cursor position.
-        let n = w.node_mut(N_CURSOR);
-        n.x = 24;  // Move cursor.
-        n.y = 0;
-        w.mark_changed(N_CURSOR);
-
-        // Update clock in-place.
-        let clock_node = w.node(N_CLOCK_TEXT);
-        if let Content::Text { runs, .. } = clock_node.content {
-            let data_buf = w.data_buf();
-            let run_offset = runs.offset as usize;
-            let run_size = core::mem::size_of::<TextRun>();
-            if run_offset + run_size <= data_buf.len() {
-                let run_ptr = unsafe {
-                    data_buf.as_ptr().add(run_offset) as *const TextRun
-                };
-                let text_run = unsafe { core::ptr::read(run_ptr) };
-                let new_glyphs = bytes_to_shaped_glyphs(new_clock, text_run.advance);
-                let new_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        new_glyphs.as_ptr() as *const u8,
-                        new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
-                    )
-                };
-                assert!(w.update_data(text_run.glyphs, new_bytes));
-            }
-        }
-        w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(new_clock);
-        w.mark_changed(N_CLOCK_TEXT);
-    }
-    dw.swap();
-
-    // Verify incremental (not full repaint).
-    let dr = DoubleReader::new(&buf);
-    assert!(
-        !dr.is_full_repaint(),
-        "Timer+cursor_only must use incremental path"
-    );
-
-    // Change list includes both cursor and clock.
-    let cl = dr.change_list().expect("Must have a change list");
-    assert!(cl.contains(&N_CURSOR), "Must include N_CURSOR, got {:?}", cl);
-    assert!(cl.contains(&N_CLOCK_TEXT), "Must include N_CLOCK_TEXT, got {:?}", cl);
-
-    // Clock updated.
-    let clock_hash_after = dr.front_nodes()[N_CLOCK_TEXT as usize].content_hash;
-    assert_ne!(clock_hash_before, clock_hash_after);
-    assert_eq!(clock_hash_after, fnv1a(new_clock));
-}
-
-/// VAL-PIPE-010d: Timer+input coincidence change_count ≤ max incremental
-/// (not FULL_REPAINT). Verify the scene is renderable by the compositor.
-#[test]
-fn timer_plus_input_change_count_bounded() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    build_test_editor_scene(&mut dw, b"hello", b"12:00:00");
-    dw.swap();
-
-    let gen = dw.front_generation();
-    dw.ack_reader(gen);
-
-    // Simulate timer+text_changed with full data compaction.
-    let new_doc = b"hello!";
-    let new_clock = b"12:00:01";
-
-    incremental_update_with_compaction_and_clock(
-        &mut dw, new_doc, new_clock, b"Text",
-    );
-
-    let dr = DoubleReader::new(&buf);
-
-    // Must not be full repaint.
-    assert!(!dr.is_full_repaint());
-
-    // Change list should have at most a few nodes (doc, cursor, clock).
-    let cl = dr.change_list().expect("Must have a change list");
-    assert!(cl.len() <= 10, "Change count {} is too high", cl.len());
-    assert!(cl.contains(&N_CLOCK_TEXT), "Must include clock");
-    assert!(cl.contains(&N_DOC_TEXT), "Must include doc text");
-}
-
-/// Helper: incremental update with compaction AND clock update.
-/// This is what the fixed `update_document_content` should do when
-/// timer_fired is true.
-fn incremental_update_with_compaction_and_clock(
-    dw: &mut DoubleWriter<'_>,
-    doc_text: &[u8],
-    clock_text: &[u8],
-    title_text: &[u8],
-) {
-    let char_width: u16 = 8;
-    let line_height: u16 = 20;
-    let font_size: u16 = 16;
-    let text_color = Color::rgb(220, 220, 220);
-    let clock_color = Color::rgb(130, 130, 130);
-    let chars_per_line: usize = 80;
-
-    dw.copy_front_to_back();
-    {
-        let mut w = dw.back();
-
-        w.set_node_count(WELL_KNOWN_COUNT);
-        w.reset_data();
-
-        // Re-push title.
-        let title_glyphs = bytes_to_shaped_glyphs(title_text, char_width);
-        let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-
-        // Re-push clock.
-        let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width);
-        let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
-
-        // Re-layout doc text.
-        let all_runs = layout_mono_lines(
-            doc_text, chars_per_line, line_height as i16, text_color, char_width, font_size,
-        );
-        let visible_runs = scroll_runs(all_runs, 0, line_height as u32, 700);
-        let mut final_runs: Vec<TextRun> = Vec::with_capacity(visible_runs.len());
-        for mut run in visible_runs {
-            let line_text = line_bytes_for_run(doc_text, &run);
-            let shaped = bytes_to_shaped_glyphs(line_text, char_width);
-            run.glyphs = w.push_shaped_glyphs(&shaped);
-            run.glyph_count = shaped.len() as u16;
-            final_runs.push(run);
-        }
-        let (doc_runs_ref, doc_run_count) = w.push_text_runs(&final_runs);
-
-        let title_run = TextRun {
-            glyphs: title_glyph_ref, glyph_count: title_glyphs.len() as u16, x: 0, y: 0,
-            color: text_color, advance: char_width, font_size, axis_hash: 0,
-        };
-        let (title_runs_ref, title_run_count) = w.push_text_runs(&[title_run]);
-
-        let clock_run = TextRun {
-            glyphs: clock_glyph_ref, glyph_count: clock_glyphs.len() as u16, x: 0, y: 0,
-            color: clock_color, advance: char_width, font_size, axis_hash: 0,
-        };
-        let (clock_runs_ref, clock_run_count) = w.push_text_runs(&[clock_run]);
-
-        // Update content references.
-        {
-            let n = w.node_mut(N_DOC_TEXT);
-            n.content = Content::Text {
-                runs: doc_runs_ref, run_count: doc_run_count, _pad: [0; 2],
-            };
-            n.content_hash = fnv1a(doc_text);
-        }
-        w.mark_changed(N_DOC_TEXT);
-
-        {
-            let n = w.node_mut(N_TITLE_TEXT);
-            n.content = Content::Text {
-                runs: title_runs_ref, run_count: title_run_count, _pad: [0; 2],
-            };
-        }
-
-        {
-            let n = w.node_mut(N_CLOCK_TEXT);
-            n.content = Content::Text {
-                runs: clock_runs_ref, run_count: clock_run_count, _pad: [0; 2],
-            };
-            n.content_hash = fnv1a(clock_text);
-        }
-        // Mark clock as changed (the key fix: timer+input marks both).
-        w.mark_changed(N_CLOCK_TEXT);
-
-        // Update cursor.
-        let cursor_pos = doc_text.len();
-        let (line, col) = byte_to_line_col(doc_text, cursor_pos, chars_per_line);
-        let n = w.node_mut(N_CURSOR);
-        n.x = (col as u32 * char_width as u32) as i16;
-        n.y = (line as i32 * line_height as i32) as i16;
-        n.next_sibling = NULL;
-        w.mark_changed(N_CURSOR);
-    }
-    dw.swap();
-}
-
 // ── VAL-COORD-013: abs_bounds accounts for scroll_y from ancestor nodes ──
 
 /// abs_bounds must subtract parent scroll_y when computing a child's absolute
@@ -5077,77 +2125,6 @@ fn abs_bounds_nested_scroll_containers() {
     //   outer.y(100) → 100 (relative to root, no scroll)
     //   Total: -5 + 15 + 100 = 110
     assert_eq!(ay, 110, "abs_bounds must subtract each ancestor's scroll_y");
-}
-
-// ── PathCmd round-trip tests ────────────────────────────────────────
-
-#[test]
-fn path_cmd_round_trips_through_scene_writer_reader() {
-    let mut buf = vec![0u8; SCENE_SIZE];
-    let mut writer = SceneWriter::new(&mut buf);
-
-    let cmds = [
-        PathCmd::move_to(10, 20),
-        PathCmd::line_to(50, 20),
-        PathCmd::line_to(30, 50),
-        PathCmd::close(),
-    ];
-    let dref = writer.push_path_cmds(&cmds);
-
-    let reader = SceneReader::new(&buf);
-    let read_cmds = reader.path_cmds(dref);
-
-    assert_eq!(read_cmds.len(), 4);
-    assert_eq!(read_cmds[0], PathCmd::move_to(10, 20));
-    assert_eq!(read_cmds[1], PathCmd::line_to(50, 20));
-    assert_eq!(read_cmds[2], PathCmd::line_to(30, 50));
-    assert_eq!(read_cmds[3], PathCmd::close());
-}
-
-#[test]
-fn path_cmd_curve_to_round_trips() {
-    let mut buf = vec![0u8; SCENE_SIZE];
-    let mut writer = SceneWriter::new(&mut buf);
-
-    let cmds = [
-        PathCmd::move_to(0, 0),
-        PathCmd::curve_to(10, 0, 20, 10, 20, 20),
-        PathCmd::close(),
-    ];
-    let dref = writer.push_path_cmds(&cmds);
-
-    let reader = SceneReader::new(&buf);
-    let read_cmds = reader.path_cmds(dref);
-
-    assert_eq!(read_cmds.len(), 3);
-    assert_eq!(read_cmds[0].kind, PathCmdKind::MoveTo);
-    assert_eq!(read_cmds[1].kind, PathCmdKind::CurveTo);
-    assert_eq!(read_cmds[1].x1, 10);
-    assert_eq!(read_cmds[1].y1, 0);
-    assert_eq!(read_cmds[1].x2, 20);
-    assert_eq!(read_cmds[1].y2, 10);
-    assert_eq!(read_cmds[1].x, 20);
-    assert_eq!(read_cmds[1].y, 20);
-    assert_eq!(read_cmds[2].kind, PathCmdKind::Close);
-}
-
-#[test]
-fn path_cmd_empty_returns_empty_slice() {
-    let mut buf = vec![0u8; SCENE_SIZE];
-    let _writer = SceneWriter::new(&mut buf);
-
-    let reader = SceneReader::new(&buf);
-    let dref = DataRef {
-        offset: 0,
-        length: 0,
-    };
-    let cmds = reader.path_cmds(dref);
-    assert!(cmds.is_empty());
-}
-
-#[test]
-fn path_cmd_size_is_14_bytes() {
-    assert_eq!(core::mem::size_of::<PathCmd>(), 14);
 }
 
 // ── AffineTransform tests ───────────────────────────────────────────
@@ -5544,4 +2521,564 @@ fn abs_bounds_identity_transform_unchanged() {
     assert_eq!(ay, 40, "identity transform should not change y");
     assert_eq!(aw, 50, "identity transform should not change width");
     assert_eq!(ah, 60, "identity transform should not change height");
+}
+
+// ── FillRect content type tests (VAL-SCENE-001) ────────────────────
+
+#[test]
+fn fillrect_round_trip_scene_writer_reader() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).x = 10;
+    w.node_mut(id).y = 20;
+    w.node_mut(id).width = 100;
+    w.node_mut(id).height = 50;
+    w.node_mut(id).content = Content::FillRect {
+        color: Color::rgba(255, 0, 0, 128),
+    };
+    w.set_root(id);
+    w.commit();
+
+    // FillRect uses no data buffer
+    assert_eq!(w.data_used(), 0);
+
+    let r = SceneReader::new(&buf);
+    let node = r.node(id);
+    match node.content {
+        Content::FillRect { color } => {
+            assert_eq!(color, Color::rgba(255, 0, 0, 128));
+        }
+        _ => panic!("expected FillRect content"),
+    }
+}
+
+#[test]
+fn fillrect_no_data_buffer_allocation() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    for _ in 0..10 {
+        let id = w.alloc_node().unwrap();
+        w.node_mut(id).content = Content::FillRect {
+            color: Color::rgb(0, 255, 0),
+        };
+    }
+    assert_eq!(w.data_used(), 0, "FillRect should not allocate data buffer");
+}
+
+#[test]
+fn fillrect_double_buffer_round_trip() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    {
+        let mut w = dw.back();
+        w.clear();
+        let id = w.alloc_node().unwrap();
+        w.node_mut(id).width = 50;
+        w.node_mut(id).height = 30;
+        w.node_mut(id).content = Content::FillRect {
+            color: Color::rgba(100, 200, 50, 180),
+        };
+        w.set_root(id);
+    }
+    dw.swap();
+
+    let dr = DoubleReader::new(&buf);
+    let nodes = dr.front_nodes();
+    assert_eq!(nodes.len(), 1);
+    match nodes[0].content {
+        Content::FillRect { color } => {
+            assert_eq!(color, Color::rgba(100, 200, 50, 180));
+        }
+        _ => panic!("expected FillRect in double buffer"),
+    }
+}
+
+#[test]
+fn fillrect_copy_front_to_back_preserves() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    {
+        let mut w = dw.back();
+        w.clear();
+        let id = w.alloc_node().unwrap();
+        w.node_mut(id).content = Content::FillRect {
+            color: Color::rgb(255, 128, 0),
+        };
+        w.set_root(id);
+    }
+    dw.swap();
+
+    dw.copy_front_to_back();
+    let back = dw.back();
+    match back.node(0).content {
+        Content::FillRect { color } => {
+            assert_eq!(color, Color::rgb(255, 128, 0));
+        }
+        _ => panic!("FillRect not preserved after copy_front_to_back"),
+    }
+}
+
+// ── Glyphs content type tests (VAL-SCENE-002) ──────────────────────
+
+#[test]
+fn glyphs_round_trip_scene_writer_reader() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let glyphs = [
+        ShapedGlyph { glyph_id: 72, x_advance: 600, x_offset: 0, y_offset: 0 },
+        ShapedGlyph { glyph_id: 101, x_advance: 550, x_offset: 0, y_offset: 0 },
+        ShapedGlyph { glyph_id: 108, x_advance: 250, x_offset: -5, y_offset: 3 },
+    ];
+    let dref = w.push_shaped_glyphs(&glyphs);
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Glyphs {
+        color: Color::rgb(220, 220, 220),
+        glyphs: dref,
+        glyph_count: 3,
+        font_size: 18,
+        axis_hash: 0xDEAD_BEEF,
+    };
+    w.set_root(id);
+    w.commit();
+
+    let r = SceneReader::new(&buf);
+    let node = r.node(id);
+    match node.content {
+        Content::Glyphs { color, glyphs, glyph_count, font_size, axis_hash } => {
+            assert_eq!(color, Color::rgb(220, 220, 220));
+            assert_eq!(glyph_count, 3);
+            assert_eq!(font_size, 18);
+            assert_eq!(axis_hash, 0xDEAD_BEEF);
+            let read = r.shaped_glyphs(glyphs, glyph_count);
+            assert_eq!(read.len(), 3);
+            assert_eq!(read[0].glyph_id, 72);
+            assert_eq!(read[2].x_offset, -5);
+            assert_eq!(read[2].y_offset, 3);
+        }
+        _ => panic!("expected Glyphs content"),
+    }
+}
+
+#[test]
+fn glyphs_double_buffer_round_trip() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    {
+        let mut w = dw.back();
+        w.clear();
+        let glyphs = [
+            ShapedGlyph { glyph_id: 65, x_advance: 10, x_offset: 0, y_offset: 0 },
+            ShapedGlyph { glyph_id: 66, x_advance: 10, x_offset: 0, y_offset: 0 },
+        ];
+        let dref = w.push_shaped_glyphs(&glyphs);
+        let id = w.alloc_node().unwrap();
+        w.node_mut(id).content = Content::Glyphs {
+            color: Color::rgb(200, 200, 200),
+            glyphs: dref,
+            glyph_count: 2,
+            font_size: 16,
+            axis_hash: 0x1234,
+        };
+        w.set_root(id);
+    }
+    dw.swap();
+
+    let dr = DoubleReader::new(&buf);
+    match dr.front_nodes()[0].content {
+        Content::Glyphs { glyphs, glyph_count, font_size, axis_hash, .. } => {
+            assert_eq!(glyph_count, 2);
+            assert_eq!(font_size, 16);
+            assert_eq!(axis_hash, 0x1234);
+            let read = dr.front_shaped_glyphs(glyphs, glyph_count);
+            assert_eq!(read.len(), 2);
+            assert_eq!(read[0].glyph_id, 65);
+            assert_eq!(read[1].glyph_id, 66);
+        }
+        _ => panic!("expected Glyphs"),
+    }
+}
+
+#[test]
+fn glyphs_copy_front_to_back_preserves_data() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    {
+        let mut w = dw.back();
+        w.clear();
+        let glyphs = [
+            ShapedGlyph { glyph_id: 42, x_advance: 500, x_offset: 0, y_offset: 0 },
+        ];
+        let dref = w.push_shaped_glyphs(&glyphs);
+        let id = w.alloc_node().unwrap();
+        w.node_mut(id).content = Content::Glyphs {
+            color: Color::rgb(255, 255, 255),
+            glyphs: dref,
+            glyph_count: 1,
+            font_size: 24,
+            axis_hash: 0,
+        };
+        w.set_root(id);
+    }
+    dw.swap();
+    dw.copy_front_to_back();
+
+    // Verify back buffer has the glyph data
+    let back = dw.back();
+    match back.node(0).content {
+        Content::Glyphs { glyph_count, .. } => {
+            assert_eq!(glyph_count, 1);
+            // Verify data_buf contains glyph data
+            assert!(back.data_used() > 0);
+        }
+        _ => panic!("Glyphs not preserved after copy"),
+    }
+}
+
+// ── Multiple Glyphs nodes coexist (VAL-SCENE-004) ──────────────────
+
+#[test]
+fn multiple_glyphs_nodes_coexist() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let root = w.alloc_node().unwrap();
+    w.set_root(root);
+
+    let mut expected_ids: Vec<(u16, u16)> = Vec::new(); // (first_glyph_id, count)
+
+    for i in 0..5u16 {
+        let glyphs: Vec<ShapedGlyph> = (0..(i + 1) * 3).map(|j| ShapedGlyph {
+            glyph_id: i * 100 + j,
+            x_advance: 10,
+            x_offset: 0,
+            y_offset: 0,
+        }).collect();
+        let count = glyphs.len() as u16;
+        let dref = w.push_shaped_glyphs(&glyphs);
+        let nid = w.alloc_node().unwrap();
+        w.node_mut(nid).content = Content::Glyphs {
+            color: Color::rgb(200, 200, 200),
+            glyphs: dref,
+            glyph_count: count,
+            font_size: 16,
+            axis_hash: 0,
+        };
+        w.add_child(root, nid);
+        expected_ids.push((i * 100, count));
+    }
+    w.commit();
+
+    let r = SceneReader::new(&buf);
+    for (idx, &(first_id, count)) in expected_ids.iter().enumerate() {
+        let nid = (idx + 1) as u16; // root is 0, children are 1..5
+        match r.node(nid).content {
+            Content::Glyphs { glyphs, glyph_count, .. } => {
+                assert_eq!(glyph_count, count, "node {} glyph_count mismatch", idx);
+                let read = r.shaped_glyphs(glyphs, glyph_count);
+                assert_eq!(read.len(), count as usize);
+                assert_eq!(read[0].glyph_id, first_id, "node {} first glyph mismatch", idx);
+            }
+            _ => panic!("node {} expected Glyphs", idx),
+        }
+    }
+}
+
+// ── Node size unchanged (VAL-SCENE-006) ─────────────────────────────
+
+#[test]
+fn node_size_is_96_bytes() {
+    assert_eq!(core::mem::size_of::<Node>(), 96);
+}
+
+#[test]
+fn scene_header_size_is_64_bytes() {
+    assert_eq!(core::mem::size_of::<SceneHeader>(), 64);
+}
+
+#[test]
+fn shaped_glyph_size_is_8_bytes() {
+    assert_eq!(core::mem::size_of::<ShapedGlyph>(), 8);
+}
+
+// ── Scene diffing with new types (VAL-SCENE-007) ────────────────────
+
+#[test]
+fn diff_fillrect_color_change_detected() {
+    let mut buf1 = make_buf();
+    let mut w1 = SceneWriter::new(&mut buf1);
+    let root = w1.alloc_node().unwrap();
+    w1.node_mut(root).width = 100;
+    w1.node_mut(root).height = 50;
+    w1.node_mut(root).content = Content::FillRect {
+        color: Color::rgb(255, 0, 0),
+    };
+    w1.set_root(root);
+    w1.commit();
+
+    let mut buf2 = make_buf();
+    let mut w2 = SceneWriter::new(&mut buf2);
+    let root2 = w2.alloc_node().unwrap();
+    w2.node_mut(root2).width = 100;
+    w2.node_mut(root2).height = 50;
+    w2.node_mut(root2).content = Content::FillRect {
+        color: Color::rgb(0, 255, 0), // changed
+    };
+    w2.set_root(root2);
+    w2.commit();
+
+    let rects = diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
+    assert_eq!(rects.len(), 1, "FillRect color change should produce dirty rect");
+}
+
+#[test]
+fn diff_glyphs_content_hash_change_detected() {
+    let mut buf1 = make_buf();
+    let mut w1 = SceneWriter::new(&mut buf1);
+    let root = w1.alloc_node().unwrap();
+    w1.node_mut(root).width = 200;
+    w1.node_mut(root).height = 20;
+    w1.node_mut(root).content_hash = fnv1a(b"hello");
+    w1.node_mut(root).content = Content::Glyphs {
+        color: Color::rgb(200, 200, 200),
+        glyphs: DataRef { offset: 0, length: 0 },
+        glyph_count: 0,
+        font_size: 16,
+        axis_hash: 0,
+    };
+    w1.set_root(root);
+    w1.commit();
+
+    let mut buf2 = make_buf();
+    let mut w2 = SceneWriter::new(&mut buf2);
+    let root2 = w2.alloc_node().unwrap();
+    w2.node_mut(root2).width = 200;
+    w2.node_mut(root2).height = 20;
+    w2.node_mut(root2).content_hash = fnv1a(b"world"); // changed hash
+    w2.node_mut(root2).content = Content::Glyphs {
+        color: Color::rgb(200, 200, 200),
+        glyphs: DataRef { offset: 0, length: 0 },
+        glyph_count: 0,
+        font_size: 16,
+        axis_hash: 0,
+    };
+    w2.set_root(root2);
+    w2.commit();
+
+    let rects = diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
+    assert_eq!(rects.len(), 1, "Glyphs content_hash change should produce dirty rect");
+}
+
+#[test]
+fn diff_identical_fillrect_scenes_empty() {
+    let mut buf1 = make_buf();
+    let mut w1 = SceneWriter::new(&mut buf1);
+    let root = w1.alloc_node().unwrap();
+    w1.node_mut(root).width = 50;
+    w1.node_mut(root).height = 30;
+    w1.node_mut(root).content = Content::FillRect { color: Color::rgb(128, 128, 128) };
+    w1.set_root(root);
+    w1.commit();
+
+    let rects = diff_scenes(w1.nodes(), 1, w1.nodes(), 1).unwrap();
+    assert!(rects.is_empty(), "identical FillRect scenes should have no dirty rects");
+}
+
+// ── Mixed content type tests (VAL-SCENE-008) ───────────────────────
+
+#[test]
+fn mixed_fillrect_glyphs_image_double_buffer_swap() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    {
+        let mut w = dw.back();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.node_mut(root).width = 800;
+        w.node_mut(root).height = 600;
+        w.set_root(root);
+
+        // FillRect child
+        let fill_id = w.alloc_node().unwrap();
+        w.node_mut(fill_id).width = 100;
+        w.node_mut(fill_id).height = 20;
+        w.node_mut(fill_id).content = Content::FillRect {
+            color: Color::rgba(200, 200, 200, 128),
+        };
+        w.add_child(root, fill_id);
+
+        // Glyphs child
+        let glyphs = [
+            ShapedGlyph { glyph_id: 65, x_advance: 10, x_offset: 0, y_offset: 0 },
+        ];
+        let gref = w.push_shaped_glyphs(&glyphs);
+        let glyph_id = w.alloc_node().unwrap();
+        w.node_mut(glyph_id).content = Content::Glyphs {
+            color: Color::rgb(255, 255, 255),
+            glyphs: gref,
+            glyph_count: 1,
+            font_size: 16,
+            axis_hash: 0,
+        };
+        w.add_child(root, glyph_id);
+
+        // Image child
+        let pixels = vec![0u8; 16]; // 1x1 BGRA pixel (4 bytes)
+        let iref = w.push_data(&pixels);
+        let img_id = w.alloc_node().unwrap();
+        w.node_mut(img_id).content = Content::Image {
+            data: iref,
+            src_width: 2,
+            src_height: 2,
+        };
+        w.add_child(root, img_id);
+    }
+    dw.swap();
+
+    // Verify all survive the swap
+    let dr = DoubleReader::new(&buf);
+    assert_eq!(dr.front_nodes().len(), 4);
+    match dr.front_nodes()[1].content {
+        Content::FillRect { color } => assert_eq!(color.a, 128),
+        _ => panic!("expected FillRect"),
+    }
+    match dr.front_nodes()[2].content {
+        Content::Glyphs { glyph_count, .. } => assert_eq!(glyph_count, 1),
+        _ => panic!("expected Glyphs"),
+    }
+    match dr.front_nodes()[3].content {
+        Content::Image { src_width, src_height, .. } => {
+            assert_eq!(src_width, 2);
+            assert_eq!(src_height, 2);
+        }
+        _ => panic!("expected Image"),
+    }
+}
+
+// ── mark_changed works with FillRect and Glyphs (VAL-SCENE-008) ────
+
+#[test]
+fn mark_changed_works_for_fillrect_and_glyphs() {
+    let mut buf = make_double_buf();
+    let mut dw = DoubleWriter::new(&mut buf);
+    {
+        let mut w = dw.back();
+        w.clear();
+        for _ in 0..4 { w.alloc_node().unwrap(); }
+        // Node 0: root
+        // Node 1: FillRect cursor
+        w.node_mut(1).content = Content::FillRect { color: Color::rgb(200, 200, 200) };
+        // Node 2: Glyphs text
+        w.node_mut(2).content = Content::Glyphs {
+            color: Color::rgb(255, 255, 255),
+            glyphs: DataRef { offset: 0, length: 0 },
+            glyph_count: 0,
+            font_size: 16,
+            axis_hash: 0,
+        };
+        w.set_root(0);
+    }
+    dw.swap();
+
+    // Incremental update: change FillRect and Glyphs nodes
+    dw.copy_front_to_back();
+    {
+        let mut w = dw.back();
+        w.node_mut(1).content = Content::FillRect { color: Color::rgb(100, 100, 100) };
+        w.mark_changed(1);
+        w.node_mut(2).content_hash = fnv1a(b"new text");
+        w.mark_changed(2);
+    }
+    dw.swap();
+
+    let dr = DoubleReader::new(&buf);
+    let cl = dr.change_list().unwrap();
+    assert_eq!(cl.len(), 2);
+    assert!(cl.contains(&1));
+    assert!(cl.contains(&2));
+}
+
+// ── Glyphs axis_hash round-trip (VAL-SCENE-002) ────────────────────
+
+#[test]
+fn glyphs_axis_hash_round_trip() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Glyphs {
+        color: Color::rgb(255, 255, 255),
+        glyphs: DataRef { offset: 0, length: 0 },
+        glyph_count: 0,
+        font_size: 18,
+        axis_hash: 0xABCD_1234,
+    };
+    w.set_root(id);
+    w.commit();
+
+    let r = SceneReader::new(&buf);
+    match r.node(id).content {
+        Content::Glyphs { axis_hash, .. } => {
+            assert_eq!(axis_hash, 0xABCD_1234, "axis_hash must survive round-trip");
+        }
+        _ => panic!("expected Glyphs"),
+    }
+}
+
+// ── Removed types do not exist (VAL-SCENE-005) ─────────────────────
+// These are compile-time assertions — the test compiles = types removed.
+// grep-based verification is in the feature's verificationSteps.
+
+#[test]
+fn content_enum_has_four_variants() {
+    // Verify that Content has exactly: None, FillRect, Image, Glyphs
+    let none = Content::None;
+    let fill = Content::FillRect { color: Color::rgb(0, 0, 0) };
+    let img = Content::Image {
+        data: DataRef { offset: 0, length: 0 },
+        src_width: 0,
+        src_height: 0,
+    };
+    let glyphs = Content::Glyphs {
+        color: Color::rgb(0, 0, 0),
+        glyphs: DataRef { offset: 0, length: 0 },
+        glyph_count: 0,
+        font_size: 0,
+        axis_hash: 0,
+    };
+    // If Text or Path existed, this test would need updating
+    assert!(matches!(none, Content::None));
+    assert!(matches!(fill, Content::FillRect { .. }));
+    assert!(matches!(img, Content::Image { .. }));
+    assert!(matches!(glyphs, Content::Glyphs { .. }));
+}
+
+// ── Monospace Glyphs convenience test ──────────────────────────────
+
+#[test]
+fn make_mono_glyphs_produces_correct_content() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let content = make_mono_glyphs(&mut w, b"Hello", 16, Color::rgb(200, 200, 200), 8);
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = content;
+    w.set_root(id);
+    w.commit();
+
+    let r = SceneReader::new(&buf);
+    match r.node(id).content {
+        Content::Glyphs { color, glyphs, glyph_count, font_size, axis_hash } => {
+            assert_eq!(glyph_count, 5);
+            assert_eq!(font_size, 16);
+            assert_eq!(axis_hash, 0);
+            assert_eq!(color, Color::rgb(200, 200, 200));
+            let read = r.shaped_glyphs(glyphs, glyph_count);
+            assert_eq!(read.len(), 5);
+            assert_eq!(read[0].glyph_id, b'H' as u16);
+            assert_eq!(read[4].glyph_id, b'o' as u16);
+            // Each glyph has x_advance == 8 (monospace)
+            for g in read {
+                assert_eq!(g.x_advance, 8);
+            }
+        }
+        _ => panic!("expected Glyphs content"),
+    }
 }

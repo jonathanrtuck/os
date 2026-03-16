@@ -23,9 +23,9 @@
 //!
 //! One node type with optional content (Core Animation model). Every node
 //! can have children, visual decoration (background, border, corner radius),
-//! and an optional content variant (Text, Image, Path). This avoids wrapper
-//! nodes in compound documents where containers routinely need backgrounds
-//! and borders.
+//! and an optional content variant (FillRect, Image, Glyphs). This avoids
+//! wrapper nodes in compound documents where containers routinely need
+//! backgrounds and borders.
 
 #![no_std]
 
@@ -139,36 +139,7 @@ impl Color {
     }
 }
 
-// ── Text runs ───────────────────────────────────────────────────────
-
-/// A positioned run of shaped glyphs — one line (or fragment) of text.
-///
-/// The OS service computes layout (line breaking, shaping, positioning)
-/// and emits runs. The compositor just rasterizes glyphs at the given
-/// positions. Layout in the OS service, rasterization in the compositor.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-#[repr(C)]
-pub struct TextRun {
-    /// Glyph data in the data buffer. For monospace: raw UTF-8 bytes
-    /// (glyph ID == byte value). For shaped text (future): array of
-    /// `ShapedGlyph`.
-    pub glyphs: DataRef,
-    /// Number of glyphs in this run.
-    pub glyph_count: u16,
-    /// Starting pixel position relative to the parent node.
-    pub x: i16,
-    pub y: i16,
-    /// Text color.
-    pub color: Color,
-    /// Uniform advance width per glyph (monospace). When 0, per-glyph
-    /// advances are stored in the data buffer as `ShapedGlyph` entries.
-    pub advance: u16,
-    /// Font size in pixels (selects the glyph cache).
-    pub font_size: u16,
-    /// Hash of variable font axis values used for rasterization (0 = default).
-    /// Flows from core service → scene graph → compositor for glyph cache key.
-    pub axis_hash: u32,
-}
+// ── Shaped glyphs ───────────────────────────────────────────────────
 
 /// A shaped glyph with individual positioning (proportional/shaped text).
 ///
@@ -196,21 +167,19 @@ const _: () = assert!(core::mem::size_of::<ShapedGlyph>() == 8);
 
 /// What a node draws (beyond its container decoration).
 ///
-/// Cursor and selection are not part of Text — they are regular nodes
-/// with backgrounds, positioned by the OS service's layout engine.
+/// Cursor and selection highlights use `FillRect`. Text lines use
+/// `Glyphs`. Each variant is geometric — the render backend needs no
+/// content-type knowledge beyond these primitives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub enum Content {
     /// Pure container — no content, just children and decoration.
     None,
-    /// Positioned text runs laid out by the OS service.
-    /// The compositor rasterizes glyphs at given positions.
-    Text {
-        /// Reference to array of `TextRun` in the data buffer.
-        runs: DataRef,
-        /// Number of runs.
-        run_count: u16,
-        _pad: [u8; 2],
+    /// Solid rectangle fill. Position and size come from the node's
+    /// `x`, `y`, `width`, `height` fields. No data buffer allocation.
+    FillRect {
+        /// Fill color.
+        color: Color,
     },
     /// A pixel buffer reference.
     Image {
@@ -220,17 +189,22 @@ pub enum Content {
         src_width: u16,
         src_height: u16,
     },
-    /// Arbitrary vector shape (cursor bars, decorations, highlights).
-    Path {
-        /// Reference to `PathCmd` array in the data buffer.
-        commands: DataRef,
-        /// Fill color (transparent = no fill).
-        fill: Color,
-        /// Stroke color (transparent = no stroke).
-        stroke: Color,
-        /// Stroke width in pixels (0 = no stroke).
-        stroke_width: u8,
-        _pad: [u8; 3],
+    /// A single run of shaped glyphs — one font, one color, one glyph
+    /// array. Multiple `Glyphs` nodes replace what was one multi-run
+    /// `Text` node. The render backend looks up each glyph_id in the
+    /// glyph cache and draws coverage at the correct position.
+    Glyphs {
+        /// Text color.
+        color: Color,
+        /// Reference to `ShapedGlyph` array in the data buffer.
+        glyphs: DataRef,
+        /// Number of glyphs in this run.
+        glyph_count: u16,
+        /// Font size in pixels (selects the glyph cache).
+        font_size: u16,
+        /// Hash of variable font axis values used for rasterization
+        /// (0 = default). Used as glyph cache key.
+        axis_hash: u32,
     },
 }
 
@@ -546,10 +520,10 @@ pub struct Node {
     /// transform stack: world = parent_world × node_local.
     pub transform: AffineTransform,
     // ── content hash (FNV-1a of variable-length data referenced by Content) ──
-    /// Hash of the node's variable-length data (text bytes, path commands,
-    /// image pixels). Computed by the scene writer when content is set.
-    /// The compositor uses this for scene diffing — a changed hash means
-    /// the data buffer content changed even if the DataRef is identical.
+    /// Hash of the node's variable-length data (glyph arrays, image pixels).
+    /// Computed by the scene writer when content is set. The compositor
+    /// uses this for scene diffing — a changed hash means the data buffer
+    /// content changed even if the DataRef is identical.
     pub content_hash: u32,
     // ── content ──
     pub content: Content,
@@ -645,67 +619,6 @@ pub struct SceneHeader {
     /// Node IDs that changed this frame (valid entries: `0..change_count`).
     pub changed_nodes: [NodeId; CHANGE_LIST_CAPACITY],
     pub _reserved2: [u8; 2],
-}
-
-// ── Path commands ───────────────────────────────────────────────────
-
-/// A single path command in the scene graph data buffer.
-///
-/// For `MoveTo`, `LineTo`, and `Close`: only `x` and `y` are used
-/// (control point fields are ignored).
-///
-/// For `CurveTo` (cubic Bézier): `x1`,`y1` and `x2`,`y2` are the two
-/// control points; `x`,`y` is the endpoint.
-#[derive(Clone, Copy, Debug, PartialEq)]
-#[repr(C)]
-pub struct PathCmd {
-    pub kind: PathCmdKind,
-    pub _pad: u8,
-    /// Endpoint x coordinate (or unused for Close).
-    pub x: i16,
-    /// Endpoint y coordinate (or unused for Close).
-    pub y: i16,
-    /// First control point x (CurveTo only).
-    pub x1: i16,
-    /// First control point y (CurveTo only).
-    pub y1: i16,
-    /// Second control point x (CurveTo only).
-    pub x2: i16,
-    /// Second control point y (CurveTo only).
-    pub y2: i16,
-}
-
-// Compile-time size assertion: PathCmd must be exactly 14 bytes
-// (kind:1 + pad:1 + x:2 + y:2 + x1:2 + y1:2 + x2:2 + y2:2 = 14).
-const _: () = assert!(core::mem::size_of::<PathCmd>() == 14);
-
-impl PathCmd {
-    /// Create a MoveTo command.
-    pub const fn move_to(x: i16, y: i16) -> Self {
-        Self { kind: PathCmdKind::MoveTo, _pad: 0, x, y, x1: 0, y1: 0, x2: 0, y2: 0 }
-    }
-    /// Create a LineTo command.
-    pub const fn line_to(x: i16, y: i16) -> Self {
-        Self { kind: PathCmdKind::LineTo, _pad: 0, x, y, x1: 0, y1: 0, x2: 0, y2: 0 }
-    }
-    /// Create a CurveTo command (cubic Bézier).
-    /// `(x1,y1)` and `(x2,y2)` are control points, `(x,y)` is the endpoint.
-    pub const fn curve_to(x1: i16, y1: i16, x2: i16, y2: i16, x: i16, y: i16) -> Self {
-        Self { kind: PathCmdKind::CurveTo, _pad: 0, x, y, x1, y1, x2, y2 }
-    }
-    /// Create a Close command.
-    pub const fn close() -> Self {
-        Self { kind: PathCmdKind::Close, _pad: 0, x: 0, y: 0, x1: 0, y1: 0, x2: 0, y2: 0 }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub enum PathCmdKind {
-    MoveTo = 0,
-    LineTo = 1,
-    Close = 2,
-    CurveTo = 3,
 }
 
 // ── SceneWriter ─────────────────────────────────────────────────────
@@ -942,52 +855,7 @@ impl<'a> SceneWriter<'a> {
 
         self.push_data(bytes)
     }
-    /// Push an array of `TextRun` structs into the data buffer.
-    /// Aligns the write offset to `align_of::<TextRun>()` first.
-    /// Returns a `DataRef` and the count.
-    pub fn push_text_runs(&mut self, runs: &[TextRun]) -> (DataRef, u16) {
-        // Align data_used to TextRun alignment (typically 4 bytes).
-        let align = core::mem::align_of::<TextRun>();
-        let used = self.header().data_used as usize;
-        let aligned = (used + align - 1) & !(align - 1);
 
-        if aligned > used && aligned <= DATA_BUFFER_SIZE {
-            self.header_mut().data_used = aligned as u32;
-        }
-
-        // SAFETY: TextRun is #[repr(C)] with no padding, so
-        // transmuting to bytes is safe for serialization.
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                runs.as_ptr() as *const u8,
-                runs.len() * core::mem::size_of::<TextRun>(),
-            )
-        };
-
-        (self.push_data(bytes), runs.len() as u16)
-    }
-    /// Push an array of `PathCmd` structs into the data buffer.
-    /// Aligns the write offset to `align_of::<PathCmd>()` first.
-    /// Returns a `DataRef` covering the path command data.
-    pub fn push_path_cmds(&mut self, cmds: &[PathCmd]) -> DataRef {
-        let align = core::mem::align_of::<PathCmd>();
-        let used = self.header().data_used as usize;
-        let aligned = (used + align - 1) & !(align - 1);
-
-        if aligned > used && aligned <= DATA_BUFFER_SIZE {
-            self.header_mut().data_used = aligned as u32;
-        }
-
-        // SAFETY: PathCmd is #[repr(C)] — transmuting to bytes is safe.
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                cmds.as_ptr() as *const u8,
-                cmds.len() * core::mem::size_of::<PathCmd>(),
-            )
-        };
-
-        self.push_data(bytes)
-    }
     /// Append new data (old DataRef is abandoned — bump allocator).
     pub fn replace_data(&mut self, bytes: &[u8]) -> DataRef {
         self.push_data(bytes)
@@ -1114,36 +982,7 @@ impl<'a> SceneReader<'a> {
         // push_shaped_glyphs to ShapedGlyph alignment.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
-    /// Interpret a DataRef as an array of `TextRun` structs.
-    pub fn text_runs(&self, dref: DataRef) -> &[TextRun] {
-        let bytes = self.data(dref);
-        let run_size = core::mem::size_of::<TextRun>();
 
-        if bytes.is_empty() || bytes.len() < run_size {
-            return &[];
-        }
-
-        let count = bytes.len() / run_size;
-
-        // SAFETY: TextRun is repr(C), data buffer is aligned to node size
-        // which is >= alignment of TextRun.
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
-    }
-    /// Interpret a DataRef as an array of `PathCmd` structs.
-    pub fn path_cmds(&self, dref: DataRef) -> &[PathCmd] {
-        let bytes = self.data(dref);
-        let cmd_size = core::mem::size_of::<PathCmd>();
-
-        if bytes.is_empty() || bytes.len() < cmd_size {
-            return &[];
-        }
-
-        let count = bytes.len() / cmd_size;
-
-        // SAFETY: PathCmd is #[repr(C)], data buffer is aligned by
-        // push_path_cmds to PathCmd alignment.
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const PathCmd, count) }
-    }
 }
 
 // ── Double-buffered scene graph ─────────────────────────────────────
@@ -1455,22 +1294,6 @@ impl<'a> DoubleWriter<'a> {
         // available bytes. The slice borrows `self`, preventing concurrent mutation.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
-    /// Interpret a DataRef from the front buffer as TextRun array.
-    pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
-        let bytes = self.front_data(dref);
-        let run_size = core::mem::size_of::<TextRun>();
-
-        if bytes.is_empty() || bytes.len() < run_size {
-            return &[];
-        }
-
-        let count = bytes.len() / run_size;
-
-        // SAFETY: TextRun is #[repr(C)]. Data buffer is aligned to NODE_SIZE
-        // (>= TextRun alignment). `count` is bounded by available bytes.
-        // The slice borrows `self`, preventing concurrent mutation.
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
-    }
     /// Publish the back buffer as the new front by setting its generation
     /// above the current front's. A release fence ensures all scene data
     /// written via `back()` is visible before the generation update.
@@ -1575,22 +1398,6 @@ impl<'a> DoubleReader<'a> {
         // aligns the data buffer to ShapedGlyph alignment. `count` is bounded by
         // available bytes. The acquire fence at construction ensures visibility.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
-    }
-    /// Interpret a DataRef from the front buffer as TextRun array.
-    pub fn front_text_runs(&self, dref: DataRef) -> &[TextRun] {
-        let bytes = self.front_data(dref);
-        let run_size = core::mem::size_of::<TextRun>();
-
-        if bytes.is_empty() || bytes.len() < run_size {
-            return &[];
-        }
-
-        let count = bytes.len() / run_size;
-
-        // SAFETY: TextRun is #[repr(C)]. Data buffer is aligned to NODE_SIZE
-        // (>= TextRun alignment). `count` is bounded by available bytes.
-        // The acquire fence at construction ensures visibility.
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const TextRun, count) }
     }
     /// Returns the change list from the front buffer, or `None` if the
     /// FULL_REPAINT sentinel is set (overflow or full rebuild).

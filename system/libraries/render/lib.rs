@@ -14,7 +14,6 @@ pub mod cursor;
 pub mod damage;
 pub mod scene_render;
 pub mod surface_pool;
-pub mod svg;
 
 use drawing::Surface;
 use protocol::DirtyRect;
