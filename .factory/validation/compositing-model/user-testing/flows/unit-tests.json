@@ -1,0 +1,200 @@
+{
+  "groupId": "unit-tests",
+  "testedAt": "2026-03-16T01:15:00Z",
+  "isolation": {
+    "surface": "Host-side Rust unit tests (macOS aarch64)",
+    "testCommand": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1",
+    "noSharedMutableState": true,
+    "noSourceModification": true,
+    "noQEMU": true
+  },
+  "toolsUsed": ["cargo test"],
+  "assertions": [
+    {
+      "id": "VAL-COMP-001",
+      "title": "Group opacity differs from individual opacity",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test group_opacity_differs_from_individual_opacity", "expected": "Test passes", "observed": "test group_opacity_differs_from_individual_opacity ... ok" },
+        { "action": "Read test source (scene_render.rs:2071-2167)", "expected": "Test creates two scenes: one with parent opacity=128 and opaque children, another with parent opacity=255 and per-child opacity=128", "observed": "Test constructs both scenes with overlapping red/blue children, renders each to separate buffers, and asserts the overlap pixel differs between group vs individual opacity" }
+      ],
+      "evidence": {
+        "testOutput": "test group_opacity_differs_from_individual_opacity ... ok",
+        "sourceVerification": "Test at scene_render.rs:2071 creates two overlapping children (red 50x60 and blue 50x60 at x=30). Scenario A: parent opacity=128, children opaque. Scenario B: parent opaque, children each opacity=128. Pixel at (40,30) in overlap region is asserted to differ (assert_ne!), confirming group compositing produces different results from per-child compositing."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-002",
+      "title": "Opacity 255 bypasses offscreen buffer",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test opacity_255_bypasses_offscreen", "expected": "Test passes", "observed": "test opacity_255_bypasses_offscreen ... ok" },
+        { "action": "Read test source (scene_render.rs:2168-2210)", "expected": "Test uses SurfacePool and verifies alloc_count==0", "observed": "Test creates a node with opacity=255, renders with render_scene_with_pool, asserts pool.alloc_count()==0 and pixel is red" }
+      ],
+      "evidence": {
+        "testOutput": "test opacity_255_bypasses_offscreen ... ok",
+        "sourceVerification": "Test at scene_render.rs:2168 creates a 60x40 red node with opacity=255, uses render_scene_with_pool with a SurfacePool, then asserts pool.alloc_count()==0 (no offscreen allocation) and the pixel at (30,20) is (255,0,0) red."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-003",
+      "title": "Opacity 0 produces fully transparent output",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test opacity_zero_produces_no_output", "expected": "Test passes", "observed": "test opacity_zero_produces_no_output ... ok" },
+        { "action": "Read test source (scene_render.rs:2211-2257)", "expected": "Destination pixels unchanged after rendering opacity=0 node", "observed": "Test fills framebuffer white, renders red node with opacity=0, asserts pixel at (30,20) remains (255,255,255,255)" }
+      ],
+      "evidence": {
+        "testOutput": "test opacity_zero_produces_no_output ... ok",
+        "sourceVerification": "Test at scene_render.rs:2211 creates a 60x40 red node with opacity=0, clears framebuffer to WHITE, renders, then asserts pixel at (30,20) is still (255,255,255,255) — destination unchanged."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-004",
+      "title": "Offscreen buffer dimensions match node bounds at scale",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test buffer_dimensions_match_node_bounds_times_scale", "expected": "Test passes", "observed": "test buffer_dimensions_match_node_bounds_times_scale ... ok" },
+        { "action": "Read test source (surface_pool.rs:31-47)", "expected": "120x80 at scale=2 allocates 240x160 buffer", "observed": "Test computes phys_w=240, phys_h=160 from logical 120x80 * scale 2.0, acquires from pool, asserts data.len()==240*160*4" }
+      ],
+      "evidence": {
+        "testOutput": "test buffer_dimensions_match_node_bounds_times_scale ... ok",
+        "sourceVerification": "Test at surface_pool.rs:31 computes physical dimensions (120*2.0=240, 80*2.0=160), acquires buffer from pool, asserts data.len()==240*160*4=153600 bytes."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-005",
+      "title": "Offscreen buffer cleared before subtree rendering",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test buffer_cleared_to_transparent_on_acquire", "expected": "Test passes", "observed": "test buffer_cleared_to_transparent_on_acquire ... ok" },
+        { "action": "Run cargo test no_stale_data_across_frames", "expected": "Test passes", "observed": "test no_stale_data_across_frames ... ok" },
+        { "action": "Read test sources (surface_pool.rs:48-73, 304-333)", "expected": "Fresh buffer is zeroed, reused buffer is cleared", "observed": "First test: acquires fresh buffer, verifies all zeros; writes 0xAB, releases, re-acquires, verifies all zeros again. Second test: fills buffer with pattern data, releases, ends frame, re-acquires, verifies every byte is 0." }
+      ],
+      "evidence": {
+        "testOutput": "buffer_cleared_to_transparent_on_acquire ... ok\nno_stale_data_across_frames ... ok",
+        "sourceVerification": "buffer_cleared_to_transparent_on_acquire (surface_pool.rs:48) verifies fresh allocation is all zeros, then writes 0xAB to every byte, releases, re-acquires, and asserts all zeros again. no_stale_data_across_frames (surface_pool.rs:304) fills buffer with indexed pattern, releases+end_frame, re-acquires, asserts every byte is 0 with per-byte error reporting."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-006",
+      "title": "Pool-based offscreen buffer reuse",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test second_frame_reuses_first_frames_buffer", "expected": "Test passes", "observed": "test second_frame_reuses_first_frames_buffer ... ok" },
+        { "action": "Read test source (surface_pool.rs:74-96)", "expected": "alloc_count remains 1 across two frames", "observed": "Frame 1: acquire 200x150, release, alloc_count==1. end_frame(). Frame 2: acquire 200x150, alloc_count still 1 (reused)." }
+      ],
+      "evidence": {
+        "testOutput": "test second_frame_reuses_first_frames_buffer ... ok",
+        "sourceVerification": "Test at surface_pool.rs:74 acquires a 200x150 buffer (alloc_count=1), releases, calls end_frame(), re-acquires same size, asserts alloc_count==1 (buffer was reused, not re-allocated)."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-007",
+      "title": "Pool handles multiple simultaneous buffers",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test two_simultaneous_buffers_allocated_and_reused", "expected": "Test passes", "observed": "test two_simultaneous_buffers_allocated_and_reused ... ok" },
+        { "action": "Read test source (surface_pool.rs:97-128)", "expected": "alloc_count=2 frame 1, still 2 frame 2 (reused)", "observed": "Frame 1: acquires two 100x80 buffers simultaneously, alloc_count==2. Releases both, end_frame(). Frame 2: acquires two same-size, alloc_count still 2." }
+      ],
+      "evidence": {
+        "testOutput": "test two_simultaneous_buffers_allocated_and_reused ... ok",
+        "sourceVerification": "Test at surface_pool.rs:97 acquires two 100x80 buffers simultaneously (alloc_count=2), releases both, calls end_frame(). Frame 2 acquires two buffers of same size, asserts alloc_count==2 (both reused)."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-008",
+      "title": "sRGB-correct group opacity compositing",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test srgb_correct_group_opacity", "expected": "Test passes", "observed": "test srgb_correct_group_opacity ... ok" },
+        { "action": "Read test source (scene_render.rs:2258-2308)", "expected": "White at opacity 128 over black produces ~188, not naive 128", "observed": "Test renders white node at opacity=128 over black background, asserts r,g,b each in range [186,190] — confirming sRGB-correct gamma blending." }
+      ],
+      "evidence": {
+        "testOutput": "test srgb_correct_group_opacity ... ok",
+        "sourceVerification": "Test at scene_render.rs:2258 creates a 60x40 white node with opacity=128, renders over black background. Asserts pixel at (30,20) has r,g,b in [186,190] — the sRGB-correct result (~188) rather than naive linear (128). Tolerance is ±2."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-009",
+      "title": "Nested group opacity",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test nested_group_opacity", "expected": "Test passes", "observed": "test nested_group_opacity ... ok" },
+        { "action": "Read test source (scene_render.rs:2309-2369)", "expected": "Parent opacity=128 × child opacity=128 produces ~25% effective opacity", "observed": "Test creates parent with opacity=128, child with opacity=128 and white background. Asserts r<150 (less than single 128 opacity ~188) and r>50 (visible), with R=G=B equality." }
+      ],
+      "evidence": {
+        "testOutput": "test nested_group_opacity ... ok",
+        "sourceVerification": "Test at scene_render.rs:2309 creates a parent node (opacity=128) containing a child node (opacity=128, white background). Renders over black. Asserts pixel value r<150 (significantly less than single-layer 50% ~188), r>50 (not invisible), and R=G=B equal (white over black should have equal channels). This confirms multiplicative composition of nested opacity."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-010",
+      "title": "Offscreen buffer respects clip rect",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test offscreen_opacity_respects_clip", "expected": "Test passes", "observed": "test offscreen_opacity_respects_clip ... ok" },
+        { "action": "Read test source (scene_render.rs:2370-2437)", "expected": "Children clipped to parent bounds within offscreen buffer", "observed": "Test creates parent 40x40 at (10,10) with opacity=128 and CLIPS_CHILDREN, child 80x80 extending beyond. Asserts (30,30) inside clip has green g>50, and (60,60) outside is black (0,0,0)." }
+      ],
+      "evidence": {
+        "testOutput": "test offscreen_opacity_respects_clip ... ok",
+        "sourceVerification": "Test at scene_render.rs:2370 creates a 100x100 root, a 40x40 parent at (10,10) with opacity=128 and CLIPS_CHILDREN, and an 80x80 green child. Pixel at (30,30) inside clip region has g>50 (green visible). Pixel at (60,60) outside parent bounds is (0,0,0) — child clipped correctly despite extending beyond parent."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-COMP-011",
+      "title": "Scroll offset applied within offscreen buffer",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test offscreen_opacity_respects_scroll", "expected": "Test passes", "observed": "test offscreen_opacity_respects_scroll ... ok" },
+        { "action": "Read test source (scene_render.rs:2438-2505)", "expected": "scroll_y correctly applied within offscreen rendering", "observed": "Test creates parent with opacity=128, scroll_y=10, CLIPS_CHILDREN, and a red child. Asserts pixel at (30,10) inside scrolled region has r>50 (red visible at reduced opacity with scroll applied)." }
+      ],
+      "evidence": {
+        "testOutput": "test offscreen_opacity_respects_scroll ... ok",
+        "sourceVerification": "Test at scene_render.rs:2438 creates a 60x40 parent with opacity=128, scroll_y=10, and CLIPS_CHILDREN. Child is 60x40 red at y=0. With scroll_y=10, the child's content is scrolled up by 10px. Asserts pixel at (30,10) inside the visible area has r>50, confirming scroll offset is correctly applied within the offscreen compositing path."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-010",
+      "title": "Damage tracking detects new node property changes (opacity)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test opacity_change_detected_by_damage", "expected": "Test passes", "observed": "test opacity_change_detected_by_damage ... ok" },
+        { "action": "Read test source (scene_render.rs:2536-2567)", "expected": "Byte-level diff catches opacity field change", "observed": "Test creates two Node structs differing only in opacity (255 vs 128), converts to raw bytes, asserts bytes differ (assert_ne!)." }
+      ],
+      "evidence": {
+        "testOutput": "test opacity_change_detected_by_damage ... ok",
+        "sourceVerification": "Test at scene_render.rs:2536 creates two Node::EMPTY instances, sets node_a.opacity=255 and node_b.opacity=128. Converts both to raw byte slices via unsafe pointer cast, then asserts bytes_a != bytes_b. This confirms the byte-level damage diff will detect opacity changes in the scene graph."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-CROSS-015",
+      "title": "Double-buffer swap preserves all new node fields (opacity)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run cargo test double_buffer_swap_preserves_opacity", "expected": "Test passes", "observed": "test double_buffer_swap_preserves_opacity ... ok" },
+        { "action": "Read test source (scene_render.rs:2568-2598)", "expected": "copy_front_to_back preserves opacity field", "observed": "Test creates DoubleWriter, writes node with opacity=128 to back buffer, commits, swaps, calls copy_front_to_back, then verifies back buffer's node still has opacity=128." }
+      ],
+      "evidence": {
+        "testOutput": "test double_buffer_swap_preserves_opacity ... ok",
+        "sourceVerification": "Test at scene_render.rs:2568 uses DoubleWriter to allocate a node with opacity=128, width=100, height=100 in back buffer. Commits and swaps. Calls copy_front_to_back (simulating incremental update). Reads back buffer and asserts node.opacity==128, confirming the field survives the double-buffer copy cycle."
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 13 assertions: 13 passed, 0 failed. All compositing model tests (VAL-COMP-001 through VAL-COMP-011) and cross-area tests (VAL-CROSS-010, VAL-CROSS-015) pass. Source code review confirms each test accurately validates its claimed property: group opacity compositing via offscreen buffers, opacity bypass/zero optimization, buffer dimension scaling, clearing and reuse via SurfacePool, sRGB-correct blending, nested opacity composition, clip+opacity interaction, scroll+opacity interaction, damage tracking for opacity changes, and double-buffer opacity preservation."
+}

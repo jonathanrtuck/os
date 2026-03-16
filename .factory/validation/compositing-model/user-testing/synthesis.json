@@ -1,0 +1,36 @@
+{
+  "milestone": "compositing-model",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 13,
+    "passed": 13,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-COMP-001",
+    "VAL-COMP-002",
+    "VAL-COMP-003",
+    "VAL-COMP-004",
+    "VAL-COMP-005",
+    "VAL-COMP-006",
+    "VAL-COMP-007",
+    "VAL-COMP-008",
+    "VAL-COMP-009",
+    "VAL-COMP-010",
+    "VAL-COMP-011",
+    "VAL-CROSS-010",
+    "VAL-CROSS-015"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added Flow Validator Guidance: Compositing Model section with assertion-to-test mapping for all 13 compositing-model assertions",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null
+}

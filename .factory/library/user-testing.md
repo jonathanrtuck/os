@@ -124,6 +124,41 @@ Testing surface, validation approach, and resource cost classification.
 3. Run specific test filters to confirm individual assertion coverage
 4. Record pass/fail per assertion
 
+## Flow Validator Guidance: Compositing Model (Unit Tests)
+
+**Surface:** Host-side Rust unit tests (macOS aarch64)
+**Testing tool:** Direct `cargo test` invocation with name filters
+**Isolation:** No shared mutable state — tests are pure functions on in-memory buffers.
+**Max concurrency:** 1 (cargo build lock contention)
+
+**Key test files:**
+- `system/test/tests/scene_render.rs` — per-subtree opacity tests (VAL-COMP-001 through VAL-COMP-011)
+- `system/test/tests/surface_pool.rs` — offscreen buffer pool tests (VAL-COMP-004 through VAL-COMP-007)
+
+**Assertion → Test mapping:**
+
+| Assertion | Test name(s) | File |
+|-----------|-------------|------|
+| VAL-COMP-001 | `group_opacity_differs_from_individual_opacity` | scene_render.rs |
+| VAL-COMP-002 | `opacity_255_bypasses_offscreen` | scene_render.rs |
+| VAL-COMP-003 | `opacity_zero_produces_no_output` | scene_render.rs |
+| VAL-COMP-004 | `buffer_dimensions_match_node_bounds_times_scale` | surface_pool.rs |
+| VAL-COMP-005 | `buffer_cleared_to_transparent_on_acquire`, `no_stale_data_across_frames` | surface_pool.rs |
+| VAL-COMP-006 | `second_frame_reuses_first_frames_buffer` | surface_pool.rs |
+| VAL-COMP-007 | `two_simultaneous_buffers_allocated_and_reused` | surface_pool.rs |
+| VAL-COMP-008 | `srgb_correct_group_opacity` | scene_render.rs |
+| VAL-COMP-009 | `nested_group_opacity` | scene_render.rs |
+| VAL-COMP-010 | `offscreen_opacity_respects_clip` | scene_render.rs |
+| VAL-COMP-011 | `offscreen_opacity_respects_scroll` | scene_render.rs |
+| VAL-CROSS-010 | `opacity_change_detected_by_damage` | scene_render.rs |
+| VAL-CROSS-015 | `double_buffer_swap_preserves_opacity` | scene_render.rs |
+
+**Verification approach:**
+1. Run full test suite to confirm all tests pass
+2. For each assertion, confirm the mapped test(s) verify the claimed property by reading test source
+3. Run specific test filters to confirm individual assertion coverage
+4. Record pass/fail per assertion
+
 ## QEMU Test Scripts
 
 - `test-qemu.sh` — interactive display pipeline test (safe, user's QEMU is closed)
