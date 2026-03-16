@@ -73,4 +73,22 @@ Scale factor is **f32** (fractional) throughout the pipeline, supporting 1.0, 1.
 ## Drawing Library Constraints
 
 - **Pixel format:** The drawing library exclusively assumes **Bgra8888** (Blue, Green, Red, Alpha byte order). All blending functions (`fill_rect_blend_scalar_1px`, `neon_blend_const_4px`, `rounded_rect_write_aa_pixel`, `blend_pixel`) hard-code this byte order. If a second pixel format is ever needed, all blending functions must be audited.
-- **Stroke width convention:** In `build_stroke_outline()` / `stroke_subpath()`, the parameter is a **half-width** (offset from center to each edge). Callers must pass `stroke_width / 2`, not the full stroke width. Note: as of the visual-primitives milestone, `render_path()` incorrectly passes the full width — a known non-blocking bug producing strokes at 2× specified width.
+- **Stroke width convention:** In `build_stroke_outline()` / `stroke_subpath()`, the parameter is a **half-width** (offset from center to each edge). Callers must pass `stroke_width / 2`, not the full stroke width. Fixed in compositing-model milestone (commit 1f0ac31). Note: stroke_width=1 at scale=1.0 produces half_width=0 (invisible) — minimum visible stroke is stroke_width=2 at scale=1.0.
+
+## SurfacePool (Offscreen Buffer Management)
+
+`compositor/surface_pool.rs` provides pool-based allocation of temporary `Surface` objects for offscreen rendering (group opacity, future blur/shadow).
+
+**Lifecycle contract:**
+1. `pool.acquire(width, height)` → returns `PoolHandle` + clears buffer to transparent
+2. Use the buffer for rendering (access via `pool.surface(handle)` / `pool.surface_mut(handle)`)
+3. `pool.release(handle)` — marks buffer as reusable
+4. `pool.end_frame()` — frees unused buffers, reclaims memory. **All handles must be released before calling end_frame.** Uses `swap_remove` internally — handle indices are invalidated after `end_frame`.
+
+**Constraints:**
+- Budget: 32 MiB total. `acquire()` returns `None` if budget exceeded.
+- Size-matched: buffers reused only for exact width×height match.
+- MAX_ENTRIES: 32 pooled buffers maximum.
+- Dimensions = node logical size × scale factor (physical pixels).
+
+**Current status (compositing-model milestone):** SurfacePool exists and is tested (16 tests), but the opacity rendering path allocates via `vec![0u8; ...]` instead of pool. This is a deliberate simplification — the borrow checker prevents passing `&mut pool` while a buffer acquired from it is in use. Integration is a future follow-up.
