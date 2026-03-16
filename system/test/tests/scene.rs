@@ -5379,3 +5379,169 @@ fn double_buffer_swap_preserves_transform_fields() {
             "transform.a must survive copy_front_to_back, got {}", node.transform.a);
     }
 }
+
+// ── Transform-aware damage tracking tests ───────────────────────────
+
+/// VAL-XFORM-016: Transformed damage tracking covers AABB.
+/// A 40×40 node rotated 45° should have abs_bounds returning the AABB
+/// of the rotated square (~57×57), not the original 40×40.
+#[test]
+fn abs_bounds_rotated_node_uses_aabb() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = 200;
+    w.node_mut(root).height = 200;
+    w.set_root(root);
+
+    let child = w.alloc_node().unwrap();
+    w.node_mut(child).x = 50;
+    w.node_mut(child).y = 50;
+    w.node_mut(child).width = 40;
+    w.node_mut(child).height = 40;
+    w.node_mut(child).flags = NodeFlags::VISIBLE;
+    // 45° rotation
+    w.node_mut(child).transform = AffineTransform::rotate(
+        45.0 * core::f32::consts::PI / 180.0,
+    );
+    w.add_child(root, child);
+
+    let nodes = w.nodes();
+    let parent_map = build_parent_map(nodes, 2);
+    let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
+
+    // 40×40 rotated 45°: AABB should be ~56.57×56.57
+    // The center of the 40×40 rect at (50,50) is at (70,70).
+    // After rotation, the AABB expands.
+    // The AABB width and height should be approximately sqrt(2)*40 ≈ 56.57.
+    assert!(
+        aw >= 55 && aw <= 60,
+        "VAL-XFORM-016: rotated 40×40 node AABB width should be ~57, got {aw}"
+    );
+    assert!(
+        ah >= 55 && ah <= 60,
+        "VAL-XFORM-016: rotated 40×40 node AABB height should be ~57, got {ah}"
+    );
+}
+
+/// VAL-XFORM-016 (dirty rect coverage): Moving a rotated node should
+/// produce dirty rects covering both old and new AABBs.
+#[test]
+fn abs_bounds_scaled_node_uses_scaled_size() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = 200;
+    w.node_mut(root).height = 200;
+    w.set_root(root);
+
+    let child = w.alloc_node().unwrap();
+    w.node_mut(child).x = 10;
+    w.node_mut(child).y = 10;
+    w.node_mut(child).width = 20;
+    w.node_mut(child).height = 20;
+    w.node_mut(child).flags = NodeFlags::VISIBLE;
+    // 3x scale
+    w.node_mut(child).transform = AffineTransform::scale(3.0, 3.0);
+    w.add_child(root, child);
+
+    let nodes = w.nodes();
+    let parent_map = build_parent_map(nodes, 2);
+    let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
+
+    // 20×20 node scaled 3x: AABB should be 60×60
+    assert_eq!(aw, 60, "scaled 20×20 at 3x should have AABB width 60, got {aw}");
+    assert_eq!(ah, 60, "scaled 20×20 at 3x should have AABB height 60, got {ah}");
+}
+
+/// VAL-XFORM-017: Compound transform correctness.
+/// translate(50,50) × rotate(45°) × scale(2,2) on 10x10:
+/// ~28×28 diamond centered at (50,50).
+#[test]
+fn abs_bounds_compound_transform_aabb() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = 200;
+    w.node_mut(root).height = 200;
+    w.set_root(root);
+
+    let child = w.alloc_node().unwrap();
+    w.node_mut(child).x = 0;
+    w.node_mut(child).y = 0;
+    w.node_mut(child).width = 10;
+    w.node_mut(child).height = 10;
+    w.node_mut(child).flags = NodeFlags::VISIBLE;
+    // Compound: translate(50,50) × rotate(45°) × scale(2,2)
+    let xform = AffineTransform::translate(50.0, 50.0)
+        .compose(AffineTransform::rotate(45.0 * core::f32::consts::PI / 180.0))
+        .compose(AffineTransform::scale(2.0, 2.0));
+    w.node_mut(child).transform = xform;
+    w.add_child(root, child);
+
+    let nodes = w.nodes();
+    let parent_map = build_parent_map(nodes, 2);
+    let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
+
+    // 10×10 scaled 2x then rotated 45°: effective size 20×20 rotated = ~28.28×28.28
+    // Then translated to (50,50).
+    //
+    // The four corners of (0,0,10,10) after the full transform:
+    //   (0,0) → scale → (0,0) → rotate → (0,0) → translate → (50,50)
+    //   (10,0) → scale → (20,0) → rotate → (~14.1, 14.1) → translate → (~64.1, 64.1)
+    //   (10,10) → scale → (20,20) → rotate → (0, ~28.3) → translate → (50, ~78.3)
+    //   (0,10) → scale → (0,20) → rotate → (~-14.1, 14.1) → translate → (~35.9, 64.1)
+    //
+    // AABB: x ≈ 35.9, y = 50, w ≈ 28.3, h ≈ 28.3
+    assert!(
+        aw >= 27 && aw <= 30,
+        "VAL-XFORM-017: compound transform AABB width should be ~28, got {aw}"
+    );
+    assert!(
+        ah >= 27 && ah <= 30,
+        "VAL-XFORM-017: compound transform AABB height should be ~28, got {ah}"
+    );
+    // The AABB x origin should be near 35.9 (from bottom-left corner transform)
+    assert!(
+        ax >= 34 && ax <= 38,
+        "VAL-XFORM-017: compound transform AABB x should be ~36, got {ax}"
+    );
+    // The AABB y origin should be near 50 (from top-left corner transform)
+    assert!(
+        ay >= 49 && ay <= 52,
+        "VAL-XFORM-017: compound transform AABB y should be ~50, got {ay}"
+    );
+}
+
+/// Identity transform should not change abs_bounds.
+#[test]
+fn abs_bounds_identity_transform_unchanged() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = 200;
+    w.node_mut(root).height = 200;
+    w.set_root(root);
+
+    let child = w.alloc_node().unwrap();
+    w.node_mut(child).x = 30;
+    w.node_mut(child).y = 40;
+    w.node_mut(child).width = 50;
+    w.node_mut(child).height = 60;
+    w.node_mut(child).flags = NodeFlags::VISIBLE;
+    // Identity transform (default)
+    w.add_child(root, child);
+
+    let nodes = w.nodes();
+    let parent_map = build_parent_map(nodes, 2);
+    let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
+
+    assert_eq!(ax, 30, "identity transform should not change x");
+    assert_eq!(ay, 40, "identity transform should not change y");
+    assert_eq!(aw, 50, "identity transform should not change width");
+    assert_eq!(ah, 60, "identity transform should not change height");
+}

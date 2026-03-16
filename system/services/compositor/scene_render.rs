@@ -882,16 +882,55 @@ fn render_node_content_translated(
             if data.length > 0 && (data.offset as usize + data.length as usize) <= graph.data.len()
             {
                 let pixels = &graph.data[data.offset as usize..][..data.length as usize];
-                let stride = src_width as u32 * 4;
+                let src_stride = src_width as u32 * 4;
 
-                fb.blit_blend(
-                    pixels,
-                    src_width as u32,
-                    src_height as u32,
-                    stride,
-                    draw_x as u32,
-                    draw_y as u32,
-                );
+                // When source dimensions differ from the node's display size,
+                // use bilinear resampling for smooth scaling instead of nearest-
+                // neighbor. This produces blended gray for downscaled checker-
+                // boards instead of aliased black/white.
+                let phys_nw = nw.max(0) as u32;
+                let phys_nh = nh.max(0) as u32;
+                if phys_nw > 0 && phys_nh > 0
+                    && (src_width as u32 != phys_nw || src_height as u32 != phys_nh)
+                {
+                    // Inverse transform: maps each dest pixel back to source
+                    // coordinates. For a simple scale: inv_a = src_w/dst_w,
+                    // inv_d = src_h/dst_h. Offset by 0.5 src pixel to center
+                    // the sampling between source pixels.
+                    let inv_a = src_width as f32 / phys_nw as f32;
+                    let inv_d = src_height as f32 / phys_nh as f32;
+                    // Center the sampling: offset by half a source pixel so
+                    // destination pixel centers land between source pixels.
+                    let inv_tx = (inv_a - 1.0) * 0.5;
+                    let inv_ty = (inv_d - 1.0) * 0.5;
+
+                    fb.blit_transformed_bilinear(
+                        pixels,
+                        src_width as u32,
+                        src_height as u32,
+                        src_stride,
+                        draw_x,
+                        draw_y,
+                        phys_nw,
+                        phys_nh,
+                        inv_a,
+                        0.0,
+                        0.0,
+                        inv_d,
+                        inv_tx,
+                        inv_ty,
+                        255,
+                    );
+                } else {
+                    fb.blit_blend(
+                        pixels,
+                        src_width as u32,
+                        src_height as u32,
+                        src_stride,
+                        draw_x as u32,
+                        draw_y as u32,
+                    );
+                }
             }
         }
         Content::Path {

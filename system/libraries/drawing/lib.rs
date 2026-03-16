@@ -36,6 +36,19 @@ pub struct Color {
     pub a: u8,
 }
 
+/// Resampling method for scaled or transformed blits.
+///
+/// The API is parameterized so new methods (e.g., Lanczos) can be added
+/// without changing call sites — callers pass the enum variant and the
+/// implementation dispatches internally.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResamplingMethod {
+    /// Bilinear interpolation: samples 4 surrounding pixels and blends
+    /// based on fractional position. Good balance of quality and speed
+    /// for most scaling/rotation operations.
+    Bilinear,
+}
+
 /// A mutable view into a pixel buffer.
 ///
 /// Does not own the backing memory — the caller provides a mutable byte slice
@@ -1360,6 +1373,9 @@ impl<'a> Surface<'a> {
     ///
     /// Source pixels outside `[0, src_width) × [0, src_height)` are treated
     /// as transparent (no contribution).
+    ///
+    /// Wrapper that defaults to `ResamplingMethod::Bilinear`. Use
+    /// [`blit_blend_bilinear`] for explicit method selection.
     pub fn blit_transformed_bilinear(
         &mut self,
         src_data: &[u8],
@@ -1479,6 +1495,51 @@ impl<'a> Surface<'a> {
                 self.data[fb_off + 1] = blended.g;
                 self.data[fb_off + 2] = blended.r;
                 self.data[fb_off + 3] = blended.a;
+            }
+        }
+    }
+
+    /// Blit a source buffer to this surface with a 2D affine inverse transform
+    /// and configurable resampling method.
+    ///
+    /// This is the primary interface for scaled/transformed blits. The
+    /// `_method` parameter selects the resampling algorithm. Currently only
+    /// `Bilinear` is implemented; `Lanczos` can be added later without
+    /// changing call sites.
+    ///
+    /// Parameters are identical to [`blit_transformed_bilinear`] plus the
+    /// resampling method selector.
+    #[allow(clippy::too_many_arguments)]
+    pub fn blit_blend_bilinear(
+        &mut self,
+        src_data: &[u8],
+        src_width: u32,
+        src_height: u32,
+        src_stride: u32,
+        dst_x: i32,
+        dst_y: i32,
+        dst_w: u32,
+        dst_h: u32,
+        inv_a: f32,
+        inv_b: f32,
+        inv_c: f32,
+        inv_d: f32,
+        inv_tx: f32,
+        inv_ty: f32,
+        opacity: u8,
+        _method: ResamplingMethod,
+    ) {
+        // Dispatch to the appropriate implementation based on method.
+        // Currently only Bilinear is supported; future variants
+        // (e.g., Lanczos) would branch here.
+        match _method {
+            ResamplingMethod::Bilinear => {
+                self.blit_transformed_bilinear(
+                    src_data, src_width, src_height, src_stride,
+                    dst_x, dst_y, dst_w, dst_h,
+                    inv_a, inv_b, inv_c, inv_d, inv_tx, inv_ty,
+                    opacity,
+                );
             }
         }
     }

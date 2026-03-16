@@ -7110,3 +7110,157 @@ fn blur_uniform_surface_unchanged() {
         }
     }
 }
+
+// ── ResamplingMethod and bilinear downscale tests ───────────────────
+
+/// VAL-XFORM-015: ResamplingMethod enum exists with Bilinear variant.
+/// The API is parameterized so Lanczos can be added later without
+/// changing call sites.
+#[test]
+fn resampling_method_enum_exists() {
+    let method = drawing::ResamplingMethod::Bilinear;
+    // The enum variant must exist and be usable.
+    match method {
+        drawing::ResamplingMethod::Bilinear => {} // OK
+    }
+}
+
+/// VAL-XFORM-014: Bilinear downscale of checkerboard.
+/// A 100×100 checkerboard at scale(0.5) → 50×50 output.
+/// Center pixels should be blended gray (~128), NOT aliased black/white.
+#[test]
+fn bilinear_downscale_checkerboard_produces_gray() {
+    // Create a 100×100 checkerboard: alternating black/white pixels.
+    let src_w = 100u32;
+    let src_h = 100u32;
+    let src_stride = src_w * 4;
+    let mut src_buf = vec![0u8; (src_stride * src_h) as usize];
+
+    for y in 0..src_h {
+        for x in 0..src_w {
+            let off = (y * src_stride + x * 4) as usize;
+            let is_white = (x + y) % 2 == 0;
+            let val = if is_white { 255u8 } else { 0u8 };
+            src_buf[off] = val;     // B
+            src_buf[off + 1] = val; // G
+            src_buf[off + 2] = val; // R
+            src_buf[off + 3] = 255; // A (opaque)
+        }
+    }
+
+    // Destination: 50×50 (downscale by 0.5x).
+    let dst_w = 50u32;
+    let dst_h = 50u32;
+    let dst_stride = dst_w * 4;
+    let mut dst_buf = vec![0u8; (dst_stride * dst_h) as usize];
+    let mut fb = Surface {
+        data: &mut dst_buf,
+        width: dst_w,
+        height: dst_h,
+        stride: dst_stride,
+        format: PixelFormat::Bgra8888,
+    };
+
+    // Use blit_blend_bilinear to downsample. The inverse transform maps
+    // each dst pixel to 2× source coordinates: inv = scale(2, 2).
+    // Offset by 0.5 in source space so dst pixel centers land between
+    // source pixels, producing blended output instead of point samples.
+    fb.blit_blend_bilinear(
+        &src_buf,
+        src_w,
+        src_h,
+        src_stride,
+        0, 0,
+        dst_w, dst_h,
+        2.0, 0.0,  // inv_a, inv_b
+        0.0, 2.0,  // inv_c, inv_d
+        0.5, 0.5,  // inv_tx, inv_ty — offset to sample between pixels
+        255,
+        drawing::ResamplingMethod::Bilinear,
+    );
+
+    // Sample center pixels: should be blended gray (approximately 128).
+    let center_x = 25u32;
+    let center_y = 25u32;
+    let off = (center_y * dst_stride + center_x * 4) as usize;
+    let r = dst_buf[off + 2];
+    let g = dst_buf[off + 1];
+    let b = dst_buf[off];
+
+    assert!(
+        r >= 98 && r <= 158,
+        "VAL-XFORM-014: downscaled checkerboard center R should be ~128, got {r}"
+    );
+    assert!(
+        g >= 98 && g <= 158,
+        "VAL-XFORM-014: downscaled checkerboard center G should be ~128, got {g}"
+    );
+    assert!(
+        b >= 98 && b <= 158,
+        "VAL-XFORM-014: downscaled checkerboard center B should be ~128, got {b}"
+    );
+}
+
+/// VAL-XFORM-014 (supplementary): Verify that MOST center pixels are
+/// blended gray, not a mix of pure black and pure white.
+#[test]
+fn bilinear_downscale_checkerboard_no_aliased_pixels() {
+    let src_w = 100u32;
+    let src_h = 100u32;
+    let src_stride = src_w * 4;
+    let mut src_buf = vec![0u8; (src_stride * src_h) as usize];
+
+    for y in 0..src_h {
+        for x in 0..src_w {
+            let off = (y * src_stride + x * 4) as usize;
+            let is_white = (x + y) % 2 == 0;
+            let val = if is_white { 255u8 } else { 0u8 };
+            src_buf[off] = val;
+            src_buf[off + 1] = val;
+            src_buf[off + 2] = val;
+            src_buf[off + 3] = 255;
+        }
+    }
+
+    let dst_w = 50u32;
+    let dst_h = 50u32;
+    let dst_stride = dst_w * 4;
+    let mut dst_buf = vec![0u8; (dst_stride * dst_h) as usize];
+    let mut fb = Surface {
+        data: &mut dst_buf,
+        width: dst_w,
+        height: dst_h,
+        stride: dst_stride,
+        format: PixelFormat::Bgra8888,
+    };
+
+    fb.blit_blend_bilinear(
+        &src_buf,
+        src_w, src_h, src_stride,
+        0, 0, dst_w, dst_h,
+        2.0, 0.0, 0.0, 2.0, 0.5, 0.5,
+        255,
+        drawing::ResamplingMethod::Bilinear,
+    );
+
+    // In the interior (avoid edges), count pixels that are pure B/W vs gray.
+    let mut gray_count = 0u32;
+    let mut extreme_count = 0u32;
+    for y in 5..45 {
+        for x in 5..45 {
+            let off = (y * dst_stride + x * 4) as usize;
+            let r = dst_buf[off + 2];
+            if r < 10 || r > 245 {
+                extreme_count += 1;
+            } else {
+                gray_count += 1;
+            }
+        }
+    }
+
+    // The vast majority should be gray, not aliased B/W.
+    assert!(
+        gray_count > extreme_count,
+        "bilinear downscale should produce more gray than B/W pixels: gray={gray_count}, extreme={extreme_count}"
+    );
+}

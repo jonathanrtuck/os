@@ -4142,3 +4142,163 @@ fn full_feature_composition() {
     // Shadow may be subtle — at least check for colored pixels.
     // The main point is that all features compose without panicking.
 }
+
+// ── Bilinear resampling + damage tracking tests ─────────────────────
+
+/// VAL-XFORM-014: Content::Image with src dimensions != node dimensions
+/// uses bilinear resampling. A checkerboard image downscaled should
+/// produce blended gray pixels, not aliased black/white.
+#[test]
+fn content_image_downscaled_checkerboard_bilinear() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Create a 40×40 checkerboard image (alternating B/W).
+    let img_w: u16 = 40;
+    let img_h: u16 = 40;
+    let img_stride = img_w as u32 * 4;
+    let mut img_data = vec![0u8; (img_stride * img_h as u32) as usize];
+    for y in 0..img_h as u32 {
+        for x in 0..img_w as u32 {
+            let off = (y * img_stride + x * 4) as usize;
+            let is_white = (x + y) % 2 == 0;
+            let val = if is_white { 255u8 } else { 0u8 };
+            img_data[off] = val;     // B
+            img_data[off + 1] = val; // G
+            img_data[off + 2] = val; // R
+            img_data[off + 3] = 255; // A
+        }
+    }
+
+    // Node: 20×20 display area for a 40×40 image → 0.5x downscale.
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 20;
+    nodes[1].height = 20;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].content = scene::Content::Image {
+        data: scene::DataRef { offset: 0, length: img_data.len() as u32 },
+        src_width: img_w,
+        src_height: img_h,
+    };
+
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &img_data };
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100u32 * 4;
+
+    // Sample center of the downscaled image area (around pixel 20, 20).
+    // With bilinear downscale, checkerboard should produce ~gray.
+    let mut gray_count = 0u32;
+    let mut extreme_count = 0u32;
+    for y in 12..28 {
+        for x in 12..28 {
+            let (r, g, b, _a) = read_pixel(&buf, stride, x, y);
+            if r < 10 || r > 245 {
+                extreme_count += 1;
+            } else {
+                gray_count += 1;
+            }
+        }
+    }
+
+    assert!(
+        gray_count > extreme_count,
+        "VAL-XFORM-014: downscaled checkerboard image should produce gray, not B/W: gray={gray_count}, extreme={extreme_count}"
+    );
+}
+
+/// VAL-XFORM-016: Transform-aware damage tracking.
+/// A rotated 40×40 node diff_scenes should produce dirty rects
+/// that cover the AABB (~57×57).
+#[test]
+fn diff_scenes_rotated_node_aabb_damage() {
+    // Frame 1: node at position (50, 50) with 45° rotation.
+    let mut nodes1 = vec![Node::EMPTY; 2];
+    nodes1[0].width = 200;
+    nodes1[0].height = 200;
+    nodes1[0].flags = NodeFlags::VISIBLE;
+    nodes1[0].first_child = 1;
+
+    nodes1[1].x = 50;
+    nodes1[1].y = 50;
+    nodes1[1].width = 40;
+    nodes1[1].height = 40;
+    nodes1[1].flags = NodeFlags::VISIBLE;
+    nodes1[1].transform = scene::AffineTransform::rotate(
+        45.0 * core::f32::consts::PI / 180.0,
+    );
+
+    // Frame 2: same node moved to (55, 50) — 5px rightward.
+    let mut nodes2 = nodes1.clone();
+    nodes2[1].x = 55;
+
+    let rects = scene::diff_scenes(&nodes1, 2, &nodes2, 2);
+    assert!(rects.is_some(), "diff_scenes should return Some for same-count frames");
+
+    let rects = rects.unwrap();
+    // Should have dirty rects for the changed node (old + new positions).
+    assert!(!rects.is_empty(), "should have dirty rects for moved rotated node");
+
+    // Each dirty rect should cover the AABB of the rotated 40×40 node (~57×57).
+    for &(rx, ry, rw, rh) in &rects {
+        assert!(
+            rw >= 55,
+            "VAL-XFORM-016: rotated 40×40 dirty rect width should be >= 55, got {rw}"
+        );
+        assert!(
+            rh >= 55,
+            "VAL-XFORM-016: rotated 40×40 dirty rect height should be >= 55, got {rh}"
+        );
+    }
+}
+
+/// VAL-XFORM-017 via diff_scenes: compound transform produces correct AABB.
+#[test]
+fn diff_scenes_compound_transform_aabb() {
+    let mut nodes1 = vec![Node::EMPTY; 2];
+    nodes1[0].width = 200;
+    nodes1[0].height = 200;
+    nodes1[0].flags = NodeFlags::VISIBLE;
+    nodes1[0].first_child = 1;
+
+    nodes1[1].x = 0;
+    nodes1[1].y = 0;
+    nodes1[1].width = 10;
+    nodes1[1].height = 10;
+    nodes1[1].flags = NodeFlags::VISIBLE;
+    let xform = scene::AffineTransform::translate(50.0, 50.0)
+        .compose(scene::AffineTransform::rotate(45.0 * core::f32::consts::PI / 180.0))
+        .compose(scene::AffineTransform::scale(2.0, 2.0));
+    nodes1[1].transform = xform;
+
+    // Modify background to trigger change detection.
+    let mut nodes2 = nodes1.clone();
+    nodes2[1].background = scene::Color::rgba(255, 0, 0, 255);
+
+    let rects = scene::diff_scenes(&nodes1, 2, &nodes2, 2);
+    assert!(rects.is_some());
+    let rects = rects.unwrap();
+    assert!(!rects.is_empty());
+
+    // The AABB of 10×10 scaled 2x rotated 45° is ~28×28.
+    for &(rx, ry, rw, rh) in &rects {
+        assert!(
+            rw >= 27,
+            "compound transform dirty rect width should be >= 27, got {rw}"
+        );
+        assert!(
+            rh >= 27,
+            "compound transform dirty rect height should be >= 27, got {rh}"
+        );
+    }
+}
