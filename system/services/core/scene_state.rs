@@ -365,8 +365,6 @@ impl SceneState {
     /// `update_data` (same length). Only N_CLOCK_TEXT is marked changed.
     pub fn update_clock(&mut self, clock_text: &[u8]) {
         let mut tw = self.triple();
-        // acquire_copy always succeeds — no fallback needed.
-        let mut updated_ok = false;
 
         {
             let mut w = tw.acquire_copy();
@@ -390,14 +388,14 @@ impl SceneState {
                 if w.update_data(glyphs, new_bytes) {
                     w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(clock_text);
                     w.mark_changed(N_CLOCK_TEXT);
-                    updated_ok = true;
                 }
             }
         }
 
-        if updated_ok {
-            tw.publish();
-        }
+        // Always publish — acquire_copy always succeeds so no fallback
+        // logic is needed. Even if update_data fails (length mismatch),
+        // the buffer is a valid copy of the latest frame.
+        tw.publish();
     }
 
     /// Update only the cursor position. Zero heap allocations.
