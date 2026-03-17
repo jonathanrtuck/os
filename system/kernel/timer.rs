@@ -12,13 +12,14 @@
 //!
 //! Two concerns in one module:
 //!
-//! 1. **Hardware timer** — fixed-interval 250 Hz tick. Simple and predictable.
-//!    A tickless design (next-event programming) would eliminate idle wakeups
-//!    but adds complexity; fixed tick is the right starting point.
+//! 1. **Hardware timer** — tickless (next-event programming). Each core
+//!    programs CNTP_TVAL to fire at the earliest deadline across: timer
+//!    objects, scheduler quantum expiry, and scheduling context replenishment.
+//!    Cores with no deadlines enter WFI and wake only on IPI or device IRQ.
 //!
 //! 2. **Timer objects** — one-shot deadline handles for userspace. Created via
-//!    `timer_create(timeout_ns)`, waited on via `wait`. The hardware tick checks
-//!    all active timers and wakes blocked threads when deadlines expire.
+//!    `timer_create(timeout_ns)`, waited on via `wait`. The timer IRQ handler
+//!    checks all active timers and wakes blocked threads when deadlines expire.
 //!    Level-triggered: once fired, the timer is permanently "ready" until closed.
 //!
 //! Waiter registration and readiness tracking are delegated to `WaitableRegistry`.
@@ -36,15 +37,15 @@ use super::{
 
 /// Maximum concurrent timer objects across all processes.
 const MAX_TIMERS: usize = 32;
-/// Timer fires 250 times/sec (4ms). Responsive enough for interactive use
-/// without excessive overhead. SMP-safe: each core has its own timer PPI.
-const TICKS_PER_SEC: u64 = 250;
 
 /// Physical timer PPI interrupt ID.
 pub const IRQ_ID: u32 = 30;
 
 static CNTFRQ: AtomicU64 = AtomicU64::new(0);
-static TICKS: AtomicU64 = AtomicU64::new(0);
+/// Cached earliest timer deadline in counter ticks. Updated on timer create,
+/// destroy, and check_expired. 0 means "no timers" (sentinel). Avoids acquiring
+/// the TIMERS lock on every schedule_inner call.
+static EARLIEST_DEADLINE: AtomicU64 = AtomicU64::new(0);
 static TIMERS: IrqMutex<TimerTable> = IrqMutex::new(TimerTable {
     slots: [const { None }; MAX_TIMERS],
     waiters: WaitableRegistry::new(),
@@ -67,14 +68,38 @@ impl WaitableId for TimerId {
     }
 }
 
-/// Set CNTP_TVAL_EL0 so the timer fires after one interval.
-///
-/// `freq` is CNTFRQ_EL0 (counter ticks per second), so `freq / TICKS_PER_SEC`
-/// gives the number of counter ticks per timer interval. Writing TVAL also
-/// clears the timer condition (de-asserts the interrupt).
-fn reprogram(freq: u64) {
-    let tval = freq / TICKS_PER_SEC;
+/// Recompute and cache the earliest timer deadline from the TIMERS table.
+/// Must be called with the TIMERS lock held (not public).
+fn update_earliest_deadline_locked(table: &TimerTable) {
+    let mut earliest: u64 = 0; // 0 = sentinel for "no timers"
 
+    for slot in &table.slots {
+        if let Some(&deadline) = slot.as_ref() {
+            if earliest == 0 || deadline < earliest {
+                earliest = deadline;
+            }
+        }
+    }
+
+    EARLIEST_DEADLINE.store(earliest, Ordering::Release);
+}
+
+/// Return the cached earliest timer object deadline, or None if no timers.
+/// Lock-free: reads an atomic that is updated on timer create/destroy/expire.
+fn earliest_timer_deadline() -> Option<u64> {
+    let cached = EARLIEST_DEADLINE.load(Ordering::Acquire);
+
+    if cached == 0 {
+        None
+    } else {
+        Some(cached)
+    }
+}
+
+/// Program CNTP_TVAL_EL0 with the given number of counter ticks.
+///
+/// Writing TVAL also clears the timer condition (de-asserts the interrupt).
+fn program_tval(tval: u64) {
     // SAFETY: Writing CNTP_TVAL_EL0 reprograms the timer countdown and
     // de-asserts the interrupt line — a hardware side effect. The ISB
     // ensures the new countdown is committed before returning. `nomem` is
@@ -89,6 +114,54 @@ fn reprogram(freq: u64) {
             tval = in(reg) tval,
             options(nostack)
         );
+    }
+}
+
+/// Reprogram the hardware timer for the earliest deadline across all sources.
+///
+/// Sources:
+/// 1. Timer objects: scanned from the global TIMERS table.
+/// 2. Scheduler deadline: quantum expiry or context replenishment (passed by caller).
+///
+/// The scheduler deadline is passed as a parameter because this function is
+/// called from `schedule_inner` (which holds the scheduler lock — we can't
+/// re-acquire it). When called from `timer::create`, pass `None` for the
+/// scheduler deadline — `schedule_inner` will reprogram with full info on
+/// the next schedule.
+///
+/// If the minimum deadline is in the past, sets CNTP_TVAL to 1 (fire immediately).
+/// If no deadlines exist, programs the maximum interval (u32::MAX ticks ≈ 68s).
+pub fn reprogram_next_deadline(scheduler_deadline_ticks: Option<u64>) {
+    let now = counter();
+
+    // Source 1: earliest timer object deadline.
+    let timer_deadline = earliest_timer_deadline();
+
+    // Collect all deadline sources and find the minimum.
+    let mut earliest: Option<u64> = timer_deadline;
+
+    if let Some(sched) = scheduler_deadline_ticks {
+        earliest = Some(earliest.map_or(sched, |e| e.min(sched)));
+    }
+
+    match earliest {
+        None => {
+            // No deadlines — program a very long interval. u32::MAX ticks
+            // ≈ 68 seconds at 62.5 MHz. The core will be woken by IPI or
+            // device IRQ if work arrives before this expires.
+            program_tval(u32::MAX as u64);
+        }
+        Some(deadline) if deadline <= now => {
+            // Deadline already passed — fire immediately.
+            program_tval(1);
+        }
+        Some(deadline) => {
+            let delta = deadline - now;
+            // Cap to u32::MAX (CNTP_TVAL is 32-bit).
+            let tval = delta.min(u32::MAX as u64);
+
+            program_tval(tval);
+        }
     }
 }
 
@@ -116,6 +189,11 @@ pub fn check_expired() {
                     }
                 }
             }
+        }
+
+        // Update cached earliest deadline (some timers may have fired).
+        if wake_count > 0 {
+            update_earliest_deadline_locked(&table);
         }
     }
 
@@ -180,20 +258,48 @@ pub fn create(timeout_ns: u64) -> Option<TimerId> {
         let delta = (timeout_ns as u128 * freq as u128 / 1_000_000_000) as u64;
         now.saturating_add(delta)
     };
-    let mut table = TIMERS.lock();
+    let result = {
+        let mut table = TIMERS.lock();
 
-    for i in 0..MAX_TIMERS {
-        if table.slots[i].is_none() {
-            let id = TimerId(i as u8);
+        let mut found = None;
 
-            table.slots[i] = Some(deadline_ticks);
-            table.waiters.create(id);
+        for i in 0..MAX_TIMERS {
+            if table.slots[i].is_none() {
+                let id = TimerId(i as u8);
 
-            return Some(id);
+                table.slots[i] = Some(deadline_ticks);
+                table.waiters.create(id);
+
+                found = Some(id);
+
+                break;
+            }
+        }
+
+        // Update the cached earliest deadline while we hold the lock.
+        if found.is_some() {
+            update_earliest_deadline_locked(&table);
+        }
+
+        found
+    };
+
+    // Reprogram the hardware timer so the new deadline takes effect.
+    // Only reprogram if the new timer's deadline is meaningfully in the future
+    // (more than 100µs). Very short timers (including already-expired ones)
+    // will be caught by check_fired() on the next poll or check_expired() on
+    // the next schedule event. This prevents IRQ storms from rapid
+    // create-poll-destroy patterns (e.g., stress test timer worker).
+    if result.is_some() {
+        let now = counter();
+
+        if deadline_ticks > now + (counter_freq() / 10_000) {
+            // Timer is > 100µs in the future — reprogram to catch it.
+            reprogram_next_deadline(None);
         }
     }
 
-    None
+    result
 }
 /// Destroy a timer object (called from `handle_close`).
 ///
@@ -203,6 +309,7 @@ pub fn destroy(id: TimerId) {
     let waiter = {
         let mut table = TIMERS.lock();
         table.slots[id.0 as usize] = None;
+        update_earliest_deadline_locked(&table);
         table.waiters.destroy(id)
     };
 
@@ -214,14 +321,21 @@ pub fn destroy(id: TimerId) {
         }
     }
 }
-/// Handle a timer interrupt: increment tick count, check timer objects, reprogram.
+/// Handle a timer interrupt: check timer objects for expiry.
+///
+/// Note: `reprogram_next_deadline` is NOT called here. The caller (irq_handler)
+/// calls `scheduler::schedule()` next, and `schedule_inner` calls
+/// `reprogram_next_deadline` with the full scheduler deadline (quantum +
+/// replenishment). This avoids double-reprogramming and ensures the scheduler's
+/// deadline is always included.
 pub fn handle_irq() {
-    TICKS.fetch_add(1, Ordering::Relaxed);
-
     check_expired();
-    reprogram(CNTFRQ.load(Ordering::Relaxed));
 }
 /// Initialize the timer. Call after `interrupt_controller::init()`.
+///
+/// Tickless: does NOT program a fixed 250 Hz interval. Instead, programs
+/// the timer for a long sleep (u32::MAX ticks). The first `schedule_inner`
+/// call will reprogram with the actual deadline.
 pub fn init() {
     interrupt_controller::GIC.enable_irq(IRQ_ID);
 
@@ -254,13 +368,14 @@ pub fn init() {
         );
     }
 
-    // Program first interval and enable the timer.
-    reprogram(freq);
+    // Tickless: program a long initial interval. No fixed 250 Hz tick.
+    // The first schedule_inner call will reprogram with the actual deadline.
+    program_tval(u32::MAX as u64);
 
     // SAFETY: Writing CNTP_CTL_EL0 with ENABLE=1, IMASK=0 starts generating
     // timer IRQs — a hardware side effect. `nomem` is intentionally omitted
     // because enabling the timer has observable effects that LLVM must not
-    // reorder past the preceding reprogram() call. `nostack` is correct —
+    // reorder past the preceding program_tval() call. `nostack` is correct —
     // MOV and MSR do not touch the stack. x0 is clobbered and declared via
     // out("x0").
     unsafe {

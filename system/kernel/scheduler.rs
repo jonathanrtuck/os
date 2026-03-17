@@ -311,6 +311,67 @@ fn replenish_contexts(contexts: &mut [Option<SchedulingContextSlot>], now: u64) 
         entry.context = entry.context.maybe_replenish(now);
     }
 }
+/// Compute the scheduler's next deadline in counter ticks.
+///
+/// Considers:
+/// 1. The current thread's remaining scheduling context budget (quantum expiry).
+/// 2. The earliest `replenish_at` across all active scheduling contexts.
+///
+/// Returns `None` if there are no scheduler-driven deadlines (e.g., idle thread
+/// with no scheduling contexts, or thread with unlimited budget).
+///
+/// `now_ns_val`: current time in nanoseconds (already computed by caller).
+fn scheduler_deadline_ticks(
+    thread: &Thread,
+    contexts: &[Option<SchedulingContextSlot>],
+    now_ns_val: u64,
+) -> Option<u64> {
+    let freq = timer::counter_freq();
+
+    if freq == 0 {
+        return None;
+    }
+
+    let now_ticks = timer::counter();
+    let mut earliest_ns: Option<u64> = None;
+
+    // Source 1: current thread's remaining budget → quantum expiry deadline.
+    if !thread.is_idle() {
+        if let Some(ctx_id) = thread.scheduling.context_id {
+            if let Some(Some(slot)) = contexts.get(ctx_id.0 as usize) {
+                if slot.context.has_budget() && slot.context.remaining > 0 {
+                    // Quantum expires at now + remaining budget.
+                    let deadline_ns = now_ns_val.saturating_add(slot.context.remaining);
+
+                    earliest_ns = Some(deadline_ns);
+                }
+            }
+        }
+    }
+
+    // Source 2: earliest replenish_at across all active contexts.
+    for slot in contexts.iter().flatten() {
+        if !slot.context.has_budget() || slot.context.replenish_at > now_ns_val {
+            // Only consider replenishment deadlines that are in the future.
+            let replenish = slot.context.replenish_at;
+
+            earliest_ns = Some(earliest_ns.map_or(replenish, |e| e.min(replenish)));
+        }
+    }
+
+    // Convert from nanoseconds to counter ticks.
+    earliest_ns.map(|deadline_ns| {
+        if deadline_ns <= now_ns_val {
+            // Already passed — return current tick count (will fire immediately).
+            now_ticks
+        } else {
+            let delta_ns = deadline_ns - now_ns_val;
+            let delta_ticks = (delta_ns as u128 * freq as u128 / 1_000_000_000) as u64;
+
+            now_ticks.saturating_add(delta_ticks)
+        }
+    })
+}
 #[inline(never)]
 fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Context {
     // Drop threads deferred from the previous schedule_inner. Safe now because
@@ -415,6 +476,17 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     // Deferred cleanup: if the old thread was from a killed process, decrement
     // the running count and free the address space when it reaches zero.
     maybe_cleanup_killed_process(s, old_pid, old_exited);
+
+    // Tickless timer: reprogram the hardware timer for the next deadline.
+    // Compute the scheduler's next deadline from the current thread's quantum
+    // and context replenishment, then delegate to timer::reprogram_next_deadline
+    // which also considers timer objects.
+    let sched_deadline = s.cores[core]
+        .current
+        .as_ref()
+        .map(|t| scheduler_deadline_ticks(t, &s.scheduling_contexts, now))
+        .flatten();
+    timer::reprogram_next_deadline(sched_deadline);
 
     debug_assert!(
         !result.is_null(),

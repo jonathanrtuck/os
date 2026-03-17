@@ -724,7 +724,7 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     boot_secondaries();
 
     timer::init();
-    serial::puts("  ⏱️  timer - 250hz\n");
+    serial::puts("  ⏱️  timer - tickless\n");
     serial::puts("🥾 booted.\n");
 
     loop {
