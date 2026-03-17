@@ -83,6 +83,17 @@ Triple buffering is the standard solution in graphics pipelines:
 - **Fuchsia (Scenic):** `BufferCollection` with configurable count, typically 3.
 - **Vulkan/Metal/DX12:** All expose explicit swap chain buffer counts; 3 is the standard recommendation.
 
+### Presentation model: mailbox, not FIFO
+
+Triple buffering has two flavors (see [Triple Buffering in Rendering APIs](https://www.4rknova.com/blog/2025/09/12/triple-buffering)):
+
+- **FIFO (queue):** Frames are consumed in order. Every frame produced is eventually displayed. Latency increases under load because frames queue up. Correct for video playback and sequential animation where every frame matters.
+- **Mailbox (flip):** The writer publishes to a slot; the reader always takes the latest. Intermediate frames are silently replaced. No latency buildup. Correct for interactive UI where only the latest state matters.
+
+**The scene graph transport should use mailbox.** The scene represents the current document state. If core produces three updates before the compositor renders, the compositor should see the latest, not replay intermediates. Showing stale intermediate states adds latency with no benefit.
+
+**Video and animation use FIFO, but at the leaf level, not the transport level.** A video node in the scene tree would own its own FIFO buffer pool for decoded frames. The compositor composites the latest scene tree (mailbox) but reads whichever video frame the player has marked current (FIFO, controlled by the player process via presentation timestamps). The two models compose -- they don't conflict. This is exactly how Android (SurfaceFlinger + MediaCodec), macOS (Core Animation + AVSampleBufferDisplayLayer), and Wayland (wl_surface + wp_linux_dmabuf) work.
+
 ### Implementation plan
 
 1. ~~**Revert** all session changes (retry timer, `is_back_available`, `scene_pending` flag, `bool` return types on scene update methods). Return to clean baseline.~~

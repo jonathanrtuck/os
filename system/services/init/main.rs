@@ -735,34 +735,26 @@ fn setup_display_pipeline(
 
         let _ = sys::process_start(input_proc_handle);
 
-        for _ in 0..8 {
-            sys::yield_now();
-        }
+        sys::yield_now();
     }
 
     sys::print(b"     starting text editor\n");
 
     let _ = sys::process_start(editor_proc);
 
-    for _ in 0..8 {
-        sys::yield_now();
-    }
+    sys::yield_now();
 
     sys::print(b"     starting compositor\n");
 
     let _ = sys::process_start(comp_proc);
 
-    for _ in 0..8 {
-        sys::yield_now();
-    }
+    sys::yield_now();
 
     sys::print(b"     starting core\n");
 
     let _ = sys::process_start(core_proc);
 
-    for _ in 0..8 {
-        sys::yield_now();
-    }
+    sys::yield_now();
 
     sys::print(b"     display pipeline running\n");
 }
