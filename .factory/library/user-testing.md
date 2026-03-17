@@ -169,6 +169,55 @@ This mission replaces GICv2 with GICv3, adds IPI-driven wakeup, and converts the
 3. Run specific test filters to confirm individual assertion coverage
 4. Record pass/fail per assertion
 
+## Flow Validator Guidance: GIC Source Inspection
+
+**Surface:** Source code files in `system/kernel/src/` and shell scripts in `system/`
+**Testing tool:** File reads (Read tool) and grep (Grep tool, or `rg` / shell grep)
+**Isolation:** Read-only. No builds, no QEMU, no file modifications.
+
+**How to verify assertions:**
+1. Use Grep/Read tools to inspect kernel source files
+2. Check for presence/absence of specific patterns (trait definitions, asm instructions, register names)
+3. Verify QEMU scripts for gic-version settings
+4. Check DTB-related code for correct compat strings
+
+**Key source files:**
+- `system/kernel/src/gic.rs` — GicV3 implementation (trait + struct + impl)
+- `system/kernel/src/main.rs` — irq_handler, secondary_main, DTB parsing
+- `system/kernel/src/timer.rs` — timer init, enable_irq usage
+- `system/kernel/src/interrupt.rs` — interrupt register/destroy, enable_irq/disable_irq
+- `system/kernel/src/scheduler.rs` — PerCoreState, is_idle tracking
+- `system/user/fuzz/main.rs` — fuzz test bad_nrs array
+
+**QEMU scripts to check (6 files):**
+- `system/run-qemu.sh`
+- `system/test-qemu.sh`
+- `system/test/smoke.sh`
+- `system/test/crash.sh`
+- `system/test/integration.sh`
+- `system/test/stress.sh`
+
+**Shared state:** None — read-only operations.
+**Boundaries:** Do not modify any files. Do not build. Do not launch QEMU.
+
+## Flow Validator Guidance: GIC Build and QEMU
+
+**Surface:** Build output, unit test output, QEMU serial output and screenshots
+**Testing tool:** cargo build, cargo test, QEMU test scripts (smoke.sh, integration.sh, stress.sh)
+**Isolation:** Uses /tmp/ for QEMU files. Kill stale QEMU before launching.
+
+**How to verify assertions:**
+1. Build: `cd /Users/user/Sites/os/system && cargo build --release`
+2. Unit tests: `cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1`
+3. Smoke test: `cd /Users/user/Sites/os/system/test && bash smoke.sh`
+4. Integration test: `cd /Users/user/Sites/os/system/test && bash integration.sh`
+5. Stress test: `cd /Users/user/Sites/os/system/test && bash stress.sh` (180s)
+6. For serial output inspection: check `/tmp/qemu-serial.log` or script output
+7. For visual verification: use test-qemu.sh or manual QEMU launch with screendump
+
+**Shared state:** QEMU monitor socket, serial log, test.img disk image.
+**Boundaries:** Do not modify source files. Kill stale QEMU before/after tests.
+
 ## QEMU Test Scripts
 
 - `test-qemu.sh` — interactive display pipeline test (safe, user's QEMU is closed)

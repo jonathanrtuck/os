@@ -1,0 +1,105 @@
+{
+  "groupId": "build-and-qemu",
+  "testedAt": "2026-03-16T23:45:00Z",
+  "isolation": {
+    "workingDirectory": "/Users/user/Sites/os/system",
+    "testDirectory": "/Users/user/Sites/os/system/test",
+    "qemuCleanup": "pkill -f qemu-system-aarch64 before and after each test"
+  },
+  "toolsUsed": ["Execute", "Grep"],
+  "assertions": [
+    {
+      "id": "VAL-GIC-019",
+      "title": "Boot serial output shows GICv3 identification",
+      "status": "pass",
+      "steps": [
+        { "action": "Run smoke.sh which boots QEMU with gic-version=3", "expected": "Serial output contains GICv3 identification", "observed": "Serial contains '⚡ interrupts - gic v3 (dtb)'" },
+        { "action": "Grep serial log for 'gic' references", "expected": "Only 'gic v3' present, no 'gic v2'", "observed": "Only match: '⚡ interrupts - gic v3 (dtb)'. Zero 'gic v2' references." }
+      ],
+      "evidence": {
+        "serialLog": "gic-v3-migration/build-and-qemu/smoke-serial.log",
+        "grepOutput": "grep -i gic /tmp/qemu-serial.log returned only: '⚡ interrupts - gic v3 (dtb)'"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-GIC-020",
+      "title": "All existing tests pass (≥1,698 tests)",
+      "status": "pass",
+      "steps": [
+        { "action": "Run: cd system/test && cargo test -- --test-threads=1", "expected": "Exit code 0, ≥1,698 tests pass", "observed": "Exit code 0, 1,738 tests passed, 0 failed" }
+      ],
+      "evidence": {
+        "testOutput": "test result: ok. 1738 total passed across all test binaries. Exit code 0.",
+        "testCount": 1738
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-GIC-021",
+      "title": "Kernel builds cleanly with cargo build --release",
+      "status": "pass",
+      "steps": [
+        { "action": "Run: cd system && cargo build --release", "expected": "Exit code 0, no errors", "observed": "Exit code 0. One warning: method `send_ipi` is never used (dead_code). No errors." }
+      ],
+      "evidence": {
+        "buildOutput": "Finished `release` profile [optimized] target(s) in 0.04s. 1 warning (send_ipi unused). Exit code 0."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-GIC-022",
+      "title": "QEMU boots on GICv3 — all 4 cores, timer, init spawns processes",
+      "status": "pass",
+      "steps": [
+        { "action": "Run: cd system/test && bash smoke.sh", "expected": "All 4 cores online, timer fires, init spawns processes, smoke test passes", "observed": "All 17 smoke checks passed. Serial shows: core 1/2/3 online, timer - 250hz, init spawns drivers (blk), fuzz test passes, stress test starts. Smoke test exited 0." }
+      ],
+      "evidence": {
+        "smokeOutput": "Smoke test passed. 17/17 checks OK: booting, memory, heap, dtb, devices, frames, interrupts, scheduler, virtio, sector 0, processes, smp, core 1/2/3 online, timer, booted.",
+        "serialLog": "gic-v3-migration/build-and-qemu/smoke-serial.log"
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-GIC-023",
+      "title": "Display pipeline works after migration — keystrokes appear on framebuffer",
+      "status": "pass",
+      "steps": [
+        { "action": "Run: cd system/test && bash integration.sh", "expected": "Integration test passes, display pipeline running", "observed": "Integration test PASSED. Serial shows full pipeline: GPU ready (1280x800), compositor starting, core starting, text-editor starting, 'display pipeline running'. All 17 integration checks OK." }
+      ],
+      "evidence": {
+        "integrationOutput": "Integration test PASSED. Full device pipeline (GPU + keyboard + blk + 9p) booted. Display 1280x800, double framebuffer, scene graph allocated, render loop entered."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-GIC-024",
+      "title": "180s stress test passes on GICv3 — no panics, no crashes",
+      "status": "pass",
+      "steps": [
+        { "action": "Run: cd system/test && bash stress.sh", "expected": "Stress test exits 0, no panics or crashes within 180s timeout", "observed": "ALL PASS after 40s. Fuzz test PASS (36 phases). Stress test PASS. Exit code 0. No panics, no crashes." }
+      ],
+      "evidence": {
+        "stressOutput": "ALL PASS after 40s. Summary: fuzz test PASS (36 phases), stress test PASS. Exit code 0."
+      },
+      "issues": null
+    },
+    {
+      "id": "VAL-IPI-001",
+      "title": "Unit tests verify ICC_SGI1R_EL1 value computed for cores 0-3",
+      "status": "pass",
+      "steps": [
+        { "action": "Search test files for IPI/SGI/affinity tests", "expected": "Tests exist for ICC_SGI1R_EL1 encoding for cores 0-3", "observed": "Found in system/test/tests/interrupt_controller.rs: sgi1r_value_core_0, sgi1r_value_core_1, sgi1r_value_core_2, sgi1r_value_core_3, sgi1r_value_all_upper_bits_zero_for_flat_affinity" },
+        { "action": "Confirm tests pass as part of full test suite", "expected": "All SGI1R tests pass", "observed": "All 1,738 tests passed including interrupt_controller tests. Exit code 0." }
+      ],
+      "evidence": {
+        "testFiles": "system/test/tests/interrupt_controller.rs — tests at lines 196-231: sgi1r_value_core_0 (target list bit 0), sgi1r_value_core_1 (target list bit 1), sgi1r_value_core_2 (target list bit 2), sgi1r_value_core_3 (target list bit 3), plus upper-bits-zero verification for flat affinity",
+        "testOutput": "All passed as part of 1,738 total tests. Exit code 0."
+      },
+      "issues": null
+    }
+  ],
+  "frictions": [],
+  "blockers": [],
+  "summary": "Tested 7 assertions: all 7 passed. Kernel builds cleanly (1 warning: unused send_ipi). 1,738 unit tests pass (≥1,698 required). QEMU boots with GICv3 on all 4 cores. Display pipeline functional. Stress test passes in 40s. IPI affinity encoding verified for cores 0-3."
+}

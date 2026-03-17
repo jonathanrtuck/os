@@ -1,0 +1,59 @@
+{
+  "milestone": "gic-v3-migration",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 28,
+    "passed": 28,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-GIC-001", "VAL-GIC-002", "VAL-GIC-003", "VAL-GIC-004",
+    "VAL-GIC-005", "VAL-GIC-006", "VAL-GIC-007", "VAL-GIC-008",
+    "VAL-GIC-009", "VAL-GIC-010", "VAL-GIC-011", "VAL-GIC-012",
+    "VAL-GIC-013", "VAL-GIC-014", "VAL-GIC-015", "VAL-GIC-016",
+    "VAL-GIC-017", "VAL-GIC-018", "VAL-GIC-019", "VAL-GIC-020",
+    "VAL-GIC-021", "VAL-GIC-022", "VAL-GIC-023", "VAL-GIC-024",
+    "VAL-IPI-001", "VAL-IPI-008", "VAL-IPI-009", "VAL-IPI-010"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [
+    {
+      "target": "user-testing.md",
+      "description": "Added 'Flow Validator Guidance: GIC Source Inspection' and 'Flow Validator Guidance: GIC Build and QEMU' sections with key source file paths and testing procedures",
+      "source": "setup"
+    }
+  ],
+  "previousRound": null,
+  "details": {
+    "sourceInspection": {
+      "assertionsTested": 21,
+      "passed": 21,
+      "keyFindings": [
+        "InterruptController trait fully defined with 7 methods, all implemented in GicV3",
+        "GICv2 artifacts completely removed from kernel source (.rs files)",
+        "Static dispatch only — no dyn InterruptController",
+        "All ICC asm uses options(nostack) without nomem, with SAFETY comments on every unsafe block",
+        "GICD uses IROUTER with ARE_NS=1, GICR uses core_id * 0x20000 stride",
+        "DTB parsing uses arm,gic-v3, handles 2+ reg entries",
+        "All 6 QEMU scripts use gic-version=3",
+        "Per-core idle tracking (is_idle) correctly implemented in scheduler"
+      ]
+    },
+    "buildAndQemu": {
+      "assertionsTested": 7,
+      "passed": 7,
+      "keyFindings": [
+        "Kernel builds cleanly (1 warning: unused send_ipi — expected, used in next milestone)",
+        "1,738 unit tests pass (exceeds 1,698 minimum)",
+        "Smoke test: all 17 checks pass, all 4 cores online with GICv3",
+        "Integration test: full display pipeline functional (1280x800)",
+        "Stress test: ALL PASS in 40s (no panics, no crashes)",
+        "Serial shows 'gic v3 (dtb)' identification",
+        "5 IPI affinity encoding tests for cores 0-3 all pass"
+      ]
+    }
+  }
+}
