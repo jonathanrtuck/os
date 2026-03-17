@@ -1,0 +1,125 @@
+{
+  "milestone": "pipeline-transport",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": { "passed": true, "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1", "exitCode": 0, "testCount": 1791 },
+    "build": { "passed": true, "command": "cd /Users/user/Sites/os/system && cargo build --release", "exitCode": 0 }
+  },
+  "reviewsSummary": {
+    "total": 6,
+    "passed": 6,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "triple-buffer-protocol",
+      "severity": "non_blocking",
+      "description": "TripleReader::new() writes CTRL_READER_BUF without a preceding release fence. Theoretical SMP race — writer could see stale NO_READER. Near-impossible in practice due to event-driven architecture."
+    },
+    {
+      "featureId": "triple-buffer-protocol",
+      "severity": "non_blocking",
+      "description": "triple_write_ctrl() takes &[u8] but casts to *mut u32 for volatile writes — technically UB under strict Rust aliasing rules. Pre-existing pattern from double-buffer code. Works on bare metal but not Miri-sound."
+    },
+    {
+      "featureId": "core-scene-dispatch-fix",
+      "severity": "non_blocking",
+      "description": "When update_data fails in update_clock, publish() is called but no node is marked changed, causing a harmless no-op render pass (one unnecessary IPC message)."
+    },
+    {
+      "featureId": "gpu-completion-signal",
+      "severity": "non_blocking",
+      "description": "Partial renders to non-displayed buffer depend on implicit invariant: scene graph root always has opaque background. Not documented; could break if future scene graph has transparent regions."
+    },
+    {
+      "featureId": "gpu-dirty-rect-union",
+      "severity": "non_blocking",
+      "description": "Single-message multi-rect case now collapses into one bounding box (slightly different from pre-fix behavior). Functionally correct but transfers marginally more pixels for non-overlapping rects."
+    },
+    {
+      "featureId": "gpu-dirty-rect-union",
+      "severity": "non_blocking",
+      "description": "virtio-gpu/main.rs has ~20 unsafe blocks with zero SAFETY comments. Pre-existing gap, not introduced by this feature."
+    },
+    {
+      "featureId": "integration-verification",
+      "severity": "non_blocking",
+      "description": "DoubleWriter/DoubleReader/copy_front_to_back (~350 lines) remain as dead code in scene library. Per 'kill the old way' claim, should be removed. Only used in test files."
+    },
+    {
+      "featureId": "integration-verification",
+      "severity": "non_blocking",
+      "description": "VAL-CROSS-001 keyboard text entry verified via clock-update pixel diffs (not actual keystroke typing) due to known QEMU sendkey limitation. Reasonable proxy — same rendering pipeline path."
+    },
+    {
+      "featureId": "damage-tracking-skip-fix",
+      "severity": "non_blocking",
+      "description": "The zeroing branch in update_bounds_for_skip (n < old_n) is currently unreachable because prepare_frame() returns Full when node counts differ. Defensive/future-proofing code."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Updated .factory/library/architecture.md: changed Scene Graph description from 'Double-buffered shared memory' to 'Triple-buffered shared memory (mailbox semantics)' with writer/reader description.",
+      "sourceFeature": "core-scene-dispatch-fix, integration-verification"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Update Key Source Files table: change scene_state.rs description from 'Scene building, copy_front_to_back call sites' to 'Scene building, acquire/publish scene updates'. Update Key Architecture section: change 'currently double-buffered, changing to triple' to 'triple-buffered (mailbox semantics)' for the Core→Compositor transport.",
+      "evidence": "Features core-scene-dispatch-fix and integration-verification both flagged stale double-buffer references in AGENTS.md. grep for copy_front_to_back in services/core/ returns zero results.",
+      "isSystemic": true
+    },
+    {
+      "target": "skills",
+      "suggestion": "Update os-worker skill: change 'Scene graph types and double-buffer protocol' references to 'triple-buffer protocol'. The protocol has been fully migrated.",
+      "evidence": "Features core-scene-dispatch-fix and integration-verification both flagged stale os-worker skill references to double-buffer protocol.",
+      "isSystemic": true
+    },
+    {
+      "target": "skills",
+      "suggestion": "Add TDD exception guidance to os-worker skill for bare-metal driver code and multi-process IPC flow-control features that cannot be unit-tested on the host. Current TDD rule exempts only 'pure refactoring' — several features in this milestone reasonably skipped tests for runtime-only driver behavior.",
+      "evidence": "Features gpu-completion-signal and gpu-dirty-rect-union both had no new tests. Workers justified this citing untestability of driver IPC code. Skill procedure's TDD step doesn't cover this exception case.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Document the opaque-root-background invariant for partial rendering: the scene graph root node must always have an opaque background that covers the full viewport. Partial renders do not clear the buffer first — they rely on the root background overwriting stale pixels. Breaking this invariant would cause visual corruption with no test catching it.",
+      "evidence": "Feature gpu-completion-signal identified this implicit invariant. render_scene_clipped_with_pool only renders within the damage bbox without clearing the buffer. Currently correct because the scene graph always has an opaque root background.",
+      "isSystemic": false
+    },
+    {
+      "target": "skills",
+      "suggestion": "Add shared-memory concurrency convention documentation to os-worker skill: (1) volatile read/write + standalone fences (not atomic types) is the established pattern because shared memory is mapped at different virtual addresses across processes. (2) Writing through &[u8] to shared memory control regions is a known UB-but-intentional pattern for the bare-metal context.",
+      "evidence": "Feature triple-buffer-protocol flagged the volatile+fence and &[u8]-write-through patterns as undocumented conventions that new workers may incorrectly 'fix'.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "os-worker skill should document that test borrow checker constraints differ from real cross-process shared memory model",
+      "reason": "Too narrowly scoped to a single test pattern. The broader volatile+fence convention suggestion (applied) covers this. Individual test workarounds don't need skill-level documentation."
+    },
+    {
+      "observation": "Worker handling features where precondition worker already did most work",
+      "reason": "This is a natural consequence of feature decomposition, not a skill gap. The worker correctly identified and fixed the one remaining inconsistency."
+    },
+    {
+      "observation": "Missing .factory/library entry for QEMU sendkey limitation",
+      "reason": "Already documented in CLAUDE.md under 'Known'. The library is for codebase knowledge discovered during work, not QEMU tool limitations that are already in project docs."
+    },
+    {
+      "observation": "No convention for flagging dead code during verification grepping",
+      "reason": "Too process-heavy. Verification features already naturally discover dead code through their grep checks. The dead code finding was properly reported as a non-blocking issue."
+    },
+    {
+      "observation": ".factory/library/architecture.md PREV_BOUNDS section should document Skip-path bookkeeping",
+      "reason": "Applying directly — already handled by the architecture.md library update."
+    }
+  ],
+  "previousRound": null
+}

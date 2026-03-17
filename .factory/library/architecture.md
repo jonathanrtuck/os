@@ -23,7 +23,7 @@ Core (OS service) → Scene Graph (shared memory) → Compositor (pixel pump) �
 ```
 
 - **Core:** Owns document state, text layout, scene graph construction. Builds scene in logical coordinates.
-- **Scene Graph:** Double-buffered shared memory. Flat array of fixed-size repr(C) Nodes + 64KB data buffer. Change list (24 entries) for incremental updates.
+- **Scene Graph:** Triple-buffered shared memory (mailbox semantics). Flat array of fixed-size repr(C) Nodes + 64KB data buffer. Change list (24 entries) for incremental updates. Writer always has a free buffer; reader always gets the latest published frame.
 - **Compositor:** Reads scene graph, calls render backend to produce framebuffer. Content-agnostic thin event loop — no font knowledge, no content dispatch, no SVG. Owns the render backend instance.
 - **GPU Driver:** Transfers dirty rects from guest framebuffer to host display via virtio-gpu MMIO.
 
@@ -57,6 +57,7 @@ The `CpuBackend` (in `libraries/render/`) maintains per-node previous-frame phys
 
 - **On render:** After rendering a node, store its physical (x, y, w, h) in prev_bounds[node_id]
 - **On partial update:** Damage BOTH the old position (from prev_bounds) AND the new position
+- **On skip (no render):** `update_bounds_for_skip()` zeroes stale prev_bounds entries when node count decreases, updates prev_node_count. Called by compositor's Skip path before releasing the scene buffer. Prevents stale bounds from influencing future damage calculations after mailbox frame skips.
 - **Type constraint:** Physical coordinates = logical × scale_factor. At scale≥2, logical i16 values produce physical coordinates exceeding i16::MAX (32767). prev_bounds uses i32 for x/y to avoid truncation. The new-position damage path clamps i32→u16 with `.min(fbw)` guards.
 - **Ownership:** Formerly a compositor static mut; now encapsulated inside `render::CpuBackend` as part of the Phase 1 render backend extraction.
 
