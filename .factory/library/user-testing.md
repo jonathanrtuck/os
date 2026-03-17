@@ -316,3 +316,57 @@ This mission replaces double-buffered scene graph with triple buffering (mailbox
 2. For each assertion, run the specific test(s) with name filter
 3. Read test source to confirm it verifies the claimed property
 4. Record pass/fail per assertion
+
+## Flow Validator Guidance: Pipeline Transport (Unit Tests + Code Inspection)
+
+**Surface:** Host-side Rust unit tests + code inspection via grep
+**Testing tool:** `cargo test` + Grep/Read tools
+**Isolation:** No shared mutable state. Read-only code inspection.
+**Max concurrency:** 1 (cargo build lock)
+
+**Key test files:**
+- `system/test/tests/scene.rs` — triple-buffer protocol tests (triple_writer_*, triple_reader_*, triple_buffer_*)
+- `system/test/tests/scene_render.rs` — damage tracking skip tests (damage_correct_after_*, prev_bounds_zeroed_*, full_repaint_*)
+
+**Assertion → Test/Evidence mapping for pipeline-transport:**
+
+| Assertion | Evidence Type | Test/Pattern |
+|-----------|-------------|------|
+| VAL-TBUF-001 | unit test | `triple_writer_acquire_always_succeeds`, `triple_writer_acquire_succeeds_with_active_reader`, `triple_writer_acquire_after_multiple_publishes` |
+| VAL-TBUF-002 | unit test | `triple_writer_publish_makes_latest`, `triple_reader_sees_published_buffer` |
+| VAL-TBUF-003 | unit test | `triple_reader_sees_latest_skipping_intermediate` |
+| VAL-TBUF-004 | unit test | `triple_buffer_no_torn_reads` |
+| VAL-TBUF-005 | unit test | `triple_writer_never_acquires_reader_buffer` |
+| VAL-TBUF-006 | unit test | `triple_scene_size_is_correct` |
+| VAL-TBUF-007 | unit test | `triple_writer_generation_increments` |
+| VAL-TBUF-008 | grep | `copy_front_to_back` absent from production code (services/, libraries/ excluding test/) |
+| VAL-TBUF-009 | unit test | `triple_reader_finish_read_releases_buffer` |
+| VAL-TBUF-010 | unit test | `triple_buffer_scene_writer_api_unchanged`, `triple_buffer_fillrect_glyphs_round_trip` |
+| VAL-TBUF-011 | grep | `DoubleWriter`/`DoubleReader` absent from production code |
+| VAL-TBUF-012 | unit test | `triple_writer_initial_state` |
+| VAL-CORE-001 | code inspection | No early returns on buffer failure in scene_state.rs |
+| VAL-CORE-002 | grep | `retry\|is_back_available\|scene_pending` absent from services/core/ |
+| VAL-CORE-003 | code inspection | scene_state.rs update methods use acquire/publish |
+| VAL-CORE-004 | code inspection | scene_state.rs build_editor_scene uses acquire/publish |
+| VAL-CORE-005 | code inspection | MSG_SCENE_UPDATED sent after every publish |
+| VAL-COMP-001 | code inspection | compositor renders to `1 - presented_buf` |
+| VAL-COMP-002 | grep | `MSG_PRESENT_DONE` exists in protocol/lib.rs |
+| VAL-COMP-003 | code inspection | compositor tracks in-flight buffer, waits for completion |
+| VAL-COMP-004 | code inspection | GPU driver sends MSG_PRESENT_DONE after transfer+flush |
+| VAL-COMP-005 | code inspection | partial updates go to non-displayed buffer |
+| VAL-GPU-001 | code inspection | GPU driver unions dirty rects in present loop |
+| VAL-GPU-002 | code inspection | union accumulation covers all rects |
+| VAL-GPU-003 | code inspection | single-message case is degenerate union |
+| VAL-DMG-001 | unit test | `damage_correct_after_single_skip` |
+| VAL-DMG-002 | unit test | `damage_correct_after_multiple_skips` |
+| VAL-DMG-003 | unit test | `full_repaint_on_node_count_change_after_skip` |
+| VAL-DMG-004 | unit test | `prev_bounds_zeroed_for_removed_nodes` |
+| VAL-INIT-001 | grep | `TRIPLE_SCENE_SIZE` in init/main.rs, no `DOUBLE_SCENE_SIZE` |
+| VAL-INIT-002 | code inspection | GPU-to-compositor channel exists in init |
+| VAL-CROSS-002 | cargo test | scene/scene_render/surface_pool/frame_scheduler test count >= 257 |
+| VAL-CROSS-003 | cargo test | full suite >= 1768 tests pass |
+| VAL-CROSS-004 | cargo build | `cargo build --release` exit 0 |
+| VAL-CROSS-005 | grep | no DoubleWriter/DoubleReader in production paths |
+| VAL-CROSS-007 | unit test + grep | `triple_scene_size_is_correct` + TRIPLE_SCENE_SIZE in init |
+| VAL-CROSS-001 | QEMU visual | rapid typing produces all characters on screen |
+| VAL-CROSS-006 | QEMU stress | 60s+ sustained input, no crash/panic/deadlock |
