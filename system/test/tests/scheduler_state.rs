@@ -89,6 +89,7 @@ impl Thread {
 struct PerCoreState {
     current: Option<Thread>,
     idle: Option<Thread>,
+    is_idle: bool,
 }
 
 struct State {
@@ -108,6 +109,7 @@ impl State {
             .map(|i| PerCoreState {
                 current: None,
                 idle: Some(Thread::new_idle(i as u64)),
+                is_idle: false,
             })
             .collect();
 
@@ -569,6 +571,23 @@ fn check_invariants(s: &State, label: &str) {
             "{label}: non-exited thread in deferred drops"
         );
     }
+
+    // 6. is_idle must be consistent with the current thread.
+    for (i, core) in s.cores.iter().enumerate() {
+        if let Some(t) = &core.current {
+            if t.is_idle() {
+                assert!(
+                    core.is_idle,
+                    "{label}: core {i} runs idle thread but is_idle is false"
+                );
+            } else {
+                assert!(
+                    !core.is_idle,
+                    "{label}: core {i} runs non-idle thread but is_idle is true"
+                );
+            }
+        }
+    }
 }
 
 /// Actions that can be randomly applied to the scheduler state.
@@ -644,6 +663,7 @@ fn randomized_scheduler_state_machine() {
                         let mut t = s.ready.remove(0);
                         t.activate();
                         s.cores[core].current = Some(t);
+                        s.cores[core].is_idle = false;
                     }
                 }
                 Action::BlockOnCore(core) => {
@@ -686,6 +706,7 @@ fn randomized_scheduler_state_machine() {
                         let mut t = s.ready.remove(0);
                         t.activate();
                         s.cores[core].current = Some(t);
+                        s.cores[core].is_idle = false;
                     } else {
                         let mut idle = s.cores[core]
                             .idle
@@ -693,6 +714,7 @@ fn randomized_scheduler_state_machine() {
                             .unwrap_or_else(|| panic!("{label}: idle missing for core {core}"));
                         idle.activate();
                         s.cores[core].current = Some(idle);
+                        s.cores[core].is_idle = true;
                     }
                 }
                 Action::DrainDeferred => {
@@ -721,6 +743,7 @@ fn rapid_block_wake_never_duplicates() {
         let mut t = s.ready.remove(0);
         t.activate();
         s.cores[core].current = Some(t);
+        s.cores[core].is_idle = false;
     }
 
     // Rapid block/wake cycles. Reduced under Miri for practical runtime.
@@ -756,10 +779,12 @@ fn rapid_block_wake_never_duplicates() {
             let mut t = s.ready.remove(0);
             t.activate();
             s.cores[core].current = Some(t);
+            s.cores[core].is_idle = false;
         } else if s.cores[core].current.is_none() {
             let mut idle = s.cores[core].idle.take().expect("idle missing");
             idle.activate();
             s.cores[core].current = Some(idle);
+            s.cores[core].is_idle = true;
         }
 
         check_invariants(&s, &label);
@@ -1019,4 +1044,237 @@ fn reap_removes_exited_from_blocked_list() {
         s.blocked.is_empty(),
         "exited thread not reaped from blocked list"
     );
+}
+
+// ============================================================
+// Per-core idle tracking (VAL-IPI-008, VAL-IPI-009, VAL-IPI-010)
+// ============================================================
+
+/// VAL-IPI-008: is_idle is false initially for all cores.
+#[test]
+fn is_idle_false_initially() {
+    let s = State::new(4);
+
+    for (i, core) in s.cores.iter().enumerate() {
+        assert!(
+            !core.is_idle,
+            "core {i}: is_idle must be false at initialization"
+        );
+    }
+}
+
+/// VAL-IPI-009: is_idle becomes true when core runs idle thread.
+#[test]
+fn is_idle_true_when_core_runs_idle_thread() {
+    let mut s = State::new(4);
+
+    // Simulate schedule_inner on core 0 with no runnable threads → idle fallback.
+    let mut idle = s.cores[0].idle.take().expect("idle thread must exist");
+    idle.activate();
+    s.cores[0].current = Some(idle);
+    s.cores[0].is_idle = true;
+
+    assert!(
+        s.cores[0].is_idle,
+        "is_idle must be true when core runs idle thread"
+    );
+    assert!(
+        s.cores[0].current.as_ref().unwrap().is_idle(),
+        "current thread must be the idle thread"
+    );
+
+    check_invariants(&s, "idle_thread_on_core_0");
+}
+
+/// VAL-IPI-010: is_idle becomes false when a real thread is scheduled.
+#[test]
+fn is_idle_false_when_real_thread_scheduled() {
+    let mut s = State::new(4);
+
+    // Step 1: Core goes idle (no runnable threads).
+    let mut idle = s.cores[0].idle.take().expect("idle thread must exist");
+    idle.activate();
+    s.cores[0].current = Some(idle);
+    s.cores[0].is_idle = true;
+
+    assert!(s.cores[0].is_idle);
+
+    // Step 2: A real thread becomes ready and is scheduled.
+    s.ready.push(Thread::new(1));
+
+    // Simulate schedule_inner: park idle, select from ready queue.
+    let mut old = s.cores[0].current.take().unwrap();
+    old.deschedule();
+    park_old(&mut s, old, 0);
+
+    let mut new_thread = s.ready.remove(0);
+    new_thread.activate();
+    s.cores[0].current = Some(new_thread);
+    s.cores[0].is_idle = false;
+
+    assert!(
+        !s.cores[0].is_idle,
+        "is_idle must be false when a real thread is scheduled"
+    );
+
+    check_invariants(&s, "real_thread_on_core_0");
+}
+
+/// is_idle is false when old thread continues (no better candidate in queue).
+#[test]
+fn is_idle_false_when_current_thread_continues() {
+    let mut s = State::new(4);
+
+    // A real thread is running and continues (no other threads in queue).
+    let mut t = Thread::new(1);
+    t.activate();
+    s.cores[0].current = Some(t);
+    s.cores[0].is_idle = false;
+
+    // Simulate schedule_inner: old thread continues (no other runnable threads).
+    // deschedule + re-activate represents the "current continues" path.
+    let mut old = s.cores[0].current.take().unwrap();
+    old.deschedule();
+    old.activate();
+    s.cores[0].current = Some(old);
+    s.cores[0].is_idle = false; // Must remain false.
+
+    assert!(
+        !s.cores[0].is_idle,
+        "is_idle must be false when current thread continues"
+    );
+
+    check_invariants(&s, "current_continues");
+}
+
+/// is_idle transitions correctly across idle → real → idle → real cycles.
+#[test]
+fn is_idle_lifecycle_multiple_transitions() {
+    let mut s = State::new(1);
+
+    // Cycle 1: Go idle.
+    let mut idle = s.cores[0].idle.take().unwrap();
+    idle.activate();
+    s.cores[0].current = Some(idle);
+    s.cores[0].is_idle = true;
+    assert!(s.cores[0].is_idle);
+    check_invariants(&s, "cycle1_idle");
+
+    // Cycle 2: Real thread scheduled → not idle.
+    s.ready.push(Thread::new(1));
+    let mut old = s.cores[0].current.take().unwrap();
+    old.deschedule();
+    park_old(&mut s, old, 0);
+    let mut t = s.ready.remove(0);
+    t.activate();
+    s.cores[0].current = Some(t);
+    s.cores[0].is_idle = false;
+    assert!(!s.cores[0].is_idle);
+    check_invariants(&s, "cycle2_real");
+
+    // Cycle 3: Real thread blocks → go idle again.
+    let mut old = s.cores[0].current.take().unwrap();
+    old.block();
+    park_old(&mut s, old, 0);
+    let mut idle = s.cores[0].idle.take().unwrap();
+    idle.activate();
+    s.cores[0].current = Some(idle);
+    s.cores[0].is_idle = true;
+    assert!(s.cores[0].is_idle);
+    check_invariants(&s, "cycle3_idle");
+
+    // Cycle 4: Wake the blocked thread → real thread again.
+    try_wake(&mut s, 1);
+    let mut old = s.cores[0].current.take().unwrap();
+    old.deschedule();
+    park_old(&mut s, old, 0);
+    let mut t = s.ready.remove(0);
+    t.activate();
+    s.cores[0].current = Some(t);
+    s.cores[0].is_idle = false;
+    assert!(!s.cores[0].is_idle);
+    check_invariants(&s, "cycle4_real");
+}
+
+/// is_idle is per-core — one core idle doesn't affect others.
+#[test]
+fn is_idle_per_core_independence() {
+    let mut s = State::new(4);
+
+    // Core 0: real thread running.
+    let mut t = Thread::new(1);
+    t.activate();
+    s.cores[0].current = Some(t);
+    s.cores[0].is_idle = false;
+
+    // Core 1: idle.
+    let mut idle = s.cores[1].idle.take().unwrap();
+    idle.activate();
+    s.cores[1].current = Some(idle);
+    s.cores[1].is_idle = true;
+
+    // Core 2: real thread running.
+    let mut t2 = Thread::new(2);
+    t2.activate();
+    s.cores[2].current = Some(t2);
+    s.cores[2].is_idle = false;
+
+    // Core 3: idle.
+    let mut idle3 = s.cores[3].idle.take().unwrap();
+    idle3.activate();
+    s.cores[3].current = Some(idle3);
+    s.cores[3].is_idle = true;
+
+    assert!(!s.cores[0].is_idle, "core 0 should not be idle");
+    assert!(s.cores[1].is_idle, "core 1 should be idle");
+    assert!(!s.cores[2].is_idle, "core 2 should not be idle");
+    assert!(s.cores[3].is_idle, "core 3 should be idle");
+
+    check_invariants(&s, "per_core_independence");
+}
+
+/// Randomized test verifies is_idle consistency through random actions.
+/// The check_invariants function now validates is_idle on every step.
+#[test]
+fn is_idle_consistent_under_randomized_schedule() {
+    // The existing randomized_scheduler_state_machine test already validates
+    // is_idle via check_invariants (invariant 6). This test runs a focused
+    // scenario with more idle transitions.
+    let mut rng = Rng::new(0xDEAD);
+    let num_cores = 4;
+    let mut s = State::new(num_cores);
+
+    for step in 0..200 {
+        let label = format!("is_idle_random step={step}");
+        let core = rng.range(num_cores);
+
+        // Half the time: spawn a thread. Other half: schedule cycle.
+        if rng.range(2) == 0 {
+            s.ready.push(Thread::new(step as u64 + 1));
+        }
+
+        // Full schedule cycle.
+        if let Some(mut old) = s.cores[core].current.take() {
+            old.deschedule();
+            park_old(&mut s, old, core);
+        }
+        s.deferred_drops.clear();
+
+        if !s.ready.is_empty() {
+            let mut t = s.ready.remove(0);
+            t.activate();
+            s.cores[core].current = Some(t);
+            s.cores[core].is_idle = false;
+        } else {
+            let mut idle = s.cores[core]
+                .idle
+                .take()
+                .unwrap_or_else(|| panic!("{label}: idle missing for core {core}"));
+            idle.activate();
+            s.cores[core].current = Some(idle);
+            s.cores[core].is_idle = true;
+        }
+
+        check_invariants(&s, &label);
+    }
 }

@@ -44,6 +44,7 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
         const INIT: PerCoreState = PerCoreState {
             current: None,
             idle: None,
+            is_idle: false,
         };
         [INIT; per_core::MAX_CORES]
     },
@@ -58,6 +59,10 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
 struct PerCoreState {
     current: Option<Box<Thread>>,
     idle: Option<Box<Thread>>,
+    /// True when this core is running its idle thread (no runnable work).
+    /// Set in `schedule_inner` under the STATE lock. Used by `try_wake_impl`
+    /// (Phase 3: IPI) to decide whether to send an inter-processor interrupt.
+    is_idle: bool,
 }
 /// Single run queue — linear scan for EEVDF selection.
 #[allow(clippy::vec_box)]
@@ -372,6 +377,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         park_old(s, old_thread, core);
 
         s.cores[core].current = Some(new_thread);
+        s.cores[core].is_idle = false;
 
         new_ctx
     } else if old_thread.is_ready() && has_budget(&old_thread, &s.scheduling_contexts) {
@@ -382,6 +388,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         let old_ctx = old_thread.context_ptr();
 
         s.cores[core].current = Some(old_thread);
+        s.cores[core].is_idle = false;
 
         old_ctx
     } else {
@@ -400,6 +407,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         park_old(s, old_thread, core);
 
         s.cores[core].current = Some(idle);
+        s.cores[core].is_idle = true;
 
         idle_ctx
     };
