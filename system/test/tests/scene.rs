@@ -2523,10 +2523,12 @@ fn abs_bounds_identity_transform_unchanged() {
     assert_eq!(ah, 60, "identity transform should not change height");
 }
 
-// ── FillRect content type tests (VAL-SCENE-001) ────────────────────
+// ── Background container tests (VAL-FILL-01: FillRect removed) ─────
+// FillRect has been removed from Content. Solid rectangle fills (cursor,
+// selection) now use Content::None with node.background set to the color.
 
 #[test]
-fn fillrect_round_trip_scene_writer_reader() {
+fn background_container_round_trip_scene_writer_reader() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     let id = w.alloc_node().unwrap();
@@ -2534,40 +2536,34 @@ fn fillrect_round_trip_scene_writer_reader() {
     w.node_mut(id).y = 20;
     w.node_mut(id).width = 100;
     w.node_mut(id).height = 50;
-    w.node_mut(id).content = Content::FillRect {
-        color: Color::rgba(255, 0, 0, 128),
-    };
+    w.node_mut(id).background = Color::rgba(255, 0, 0, 128);
+    w.node_mut(id).content = Content::None;
     w.set_root(id);
     w.commit();
 
-    // FillRect uses no data buffer
+    // Background container uses no data buffer
     assert_eq!(w.data_used(), 0);
 
     let r = SceneReader::new(&buf);
     let node = r.node(id);
-    match node.content {
-        Content::FillRect { color } => {
-            assert_eq!(color, Color::rgba(255, 0, 0, 128));
-        }
-        _ => panic!("expected FillRect content"),
-    }
+    assert!(matches!(node.content, Content::None));
+    assert_eq!(node.background, Color::rgba(255, 0, 0, 128));
 }
 
 #[test]
-fn fillrect_no_data_buffer_allocation() {
+fn background_container_no_data_buffer_allocation() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     for _ in 0..10 {
         let id = w.alloc_node().unwrap();
-        w.node_mut(id).content = Content::FillRect {
-            color: Color::rgb(0, 255, 0),
-        };
+        w.node_mut(id).background = Color::rgb(0, 255, 0);
+        w.node_mut(id).content = Content::None;
     }
-    assert_eq!(w.data_used(), 0, "FillRect should not allocate data buffer");
+    assert_eq!(w.data_used(), 0, "background container should not allocate data buffer");
 }
 
 #[test]
-fn fillrect_double_buffer_round_trip() {
+fn background_container_double_buffer_round_trip() {
     let mut buf = make_double_buf();
     let mut dw = DoubleWriter::new(&mut buf);
     {
@@ -2576,9 +2572,8 @@ fn fillrect_double_buffer_round_trip() {
         let id = w.alloc_node().unwrap();
         w.node_mut(id).width = 50;
         w.node_mut(id).height = 30;
-        w.node_mut(id).content = Content::FillRect {
-            color: Color::rgba(100, 200, 50, 180),
-        };
+        w.node_mut(id).background = Color::rgba(100, 200, 50, 180);
+        w.node_mut(id).content = Content::None;
         w.set_root(id);
     }
     dw.swap();
@@ -2586,37 +2581,28 @@ fn fillrect_double_buffer_round_trip() {
     let dr = DoubleReader::new(&buf);
     let nodes = dr.front_nodes();
     assert_eq!(nodes.len(), 1);
-    match nodes[0].content {
-        Content::FillRect { color } => {
-            assert_eq!(color, Color::rgba(100, 200, 50, 180));
-        }
-        _ => panic!("expected FillRect in double buffer"),
-    }
+    assert!(matches!(nodes[0].content, Content::None));
+    assert_eq!(nodes[0].background, Color::rgba(100, 200, 50, 180));
 }
 
 #[test]
-fn fillrect_copy_front_to_back_preserves() {
+fn background_container_copy_front_to_back_preserves() {
     let mut buf = make_double_buf();
     let mut dw = DoubleWriter::new(&mut buf);
     {
         let mut w = dw.back();
         w.clear();
         let id = w.alloc_node().unwrap();
-        w.node_mut(id).content = Content::FillRect {
-            color: Color::rgb(255, 128, 0),
-        };
+        w.node_mut(id).background = Color::rgb(255, 128, 0);
+        w.node_mut(id).content = Content::None;
         w.set_root(id);
     }
     dw.swap();
 
     dw.copy_front_to_back();
     let back = dw.back();
-    match back.node(0).content {
-        Content::FillRect { color } => {
-            assert_eq!(color, Color::rgb(255, 128, 0));
-        }
-        _ => panic!("FillRect not preserved after copy_front_to_back"),
-    }
+    assert!(matches!(back.node(0).content, Content::None));
+    assert_eq!(back.node(0).background, Color::rgb(255, 128, 0));
 }
 
 // ── Glyphs content type tests (VAL-SCENE-002) ──────────────────────
@@ -2803,15 +2789,14 @@ fn shaped_glyph_size_is_8_bytes() {
 // ── Scene diffing with new types (VAL-SCENE-007) ────────────────────
 
 #[test]
-fn diff_fillrect_color_change_detected() {
+fn diff_background_color_change_detected() {
     let mut buf1 = make_buf();
     let mut w1 = SceneWriter::new(&mut buf1);
     let root = w1.alloc_node().unwrap();
     w1.node_mut(root).width = 100;
     w1.node_mut(root).height = 50;
-    w1.node_mut(root).content = Content::FillRect {
-        color: Color::rgb(255, 0, 0),
-    };
+    w1.node_mut(root).background = Color::rgb(255, 0, 0);
+    w1.node_mut(root).content = Content::None;
     w1.set_root(root);
     w1.commit();
 
@@ -2820,14 +2805,13 @@ fn diff_fillrect_color_change_detected() {
     let root2 = w2.alloc_node().unwrap();
     w2.node_mut(root2).width = 100;
     w2.node_mut(root2).height = 50;
-    w2.node_mut(root2).content = Content::FillRect {
-        color: Color::rgb(0, 255, 0), // changed
-    };
+    w2.node_mut(root2).background = Color::rgb(0, 255, 0); // changed
+    w2.node_mut(root2).content = Content::None;
     w2.set_root(root2);
     w2.commit();
 
     let rects = diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
-    assert_eq!(rects.len(), 1, "FillRect color change should produce dirty rect");
+    assert_eq!(rects.len(), 1, "background color change should produce dirty rect");
 }
 
 #[test]
@@ -2869,24 +2853,25 @@ fn diff_glyphs_content_hash_change_detected() {
 }
 
 #[test]
-fn diff_identical_fillrect_scenes_empty() {
+fn diff_identical_background_scenes_empty() {
     let mut buf1 = make_buf();
     let mut w1 = SceneWriter::new(&mut buf1);
     let root = w1.alloc_node().unwrap();
     w1.node_mut(root).width = 50;
     w1.node_mut(root).height = 30;
-    w1.node_mut(root).content = Content::FillRect { color: Color::rgb(128, 128, 128) };
+    w1.node_mut(root).background = Color::rgb(128, 128, 128);
+    w1.node_mut(root).content = Content::None;
     w1.set_root(root);
     w1.commit();
 
     let rects = diff_scenes(w1.nodes(), 1, w1.nodes(), 1).unwrap();
-    assert!(rects.is_empty(), "identical FillRect scenes should have no dirty rects");
+    assert!(rects.is_empty(), "identical background scenes should have no dirty rects");
 }
 
 // ── Mixed content type tests (VAL-SCENE-008) ───────────────────────
 
 #[test]
-fn mixed_fillrect_glyphs_image_double_buffer_swap() {
+fn mixed_background_glyphs_image_double_buffer_swap() {
     let mut buf = make_double_buf();
     let mut dw = DoubleWriter::new(&mut buf);
     {
@@ -2897,13 +2882,12 @@ fn mixed_fillrect_glyphs_image_double_buffer_swap() {
         w.node_mut(root).height = 600;
         w.set_root(root);
 
-        // FillRect child
+        // Background container child (replaces FillRect)
         let fill_id = w.alloc_node().unwrap();
         w.node_mut(fill_id).width = 100;
         w.node_mut(fill_id).height = 20;
-        w.node_mut(fill_id).content = Content::FillRect {
-            color: Color::rgba(200, 200, 200, 128),
-        };
+        w.node_mut(fill_id).background = Color::rgba(200, 200, 200, 128);
+        w.node_mut(fill_id).content = Content::None;
         w.add_child(root, fill_id);
 
         // Glyphs child
@@ -2937,10 +2921,8 @@ fn mixed_fillrect_glyphs_image_double_buffer_swap() {
     // Verify all survive the swap
     let dr = DoubleReader::new(&buf);
     assert_eq!(dr.front_nodes().len(), 4);
-    match dr.front_nodes()[1].content {
-        Content::FillRect { color } => assert_eq!(color.a, 128),
-        _ => panic!("expected FillRect"),
-    }
+    assert!(matches!(dr.front_nodes()[1].content, Content::None));
+    assert_eq!(dr.front_nodes()[1].background.a, 128);
     match dr.front_nodes()[2].content {
         Content::Glyphs { glyph_count, .. } => assert_eq!(glyph_count, 1),
         _ => panic!("expected Glyphs"),
@@ -2954,10 +2936,10 @@ fn mixed_fillrect_glyphs_image_double_buffer_swap() {
     }
 }
 
-// ── mark_changed works with FillRect and Glyphs (VAL-SCENE-008) ────
+// ── mark_changed works with background and Glyphs (VAL-SCENE-008) ──
 
 #[test]
-fn mark_changed_works_for_fillrect_and_glyphs() {
+fn mark_changed_works_for_background_and_glyphs() {
     let mut buf = make_double_buf();
     let mut dw = DoubleWriter::new(&mut buf);
     {
@@ -2965,8 +2947,9 @@ fn mark_changed_works_for_fillrect_and_glyphs() {
         w.clear();
         for _ in 0..4 { w.alloc_node().unwrap(); }
         // Node 0: root
-        // Node 1: FillRect cursor
-        w.node_mut(1).content = Content::FillRect { color: Color::rgb(200, 200, 200) };
+        // Node 1: background container (cursor)
+        w.node_mut(1).background = Color::rgb(200, 200, 200);
+        w.node_mut(1).content = Content::None;
         // Node 2: Glyphs text
         w.node_mut(2).content = Content::Glyphs {
             color: Color::rgb(255, 255, 255),
@@ -2979,11 +2962,11 @@ fn mark_changed_works_for_fillrect_and_glyphs() {
     }
     dw.swap();
 
-    // Incremental update: change FillRect and Glyphs nodes
+    // Incremental update: change background and Glyphs nodes
     dw.copy_front_to_back();
     {
         let mut w = dw.back();
-        w.node_mut(1).content = Content::FillRect { color: Color::rgb(100, 100, 100) };
+        w.node_mut(1).background = Color::rgb(100, 100, 100);
         w.mark_changed(1);
         w.node_mut(2).content_hash = fnv1a(b"new text");
         w.mark_changed(2);
@@ -3028,10 +3011,11 @@ fn glyphs_axis_hash_round_trip() {
 // grep-based verification is in the feature's verificationSteps.
 
 #[test]
-fn content_enum_has_four_variants() {
-    // Verify that Content has exactly: None, FillRect, Image, Glyphs
+fn content_enum_has_three_variants() {
+    // Verify that Content has exactly: None, Image, Glyphs
+    // FillRect removed — solid fills use Content::None + node.background.
+    // Path will be added in a later feature.
     let none = Content::None;
-    let fill = Content::FillRect { color: Color::rgb(0, 0, 0) };
     let img = Content::Image {
         data: DataRef { offset: 0, length: 0 },
         src_width: 0,
@@ -3044,9 +3028,7 @@ fn content_enum_has_four_variants() {
         font_size: 0,
         axis_hash: 0,
     };
-    // If Text or Path existed, this test would need updating
     assert!(matches!(none, Content::None));
-    assert!(matches!(fill, Content::FillRect { .. }));
     assert!(matches!(img, Content::Image { .. }));
     assert!(matches!(glyphs, Content::Glyphs { .. }));
 }
@@ -3114,7 +3096,7 @@ fn bytes_to_shaped_glyphs_test(text: &[u8], advance: u16) -> Vec<ShapedGlyph> {
 }
 
 /// Build a minimal editor scene (core pattern) with per-line Glyphs,
-/// FillRect cursor, and FillRect selection rects.
+/// background-colored cursor, and background-colored selection rects.
 #[allow(clippy::too_many_arguments)]
 fn build_test_editor_scene(
     w: &mut SceneWriter,
@@ -3298,7 +3280,7 @@ fn build_test_editor_scene(
         w.node_mut(prev_line_node).next_sibling = CORE_N_CURSOR;
     }
 
-    // N_CURSOR — Content::FillRect
+    // N_CURSOR — Content::None with background color
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line);
     let cursor_x = (cursor_col as u32 * char_width) as i16;
@@ -3309,12 +3291,13 @@ fn build_test_editor_scene(
         n.y = cursor_y_px;
         n.width = 2;
         n.height = line_height as u16;
-        n.content = Content::FillRect { color: cursor_color };
+        n.background = cursor_color;
+        n.content = Content::None;
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
     }
 
-    // Selection rects (Content::FillRect).
+    // Selection rects (Content::None with background color).
     let (sel_lo, sel_hi) = if sel_start <= sel_end {
         (sel_start as usize, sel_end as usize)
     } else {
@@ -3336,7 +3319,8 @@ fn build_test_editor_scene(
                 n.y = sel_y as i16;
                 n.width = ((col_end - col_start) as u32 * char_width) as u16;
                 n.height = line_height as u16;
-                n.content = Content::FillRect { color: sel_color };
+                n.background = sel_color;
+                n.content = Content::None;
                 n.flags = NodeFlags::VISIBLE;
                 n.next_sibling = NULL;
                 if prev_sel == NULL {
@@ -3364,29 +3348,28 @@ fn collect_children(w: &SceneWriter, parent: u16) -> Vec<u16> {
     children
 }
 
-// ── VAL-CORE-001: Cursor uses Content::FillRect ─────────────────────
+// ── VAL-FILL-02: Cursor uses Content::None with background color ────
 
 #[test]
-fn core_cursor_uses_fillrect() {
+fn core_cursor_uses_background_container() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0);
 
     let cursor = w.node(CORE_N_CURSOR);
-    match cursor.content {
-        Content::FillRect { color } => {
-            assert!(color.a > 0, "cursor color should be visible");
-        }
-        _ => panic!("N_CURSOR should have Content::FillRect, got {:?}", cursor.content),
-    }
+    assert!(
+        matches!(cursor.content, Content::None),
+        "N_CURSOR should have Content::None, got {:?}", cursor.content
+    );
+    assert!(cursor.background.a > 0, "cursor background color should be visible");
     assert_eq!(cursor.width, 2, "cursor width should be 2px");
     assert_eq!(cursor.height, 20, "cursor height should be line_height");
 }
 
-// ── VAL-CORE-002: Selection rects use Content::FillRect ─────────────
+// ── VAL-FILL-02: Selection rects use Content::None with background ──
 
 #[test]
-fn core_selection_rects_use_fillrect() {
+fn core_selection_rects_use_background_container() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     // Select "ell" in "Hello\nWorld"
@@ -3402,15 +3385,12 @@ fn core_selection_rects_use_fillrect() {
     let mut sel_count = 0;
     while sel_id != NULL {
         let sel = w.node(sel_id);
-        match sel.content {
-            Content::FillRect { color } => {
-                assert!(color.a > 0, "selection color should be visible");
-            }
-            _ => panic!(
-                "Selection rect node {} should have Content::FillRect, got {:?}",
-                sel_id, sel.content
-            ),
-        }
+        assert!(
+            matches!(sel.content, Content::None),
+            "Selection rect node {} should have Content::None, got {:?}",
+            sel_id, sel.content
+        );
+        assert!(sel.background.a > 0, "selection background color should be visible");
         sel_count += 1;
         sel_id = sel.next_sibling;
     }
@@ -3418,7 +3398,7 @@ fn core_selection_rects_use_fillrect() {
 }
 
 #[test]
-fn core_multiline_selection_all_fillrect() {
+fn core_multiline_selection_all_background_containers() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     // Select across two lines: "llo\nWor"
@@ -3427,11 +3407,13 @@ fn core_multiline_selection_all_fillrect() {
     let mut sel_id = w.node(CORE_N_CURSOR).next_sibling;
     let mut sel_count = 0;
     while sel_id != NULL {
+        let sel = w.node(sel_id);
         assert!(
-            matches!(w.node(sel_id).content, Content::FillRect { .. }),
-            "selection node {} must be FillRect",
+            matches!(sel.content, Content::None),
+            "selection node {} must be Content::None with background",
             sel_id
         );
+        assert!(sel.background.a > 0, "selection node {} must have visible background", sel_id);
         sel_count += 1;
         sel_id = w.node(sel_id).next_sibling;
     }
@@ -3503,12 +3485,14 @@ fn core_child_ordering_glyphs_then_cursor_then_selection() {
         );
     }
 
-    // Selection rects come after cursor.
+    // Selection rects come after cursor (Content::None with background).
     for &child_id in &children[cursor_idx + 1..] {
+        let sel = w.node(child_id);
         assert!(
-            matches!(w.node(child_id).content, Content::FillRect { .. }),
-            "children after cursor should be FillRect (selection)"
+            matches!(sel.content, Content::None),
+            "children after cursor should be Content::None (selection)"
         );
+        assert!(sel.background.a > 0, "selection node should have visible background");
     }
 }
 
@@ -3744,9 +3728,8 @@ fn core_update_cursor_position_only() {
         w.node_mut(CORE_N_CURSOR).y = 0;
         w.node_mut(CORE_N_CURSOR).width = 2;
         w.node_mut(CORE_N_CURSOR).height = 20;
-        w.node_mut(CORE_N_CURSOR).content = Content::FillRect {
-            color: Color::rgb(200, 200, 200),
-        };
+        w.node_mut(CORE_N_CURSOR).background = Color::rgb(200, 200, 200);
+        w.node_mut(CORE_N_CURSOR).content = Content::None;
         w.set_root(CORE_N_ROOT);
     }
     dw.swap();
@@ -3767,8 +3750,11 @@ fn core_update_cursor_position_only() {
     assert_eq!(cursor.x, 40);
     assert_eq!(cursor.y, 20);
     assert!(
-        matches!(cursor.content, Content::FillRect { .. }),
-        "cursor should still be FillRect after position update"
+        matches!(cursor.content, Content::None),
+        "cursor should be Content::None after position update"
+    );
+    assert_eq!(cursor.background, Color::rgb(200, 200, 200),
+        "cursor background color should be preserved after position update"
     );
     let cl = dr.change_list().unwrap();
     assert!(cl.contains(&CORE_N_CURSOR), "cursor should be in change list");
@@ -4284,9 +4270,9 @@ fn triple_buffer_writer_publishes_multiple_reader_sees_latest() {
     assert_eq!(tr2.front_generation(), 4);
 }
 
-// Test: FillRect and Glyphs work with triple buffer
+// Test: Background container and Glyphs work with triple buffer
 #[test]
-fn triple_buffer_fillrect_glyphs_round_trip() {
+fn triple_buffer_background_glyphs_round_trip() {
     let mut buf = make_triple_buf();
     let mut tw = scene::TripleWriter::new(&mut buf);
     {
@@ -4295,11 +4281,10 @@ fn triple_buffer_fillrect_glyphs_round_trip() {
         let root = w.alloc_node().unwrap();
         w.set_root(root);
 
-        // FillRect
+        // Background container (replaces FillRect)
         let fill_id = w.alloc_node().unwrap();
-        w.node_mut(fill_id).content = Content::FillRect {
-            color: Color::rgba(100, 200, 50, 180),
-        };
+        w.node_mut(fill_id).background = Color::rgba(100, 200, 50, 180);
+        w.node_mut(fill_id).content = Content::None;
         w.add_child(root, fill_id);
 
         // Glyphs
@@ -4322,10 +4307,8 @@ fn triple_buffer_fillrect_glyphs_round_trip() {
     drop(tw);
     let tr = scene::TripleReader::new(&buf);
     assert_eq!(tr.front_nodes().len(), 3);
-    match tr.front_nodes()[1].content {
-        Content::FillRect { color } => assert_eq!(color.a, 180),
-        _ => panic!("expected FillRect"),
-    }
+    assert!(matches!(tr.front_nodes()[1].content, Content::None));
+    assert_eq!(tr.front_nodes()[1].background.a, 180);
     match tr.front_nodes()[2].content {
         Content::Glyphs { glyph_count, .. } => assert_eq!(glyph_count, 1),
         _ => panic!("expected Glyphs"),

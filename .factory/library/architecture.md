@@ -5,12 +5,12 @@
 Replacing double-buffered scene graph with triple buffering (mailbox semantics) and adding GPU completion flow control to fix 6 transport bugs.
 
 ### Content Type Field Layout
-- **FillRect:** Color (4B). Position/size from Node geometry.
+- **None:** Pure container. Solid rectangle fills (cursor, selection) use Content::None with node.background set to the desired color.
 - **Glyphs:** color(4B) + DataRef(8B) + glyph_count(u16, 2B) + font_size(u16, 2B) + axis_hash(u32, 4B) = 20B. Single run per node.
 - **Image:** DataRef(8B) + src_width(u16) + src_height(u16) = 12B. Unchanged.
 
 ### Node Child Ordering (N_DOC_TEXT)
-Per-line Glyphs nodes first, then N_CURSOR (FillRect), then selection rects (FillRect). set_node_count truncates both line nodes and selection rects.
+Per-line Glyphs nodes first, then N_CURSOR (Content::None + background), then selection rects (Content::None + background). set_node_count truncates both line nodes and selection rects.
 
 Architectural decisions, patterns, and constraints for the rendering pipeline.
 
@@ -30,7 +30,7 @@ Core (OS service) → Scene Graph (shared memory) → Compositor (pixel pump) �
 ## Key Types
 
 - `scene::Node` — 72 bytes (verified with compile-time assertion in scene/lib.rs). Fields: tree links, geometry (i16/u16 logical), scroll_y (i32), background (Color), border (Border), corner_radius (u8), opacity (u8), shadow fields (shadow_color, shadow_offset_x/y, shadow_blur_radius, shadow_spread), flags, content_hash, content variant.
-- `scene::Content` — None | FillRect{color} | Image{data, src_w, src_h} | Glyphs{color, glyphs DataRef, glyph_count, font_size, axis_hash}
+- `scene::Content` — None | Image{data, src_w, src_h} | Glyphs{color, glyphs DataRef, glyph_count, font_size, axis_hash}
 - `drawing::Surface` — borrowed pixel buffer with BGRA8888 format
 - `drawing::Color` — RGBA u8×4 with sRGB gamma-correct blend_over
 

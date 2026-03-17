@@ -775,26 +775,6 @@ fn render_node_content_translated(
     // Draw content.
     match node.content {
         Content::None => {}
-        Content::FillRect { color } => {
-            let fill_color = scene_to_draw_color(color);
-            if fill_color.a == 255 {
-                fb.fill_rect(
-                    draw_x as u32,
-                    draw_y as u32,
-                    nw.max(0) as u32,
-                    nh.max(0) as u32,
-                    fill_color,
-                );
-            } else if fill_color.a > 0 {
-                fb.fill_rect_blend(
-                    draw_x as u32,
-                    draw_y as u32,
-                    nw.max(0) as u32,
-                    nh.max(0) as u32,
-                    fill_color,
-                );
-            }
-        }
         Content::Glyphs {
             color,
             glyphs,

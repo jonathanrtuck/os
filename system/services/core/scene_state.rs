@@ -329,9 +329,8 @@ impl SceneState {
                 n.y = cursor_y;
                 n.width = 2;
                 n.height = line_height as u16;
-                n.content = Content::FillRect {
-                    color: dc(cursor_color),
-                };
+                n.background = dc(cursor_color);
+                n.content = Content::None;
                 n.flags = NodeFlags::VISIBLE;
                 n.next_sibling = NULL;
             }
@@ -777,7 +776,8 @@ fn allocate_selection_rects(
             n.y = sel_y as i16;
             n.width = ((col_end - col_start) as u32 * char_width) as u16;
             n.height = line_height as u16;
-            n.content = Content::FillRect { color: sel_color };
+            n.background = sel_color;
+            n.content = Content::None;
             n.flags = NodeFlags::VISIBLE;
             n.next_sibling = NULL;
 

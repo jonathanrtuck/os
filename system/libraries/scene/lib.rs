@@ -23,7 +23,7 @@
 //!
 //! One node type with optional content (Core Animation model). Every node
 //! can have children, visual decoration (background, border, corner radius),
-//! and an optional content variant (FillRect, Image, Glyphs). This avoids
+//! and an optional content variant (Image, Glyphs). This avoids
 //! wrapper nodes in compound documents where containers routinely need
 //! backgrounds and borders.
 
@@ -167,20 +167,17 @@ const _: () = assert!(core::mem::size_of::<ShapedGlyph>() == 8);
 
 /// What a node draws (beyond its container decoration).
 ///
-/// Cursor and selection highlights use `FillRect`. Text lines use
-/// `Glyphs`. Each variant is geometric — the render backend needs no
-/// content-type knowledge beyond these primitives.
+/// Cursor and selection highlights use `Content::None` containers with
+/// `node.background` set to the desired color. Text lines use `Glyphs`.
+/// Each variant is geometric — the render backend needs no content-type
+/// knowledge beyond these primitives.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub enum Content {
     /// Pure container — no content, just children and decoration.
+    /// Solid rectangle fills (cursor, selection) use this with
+    /// `node.background` set to the desired color.
     None,
-    /// Solid rectangle fill. Position and size come from the node's
-    /// `x`, `y`, `width`, `height` fields. No data buffer allocation.
-    FillRect {
-        /// Fill color.
-        color: Color,
-    },
     /// A pixel buffer reference.
     Image {
         /// Reference to pixel data in the data buffer.
