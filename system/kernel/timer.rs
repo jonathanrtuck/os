@@ -73,8 +73,20 @@ impl WaitableId for TimerId {
 fn update_earliest_deadline_locked(table: &TimerTable) {
     let mut earliest: u64 = 0; // 0 = sentinel for "no timers"
 
-    for slot in &table.slots {
+    for (i, slot) in table.slots.iter().enumerate() {
         if let Some(&deadline) = slot.as_ref() {
+            // Skip timers that have already fired (ready=true). Their expired
+            // deadlines are in the past and would poison EARLIEST_DEADLINE,
+            // causing reprogram_next_deadline to program TVAL=1 repeatedly
+            // (timer IRQ storm). Fired timers stay in the slot until the
+            // owning thread closes the handle; they don't need hardware timer
+            // wakeups — they're already level-triggered ready.
+            let id = TimerId(i as u8);
+
+            if table.waiters.check_ready(id) {
+                continue;
+            }
+
             if earliest == 0 || deadline < earliest {
                 earliest = deadline;
             }
@@ -172,6 +184,7 @@ pub fn check_expired() {
     // Phase 1: collect fired timers under lock.
     let mut to_wake: [(TimerId, ThreadId); MAX_TIMERS] = [(TimerId(0), ThreadId(0)); MAX_TIMERS];
     let mut wake_count = 0;
+    let mut any_expired = false;
 
     {
         let mut table = TIMERS.lock();
@@ -179,6 +192,8 @@ pub fn check_expired() {
         for i in 0..MAX_TIMERS {
             if let Some(&deadline_ticks) = table.slots[i].as_ref() {
                 if now >= deadline_ticks {
+                    any_expired = true;
+
                     let id = TimerId(i as u8);
 
                     if let Some(waiter) = table.waiters.notify(id) {
@@ -189,8 +204,13 @@ pub fn check_expired() {
             }
         }
 
-        // Update cached earliest deadline (some timers may have fired).
-        if wake_count > 0 {
+        // Update cached earliest deadline whenever expired timers exist.
+        // Previously guarded by `wake_count > 0`, which missed the case
+        // where a timer expired but had no waiter (already notified, not
+        // yet destroyed). The stale expired deadline in EARLIEST_DEADLINE
+        // caused reprogram_next_deadline to program TVAL=1 repeatedly,
+        // creating a timer IRQ storm that starved the display pipeline.
+        if any_expired {
             update_earliest_deadline_locked(&table);
         }
     }
