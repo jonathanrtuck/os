@@ -20,7 +20,7 @@ Core currently bypasses `fonts::shape()` entirely. Instead it uses `bytes_to_sha
 
 ### Unit chain
 
-```
+```text
 font units × (point_size / units_per_em) = points
 points × scale_factor = physical pixels
 ```
@@ -35,6 +35,7 @@ Currently the scene graph comments say "scaled pixel units" — this should say 
 **1. Core calls `fonts::shape_with_variations()` instead of `bytes_to_shaped_glyphs()`.**
 
 Core already has the font data in shared memory and the axis values (MONO=1). It needs to:
+
 - Call `fonts::shape_with_variations(font_data, text, features, axes)`
 - Convert the returned `fonts::ShapedGlyph` array from font units to points: `value_pt = value_fu * point_size / units_per_em`
 - Write the results as `scene::ShapedGlyph` into the scene graph data buffer
@@ -76,7 +77,7 @@ Core needs font data bytes to call `fonts::shape_with_variations()`. It currentl
 
 ## Framebuffer Stale-Buffer Bug: Remove Damage Tracking from Compositor (2026-03-17)
 
-**Status:** design-settled, implementing.
+**Status:** FIXED. Damage tracking removed from compositor, always full repaint. Serial interleaving and clock kerning also fixed in the same commit. 1,786 tests pass, QEMU visual verified.
 
 ### The bug
 
