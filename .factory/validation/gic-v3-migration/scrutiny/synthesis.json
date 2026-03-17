@@ -1,0 +1,44 @@
+{
+  "milestone": "gic-v3-migration",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "build": { "passed": true, "command": "cd /Users/user/Sites/os/system && cargo build --release", "exitCode": 0 },
+    "test": { "passed": true, "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1", "exitCode": 0, "detail": "1738 tests passed, 0 failed" }
+  },
+  "reviewsSummary": {
+    "total": 3,
+    "passed": 3,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "description": "Created .factory/library/gicv3-traps.md documenting two critical GICv3 traps discovered during implementation: (1) ICC_SRE_EL2.Enable must be set in boot.S during EL2→EL1 transition, (2) IGROUPR/GICR_IGROUPR0 must be set to Group 1 NS for interrupt delivery via ICC_IAR1_EL1.",
+      "sourceFeature": "interrupt-controller-trait-gicv3"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Add to GICv3 specifics section: 'ICC_SRE_EL2.Enable=1 must be set during boot.S EL2→EL1 transition before any EL1 ICC register access' and 'All interrupts must be Group 1 NS (GICR_IGROUPR0=0xFFFFFFFF, GICD_IGROUPR[n]=0xFFFFFFFF) for delivery via ICC_IAR1_EL1'.",
+      "evidence": "Feature interrupt-controller-trait-gicv3 worker spent debugging time discovering these requirements. Documented in handoff discoveredIssues but not in AGENTS.md.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Consider adding guidance: 'When migrating hardware abstractions (e.g., interrupt controller), update or remove stale test fixtures in system/test/ that reference the old implementation. DTB test fixtures with old compatible strings are OK (parser tests), but hardware-specific register tests should be updated.'",
+      "evidence": "Feature interrupt-controller-trait-gicv3 review found stale GICv2 references in interrupt_timer.rs tests (GICC_PMR, GICC_CTLR, ITARGETSR) and device_tree.rs still uses arm,cortex-a15-gic in test fixtures.",
+      "isSystemic": false
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "Skills observation suggesting os-worker skill mention checking IGROUPR and EL2 init requirements",
+      "reason": "Already captured in library (gicv3-traps.md) and recommended for AGENTS.md. Skill-level change is too narrow — these are hardware-specific facts better suited to library/AGENTS.md than skill procedure."
+    }
+  ],
+  "previousRound": null
+}

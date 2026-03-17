@@ -1,0 +1,8 @@
+{
+  "featureId": "fuzz-test-fix",
+  "milestone": "gic-v3-migration",
+  "status": "pass",
+  "codeReviewIssues": [],
+  "sharedStateObservations": [],
+  "summary": "One-line data fix correctly updates bad_nrs from [27, 28, ...] to [28, 29, ...]. Kernel syscall table confirms syscall 27 is PROCESS_SET_SYSCALL_FILTER (valid, handled in dispatch match arm, returns InvalidArgument for bad args — not UnknownSyscall). Syscall 28 is the first unhandled number (falls through to the _ => UnknownSyscall arm). The diff is minimal, correct, and the worker verified all 1,698 unit tests pass plus stress.sh exit 0."
+}

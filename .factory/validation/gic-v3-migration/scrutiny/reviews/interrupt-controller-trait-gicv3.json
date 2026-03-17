@@ -1,0 +1,59 @@
+{
+  "featureId": "interrupt-controller-trait-gicv3",
+  "milestone": "gic-v3-migration",
+  "reviewedAt": "2026-03-17T01:15:00.000Z",
+  "commitId": "20b0a3531d8e480b6b5e0dc34700431ee2504f22",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReviewIssues": [
+    {
+      "severity": "non_blocking",
+      "description": "Old test file interrupt_timer.rs still references GICv2 patterns (GICC_PMR, GICC_CTLR, ITARGETSR) in its init sequence tests and target offset computation. These tests verify logic from the old GICv2 implementation that no longer exists in the kernel. They still compile and pass (testing pure computation), but are stale and could mislead future readers. The new interrupt_controller.rs test file correctly tests GICv3 patterns. Consider updating or removing the GICv2-specific tests in interrupt_timer.rs in a follow-up.",
+      "file": "system/test/tests/interrupt_timer.rs",
+      "line": null
+    },
+    {
+      "severity": "non_blocking",
+      "description": "device_tree.rs tests use 'arm,cortex-a15-gic' as the compatible string in DTB test fixtures. These are DTB parser tests (not GIC tests) and still valid — the parser works with any compatible string. However, adding a GICv3 DTB parsing test here (using 'arm,gic-v3') would strengthen coverage of the actual production path.",
+      "file": "system/test/tests/device_tree.rs",
+      "line": 278
+    },
+    {
+      "severity": "non_blocking",
+      "description": "kernel/DESIGN.md still references 'arm,cortex-a15-gic' and 'ITARGETSR' in historical entries (lines ~549, 882-884). These are historical documentation of past changes and are accurate records of what happened. Not incorrect, but a reader might think GICv2 is still in use. A note in DESIGN.md about the GICv3 migration would clarify.",
+      "file": "system/kernel/DESIGN.md",
+      "line": null
+    },
+    {
+      "severity": "suggestion",
+      "description": "send_ipi generates compiler warning (unused). Expected since it's for milestone 2 (IPI). The handoff acknowledges this. No action needed, but the warning will persist until IPI feature lands.",
+      "file": "system/kernel/interrupt_controller.rs",
+      "line": null
+    }
+  ],
+  "sharedStateObservations": [
+    {
+      "target": "AGENTS.md",
+      "observation": "AGENTS.md correctly documents GICv3 conventions post-migration (ICC system register asm rules, GICR stride, ISB after SRE, DSB after EOIR, DSB+ISB after CTLR). The worker or orchestrator updated AGENTS.md proactively — good practice. One gap: AGENTS.md doesn't mention the ICC_SRE_EL2.Enable=1 requirement in boot.S (EL2→EL1 transition). This was a critical discovery during implementation and could trap future workers modifying the boot sequence.",
+      "evidence": "Handoff discoveredIssues[1]: 'GICv3 requires ICC_SRE_EL2.Enable=1 to be set during the EL2→EL1 transition in boot.S'. AGENTS.md GICv3 specifics section does not mention EL2 requirements."
+    },
+    {
+      "target": "AGENTS.md",
+      "observation": "AGENTS.md doesn't document the IGROUPR requirement (all interrupts must be configured as Group 1 NS for delivery via ICC_IAR1_EL1). This was another critical discovery — without it, interrupts silently go to Group 0/FIQ/EL3 and never reach the kernel IRQ handler.",
+      "evidence": "Handoff discoveredIssues[0]: 'GICv3 requires IGROUPR/GICR_IGROUPR0 to be set to Group 1 NS (all 1s)'. AGENTS.md GICv3 specifics section does not mention IGROUPR."
+    },
+    {
+      "target": "library",
+      "observation": "The two critical GICv3 discoveries (ICC_SRE_EL2.Enable and IGROUPR Group 1 NS) should be captured in .factory/library/ as reusable knowledge. Future workers modifying boot.S or interrupt handling would benefit from having these documented as known-traps.",
+      "evidence": "Worker spent debugging time discovering these requirements. Handoff documents them in discoveredIssues but they're not in the library."
+    },
+    {
+      "target": "skills",
+      "observation": "The os-worker skill correctly lists 'Interrupt controller changes (GICv3 migration, IPI, tickless idle)' in its scope. The worker's skillFeedback suggests adding notes about IGROUPR configuration and EL2 initialization requirements — reasonable enhancement for future interrupt controller work.",
+      "evidence": "Handoff skillFeedback.suggestedChanges: 'For kernel-level interrupt controller changes, the skill should mention checking IGROUPR configuration and EL2 initialization requirements.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "GICv3 migration is thorough and correct. All 7 InterruptController trait methods implemented with real hardware register access. Every unsafe block has SAFETY comments, no nomem on any ICC system register asm (all use only nostack). ICC_SRE_EL1 written first with ISB, DSB SY after EOIR, IROUTER-based routing with ARE_NS=1, GICR per-core at correct stride. GICv2 completely removed from kernel source. All 6 QEMU scripts migrated. DTB parsing updated. Consumers migrated to trait methods via static dispatch. 33 new tests. Boot, smoke, integration, and 180s stress all pass. Non-blocking: stale GICv2 test references in interrupt_timer.rs and device_tree.rs."
+}
