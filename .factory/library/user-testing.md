@@ -45,6 +45,28 @@ qemu-system-aarch64 \
 - QEMU framebuffer is 1× scale (not Retina) — visual quality assessment at 1× only
 - Font loading requires `share/` directory with font files + 9p device
 
+## Flow Validator Guidance: code-inspection
+
+**Surface:** Source code files and build output.
+**Tool:** Shell commands (`cargo build`, `rg` via Grep tool, Read tool for file inspection).
+**Isolation:** Read-only. Multiple subagents can inspect code simultaneously.
+**Boundaries:** Do not modify source files. Do not run tests (separate surface).
+
+## Flow Validator Guidance: unit-tests
+
+**Surface:** Host-side test suite output (`cargo test`).
+**Tool:** `cargo test` with specific test name filters.
+**Isolation:** Single-threaded test runner (`--test-threads=1`). Only ONE test runner at a time due to shared global state.
+**Boundaries:** Do not modify source files or test files. Only run specific tests by name filter to verify assertions.
+
+## Flow Validator Guidance: qemu-visual
+
+**Surface:** QEMU framebuffer screenshots (PPM→PNG).
+**Tool:** QEMU monitor socket (sendkey, screendump), Python3 PIL for conversion, Read tool for PNG viewing.
+**Isolation:** Each QEMU instance on separate monitor socket and serial log file. Ensure different filenames per subagent.
+**Boundaries:** Kill stale QEMU instances before starting. Use unique socket/log paths. Clean up QEMU process after testing.
+**Known limitation:** `sendkey` does NOT route to virtio-keyboard in headless (`-nographic`) mode. Interactive keystroke injection is not possible. Subagents can only verify initial-frame rendering (clock, background, default text). For interactive testing (typing, cursor, selection), the initial boot frame must be assessed for elements visible from the boot state.
+
 ## Validation Concurrency
 
 **Machine:** 48 GB RAM, 14 CPU cores, macOS (aarch64-apple-darwin).
