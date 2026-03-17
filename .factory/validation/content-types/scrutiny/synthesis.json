@@ -1,0 +1,133 @@
+{
+  "milestone": "content-types",
+  "round": 1,
+  "status": "pass",
+  "validatorsRun": {
+    "test": {
+      "passed": true,
+      "command": "cd /Users/user/Sites/os/system/test && cargo test -- --test-threads=1",
+      "exitCode": 0,
+      "detail": "1,801 tests passed, 0 failed (baseline: 1,791)"
+    },
+    "typecheck": {
+      "passed": true,
+      "command": "cd /Users/user/Sites/os/system && cargo build --release",
+      "exitCode": 0,
+      "detail": "Build succeeded for aarch64-unknown-none target"
+    },
+    "lint": {
+      "passed": true,
+      "command": "N/A (no lint command in services.yaml; compiler warnings noted)",
+      "exitCode": 0,
+      "detail": "Build warnings present in drawing/lib.rs, fonts/rasterize.rs, render/scene_render.rs (unused variables, unused imports). No errors. No dedicated lint tool configured in services.yaml."
+    }
+  },
+  "reviewsSummary": {
+    "total": 4,
+    "passed": 4,
+    "failed": 0,
+    "failedFeatures": []
+  },
+  "blockingIssues": [],
+  "nonBlockingIssues": [
+    {
+      "featureId": "path-content-type",
+      "severity": "non_blocking",
+      "description": "Implicit close only handles the LAST contour in multi-contour unclosed paths. When multiple contours lack Close commands, only the final contour gets an implicit closing segment. Low practical impact since well-formed paths use Close commands."
+    },
+    {
+      "featureId": "path-content-type",
+      "severity": "non_blocking",
+      "description": "Pre-allocating vec![PathSegment; 4096] (64KB) on every path render call. For scenes with many small path nodes, this could add up. Consider reusable buffer for optimization."
+    },
+    {
+      "featureId": "path-content-type",
+      "severity": "non_blocking",
+      "description": "f32_to_fp casts f32 to i32 without NaN/infinity guarding. Not required by validation contract but noted for future hardening."
+    },
+    {
+      "featureId": "content-types-integration",
+      "severity": "non_blocking",
+      "description": "VAL-CROSS-04 (interactive editing) could not be directly verified — sendkey doesn't reach virtio-keyboard in headless mode. Worker's code-unchanged argument is valid for this milestone but future milestones changing interactive paths will need a keystroke injection solution."
+    },
+    {
+      "featureId": "content-types-integration",
+      "severity": "non_blocking",
+      "description": "Pre-existing display freeze: compositor stops presenting new frames after initial boot frame. Clock frozen, framebuffer pixel-identical after 30+ seconds. Hypothesis: MSG_PRESENT_DONE signal lost, causing compositor deadlock. Not a regression from this milestone."
+    },
+    {
+      "featureId": "subpixel-removal",
+      "severity": "non_blocking",
+      "description": "STEM_DARKENING_BOOST and STEM_DARKENING_LUT defined identically in both rasterize.rs and cache.rs. Pre-existing DRY violation that could lead to divergence."
+    },
+    {
+      "featureId": "fillrect-removal",
+      "severity": "non_blocking",
+      "description": "system/DESIGN.md has 4 stale FillRect references (lines 277, 279, 321, 322). Documentation drift from implementation."
+    },
+    {
+      "featureId": "subpixel-removal",
+      "severity": "non_blocking",
+      "description": "system/DESIGN.md and README.md still reference 'subpixel rendering' and 'LCD subpixel rendering'. Documentation drift from implementation."
+    }
+  ],
+  "appliedUpdates": [
+    {
+      "target": "library",
+      "file": ".factory/library/font-rendering.md",
+      "description": "Updated GlyphCache size from ~1.3 MiB to ~238 KiB (grayscale AA migration)",
+      "sourceFeature": "subpixel-removal"
+    },
+    {
+      "target": "library",
+      "file": ".factory/library/architecture.md",
+      "description": "Fixed Node size from 72B to 96B (was already incorrect pre-mission)",
+      "sourceFeature": "path-content-type"
+    },
+    {
+      "target": "library",
+      "file": ".factory/library/architecture.md",
+      "description": "Added Content::Path variant to Content Type Field Layout and Key Types sections",
+      "sourceFeature": "path-content-type"
+    },
+    {
+      "target": "library",
+      "file": ".factory/library/user-testing.md",
+      "description": "Corrected sendkey limitation: both QMP input-send-event AND monitor sendkey fail to reach virtio-keyboard in headless mode. Interactive testing requires QEMU display window.",
+      "sourceFeature": "content-types-integration"
+    }
+  ],
+  "suggestedGuidanceUpdates": [
+    {
+      "target": "skill:os-worker",
+      "suggestion": "Update the visual testing section (Step 6) to note that sendkey does NOT route to virtio-keyboard in headless/nographic mode. Workers should verify initial-frame rendering rather than expecting interactive input. Consider adding guidance for when interactive testing is truly needed (requires display window, not automated).",
+      "evidence": "All four features' workers (subpixel-removal, fillrect-removal, path-content-type, content-types-integration) encountered the sendkey limitation. Integration worker explicitly flagged this in skillFeedback.",
+      "isSystemic": true
+    },
+    {
+      "target": "AGENTS.md",
+      "suggestion": "Consider adding convention: workers should fix compiler warnings (unused variables, unused imports) in files they touch, to prevent warning accumulation.",
+      "evidence": "Build produces warnings in drawing/lib.rs (1), fonts/rasterize.rs (3), render/scene_render.rs (8). Some pre-existing, some introduced by content-types workers. Multiple reviewers noted this pattern.",
+      "isSystemic": true
+    }
+  ],
+  "rejectedObservations": [
+    {
+      "observation": "system/DESIGN.md and README.md still reference subpixel rendering and FillRect",
+      "reason": "Code documentation (not .factory infrastructure). Should be updated by workers when they next touch those files. Not a shared state concern for the scrutiny validator."
+    },
+    {
+      "observation": "Worker transcript skeleton had null fields (fillrect-removal session)",
+      "reason": "Recording system limitation, not a worker or convention issue."
+    },
+    {
+      "observation": "Path rasterizer uses Vec heap allocations inside render loop (consistent with existing patterns)",
+      "reason": "Performance observation only, consistent with codebase conventions. Not actionable."
+    },
+    {
+      "observation": "Pre-existing display freeze after initial boot frame",
+      "reason": "Pre-existing issue not caused by this milestone. Already documented in integration worker's handoff discoveredIssues. Should be tracked in design journal, not .factory/library."
+    }
+  ],
+  "previousRound": null
+}

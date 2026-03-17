@@ -6,6 +6,7 @@ Replacing double-buffered scene graph with triple buffering (mailbox semantics) 
 
 ### Content Type Field Layout
 - **None:** Pure container. Solid rectangle fills (cursor, selection) use Content::None with node.background set to the desired color.
+- **Path:** color(4B) + fill_rule(1B) + padding(3B) + DataRef(8B) = 16B. Contour data (MoveTo/LineTo/CubicTo/Close commands) stored in data buffer. FillRule: Winding or EvenOdd.
 - **Glyphs:** color(4B) + DataRef(8B) + glyph_count(u16, 2B) + font_size(u16, 2B) + axis_hash(u32, 4B) = 20B. Single run per node.
 - **Image:** DataRef(8B) + src_width(u16) + src_height(u16) = 12B. Unchanged.
 
@@ -29,8 +30,8 @@ Core (OS service) → Scene Graph (shared memory) → Compositor (pixel pump) �
 
 ## Key Types
 
-- `scene::Node` — 72 bytes (verified with compile-time assertion in scene/lib.rs). Fields: tree links, geometry (i16/u16 logical), scroll_y (i32), background (Color), border (Border), corner_radius (u8), opacity (u8), shadow fields (shadow_color, shadow_offset_x/y, shadow_blur_radius, shadow_spread), flags, content_hash, content variant.
-- `scene::Content` — None | Image{data, src_w, src_h} | Glyphs{color, glyphs DataRef, glyph_count, font_size, axis_hash}
+- `scene::Node` — 96 bytes (verified with compile-time assertion in scene/lib.rs). Fields: tree links, geometry (i16/u16 logical), scroll_y (i32), background (Color), border (Border), corner_radius (u8), opacity (u8), shadow fields (shadow_color, shadow_offset_x/y, shadow_blur_radius, shadow_spread), flags, content_hash, content variant.
+- `scene::Content` — None | Image{data, src_w, src_h} | Path{color, fill_rule, contours DataRef} | Glyphs{color, glyphs DataRef, glyph_count, font_size, axis_hash}
 - `drawing::Surface` — borrowed pixel buffer with BGRA8888 format
 - `drawing::Color` — RGBA u8×4 with sRGB gamma-correct blend_over
 

@@ -1,0 +1,39 @@
+{
+  "featureId": "fillrect-removal",
+  "reviewedAt": "2026-03-17T17:45:00.000Z",
+  "commitId": "5cd9488",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "Clean, minimal removal of Content::FillRect with correct migration to Content::None + node.background. The diff is tight (5 files, net -40 lines) and every change is directly motivated by the feature. Scene library enum updated with correct doc comments. Core scene_state.rs correctly sets background + Content::None for both cursor (line 332) and selection rects (line 779). Incremental update paths (update_cursor, update_selection) are correct: update_cursor only mutates position (background persists from build_full_scene), and update_selection re-allocates selection rects via allocate_selection_rects which sets background correctly. Render backend FillRect match arm cleanly removed; pre-existing background rendering at line 684 (node.background.a > 0) handles both opaque and semi-transparent fills. The .factory/library/architecture.md was updated to reflect the change. 20+ tests updated in scene.rs from FillRect pattern to background container pattern. 1,782 tests pass. QEMU visual verification confirmed cursor visible.",
+    "issues": [
+      {
+        "file": "system/DESIGN.md",
+        "line": 277,
+        "severity": "non_blocking",
+        "description": "DESIGN.md still references FillRect in 4 places (lines 277, 279, 321, 322). These describe the old content type variants and rendering behavior. Should be updated to reflect the new Content::None + background pattern for cursor/selection."
+      },
+      {
+        "file": "system/test/tests/scene_render.rs",
+        "line": null,
+        "severity": "non_blocking",
+        "description": "VAL-FILL-03 evidence asks for explicit render-level tests: (1) Content::None node with opaque background renders filled rectangle, (2) semi-transparent background over Glyphs shows text through highlight. No new scene_render.rs tests were added by this feature. The behavior is covered by pre-existing background rendering tests (corner_radius_renders_rounded_background, VAL-CROSS-03 at line 4424) and the unchanged render backend code path, so this is not a correctness gap — but the specific VAL-FILL-03 evidence bullets are not individually addressed by dedicated tests."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "conventions",
+      "observation": "system/DESIGN.md contains 4 stale FillRect references after this feature removed Content::FillRect. The worker updated .factory/library/architecture.md but not system/DESIGN.md. DESIGN.md is listed in CLAUDE.md as a key design document ('system/DESIGN.md — Userspace architecture'). Convention gap: no documented rule about which design documents must be updated when shared types change.",
+      "evidence": "system/DESIGN.md lines 277, 279, 321, 322 still reference FillRect. Compare to .factory/library/architecture.md which was correctly updated in the same commit."
+    },
+    {
+      "area": "conventions",
+      "observation": "The worker's transcript skeleton had no tool call details (all fields null except workerSessionId and featureId). This may be a recording limitation rather than a worker issue, but it made transcript-based review impossible — the review relied entirely on the handoff and git diff.",
+      "evidence": "worker-transcripts.jsonl entry for session 58b6ca42 has null for duration, totalToolCalls, outcome, and empty toolCallSkeleton."
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Feature passes. Content::FillRect cleanly removed from the Content enum. Cursor and selection highlights correctly migrated to Content::None + node.background in both full-scene and incremental update paths. Render backend FillRect arm removed; pre-existing background rendering handles the new pattern with alpha blending. 20+ scene tests updated, 1,782 pass, QEMU verified. Two non-blocking observations: system/DESIGN.md has 4 stale FillRect references, and VAL-FILL-03 evidence bullets lack dedicated render-level tests (though the behavior is covered by existing tests). All three validation assertions (VAL-FILL-01, VAL-FILL-02, VAL-FILL-03) are substantively satisfied."
+}

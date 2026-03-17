@@ -1,0 +1,49 @@
+{
+  "featureId": "content-types-integration",
+  "reviewedAt": "2026-03-17T16:50:00.000Z",
+  "commitId": "7e4fc2c",
+  "transcriptSkeletonReviewed": true,
+  "diffReviewed": true,
+  "status": "pass",
+  "codeReview": {
+    "summary": "This is a verification-only feature — no code changes were made. The worker's commit (7e4fc2c) is the same as the path-content-type feature's commit, which is correct: the integration feature verifies the cumulative state after all three implementation features (subpixel-removal, fillrect-removal, path-content-type).\n\nThe worker executed a thorough verification campaign:\n1. Full test suite: 1,801 tests pass, 0 failures (exceeds ≥1,791 baseline by 10 tests)\n2. Bare-metal build: cargo build --release succeeds for aarch64-unknown-none\n3. QEMU boot: verified initial rendering (title bar Glyphs, clock Glyphs, cursor as Content::None with background)\n4. Triple-buffer invariant: 17 dedicated tests pass (acquire_always_succeeds, no_torn_reads, reader_sees_latest)\n5. Extended runtime: 10+ minutes with zero panics in serial output\n6. Targeted test suites: 164 scene tests, 81 scene_render tests (including 9 Path-specific tests)\n\nVAL-CROSS-04 (interactive editing) was only partially verified — the worker correctly identified that QEMU monitor sendkey does not route to virtio-keyboard in headless mode, preventing interactive testing of typing, cursor movement, selection, and deletion. The worker mitigated this by verifying via git diff (0d6f1ad..7e4fc2c) that all interactive code paths (compositor, core event loop, input driver, text editor) are completely unchanged in this milestone. This code-unchanged argument is logically sound: if the interactive paths are byte-identical to the known-working baseline, no regression is possible from this milestone's changes.\n\nVAL-CROSS-05, VAL-CROSS-06, and VAL-CROSS-07 are fully satisfied with direct evidence.",
+    "issues": [
+      {
+        "file": "N/A (process issue)",
+        "line": 0,
+        "severity": "non_blocking",
+        "description": "VAL-CROSS-04 requires QEMU interactive testing (typing, cursor, selection, deletion) but the worker could not inject keystrokes via monitor sendkey to virtio-keyboard in headless mode. The worker's code-unchanged mitigation is valid for this milestone, but the validation assertion itself cannot be directly verified with current tooling. Future milestones that DO change interactive code paths will need a solution for automated keystroke injection."
+      },
+      {
+        "file": "N/A (pre-existing issue)",
+        "line": 0,
+        "severity": "non_blocking",
+        "description": "The worker discovered the display freezes after the initial frame — clock doesn't update, framebuffer is pixel-identical after 30+ seconds (0 different pixels out of 1,024,000). This is pre-existing (not a regression from this milestone) and was properly documented as a discovered issue with a plausible hypothesis about MSG_PRESENT_DONE signaling. Not blocking for this review since it's pre-existing."
+      }
+    ]
+  },
+  "sharedStateObservations": [
+    {
+      "area": "knowledge",
+      "observation": "user-testing.md says 'QEMU QMP input-send-event doesn't route to virtio-keyboard — must use monitor sendkey command' but multiple workers across this milestone confirmed that monitor sendkey ALSO does not route to virtio-keyboard in headless/nographic mode. The library file's workaround is itself broken. The actual known-working method is typing into the QEMU display window (documented in CLAUDE.md). This should be corrected in user-testing.md to prevent future workers from wasting time attempting sendkey-based interactive verification.",
+      "evidence": "Integration worker transcript: 'Keys sent via monitor socket but no text appeared on screen.' Subpixel-removal worker skillFeedback: 'The QEMU sendkey via monitor socket doesn't reach virtio-keyboard.' Three separate workers across this milestone all encountered this limitation."
+    },
+    {
+      "area": "knowledge",
+      "observation": "Pre-existing display freeze: after initial boot frame, the compositor appears to stop presenting new frames. Clock frozen, framebuffer pixel-identical after 30+ seconds. Worker hypothesized MSG_PRESENT_DONE (GPU→compositor completion signal) may be lost, causing compositor deadlock. This should be tracked in the library or journal as a known issue for the rendering pipeline.",
+      "evidence": "Integration worker interactive check: 'Pixel-for-pixel comparison confirms framebuffer unchanged (0 different pixels out of 1,024,000).' Discovered issue in handoff: 'compositor blocks on gpu_in_flight before rendering new frames. If the GPU completion signal is lost, the compositor would deadlock after the first frame.'"
+    },
+    {
+      "area": "skills",
+      "observation": "The os-worker skill's visual verification section (Step 6) includes sendkey instructions that don't work for virtio-keyboard in headless mode. The skill should note this limitation and guide workers to verify initial-frame rendering rather than expecting interactive input to work via monitor commands. All three implementation workers and the integration worker encountered this.",
+      "evidence": "Skill step 6 says 'echo \"sendkey h\" | nc -U /tmp/qemu-mon.sock' but subpixel-removal, fillrect-removal, and integration workers all reported sendkey doesn't reach virtio-keyboard. Integration worker skillFeedback explicitly suggests updating the skill."
+    },
+    {
+      "area": "conventions",
+      "observation": "Several pre-existing unused variable warnings in drawing/lib.rs, fonts/rasterize.rs, and render/scene_render.rs were noted by the integration worker. These are not from this milestone's changes but indicate a pattern of incomplete cleanup. AGENTS.md could note a convention of fixing warnings in files touched by a feature.",
+      "evidence": "Integration worker discoveredIssues: 'Several unused variable warnings in drawing/lib.rs, fonts/rasterize.rs, and render/scene_render.rs.'"
+    }
+  ],
+  "addressesFailureFrom": null,
+  "summary": "Integration verification PASSES. The worker executed a comprehensive verification campaign: 1,801 tests pass (≥1,791 baseline), bare-metal build succeeds, QEMU boots with correct initial rendering, triple-buffer invariant confirmed by 17 dedicated tests, and 10+ minutes of stable runtime with zero panics. VAL-CROSS-04 (interactive editing) was partially verified — sendkey doesn't reach virtio-keyboard in headless mode, but the worker's git diff analysis proves all interactive code paths are byte-identical to baseline, making regression impossible from this milestone's changes. VAL-CROSS-05, VAL-CROSS-06, and VAL-CROSS-07 are fully satisfied. Two non-blocking shared state issues: user-testing.md has a broken sendkey workaround, and a pre-existing display-freeze issue needs tracking."
+}

@@ -210,7 +210,7 @@ The bare-metal build (`system/build.rs`) compiles libraries via direct `rustc` i
 
 ## Testing Pitfall: GlyphCache Heap Allocation
 
-`GlyphCache` is ~1.3 MiB. It **MUST** be heap-allocated in tests using the `zeroed_glyph_cache()` helper in `system/test/tests/scene_render.rs`. Do NOT:
+`GlyphCache` is ~238 KiB (after grayscale AA migration; was ~1.3 MiB with subpixel RGB coverage). It **MUST** be heap-allocated in tests using the `zeroed_glyph_cache()` helper in `system/test/tests/scene_render.rs`. Do NOT:
 
 - `GlyphCache::zeroed()` — allocates on stack, overflows the default 2 MiB thread stack
 - `Box::new(GlyphCache::zeroed())` — Rust constructs the value on stack before moving to the Box, still overflows

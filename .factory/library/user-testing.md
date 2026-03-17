@@ -40,7 +40,8 @@ qemu-system-aarch64 \
 ```
 
 **Known limitations:**
-- QEMU QMP `input-send-event` doesn't route to virtio-keyboard — must use monitor `sendkey` command
+- QEMU QMP `input-send-event` doesn't route to virtio-keyboard in headless (`-nographic`) mode
+- QEMU monitor `sendkey` command also does NOT route to virtio-keyboard in headless mode — interactive keystroke injection is not possible in headless/nographic mode. Workers can only verify initial-frame rendering; interactive testing (typing, cursor, selection) requires the QEMU display window
 - QEMU framebuffer is 1× scale (not Retina) — visual quality assessment at 1× only
 - Font loading requires `share/` directory with font files + 9p device
 
