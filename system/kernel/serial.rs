@@ -98,13 +98,22 @@ pub fn put_u32(n: u32) {
 
     panic_put_u32(n);
 }
-pub fn putc(c: u8) {
-    let _guard = LOCK.lock();
-
-    raw_putc(c);
-}
 pub fn puts(s: &str) {
     let _guard = LOCK.lock();
 
     raw_puts(s);
+}
+/// Write a byte slice atomically — holds the lock for the entire buffer.
+/// Used by the sys_write syscall to prevent interleaved output from
+/// concurrent cores.
+pub fn write_bytes(buf: &[u8]) {
+    let _guard = LOCK.lock();
+
+    for &byte in buf {
+        if byte == b'\n' {
+            raw_putc(b'\r');
+        }
+
+        raw_putc(byte);
+    }
 }

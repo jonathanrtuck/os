@@ -372,8 +372,9 @@ impl SceneState {
             // Read the clock node's Content::Glyphs to find the glyph DataRef.
             let clock_node = w.node(N_CLOCK_TEXT);
             if let Content::Glyphs { glyphs, .. } = clock_node.content {
-                // Build new glyphs from clock_text using same advance.
-                let advance = 8u16; // monospace char width
+                // Read the advance from the existing glyph data rather than
+                // hardcoding — the actual char_width depends on font metrics.
+                let advance = read_advance_from_data(&w, glyphs);
                 let new_glyphs = bytes_to_shaped_glyphs(clock_text, advance);
 
                 // SAFETY: ShapedGlyph is repr(C) with no padding.
@@ -711,7 +712,7 @@ impl SceneState {
 fn update_clock_inline(w: &mut scene::SceneWriter<'_>, clock_text: &[u8]) {
     let clock_node = w.node(N_CLOCK_TEXT);
     if let Content::Glyphs { glyphs, .. } = clock_node.content {
-        let advance = 8u16; // monospace char width
+        let advance = read_advance_from_data(w, glyphs);
         let new_glyphs = bytes_to_shaped_glyphs(clock_text, advance);
 
         // SAFETY: ShapedGlyph is repr(C) with no padding.
@@ -918,6 +919,24 @@ fn scroll_runs(
             Some(run)
         })
         .collect()
+}
+
+/// Read the x_advance from the first ShapedGlyph in an existing DataRef.
+/// Falls back to 8 if the data is empty or too short.
+fn read_advance_from_data(w: &scene::SceneWriter<'_>, glyphs: DataRef) -> u16 {
+    let data_buf = w.data_buf();
+    let off = glyphs.offset as usize;
+    let len = glyphs.length as usize;
+    let glyph_size = core::mem::size_of::<ShapedGlyph>();
+    if off + len <= data_buf.len() && len >= glyph_size {
+        let bytes = &data_buf[off..off + glyph_size];
+        // SAFETY: ShapedGlyph is repr(C) with no padding. The data buffer
+        // is populated by push_shaped_glyphs which ensures alignment.
+        let first = unsafe { &*(bytes.as_ptr() as *const ShapedGlyph) };
+        first.x_advance as u16
+    } else {
+        8
+    }
 }
 
 /// Convert raw ASCII text bytes into ShapedGlyph arrays for monospace rendering.

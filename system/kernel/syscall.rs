@@ -1295,9 +1295,7 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
     // (verified via AT S1E0R hardware translation check).
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
 
-    for &byte in slice {
-        serial::putc(byte);
-    }
+    serial::write_bytes(slice);
 
     Ok(len)
 }

@@ -1,5 +1,8 @@
 //! Compositor — content-agnostic pixel pump. Reads a scene graph from shared
 //! memory and renders it to a framebuffer via `CpuBackend`.
+//!
+//! Always does full repaints. Damage tracking, if needed, belongs inside
+//! the render backend — not here. See journal entry 2026-03-17.
 
 #![no_std]
 #![no_main]
@@ -15,7 +18,7 @@ use protocol::{
     compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG, MSG_IMAGE_CONFIG},
     present::{PresentPayload, MSG_PRESENT, MSG_PRESENT_DONE},
 };
-use render::{FrameAction, RenderBackend};
+use render::RenderBackend;
 
 const FONT_SIZE: u32 = 18;
 const SCREEN_DPI: u16 = 96;
@@ -34,12 +37,12 @@ fn clamp_scale(raw: f32) -> f32 {
     if raw <= 0.0 || raw.is_nan() { 1.0 } else if raw > 4.0 { 4.0 } else { raw }
 }
 
-fn present(gpu_ch: &ipc::Channel, buf_idx: usize, rects: &[protocol::DirtyRect]) {
-    let mut dirty = [protocol::DirtyRect::new(0, 0, 0, 0); 6];
-    let n = rects.len().min(6);
-    dirty[..n].copy_from_slice(&rects[..n]);
+fn present(gpu_ch: &ipc::Channel, buf_idx: usize) {
     let payload = PresentPayload {
-        buffer_index: buf_idx as u32, rect_count: n as u32, rects: dirty, _pad: [0; 4],
+        buffer_index: buf_idx as u32,
+        rect_count: 0,
+        rects: [protocol::DirtyRect::new(0, 0, 0, 0); 6],
+        _pad: [0; 4],
     };
     gpu_ch.send(&unsafe { ipc::Message::from_payload(MSG_PRESENT, &payload) });
     let _ = sys::channel_signal(GPU_HANDLE);
@@ -105,12 +108,10 @@ pub extern "C" fn _start() -> ! {
         let tr = scene::TripleReader::new(scene_buf);
         let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
         let graph = render::scene_render::SceneGraph { nodes, data: tr.front_data_buf() };
-        backend.damage.mark_full_screen();
         backend.render(&graph, &mut make_fb(0));
-        backend.finish_frame(nodes, nodes.len() as u16, None);
         tr.finish_read(gen);
     }
-    present(&gpu_ch, 0, &[]);
+    present(&gpu_ch, 0);
 
     // Frame scheduler + render loop state.
     let fps = if config.frame_rate > 0 { config.frame_rate as u32 } else { 60 };
@@ -168,37 +169,12 @@ pub extern "C" fn _start() -> ! {
 
         let tr = scene::TripleReader::new(scene_buf);
         let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
-        let count = nodes.len() as u16;
-        let action = backend.prepare_frame(nodes, count, tr.change_list(), tr.is_full_repaint());
-        if action == FrameAction::Skip {
-            // Update prev_bounds bookkeeping even on skip so the next
-            // rendered frame's damage calculation uses accurate bounds.
-            backend.update_bounds_for_skip(nodes, count);
-            tr.finish_read(gen);
-            sched.on_render_complete();
-            continue;
-        }
         let graph = render::scene_render::SceneGraph { nodes, data: tr.front_data_buf() };
         // Always render to the non-displayed buffer (1 - presented_buf).
-        // This prevents tearing on both full and partial updates: we never
-        // write into the buffer the GPU is currently displaying.
         let render_buf = 1 - presented_buf;
-        if backend.is_full_repaint() {
-            backend.render(&graph, &mut make_fb(render_buf));
-            backend.finish_frame(nodes, count, None);
-        } else if backend.damage.count > 0 {
-            backend.render(&graph, &mut make_fb(render_buf));
-            backend.finish_frame(nodes, count, tr.change_list());
-        } else {
-            tr.finish_read(gen); sched.on_render_complete(); continue;
-        };
+        backend.render(&graph, &mut make_fb(render_buf));
         tr.finish_read(gen);
-        let rects = backend.dirty_rects();
-        if !backend.is_full_repaint() && !rects.is_empty() {
-            present(&gpu_ch, render_buf, rects);
-        } else {
-            present(&gpu_ch, render_buf, &[]);
-        }
+        present(&gpu_ch, render_buf);
         presented_buf = render_buf;
         gpu_in_flight = true;
         sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));

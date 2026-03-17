@@ -4,6 +4,64 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Framebuffer Stale-Buffer Bug: Remove Damage Tracking from Compositor (2026-03-17)
+
+**Status:** design-settled, implementing.
+
+### The bug
+
+After the triple buffering mission completed, the display flickers every clock tick: the titlebar, document title, cursor, and trailing text characters appear and disappear each second. One screenshot shows the full UI (titlebar with "Text", clock, cursor). The next shows only the clock on a black background. The clock is always visible because it's the only dirty region being re-rendered each tick.
+
+### Root cause: double-buffered framebuffers with no copy-forward
+
+The compositor double-buffers its pixel framebuffers (`fb_va`, `fb_va2`). On each frame it renders into `1 - presented_buf` (the non-displayed buffer), then presents and swaps. When the render backend does a **partial update** (only dirty rectangles), it only repaints those regions into the target framebuffer. The rest of that framebuffer still contains whatever was last rendered into it — which was **two frames ago**, not one.
+
+Timeline:
+
+1. Frame N: full repaint into FB0. Present FB0. `presented_buf = 0`.
+2. Frame N+1 (clock tick): partial update, renders only the clock rect into FB1. But FB1 still has stale content from frame N-1 (or is black from boot). Titlebar, text, cursor are not in the dirty region, so they're never painted. Present FB1.
+3. Frame N+2 (clock tick): partial update into FB0. FB0 still has the full scene from step 1. Everything is visible. Present FB0.
+4. Repeat: alternating between a complete FB0 and an incomplete FB1.
+
+The scene graph's triple-buffer `acquire_copy` correctly copies scene data forward before mutation. But the compositor's framebuffer double-buffer has no equivalent copy-forward step. The discipline that makes triple buffering correct was never applied to the pixel output layer below it.
+
+### Design discussion: should we fix damage tracking or remove it?
+
+**Game engines vs. compositors.** Game engines (Unity, Unreal, Vulkan apps) never do partial updates — every frame is a full redraw. The GPU fills pixels so fast that damage tracking isn't worth the complexity. Desktop compositors (Wayland/Weston, macOS Core Animation, Android SurfaceFlinger) do partial updates because compositing multiple overlapping windows with alpha blending, blur, and shadows is expensive, and 99% of frames only change a tiny region.
+
+**Where this system sits.** Right now: a single full-screen document, a titlebar, a cursor, a clock. CPU software rasterizer. QEMU runs at the host Mac's physical resolution (3456x2234 on the development machine — the run script detects this via `system_profiler` and passes it to virtio-gpu). At that resolution, each framebuffer is ~30.8MB and full repaints touch 7.7 million pixels. Damage tracking would meaningfully help the CPU path at this resolution — a clock tick touching ~200 pixels vs 7.7M is a 38,000x difference. But the damage tracking is in the wrong layer (compositor, not render backend), causing the stale-buffer bug.
+
+**The CPU rasterizer is temporary.** virtio-gpu with Virgil 3D provides GPU-accelerated rendering inside QEMU. The architecture should assume a GPU backend as the primary path, with the CPU rasterizer as a fallback. A GPU backend would do full repaints trivially (like game engines). Damage tracking only makes sense as an optimization internal to the CPU fallback path — not in the compositor's render loop where it creates layer-boundary bugs.
+
+**Damage tracking was in the wrong layer.** The compositor shouldn't decide whether to skip pixels — it should always ask for a full render. If a `CpuBackend` internally wants to optimize by tracking damage and doing copy-forward on its own managed buffers, that's its business. The compositor's framebuffer management doesn't support partial updates correctly (no copy-forward), which is the root cause of the bug.
+
+### Decision: remove damage tracking entirely for now
+
+1. **Compositor always does full repaints.** Read the scene, call `backend.render()`, present. No skip logic, no dirty rect tracking, no `FrameAction::Partial`.
+2. **`RenderBackend` trait simplifies.** Remove `prepare_frame`, `finish_frame`, `update_bounds_for_skip`, `dirty_rects`, `FrameAction`. The trait is just `render()`.
+3. **`CpuBackend` strips damage internals.** Remove `damage: DamageTracker`, `prev_bounds`, `prev_node_count`. Keep glyph caches, scale, surface pool.
+4. **`damage.rs` module stays in the tree.** It's a standalone building block for future use — either inside a future `CpuBackend` optimization or for a compositor that properly manages its own buffer copies.
+5. **GPU driver receives full-screen transfers.** Always `rect_count = 0`. The partial transfer path stays in the GPU driver (it's correct and tested) but won't be exercised until damage tracking is reintroduced at the right layer.
+6. **Scene graph change list stays.** Core's incremental updates (`update_clock`, `update_cursor`, `mark_changed`, `acquire_copy`) are still valuable for minimizing scene _building_ work. That's independent of how the compositor _renders_ it.
+
+### When to reintroduce damage tracking
+
+At 3456x2234, full CPU repaints are expensive enough that damage tracking will likely be needed soon. But the reintroduction should be:
+
+- Inside the `CpuBackend`, not the compositor — the backend manages its own buffer copies and damage state
+- With proper copy-forward: the backend maintains its own previous-frame buffer and copies it to the render target before partial updates
+- Or not at all if a `GpuBackend` handles the workload (GPU full repaints are effectively free)
+
+### Design for GPU, fall back to CPU
+
+The `RenderBackend` trait supports this cleanly:
+
+- **`GpuBackend`:** full repaints every frame, no damage tracking, GPU handles it trivially
+- **`CpuBackend`:** could internally optimize with damage tracking + copy-forward, because CPU pixel-filling is expensive enough to justify the complexity
+- Damage tracking becomes a backend-internal optimization, not a compositor-level protocol
+
+---
+
 ## Scene Graph Content Type Revision: Path + Subpixel Removal + FillRect Removal (2026-03-17)
 
 **Status:** design-settled, not yet implemented (blocked by in-progress transport bugs mission).
