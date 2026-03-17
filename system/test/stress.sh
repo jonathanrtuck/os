@@ -45,7 +45,7 @@ fi
 # Generate DTB if needed.
 if [ ! -f "$DTB_FILE" ]; then
     qemu-system-aarch64 \
-        -machine "virt,gic-version=2,dumpdtb=${DTB_FILE}" \
+        -machine "virt,gic-version=3,dumpdtb=${DTB_FILE}" \
         -cpu cortex-a53 -smp 4 -m 256M -nographic 2>/dev/null
     dd if="$DTB_FILE" of="${DTB_FILE}.trim" bs=65536 count=1 2>/dev/null
     printf '\x00\x01\x00\x00' | dd of="${DTB_FILE}.trim" bs=1 seek=4 count=4 conv=notrunc 2>/dev/null
@@ -60,7 +60,7 @@ echo "Starting headless QEMU (timeout ${TIMEOUT}s)..."
 # Launch QEMU headless — NO GPU, NO keyboard. Only blk device.
 # Init will detect no GPU and run the stress test automatically.
 qemu-system-aarch64 \
-    -machine "virt,gic-version=2" \
+    -machine "virt,gic-version=3" \
     -cpu cortex-a53 -smp 4 -m 256M \
     -nographic \
     -global virtio-mmio.force-legacy=false \

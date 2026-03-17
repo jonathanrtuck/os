@@ -46,7 +46,7 @@ fi
 # Generate DTB with full device config (GPU + keyboard + blk).
 INTEGRATION_DTB=$(mktemp)
 qemu-system-aarch64 \
-    -machine "virt,gic-version=2,dumpdtb=${INTEGRATION_DTB}" \
+    -machine "virt,gic-version=3,dumpdtb=${INTEGRATION_DTB}" \
     -cpu cortex-a53 -smp 4 -m 256M \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$DISK_IMG,if=none,format=raw,id=hd0" \
@@ -66,7 +66,7 @@ SHARE_DIR="${SYSTEM_DIR}/share"
 echo "Starting QEMU with full device set (GPU + keyboard + blk + 9p)..."
 
 qemu-system-aarch64 \
-    -machine "virt,gic-version=2" \
+    -machine "virt,gic-version=3" \
     -cpu cortex-a53 -smp 4 -m 256M \
     -display none \
     -global virtio-mmio.force-legacy=false \

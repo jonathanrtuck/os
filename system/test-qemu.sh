@@ -68,7 +68,7 @@ rm -f "$MON_SOCK" "$SERIAL_LOG"
 SHARE_DIR="${SCRIPT_DIR}/share"
 
 qemu-system-aarch64 \
-    -machine virt,gic-version=2 \
+    -machine virt,gic-version=3 \
     -cpu cortex-a53 -smp 4 -m 256M \
     -rtc base=localtime \
     -global virtio-mmio.force-legacy=false \

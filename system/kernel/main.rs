@@ -26,7 +26,7 @@
 //! ## Physical (QEMU virt, 256 MiB RAM at 0x4000_0000)
 //!
 //! ```text
-//! 0x0800_0000  GICv2 (distributor + CPU interface)
+//! 0x0800_0000  GICv3 (distributor + redistributor, CPU interface via system registers)
 //! 0x0900_0000  PL011 UART
 //! 0x0A00_0000  Virtio MMIO (32 slots, 0x200 stride)
 //! 0x4000_0000  RAM_START ─── kernel image (.text/.rodata/.data/.bss)
@@ -467,13 +467,13 @@ fn write_device_manifest(
 
 #[unsafe(no_mangle)]
 pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
+    use interrupt_controller::InterruptController;
+
     debug_assert!(!ctx.is_null(), "irq_handler: ctx is null (TPIDR_EL1 was 0)");
 
     let mut next: *const Context = ctx;
 
-    if let Some(iar) = interrupt_controller::acknowledge() {
-        let id = iar & 0x3FF;
-
+    if let Some(id) = interrupt_controller::GIC.acknowledge() {
         if id == timer::IRQ_ID {
             metrics::inc_timer_ticks();
             timer::handle_irq();
@@ -485,7 +485,7 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
         // Reschedule after any IRQ — timer tick or woken driver thread.
         next = scheduler::schedule(ctx);
 
-        interrupt_controller::end_of_interrupt(iar);
+        interrupt_controller::GIC.end_of_interrupt(id);
     }
 
     debug_assert!(
@@ -632,9 +632,10 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
 
     // Wire DTB into device initialization.
     let gic_from_dtb = if let Some(ref dt) = device_table {
-        // GIC: look for "arm,cortex-a15-gic" (QEMU virt GICv2).
-        // The reg property has two entries: [distributor, CPU interface].
-        if let Some(gic) = dt.find_first("arm,cortex-a15-gic") {
+        // GIC: look for "arm,gic-v3" (QEMU virt GICv3).
+        // The reg property has 2+ entries: [distributor, redistributor, ...].
+        // A 3rd entry (GICv2 compat region) may be present — handle gracefully.
+        if let Some(gic) = dt.find_first("arm,gic-v3") {
             if gic.regs.len() >= 2 {
                 interrupt_controller::set_base_addresses(gic.regs[0].0, gic.regs[1].0);
 
@@ -652,9 +653,9 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     interrupt_controller::init();
 
     if gic_from_dtb {
-        serial::puts("  ⚡ interrupts - gic v2 (dtb)\n");
+        serial::puts("  ⚡ interrupts - gic v3 (dtb)\n");
     } else {
-        serial::puts("  ⚡ interrupts - gic v2 (hardcoded)\n");
+        serial::puts("  ⚡ interrupts - gic v3 (hardcoded)\n");
     }
 
     scheduler::init();
@@ -731,7 +732,9 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
 /// Initializes per-core GIC, scheduler state, and timer, then enters idle.
 #[unsafe(no_mangle)]
 pub extern "C" fn secondary_main(core_id: u64) -> ! {
-    interrupt_controller::init_cpu_interface();
+    use interrupt_controller::InterruptController;
+
+    interrupt_controller::GIC.init_per_core(core_id as u32);
     scheduler::init_secondary(core_id as u32);
 
     // Print before marking online — core 0 waits for online flags, so this

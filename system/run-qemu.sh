@@ -34,7 +34,7 @@ if [ ! -f "$DISK_IMG" ]; then
     echo -n "HELLO VIRTIO BLK" | dd of="$DISK_IMG" bs=1 count=16 conv=notrunc 2>/dev/null
 fi
 
-QEMU_MACHINE="virt,gic-version=2"
+QEMU_MACHINE="virt,gic-version=3"
 SHARE_DIR="${SCRIPT_DIR}/share"
 
 QEMU_COMMON=(

@@ -27,7 +27,8 @@ use core::sync::atomic::{AtomicU64, Ordering};
 
 use super::{
     handle::HandleObject,
-    interrupt_controller, scheduler,
+    interrupt_controller::{self, InterruptController},
+    scheduler,
     sync::IrqMutex,
     thread::ThreadId,
     waitable::{WaitableId, WaitableRegistry},
@@ -222,7 +223,7 @@ pub fn handle_irq() {
 }
 /// Initialize the timer. Call after `interrupt_controller::init()`.
 pub fn init() {
-    interrupt_controller::enable_irq(IRQ_ID);
+    interrupt_controller::GIC.enable_irq(IRQ_ID);
 
     // CNTFRQ_EL0: counter frequency in Hz, set by firmware (e.g. 62.5 MHz on QEMU)
     let freq: u64;
