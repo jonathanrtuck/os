@@ -163,6 +163,70 @@ pub struct ShapedGlyph {
 // (4 × u16/i16 fields, #[repr(C)], no padding needed).
 const _: () = assert!(core::mem::size_of::<ShapedGlyph>() == 8);
 
+// ── Path commands ───────────────────────────────────────────────────
+
+/// Fill rule for path rendering.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum FillRule {
+    /// Non-zero winding rule: fills all enclosed regions regardless of
+    /// winding direction.
+    Winding = 0,
+    /// Even-odd rule: fills only regions enclosed an odd number of times.
+    EvenOdd = 1,
+}
+
+/// Path command tags. Commands are variable-size, stored sequentially
+/// in the data buffer.
+pub const PATH_MOVE_TO: u32 = 0;
+pub const PATH_LINE_TO: u32 = 1;
+pub const PATH_CUBIC_TO: u32 = 2;
+pub const PATH_CLOSE: u32 = 3;
+
+/// Size in bytes of each path command.
+pub const PATH_MOVE_TO_SIZE: usize = 12; // tag(4) + x(4) + y(4)
+pub const PATH_LINE_TO_SIZE: usize = 12; // tag(4) + x(4) + y(4)
+pub const PATH_CUBIC_TO_SIZE: usize = 28; // tag(4) + c1x(4) + c1y(4) + c2x(4) + c2y(4) + x(4) + y(4)
+pub const PATH_CLOSE_SIZE: usize = 4; // tag(4)
+
+/// Append a MoveTo command to a byte buffer.
+pub fn path_move_to(buf: &mut Vec<u8>, x: f32, y: f32) {
+    buf.extend_from_slice(&PATH_MOVE_TO.to_le_bytes());
+    buf.extend_from_slice(&x.to_le_bytes());
+    buf.extend_from_slice(&y.to_le_bytes());
+}
+
+/// Append a LineTo command to a byte buffer.
+pub fn path_line_to(buf: &mut Vec<u8>, x: f32, y: f32) {
+    buf.extend_from_slice(&PATH_LINE_TO.to_le_bytes());
+    buf.extend_from_slice(&x.to_le_bytes());
+    buf.extend_from_slice(&y.to_le_bytes());
+}
+
+/// Append a CubicTo command to a byte buffer.
+pub fn path_cubic_to(
+    buf: &mut Vec<u8>,
+    c1x: f32,
+    c1y: f32,
+    c2x: f32,
+    c2y: f32,
+    x: f32,
+    y: f32,
+) {
+    buf.extend_from_slice(&PATH_CUBIC_TO.to_le_bytes());
+    buf.extend_from_slice(&c1x.to_le_bytes());
+    buf.extend_from_slice(&c1y.to_le_bytes());
+    buf.extend_from_slice(&c2x.to_le_bytes());
+    buf.extend_from_slice(&c2y.to_le_bytes());
+    buf.extend_from_slice(&x.to_le_bytes());
+    buf.extend_from_slice(&y.to_le_bytes());
+}
+
+/// Append a Close command to a byte buffer.
+pub fn path_close(buf: &mut Vec<u8>) {
+    buf.extend_from_slice(&PATH_CLOSE.to_le_bytes());
+}
+
 // ── Content variant ─────────────────────────────────────────────────
 
 /// What a node draws (beyond its container decoration).
@@ -185,6 +249,18 @@ pub enum Content {
         /// Source image dimensions.
         src_width: u16,
         src_height: u16,
+    },
+    /// Filled cubic Bezier contours. The render backend rasterizes them
+    /// with scanline coverage (same engine as glyph outlines). Vector
+    /// content scales cleanly at any display density.
+    Path {
+        /// Fill color.
+        color: Color,
+        /// Winding or even-odd fill rule.
+        fill_rule: FillRule,
+        /// Reference to serialized path commands in the data buffer
+        /// (MoveTo, LineTo, CubicTo, Close). 4-byte aligned.
+        contours: DataRef,
     },
     /// A single run of shaped glyphs — one font, one color, one glyph
     /// array. Multiple `Glyphs` nodes replace what was one multi-run
@@ -827,6 +903,21 @@ impl<'a> SceneWriter<'a> {
             offset: used,
             length: actual as u32,
         }
+    }
+    /// Push serialized path commands into the data buffer.
+    /// Ensures 4-byte alignment (f32 alignment) before writing.
+    /// Returns a `DataRef` covering the path command data.
+    pub fn push_path_commands(&mut self, commands: &[u8]) -> DataRef {
+        // Align data_used to 4 bytes (f32 alignment).
+        let align = 4usize;
+        let used = self.header().data_used as usize;
+        let aligned = (used + align - 1) & !(align - 1);
+
+        if aligned > used && aligned <= DATA_BUFFER_SIZE {
+            self.header_mut().data_used = aligned as u32;
+        }
+
+        self.push_data(commands)
     }
     /// Push an array of `ShapedGlyph` structs into the data buffer.
     /// Aligns the write offset to `align_of::<ShapedGlyph>()` first.

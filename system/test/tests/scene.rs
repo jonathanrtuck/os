@@ -4314,3 +4314,178 @@ fn triple_buffer_background_glyphs_round_trip() {
         _ => panic!("expected Glyphs"),
     }
 }
+
+// ── Content::Path and path command tests ────────────────────────────
+
+#[test]
+fn path_command_encoding_triangle_roundtrip() {
+    // VAL-PATH-02: Triangle (MoveTo + 2×LineTo + Close) roundtrips through data buffer.
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 50.0, 10.0);
+    scene::path_line_to(&mut cmds, 30.0, 50.0);
+    scene::path_close(&mut cmds);
+
+    let expected_len = scene::PATH_MOVE_TO_SIZE
+        + scene::PATH_LINE_TO_SIZE
+        + scene::PATH_LINE_TO_SIZE
+        + scene::PATH_CLOSE_SIZE;
+    assert_eq!(cmds.len(), expected_len, "triangle command size");
+
+    let dref = w.push_path_commands(&cmds);
+    assert_eq!(dref.length as usize, expected_len);
+
+    // Verify 4-byte alignment.
+    assert_eq!(dref.offset % 4, 0, "path data should be 4-byte aligned");
+
+    // Read back via SceneReader.
+    let r = SceneReader::new(&buf);
+    let read_back = r.data(dref);
+    assert_eq!(read_back, &cmds[..], "byte-exact roundtrip");
+}
+
+#[test]
+fn path_data_alignment_after_other_data() {
+    // VAL-PATH-02: Push ShapedGlyph data then Path commands — Path DataRef is 4-byte aligned.
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // Push 3 bytes of arbitrary data to misalign.
+    w.push_data(b"abc");
+    assert_eq!(w.data_used(), 3);
+
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_close(&mut cmds);
+
+    let dref = w.push_path_commands(&cmds);
+    assert_eq!(dref.offset % 4, 0, "path data must be 4-byte aligned even after odd push");
+}
+
+#[test]
+fn path_content_variant_exists() {
+    // VAL-PATH-01: Content::Path variant exists with color, fill_rule, contours.
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+    scene::path_line_to(&mut cmds, 5.0, 10.0);
+    scene::path_close(&mut cmds);
+    let dref = w.push_path_commands(&cmds);
+
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Path {
+        color: Color::rgb(255, 0, 0),
+        fill_rule: scene::FillRule::Winding,
+        contours: dref,
+    };
+    w.set_root(id);
+
+    let r = SceneReader::new(&buf);
+    match r.node(id).content {
+        Content::Path {
+            color,
+            fill_rule,
+            contours,
+        } => {
+            assert_eq!(color, Color::rgb(255, 0, 0));
+            assert_eq!(fill_rule, scene::FillRule::Winding);
+            assert_eq!(contours.length as usize, cmds.len());
+        }
+        _ => panic!("expected Path content"),
+    }
+}
+
+#[test]
+fn fill_rule_enum_variants() {
+    // VAL-PATH-01: FillRule has Winding and EvenOdd variants.
+    let w = scene::FillRule::Winding;
+    let e = scene::FillRule::EvenOdd;
+    assert_ne!(w, e);
+    assert_eq!(w as u8, 0);
+    assert_eq!(e as u8, 1);
+}
+
+#[test]
+fn path_command_sizes_correct() {
+    assert_eq!(scene::PATH_MOVE_TO_SIZE, 12);
+    assert_eq!(scene::PATH_LINE_TO_SIZE, 12);
+    assert_eq!(scene::PATH_CUBIC_TO_SIZE, 28);
+    assert_eq!(scene::PATH_CLOSE_SIZE, 4);
+}
+
+#[test]
+fn path_cubic_to_encoding() {
+    let mut cmds = Vec::new();
+    scene::path_cubic_to(&mut cmds, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0);
+    assert_eq!(cmds.len(), scene::PATH_CUBIC_TO_SIZE);
+
+    // Verify tag.
+    let tag = u32::from_le_bytes([cmds[0], cmds[1], cmds[2], cmds[3]]);
+    assert_eq!(tag, scene::PATH_CUBIC_TO);
+
+    // Verify c1x.
+    let c1x = f32::from_le_bytes([cmds[4], cmds[5], cmds[6], cmds[7]]);
+    assert_eq!(c1x, 1.0);
+
+    // Verify endpoint y.
+    let y = f32::from_le_bytes([cmds[24], cmds[25], cmds[26], cmds[27]]);
+    assert_eq!(y, 6.0);
+}
+
+#[test]
+fn node_size_unchanged_with_path() {
+    // VAL-CROSS-01: Node size assertion passes after adding Content::Path.
+    let size = core::mem::size_of::<Node>();
+    assert_eq!(size, 96, "Node must remain 96 bytes with Path variant");
+}
+
+#[test]
+fn path_multiple_contours_in_data_buffer() {
+    // VAL-PATH-07: Multiple contours in one Path node.
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let mut cmds = Vec::new();
+    // First triangle.
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 20.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 20.0);
+    scene::path_close(&mut cmds);
+    // Second triangle.
+    scene::path_move_to(&mut cmds, 50.0, 0.0);
+    scene::path_line_to(&mut cmds, 70.0, 0.0);
+    scene::path_line_to(&mut cmds, 60.0, 20.0);
+    scene::path_close(&mut cmds);
+
+    let dref = w.push_path_commands(&cmds);
+    assert_eq!(dref.length as usize, cmds.len());
+
+    // Both contours fit in one DataRef.
+    let expected = 2 * (scene::PATH_MOVE_TO_SIZE + 2 * scene::PATH_LINE_TO_SIZE + scene::PATH_CLOSE_SIZE);
+    assert_eq!(cmds.len(), expected);
+}
+
+#[test]
+fn path_empty_commands() {
+    // VAL-PATH-06: Empty path (zero-length DataRef) — no crash.
+    let dref = DataRef {
+        offset: 0,
+        length: 0,
+    };
+    let content = Content::Path {
+        color: Color::rgb(255, 0, 0),
+        fill_rule: scene::FillRule::Winding,
+        contours: dref,
+    };
+    // Just verify it can be stored and matched.
+    match content {
+        Content::Path { contours, .. } => assert_eq!(contours.length, 0),
+        _ => panic!("expected Path"),
+    }
+}

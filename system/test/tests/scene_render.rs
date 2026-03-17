@@ -3831,3 +3831,603 @@ fn full_repaint_no_stale_pixel_artifacts() {
     assert_eq!((r, g, b), (255, 0, 0),
         "New position should show the moved red child");
 }
+
+// ── Content::Path rendering tests ───────────────────────────────────
+
+/// Helper: build a scene with a single Path node.
+fn build_path_scene(
+    cmds: &[u8],
+    color: scene::Color,
+    fill_rule: scene::FillRule,
+    node_w: u16,
+    node_h: u16,
+) -> (Vec<Node>, Vec<u8>) {
+    let mut scene_buf = vec![0u8; scene::SCENE_SIZE];
+    let mut w = scene::SceneWriter::new(&mut scene_buf);
+
+    let dref = w.push_path_commands(cmds);
+
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = node_w;
+    w.node_mut(root).height = node_h;
+    w.node_mut(root).flags = NodeFlags::VISIBLE;
+    w.node_mut(root).content = scene::Content::Path {
+        color,
+        fill_rule,
+        contours: dref,
+    };
+    w.set_root(root);
+
+    let nodes = w.nodes().to_vec();
+    let data = w.data_buf().to_vec();
+    (nodes, data)
+}
+
+/// VAL-PATH-03: Filled triangle renders correctly.
+/// Interior pixels match path color; exterior pixels unchanged.
+#[test]
+fn path_triangle_fill_winding() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut cmds = Vec::new();
+    // Triangle: (10,10) → (90,10) → (50,90) → close.
+    scene::path_move_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 90.0, 10.0);
+    scene::path_line_to(&mut cmds, 50.0, 90.0);
+    scene::path_close(&mut cmds);
+
+    let (nodes, data) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::FillRule::Winding,
+        100,
+        100,
+    );
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100 * 4;
+
+    // Interior center (50, 40): well inside the triangle.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 50, 40);
+    assert_eq!((r, g, b), (255, 0, 0), "VAL-PATH-03: interior should be red");
+
+    // Exterior (5, 5): outside the triangle.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 5, 5);
+    assert_eq!((r, g, b), (0, 0, 0), "VAL-PATH-03: exterior should be unchanged (black)");
+
+    // Exterior (95, 95): outside the triangle.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 95, 95);
+    assert_eq!((r, g, b), (0, 0, 0), "VAL-PATH-03: bottom-right exterior should be black");
+}
+
+/// VAL-PATH-04: Winding and EvenOdd produce different results on overlapping contours.
+/// Bowtie: two overlapping triangles (CW + CCW).
+#[test]
+fn path_fill_rule_winding_vs_evenodd() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Concentric squares: outer CW, inner CW. The inner region is wound
+    // twice (same direction). Winding rule fills everything; EvenOdd
+    // leaves the inner region unfilled (even winding count).
+    let mut cmds = Vec::new();
+    // Outer square CW: (10,10) → (90,10) → (90,90) → (10,90).
+    scene::path_move_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 90.0, 10.0);
+    scene::path_line_to(&mut cmds, 90.0, 90.0);
+    scene::path_line_to(&mut cmds, 10.0, 90.0);
+    scene::path_close(&mut cmds);
+    // Inner square CW: (30,30) → (70,30) → (70,70) → (30,70).
+    scene::path_move_to(&mut cmds, 30.0, 30.0);
+    scene::path_line_to(&mut cmds, 70.0, 30.0);
+    scene::path_line_to(&mut cmds, 70.0, 70.0);
+    scene::path_line_to(&mut cmds, 30.0, 70.0);
+    scene::path_close(&mut cmds);
+
+    // Render with Winding.
+    let (nodes_w, data_w) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::FillRule::Winding,
+        100,
+        100,
+    );
+    let graph_w = scene_render::SceneGraph { nodes: &nodes_w, data: &data_w };
+    let mut buf_w = vec![0u8; 100 * 100 * 4];
+    {
+        let mut fb = black_surface(&mut buf_w);
+        scene_render::render_scene(&mut fb, &graph_w, &ctx);
+    }
+
+    // Render with EvenOdd.
+    let (nodes_e, data_e) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::FillRule::EvenOdd,
+        100,
+        100,
+    );
+    let graph_e = scene_render::SceneGraph { nodes: &nodes_e, data: &data_e };
+    let mut buf_e = vec![0u8; 100 * 100 * 4];
+    {
+        let mut fb = black_surface(&mut buf_e);
+        scene_render::render_scene(&mut fb, &graph_e, &ctx);
+    }
+
+    let stride = 100 * 4;
+
+    // Outer ring (20, 20): inside outer square but outside inner square.
+    // Both fill rules should fill this region.
+    let (r_w_outer, _, _, _) = read_pixel(&buf_w, stride, 20, 20);
+    assert!(r_w_outer > 200, "Winding: outer ring should be filled, r={}", r_w_outer);
+    let (r_e_outer, _, _, _) = read_pixel(&buf_e, stride, 20, 20);
+    assert!(r_e_outer > 200, "EvenOdd: outer ring should be filled, r={}", r_e_outer);
+
+    // Inner center (50, 50): inside both squares (wound twice).
+    // Winding rule: fills (winding count = 2, non-zero).
+    // EvenOdd rule: unfills (winding count = 2, even).
+    let (r_w_inner, _, _, _) = read_pixel(&buf_w, stride, 50, 50);
+    let (r_e_inner, _, _, _) = read_pixel(&buf_e, stride, 50, 50);
+    assert!(r_w_inner > 200,
+        "VAL-PATH-04: Winding should fill inner region (non-zero winding), r={}", r_w_inner);
+    assert!(r_e_inner < 50,
+        "VAL-PATH-04: EvenOdd should NOT fill inner region (even winding), r={}", r_e_inner);
+
+    // The two buffers must differ.
+    assert_ne!(buf_w, buf_e,
+        "VAL-PATH-04: Winding and EvenOdd must produce different output on overlapping contours");
+}
+
+/// VAL-PATH-05: CubicTo renders smooth curves (not a straight line).
+#[test]
+fn path_cubic_bezier_smooth_curve() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Shape: a region bounded by a cubic curve on the top edge and
+    // straight lines on the other three edges.
+    // Bottom-left → bottom-right → top-right → CubicTo(top-left) → close.
+    // The cubic bulges upward from the straight diagonal.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 10.0, 90.0);  // bottom-left
+    scene::path_line_to(&mut cmds, 90.0, 90.0);  // bottom-right
+    scene::path_line_to(&mut cmds, 90.0, 50.0);  // top-right
+    // Cubic from (90,50) to (10,50) with control points bulging upward.
+    scene::path_cubic_to(&mut cmds, 90.0, 10.0, 10.0, 10.0, 10.0, 50.0);
+    scene::path_close(&mut cmds);
+
+    let (nodes, data) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(0, 255, 0, 255),
+        scene::FillRule::Winding,
+        100,
+        100,
+    );
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100 * 4;
+
+    // At (50, 70) — well inside the rectangular body — should be green.
+    let (_, g1, _, _) = read_pixel(&buf, stride, 50, 70);
+    assert!(g1 > 200, "VAL-PATH-05: pixel inside body should be green, g={}", g1);
+
+    // At (50, 30) — inside the curve bulge area — should also be green
+    // if the cubic bulges upward past y=30. With control points at y=10,
+    // the curve apex is well above y=30.
+    let (_, g2, _, _) = read_pixel(&buf, stride, 50, 30);
+    assert!(g2 > 200, "VAL-PATH-05: pixel inside curve bulge should be green, g={}", g2);
+
+    // At (50, 5) — outside everything (above the curve) — should be black.
+    let (r, g, b, _) = read_pixel(&buf, stride, 50, 5);
+    assert_eq!((r, g, b), (0, 0, 0), "VAL-PATH-05: outside (above curve) should be black");
+
+    // Verify the curve makes a difference vs a straight line.
+    // If we replaced the cubic with a straight LineTo from (90,50) to (10,50),
+    // pixel (50, 30) would NOT be filled. The fact that it IS filled proves
+    // the cubic is bulging upward (flattening into sub-pixel segments).
+    // This is the core assertion: the cubic flattening produces a curve,
+    // not just the chord.
+}
+
+/// VAL-PATH-06: Empty path — no pixels, no crash.
+#[test]
+fn path_empty_no_crash() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let cmds: Vec<u8> = Vec::new();
+    let (nodes, data) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::FillRule::Winding,
+        100,
+        100,
+    );
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    // Must not panic.
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // All pixels should remain black.
+    let stride = 100 * 4;
+    let (r, g, b, _) = read_pixel(&buf, stride, 50, 50);
+    assert_eq!((r, g, b), (0, 0, 0), "VAL-PATH-06: empty path should not draw anything");
+}
+
+/// VAL-PATH-06: Unclosed path — implicitly closed.
+#[test]
+fn path_unclosed_implicitly_closed() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Triangle without Close command.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 90.0, 10.0);
+    scene::path_line_to(&mut cmds, 50.0, 90.0);
+    // No close!
+
+    let (nodes, data) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(0, 0, 255, 255),
+        scene::FillRule::Winding,
+        100,
+        100,
+    );
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100 * 4;
+
+    // Interior should be filled even without Close.
+    let (_, _, b, _) = read_pixel(&buf, stride, 50, 40);
+    assert!(b > 200, "VAL-PATH-06: unclosed path should render (implicit close), b={}", b);
+}
+
+/// VAL-PATH-06: Degenerate cubic (collinear control points) renders like LineTo.
+#[test]
+fn path_degenerate_cubic_collinear() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Cubic where control points are on the line (10,50)→(90,50).
+    // Should render identically to a straight LineTo.
+    let mut cmds_cubic = Vec::new();
+    scene::path_move_to(&mut cmds_cubic, 10.0, 30.0);
+    scene::path_cubic_to(&mut cmds_cubic, 30.0, 30.0, 70.0, 30.0, 90.0, 30.0);
+    scene::path_line_to(&mut cmds_cubic, 90.0, 70.0);
+    scene::path_line_to(&mut cmds_cubic, 10.0, 70.0);
+    scene::path_close(&mut cmds_cubic);
+
+    let mut cmds_line = Vec::new();
+    scene::path_move_to(&mut cmds_line, 10.0, 30.0);
+    scene::path_line_to(&mut cmds_line, 90.0, 30.0);
+    scene::path_line_to(&mut cmds_line, 90.0, 70.0);
+    scene::path_line_to(&mut cmds_line, 10.0, 70.0);
+    scene::path_close(&mut cmds_line);
+
+    let (nodes_c, data_c) = build_path_scene(
+        &cmds_cubic,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::FillRule::Winding,
+        100,
+        100,
+    );
+    let (nodes_l, data_l) = build_path_scene(
+        &cmds_line,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::FillRule::Winding,
+        100,
+        100,
+    );
+
+    let graph_c = scene_render::SceneGraph { nodes: &nodes_c, data: &data_c };
+    let graph_l = scene_render::SceneGraph { nodes: &nodes_l, data: &data_l };
+
+    let mut buf_c = vec![0u8; 100 * 100 * 4];
+    {
+        let mut fb = black_surface(&mut buf_c);
+        scene_render::render_scene(&mut fb, &graph_c, &ctx);
+    }
+    let mut buf_l = vec![0u8; 100 * 100 * 4];
+    {
+        let mut fb = black_surface(&mut buf_l);
+        scene_render::render_scene(&mut fb, &graph_l, &ctx);
+    }
+
+    // Compare — should be identical or very close.
+    let mut max_diff = 0u8;
+    for (a, b) in buf_c.iter().zip(buf_l.iter()) {
+        let diff = if *a > *b { *a - *b } else { *b - *a };
+        if diff > max_diff { max_diff = diff; }
+    }
+    assert!(max_diff <= 2,
+        "VAL-PATH-06: collinear cubic should render like LineTo, max pixel diff = {}", max_diff);
+}
+
+/// VAL-PATH-07: Multiple contours in one Path node — both fill.
+#[test]
+fn path_multiple_contours_both_fill() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut cmds = Vec::new();
+    // First triangle at left side.
+    scene::path_move_to(&mut cmds, 5.0, 5.0);
+    scene::path_line_to(&mut cmds, 45.0, 5.0);
+    scene::path_line_to(&mut cmds, 25.0, 45.0);
+    scene::path_close(&mut cmds);
+    // Second triangle at right side.
+    scene::path_move_to(&mut cmds, 55.0, 5.0);
+    scene::path_line_to(&mut cmds, 95.0, 5.0);
+    scene::path_line_to(&mut cmds, 75.0, 45.0);
+    scene::path_close(&mut cmds);
+
+    let (nodes, data) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 255, 0, 255),
+        scene::FillRule::Winding,
+        100,
+        50,
+    );
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    let w = 100u32;
+    let h = 50u32;
+    let stride = w * 4;
+    let mut buf = vec![0u8; (w * h * 4) as usize];
+    let mut fb = black_surface_sized(&mut buf, w, h);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    // Interior of first triangle (25, 20).
+    let (r1, g1, _, _) = read_pixel(&buf, stride, 25, 20);
+    assert!(r1 > 200 && g1 > 200,
+        "VAL-PATH-07: first contour should be yellow, r={} g={}", r1, g1);
+
+    // Interior of second triangle (75, 20).
+    let (r2, g2, _, _) = read_pixel(&buf, stride, 75, 20);
+    assert!(r2 > 200 && g2 > 200,
+        "VAL-PATH-07: second contour should be yellow, r={} g={}", r2, g2);
+
+    // Gap between triangles (50, 20) — should be black.
+    let (r, g, b, _) = read_pixel(&buf, stride, 50, 20);
+    assert_eq!((r, g, b), (0, 0, 0),
+        "VAL-PATH-07: gap between contours should be black");
+}
+
+/// VAL-PATH-08: Edge pixels have fractional coverage (anti-aliasing).
+#[test]
+fn path_edges_antialiased() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    // Diagonal edge: triangle with a sloped edge.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 90.0, 10.0);
+    scene::path_line_to(&mut cmds, 50.0, 90.0);
+    scene::path_close(&mut cmds);
+
+    let (nodes, data) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 255, 255, 255),
+        scene::FillRule::Winding,
+        100,
+        100,
+    );
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 100 * 4;
+
+    // Sample along the left diagonal edge (from (10,10) to (50,90)).
+    // Edge pixels should have intermediate coverage (not just 0 or 255).
+    let mut found_intermediate = false;
+    for row in 20..80 {
+        // The left edge x ≈ 10 + (row - 10) * (50-10)/(90-10) = 10 + (row-10)*0.5
+        let edge_x = 10.0 + (row as f32 - 10.0) * 0.5;
+        let px = edge_x as u32;
+        let (r, _, _, _) = read_pixel(&buf, stride, px, row);
+        if r > 5 && r < 250 {
+            found_intermediate = true;
+            break;
+        }
+    }
+    assert!(found_intermediate,
+        "VAL-PATH-08: diagonal edge should have anti-aliased pixels with intermediate coverage");
+}
+
+/// VAL-PATH-09: Scale factor applied to path coordinates.
+/// scale=2 gives ~4× the pixel area.
+#[test]
+fn path_scale_factor_applied() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+
+    // Triangle occupying (10,10)-(40,40) in logical coords.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 40.0, 10.0);
+    scene::path_line_to(&mut cmds, 25.0, 40.0);
+    scene::path_close(&mut cmds);
+
+    // Render at scale=1 on a 50×50 surface.
+    let ctx1 = scene_render::RenderCtx {
+        mono_cache: &mono,
+        prop_cache: &prop,
+        scale: 1.0,
+    };
+    let (nodes1, data1) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::FillRule::Winding,
+        50,
+        50,
+    );
+    let graph1 = scene_render::SceneGraph { nodes: &nodes1, data: &data1 };
+    let mut buf1 = vec![0u8; 50 * 50 * 4];
+    {
+        let mut fb = black_surface_sized(&mut buf1, 50, 50);
+        scene_render::render_scene(&mut fb, &graph1, &ctx1);
+    }
+
+    // Render at scale=2 on a 100×100 surface.
+    let ctx2 = scene_render::RenderCtx {
+        mono_cache: &mono,
+        prop_cache: &prop,
+        scale: 2.0,
+    };
+    let (nodes2, data2) = build_path_scene(
+        &cmds,
+        scene::Color::rgba(255, 0, 0, 255),
+        scene::FillRule::Winding,
+        50,
+        50,
+    );
+    let graph2 = scene_render::SceneGraph { nodes: &nodes2, data: &data2 };
+    let mut buf2 = vec![0u8; 100 * 100 * 4];
+    {
+        let mut fb = black_surface_sized(&mut buf2, 100, 100);
+        scene_render::render_scene(&mut fb, &graph2, &ctx2);
+    }
+
+    // Count red pixels in each buffer.
+    let count_red = |buf: &[u8]| -> usize {
+        buf.chunks_exact(4)
+            .filter(|px| px[2] > 128) // R in BGRA at offset 2
+            .count()
+    };
+    let red1 = count_red(&buf1);
+    let red2 = count_red(&buf2);
+
+    // At scale=2, the triangle is drawn in a 4× larger pixel area.
+    // The ratio should be approximately 4:1.
+    assert!(red1 > 50, "scale=1 should have significant red pixels, got {}", red1);
+    assert!(red2 > red1 * 3, "VAL-PATH-09: scale=2 should have ~4x red pixels: s1={} s2={}", red1, red2);
+    let ratio = red2 as f64 / red1 as f64;
+    assert!(ratio > 3.0 && ratio < 5.5,
+        "VAL-PATH-09: pixel area ratio should be ~4, got {:.2}", ratio);
+}
+
+/// VAL-CROSS-02: Render backend exhaustively handles all Content variants.
+/// No wildcard fallback in content match.
+#[test]
+fn all_content_types_render_in_one_scene() {
+    // VAL-CROSS-03: Scene with None, Path, Glyphs, and Image.
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let mut scene_buf = vec![0u8; scene::SCENE_SIZE];
+    let mut w = scene::SceneWriter::new(&mut scene_buf);
+
+    // Root container (Content::None with background).
+    let root = w.alloc_node().unwrap();
+    w.node_mut(root).width = 200;
+    w.node_mut(root).height = 200;
+    w.node_mut(root).background = scene::Color::rgba(30, 30, 30, 255);
+    w.node_mut(root).flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    w.set_root(root);
+
+    // Path node.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 90.0, 10.0);
+    scene::path_line_to(&mut cmds, 50.0, 90.0);
+    scene::path_close(&mut cmds);
+    let path_ref = w.push_path_commands(&cmds);
+    let path_node = w.alloc_node().unwrap();
+    w.node_mut(path_node).width = 100;
+    w.node_mut(path_node).height = 100;
+    w.node_mut(path_node).flags = NodeFlags::VISIBLE;
+    w.node_mut(path_node).content = scene::Content::Path {
+        color: scene::Color::rgba(0, 255, 0, 255),
+        fill_rule: scene::FillRule::Winding,
+        contours: path_ref,
+    };
+    w.add_child(root, path_node);
+
+    // Glyphs node (empty glyphs — just testing no-crash dispatch).
+    let glyphs_node = w.alloc_node().unwrap();
+    w.node_mut(glyphs_node).x = 100;
+    w.node_mut(glyphs_node).width = 100;
+    w.node_mut(glyphs_node).height = 100;
+    w.node_mut(glyphs_node).flags = NodeFlags::VISIBLE;
+    w.node_mut(glyphs_node).content = scene::Content::Glyphs {
+        color: scene::Color::rgba(255, 255, 255, 255),
+        glyphs: scene::DataRef { offset: 0, length: 0 },
+        glyph_count: 0,
+        font_size: 16,
+        axis_hash: 0,
+    };
+    w.add_child(root, glyphs_node);
+
+    // Image node (4×4 blue pixels).
+    let mut pixels = vec![0u8; 4 * 4 * 4];
+    for chunk in pixels.chunks_exact_mut(4) {
+        chunk[0] = 255; // B
+        chunk[1] = 0;   // G
+        chunk[2] = 0;   // R
+        chunk[3] = 255; // A
+    }
+    let img_ref = w.push_data(&pixels);
+    let img_node = w.alloc_node().unwrap();
+    w.node_mut(img_node).y = 100;
+    w.node_mut(img_node).width = 4;
+    w.node_mut(img_node).height = 4;
+    w.node_mut(img_node).flags = NodeFlags::VISIBLE;
+    w.node_mut(img_node).content = scene::Content::Image {
+        data: img_ref,
+        src_width: 4,
+        src_height: 4,
+    };
+    w.add_child(root, img_node);
+
+    let nodes = w.nodes().to_vec();
+    let data = w.data_buf().to_vec();
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    let mut buf = vec![0u8; 200 * 200 * 4];
+    let mut fb = black_surface_sized(&mut buf, 200, 200);
+    // Must not panic — all content types dispatched.
+    scene_render::render_scene(&mut fb, &graph, &ctx);
+
+    let stride = 200 * 4;
+
+    // Background should be visible.
+    let (r, g, b, _) = read_pixel(&buf, stride, 150, 150);
+    assert_eq!((r, g, b), (30, 30, 30), "VAL-CROSS-03: background should render");
+
+    // Path interior should be green.
+    let (_, g, _, _) = read_pixel(&buf, stride, 50, 40);
+    assert!(g > 200, "VAL-CROSS-03: path should render green, g={}", g);
+
+    // Image should be blue.
+    let (_, _, b, _) = read_pixel(&buf, stride, 2, 102);
+    assert!(b > 200, "VAL-CROSS-03: image should render blue, b={}", b);
+}
