@@ -34,7 +34,7 @@ use protocol::{
         DisplayInfoMsg, FbPaChunk, GpuConfig, MSG_DISPLAY_INFO, MSG_FB_PA_CHUNK, MSG_GPU_CONFIG,
         MSG_GPU_READY,
     },
-    present::{PresentPayload, MSG_PRESENT},
+    present::{PresentPayload, MSG_PRESENT, MSG_PRESENT_DONE},
 };
 /// Control virtqueue index.
 const VIRTQ_CONTROL: u32 = 0;
@@ -933,5 +933,11 @@ pub extern "C" fn _start() -> ! {
                 );
             }
         }
+
+        // Signal the compositor that the transfer+flush is complete.
+        // The compositor can now reuse the framebuffer that was in-flight.
+        let done_msg = ipc::Message::new(MSG_PRESENT_DONE);
+        present_ch.send(&done_msg);
+        let _ = sys::channel_signal(PRESENT_HANDLE);
     }
 }

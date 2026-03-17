@@ -15,7 +15,7 @@
 //! - `compose`     — init -> compositor (compositor config)
 //! - `editor`      — init -> text editor (editor config)
 //! - `fs`          — init <-> 9p driver (filesystem requests)
-//! - `present`     — compositor -> GPU driver (frame presentation)
+//! - `present`     — compositor <-> GPU driver (frame presentation + completion)
 //!
 //! # Conventions
 //!
@@ -332,12 +332,15 @@ pub mod editor {
     }
 }
 
-// ── present: compositor -> GPU driver ───────────────────────────────
+// ── present: compositor <-> GPU driver ──────────────────────────────
 
 pub mod present {
     use crate::DirtyRect;
 
     pub const MSG_PRESENT: u32 = 20;
+    /// GPU → compositor: the transfer+flush for the last present is done.
+    /// The compositor can now reuse the framebuffer that was in-flight.
+    pub const MSG_PRESENT_DONE: u32 = 21;
 
     /// Present payload with double-buffering and damage tracking.
     ///

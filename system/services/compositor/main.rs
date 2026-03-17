@@ -13,7 +13,7 @@ mod frame_scheduler;
 
 use protocol::{
     compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG, MSG_IMAGE_CONFIG},
-    present::{PresentPayload, MSG_PRESENT},
+    present::{PresentPayload, MSG_PRESENT, MSG_PRESENT_DONE},
 };
 use render::{FrameAction, RenderBackend};
 
@@ -120,11 +120,23 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"compositor: frame timer create failed\n"); sys::exit();
     });
     let mut presented_buf: usize = 0;
+    // GPU flow control: track whether a framebuffer is in-flight to the GPU.
+    // After sending MSG_PRESENT, the presented buffer is in-flight until we
+    // receive MSG_PRESENT_DONE. We must not render into the in-flight buffer.
+    let mut gpu_in_flight = true; // first frame is in-flight after present above
     sys::print(b"     entering render loop\n");
 
     loop {
-        let _ = sys::wait(&[CORE_HANDLE, timer_h], u64::MAX);
+        let _ = sys::wait(&[CORE_HANDLE, timer_h, GPU_HANDLE], u64::MAX);
         let mut go = false;
+        // Drain GPU completion signals.
+        if sys::wait(&[GPU_HANDLE], 0).is_ok() {
+            while gpu_ch.try_recv(&mut msg) {
+                if msg.msg_type == MSG_PRESENT_DONE {
+                    gpu_in_flight = false;
+                }
+            }
+        }
         if sys::wait(&[CORE_HANDLE], 0).is_ok() {
             while core_ch.try_recv(&mut msg) {}
             go = sched.should_render_immediately(counter_to_ns(sys::counter(), cfreq));
@@ -139,6 +151,21 @@ pub extern "C" fn _start() -> ! {
         }
         if !go { continue; }
 
+        // Wait for GPU completion if the target buffer is still in-flight.
+        // The render target is always 1 - presented_buf (the non-displayed buffer).
+        if gpu_in_flight {
+            // Block until the GPU signals completion.
+            loop {
+                let _ = sys::wait(&[GPU_HANDLE], u64::MAX);
+                while gpu_ch.try_recv(&mut msg) {
+                    if msg.msg_type == MSG_PRESENT_DONE {
+                        gpu_in_flight = false;
+                    }
+                }
+                if !gpu_in_flight { break; }
+            }
+        }
+
         let tr = scene::TripleReader::new(scene_buf);
         let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
         let count = nodes.len() as u16;
@@ -149,26 +176,28 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
         let graph = render::scene_render::SceneGraph { nodes, data: tr.front_data_buf() };
-        let buf = if backend.is_full_repaint() {
-            let b = 1 - presented_buf;
-            backend.render(&graph, &mut make_fb(b));
-            presented_buf = b;
+        // Always render to the non-displayed buffer (1 - presented_buf).
+        // This prevents tearing on both full and partial updates: we never
+        // write into the buffer the GPU is currently displaying.
+        let render_buf = 1 - presented_buf;
+        if backend.is_full_repaint() {
+            backend.render(&graph, &mut make_fb(render_buf));
             backend.finish_frame(nodes, count, None);
-            b
         } else if backend.damage.count > 0 {
-            backend.render(&graph, &mut make_fb(presented_buf));
+            backend.render(&graph, &mut make_fb(render_buf));
             backend.finish_frame(nodes, count, tr.change_list());
-            presented_buf
         } else {
             tr.finish_read(gen); sched.on_render_complete(); continue;
         };
         tr.finish_read(gen);
         let rects = backend.dirty_rects();
         if !backend.is_full_repaint() && !rects.is_empty() {
-            present(&gpu_ch, buf, rects);
+            present(&gpu_ch, render_buf, rects);
         } else {
-            present(&gpu_ch, buf, &[]);
+            present(&gpu_ch, render_buf, &[]);
         }
+        presented_buf = render_buf;
+        gpu_in_flight = true;
         sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
     }
 }
