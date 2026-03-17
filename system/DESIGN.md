@@ -388,11 +388,13 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 2.2b Compositor (`services/compositor/`) 🟢
+### 2.2b Compositor (`services/compositor/`) 🟢 → evolving to CPU Render Service
 
 **Goal:** Content-agnostic pixel pump. Read the scene graph from shared memory and delegate all rendering to the render backend.
 
 **Status:** 174 lines, 2 files (main.rs, frame_scheduler.rs). Minimal event loop that calls `backend.render()` and presents dirty rects to the GPU driver. Zero font knowledge, zero content-type dispatch, no SVG. Achieves the settled architecture design (2026-03-16).
+
+**Architectural direction (2026-03-17):** The compositor + virtio-gpu 2D driver will be merged into a single `services/drivers/cpu-render/` process — a sibling of the planned `services/drivers/virgil-render/`. Both are thick render services with the same shape: read scene graph from shared memory, produce display output. Once `cpu-render` exists, the current `services/compositor/` and `services/drivers/virtio-gpu/` are deleted — no parallel implementations. See journal entry "GPU Rendering Architecture: Thick Drivers (2026-03-17)".
 
 **What's foundational (the approach):**
 
@@ -427,6 +429,8 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - **Framebuffer owned by init.** Init allocates the DMA buffer and shares it. The driver just attaches it as backing. Real ownership: compositor or GPU driver owns display buffers.
 
 **QEMU-specific but architecturally sound.** On real hardware, a different driver would implement the same abstract display interface. The virtio-gpu driver is a leaf node — replacing it doesn't affect anything above.
+
+**Architectural direction (2026-03-17):** This driver will be merged with the compositor into `services/drivers/cpu-render/` — a single thick render service that reads the scene graph and produces display output via software rasterization + virtio-gpu 2D transfer. Sibling to `services/drivers/virgil-render/`. The current separate `services/compositor/` and `services/drivers/virtio-gpu/` directories are then deleted. See journal entry "GPU Rendering Architecture: Thick Drivers (2026-03-17)".
 
 ---
 

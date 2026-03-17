@@ -6,13 +6,18 @@ An honest audit of what this OS's rendering pipeline can and cannot do, compared
 
 ## Pipeline summary
 
-CPU-rasterized, event-driven, 2D document rendering:
+Event-driven 2D document rendering with pluggable render services:
 
 ```text
-Core (layout + scene build) → Scene Graph (shared memory) → Compositor (pixel pump) → GPU Driver (transfer) → Display
+Core (layout + scene build) → Scene Graph (shared memory) → Render Service → Display
 ```
 
-All rendering is software. The GPU is a dumb transport (virtio-gpu copies guest→host framebuffer). There is no GPU-accelerated compositing, no shaders, no hardware-accelerated blending.
+The scene graph is the interface. Render services are thick GPU drivers that read the scene graph, perform the full tree walk, and produce pixels. Two render services:
+
+- **`cpu-render`** (planned restructure of current compositor + virtio-gpu 2D driver): software rasterization via `CpuBackend`. Proven, tested, used for headless testing.
+- **`virgil-render`** (planned): GPU-accelerated rendering via virtio-gpu 3D / Virgl. Same scene graph interface, hardware-accelerated compositing and blending.
+
+Both live as sibling directories under `services/drivers/`. Init selects which render service to launch. See journal entry "GPU Rendering Architecture: Thick Drivers (2026-03-17)" for the design rationale.
 
 The pipeline uses a **configurable-cadence frame scheduler** (60/30/120fps) with event coalescing, frame budgeting, and idle optimization. Updates are driven by state changes (keystroke, clock tick, pointer move), coalesced within frame boundaries.
 

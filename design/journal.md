@@ -4,6 +4,110 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## GPU Rendering Architecture: Thick Drivers (2026-03-17)
+
+**Status:** settled design, ready to implement.
+
+### The decision
+
+GPU drivers are **thick**: they read the scene graph from shared memory, perform the full tree walk, and produce pixels using hardware-accelerated rendering. The scene graph is the interface between the OS service (core) and the GPU driver. There is no intermediate command list or display list abstraction.
+
+### Architecture
+
+```text
+Core (layout + scene build) → Scene Graph (shared memory) → GPU Driver (tree walk + render + present) → Display
+```
+
+The current pipeline splits rendering across two processes:
+
+```text
+Core → Scene Graph → Compositor (CpuBackend tree walk + rasterization) → virtio-gpu 2D driver (dumb blit) → Display
+```
+
+The new architecture collapses compositor + GPU driver into a single **render service** process per display backend:
+
+```text
+Core → Scene Graph → virgil-render (tree walk + Virgil3D commands + present) → Display
+Core → Scene Graph → cpu-render (tree walk + software rasterization + present) → Display
+```
+
+Init selects which render service to launch. Only one runs at a time per display.
+
+### Why thick drivers
+
+The key question was where to put complexity in the `compositor → driver` pipeline. Three options were evaluated:
+
+1. **Thin driver (current).** Compositor does all rendering, GPU driver is a dumb blitter. Works for CPU rendering but means a GPU-accelerated path would still do all rendering in the compositor, then serialize GPU commands across a process boundary. Cross-process command buffer protocol adds a new interface in the hot path.
+
+2. **Hybrid: command list intermediate representation.** Tree walk emits a flat command list (fill rect, blit glyph, blend surface), backends execute it. Shares the tree walk across backends, but the command list becomes a committed interface — a mini graphics API in the middle of the pipeline. If it needs to change (new content type, GPU-specific optimization), every backend and the tree walk layer must update. This is complexity in the connective tissue, which violates the design principle: connective tissue must be simple.
+
+3. **Thick driver (chosen).** Each driver reads the scene graph directly and does whatever it needs. The scene graph is the only interface. Drivers are leaf nodes — complex inside, simple boundary. Duplication of tree walk logic across drivers is mitigated by a shared utility library when needed (not before a second driver exists).
+
+The thick driver approach was chosen because:
+
+- **The scene graph is the interface.** It's already designed, already in shared memory, already stable. No new interface to design or maintain.
+- **Complexity at the edges.** Essential rendering complexity (tree walk, clipping, batching, hardware commands) lives inside the driver — a leaf node behind the scene graph interface. This is exactly where "push complexity to the edges" says it should go.
+- **No connective tissue coupling.** A command list in the middle would couple all backends to a shared format. Thick drivers are independent — a Virgil3D driver and a future Metal driver don't need to agree on anything except the scene graph.
+- **GPU-specific optimization without abstraction leaks.** A GPU driver can batch glyphs, reorder draws, use native texture atlases — all internal decisions. A command list would either be too simple (preventing optimizations) or too complex (leaking GPU concerns upward).
+
+### What about code duplication?
+
+Multiple thick drivers would duplicate tree walk and clipping logic. Mitigations:
+
+- **Don't solve it prematurely.** Today there's one GPU driver (Virgil3D) and one CPU fallback. Extract shared code when a second GPU driver appears, not before.
+- **Shared utility library (`render-util`) when needed.** Common building blocks (tree walk skeleton, clipping math, coordinate scaling, glyph atlas management) as a toolkit — composable functions, not a framework. Each driver picks what it needs.
+- **The render library (`libraries/render/`) already exists.** Its `scene_render.rs` (tree walk, clipping, compositing) and utility modules can be reused by any driver that wants them. The `CpuBackend` is just one consumer.
+
+### Visual effects are node properties, not content types
+
+Shadows, blur, opacity, transforms, and rounded corners are properties on `Node`, not `Content` variants. This is correct: they're visual modifiers derived from the node's shape, not independent content. A thick driver renders these properties however it wants — CPU does box blur in software, GPU does it with a shader. The scene graph interface doesn't change.
+
+Content types remain: `None`, `Path`, `Glyphs`, `Image`.
+
+### Terminology
+
+- **Render service** — a process that reads the scene graph and produces display output. Encompasses tree walk, rendering, and hardware presentation.
+- **GPU driver** — a render service backed by GPU hardware. "Driver" conveys hardware abstraction; "thick" conveys the higher abstraction level of the interface (scene graph vs draw calls).
+- **CPU render** — the existing `CpuBackend` path, restructured as a standalone render service (merging the current compositor + virtio-gpu 2D driver).
+
+### Implementation plan (Virgil3D render service)
+
+**Phase 1: Virgil3D driver scaffolding.**
+Create `services/drivers/virgil-render/`. Initialize virtio-gpu in 3D mode (Virgl context). Establish a rendering context that can submit Gallium3D commands to the host GPU via virtio-gpu capsets. Verify basic operation: clear screen to a solid color.
+
+**Phase 2: Scene graph rendering.**
+Read the scene graph from shared memory (same `TripleReader` the compositor uses). Implement tree walk: `Path` → tessellate to triangles + GPU fill (or stencil-then-cover), `Glyphs` → texture atlas + textured quads, `Image` → texture upload + blit. Handle clipping, transforms, opacity. Present to display.
+
+**Phase 3: Glyph atlas.**
+Upload rasterized glyphs to a GPU texture atlas. The fonts library rasterizes (CPU-side, same as today); the driver uploads coverage bitmaps to GPU memory and composites them via textured quads or blits.
+
+**Phase 4: Init integration.**
+Init selects the render service at boot (Virgil3D if available, CPU fallback otherwise). The scene graph shared memory setup is identical for both paths — init doesn't know or care which driver reads it.
+
+**Phase 5: CPU render service restructure.**
+Merge the existing compositor + virtio-gpu 2D driver into a single `services/drivers/cpu-render/` process — sibling to `virgil-render/`. Same shape, same interface (reads scene graph, produces display output). The current `services/compositor/` and `services/drivers/virtio-gpu/` are then deleted — no parallel implementations. The render library (`libraries/render/`) and its `CpuBackend` move into the new process.
+
+```text
+services/drivers/
+  cpu-render/       (merges compositor + virtio-gpu 2D)
+  virgil-render/    (thick Virgil3D driver)
+```
+
+### Unforeseen issues audit
+
+Reviewed potential problems with the thick driver approach:
+
+- **Video playback:** `Image` nodes in shared memory, driver composites via texture upload. Actually better than thin drivers — decoder and renderer in same process, zero-copy possible.
+- **Hardware video decode:** GPU often does decoding too. Thick driver has both decoder and renderer — no cross-process transfer.
+- **Shader effects:** New node properties (blur, shadow already exist), not new content types. Driver implements however it wants.
+- **Multiple displays / mixed DPI:** Each display gets its own driver instance reading the same scene graph, rendering at its own scale. Works naturally.
+- **Multiple GPUs simultaneously:** Scene graph is in shared memory, multiple drivers can read it. No issue.
+- **Something above the scene graph needing direct GPU access:** Architecture prevents this. Editors don't render. Core builds the scene graph. The scene graph is expressive enough to add new visual operations via new content types or node properties.
+
+No architectural problems identified.
+
+---
+
 ## Text Shaping Pipeline: HarfBuzz Exists but Is Bypassed (2026-03-17)
 
 **Status:** open-thread, ready to implement when needed.

@@ -7,24 +7,26 @@
 %%
 %% One-way data flow. Each translator only knows its input and output shapes.
 %%
-%% Design decisions (2026-03-16):
+%% Design decisions (2026-03-16, updated 2026-03-17):
 %%   - Path-centric rendering: everything is geometric (paths, rects, glyphs, images)
 %%   - Glyph rasterization in the render backend (core shapes + lays out, backend rasterizes)
 %%   - Tree-structured scene graph with geometric content types
-%%   - Explicit RenderBackend trait: fn render(scene, surface)
-%%   - Render backend owns tree walk, transform/clip stack, compositing
-%%   - Multi-core rasterization is internal to the render backend
+%%   - Scene graph is THE interface between core and rendering
+%%   - Thick GPU drivers: each driver reads the scene graph, does its own tree walk,
+%%     renders via its hardware, and presents to display. No intermediate command list.
+%%   - CPU render path (existing) and GPU render path (Virgil3D) are independent
+%%     render services — init selects which to launch.
+%%   - Visual effects (shadow, blur, opacity, transforms) are node properties,
+%%     not content types. Drivers implement them however they want.
 
 graph LR
     HW(["Hardware Events\n(evdev interrupts:\ntype, code, value)"])
     KE(["Key Events\n(logical key +\nmodifier set)"])
     WR(["Write Requests\n(insert, delete,\nmove_cursor,\nset_selection)"])
     ST(["Scene Tree\n(containers, rects,\nglyphs, images —\nlogical coordinates)"])
-    PX(["Pixel Buffer\n(BGRA8888\nframebuffer)"])
-    DS(["Display Signal\n(present +\ndirty rects)"])
+    DS(["Display\n(pixels on screen)"])
 
     HW -->|"Input Driver"| KE
     KE -->|"Editor"| WR
     WR -->|"Core"| ST
-    ST -->|"Render Backend"| PX
-    PX -->|"GPU Driver"| DS
+    ST -->|"Render Service\n(thick GPU driver:\ntree walk + render\n+ present)"| DS
