@@ -6,5 +6,6 @@
 *.swp
 *~
 design/drafts/
+docs/
 reference/
 target/
