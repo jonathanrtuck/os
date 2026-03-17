@@ -328,6 +328,34 @@ impl CpuBackend {
         self.prev_node_count = node_count;
     }
 
+    /// Update `prev_bounds` bookkeeping when a frame is skipped.
+    ///
+    /// Call this when `prepare_frame()` returns `FrameAction::Skip` to keep
+    /// the damage tracker's state consistent. Unlike `finish_frame()`, this
+    /// does not recompute bounds (no rendering happened), but it does:
+    /// - Update `prev_node_count`
+    /// - Zero stale `prev_bounds` entries if the node count decreased
+    ///
+    /// This ensures the next rendered frame's damage calculation uses
+    /// accurate prev_bounds even after one or more skipped frames.
+    pub fn update_bounds_for_skip(
+        &mut self,
+        nodes: &[scene::Node],
+        node_count: u16,
+    ) {
+        let n = (node_count as usize).min(nodes.len()).min(scene::MAX_NODES);
+        let old_n = (self.prev_node_count as usize).min(scene::MAX_NODES);
+
+        // Zero out entries for nodes that were removed since last frame.
+        if n < old_n {
+            for i in n..old_n {
+                self.prev_bounds[i] = (0, 0, 0, 0);
+            }
+        }
+
+        self.prev_node_count = node_count;
+    }
+
     /// Build a `RenderCtx` from the backend's cached state.
     fn make_ctx(&self) -> scene_render::RenderCtx<'_> {
         scene_render::RenderCtx {

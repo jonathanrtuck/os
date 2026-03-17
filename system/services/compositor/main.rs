@@ -171,6 +171,9 @@ pub extern "C" fn _start() -> ! {
         let count = nodes.len() as u16;
         let action = backend.prepare_frame(nodes, count, tr.change_list(), tr.is_full_repaint());
         if action == FrameAction::Skip {
+            // Update prev_bounds bookkeeping even on skip so the next
+            // rendered frame's damage calculation uses accurate bounds.
+            backend.update_bounds_for_skip(nodes, count);
             tr.finish_read(gen);
             sched.on_render_complete();
             continue;

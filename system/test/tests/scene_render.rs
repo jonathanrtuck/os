@@ -5,6 +5,7 @@
 
 use render::scene_render;
 use render::surface_pool;
+use render::RenderBackend;
 
 use drawing::{Color, PixelFormat, Surface};
 use scene::Node;
@@ -3766,6 +3767,378 @@ fn diff_scenes_rotated_node_aabb_damage() {
             "VAL-XFORM-016: rotated 40×40 dirty rect height should be >= 55, got {rh}"
         );
     }
+}
+
+// ── Damage tracking with skipped frames (VAL-DMG-001 through VAL-DMG-004) ──
+
+/// Helper to create a CpuBackend for damage tracking tests.
+/// Uses real font data to satisfy the constructor, though damage tests
+/// don't exercise text rendering.
+fn test_cpu_backend(fb_w: u16, fb_h: u16) -> Box<render::CpuBackend> {
+    let mono = include_bytes!("../../share/source-code-pro.ttf");
+    render::CpuBackend::new(mono, None, 16, 96, 1.0, fb_w, fb_h)
+        .expect("CpuBackend::new should succeed with valid font")
+}
+
+/// VAL-DMG-001: prev_bounds updated even when FrameAction::Skip occurs.
+///
+/// Scenario: Render frame 1 with a node at position A. Frame 2 is identical
+/// (no changes → Skip). Frame 3 moves the node to position B. The damage
+/// from frame 3 should use the correct prev_bounds from frame 1 (not stale
+/// or zeroed bounds).
+#[test]
+fn damage_correct_after_single_skip() {
+    let mut backend = test_cpu_backend(100, 100);
+
+    let red = scene::Color::rgba(255, 0, 0, 255);
+    let bg = scene::Color::rgba(30, 30, 30, 255);
+
+    // Frame 1: root + child at (10, 10) 20×20
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].background = bg;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 20;
+    nodes[1].height = 20;
+    nodes[1].background = red;
+    nodes[1].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    // Render frame 1 (full repaint).
+    let action = backend.prepare_frame(&nodes, 2, None, true);
+    assert_eq!(action, render::FrameAction::Full);
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    backend.render(&graph, &mut fb);
+    backend.finish_frame(&nodes, 2, None);
+
+    // Verify prev_bounds for node 1 is (10, 10, 20, 20).
+    assert_eq!(backend.prev_bounds[1], (10, 10, 20, 20),
+        "Frame 1: prev_bounds[1] should be (10,10,20,20)");
+
+    // Frame 2: identical scene — no changes. This should be Skip.
+    let change_list: &[u16] = &[];
+    let action2 = backend.prepare_frame(&nodes, 2, Some(change_list), false);
+    assert_eq!(action2, render::FrameAction::Skip);
+
+    // After Skip, prev_bounds should still be valid and unchanged.
+    // This is the bug: currently finish_frame is not called on Skip,
+    // so prev_bounds stays stale if node_count changes later.
+    // For this test, since nothing changed, prev_bounds should still be correct.
+    backend.update_bounds_for_skip(&nodes, 2);
+
+    // Frame 3: move node 1 to (50, 50) — this triggers a partial update.
+    let mut nodes3 = nodes.clone();
+    nodes3[1].x = 50;
+    nodes3[1].y = 50;
+
+    let change_list3: &[u16] = &[1];
+    let action3 = backend.prepare_frame(&nodes3, 2, Some(change_list3), false);
+    assert_eq!(action3, render::FrameAction::Partial);
+
+    // The damage should include BOTH the old position (10,10,20,20) and
+    // the new position (50,50,20,20). If prev_bounds was stale/zeroed,
+    // the old position damage would be wrong.
+    let rects = backend.dirty_rects();
+    assert!(!rects.is_empty(), "Frame 3 should have dirty rects");
+
+    // Verify the old position (10,10) is covered by some dirty rect.
+    let covers_old = rects.iter().any(|r| {
+        r.x <= 10 && r.y <= 10 &&
+        r.x as u32 + r.w as u32 >= 30 && r.y as u32 + r.h as u32 >= 30
+    });
+    assert!(covers_old, "Damage should cover old position (10,10)-(30,30), rects={:?}", rects);
+
+    // Verify the new position (50,50) is covered.
+    let covers_new = rects.iter().any(|r| {
+        r.x <= 50 && r.y <= 50 &&
+        r.x as u32 + r.w as u32 >= 70 && r.y as u32 + r.h as u32 >= 70
+    });
+    assert!(covers_new, "Damage should cover new position (50,50)-(70,70), rects={:?}", rects);
+}
+
+/// VAL-DMG-002: Damage correct after multiple skipped frames (mailbox semantics).
+///
+/// Scenario: Render frame 1 with node at A. Frames 2, 3, 4 are all skipped
+/// (scene unchanged). Frame 5 moves the node to B. Damage should still be
+/// correct — prev_bounds should reflect frame 1's state, not be corrupted.
+#[test]
+fn damage_correct_after_multiple_skips() {
+    let mut backend = test_cpu_backend(100, 100);
+
+    let red = scene::Color::rgba(255, 0, 0, 255);
+    let bg = scene::Color::rgba(30, 30, 30, 255);
+
+    // Frame 1: root + child at (5, 5) 15×15
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].background = bg;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 5;
+    nodes[1].y = 5;
+    nodes[1].width = 15;
+    nodes[1].height = 15;
+    nodes[1].background = red;
+    nodes[1].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    // Frame 1: full repaint.
+    let action = backend.prepare_frame(&nodes, 2, None, true);
+    assert_eq!(action, render::FrameAction::Full);
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    backend.render(&graph, &mut fb);
+    backend.finish_frame(&nodes, 2, None);
+
+    assert_eq!(backend.prev_bounds[1], (5, 5, 15, 15));
+
+    // Frames 2-4: all skipped (no changes).
+    for _ in 0..3 {
+        let change_list: &[u16] = &[];
+        let action = backend.prepare_frame(&nodes, 2, Some(change_list), false);
+        assert_eq!(action, render::FrameAction::Skip);
+        backend.update_bounds_for_skip(&nodes, 2);
+    }
+
+    // prev_bounds should still be valid after multiple skips.
+    assert_eq!(backend.prev_bounds[1], (5, 5, 15, 15),
+        "prev_bounds should be preserved across multiple skips");
+
+    // Frame 5: move node to (80, 80).
+    let mut nodes5 = nodes.clone();
+    nodes5[1].x = 80;
+    nodes5[1].y = 80;
+
+    let change_list5: &[u16] = &[1];
+    let action5 = backend.prepare_frame(&nodes5, 2, Some(change_list5), false);
+    assert_eq!(action5, render::FrameAction::Partial);
+
+    // Damage should cover old (5,5,15,15) and new (80,80,15,15).
+    let rects = backend.dirty_rects();
+    assert!(!rects.is_empty(), "Frame 5 should have dirty rects");
+
+    let covers_old = rects.iter().any(|r| {
+        r.x <= 5 && r.y <= 5 &&
+        r.x as u32 + r.w as u32 >= 20 && r.y as u32 + r.h as u32 >= 20
+    });
+    assert!(covers_old, "Damage should cover old position (5,5)-(20,20), rects={:?}", rects);
+}
+
+/// VAL-DMG-003: Full repaint fallback when incremental damage is unreliable.
+///
+/// When node count changes between frames (even after skips), the backend
+/// should trigger a full repaint rather than attempting incremental damage
+/// with stale prev_bounds.
+#[test]
+fn full_repaint_on_node_count_change_after_skip() {
+    let mut backend = test_cpu_backend(100, 100);
+
+    let red = scene::Color::rgba(255, 0, 0, 255);
+    let green = scene::Color::rgba(0, 255, 0, 255);
+
+    // Frame 1: 3 nodes (root + 2 children).
+    let mut nodes = vec![Node::EMPTY; 3];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 20;
+    nodes[1].height = 20;
+    nodes[1].background = red;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].next_sibling = 2;
+
+    nodes[2].x = 50;
+    nodes[2].y = 50;
+    nodes[2].width = 20;
+    nodes[2].height = 20;
+    nodes[2].background = green;
+    nodes[2].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    // Frame 1: full repaint.
+    let action = backend.prepare_frame(&nodes, 3, None, true);
+    assert_eq!(action, render::FrameAction::Full);
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    backend.render(&graph, &mut fb);
+    backend.finish_frame(&nodes, 3, None);
+
+    // Frame 2: skip (no changes).
+    let change_list: &[u16] = &[];
+    let action2 = backend.prepare_frame(&nodes, 3, Some(change_list), false);
+    assert_eq!(action2, render::FrameAction::Skip);
+    backend.update_bounds_for_skip(&nodes, 3);
+
+    // Frame 3: node count decreased to 2 (removed node 2).
+    // This should trigger Full repaint since node_count changed.
+    let nodes3 = &nodes[..2];
+    let action3 = backend.prepare_frame(nodes3, 2, Some(&[1u16]), false);
+    assert_eq!(action3, render::FrameAction::Full,
+        "Node count change should trigger full repaint");
+}
+
+/// VAL-DMG-004: prev_bounds entries zeroed for removed nodes when node count decreases.
+///
+/// After rendering N nodes, reducing to N-2 nodes should zero out the
+/// prev_bounds entries for the removed nodes.
+#[test]
+fn prev_bounds_zeroed_for_removed_nodes() {
+    let mut backend = test_cpu_backend(100, 100);
+
+    let red = scene::Color::rgba(255, 0, 0, 255);
+    let green = scene::Color::rgba(0, 255, 0, 255);
+    let blue = scene::Color::rgba(0, 0, 255, 255);
+
+    // Frame 1: 4 nodes (root + 3 children).
+    let mut nodes = vec![Node::EMPTY; 4];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 20;
+    nodes[1].height = 20;
+    nodes[1].background = red;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].next_sibling = 2;
+
+    nodes[2].x = 40;
+    nodes[2].y = 40;
+    nodes[2].width = 20;
+    nodes[2].height = 20;
+    nodes[2].background = green;
+    nodes[2].flags = NodeFlags::VISIBLE;
+    nodes[2].next_sibling = 3;
+
+    nodes[3].x = 70;
+    nodes[3].y = 70;
+    nodes[3].width = 20;
+    nodes[3].height = 20;
+    nodes[3].background = blue;
+    nodes[3].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+
+    // Frame 1: full repaint with 4 nodes.
+    let action = backend.prepare_frame(&nodes, 4, None, true);
+    assert_eq!(action, render::FrameAction::Full);
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    backend.render(&graph, &mut fb);
+    backend.finish_frame(&nodes, 4, None);
+
+    // Verify prev_bounds are set for all 4 nodes.
+    assert_ne!(backend.prev_bounds[2], (0, 0, 0, 0), "node 2 should have bounds set");
+    assert_ne!(backend.prev_bounds[3], (0, 0, 0, 0), "node 3 should have bounds set");
+
+    // Frame 2: reduce to 2 nodes (root + child 1 only).
+    // This triggers a full repaint due to node count change.
+    let nodes2 = &nodes[..2];
+    let graph2 = scene_render::SceneGraph { nodes: nodes2, data: &data };
+    let action2 = backend.prepare_frame(nodes2, 2, None, true);
+    assert_eq!(action2, render::FrameAction::Full);
+    backend.render(&graph2, &mut fb);
+    backend.finish_frame(nodes2, 2, None);
+
+    // prev_bounds for removed nodes (indices 2, 3) should be zeroed.
+    assert_eq!(backend.prev_bounds[2], (0, 0, 0, 0),
+        "VAL-DMG-004: prev_bounds[2] should be zeroed after node removal");
+    assert_eq!(backend.prev_bounds[3], (0, 0, 0, 0),
+        "VAL-DMG-004: prev_bounds[3] should be zeroed after node removal");
+
+    // prev_bounds for surviving nodes should still be valid.
+    assert_ne!(backend.prev_bounds[0], (0, 0, 0, 0),
+        "prev_bounds[0] (root) should still have bounds");
+    assert_ne!(backend.prev_bounds[1], (0, 0, 0, 0),
+        "prev_bounds[1] (child) should still have bounds");
+}
+
+/// VAL-DMG-001 + VAL-DMG-002 combined: skip then render produces correct
+/// pixel output, not stale artifacts.
+///
+/// Visual verification: render frame 1 (node at A), skip frame 2, render
+/// frame 3 (node at B with partial update). The old position A should show
+/// the background, not stale node pixels.
+#[test]
+fn skip_then_render_no_stale_pixel_artifacts() {
+    let mut backend = test_cpu_backend(100, 100);
+
+    let red = scene::Color::rgba(255, 0, 0, 255);
+    let bg = scene::Color::rgba(30, 30, 30, 255);
+
+    // Frame 1: child at (10, 10) 20×20
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 100;
+    nodes[0].height = 100;
+    nodes[0].background = bg;
+    nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+    nodes[0].first_child = 1;
+
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 20;
+    nodes[1].height = 20;
+    nodes[1].background = red;
+    nodes[1].flags = NodeFlags::VISIBLE;
+
+    let data: Vec<u8> = vec![];
+
+    // Frame 1: full repaint
+    let action = backend.prepare_frame(&nodes, 2, None, true);
+    let mut buf = vec![0u8; 100 * 100 * 4];
+    let mut fb = black_surface(&mut buf);
+    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    backend.render(&graph, &mut fb);
+    backend.finish_frame(&nodes, 2, None);
+
+    // Frame 2: skip
+    let action2 = backend.prepare_frame(&nodes, 2, Some(&[]), false);
+    assert_eq!(action2, render::FrameAction::Skip);
+    backend.update_bounds_for_skip(&nodes, 2);
+
+    // Frame 3: move child to (60, 60), partial update
+    let mut nodes3 = nodes.clone();
+    nodes3[1].x = 60;
+    nodes3[1].y = 60;
+    let action3 = backend.prepare_frame(&nodes3, 2, Some(&[1u16]), false);
+    assert_eq!(action3, render::FrameAction::Partial);
+
+    // Render frame 3 — the damage rects should cover old + new position.
+    let graph3 = scene_render::SceneGraph { nodes: &nodes3, data: &data };
+    backend.render(&graph3, &mut fb);
+    backend.finish_frame(&nodes3, 2, Some(&[1u16]));
+
+    // Pixel at old position (20, 20) should be background, not red.
+    let stride = 100 * 4;
+    let (r, g, b, _a) = read_pixel(&buf, stride, 20, 20);
+    assert_eq!((r, g, b), (30, 30, 30),
+        "After skip+render, old position should show background, not stale red");
+
+    // Pixel at new position (70, 70) should be red.
+    let (r, g, b, _a) = read_pixel(&buf, stride, 70, 70);
+    assert_eq!((r, g, b), (255, 0, 0),
+        "New position should show the moved red child");
 }
 
 /// VAL-XFORM-017 via diff_scenes: compound transform produces correct AABB.
