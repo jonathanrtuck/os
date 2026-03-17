@@ -1,8 +1,8 @@
 # Architecture
 
-## Current Mission: Tickless Idle + Inter-Processor Interrupts
+## Current Mission: Rendering Pipeline Triple Buffering
 
-Replacing GICv2 with GICv3, adding IPI-driven wakeup, and converting fixed 250Hz tick to tickless idle.
+Replacing double-buffered scene graph with triple buffering (mailbox semantics) and adding GPU completion flow control to fix 6 transport bugs.
 
 ### Content Type Field Layout
 - **FillRect:** Color (4B). Position/size from Node geometry.
@@ -34,16 +34,22 @@ Core (OS service) → Scene Graph (shared memory) → Compositor (pixel pump) �
 - `drawing::Surface` — borrowed pixel buffer with BGRA8888 format
 - `drawing::Color` — RGBA u8×4 with sRGB gamma-correct blend_over
 
-## Double-Buffer Protocol
+## Triple-Buffer Protocol (replacing Double-Buffer)
 
-1. Core calls `copy_front_to_back()` — copies current front to back, resets change list. **Checks `reader_done_gen`**: if compositor hasn't finished reading the current front buffer, returns `false` and the update is skipped (retried next event).
-2. Core mutates specific nodes in back buffer, calls `mark_changed(node_id)` for each
-3. Core calls `swap()` — bumps generation counter, back becomes new front
-4. Compositor reads front buffer via `DoubleReader` (acquire fence on generation)
-5. Compositor calls `finish_read(gen)` after reading all nodes/data — writes `reader_done_gen` with release fence, signaling the writer it's safe to overwrite this buffer
-6. Generation counter determines which buffer is front (higher gen = front)
+The old double-buffer protocol dropped frames when the writer was faster than the reader (copy_front_to_back returned false). The new triple-buffer protocol uses mailbox semantics:
 
-**Synchronization:** Release-acquire fence pairs on generation counter (write side) and reader_done_gen (read side). No mutexes — atomics only (bare-metal constraint). The u32 generation wraps after ~2.2 years at 60fps.
+1. Core calls `acquire()` — always returns a free buffer (the third buffer that neither the reader nor the writer's last published buffer). Never fails.
+2. Core mutates nodes in the acquired buffer, calls `mark_changed(node_id)` for each
+3. Core calls `publish()` — atomically makes this buffer the "latest". Intermediate unpublished frames from the old "latest" slot become the new free buffer.
+4. Compositor reads the latest published buffer via `TripleReader` (acquire fence)
+5. Compositor calls `finish_read(gen)` after reading — releases the buffer back to the free pool
+6. If the writer publishes multiple times before the reader reads, only the latest is seen (mailbox semantics — correct for interactive UI)
+
+**Three buffers:** One held by reader, one "latest" (published), one free for writer. Roles rotate atomically.
+
+**Synchronization:** Same release-acquire fence pairs as before. No mutexes — atomics only (bare-metal constraint).
+
+**Memory:** TRIPLE_SCENE_SIZE = 3 * SCENE_SIZE + control region (~48 KiB more than double-buffer).
 
 ## Damage Tracking — PREV_BOUNDS
 

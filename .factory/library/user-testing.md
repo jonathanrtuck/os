@@ -4,13 +4,14 @@ Testing surface, validation approach, and resource cost classification.
 
 ---
 
-## Current Mission: Tickless Idle + Inter-Processor Interrupts
+## Current Mission: Rendering Pipeline Triple Buffering
 
-This mission replaces GICv2 with GICv3, adds IPI-driven wakeup, and converts the fixed 250Hz tick to tickless idle. Key testing considerations:
-- After GICv3 migration, ALL QEMU scripts use gic-version=3
-- Stress testing is critical — SMP timing changes may surface latent bugs
-- Timer behavior changes require verifying deadline accuracy (not just "fires eventually")
-- IPI delivery must be verified across all 4 SMP cores
+This mission replaces double-buffered scene graph with triple buffering (mailbox semantics) and adds GPU completion flow control. Key testing considerations:
+- Scene graph protocol changes affect core, compositor, and init — all must be updated consistently
+- The triple-buffer protocol must be verified with concurrent producer-consumer tests
+- Visual testing confirms end-to-end: rapid typing produces no dropped frames
+- Stress testing confirms no crashes under sustained SMP load with new protocol
+- ALL QEMU scripts use gic-version=3
 
 ---
 
