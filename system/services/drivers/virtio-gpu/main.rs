@@ -826,11 +826,43 @@ pub extern "C" fn _start() -> ! {
         // Wait for a present command from the compositor.
         let _ = sys::wait(&[PRESENT_HANDLE], u64::MAX);
 
-        // Drain all pending present messages (coalesce: use the last one).
+        // Drain all pending present messages, computing the bounding-box
+        // union of dirty rects across ALL coalesced messages. The buffer
+        // index comes from the last message (most recent framebuffer).
+        // If any message requests a full-screen transfer (rect_count == 0),
+        // the union degrades to full-screen.
+        let mut union_rect = protocol::DirtyRect::new(0, 0, 0, 0);
+        let mut coalesced_full_screen = false;
+        let mut got_present = false;
         while present_ch.try_recv(&mut msg) {
             if msg.msg_type == MSG_PRESENT {
-                last_payload = unsafe { msg.payload_as() };
+                let payload: PresentPayload = unsafe { msg.payload_as() };
+                last_payload.buffer_index = payload.buffer_index;
+                got_present = true;
+
+                if payload.rect_count == 0 || payload.rect_count > 6 {
+                    // Full-screen request — union becomes full screen.
+                    coalesced_full_screen = true;
+                } else if !coalesced_full_screen {
+                    // Accumulate bounding box of this message's rects.
+                    let n = payload.rect_count as usize;
+                    let mut i = 0;
+                    while i < n {
+                        union_rect = union_rect.union(payload.rects[i]);
+                        i += 1;
+                    }
+                }
             }
+        }
+
+        // Build the effective rect_count and rects for this coalesced present.
+        if coalesced_full_screen || !got_present {
+            last_payload.rect_count = 0;
+        } else if union_rect.w > 0 && union_rect.h > 0 {
+            last_payload.rect_count = 1;
+            last_payload.rects[0] = union_rect;
+        } else {
+            last_payload.rect_count = 0;
         }
 
         // Compute byte offset into the double-buffer backing memory.
