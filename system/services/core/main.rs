@@ -589,7 +589,7 @@ pub extern "C" fn _start() -> ! {
     let content_h = fb_height;
     // Scene graph in shared memory.
     let scene_buf = unsafe {
-        core::slice::from_raw_parts_mut(config.scene_va as *mut u8, scene::DOUBLE_SCENE_SIZE)
+        core::slice::from_raw_parts_mut(config.scene_va as *mut u8, scene::TRIPLE_SCENE_SIZE)
     };
     let mut scene = scene_state::SceneState::from_buf(scene_buf);
     // Build initial scene.

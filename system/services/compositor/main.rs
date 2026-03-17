@@ -93,7 +93,7 @@ pub extern "C" fn _start() -> ! {
         drawing::Surface { data, width: fb_width, height: fb_height,
             stride: fb_width * 4, format: drawing::PixelFormat::Bgra8888 }
     };
-    let scene_buf = unsafe { core::slice::from_raw_parts(scene_va as *const u8, scene::DOUBLE_SCENE_SIZE) };
+    let scene_buf = unsafe { core::slice::from_raw_parts(scene_va as *const u8, scene::TRIPLE_SCENE_SIZE) };
     let core_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
     let gpu_ch = unsafe { ipc::Channel::from_base(channel_shm_va(2), ipc::PAGE_SIZE, 0) };
 
@@ -102,13 +102,13 @@ pub extern "C" fn _start() -> ! {
     let _ = sys::wait(&[CORE_HANDLE], u64::MAX);
     while core_ch.try_recv(&mut msg) {}
     {
-        let dr = scene::DoubleReader::new(scene_buf);
-        let (gen, nodes) = (dr.front_generation(), dr.front_nodes());
-        let graph = render::scene_render::SceneGraph { nodes, data: dr.front_data_buf() };
+        let tr = scene::TripleReader::new(scene_buf);
+        let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
+        let graph = render::scene_render::SceneGraph { nodes, data: tr.front_data_buf() };
         backend.damage.mark_full_screen();
         backend.render(&graph, &mut make_fb(0));
         backend.finish_frame(nodes, nodes.len() as u16, None);
-        dr.finish_read(gen);
+        tr.finish_read(gen);
     }
     present(&gpu_ch, 0, &[]);
 
@@ -139,16 +139,16 @@ pub extern "C" fn _start() -> ! {
         }
         if !go { continue; }
 
-        let dr = scene::DoubleReader::new(scene_buf);
-        let (gen, nodes) = (dr.front_generation(), dr.front_nodes());
+        let tr = scene::TripleReader::new(scene_buf);
+        let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
         let count = nodes.len() as u16;
-        let action = backend.prepare_frame(nodes, count, dr.change_list(), dr.is_full_repaint());
+        let action = backend.prepare_frame(nodes, count, tr.change_list(), tr.is_full_repaint());
         if action == FrameAction::Skip {
-            dr.finish_read(gen);
+            tr.finish_read(gen);
             sched.on_render_complete();
             continue;
         }
-        let graph = render::scene_render::SceneGraph { nodes, data: dr.front_data_buf() };
+        let graph = render::scene_render::SceneGraph { nodes, data: tr.front_data_buf() };
         let buf = if backend.is_full_repaint() {
             let b = 1 - presented_buf;
             backend.render(&graph, &mut make_fb(b));
@@ -157,12 +157,12 @@ pub extern "C" fn _start() -> ! {
             b
         } else if backend.damage.count > 0 {
             backend.render(&graph, &mut make_fb(presented_buf));
-            backend.finish_frame(nodes, count, dr.change_list());
+            backend.finish_frame(nodes, count, tr.change_list());
             presented_buf
         } else {
-            dr.finish_read(gen); sched.on_render_complete(); continue;
+            tr.finish_read(gen); sched.on_render_complete(); continue;
         };
-        dr.finish_read(gen);
+        tr.finish_read(gen);
         let rects = backend.dirty_rects();
         if !backend.is_full_repaint() && !rects.is_empty() {
             present(&gpu_ch, buf, rects);

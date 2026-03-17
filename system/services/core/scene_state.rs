@@ -1,14 +1,16 @@
-//! Mutable scene graph state backed by a double-buffered shared memory layout.
+//! Mutable scene graph state backed by a triple-buffered shared memory layout.
 //!
-//! Wraps a `DoubleWriter` operating on shared memory. The core process
-//! builds each frame into the back buffer, then `swap()` publishes it.
-//! The compositor reads the front buffer from the same shared memory region.
+//! Wraps a `TripleWriter` operating on shared memory. The core process
+//! acquires a free buffer, builds the scene, then publishes. The compositor
+//! reads the latest published buffer from the same shared memory region.
+//! Mailbox semantics: the writer always has a free buffer (never blocks),
+//! and intermediate frames are silently skipped.
 
 use alloc::vec::Vec;
 
 use scene::{
-    fnv1a, Border, Color, Content, DataRef, DoubleWriter, NodeFlags, ShapedGlyph,
-    DATA_BUFFER_SIZE, DOUBLE_SCENE_SIZE, NULL,
+    fnv1a, Border, Color, Content, DataRef, NodeFlags, ShapedGlyph, TripleWriter,
+    DATA_BUFFER_SIZE, NULL, TRIPLE_SCENE_SIZE,
 };
 
 /// Local layout run type — used for line-breaking before writing to
@@ -48,15 +50,15 @@ pub struct SceneState {
 impl SceneState {
     /// Create from an externally-provided buffer (shared memory).
     pub fn from_buf(buf: &'static mut [u8]) -> Self {
-        assert!(buf.len() >= DOUBLE_SCENE_SIZE);
+        assert!(buf.len() >= TRIPLE_SCENE_SIZE);
 
-        let _ = DoubleWriter::new(buf);
+        let _ = TripleWriter::new(buf);
 
         Self { buf }
     }
 
-    fn double(&mut self) -> DoubleWriter<'_> {
-        DoubleWriter::from_existing(self.buf)
+    fn triple(&mut self) -> TripleWriter<'_> {
+        TripleWriter::from_existing(self.buf)
     }
 
     /// Build the full scene tree for the text editor screen layout.
@@ -128,10 +130,10 @@ impl SceneState {
             (sel_end as usize, sel_start as usize)
         };
         let has_selection = sel_lo < sel_hi;
-        let mut dw = self.double();
+        let mut tw = self.triple();
 
         {
-            let mut w = dw.back();
+            let mut w = tw.acquire();
 
             w.clear();
 
@@ -353,7 +355,7 @@ impl SceneState {
             w.set_root(N_ROOT);
         }
 
-        dw.swap();
+        tw.publish();
     }
 
     // ── Targeted incremental update methods ─────────────────────────
@@ -362,15 +364,12 @@ impl SceneState {
     /// for the glyph data: the old ShapedGlyph array is overwritten via
     /// `update_data` (same length). Only N_CLOCK_TEXT is marked changed.
     pub fn update_clock(&mut self, clock_text: &[u8]) {
-        let mut dw = self.double();
-        if !dw.copy_front_to_back() {
-            return; // Reader still on back buffer — skip update.
-        }
-
+        let mut tw = self.triple();
+        // acquire_copy always succeeds — no fallback needed.
         let mut updated_ok = false;
 
         {
-            let mut w = dw.back();
+            let mut w = tw.acquire_copy();
 
             // Read the clock node's Content::Glyphs to find the glyph DataRef.
             let clock_node = w.node(N_CLOCK_TEXT);
@@ -397,7 +396,7 @@ impl SceneState {
         }
 
         if updated_ok {
-            dw.swap();
+            tw.publish();
         }
     }
 
@@ -413,13 +412,10 @@ impl SceneState {
         scroll_px: i32,
         clock_text: Option<&[u8]>,
     ) {
-        let mut dw = self.double();
-        if !dw.copy_front_to_back() {
-            return;
-        }
+        let mut tw = self.triple();
 
         {
-            let mut w = dw.back();
+            let mut w = tw.acquire_copy();
 
             let (cursor_line, cursor_col) =
                 byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
@@ -437,7 +433,7 @@ impl SceneState {
             }
         }
 
-        dw.swap();
+        tw.publish();
     }
 
     /// Update cursor position and selection rects.
@@ -456,13 +452,10 @@ impl SceneState {
         scroll_px: i32,
         clock_text: Option<&[u8]>,
     ) {
-        let mut dw = self.double();
-        if !dw.copy_front_to_back() {
-            return;
-        }
+        let mut tw = self.triple();
 
         {
-            let mut w = dw.back();
+            let mut w = tw.acquire_copy();
 
             // Count per-line Glyphs children under N_DOC_TEXT (stop at
             // N_CURSOR). These must be preserved — only selection rects
@@ -516,7 +509,7 @@ impl SceneState {
             }
         }
 
-        dw.swap();
+        tw.publish();
     }
 
     /// Update document content (line nodes + cursor + selection).
@@ -564,13 +557,10 @@ impl SceneState {
         let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
         let scroll_px = scroll_lines as i32 * line_height as i32;
 
-        let mut dw = self.double();
-        if !dw.copy_front_to_back() {
-            return;
-        }
+        let mut tw = self.triple();
 
         {
-            let mut w = dw.back();
+            let mut w = tw.acquire_copy();
 
             // Remove old dynamic nodes (line nodes + selection rects).
             w.set_node_count(WELL_KNOWN_COUNT);
@@ -715,7 +705,7 @@ impl SceneState {
             }
         }
 
-        dw.swap();
+        tw.publish();
     }
 }
 

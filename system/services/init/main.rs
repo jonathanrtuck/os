@@ -378,7 +378,7 @@ fn setup_display_pipeline(
     // Allocate scene graph shared memory (double-buffered).
     // Core writes, compositor reads.
     // -----------------------------------------------------------------------
-    let scene_size = scene::DOUBLE_SCENE_SIZE;
+    let scene_size = scene::TRIPLE_SCENE_SIZE;
     let scene_pages_needed = (scene_size + 4095) / 4096;
     let scene_order = (scene_pages_needed.next_power_of_two().trailing_zeros()) as u32;
     let scene_alloc_bytes = (1usize << scene_order) * 4096;
