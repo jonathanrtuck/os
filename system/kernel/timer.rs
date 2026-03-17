@@ -2,18 +2,26 @@
 // Findings: (1) timer::create() used wrapping addition for deadline computation;
 // if `now + delta` overflowed u64, the timer would fire immediately instead of
 // far in the future — fixed with saturating_add. (2) nomem correctly omitted
-// from CNTP_TVAL, CNTP_CTL, CNTPCT, DAIFCLR writes (all have side effects).
+// from CNTV_TVAL, CNTV_CTL, CNTVCT, DAIFCLR writes (all have side effects).
 // (3) nomem correctly present on CNTFRQ read (immutable firmware value).
 // (4) counter_to_ns uses u128 intermediate — no overflow. (5) Two-phase wake
 // in check_expired maintains lock ordering (timer → scheduler). (6) SAFETY
 // comments added to all 5 blocks.
 //
-//! ARM generic timer (EL1 physical) and userspace timer objects.
+// HVF compatibility (2026-03-17): switched from physical timer (CNTP_*) to
+// virtual timer (CNTV_*). Under HVF (Apple Hypervisor.framework), the physical
+// timer is managed by the hypervisor for VM scheduling. Guest access to
+// CNTP_TVAL_EL0 / CNTP_CTL_EL0 traps with EC=0 (uncategorized). The virtual
+// timer is the standard guest timer for both bare-metal and HVF. CNTVOFF_EL2
+// is set to 0 by both our boot.S (bare-metal) and QEMU HVF, so CNTVCT_EL0
+// equals CNTPCT_EL0. Virtual timer PPI = IRQ 27 (vs physical PPI = IRQ 30).
+//
+//! ARM generic timer (EL1 virtual) and userspace timer objects.
 //!
 //! Two concerns in one module:
 //!
 //! 1. **Hardware timer** — tickless (next-event programming). Each core
-//!    programs CNTP_TVAL to fire at the earliest deadline across: timer
+//!    programs CNTV_TVAL_EL0 to fire at the earliest deadline across: timer
 //!    objects, scheduler quantum expiry, and scheduling context replenishment.
 //!    Cores with no deadlines enter WFI and wake only on IPI or device IRQ.
 //!
@@ -38,8 +46,9 @@ use super::{
 /// Maximum concurrent timer objects across all processes.
 const MAX_TIMERS: usize = 32;
 
-/// Physical timer PPI interrupt ID.
-pub const IRQ_ID: u32 = 30;
+/// Virtual timer PPI interrupt ID (27). Physical timer PPI (30) is reserved
+/// by the hypervisor under HVF.
+pub const IRQ_ID: u32 = 27;
 
 static CNTFRQ: AtomicU64 = AtomicU64::new(0);
 /// Cached earliest timer deadline in counter ticks. Updated on timer create,
@@ -108,20 +117,17 @@ fn earliest_timer_deadline() -> Option<u64> {
     }
 }
 
-/// Program CNTP_TVAL_EL0 with the given number of counter ticks.
+/// Program CNTV_TVAL_EL0 with the given number of counter ticks.
 ///
 /// Writing TVAL also clears the timer condition (de-asserts the interrupt).
 fn program_tval(tval: u64) {
-    // SAFETY: Writing CNTP_TVAL_EL0 reprograms the timer countdown and
-    // de-asserts the interrupt line — a hardware side effect. The ISB
-    // ensures the new countdown is committed before returning. `nomem` is
-    // intentionally omitted: the write has observable side effects that
-    // LLVM must not reorder past surrounding memory operations (e.g.
-    // check_expired's timer table reads). `nostack` is correct — MSR and
-    // ISB do not touch the stack. `tval` is passed via in(reg).
+    // SAFETY: Writing CNTV_TVAL_EL0 reprograms the virtual timer countdown
+    // and de-asserts the interrupt line. ISB ensures the new countdown is
+    // committed before returning. `nomem` intentionally omitted (side effects).
+    // `nostack` correct.
     unsafe {
         core::arch::asm!(
-            "msr cntp_tval_el0, {tval}",
+            "msr cntv_tval_el0, {tval}",
             "isb",
             tval = in(reg) tval,
             options(nostack)
@@ -229,17 +235,18 @@ pub fn check_expired() {
 pub fn check_fired(id: TimerId) -> bool {
     TIMERS.lock().waiters.check_ready(id)
 }
-/// Read the hardware counter (CNTPCT_EL0). Monotonic, sub-tick precision.
+/// Read the hardware counter (CNTVCT_EL0). Monotonic, sub-tick precision.
+///
+/// Uses the virtual counter, which equals the physical counter when
+/// CNTVOFF_EL2 = 0 (set by boot.S and QEMU HVF).
 pub fn counter() -> u64 {
     let cnt: u64;
 
-    // SAFETY: Reading CNTPCT_EL0 (physical counter). The counter is
-    // monotonically increasing hardware state. `nomem` is intentionally
-    // omitted so LLVM cannot CSE or hoist repeated reads, which would
-    // return stale values. `nostack` is correct — MRS does not touch the
-    // stack. The result is written to `cnt` via out(reg).
+    // SAFETY: Reading CNTVCT_EL0 (virtual counter). Monotonically
+    // increasing hardware state. `nomem` intentionally omitted so LLVM
+    // cannot CSE or hoist repeated reads. `nostack` correct.
     unsafe {
-        core::arch::asm!("mrs {0}, cntpct_el0", out(reg) cnt, options(nostack));
+        core::arch::asm!("mrs {0}, cntvct_el0", out(reg) cnt, options(nostack));
     }
 
     cnt
@@ -390,16 +397,13 @@ pub fn init() {
     // The first schedule_inner call will reprogram with the actual deadline.
     program_tval(u32::MAX as u64);
 
-    // SAFETY: Writing CNTP_CTL_EL0 with ENABLE=1, IMASK=0 starts generating
-    // timer IRQs — a hardware side effect. `nomem` is intentionally omitted
-    // because enabling the timer has observable effects that LLVM must not
-    // reorder past the preceding program_tval() call. `nostack` is correct —
-    // MOV and MSR do not touch the stack. x0 is clobbered and declared via
-    // out("x0").
+    // SAFETY: Writing CNTV_CTL_EL0 with ENABLE=1, IMASK=0 starts generating
+    // virtual timer IRQs. `nomem` intentionally omitted (side effects).
+    // `nostack` correct.
     unsafe {
         core::arch::asm!(
             "mov x0, #1",
-            "msr cntp_ctl_el0, x0",       // ENABLE=1, IMASK=0
+            "msr cntv_ctl_el0, x0",       // ENABLE=1, IMASK=0
             out("x0") _,
             options(nostack)
         );
