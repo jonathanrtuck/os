@@ -549,10 +549,8 @@ fn scale_pointer_coord(coord: u32, max_pixels: u32) -> u32 {
 
 /// Heap-allocate a zeroed GlyphCache without touching the stack.
 ///
-/// GlyphCache is ~1.3 MB with OVERSAMPLE_X=6, which overflows test thread
-/// stacks if allocated via `Box::new(GlyphCache::zeroed())` (the value is
-/// constructed on stack before moving to heap). This uses `Box::new_uninit`
-/// + zero-fill to avoid that.
+/// GlyphCache is ~238 KiB with grayscale rendering. Uses `alloc_zeroed`
+/// to avoid constructing the value on stack before moving to heap.
 fn heap_glyph_cache() -> Box<fonts::cache::GlyphCache> {
     unsafe {
         let layout = std::alloc::Layout::new::<fonts::cache::GlyphCache>();
@@ -1765,14 +1763,14 @@ fn draw_coverage_basic() {
     let mut dst = make_surface(&mut dst_buf, 8, 8);
     dst.clear(Color::BLACK);
 
-    // 2x2 coverage map with varying coverage (3-channel: RGB per pixel).
-    // Pixel (0,0): full coverage on all channels.
-    // Pixel (1,0): half coverage on all channels.
-    // Pixel (0,1): quarter coverage on all channels.
-    // Pixel (1,1): zero coverage on all channels.
+    // 2x2 coverage map (1 byte per pixel, grayscale).
+    // Pixel (0,0): full coverage.
+    // Pixel (1,0): half coverage.
+    // Pixel (0,1): quarter coverage.
+    // Pixel (1,1): zero coverage.
     let coverage = [
-        255, 255, 255, 128, 128, 128, // row 0: full, half
-        64, 64, 64, 0, 0, 0, // row 1: quarter, zero
+        255, 128, // row 0: full, half
+        64, 0, // row 1: quarter, zero
     ];
     dst.draw_coverage(2, 2, &coverage, 2, 2, Color::WHITE);
 
@@ -1800,8 +1798,8 @@ fn draw_coverage_negative_coords_clip() {
     let mut dst = make_surface(&mut dst_buf, 8, 8);
 
     // Place at negative coords — should clip without panic.
-    // 2x2 coverage, 3-channel (RGB). All full coverage.
-    let coverage = [255u8; 12]; // 2*2*3 = 12 bytes
+    // 2x2 coverage, 1 byte per pixel (grayscale). All full coverage.
+    let coverage = [255u8; 4]; // 2*2 = 4 bytes
     dst.draw_coverage(-1, -1, &coverage, 2, 2, Color::WHITE);
 
     // (0, 0) should be drawn (it's at local (1, 1) of the coverage map).
@@ -1815,8 +1813,8 @@ fn draw_coverage_colored() {
     let mut dst = make_surface(&mut dst_buf, 8, 8);
     dst.clear(Color::BLACK);
 
-    // 1x1 pixel, 3-channel (RGB) coverage, all channels full.
-    let coverage = [255u8, 255, 255];
+    // 1x1 pixel, grayscale coverage, full coverage.
+    let coverage = [255u8];
     dst.draw_coverage(0, 0, &coverage, 1, 1, Color::rgb(255, 0, 0));
 
     let p = dst.get_pixel(0, 0).unwrap();
@@ -2140,8 +2138,8 @@ fn gamma_blend_zero_coverage_unchanged() {
     // Read the original pixel value.
     let orig = dst.get_pixel(0, 0).unwrap();
 
-    // Draw with zero coverage (3-channel: 2x2 pixels * 3 = 12 bytes).
-    let coverage = [0u8; 12];
+    // Draw with zero coverage (1 byte per pixel: 2x2 pixels = 4 bytes).
+    let coverage = [0u8; 4];
     dst.draw_coverage(0, 0, &coverage, 2, 2, Color::WHITE);
 
     // Pixel must be identical.
@@ -2156,8 +2154,8 @@ fn gamma_blend_full_coverage_replaces() {
     let mut dst = make_surface(&mut dst_buf, 4, 4);
     dst.clear(Color::rgb(0, 0, 255));
 
-    // 1x1 pixel, 3-channel (RGB), all full coverage.
-    let coverage = [255u8, 255, 255];
+    // 1x1 pixel, grayscale, full coverage.
+    let coverage = [255u8];
     dst.draw_coverage(0, 0, &coverage, 1, 1, Color::rgb(255, 0, 0));
 
     let p = dst.get_pixel(0, 0).unwrap();
@@ -2175,8 +2173,8 @@ fn gamma_blend_half_coverage_heavier_than_linear() {
     let mut dst = make_surface(&mut dst_buf, 4, 4);
     dst.clear(Color::BLACK);
 
-    // 1x1 pixel, 3-channel (RGB), all channels at 50% coverage.
-    let coverage = [128u8, 128, 128]; // ~50% coverage
+    // 1x1 pixel, grayscale, 50% coverage.
+    let coverage = [128u8]; // ~50% coverage
     dst.draw_coverage(0, 0, &coverage, 1, 1, Color::WHITE);
 
     let p = dst.get_pixel(0, 0).unwrap();
@@ -2230,8 +2228,8 @@ fn gamma_draw_coverage_uses_gamma_correction() {
     let mut dst = make_surface(&mut dst_buf, 4, 4);
     dst.clear(Color::BLACK);
 
-    // 1x1 pixel, 3-channel (RGB), all at 50% coverage.
-    let coverage = [128u8, 128, 128];
+    // 1x1 pixel, grayscale, 50% coverage.
+    let coverage = [128u8];
     dst.draw_coverage(0, 0, &coverage, 1, 1, Color::WHITE);
 
     let p = dst.get_pixel(0, 0).unwrap();
@@ -2247,19 +2245,10 @@ fn gamma_draw_coverage_uses_gamma_correction() {
 }
 
 // ---------------------------------------------------------------------------
-// 2D oversampling tests
+// Vertical oversampling tests (grayscale anti-aliasing)
 // ---------------------------------------------------------------------------
 
-use fonts::rasterize::{OVERSAMPLE_X, OVERSAMPLE_Y};
-
-#[test]
-fn oversample_x_is_at_least_2() {
-    assert!(
-        OVERSAMPLE_X >= 2,
-        "OVERSAMPLE_X should be >= 2 for horizontal oversampling, got {}",
-        OVERSAMPLE_X,
-    );
-}
+use fonts::rasterize::OVERSAMPLE_Y;
 
 #[test]
 fn oversample_y_is_at_least_4() {
@@ -2271,10 +2260,10 @@ fn oversample_y_is_at_least_4() {
 }
 
 #[test]
-fn oversampled_rasterize_produces_intermediate_coverage() {
-    // Diagonal strokes should have intermediate coverage values (not just 0/255)
-    // in the horizontal direction. 'k' has diagonal strokes.
-    
+fn grayscale_rasterize_produces_intermediate_coverage() {
+    // Diagonal strokes should have intermediate coverage values (not just 0/255).
+    // 'k' has diagonal strokes.
+
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -2286,9 +2275,8 @@ fn oversampled_rasterize_produces_intermediate_coverage() {
     let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
 
-    // Check that there are intermediate coverage values (not just 0 and 255)
-    // along the edges. With subpixel rendering, output is 3 bytes per pixel.
-    let total = (metrics.width * metrics.height * 3) as usize;
+    // Output is 1 byte per pixel (grayscale).
+    let total = (metrics.width * metrics.height) as usize;
     let coverage = &buf[..total];
 
     let intermediate_count = coverage.iter().filter(|&&c| c > 0 && c < 255).count();
@@ -2299,10 +2287,9 @@ fn oversampled_rasterize_produces_intermediate_coverage() {
 }
 
 #[test]
-fn oversampled_diagonal_has_horizontal_gradients() {
-    // With horizontal oversampling + subpixel rendering, diagonal strokes
-    // should show smooth horizontal transitions. Check 'x' which has diagonals.
-    
+fn grayscale_diagonal_has_smooth_transitions() {
+    // Diagonal strokes should show smooth transitions. Check 'x' which has diagonals.
+
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -2313,28 +2300,28 @@ fn oversampled_diagonal_has_horizontal_gradients() {
 
     let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'x').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
-    // Output is 3 bytes per pixel (RGB subpixel coverage).
-    let total = (w * metrics.height * 3) as usize;
+    // Output is 1 byte per pixel (grayscale).
+    let total = (w * metrics.height) as usize;
     let coverage = &buf[..total];
 
     // Find a row in the middle of the glyph (where diagonals cross).
     let mid_row = metrics.height / 2;
-    let row_start = (mid_row * w * 3) as usize;
-    let row_end = row_start + (w * 3) as usize;
+    let row_start = (mid_row * w) as usize;
+    let row_end = row_start + w as usize;
     let row = &coverage[row_start..row_end];
 
     // The middle row should have some intermediate values along edges.
     let has_intermediate = row.iter().any(|&c| c > 10 && c < 245);
     assert!(
         has_intermediate,
-        "'x' mid-row should have intermediate coverage from horizontal oversampling",
+        "'x' mid-row should have intermediate coverage from vertical oversampling",
     );
 }
 
 #[test]
-fn oversampled_curve_has_smooth_edges() {
-    // Curved characters like 'o' should have smooth edges with subpixel rendering.
-    
+fn grayscale_curve_has_smooth_edges() {
+    // Curved characters like 'o' should have smooth edges with grayscale AA.
+
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -2345,8 +2332,8 @@ fn oversampled_curve_has_smooth_edges() {
 
     let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'o').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
-    // Output is 3 bytes per pixel (RGB subpixel coverage).
-    let total = (w * metrics.height * 3) as usize;
+    // Output is 1 byte per pixel (grayscale).
+    let total = (w * metrics.height) as usize;
     let coverage = &buf[..total];
 
     // Count distinct non-zero coverage levels (more levels = smoother).
@@ -2358,8 +2345,8 @@ fn oversampled_curve_has_smooth_edges() {
     }
     let distinct_levels = levels.iter().filter(|&&v| v).count();
 
-    // With 6× horizontal oversampling (OVERSAMPLE_X*OVERSAMPLE_Y = 24
-    // samples per channel), we expect more than 4 distinct levels at minimum.
+    // With OVERSAMPLE_Y=8 vertical oversampling, we expect
+    // more than 4 distinct levels at minimum.
     assert!(
         distinct_levels >= 4,
         "'o' should have at least 4 distinct non-zero coverage levels, got {}",
@@ -2368,10 +2355,9 @@ fn oversampled_curve_has_smooth_edges() {
 }
 
 #[test]
-fn oversampled_all_printable_ascii_still_rasterize() {
-    // All printable ASCII should still rasterize successfully after adding
-    // horizontal oversampling.
-    
+fn grayscale_all_printable_ascii_still_rasterize() {
+    // All printable ASCII should rasterize successfully with grayscale AA.
+
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
 
@@ -2389,7 +2375,7 @@ fn oversampled_all_printable_ascii_still_rasterize() {
         let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, gid, 24, &mut raster, &mut scratch);
         assert!(
             metrics.is_some(),
-            "oversampled: should rasterize '{}' (0x{:02x}) at 24px",
+            "grayscale: should rasterize '{}' (0x{:02x}) at 24px",
             ch,
             c,
         );
@@ -2397,10 +2383,9 @@ fn oversampled_all_printable_ascii_still_rasterize() {
 }
 
 #[test]
-fn oversampled_glyph_cache_populated() {
-    // GlyphCache should still populate correctly with subpixel rendering.
-    
-    // Heap-allocate: GlyphCache is ~1.3 MB with OVERSAMPLE_X=6 (too big for stack).
+fn grayscale_glyph_cache_populated() {
+    // GlyphCache should populate correctly with grayscale rendering.
+
     let mut cache = heap_glyph_cache();
 
     cache.populate(SOURCE_CODE_PRO, 16);
@@ -2412,11 +2397,11 @@ fn oversampled_glyph_cache_populated() {
         "'A' should have non-zero cached dimensions"
     );
     assert!(cov_a.len() > 0, "'A' coverage should be non-empty");
-    // Coverage length should be 3× (width * height) for RGB subpixel.
+    // Coverage length should be width * height (1 byte per pixel grayscale).
     assert_eq!(
         cov_a.len(),
-        (g_a.width * g_a.height * 3) as usize,
-        "'A' coverage should be 3 bytes per pixel (RGB subpixel)"
+        (g_a.width * g_a.height) as usize,
+        "'A' coverage should be 1 byte per pixel (grayscale)"
     );
 
     let (g_k, cov_k) = cache.get(b'k' as u16).unwrap();
@@ -2431,23 +2416,13 @@ fn oversampled_glyph_cache_populated() {
 }
 
 // ---------------------------------------------------------------------------
-// Subpixel rendering tests
+// Grayscale coverage tests (replaced subpixel tests)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn subpixel_oversample_x_is_6() {
-    // OVERSAMPLE_X must be 6 for subpixel rendering (3 sub-pixels × 2× each).
-    assert_eq!(
-        OVERSAMPLE_X, 6,
-        "OVERSAMPLE_X must be 6 for subpixel rendering, got {}",
-        OVERSAMPLE_X,
-    );
-}
+fn grayscale_rasterizer_output_is_1_byte_per_pixel() {
+    // Rasterized glyph coverage should be 1 byte per pixel (grayscale).
 
-#[test]
-fn subpixel_coverage_has_3_channels() {
-    // Rasterized glyph coverage should be 3 bytes per pixel (R, G, B).
-    
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -2459,66 +2434,21 @@ fn subpixel_coverage_has_3_channels() {
     let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'H').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
 
-    // Total output bytes should be width * height * 3.
-    let expected_bytes = (metrics.width * metrics.height * 3) as usize;
+    // Total output bytes should be width * height (1 byte per pixel).
+    let expected_bytes = (metrics.width * metrics.height) as usize;
 
     // Verify the data region is valid (non-zero coverage exists).
     let coverage = &buf[..expected_bytes];
     let has_nonzero = coverage.iter().any(|&c| c > 0);
     assert!(
         has_nonzero,
-        "'H' subpixel coverage should have non-zero values"
+        "'H' grayscale coverage should have non-zero values"
     );
 }
 
 #[test]
-fn subpixel_rgb_channels_differ_at_edges() {
-    // When GREYSCALE_AA is true, all RGB channels are equal (no color fringing).
-    // When false, R/G/B differ at glyph edges (subpixel rendering signature).
-
-    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-    let mut raster = fonts::rasterize::RasterBuffer {
-        data: &mut buf,
-        width: 128,
-        height: 128,
-    };
-
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
-    let w = metrics.width;
-    let h = metrics.height;
-    let total = (w * h * 3) as usize;
-    let coverage = &buf[..total];
-
-    let mut rgb_differ_count = 0;
-    for pixel in 0..(w * h) as usize {
-        let r = coverage[pixel * 3];
-        let g = coverage[pixel * 3 + 1];
-        let b = coverage[pixel * 3 + 2];
-        if (r > 0 || g > 0 || b > 0) && (r < 255 || g < 255 || b < 255) {
-            if r != g || g != b {
-                rgb_differ_count += 1;
-            }
-        }
-    }
-
-    if fonts::rasterize::GREYSCALE_AA {
-        assert_eq!(
-            rgb_differ_count, 0,
-            "greyscale AA mode: all RGB channels should be equal"
-        );
-    } else {
-        assert!(
-            rgb_differ_count > 0,
-            "subpixel mode: should produce pixels where R != G != B at edges"
-        );
-    }
-}
-
-#[test]
-fn subpixel_monospace_cache_has_3_channel_coverage() {
-    // Cache always produces 3-channel data (RGB), regardless of greyscale mode.
-    // In greyscale mode, all 3 channels are equal; in subpixel mode, they differ.
+fn grayscale_monospace_cache_has_1_byte_per_pixel() {
+    // Cache produces 1-byte-per-pixel grayscale coverage.
 
     let mut cache = heap_glyph_cache();
     cache.populate(SOURCE_CODE_PRO, 16);
@@ -2526,8 +2456,8 @@ fn subpixel_monospace_cache_has_3_channel_coverage() {
     let (g, cov) = cache.get(b'A' as u16).unwrap();
     assert_eq!(
         cov.len(),
-        (g.width * g.height * 3) as usize,
-        "monospace cache: coverage should be 3 bytes per pixel"
+        (g.width * g.height) as usize,
+        "monospace cache: coverage should be 1 byte per pixel (grayscale)"
     );
 
     // Verify non-zero coverage exists.
@@ -2538,17 +2468,17 @@ fn subpixel_monospace_cache_has_3_channel_coverage() {
 }
 
 #[test]
-fn subpixel_proportional_cache_has_3_channel_coverage() {
-    // The proportional (Nunito Sans) cache should produce 3-channel data.
-    
+fn grayscale_proportional_cache_has_1_byte_per_pixel() {
+    // The proportional cache should produce 1-byte-per-pixel data.
+
     let mut cache = heap_glyph_cache();
     cache.populate(SOURCE_CODE_PRO, 16);
 
     let (g, cov) = cache.get(b'A' as u16).unwrap();
     assert_eq!(
         cov.len(),
-        (g.width * g.height * 3) as usize,
-        "proportional cache: coverage should be 3 bytes per pixel"
+        (g.width * g.height) as usize,
+        "proportional cache: coverage should be 1 byte per pixel (grayscale)"
     );
 
     // Verify non-zero coverage exists.
@@ -2559,75 +2489,26 @@ fn subpixel_proportional_cache_has_3_channel_coverage() {
 }
 
 #[test]
-fn subpixel_draw_coverage_rgb_per_channel_blend() {
-    // Verify that draw_coverage with different R, G, B coverage values
-    // produces per-channel blending (R, G, B of output differ).
+fn grayscale_draw_coverage_uniform_rgb() {
+    // Verify that draw_coverage with grayscale coverage applies the
+    // single coverage value uniformly to R, G, B (no color fringing).
     let mut dst_buf = [0u8; 8 * 8 * 4];
     let mut dst = make_surface(&mut dst_buf, 8, 8);
     dst.clear(Color::BLACK);
 
-    // 1x1 pixel: R=255 (full), G=128 (half), B=0 (zero).
-    let coverage = [255u8, 128, 0];
+    // 1x1 pixel: coverage=128 (half).
+    let coverage = [128u8];
     dst.draw_coverage(0, 0, &coverage, 1, 1, Color::WHITE);
 
     let p = dst.get_pixel(0, 0).unwrap();
-    // R channel: full coverage of white on black → white.
-    assert_eq!(p.r, 255, "R channel with full coverage should be 255");
-    // G channel: half coverage → intermediate (gamma-correct, so > 128).
+    // All channels should be equal (uniform grayscale blend).
+    assert_eq!(p.r, p.g, "R ({}) should equal G ({})", p.r, p.g);
+    assert_eq!(p.r, p.b, "R ({}) should equal B ({})", p.r, p.b);
+    // Half coverage should produce intermediate value.
     assert!(
-        p.g > 128 && p.g < 255,
-        "G channel with half coverage should be intermediate, got {}",
-        p.g
-    );
-    // B channel: zero coverage → unchanged (black).
-    assert_eq!(p.b, 0, "B channel with zero coverage should be 0");
-}
-
-#[test]
-fn subpixel_fir_filter_reduces_fringing() {
-    // The FIR filter should smooth the transition between channels.
-    // Rasterize a vertical stroke ('l') and check that the filtered
-    // coverage has smoother channel transitions than raw subpixel data.
-    
-    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
-    let mut buf = [0u8; 128 * 128];
-    let mut raster = fonts::rasterize::RasterBuffer {
-        data: &mut buf,
-        width: 128,
-        height: 128,
-    };
-
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
-    let w = metrics.width;
-    let h = metrics.height;
-    let total = (w * h * 3) as usize;
-    let coverage = &buf[..total];
-
-    // At edge pixels, the maximum difference between any two channels
-    // should be limited by the FIR filter. Count high-contrast transitions.
-    let mut max_channel_diff = 0u8;
-    for pixel in 0..(w * h) as usize {
-        let r = coverage[pixel * 3];
-        let g = coverage[pixel * 3 + 1];
-        let b = coverage[pixel * 3 + 2];
-        let diff_rg = if r > g { r - g } else { g - r };
-        let diff_gb = if g > b { g - b } else { b - g };
-        let diff_rb = if r > b { r - b } else { b - r };
-        let max_d = if diff_rg > diff_gb { diff_rg } else { diff_gb };
-        let max_d = if diff_rb > max_d { diff_rb } else { max_d };
-        if max_d > max_channel_diff {
-            max_channel_diff = max_d;
-        }
-    }
-
-    // The FIR filter should keep max channel difference < 255
-    // (i.e., we never have R=255,B=0 — the filter smooths that).
-    // With a [1/4, 1/2, 1/4] filter, the max difference should be
-    // significantly less than 255 for most glyphs.
-    assert!(
-        max_channel_diff < 200,
-        "FIR filter should reduce channel difference below 200, got {}",
-        max_channel_diff,
+        p.r > 128 && p.r < 255,
+        "half coverage should produce intermediate value, got {}",
+        p.r
     );
 }
 
@@ -2711,7 +2592,7 @@ fn stem_darkening_applied_to_rasterized_glyph() {
     let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 16 as u16, &mut raster, &mut scratch).unwrap();
     let w = metrics.width;
     let h = metrics.height;
-    let total = (w * h * 3) as usize;
+    let total = (w * h) as usize; // 1 byte per pixel (grayscale)
     let coverage = &buf[..total];
 
     // Count coverage values that are in the boosted range (30-200).
@@ -2729,13 +2610,9 @@ fn stem_darkening_applied_to_rasterized_glyph() {
 }
 
 #[test]
-fn stem_darkening_all_three_channels_equally() {
-    // For a fully symmetric glyph rendered at the center of a pixel,
-    // all 3 channels should be darkened equally. We check that the LUT
-    // applies the same transformation to each channel.
-    //
-    // Since the LUT is a single table applied identically to R, G, B,
-    // verify the formula: darkened = cov + BOOST * (255 - cov) / 255.
+fn stem_darkening_lut_matches_formula() {
+    // The LUT is applied per grayscale byte.
+    // Verify the formula: darkened = cov + BOOST * (255 - cov) / 255.
     // Special case: LUT[0] = 0 (no phantom pixels).
     let boost = STEM_DARKENING_BOOST as u32;
     assert_eq!(STEM_DARKENING_LUT[0], 0, "LUT[0] must be 0");
@@ -5750,9 +5627,9 @@ fn test_draw_coverage_large_negative_y() {
 
     let cov_w = 4u32;
     let cov_h = 520u32;
-    let mut coverage = vec![0u8; (cov_w * cov_h * 3) as usize];
+    let mut coverage = vec![0u8; (cov_w * cov_h) as usize];
 
-    // Set full white coverage on all pixels of the coverage buffer.
+    // Set full coverage on all pixels of the coverage buffer.
     for i in 0..coverage.len() {
         coverage[i] = 255;
     }
@@ -5789,7 +5666,7 @@ fn test_draw_coverage_large_negative_x() {
 
     let cov_w = 520u32;
     let cov_h = 4u32;
-    let mut coverage = vec![0u8; (cov_w * cov_h * 3) as usize];
+    let mut coverage = vec![0u8; (cov_w * cov_h) as usize];
 
     for i in 0..coverage.len() {
         coverage[i] = 255;
@@ -5810,7 +5687,7 @@ fn test_draw_coverage_large_negative_x() {
 /// draw_coverage entirely off-screen should not modify any pixels.
 #[test]
 fn test_draw_coverage_fully_outside() {
-    let coverage = [255u8; 2 * 2 * 3]; // 2x2, full coverage
+    let coverage = [255u8; 2 * 2]; // 2x2, full coverage (1 byte per pixel)
 
     // Entirely to the left.
     {
@@ -5852,8 +5729,8 @@ fn test_draw_coverage_fully_outside() {
 /// draw_coverage with a single pixel at various positions.
 #[test]
 fn test_draw_coverage_single_pixel() {
-    // 1x1 coverage, full white.
-    let coverage = [255u8, 255, 255];
+    // 1x1 coverage, full coverage (1 byte per pixel).
+    let coverage = [255u8];
 
     // At origin.
     let mut buf = [0u8; 4 * 4 * 4];
@@ -5906,6 +5783,7 @@ fn test_draw_coverage_zero_size() {
 
 /// Reference (safe) implementation of draw_coverage for comparison.
 /// Uses the same div255 + pre-clip algorithm but safe pixel access.
+/// Coverage is 1 byte per pixel (grayscale).
 fn draw_coverage_reference(
     surf: &mut Surface,
     x: i32,
@@ -5918,7 +5796,7 @@ fn draw_coverage_reference(
     if cov_width == 0 || cov_height == 0 || color.a == 0 {
         return;
     }
-    let cov_total = (cov_width as usize) * (cov_height as usize) * 3;
+    let cov_total = (cov_width as usize) * (cov_height as usize);
     if coverage.len() < cov_total {
         return;
     }
@@ -5929,11 +5807,8 @@ fn draw_coverage_reference(
 
     for row in 0..cov_height {
         for col in 0..cov_width {
-            let base = ((row * cov_width + col) * 3) as usize;
-            let cov_r = coverage[base];
-            let cov_g = coverage[base + 1];
-            let cov_b = coverage[base + 2];
-            if cov_r == 0 && cov_g == 0 && cov_b == 0 {
+            let cov = coverage[(row * cov_width + col) as usize];
+            if cov == 0 {
                 continue;
             }
             let px = x + col as i32;
@@ -5943,10 +5818,8 @@ fn draw_coverage_reference(
             }
             let ux = px as u32;
             let uy = py as u32;
-            let alpha_r = div255(color_a * cov_r as u32 + 127);
-            let alpha_g = div255(color_a * cov_g as u32 + 127);
-            let alpha_b = div255(color_a * cov_b as u32 + 127);
-            if alpha_r >= 255 && alpha_g >= 255 && alpha_b >= 255 {
+            let alpha = div255(color_a * cov as u32 + 127);
+            if alpha >= 255 {
                 surf.set_pixel(ux, uy, color);
                 continue;
             }
@@ -5954,22 +5827,14 @@ fn draw_coverage_reference(
                 let dst_r_lin = drawing::SRGB_TO_LINEAR[dst.r as usize] as u32;
                 let dst_g_lin = drawing::SRGB_TO_LINEAR[dst.g as usize] as u32;
                 let dst_b_lin = drawing::SRGB_TO_LINEAR[dst.b as usize] as u32;
-                let inv_r = 255 - alpha_r;
-                let inv_g = 255 - alpha_g;
-                let inv_b = 255 - alpha_b;
-                let out_r_lin = div255(dst_r_lin * inv_r + src_r_lin * alpha_r + 127);
-                let out_g_lin = div255(dst_g_lin * inv_g + src_g_lin * alpha_g + 127);
-                let out_b_lin = div255(dst_b_lin * inv_b + src_b_lin * alpha_b + 127);
+                let inv_a = 255 - alpha;
+                let out_r_lin = div255(dst_r_lin * inv_a + src_r_lin * alpha + 127);
+                let out_g_lin = div255(dst_g_lin * inv_a + src_g_lin * alpha + 127);
+                let out_b_lin = div255(dst_b_lin * inv_a + src_b_lin * alpha + 127);
                 let out_r = drawing::LINEAR_TO_SRGB[drawing::linear_to_idx(out_r_lin)];
                 let out_g = drawing::LINEAR_TO_SRGB[drawing::linear_to_idx(out_g_lin)];
                 let out_b = drawing::LINEAR_TO_SRGB[drawing::linear_to_idx(out_b_lin)];
-                let max_alpha = if alpha_r > alpha_g { alpha_r } else { alpha_g };
-                let max_alpha = if alpha_b > max_alpha {
-                    alpha_b
-                } else {
-                    max_alpha
-                };
-                let out_a = dst.a as u32 + div255(max_alpha * (255 - dst.a as u32));
+                let out_a = dst.a as u32 + div255(alpha * (255 - dst.a as u32));
                 surf.set_pixel(
                     ux,
                     uy,
@@ -6000,7 +5865,7 @@ fn test_draw_coverage_unsafe_vs_reference() {
     ];
 
     for &(x, y, cw, ch) in test_cases {
-        let cov_len = (cw * ch * 3) as usize;
+        let cov_len = (cw * ch) as usize; // 1 byte per pixel
         let mut coverage = vec![0u8; cov_len];
         // Varying coverage values.
         for i in 0..cov_len {

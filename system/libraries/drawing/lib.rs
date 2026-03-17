@@ -384,19 +384,16 @@ impl<'a> Surface<'a> {
     pub fn clear(&mut self, color: Color) {
         self.fill_rect(0, 0, self.width, self.height, color);
     }
-    /// Draw a 3-channel subpixel coverage map (anti-aliased glyph) at
-    /// position (x, y) in the given color. The coverage data has 3 bytes
-    /// per pixel (R, G, B coverage), stored row-major:
-    /// `coverage[(row * cov_width + col) * 3 + channel]` where channel
-    /// 0=R, 1=G, 2=B.
+    /// Draw a 1-byte-per-pixel grayscale coverage map (anti-aliased glyph)
+    /// at position (x, y) in the given color. The coverage data has 1 byte
+    /// per pixel, stored row-major: `coverage[row * cov_width + col]`.
     ///
-    /// Each channel's coverage independently modulates the corresponding
-    /// color channel's alpha, enabling LCD subpixel rendering (RGB sub-pixel
-    /// order). This produces crisper text than greyscale antialiasing by
-    /// exploiting the separate R, G, B sub-pixels of LCD displays.
+    /// The single coverage value is applied uniformly to R, G, B channels
+    /// (no per-channel independent modulation). This produces smooth
+    /// grayscale anti-aliased text without color fringing.
     ///
-    /// Blending is performed in linear light (sRGB gamma-correct) per
-    /// channel. `x` and `y` can be negative. Clips to surface bounds.
+    /// Blending is performed in linear light (sRGB gamma-correct).
+    /// `x` and `y` can be negative. Clips to surface bounds.
     pub fn draw_coverage(
         &mut self,
         x: i32,
@@ -411,7 +408,7 @@ impl<'a> Surface<'a> {
         }
 
         // Upfront coverage buffer size check.
-        let cov_total = (cov_width as usize) * (cov_height as usize) * 3;
+        let cov_total = (cov_width as usize) * (cov_height as usize);
         if coverage.len() < cov_total {
             return;
         }
@@ -455,26 +452,21 @@ impl<'a> Surface<'a> {
             let row_base = (py * stride) as usize;
 
             for col in start_col..end_col {
-                let base = ((row * cov_width + col) * 3) as usize;
-                let cov_r = coverage[base];
-                let cov_g = coverage[base + 1];
-                let cov_b = coverage[base + 2];
+                let cov = coverage[(row * cov_width + col) as usize];
 
-                // Skip if all channels are zero.
-                if cov_r == 0 && cov_g == 0 && cov_b == 0 {
+                // Skip zero coverage.
+                if cov == 0 {
                     continue;
                 }
 
                 let px = (x + col as i32) as u32;
                 let pixel_off = row_base + (px * 4) as usize;
 
-                // Per-channel effective alpha: color.a * channel_coverage / 255.
-                let alpha_r = div255(color_a * cov_r as u32 + 127);
-                let alpha_g = div255(color_a * cov_g as u32 + 127);
-                let alpha_b = div255(color_a * cov_b as u32 + 127);
+                // Effective alpha: color.a * coverage / 255 (uniform for all channels).
+                let alpha = div255(color_a * cov as u32 + 127);
 
-                // Fast path: all channels full coverage + opaque color.
-                if alpha_r >= 255 && alpha_g >= 255 && alpha_b >= 255 {
+                // Fast path: full coverage + opaque color.
+                if alpha >= 255 {
                     // SAFETY: coords are pre-clipped to [0..width, 0..height];
                     // pixel_off = py * stride + px * 4 where py < height and
                     // px < width, so pixel_off + 4 <= height * stride <= data.len().
@@ -502,28 +494,20 @@ impl<'a> Surface<'a> {
                     let dst_g_lin = SRGB_TO_LINEAR[dst_g_byte as usize] as u32;
                     let dst_b_lin = SRGB_TO_LINEAR[dst_b as usize] as u32;
 
-                    // Blend each channel independently in linear space.
-                    let inv_r = 255 - alpha_r;
-                    let inv_g = 255 - alpha_g;
-                    let inv_b = 255 - alpha_b;
-                    let out_r_lin = div255(dst_r_lin * inv_r + src_r_lin * alpha_r + 127);
-                    let out_g_lin = div255(dst_g_lin * inv_g + src_g_lin * alpha_g + 127);
-                    let out_b_lin = div255(dst_b_lin * inv_b + src_b_lin * alpha_b + 127);
+                    // Blend uniformly in linear space (same alpha for all channels).
+                    let inv_a = 255 - alpha;
+                    let out_r_lin = div255(dst_r_lin * inv_a + src_r_lin * alpha + 127);
+                    let out_g_lin = div255(dst_g_lin * inv_a + src_g_lin * alpha + 127);
+                    let out_b_lin = div255(dst_b_lin * inv_a + src_b_lin * alpha + 127);
 
                     // Convert back to sRGB.
                     let out_r = LINEAR_TO_SRGB[linear_to_idx(out_r_lin)];
                     let out_g = LINEAR_TO_SRGB[linear_to_idx(out_g_lin)];
                     let out_b = LINEAR_TO_SRGB[linear_to_idx(out_b_lin)];
 
-                    // Alpha: use max channel alpha for the output alpha.
-                    let max_alpha = if alpha_r > alpha_g { alpha_r } else { alpha_g };
-                    let max_alpha = if alpha_b > max_alpha {
-                        alpha_b
-                    } else {
-                        max_alpha
-                    };
+                    // Alpha compositing.
                     let out_a = dst_a_byte as u32
-                        + div255(max_alpha * (255 - dst_a_byte as u32));
+                        + div255(alpha * (255 - dst_a_byte as u32));
                     let out_a = if out_a > 255 { 255u8 } else { out_a as u8 };
 
                     // Write BGRA pixel.

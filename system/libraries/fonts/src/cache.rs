@@ -2,10 +2,12 @@
 //!
 //! Fixed-size ASCII cache (`GlyphCache`) for fast path rendering, and an
 //! LRU cache (`LruGlyphCache`) for arbitrary glyph IDs with bounded memory.
+//!
+//! Coverage data is 1 byte per pixel (grayscale). No subpixel (LCD) rendering.
 
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
-use crate::rasterize::{self, OVERSAMPLE_X};
+use crate::rasterize;
 
 // ---------------------------------------------------------------------------
 // Stem darkening — non-linear coverage boost for thin strokes
@@ -26,8 +28,7 @@ pub const STEM_DARKENING_BOOST: u32 = 90;
 /// - LUT[c] = c for c in 252..=254 (boost rounds to zero at high coverage)
 /// - Monotonically non-decreasing
 ///
-/// Applied equally to all 3 subpixel channels (R, G, B) after the FIR
-/// color-fringe filter in the rasterizer.
+/// Applied per grayscale coverage byte after rasterization.
 pub const STEM_DARKENING_LUT: [u8; 256] = {
     let mut lut = [0u8; 256];
     let boost = STEM_DARKENING_BOOST;
@@ -64,14 +65,8 @@ const GLYPH_MAX_W: usize = 50;
 const GLYPH_MAX_H: usize = 50;
 /// Number of printable ASCII glyphs cached (0x20..=0x7E).
 const ASCII_CACHE_COUNT: usize = 95;
-/// Per-glyph coverage buffer size. Must accommodate the intermediate
-/// oversampled raster (GLYPH_MAX_W * OVERSAMPLE_X * GLYPH_MAX_H) since
-/// rasterize() uses the same buffer for the oversampled coverage map before
-/// downsampling in-place. With subpixel rendering, the final coverage is
-/// 3 bytes per pixel (RGB), so GLYPH_MAX_W * 3 * GLYPH_MAX_H for the output.
-/// We need the max of (oversampled intermediate, 3-channel output).
-/// The oversampled intermediate is always larger.
-const GLYPH_BUF_SIZE: usize = GLYPH_MAX_W * OVERSAMPLE_X as usize * GLYPH_MAX_H;
+/// Per-glyph coverage buffer size. 1 byte per pixel (grayscale coverage).
+const GLYPH_BUF_SIZE: usize = GLYPH_MAX_W * GLYPH_MAX_H;
 
 /// Pre-rasterized metrics for one cached glyph.
 #[derive(Clone, Copy)]
@@ -86,9 +81,9 @@ pub struct CachedGlyph {
 
 /// Fixed-size glyph cache for printable ASCII (0x20–0x7E).
 /// Coverage maps are stored in a single contiguous buffer.
-/// Total size: ~1.3 MiB (95 glyphs × 13 824 bytes coverage + metadata).
-/// Each glyph buffer is GLYPH_MAX_W × OVERSAMPLE_X × GLYPH_MAX_H bytes
-/// to accommodate the 6× oversampled intermediate raster used by subpixel rendering.
+/// Total size: ~238 KiB (95 glyphs × 2,500 bytes coverage + metadata).
+/// Each glyph buffer is GLYPH_MAX_W × GLYPH_MAX_H bytes (1 byte per pixel
+/// grayscale coverage).
 pub struct GlyphCache {
     glyphs: [CachedGlyph; ASCII_CACHE_COUNT],
     coverage: [u8; ASCII_CACHE_COUNT * GLYPH_BUF_SIZE],
@@ -108,8 +103,8 @@ impl GlyphCache {
     /// Accepts a full `u16` glyph ID to avoid truncation bugs. IDs outside
     /// the ASCII printable range return `None`.
     ///
-    /// Returns 3-channel (RGB) subpixel coverage: 3 bytes per pixel
-    /// (R, G, B coverage), stored row-major. Total length = width * height * 3.
+    /// Returns 1-byte-per-pixel grayscale coverage, stored row-major.
+    /// Total length = width * height.
     pub fn get(&self, glyph_id: u16) -> Option<(&CachedGlyph, &[u8])> {
         if glyph_id < 0x20 || glyph_id > 0x7E {
             return None;
@@ -117,7 +112,7 @@ impl GlyphCache {
 
         let idx = (glyph_id - 0x20) as usize;
         let g = &self.glyphs[idx];
-        let len = (g.width * g.height) as usize * 3; // 3 channels (RGB)
+        let len = (g.width * g.height) as usize; // 1 byte per pixel (grayscale)
         let cov = &self.coverage[g.buf_offset..g.buf_offset + len];
 
         Some((g, cov))
@@ -128,9 +123,8 @@ impl GlyphCache {
     /// scanline algorithm for coverage generation). The `font_data` is raw font
     /// file bytes.
     ///
-    /// With subpixel rendering, the rasterizer writes 3-channel (RGB)
-    /// coverage: width × height × 3 bytes per glyph. The GLYPH_BUF_SIZE
-    /// accommodates the oversampled intermediate (which is always larger).
+    /// The rasterizer writes 1-byte-per-pixel grayscale coverage:
+    /// width × height bytes per glyph.
     pub fn populate(&mut self, font_data: &[u8], size_px: u32) {
         self.populate_with_dpi(font_data, size_px, 96);
     }
@@ -236,7 +230,7 @@ impl GlyphCache {
             }
         }
     }
-    /// Zero-initialize the cache. The struct is ~1.3 MiB -- callers with
+    /// Zero-initialize the cache. The struct is ~238 KiB -- callers with
     /// limited stack should allocate on the heap first, then call `populate`.
     pub const fn zeroed() -> Self {
         GlyphCache {
@@ -271,7 +265,7 @@ const NONE: usize = usize::MAX;
 /// Pre-rasterized glyph data stored in the LRU cache.
 ///
 /// Contains the same metrics as `CachedGlyph` plus an owned coverage buffer.
-/// The coverage buffer holds 3-channel (RGB) subpixel data: `width * height * 3`
+/// The coverage buffer holds 1-byte-per-pixel grayscale data: `width * height`
 /// bytes, matching the format produced by the scanline rasterizer.
 #[derive(Clone, Debug)]
 pub struct LruCachedGlyph {
@@ -280,7 +274,7 @@ pub struct LruCachedGlyph {
     pub bearing_x: i32,
     pub bearing_y: i32,
     pub advance: u32,
-    /// 3-channel (RGB) subpixel coverage, row-major. Length = width * height * 3.
+    /// Grayscale coverage, row-major. Length = width * height.
     pub coverage: Vec<u8>,
 }
 

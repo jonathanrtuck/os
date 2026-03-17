@@ -2,7 +2,9 @@
 //!
 //! Uses read-fonts for glyph outline extraction and metrics, then runs the
 //! scanline rasterizer algorithm (bezier flattening, active edge sweep, coverage
-//! map generation with subpixel rendering).
+//! map generation with grayscale anti-aliasing via vertical oversampling).
+//!
+//! Output is 1 byte per pixel (grayscale coverage). No subpixel (LCD) rendering.
 //!
 //! All math is integer/fixed-point. No floating point in the rasterizer itself.
 
@@ -220,22 +222,11 @@ const MAX_ACTIVE_EDGES: usize = 64;
 const FP_SHIFT: i32 = 12;
 const FP_ONE: i32 = 1 << FP_SHIFT;
 
-/// Horizontal oversampling factor for anti-aliasing.
-/// 6 = 3 subpixels × 2× oversampling each.
-pub const OVERSAMPLE_X: i32 = 6;
 /// Vertical oversampling factor for anti-aliasing.
 pub const OVERSAMPLE_Y: i32 = 8;
 
 /// Maximum glyph dimensions for buffer sizing.
 const GLYPH_MAX_W: usize = 50;
-
-/// Greyscale anti-aliasing mode. When true, subpixel RGB channels are
-/// averaged into uniform greyscale coverage, eliminating color fringing.
-/// Use for virtual displays (QEMU), Retina/HiDPI screens, and any display
-/// where virtual pixels don't map 1:1 to physical LCD subpixels.
-/// Set to false for native LCD subpixel rendering on real hardware with
-/// known RGB subpixel layout.
-pub const GREYSCALE_AA: bool = true;
 
 /// Tunable boost constant for stem darkening.
 pub const STEM_DARKENING_BOOST: u32 = 90;
@@ -878,17 +869,16 @@ pub fn rasterize(
         return None;
     }
 
-    // Subpixel rendering: rasterize at OVERSAMPLE_X × width
-    let over_w = bmp_w * OVERSAMPLE_X as u32;
-    let over_total = (over_w * bmp_h) as usize;
-    let out_total = (bmp_w * bmp_h * 3) as usize;
+    // Grayscale anti-aliasing: rasterize at 1× width with vertical oversampling.
+    // Output is 1 byte per pixel (grayscale coverage).
+    let out_total = (bmp_w * bmp_h) as usize;
 
-    if over_total > buffer.data.len() {
+    if out_total > buffer.data.len() {
         return None;
     }
 
-    // Clear the oversampled coverage region
-    for b in buffer.data[..over_total].iter_mut() {
+    // Clear the coverage region
+    for b in buffer.data[..out_total].iter_mut() {
         *b = 0;
     }
 
@@ -896,84 +886,10 @@ pub fn rasterize(
     scratch.num_segments = 0;
     flatten_outline_from_scratch(scratch, size_px, upem, x_min_px, y_max_px);
 
-    // Scale segment x-coordinates by OVERSAMPLE_X
-    for i in 0..scratch.num_segments {
-        scratch.segments[i].x0 *= OVERSAMPLE_X;
-        scratch.segments[i].x1 *= OVERSAMPLE_X;
-    }
+    // Rasterize at native width (no horizontal oversampling)
+    rasterize_segments(scratch, &mut buffer.data[..out_total], bmp_w, bmp_h);
 
-    // Rasterize at oversampled width
-    rasterize_segments(scratch, &mut buffer.data[..over_total], over_w, bmp_h);
-
-    // Downsample into 3-channel (RGB) subpixel coverage
-    let samples_per_channel = (OVERSAMPLE_X / 3) as u32;
-    for row in 0..bmp_h {
-        for col in 0..bmp_w {
-            let src_base = (row * over_w + col * OVERSAMPLE_X as u32) as usize;
-            let dst_base = (row * bmp_w * 3 + col * 3) as usize;
-            let mut sum_r = 0u32;
-            for s in 0..samples_per_channel {
-                sum_r += buffer.data[src_base + s as usize] as u32;
-            }
-            let mut sum_g = 0u32;
-            for s in 0..samples_per_channel {
-                sum_g += buffer.data[src_base + samples_per_channel as usize + s as usize] as u32;
-            }
-            let mut sum_b = 0u32;
-            for s in 0..samples_per_channel {
-                sum_b +=
-                    buffer.data[src_base + 2 * samples_per_channel as usize + s as usize] as u32;
-            }
-            buffer.data[dst_base] = (sum_r / samples_per_channel) as u8;
-            buffer.data[dst_base + 1] = (sum_g / samples_per_channel) as u8;
-            buffer.data[dst_base + 2] = (sum_b / samples_per_channel) as u8;
-        }
-    }
-
-    // FIR color-fringe filter [1/4, 1/2, 1/4]
-    {
-        let stride3 = (bmp_w * 3) as usize;
-        let mut tmp = [0u8; GLYPH_MAX_W * 3];
-        for row in 0..bmp_h {
-            let row_start = (row * bmp_w * 3) as usize;
-            for i in 0..stride3 {
-                tmp[i] = buffer.data[row_start + i];
-            }
-            for i in 0..stride3 {
-                let prev = if i > 0 {
-                    tmp[i - 1] as u32
-                } else {
-                    tmp[0] as u32
-                };
-                let curr = tmp[i] as u32;
-                let next = if i + 1 < stride3 {
-                    tmp[i + 1] as u32
-                } else {
-                    tmp[stride3 - 1] as u32
-                };
-                let filtered = (prev + 2 * curr + next + 2) / 4;
-                buffer.data[row_start + i] = if filtered > 255 { 255 } else { filtered as u8 };
-            }
-        }
-    }
-
-    // Greyscale AA: average RGB channels to eliminate color fringing.
-    if GREYSCALE_AA {
-        for row in 0..bmp_h {
-            for col in 0..bmp_w {
-                let base = (row * bmp_w * 3 + col * 3) as usize;
-                let r = buffer.data[base] as u32;
-                let g = buffer.data[base + 1] as u32;
-                let b = buffer.data[base + 2] as u32;
-                let avg = ((r + g + b + 1) / 3) as u8;
-                buffer.data[base] = avg;
-                buffer.data[base + 1] = avg;
-                buffer.data[base + 2] = avg;
-            }
-        }
-    }
-
-    // Stem darkening
+    // Stem darkening (applied per grayscale byte)
     {
         for i in 0..out_total {
             buffer.data[i] = STEM_DARKENING_LUT[buffer.data[i] as usize];
@@ -1594,97 +1510,25 @@ pub fn rasterize_with_axes(
         return None;
     }
 
-    let over_w = bmp_w * OVERSAMPLE_X as u32;
-    let over_total = (over_w * bmp_h) as usize;
-    let out_total = (bmp_w * bmp_h * 3) as usize;
+    // Grayscale anti-aliasing: rasterize at 1× width with vertical oversampling.
+    // Output is 1 byte per pixel (grayscale coverage).
+    let out_total = (bmp_w * bmp_h) as usize;
 
-    if over_total > buffer.data.len() {
+    if out_total > buffer.data.len() {
         return None;
     }
 
-    for b in buffer.data[..over_total].iter_mut() {
+    for b in buffer.data[..out_total].iter_mut() {
         *b = 0;
     }
 
     scratch.num_segments = 0;
     flatten_outline_from_scratch(scratch, size_px_u32, upem, x_min_px, y_max_px);
 
-    for i in 0..scratch.num_segments {
-        scratch.segments[i].x0 *= OVERSAMPLE_X;
-        scratch.segments[i].x1 *= OVERSAMPLE_X;
-    }
+    // Rasterize at native width (no horizontal oversampling)
+    rasterize_segments(scratch, &mut buffer.data[..out_total], bmp_w, bmp_h);
 
-    rasterize_segments(scratch, &mut buffer.data[..over_total], over_w, bmp_h);
-
-    // Downsample into 3-channel (RGB) subpixel coverage.
-    let samples_per_channel = (OVERSAMPLE_X / 3) as u32;
-    for row in 0..bmp_h {
-        for col in 0..bmp_w {
-            let src_base = (row * over_w + col * OVERSAMPLE_X as u32) as usize;
-            let dst_base = (row * bmp_w * 3 + col * 3) as usize;
-            let mut sum_r = 0u32;
-            for s in 0..samples_per_channel {
-                sum_r += buffer.data[src_base + s as usize] as u32;
-            }
-            let mut sum_g = 0u32;
-            for s in 0..samples_per_channel {
-                sum_g += buffer.data[src_base + samples_per_channel as usize + s as usize] as u32;
-            }
-            let mut sum_b = 0u32;
-            for s in 0..samples_per_channel {
-                sum_b +=
-                    buffer.data[src_base + 2 * samples_per_channel as usize + s as usize] as u32;
-            }
-            buffer.data[dst_base] = (sum_r / samples_per_channel) as u8;
-            buffer.data[dst_base + 1] = (sum_g / samples_per_channel) as u8;
-            buffer.data[dst_base + 2] = (sum_b / samples_per_channel) as u8;
-        }
-    }
-
-    // FIR color-fringe filter [1/4, 1/2, 1/4].
-    {
-        let stride3 = (bmp_w * 3) as usize;
-        let mut tmp = [0u8; GLYPH_MAX_W * 3];
-        for row in 0..bmp_h {
-            let row_start = (row * bmp_w * 3) as usize;
-            for i in 0..stride3 {
-                tmp[i] = buffer.data[row_start + i];
-            }
-            for i in 0..stride3 {
-                let prev = if i > 0 {
-                    tmp[i - 1] as u32
-                } else {
-                    tmp[0] as u32
-                };
-                let curr = tmp[i] as u32;
-                let next = if i + 1 < stride3 {
-                    tmp[i + 1] as u32
-                } else {
-                    tmp[stride3 - 1] as u32
-                };
-                let filtered = (prev + 2 * curr + next + 2) / 4;
-                buffer.data[row_start + i] = if filtered > 255 { 255 } else { filtered as u8 };
-            }
-        }
-    }
-
-    // Greyscale AA: average RGB channels to eliminate color fringing.
-    if GREYSCALE_AA {
-        for row in 0..bmp_h {
-            for col in 0..bmp_w {
-                let base = (row * bmp_w * 3 + col * 3) as usize;
-                let r = buffer.data[base] as u32;
-                let g = buffer.data[base + 1] as u32;
-                let b = buffer.data[base + 2] as u32;
-                let avg = ((r + g + b + 1) / 3) as u8;
-                buffer.data[base] = avg;
-                buffer.data[base + 1] = avg;
-                buffer.data[base + 2] = avg;
-            }
-        }
-    }
-
-    // Stem darkening.
+    // Stem darkening (applied per grayscale byte).
     for i in 0..out_total {
         buffer.data[i] = STEM_DARKENING_LUT[buffer.data[i] as usize];
     }
