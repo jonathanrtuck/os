@@ -145,7 +145,10 @@ impl InterruptController for GicV3 {
         }
 
         // Enable distributor with affinity routing (ARE_NS=1) and Group 1 NS.
-        memory_mapped_io::write32(base + GICD_CTLR, GICD_CTLR_ENABLE_GRP1_NS | GICD_CTLR_ARE_NS);
+        memory_mapped_io::write32(
+            base + GICD_CTLR,
+            GICD_CTLR_ENABLE_GRP1_NS | GICD_CTLR_ARE_NS,
+        );
 
         // SAFETY: DSB SY + ISB after enabling the distributor ensures the
         // CTLR write (with ARE_NS=1) is visible to the GIC before any IRQ
@@ -230,10 +233,7 @@ impl InterruptController for GicV3 {
         let waker = memory_mapped_io::read32(gicr + GICR_WAKER);
 
         if waker & GICR_WAKER_PROCESSOR_SLEEP != 0 {
-            memory_mapped_io::write32(
-                gicr + GICR_WAKER,
-                waker & !GICR_WAKER_PROCESSOR_SLEEP,
-            );
+            memory_mapped_io::write32(gicr + GICR_WAKER, waker & !GICR_WAKER_PROCESSOR_SLEEP);
 
             // Poll until ChildrenAsleep clears (redistributor is awake).
             while memory_mapped_io::read32(gicr + GICR_WAKER) & GICR_WAKER_CHILDREN_ASLEEP != 0 {

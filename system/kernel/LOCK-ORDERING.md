@@ -345,6 +345,7 @@ register — it acquires **no lock**. It is safe to execute while holding the
 scheduler lock.
 
 The call sites are:
+
 - `try_wake_impl()` — after moving a thread from blocked to ready
 - `spawn_user()` — after adding a new thread to the ready queue
 - `start_suspended_threads()` — after moving suspended threads to the ready queue
@@ -384,6 +385,7 @@ lock drops. No additional lock is acquired by `send_ipi()`. No inversion.
 Both `try_wake_impl` (queue push + is_idle read) and the idle entry path in
 `schedule_inner` (is_idle write + WFI) execute under the `STATE` lock. This
 prevents the race where:
+
 1. Core A checks is_idle for core B → reads false
 2. Core B sets is_idle = true and enters WFI
 3. Thread is stranded in the queue (no IPI sent, core B sleeping)

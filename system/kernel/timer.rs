@@ -133,10 +133,8 @@ fn program_tval(tval: u64) {
 /// If no deadlines exist, programs the maximum interval (u32::MAX ticks ≈ 68s).
 pub fn reprogram_next_deadline(scheduler_deadline_ticks: Option<u64>) {
     let now = counter();
-
     // Source 1: earliest timer object deadline.
     let timer_deadline = earliest_timer_deadline();
-
     // Collect all deadline sources and find the minimum.
     let mut earliest: Option<u64> = timer_deadline;
 
@@ -260,7 +258,6 @@ pub fn create(timeout_ns: u64) -> Option<TimerId> {
     };
     let result = {
         let mut table = TIMERS.lock();
-
         let mut found = None;
 
         for i in 0..MAX_TIMERS {
@@ -268,6 +265,7 @@ pub fn create(timeout_ns: u64) -> Option<TimerId> {
                 let id = TimerId(i as u8);
 
                 table.slots[i] = Some(deadline_ticks);
+
                 table.waiters.create(id);
 
                 found = Some(id);

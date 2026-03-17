@@ -656,8 +656,10 @@ fn ipi_kick_idle_core(s: &State, current_core: usize) {
         if i == current_core {
             continue; // No self-IPI
         }
+
         if core.is_idle {
             GIC.send_ipi(i as u32);
+
             return; // One IPI is enough — the woken core will pick up the thread.
         }
     }
