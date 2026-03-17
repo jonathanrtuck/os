@@ -4,6 +4,76 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Text Shaping Pipeline: HarfBuzz Exists but Is Bypassed (2026-03-17)
+
+**Status:** open-thread, ready to implement when needed.
+
+### The problem
+
+There are **two `ShapedGlyph` types** that don't talk to each other:
+
+1. **`fonts::ShapedGlyph`** (shaping library output): `glyph_id: u16`, `x_advance: i32`, `y_advance: i32`, `x_offset: i32`, `y_offset: i32`, `cluster: u32`. Values in **font units** (design units, an arbitrary grid per font — typically 1000 or 2048 units per em). Produced by `fonts::shape()` / `fonts::shape_with_variations()` which wrap HarfBuzz (harfrust). This is the real shaping pipeline.
+
+2. **`scene::ShapedGlyph`** (scene graph wire format): `glyph_id: u16`, `x_advance: i16`, `x_offset: i16`, `y_offset: i16`. Values in **points** (the scene graph's logical coordinate unit, 1pt = 1/110"). 8 bytes total, `#[repr(C)]`. This is what the render backend reads.
+
+Core currently bypasses `fonts::shape()` entirely. Instead it uses `bytes_to_shaped_glyphs(text, advance)` — a fake shaper that treats each ASCII byte as a glyph ID and stamps a uniform advance onto every glyph. This works because: (1) monospace font only, (2) ASCII only, (3) no ligatures, kerning, combining marks, or bidirectional text.
+
+### Unit chain
+
+```
+font units × (point_size / units_per_em) = points
+points × scale_factor = physical pixels
+```
+
+- **Font units → points**: Core's responsibility. Core calls the shaper, gets font units, converts to points using the font's `units_per_em` and the requested point size.
+- **Points → physical pixels**: Render backend's responsibility. The backend reads `scene::ShapedGlyph` values in points and multiplies by the display scale factor.
+
+Currently the scene graph comments say "scaled pixel units" — this should say "points" to match the settled terminology (journal entry on logical unit definition).
+
+### What needs to change
+
+**1. Core calls `fonts::shape_with_variations()` instead of `bytes_to_shaped_glyphs()`.**
+
+Core already has the font data in shared memory and the axis values (MONO=1). It needs to:
+- Call `fonts::shape_with_variations(font_data, text, features, axes)`
+- Convert the returned `fonts::ShapedGlyph` array from font units to points: `value_pt = value_fu * point_size / units_per_em`
+- Write the results as `scene::ShapedGlyph` into the scene graph data buffer
+
+**2. `scene::ShapedGlyph` field widths may need revisiting.**
+
+Currently `i16` for advances/offsets. At point size 18 with upem=1000, a typical advance is ~10pt, which fits easily. But at larger point sizes or with fonts that have large design units, `i16` (max 32767) could overflow. Check: `max_advance_fu * max_point_size / min_upem` — if this exceeds 32767, widen to `i32`. The tradeoff is glyph data size in the scene graph data buffer (8 bytes vs 14 bytes per glyph).
+
+At point size 18, upem 1000, max reasonable advance ~600fu: `600 * 18 / 1000 = 10.8pt`. Even at point size 72: `600 * 72 / 1000 = 43.2pt`. `i16` is fine for any practical point size. Keep `i16`.
+
+**3. The clock's in-place update path needs rethinking.**
+
+Currently `update_clock` / `update_clock_inline` overwrite glyph data in-place, assuming the new text produces the same number of glyphs with the same byte layout. With real shaping this assumption breaks — different clock strings could produce different glyph counts (ligatures) or different advances (kerning pairs like "1:" vs "2:"). The in-place path should be replaced with a re-shape + re-push into the data buffer, or the clock update should go through `update_document_content` which already re-pushes all data.
+
+**4. `bytes_to_shaped_glyphs` is deleted.**
+
+It's the fake shaper. Once core calls real shaping, it has no purpose.
+
+**5. `fonts::ShapedGlyph` may be unnecessary as a separate type.**
+
+If core converts font units to points immediately after shaping, the intermediate `fonts::ShapedGlyph` is just a transient. The shaping function could return `scene::ShapedGlyph` directly (with the conversion baked in) if we pass `point_size` and `upem` to the shaping call. Or keep them separate to maintain the library boundary — the fonts library shouldn't depend on the scene library. Keeping them separate is cleaner: `fonts` is a pure shaping/rasterization library, `scene` is the IPC wire format.
+
+### What doesn't change
+
+- The render backend reads `scene::ShapedGlyph` from the data buffer and uses `x_advance` (in points) to position glyphs. It multiplies by scale to get physical pixels. This is correct.
+- The glyph cache in the render backend is keyed by glyph ID and rasterizes at physical pixel size. This is correct — it doesn't care about advances.
+- The scene graph's `Content::Glyphs` node type carries a `DataRef` to the shaped glyph array. This is correct.
+- Core's scene-building functions (`build_editor_scene`, `update_document_content`) already re-push glyph data on each call. They just need to call the real shaper instead of the fake one.
+
+### Why not fix it now
+
+The monospace fake shaper works for the prototype. The interesting design questions (document model, compound documents, editor protocol) don't depend on text shaping. Fixing it is straightforward but touches the core→scene data flow at every text-producing call site. Better to do it as a focused session when: (a) proportional text is needed, (b) non-ASCII text is needed, or (c) the clock kerning hack becomes untenable.
+
+### Dependency: font data access in core
+
+Core needs font data bytes to call `fonts::shape_with_variations()`. It currently has font data mapped in shared memory (loaded via 9p in init, mapped into core's address space). This is sufficient. The `units_per_em` value should be cached at startup alongside `CHAR_W` and `LINE_H` so it doesn't need to be re-parsed on every frame.
+
+---
+
 ## Framebuffer Stale-Buffer Bug: Remove Damage Tracking from Compositor (2026-03-17)
 
 **Status:** design-settled, implementing.
