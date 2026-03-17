@@ -34,11 +34,21 @@ if [ ! -f "$DISK_IMG" ]; then
     echo -n "HELLO VIRTIO BLK" | dd of="$DISK_IMG" bs=1 count=16 conv=notrunc 2>/dev/null
 fi
 
-QEMU_MACHINE="virt,gic-version=3"
+# Use HVF (Apple Hypervisor.framework) when available for native-speed
+# execution. Falls back to TCG (software emulation) on non-macOS or when
+# HVF is unavailable. HVF requires the virtual timer (CNTV_*) and
+# ISV-safe MMIO instructions — see timer.rs and memory_mapped_io.rs.
+if qemu-system-aarch64 -accel help 2>&1 | grep -q hvf; then
+    QEMU_MACHINE="virt,gic-version=3,accel=hvf"
+    QEMU_CPU="host"
+else
+    QEMU_MACHINE="virt,gic-version=3"
+    QEMU_CPU="cortex-a53"
+fi
 SHARE_DIR="${SCRIPT_DIR}/share"
 
 QEMU_COMMON=(
-    -cpu cortex-a53
+    -cpu "$QEMU_CPU"
     -smp 4
     -m 256M
     -rtc base=localtime
@@ -57,7 +67,7 @@ QEMU_COMMON=(
 if [ ! -f "$DTB_FILE" ]; then
     qemu-system-aarch64 \
         -machine "${QEMU_MACHINE},dumpdtb=${DTB_FILE}" \
-        -cpu cortex-a53 -smp 4 -m 256M -nographic 2>/dev/null
+        -cpu "$QEMU_CPU" -smp 4 -m 256M -nographic 2>/dev/null
 
     # QEMU pads totalsize to 1MB; truncate to 64KB and fix header.
     dd if="$DTB_FILE" of="${DTB_FILE}.trim" bs=65536 count=1 2>/dev/null
