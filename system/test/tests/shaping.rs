@@ -1347,3 +1347,78 @@ fn weight_correction_dark_on_light_no_change() {
     }
     // Either way: no error, no panic.
 }
+
+// ===========================================================================
+// VAL-SHAPE-02: Real font metrics — glyph IDs from cmap, not ASCII
+// ===========================================================================
+
+#[test]
+fn shape_a_glyph_id_not_ascii() {
+    // VAL-SHAPE-02: Shape "A" in Source Code Pro, verify glyph ID ≠ 65
+    // (real cmap lookup, not ASCII byte cast).
+    let glyphs = shape(SOURCE_CODE_PRO, "A", &[]);
+    assert_eq!(glyphs.len(), 1, "expected 1 glyph for 'A'");
+    assert_ne!(
+        glyphs[0].glyph_id, 65,
+        "glyph ID for 'A' should not be 65 (the ASCII byte) — real cmap lookup produces a different ID"
+    );
+    assert!(
+        glyphs[0].x_advance > 0,
+        "advance should be non-zero from real font metrics"
+    );
+}
+
+// ===========================================================================
+// VAL-SHAPE-03: Empty and whitespace text handled gracefully
+// ===========================================================================
+
+#[test]
+fn shape_whitespace_produces_glyphs_with_advances() {
+    // VAL-SHAPE-03: Shaping whitespace produces glyph(s) with non-zero advance.
+    let glyphs = shape(SOURCE_CODE_PRO, " ", &[]);
+    assert!(
+        !glyphs.is_empty(),
+        "shaping a single space should produce at least one glyph"
+    );
+    assert!(
+        glyphs[0].x_advance > 0,
+        "space glyph should have non-zero x_advance, got {}",
+        glyphs[0].x_advance
+    );
+}
+
+// ===========================================================================
+// Font unit → point conversion helper test
+// ===========================================================================
+
+#[test]
+fn font_units_to_points_conversion_correct() {
+    // Verify the conversion formula: value_pt = value_fu * point_size / upem
+    // For Source Code Pro: units_per_em is typically 1000.
+    let fm = fonts::rasterize::font_metrics(SOURCE_CODE_PRO)
+        .expect("should parse font metrics");
+    let upem = fm.units_per_em;
+    assert!(upem > 0, "units_per_em should be > 0");
+
+    // Shape "A" to get font-unit advance
+    let glyphs = shape(SOURCE_CODE_PRO, "A", &[]);
+    assert_eq!(glyphs.len(), 1);
+    let advance_fu = glyphs[0].x_advance;
+    assert!(advance_fu > 0, "advance in font units should be > 0");
+
+    // Convert to points at size 18
+    let point_size: i32 = 18;
+    let advance_pt = (advance_fu * point_size) / upem as i32;
+    assert!(
+        advance_pt > 0,
+        "advance in points should be > 0 at size 18, got {} (fu={}, upem={})",
+        advance_pt,
+        advance_fu,
+        upem
+    );
+    // Truncated to i16 should still be reasonable
+    assert!(
+        advance_pt <= i16::MAX as i32,
+        "advance in points should fit in i16"
+    );
+}

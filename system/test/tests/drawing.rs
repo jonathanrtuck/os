@@ -2391,7 +2391,10 @@ fn grayscale_glyph_cache_populated() {
     cache.populate(SOURCE_CODE_PRO, 16);
 
     // Check a few glyphs are cached with valid dimensions.
-    let (g_a, cov_a) = cache.get(b'A' as u16).unwrap();
+    // Look up the real font glyph ID for 'A' and 'k' via cmap.
+    let gid_a = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A')
+        .expect("font should have glyph for 'A'");
+    let (g_a, cov_a) = cache.get(gid_a).unwrap();
     assert!(
         g_a.width > 0 && g_a.height > 0,
         "'A' should have non-zero cached dimensions"
@@ -2404,7 +2407,9 @@ fn grayscale_glyph_cache_populated() {
         "'A' coverage should be 1 byte per pixel (grayscale)"
     );
 
-    let (g_k, cov_k) = cache.get(b'k' as u16).unwrap();
+    let gid_k = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k')
+        .expect("font should have glyph for 'k'");
+    let (g_k, cov_k) = cache.get(gid_k).unwrap();
     assert!(g_k.width > 0 && g_k.height > 0);
 
     // Check coverage has intermediate values (smooth edges).

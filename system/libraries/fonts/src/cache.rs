@@ -84,9 +84,17 @@ pub struct CachedGlyph {
 /// Total size: ~238 KiB (95 glyphs × 2,500 bytes coverage + metadata).
 /// Each glyph buffer is GLYPH_MAX_W × GLYPH_MAX_H bytes (1 byte per pixel
 /// grayscale coverage).
+/// Maximum glyph ID that the fixed cache supports. Real fonts typically
+/// have up to a few thousand glyphs; 2048 covers most common fonts.
+const MAX_GLYPH_ID: usize = 2048;
+
 pub struct GlyphCache {
     glyphs: [CachedGlyph; ASCII_CACHE_COUNT],
     coverage: [u8; ASCII_CACHE_COUNT * GLYPH_BUF_SIZE],
+    /// Maps a font glyph ID → cache index (0..94), or 0xFF if not cached.
+    /// Indexed by glyph_id. Allows O(1) lookup from real font glyph IDs
+    /// (produced by HarfBuzz shaping) to cached glyph data.
+    glyph_id_map: [u8; MAX_GLYPH_ID],
     pub line_height: u32,
     /// Distance from top of line to baseline, in pixels. Derived from hhea ascent.
     pub ascent: u32,
@@ -98,20 +106,25 @@ pub struct GlyphCache {
 }
 
 impl GlyphCache {
-    /// Get cached glyph data for a glyph ID (must map to 0x20..=0x7E).
+    /// Get cached glyph data for a font glyph ID.
     ///
-    /// Accepts a full `u16` glyph ID to avoid truncation bugs. IDs outside
-    /// the ASCII printable range return `None`.
+    /// Accepts a real font glyph ID (from HarfBuzz shaping / cmap lookup).
+    /// Returns `None` if the glyph is not in the ASCII cache.
     ///
     /// Returns 1-byte-per-pixel grayscale coverage, stored row-major.
     /// Total length = width * height.
     pub fn get(&self, glyph_id: u16) -> Option<(&CachedGlyph, &[u8])> {
-        if glyph_id < 0x20 || glyph_id > 0x7E {
+        let id = glyph_id as usize;
+        if id >= MAX_GLYPH_ID {
+            return None;
+        }
+        let idx = self.glyph_id_map[id];
+        if idx == 0xFF {
             return None;
         }
 
-        let idx = (glyph_id - 0x20) as usize;
-        let g = &self.glyphs[idx];
+        let i = idx as usize;
+        let g = &self.glyphs[i];
         let len = (g.width * g.height) as usize; // 1 byte per pixel (grayscale)
         let cov = &self.coverage[g.buf_offset..g.buf_offset + len];
 
@@ -197,6 +210,11 @@ impl GlyphCache {
             alloc::boxed::Box::from_raw(ptr)
         };
 
+        // Reset glyph ID → cache index mapping (0xFF = not cached).
+        for slot in self.glyph_id_map.iter_mut() {
+            *slot = 0xFF;
+        }
+
         for i in 0..ASCII_CACHE_COUNT {
             let codepoint = (0x20u8 + i as u8) as char;
             let glyph_id = match rasterize::glyph_id_for_char(font_data, codepoint) {
@@ -227,6 +245,10 @@ impl GlyphCache {
                     advance: m.advance,
                     buf_offset,
                 };
+                // Record the real font glyph ID → cache index mapping.
+                if (glyph_id as usize) < MAX_GLYPH_ID {
+                    self.glyph_id_map[glyph_id as usize] = i as u8;
+                }
             }
         }
     }
@@ -243,6 +265,7 @@ impl GlyphCache {
                 buf_offset: 0,
             }; ASCII_CACHE_COUNT],
             coverage: [0u8; ASCII_CACHE_COUNT * GLYPH_BUF_SIZE],
+            glyph_id_map: [0xFF; MAX_GLYPH_ID],
             line_height: 0,
             ascent: 0,
             descent: 0,

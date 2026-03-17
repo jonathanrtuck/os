@@ -94,6 +94,9 @@ impl SceneState {
         title_label: &[u8],
         clock_text: &[u8],
         scroll_y: i32,
+        font_data: &[u8],
+        upem: u16,
+        axes: &[fonts::rasterize::AxisValue],
     ) {
         let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
         let scene_text_color = dc(text_color);
@@ -138,9 +141,9 @@ impl SceneState {
             w.clear();
 
             // Push shaped glyph arrays for title and clock.
-            let title_glyphs = bytes_to_shaped_glyphs(title_label, char_width as u16);
+            let title_glyphs = shape_text(font_data, title_label, font_size, upem, axes);
             let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-            let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width as u16);
+            let clock_glyphs = shape_text(font_data, clock_text, font_size, upem, axes);
             let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
             // Push visible line glyph data.
@@ -149,7 +152,7 @@ impl SceneState {
 
             for run in &visible_runs {
                 let line_text = line_bytes_for_run(doc_text, run);
-                let shaped = bytes_to_shaped_glyphs(line_text, char_width as u16);
+                let shaped = shape_text(font_data, line_text, font_size, upem, axes);
                 let glyph_ref = w.push_shaped_glyphs(&shaped);
 
                 line_glyph_refs.push((glyph_ref, shaped.len() as u16, run.y));
@@ -359,42 +362,42 @@ impl SceneState {
 
     // ── Targeted incremental update methods ─────────────────────────
 
-    /// Update only the clock text glyphs in-place. Zero heap allocations
-    /// for the glyph data: the old ShapedGlyph array is overwritten via
-    /// `update_data` (same length). Only N_CLOCK_TEXT is marked changed.
-    pub fn update_clock(&mut self, clock_text: &[u8]) {
+    /// Update only the clock text glyphs via re-push. Real shaping may
+    /// produce different glyph counts for different clock strings, so
+    /// in-place overwrite is no longer safe. Instead, push new shaped
+    /// data and update the Content::Glyphs reference.
+    pub fn update_clock(
+        &mut self,
+        clock_text: &[u8],
+        font_data: &[u8],
+        font_size: u16,
+        upem: u16,
+        axes: &[fonts::rasterize::AxisValue],
+    ) {
         let mut tw = self.triple();
 
         {
             let mut w = tw.acquire_copy();
 
-            // Read the clock node's Content::Glyphs to find the glyph DataRef.
             let clock_node = w.node(N_CLOCK_TEXT);
-            if let Content::Glyphs { glyphs, .. } = clock_node.content {
-                // Read the advance from the existing glyph data rather than
-                // hardcoding — the actual char_width depends on font metrics.
-                let advance = read_advance_from_data(&w, glyphs);
-                let new_glyphs = bytes_to_shaped_glyphs(clock_text, advance);
+            if let Content::Glyphs { color, .. } = clock_node.content {
+                let new_glyphs = shape_text(font_data, clock_text, font_size, upem, axes);
+                let new_ref = w.push_shaped_glyphs(&new_glyphs);
+                let new_count = new_glyphs.len() as u16;
 
-                // SAFETY: ShapedGlyph is repr(C) with no padding.
-                let new_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        new_glyphs.as_ptr() as *const u8,
-                        new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
-                    )
+                let n = w.node_mut(N_CLOCK_TEXT);
+                n.content = Content::Glyphs {
+                    color,
+                    glyphs: new_ref,
+                    glyph_count: new_count,
+                    font_size,
+                    axis_hash: 0,
                 };
-
-                // In-place overwrite (same length: 8 glyphs = 64 bytes).
-                if w.update_data(glyphs, new_bytes) {
-                    w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(clock_text);
-                    w.mark_changed(N_CLOCK_TEXT);
-                }
+                n.content_hash = fnv1a(clock_text);
+                w.mark_changed(N_CLOCK_TEXT);
             }
         }
 
-        // Always publish — acquire_copy always succeeds so no fallback
-        // logic is needed. Even if update_data fails (length mismatch),
-        // the buffer is a valid copy of the latest frame.
         tw.publish();
     }
 
@@ -409,6 +412,10 @@ impl SceneState {
         line_height: u32,
         scroll_px: i32,
         clock_text: Option<&[u8]>,
+        font_data: &[u8],
+        font_size: u16,
+        upem: u16,
+        axes: &[fonts::rasterize::AxisValue],
     ) {
         let mut tw = self.triple();
 
@@ -427,7 +434,7 @@ impl SceneState {
             w.mark_changed(N_CURSOR);
 
             if let Some(ct) = clock_text {
-                update_clock_inline(&mut w, ct);
+                update_clock_inline(&mut w, ct, font_data, font_size, upem, axes);
             }
         }
 
@@ -449,6 +456,10 @@ impl SceneState {
         content_h: u32,
         scroll_px: i32,
         clock_text: Option<&[u8]>,
+        font_data: &[u8],
+        font_size: u16,
+        upem: u16,
+        axes: &[fonts::rasterize::AxisValue],
     ) {
         let mut tw = self.triple();
 
@@ -482,7 +493,7 @@ impl SceneState {
             w.mark_changed(N_CURSOR);
 
             if let Some(ct) = clock_text {
-                update_clock_inline(&mut w, ct);
+                update_clock_inline(&mut w, ct, font_data, font_size, upem, axes);
             }
 
             let (sel_lo, sel_hi) = if sel_start <= sel_end {
@@ -540,6 +551,9 @@ impl SceneState {
         clock_text: &[u8],
         scroll_y: i32,
         mark_clock_changed: bool,
+        font_data_bytes: &[u8],
+        upem: u16,
+        axes: &[fonts::rasterize::AxisValue],
     ) {
         let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
         let scene_text_color = dc(text_color);
@@ -567,11 +581,11 @@ impl SceneState {
             w.reset_data();
 
             // Re-push title glyph data.
-            let title_glyphs = bytes_to_shaped_glyphs(title_label, char_width as u16);
+            let title_glyphs = shape_text(font_data_bytes, title_label, font_size, upem, axes);
             let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
 
             // Re-push clock glyph data.
-            let clock_glyphs = bytes_to_shaped_glyphs(clock_text, char_width as u16);
+            let clock_glyphs = shape_text(font_data_bytes, clock_text, font_size, upem, axes);
             let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
             // Re-layout visible document text lines.
@@ -591,7 +605,7 @@ impl SceneState {
 
             for run in &visible_runs {
                 let line_text = line_bytes_for_run(doc_text, run);
-                let shaped = bytes_to_shaped_glyphs(line_text, char_width as u16);
+                let shaped = shape_text(font_data_bytes, line_text, font_size, upem, axes);
                 let glyph_ref = w.push_shaped_glyphs(&shaped);
 
                 line_glyph_refs.push((glyph_ref, shaped.len() as u16, run.y));
@@ -707,25 +721,33 @@ impl SceneState {
     }
 }
 
-/// Update the clock text in-place within an already-open back buffer.
-fn update_clock_inline(w: &mut scene::SceneWriter<'_>, clock_text: &[u8]) {
+/// Update the clock text via re-push within an already-open back buffer.
+/// Real shaping may produce different glyph counts, so we re-push data
+/// and update the Content::Glyphs reference rather than overwriting in place.
+fn update_clock_inline(
+    w: &mut scene::SceneWriter<'_>,
+    clock_text: &[u8],
+    font_data: &[u8],
+    font_size: u16,
+    upem: u16,
+    axes: &[fonts::rasterize::AxisValue],
+) {
     let clock_node = w.node(N_CLOCK_TEXT);
-    if let Content::Glyphs { glyphs, .. } = clock_node.content {
-        let advance = read_advance_from_data(w, glyphs);
-        let new_glyphs = bytes_to_shaped_glyphs(clock_text, advance);
+    if let Content::Glyphs { color, .. } = clock_node.content {
+        let new_glyphs = shape_text(font_data, clock_text, font_size, upem, axes);
+        let new_ref = w.push_shaped_glyphs(&new_glyphs);
+        let new_count = new_glyphs.len() as u16;
 
-        // SAFETY: ShapedGlyph is repr(C) with no padding.
-        let new_bytes = unsafe {
-            core::slice::from_raw_parts(
-                new_glyphs.as_ptr() as *const u8,
-                new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
-            )
+        let n = w.node_mut(N_CLOCK_TEXT);
+        n.content = Content::Glyphs {
+            color,
+            glyphs: new_ref,
+            glyph_count: new_count,
+            font_size,
+            axis_hash: 0,
         };
-
-        if w.update_data(glyphs, new_bytes) {
-            w.node_mut(N_CLOCK_TEXT).content_hash = fnv1a(clock_text);
-            w.mark_changed(N_CLOCK_TEXT);
-        }
+        n.content_hash = fnv1a(clock_text);
+        w.mark_changed(N_CLOCK_TEXT);
     }
 }
 
@@ -921,32 +943,33 @@ fn scroll_runs(
         .collect()
 }
 
-/// Read the x_advance from the first ShapedGlyph in an existing DataRef.
-/// Falls back to 8 if the data is empty or too short.
-fn read_advance_from_data(w: &scene::SceneWriter<'_>, glyphs: DataRef) -> u16 {
-    let data_buf = w.data_buf();
-    let off = glyphs.offset as usize;
-    let len = glyphs.length as usize;
-    let glyph_size = core::mem::size_of::<ShapedGlyph>();
-    if off + len <= data_buf.len() && len >= glyph_size {
-        let bytes = &data_buf[off..off + glyph_size];
-        // SAFETY: ShapedGlyph is repr(C) with no padding. The data buffer
-        // is populated by push_shaped_glyphs which ensures alignment.
-        let first = unsafe { &*(bytes.as_ptr() as *const ShapedGlyph) };
-        first.x_advance as u16
-    } else {
-        8
-    }
-}
 
-/// Convert raw ASCII text bytes into ShapedGlyph arrays for monospace rendering.
-fn bytes_to_shaped_glyphs(text: &[u8], advance: u16) -> Vec<ShapedGlyph> {
-    text.iter()
-        .map(|&ch| ShapedGlyph {
-            glyph_id: ch as u16,
-            x_advance: advance as i16,
-            x_offset: 0,
-            y_offset: 0,
+/// Shape text through HarfBuzz and convert from font units to points.
+///
+/// Calls `fonts::shape_with_variations()` to produce real glyph IDs and
+/// metrics, then converts font-unit values to scene-graph points using
+/// `value_pt = value_fu * point_size / upem`.
+fn shape_text(
+    font_data: &[u8],
+    text: &[u8],
+    point_size: u16,
+    upem: u16,
+    axes: &[fonts::rasterize::AxisValue],
+) -> Vec<ShapedGlyph> {
+    let s = core::str::from_utf8(text).unwrap_or("");
+    if s.is_empty() || font_data.is_empty() || upem == 0 {
+        return Vec::new();
+    }
+    let shaped = fonts::shape_with_variations(font_data, s, &[], axes);
+    let ps = point_size as i32;
+    let u = upem as i32;
+    shaped
+        .iter()
+        .map(|g| ShapedGlyph {
+            glyph_id: g.glyph_id,
+            x_advance: ((g.x_advance * ps) / u) as i16,
+            x_offset: ((g.x_offset * ps) / u) as i16,
+            y_offset: ((g.y_offset * ps) / u) as i16,
         })
         .collect()
 }

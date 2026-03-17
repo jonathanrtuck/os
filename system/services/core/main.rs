@@ -69,6 +69,9 @@ static mut CURSOR_POS: usize = 0;
 static mut DOC_BUF: *mut u8 = core::ptr::null_mut();
 static mut DOC_CAPACITY: usize = 0;
 static mut DOC_LEN: usize = 0;
+static mut FONT_DATA_PTR: *const u8 = core::ptr::null();
+static mut FONT_DATA_LEN: usize = 0;
+static mut FONT_UPEM: u16 = 1000;
 static mut IMAGE_MODE: bool = false;
 static mut LINE_H: u32 = 20;
 static mut MOUSE_X: u32 = 0;
@@ -91,6 +94,20 @@ struct KeyAction {
 
 fn channel_shm_va(idx: usize) -> usize {
     protocol::channel_shm_va(idx)
+}
+/// Access the font data slice from shared memory.
+fn font_data() -> &'static [u8] {
+    unsafe {
+        if FONT_DATA_PTR.is_null() || FONT_DATA_LEN == 0 {
+            &[]
+        } else {
+            core::slice::from_raw_parts(FONT_DATA_PTR, FONT_DATA_LEN)
+        }
+    }
+}
+/// Get the font's units-per-em value.
+fn font_upem() -> u16 {
+    unsafe { FONT_UPEM }
 }
 fn clock_seconds() -> u64 {
     let rtc_va = unsafe { RTC_MMIO_VA };
@@ -498,8 +515,16 @@ pub extern "C" fn _start() -> ! {
                 config.mono_font_len as usize,
             )
         };
+        // Store font data pointer and length for shaping calls.
+        unsafe {
+            FONT_DATA_PTR = config.mono_font_va as *const u8;
+            FONT_DATA_LEN = config.mono_font_len as usize;
+        }
         if let Some(fm) = fonts::rasterize::font_metrics(font_data) {
             let upem = fm.units_per_em;
+            unsafe {
+                FONT_UPEM = upem;
+            }
             let asc = fm.ascent as i32;
             let desc = fm.descent as i32;
             let gap = fm.line_gap as i32;
@@ -597,6 +622,12 @@ pub extern "C" fn _start() -> ! {
 
     format_time_hms(clock_seconds(), &mut time_buf);
 
+    // Axis values for monospace shaping (MONO=1).
+    let mono_shape_axes = [fonts::rasterize::AxisValue {
+        tag: *b"MONO",
+        value: 1.0,
+    }];
+
     scene.build_editor_scene(
         fb_width,
         fb_height,
@@ -622,6 +653,9 @@ pub extern "C" fn _start() -> ! {
         b"Text",
         &time_buf,
         0,
+        font_data(),
+        font_upem(),
+        &mono_shape_axes,
     );
 
     // Signal compositor that first frame is ready.
@@ -906,6 +940,9 @@ pub extern "C" fn _start() -> ! {
                     b"Text",
                     &time_buf,
                     unsafe { SCROLL_OFFSET } as i32,
+                    font_data(),
+                    font_upem(),
+                    &mono_shape_axes,
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
@@ -944,6 +981,9 @@ pub extern "C" fn _start() -> ! {
                     &time_buf,
                     unsafe { SCROLL_OFFSET } as i32,
                     timer_fired,
+                    font_data(),
+                    font_upem(),
+                    &mono_shape_axes,
                 );
             } else if selection_changed {
                 // Selection changed without text change (e.g., click
@@ -984,6 +1024,10 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         None
                     },
+                    font_data(),
+                    FONT_SIZE as u16,
+                    font_upem(),
+                    &mono_shape_axes,
                 );
             } else if changed {
                 // Cursor moved without text or selection change
@@ -1012,10 +1056,20 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         None
                     },
+                    font_data(),
+                    FONT_SIZE as u16,
+                    font_upem(),
+                    &mono_shape_axes,
                 );
             } else if timer_fired {
                 // Timer only — just update the clock text.
-                scene.update_clock(&time_buf);
+                scene.update_clock(
+                    &time_buf,
+                    font_data(),
+                    FONT_SIZE as u16,
+                    font_upem(),
+                    &mono_shape_axes,
+                );
             }
 
             // Signal compositor.

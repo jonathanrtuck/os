@@ -1,7 +1,6 @@
 .claude/
 .DS_Store
-.factory/missions/
-.factory/research/
+.factory/
 .vscode/
 *.swo
 *.swp

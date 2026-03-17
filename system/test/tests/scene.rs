@@ -4489,3 +4489,83 @@ fn path_empty_commands() {
         _ => panic!("expected Path"),
     }
 }
+
+// ── VAL-CLOCK-02: Clock re-push data buffer exhaustion ─────────────
+
+/// VAL-CLOCK-02: Simulate 120 clock re-pushes (once per second) without
+/// a full rebuild. In the real system, update_document_content calls
+/// reset_data() which reclaims the buffer. Verify that 120 clock pushes
+/// (each ~64 bytes) plus typical scene data fit within DATA_BUFFER_SIZE.
+#[test]
+fn clock_repush_120_times_no_overflow() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // Allocate 8 well-known nodes (standard editor scene).
+    for _ in 0..8 {
+        w.alloc_node().unwrap();
+    }
+    w.set_root(0);
+
+    // Push initial scene data: title (4 glyphs) + document (50 lines × 80 chars).
+    // This represents a typical document scene.
+    let title_glyphs: Vec<ShapedGlyph> = (0..4u16)
+        .map(|i| ShapedGlyph {
+            glyph_id: i,
+            x_advance: 8,
+            x_offset: 0,
+            y_offset: 0,
+        })
+        .collect();
+    let _ = w.push_shaped_glyphs(&title_glyphs);
+
+    // 50 lines of 80 characters each
+    for _ in 0..50 {
+        let line_glyphs: Vec<ShapedGlyph> = (0..80u16)
+            .map(|i| ShapedGlyph {
+                glyph_id: i,
+                x_advance: 8,
+                x_offset: 0,
+                y_offset: 0,
+            })
+            .collect();
+        let _ = w.push_shaped_glyphs(&line_glyphs);
+    }
+
+    let data_after_doc = w.data_used();
+
+    // Now simulate 120 clock re-pushes. Each clock is 8 glyphs = 64 bytes.
+    // Since update_document_content calls reset_data() on text changes,
+    // the clock re-push only accumulates between full rebuilds.
+    // In practice, typing resets data frequently. But verify worst case.
+    for _ in 0..120 {
+        let clock_glyphs: Vec<ShapedGlyph> = (0..8u16)
+            .map(|i| ShapedGlyph {
+                glyph_id: i,
+                x_advance: 8,
+                x_offset: 0,
+                y_offset: 0,
+            })
+            .collect();
+        let _ = w.push_shaped_glyphs(&clock_glyphs);
+    }
+
+    let data_after_clocks = w.data_used();
+    let clock_data_total = data_after_clocks - data_after_doc;
+
+    // 120 clock pushes × 64 bytes each = 7,680 bytes.
+    // DATA_BUFFER_SIZE is 65,536 bytes. Even with document data, this fits.
+    assert!(
+        (data_after_clocks as usize) < DATA_BUFFER_SIZE,
+        "data_used ({}) should be < DATA_BUFFER_SIZE ({}) after 120 clock re-pushes + document data",
+        data_after_clocks,
+        DATA_BUFFER_SIZE
+    );
+
+    // Verify the accumulated clock data size is reasonable.
+    assert!(
+        clock_data_total <= 120 * 64 + 120, // 64 bytes per clock + alignment padding
+        "120 clock re-pushes should use ~7,680 bytes, got {}",
+        clock_data_total
+    );
+}

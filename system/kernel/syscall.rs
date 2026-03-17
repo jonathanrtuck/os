@@ -127,9 +127,9 @@ pub mod nr {
 /// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
 /// Derived from RAM geometry so resolution changes never require kernel updates.
 const MAX_DMA_ORDER: u64 = (paging::RAM_SIZE / paging::PAGE_SIZE).ilog2() as u64;
-/// Maximum ELF size for process_create (2 MiB).
-/// ELF files include debug info and symbol tables beyond loadable segments.
-const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
+/// Maximum ELF size for process_create (4 MiB).
+/// Increased from 2 MiB to accommodate real HarfBuzz text shaping in core.
+const MAX_ELF_SIZE: u64 = 4 * 1024 * 1024;
 /// Maximum number of handles in a single `wait` call.
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
