@@ -71,7 +71,11 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-16 (latest):** Tickless idle + IPI wakeup mission COMPLETE — GICv3 migration, cross-core IPI wakeup, tickless idle scheduling. 70 new tests, 1,768 total pass.
+**Session 2026-03-17 (latest):** Rendering pipeline triple buffering mission COMPLETE — all 6 transport bugs fixed. 23 new tests, 1,791 total pass.
+
+**Triple buffering + flow control (2026-03-17):** Replaced double-buffered scene graph with triple buffering (mailbox semantics). `TripleWriter`/`TripleReader` replace `DoubleWriter`/`DoubleReader` — `acquire()` always succeeds (writer never blocks), `publish()` atomically makes buffer latest, reader always gets most recent (intermediate frames silently skipped). `copy_front_to_back()` eliminated entirely. Core scene dispatch simplified: all update paths use acquire/publish, no retry logic. `MSG_PRESENT_DONE` (ID 21) added for GPU→compositor completion signaling — compositor tracks in-flight framebuffers, waits for GPU before reuse. Compositor always renders to non-displayed buffer (fixes tearing on partial updates). GPU driver dirty rect coalescing now unions all rects instead of keeping only the last. Damage tracking `update_bounds_for_skip()` keeps `prev_bounds` consistent across skipped frames. Init allocates `TRIPLE_SCENE_SIZE` shared memory. 23 new tests, 1,791 total pass. QEMU visual verified + 68s stress test on 4 SMP cores.
+
+**Session 2026-03-16:** Tickless idle + IPI wakeup mission COMPLETE — GICv3 migration, cross-core IPI wakeup, tickless idle scheduling. 70 new tests, 1,768 total pass.
 
 **GICv3 migration + tickless idle (2026-03-16):** Full interrupt controller migration from GICv2 to GICv3. `InterruptController` trait with `GicV3` implementation using system register CPU interface (ICC_*) and MMIO distributor/redistributor. GICv2 code deleted entirely — no parallel implementations. boot.S updated for ICC_SRE_EL2 during EL2→EL1 transition. All QEMU scripts updated to `gic-version=3`. IPI-driven cross-core wakeup: `try_wake` sends SGI 0 via ICC_SGI1R_EL1 to idle cores blocked in WFI. Per-core idle tracking (`is_idle` in `PerCoreState`). Tickless idle: `reprogram_next_deadline` replaces fixed 250Hz tick — deadline computed from timer objects, quantum expiry, and context replenishment. `TICKS_PER_SEC` removed. Lock-free deadline cache (AtomicU64) avoids STATE→TIMERS lock ordering. Fuzz test updated (syscall 27 now valid). 70 new tests (33 GICv3 + 7 idle tracking + 13 IPI + 17 tickless), 1,768 total pass.
 

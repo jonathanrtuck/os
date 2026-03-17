@@ -4,9 +4,74 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Scene Graph Content Type Revision: Path + Subpixel Removal + FillRect Removal (2026-03-17)
+
+**Status:** design-settled, not yet implemented (blocked by in-progress transport bugs mission).
+
+### Context
+
+The Phase 2 rendering redesign (2026-03-16) replaced semantic content types (`Text`, `Path`) with geometric ones (`FillRect`, `Glyphs`, `Image`). This eliminated the SVG parser and routed icons through the glyph cache. But the redesign left a gap: the render backend already IS a path rasterizer (Bezier flattening + scanline coverage for font outlines), yet the scene graph has no way to express arbitrary vector content. Editors would have to pre-rasterize vector content to `Image`, splitting rasterization across both sides of the interface and losing resolution independence.
+
+### Decisions
+
+**1. Add `Path` content type.** Arbitrary filled Bezier contours as a first-class scene graph primitive. The render backend rasterizes them with the same scanline engine it uses for glyphs. No editor does its own pixel work. Vector content scales cleanly at any display density.
+
+```rust
+Path {
+    color: Color,
+    fill_rule: FillRule,          // Winding | EvenOdd
+    contours: DataRef,            // cubic Bezier commands in data buffer
+    stroke: Option<StrokeParams>, // width, cap, join — backend handles expansion
+}
+```
+
+**2. Remove `FillRect` content type.** Solid rectangles are expressed via `background_color` on Container nodes. `FillRect` was always a degenerate case — a rectangular path with no curves. Promoting background color to a container property is cleaner: it's decoration on the node, not a separate content type. This was decided prior to the Path discussion; implementation deferred.
+
+**3. Cubic Beziers only at the interface.** The scene graph mandates one contour format: cubic Beziers. Quadratics (TrueType font outlines) are converted to cubics losslessly when Core builds the scene graph (`cp1 = p0 + 2/3*(c-p0)`, `cp2 = p1 + 2/3*(c-p1)`). One format, one flattening algorithm in the backend. If the rasterizer wants to detect degenerate cubics and fast-path them as quadratics internally, that's its business — implementation detail behind the interface.
+
+**4. Logical coordinates, not pixels.** Core does layout in device-independent logical units. The scene graph carries logical coordinates. The render backend multiplies by a display scale factor to get physical pixels for rasterization. Path contour coordinates are in the same logical space as node x/y/width/height. This keeps the entire pipeline above the render backend density-agnostic — Core doesn't know or care whether it's 1x or 2x. What "logical unit" means precisely (points, CSS px, abstract scene units) is a scene-graph-wide decision, not Path-specific.
+
+**5. Stroke in the render backend.** The render backend handles stroke expansion (offset curves + caps + joins) internally. Stroke parameters (width, cap style, join style) live on the Path node as optional fields. This follows the principle of pushing complexity to the leaf nodes — the render backend is the leaf. Centralizing stroke logic in the backend avoids duplicating it across editors.
+
+**6. Remove subpixel (LCD) rendering.** macOS dropped it in 2018. Android/iOS never used it on HiDPI. The OS targets Retina-class displays (220+ PPI) where individual pixels are below the eye's resolving power. Subpixel rendering adds complexity (color fringing, display-technology dependence) for imperceptible benefit at HiDPI. Switch to grayscale antialiasing with vertical oversampling only. This simplifies the rasterizer and eliminates the only remaining difference between glyph rasterization and general path rasterization.
+
+### Content types after this revision
+
+- `None` — pure container (decoration via background_color, border, corner_radius, opacity)
+- `Path` — filled (and optionally stroked) cubic Bezier contours
+- `Glyphs` — batched font glyph run (glyph IDs + advances + font reference). Distinct from Path because text is a fundamentally different data shape: batched references with shaping metadata, not inline contours. The render backend uses the same rasterizer internally.
+- `Image` — pixel data reference
+
+### Why Glyphs stays separate from Path
+
+A page of text has ~5,000 characters but currently ~50 scene graph nodes (one `Glyphs` per line, carrying an array of glyph_id + x_advance). Unifying Glyphs into Path would either: (a) emit 5,000 individual Path nodes (massive scene graph bloat), or (b) require a batching mechanism — an array of (PathId, position) pairs in one node — which is exactly what Glyphs already is. The distinction is batched-references-with-shaping-metadata vs. inline-contours. These are different data shapes at the interface, not an optimization leak.
+
+### Caching
+
+Caching is an implementation detail behind the interface. The render backend can cache rasterized coverage maps for any contour, keyed by (contour identity, scale). For `Glyphs`, contour identity comes from (glyph_id, font). For `Path`, it can come from the DataRef offset or a contour hash. Multiple scene graph nodes can reference the same DataRef in the data buffer (e.g., repeated shapes). The scene graph expresses what to render; the backend decides what to cache.
+
+### Relationship to rendering pipeline architecture
+
+The settled pipeline remains:
+
+```text
+Core (shaping, layout, scene building) → Scene Graph (shared memory) → Compositor (thin event loop) → Render Backend (tree walk, rasterization, compositing) → GPU Driver → Display
+```
+
+Path doesn't change any component boundaries. Core writes contour data into the scene graph. The render backend rasterizes it. The compositor never sees or cares about content types.
+
+### Open questions
+
+- **Logical unit definition:** What is the scene graph's logical unit? A "point" (1/72"), a CSS-style pixel (1/96"), or an abstract unit with no physical definition? Affects font sizing, path coordinates, everything. Decision applies scene-graph-wide, not just to Path.
+- **Path command encoding:** Exact binary format for cubic Bezier commands in the data buffer. MoveTo/LineTo/CurveTo/Close with coordinate pairs. Compact fixed-point or f32? Deferred to implementation.
+
+---
+
 ## Rendering Pipeline Transport Bugs (2026-03-17)
 
-**Status:** open-bug. Six related issues across the rendering pipeline, all stemming from unsynchronized shared-memory transport between pipeline stages. No backpressure, no flow control. The pipeline assumes each stage is faster than the previous one and never falls behind. When that assumption breaks: dropped frames, torn reads, stale data.
+**Status:** FIXED. All six bugs fixed via triple buffering + GPU completion flow control. TripleWriter/TripleReader replace DoubleWriter/DoubleReader with mailbox semantics (acquire always succeeds, reader gets latest). MSG_PRESENT_DONE adds GPU→compositor backpressure. Dirty rect coalescing unions all rects. Damage tracking handles skipped frames. 23 new tests, 1,791 total pass. QEMU visual + 68s stress test verified.
+
+**Original problem:** Six related issues across the rendering pipeline, all stemming from unsynchronized shared-memory transport between pipeline stages. No backpressure, no flow control. The pipeline assumes each stage is faster than the previous one and never falls behind. When that assumption breaks: dropped frames, torn reads, stale data.
 
 The pipeline architecture (data shapes and translators) is sound. The problems are all in the _transport_ between translators.
 
