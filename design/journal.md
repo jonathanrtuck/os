@@ -4,6 +4,96 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Rendering Pipeline Transport Bugs (2026-03-17)
+
+**Status:** open-bug. Six related issues across the rendering pipeline, all stemming from unsynchronized shared-memory transport between pipeline stages. No backpressure, no flow control. The pipeline assumes each stage is faster than the previous one and never falls behind. When that assumption breaks: dropped frames, torn reads, stale data.
+
+The pipeline architecture (data shapes and translators) is sound. The problems are all in the _transport_ between translators.
+
+### Bug 1: Scene graph double-buffering drops frames (core → compositor)
+
+The scene graph uses double buffering in shared memory between core (writer) and compositor (reader). When the writer gets 2+ frames ahead of the reader, there is no safe buffer to write to — the front is what the reader will read, and the back may be what the reader is currently reading. `copy_front_to_back()` correctly detects this and returns `false`, but the scene update is then silently dropped. The character is in the document but never rendered until a future event produces a successful `copy_front_to_back`.
+
+The `reader_done_gen` check is conservative by design: it tracks the last generation the reader _finished_, not what it's _currently_ reading. When `reader_done_gen < back_gen`, the back buffer might be in use. This is correct — the alternative is torn reads.
+
+With two buffers, the writer can get exactly one frame ahead. Any further writes require the reader to have finished. This is a fundamental constraint of the protocol, not a bug in the implementation. The failure manifests under fast typing because core processes input → editor → document mutation → scene build faster than the compositor renders the previous frame.
+
+Attempted fixes that failed:
+
+- **Spin-loop (`wait_for_back`):** Blocks core until compositor finishes. Violates "event-driven over polling." Can deadlock if core and compositor share a CPU core.
+- **Retry timer (2ms):** Event-driven but adds complexity and doesn't prevent the initial dropped frame. Still drops the first attempt; latency depends on timer granularity.
+- **Always render immediately in compositor:** Removed valid frame coalescing without fixing the root cause.
+
+**Files:** `libraries/scene/lib.rs` (double-buffer protocol), `services/core/scene_state.rs` (all `copy_front_to_back` call sites return early on failure), `services/core/main.rs` (scene dispatch silently drops failed updates).
+
+### Bug 2: Framebuffer tearing (compositor → GPU driver)
+
+The compositor has `presented_buf` toggling between framebuffers 0 and 1. On full repaint it renders to `1 - presented_buf` (the non-displayed buffer), then presents — correct double-buffer usage. But on partial update it renders _into the currently displayed buffer_ (`presented_buf`). There is no synchronization with the GPU driver — the compositor writes pixels to a framebuffer while the GPU driver may be in the middle of `transfer_to_host` reading those same pixels. This is tearing. It works visually because virtio-gpu on QEMU is fast enough that the race window is small, but it's the same class of problem as Bug 1: unsynchronized shared memory between producer and consumer.
+
+**Files:** `services/compositor/main.rs` (lines 153-161, the `presented_buf` logic), `services/drivers/virtio-gpu/main.rs` (present loop reads framebuffer without synchronization).
+
+### Bug 3: Compositor frame scheduling can defer scene updates
+
+When core signals a scene update, the compositor calls `should_render_immediately()`, which returns `true` only if the last timer tick was more than half a frame period ago. Otherwise it sets `dirty = true` and waits for the next timer tick. If core writes another scene update before the tick fires, the scene data in shared memory is overwritten. The first update's frame was never rendered.
+
+This is usually fine — only the latest state matters for rendering. But combined with Bug 1, it means the compositor can defer rendering a frame that then gets overwritten before it's ever read, compounding the dropped-frame problem.
+
+**Files:** `services/compositor/frame_scheduler.rs` (`should_render_immediately`), `services/compositor/main.rs` (line 130).
+
+### Bug 4: GPU driver present coalescing loses dirty rects
+
+The GPU driver drains all pending `MSG_PRESENT` messages and uses the _last_ one (`last_payload`). If the compositor sends two presents with different dirty rects before the GPU driver wakes up, only the last set of dirty rects is transferred to the host. The pixels from the first present's dirty region are not transferred, causing partial screen corruption until the next full repaint.
+
+**Files:** `services/drivers/virtio-gpu/main.rs` (present loop around line 831 — "coalesce: use the last one").
+
+### Bug 5: No backpressure from GPU to compositor
+
+The compositor sends `MSG_PRESENT` and immediately continues to the next frame. It never waits for the GPU driver to finish the transfer. If the compositor produces frames faster than the GPU can transfer, presents pile up in the IPC ring buffer and get coalesced (see Bug 4). There's no flow control signal. In a real GPU pipeline you'd have a fence or semaphore — the compositor waits until the GPU is done with a framebuffer before writing to it again.
+
+**Files:** `services/compositor/main.rs` (present is fire-and-forget), `services/drivers/virtio-gpu/main.rs` (no completion signal back to compositor).
+
+### Bug 6: Damage tracking uses stale bounds after skipped frames
+
+`PREV_BOUNDS` in the render backend stores the previous frame's node positions so the damage tracker can mark both old and new positions as dirty when a node moves. But if a frame is skipped (due to Bug 1 or Bug 3), `PREV_BOUNDS` doesn't update, so the next frame's damage calculation uses stale bounds. This can cause rendering artifacts — old content not cleared, or new content not drawn in the right region.
+
+**Files:** `libraries/render/lib.rs` (`prev_bounds` array, `finish_frame` method).
+
+### The structural fix: triple buffering + flow control
+
+All six bugs are instances of the same pattern: unsynchronized producer-consumer shared memory with no backpressure. The fix is the same at each interface boundary.
+
+**Triple buffering** adds a third buffer so the writer always has a free buffer. The protocol becomes:
+
+- **Writer:** acquire the free buffer, write, publish (atomically make it the latest). Never blocks, never fails.
+- **Reader:** always read the most recently published buffer. Intermediate frames are silently skipped (the reader always sees the latest state).
+- **The third buffer** is whichever one neither the writer nor reader is currently using.
+
+The writer never blocks, the reader never sees torn data, and frame skipping is the natural behavior when the writer is faster (which is correct — only the latest state matters for rendering).
+
+**Flow control** (fences/semaphores) at the compositor → GPU boundary ensures the compositor doesn't write to a framebuffer the GPU is still reading. The GPU signals completion; the compositor waits for it before reusing that buffer.
+
+### Prior art
+
+Triple buffering is the standard solution in graphics pipelines:
+
+- **Android (SurfaceFlinger):** Triple buffering by default since 4.1 (Project Butter, 2012). `BufferQueue` manages a pool of typically 3 buffers.
+- **Wayland/Weston:** `wl_surface` protocol designed around multi-buffer attach/commit.
+- **macOS (Core Animation):** Triple-buffered internally via CALayer buffer pools.
+- **Windows (DWM/DXGI):** Desktop Window Manager uses triple-buffered composition. DXGI swap chains default to 2-3 buffers.
+- **Fuchsia (Scenic):** `BufferCollection` with configurable count, typically 3.
+- **Vulkan/Metal/DX12:** All expose explicit swap chain buffer counts; 3 is the standard recommendation.
+
+### Implementation plan
+
+1. ~~**Revert** all session changes (retry timer, `is_back_available`, `scene_pending` flag, `bool` return types on scene update methods). Return to clean baseline.~~
+2. **Triple-buffer the scene graph** (`libraries/scene/lib.rs`). `DoubleWriter`/`DoubleReader` become `TripleWriter`/`TripleReader`. `back()` becomes `acquire()` (always succeeds), `swap()` becomes `publish()`, `copy_front_to_back()` is eliminated. Cost: ~48 KiB extra shared memory.
+3. **Fix scene dispatch in core** (`services/core/main.rs`). Try incremental update, fall back to full rebuild. Both always succeed with triple buffering. No retry logic needed.
+4. **Add GPU completion signal** (`services/drivers/virtio-gpu/main.rs` → `services/compositor/main.rs`). GPU driver sends `MSG_PRESENT_DONE` after transfer+flush. Compositor waits for it before reusing a framebuffer.
+5. **Fix dirty rect coalescing** in GPU driver. Union the dirty rects from all coalesced presents instead of discarding earlier ones.
+6. **Fix damage tracking** in render backend. When a frame is skipped (`FrameAction::Skip`), `PREV_BOUNDS` should still be valid for the next frame. Verify this is the case, or update bounds even on skip.
+
+---
+
 ## Tickless Idle + Inter-Processor Interrupts (2026-03-16)
 
 **Status:** Design discussion complete. Ready to implement when desired.
