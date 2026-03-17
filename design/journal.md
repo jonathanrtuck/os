@@ -60,10 +60,30 @@ Core (shaping, layout, scene building) → Scene Graph (shared memory) → Compo
 
 Path doesn't change any component boundaries. Core writes contour data into the scene graph. The render backend rasterizes it. The compositor never sees or cares about content types.
 
-### Open questions
+### Resolved: Logical unit definition (points)
 
-- **Logical unit definition:** What is the scene graph's logical unit? A "point" (1/72"), a CSS-style pixel (1/96"), or an abstract unit with no physical definition? Affects font sizing, path coordinates, everything. Decision applies scene-graph-wide, not just to Path.
-- **Path command encoding:** Exact binary format for cubic Bezier commands in the data buffer. MoveTo/LineTo/CurveTo/Close with coordinate pairs. Compact fixed-point or f32? Deferred to implementation.
+The scene graph's logical unit is a **point**, matching the macOS convention: 1pt = 1/110" at the reference density. The render backend applies `scale = physical_PPI / 110` to convert to physical pixels (~2.0 on Retina, 1.0 on QEMU's virtual framebuffer). Core, editors, and the scene graph never deal in physical pixels — the entire pipeline above the render backend is density-agnostic.
+
+Font sizes, node positions, path coordinates all use the same unit. "Font size 16" = 16 points. A 200pt-wide panel = 200 points. The only thing that changes between displays is the scale factor.
+
+Why not viewport-relative (vh/vw): a point-based unit maintains roughly consistent perceived size across display sizes and densities. Viewport-relative units make content tiny on small screens and huge on large ones — they solve the aspect ratio problem but create a sizing problem. Every modern system (macOS pt, iOS pt, Android dp, CSS px) converges on density-based logical units with per-device scale factors for this reason.
+
+### Resolved: Path command encoding
+
+**Commands:** four cubic Bezier commands — MoveTo, LineTo, CubicTo, Close. Same as SVG/PostScript/Skia/Cairo. Higher-level constructs (arcs, rounded rects) decompose to these in Core before the scene graph.
+
+**Coordinates:** f32. Sub-point precision for smooth curves. Natural for AArch64 (full FPU). IEEE 754, well-defined in shared memory. The rasterizer converts to its internal integer math during Bezier flattening anyway. No benefit to fixed-point when hardware has an FPU.
+
+**Layout:** variable-size commands, sequential in the data buffer. Referenced by a `DataRef` on the Path node.
+
+```text
+MoveTo:  [tag: u32, x: f32, y: f32]                                          = 12 bytes
+LineTo:  [tag: u32, x: f32, y: f32]                                          = 12 bytes
+CubicTo: [tag: u32, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32]  = 28 bytes
+Close:   [tag: u32]                                                          =  4 bytes
+```
+
+Variable-size is compact and matches access patterns — the rasterizer walks commands sequentially for flattening, never needs random access by index. u32 tag ensures 4-byte alignment for all f32 fields.
 
 ---
 
