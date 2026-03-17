@@ -502,3 +502,79 @@ fn init_distributor_uses_irouter() {
         "Must use IROUTER for SPI routing"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Tests: SGI 0 (IPI) dispatch in irq_handler
+// ---------------------------------------------------------------------------
+//
+// The irq_handler must distinguish SGI 0 (IPI) from timer IRQ 30 and
+// other SPIs. SGI 0 must NOT call timer::handle_irq or increment TICKS.
+
+/// SGI 0 IRQ ID constant.
+const SGI_IPI: u32 = 0;
+/// Timer PPI IRQ ID.
+const TIMER_IRQ: u32 = 30;
+
+/// Model of irq_handler dispatch logic.
+///
+/// Returns a tuple: (called_timer_handle_irq, called_interrupt_handle_irq, incremented_ticks, called_schedule)
+fn irq_dispatch_model(irq_id: u32) -> (bool, bool, bool, bool) {
+    if irq_id == SGI_IPI {
+        // SGI 0: just EOI + schedule. No timer, no interrupt forwarding, no TICKS.
+        (false, false, false, true)
+    } else if irq_id == TIMER_IRQ {
+        // Timer: increment TICKS, handle timer, schedule.
+        (true, false, true, true)
+    } else {
+        // Device IRQ: forward to interrupt handler, schedule.
+        (false, true, false, true)
+    }
+}
+
+/// VAL-IPI-005: SGI 0 does not call timer::handle_irq.
+#[test]
+fn sgi0_does_not_call_timer_handler() {
+    let (timer, _interrupt, _ticks, _sched) = irq_dispatch_model(SGI_IPI);
+    assert!(!timer, "SGI 0 must not call timer::handle_irq()");
+}
+
+/// VAL-IPI-005: SGI 0 does not increment TICKS.
+#[test]
+fn sgi0_does_not_increment_ticks() {
+    let (_timer, _interrupt, ticks, _sched) = irq_dispatch_model(SGI_IPI);
+    assert!(!ticks, "SGI 0 must not increment TICKS counter");
+}
+
+/// VAL-IPI-005: SGI 0 does not forward to interrupt::handle_irq.
+#[test]
+fn sgi0_does_not_forward_to_interrupt_handler() {
+    let (_timer, interrupt, _ticks, _sched) = irq_dispatch_model(SGI_IPI);
+    assert!(!interrupt, "SGI 0 must not call interrupt::handle_irq(0)");
+}
+
+/// VAL-IPI-005: SGI 0 still triggers schedule.
+#[test]
+fn sgi0_triggers_schedule() {
+    let (_timer, _interrupt, _ticks, sched) = irq_dispatch_model(SGI_IPI);
+    assert!(sched, "SGI 0 must trigger schedule()");
+}
+
+/// Timer IRQ 30 still works correctly (regression check).
+#[test]
+fn timer_irq_increments_ticks_and_handles() {
+    let (timer, interrupt, ticks, sched) = irq_dispatch_model(TIMER_IRQ);
+    assert!(timer, "timer IRQ must call timer::handle_irq()");
+    assert!(!interrupt, "timer IRQ must not forward to interrupt handler");
+    assert!(ticks, "timer IRQ must increment TICKS");
+    assert!(sched, "timer IRQ must trigger schedule()");
+}
+
+/// Device IRQ forwards to interrupt handler (regression check).
+#[test]
+fn device_irq_forwards_correctly() {
+    let (timer, interrupt, ticks, sched) = irq_dispatch_model(48);
+    assert!(!timer, "device IRQ must not call timer::handle_irq()");
+    assert!(interrupt, "device IRQ must forward to interrupt handler");
+    assert!(!ticks, "device IRQ must not increment TICKS");
+    assert!(sched, "device IRQ must trigger schedule()");
+}

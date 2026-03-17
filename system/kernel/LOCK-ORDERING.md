@@ -335,7 +335,64 @@ and no reverse path exists.
 
 ---
 
-## 6. Summary
+## 6. IPI (Inter-Processor Interrupt) and Scheduler Lock Interaction
+
+### send_ipi under the scheduler lock
+
+`scheduler::ipi_kick_idle_core()` calls `GIC.send_ipi(core_id)`, which is a
+raw `msr ICC_SGI1R_EL1`. This inline asm instruction writes to a GICv3 system
+register — it acquires **no lock**. It is safe to execute while holding the
+scheduler lock.
+
+The call sites are:
+- `try_wake_impl()` — after moving a thread from blocked to ready
+- `spawn_user()` — after adding a new thread to the ready queue
+- `start_suspended_threads()` — after moving suspended threads to the ready queue
+
+All three execute under `STATE.lock()`. The `send_ipi` is a fire-and-forget
+write; it does not wait for the target core to acknowledge the interrupt.
+
+### IPI handler on the target core
+
+When core N receives SGI 0 (IPI), it exits WFI and enters `irq_handler()`:
+
+```text
+irq_handler():
+  interrupt_controller::GIC.acknowledge()  → no lock (system register read)
+  if id == 0 (SGI/IPI):
+    scheduler::schedule()  → acquires STATE lock → release
+  interrupt_controller::GIC.end_of_interrupt()  → no lock (system register write)
+```
+
+The handler acquires the scheduler lock **independently** — the sending core
+has already released its lock (or will release before the IPI is delivered,
+because IRQs are masked while the lock is held and IPI delivery is asynchronous).
+
+### No deadlock possible
+
+1. **Sender path:** `STATE.lock()` → `send_ipi()` (no lock) → release `STATE`
+2. **Handler path:** (IRQ fires after sender releases) → `STATE.lock()` → release
+
+The sender holds the scheduler lock when it calls `send_ipi()`. The IPI is
+delivered asynchronously. The target core's IRQ handler fires only when IRQs
+are unmasked on the target. If the target core holds the scheduler lock, its
+IRQs are masked (IrqMutex), so the IPI is pending — not delivered until the
+lock drops. No additional lock is acquired by `send_ipi()`. No inversion.
+
+### Race prevention: is_idle and queue insertion
+
+Both `try_wake_impl` (queue push + is_idle read) and the idle entry path in
+`schedule_inner` (is_idle write + WFI) execute under the `STATE` lock. This
+prevents the race where:
+1. Core A checks is_idle for core B → reads false
+2. Core B sets is_idle = true and enters WFI
+3. Thread is stranded in the queue (no IPI sent, core B sleeping)
+
+Under the lock, step 2 cannot interleave between step 1 and the queue push.
+
+---
+
+## 7. Summary
 
 | Property                 | Status                                                 |
 | ------------------------ | ------------------------------------------------------ |

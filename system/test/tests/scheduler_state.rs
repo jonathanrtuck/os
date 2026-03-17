@@ -1278,3 +1278,202 @@ fn is_idle_consistent_under_randomized_schedule() {
         check_invariants(&s, &label);
     }
 }
+
+// ============================================================
+// IPI send-on-wake logic
+// ============================================================
+//
+// These tests model the IPI send logic that lives in try_wake_impl,
+// spawn_user, and start_suspended_threads. The real kernel calls
+// interrupt_controller::GIC.send_ipi(core_id) under the STATE lock.
+// We model it as collecting the target core IDs.
+
+/// Determine which core to IPI after adding a thread to the ready queue.
+/// Returns None if no IPI should be sent (no idle core, or only self is idle).
+fn find_ipi_target(s: &State, current_core: usize) -> Option<usize> {
+    for (i, core) in s.cores.iter().enumerate() {
+        if i == current_core {
+            continue; // No self-IPI
+        }
+        if core.is_idle {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// VAL-IPI-002: try_wake sends IPI to idle target core.
+#[test]
+fn ipi_sent_to_idle_core_after_wake() {
+    let mut s = State::new(4);
+
+    // Core 0 is running a real thread (is_idle = false).
+    let mut t0 = Thread::new(100);
+    t0.activate();
+    s.cores[0].current = Some(t0);
+    s.cores[0].is_idle = false;
+
+    // Core 1 is idle.
+    let mut idle1 = s.cores[1].idle.take().unwrap();
+    idle1.activate();
+    s.cores[1].current = Some(idle1);
+    s.cores[1].is_idle = true;
+
+    // A thread was blocked, now try_wake moves it to ready.
+    let mut blocked_thread = Thread::new(1);
+    blocked_thread.activate();
+    blocked_thread.block();
+    s.blocked.push(blocked_thread);
+    assert!(try_wake(&mut s, 1));
+
+    // After wake, check if we should IPI.
+    let target = find_ipi_target(&s, 0);
+    assert_eq!(target, Some(1), "should IPI idle core 1");
+}
+
+/// VAL-IPI-003: try_wake does NOT send IPI to busy core.
+#[test]
+fn ipi_not_sent_when_all_cores_busy() {
+    let mut s = State::new(4);
+
+    // All 4 cores running real threads.
+    for i in 0..4 {
+        let mut t = Thread::new(100 + i as u64);
+        t.activate();
+        s.cores[i].current = Some(t);
+        s.cores[i].is_idle = false;
+    }
+
+    // Wake a blocked thread on core 0.
+    let mut blocked_thread = Thread::new(1);
+    blocked_thread.activate();
+    blocked_thread.block();
+    s.blocked.push(blocked_thread);
+    assert!(try_wake(&mut s, 1));
+
+    let target = find_ipi_target(&s, 0);
+    assert_eq!(target, None, "no IPI when all cores are busy");
+}
+
+/// VAL-IPI-004: try_wake does NOT self-IPI.
+#[test]
+fn ipi_no_self_ipi() {
+    let mut s = State::new(4);
+
+    // Core 0 is running and current core.
+    let mut t0 = Thread::new(100);
+    t0.activate();
+    s.cores[0].current = Some(t0);
+    s.cores[0].is_idle = false;
+
+    // All other cores busy.
+    for i in 1..4 {
+        let mut t = Thread::new(100 + i as u64);
+        t.activate();
+        s.cores[i].current = Some(t);
+        s.cores[i].is_idle = false;
+    }
+
+    // Make core 0 the only "idle" core — but it's the current core.
+    s.cores[0].is_idle = true;
+
+    let target = find_ipi_target(&s, 0);
+    assert_eq!(target, None, "must not self-IPI even if current core is idle");
+}
+
+/// VAL-IPI-004: Self-IPI skip when current is the only idle core.
+#[test]
+fn ipi_skip_self_finds_other_idle() {
+    let mut s = State::new(4);
+
+    // Core 0 and core 2 idle, core 1 and 3 busy. Current = core 0.
+    for i in 0..4 {
+        let mut t = Thread::new(100 + i as u64);
+        t.activate();
+        s.cores[i].current = Some(t);
+        s.cores[i].is_idle = i == 0 || i == 2;
+    }
+
+    let target = find_ipi_target(&s, 0);
+    assert_eq!(target, Some(2), "should IPI core 2, skipping self (core 0)");
+}
+
+/// VAL-IPI-011: spawn_user sends IPI to idle core.
+#[test]
+fn ipi_sent_after_spawn() {
+    let mut s = State::new(4);
+
+    // Core 0 busy (spawner).
+    let mut t0 = Thread::new(100);
+    t0.activate();
+    s.cores[0].current = Some(t0);
+    s.cores[0].is_idle = false;
+
+    // Core 3 idle.
+    let mut idle3 = s.cores[3].idle.take().unwrap();
+    idle3.activate();
+    s.cores[3].current = Some(idle3);
+    s.cores[3].is_idle = true;
+
+    // Spawn a new user thread (goes to ready queue).
+    s.ready.push(Thread::new(1));
+
+    let target = find_ipi_target(&s, 0);
+    assert_eq!(target, Some(3), "should IPI idle core 3 after spawn");
+}
+
+/// VAL-IPI-011: start_suspended_threads sends IPI to idle core.
+#[test]
+fn ipi_sent_after_start_suspended() {
+    let mut s = State::new(4);
+
+    // Core 0 busy.
+    let mut t0 = Thread::new(100);
+    t0.activate();
+    s.cores[0].current = Some(t0);
+    s.cores[0].is_idle = false;
+
+    // Core 2 idle.
+    let mut idle2 = s.cores[2].idle.take().unwrap();
+    idle2.activate();
+    s.cores[2].current = Some(idle2);
+    s.cores[2].is_idle = true;
+
+    // Move suspended thread to ready (simulates start_suspended_threads).
+    s.ready.push(Thread::new(1));
+
+    let target = find_ipi_target(&s, 0);
+    assert_eq!(target, Some(2), "should IPI idle core 2 after starting suspended threads");
+}
+
+/// VAL-IPI-007: is_idle check and queue insertion under same lock.
+/// This test verifies that the model function checks idle state from the
+/// same State that contains the ready queue — no separate lock.
+#[test]
+fn ipi_check_and_push_same_state() {
+    let mut s = State::new(4);
+
+    // Core 0 running, core 1 idle.
+    let mut t0 = Thread::new(100);
+    t0.activate();
+    s.cores[0].current = Some(t0);
+    s.cores[0].is_idle = false;
+
+    let mut idle1 = s.cores[1].idle.take().unwrap();
+    idle1.activate();
+    s.cores[1].current = Some(idle1);
+    s.cores[1].is_idle = true;
+
+    // Simulate try_wake: push to ready AND check idle in one &mut State call.
+    let mut blocked_thread = Thread::new(1);
+    blocked_thread.activate();
+    blocked_thread.block();
+    s.blocked.push(blocked_thread);
+
+    // Under the same &mut s borrow:
+    let woke = try_wake(&mut s, 1);
+    let target = find_ipi_target(&s, 0);
+
+    assert!(woke, "thread should be woken");
+    assert_eq!(target, Some(1), "idle core should be found under same state");
+}

@@ -8,7 +8,7 @@
 //     Context diagnostics (5), stack walk
 //   - Volatile write (1): write_device_manifest
 //   - Inline asm barrier (1): dsb ish (no nomem — intentional, Fix 6/9)
-//   - Inline asm hint (2): wfe idle loops (nomem correct)
+//   - Inline asm hint (2): wfi idle loops (nomem correct)
 //   - System register read (1): mrs esr_el1/far_el1/elr_el1 (1 block, 3 reads)
 //   - from_raw_parts (1): DTB blob slice
 //   - from_utf8_unchecked (1): secondary_main message
@@ -465,6 +465,9 @@ fn write_device_manifest(
     }
 }
 
+/// SGI 0 is used as the inter-processor interrupt (IPI) for cross-core wakeup.
+const SGI_IPI: u32 = 0;
+
 #[unsafe(no_mangle)]
 pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
     use interrupt_controller::InterruptController;
@@ -474,7 +477,12 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
     let mut next: *const Context = ctx;
 
     if let Some(id) = interrupt_controller::GIC.acknowledge() {
-        if id == timer::IRQ_ID {
+        if id == SGI_IPI {
+            // IPI wakeup: just acknowledge and reschedule.
+            // Do NOT call timer::handle_irq or increment TICKS — SGI 0 is
+            // distinct from the timer PPI (IRQ 30). The scheduler will pick
+            // up the newly-ready thread that triggered this IPI.
+        } else if id == timer::IRQ_ID {
             metrics::inc_timer_ticks();
             timer::handle_irq();
         } else {
@@ -482,7 +490,7 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
             interrupt::handle_irq(id);
         }
 
-        // Reschedule after any IRQ — timer tick or woken driver thread.
+        // Reschedule after any IRQ — timer tick, IPI, or woken driver thread.
         next = scheduler::schedule(ctx);
 
         interrupt_controller::GIC.end_of_interrupt(id);
@@ -720,10 +728,12 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     serial::puts("🥾 booted.\n");
 
     loop {
-        // SAFETY: WFE is a hint instruction that puts the core into a
-        // low-power wait state until an event (SEV/interrupt). Does not
-        // access memory or use the stack. nomem is correct.
-        unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
+        // SAFETY: WFI puts the core into a low-power wait state until an
+        // interrupt (timer, IPI, or device IRQ). Does not access memory or
+        // use the stack. nomem is correct. WFI is used instead of WFE
+        // because IPIs (SGI 0 via ICC_SGI1R_EL1) wake WFI but not WFE
+        // (WFE requires a SEV event which GICv3 IPIs do not generate).
+        unsafe { core::arch::asm!("wfi", options(nostack, nomem)) };
     }
 }
 /// Entry point for secondary cores (called from boot.S secondary_entry).
@@ -754,9 +764,11 @@ pub extern "C" fn secondary_main(core_id: u64) -> ! {
     timer::init();
 
     loop {
-        // SAFETY: WFE is a hint instruction — low-power wait for event.
-        // No memory access, no stack usage. nomem is correct.
-        unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
+        // SAFETY: WFI puts the core into a low-power wait state until an
+        // interrupt (timer, IPI, or device IRQ). No memory access, no stack
+        // usage. nomem is correct. WFI is used instead of WFE because IPIs
+        // (SGI 0) wake WFI but not WFE.
+        unsafe { core::arch::asm!("wfi", options(nostack, nomem)) };
     }
 }
 #[unsafe(no_mangle)]

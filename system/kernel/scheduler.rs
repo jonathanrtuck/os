@@ -569,6 +569,27 @@ fn swap_ttbr0(old: &Thread, new: &Thread) {
         }
     }
 }
+/// Send an IPI to a single idle core (if any), skipping `current_core`.
+///
+/// Called under the STATE lock after adding a thread to the ready queue.
+/// The `send_ipi` call is a raw `msr ICC_SGI1R_EL1` — it acquires no lock,
+/// so it is safe to call while holding the scheduler lock. The IPI handler
+/// on the target core will acquire the scheduler lock independently (after
+/// the sender releases it, since IRQs are masked while the lock is held
+/// and IPI delivery is asynchronous).
+fn ipi_kick_idle_core(s: &State, current_core: usize) {
+    use super::interrupt_controller::{InterruptController, GIC};
+
+    for (i, core) in s.cores.iter().enumerate() {
+        if i == current_core {
+            continue; // No self-IPI
+        }
+        if core.is_idle {
+            GIC.send_ipi(i as u32);
+            return; // One IPI is enough — the woken core will pick up the thread.
+        }
+    }
+}
 /// Shared wake implementation. If `reason` is Some, the thread's wait set
 /// is consulted to compute the return index and patch `context.x[0]`.
 #[inline(never)]
@@ -587,6 +608,9 @@ fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> 
             thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
 
             s.queue.ready.push(thread);
+
+            // IPI an idle core so it picks up the newly-ready thread.
+            ipi_kick_idle_core(s, per_core::core_id() as usize);
 
             return true;
         }
@@ -1365,6 +1389,9 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
 
     s.queue.ready.push(thread);
 
+    // IPI an idle core so it picks up the newly-spawned thread.
+    ipi_kick_idle_core(&s, per_core::core_id() as usize);
+
     Some(ThreadId(id))
 }
 /// Like `spawn_user`, but the thread is placed in the suspended list instead
@@ -1422,6 +1449,9 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
         if let Some(Some(process)) = s.processes.get_mut(process_id.0 as usize) {
             process.started = true;
         }
+
+        // IPI an idle core so it picks up the newly-ready threads.
+        ipi_kick_idle_core(&s, per_core::core_id() as usize);
     }
 
     started
