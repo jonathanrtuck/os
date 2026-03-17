@@ -1,0 +1,26 @@
+{
+  "milestone": "tickless-ipi",
+  "round": 1,
+  "status": "pass",
+  "assertionsSummary": {
+    "total": 39,
+    "passed": 39,
+    "failed": 0,
+    "blocked": 0
+  },
+  "passedAssertions": [
+    "VAL-IPI-002", "VAL-IPI-003", "VAL-IPI-004", "VAL-IPI-005", "VAL-IPI-006",
+    "VAL-IPI-007", "VAL-IPI-011", "VAL-IPI-012",
+    "VAL-TICK-001", "VAL-TICK-002", "VAL-TICK-003", "VAL-TICK-004", "VAL-TICK-005",
+    "VAL-TICK-006", "VAL-TICK-007", "VAL-TICK-008", "VAL-TICK-009", "VAL-TICK-010",
+    "VAL-TICK-011", "VAL-TICK-012", "VAL-TICK-013", "VAL-TICK-014", "VAL-TICK-015",
+    "VAL-TICK-016", "VAL-TICK-017", "VAL-TICK-018", "VAL-TICK-019", "VAL-TICK-020",
+    "VAL-CROSS-001", "VAL-CROSS-002", "VAL-CROSS-003", "VAL-CROSS-004", "VAL-CROSS-005",
+    "VAL-CROSS-006", "VAL-CROSS-007", "VAL-CROSS-008", "VAL-CROSS-009", "VAL-CROSS-010",
+    "VAL-CROSS-011"
+  ],
+  "failedAssertions": [],
+  "blockedAssertions": [],
+  "appliedUpdates": [],
+  "previousRound": null
+}
