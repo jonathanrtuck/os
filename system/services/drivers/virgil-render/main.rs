@@ -982,25 +982,17 @@ fn setup_pipeline(
     // Create surface wrapping our render target resource.
     cmdbuf.cmd_create_surface(HANDLE_SURFACE, RT_RESOURCE_ID, VIRGL_FORMAT_B8G8R8A8_UNORM);
 
-    // Create vertex elements layout (position float2 + color float4).
-    cmdbuf.cmd_create_vertex_elements_color(HANDLE_VE);
+    // Shaders and vertex elements are not needed for scissor+clear rendering.
+    // They will be added when VBO-based triangle rendering is implemented.
 
-    // Create shaders from TGSI text.
-    cmdbuf.cmd_create_shader_text(HANDLE_VS, PIPE_SHADER_VERTEX, shaders::COLOR_VS);
-    cmdbuf.cmd_create_shader_text(HANDLE_FS, PIPE_SHADER_FRAGMENT, shaders::COLOR_FS);
-
-    // Bind all state.
+    // Bind pipeline state.
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_RASTERIZER, HANDLE_RASTERIZER);
-    cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE);
-    cmdbuf.cmd_bind_shader(HANDLE_VS, PIPE_SHADER_VERTEX);
-    cmdbuf.cmd_bind_shader(HANDLE_FS, PIPE_SHADER_FRAGMENT);
 
-    // Set framebuffer, viewport, and vertex buffer binding.
+    // Set framebuffer and viewport.
     cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, 0);
     cmdbuf.cmd_set_viewport(width as f32, height as f32);
-    cmdbuf.cmd_set_vertex_buffers(scene_walk::VERTEX_STRIDE, 0, VB_RESOURCE_ID);
 
     if cmdbuf.overflowed() {
         sys::print(b"virgil-render: pipeline command buffer overflowed!\n");
@@ -1102,13 +1094,9 @@ pub extern "C" fn _start() -> ! {
     ctx_attach_resource(&device, &mut vq, irq_handle);
     set_scanout(&device, &mut vq, irq_handle, width, height);
 
-    // Create vertex buffer resource for scene quad rendering.
-    let vbo_size = scene_walk::MAX_VERTEX_BYTES as u32;
-    resource_create_vbo(&device, &mut vq, irq_handle, vbo_size);
-    attach_backing_vbo(&device, &mut vq, irq_handle, vbo_size);
-    ctx_attach_vbo(&device, &mut vq, irq_handle);
-
     // ── Phase D: GPU pipeline setup ──────────────────────────────────────
+    // No VBO needed — we render rectangles using scissor+clear, which is
+    // simpler and avoids RESOURCE_INLINE_WRITE issues with virglrenderer.
     setup_pipeline(&device, &mut vq, irq_handle, width, height);
 
     // ── Phase E: Clear screen + flush ────────────────────────────────────
@@ -1155,7 +1143,7 @@ pub extern "C" fn _start() -> ! {
         core::slice::from_raw_parts(scene_va as *const u8, scene::TRIPLE_SCENE_SIZE)
     };
 
-    // Heap-allocate the quad batch (73 KiB — too large for 16 KiB stack).
+    // Heap-allocate the quad batch for scene walk results.
     let mut batch = Box::new(scene_walk::QuadBatch::new());
     // Heap-allocate the command buffer for per-frame rendering (16 KiB).
     let mut cmdbuf = Box::new(virgl::CommandBuffer::new());
@@ -1174,9 +1162,7 @@ pub extern "C" fn _start() -> ! {
             // SAFETY: Channel 1 shared memory was set up by init before start.
             let scene_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
             let mut drain_msg = ipc::Message::new(0);
-            while scene_ch.try_recv(&mut drain_msg) {
-                // Consume all queued MSG_SCENE_UPDATED messages.
-            }
+            while scene_ch.try_recv(&mut drain_msg) {}
         }
 
         // Read the latest scene graph.
@@ -1195,33 +1181,58 @@ pub extern "C" fn _start() -> ! {
         let root = reader.front_root();
         scene_walk::walk_scene(nodes, root, scale_factor, width, height, &mut batch);
 
-        // Build GPU command buffer for this frame.
+        // Debug: log frame info for first few frames.
+        if frame_count < 3 {
+            sys::print(b"     frame ");
+            print_u32(frame_count);
+            sys::print(b": gen=");
+            print_u32(gen);
+            sys::print(b" root=");
+            print_u32(root as u32);
+            sys::print(b" nodes=");
+            print_u32(nodes.len() as u32);
+            sys::print(b" quads=");
+            print_u32(batch.quads().len() as u32);
+            sys::print(b"\n");
+
+            // Log first few quads' colors.
+            for (i, q) in batch.quads().iter().take(5).enumerate() {
+                sys::print(b"       q");
+                print_u32(i as u32);
+                sys::print(b": (");
+                print_u32(q.x as u32);
+                sys::print(b",");
+                print_u32(q.y as u32);
+                sys::print(b" ");
+                print_u32(q.w as u32);
+                sys::print(b"x");
+                print_u32(q.h as u32);
+                sys::print(b") rgba=(");
+                print_u32((q.r * 255.0) as u32);
+                sys::print(b",");
+                print_u32((q.g * 255.0) as u32);
+                sys::print(b",");
+                print_u32((q.b * 255.0) as u32);
+                sys::print(b",");
+                print_u32((q.a * 255.0) as u32);
+                sys::print(b")\n");
+            }
+        }
+
+        // TODO: render quads via VBO triangle draw (scissor+clear doesn't work —
+        // virglrenderer's CLEAR ignores scissor state).
+        // For now, just clear to the scene's background color.
         cmdbuf.clear();
-
-        // Clear to dark background.
-        cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
-
-        // Upload vertex data and draw quads.
-        if batch.vertex_count > 0 {
-            // Inline-write vertex data into the VBO resource.
-            cmdbuf.cmd_resource_inline_write(
-                VB_RESOURCE_ID,
-                batch.as_dwords(),
-                batch.size_bytes(),
-                1,
-                batch.size_bytes(),
-            );
-
-            // Draw all quads as triangles.
-            cmdbuf.cmd_draw_vbo(0, batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
+        if let Some(q) = batch.quads().first() {
+            cmdbuf.cmd_clear(q.r, q.g, q.b, q.a);
+        } else {
+            cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
         }
 
         if cmdbuf.overflowed() {
             sys::print(b"virgil-render: frame command buffer overflowed!\n");
         } else {
-            // Submit 3D commands.
             submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
-            // Flush to display.
             flush_resource(&device, &mut vq, irq_handle, width, height);
         }
 

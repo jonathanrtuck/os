@@ -1,95 +1,102 @@
 //! Scene graph tree walk for solid rectangle rendering.
 //!
 //! Walks the scene graph depth-first and accumulates colored quads
-//! (two triangles each) into a vertex buffer. Each vertex carries
-//! position (float2) and color (float4) = 24 bytes.
+//! for rendering via scissor+clear (each quad = one scissored glClear).
 //!
 //! Only node backgrounds are rendered (Task 5). Glyphs, images, and
 //! paths are deferred to Tasks 6-7.
+//!
+//! Note: this file is included via `#[path]` in the test crate —
+//! it must remain dependency-free (no external `use` statements beyond `scene`).
 
 use scene::{Node, NodeFlags, NodeId, NULL};
 
-/// Maximum number of quads per frame. Each quad = 6 vertices = 144 bytes.
-/// Limited to 100 to fit within a single 16 KiB virgl command buffer
-/// (clear + inline_write + draw overhead = ~34 dwords, leaving room for
-/// 100 * 36 = 3600 dwords of vertex data). Typical scenes use 20-30 quads.
-const MAX_QUADS: usize = 100;
+/// Maximum number of quads per frame.
+const MAX_QUADS: usize = 256;
 
 /// Bytes per vertex: x(f32) + y(f32) + r(f32) + g(f32) + b(f32) + a(f32) = 24.
 pub const VERTEX_STRIDE: u32 = 24;
 
-/// Maximum vertex data size in bytes.
+/// Maximum vertex data size in bytes (kept for VBO resource sizing).
 pub const MAX_VERTEX_BYTES: usize = MAX_QUADS * 6 * VERTEX_STRIDE as usize;
 
-/// Maximum vertex data size in u32 DWORDs (for inline write).
-pub const MAX_VERTEX_DWORDS: usize = MAX_VERTEX_BYTES / 4;
+/// A single colored quad (rectangle).
+#[derive(Clone, Copy)]
+pub struct Quad {
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32,
+}
 
-/// Accumulated vertex data from a scene walk.
+/// Accumulated quads from a scene walk.
 pub struct QuadBatch {
-    /// Vertex data as f32 values packed into u32 (bit representation).
-    /// Layout per vertex: [x, y, r, g, b, a] as f32 bits.
-    data: [u32; MAX_VERTEX_DWORDS],
-    /// Current write offset in u32 DWORDs.
-    len: usize,
-    /// Number of vertices accumulated.
+    quads: [Quad; MAX_QUADS],
+    count: usize,
+    /// Number of vertices (for compatibility — 6 per quad).
     pub vertex_count: u32,
 }
 
 impl QuadBatch {
     pub const fn new() -> Self {
         Self {
-            data: [0; MAX_VERTEX_DWORDS],
-            len: 0,
+            quads: [Quad {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }; MAX_QUADS],
+            count: 0,
             vertex_count: 0,
         }
     }
 
     /// Reset for a new frame.
     pub fn clear(&mut self) {
-        self.len = 0;
+        self.count = 0;
         self.vertex_count = 0;
     }
 
-    /// Get the vertex data as a u32 slice for inline write.
-    pub fn as_dwords(&self) -> &[u32] {
-        &self.data[..self.len]
+    /// Get the accumulated quads.
+    pub fn quads(&self) -> &[Quad] {
+        &self.quads[..self.count]
     }
 
-    /// Total byte size of vertex data.
-    pub fn size_bytes(&self) -> u32 {
-        (self.len * 4) as u32
-    }
-
-    /// Push a single vertex (position + color).
-    fn push_vertex(&mut self, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32) {
-        if self.len + 6 > MAX_VERTEX_DWORDS {
-            return; // silently drop if full
-        }
-        self.data[self.len] = x.to_bits();
-        self.data[self.len + 1] = y.to_bits();
-        self.data[self.len + 2] = r.to_bits();
-        self.data[self.len + 3] = g.to_bits();
-        self.data[self.len + 4] = b.to_bits();
-        self.data[self.len + 5] = a.to_bits();
-        self.len += 6;
-        self.vertex_count += 1;
-    }
-
-    /// Emit a colored quad as two triangles (6 vertices).
-    /// Coordinates are in pixel space (viewport transform handles NDC).
+    /// Add a colored quad.
     fn push_quad(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) {
-        let x1 = x + w;
-        let y1 = y + h;
+        if self.count >= MAX_QUADS {
+            return;
+        }
+        self.quads[self.count] = Quad {
+            x,
+            y,
+            w,
+            h,
+            r,
+            g,
+            b,
+            a,
+        };
+        self.count += 1;
+        self.vertex_count += 6;
+    }
 
-        // Triangle 1: top-left, top-right, bottom-left
-        self.push_vertex(x, y, r, g, b, a);
-        self.push_vertex(x1, y, r, g, b, a);
-        self.push_vertex(x, y1, r, g, b, a);
+    /// Placeholder for future VBO use.
+    pub fn as_dwords(&self) -> &[u32] {
+        &[]
+    }
 
-        // Triangle 2: top-right, bottom-right, bottom-left
-        self.push_vertex(x1, y, r, g, b, a);
-        self.push_vertex(x1, y1, r, g, b, a);
-        self.push_vertex(x, y1, r, g, b, a);
+    /// Placeholder for future VBO use.
+    pub fn size_bytes(&self) -> u32 {
+        0
     }
 }
 
@@ -123,10 +130,6 @@ impl ClipRect {
 }
 
 /// Walk the scene graph and accumulate colored quads.
-///
-/// `scale` is the display scale factor (1.0 or 2.0). Node coordinates
-/// are in logical pixels; we multiply by scale to get physical pixels
-/// for the GPU vertex positions.
 pub fn walk_scene(
     nodes: &[Node],
     root: NodeId,
@@ -182,7 +185,6 @@ fn walk_node(
     // Draw background if non-transparent.
     let bg = node.background;
     if bg.a > 0 {
-        // Clip the quad against the current clip rect.
         let quad_clip = ClipRect {
             x: abs_x,
             y: abs_y,

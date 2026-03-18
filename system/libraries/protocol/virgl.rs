@@ -95,9 +95,12 @@ pub const PIPE_FUNC_ALWAYS: u32 = 7;
 
 pub const PIPE_MASK_RGBA: u32 = 0x0F;
 
-// virgl_hw.h format values (same numbering as the virtio-gpu 2D format enum):
+// virgl_hw.h format values — NOT the same as Mesa pipe_format!
+// Always verify against virglrenderer/src/virgl_hw.h.
 pub const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
-pub const VIRGL_FORMAT_R8_UNORM: u32 = 64; // pipe_format 64
+pub const VIRGL_FORMAT_R8_UNORM: u32 = 64;
+pub const VIRGL_FORMAT_R32G32_FLOAT: u32 = 29;
+pub const VIRGL_FORMAT_R32G32B32A32_FLOAT: u32 = 31;
 
 // ── TGSI shader types ────────────────────────────────────────────────────
 
@@ -339,16 +342,16 @@ impl CommandBuffer {
             9,
         ));
         self.push(handle);
-        // Element 0: position (offset=0, float2, R32G32_FLOAT=130)
+        // Element 0: position (offset=0, float2)
         self.push(0); // src_offset
         self.push(0); // instance_divisor
         self.push(0); // vertex_buffer_index
-        self.push(130); // src_format = R32G32_FLOAT
-                        // Element 1: color (offset=8, float4, R32G32B32A32_FLOAT=124)
+        self.push(VIRGL_FORMAT_R32G32_FLOAT); // src_format (virgl_hw.h = 29)
+        // Element 1: color (offset=8, float4)
         self.push(8); // src_offset (after 2 floats)
         self.push(0); // instance_divisor
         self.push(0); // vertex_buffer_index
-        self.push(124); // src_format = R32G32B32A32_FLOAT
+        self.push(VIRGL_FORMAT_R32G32B32A32_FLOAT); // src_format (virgl_hw.h = 31)
     }
 
     /// VIRGL_CCMD_RESOURCE_INLINE_WRITE — upload data to a resource.
