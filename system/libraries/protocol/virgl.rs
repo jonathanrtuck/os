@@ -347,11 +347,38 @@ impl CommandBuffer {
         self.push(0); // instance_divisor
         self.push(0); // vertex_buffer_index
         self.push(VIRGL_FORMAT_R32G32_FLOAT); // src_format (virgl_hw.h = 29)
-        // Element 1: color (offset=8, float4)
+                                              // Element 1: color (offset=8, float4)
         self.push(8); // src_offset (after 2 floats)
         self.push(0); // instance_divisor
         self.push(0); // vertex_buffer_index
         self.push(VIRGL_FORMAT_R32G32B32A32_FLOAT); // src_format (virgl_hw.h = 31)
+    }
+
+    /// VIRGL_CCMD_CREATE_OBJECT — create vertex element layout for textured rendering.
+    /// Three attributes: 2D position + 2D texcoord + RGBA color = 8 floats = 32 bytes.
+    pub fn cmd_create_vertex_elements_textured(&mut self, handle: u32) {
+        // 3 elements × 4 dwords each + 1 handle = 13 dwords payload
+        self.push(virgl_cmd0(
+            VIRGL_CCMD_CREATE_OBJECT,
+            VIRGL_OBJECT_VERTEX_ELEMENTS,
+            13,
+        ));
+        self.push(handle);
+        // Element 0: position (offset=0, float2)
+        self.push(0); // src_offset
+        self.push(0); // instance_divisor
+        self.push(0); // vertex_buffer_index
+        self.push(VIRGL_FORMAT_R32G32_FLOAT);
+        // Element 1: texcoord (offset=8, float2)
+        self.push(8); // src_offset
+        self.push(0); // instance_divisor
+        self.push(0); // vertex_buffer_index
+        self.push(VIRGL_FORMAT_R32G32_FLOAT);
+        // Element 2: color (offset=16, float4)
+        self.push(16); // src_offset
+        self.push(0); // instance_divisor
+        self.push(0); // vertex_buffer_index
+        self.push(VIRGL_FORMAT_R32G32B32A32_FLOAT);
     }
 
     /// VIRGL_CCMD_RESOURCE_INLINE_WRITE — upload data to a resource.
@@ -408,15 +435,15 @@ impl CommandBuffer {
         ));
         self.push(handle);
         // S0: wrap_s=CLAMP_TO_EDGE(2), wrap_t=CLAMP_TO_EDGE(2), wrap_r=0,
-        //     min_img_filter=NEAREST(0), min_mip_filter=NONE(3), mag_img_filter=NEAREST(0)
+        //     min_img_filter=NEAREST(0), min_mip_filter=NONE(2), mag_img_filter=NEAREST(0)
         // Bit layout per virgl_protocol.h:
         //   bits 0-2:   wrap_s (CLAMP_TO_EDGE = 2)
         //   bits 3-5:   wrap_t (CLAMP_TO_EDGE = 2)
         //   bits 6-8:   wrap_r (0)
         //   bits 9-10:  min_img_filter (NEAREST = 0)
-        //   bits 11-12: min_mip_filter (NONE = 3)
+        //   bits 11-12: min_mip_filter (NONE = 2, NOT 3!)
         //   bits 13-14: mag_img_filter (NEAREST = 0)
-        let s0 = 2 | (2 << 3) | (3 << 11);
+        let s0 = 2 | (2 << 3) | (2 << 11);
         self.push(s0);
         self.push(0); // lod_bias (float bits)
         self.push(0); // min_lod (float bits)

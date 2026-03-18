@@ -15,6 +15,7 @@
 #![no_main]
 
 extern crate alloc;
+extern crate fonts;
 extern crate scene;
 
 use alloc::boxed::Box;
@@ -28,15 +29,20 @@ use protocol::{
     },
     virgl::{
         self, PIPE_BUFFER, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
-        VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_OBJECT_BLEND, VIRGL_OBJECT_DSA, VIRGL_OBJECT_RASTERIZER,
-        VIRGL_OBJECT_VERTEX_ELEMENTS, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
-        VIRTIO_GPU_CMD_CTX_CREATE, VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
-        VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
-        VIRTIO_GPU_CMD_RESOURCE_FLUSH, VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_SUBMIT_3D,
-        VIRTIO_GPU_RESP_OK_DISPLAY_INFO, VIRTIO_GPU_RESP_OK_NODATA,
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_R8_UNORM,
+        VIRGL_OBJECT_BLEND,
+        VIRGL_OBJECT_DSA, VIRGL_OBJECT_RASTERIZER, VIRGL_OBJECT_VERTEX_ELEMENTS,
+        VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, VIRTIO_GPU_CMD_CTX_CREATE,
+        VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
+        VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, VIRTIO_GPU_CMD_RESOURCE_FLUSH,
+        VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_SUBMIT_3D,
+        VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
+        VIRTIO_GPU_RESP_OK_NODATA,
     },
 };
 
+#[path = "atlas.rs"]
+mod atlas;
 #[path = "scene_walk.rs"]
 mod scene_walk;
 #[path = "shaders.rs"]
@@ -69,9 +75,19 @@ const HANDLE_RASTERIZER: u32 = 3;
 const HANDLE_SURFACE: u32 = 4;
 const HANDLE_VS: u32 = 5;
 const HANDLE_FS: u32 = 6;
-const HANDLE_VE: u32 = 7; // vertex elements layout
+const HANDLE_VE: u32 = 7; // vertex elements layout (color)
+/// Textured pipeline handles (for glyph rendering).
+const HANDLE_VE_TEXTURED: u32 = 8;
+const HANDLE_VS_TEXTURED: u32 = 9;
+const HANDLE_FS_GLYPH: u32 = 10;
+const HANDLE_SAMPLER: u32 = 11;
+const HANDLE_SAMPLER_VIEW: u32 = 12;
 /// Resource ID for the vertex buffer (PIPE_BUFFER).
 const VB_RESOURCE_ID: u32 = 2;
+/// Resource ID for the glyph atlas texture (R8_UNORM).
+const ATLAS_RESOURCE_ID: u32 = 3;
+/// Resource ID for the textured vertex buffer (PIPE_BUFFER).
+const TEXT_VB_RESOURCE_ID: u32 = 4;
 
 // ── Wire-format structs ──────────────────────────────────────────────────
 
@@ -918,6 +934,213 @@ fn ctx_attach_vbo(device: &virtio::Device, vq: &mut virtio::Virtqueue, irq_handl
     sys::print(b"     VBO attached to context\n");
 }
 
+/// Create a 3D resource with given parameters.
+fn resource_create_3d_generic(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    resource_id: u32,
+    target: u32,
+    format: u32,
+    bind: u32,
+    width: u32,
+    height: u32,
+) {
+    let cmd = DmaBuf::alloc(0);
+    // SAFETY: cmd.va points to zeroed DMA page, writing ResourceCreate3d.
+    unsafe {
+        core::ptr::write(
+            cmd.va as *mut ResourceCreate3d,
+            ResourceCreate3d {
+                hdr: ctrl_header(VIRTIO_GPU_CMD_RESOURCE_CREATE_3D),
+                resource_id,
+                target,
+                format,
+                bind,
+                width,
+                height,
+                depth: 1,
+                array_size: 1,
+                last_level: 0,
+                nr_samples: 0,
+                flags: 0,
+                _pad: 0,
+            },
+        );
+    }
+    if !gpu_cmd_ok(
+        device,
+        vq,
+        irq_handle,
+        &cmd,
+        core::mem::size_of::<ResourceCreate3d>() as u32,
+    ) {
+        sys::print(b"virgil-render: RESOURCE_CREATE_3D (generic) failed\n");
+        sys::exit();
+    }
+    cmd.free();
+}
+
+/// Attach backing memory and context-attach a resource. Returns (va, pa, order).
+fn attach_and_ctx_resource(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    resource_id: u32,
+    size_bytes: u32,
+) -> (usize, u64, u32) {
+    let cmd = DmaBuf::alloc(0);
+    let header_size = core::mem::size_of::<AttachBacking>();
+    let entry_size = core::mem::size_of::<MemEntry>();
+
+    let pages = ((size_bytes as usize) + 4095) / 4096;
+    let order = (pages.next_power_of_two().trailing_zeros()) as u32;
+    let mut pa: u64 = 0;
+    let va = sys::dma_alloc(order, &mut pa).unwrap_or_else(|_| {
+        sys::print(b"virgil-render: dma_alloc (resource backing) failed\n");
+        sys::exit();
+    });
+    // SAFETY: va is valid DMA memory of (1 << order) pages.
+    unsafe { core::ptr::write_bytes(va as *mut u8, 0, (1usize << order) * 4096) };
+
+    let ptr = cmd.va as *mut u8;
+    // SAFETY: writing into zeroed DMA page at correct offsets.
+    unsafe {
+        core::ptr::write(
+            ptr as *mut AttachBacking,
+            AttachBacking {
+                hdr: ctrl_header(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING),
+                resource_id,
+                nr_entries: 1,
+            },
+        );
+        core::ptr::write(
+            ptr.add(header_size) as *mut MemEntry,
+            MemEntry {
+                addr: pa,
+                length: (1u32 << order) * 4096,
+                _padding: 0,
+            },
+        );
+    }
+    let total_cmd_bytes = header_size + entry_size;
+    if !gpu_cmd_ok(device, vq, irq_handle, &cmd, total_cmd_bytes as u32) {
+        sys::print(b"virgil-render: RESOURCE_ATTACH_BACKING (generic) failed\n");
+        sys::exit();
+    }
+    cmd.free();
+
+    // Context attach.
+    let cmd2 = DmaBuf::alloc(0);
+    // SAFETY: cmd2.va points to zeroed DMA page.
+    unsafe {
+        core::ptr::write(
+            cmd2.va as *mut CtxResource,
+            CtxResource {
+                hdr: ctrl_header_ctx(VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE),
+                resource_id,
+                _pad: [0; 3],
+            },
+        );
+    }
+    if !gpu_cmd_ok(
+        device,
+        vq,
+        irq_handle,
+        &cmd2,
+        core::mem::size_of::<CtxResource>() as u32,
+    ) {
+        sys::print(b"virgil-render: CTX_ATTACH_RESOURCE (generic) failed\n");
+        sys::exit();
+    }
+    cmd2.free();
+    (va, pa, order)
+}
+
+/// Transfer a texture region to host (for atlas uploads).
+fn transfer_texture_to_host(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    resource_id: u32,
+    width: u32,
+    height: u32,
+    stride: u32,
+) {
+    let cmd = DmaBuf::alloc(0);
+    // SAFETY: cmd.va points to zeroed DMA page.
+    unsafe {
+        core::ptr::write(
+            cmd.va as *mut TransferToHost3d,
+            TransferToHost3d {
+                hdr: ctrl_header_ctx(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D),
+                box_x: 0,
+                box_y: 0,
+                box_z: 0,
+                box_w: width,
+                box_h: height,
+                box_d: 1,
+                offset: 0,
+                resource_id,
+                level: 0,
+                stride,
+                layer_stride: 0,
+            },
+        );
+    }
+    if !gpu_cmd_ok(
+        device,
+        vq,
+        irq_handle,
+        &cmd,
+        core::mem::size_of::<TransferToHost3d>() as u32,
+    ) {
+        sys::print(b"virgil-render: TRANSFER_TO_HOST_3D (texture) failed\n");
+    }
+    cmd.free();
+}
+
+/// Transfer buffer data to host (for VBO uploads).
+fn transfer_buffer_to_host(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    resource_id: u32,
+    data_bytes: u32,
+) {
+    let cmd = DmaBuf::alloc(0);
+    // SAFETY: cmd.va points to zeroed DMA page.
+    unsafe {
+        core::ptr::write(
+            cmd.va as *mut TransferToHost3d,
+            TransferToHost3d {
+                hdr: ctrl_header_ctx(VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D),
+                box_x: 0,
+                box_y: 0,
+                box_z: 0,
+                box_w: data_bytes,
+                box_h: 1,
+                box_d: 1,
+                offset: 0,
+                resource_id,
+                level: 0,
+                stride: 0,
+                layer_stride: 0,
+            },
+        );
+    }
+    if !gpu_cmd_ok(
+        device,
+        vq,
+        irq_handle,
+        &cmd,
+        core::mem::size_of::<TransferToHost3d>() as u32,
+    ) {
+        sys::print(b"virgil-render: TRANSFER_TO_HOST_3D (buffer) failed\n");
+    }
+    cmd.free();
+}
+
 /// Flush the render target to the display.
 fn flush_resource(
     device: &virtio::Device,
@@ -1029,8 +1252,13 @@ fn setup_pipeline(
     width: u32,
     height: u32,
 ) {
-    // Heap-allocate the CommandBuffer (16 KiB — must not go on 16 KiB stack).
-    let mut cmdbuf = Box::new(virgl::CommandBuffer::new());
+    // Heap-allocate the CommandBuffer (16 KiB — same size as user stack).
+    let mut cmdbuf: Box<virgl::CommandBuffer> = unsafe {
+        let ptr = alloc::alloc::alloc_zeroed(
+            alloc::alloc::Layout::new::<virgl::CommandBuffer>(),
+        ) as *mut virgl::CommandBuffer;
+        Box::from_raw(ptr)
+    };
 
     // Create pipeline state objects.
     cmdbuf.cmd_create_blend(HANDLE_BLEND);
@@ -1047,7 +1275,18 @@ fn setup_pipeline(
     cmdbuf.cmd_create_shader_text(HANDLE_VS, PIPE_SHADER_VERTEX, shaders::COLOR_VS);
     cmdbuf.cmd_create_shader_text(HANDLE_FS, PIPE_SHADER_FRAGMENT, shaders::COLOR_FS);
 
-    // Bind all state.
+    // Textured pipeline objects (for glyph rendering).
+    cmdbuf.cmd_create_vertex_elements_textured(HANDLE_VE_TEXTURED);
+    cmdbuf.cmd_create_shader_text(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX, shaders::TEXTURED_VS);
+    cmdbuf.cmd_create_shader_text(HANDLE_FS_GLYPH, PIPE_SHADER_FRAGMENT, shaders::GLYPH_FS);
+    cmdbuf.cmd_create_sampler_state(HANDLE_SAMPLER);
+    cmdbuf.cmd_create_sampler_view(
+        HANDLE_SAMPLER_VIEW,
+        ATLAS_RESOURCE_ID,
+        VIRGL_FORMAT_R8_UNORM,
+    );
+
+    // Bind color pipeline state (initial state for background rendering).
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_RASTERIZER, HANDLE_RASTERIZER);
@@ -1086,7 +1325,12 @@ fn clear_screen(
     height: u32,
 ) {
     // Clear to OS theme dark background.
-    let mut cmdbuf = Box::new(virgl::CommandBuffer::new());
+    let mut cmdbuf: Box<virgl::CommandBuffer> = unsafe {
+        let ptr = alloc::alloc::alloc_zeroed(
+            alloc::alloc::Layout::new::<virgl::CommandBuffer>(),
+        ) as *mut virgl::CommandBuffer;
+        Box::from_raw(ptr)
+    };
     cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
 
     if !submit_3d(device, vq, irq_handle, &cmdbuf) {
@@ -1160,11 +1404,54 @@ pub extern "C" fn _start() -> ! {
     ctx_attach_resource(&device, &mut vq, irq_handle);
     set_scanout(&device, &mut vq, irq_handle, width, height);
 
-    // Create vertex buffer resource for triangle rendering.
+    // Create color vertex buffer resource.
     let vbo_size = scene_walk::MAX_VERTEX_BYTES as u32;
     resource_create_vbo(&device, &mut vq, irq_handle, vbo_size);
     let (vbo_va, _vbo_pa, _vbo_order) = attach_backing_vbo(&device, &mut vq, irq_handle, vbo_size);
     ctx_attach_vbo(&device, &mut vq, irq_handle);
+
+    // Create glyph atlas texture resource (R8_UNORM, 512×512).
+    resource_create_3d_generic(
+        &device,
+        &mut vq,
+        irq_handle,
+        ATLAS_RESOURCE_ID,
+        PIPE_TEXTURE_2D,
+        VIRGL_FORMAT_R8_UNORM,
+        virgl::PIPE_BIND_SAMPLER_VIEW,
+        atlas::ATLAS_WIDTH,
+        atlas::ATLAS_HEIGHT,
+    );
+    let (atlas_va, _atlas_pa, _atlas_order) = attach_and_ctx_resource(
+        &device,
+        &mut vq,
+        irq_handle,
+        ATLAS_RESOURCE_ID,
+        atlas::ATLAS_BYTES as u32,
+    );
+    sys::print(b"     glyph atlas texture created\n");
+
+    // Create textured vertex buffer resource.
+    let text_vbo_size = scene_walk::MAX_TEXTURED_VERTEX_BYTES as u32;
+    resource_create_3d_generic(
+        &device,
+        &mut vq,
+        irq_handle,
+        TEXT_VB_RESOURCE_ID,
+        PIPE_BUFFER,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+        virgl::PIPE_BIND_VERTEX_BUFFER,
+        text_vbo_size,
+        1,
+    );
+    let (text_vbo_va, _text_vbo_pa, _text_vbo_order) = attach_and_ctx_resource(
+        &device,
+        &mut vq,
+        irq_handle,
+        TEXT_VB_RESOURCE_ID,
+        text_vbo_size,
+    );
+    sys::print(b"     textured VBO created\n");
 
     // ── Phase D: GPU pipeline setup ──────────────────────────────────────
     setup_pipeline(&device, &mut vq, irq_handle, width, height);
@@ -1172,13 +1459,12 @@ pub extern "C" fn _start() -> ! {
     // ── Phase E: Clear screen + flush ────────────────────────────────────
     clear_screen(&device, &mut vq, irq_handle, width, height);
 
-    // ── Phase F: Receive render config + scene graph render loop ─────────
-    //
-    // Read compositor config from init (sent on the init channel).
-    // Contains scene_va, font_va, font_len, scale_factor.
+    // ── Phase F: Receive render config, init glyph atlas, render loop ────
     sys::print(b"     waiting for render config\n");
 
     let mut scene_va: u64 = 0;
+    let mut font_va: u64 = 0;
+    let mut font_len: u32 = 0;
     let mut scale_factor: f32 = 1.0;
 
     loop {
@@ -1187,11 +1473,15 @@ pub extern "C" fn _start() -> ! {
             // SAFETY: msg payload is a valid CompositorConfig from init.
             let config: CompositorConfig = unsafe { msg.payload_as() };
             scene_va = config.scene_va;
+            font_va = config.mono_font_va;
+            font_len = config.mono_font_len;
             scale_factor = config.scale_factor;
 
             sys::print(b"     render config: scene_va=");
             print_hex_u32((scene_va >> 32) as u32);
             print_hex_u32(scene_va as u32);
+            sys::print(b" font_len=");
+            print_u32(font_len);
             sys::print(b" scale=");
             print_u32((scale_factor * 100.0) as u32);
             sys::print(b"%\n");
@@ -1206,17 +1496,161 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Scene graph shared memory: TripleReader reads from this.
+    // ── Glyph atlas initialization ───────────────────────────────────────
+    //
+    // Rasterize ASCII glyphs on the CPU via GlyphCache, pack into atlas
+    // DMA backing memory, then transfer to GPU texture.
+    // Heap-allocate atlas (~24 KiB) directly — cannot use Box::new() because
+    // the struct exceeds the 16 KiB stack. alloc_zeroed produces valid initial
+    // state (all entries empty, cursors at 0), then we set dma_va.
+    let mut glyph_atlas: Box<atlas::GlyphAtlas> = unsafe {
+        let layout = alloc::alloc::Layout::new::<atlas::GlyphAtlas>();
+        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut atlas::GlyphAtlas;
+        if ptr.is_null() {
+            sys::print(b"virgil-render: atlas alloc failed\n");
+            sys::exit();
+        }
+        (*ptr).set_dma_va(atlas_va);
+        Box::from_raw(ptr)
+    };
+    let mut font_ascent: u32 = 14;
+
+    if font_va != 0 && font_len > 0 {
+        sys::print(b"     initializing glyph atlas via HarfBuzz shaping\n");
+
+        // SAFETY: font_va is mapped read-only into our address space by init.
+        let font_data =
+            unsafe { core::slice::from_raw_parts(font_va as *const u8, font_len as usize) };
+
+        // Font size = core's FONT_SIZE (18px) in logical pixels.
+        // The scene graph x_advance/x_offset are in logical pixels at this size.
+        // Rasterize at the LOGICAL size — the scene_walk applies * scale for NDC.
+        let font_size_px: u32 = 18; // must match core/main.rs FONT_SIZE
+
+        // Axes must match core's shaping axes (MONO=1.0).
+        let mono_axes = [fonts::rasterize::AxisValue {
+            tag: *b"MONO",
+            value: 1.0,
+        }];
+
+        // Get font metrics for ascent.
+        // scale_fu_ceil(val, size, upem) = (val * size + upem - 1) / upem
+        if let Some(metrics) = fonts::rasterize::font_metrics(font_data) {
+            let upem = metrics.units_per_em as i32;
+            let asc = metrics.ascent as i32;
+            let size = font_size_px as i32;
+            font_ascent = ((asc * size + upem - 1) / upem) as u32;
+
+            sys::print(b"     font ascent=");
+            print_u32(font_ascent);
+            sys::print(b" size=");
+            print_u32(font_size_px);
+            sys::print(b"\n");
+        }
+
+        // Shape all printable ASCII through HarfBuzz to get real glyph IDs
+        // (including GSUB substitutions like Recursive's MONO alternates).
+        // Then rasterize each unique glyph ID directly into the atlas.
+        let ascii: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
+        let shaped = fonts::shape_with_variations(font_data, ascii, &[], &mono_axes);
+
+        // Heap-allocate rasterization scratch space (~39 KiB).
+        let mut scratch: Box<fonts::rasterize::RasterScratch> = unsafe {
+            let layout = alloc::alloc::Layout::new::<fonts::rasterize::RasterScratch>();
+            let ptr =
+                alloc::alloc::alloc_zeroed(layout) as *mut fonts::rasterize::RasterScratch;
+            if ptr.is_null() {
+                sys::print(b"virgil-render: scratch alloc failed\n");
+                sys::exit();
+            }
+            Box::from_raw(ptr)
+        };
+
+        // Raster buffer for individual glyph rasterization (50×50 max).
+        let mut raster_buf = [0u8; 50 * 50];
+
+        let mut packed = 0u32;
+        for sg in &shaped {
+            if glyph_atlas.lookup(sg.glyph_id).is_some() {
+                continue; // Already packed.
+            }
+            let mut rb = fonts::rasterize::RasterBuffer {
+                data: &mut raster_buf,
+                width: 50,
+                height: 50,
+            };
+            if let Some(m) = fonts::rasterize::rasterize_with_axes(
+                font_data,
+                sg.glyph_id,
+                font_size_px as u16,
+                &mut rb,
+                &mut scratch,
+                &mono_axes,
+            ) {
+                if m.width > 0 && m.height > 0 {
+                    let coverage =
+                        &raster_buf[..(m.width * m.height) as usize];
+                    glyph_atlas.pack_glyph(
+                        sg.glyph_id,
+                        m.width,
+                        m.height,
+                        m.bearing_x,
+                        m.bearing_y,
+                        coverage,
+                    );
+                    packed += 1;
+                }
+            }
+        }
+
+        sys::print(b"     atlas packed ");
+        print_u32(packed);
+        sys::print(b" glyphs (");
+        print_u32(shaped.len() as u32);
+        sys::print(b" shaped)\n");
+
+        // Transfer atlas texture to GPU.
+        transfer_texture_to_host(
+            &device,
+            &mut vq,
+            irq_handle,
+            ATLAS_RESOURCE_ID,
+            atlas::ATLAS_WIDTH,
+            atlas::ATLAS_HEIGHT,
+            atlas::ATLAS_WIDTH, // stride = width for R8
+        );
+        sys::print(b"     glyph atlas uploaded to GPU\n");
+    } else {
+        sys::print(b"     no font data, text rendering disabled\n");
+    }
+
+    // Scene graph shared memory.
     let scene_buf = unsafe {
         // SAFETY: scene_va is mapped into our address space by init via
         // memory_share before process start. Size is TRIPLE_SCENE_SIZE.
         core::slice::from_raw_parts(scene_va as *const u8, scene::TRIPLE_SCENE_SIZE)
     };
 
-    // Heap-allocate the quad batch for scene walk results.
-    let mut batch = Box::new(scene_walk::QuadBatch::new());
-    // Heap-allocate the command buffer for per-frame rendering (16 KiB).
-    let mut cmdbuf = Box::new(virgl::CommandBuffer::new());
+    // Heap-allocate batches and command buffer directly (all are zero-valid).
+    // Cannot use Box::new() — TexturedBatch (~96 KiB) exceeds 16 KiB stack.
+    let mut batch: Box<scene_walk::QuadBatch> = unsafe {
+        let ptr = alloc::alloc::alloc_zeroed(
+            alloc::alloc::Layout::new::<scene_walk::QuadBatch>(),
+        ) as *mut scene_walk::QuadBatch;
+        Box::from_raw(ptr)
+    };
+    let mut text_batch: Box<scene_walk::TexturedBatch> = unsafe {
+        let ptr = alloc::alloc::alloc_zeroed(
+            alloc::alloc::Layout::new::<scene_walk::TexturedBatch>(),
+        ) as *mut scene_walk::TexturedBatch;
+        Box::from_raw(ptr)
+    };
+    let mut cmdbuf: Box<virgl::CommandBuffer> = unsafe {
+        let ptr = alloc::alloc::alloc_zeroed(
+            alloc::alloc::Layout::new::<virgl::CommandBuffer>(),
+        ) as *mut virgl::CommandBuffer;
+        Box::from_raw(ptr)
+    };
 
     let mut last_gen: u32 = 0;
     let mut frame_count: u32 = 0;
@@ -1224,10 +1658,9 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"  \xF0\x9F\x8E\xAE virgil-render: render loop starting\n");
 
     loop {
-        // Wait for scene update signal from core (handle 1).
         let _ = sys::wait(&[SCENE_HANDLE], u64::MAX);
 
-        // Drain scene update messages (we only care that there's a new frame).
+        // Drain scene update messages.
         {
             // SAFETY: Channel 1 shared memory was set up by init before start.
             let scene_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
@@ -1240,92 +1673,110 @@ pub extern "C" fn _start() -> ! {
         let nodes = reader.front_nodes();
         let gen = reader.front_generation();
 
-        // Skip if generation hasn't changed.
         if gen == last_gen && frame_count > 0 {
             reader.finish_read(gen);
             continue;
         }
         last_gen = gen;
 
-        // Walk scene tree and accumulate colored quads.
+        // Walk scene tree: accumulate colored quads (backgrounds) and
+        // textured quads (glyphs) in a single pass.
         let root = reader.front_root();
-        scene_walk::walk_scene(nodes, root, scale_factor, width, height, &mut batch);
+        let data_buf = reader.front_data_buf();
+        scene_walk::walk_scene(
+            nodes,
+            root,
+            scale_factor,
+            width,
+            height,
+            &mut batch,
+            &mut text_batch,
+            data_buf,
+            &glyph_atlas,
+            font_ascent,
+        );
 
-        // Debug: log vertex count for first few frames.
         if frame_count < 3 {
             sys::print(b"     frame ");
             print_u32(frame_count);
-            sys::print(b": gen=");
-            print_u32(gen);
-            sys::print(b" verts=");
+            sys::print(b": bg_verts=");
             print_u32(batch.vertex_count);
+            sys::print(b" text_verts=");
+            print_u32(text_batch.vertex_count);
             sys::print(b"\n");
         }
 
-        // Write scene graph vertex data to VBO DMA backing, then draw.
-        let vertex_data = batch.as_vertex_data();
-        let vert_dwords = vertex_data.len();
-        let data_bytes = vert_dwords * 4;
+        // ── Pass 1: Upload + draw colored backgrounds ────────────────────
+        let color_data = batch.as_vertex_data();
+        let color_dwords = color_data.len();
+        let color_bytes = color_dwords * 4;
 
-        // Debug first few frames.
-        if frame_count < 3 {
-            sys::print(b"     frame ");
-            print_u32(frame_count);
-            sys::print(b": verts=");
-            print_u32(batch.vertex_count);
-            sys::print(b" dwords=");
-            print_u32(vert_dwords as u32);
-            sys::print(b" bytes=");
-            print_u32(data_bytes as u32);
-            // Print first vertex's NDC x,y as raw bits to verify they're sane.
-            if vert_dwords >= 2 {
-                sys::print(b" v0_x=");
-                print_hex_u32(vertex_data[0]);
-                sys::print(b" v0_y=");
-                print_hex_u32(vertex_data[1]);
-            }
-            sys::print(b"\n");
-        }
-
-        // Write scene graph vertex data to VBO DMA backing, transfer to host.
-        let vertex_data = batch.as_vertex_data();
-        let vert_dwords = vertex_data.len();
-        let data_bytes = vert_dwords * 4;
-
-        if batch.vertex_count > 0 && data_bytes > 0 {
-            let dst = vbo_va as *mut u32;
-            // SAFETY: vbo_va is valid DMA memory of sufficient size.
+        if batch.vertex_count > 0 && color_bytes > 0 {
+            // SAFETY: vbo_va is valid DMA memory of MAX_VERTEX_BYTES size.
             unsafe {
-                core::ptr::copy_nonoverlapping(vertex_data.as_ptr(), dst, vert_dwords);
+                core::ptr::copy_nonoverlapping(
+                    color_data.as_ptr(),
+                    vbo_va as *mut u32,
+                    color_dwords,
+                );
             }
-            transfer_vbo_to_host(&device, &mut vq, irq_handle, data_bytes as u32);
+            transfer_vbo_to_host(&device, &mut vq, irq_handle, color_bytes as u32);
         }
 
-        // Build GPU commands: clear + draw.
+        // Build GPU commands.
         cmdbuf.clear();
         cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
 
+        // Draw backgrounds with color pipeline (already bound from setup).
         if batch.vertex_count > 0 {
+            // Ensure color pipeline is active (re-bind in case text pipeline was last).
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE);
+            cmdbuf.cmd_bind_shader(HANDLE_VS, PIPE_SHADER_VERTEX);
+            cmdbuf.cmd_bind_shader(HANDLE_FS, PIPE_SHADER_FRAGMENT);
+            cmdbuf.cmd_set_vertex_buffers(scene_walk::VERTEX_STRIDE, 0, VB_RESOURCE_ID);
             cmdbuf.cmd_draw_vbo(0, batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
         }
 
-        if frame_count < 3 {
-            sys::print(b"     cmdbuf=");
-            print_u32(cmdbuf.size_bytes());
-            sys::print(b"b submit=");
+        // ── Pass 2: Upload + draw textured glyphs ────────────────────────
+        let text_data = text_batch.as_vertex_data();
+        let text_dwords = text_data.len();
+        let text_bytes = text_dwords * 4;
+
+        if text_batch.vertex_count > 0 && text_bytes > 0 {
+            // SAFETY: text_vbo_va is valid DMA of MAX_TEXTURED_VERTEX_BYTES.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    text_data.as_ptr(),
+                    text_vbo_va as *mut u32,
+                    text_dwords,
+                );
+            }
+            transfer_buffer_to_host(
+                &device,
+                &mut vq,
+                irq_handle,
+                TEXT_VB_RESOURCE_ID,
+                text_bytes as u32,
+            );
+
+            // Switch to textured pipeline.
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+            cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+            cmdbuf.cmd_bind_shader(HANDLE_FS_GLYPH, PIPE_SHADER_FRAGMENT);
+            cmdbuf.cmd_set_vertex_buffers(
+                scene_walk::TEXTURED_VERTEX_STRIDE,
+                0,
+                TEXT_VB_RESOURCE_ID,
+            );
+            cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+            cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER_VIEW);
+            cmdbuf.cmd_draw_vbo(0, text_batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
         }
 
         if cmdbuf.overflowed() {
-            sys::print(b"OVERFLOW!\n");
+            sys::print(b"virgil-render: command buffer overflow!\n");
         } else {
-            let ok = submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
-            if frame_count < 3 {
-                if ok {
-                    sys::print(b"ok\n");
-                } else {
-                    sys::print(b"FAILED\n");
-                }
-            }
+            submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
             flush_resource(&device, &mut vq, irq_handle, width, height);
         }
 

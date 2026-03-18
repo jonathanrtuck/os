@@ -109,3 +109,29 @@ DCL TEMP[0]\n\
   0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
   1: MUL OUT[0], TEMP[0], IN[1]\n\
   2: END\n\0";
+
+// ── Glyph fragment shader ──────────────────────────────────────────────
+//
+// Specialized for R8_UNORM glyph atlas textures. The texture contains
+// grayscale coverage (0.0–1.0 in the R channel). The shader uses the
+// vertex color as the glyph color and multiplies vertex alpha by the
+// sampled coverage to produce the output alpha.
+//
+// With SRC_ALPHA / INV_SRC_ALPHA blending, the result is:
+//   out.rgb = glyph_color.rgb * (alpha * coverage) + dst.rgb * (1 - alpha * coverage)
+//
+// This is correct non-premultiplied alpha compositing. The R8 texture
+// returns (coverage, 0, 0, 1); we read only .x for the coverage value.
+
+pub const GLYPH_FS: &[u8] = b"FRAG\n\
+DCL IN[0], GENERIC[0], PERSPECTIVE\n\
+DCL IN[1], COLOR, LINEAR\n\
+DCL OUT[0], COLOR\n\
+DCL SAMP[0]\n\
+DCL TEMP[0]\n\
+DCL TEMP[1]\n\
+  0: TEX TEMP[0], IN[0], SAMP[0], 2D\n\
+  1: MOV TEMP[1], IN[1]\n\
+  2: MUL TEMP[1].w, IN[1].wwww, TEMP[0].xxxx\n\
+  3: MOV OUT[0], TEMP[1]\n\
+  4: END\n\0";
