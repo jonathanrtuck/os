@@ -29,9 +29,9 @@ use protocol::{
     },
     virgl::{
         self, PIPE_BUFFER, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
-        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_R8_UNORM,
-        VIRGL_FORMAT_S8_UINT, VIRGL_OBJECT_BLEND, VIRGL_OBJECT_DSA,
-        VIRGL_OBJECT_RASTERIZER, VIRGL_OBJECT_VERTEX_ELEMENTS, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+        PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_R8_UNORM, VIRGL_FORMAT_S8_UINT,
+        VIRGL_OBJECT_BLEND, VIRGL_OBJECT_DSA, VIRGL_OBJECT_RASTERIZER,
+        VIRGL_OBJECT_VERTEX_ELEMENTS, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
         VIRTIO_GPU_CMD_CTX_CREATE, VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
         VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
         VIRTIO_GPU_CMD_RESOURCE_FLUSH, VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_SUBMIT_3D,
@@ -1334,15 +1334,30 @@ fn setup_pipeline(
     }
     sys::print(b"     pipeline setup complete\n");
 
-    // ── Stencil-then-cover: deferred ──
-    // Resource creation works (bind=0x01, Z32_FLOAT format 18).
-    // Surface creation works.
-    // DSA stencil state causes CREATE_OBJECT:22 — encoding mismatch with
-    // what virglrenderer expects. Poisons context, breaks all rendering.
-    // Needs virglrenderer source to compare DSA binary encoding.
-    // Path rendering disabled until resolved.
-    sys::print(b"     stencil-then-cover: deferred (DSA encoding TBD)\n");
-    false
+    // ── Stencil-then-cover setup (each object in its own submission) ──
+    cmdbuf.clear();
+    cmdbuf.cmd_create_dsa_stencil_write(HANDLE_DSA_STENCIL_WRITE);
+    cmdbuf.cmd_create_dsa_stencil_test(HANDLE_DSA_STENCIL_TEST);
+    cmdbuf.cmd_create_blend_no_color(HANDLE_BLEND_NO_COLOR);
+    cmdbuf.cmd_create_surface(
+        HANDLE_STENCIL_SURFACE,
+        STENCIL_RESOURCE_ID,
+        126, // Z32_FLOAT_S8X24_UINT (depth32f + stencil8) (Apple Silicon compatible)
+    );
+    cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, HANDLE_STENCIL_SURFACE);
+    let stencil_ok = submit_3d(device, vq, irq_handle, &cmdbuf);
+
+    if stencil_ok {
+        sys::print(b"     stencil pipeline ready\n");
+    } else {
+        sys::print(b"     stencil pipeline FAILED - recovering\n");
+        cmdbuf.clear();
+        cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, 0);
+        cmdbuf.cmd_set_viewport(width as f32, height as f32);
+        let _ = submit_3d(device, vq, irq_handle, &cmdbuf);
+    }
+
+    stencil_ok
 }
 
 // ── Phase E: Clear screen + flush ────────────────────────────────────────
@@ -1482,7 +1497,26 @@ pub extern "C" fn _start() -> ! {
     );
     sys::print(b"     textured VBO created\n");
 
-    // Stencil resource creation deferred (see setup_pipeline comments).
+    // Create depth/stencil surface resource (Z32_FLOAT, same size as render target).
+    resource_create_3d_generic(
+        &device,
+        &mut vq,
+        irq_handle,
+        STENCIL_RESOURCE_ID,
+        PIPE_TEXTURE_2D,
+        126, // Z32_FLOAT_S8X24_UINT (depth32f + stencil8) (Apple Silicon; D24_S8 is Intel-only)
+        virgl::VIRGL_BIND_DEPTH_STENCIL,
+        width,
+        height,
+    );
+    let (_stencil_va, _stencil_pa, _stencil_order) = attach_and_ctx_resource(
+        &device,
+        &mut vq,
+        irq_handle,
+        STENCIL_RESOURCE_ID,
+        width * height * 8, // Z32F_S8X24 = 8 bytes/pixel
+    );
+    sys::print(b"     stencil surface created\n");
 
     // Image texture will be created lazily on first image frame.
     // Pre-allocate a DMA buffer for the max image size we support (64×64 BGRA).

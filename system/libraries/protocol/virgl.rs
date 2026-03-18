@@ -53,7 +53,7 @@ pub const VIRGL_CCMD_SET_CONSTANT_BUFFER: u32 = 12;
 pub const VIRGL_CCMD_SET_SCISSOR_STATE: u32 = 15;
 pub const VIRGL_CCMD_BLIT: u32 = 16;
 pub const VIRGL_CCMD_BIND_SAMPLER_STATES: u32 = 18;
-pub const VIRGL_CCMD_SET_STENCIL_REF: u32 = 19;
+pub const VIRGL_CCMD_SET_STENCIL_REF: u32 = 13;
 pub const VIRGL_CCMD_SET_UNIFORM_BUFFER: u32 = 27;
 pub const VIRGL_CCMD_BIND_SHADER: u32 = 31;
 
@@ -361,7 +361,8 @@ impl CommandBuffer {
     pub fn cmd_create_dsa_stencil_write(&mut self, handle: u32) {
         self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
         self.push(handle);
-        self.push(PIPE_FUNC_ALWAYS << 2); // S0: depth disabled, func=ALWAYS
+        // S0: depth enabled (so zpass_op triggers), func=ALWAYS, writemask=0 (no depth write).
+        self.push(1 | (PIPE_FUNC_ALWAYS << 2));
                                           // S1: stencil[0] (front) — always pass, increment-wrap on pass
         self.push(Self::stencil_face(
             PIPE_FUNC_ALWAYS,
@@ -389,7 +390,8 @@ impl CommandBuffer {
     pub fn cmd_create_dsa_stencil_test(&mut self, handle: u32) {
         self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
         self.push(handle);
-        self.push(PIPE_FUNC_ALWAYS << 2); // S0: depth disabled
+        // S0: depth enabled, func=ALWAYS, writemask=0.
+        self.push(1 | (PIPE_FUNC_ALWAYS << 2));
                                           // S1: stencil[0] (front) — pass if != 0, zero on pass
         let face = Self::stencil_face(
             PIPE_FUNC_NOTEQUAL,
@@ -406,22 +408,22 @@ impl CommandBuffer {
 
     /// Create a blend state with color writes disabled (for stencil-only pass).
     pub fn cmd_create_blend_no_color(&mut self, handle: u32) {
-        // Same structure as cmd_create_blend but colormask = 0.
-        self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_BLEND, 10));
+        // Payload = handle(1) + S0(1) + S1/logicop(1) + RT0-RT7(8) = 11.
+        self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_BLEND, 11));
         self.push(handle);
-        self.push(0); // S0: independent_blend_enable=0, logicop_enable=0
-                      // RT0: blend disabled, colormask = 0 (no color write)
-        self.push(0);
-        for _ in 0..7 {
+        self.push(0); // S0: no independent blend, no logicop, no dither
+        self.push(0); // S1: logicop_func = 0 (CLEAR, unused since logicop disabled)
+                      // RT0-RT7: all zeros (blend disabled, colormask = 0 → no color write).
+        for _ in 0..8 {
             self.push(0);
         }
     }
 
     /// VIRGL_CCMD_SET_STENCIL_REF — set stencil reference values.
+    /// Both refs packed into one dword: front in bits 0-7, back in bits 8-15.
     pub fn cmd_set_stencil_ref(&mut self, front: u32, back: u32) {
-        self.push(virgl_cmd0(VIRGL_CCMD_SET_STENCIL_REF, 0, 2));
-        self.push(front);
-        self.push(back);
+        self.push(virgl_cmd0(VIRGL_CCMD_SET_STENCIL_REF, 0, 1));
+        self.push((front & 0xFF) | ((back & 0xFF) << 8));
     }
 
     /// VIRGL_CCMD_CLEAR — clear stencil buffer.
