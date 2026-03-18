@@ -204,15 +204,7 @@ pub fn path_line_to(buf: &mut Vec<u8>, x: f32, y: f32) {
 }
 
 /// Append a CubicTo command to a byte buffer.
-pub fn path_cubic_to(
-    buf: &mut Vec<u8>,
-    c1x: f32,
-    c1y: f32,
-    c2x: f32,
-    c2y: f32,
-    x: f32,
-    y: f32,
-) {
+pub fn path_cubic_to(buf: &mut Vec<u8>, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
     buf.extend_from_slice(&PATH_CUBIC_TO.to_le_bytes());
     buf.extend_from_slice(&c1x.to_le_bytes());
     buf.extend_from_slice(&c1y.to_le_bytes());
@@ -468,14 +460,22 @@ impl AffineTransform {
 fn min4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     let ab = if a < b { a } else { b };
     let cd = if c < d { c } else { d };
-    if ab < cd { ab } else { cd }
+    if ab < cd {
+        ab
+    } else {
+        cd
+    }
 }
 
 /// Maximum of four f32 values.
 fn max4(a: f32, b: f32, c: f32, d: f32) -> f32 {
     let ab = if a > b { a } else { b };
     let cd = if c > d { c } else { d };
-    if ab > cd { ab } else { cd }
+    if ab > cd {
+        ab
+    } else {
+        cd
+    }
 }
 
 /// Sine and cosine for `no_std`. Uses Taylor series with Payne-Hanek-style
@@ -508,10 +508,14 @@ fn sin_cos_f32(x: f32) -> (f32, f32) {
     let a2 = reduced * reduced;
 
     // sin: x - x³/6 + x⁵/120 - x⁷/5040 + x⁹/362880 - x¹¹/39916800
-    let sin_val = reduced * (1.0 - a2 / 6.0 * (1.0 - a2 / 20.0 * (1.0 - a2 / 42.0 * (1.0 - a2 / 72.0 * (1.0 - a2 / 110.0)))));
+    let sin_val = reduced
+        * (1.0
+            - a2 / 6.0
+                * (1.0 - a2 / 20.0 * (1.0 - a2 / 42.0 * (1.0 - a2 / 72.0 * (1.0 - a2 / 110.0)))));
 
     // cos: 1 - x²/2 + x⁴/24 - x⁶/720 + x⁸/40320 - x¹⁰/3628800
-    let cos_val = 1.0 - a2 / 2.0 * (1.0 - a2 / 12.0 * (1.0 - a2 / 30.0 * (1.0 - a2 / 56.0 * (1.0 - a2 / 90.0))));
+    let cos_val = 1.0
+        - a2 / 2.0 * (1.0 - a2 / 12.0 * (1.0 - a2 / 30.0 * (1.0 - a2 / 56.0 * (1.0 - a2 / 90.0))));
 
     (sin_sign * sin_val, cos_sign * cos_val)
 }
@@ -520,7 +524,11 @@ fn sin_cos_f32(x: f32) -> (f32, f32) {
 fn tan_f32(x: f32) -> f32 {
     let (sin, cos) = sin_cos_f32(x);
     if cos.abs_f32() < 1e-10 {
-        if sin >= 0.0 { f32::MAX } else { f32::MIN }
+        if sin >= 0.0 {
+            f32::MAX
+        } else {
+            f32::MIN
+        }
     } else {
         sin / cos
     }
@@ -537,12 +545,20 @@ impl F32Ext for f32 {
     fn floor_f32(self) -> f32 {
         let i = self as i32;
         let f = i as f32;
-        if self < f { f - 1.0 } else { f }
+        if self < f {
+            f - 1.0
+        } else {
+            f
+        }
     }
 
     #[inline]
     fn abs_f32(self) -> f32 {
-        if self < 0.0 { -self } else { self }
+        if self < 0.0 {
+            -self
+        } else {
+            self
+        }
     }
 }
 
@@ -1070,7 +1086,6 @@ impl<'a> SceneReader<'a> {
         // push_shaped_glyphs to ShapedGlyph alignment.
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
-
 }
 
 // ── Triple-buffered scene graph (mailbox semantics) ─────────────────
@@ -1111,7 +1126,7 @@ fn triple_read_ctrl(buf: &[u8], field_offset: usize) -> u32 {
     // offset (TRIPLE_CONTROL_OFFSET = 3 * SCENE_SIZE, a multiple of 4).
     unsafe {
         core::ptr::read_volatile(
-            buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *const u32,
+            buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *const u32
         )
     }
 }
@@ -1226,7 +1241,11 @@ impl<'a> TripleWriter<'a> {
         let reader = triple_read_ctrl(buf, CTRL_READER_BUF);
         let free = if reader == NO_READER || reader > 2 || reader == latest {
             // Pick any buffer that isn't latest.
-            if latest == 0 { 1 } else { 0 }
+            if latest == 0 {
+                1
+            } else {
+                0
+            }
         } else {
             free_index(latest, reader)
         };
@@ -1430,8 +1449,7 @@ impl<'a> TripleWriter<'a> {
         // Write destination header: copy source metadata, reset change list.
         // SAFETY: dst_off is a valid scene buffer offset. SceneHeader is
         // repr(C) at offset 0. Exclusive &mut borrow prevents aliasing.
-        let dst_hdr =
-            unsafe { &mut *(self.buf.as_mut_ptr().add(dst_off) as *mut SceneHeader) };
+        let dst_hdr = unsafe { &mut *(self.buf.as_mut_ptr().add(dst_off) as *mut SceneHeader) };
         dst_hdr.node_count = node_count;
         dst_hdr.root = src_hdr.root;
         dst_hdr.data_used = data_used;
@@ -1501,6 +1519,11 @@ impl<'a> TripleReader<'a> {
     /// Generation of the buffer being read.
     pub fn front_generation(&self) -> u32 {
         self.read_gen
+    }
+
+    /// Root node ID from the claimed buffer.
+    pub fn front_root(&self) -> NodeId {
+        self.header().root
     }
 
     /// Node slice from the claimed buffer.
@@ -1652,12 +1675,7 @@ fn write_reader_done_gen(buf: &[u8], value: u32) {
     // even though the buffer is shared (reader writes this field, writer
     // reads it). In the real system, this is shared memory with volatile
     // access; the &[u8] immutability is a Rust-side convenience.
-    unsafe {
-        core::ptr::write_volatile(
-            buf.as_ptr().add(READER_STATE_OFFSET) as *mut u32,
-            value,
-        )
-    }
+    unsafe { core::ptr::write_volatile(buf.as_ptr().add(READER_STATE_OFFSET) as *mut u32, value) }
 }
 
 impl<'a> DoubleWriter<'a> {
@@ -1773,8 +1791,7 @@ impl<'a> DoubleWriter<'a> {
         // SAFETY: back_off is a valid scene buffer offset. SceneHeader is
         // repr(C) at offset 0 of each scene buffer. Exclusive &mut borrow
         // on self prevents aliasing.
-        let back_hdr =
-            unsafe { &mut *(self.buf.as_mut_ptr().add(back_off) as *mut SceneHeader) };
+        let back_hdr = unsafe { &mut *(self.buf.as_mut_ptr().add(back_off) as *mut SceneHeader) };
 
         back_hdr.node_count = node_count;
         back_hdr.root = front_hdr.root;
@@ -2023,7 +2040,11 @@ pub fn build_parent_map(nodes: &[Node], count: usize) -> [NodeId; MAX_NODES] {
 /// the axis-aligned bounding box (AABB) of the transformed node bounds.
 /// This ensures damage tracking covers the full area affected by rotated,
 /// scaled, or skewed nodes.
-pub fn abs_bounds(nodes: &[Node], parent_map: &[NodeId; MAX_NODES], id: usize) -> (i32, i32, u32, u32) {
+pub fn abs_bounds(
+    nodes: &[Node],
+    parent_map: &[NodeId; MAX_NODES],
+    id: usize,
+) -> (i32, i32, u32, u32) {
     let node = &nodes[id];
     let mut ax = node.x as i32;
     let mut ay = node.y as i32;
@@ -2046,12 +2067,9 @@ pub fn abs_bounds(nodes: &[Node], parent_map: &[NodeId; MAX_NODES], id: usize) -
     // transformed bounds. The transform shifts the node's visual footprint
     // — damage tracking must cover the full transformed area.
     if !node.transform.is_identity() {
-        let (aabb_x, aabb_y, aabb_w, aabb_h) = node.transform.transform_aabb(
-            0.0,
-            0.0,
-            node.width as f32,
-            node.height as f32,
-        );
+        let (aabb_x, aabb_y, aabb_w, aabb_h) =
+            node.transform
+                .transform_aabb(0.0, 0.0, node.width as f32, node.height as f32);
 
         // The AABB origin is relative to the node's position.
         // Round conservatively: floor for origin, ceil for size.
@@ -2095,14 +2113,22 @@ pub fn abs_bounds(nodes: &[Node], parent_map: &[NodeId; MAX_NODES], id: usize) -
 fn floor_f32(x: f32) -> f32 {
     let i = x as i32;
     let f = i as f32;
-    if x < f { f - 1.0 } else { f }
+    if x < f {
+        f - 1.0
+    } else {
+        f
+    }
 }
 
 /// Ceil for f32 in `no_std`.
 fn ceil_f32(x: f32) -> f32 {
     let i = x as i32;
     let f = i as f32;
-    if x > f { f + 1.0 } else { f }
+    if x > f {
+        f + 1.0
+    } else {
+        f
+    }
 }
 
 /// Compare two scene snapshots and return dirty rectangles.
@@ -2120,7 +2146,10 @@ pub fn diff_scenes(
     if prev_count != curr_count || prev_count == 0 {
         return None;
     }
-    let n = prev_count.min(prev_nodes.len()).min(curr_nodes.len()).min(MAX_NODES);
+    let n = prev_count
+        .min(prev_nodes.len())
+        .min(curr_nodes.len())
+        .min(MAX_NODES);
     let curr_parents = build_parent_map(curr_nodes, n);
     let prev_parents = build_parent_map(prev_nodes, n);
     let node_size = core::mem::size_of::<Node>();

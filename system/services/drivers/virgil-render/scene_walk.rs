@@ -1,0 +1,249 @@
+//! Scene graph tree walk for solid rectangle rendering.
+//!
+//! Walks the scene graph depth-first and accumulates colored quads
+//! (two triangles each) into a vertex buffer. Each vertex carries
+//! position (float2) and color (float4) = 24 bytes.
+//!
+//! Only node backgrounds are rendered (Task 5). Glyphs, images, and
+//! paths are deferred to Tasks 6-7.
+
+use scene::{Node, NodeFlags, NodeId, NULL};
+
+/// Maximum number of quads per frame. Each quad = 6 vertices = 144 bytes.
+/// Limited to 100 to fit within a single 16 KiB virgl command buffer
+/// (clear + inline_write + draw overhead = ~34 dwords, leaving room for
+/// 100 * 36 = 3600 dwords of vertex data). Typical scenes use 20-30 quads.
+const MAX_QUADS: usize = 100;
+
+/// Bytes per vertex: x(f32) + y(f32) + r(f32) + g(f32) + b(f32) + a(f32) = 24.
+pub const VERTEX_STRIDE: u32 = 24;
+
+/// Maximum vertex data size in bytes.
+pub const MAX_VERTEX_BYTES: usize = MAX_QUADS * 6 * VERTEX_STRIDE as usize;
+
+/// Maximum vertex data size in u32 DWORDs (for inline write).
+pub const MAX_VERTEX_DWORDS: usize = MAX_VERTEX_BYTES / 4;
+
+/// Accumulated vertex data from a scene walk.
+pub struct QuadBatch {
+    /// Vertex data as f32 values packed into u32 (bit representation).
+    /// Layout per vertex: [x, y, r, g, b, a] as f32 bits.
+    data: [u32; MAX_VERTEX_DWORDS],
+    /// Current write offset in u32 DWORDs.
+    len: usize,
+    /// Number of vertices accumulated.
+    pub vertex_count: u32,
+}
+
+impl QuadBatch {
+    pub const fn new() -> Self {
+        Self {
+            data: [0; MAX_VERTEX_DWORDS],
+            len: 0,
+            vertex_count: 0,
+        }
+    }
+
+    /// Reset for a new frame.
+    pub fn clear(&mut self) {
+        self.len = 0;
+        self.vertex_count = 0;
+    }
+
+    /// Get the vertex data as a u32 slice for inline write.
+    pub fn as_dwords(&self) -> &[u32] {
+        &self.data[..self.len]
+    }
+
+    /// Total byte size of vertex data.
+    pub fn size_bytes(&self) -> u32 {
+        (self.len * 4) as u32
+    }
+
+    /// Push a single vertex (position + color).
+    fn push_vertex(&mut self, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32) {
+        if self.len + 6 > MAX_VERTEX_DWORDS {
+            return; // silently drop if full
+        }
+        self.data[self.len] = x.to_bits();
+        self.data[self.len + 1] = y.to_bits();
+        self.data[self.len + 2] = r.to_bits();
+        self.data[self.len + 3] = g.to_bits();
+        self.data[self.len + 4] = b.to_bits();
+        self.data[self.len + 5] = a.to_bits();
+        self.len += 6;
+        self.vertex_count += 1;
+    }
+
+    /// Emit a colored quad as two triangles (6 vertices).
+    /// Coordinates are in pixel space (viewport transform handles NDC).
+    fn push_quad(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) {
+        let x1 = x + w;
+        let y1 = y + h;
+
+        // Triangle 1: top-left, top-right, bottom-left
+        self.push_vertex(x, y, r, g, b, a);
+        self.push_vertex(x1, y, r, g, b, a);
+        self.push_vertex(x, y1, r, g, b, a);
+
+        // Triangle 2: top-right, bottom-right, bottom-left
+        self.push_vertex(x1, y, r, g, b, a);
+        self.push_vertex(x1, y1, r, g, b, a);
+        self.push_vertex(x, y1, r, g, b, a);
+    }
+}
+
+/// Clip rectangle for scissor-based clipping.
+#[derive(Clone, Copy)]
+struct ClipRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+}
+
+impl ClipRect {
+    fn intersect(self, other: ClipRect) -> ClipRect {
+        let x0 = if self.x > other.x { self.x } else { other.x };
+        let y0 = if self.y > other.y { self.y } else { other.y };
+        let x1_a = self.x + self.w;
+        let x1_b = other.x + other.w;
+        let y1_a = self.y + self.h;
+        let y1_b = other.y + other.h;
+        let x1 = if x1_a < x1_b { x1_a } else { x1_b };
+        let y1 = if y1_a < y1_b { y1_a } else { y1_b };
+        let w = if x1 > x0 { x1 - x0 } else { 0.0 };
+        let h = if y1 > y0 { y1 - y0 } else { 0.0 };
+        ClipRect { x: x0, y: y0, w, h }
+    }
+
+    fn is_empty(self) -> bool {
+        self.w <= 0.0 || self.h <= 0.0
+    }
+}
+
+/// Walk the scene graph and accumulate colored quads.
+///
+/// `scale` is the display scale factor (1.0 or 2.0). Node coordinates
+/// are in logical pixels; we multiply by scale to get physical pixels
+/// for the GPU vertex positions.
+pub fn walk_scene(
+    nodes: &[Node],
+    root: NodeId,
+    scale: f32,
+    viewport_w: u32,
+    viewport_h: u32,
+    batch: &mut QuadBatch,
+) {
+    batch.clear();
+
+    if root == NULL || nodes.is_empty() {
+        return;
+    }
+
+    let clip = ClipRect {
+        x: 0.0,
+        y: 0.0,
+        w: viewport_w as f32,
+        h: viewport_h as f32,
+    };
+
+    walk_node(nodes, root, 0.0, 0.0, scale, clip, batch);
+}
+
+/// Recursive depth-first walk of the scene tree.
+fn walk_node(
+    nodes: &[Node],
+    id: NodeId,
+    parent_x: f32,
+    parent_y: f32,
+    scale: f32,
+    clip: ClipRect,
+    batch: &mut QuadBatch,
+) {
+    let idx = id as usize;
+    if idx >= nodes.len() {
+        return;
+    }
+
+    let node = &nodes[idx];
+
+    // Skip invisible nodes.
+    if !node.flags.contains(NodeFlags::VISIBLE) {
+        return;
+    }
+
+    // Compute absolute position in physical pixels.
+    let abs_x = parent_x + (node.x as f32) * scale;
+    let abs_y = parent_y + (node.y as f32) * scale;
+    let w = (node.width as f32) * scale;
+    let h = (node.height as f32) * scale;
+
+    // Draw background if non-transparent.
+    let bg = node.background;
+    if bg.a > 0 {
+        // Clip the quad against the current clip rect.
+        let quad_clip = ClipRect {
+            x: abs_x,
+            y: abs_y,
+            w,
+            h,
+        }
+        .intersect(clip);
+
+        if !quad_clip.is_empty() {
+            let r = bg.r as f32 / 255.0;
+            let g = bg.g as f32 / 255.0;
+            let b = bg.b as f32 / 255.0;
+            let a = bg.a as f32 / 255.0;
+            batch.push_quad(
+                quad_clip.x,
+                quad_clip.y,
+                quad_clip.w,
+                quad_clip.h,
+                r,
+                g,
+                b,
+                a,
+            );
+        }
+    }
+
+    // Compute clip rect for children.
+    let child_clip = if node.flags.contains(NodeFlags::CLIPS_CHILDREN) {
+        clip.intersect(ClipRect {
+            x: abs_x,
+            y: abs_y,
+            w,
+            h,
+        })
+    } else {
+        clip
+    };
+
+    if child_clip.is_empty() {
+        return;
+    }
+
+    // Apply scroll offset for children.
+    let scroll_y = (node.scroll_y as f32) * scale;
+
+    // Recurse into children.
+    let mut child = node.first_child;
+    while child != NULL {
+        let child_idx = child as usize;
+        if child_idx >= nodes.len() {
+            break;
+        }
+        walk_node(
+            nodes,
+            child,
+            abs_x,
+            abs_y - scroll_y,
+            scale,
+            child_clip,
+            batch,
+        );
+        child = nodes[child_idx].next_sibling;
+    }
+}

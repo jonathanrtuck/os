@@ -15,26 +15,30 @@
 #![no_main]
 
 extern crate alloc;
+extern crate scene;
 
 use alloc::boxed::Box;
 
 use protocol::{
+    compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG},
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
     gpu::{
         DisplayInfoMsg, FbPaChunk, GpuConfig, MSG_DISPLAY_INFO, MSG_FB_PA_CHUNK, MSG_GPU_CONFIG,
         MSG_GPU_READY,
     },
     virgl::{
-        self, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX, VIRGL_FORMAT_B8G8R8A8_UNORM,
-        VIRGL_OBJECT_BLEND, VIRGL_OBJECT_DSA, VIRGL_OBJECT_RASTERIZER,
-        VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, VIRTIO_GPU_CMD_CTX_CREATE,
-        VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
-        VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, VIRTIO_GPU_CMD_RESOURCE_FLUSH,
-        VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_SUBMIT_3D, VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
-        VIRTIO_GPU_RESP_OK_NODATA,
+        self, PIPE_BUFFER, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
+        VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_OBJECT_BLEND, VIRGL_OBJECT_DSA, VIRGL_OBJECT_RASTERIZER,
+        VIRGL_OBJECT_VERTEX_ELEMENTS, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+        VIRTIO_GPU_CMD_CTX_CREATE, VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
+        VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
+        VIRTIO_GPU_CMD_RESOURCE_FLUSH, VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_SUBMIT_3D,
+        VIRTIO_GPU_RESP_OK_DISPLAY_INFO, VIRTIO_GPU_RESP_OK_NODATA,
     },
 };
 
+#[path = "scene_walk.rs"]
+mod scene_walk;
 #[path = "shaders.rs"]
 mod shaders;
 
@@ -55,6 +59,8 @@ const SCANOUT_ID: u32 = 0;
 
 /// Handle indices for IPC channels.
 const INIT_HANDLE: u8 = 0;
+/// Handle for the core→virgil-render scene update channel.
+const SCENE_HANDLE: u8 = 1;
 
 /// Virgl object handles (assigned by us, must be nonzero).
 const HANDLE_BLEND: u32 = 1;
@@ -63,6 +69,9 @@ const HANDLE_RASTERIZER: u32 = 3;
 const HANDLE_SURFACE: u32 = 4;
 const HANDLE_VS: u32 = 5;
 const HANDLE_FS: u32 = 6;
+const HANDLE_VE: u32 = 7; // vertex elements layout
+/// Resource ID for the vertex buffer (PIPE_BUFFER).
+const VB_RESOURCE_ID: u32 = 2;
 
 // ── Wire-format structs ──────────────────────────────────────────────────
 
@@ -536,9 +545,9 @@ fn resource_create_3d(
             ResourceCreate3d {
                 hdr: ctrl_header(VIRTIO_GPU_CMD_RESOURCE_CREATE_3D),
                 resource_id: RT_RESOURCE_ID,
-                target: 2,                           // PIPE_TEXTURE_2D
+                target: 2, // PIPE_TEXTURE_2D
                 format: VIRGL_FORMAT_B8G8R8A8_UNORM,
-                bind: 2,                             // PIPE_BIND_RENDER_TARGET
+                bind: 2, // PIPE_BIND_RENDER_TARGET
                 width,
                 height,
                 depth: 1,
@@ -725,6 +734,168 @@ fn set_scanout(
     sys::print(b"     scanout bound to render target\n");
 }
 
+// ── Vertex buffer resource ────────────────────────────────────────────────
+
+/// Create a PIPE_BUFFER resource for vertex data.
+fn resource_create_vbo(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    size_bytes: u32,
+) {
+    let cmd = DmaBuf::alloc(0);
+    // SAFETY: cmd.va points to zeroed DMA page, writing ResourceCreate3d.
+    unsafe {
+        core::ptr::write(
+            cmd.va as *mut ResourceCreate3d,
+            ResourceCreate3d {
+                hdr: ctrl_header(VIRTIO_GPU_CMD_RESOURCE_CREATE_3D),
+                resource_id: VB_RESOURCE_ID,
+                target: PIPE_BUFFER,
+                format: VIRGL_FORMAT_B8G8R8A8_UNORM, // format doesn't matter for buffers
+                bind: 0x10,                          // PIPE_BIND_VERTEX_BUFFER
+                width: size_bytes,
+                height: 1,
+                depth: 1,
+                array_size: 1,
+                last_level: 0,
+                nr_samples: 0,
+                flags: 0,
+                _pad: 0,
+            },
+        );
+    }
+    if !gpu_cmd_ok(
+        device,
+        vq,
+        irq_handle,
+        &cmd,
+        core::mem::size_of::<ResourceCreate3d>() as u32,
+    ) {
+        sys::print(b"virgil-render: RESOURCE_CREATE_3D (VBO) failed\n");
+        sys::exit();
+    }
+    cmd.free();
+    sys::print(b"     vertex buffer resource created\n");
+}
+
+/// Attach backing memory for the vertex buffer resource.
+fn attach_backing_vbo(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    size_bytes: u32,
+) {
+    let cmd = DmaBuf::alloc(0);
+    let header_size = core::mem::size_of::<AttachBacking>();
+    let entry_size = core::mem::size_of::<MemEntry>();
+
+    // Allocate DMA pages for VBO backing.
+    let vbo_pages = ((size_bytes as usize) + 4095) / 4096;
+    let vbo_order = (vbo_pages.next_power_of_two().trailing_zeros()) as u32;
+    let mut vbo_pa: u64 = 0;
+    let vbo_va = sys::dma_alloc(vbo_order, &mut vbo_pa).unwrap_or_else(|_| {
+        sys::print(b"virgil-render: dma_alloc (vbo backing) failed\n");
+        sys::exit();
+    });
+    // SAFETY: vbo_va is valid DMA memory, zero it.
+    unsafe { core::ptr::write_bytes(vbo_va as *mut u8, 0, (1usize << vbo_order) * 4096) };
+
+    // Write attach backing header + one entry.
+    let ptr = cmd.va as *mut u8;
+    // SAFETY: writing into zeroed DMA page at correct offsets.
+    unsafe {
+        core::ptr::write(
+            ptr as *mut AttachBacking,
+            AttachBacking {
+                hdr: ctrl_header(VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING),
+                resource_id: VB_RESOURCE_ID,
+                nr_entries: 1,
+            },
+        );
+        core::ptr::write(
+            ptr.add(header_size) as *mut MemEntry,
+            MemEntry {
+                addr: vbo_pa,
+                length: (1u32 << vbo_order) * 4096,
+                _padding: 0,
+            },
+        );
+    }
+
+    let total_cmd_bytes = header_size + entry_size;
+    if !gpu_cmd_ok(device, vq, irq_handle, &cmd, total_cmd_bytes as u32) {
+        sys::print(b"virgil-render: RESOURCE_ATTACH_BACKING (VBO) failed\n");
+        sys::exit();
+    }
+    cmd.free();
+    sys::print(b"     VBO backing attached\n");
+}
+
+/// Attach VBO resource to the virgl context.
+fn ctx_attach_vbo(device: &virtio::Device, vq: &mut virtio::Virtqueue, irq_handle: u8) {
+    let cmd = DmaBuf::alloc(0);
+    // SAFETY: cmd.va points to zeroed DMA page.
+    unsafe {
+        core::ptr::write(
+            cmd.va as *mut CtxResource,
+            CtxResource {
+                hdr: ctrl_header_ctx(VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE),
+                resource_id: VB_RESOURCE_ID,
+                _pad: [0; 3],
+            },
+        );
+    }
+    if !gpu_cmd_ok(
+        device,
+        vq,
+        irq_handle,
+        &cmd,
+        core::mem::size_of::<CtxResource>() as u32,
+    ) {
+        sys::print(b"virgil-render: CTX_ATTACH_RESOURCE (VBO) failed\n");
+        sys::exit();
+    }
+    cmd.free();
+    sys::print(b"     VBO attached to context\n");
+}
+
+/// Flush the render target to the display.
+fn flush_resource(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    width: u32,
+    height: u32,
+) {
+    let cmd = DmaBuf::alloc(0);
+    // SAFETY: cmd.va points to zeroed DMA page.
+    unsafe {
+        core::ptr::write(
+            cmd.va as *mut ResourceFlush,
+            ResourceFlush {
+                hdr: ctrl_header(VIRTIO_GPU_CMD_RESOURCE_FLUSH),
+                rect_x: 0,
+                rect_y: 0,
+                rect_width: width,
+                rect_height: height,
+                resource_id: RT_RESOURCE_ID,
+                _padding: 0,
+            },
+        );
+    }
+    if !gpu_cmd_ok(
+        device,
+        vq,
+        irq_handle,
+        &cmd,
+        core::mem::size_of::<ResourceFlush>() as u32,
+    ) {
+        sys::print(b"virgil-render: RESOURCE_FLUSH failed\n");
+    }
+    cmd.free();
+}
+
 // ── Phase D: GPU pipeline setup via CMD_SUBMIT_3D ────────────────────────
 
 fn submit_3d(
@@ -811,6 +982,9 @@ fn setup_pipeline(
     // Create surface wrapping our render target resource.
     cmdbuf.cmd_create_surface(HANDLE_SURFACE, RT_RESOURCE_ID, VIRGL_FORMAT_B8G8R8A8_UNORM);
 
+    // Create vertex elements layout (position float2 + color float4).
+    cmdbuf.cmd_create_vertex_elements_color(HANDLE_VE);
+
     // Create shaders from TGSI text.
     cmdbuf.cmd_create_shader_text(HANDLE_VS, PIPE_SHADER_VERTEX, shaders::COLOR_VS);
     cmdbuf.cmd_create_shader_text(HANDLE_FS, PIPE_SHADER_FRAGMENT, shaders::COLOR_FS);
@@ -819,12 +993,14 @@ fn setup_pipeline(
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_RASTERIZER, HANDLE_RASTERIZER);
+    cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE);
     cmdbuf.cmd_bind_shader(HANDLE_VS, PIPE_SHADER_VERTEX);
     cmdbuf.cmd_bind_shader(HANDLE_FS, PIPE_SHADER_FRAGMENT);
 
-    // Set framebuffer and viewport.
+    // Set framebuffer, viewport, and vertex buffer binding.
     cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, 0);
     cmdbuf.cmd_set_viewport(width as f32, height as f32);
+    cmdbuf.cmd_set_vertex_buffers(scene_walk::VERTEX_STRIDE, 0, VB_RESOURCE_ID);
 
     if cmdbuf.overflowed() {
         sys::print(b"virgil-render: pipeline command buffer overflowed!\n");
@@ -926,15 +1102,130 @@ pub extern "C" fn _start() -> ! {
     ctx_attach_resource(&device, &mut vq, irq_handle);
     set_scanout(&device, &mut vq, irq_handle, width, height);
 
+    // Create vertex buffer resource for scene quad rendering.
+    let vbo_size = scene_walk::MAX_VERTEX_BYTES as u32;
+    resource_create_vbo(&device, &mut vq, irq_handle, vbo_size);
+    attach_backing_vbo(&device, &mut vq, irq_handle, vbo_size);
+    ctx_attach_vbo(&device, &mut vq, irq_handle);
+
     // ── Phase D: GPU pipeline setup ──────────────────────────────────────
     setup_pipeline(&device, &mut vq, irq_handle, width, height);
 
     // ── Phase E: Clear screen + flush ────────────────────────────────────
     clear_screen(&device, &mut vq, irq_handle, width, height);
 
-    // ── Phase F: Idle loop ───────────────────────────────────────────────
-    sys::print(b"  \xF0\x9F\x8E\xAE virgil-render: 3D init complete, idling\n");
+    // ── Phase F: Receive render config + scene graph render loop ─────────
+    //
+    // Read compositor config from init (sent on the init channel).
+    // Contains scene_va, font_va, font_len, scale_factor.
+    sys::print(b"     waiting for render config\n");
+
+    let mut scene_va: u64 = 0;
+    let mut scale_factor: f32 = 1.0;
+
     loop {
         let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
+        if ch.try_recv(&mut msg) && msg.msg_type == MSG_COMPOSITOR_CONFIG {
+            // SAFETY: msg payload is a valid CompositorConfig from init.
+            let config: CompositorConfig = unsafe { msg.payload_as() };
+            scene_va = config.scene_va;
+            scale_factor = config.scale_factor;
+
+            sys::print(b"     render config: scene_va=");
+            print_hex_u32((scene_va >> 32) as u32);
+            print_hex_u32(scene_va as u32);
+            sys::print(b" scale=");
+            print_u32((scale_factor * 100.0) as u32);
+            sys::print(b"%\n");
+            break;
+        }
+    }
+
+    if scene_va == 0 {
+        sys::print(b"virgil-render: no scene_va in config, idling\n");
+        loop {
+            let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
+        }
+    }
+
+    // Scene graph shared memory: TripleReader reads from this.
+    let scene_buf = unsafe {
+        // SAFETY: scene_va is mapped into our address space by init via
+        // memory_share before process start. Size is TRIPLE_SCENE_SIZE.
+        core::slice::from_raw_parts(scene_va as *const u8, scene::TRIPLE_SCENE_SIZE)
+    };
+
+    // Heap-allocate the quad batch (73 KiB — too large for 16 KiB stack).
+    let mut batch = Box::new(scene_walk::QuadBatch::new());
+    // Heap-allocate the command buffer for per-frame rendering (16 KiB).
+    let mut cmdbuf = Box::new(virgl::CommandBuffer::new());
+
+    let mut last_gen: u32 = 0;
+    let mut frame_count: u32 = 0;
+
+    sys::print(b"  \xF0\x9F\x8E\xAE virgil-render: render loop starting\n");
+
+    loop {
+        // Wait for scene update signal from core (handle 1).
+        let _ = sys::wait(&[SCENE_HANDLE], u64::MAX);
+
+        // Drain scene update messages (we only care that there's a new frame).
+        {
+            // SAFETY: Channel 1 shared memory was set up by init before start.
+            let scene_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
+            let mut drain_msg = ipc::Message::new(0);
+            while scene_ch.try_recv(&mut drain_msg) {
+                // Consume all queued MSG_SCENE_UPDATED messages.
+            }
+        }
+
+        // Read the latest scene graph.
+        let reader = scene::TripleReader::new(scene_buf);
+        let nodes = reader.front_nodes();
+        let gen = reader.front_generation();
+
+        // Skip if generation hasn't changed.
+        if gen == last_gen && frame_count > 0 {
+            reader.finish_read(gen);
+            continue;
+        }
+        last_gen = gen;
+
+        // Walk scene tree and accumulate colored quads.
+        let root = reader.front_root();
+        scene_walk::walk_scene(nodes, root, scale_factor, width, height, &mut batch);
+
+        // Build GPU command buffer for this frame.
+        cmdbuf.clear();
+
+        // Clear to dark background.
+        cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
+
+        // Upload vertex data and draw quads.
+        if batch.vertex_count > 0 {
+            // Inline-write vertex data into the VBO resource.
+            cmdbuf.cmd_resource_inline_write(
+                VB_RESOURCE_ID,
+                batch.as_dwords(),
+                batch.size_bytes(),
+                1,
+                batch.size_bytes(),
+            );
+
+            // Draw all quads as triangles.
+            cmdbuf.cmd_draw_vbo(0, batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
+        }
+
+        if cmdbuf.overflowed() {
+            sys::print(b"virgil-render: frame command buffer overflowed!\n");
+        } else {
+            // Submit 3D commands.
+            submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+            // Flush to display.
+            flush_resource(&device, &mut vq, irq_handle, width, height);
+        }
+
+        reader.finish_read(gen);
+        frame_count += 1;
     }
 }
