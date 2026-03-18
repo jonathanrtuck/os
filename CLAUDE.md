@@ -71,9 +71,11 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-18 (latest):** Virgl implementation plan COMPLETE — all 8 tasks done. Init auto-detects virgl capability at boot via MMIO feature probe, selects GPU-accelerated (virgil-render) or CPU fallback (compositor + virtio-gpu 2D) pipeline accordingly. Both paths tested and working. 1,816+ total tests pass.
+**Session 2026-03-18 (latest):** Virgl implementation plan COMPLETE (all 8 tasks) + Phase 5 COMPLETE (cpu-render merge). Both render pipelines are now single-process: `virgil-render` (GPU-accelerated) and `cpu-render` (CPU software). Init auto-detects at boot. 1,816+ total tests pass.
 
-**Task 8: Init integration (2026-03-18):** Added `probe_virgl()` to init — maps GPU MMIO region, reads virtio feature bits, checks `VIRTIO_GPU_F_VIRGL` (bit 0). If set: spawns `VIRGIL_RENDER_ELF` → `setup_virgl_pipeline()`. If not: spawns `VIRTIO_GPU_ELF` → `setup_display_pipeline()`. No new IPC messages needed — simpler than planned. Tested with `VIRGL=1` (virgl QEMU, 3D detected) and `VIRGL=0` (standard QEMU, fallback). Phase 5 (merge compositor + virtio-gpu into single cpu-render process) deferred.
+**Phase 5: cpu-render merge (2026-03-18):** Merged `compositor/` + `virtio-gpu/` into single `cpu-render/` process. Key insight: cpu-render self-allocates framebuffers via `dma_alloc`, making its init handshake identical to virgil-render's. Eliminated compositor→GPU IPC channel, MSG_PRESENT/MSG_PRESENT_DONE protocol, one process boundary. Init's `setup_display_pipeline()` rewritten to mirror `setup_virgl_pipeline()`. Old compositor/ and virtio-gpu/ deleted (no parallel implementations).
+
+**Task 8: Init integration (2026-03-18):** Added `probe_virgl()` to init — maps GPU MMIO region, reads virtio feature bits, checks `VIRTIO_GPU_F_VIRGL` (bit 0). If set: spawns `VIRGIL_RENDER_ELF` → `setup_virgl_pipeline()`. If not: spawns `CPU_RENDER_ELF` → `setup_display_pipeline()`. No new IPC messages needed — simpler than planned.
 
 **Virgl Tasks 1-7 (2026-03-17/18):** Virgil3D GPU driver (`virgil-render`) built from scratch. All four content types render via GPU: backgrounds (color quads), text (glyph atlas), images (BGRA textures), paths (stencil-then-cover). See `project_virgl_progress.md` memory for details.
 

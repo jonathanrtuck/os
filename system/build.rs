@@ -33,11 +33,10 @@ struct CargoLibOutput {
 const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("virtio-blk", "VIRTIO_BLK_ELF"),
     ("virtio-console", "VIRTIO_CONSOLE_ELF"),
-    ("virtio-gpu", "VIRTIO_GPU_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
     ("virtio-9p", "VIRTIO_9P_ELF"),
     ("core", "CORE_ELF"),
-    ("compositor", "COMPOSITOR_ELF"),
+    ("cpu-render", "CPU_RENDER_ELF"),
     ("virgil-render", "VIRGIL_RENDER_ELF"),
     ("text-editor", "TEXT_EDITOR_ELF"),
     ("stress", "STRESS_ELF"),
@@ -55,11 +54,10 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
         true,
         false,
     ),
-    ("virtio-gpu", "services/drivers/virtio-gpu", true, false),
     ("virtio-input", "services/drivers/virtio-input", true, false),
     ("virtio-9p", "services/drivers/virtio-9p", true, false),
     ("core", "services/core", false, true),
-    ("compositor", "services/compositor", false, true),
+    ("cpu-render", "services/drivers/cpu-render", true, true),
     (
         "virgil-render",
         "services/drivers/virgil-render",
@@ -163,7 +161,7 @@ fn main() {
             externs.push(("scene", scene_rlib.clone()));
             externs.push(("fonts", fonts_output.rlib.clone()));
         }
-        if name == "compositor" {
+        if name == "cpu-render" {
             externs.push(("render", render_rlib.clone()));
         }
 

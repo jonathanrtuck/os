@@ -4,7 +4,7 @@
 //! and render/present counting. The frame scheduler is a pure state machine
 //! that can be tested without kernel syscalls.
 
-#[path = "../../services/compositor/frame_scheduler.rs"]
+#[path = "../../services/drivers/cpu-render/frame_scheduler.rs"]
 mod frame_scheduler;
 
 use frame_scheduler::FrameScheduler;
@@ -157,7 +157,10 @@ fn idle_to_active_wakeup() {
     sched.on_scene_update();
 
     // Very next timer tick should trigger a render.
-    assert!(sched.on_timer_tick(), "should render on first tick after update");
+    assert!(
+        sched.on_timer_tick(),
+        "should render on first tick after update"
+    );
     sched.on_render_complete();
 
     assert_eq!(sched.render_count, 1);
@@ -377,7 +380,7 @@ fn frame_budgeting_skip_overdue() {
     // Frame 1: normal render at t=period.
     sched.on_scene_update();
     sched.on_timer_tick_at(period); // tick at t=period
-    // Rendering takes 3x period (overrun).
+                                    // Rendering takes 3x period (overrun).
     sched.on_render_complete_at(period + 3 * period);
 
     // Scene is still dirty (new update during render).
@@ -386,10 +389,7 @@ fn frame_budgeting_skip_overdue() {
     // Next timer tick at t=2*period — this was MISSED (render ended at t=4*period).
     // The scheduler should detect overrun and skip it.
     let should = sched.on_timer_tick_at(2 * period);
-    assert!(
-        !should,
-        "should skip overdue tick after render overrun"
-    );
+    assert!(!should, "should skip overdue tick after render overrun");
     assert_eq!(sched.overrun_skip_count, 1);
 
     // Next timer tick at t=5*period — past the overrun window, should render.
@@ -571,10 +571,7 @@ fn clock_only_3_renders_in_3_seconds() {
         }
     }
 
-    assert_eq!(
-        sched.render_count, 3,
-        "exactly 3 renders for 3 clock ticks"
-    );
+    assert_eq!(sched.render_count, 3, "exactly 3 renders for 3 clock ticks");
 }
 
 // ── VAL-FRAME-009: Frame scheduler coexists with damage tracking ────

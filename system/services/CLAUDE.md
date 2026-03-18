@@ -6,10 +6,10 @@ Platform services that run as userspace processes. Each is a `#![no_std]` ELF bi
 | ------------------------- | --------------------------------------------------------------------------------- | ----------- |
 | `init/`                   | Root task: reads device manifest, spawns drivers, orchestrates display pipeline   | Scaffolding |
 | `core/`                   | OS service: sole writer to document state, scene graph builder, input router      | Scaffolding |
-| `compositor/`             | Scene graph renderer: reads scene, composites surfaces, damage tracking, presents | Scaffolding |
+| `drivers/cpu-render/`     | CPU render service: CpuBackend + virtio-gpu 2D present (no-virgl fallback)        | Scaffolding |
+| `drivers/virgil-render/`  | GPU render service: Gallium3D via virglrenderer (virgl-capable QEMU)              | Scaffolding |
 | `drivers/virtio-blk/`     | Block device driver (reads sector 0 as proof of life)                             | Scaffolding |
 | `drivers/virtio-console/` | Console driver (placeholder)                                                      | Scaffolding |
-| `drivers/virtio-gpu/`     | GPU driver: allocates framebuffer, runs present loop                              | Scaffolding |
 | `drivers/virtio-input/`   | Keyboard + tablet driver: reads evdev events, forwards to core via IPC            | Scaffolding |
 | `drivers/virtio-9p/`      | Host filesystem passthrough: 9P2000.L protocol, loads fonts/images/icons          | Scaffolding |
 

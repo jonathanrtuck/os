@@ -54,10 +54,7 @@ use protocol::{
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
     editor::{EditorConfig, MSG_EDITOR_CONFIG},
     fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
-    gpu::{
-        DisplayInfoMsg, FbPaChunk, GpuConfig, MSG_DISPLAY_INFO, MSG_FB_PA_CHUNK, MSG_GPU_CONFIG,
-        MSG_GPU_READY,
-    },
+    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
 };
 
 /// Bytes per pixel (BGRA8888).
@@ -635,30 +632,96 @@ fn setup_display_pipeline(
     rtc_pa: u64,                             // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
 ) {
-    sys::print(b"     setting up display pipeline\n");
+    sys::print(b"     setting up cpu-render pipeline\n");
 
     // -----------------------------------------------------------------------
-    // Phase 1: Create compositor→GPU channel BEFORE starting GPU driver.
-    // handle_send only works on unstarted processes, so all handles must be
-    // sent before process_start.
+    // Phase 1: Allocate scene graph + doc buffer (no display dependency).
+    // These must be shared BEFORE starting cpu-render.
     // -----------------------------------------------------------------------
-    sys::print(b"     creating compositor\xE2\x86\x92gpu channel\n");
+    let scene_size = scene::TRIPLE_SCENE_SIZE;
+    let scene_pages_needed = (scene_size + 4095) / 4096;
+    let scene_order = (scene_pages_needed.next_power_of_two().trailing_zeros()) as u32;
+    let scene_alloc_bytes = (1usize << scene_order) * 4096;
+    let mut scene_pa: u64 = 0;
+    let _scene_va = sys::dma_alloc(scene_order, &mut scene_pa).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (scene graph) failed\n");
+        sys::exit();
+    });
 
-    let (cg_a, cg_b) = sys::channel_create().unwrap_or_else(|_| {
-        sys::print(b"init: channel_create (comp-gpu) failed\n");
+    unsafe { core::ptr::write_bytes(_scene_va as *mut u8, 0, scene_alloc_bytes) };
+
+    sys::print(b"     scene graph: shared memory allocated\n");
+
+    let scene_page_count = scene_alloc_bytes as u64 / 4096;
+
+    // Document buffer (1 page).
+    let mut doc_pa: u64 = 0;
+    let _doc_va = sys::dma_alloc(0, &mut doc_pa).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (doc buffer) failed\n");
+        sys::exit();
+    });
+
+    unsafe { core::ptr::write_bytes(_doc_va as *mut u8, 0, 4096) };
+
+    sys::print(b"     document buffer: 4 KiB shared\n");
+
+    // Unpack font buffer info.
+    let (font_pa_val, mono_font_len, prop_font_len, png_offset, png_len) =
+        if let Some((pa, mono, prop, png_off, png_l)) = font_buf {
+            (pa, mono, prop, png_off, png_l)
+        } else {
+            (0u64, 0u32, 0u32, 0u32, 0u32)
+        };
+    let font_total_len = mono_font_len + prop_font_len + png_len;
+    let font_pages = if font_total_len > 0 {
+        ((font_total_len as u64) + 4095) / 4096
+    } else {
+        0
+    };
+
+    // -----------------------------------------------------------------------
+    // Phase 2: Create core→cpu-render scene update channel.
+    // -----------------------------------------------------------------------
+    sys::print(b"     creating core\xE2\x86\x92cpu-render channel\n");
+
+    let (cv_a, cv_b) = sys::channel_create().unwrap_or_else(|_| {
+        sys::print(b"init: channel_create (core-cpu-render) failed\n");
         sys::exit();
     });
 
     *next_channel += 1;
 
-    // Send present channel endpoint B to GPU driver (handle 1).
-    sys::handle_send(gpu_proc, cg_b).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (comp-gpu B) failed\n");
+    // -----------------------------------------------------------------------
+    // Phase 3: Share memory with cpu-render BEFORE starting it.
+    // memory_share only works on unstarted processes.
+    // -----------------------------------------------------------------------
+
+    // Share scene graph with cpu-render (for reading).
+    let render_scene_va = sys::memory_share(gpu_proc, scene_pa, scene_page_count, false)
+        .unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (cpu-render scene) failed\n");
+            sys::exit();
+        });
+
+    // Share font data with cpu-render (for glyph rasterization).
+    let render_font_va = if font_pages > 0 {
+        sys::memory_share(gpu_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (cpu-render font) failed\n");
+            sys::exit();
+        }) as u64
+    } else {
+        0u64
+    };
+
+    // Send scene update channel endpoint B to cpu-render (handle 1).
+    sys::handle_send(gpu_proc, cv_b).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (core-cpu-render B) failed\n");
         sys::exit();
     });
 
     // -----------------------------------------------------------------------
-    // Phase 2: Start GPU driver for display query. Send device config first.
+    // Phase 4: Start cpu-render for display query.
+    // Send device config first, then start.
     // -----------------------------------------------------------------------
     let gpu_ch = init_channel(gpu_channel_idx);
     let dev_config = DeviceConfig {
@@ -670,11 +733,11 @@ fn setup_display_pipeline(
 
     gpu_ch.send(&msg);
 
-    sys::print(b"     starting gpu driver (display query)\n");
+    sys::print(b"     starting cpu-render (display query)\n");
 
     let _ = sys::process_start(gpu_proc);
 
-    // Wait for the GPU driver to report display dimensions.
+    // Wait for display info from cpu-render.
     sys::print(b"     waiting for display info\n");
 
     let mut resp_msg = ipc::Message::new(0);
@@ -690,11 +753,8 @@ fn setup_display_pipeline(
     let display_info: DisplayInfoMsg = unsafe { resp_msg.payload_as() };
     let fb_width = display_info.width;
     let fb_height = display_info.height;
-    let fb_stride = fb_width * FB_BPP;
-    let fb_size = fb_stride * fb_height;
-    // Compute fractional display scale factor from physical resolution.
-    // >= 2048px wide → 2.0×, otherwise 1.0×. Matches Retina/HiDPI thresholds.
-    // f32 represents 1.0, 1.25, 1.5, 1.75, 2.0 exactly.
+
+    // Compute scale factor.
     let scale_factor: f32 = if fb_width >= 2048 { 2.0 } else { 1.0 };
     let logical_w = (fb_width as f32 / scale_factor) as u32;
     let logical_h = (fb_height as f32 / scale_factor) as u32;
@@ -718,96 +778,7 @@ fn setup_display_pipeline(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 3: Allocate double framebuffer using scatter-gather.
-    //
-    // Each buffer is allocated as many small chunks (order CHUNK_ORDER) instead
-    // of one huge contiguous block. The DMA bump allocator gives contiguous VA
-    // even when PAs are scattered. The GPU driver uses the PA table to build a
-    // scatter-gather attach_backing command.
-    // -----------------------------------------------------------------------
-    const CHUNK_ORDER: u32 = 6; // 64 pages = 256 KiB per chunk
-    const CHUNK_PAGES: usize = 1 << CHUNK_ORDER;
-    const CHUNK_BYTES: usize = CHUNK_PAGES * 4096;
-
-    let fb_bytes = fb_size as usize;
-    let chunks_per_buf = (fb_bytes + CHUNK_BYTES - 1) / CHUNK_BYTES;
-    let fb_alloc_bytes = chunks_per_buf * CHUNK_BYTES;
-
-    // PA table: tracks chunk PAs for GPU scatter-gather and compositor sharing.
-    // Max 512 chunks per buffer (64 KiB × 512 = 32 MiB, covers up to 8K).
-    // Uses static to avoid blowing the 16 KiB stack (1024 × 8 = 8 KiB).
-    const MAX_CHUNKS: usize = 512;
-    static mut PA_TABLE_BUF: [u64; MAX_CHUNKS * 2] = [0u64; MAX_CHUNKS * 2];
-    let pa_table = unsafe { &mut PA_TABLE_BUF };
-
-    // Front buffer (buffer 0): allocate chunks, record PAs.
-    let mut fb_va0: usize = 0;
-    for i in 0..chunks_per_buf {
-        let mut chunk_pa: u64 = 0;
-        let chunk_va = sys::dma_alloc(CHUNK_ORDER, &mut chunk_pa).unwrap_or_else(|_| {
-            sys::print(b"init: dma_alloc (fb0 chunk) failed\n");
-            sys::exit();
-        });
-        if i == 0 {
-            fb_va0 = chunk_va;
-        }
-        pa_table[i] = chunk_pa;
-        unsafe { core::ptr::write_bytes(chunk_va as *mut u8, 0, CHUNK_BYTES) };
-    }
-
-    // Back buffer (buffer 1): allocate chunks, record PAs.
-    let mut fb_va1: usize = 0;
-    for i in 0..chunks_per_buf {
-        let mut chunk_pa: u64 = 0;
-        let chunk_va = sys::dma_alloc(CHUNK_ORDER, &mut chunk_pa).unwrap_or_else(|_| {
-            sys::print(b"init: dma_alloc (fb1 chunk) failed\n");
-            sys::exit();
-        });
-        if i == 0 {
-            fb_va1 = chunk_va;
-        }
-        pa_table[chunks_per_buf + i] = chunk_pa;
-        unsafe { core::ptr::write_bytes(chunk_va as *mut u8, 0, CHUNK_BYTES) };
-    }
-
-    {
-        let mut buf = [0u8; 80];
-        let prefix = b"     double framebuffer: ";
-
-        buf[..prefix.len()].copy_from_slice(prefix);
-
-        let mut pos = prefix.len();
-
-        pos += format_u32(fb_width, &mut buf[pos..]);
-        buf[pos] = b'x';
-        pos += 1;
-        pos += format_u32(fb_height, &mut buf[pos..]);
-
-        let mid = b" x2 (";
-
-        buf[pos..pos + mid.len()].copy_from_slice(mid);
-
-        pos += mid.len();
-        pos += format_u32((fb_alloc_bytes * 2) as u32 / 1024, &mut buf[pos..]);
-
-        let mid2 = b" KiB, ";
-
-        buf[pos..pos + mid2.len()].copy_from_slice(mid2);
-
-        pos += mid2.len();
-        pos += format_u32(chunks_per_buf as u32, &mut buf[pos..]);
-
-        let suffix = b" chunks)\n";
-
-        buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-
-        pos += suffix.len();
-
-        sys::print(&buf[..pos]);
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase 4: Send GPU config with framebuffer info to running GPU driver.
+    // Phase 5: Send GPU config (cpu-render self-allocates framebuffers).
     // -----------------------------------------------------------------------
     let gpu_config = GpuConfig {
         mmio_pa: gpu_pa,
@@ -815,39 +786,18 @@ fn setup_display_pipeline(
         _pad: 0,
         fb_width,
         fb_height,
-        fb_size,
-        chunks_per_buf: chunks_per_buf as u16,
-        chunk_order: CHUNK_ORDER as u8,
+        fb_size: fb_width * fb_height * FB_BPP,
+        chunks_per_buf: 0, // cpu-render self-allocates
+        chunk_order: 0,
         _pad2: 0,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_GPU_CONFIG, &gpu_config) };
 
     gpu_ch.send(&msg);
 
-    // Send scatter-gather PA table entries (both buffers, 6 PAs per message).
-    let total_entries = chunks_per_buf * 2;
-    let mut sent = 0;
-    while sent < total_entries {
-        let remaining = total_entries - sent;
-        let count = if remaining > 6 { 6 } else { remaining };
-        let mut chunk = FbPaChunk {
-            count: count as u32,
-            _pad: 0,
-            pas: [0u64; 6],
-        };
-        for j in 0..count {
-            chunk.pas[j] = pa_table[sent + j];
-        }
-        let pa_msg = unsafe { ipc::Message::from_payload(MSG_FB_PA_CHUNK, &chunk) };
-        gpu_ch.send(&pa_msg);
-        sent += count;
-    }
-
     let _ = sys::channel_signal(gpu_ch_handle);
 
-    // Wait for the GPU driver to complete device setup before continuing.
-    // This prevents the GPU driver's startup logging from interleaving with
-    // init's compositor/editor spawn logging on the serial console.
+    // Wait for GPU_READY (cpu-render finished FB and device setup).
     loop {
         let _ = sys::wait(&[gpu_ch_handle], u64::MAX);
 
@@ -857,53 +807,33 @@ fn setup_display_pipeline(
     }
 
     // -----------------------------------------------------------------------
-    // Allocate shared document buffer (1 page).
-    // Core gets read-write (sole writer), editor gets read-only.
+    // Phase 6: Send render config (CompositorConfig) to cpu-render.
+    // Reuse CompositorConfig struct: scene_va, font_va, font_len, scale.
+    // cpu-render ignores fb_va/fb_va2 fields (it owns its framebuffers).
     // -----------------------------------------------------------------------
-    let mut doc_pa: u64 = 0;
-    let _doc_va = sys::dma_alloc(0, &mut doc_pa).unwrap_or_else(|_| {
-        sys::print(b"init: dma_alloc (doc buffer) failed\n");
-        sys::exit();
-    });
-
-    unsafe { core::ptr::write_bytes(_doc_va as *mut u8, 0, 4096) };
-
-    sys::print(b"     document buffer: 4 KiB shared\n");
-
-    // -----------------------------------------------------------------------
-    // Allocate scene graph shared memory (double-buffered).
-    // Core writes, compositor reads.
-    // -----------------------------------------------------------------------
-    let scene_size = scene::TRIPLE_SCENE_SIZE;
-    let scene_pages_needed = (scene_size + 4095) / 4096;
-    let scene_order = (scene_pages_needed.next_power_of_two().trailing_zeros()) as u32;
-    let scene_alloc_bytes = (1usize << scene_order) * 4096;
-    let mut scene_pa: u64 = 0;
-    let _scene_va = sys::dma_alloc(scene_order, &mut scene_pa).unwrap_or_else(|_| {
-        sys::print(b"init: dma_alloc (scene graph) failed\n");
-        sys::exit();
-    });
-
-    unsafe { core::ptr::write_bytes(_scene_va as *mut u8, 0, scene_alloc_bytes) };
-
-    sys::print(b"     scene graph: shared memory allocated\n");
-
-    // Unpack font buffer info.
-    let (font_pa_val, mono_font_len, prop_font_len, png_offset, png_len) =
-        if let Some((pa, mono, prop, png_off, png_l)) = font_buf {
-            (pa, mono, prop, png_off, png_l)
-        } else {
-            (0u64, 0u32, 0u32, 0u32, 0u32)
-        };
-    let font_total_len = mono_font_len + prop_font_len + png_len;
-    let font_pages = if font_total_len > 0 {
-        ((font_total_len as u64) + 4095) / 4096
-    } else {
-        0
+    let render_config = CompositorConfig {
+        fb_va: 0, // unused by cpu-render
+        fb_va2: 0,
+        scene_va: render_scene_va as u64,
+        mono_font_va: render_font_va,
+        fb_width,
+        fb_height,
+        mono_font_len,
+        prop_font_len,
+        scale_factor,
+        frame_rate: 60,
+        _pad: 0,
     };
+    let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &render_config) };
+
+    gpu_ch.send(&msg);
+
+    let _ = sys::channel_signal(gpu_ch_handle);
+
+    sys::print(b"     render config sent to cpu-render\n");
 
     // -----------------------------------------------------------------------
-    // Spawn core process.
+    // Phase 7: Spawn core process.
     // -----------------------------------------------------------------------
     let (core_proc, _core_ch_handle, core_channel_idx) =
         match spawn_with_channel(CORE_ELF, next_channel) {
@@ -913,20 +843,19 @@ fn setup_display_pipeline(
                 sys::exit();
             }
         };
-    // Share document buffer with core (read-write — sole writer).
+    // Share document buffer with core (read-write).
     let core_doc_va =
         sys::memory_share(core_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (core doc) failed\n");
             sys::exit();
         });
     // Share scene graph with core (read-write).
-    let scene_page_count = scene_alloc_bytes as u64 / 4096;
     let core_scene_va = sys::memory_share(core_proc, scene_pa, scene_page_count, false)
         .unwrap_or_else(|_| {
             sys::print(b"init: memory_share (core scene) failed\n");
             sys::exit();
         });
-    // Share font data with core (read-only, for metrics).
+    // Share font data with core (read-only).
     let core_font_va = if font_pages > 0 {
         sys::memory_share(core_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (core font) failed\n");
@@ -976,103 +905,13 @@ fn setup_display_pipeline(
     }
 
     // -----------------------------------------------------------------------
-    // Spawn compositor.
-    // -----------------------------------------------------------------------
-    let (comp_proc, _comp_ch_handle, comp_channel_idx) =
-        match spawn_with_channel(COMPOSITOR_ELF, next_channel) {
-            Some(v) => v,
-            None => {
-                sys::print(b"init: failed to spawn compositor\n");
-                sys::exit();
-            }
-        };
-    // Share framebuffers with compositor (chunk by chunk, scatter-gather).
-    let mut comp_fb_va0: usize = 0;
-    for i in 0..chunks_per_buf {
-        let va = sys::memory_share(comp_proc, pa_table[i], CHUNK_PAGES as u64, false)
-            .unwrap_or_else(|_| {
-                sys::print(b"init: memory_share (comp fb0) failed\n");
-                sys::exit();
-            });
-        if i == 0 {
-            comp_fb_va0 = va;
-        }
-    }
-    let mut comp_fb_va1: usize = 0;
-    for i in 0..chunks_per_buf {
-        let va = sys::memory_share(
-            comp_proc,
-            pa_table[chunks_per_buf + i],
-            CHUNK_PAGES as u64,
-            false,
-        )
-        .unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (comp fb1) failed\n");
-            sys::exit();
-        });
-        if i == 0 {
-            comp_fb_va1 = va;
-        }
-    }
-    // Share scene graph with compositor (read-only for rendering).
-    let comp_scene_va = sys::memory_share(comp_proc, scene_pa, scene_page_count, false)
-        .unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (comp scene) failed\n");
-            sys::exit();
-        });
-    // Share font data with compositor (passed to render backend for glyph rasterization).
-    let comp_font_va = if font_pages > 0 {
-        sys::memory_share(comp_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (comp font) failed\n");
-            sys::exit();
-        }) as u64
-    } else {
-        0u64
-    };
-    // Send compositor config.
-    let comp_ch = init_channel(comp_channel_idx);
-    let comp_config = CompositorConfig {
-        fb_va: comp_fb_va0 as u64,
-        fb_va2: comp_fb_va1 as u64,
-        scene_va: comp_scene_va as u64,
-        mono_font_va: comp_font_va,
-        fb_width,
-        fb_height,
-        mono_font_len,
-        prop_font_len,
-        scale_factor,
-        frame_rate: 60,
-        _pad: 0,
-    };
-    let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &comp_config) };
-
-    comp_ch.send(&msg);
-
-    // Send image config to compositor (consumed but not used for now).
-    if png_len > 0 {
-        let image_va = comp_font_va + png_offset as u64;
-        let img_config = ImageConfig {
-            image_va,
-            image_len: png_len,
-            _pad: 0,
-        };
-        let img_msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_CONFIG, &img_config) };
-
-        comp_ch.send(&img_msg);
-    }
-
-    // -----------------------------------------------------------------------
-    // Create cross-process channels.
+    // Phase 8: Cross-process channels.
     //
     // Core handle layout:
     //   handle 1 = first input (keyboard)
-    //   handle 2 = core → compositor (scene update)
+    //   handle 2 = core → cpu-render (scene update)
     //   handle 3 = core ↔ editor
     //   handle 4+ = additional input devices
-    //
-    // Compositor handle layout:
-    //   handle 1 = core → compositor (scene update)
-    //   handle 2 = compositor → GPU (present)
     // -----------------------------------------------------------------------
 
     // Input → Core channel (keyboard events).
@@ -1111,34 +950,15 @@ fn setup_display_pipeline(
         sys::print(b"     input device 0 channel created\n");
     }
 
-    // Core → Compositor scene update channel.
-    sys::print(b"     creating core\xE2\x86\x92compositor channel\n");
-
-    let (cc_a, cc_b) = sys::channel_create().unwrap_or_else(|_| {
-        sys::print(b"init: channel_create (core-comp) failed\n");
-        sys::exit();
-    });
-
-    *next_channel += 1;
-
+    // Core → cpu-render scene update channel.
     // Endpoint A → core (handle 2 = COMPOSITOR_HANDLE in core).
-    sys::handle_send(core_proc, cc_a).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (core-comp A) failed\n");
-        sys::exit();
-    });
-    // Endpoint B → compositor (handle 1 = CORE_HANDLE in compositor).
-    sys::handle_send(comp_proc, cc_b).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (core-comp B) failed\n");
-        sys::exit();
-    });
-    // Compositor → GPU present channel endpoint A → compositor (handle 2).
-    sys::handle_send(comp_proc, cg_a).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (comp-gpu A) failed\n");
+    sys::handle_send(core_proc, cv_a).unwrap_or_else(|_| {
+        sys::print(b"init: handle_send (core-cpu-render A) failed\n");
         sys::exit();
     });
 
     // -----------------------------------------------------------------------
-    // Core ↔ Editor channel.
+    // Phase 9: Core ↔ Editor channel.
     // -----------------------------------------------------------------------
     sys::print(b"     spawning text editor\n");
 
@@ -1220,9 +1040,9 @@ fn setup_display_pipeline(
     }
 
     // -----------------------------------------------------------------------
-    // Start processes. Order: input drivers, editor, compositor, core.
-    // Core starts last because it signals the compositor, and the compositor
-    // must be running to receive the signal.
+    // Phase 10: Start processes.
+    // Input drivers first, then editor, then core.
+    // cpu-render is already running (started in Phase 4).
     // -----------------------------------------------------------------------
     for &(input_proc_handle, _, _, _) in input_devices {
         sys::print(b"     starting input driver\n");
@@ -1238,19 +1058,13 @@ fn setup_display_pipeline(
 
     sys::yield_now();
 
-    sys::print(b"     starting compositor\n");
-
-    let _ = sys::process_start(comp_proc);
-
-    sys::yield_now();
-
     sys::print(b"     starting core\n");
 
     let _ = sys::process_start(core_proc);
 
     sys::yield_now();
 
-    sys::print(b"     display pipeline running\n");
+    sys::print(b"     cpu-render pipeline running\n");
 }
 /// Spawn a suspended process, create a channel to it, and send one endpoint.
 ///
@@ -1379,7 +1193,7 @@ pub extern "C" fn _start() -> ! {
                 if use_virgl {
                     VIRGIL_RENDER_ELF
                 } else {
-                    VIRTIO_GPU_ELF
+                    CPU_RENDER_ELF
                 }
             }
             VIRTIO_DEVICE_INPUT => VIRTIO_INPUT_ELF,

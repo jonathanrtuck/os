@@ -4,46 +4,57 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
-## Virgl Task 8: Init Integration — Render Service Selection (2026-03-18)
+## Phase 5: CPU Render Service Merge (2026-03-18)
 
-**Status:** Complete. Virgl implementation plan fully executed (all 8 tasks).
+**Status:** Complete. Compositor + virtio-gpu merged into single `cpu-render/` process.
 
 ### What was done
 
-Added runtime render service selection to init. Init now auto-detects whether the GPU device supports Virgil3D and selects the appropriate pipeline at boot.
+Merged `services/compositor/` and `services/drivers/virtio-gpu/` into a single `services/drivers/cpu-render/` process — a sibling to `virgil-render`. The two-process pipeline (compositor → MSG_PRESENT → virtio-gpu) is replaced by a single process that does CPU rendering and GPU presentation in the same event loop.
 
-**Detection mechanism:** `probe_virgl()` maps the GPU's virtio-MMIO region, selects features page 0 (write 0 to DeviceFeaturesSel at +0x14), reads DeviceFeatures at +0x10, checks bit 0 (`VIRTIO_GPU_F_VIRGL`). This happens BEFORE spawning the GPU process, so init can select the correct ELF binary.
+**Key design decision:** cpu-render self-allocates framebuffers via `dma_alloc` instead of receiving them from init. This makes its init handshake identical to virgil-render's (MSG_DEVICE_CONFIG → MSG_DISPLAY_INFO → MSG_GPU_CONFIG → MSG_GPU_READY → MSG_COMPOSITOR_CONFIG). Init's `setup_display_pipeline()` was rewritten to mirror `setup_virgl_pipeline()`.
 
-**Pipeline selection:**
-- Virgl detected → `VIRGIL_RENDER_ELF` → `setup_virgl_pipeline()` (GPU-accelerated, Gallium3D)
-- No virgl → `VIRTIO_GPU_ELF` → `setup_display_pipeline()` (CPU software rendering)
+**Eliminated:**
+- Compositor→GPU IPC channel (no MSG_PRESENT/MSG_PRESENT_DONE)
+- One process boundary (one fewer context switch per frame)
+- Framebuffer allocation in init (~24 dma_alloc calls moved to cpu-render)
+- Scatter-gather PA table messaging (MSG_FB_PA_CHUNK)
+- ~175 lines of init code
 
-**Implementation note:** The original plan proposed using a new IPC message (`MSG_GPU_VIRGL_AVAILABLE`) — the driver would probe and report back. The MMIO probe approach is simpler: no new message types, no extra IPC round trip, and the decision is made before any process is spawned. The GPU process never sees a failed init path.
+**Files:**
+- Created: `cpu-render/main.rs` (457 lines), `cpu-render/gpu.rs` (524 lines), `cpu-render/frame_scheduler.rs` (173 lines, copied from compositor)
+- Modified: `build.rs` (replaced compositor+virtio-gpu with cpu-render), `init/main.rs` (rewritten setup_display_pipeline)
+- Deleted: `services/compositor/`, `services/drivers/virtio-gpu/` (no parallel implementations)
 
-### Testing
-
-Both paths verified end-to-end:
-- `VIRGL=1` (custom QEMU with `virtio-gpu-gl-device`): "3D support detected" → virgl pipeline → frames render
-- `VIRGL=0` (standard QEMU with `virtio-gpu-device`): "no 3D support, using CPU fallback" → display pipeline → render loop
-
-### Architecture summary (post-completion)
-
-The rendering pipeline is now fully dual-path:
+### Architecture (post-merge)
 
 ```text
 Init probes GPU features
   ├── VIRTIO_GPU_F_VIRGL set:
   │   Core → Scene Graph → virgil-render (Gallium3D → virglrenderer → ANGLE → Metal → GPU)
   └── No virgl:
-      Core → Scene Graph → compositor (CpuBackend) → virtio-gpu 2D → Display
+      Core → Scene Graph → cpu-render (CpuBackend + virtio-gpu 2D) → Display
 ```
 
-The scene graph is the stable interface. Everything above it (core, editors) is identical regardless of which render service is active. Everything below it (rendering technique, hardware commands) is internal to the render service — a leaf node behind a simple boundary.
+Both render services follow the same pattern: single process, same handshake, scene graph as sole input interface. The only difference is what happens inside (Gallium3D commands vs CPU rasterization + 2D transfer).
+
+### Testing
+
+- 1,816 host-side tests pass
+- QEMU visual verification: all content types render correctly (text, images, paths, backgrounds, clock)
+- Stress test: no crashes under 4 SMP cores
+- Boot serial output confirms clean handshake sequence
 
 ### Remaining deferred work
 
-- **Phase 5:** Merge `compositor/` + `virtio-gpu/` into single `cpu-render/` process (sibling to `virgil-render`). Not blocking — both old services work correctly.
 - **Remove test content** from `scene_state.rs` once real Image/Path producers exist.
+- **Extract common handshake** from setup_virgl_pipeline and setup_display_pipeline (they're now structurally identical). Not blocking — duplication is manageable.
+
+---
+
+## Virgl Task 8: Init Integration — Render Service Selection (2026-03-18)
+
+**Status:** Complete. Virgl implementation plan fully executed (all 8 tasks).
 
 ---
 
