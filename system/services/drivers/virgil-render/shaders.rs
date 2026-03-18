@@ -39,10 +39,14 @@ pub const COLOR_VS: &[u8] = b"VERT\n\
 DCL IN[0]\n\
 DCL IN[1]\n\
 DCL OUT[0], POSITION\n\
-DCL OUT[1], COLOR\n\
-  0: MOV OUT[0], IN[0]\n\
-  1: MOV OUT[1], IN[1]\n\
-  2: END\n\0";
+DCL OUT[1], COLOR, LINEAR\n\
+DCL TEMP[0]\n\
+IMM[0] FLT32 { 0.0, 0.0, 0.0, 1.0 }\n\
+  0: MOV TEMP[0], IMM[0]\n\
+  1: MOV TEMP[0].xy, IN[0].xyxy\n\
+  2: MOV OUT[0], TEMP[0]\n\
+  3: MOV OUT[1], IN[1]\n\
+  4: END\n\0";
 
 // ── Color fragment shader ────────────────────────────────────────────────
 //
@@ -73,12 +77,16 @@ DCL IN[0]\n\
 DCL IN[1]\n\
 DCL IN[2]\n\
 DCL OUT[0], POSITION\n\
-DCL OUT[1], GENERIC[0]\n\
-DCL OUT[2], COLOR\n\
-  0: MOV OUT[0], IN[0]\n\
-  1: MOV OUT[1], IN[1]\n\
-  2: MOV OUT[2], IN[2]\n\
-  3: END\n\0";
+DCL OUT[1], GENERIC[0], PERSPECTIVE\n\
+DCL OUT[2], COLOR, LINEAR\n\
+DCL TEMP[0]\n\
+IMM[0] FLT32 { 0.0, 0.0, 0.0, 1.0 }\n\
+  0: MOV TEMP[0], IMM[0]\n\
+  1: MOV TEMP[0].xy, IN[0].xyxy\n\
+  2: MOV OUT[0], TEMP[0]\n\
+  3: MOV OUT[1], IN[1]\n\
+  4: MOV OUT[2], IN[2]\n\
+  5: END\n\0";
 
 // ── Textured fragment shader ─────────────────────────────────────────────
 //

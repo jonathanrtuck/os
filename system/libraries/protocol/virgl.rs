@@ -486,7 +486,9 @@ impl CommandBuffer {
     /// `text` must be a null-terminated byte slice (the final byte must be `\0`).
     pub fn cmd_create_shader_text(&mut self, handle: u32, shader_type: u32, text: &[u8]) {
         // text must be null-terminated; byte length includes the '\0'.
-        debug_assert!(!text.is_empty() && text[text.len() - 1] == 0);
+        // Hard assert (not debug_assert) — violating this sends a non-terminated
+        // string to virglrenderer which would read past the allocation.
+        assert!(!text.is_empty() && text[text.len() - 1] == 0);
 
         // Pack bytes into DWORDs (4 bytes each, last one zero-padded).
         let text_dwords = (text.len() + 3) / 4;
