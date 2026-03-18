@@ -95,8 +95,8 @@ pub const PIPE_FUNC_ALWAYS: u32 = 7;
 
 pub const PIPE_MASK_RGBA: u32 = 0x0F;
 
-// Gallium pipe_format enum values (NOT the virtio-gpu 2D format IDs!):
-pub const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 32; // pipe_format 32, NOT 1
+// virgl_hw.h format values (same numbering as the virtio-gpu 2D format enum):
+pub const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 pub const VIRGL_FORMAT_R8_UNORM: u32 = 64; // pipe_format 64
 
 // ── TGSI shader types ────────────────────────────────────────────────────

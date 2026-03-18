@@ -136,7 +136,7 @@ fn setup_display_pipeline(
     gpu_irq: u32,
     input_devices: &[(u8, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
     font_buf: Option<(u64, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len)
-    rtc_pa: u64, // PL031 RTC physical address (0 = not found)
+    rtc_pa: u64,                             // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
 ) {
     sys::print(b"     setting up display pipeline\n");
@@ -493,12 +493,11 @@ fn setup_display_pipeline(
     // Share framebuffers with compositor (chunk by chunk, scatter-gather).
     let mut comp_fb_va0: usize = 0;
     for i in 0..chunks_per_buf {
-        let va =
-            sys::memory_share(comp_proc, pa_table[i], CHUNK_PAGES as u64, false)
-                .unwrap_or_else(|_| {
-                    sys::print(b"init: memory_share (comp fb0) failed\n");
-                    sys::exit();
-                });
+        let va = sys::memory_share(comp_proc, pa_table[i], CHUNK_PAGES as u64, false)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (comp fb0) failed\n");
+                sys::exit();
+            });
         if i == 0 {
             comp_fb_va0 = va;
         }
@@ -565,7 +564,6 @@ fn setup_display_pipeline(
 
         comp_ch.send(&img_msg);
     }
-
 
     // -----------------------------------------------------------------------
     // Create cross-process channels.
@@ -874,7 +872,7 @@ pub extern "C" fn _start() -> ! {
         let elf: &[u8] = match dev_id {
             VIRTIO_DEVICE_BLK => VIRTIO_BLK_ELF,
             VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
-            VIRTIO_DEVICE_GPU => VIRTIO_GPU_ELF,
+            VIRTIO_DEVICE_GPU => VIRGIL_RENDER_ELF,
             VIRTIO_DEVICE_INPUT => VIRTIO_INPUT_ELF,
             VIRTIO_DEVICE_9P => VIRTIO_9P_ELF,
             _ => {
