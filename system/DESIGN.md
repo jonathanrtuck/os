@@ -168,7 +168,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **What's foundational:**
 
-- **One module per protocol boundary.** `device` (init→drivers), `gpu` (init↔GPU), `input` (input→core), `edit` (core↔editor), `core_config` (init→core), `compose` (init→compositor), `editor` (init→editor), `present` (compositor→GPU), `fs` (init↔9p). The module structure mirrors the IPC topology.
+- **One module per protocol boundary.** `device` (init→drivers), `gpu` (init↔render service), `input` (input→core), `edit` (core↔editor), `core_config` (init→core), `compose` (init→render service), `editor` (init→editor), `fs` (init↔9p). The module structure mirrors the IPC topology.
 - **All payload structs are `#[repr(C)]`** and fit within the 60-byte IPC message payload. Size guards via `const _: ()` assertions where payloads approach the limit.
 - **`CHANNEL_SHM_BASE` and `channel_shm_va()`** defined once. Every userspace component imports these instead of defining local copies.
 - **Zero dependencies.** Pure `no_std` library, fully testable on the host.
@@ -296,7 +296,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **APIs:**
 
 - `SceneWriter` — builds/mutates a scene graph in a `&mut [u8]` buffer. Provides `alloc_node()`, `node_mut()`, `push_data()`, `add_child()`, `commit()`. Also exposes read-back via `nodes()` and `data_buf()` for single-process use.
-- `SceneReader` — read-only access to a scene graph buffer. Provides `node()`, `nodes()`, `data()`, `data_buf()`. This is the API the compositor will use when reading from shared memory after the OS service / compositor process split.
+- `SceneReader` — read-only access to a scene graph buffer. Provides `node()`, `nodes()`, `data()`, `data_buf()`. This is the API the render services (cpu-render and virgil-render) use when reading from shared memory.
 - `DoubleWriter` / `DoubleReader` — double-buffered wrapper over two `SCENE_SIZE` regions (`DOUBLE_SCENE_SIZE = 2 × SCENE_SIZE`). The writer writes to the back buffer (lower generation), then `swap()` atomically publishes it as the new front by bumping its generation counter. The reader always reads the front buffer (higher generation). No locks — they never access the same buffer. A release fence before the generation write and an acquire fence after the generation read ensure cross-core visibility on AArch64.
 
 **Incremental update support (2026-03-15 rendering pipeline optimization):**
@@ -351,11 +351,11 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 - **Embedded ELFs via `include_bytes!`.** All binaries baked into init at compile time. Requires full rebuild to change any component. Real OS loads from a filesystem.
 - **Hardcoded framebuffer dimensions** (1024×768). Should come from GPU driver, not init.
-- **Synchronous linear orchestration.** Spawn compositor, wait for it to finish, then start GPU driver. No event loop, no dynamic process management, no error recovery.
+- **Linear orchestration.** Spawn render service, run 10-phase handshake, start remaining processes. No dynamic process management, no error recovery.
 - **Device manifest format.** Ad hoc packed struct (u32 count + 8-byte-aligned entries with device_id, mmio_pa, mmio_size, irq). No versioning, no extensibility. Works for 2 devices.
 - **Channel shared memory layout.** Raw bytes at magic offsets. Init writes `fb_va` at offset 0, `fb_width` at offset 8, etc. Each process pair has its own undocumented layout. No schema, no validation.
 
-**Key change (2026-03-11):** Init no longer exits. After setting up all processes and cross-process channels, it idles via `yield_now()`. It creates four kinds of channels: config (init↔child), input (input driver→compositor), present (compositor→GPU driver), and editor (compositor↔text editor). The display pipeline starts four event-loop processes (GPU, input, text editor, compositor) and lets them run autonomously. Start order: GPU driver first (device setup), input driver (IRQ wait), text editor (input wait), compositor last (renders initial frame then enters event loop).
+**Key change (2026-03-11, updated 2026-03-18):** Init no longer exits. After probing GPU capabilities and spawning the appropriate render service (virgil-render or cpu-render), it runs `setup_render_pipeline()` — a unified 10-phase handshake that sets up shared memory, spawns core + editor + input drivers, creates all cross-process channels, and starts processes. Both render services follow the same handshake. Init then idles via `yield_now()`.
 
 **Key constraint:** Init is still not a real OS service. It sets up the process topology but doesn't mediate runtime communication. The real OS service (renderer + metadata DB + input router + compositor) doesn't exist — init is a stand-in.
 
@@ -388,49 +388,41 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 ---
 
-### 2.2b Compositor (`services/compositor/`) 🟢 → evolving to CPU Render Service
+### 2.2b CPU Render Service (`services/drivers/cpu-render/`) 🟢
 
-**Goal:** Content-agnostic pixel pump. Read the scene graph from shared memory and delegate all rendering to the render backend.
+**Goal:** Thick render service for software rendering. Reads scene graph from shared memory, rasterizes via CpuBackend, presents via virtio-gpu 2D commands. Sibling to virgil-render.
 
-**Status:** 174 lines, 2 files (main.rs, frame_scheduler.rs). Minimal event loop that calls `backend.render()` and presents dirty rects to the GPU driver. Zero font knowledge, zero content-type dispatch, no SVG. Achieves the settled architecture design (2026-03-16).
-
-**Architectural direction (2026-03-17):** The compositor + virtio-gpu 2D driver will be merged into a single `services/drivers/cpu-render/` process — a sibling of the planned `services/drivers/virgil-render/`. Both are thick render services with the same shape: read scene graph from shared memory, produce display output. Once `cpu-render` exists, the current `services/compositor/` and `services/drivers/virtio-gpu/` are deleted — no parallel implementations. See journal entry "GPU Rendering Architecture: Thick Drivers (2026-03-17)".
+**Status (2026-03-18):** 3 files (main.rs ~457 lines, gpu.rs ~524 lines, frame_scheduler.rs ~173 lines). Merged from the former `services/compositor/` and `services/drivers/virtio-gpu/`. The old directories are deleted — no parallel implementations remain.
 
 **What's foundational (the approach):**
 
-- **Pure event loop.** Wait for scene updates or frame timer → call `backend.render()` → present dirty rects. No rendering logic in the compositor itself.
-- **Render backend delegation.** All pixel work (tree walk, rasterization, compositing, damage tracking, glyph caching) lives in `libraries/render/`. The compositor constructs a `CpuBackend`, passes font data, and calls it.
+- **Single-process thick driver.** Tree walk, rasterization, compositing, and GPU presentation in one process. No cross-process IPC for frame submission.
+- **Render backend delegation.** All pixel work (tree walk, rasterization, compositing, damage tracking, glyph caching) lives in `libraries/render/`. The service constructs a `CpuBackend`, passes font data, and calls it.
+- **Self-allocates framebuffers** via `dma_alloc`. Makes its init handshake identical to virgil-render's.
 - **Frame scheduler.** Timer-driven rendering at configurable cadence (default 60fps). Event coalescing, idle optimization, frame budgeting (skip overdue ticks), idle-to-active wakeup for low-latency response after idle periods.
-- **Double-buffered framebuffer.** Two framebuffer regions, swaps on full repaints. Incremental updates render into the presented buffer.
+- **Complete 2D command implementation** (create resource, attach backing, set scanout, transfer, flush, get display info). Interrupt-driven I/O.
 
 **What's scaffolding (the implementation):**
 
 - **Hardcoded font size and DPI** (18px, 96 DPI). Should come from system configuration.
 
----
+### 2.2c Virgil Render Service (`services/drivers/virgil-render/`) 🟢
 
-### 2.3 Virtio GPU Driver (`services/drivers/virtio-gpu/`) 🟢
+**Goal:** Thick render service for GPU-accelerated rendering. Reads scene graph from shared memory, renders via Gallium3D commands through virglrenderer → ANGLE → Metal → Apple GPU. Sibling to cpu-render.
 
-**Goal:** Present pixel buffers to the QEMU virtual display.
-
-**Status:** ~600 lines. All six core virtio-gpu 2D commands. Event loop — waits for present commands from compositor.
+**Status (2026-03-18):** 5 files (~1,800 lines). All four content types render via GPU: backgrounds (color quads), text (glyph atlas), images (BGRA textures), paths (stencil-then-cover, blocked on ANGLE but code ready). TGSI shaders, VBO management, single SUBMIT_3D per frame.
 
 **What's foundational:**
 
-- Complete 2D command implementation (create resource, attach backing, set scanout, transfer, flush, get display info).
-- Interrupt-driven I/O (register IRQ → wait → ack). Correct async pattern.
-- **Present loop.** After one-time device setup (create resource, attach backing, set scanout), enters an event loop: wait for `MSG_PRESENT` on compositor channel → transfer to host → flush → loop. Coalesces multiple pending presents into a single transfer+flush.
-- Page-aligned MMIO mapping with sub-page offset handling.
-- Reuses virtio library for transport + virtqueue.
+- **Thick driver architecture.** Scene graph is the only interface — the driver owns tree walk, batching, GPU commands, and presentation.
+- **Same handshake as cpu-render.** Init's `setup_render_pipeline()` handles both identically.
+- **Glyph atlas.** 512×512 R8_UNORM texture, row-packed from fonts::GlyphCache, uploaded to GPU.
+- Custom QEMU build (akihikodaki/v) with virglrenderer + ANGLE/Metal backend.
 
 **What's scaffolding:**
 
-- **No surface trait.** The design thread identified `create_surface`/`present` as the right GPU abstraction, but the driver uses raw virtio-gpu commands. There's no abstract display interface that the compositor could program against.
-- **Framebuffer owned by init.** Init allocates the DMA buffer and shares it. The driver just attaches it as backing. Real ownership: compositor or GPU driver owns display buffers.
-
-**QEMU-specific but architecturally sound.** On real hardware, a different driver would implement the same abstract display interface. The virtio-gpu driver is a leaf node — replacing it doesn't affect anything above.
-
-**Architectural direction (2026-03-17):** This driver will be merged with the compositor into `services/drivers/cpu-render/` — a single thick render service that reads the scene graph and produces display output via software rasterization + virtio-gpu 2D transfer. Sibling to `services/drivers/virgil-render/`. The current separate `services/compositor/` and `services/drivers/virtio-gpu/` directories are then deleted. See journal entry "GPU Rendering Architecture: Thick Drivers (2026-03-17)".
+- **Stencil-then-cover blocked on ANGLE.** `VIRGL_BIND_DEPTH_STENCIL` rejected for PIPE_TEXTURE_2D. Code ready for real hardware.
+- **Hardcoded font size and DPI** (18px, 96 DPI). Should come from system configuration.
 
 ---
 
@@ -569,7 +561,7 @@ These are the things that limit what can be built above the kernel today, ordere
 
 **Resolved:** virtio-input keyboard driver (`services/drivers/virtio-input/`). Same interrupt-driven pattern as virtio-blk/gpu: post device-writable event buffers on the event virtqueue, wait for IRQ, read 8-byte Linux evdev events, translate keycodes to ASCII, forward to compositor via IPC ring buffer.
 
-**IPC topology:** Init creates a cross-process channel (input driver → compositor). Input driver sends `MSG_KEY_EVENT` messages; compositor receives and re-renders. This is scaffolding — in the real OS, input routes through the OS service to the active editor process.
+**IPC topology:** Init creates cross-process channels (input driver → core, core → render service, core ↔ editor). Input driver sends `MSG_KEY_EVENT` messages to core; core routes to editor and rebuilds the scene graph; render service reads the scene graph and presents.
 
 **QEMU note:** `-device virtio-keyboard-device` added to run-qemu.sh. QEMU's QMP `input-send-event` does NOT route to virtio-keyboard (QEMU limitation) — must type into the display window directly.
 
@@ -577,15 +569,16 @@ These are the things that limit what can be built above the kernel today, ordere
 
 ### 3.4 ~~No Event Loop / Display Loop~~ ✅ Resolved
 
-**Resolved:** Three processes now run continuous event loops:
+**Resolved:** Multiple processes run continuous event loops:
 
-1. **Input driver** — `wait(IRQ)` → read event → send to compositor → repost buffer → loop
-2. **Compositor** — `wait(input_channel)` → receive key → update text buffer → re-render → signal GPU → loop
-3. **GPU driver** — `wait(compositor_channel)` → transfer framebuffer → flush → loop
+1. **Input driver** — `wait(IRQ)` → read event → send to core → repost buffer → loop
+2. **Core** — `wait(input_channel | editor_channel)` → route events → update document → rebuild scene graph → signal render service → loop
+3. **Editor** — `wait(core_channel)` → receive input → compute write requests → send to core → loop
+4. **Render service** (cpu-render or virgil-render) — `wait(scene_update_channel | frame_timer)` → read scene graph → render → present → loop
 
-Init no longer exits — it sets up all cross-process channels, starts all processes, then idles via `yield_now()`.
+Init probes GPU, calls `setup_render_pipeline()`, starts all processes, then idles via `yield_now()`.
 
-**Cross-process IPC channels:** Init creates direct channels between processes (input→compositor, compositor→GPU) in addition to its own config channels. Each child gets handle 0 = init channel, handle 1+ = cross-process channels.
+**Cross-process IPC channels:** Init creates direct channels between processes (input→core, core→render service, core↔editor) in addition to its own config channels. Each child gets handle 0 = init channel, handle 1+ = cross-process channels.
 
 **Known limitation:** The kernel's `wait` syscall doesn't implement finite timeouts — only poll (`timeout=0`) or infinite block. Timer handles (`timer_create`) can be mixed into `wait` calls as a workaround.
 
@@ -729,7 +722,7 @@ Ordered by what unblocks the most, building the happy path first:
 4. ~~**Structured IPC**~~ (§3.5) — **Done.** Ring buffer library implemented (`libraries/ipc/`). Kernel allocates two pages per channel. All services migrated to ring buffer messages.
 5. ~~**Input driver**~~ (§3.3) — **Done.** virtio-input keyboard driver with IPC forwarding to compositor. Cross-process channels for direct driver↔compositor communication.
 6. ~~**Event loop**~~ (§3.4) — **Done.** Compositor, GPU driver, and input driver all run continuous event loops. Init stays alive.
-7. ~~**Editor process separation**~~ — **Done.** Text editor process (`user/text-editor/`) receives input events from core, sends write requests back. Core is sole writer to document state. Demonstrates Decision #9 (editors as read-only consumers). Five processes in the display pipeline: GPU driver, input driver, text editor, core, compositor.
+7. ~~**Editor process separation**~~ — **Done.** Text editor process (`user/text-editor/`) receives input events from core, sends write requests back. Core is sole writer to document state. Demonstrates Decision #9 (editors as read-only consumers). Four processes in the display pipeline: render service, input driver, text editor, core.
 8. ~~**Read-only document mapping**~~ — **Done.** Text editor has a hardware-enforced read-only shared memory mapping of the document buffer. Reads content for cursor positioning and context-aware editing. All writes go through IPC to core (sole writer).
 9. **Text layout** — connective tissue between fonts, drawing, and the rendering pipeline. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about. Currently monospace-only layout helpers live in core's `scene_state.rs`.
 10. **Filesystem service** (§3.2) — blocked on Decision #16. Files interface designed (12 operations), macOS prototype validated at `prototype/files/` with 21 passing tests. **Partially unblocked:** virtio-9p driver (§2.6) provides runtime file loading from host filesystem during prototyping. Font loading working end-to-end.

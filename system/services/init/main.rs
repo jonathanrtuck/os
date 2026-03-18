@@ -2,10 +2,17 @@
 //!
 //! The kernel spawns only init. Init reads a device manifest from the kernel
 //! via channel shared memory, then spawns and orchestrates all other userspace
-//! processes: virtio drivers, compositor, etc.
+//! processes: render services, input drivers, core, text editor, etc.
 //!
 //! This is the microkernel pattern: kernel provides mechanism, init provides
 //! policy. Matches Fuchsia's component_manager, seL4's root task, QNX's procnto.
+//!
+//! # Render pipeline
+//!
+//! Init probes the GPU for virgl support and spawns the appropriate render
+//! service (`virgil-render` for GPU-accelerated, `cpu-render` for software
+//! fallback). Both share an identical handshake — `setup_render_pipeline()`
+//! handles the full 10-phase setup for either backend.
 //!
 //! # IPC topology
 //!
@@ -14,12 +21,12 @@
 //! 1. **Config channels** (init ↔ child) — one per child process. Init sends
 //!    configuration as the first ring buffer message before starting the child.
 //!
-//! 2. **Input channel** (input driver → compositor) — carries keyboard events.
+//! 2. **Input channels** (input driver → core) — carries keyboard/tablet events.
 //!    Init creates the channel, sends endpoint A to the input driver and
-//!    endpoint B to the compositor. The driver produces, compositor consumes.
+//!    endpoint B to core.
 //!
-//! 3. **Present channel** (compositor → GPU driver) — carries frame present
-//!    commands. Compositor produces, GPU driver consumes.
+//! 3. **Scene update channel** (core → render service) — signals scene graph
+//!    changes. Core produces, render service consumes.
 //!
 //! # Kernel channel (raw bytes, not ring buffer)
 //!
@@ -174,7 +181,11 @@ fn probe_virgl(gpu_pa: u64) -> bool {
     has_virgl
 }
 
-fn setup_virgl_pipeline(
+/// Set up the full render pipeline (scene graph, shared memory, core, editor,
+/// input channels, render service). Used for both virgil-render and cpu-render —
+/// the `name` parameter controls diagnostic output only.
+fn setup_render_pipeline(
+    name: &[u8], // e.g. b"virgl" or b"cpu-render"
     gpu_proc: u8,
     gpu_ch_handle: u8,
     gpu_channel_idx: usize,
@@ -185,11 +196,13 @@ fn setup_virgl_pipeline(
     rtc_pa: u64,                             // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
 ) {
-    sys::print(b"     setting up virgl pipeline\n");
+    sys::print(b"     setting up ");
+    sys::print(name);
+    sys::print(b" pipeline\n");
 
     // -----------------------------------------------------------------------
     // Phase 1: Allocate scene graph + doc buffer (no display dependency).
-    // These must be shared BEFORE starting virgil-render.
+    // These must be shared BEFORE starting the render service.
     // -----------------------------------------------------------------------
     let scene_size = scene::TRIPLE_SCENE_SIZE;
     let scene_pages_needed = (scene_size + 4095) / 4096;
@@ -233,47 +246,49 @@ fn setup_virgl_pipeline(
     };
 
     // -----------------------------------------------------------------------
-    // Phase 2: Create core→virgil-render scene update channel.
+    // Phase 2: Create core→render service scene update channel.
     // -----------------------------------------------------------------------
-    sys::print(b"     creating core\xE2\x86\x92virgil-render channel\n");
+    sys::print(b"     creating core\xE2\x86\x92");
+    sys::print(name);
+    sys::print(b" channel\n");
 
     let (cv_a, cv_b) = sys::channel_create().unwrap_or_else(|_| {
-        sys::print(b"init: channel_create (core-virgl) failed\n");
+        sys::print(b"init: channel_create (core-render) failed\n");
         sys::exit();
     });
 
     *next_channel += 1;
 
     // -----------------------------------------------------------------------
-    // Phase 3: Share memory with virgil-render BEFORE starting it.
+    // Phase 3: Share memory with render service BEFORE starting it.
     // memory_share only works on unstarted processes.
     // -----------------------------------------------------------------------
 
-    // Share scene graph with virgil-render (for reading).
-    let virgl_scene_va = sys::memory_share(gpu_proc, scene_pa, scene_page_count, false)
+    // Share scene graph with render service (for reading).
+    let render_scene_va = sys::memory_share(gpu_proc, scene_pa, scene_page_count, false)
         .unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (virgl scene) failed\n");
+            sys::print(b"init: memory_share (render scene) failed\n");
             sys::exit();
         });
 
-    // Share font data with virgil-render (future: glyph atlas).
-    let virgl_font_va = if font_pages > 0 {
+    // Share font data with render service (for glyph atlas/rasterization).
+    let render_font_va = if font_pages > 0 {
         sys::memory_share(gpu_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (virgl font) failed\n");
+            sys::print(b"init: memory_share (render font) failed\n");
             sys::exit();
         }) as u64
     } else {
         0u64
     };
 
-    // Send scene update channel endpoint B to virgil-render (handle 1).
+    // Send scene update channel endpoint B to render service (handle 1).
     sys::handle_send(gpu_proc, cv_b).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (core-virgl B) failed\n");
+        sys::print(b"init: handle_send (core-render B) failed\n");
         sys::exit();
     });
 
     // -----------------------------------------------------------------------
-    // Phase 4: Start virgil-render for display query.
+    // Phase 4: Start render service for display query.
     // Send device config first, then start.
     // -----------------------------------------------------------------------
     let gpu_ch = init_channel(gpu_channel_idx);
@@ -286,11 +301,13 @@ fn setup_virgl_pipeline(
 
     gpu_ch.send(&msg);
 
-    sys::print(b"     starting virgil-render (display query)\n");
+    sys::print(b"     starting ");
+    sys::print(name);
+    sys::print(b" (display query)\n");
 
     let _ = sys::process_start(gpu_proc);
 
-    // Wait for display info from virgil-render.
+    // Wait for display info from render service.
     sys::print(b"     waiting for display info\n");
 
     let mut resp_msg = ipc::Message::new(0);
@@ -331,8 +348,8 @@ fn setup_virgl_pipeline(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 5: Send GPU config (virgil-render drains FB PA chunks).
-    // We still send GpuConfig + chunks so virgil-render's init_handshake works.
+    // Phase 5: Send GPU config. Both render services self-allocate
+    // framebuffers, so chunks_per_buf and chunk_order are zero.
     // -----------------------------------------------------------------------
     let gpu_config = GpuConfig {
         mmio_pa: gpu_pa,
@@ -341,7 +358,7 @@ fn setup_virgl_pipeline(
         fb_width,
         fb_height,
         fb_size: fb_width * fb_height * FB_BPP,
-        chunks_per_buf: 0, // no framebuffer chunks for virgl
+        chunks_per_buf: 0,
         chunk_order: 0,
         _pad2: 0,
     };
@@ -361,458 +378,11 @@ fn setup_virgl_pipeline(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 6: Send render config (CompositorConfig) to virgil-render.
-    // Reuse CompositorConfig struct: scene_va, font_va, font_len, scale.
-    // virgil-render ignores fb_va/fb_va2 fields.
+    // Phase 6: Send render config (CompositorConfig) to render service.
+    // Both services ignore fb_va/fb_va2 (they own their own framebuffers).
     // -----------------------------------------------------------------------
     let render_config = CompositorConfig {
-        fb_va: 0, // unused by virgil-render
-        fb_va2: 0,
-        scene_va: virgl_scene_va as u64,
-        mono_font_va: virgl_font_va,
-        fb_width,
-        fb_height,
-        mono_font_len,
-        prop_font_len,
-        scale_factor,
-        frame_rate: 60,
-        _pad: 0,
-    };
-    let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &render_config) };
-
-    gpu_ch.send(&msg);
-
-    let _ = sys::channel_signal(gpu_ch_handle);
-
-    sys::print(b"     render config sent to virgil-render\n");
-
-    // -----------------------------------------------------------------------
-    // Phase 7: Spawn core process.
-    // -----------------------------------------------------------------------
-    let (core_proc, _core_ch_handle, core_channel_idx) =
-        match spawn_with_channel(CORE_ELF, next_channel) {
-            Some(v) => v,
-            None => {
-                sys::print(b"init: failed to spawn core\n");
-                sys::exit();
-            }
-        };
-    // Share document buffer with core (read-write).
-    let core_doc_va =
-        sys::memory_share(core_proc, doc_pa, DOC_BUF_PAGES, false).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (core doc) failed\n");
-            sys::exit();
-        });
-    // Share scene graph with core (read-write).
-    let core_scene_va = sys::memory_share(core_proc, scene_pa, scene_page_count, false)
-        .unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (core scene) failed\n");
-            sys::exit();
-        });
-    // Share font data with core (read-only).
-    let core_font_va = if font_pages > 0 {
-        sys::memory_share(core_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (core font) failed\n");
-            sys::exit();
-        }) as u64
-    } else {
-        0u64
-    };
-    // Send core config.
-    let core_ch = init_channel(core_channel_idx);
-    let core_config = CoreConfig {
-        doc_va: core_doc_va as u64,
-        scene_va: core_scene_va as u64,
-        mono_font_va: core_font_va,
-        fb_width: logical_w,
-        fb_height: logical_h,
-        doc_capacity: DOC_BUF_CAPACITY,
-        mono_font_len,
-        prop_font_len,
-        _pad: 0,
-    };
-    let msg = unsafe { ipc::Message::from_payload(MSG_CORE_CONFIG, &core_config) };
-
-    core_ch.send(&msg);
-
-    // Send image config to core (for has_image detection).
-    if png_len > 0 {
-        let image_va = core_font_va + png_offset as u64;
-        let img_config = ImageConfig {
-            image_va,
-            image_len: png_len,
-            _pad: 0,
-        };
-        let img_msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_CONFIG, &img_config) };
-
-        core_ch.send(&img_msg);
-    }
-
-    // Send RTC config to core.
-    if rtc_pa != 0 {
-        let rtc_config = RtcConfig { mmio_pa: rtc_pa };
-        let rtc_msg = unsafe { ipc::Message::from_payload(MSG_RTC_CONFIG, &rtc_config) };
-
-        core_ch.send(&rtc_msg);
-
-        sys::print(b"     rtc config sent to core\n");
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase 8: Cross-process channels.
-    //
-    // Core handle layout:
-    //   handle 1 = first input (keyboard)
-    //   handle 2 = core → virgil-render (scene update)
-    //   handle 3 = core ↔ editor
-    //   handle 4+ = additional input devices
-    // -----------------------------------------------------------------------
-
-    // Input → Core channel (keyboard events).
-    if !input_devices.is_empty() {
-        let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[0];
-
-        sys::print(b"     creating input\xE2\x86\x92core channel\n");
-
-        let (ic_a, ic_b) = sys::channel_create().unwrap_or_else(|_| {
-            sys::print(b"init: channel_create (input-core) failed\n");
-            sys::exit();
-        });
-
-        *next_channel += 1;
-
-        sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
-            sys::print(b"init: handle_send (input-core A) failed\n");
-            sys::exit();
-        });
-        // Send to core (handle 1 in core).
-        sys::handle_send(core_proc, ic_b).unwrap_or_else(|_| {
-            sys::print(b"init: handle_send (input-core B) failed\n");
-            sys::exit();
-        });
-
-        let input_ch = init_channel(input_ch_idx);
-        let input_config = DeviceConfig {
-            mmio_pa: input_pa,
-            irq: input_irq,
-            _pad: 0,
-        };
-        let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
-
-        input_ch.send(&msg);
-
-        sys::print(b"     input device 0 channel created\n");
-    }
-
-    // Core → virgil-render scene update channel.
-    // Endpoint A → core (handle 2 = COMPOSITOR_HANDLE in core).
-    sys::handle_send(core_proc, cv_a).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (core-virgl A) failed\n");
-        sys::exit();
-    });
-
-    // -----------------------------------------------------------------------
-    // Phase 9: Core ↔ Editor channel.
-    // -----------------------------------------------------------------------
-    sys::print(b"     spawning text editor\n");
-
-    let (editor_proc, _editor_ch, editor_ch_idx) =
-        match spawn_with_channel(TEXT_EDITOR_ELF, next_channel) {
-            Some(v) => v,
-            None => {
-                sys::print(b"init: failed to spawn text editor\n");
-                sys::exit();
-            }
-        };
-    // Share document buffer with editor (read-only).
-    let editor_doc_va =
-        sys::memory_share(editor_proc, doc_pa, DOC_BUF_PAGES, true).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (editor doc) failed\n");
-            sys::exit();
-        });
-    let editor_ch = init_channel(editor_ch_idx);
-    let editor_config = EditorConfig {
-        doc_va: editor_doc_va as u64,
-        doc_capacity: DOC_BUF_CAPACITY,
-        _pad: 0,
-    };
-    let msg = unsafe { ipc::Message::from_payload(MSG_EDITOR_CONFIG, &editor_config) };
-
-    editor_ch.send(&msg);
-
-    sys::print(b"     creating core\xE2\x86\x94editor channel\n");
-
-    let (ce_a, ce_b) = sys::channel_create().unwrap_or_else(|_| {
-        sys::print(b"init: channel_create (core-editor) failed\n");
-        sys::exit();
-    });
-
-    *next_channel += 1;
-
-    // Endpoint A → core (handle 3 = EDITOR_HANDLE in core).
-    sys::handle_send(core_proc, ce_a).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (core-editor A) failed\n");
-        sys::exit();
-    });
-    // Endpoint B → editor (handle 1 in editor's table).
-    sys::handle_send(editor_proc, ce_b).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (core-editor B) failed\n");
-        sys::exit();
-    });
-
-    // Additional input device channels → core handle 4+.
-    for i in 1..input_devices.len() {
-        let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[i];
-
-        sys::print(b"     creating input\xE2\x86\x92core channel\n");
-
-        let (ic_a, ic_b) = sys::channel_create().unwrap_or_else(|_| {
-            sys::print(b"init: channel_create (input-core) failed\n");
-            sys::exit();
-        });
-
-        *next_channel += 1;
-
-        sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
-            sys::print(b"init: handle_send (input-core A) failed\n");
-            sys::exit();
-        });
-        sys::handle_send(core_proc, ic_b).unwrap_or_else(|_| {
-            sys::print(b"init: handle_send (input-core B) failed\n");
-            sys::exit();
-        });
-
-        let input_ch = init_channel(input_ch_idx);
-        let input_config = DeviceConfig {
-            mmio_pa: input_pa,
-            irq: input_irq,
-            _pad: 0,
-        };
-        let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
-
-        input_ch.send(&msg);
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase 10: Start processes.
-    // Input drivers first, then editor, then core.
-    // virgil-render is already running (started in Phase 4).
-    // No compositor to start.
-    // -----------------------------------------------------------------------
-    for &(input_proc_handle, _, _, _) in input_devices {
-        sys::print(b"     starting input driver\n");
-
-        let _ = sys::process_start(input_proc_handle);
-
-        sys::yield_now();
-    }
-
-    sys::print(b"     starting text editor\n");
-
-    let _ = sys::process_start(editor_proc);
-
-    sys::yield_now();
-
-    sys::print(b"     starting core\n");
-
-    let _ = sys::process_start(core_proc);
-
-    sys::yield_now();
-
-    sys::print(b"     virgl pipeline running\n");
-}
-fn setup_display_pipeline(
-    gpu_proc: u8,
-    gpu_ch_handle: u8,
-    gpu_channel_idx: usize,
-    gpu_pa: u64,
-    gpu_irq: u32,
-    input_devices: &[(u8, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
-    font_buf: Option<(u64, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len)
-    rtc_pa: u64,                             // PL031 RTC physical address (0 = not found)
-    next_channel: &mut usize,
-) {
-    sys::print(b"     setting up cpu-render pipeline\n");
-
-    // -----------------------------------------------------------------------
-    // Phase 1: Allocate scene graph + doc buffer (no display dependency).
-    // These must be shared BEFORE starting cpu-render.
-    // -----------------------------------------------------------------------
-    let scene_size = scene::TRIPLE_SCENE_SIZE;
-    let scene_pages_needed = (scene_size + 4095) / 4096;
-    let scene_order = (scene_pages_needed.next_power_of_two().trailing_zeros()) as u32;
-    let scene_alloc_bytes = (1usize << scene_order) * 4096;
-    let mut scene_pa: u64 = 0;
-    let _scene_va = sys::dma_alloc(scene_order, &mut scene_pa).unwrap_or_else(|_| {
-        sys::print(b"init: dma_alloc (scene graph) failed\n");
-        sys::exit();
-    });
-
-    unsafe { core::ptr::write_bytes(_scene_va as *mut u8, 0, scene_alloc_bytes) };
-
-    sys::print(b"     scene graph: shared memory allocated\n");
-
-    let scene_page_count = scene_alloc_bytes as u64 / 4096;
-
-    // Document buffer (1 page).
-    let mut doc_pa: u64 = 0;
-    let _doc_va = sys::dma_alloc(0, &mut doc_pa).unwrap_or_else(|_| {
-        sys::print(b"init: dma_alloc (doc buffer) failed\n");
-        sys::exit();
-    });
-
-    unsafe { core::ptr::write_bytes(_doc_va as *mut u8, 0, 4096) };
-
-    sys::print(b"     document buffer: 4 KiB shared\n");
-
-    // Unpack font buffer info.
-    let (font_pa_val, mono_font_len, prop_font_len, png_offset, png_len) =
-        if let Some((pa, mono, prop, png_off, png_l)) = font_buf {
-            (pa, mono, prop, png_off, png_l)
-        } else {
-            (0u64, 0u32, 0u32, 0u32, 0u32)
-        };
-    let font_total_len = mono_font_len + prop_font_len + png_len;
-    let font_pages = if font_total_len > 0 {
-        ((font_total_len as u64) + 4095) / 4096
-    } else {
-        0
-    };
-
-    // -----------------------------------------------------------------------
-    // Phase 2: Create core→cpu-render scene update channel.
-    // -----------------------------------------------------------------------
-    sys::print(b"     creating core\xE2\x86\x92cpu-render channel\n");
-
-    let (cv_a, cv_b) = sys::channel_create().unwrap_or_else(|_| {
-        sys::print(b"init: channel_create (core-cpu-render) failed\n");
-        sys::exit();
-    });
-
-    *next_channel += 1;
-
-    // -----------------------------------------------------------------------
-    // Phase 3: Share memory with cpu-render BEFORE starting it.
-    // memory_share only works on unstarted processes.
-    // -----------------------------------------------------------------------
-
-    // Share scene graph with cpu-render (for reading).
-    let render_scene_va = sys::memory_share(gpu_proc, scene_pa, scene_page_count, false)
-        .unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (cpu-render scene) failed\n");
-            sys::exit();
-        });
-
-    // Share font data with cpu-render (for glyph rasterization).
-    let render_font_va = if font_pages > 0 {
-        sys::memory_share(gpu_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (cpu-render font) failed\n");
-            sys::exit();
-        }) as u64
-    } else {
-        0u64
-    };
-
-    // Send scene update channel endpoint B to cpu-render (handle 1).
-    sys::handle_send(gpu_proc, cv_b).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (core-cpu-render B) failed\n");
-        sys::exit();
-    });
-
-    // -----------------------------------------------------------------------
-    // Phase 4: Start cpu-render for display query.
-    // Send device config first, then start.
-    // -----------------------------------------------------------------------
-    let gpu_ch = init_channel(gpu_channel_idx);
-    let dev_config = DeviceConfig {
-        mmio_pa: gpu_pa,
-        irq: gpu_irq,
-        _pad: 0,
-    };
-    let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
-
-    gpu_ch.send(&msg);
-
-    sys::print(b"     starting cpu-render (display query)\n");
-
-    let _ = sys::process_start(gpu_proc);
-
-    // Wait for display info from cpu-render.
-    sys::print(b"     waiting for display info\n");
-
-    let mut resp_msg = ipc::Message::new(0);
-
-    loop {
-        let _ = sys::wait(&[gpu_ch_handle], u64::MAX);
-
-        if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_DISPLAY_INFO {
-            break;
-        }
-    }
-
-    let display_info: DisplayInfoMsg = unsafe { resp_msg.payload_as() };
-    let fb_width = display_info.width;
-    let fb_height = display_info.height;
-
-    // Compute scale factor.
-    let scale_factor: f32 = if fb_width >= 2048 { 2.0 } else { 1.0 };
-    let logical_w = (fb_width as f32 / scale_factor) as u32;
-    let logical_h = (fb_height as f32 / scale_factor) as u32;
-
-    {
-        let mut buf = [0u8; 40];
-        let prefix = b"     display resolution: ";
-
-        buf[..prefix.len()].copy_from_slice(prefix);
-
-        let mut pos = prefix.len();
-
-        pos += format_u32(fb_width, &mut buf[pos..]);
-        buf[pos] = b'x';
-        pos += 1;
-        pos += format_u32(fb_height, &mut buf[pos..]);
-        buf[pos] = b'\n';
-        pos += 1;
-
-        sys::print(&buf[..pos]);
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase 5: Send GPU config (cpu-render self-allocates framebuffers).
-    // -----------------------------------------------------------------------
-    let gpu_config = GpuConfig {
-        mmio_pa: gpu_pa,
-        irq: gpu_irq,
-        _pad: 0,
-        fb_width,
-        fb_height,
-        fb_size: fb_width * fb_height * FB_BPP,
-        chunks_per_buf: 0, // cpu-render self-allocates
-        chunk_order: 0,
-        _pad2: 0,
-    };
-    let msg = unsafe { ipc::Message::from_payload(MSG_GPU_CONFIG, &gpu_config) };
-
-    gpu_ch.send(&msg);
-
-    let _ = sys::channel_signal(gpu_ch_handle);
-
-    // Wait for GPU_READY (cpu-render finished FB and device setup).
-    loop {
-        let _ = sys::wait(&[gpu_ch_handle], u64::MAX);
-
-        if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_GPU_READY {
-            break;
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Phase 6: Send render config (CompositorConfig) to cpu-render.
-    // Reuse CompositorConfig struct: scene_va, font_va, font_len, scale.
-    // cpu-render ignores fb_va/fb_va2 fields (it owns its framebuffers).
-    // -----------------------------------------------------------------------
-    let render_config = CompositorConfig {
-        fb_va: 0, // unused by cpu-render
+        fb_va: 0,
         fb_va2: 0,
         scene_va: render_scene_va as u64,
         mono_font_va: render_font_va,
@@ -830,7 +400,9 @@ fn setup_display_pipeline(
 
     let _ = sys::channel_signal(gpu_ch_handle);
 
-    sys::print(b"     render config sent to cpu-render\n");
+    sys::print(b"     render config sent to ");
+    sys::print(name);
+    sys::print(b"\n");
 
     // -----------------------------------------------------------------------
     // Phase 7: Spawn core process.
@@ -909,7 +481,7 @@ fn setup_display_pipeline(
     //
     // Core handle layout:
     //   handle 1 = first input (keyboard)
-    //   handle 2 = core → cpu-render (scene update)
+    //   handle 2 = core → render service (scene update)
     //   handle 3 = core ↔ editor
     //   handle 4+ = additional input devices
     // -----------------------------------------------------------------------
@@ -950,10 +522,10 @@ fn setup_display_pipeline(
         sys::print(b"     input device 0 channel created\n");
     }
 
-    // Core → cpu-render scene update channel.
+    // Core → render service scene update channel.
     // Endpoint A → core (handle 2 = COMPOSITOR_HANDLE in core).
     sys::handle_send(core_proc, cv_a).unwrap_or_else(|_| {
-        sys::print(b"init: handle_send (core-cpu-render A) failed\n");
+        sys::print(b"init: handle_send (core-render A) failed\n");
         sys::exit();
     });
 
@@ -1042,7 +614,7 @@ fn setup_display_pipeline(
     // -----------------------------------------------------------------------
     // Phase 10: Start processes.
     // Input drivers first, then editor, then core.
-    // cpu-render is already running (started in Phase 4).
+    // Render service is already running (started in Phase 4).
     // -----------------------------------------------------------------------
     for &(input_proc_handle, _, _, _) in input_devices {
         sys::print(b"     starting input driver\n");
@@ -1064,7 +636,9 @@ fn setup_display_pipeline(
 
     sys::yield_now();
 
-    sys::print(b"     cpu-render pipeline running\n");
+    sys::print(b"     ");
+    sys::print(name);
+    sys::print(b" pipeline running\n");
 }
 /// Spawn a suspended process, create a channel to it, and send one endpoint.
 ///
@@ -1455,31 +1029,19 @@ pub extern "C" fn _start() -> ! {
 
     // Phase 2: Display pipeline — select based on virgl probe result.
     if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq, has_virgl)) = gpu {
-        if has_virgl {
-            setup_virgl_pipeline(
-                gpu_proc,
-                gpu_ch_handle,
-                gpu_channel_idx,
-                gpu_pa,
-                gpu_irq,
-                &input_devices[..input_count],
-                font_buf,
-                rtc_pa,
-                &mut next_channel,
-            );
-        } else {
-            setup_display_pipeline(
-                gpu_proc,
-                gpu_ch_handle,
-                gpu_channel_idx,
-                gpu_pa,
-                gpu_irq,
-                &input_devices[..input_count],
-                font_buf,
-                rtc_pa,
-                &mut next_channel,
-            );
-        }
+        let render_name: &[u8] = if has_virgl { b"virgl" } else { b"cpu-render" };
+        setup_render_pipeline(
+            render_name,
+            gpu_proc,
+            gpu_ch_handle,
+            gpu_channel_idx,
+            gpu_pa,
+            gpu_irq,
+            &input_devices[..input_count],
+            font_buf,
+            rtc_pa,
+            &mut next_channel,
+        );
     } else {
         sys::print(b"     no gpu found\n");
     }

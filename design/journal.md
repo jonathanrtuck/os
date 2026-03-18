@@ -15,6 +15,7 @@ Merged `services/compositor/` and `services/drivers/virtio-gpu/` into a single `
 **Key design decision:** cpu-render self-allocates framebuffers via `dma_alloc` instead of receiving them from init. This makes its init handshake identical to virgil-render's (MSG_DEVICE_CONFIG → MSG_DISPLAY_INFO → MSG_GPU_CONFIG → MSG_GPU_READY → MSG_COMPOSITOR_CONFIG). Init's `setup_display_pipeline()` was rewritten to mirror `setup_virgl_pipeline()`.
 
 **Eliminated:**
+
 - Compositor→GPU IPC channel (no MSG_PRESENT/MSG_PRESENT_DONE)
 - One process boundary (one fewer context switch per frame)
 - Framebuffer allocation in init (~24 dma_alloc calls moved to cpu-render)
@@ -22,6 +23,7 @@ Merged `services/compositor/` and `services/drivers/virtio-gpu/` into a single `
 - ~175 lines of init code
 
 **Files:**
+
 - Created: `cpu-render/main.rs` (457 lines), `cpu-render/gpu.rs` (524 lines), `cpu-render/frame_scheduler.rs` (173 lines, copied from compositor)
 - Modified: `build.rs` (replaced compositor+virtio-gpu with cpu-render), `init/main.rs` (rewritten setup_display_pipeline)
 - Deleted: `services/compositor/`, `services/drivers/virtio-gpu/` (no parallel implementations)
@@ -48,7 +50,7 @@ Both render services follow the same pattern: single process, same handshake, sc
 ### Remaining deferred work
 
 - **Remove test content** from `scene_state.rs` once real Image/Path producers exist.
-- **Extract common handshake** from setup_virgl_pipeline and setup_display_pipeline (they're now structurally identical). Not blocking — duplication is manageable.
+- ~~**Extract common handshake** from setup_virgl_pipeline and setup_display_pipeline.~~ **Done (2026-03-18).** Unified into single `setup_render_pipeline(name, ...)` function. The `name` parameter (`b"virgl"` or `b"cpu-render"`) drives diagnostic output only. Reduced init from ~1,500 lines to ~1,076 lines.
 
 ---
 
@@ -263,9 +265,9 @@ No architectural problems identified.
 
 ---
 
-## Text Shaping Pipeline: HarfBuzz Exists but Is Bypassed (2026-03-17)
+## Text Shaping Pipeline: HarfBuzz Integration (2026-03-17)
 
-**Status:** open-thread, ready to implement when needed.
+**Status:** Complete. Core calls `fonts::shape_with_variations()` via `shape_text()`. The fake monospace shaper (`bytes_to_shaped_glyphs`) remains in test code only. The open items below document the original analysis and remaining edge cases.
 
 ### The problem
 
@@ -275,7 +277,7 @@ There are **two `ShapedGlyph` types** that don't talk to each other:
 
 2. **`scene::ShapedGlyph`** (scene graph wire format): `glyph_id: u16`, `x_advance: i16`, `x_offset: i16`, `y_offset: i16`. Values in **points** (the scene graph's logical coordinate unit, 1pt = 1/110"). 8 bytes total, `#[repr(C)]`. This is what the render backend reads.
 
-Core currently bypasses `fonts::shape()` entirely. Instead it uses `bytes_to_shaped_glyphs(text, advance)` — a fake shaper that treats each ASCII byte as a glyph ID and stamps a uniform advance onto every glyph. This works because: (1) monospace font only, (2) ASCII only, (3) no ligatures, kerning, combining marks, or bidirectional text.
+Core previously bypassed `fonts::shape()` entirely, using `bytes_to_shaped_glyphs(text, advance)` — a fake shaper that treated each ASCII byte as a glyph ID. This was replaced by `shape_text()` in `scene_state.rs`, which calls `fonts::shape_with_variations()` (HarfBuzz via harfrust), converts font units to pixel units, and produces `scene::ShapedGlyph` values for the scene graph. The fake shaper remains in test code only.
 
 ### Unit chain
 
@@ -413,7 +415,7 @@ Path {
 }
 ```
 
-**2. Remove `FillRect` content type.** Solid rectangles are expressed via `background_color` on Container nodes. `FillRect` was always a degenerate case — a rectangular path with no curves. Promoting background color to a container property is cleaner: it's decoration on the node, not a separate content type. This was decided prior to the Path discussion; implementation deferred.
+**2. ~~Remove `FillRect` content type.~~** **Done.** `FillRect` removed from `Content` enum. Solid rectangles use `Content::None` with `node.background` color. Cursor and selection highlights use this pattern. Tests validate (`content_enum_has_three_variants`, `core_cursor_uses_background_container`).
 
 **3. Cubic Beziers only at the interface.** The scene graph mandates one contour format: cubic Beziers. Quadratics (TrueType font outlines) are converted to cubics losslessly when Core builds the scene graph (`cp1 = p0 + 2/3*(c-p0)`, `cp2 = p1 + 2/3*(c-p1)`). One format, one flattening algorithm in the backend. If the rasterizer wants to detect degenerate cubics and fast-path them as quadratics internally, that's its business — implementation detail behind the interface.
 

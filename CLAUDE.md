@@ -73,9 +73,9 @@ Read these before making any design suggestions:
 
 **Session 2026-03-18 (latest):** Virgl implementation plan COMPLETE (all 8 tasks) + Phase 5 COMPLETE (cpu-render merge). Both render pipelines are now single-process: `virgil-render` (GPU-accelerated) and `cpu-render` (CPU software). Init auto-detects at boot. 1,816+ total tests pass.
 
-**Phase 5: cpu-render merge (2026-03-18):** Merged `compositor/` + `virtio-gpu/` into single `cpu-render/` process. Key insight: cpu-render self-allocates framebuffers via `dma_alloc`, making its init handshake identical to virgil-render's. Eliminated compositor→GPU IPC channel, MSG_PRESENT/MSG_PRESENT_DONE protocol, one process boundary. Init's `setup_display_pipeline()` rewritten to mirror `setup_virgl_pipeline()`. Old compositor/ and virtio-gpu/ deleted (no parallel implementations).
+**Phase 5: cpu-render merge (2026-03-18):** Merged `compositor/` + `virtio-gpu/` into single `cpu-render/` process. Key insight: cpu-render self-allocates framebuffers via `dma_alloc`, making its init handshake identical to virgil-render's. Eliminated compositor→GPU IPC channel, MSG_PRESENT/MSG_PRESENT_DONE protocol, one process boundary. Old compositor/ and virtio-gpu/ deleted (no parallel implementations). Init's two pipeline functions (`setup_virgl_pipeline()` / `setup_display_pipeline()`) unified into a single `setup_render_pipeline(name, ...)` — the `name` parameter (`b"virgl"` or `b"cpu-render"`) drives diagnostic output only.
 
-**Task 8: Init integration (2026-03-18):** Added `probe_virgl()` to init — maps GPU MMIO region, reads virtio feature bits, checks `VIRTIO_GPU_F_VIRGL` (bit 0). If set: spawns `VIRGIL_RENDER_ELF` → `setup_virgl_pipeline()`. If not: spawns `CPU_RENDER_ELF` → `setup_display_pipeline()`. No new IPC messages needed — simpler than planned.
+**Task 8: Init integration (2026-03-18):** Added `probe_virgl()` to init — maps GPU MMIO region, reads virtio feature bits, checks `VIRTIO_GPU_F_VIRGL` (bit 0). Selects `VIRGIL_RENDER_ELF` or `CPU_RENDER_ELF` accordingly, then calls `setup_render_pipeline()` for either backend. No new IPC messages needed — simpler than planned.
 
 **Virgl Tasks 1-7 (2026-03-17/18):** Virgil3D GPU driver (`virgil-render`) built from scratch. All four content types render via GPU: backgrounds (color quads), text (glyph atlas), images (BGRA textures), paths (stencil-then-cover). See `project_virgl_progress.md` memory for details.
 
@@ -83,23 +83,25 @@ Read these before making any design suggestions:
 
 **Session 2026-03-16:** Tickless idle + IPI wakeup mission COMPLETE — GICv3 migration, cross-core IPI wakeup, tickless idle scheduling. 70 new tests, 1,768 total pass.
 
-**GICv3 migration + tickless idle (2026-03-16):** Full interrupt controller migration from GICv2 to GICv3. `InterruptController` trait with `GicV3` implementation using system register CPU interface (ICC_*) and MMIO distributor/redistributor. GICv2 code deleted entirely — no parallel implementations. boot.S updated for ICC_SRE_EL2 during EL2→EL1 transition. All QEMU scripts updated to `gic-version=3`. IPI-driven cross-core wakeup: `try_wake` sends SGI 0 via ICC_SGI1R_EL1 to idle cores blocked in WFI. Per-core idle tracking (`is_idle` in `PerCoreState`). Tickless idle: `reprogram_next_deadline` replaces fixed 250Hz tick — deadline computed from timer objects, quantum expiry, and context replenishment. `TICKS_PER_SEC` removed. Lock-free deadline cache (AtomicU64) avoids STATE→TIMERS lock ordering. Fuzz test updated (syscall 27 now valid). 70 new tests (33 GICv3 + 7 idle tracking + 13 IPI + 17 tickless), 1,768 total pass.
+**GICv3 migration + tickless idle (2026-03-16):** Full interrupt controller migration from GICv2 to GICv3. `InterruptController` trait with `GicV3` implementation using system register CPU interface (ICC\_\*) and MMIO distributor/redistributor. GICv2 code deleted entirely — no parallel implementations. boot.S updated for ICC_SRE_EL2 during EL2→EL1 transition. All QEMU scripts updated to `gic-version=3`. IPI-driven cross-core wakeup: `try_wake` sends SGI 0 via ICC_SGI1R_EL1 to idle cores blocked in WFI. Per-core idle tracking (`is_idle` in `PerCoreState`). Tickless idle: `reprogram_next_deadline` replaces fixed 250Hz tick — deadline computed from timer objects, quantum expiry, and context replenishment. `TICKS_PER_SEC` removed. Lock-free deadline cache (AtomicU64) avoids STATE→TIMERS lock ordering. Fuzz test updated (syscall 27 now valid). 70 new tests (33 GICv3 + 7 idle tracking + 13 IPI + 17 tickless), 1,768 total pass.
 
 **Session 2026-03-16:** Rendering architecture redesign COMPLETE — all three phases shipped.
 
 **Rendering architecture Phases 1–3 (2026-03-16):** The full rendering pipeline redesign is done. Three phases delivered in sequence:
 
 - **Phase 1: Extract Render Backend.** Created `libraries/render/` with `RenderBackend` trait and `CpuBackend` implementation. Moved ~3,100 lines of rendering code from compositor into the standalone library: scene_render.rs (tree walk, content rendering, transforms), compositing.rs, surface_pool.rs, damage.rs, cursor.rs. CpuBackend encapsulates all rendering state (glyph caches, damage tracker, surface pool, PREV_BOUNDS).
-- **Phase 2: Geometric Content Types.** Replaced semantic scene graph content types (`Text`, `Path`) with geometric primitives (`FillRect`, `Glyphs`). `Image` unchanged. Core now emits one `Glyphs` node per visible text line, `FillRect` for cursor and selection highlights. SVG parser and all path rendering code eliminated — icons use the glyph cache. Render backend updated for new content types. QEMU visual output pixel-identical before and after.
+- **Phase 2: Geometric Content Types.** Replaced semantic scene graph content types (`Text`, `Path`) with geometric primitives (`Glyphs`). `Image` unchanged. `FillRect` was initially added but subsequently removed — solid fills now use `Content::None` with `node.background` color. Core emits one `Glyphs` node per visible text line, background-colored containers for cursor and selection highlights. SVG parser and all path rendering code eliminated — icons use the glyph cache. Render backend updated for new content types. QEMU visual output pixel-identical before and after.
 - **Phase 3: Architecture Cleanup.** Compositor minimized to 174 lines — content-agnostic pixel pump with zero font knowledge, zero content dispatch, no SVG. Layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) confirmed in core (not scene library). Font handling boundary clean: core owns shaping + metrics, render backend owns rasterization + glyph caching. Scene library is purely geometric (no content-aware code).
 
-**Post-cleanup architecture:**
-```
-Core (shaping, layout, scene building) → Scene Graph (shared memory) → Compositor (thin event loop) → Render Backend (tree walk, rasterization, compositing) → GPU Driver → Display
-```
-Content types: `None`, `FillRect`, `Glyphs`, `Image`. The render backend (`libraries/render/`, ~2,194 lines) owns all pixel work. The compositor (`services/compositor/`, 174 lines) is a pure event loop that calls `backend.render()` and presents dirty rects. See `design/rendering-pipeline.mermaid` and journal entry.
+**Post-cleanup architecture (updated 2026-03-18):**
 
-**Rendering architecture design (2026-03-16, earlier):** Top-down audit of the rendering stack committed to path-centric rendering: the pipeline is a series of data shape transformations (Hardware Events → Key Events → Write Requests → Scene Tree → Pixel Buffer → Display Signal) with four translators (Input Driver, Editor, Core, Render Backend). Key decisions: (1) glyph rasterization in the render backend, (2) tree-structured scene graph with geometric content types (Container, FillRect, Glyphs, Image), (3) explicit `RenderBackend` trait with `fn render(scene, surface)` — backend owns tree walk, rasterization, compositing, (4) multi-core rasterization internal to backend, (5) Glyphs type serves both text and monochrome icons (eliminates SVG parser), (6) compositor becomes ~174 lines (event loop + `backend.render()` + present). See `design/rendering-pipeline.mermaid` and full journal entry.
+```
+Core (shaping, layout, scene building) → Scene Graph (shared memory) → Render Service (tree walk, rasterization/GPU, compositing, present) → Display
+```
+
+Content types: `None`, `Path`, `Glyphs`, `Image`. Each render service (`cpu-render` or `virgil-render`) is a single process that reads the scene graph and produces display output. The render library (`libraries/render/`, ~2,194 lines) provides `CpuBackend` used by cpu-render. See `design/rendering-pipeline.mermaid` and journal entry.
+
+**Rendering architecture design (2026-03-16, earlier):** Top-down audit of the rendering stack committed to path-centric rendering: the pipeline is a series of data shape transformations (Hardware Events → Key Events → Write Requests → Scene Tree → Pixel Buffer → Display Signal) with four translators (Input Driver, Editor, Core, Render Backend). Key decisions: (1) glyph rasterization in the render backend, (2) tree-structured scene graph with geometric content types (Container, Glyphs, Image, Path), (3) explicit `RenderBackend` trait with `fn render(scene, surface)` — backend owns tree walk, rasterization, compositing, (4) multi-core rasterization internal to backend, (5) Glyphs type serves both text and monochrome icons (eliminates SVG parser), (6) render service is a single process (tree walk + render + present). See `design/rendering-pipeline.mermaid` and full journal entry.
 
 **Session 2026-03-14:** Scene scroll fix + kernel TPIDR race fix (EC=0x21 crash resolved).
 
@@ -145,7 +147,7 @@ Content types: `None`, `FillRect`, `Glyphs`, `Image`. The render backend (`libra
 
 **Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, unblocked by prototype-on-host strategy). GUI track: input + event loops done → editor process separation done → **read-only document mapping next** (give editor zero-copy read access) → text layout. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: Files prototype complete → integrate with OS service when document pipeline reaches that point.
 
-**System code:** `system/kernel/` (33 .rs files + 2 .S + link.ld), `system/services/{init,core,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`. `prototype/files/` (21 tests). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with scene graph + render backend. 28 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (33 .rs files + 2 .S + link.ld), `system/services/{init,core,drivers/{cpu-render,virgil-render,virtio-blk,virtio-console,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`. `prototype/files/` (21 tests). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with scene graph + render services. 28 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 
@@ -169,7 +171,7 @@ Content types: `None`, `FillRect`, `Glyphs`, `Image`. The render backend (`libra
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~1,768 tests).
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~1,816 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
