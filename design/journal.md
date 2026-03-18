@@ -4,6 +4,58 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## GPU Path Rendering: Stencil-Then-Cover vs Compute (2026-03-17)
+
+**Status:** research complete, approach settled, implementation deferred (core doesn't emit paths yet).
+
+### The question
+
+How should the GPU render filled vector paths (cubic Bezier contours)? Three approaches evaluated:
+
+### Approaches considered
+
+**A. CPU rasterize → texture upload.** Rasterize path to coverage bitmap on CPU, upload as GPU texture, composite as textured quad. What Cairo and older Skia did. Defeats the purpose of GPU acceleration — CPU does the hard work, GPU just blits. Also requires per-path texture resource management.
+
+**B. Tessellate → triangles.** Flatten Bezier curves to line segments, triangulate the filled polygon, draw as colored triangles. Problem: correct triangulation of arbitrary concave, self-intersecting polygons with holes is a hard computational geometry problem (ear clipping is O(n²), constrained Delaunay is complex). Doesn't handle winding rules naturally.
+
+**C. Stencil-then-cover.** The dominant production technique — used by NanoVG, Pathfinder, Skia (Ganesh/Graphite), Chrome, Firefox (WebRender), Direct2D. Algorithm:
+1. Triangle fan from an arbitrary interior point into the **stencil buffer** (increment/decrement tracks winding count) — overlapping triangles are fine
+2. Covering quad reads stencil buffer — non-zero stencil (or odd for even-odd rule) gets filled
+
+Handles self-intersections, complex winding rules, and concave shapes correctly without correct triangulation. Requires only a stencil buffer (standard since ES 2.0).
+
+**D. Compute shader (Vello-style).** GPU-native path rendering via compute shaders. CPU flattens curves → SSBO → compute shader does scanline coverage → output texture. No stencil, no tessellation. The frontier (Raph Levien / Linebender project, 2024-2025).
+
+### Decision: Stencil-then-cover (C) for current driver, compute (D) for future hardware drivers
+
+**Stencil-then-cover** is the right approach for virgil-render:
+- Works within ES 3.0 (our ceiling — ANGLE/Metal hardcodes `kMaxSupportedGLVersion = gl::Version(3, 0)`)
+- virglrenderer supports stencil buffers (standard Gallium3D)
+- Battle-tested in production by every major renderer
+- Implementation: depth/stencil surface (one-time), two passes per path
+
+**Compute is blocked** on the current QEMU stack:
+- Requires ES 3.1 (compute shaders) + SSBOs
+- ANGLE's Metal backend explicitly caps at ES 3.0, sets `maxPerStageStorageBuffers = 0`
+- virglrenderer's protocol *does* support compute (`VIRGL_CCMD_LAUNCH_GRID`, `SET_SHADER_BUFFERS`, `SET_SHADER_IMAGES`, `MEMORY_BARRIER`, `PIPE_SHADER_COMPUTE`), but the host-side GL doesn't
+
+**Compute becomes viable on real hardware:** When a native GPU driver replaces virglrenderer (no ANGLE translation layer), every modern GPU (Apple M-series, AMD RDNA, Intel Arc, Arm Mali) has compute as a fundamental capability. The thick driver architecture makes this a driver-internal choice — same scene graph interface, different rendering strategy.
+
+### Key insight: the prototype validates the interface, not the rendering technique
+
+The scene graph is the stable boundary. Stencil-then-cover on QEMU proves paths work through the pipeline. Compute on real hardware would be a performance upgrade behind the same interface. Both are invisible to core, editors, and the rest of the OS.
+
+### Implementation plan (when paths are needed)
+
+1. Add a depth/stencil renderbuffer to the framebuffer setup in `setup_pipeline`
+2. Create a DSA state with stencil test enabled (increment on front-face, decrement on back-face)
+3. Per path: triangle fan from centroid → stencil pass (no color write), then covering quad → stencil test + color write
+4. Reset stencil to zero between paths
+
+Not implementing now — `Content::Path` exists in the scene graph enum but core never emits it. The Phase 2 rendering redesign (2026-03-16) eliminated SVG paths; icons use the glyph cache.
+
+---
+
 ## GPU Rendering Architecture: Thick Drivers (2026-03-17)
 
 **Status:** settled design, ready to implement.
@@ -1468,6 +1520,12 @@ Active questions we've started exploring but haven't resolved. Each thread links
 
 Open questions: system gesture vs shell input boundary, compound editor nesting model, whether content-type interaction primitives (cursor/selection/playhead from OS service) need to become richer editing primitives for compound documents to work.
 
+### GPU path rendering via stencil-then-cover
+
+**Informs:** Decision #11 (Rendering Technology), virgil-render driver
+**Status:** Approach settled, implementation deferred until core emits `Content::Path`
+**Context:** Researched four approaches to GPU path rendering (2026-03-17). Stencil-then-cover is the right technique for the current virgl stack (ES 3.0 ceiling from ANGLE/Metal). Compute-shader rendering (Vello-style) requires ES 3.1 + SSBOs, blocked by ANGLE's hardcoded `kMaxSupportedGLVersion = 3.0`. virglrenderer's protocol supports compute (`VIRGL_CCMD_LAUNCH_GRID`, `SET_SHADER_BUFFERS`) but the host GL doesn't expose it. Compute becomes viable on real hardware with a native driver (no ANGLE translation). Currently deferred: core never emits `Content::Path` — the Phase 2 rendering redesign eliminated SVG paths, icons use the glyph cache. See full journal entry above for details and implementation plan.
+
 ### View/edit in the CLI
 
 **Informs:** Decision #17 (Interaction Model)
@@ -1611,6 +1669,10 @@ Topics to explore, roughly prioritized by which unsettled decisions they'd infor
 ## Insights Log
 
 Non-obvious realizations worth preserving. These are the "aha moments" that should inform future design thinking.
+
+### The prototype validates the interface, not the technique (2026-03-17)
+
+The thick driver architecture means rendering strategy is a driver-internal choice invisible to the rest of the OS. Stencil-then-cover on QEMU/virglrenderer proves paths flow correctly through the scene graph → driver → display pipeline. A native GPU driver on real hardware could switch to compute-shader path rendering without changing a single line outside the driver. This is the same principle as "settle the approach, not the technology" (Decision #11) — the scene graph interface is the design artifact, the rendering technique is a leaf node behind it. Prototyping with ANGLE's ES 3.0 ceiling doesn't constrain the design; it only constrains which rendering techniques the prototype can validate.
 
 ### The architecture is the interfaces, not the components (2026-03-16)
 
