@@ -66,7 +66,7 @@ impl QuadBatch {
         &self.vertex_data[..self.vertex_len]
     }
 
-    /// Push a single vertex (position float2 + color float4 = 6 floats).
+    /// Push a single vertex in NDC (position float2 + color float4 = 6 floats).
     fn push_vertex(&mut self, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32) {
         if self.vertex_len + 6 > MAX_VERTEX_DWORDS {
             return;
@@ -82,20 +82,36 @@ impl QuadBatch {
     }
 
     /// Emit a colored quad as two triangles (6 vertices).
-    /// Coordinates are in pixel space (viewport transform handles NDC).
-    fn push_quad(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) {
-        let x1 = x + w;
-        let y1 = y + h;
+    /// Pixel coordinates are converted to NDC:
+    ///   ndc_x = pixel_x / viewport_w * 2.0 - 1.0
+    ///   ndc_y = 1.0 - pixel_y / viewport_h * 2.0  (Y-flip: pixel Y-down → NDC Y-up)
+    fn push_quad(
+        &mut self,
+        px: f32,
+        py: f32,
+        pw: f32,
+        ph: f32,
+        vw: f32,
+        vh: f32,
+        r: f32,
+        g: f32,
+        b: f32,
+        a: f32,
+    ) {
+        let x0 = px / vw * 2.0 - 1.0;
+        let y0 = 1.0 - py / vh * 2.0;
+        let x1 = (px + pw) / vw * 2.0 - 1.0;
+        let y1 = 1.0 - (py + ph) / vh * 2.0;
 
         // Triangle 1: top-left, top-right, bottom-left
-        self.push_vertex(x, y, r, g, b, a);
-        self.push_vertex(x1, y, r, g, b, a);
-        self.push_vertex(x, y1, r, g, b, a);
+        self.push_vertex(x0, y0, r, g, b, a);
+        self.push_vertex(x1, y0, r, g, b, a);
+        self.push_vertex(x0, y1, r, g, b, a);
 
         // Triangle 2: top-right, bottom-right, bottom-left
-        self.push_vertex(x1, y, r, g, b, a);
+        self.push_vertex(x1, y0, r, g, b, a);
         self.push_vertex(x1, y1, r, g, b, a);
-        self.push_vertex(x, y1, r, g, b, a);
+        self.push_vertex(x0, y1, r, g, b, a);
     }
 }
 
@@ -150,7 +166,9 @@ pub fn walk_scene(
         h: viewport_h as f32,
     };
 
-    walk_node(nodes, root, 0.0, 0.0, scale, clip, batch);
+    let vw = viewport_w as f32;
+    let vh = viewport_h as f32;
+    walk_node(nodes, root, 0.0, 0.0, scale, clip, vw, vh, batch);
 }
 
 /// Recursive depth-first walk of the scene tree.
@@ -161,6 +179,8 @@ fn walk_node(
     parent_y: f32,
     scale: f32,
     clip: ClipRect,
+    vw: f32,
+    vh: f32,
     batch: &mut QuadBatch,
 ) {
     let idx = id as usize;
@@ -202,6 +222,8 @@ fn walk_node(
                 quad_clip.y,
                 quad_clip.w,
                 quad_clip.h,
+                vw,
+                vh,
                 r,
                 g,
                 b,
@@ -243,6 +265,8 @@ fn walk_node(
             abs_y - scroll_y,
             scale,
             child_clip,
+            vw,
+            vh,
             batch,
         );
         child = nodes[child_idx].next_sibling;
