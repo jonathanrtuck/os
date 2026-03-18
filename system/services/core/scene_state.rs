@@ -728,7 +728,16 @@ impl SceneState {
             }
 
             // Re-create per-line Glyphs children under N_DOC_TEXT.
+            // Reset both first_child AND next_sibling. The initial
+            // build_editor_scene links test content (Image, Path) as
+            // siblings of N_DOC_TEXT under N_CONTENT. acquire_copy()
+            // preserves that stale next_sibling pointer. After
+            // truncation, the same node index gets reused for a line
+            // node — the walker would visit it twice (once as child of
+            // N_DOC_TEXT, once as sibling) with different parent Y
+            // offsets, causing ghost duplicates.
             w.node_mut(N_DOC_TEXT).first_child = NULL;
+            w.node_mut(N_DOC_TEXT).next_sibling = NULL;
             w.node_mut(N_DOC_TEXT).content = Content::None;
             w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
             let mut prev_line_node: u16 = NULL;
