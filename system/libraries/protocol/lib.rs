@@ -362,3 +362,7 @@ pub mod fs {
     pub const MSG_FS_READ_REQUEST: u32 = 40;
     pub const MSG_FS_READ_RESPONSE: u32 = 41;
 }
+
+// ── virgl: Virgl3D protocol constants and command encoding ───────────
+
+pub mod virgl;
