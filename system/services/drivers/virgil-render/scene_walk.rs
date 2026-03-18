@@ -33,70 +33,69 @@ pub struct Quad {
     pub a: f32,
 }
 
-/// Accumulated quads from a scene walk.
+/// Maximum vertex data in u32 DWORDs (6 floats per vertex, 6 vertices per quad).
+const MAX_VERTEX_DWORDS: usize = MAX_QUADS * 6 * 6;
+
+/// Accumulated quads from a scene walk, with vertex data for GPU upload.
 pub struct QuadBatch {
-    quads: [Quad; MAX_QUADS],
-    count: usize,
-    /// Number of vertices (for compatibility — 6 per quad).
+    /// Vertex data as f32 bit representations (x, y, r, g, b, a per vertex).
+    vertex_data: [u32; MAX_VERTEX_DWORDS],
+    /// Current write offset in u32 DWORDs.
+    vertex_len: usize,
+    /// Number of vertices accumulated.
     pub vertex_count: u32,
 }
 
 impl QuadBatch {
     pub const fn new() -> Self {
         Self {
-            quads: [Quad {
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            }; MAX_QUADS],
-            count: 0,
+            vertex_data: [0; MAX_VERTEX_DWORDS],
+            vertex_len: 0,
             vertex_count: 0,
         }
     }
 
     /// Reset for a new frame.
     pub fn clear(&mut self) {
-        self.count = 0;
+        self.vertex_len = 0;
         self.vertex_count = 0;
     }
 
-    /// Get the accumulated quads.
-    pub fn quads(&self) -> &[Quad] {
-        &self.quads[..self.count]
+    /// Get the vertex data as u32 slice for DMA copy.
+    pub fn as_vertex_data(&self) -> &[u32] {
+        &self.vertex_data[..self.vertex_len]
     }
 
-    /// Add a colored quad.
-    fn push_quad(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) {
-        if self.count >= MAX_QUADS {
+    /// Push a single vertex (position float2 + color float4 = 6 floats).
+    fn push_vertex(&mut self, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32) {
+        if self.vertex_len + 6 > MAX_VERTEX_DWORDS {
             return;
         }
-        self.quads[self.count] = Quad {
-            x,
-            y,
-            w,
-            h,
-            r,
-            g,
-            b,
-            a,
-        };
-        self.count += 1;
-        self.vertex_count += 6;
+        self.vertex_data[self.vertex_len] = x.to_bits();
+        self.vertex_data[self.vertex_len + 1] = y.to_bits();
+        self.vertex_data[self.vertex_len + 2] = r.to_bits();
+        self.vertex_data[self.vertex_len + 3] = g.to_bits();
+        self.vertex_data[self.vertex_len + 4] = b.to_bits();
+        self.vertex_data[self.vertex_len + 5] = a.to_bits();
+        self.vertex_len += 6;
+        self.vertex_count += 1;
     }
 
-    /// Placeholder for future VBO use.
-    pub fn as_dwords(&self) -> &[u32] {
-        &[]
-    }
+    /// Emit a colored quad as two triangles (6 vertices).
+    /// Coordinates are in pixel space (viewport transform handles NDC).
+    fn push_quad(&mut self, x: f32, y: f32, w: f32, h: f32, r: f32, g: f32, b: f32, a: f32) {
+        let x1 = x + w;
+        let y1 = y + h;
 
-    /// Placeholder for future VBO use.
-    pub fn size_bytes(&self) -> u32 {
-        0
+        // Triangle 1: top-left, top-right, bottom-left
+        self.push_vertex(x, y, r, g, b, a);
+        self.push_vertex(x1, y, r, g, b, a);
+        self.push_vertex(x, y1, r, g, b, a);
+
+        // Triangle 2: top-right, bottom-right, bottom-left
+        self.push_vertex(x1, y, r, g, b, a);
+        self.push_vertex(x1, y1, r, g, b, a);
+        self.push_vertex(x, y1, r, g, b, a);
     }
 }
 

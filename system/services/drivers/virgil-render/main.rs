@@ -166,6 +166,22 @@ struct ResourceFlush {
 }
 
 #[repr(C)]
+struct TransferToHost3d {
+    hdr: CtrlHeader,
+    box_x: u32,
+    box_y: u32,
+    box_z: u32,
+    box_w: u32,
+    box_h: u32,
+    box_d: u32,
+    offset: u64,
+    resource_id: u32,
+    level: u32,
+    stride: u32,
+    layer_stride: u32,
+}
+
+#[repr(C)]
 struct Submit3dHeader {
     hdr: CtrlHeader,
     size: u32,
@@ -780,12 +796,13 @@ fn resource_create_vbo(
 }
 
 /// Attach backing memory for the vertex buffer resource.
+/// Returns (va, pa, order) of the backing DMA pages for direct writes.
 fn attach_backing_vbo(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
     irq_handle: u8,
     size_bytes: u32,
-) {
+) -> (usize, u64, u32) {
     let cmd = DmaBuf::alloc(0);
     let header_size = core::mem::size_of::<AttachBacking>();
     let entry_size = core::mem::size_of::<MemEntry>();
@@ -830,6 +847,47 @@ fn attach_backing_vbo(
     }
     cmd.free();
     sys::print(b"     VBO backing attached\n");
+    (vbo_va, vbo_pa, vbo_order)
+}
+
+/// Transfer vertex data from guest DMA memory to host resource.
+fn transfer_vbo_to_host(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: u8,
+    data_bytes: u32,
+) {
+    let cmd = DmaBuf::alloc(0);
+    // SAFETY: cmd.va points to zeroed DMA page.
+    unsafe {
+        core::ptr::write(
+            cmd.va as *mut TransferToHost3d,
+            TransferToHost3d {
+                hdr: ctrl_header_ctx(protocol::virgl::VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D),
+                box_x: 0,
+                box_y: 0,
+                box_z: 0,
+                box_w: data_bytes,
+                box_h: 1,
+                box_d: 1,
+                offset: 0,
+                resource_id: VB_RESOURCE_ID,
+                level: 0,
+                stride: 0,
+                layer_stride: 0,
+            },
+        );
+    }
+    if !gpu_cmd_ok(
+        device,
+        vq,
+        irq_handle,
+        &cmd,
+        core::mem::size_of::<TransferToHost3d>() as u32,
+    ) {
+        sys::print(b"virgil-render: TRANSFER_TO_HOST_3D (VBO) failed\n");
+    }
+    cmd.free();
 }
 
 /// Attach VBO resource to the virgl context.
@@ -982,17 +1040,25 @@ fn setup_pipeline(
     // Create surface wrapping our render target resource.
     cmdbuf.cmd_create_surface(HANDLE_SURFACE, RT_RESOURCE_ID, VIRGL_FORMAT_B8G8R8A8_UNORM);
 
-    // Shaders and vertex elements are not needed for scissor+clear rendering.
-    // They will be added when VBO-based triangle rendering is implemented.
+    // Create vertex elements layout (position float2 + color float4).
+    cmdbuf.cmd_create_vertex_elements_color(HANDLE_VE);
 
-    // Bind pipeline state.
+    // Create shaders from TGSI text.
+    cmdbuf.cmd_create_shader_text(HANDLE_VS, PIPE_SHADER_VERTEX, shaders::COLOR_VS);
+    cmdbuf.cmd_create_shader_text(HANDLE_FS, PIPE_SHADER_FRAGMENT, shaders::COLOR_FS);
+
+    // Bind all state.
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_RASTERIZER, HANDLE_RASTERIZER);
+    cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE);
+    cmdbuf.cmd_bind_shader(HANDLE_VS, PIPE_SHADER_VERTEX);
+    cmdbuf.cmd_bind_shader(HANDLE_FS, PIPE_SHADER_FRAGMENT);
 
-    // Set framebuffer and viewport.
+    // Set framebuffer, viewport, and vertex buffer binding.
     cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, 0);
     cmdbuf.cmd_set_viewport(width as f32, height as f32);
+    cmdbuf.cmd_set_vertex_buffers(scene_walk::VERTEX_STRIDE, 0, VB_RESOURCE_ID);
 
     if cmdbuf.overflowed() {
         sys::print(b"virgil-render: pipeline command buffer overflowed!\n");
@@ -1094,9 +1160,13 @@ pub extern "C" fn _start() -> ! {
     ctx_attach_resource(&device, &mut vq, irq_handle);
     set_scanout(&device, &mut vq, irq_handle, width, height);
 
+    // Create vertex buffer resource for triangle rendering.
+    let vbo_size = scene_walk::MAX_VERTEX_BYTES as u32;
+    resource_create_vbo(&device, &mut vq, irq_handle, vbo_size);
+    let (vbo_va, _vbo_pa, _vbo_order) = attach_backing_vbo(&device, &mut vq, irq_handle, vbo_size);
+    ctx_attach_vbo(&device, &mut vq, irq_handle);
+
     // ── Phase D: GPU pipeline setup ──────────────────────────────────────
-    // No VBO needed — we render rectangles using scissor+clear, which is
-    // simpler and avoids RESOURCE_INLINE_WRITE issues with virglrenderer.
     setup_pipeline(&device, &mut vq, irq_handle, width, height);
 
     // ── Phase E: Clear screen + flush ────────────────────────────────────
@@ -1181,52 +1251,38 @@ pub extern "C" fn _start() -> ! {
         let root = reader.front_root();
         scene_walk::walk_scene(nodes, root, scale_factor, width, height, &mut batch);
 
-        // Debug: log frame info for first few frames.
+        // Debug: log vertex count for first few frames.
         if frame_count < 3 {
             sys::print(b"     frame ");
             print_u32(frame_count);
             sys::print(b": gen=");
             print_u32(gen);
-            sys::print(b" root=");
-            print_u32(root as u32);
-            sys::print(b" nodes=");
-            print_u32(nodes.len() as u32);
-            sys::print(b" quads=");
-            print_u32(batch.quads().len() as u32);
+            sys::print(b" verts=");
+            print_u32(batch.vertex_count);
             sys::print(b"\n");
-
-            // Log first few quads' colors.
-            for (i, q) in batch.quads().iter().take(5).enumerate() {
-                sys::print(b"       q");
-                print_u32(i as u32);
-                sys::print(b": (");
-                print_u32(q.x as u32);
-                sys::print(b",");
-                print_u32(q.y as u32);
-                sys::print(b" ");
-                print_u32(q.w as u32);
-                sys::print(b"x");
-                print_u32(q.h as u32);
-                sys::print(b") rgba=(");
-                print_u32((q.r * 255.0) as u32);
-                sys::print(b",");
-                print_u32((q.g * 255.0) as u32);
-                sys::print(b",");
-                print_u32((q.b * 255.0) as u32);
-                sys::print(b",");
-                print_u32((q.a * 255.0) as u32);
-                sys::print(b")\n");
-            }
         }
 
-        // TODO: render quads via VBO triangle draw (scissor+clear doesn't work —
-        // virglrenderer's CLEAR ignores scissor state).
-        // For now, just clear to the scene's background color.
+        // Write vertex data to VBO DMA backing pages, then transfer to host.
+        let vertex_data = batch.as_vertex_data();
+        let data_bytes = vertex_data.len() * 4;
+
+        if batch.vertex_count > 0 && data_bytes > 0 {
+            // SAFETY: vbo_va is valid DMA memory, writing vertex floats as u32.
+            let dst = vbo_va as *mut u32;
+            unsafe {
+                core::ptr::copy_nonoverlapping(vertex_data.as_ptr(), dst, vertex_data.len());
+            }
+
+            // Transfer from guest DMA to host resource.
+            transfer_vbo_to_host(&device, &mut vq, irq_handle, data_bytes as u32);
+        }
+
+        // Build GPU commands: clear + draw.
         cmdbuf.clear();
-        if let Some(q) = batch.quads().first() {
-            cmdbuf.cmd_clear(q.r, q.g, q.b, q.a);
-        } else {
-            cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
+        cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
+
+        if batch.vertex_count > 0 {
+            cmdbuf.cmd_draw_vbo(0, batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
         }
 
         if cmdbuf.overflowed() {
