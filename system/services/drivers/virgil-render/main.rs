@@ -6,7 +6,7 @@
 //!
 //! Replaces the 2D virtio-gpu driver as a drop-in. Init spawns this for the
 //! GPU device. Participates in the same IPC handshake (MSG_DEVICE_CONFIG,
-//! MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_FB_PA_CHUNK, MSG_GPU_READY).
+//! MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY).
 //!
 //! The scene graph is the only interface — all rendering complexity is
 //! internal to this driver (leaf node behind a simple boundary).
@@ -23,10 +23,7 @@ use alloc::boxed::Box;
 use protocol::{
     compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG},
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
-    gpu::{
-        DisplayInfoMsg, FbPaChunk, GpuConfig, MSG_DISPLAY_INFO, MSG_FB_PA_CHUNK, MSG_GPU_CONFIG,
-        MSG_GPU_READY,
-    },
+    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
     virgl::{
         self, PIPE_BUFFER, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
         PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_R8_UNORM, VIRGL_FORMAT_S8_UINT,
@@ -532,27 +529,6 @@ fn init_handshake(
     let config: GpuConfig = unsafe { msg.payload_as() };
     let cfg_width = config.fb_width;
     let cfg_height = config.fb_height;
-    let chunks_per_buf = config.chunks_per_buf as usize;
-
-    // Drain FB PA chunk messages (we don't use them for virgl, but init sends them).
-    let total_entries = chunks_per_buf * 2;
-    let mut received = 0;
-    while received < total_entries {
-        let mut got_any = false;
-        while received < total_entries && ch.try_recv(&mut msg) {
-            got_any = true;
-            if msg.msg_type == MSG_FB_PA_CHUNK {
-                // SAFETY: msg payload contains a valid FbPaChunk.
-                let chunk: FbPaChunk = unsafe { msg.payload_as() };
-                let count = (chunk.count as usize).min(6);
-                received += count;
-            }
-        }
-        if received < total_entries && !got_any {
-            let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
-        }
-    }
-
     // Signal init that we're ready.
     sys::print(b"     handshake complete, sending GPU_READY\n");
     let ready_msg = ipc::Message::new(MSG_GPU_READY);
@@ -1719,13 +1695,14 @@ pub extern "C" fn _start() -> ! {
 
     sys::print(b"  \xF0\x9F\x8E\xAE virgil-render: render loop starting\n");
 
+    // SAFETY: Channel 1 shared memory was set up by init before start.
+    let scene_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
+
     loop {
         let _ = sys::wait(&[SCENE_HANDLE], u64::MAX);
 
         // Drain scene update messages.
         {
-            // SAFETY: Channel 1 shared memory was set up by init before start.
-            let scene_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
             let mut drain_msg = ipc::Message::new(0);
             while scene_ch.try_recv(&mut drain_msg) {}
         }
@@ -2064,6 +2041,6 @@ pub extern "C" fn _start() -> ! {
         }
 
         reader.finish_read(gen);
-        frame_count += 1;
+        frame_count = frame_count.wrapping_add(1);
     }
 }
