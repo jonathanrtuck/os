@@ -37,8 +37,8 @@ fi
 # Virgl (GPU-accelerated) mode: VIRGL=1 uses a custom QEMU build with
 # virtio-gpu-gl-device backed by virglrenderer + ANGLE (OpenGL ES via Metal).
 # Built from https://github.com/akihikodaki/v — see docs/superpowers/plans/.
-VIRGL_QEMU_DIR="${VIRGL_QEMU_DIR:-/Users/user/Sites/v}"
-VIRGL_QEMU="${VIRGL_QEMU_DIR}/bin/qemu-system-aarch64"
+VIRGL_QEMU_DIR="${VIRGL_QEMU_DIR:-${SCRIPT_DIR}/bin/qemu}"
+VIRGL_QEMU="${VIRGL_QEMU_DIR}/qemu-system-aarch64"
 
 # Default to virgl mode — virgil-render requires it. Set VIRGL=0 to force
 # standard QEMU (only works if init is changed back to spawn virtio-gpu).
@@ -51,7 +51,7 @@ if [ "${VIRGL:-1}" = "1" ]; then
     fi
     QEMU_BIN="$VIRGL_QEMU"
     GPU_DEVICE="virtio-gpu-gl-device,xres=${SCREEN_W},yres=${SCREEN_H}"
-    DISPLAY_OPT="-display cocoa,gl=es"
+    DISPLAY_OPT="-display cocoa,gl=es,full-screen=on,zoom-to-fit=on"
 else
     QEMU_BIN="qemu-system-aarch64"
     GPU_DEVICE="virtio-gpu-device,xres=${SCREEN_W},yres=${SCREEN_H}"

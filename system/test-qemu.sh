@@ -70,8 +70,8 @@ rm -f "$MON_SOCK" "$SERIAL_LOG"
 SHARE_DIR="${SCRIPT_DIR}/share"
 
 # Virgl mode: use custom QEMU build with GPU acceleration.
-VIRGL_QEMU_DIR="${VIRGL_QEMU_DIR:-/Users/user/Sites/v}"
-VIRGL_QEMU="${VIRGL_QEMU_DIR}/bin/qemu-system-aarch64"
+VIRGL_QEMU_DIR="${VIRGL_QEMU_DIR:-${SCRIPT_DIR}/bin/qemu}"
+VIRGL_QEMU="${VIRGL_QEMU_DIR}/qemu-system-aarch64"
 
 if [ "$VIRGL" = "1" ]; then
     if [ ! -x "$VIRGL_QEMU" ]; then
