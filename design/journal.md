@@ -4,6 +4,49 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Virgl Task 8: Init Integration — Render Service Selection (2026-03-18)
+
+**Status:** Complete. Virgl implementation plan fully executed (all 8 tasks).
+
+### What was done
+
+Added runtime render service selection to init. Init now auto-detects whether the GPU device supports Virgil3D and selects the appropriate pipeline at boot.
+
+**Detection mechanism:** `probe_virgl()` maps the GPU's virtio-MMIO region, selects features page 0 (write 0 to DeviceFeaturesSel at +0x14), reads DeviceFeatures at +0x10, checks bit 0 (`VIRTIO_GPU_F_VIRGL`). This happens BEFORE spawning the GPU process, so init can select the correct ELF binary.
+
+**Pipeline selection:**
+- Virgl detected → `VIRGIL_RENDER_ELF` → `setup_virgl_pipeline()` (GPU-accelerated, Gallium3D)
+- No virgl → `VIRTIO_GPU_ELF` → `setup_display_pipeline()` (CPU software rendering)
+
+**Implementation note:** The original plan proposed using a new IPC message (`MSG_GPU_VIRGL_AVAILABLE`) — the driver would probe and report back. The MMIO probe approach is simpler: no new message types, no extra IPC round trip, and the decision is made before any process is spawned. The GPU process never sees a failed init path.
+
+### Testing
+
+Both paths verified end-to-end:
+- `VIRGL=1` (custom QEMU with `virtio-gpu-gl-device`): "3D support detected" → virgl pipeline → frames render
+- `VIRGL=0` (standard QEMU with `virtio-gpu-device`): "no 3D support, using CPU fallback" → display pipeline → render loop
+
+### Architecture summary (post-completion)
+
+The rendering pipeline is now fully dual-path:
+
+```text
+Init probes GPU features
+  ├── VIRTIO_GPU_F_VIRGL set:
+  │   Core → Scene Graph → virgil-render (Gallium3D → virglrenderer → ANGLE → Metal → GPU)
+  └── No virgl:
+      Core → Scene Graph → compositor (CpuBackend) → virtio-gpu 2D → Display
+```
+
+The scene graph is the stable interface. Everything above it (core, editors) is identical regardless of which render service is active. Everything below it (rendering technique, hardware commands) is internal to the render service — a leaf node behind a simple boundary.
+
+### Remaining deferred work
+
+- **Phase 5:** Merge `compositor/` + `virtio-gpu/` into single `cpu-render/` process (sibling to `virgil-render`). Not blocking — both old services work correctly.
+- **Remove test content** from `scene_state.rs` once real Image/Path producers exist.
+
+---
+
 ## Virgl Task 7: Image Rendering + Path Groundwork (2026-03-18)
 
 **Status:** Image rendering complete and visually verified. Path stencil-then-cover code written but blocked on ANGLE.

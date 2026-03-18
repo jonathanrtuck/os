@@ -68,6 +68,9 @@ const VIRTIO_DEVICE_CONSOLE: u32 = 3;
 const VIRTIO_DEVICE_GPU: u32 = 16;
 const VIRTIO_DEVICE_INPUT: u32 = 18;
 const VIRTIO_DEVICE_9P: u32 = 9;
+/// Virtio MMIO register offsets for feature probing.
+const MMIO_DEVICE_FEATURES: usize = 0x010;
+const MMIO_DEVICE_FEATURES_SEL: usize = 0x014;
 /// Pseudo device ID for the PL031 RTC (matches kernel's DEVICE_ID_PL031_RTC).
 const DEVICE_PL031_RTC: u32 = 200;
 /// Document buffer: 1 page. First 64 bytes = header, rest = content.
@@ -128,6 +131,52 @@ fn print_u32(mut n: u32) {
 
     sys::print(&buf[i..]);
 }
+/// Probe a virtio-gpu device for VIRTIO_GPU_F_VIRGL (bit 0) support.
+///
+/// Maps the device MMIO region, reads the feature register, and checks
+/// whether the device advertises 3D virgl capability. This determines
+/// whether init spawns virgil-render (GPU-accelerated) or the CPU
+/// fallback pipeline (compositor + virtio-gpu 2D).
+///
+/// # Safety
+/// Reads two MMIO registers (DeviceFeaturesSel, DeviceFeatures).
+/// Does not change device state — safe to call before driver negotiation.
+fn probe_virgl(gpu_pa: u64) -> bool {
+    let page_pa = gpu_pa & !0xFFF;
+    let page_offset = (gpu_pa & 0xFFF) as usize;
+
+    let va = match sys::device_map(page_pa, 0x1000) {
+        Ok(v) => v,
+        Err(_) => {
+            sys::print(b"     virgl probe: device_map failed, assuming no virgl\n");
+            return false;
+        }
+    };
+
+    let base = va + page_offset;
+
+    // SAFETY: MMIO register reads. DeviceFeaturesSel at +0x14 selects which
+    // 32-bit page of features to read. DeviceFeatures at +0x10 returns the
+    // selected page. Writing sel=0 selects bits [31:0]. These are read-only
+    // probes that don't alter device state.
+    unsafe {
+        core::ptr::write_volatile((base + MMIO_DEVICE_FEATURES_SEL) as *mut u32, 0);
+    }
+
+    let features = unsafe { core::ptr::read_volatile((base + MMIO_DEVICE_FEATURES) as *const u32) };
+
+    // VIRTIO_GPU_F_VIRGL = bit 0
+    let has_virgl = features & 1 != 0;
+
+    if has_virgl {
+        sys::print(b"     virgl probe: 3D support detected\n");
+    } else {
+        sys::print(b"     virgl probe: no 3D support, using CPU fallback\n");
+    }
+
+    has_virgl
+}
+
 fn setup_virgl_pipeline(
     gpu_proc: u8,
     gpu_ch_handle: u8,
@@ -1269,8 +1318,8 @@ pub extern "C" fn _start() -> ! {
     // Track channel allocation (0 = kernel, 1+ = ours).
     let mut next_channel: usize = 1;
     // Saved device state for Phase 2 (display pipeline).
-    let mut gpu: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
-                                                           // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
+    let mut gpu: Option<(u8, u8, usize, u64, u32, bool)> = None; // (proc, ch, ch_idx, pa, irq, virgl)
+                                                                 // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
     let mut input_devices: [(u8, usize, u64, u32); MAX_INPUT_DEVICES] =
         [(0, 0, 0, 0); MAX_INPUT_DEVICES];
     let mut input_count: usize = 0;
@@ -1316,10 +1365,23 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
+        // For GPU devices, probe for virgl support to select the right driver.
+        let use_virgl = if dev_id == VIRTIO_DEVICE_GPU {
+            probe_virgl(dev_pa)
+        } else {
+            false
+        };
+
         let elf: &[u8] = match dev_id {
             VIRTIO_DEVICE_BLK => VIRTIO_BLK_ELF,
             VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
-            VIRTIO_DEVICE_GPU => VIRGIL_RENDER_ELF,
+            VIRTIO_DEVICE_GPU => {
+                if use_virgl {
+                    VIRGIL_RENDER_ELF
+                } else {
+                    VIRTIO_GPU_ELF
+                }
+            }
             VIRTIO_DEVICE_INPUT => VIRTIO_INPUT_ELF,
             VIRTIO_DEVICE_9P => VIRTIO_9P_ELF,
             _ => {
@@ -1367,7 +1429,7 @@ pub extern "C" fn _start() -> ! {
         match dev_id {
             VIRTIO_DEVICE_GPU => {
                 // Defer GPU startup — needs framebuffer and cross-process channels.
-                gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq));
+                gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq, use_virgl));
             }
             VIRTIO_DEVICE_INPUT => {
                 // Defer input startup — needs cross-process channel to compositor.
@@ -1577,19 +1639,33 @@ pub extern "C" fn _start() -> ! {
             None
         };
 
-    // Phase 2: Display pipeline (input drivers + virgil-render + core).
-    if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq)) = gpu {
-        setup_virgl_pipeline(
-            gpu_proc,
-            gpu_ch_handle,
-            gpu_channel_idx,
-            gpu_pa,
-            gpu_irq,
-            &input_devices[..input_count],
-            font_buf,
-            rtc_pa,
-            &mut next_channel,
-        );
+    // Phase 2: Display pipeline — select based on virgl probe result.
+    if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq, has_virgl)) = gpu {
+        if has_virgl {
+            setup_virgl_pipeline(
+                gpu_proc,
+                gpu_ch_handle,
+                gpu_channel_idx,
+                gpu_pa,
+                gpu_irq,
+                &input_devices[..input_count],
+                font_buf,
+                rtc_pa,
+                &mut next_channel,
+            );
+        } else {
+            setup_display_pipeline(
+                gpu_proc,
+                gpu_ch_handle,
+                gpu_channel_idx,
+                gpu_pa,
+                gpu_irq,
+                &input_devices[..input_count],
+                font_buf,
+                rtc_pa,
+                &mut next_channel,
+            );
+        }
     } else {
         sys::print(b"     no gpu found\n");
     }
