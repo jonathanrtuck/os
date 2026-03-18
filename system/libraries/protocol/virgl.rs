@@ -361,8 +361,9 @@ impl CommandBuffer {
     pub fn cmd_create_dsa_stencil_write(&mut self, handle: u32) {
         self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
         self.push(handle);
-        // S0: depth enabled (so zpass_op triggers), func=ALWAYS, writemask=0 (no depth write).
-        self.push(1 | (PIPE_FUNC_ALWAYS << 2));
+        // S0: depth DISABLED — for 2D stencil-then-cover, depth testing is unnecessary.
+        // When depth is disabled, zpass_op triggers on stencil pass (depth "always passes").
+        self.push(0);
                                           // S1: stencil[0] (front) — always pass, increment-wrap on pass
         self.push(Self::stencil_face(
             PIPE_FUNC_ALWAYS,
@@ -390,8 +391,8 @@ impl CommandBuffer {
     pub fn cmd_create_dsa_stencil_test(&mut self, handle: u32) {
         self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
         self.push(handle);
-        // S0: depth enabled, func=ALWAYS, writemask=0.
-        self.push(1 | (PIPE_FUNC_ALWAYS << 2));
+        // S0: depth DISABLED — stencil test only, no depth involvement.
+        self.push(0);
                                           // S1: stencil[0] (front) — pass if != 0, zero on pass
         let face = Self::stencil_face(
             PIPE_FUNC_NOTEQUAL,
@@ -426,16 +427,19 @@ impl CommandBuffer {
         self.push((front & 0xFF) | ((back & 0xFF) << 8));
     }
 
-    /// VIRGL_CCMD_CLEAR — clear stencil buffer.
+    /// VIRGL_CCMD_CLEAR — clear depth + stencil buffer.
+    /// Clears both to ensure a clean state for stencil-then-cover.
     pub fn cmd_clear_stencil(&mut self) {
         self.push(virgl_cmd0(VIRGL_CCMD_CLEAR, 0, 8));
-        self.push(PIPE_CLEAR_STENCIL);
+        self.push(PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL);
         self.push(0); // color r
         self.push(0); // color g
         self.push(0); // color b
         self.push(0); // color a
-        self.push(0); // depth lo
-        self.push(0); // depth hi
+        // depth = 1.0 (standard clear value — far plane).
+        let depth_bits = 1.0f64.to_bits();
+        self.push(depth_bits as u32); // depth lo
+        self.push((depth_bits >> 32) as u32); // depth hi
         self.push(0); // stencil value = 0
     }
 

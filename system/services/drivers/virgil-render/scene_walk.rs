@@ -321,17 +321,19 @@ impl PathBatch {
     }
 
     /// Push a fan vertex (position + dummy color, for stencil write).
-    /// Color is zero — stencil pass has colormask=0, so it's ignored.
+    /// Color is not written (colormask=0 in stencil pass), but alpha MUST be
+    /// non-zero: ANGLE/Metal's early fragment discard optimization skips
+    /// per-fragment operations (including stencil writes) for alpha=0 fragments.
     fn push_fan_vertex(&mut self, x: f32, y: f32) {
         if self.fan_len + 6 > MAX_PATH_FAN_DWORDS {
             return;
         }
         self.fan_data[self.fan_len] = x.to_bits();
         self.fan_data[self.fan_len + 1] = y.to_bits();
-        self.fan_data[self.fan_len + 2] = 0; // r (unused)
-        self.fan_data[self.fan_len + 3] = 0; // g (unused)
-        self.fan_data[self.fan_len + 4] = 0; // b (unused)
-        self.fan_data[self.fan_len + 5] = 0; // a (unused)
+        self.fan_data[self.fan_len + 2] = 0; // r (unused — colormask=0 in stencil pass)
+        self.fan_data[self.fan_len + 3] = 0; // g
+        self.fan_data[self.fan_len + 4] = 0; // b
+        self.fan_data[self.fan_len + 5] = 1.0f32.to_bits(); // a = 1.0 (non-zero for ANGLE)
         self.fan_len += 6;
         self.fan_vertex_count += 1;
     }
@@ -973,9 +975,12 @@ fn emit_path(
         let bx_ndc = bx_px / vw * 2.0 - 1.0;
         let by_ndc = 1.0 - by_px / vh * 2.0;
 
+        // Emit CCW triangle: (centroid, p[i+1], p[i]).
+        // Reversed from natural order because path points go CW on screen,
+        // and ANGLE/Metal culls CW triangles in NDC despite cull_face=NONE.
         path_batch.push_fan_vertex(cx_ndc, cy_ndc);
-        path_batch.push_fan_vertex(ax_ndc, ay_ndc);
         path_batch.push_fan_vertex(bx_ndc, by_ndc);
+        path_batch.push_fan_vertex(ax_ndc, ay_ndc);
     }
 
     // Emit covering quad (bounding box of the path node).
