@@ -262,7 +262,7 @@ impl CommandBuffer {
         self.push(virgl_cmd0(VIRGL_CCMD_SET_SCISSOR_STATE, 0, 3));
         self.push(0); // start_slot
         self.push((x as u32) | ((y as u32) << 16));
-        self.push(((x + w) as u32) | (((y + h) as u32) << 16));
+        self.push((x as u32 + w as u32) | ((y as u32 + h as u32) << 16));
     }
 
     /// VIRGL_CCMD_CREATE_OBJECT — create a blend state for alpha blending.
@@ -397,20 +397,31 @@ impl CommandBuffer {
     /// VIRGL_CCMD_CREATE_OBJECT — create a sampler state.
     /// Nearest-neighbor filtering, clamp-to-edge (for pixel-perfect glyph rendering).
     pub fn cmd_create_sampler_state(&mut self, handle: u32) {
+        // VIRGL_OBJ_SAMPLER_STATE_SIZE = 9 (virglrenderer validates this).
         self.push(virgl_cmd0(
             VIRGL_CCMD_CREATE_OBJECT,
             VIRGL_OBJECT_SAMPLER_STATE,
-            5,
+            9,
         ));
         self.push(handle);
         // S0: wrap_s=CLAMP_TO_EDGE(2), wrap_t=CLAMP_TO_EDGE(2), wrap_r=0,
         //     min_img_filter=NEAREST(0), min_mip_filter=NONE(3), mag_img_filter=NEAREST(0)
-        let s0 = 2 | (2 << 3) | (3 << 15);
+        // Bit layout per virgl_protocol.h:
+        //   bits 0-2:   wrap_s (CLAMP_TO_EDGE = 2)
+        //   bits 3-5:   wrap_t (CLAMP_TO_EDGE = 2)
+        //   bits 6-8:   wrap_r (0)
+        //   bits 9-10:  min_img_filter (NEAREST = 0)
+        //   bits 11-12: min_mip_filter (NONE = 3)
+        //   bits 13-14: mag_img_filter (NEAREST = 0)
+        let s0 = 2 | (2 << 3) | (3 << 11);
         self.push(s0);
         self.push(0); // lod_bias (float bits)
-        self.push(0); // min_lod
-        self.push(0); // max_lod
-                      // border_color[4] omitted (len=5 covers handle + 4 words)
+        self.push(0); // min_lod (float bits)
+        self.push(0); // max_lod (float bits)
+        self.push(0); // border_color[0]
+        self.push(0); // border_color[1]
+        self.push(0); // border_color[2]
+        self.push(0); // border_color[3]
     }
 
     /// VIRGL_CCMD_CREATE_OBJECT — create a sampler view wrapping a texture resource.
