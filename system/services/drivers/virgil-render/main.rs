@@ -1262,18 +1262,42 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"\n");
         }
 
-        // Write vertex data to VBO DMA backing pages, then transfer to host.
+        // Write scene graph vertex data to VBO DMA backing, then draw.
         let vertex_data = batch.as_vertex_data();
-        let data_bytes = vertex_data.len() * 4;
+        let vert_dwords = vertex_data.len();
+        let data_bytes = vert_dwords * 4;
+
+        // Debug first few frames.
+        if frame_count < 3 {
+            sys::print(b"     frame ");
+            print_u32(frame_count);
+            sys::print(b": verts=");
+            print_u32(batch.vertex_count);
+            sys::print(b" dwords=");
+            print_u32(vert_dwords as u32);
+            sys::print(b" bytes=");
+            print_u32(data_bytes as u32);
+            // Print first vertex's NDC x,y as raw bits to verify they're sane.
+            if vert_dwords >= 2 {
+                sys::print(b" v0_x=");
+                print_hex_u32(vertex_data[0]);
+                sys::print(b" v0_y=");
+                print_hex_u32(vertex_data[1]);
+            }
+            sys::print(b"\n");
+        }
+
+        // Write scene graph vertex data to VBO DMA backing, transfer to host.
+        let vertex_data = batch.as_vertex_data();
+        let vert_dwords = vertex_data.len();
+        let data_bytes = vert_dwords * 4;
 
         if batch.vertex_count > 0 && data_bytes > 0 {
-            // SAFETY: vbo_va is valid DMA memory, writing vertex floats as u32.
             let dst = vbo_va as *mut u32;
+            // SAFETY: vbo_va is valid DMA memory of sufficient size.
             unsafe {
-                core::ptr::copy_nonoverlapping(vertex_data.as_ptr(), dst, vertex_data.len());
+                core::ptr::copy_nonoverlapping(vertex_data.as_ptr(), dst, vert_dwords);
             }
-
-            // Transfer from guest DMA to host resource.
             transfer_vbo_to_host(&device, &mut vq, irq_handle, data_bytes as u32);
         }
 
@@ -1285,10 +1309,23 @@ pub extern "C" fn _start() -> ! {
             cmdbuf.cmd_draw_vbo(0, batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
         }
 
+        if frame_count < 3 {
+            sys::print(b"     cmdbuf=");
+            print_u32(cmdbuf.size_bytes());
+            sys::print(b"b submit=");
+        }
+
         if cmdbuf.overflowed() {
-            sys::print(b"virgil-render: frame command buffer overflowed!\n");
+            sys::print(b"OVERFLOW!\n");
         } else {
-            submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+            let ok = submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+            if frame_count < 3 {
+                if ok {
+                    sys::print(b"ok\n");
+                } else {
+                    sys::print(b"FAILED\n");
+                }
+            }
             flush_resource(&device, &mut vq, irq_handle, width, height);
         }
 

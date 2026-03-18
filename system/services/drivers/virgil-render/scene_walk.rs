@@ -103,15 +103,15 @@ impl QuadBatch {
         let x1 = (px + pw) / vw * 2.0 - 1.0;
         let y1 = 1.0 - (py + ph) / vh * 2.0;
 
-        // Triangle 1: top-left, top-right, bottom-left
+        // Triangle 1 (CCW in NDC Y-up): top-left, bottom-left, top-right
         self.push_vertex(x0, y0, r, g, b, a);
-        self.push_vertex(x1, y0, r, g, b, a);
         self.push_vertex(x0, y1, r, g, b, a);
+        self.push_vertex(x1, y0, r, g, b, a);
 
-        // Triangle 2: top-right, bottom-right, bottom-left
+        // Triangle 2 (CCW in NDC Y-up): top-right, bottom-left, bottom-right
         self.push_vertex(x1, y0, r, g, b, a);
-        self.push_vertex(x1, y1, r, g, b, a);
         self.push_vertex(x0, y1, r, g, b, a);
+        self.push_vertex(x1, y1, r, g, b, a);
     }
 }
 
