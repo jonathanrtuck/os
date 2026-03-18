@@ -107,7 +107,7 @@ impl FrameScheduler {
     /// Handles both idle optimization (not dirty) and frame budgeting
     /// (skip ticks that arrive before the overrun window closes).
     pub fn on_timer_tick_at(&mut self, now: u64) -> bool {
-        self.tick_count += 1;
+        self.tick_count = self.tick_count.wrapping_add(1);
         self.last_tick_ns = now;
 
         if !self.dirty {

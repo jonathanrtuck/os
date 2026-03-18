@@ -480,7 +480,7 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
         if id == SGI_IPI {
             // IPI wakeup: just acknowledge and reschedule.
             // Do NOT call timer::handle_irq or increment TICKS — SGI 0 is
-            // distinct from the timer PPI (IRQ 30). The scheduler will pick
+            // distinct from the virtual timer PPI (IRQ 27). The scheduler will pick
             // up the newly-ready thread that triggered this IPI.
         } else if id == timer::IRQ_ID {
             metrics::inc_timer_ticks();

@@ -8,14 +8,14 @@
 //! One module per protocol boundary:
 //!
 //! - `device`      — init -> all drivers (device config)
-//! - `gpu`         — init <-> GPU driver, compositor -> GPU driver
+//! - `gpu`         — init <-> render service (display info, config)
 //! - `input`       — input driver -> core
 //! - `edit`        — core <-> text editor
 //! - `core_config` — init -> core (core config, scene update signal)
-//! - `compose`     — init -> compositor (compositor config)
+//! - `compose`     — init -> render service (render config)
 //! - `editor`      — init -> text editor (editor config)
 //! - `fs`          — init <-> 9p driver (filesystem requests)
-//! - `present`     — compositor <-> GPU driver (frame presentation + completion)
+//! - `present`     — core -> render service (scene update signal)
 //!
 //! # Conventions
 //!
@@ -111,6 +111,7 @@ pub mod device {
         pub irq: u32,
         pub _pad: u32,
     }
+    const _: () = assert!(core::mem::size_of::<DeviceConfig>() <= 60);
 }
 
 // ── gpu: init <-> GPU driver ────────────────────────────────────────
@@ -120,7 +121,7 @@ pub mod gpu {
     pub const MSG_DISPLAY_INFO: u32 = 5;
     pub const MSG_GPU_READY: u32 = 8;
     /// Scatter-gather PA table entries. Sent as a burst of messages after
-    /// MSG_GPU_CONFIG. Each message carries up to 7 physical addresses.
+    /// MSG_GPU_CONFIG. Each message carries up to 6 physical addresses.
     pub const MSG_FB_PA_CHUNK: u32 = 13;
 
     #[repr(C)]
@@ -156,6 +157,7 @@ pub mod gpu {
         pub width: u32,
         pub height: u32,
     }
+    const _: () = assert!(core::mem::size_of::<DisplayInfoMsg>() <= 60);
 }
 
 // ── input: input driver -> compositor ───────────────────────────────
@@ -187,6 +189,9 @@ pub mod input {
         pub pressed: u8,
         pub _pad: [u8; 2],
     }
+    const _: () = assert!(core::mem::size_of::<KeyEvent>() <= 60);
+    const _: () = assert!(core::mem::size_of::<PointerAbs>() <= 60);
+    const _: () = assert!(core::mem::size_of::<PointerButton>() <= 60);
 }
 
 // ── edit: compositor <-> text editor ────────────────────────────────
@@ -231,6 +236,11 @@ pub mod edit {
         pub sel_start: u32,
         pub sel_end: u32,
     }
+    const _: () = assert!(core::mem::size_of::<WriteInsert>() <= 60);
+    const _: () = assert!(core::mem::size_of::<WriteDelete>() <= 60);
+    const _: () = assert!(core::mem::size_of::<WriteDeleteRange>() <= 60);
+    const _: () = assert!(core::mem::size_of::<CursorMove>() <= 60);
+    const _: () = assert!(core::mem::size_of::<SelectionUpdate>() <= 60);
 }
 
 // ── core: init -> core (OS service) ─────────────────────────────────
@@ -310,12 +320,14 @@ pub mod compose {
         pub image_len: u32,
         pub _pad: u32,
     }
+    const _: () = assert!(core::mem::size_of::<ImageConfig>() <= 60);
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct RtcConfig {
         pub mmio_pa: u64,
     }
+    const _: () = assert!(core::mem::size_of::<RtcConfig>() <= 60);
 }
 
 // ── editor: init -> text editor ─────────────────────────────────────
@@ -330,6 +342,7 @@ pub mod editor {
         pub doc_capacity: u32,
         pub _pad: u32,
     }
+    const _: () = assert!(core::mem::size_of::<EditorConfig>() <= 60);
 }
 
 // ── present: compositor <-> GPU driver ──────────────────────────────
@@ -354,6 +367,7 @@ pub mod present {
         pub rects: [DirtyRect; 6],
         pub _pad: [u8; 4],
     }
+    const _: () = assert!(core::mem::size_of::<PresentPayload>() <= 60);
 }
 
 // ── fs: init <-> 9p driver ──────────────────────────────────────────

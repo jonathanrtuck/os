@@ -471,139 +471,6 @@ fn writer_reset_data_clears_usage() {
     assert_eq!(w.data_used(), 0);
 }
 
-// ── DoubleWriter / DoubleReader ─────────────────────────────────────
-
-fn make_double_buf() -> Vec<u8> {
-    vec![0u8; DOUBLE_SCENE_SIZE]
-}
-
-#[test]
-fn double_writer_initial_state() {
-    let mut buf = make_double_buf();
-    let dw = DoubleWriter::new(&mut buf);
-    // Both buffers start at generation 0.
-    assert_eq!(dw.front_generation(), 0);
-}
-
-#[test]
-fn double_writer_first_frame() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-    // Write to back buffer.
-    {
-        let mut w = dw.back();
-        w.clear();
-        let root = w.alloc_node().unwrap();
-        w.node_mut(root).width = 800;
-        w.set_root(root);
-    }
-    // Swap makes back the new front.
-    dw.swap();
-    assert_eq!(dw.front_generation(), 1);
-    assert_eq!(dw.front_nodes().len(), 1);
-    assert_eq!(dw.front_nodes()[0].width, 800);
-}
-
-#[test]
-fn double_writer_old_front_becomes_back() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-    // Frame 1.
-    {
-        let mut w = dw.back();
-        w.clear();
-        w.alloc_node().unwrap();
-        w.set_root(0);
-    }
-    dw.swap(); // buf 0 = gen 1, buf 1 = gen 0
-               // Frame 2 should write to buf 1 (gen 0 = back).
-    {
-        let mut w = dw.back();
-        w.clear();
-        let n0 = w.alloc_node().unwrap();
-        let n1 = w.alloc_node().unwrap();
-        w.set_root(n0);
-        w.add_child(n0, n1);
-    }
-    dw.swap(); // buf 1 = gen 2, buf 0 = gen 1
-               // Front is buf 1 with 2 nodes.
-    assert_eq!(dw.front_nodes().len(), 2);
-    assert_eq!(dw.front_generation(), 2);
-}
-
-#[test]
-fn double_writer_many_frames() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-    for i in 0u32..20 {
-        {
-            let mut w = dw.back();
-            w.clear();
-            let n = w.alloc_node().unwrap();
-            w.node_mut(n).width = (i + 1) as u16;
-            w.set_root(n);
-        }
-        dw.swap();
-        assert_eq!(dw.front_generation(), i + 1);
-        assert_eq!(dw.front_nodes()[0].width, (i + 1) as u16);
-    }
-}
-
-#[test]
-fn double_reader_sees_latest_after_two_swaps() {
-    let mut buf = make_double_buf();
-    {
-        let mut dw = DoubleWriter::new(&mut buf);
-        // Frame 1.
-        {
-            let mut w = dw.back();
-            w.clear();
-            let n = w.alloc_node().unwrap();
-            w.node_mut(n).width = 100;
-            w.set_root(n);
-        }
-        dw.swap();
-        // Frame 2.
-        {
-            let mut w = dw.back();
-            w.clear();
-            let n = w.alloc_node().unwrap();
-            w.node_mut(n).width = 200;
-            w.set_root(n);
-        }
-        dw.swap();
-    }
-    let dr = DoubleReader::new(&buf);
-    assert_eq!(dr.front_nodes()[0].width, 200);
-    assert_eq!(dr.front_generation(), 2);
-}
-
-#[test]
-fn double_writer_back_does_not_corrupt_front() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-    // Frame 1: commit a scene.
-    {
-        let mut w = dw.back();
-        w.clear();
-        let n = w.alloc_node().unwrap();
-        w.node_mut(n).width = 111;
-        w.set_root(n);
-    }
-    dw.swap();
-    // Start writing frame 2 to back buffer but DON'T swap.
-    {
-        let mut w = dw.back();
-        w.clear();
-        let n = w.alloc_node().unwrap();
-        w.node_mut(n).width = 222;
-        w.set_root(n);
-    }
-    // Front still shows frame 1.
-    assert_eq!(dw.front_nodes()[0].width, 111);
-    assert_eq!(dw.front_generation(), 1);
-}
-
 // ── Monospace layout ────────────────────────────────────────────────
 
 const WHITE: Color = Color {
@@ -1083,15 +950,15 @@ fn abs_bounds_nested_three_levels() {
 
 // ── Change list and copy-forward tests ──────────────────────────────
 
-// VAL-SCENE-001: copy_front_to_back preserves scene state
+// VAL-SCENE-001: acquire_copy preserves scene state
 #[test]
-fn copy_front_to_back_preserves_nodes_and_data() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn acquire_copy_preserves_nodes_and_data() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Build a scene with multiple nodes and data.
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let root = w.alloc_node().unwrap();
         w.node_mut(root).width = 1024;
@@ -1108,16 +975,16 @@ fn copy_front_to_back_preserves_nodes_and_data() {
             make_mono_glyphs(&mut w, b"Hello, world!", 16, Color::rgb(220, 220, 220), 8);
         w.add_child(root, child);
     }
-    dw.swap(); // front is now gen 1
+    tw.publish(); // front is now gen 1
 
     // Copy front to back.
-    dw.copy_front_to_back();
+    // acquire_copy below
 
     // Verify the back buffer matches the front byte-for-byte (nodes + data).
-    let front_nodes = dw.front_nodes().to_vec();
-    let front_data = dw.front_data_buf().to_vec();
+    let front_nodes = tw.latest_nodes().to_vec();
+    let front_data = tw.latest_data_buf().to_vec();
 
-    let back = dw.back();
+    let back = tw.acquire_copy();
     let back_nodes = back.nodes();
     let back_data = back.data_buf();
 
@@ -1133,144 +1000,105 @@ fn copy_front_to_back_preserves_nodes_and_data() {
         let b_bytes = unsafe {
             core::slice::from_raw_parts(b as *const Node as *const u8, node_size)
         };
-        assert_eq!(f_bytes, b_bytes, "Node {} differs after copy_front_to_back", i);
+        assert_eq!(f_bytes, b_bytes, "Node {} differs after acquire_copy", i);
     }
 }
 
-// VAL-SCENE-010: Generation counter NOT copied by copy_front_to_back
+
+
+// VAL-SCENE-004: Change list cleared on new frame (acquire_copy)
 #[test]
-fn copy_front_to_back_preserves_back_generation() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    // Frame 1: write and swap.
-    {
-        let mut w = dw.back();
-        w.clear();
-        let n = w.alloc_node().unwrap();
-        w.node_mut(n).width = 100;
-        w.set_root(n);
-    }
-    dw.swap(); // buf 0 = gen 1, buf 1 = gen 0
-
-    // Front is gen 1. Back is gen 0.
-    let front_gen_before = dw.front_generation();
-    assert_eq!(front_gen_before, 1);
-
-    // Copy front to back. Back should still have its original generation.
-    dw.copy_front_to_back();
-
-    // The front generation should not have changed.
-    assert_eq!(dw.front_generation(), 1);
-
-    // The back buffer's generation should be less than the front's (0 < 1).
-    // Verify by checking that front is still the same buffer.
-    let back = dw.back();
-    let back_gen = back.generation();
-    assert!(
-        back_gen < front_gen_before,
-        "back gen {} should be < front gen {}",
-        back_gen,
-        front_gen_before
-    );
-}
-
-// VAL-SCENE-004: Change list cleared on new frame (copy_front_to_back)
-#[test]
-fn copy_front_to_back_resets_change_list() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn acquire_copy_resets_change_list() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1: build scene with marks.
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let n = w.alloc_node().unwrap();
         w.set_root(n);
         w.mark_changed(0);
     }
-    dw.swap();
+    tw.publish();
 
     // Copy front to back — change list should be empty in back.
-    dw.copy_front_to_back();
     {
-        let back = dw.back();
+        let back = tw.acquire_copy();
         // Back header should have change_count = 0.
         assert_eq!(back.generation(), 0); // back gen preserved
     }
     // Now swap to make back the new front, then verify change list is empty.
-    dw.swap();
-    let dr = DoubleReader::new(&buf);
-    let cl = dr.change_list();
+    tw.publish();
+    let tr = scene::TripleReader::new(&buf);
+    let cl = tr.change_list();
     assert!(cl.is_some(), "change list should not be FULL_REPAINT");
-    assert_eq!(cl.unwrap().len(), 0, "change list should be empty after copy_front_to_back");
+    assert_eq!(cl.unwrap().len(), 0, "change list should be empty after acquire_copy");
 }
 
 // VAL-SCENE-002: Change list records changed node IDs
 #[test]
 fn mark_changed_records_node_ids() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1: initial scene.
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         for _ in 0..8 {
             w.alloc_node().unwrap();
         }
         w.set_root(0);
     }
-    dw.swap();
+    tw.publish();
 
     // Frame 2: copy forward, mark specific nodes.
-    dw.copy_front_to_back();
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire_copy();
         w.mark_changed(3); // clock
         w.mark_changed(7); // cursor
     }
-    dw.swap();
+    tw.publish();
 
     // Read the change list from the new front.
-    let dr = DoubleReader::new(&buf);
-    let cl = dr.change_list();
+    let tr = scene::TripleReader::new(&buf);
+    let cl = tr.change_list();
     assert!(cl.is_some());
     let changes = cl.unwrap();
     assert_eq!(changes.len(), 2);
     assert_eq!(changes[0], 3);
     assert_eq!(changes[1], 7);
-    assert!(!dr.is_full_repaint());
+    assert!(!tr.is_full_repaint());
 }
 
-// VAL-SCENE-003: Change list is readable by DoubleReader
+// VAL-SCENE-003: Change list is readable by TripleReader
 #[test]
-fn double_reader_reads_change_list_from_front() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn triple_reader_reads_change_list_from_front() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1.
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let root = w.alloc_node().unwrap();
         w.set_root(root);
     }
-    dw.swap();
+    tw.publish();
 
     // Frame 2: copy-forward + mark one node.
-    dw.copy_front_to_back();
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire_copy();
         w.node_mut(0).background = Color::rgb(255, 0, 0);
         w.mark_changed(0);
     }
-    dw.swap();
+    tw.publish();
 
-    // Now DoubleReader on the same buffer should see the change list.
-    let dr = DoubleReader::new(&buf);
-    assert!(!dr.is_full_repaint());
-    let cl = dr.change_list().unwrap();
+    // Now TripleReader on the same buffer should see the change list.
+    let tr = scene::TripleReader::new(&buf);
+    assert!(!tr.is_full_repaint());
+    let cl = tr.change_list().unwrap();
     assert_eq!(cl.len(), 1);
     assert_eq!(cl[0], 0);
 }
@@ -1298,72 +1126,71 @@ fn mark_changed_overflow_sets_full_repaint() {
     assert_eq!(hdr, 30);
 
     // Read the header directly to check change_count.
-    // We need DoubleWriter to test DoubleReader, but we can also verify
+    // We need TripleWriter to test TripleReader, but we can also verify
     // via the raw header.
     let hdr_ptr = buf.as_ptr() as *const scene::SceneHeader;
     let hdr = unsafe { &*hdr_ptr };
     assert_eq!(hdr.change_count, scene::FULL_REPAINT);
 }
 
-// VAL-SCENE-008: overflow via DoubleReader
+// VAL-SCENE-008: overflow via TripleReader
 #[test]
-fn double_reader_full_repaint_on_overflow() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn triple_reader_full_repaint_on_overflow() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1: scene with 30 nodes.
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         for _ in 0..30 {
             w.alloc_node().unwrap();
         }
         w.set_root(0);
     }
-    dw.swap();
+    tw.publish();
 
     // Frame 2: copy-forward, mark 25 nodes (overflow).
-    dw.copy_front_to_back();
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire_copy();
         for i in 0..25 {
             w.mark_changed(i as NodeId);
         }
     }
-    dw.swap();
+    tw.publish();
 
-    let dr = DoubleReader::new(&buf);
-    assert!(dr.is_full_repaint());
-    assert!(dr.change_list().is_none());
+    let tr = scene::TripleReader::new(&buf);
+    assert!(tr.is_full_repaint());
+    assert!(tr.change_list().is_none());
 }
 
 // SceneWriter::clear sets FULL_REPAINT sentinel
 #[test]
 fn clear_sets_full_repaint() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1.
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let n = w.alloc_node().unwrap();
         w.set_root(n);
     }
-    dw.swap();
+    tw.publish();
 
     // Frame 2: clear (full rebuild) should signal full repaint.
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let n = w.alloc_node().unwrap();
         w.set_root(n);
     }
-    dw.swap();
+    tw.publish();
 
-    let dr = DoubleReader::new(&buf);
-    assert!(dr.is_full_repaint());
-    assert!(dr.change_list().is_none());
+    let tr = scene::TripleReader::new(&buf);
+    assert!(tr.is_full_repaint());
+    assert!(tr.change_list().is_none());
 }
 
 // Already-overflowed mark_changed is a no-op
@@ -1391,13 +1218,13 @@ fn mark_changed_after_overflow_is_noop() {
 
 // VAL-SCENE-007: Node mutation via copy-then-mutate preserves tree structure
 #[test]
-fn copy_then_mutate_preserves_other_nodes() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn acquire_copy_then_mutate_preserves_other_nodes() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1: build a tree with 8 well-known nodes.
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let root = w.alloc_node().unwrap(); // 0
         w.node_mut(root).width = 1024;
@@ -1446,23 +1273,22 @@ fn copy_then_mutate_preserves_other_nodes() {
         w.node_mut(cursor).background = Color::rgb(200, 200, 200);
         w.add_child(content, cursor);
     }
-    dw.swap();
+    tw.publish();
 
     // Snapshot the front nodes before mutation.
-    let front_nodes_before: Vec<Node> = dw.front_nodes().to_vec();
+    let front_nodes_before: Vec<Node> = tw.latest_nodes().to_vec();
 
     // Frame 2: copy forward, mutate only cursor (node 7) position.
-    dw.copy_front_to_back();
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire_copy();
         w.node_mut(7).x = 100; // moved cursor
         w.node_mut(7).y = 48;  // moved cursor
         w.mark_changed(7);
     }
-    dw.swap();
+    tw.publish();
 
     // Verify all non-mutated nodes are identical.
-    let front_nodes_after: Vec<Node> = dw.front_nodes().to_vec();
+    let front_nodes_after: Vec<Node> = tw.latest_nodes().to_vec();
     assert_eq!(front_nodes_after.len(), 8);
 
     let node_size = core::mem::size_of::<Node>();
@@ -1511,21 +1337,21 @@ fn copy_then_mutate_preserves_other_nodes() {
     }
 
     // Verify change list only has cursor.
-    let dr = DoubleReader::new(&buf);
-    let cl = dr.change_list().unwrap();
+    let tr = scene::TripleReader::new(&buf);
+    let cl = tr.change_list().unwrap();
     assert_eq!(cl.len(), 1);
     assert_eq!(cl[0], 7);
 }
 
 // VAL-SCENE-009: Data buffer exhaustion detection
 #[test]
-fn data_buffer_exhaustion_detectable() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn data_buffer_exhaustion_detectable_triple() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1: fill data buffer to >75%.
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let root = w.alloc_node().unwrap();
         w.set_root(root);
@@ -1534,12 +1360,11 @@ fn data_buffer_exhaustion_detectable() {
         let chunk = vec![0xABu8; threshold as usize + 100];
         w.push_data(&chunk);
     }
-    dw.swap();
+    tw.publish();
 
     // After copy-forward, the back buffer inherits the high data_used.
-    dw.copy_front_to_back();
     {
-        let back = dw.back();
+        let back = tw.acquire_copy();
         let used = back.data_used();
         let threshold = (DATA_BUFFER_SIZE as u32 * 3) / 4;
         assert!(
@@ -1555,35 +1380,34 @@ fn data_buffer_exhaustion_detectable() {
 
 // VAL-SCENE-005: update_data with matching and mismatching lengths
 #[test]
-fn update_data_in_place_after_copy_forward() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn update_data_in_place_after_acquire_copy() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1: scene with data.
     let clock_dref;
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let root = w.alloc_node().unwrap();
         w.set_root(root);
         clock_dref = w.push_data(b"12:34:56");
     }
-    dw.swap();
+    tw.publish();
 
     // Frame 2: copy forward, update clock data in-place.
-    dw.copy_front_to_back();
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire_copy();
         assert!(w.update_data(clock_dref, b"12:35:00"));
         // Wrong length should fail.
         assert!(!w.update_data(clock_dref, b"ABC"));
         w.mark_changed(0); // mark root changed (for demo)
     }
-    dw.swap();
+    tw.publish();
 
     // Verify the updated data is readable.
-    let dr = DoubleReader::new(&buf);
-    let data = dr.front_data(clock_dref);
+    let tr = scene::TripleReader::new(&buf);
+    let data = tr.front_data(clock_dref);
     assert_eq!(data, b"12:35:00");
 }
 
@@ -1621,31 +1445,18 @@ fn mark_changed_exact_capacity() {
     assert_eq!(hdr.change_count, scene::FULL_REPAINT);
 }
 
-// Empty change list after initial DoubleWriter::new (both buffers empty)
-#[test]
-fn double_reader_initial_change_list_empty() {
-    let mut buf = make_double_buf();
-    {
-        let _dw = DoubleWriter::new(&mut buf);
-    }
 
-    let dr = DoubleReader::new(&buf);
-    // Initial state: change_count = 0 (set by SceneWriter::new).
-    assert!(!dr.is_full_repaint());
-    let cl = dr.change_list().unwrap();
-    assert_eq!(cl.len(), 0);
-}
 
 // Multiple frames of copy-forward + selective mutation
 #[test]
 fn multiple_copy_forward_frames() {
-    let mut buf = make_double_buf();
+    let mut buf = make_triple_buf();
 
     // Frame 1: initial build.
     {
-        let mut dw = DoubleWriter::new(&mut buf);
+        let mut tw = scene::TripleWriter::new(&mut buf);
         {
-            let mut w = dw.back();
+            let mut w = tw.acquire();
             w.clear();
             for i in 0..8u16 {
                 let n = w.alloc_node().unwrap();
@@ -1653,40 +1464,40 @@ fn multiple_copy_forward_frames() {
             }
             w.set_root(0);
         }
-        dw.swap();
+        tw.publish();
     }
 
     // Frames 2-5: copy-forward with different mutations.
     for frame in 0..4u16 {
         {
-            let mut dw = DoubleWriter::from_existing(&mut buf);
-            dw.copy_front_to_back();
+            let mut tw = scene::TripleWriter::from_existing(&mut buf);
+            // acquire_copy below
             {
-                let mut w = dw.back();
+                let mut w = tw.acquire();
                 // Mutate a different node each frame.
                 let target = (frame + 1) as NodeId; // nodes 1, 2, 3, 4
                 w.node_mut(target).height = (frame + 1) * 100;
                 w.mark_changed(target);
             }
-            dw.swap();
+            tw.publish();
         }
 
         // Verify change list has exactly one entry.
-        let dr = DoubleReader::new(&buf);
-        let cl = dr.change_list().unwrap();
+        let tr = scene::TripleReader::new(&buf);
+        let cl = tr.change_list().unwrap();
         assert_eq!(cl.len(), 1, "Frame {}: expected 1 change", frame + 2);
         assert_eq!(cl[0], (frame + 1) as NodeId);
 
         // Verify the mutation stuck.
         assert_eq!(
-            dr.front_nodes()[(frame + 1) as usize].height,
+            tr.front_nodes()[(frame + 1) as usize].height,
             (frame + 1) * 100
         );
 
         // Verify other nodes' widths are preserved from frame 1.
         for i in 0..8usize {
             assert_eq!(
-                dr.front_nodes()[i].width,
+                tr.front_nodes()[i].width,
                 ((i as u16) + 1) * 10,
                 "Frame {}: node {} width changed unexpectedly",
                 frame + 2,
@@ -1698,37 +1509,36 @@ fn multiple_copy_forward_frames() {
 
 // VAL-SCENE-009: update_data doesn't grow data_used (same-length overwrite)
 #[test]
-fn update_data_does_not_grow_data_used() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn update_data_does_not_grow_data_used_triple() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     let dref;
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let root = w.alloc_node().unwrap();
         w.set_root(root);
         dref = w.push_data(b"AAAAAAAA");
     }
-    dw.swap();
+    tw.publish();
 
-    let front_data_before = dw.front_data_buf().len();
+    let front_data_before = tw.latest_data_buf().len();
 
     // Copy forward and update in-place 10 times.
     for i in 0..10u8 {
-        dw.copy_front_to_back();
         {
-            let mut w = dw.back();
+            let mut w = tw.acquire_copy();
             let new_data = [b'A' + i; 8];
             assert!(w.update_data(dref, &new_data));
             assert_eq!(w.data_used() as usize, front_data_before);
         }
-        dw.swap();
+        tw.publish();
     }
 
     // data_used should be unchanged.
-    let dr = DoubleReader::new(&buf);
-    assert_eq!(dr.front_data_buf().len(), front_data_before);
+    let tr = scene::TripleReader::new(&buf);
+    assert_eq!(tr.front_data_buf().len(), front_data_before);
 }
 
 // ── Targeted incremental update tests ───────────────────────────────
@@ -1812,226 +1622,11 @@ fn abs_bounds_large_coords_no_truncation() {
     assert!(physical_x <= u16::MAX as i32);
 }
 
-// ── VAL-PIPE-007: Double-buffer read consistency ────────────────────
-//
-// When core calls copy_front_to_back() + modify + swap(), the published
-// front buffer must contain a complete, consistent frame — all fields
-// from the same write cycle. Exercises 10,000 write-read cycles.
-//
-// The protocol is designed for cross-process shared memory (separate
-// address spaces). In a single-process test, concurrent &mut/& references
-// to the same buffer constitute Rust aliasing UB, which causes the
-// compiler to miscompile consistency checks. We therefore test the
-// protocol sequentially: write → swap → read-via-writer → ack → repeat.
-// This validates the double-buffer invariant (copy, modify, swap, read
-// produces consistent frames) without scheduling or aliasing issues.
 
-#[test]
-fn double_buffer_read_consistency_race() {
-    let len = DOUBLE_SCENE_SIZE;
-    let mut buf = vec![0u8; len];
-    let mut dw = DoubleWriter::new(&mut buf);
 
-    // Write initial frame: one node with width=1, background red.
-    {
-        let mut w = dw.back();
-        w.clear();
-        let root = w.alloc_node().unwrap();
-        w.node_mut(root).width = 1;
-        w.node_mut(root).background = Color::rgb(255, 0, 0);
-        w.set_root(root);
-    }
-    dw.swap();
-    dw.ack_reader(dw.front_generation());
 
-    let mut inconsistencies = 0u64;
-    let mut reads = 0u64;
-    let mut last_gen = 0u32;
 
-    for frame_id in 2u32..10_002 {
-        // Writer phase: copy front → back, modify, swap.
-        let copied = dw.copy_front_to_back();
-        assert!(
-            copied,
-            "copy_front_to_back should succeed after ack (frame {})",
-            frame_id
-        );
-        {
-            let mut w = dw.back();
-            let marker = (frame_id & 0xFFFF) as u16;
-            w.node_mut(0).width = marker;
-            w.node_mut(0).height = marker;
-            w.node_mut(0).background = Color::rgb(
-                (marker & 0xFF) as u8,
-                ((marker >> 8) & 0xFF) as u8,
-                0,
-            );
-        }
-        dw.swap();
 
-        // Reader phase: read front buffer via DoubleWriter's front
-        // accessors (avoids aliasing UB from concurrent &mut/&).
-        let gen = dw.front_generation();
-        assert!(gen > 0, "generation should be non-zero at frame {}", frame_id);
-
-        let nodes = dw.front_nodes();
-        assert!(
-            !nodes.is_empty(),
-            "front should have nodes at frame {}",
-            frame_id
-        );
-
-        let node = &nodes[0];
-        let w = node.width;
-        let h = node.height;
-        let bg_marker =
-            (node.background.r as u16) | ((node.background.g as u16) << 8);
-
-        // All three fields must agree (same frame).
-        if w != h || w != bg_marker {
-            inconsistencies += 1;
-        }
-
-        // Generation must monotonically increase.
-        assert!(
-            gen >= last_gen,
-            "generation went backwards: {} -> {} at frame {}",
-            last_gen,
-            gen,
-            frame_id
-        );
-        last_gen = gen;
-        reads += 1;
-
-        // Acknowledge the read so writer can reuse this buffer.
-        dw.ack_reader(gen);
-    }
-
-    assert!(reads > 0, "reader should have completed at least one read");
-    assert_eq!(
-        inconsistencies, 0,
-        "reader saw {} torn frames out of {} reads",
-        inconsistencies, reads
-    );
-}
-
-// ── VAL-PIPE-008: Rapid swap cycles preserve latest frame ───────────
-//
-// If core performs two complete swap cycles before the compositor reads,
-// the compositor sees the second (latest) frame. Generation counter
-// monotonically increases.
-
-#[test]
-fn rapid_swap_cycles_preserve_latest_frame() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    // Frame 1: write width=100.
-    {
-        let mut w = dw.back();
-        w.clear();
-        let root = w.alloc_node().unwrap();
-        w.node_mut(root).width = 100;
-        w.node_mut(root).height = 100;
-        w.set_root(root);
-    }
-    dw.swap();
-    let gen1 = dw.front_generation();
-
-    // Acknowledge frame 1 so frame 2 can proceed.
-    dw.ack_reader(gen1);
-
-    // Frame 2: write width=200.
-    assert!(dw.copy_front_to_back(), "copy should succeed after ack");
-    {
-        let mut w = dw.back();
-        w.node_mut(0).width = 200;
-        w.node_mut(0).height = 200;
-    }
-    dw.swap();
-    let gen2 = dw.front_generation();
-
-    // Acknowledge frame 2.
-    dw.ack_reader(gen2);
-
-    // Frame 3: write width=300.
-    assert!(dw.copy_front_to_back(), "copy should succeed after ack");
-    {
-        let mut w = dw.back();
-        w.node_mut(0).width = 300;
-        w.node_mut(0).height = 300;
-    }
-    dw.swap();
-    let gen3 = dw.front_generation();
-
-    // Verify monotonically increasing generations.
-    assert!(gen2 > gen1, "gen2 ({}) should be > gen1 ({})", gen2, gen1);
-    assert!(gen3 > gen2, "gen3 ({}) should be > gen2 ({})", gen3, gen2);
-
-    // Reader sees the latest (frame 3) content — drop dw to allow immutable borrow.
-    drop(dw);
-    let dr = DoubleReader::new(&buf);
-    let gen = dr.front_generation();
-    assert_eq!(gen, gen3);
-    let nodes = dr.front_nodes();
-    assert_eq!(nodes[0].width, 300, "should see latest frame (width=300)");
-    assert_eq!(nodes[0].height, 300, "should see latest frame (height=300)");
-}
-
-// ── VAL-PIPE-008b: Two rapid swaps without ack — second copy blocked ──
-//
-// If core does two swap cycles without the compositor acknowledging the
-// first, the second copy_front_to_back should return false to prevent
-// overwriting the buffer the compositor may still be reading.
-
-#[test]
-fn rapid_swap_without_ack_blocks_copy() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
-
-    // Frame 1: write to back, swap.
-    {
-        let mut w = dw.back();
-        w.clear();
-        let root = w.alloc_node().unwrap();
-        w.node_mut(root).width = 100;
-        w.set_root(root);
-    }
-    dw.swap();
-    let gen1 = dw.front_generation();
-
-    // Compositor acknowledges frame 1.
-    dw.ack_reader(gen1);
-
-    // Frame 2: copy, modify, swap. Do NOT acknowledge.
-    assert!(dw.copy_front_to_back());
-    {
-        let mut w = dw.back();
-        w.node_mut(0).width = 200;
-    }
-    dw.swap();
-    // gen2 is now front. The old front (gen1 buffer) is now back.
-    // The reader has acknowledged gen1, so back is safe.
-
-    // Frame 3: copy should work because reader ack'd gen1 (which is now back).
-    assert!(
-        dw.copy_front_to_back(),
-        "copy should succeed because reader ack'd the gen that is now back"
-    );
-    {
-        let mut w = dw.back();
-        w.node_mut(0).width = 300;
-    }
-    dw.swap();
-    // Now gen3 is front. Gen2 buffer is back.
-    // Reader has NOT acknowledged gen2.
-
-    // Frame 4: copy should FAIL because reader hasn't ack'd gen2 (now back).
-    assert!(
-        !dw.copy_front_to_back(),
-        "copy should fail — reader hasn't ack'd the buffer that is now back"
-    );
-}
 
 // ── VAL-COORD-013: abs_bounds accounts for scroll_y from ancestor nodes ──
 
@@ -2327,13 +1922,13 @@ fn node_size_assertion_with_transform() {
 }
 
 #[test]
-fn double_buffer_swap_preserves_transform_fields() {
-    // VAL-CROSS-015: copy_front_to_back preserves transform fields.
-    let mut buf = vec![0u8; DOUBLE_SCENE_SIZE];
-    let mut dw = DoubleWriter::new(&mut buf);
+fn triple_buffer_preserves_transform_fields() {
+    // VAL-CROSS-015: acquire_copy preserves transform fields.
+    let mut buf = vec![0u8; TRIPLE_SCENE_SIZE];
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     {
-        let mut sw = dw.back();
+        let mut sw = tw.acquire();
         let n = sw.alloc_node().unwrap();
         let node = sw.node_mut(n);
         node.width = 50;
@@ -2342,18 +1937,16 @@ fn double_buffer_swap_preserves_transform_fields() {
         node.transform = AffineTransform::translate(10.0, 20.0);
         sw.commit();
     }
-    dw.swap();
-    dw.copy_front_to_back();
-
+    tw.publish();
     {
-        let sw = dw.back();
+        let sw = tw.acquire_copy();
         let node = sw.node(0);
         assert!((node.transform.tx - 10.0).abs() < 1e-5,
-            "transform.tx must survive copy_front_to_back, got {}", node.transform.tx);
+            "transform.tx must survive acquire_copy, got {}", node.transform.tx);
         assert!((node.transform.ty - 20.0).abs() < 1e-5,
-            "transform.ty must survive copy_front_to_back, got {}", node.transform.ty);
+            "transform.ty must survive acquire_copy, got {}", node.transform.ty);
         assert!((node.transform.a - 1.0).abs() < 1e-5,
-            "transform.a must survive copy_front_to_back, got {}", node.transform.a);
+            "transform.a must survive acquire_copy, got {}", node.transform.a);
     }
 }
 
@@ -2563,11 +2156,11 @@ fn background_container_no_data_buffer_allocation() {
 }
 
 #[test]
-fn background_container_double_buffer_round_trip() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn background_container_triple_buffer_round_trip() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let id = w.alloc_node().unwrap();
         w.node_mut(id).width = 50;
@@ -2576,31 +2169,30 @@ fn background_container_double_buffer_round_trip() {
         w.node_mut(id).content = Content::None;
         w.set_root(id);
     }
-    dw.swap();
+    tw.publish();
 
-    let dr = DoubleReader::new(&buf);
-    let nodes = dr.front_nodes();
+    let tr = scene::TripleReader::new(&buf);
+    let nodes = tr.front_nodes();
     assert_eq!(nodes.len(), 1);
     assert!(matches!(nodes[0].content, Content::None));
     assert_eq!(nodes[0].background, Color::rgba(100, 200, 50, 180));
 }
 
 #[test]
-fn background_container_copy_front_to_back_preserves() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn background_container_acquire_copy_preserves() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let id = w.alloc_node().unwrap();
         w.node_mut(id).background = Color::rgb(255, 128, 0);
         w.node_mut(id).content = Content::None;
         w.set_root(id);
     }
-    dw.swap();
+    tw.publish();
 
-    dw.copy_front_to_back();
-    let back = dw.back();
+    let back = tw.acquire_copy();
     assert!(matches!(back.node(0).content, Content::None));
     assert_eq!(back.node(0).background, Color::rgb(255, 128, 0));
 }
@@ -2647,11 +2239,11 @@ fn glyphs_round_trip_scene_writer_reader() {
 }
 
 #[test]
-fn glyphs_double_buffer_round_trip() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn glyphs_triple_buffer_round_trip() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let glyphs = [
             ShapedGlyph { glyph_id: 65, x_advance: 10, x_offset: 0, y_offset: 0 },
@@ -2668,15 +2260,15 @@ fn glyphs_double_buffer_round_trip() {
         };
         w.set_root(id);
     }
-    dw.swap();
+    tw.publish();
 
-    let dr = DoubleReader::new(&buf);
-    match dr.front_nodes()[0].content {
+    let tr = scene::TripleReader::new(&buf);
+    match tr.front_nodes()[0].content {
         Content::Glyphs { glyphs, glyph_count, font_size, axis_hash, .. } => {
             assert_eq!(glyph_count, 2);
             assert_eq!(font_size, 16);
             assert_eq!(axis_hash, 0x1234);
-            let read = dr.front_shaped_glyphs(glyphs, glyph_count);
+            let read = tr.front_shaped_glyphs(glyphs, glyph_count);
             assert_eq!(read.len(), 2);
             assert_eq!(read[0].glyph_id, 65);
             assert_eq!(read[1].glyph_id, 66);
@@ -2686,11 +2278,11 @@ fn glyphs_double_buffer_round_trip() {
 }
 
 #[test]
-fn glyphs_copy_front_to_back_preserves_data() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn glyphs_acquire_copy_preserves_data() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let glyphs = [
             ShapedGlyph { glyph_id: 42, x_advance: 500, x_offset: 0, y_offset: 0 },
@@ -2706,11 +2298,11 @@ fn glyphs_copy_front_to_back_preserves_data() {
         };
         w.set_root(id);
     }
-    dw.swap();
-    dw.copy_front_to_back();
+    tw.publish();
+    // acquire_copy below
 
     // Verify back buffer has the glyph data
-    let back = dw.back();
+    let back = tw.acquire_copy();
     match back.node(0).content {
         Content::Glyphs { glyph_count, .. } => {
             assert_eq!(glyph_count, 1);
@@ -2871,11 +2463,11 @@ fn diff_identical_background_scenes_empty() {
 // ── Mixed content type tests (VAL-SCENE-008) ───────────────────────
 
 #[test]
-fn mixed_background_glyphs_image_double_buffer_swap() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn mixed_background_glyphs_image_triple_buffer() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         let root = w.alloc_node().unwrap();
         w.node_mut(root).width = 800;
@@ -2916,18 +2508,18 @@ fn mixed_background_glyphs_image_double_buffer_swap() {
         };
         w.add_child(root, img_id);
     }
-    dw.swap();
+    tw.publish();
 
     // Verify all survive the swap
-    let dr = DoubleReader::new(&buf);
-    assert_eq!(dr.front_nodes().len(), 4);
-    assert!(matches!(dr.front_nodes()[1].content, Content::None));
-    assert_eq!(dr.front_nodes()[1].background.a, 128);
-    match dr.front_nodes()[2].content {
+    let tr = scene::TripleReader::new(&buf);
+    assert_eq!(tr.front_nodes().len(), 4);
+    assert!(matches!(tr.front_nodes()[1].content, Content::None));
+    assert_eq!(tr.front_nodes()[1].background.a, 128);
+    match tr.front_nodes()[2].content {
         Content::Glyphs { glyph_count, .. } => assert_eq!(glyph_count, 1),
         _ => panic!("expected Glyphs"),
     }
-    match dr.front_nodes()[3].content {
+    match tr.front_nodes()[3].content {
         Content::Image { src_width, src_height, .. } => {
             assert_eq!(src_width, 2);
             assert_eq!(src_height, 2);
@@ -2939,11 +2531,11 @@ fn mixed_background_glyphs_image_double_buffer_swap() {
 // ── mark_changed works with background and Glyphs (VAL-SCENE-008) ──
 
 #[test]
-fn mark_changed_works_for_background_and_glyphs() {
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+fn mark_changed_works_for_background_and_glyphs_triple() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         for _ in 0..4 { w.alloc_node().unwrap(); }
         // Node 0: root
@@ -2960,21 +2552,20 @@ fn mark_changed_works_for_background_and_glyphs() {
         };
         w.set_root(0);
     }
-    dw.swap();
+    tw.publish();
 
     // Incremental update: change background and Glyphs nodes
-    dw.copy_front_to_back();
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire_copy();
         w.node_mut(1).background = Color::rgb(100, 100, 100);
         w.mark_changed(1);
         w.node_mut(2).content_hash = fnv1a(b"new text");
         w.mark_changed(2);
     }
-    dw.swap();
+    tw.publish();
 
-    let dr = DoubleReader::new(&buf);
-    let cl = dr.change_list().unwrap();
+    let tr = scene::TripleReader::new(&buf);
+    let cl = tr.change_list().unwrap();
     assert_eq!(cl.len(), 2);
     assert!(cl.contains(&1));
     assert!(cl.contains(&2));
@@ -3661,12 +3252,12 @@ fn core_scroll_filters_lines_correctly() {
 #[test]
 fn core_update_clock_in_place_glyph_overwrite() {
     // Verify clock update pattern: copy forward, update data in place, mark changed
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1: build scene with clock
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         for _ in 0..8 { w.alloc_node().unwrap(); }
         let clock_glyphs = bytes_to_shaped_glyphs_test(b"12:34:56", 8);
@@ -3681,12 +3272,11 @@ fn core_update_clock_in_place_glyph_overwrite() {
         w.node_mut(CORE_N_CLOCK_TEXT).content_hash = fnv1a(b"12:34:56");
         w.set_root(CORE_N_ROOT);
     }
-    dw.swap();
+    tw.publish();
 
     // Frame 2: copy forward, in-place clock update
-    dw.copy_front_to_back();
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire_copy();
         let clock_node = w.node(CORE_N_CLOCK_TEXT);
         if let Content::Glyphs { glyphs, .. } = clock_node.content {
             let new_glyphs = bytes_to_shaped_glyphs_test(b"12:35:00", 8);
@@ -3703,25 +3293,25 @@ fn core_update_clock_in_place_glyph_overwrite() {
             panic!("clock should have Glyphs content");
         }
     }
-    dw.swap();
+    tw.publish();
 
     // Verify updated clock data.
-    let dr = DoubleReader::new(&buf);
-    let clock = &dr.front_nodes()[CORE_N_CLOCK_TEXT as usize];
+    let tr = scene::TripleReader::new(&buf);
+    let clock = &tr.front_nodes()[CORE_N_CLOCK_TEXT as usize];
     assert_eq!(clock.content_hash, fnv1a(b"12:35:00"));
-    let cl = dr.change_list().unwrap();
+    let cl = tr.change_list().unwrap();
     assert!(cl.contains(&CORE_N_CLOCK_TEXT), "clock should be in change list");
 }
 
 #[test]
 fn core_update_cursor_position_only() {
     // Verify cursor update pattern: copy forward, move cursor, mark changed
-    let mut buf = make_double_buf();
-    let mut dw = DoubleWriter::new(&mut buf);
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Frame 1: build scene with cursor at (0,0)
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire();
         w.clear();
         for _ in 0..8 { w.alloc_node().unwrap(); }
         w.node_mut(CORE_N_CURSOR).x = 0;
@@ -3732,21 +3322,20 @@ fn core_update_cursor_position_only() {
         w.node_mut(CORE_N_CURSOR).content = Content::None;
         w.set_root(CORE_N_ROOT);
     }
-    dw.swap();
+    tw.publish();
 
     // Frame 2: copy forward, move cursor to (40, 20)
-    dw.copy_front_to_back();
     {
-        let mut w = dw.back();
+        let mut w = tw.acquire_copy();
         w.node_mut(CORE_N_CURSOR).x = 40;
         w.node_mut(CORE_N_CURSOR).y = 20;
         w.mark_changed(CORE_N_CURSOR);
     }
-    dw.swap();
+    tw.publish();
 
     // Verify cursor position and content preserved.
-    let dr = DoubleReader::new(&buf);
-    let cursor = &dr.front_nodes()[CORE_N_CURSOR as usize];
+    let tr = scene::TripleReader::new(&buf);
+    let cursor = &tr.front_nodes()[CORE_N_CURSOR as usize];
     assert_eq!(cursor.x, 40);
     assert_eq!(cursor.y, 20);
     assert!(
@@ -3756,7 +3345,7 @@ fn core_update_cursor_position_only() {
     assert_eq!(cursor.background, Color::rgb(200, 200, 200),
         "cursor background color should be preserved after position update"
     );
-    let cl = dr.change_list().unwrap();
+    let cl = tr.change_list().unwrap();
     assert!(cl.contains(&CORE_N_CURSOR), "cursor should be in change list");
     // Only cursor should be changed (no line nodes affected).
     assert_eq!(cl.len(), 1, "only cursor should be in change list");
@@ -4140,7 +3729,7 @@ fn triple_buffer_scene_writer_api_unchanged() {
     assert!(tr.is_full_repaint());
 }
 
-// VAL-TBUF-011: DoubleWriter/DoubleReader removed from production
+// VAL-TBUF-011: Legacy double-buffer code removed from production
 // (compile-time: if this test compiles without TripleWriter, the types exist)
 #[test]
 fn triple_types_exist() {

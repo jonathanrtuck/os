@@ -147,7 +147,7 @@ fn program_tval(tval: u64) {
 /// scheduler deadline — `schedule_inner` will reprogram with full info on
 /// the next schedule.
 ///
-/// If the minimum deadline is in the past, sets CNTP_TVAL to 1 (fire immediately).
+/// If the minimum deadline is in the past, sets CNTV_TVAL to 1 (fire immediately).
 /// If no deadlines exist, programs the maximum interval (u32::MAX ticks ≈ 68s).
 pub fn reprogram_next_deadline(scheduler_deadline_ticks: Option<u64>) {
     let now = counter();
@@ -173,7 +173,7 @@ pub fn reprogram_next_deadline(scheduler_deadline_ticks: Option<u64>) {
         }
         Some(deadline) => {
             let delta = deadline - now;
-            // Cap to u32::MAX (CNTP_TVAL is 32-bit).
+            // Cap to u32::MAX (CNTV_TVAL is 32-bit).
             let tval = delta.min(u32::MAX as u64);
 
             program_tval(tval);

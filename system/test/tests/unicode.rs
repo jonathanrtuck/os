@@ -296,8 +296,8 @@ fn unicode_scene_graph_naive_resume_round_trip() {
 }
 
 #[test]
-fn unicode_scene_graph_double_buffer_round_trip() {
-    // Verify Unicode text survives a double-buffer write/swap/read cycle.
+fn unicode_scene_graph_write_read_round_trip() {
+    // Verify Unicode text survives a scene graph write/read cycle.
     let text = "naïve résumé";
     let shaped = shape(NUNITO_SANS_VARIABLE, text, &[]);
 
@@ -311,45 +311,40 @@ fn unicode_scene_graph_double_buffer_round_trip() {
         })
         .collect();
 
-    let mut buf = vec![0u8; DOUBLE_SCENE_SIZE];
-    let mut dw = DoubleWriter::new(&mut buf);
+    let mut buf = vec![0u8; SCENE_SIZE];
+    let mut w = SceneWriter::new(&mut buf);
 
-    // Write to back buffer.
-    {
-        let mut w = dw.back();
-        w.clear();
-        let dref = w.push_shaped_glyphs(&scene_glyphs);
-        let id = w.alloc_node().unwrap();
-        w.node_mut(id).content = Content::Glyphs {
-            color: Color::rgb(220, 220, 220),
-            glyphs: dref,
-            glyph_count: scene_glyphs.len() as u16,
-            font_size: 18,
-            axis_hash: 0,
-        };
-        w.set_root(id);
-    }
-    dw.swap();
+    let dref = w.push_shaped_glyphs(&scene_glyphs);
+    let id = w.alloc_node().unwrap();
+    w.node_mut(id).content = Content::Glyphs {
+        color: Color::rgb(220, 220, 220),
+        glyphs: dref,
+        glyph_count: scene_glyphs.len() as u16,
+        font_size: 18,
+        axis_hash: 0,
+    };
+    w.set_root(id);
+    w.commit();
 
-    // Read from front buffer via DoubleReader.
-    let dr = DoubleReader::new(&buf);
-    let nodes = dr.front_nodes();
+    // Read back via SceneReader.
+    let r = SceneReader::new(&buf);
+    let nodes = r.nodes();
     assert_eq!(nodes.len(), 1);
 
     match nodes[0].content {
         Content::Glyphs { glyphs, glyph_count, .. } => {
             assert_eq!(glyph_count, scene_glyphs.len() as u16);
-            let read_glyphs = dr.front_shaped_glyphs(glyphs, glyph_count);
+            let read_glyphs = r.shaped_glyphs(glyphs, glyph_count);
             assert_eq!(read_glyphs.len(), scene_glyphs.len());
             for (i, (orig, read)) in scene_glyphs.iter().zip(read_glyphs.iter()).enumerate() {
                 assert_eq!(
                     orig.glyph_id, read.glyph_id,
-                    "double-buffer: glyph {} glyph_id mismatch",
+                    "scene graph: glyph {} glyph_id mismatch",
                     i
                 );
             }
         }
-        _ => panic!("expected Glyphs content in front buffer"),
+        _ => panic!("expected Glyphs content"),
     }
 }
 

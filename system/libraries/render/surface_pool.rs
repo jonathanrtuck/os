@@ -122,22 +122,44 @@ impl SurfacePool {
         if self.total_bytes + needed > self.budget {
             return None;
         }
-        if self.entries.len() >= MAX_ENTRIES {
-            return None;
-        }
 
         let data = alloc::vec![0u8; needed];
         self.total_bytes += needed;
         self.alloc_count += 1;
 
-        let idx = self.entries.len();
-        self.entries.push(PoolEntry {
-            width,
-            height,
-            data,
-            in_use: true,
-            used_this_frame: true,
-        });
+        // Reuse a cleared slot (from end_frame) to keep indices stable.
+        let mut reuse_slot: Option<usize> = None;
+        for i in 0..self.entries.len() {
+            if self.entries[i].width == 0 && !self.entries[i].in_use {
+                reuse_slot = Some(i);
+                break;
+            }
+        }
+
+        let idx = if let Some(i) = reuse_slot {
+            let entry = &mut self.entries[i];
+            entry.width = width;
+            entry.height = height;
+            entry.data = data;
+            entry.in_use = true;
+            entry.used_this_frame = true;
+            i
+        } else {
+            if self.entries.len() >= MAX_ENTRIES {
+                self.total_bytes -= needed;
+                self.alloc_count -= 1;
+                return None;
+            }
+            let i = self.entries.len();
+            self.entries.push(PoolEntry {
+                width,
+                height,
+                data,
+                in_use: true,
+                used_this_frame: true,
+            });
+            i
+        };
 
         Some((PoolHandle(idx), &mut self.entries[idx].data))
     }
@@ -158,19 +180,16 @@ impl SurfacePool {
     /// Entries that were used this frame are kept for potential reuse
     /// next frame. The `used_this_frame` flags are then reset.
     pub fn end_frame(&mut self) {
-        // Remove entries that were not used this frame, reclaiming memory.
-        // We iterate in reverse to preserve indices during removal.
-        let mut i = self.entries.len();
-        while i > 0 {
-            i -= 1;
-            if !self.entries[i].used_this_frame && !self.entries[i].in_use {
-                self.total_bytes -= self.entries[i].data.len();
-                self.entries.swap_remove(i);
-            }
-        }
-
-        // Reset the used_this_frame flag for all remaining entries.
+        // Clear stale entries in-place (not removed) so that outstanding
+        // PoolHandle indices remain valid. Cleared slots (width == 0)
+        // are reused by acquire() for new allocations.
         for entry in &mut self.entries {
+            if !entry.used_this_frame && !entry.in_use {
+                self.total_bytes -= entry.data.len();
+                entry.data = Vec::new();
+                entry.width = 0;
+                entry.height = 0;
+            }
             entry.used_this_frame = false;
         }
     }

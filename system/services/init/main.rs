@@ -135,6 +135,13 @@ fn print_u32(mut n: u32) {
 
     sys::print(&buf[i..]);
 }
+fn start_process(handle: u8, name: &[u8]) {
+    if sys::process_start(handle).is_err() {
+        sys::print(b"init: process_start failed for ");
+        sys::print(name);
+        sys::print(b"\n");
+    }
+}
 /// Probe a virtio-gpu device for VIRTIO_GPU_F_VIRGL (bit 0) support.
 ///
 /// Maps the device MMIO region, reads the feature register, and checks
@@ -209,12 +216,12 @@ fn setup_render_pipeline(
     let scene_order = (scene_pages_needed.next_power_of_two().trailing_zeros()) as u32;
     let scene_alloc_bytes = (1usize << scene_order) * 4096;
     let mut scene_pa: u64 = 0;
-    let _scene_va = sys::dma_alloc(scene_order, &mut scene_pa).unwrap_or_else(|_| {
+    let scene_va = sys::dma_alloc(scene_order, &mut scene_pa).unwrap_or_else(|_| {
         sys::print(b"init: dma_alloc (scene graph) failed\n");
         sys::exit();
     });
 
-    unsafe { core::ptr::write_bytes(_scene_va as *mut u8, 0, scene_alloc_bytes) };
+    unsafe { core::ptr::write_bytes(scene_va as *mut u8, 0, scene_alloc_bytes) };
 
     sys::print(b"     scene graph: shared memory allocated\n");
 
@@ -222,12 +229,12 @@ fn setup_render_pipeline(
 
     // Document buffer (1 page).
     let mut doc_pa: u64 = 0;
-    let _doc_va = sys::dma_alloc(0, &mut doc_pa).unwrap_or_else(|_| {
+    let doc_va = sys::dma_alloc(0, &mut doc_pa).unwrap_or_else(|_| {
         sys::print(b"init: dma_alloc (doc buffer) failed\n");
         sys::exit();
     });
 
-    unsafe { core::ptr::write_bytes(_doc_va as *mut u8, 0, 4096) };
+    unsafe { core::ptr::write_bytes(doc_va as *mut u8, 0, 4096) };
 
     sys::print(b"     document buffer: 4 KiB shared\n");
 
@@ -305,7 +312,7 @@ fn setup_render_pipeline(
     sys::print(name);
     sys::print(b" (display query)\n");
 
-    let _ = sys::process_start(gpu_proc);
+    start_process(gpu_proc, b"render");
 
     // Wait for display info from render service.
     sys::print(b"     waiting for display info\n");
@@ -619,20 +626,20 @@ fn setup_render_pipeline(
     for &(input_proc_handle, _, _, _) in input_devices {
         sys::print(b"     starting input driver\n");
 
-        let _ = sys::process_start(input_proc_handle);
+        start_process(input_proc_handle, b"input");
 
         sys::yield_now();
     }
 
     sys::print(b"     starting text editor\n");
 
-    let _ = sys::process_start(editor_proc);
+    start_process(editor_proc, b"editor");
 
     sys::yield_now();
 
     sys::print(b"     starting core\n");
 
-    let _ = sys::process_start(core_proc);
+    start_process(core_proc, b"core");
 
     sys::yield_now();
 
@@ -844,7 +851,7 @@ pub extern "C" fn _start() -> ! {
 
                 ch.send(&msg);
 
-                let _ = sys::process_start(proc_h);
+                start_process(proc_h, b"driver");
                 let name = match dev_id {
                     VIRTIO_DEVICE_BLK => "blk",
                     VIRTIO_DEVICE_CONSOLE => "console",
@@ -875,7 +882,7 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b"init: dma_alloc (font buffer) failed\n");
                 sys::exit();
             });
-            let font_capacity: u32 = (font_page_count as u32) * 4096; // 1 MiB
+            let font_capacity: u32 = (font_page_count as u32) * 4096; // 4 MiB
 
             unsafe { core::ptr::write_bytes(_font_va as *mut u8, 0, font_capacity as usize) };
 
@@ -899,7 +906,7 @@ pub extern "C" fn _start() -> ! {
             // Start 9p driver.
             sys::print(b"     starting 9p driver\n");
 
-            let _ = sys::process_start(p9_proc);
+            start_process(p9_proc, b"9p");
 
             // Helper: send a file read request and wait for the response.
             // Returns the number of bytes read, or 0 on failure.
@@ -1053,7 +1060,7 @@ pub extern "C" fn _start() -> ! {
         // Fuzz test — adversarial syscall testing.
         match sys::process_create(FUZZ_ELF.as_ptr(), FUZZ_ELF.len()) {
             Ok(proc_h) => {
-                let _ = sys::process_start(proc_h);
+                start_process(proc_h, b"fuzz");
                 let _ = sys::wait(&[proc_h], u64::MAX);
             }
             Err(_) => {
@@ -1063,7 +1070,7 @@ pub extern "C" fn _start() -> ! {
         // Stress test — IPC/scheduler/timer saturation.
         match sys::process_create(STRESS_ELF.as_ptr(), STRESS_ELF.len()) {
             Ok(proc_h) => {
-                let _ = sys::process_start(proc_h);
+                start_process(proc_h, b"stress");
                 let _ = sys::wait(&[proc_h], u64::MAX);
             }
             Err(_) => {

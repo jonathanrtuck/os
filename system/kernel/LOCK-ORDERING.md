@@ -396,7 +396,7 @@ Under the lock, step 2 cannot interleave between step 1 and the queue push.
 
 With tickless idle, `schedule_inner()` calls `timer::reprogram_next_deadline()`
 after selecting a thread. This reads the cached `EARLIEST_DEADLINE` atomic
-(lock-free) and programs CNTP_TVAL. No TIMERS lock is acquired from inside
+(lock-free) and programs CNTV_TVAL. No TIMERS lock is acquired from inside
 the scheduler lock — the earliest deadline is maintained via an `AtomicU64`
 updated under the TIMERS lock on timer create/destroy/expire.
 
@@ -404,7 +404,7 @@ updated under the TIMERS lock on timer create/destroy/expire.
 schedule_inner() [holds STATE]:
   timer::reprogram_next_deadline(sched_deadline)
     → reads EARLIEST_DEADLINE (AtomicU64, lock-free)
-    → programs CNTP_TVAL (hardware register, no lock)
+    → programs CNTV_TVAL (hardware register, no lock)
 ```
 
 The TIMERS lock is only acquired from timer module functions (create, destroy,

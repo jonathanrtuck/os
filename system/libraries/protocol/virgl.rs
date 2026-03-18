@@ -121,6 +121,7 @@ pub const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 pub const VIRGL_FORMAT_Z24_UNORM_S8_UINT: u32 = 19; // Intel Mac only (not Apple Silicon!)
 pub const VIRGL_FORMAT_S8_UINT: u32 = 23; // Pure stencil-8, works on Apple Silicon
 pub const VIRGL_FORMAT_R8_UNORM: u32 = 64;
+pub const VIRGL_FORMAT_Z32_FLOAT_S8X24_UINT: u32 = 126;
 pub const VIRGL_FORMAT_R32G32_FLOAT: u32 = 29;
 pub const VIRGL_FORMAT_R32G32B32A32_FLOAT: u32 = 31;
 

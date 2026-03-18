@@ -13,8 +13,6 @@
 
 extern crate alloc;
 
-pub mod compositing;
-pub mod cursor;
 pub mod damage;
 pub mod scene_render;
 pub mod surface_pool;

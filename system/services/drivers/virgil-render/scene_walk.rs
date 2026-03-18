@@ -34,8 +34,16 @@ const MAX_TEXT_QUADS: usize = 512;
 /// Bytes per textured vertex: x(f32) + y(f32) + u(f32) + v(f32) + r + g + b + a = 32.
 pub const TEXTURED_VERTEX_STRIDE: u32 = 32;
 
-/// Maximum textured vertex data in bytes.
+/// Maximum textured vertex data in bytes (glyphs only).
 pub const MAX_TEXTURED_VERTEX_BYTES: usize = MAX_TEXT_QUADS * 6 * TEXTURED_VERTEX_STRIDE as usize;
+
+/// Dwords per image quad: 6 vertices x 8 floats = 48.
+pub const DWORDS_PER_IMAGE_QUAD: usize = 48;
+
+/// Total textured VBO size: image quads (MAX_IMAGES x 192 bytes) + glyph quads.
+/// Image vertices occupy offset 0; glyphs start after all image data.
+pub const TOTAL_TEXTURED_VBO_BYTES: usize =
+    MAX_TEXTURED_VERTEX_BYTES + MAX_IMAGES * DWORDS_PER_IMAGE_QUAD * 4;
 
 /// Maximum vertex data in u32 DWORDs (6 floats per vertex, 6 vertices per quad).
 const MAX_VERTEX_DWORDS: usize = MAX_QUADS * 6 * 6;
@@ -200,7 +208,7 @@ impl TexturedBatch {
 // ── Image batch ──────────────────────────────────────────────────────────
 
 /// Maximum images per frame.
-const MAX_IMAGES: usize = 4;
+pub const MAX_IMAGES: usize = 4;
 
 /// A single image to render as a textured quad.
 #[derive(Clone, Copy)]

@@ -499,7 +499,7 @@ fn sin_cos_f32(x: f32) -> (f32, f32) {
         (1.0_f32, -1.0_f32, pi - a)
     } else if a < -half_pi {
         // sin(-π - a) = -sin(-a) = sin(a), cos(-π - a) = -cos(a)
-        (-1.0_f32, -1.0_f32, -pi - a)
+        (1.0_f32, -1.0_f32, -pi - a)
     } else {
         (1.0_f32, 1.0_f32, a)
     };
@@ -756,6 +756,7 @@ impl<'a> SceneWriter<'a> {
 
     /// Link `child` as the last child of `parent`.
     pub fn add_child(&mut self, parent: NodeId, child: NodeId) {
+        debug_assert!(parent != child, "add_child: self-parenting");
         let first = self.node(parent).first_child;
 
         if first == NULL {
@@ -819,7 +820,7 @@ impl<'a> SceneWriter<'a> {
     }
     /// Get the used portion of the data buffer as a read-only slice.
     pub fn data_buf(&self) -> &[u8] {
-        let used = self.data_used() as usize;
+        let used = (self.data_used() as usize).min(DATA_BUFFER_SIZE);
 
         &self.buf[DATA_OFFSET..DATA_OFFSET + used]
     }
@@ -858,6 +859,7 @@ impl<'a> SceneWriter<'a> {
     }
     /// Get a shared reference to a node by ID.
     pub fn node(&self, id: NodeId) -> &Node {
+        debug_assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
         // SAFETY: `id` is a NodeId returned by `alloc_node` (bounded by
@@ -879,6 +881,7 @@ impl<'a> SceneWriter<'a> {
     }
     /// Get a mutable reference to a node by ID.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
+        debug_assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
         // SAFETY: Same bounds reasoning as `node()`. Exclusive borrow on
@@ -1031,7 +1034,7 @@ impl<'a> SceneReader<'a> {
     }
     /// Get the used portion of the data buffer as a slice.
     pub fn data_buf(&self) -> &[u8] {
-        let used = self.data_used() as usize;
+        let used = (self.data_used() as usize).min(DATA_BUFFER_SIZE);
 
         &self.buf[DATA_OFFSET..DATA_OFFSET + used]
     }
@@ -1043,6 +1046,10 @@ impl<'a> SceneReader<'a> {
     }
     /// Get a reference to a node by ID.
     pub fn node(&self, id: NodeId) -> &Node {
+        debug_assert!(
+            (id as usize) < MAX_NODES,
+            "NodeId out of bounds in reader"
+        );
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
         // SAFETY: `id` is a valid NodeId (bounded by node_count <= MAX_NODES),
@@ -1312,9 +1319,11 @@ impl<'a> TripleWriter<'a> {
         // Write generation into the acquired buffer's header.
         write_generation(self.buf, buf_offset(self.acquired), gen);
 
-        // Update control region: set latest to acquired, update generation.
-        triple_write_ctrl_release(self.buf, CTRL_GENERATION, gen);
-        triple_write_ctrl(self.buf, CTRL_LATEST_BUF, self.acquired);
+        // Update control region: generation first, then publish latest_buf
+        // with a release fence so all scene data + generation are visible
+        // before the reader sees the new latest_buf pointer.
+        triple_write_ctrl(self.buf, CTRL_GENERATION, gen);
+        triple_write_ctrl_release(self.buf, CTRL_LATEST_BUF, self.acquired);
     }
 
     /// Read the current global generation counter.
@@ -1348,7 +1357,7 @@ impl<'a> TripleWriter<'a> {
         let off = buf_offset(latest);
         // SAFETY: Same as latest_nodes.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
-        let used = hdr.data_used as usize;
+        let used = (hdr.data_used as usize).min(DATA_BUFFER_SIZE);
         &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
     }
 
@@ -1470,14 +1479,16 @@ impl<'a> TripleReader<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
         assert!(buf.len() >= TRIPLE_SCENE_SIZE);
 
-        // Claim the latest buffer by writing our buffer index into reader_buf.
+        // Read the latest buffer index published by the writer.
         let latest = triple_read_ctrl(buf, CTRL_LATEST_BUF);
-        triple_write_ctrl(buf, CTRL_READER_BUF, latest);
 
-        // Acquire fence: ensures all scene data written by the writer
-        // (which preceded the writer's release fence in publish()) is
-        // visible to us.
+        // Acquire fence: pairs with the writer's release fence in publish().
+        // Ensures all scene data written before publish() is visible to us
+        // before we access the buffer contents.
         core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+
+        // Claim this buffer so the writer won't recycle it.
+        triple_write_ctrl(buf, CTRL_READER_BUF, latest);
 
         let read_off = buf_offset(latest);
         let read_gen = read_generation(buf, read_off);
@@ -1512,7 +1523,7 @@ impl<'a> TripleReader<'a> {
     pub fn front_data_buf(&self) -> &[u8] {
         let off = self.read_off;
         let hdr = self.header();
-        let used = hdr.data_used as usize;
+        let used = (hdr.data_used as usize).min(DATA_BUFFER_SIZE);
         &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
     }
 

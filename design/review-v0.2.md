@@ -31,9 +31,9 @@ Issues cluster in two areas: (1) the scene graph shared-memory protocol has form
 
 ---
 
-## Tier 1: Fix Before Merge
+## Tier 1: Fix Before Merge — ALL FIXED
 
-### 1.1 `sin_cos_f32` wrong sine sign in third quadrant
+### 1.1 `sin_cos_f32` wrong sine sign in third quadrant [FIXED]
 
 **File:** `libraries/scene/lib.rs:500-502`
 **Severity:** CRITICAL
@@ -55,7 +55,7 @@ For `a = -3pi/4`: `reduced = -pi/4`, `sin(reduced) = -0.7071`. Code computes `-1
 
 ---
 
-### 1.2 VBO overflow in virgil-render (color VBO)
+### 1.2 VBO overflow in virgil-render (color VBO) [FIXED]
 
 **File:** `services/drivers/virgil-render/main.rs:1452-1454, 1804-1851`
 **Severity:** CRITICAL
@@ -75,7 +75,7 @@ Worst-case total: **112,896 bytes** into a 36,864-byte VBO resource and its DMA 
 
 ---
 
-### 1.3 VBO overflow in virgil-render (textured VBO)
+### 1.3 VBO overflow in virgil-render (textured VBO) [FIXED]
 
 **File:** `services/drivers/virgil-render/main.rs:1986-2003`
 **Severity:** CRITICAL
@@ -87,7 +87,7 @@ Image vertices (192 bytes) are written at offset 0 of the text VBO, and glyph ve
 
 ---
 
-### 1.4 Virgil glyph limit too low
+### 1.4 Virgil glyph limit too low [FIXED]
 
 **File:** `services/drivers/virgil-render/scene_walk.rs:32`
 **Severity:** CRITICAL
@@ -101,7 +101,7 @@ Image vertices (192 bytes) are written at offset 0 of the text VBO, and glyph ve
 
 ---
 
-### 1.5 `_fill_rule` ignored — EvenOdd treated as Winding
+### 1.5 `_fill_rule` ignored — EvenOdd treated as Winding [FIXED]
 
 **File:** `services/drivers/virgil-render/scene_walk.rs:843`
 **Severity:** CRITICAL
@@ -113,7 +113,7 @@ The `emit_path` function takes a `_fill_rule: FillRule` parameter but ignores it
 
 ---
 
-### 1.6 Triple buffer `publish()` fence ordering
+### 1.6 Triple buffer `publish()` fence ordering [FIXED]
 
 **File:** `libraries/scene/lib.rs:1316-1317`
 **Severity:** HIGH
@@ -136,7 +136,7 @@ Correct order: all data + generation committed, THEN release fence, THEN `CTRL_L
 
 ---
 
-### 1.7 `TripleReader::new` reads `CTRL_LATEST_BUF` without acquire fence before read
+### 1.7 `TripleReader::new` reads `CTRL_LATEST_BUF` without acquire fence before read [FIXED]
 
 **File:** `libraries/scene/lib.rs:1474`
 **Severity:** HIGH
@@ -148,7 +148,7 @@ The acquire fence comes AFTER reading `CTRL_LATEST_BUF`, not before. The initial
 
 ---
 
-### 1.8 NodeId bounds check missing in reader
+### 1.8 NodeId bounds check missing in reader [FIXED]
 
 **File:** `libraries/scene/lib.rs:860-867, 1045-1051`
 **Severity:** HIGH
@@ -162,7 +162,7 @@ In the reader case, this operates on shared memory written by another process. A
 
 ---
 
-### 1.9 `data_buf()` panics on corrupted `data_used`
+### 1.9 `data_buf()` panics on corrupted `data_used` [FIXED]
 
 **File:** `libraries/scene/lib.rs:1033-1037` (and 5 other instances)
 **Severity:** HIGH
@@ -178,7 +178,7 @@ let used = (self.data_used() as usize).min(DATA_BUFFER_SIZE);
 
 ---
 
-### 1.10 `doc_content()` unsound when DOC_BUF is null
+### 1.10 `doc_content()` unsound when DOC_BUF is null [FIXED]
 
 **File:** `services/core/main.rs:302-304`
 **Severity:** HIGH
@@ -192,7 +192,7 @@ let used = (self.data_used() as usize).min(DATA_BUFFER_SIZE);
 
 ## Tier 2: Fix Immediately After Merge
 
-### 2.1 Clock data buffer leak
+### 2.1 Clock data buffer leak [FIXED]
 
 **File:** `services/core/scene_state.rs:456-489`
 **Severity:** HIGH
@@ -204,7 +204,7 @@ Each clock tick appends ~64 bytes to the data buffer without compaction. After ~
 
 ---
 
-### 2.2 `update_selection` doesn't compact data buffer
+### 2.2 `update_selection` doesn't compact data buffer [FIXED]
 
 **File:** `services/core/scene_state.rs:553-608`
 **Severity:** HIGH
@@ -216,7 +216,7 @@ Each clock tick appends ~64 bytes to the data buffer without compaction. After ~
 
 ---
 
-### 2.3 `content_w` unsigned underflow
+### 2.3 `content_w` unsigned underflow [FIXED]
 
 **File:** `services/core/main.rs:266`
 **Severity:** HIGH
@@ -227,7 +227,7 @@ Each clock tick appends ~64 bytes to the data buffer without compaction. After ~
 
 ---
 
-### 2.4 No null check on `alloc_zeroed` in virgil-render
+### 2.4 No null check on `alloc_zeroed` in virgil-render [FIXED]
 
 **File:** `services/drivers/virgil-render/main.rs:1269-1273` (8+ instances)
 **Severity:** HIGH
@@ -238,7 +238,7 @@ Each clock tick appends ~64 bytes to the data buffer without compaction. After ~
 
 ---
 
-### 2.5 `byte_to_line_col` vs `byte_to_visual_line` wrap disagreement
+### 2.5 `byte_to_line_col` vs `byte_to_visual_line` wrap disagreement [FIXED]
 
 **File:** `services/core/scene_state.rs:917-938`, `services/core/main.rs:152-188`
 **Severity:** HIGH
@@ -249,7 +249,7 @@ Different wrapping rules — `byte_to_line_col` has `text[pos] != b'\n'` guard, 
 
 ---
 
-### 2.6 Image texture created at 32x32, no resize logic
+### 2.6 Image texture created at 32x32, no resize logic [FIXED]
 
 **File:** `services/drivers/virgil-render/main.rs:1524-1537`
 **Severity:** HIGH
@@ -260,7 +260,7 @@ DMA backing sized for 64x64 but GPU resource created at 32x32. Comment promises 
 
 ---
 
-### 2.7 Only first image in ImageBatch rendered
+### 2.7 Only first image in ImageBatch rendered [FIXED]
 
 **File:** `services/drivers/virgil-render/main.rs:1900-1973`
 **Severity:** HIGH
@@ -271,7 +271,7 @@ DMA backing sized for 64x64 but GPU resource created at 32x32. Comment promises 
 
 ---
 
-### 2.8 World transform dropped in offscreen rendering
+### 2.8 World transform dropped in offscreen rendering [FIXED]
 
 **File:** `libraries/render/scene_render.rs:935-945, 1007`
 **Severity:** HIGH
@@ -282,7 +282,7 @@ Children rendered into offscreen buffer (rounded-clip, group opacity) get `Affin
 
 ---
 
-### 2.9 Duplicated virtio-gpu 2D constants
+### 2.9 Duplicated virtio-gpu 2D constants [FIXED]
 
 **File:** `services/drivers/cpu-render/gpu.rs:19-28`
 **Severity:** HIGH
@@ -293,7 +293,7 @@ Same constants in `cpu-render/gpu.rs` and `protocol/virgl.rs`. Silent divergence
 
 ---
 
-### 2.10 `SurfacePool` handle invalidation after `swap_remove`
+### 2.10 `SurfacePool` handle invalidation after `swap_remove` [FIXED]
 
 **File:** `libraries/render/surface_pool.rs:168`
 **Severity:** HIGH
@@ -305,7 +305,7 @@ Same constants in `cpu-render/gpu.rs` and `protocol/virgl.rs`. Silent divergence
 
 ---
 
-### 2.11 Negative i32-to-u32 cast in shadow rendering
+### 2.11 Negative i32-to-u32 cast in shadow rendering [FIXED]
 
 **File:** `libraries/render/scene_render.rs:552-556`
 **Severity:** HIGH
@@ -317,7 +317,7 @@ When `sx` or `sy` is negative, `sx as u32` wraps to ~4 billion. `fill_rect` catc
 
 ---
 
-### 2.12 `sin_approx` (Bhaskara) wrong for negative angles
+### 2.12 `sin_approx` (Bhaskara) wrong for negative angles [INVALID — formula is correct]
 
 **File:** `services/core/scene_state.rs:1155-1173`
 **Severity:** MEDIUM
@@ -341,7 +341,7 @@ Selection rects are siblings AFTER cursor in the child list. Depending on render
 
 ---
 
-### 2.14 `add_child` allows cycles and self-parenting
+### 2.14 `add_child` allows cycles and self-parenting [FIXED]
 
 **File:** `libraries/scene/lib.rs:758-781`
 **Severity:** MEDIUM
@@ -403,7 +403,7 @@ Creates a `'static` slice from `FONT_DATA_PTR` / `FONT_DATA_LEN`. Missing SAFETY
 
 ---
 
-### 3.7 Add compile-time size guards to protocol payload structs
+### 3.7 Add compile-time size guards to protocol payload structs [FIXED]
 
 **File:** `libraries/protocol/lib.rs`
 
@@ -419,7 +419,7 @@ If `buf` is empty, `buf[0]` panics. Callers always pass adequate buffers, but in
 
 ---
 
-### 3.9 Hardcoded SHM address in echo program
+### 3.9 Hardcoded SHM address in echo program [FIXED]
 
 **File:** `system/user/echo/main.rs:14`
 
@@ -429,7 +429,7 @@ If `buf` is empty, `buf[0]` panics. Callers always pass adequate buffers, but in
 
 ## Tier 4: Dead Code & Cleanup
 
-### 4.1 Delete legacy `DoubleWriter`/`DoubleReader`
+### 4.1 Delete legacy `DoubleWriter`/`DoubleReader` [PARTIAL — tests migrated, lib code remains]
 
 **File:** `libraries/scene/lib.rs:1577-2011`
 
@@ -437,7 +437,7 @@ If `buf` is empty, `buf[0]` panics. Callers always pass adequate buffers, but in
 
 ---
 
-### 4.2 Dead `compositing.rs` and `cursor.rs` in render library
+### 4.2 Dead `compositing.rs` and `cursor.rs` in render library [FIXED]
 
 **Files:** `libraries/render/compositing.rs` (243 lines), `libraries/render/cursor.rs` (85 lines)
 
@@ -479,7 +479,7 @@ Identical implementations in 4 services.
 
 ---
 
-### 5.2 Import `scene::PATH_*` constants in virgil-render
+### 5.2 Import `scene::PATH_*` constants in virgil-render [FIXED]
 
 **File:** `services/drivers/virgil-render/scene_walk.rs:15-18`
 
@@ -495,7 +495,7 @@ Near-identical struct + `intersect` logic. Differ in coordinate type (i32 vs f32
 
 ---
 
-### 5.4 Duplicated `STEM_DARKENING_BOOST` and `STEM_DARKENING_LUT` constants
+### 5.4 Duplicated `STEM_DARKENING_BOOST` and `STEM_DARKENING_LUT` constants [FIXED]
 
 **Files:** `libraries/fonts/src/cache.rs:19-47`, `libraries/fonts/src/rasterize.rs:232-245`
 
@@ -519,7 +519,7 @@ Trivial forwarder to `protocol::channel_shm_va`. Other services call protocol di
 
 ---
 
-### 5.7 `Box::from_raw(alloc_zeroed(...))` pattern repeated 8+ times
+### 5.7 `Box::from_raw(alloc_zeroed(...))` pattern repeated 8+ times [FIXED — via 2.4 box_zeroed helper]
 
 **File:** `services/drivers/virgil-render/main.rs`
 
@@ -723,7 +723,7 @@ Should come from config message, not hardcoded in render service.
 
 ---
 
-### 7.11 Magic number 126 for depth/stencil format
+### 7.11 Magic number 126 for depth/stencil format [FIXED — constant added to protocol/virgl.rs]
 
 **File:** `services/drivers/virgil-render/main.rs:1345, 1507`
 
@@ -747,7 +747,7 @@ Comment mentions `Z32_FLOAT_S8X24_UINT` using 8 bytes/pixel; format value 126 sh
 
 ---
 
-### 7.14 `frame_count`/`tick_count` u32 overflow
+### 7.14 `frame_count`/`tick_count` u32 overflow [PARTIAL — cpu-render fixed, virgil-render pending]
 
 **Files:** `services/drivers/virgil-render/main.rs:2053`, `services/drivers/cpu-render/frame_scheduler.rs:110`
 
@@ -797,7 +797,7 @@ Clamping min to (0,0) causes coverage buffer offset mismatch for paths with cont
 
 ## Tier 8: Documentation
 
-### 8.1 CLAUDE.md visual testing references `gic-version=2`
+### 8.1 CLAUDE.md visual testing references `gic-version=2` [FIXED]
 
 **File:** `CLAUDE.md:234`
 
@@ -805,7 +805,7 @@ All QEMU scripts now use `gic-version=3`.
 
 ---
 
-### 8.2 Stale timer comments
+### 8.2 Stale timer comments [FIXED]
 
 **Files:** `kernel/timer.rs:150-151`, `kernel/main.rs:484`
 
@@ -813,7 +813,7 @@ Timer comment says "CNTP_TVAL" (physical) but code uses CNTV_TVAL_EL0 (virtual).
 
 ---
 
-### 8.3 Init font buffer comment wrong
+### 8.3 Init font buffer comment wrong [FIXED]
 
 **File:** `services/init/main.rs:878`
 
@@ -821,7 +821,7 @@ Comment says "1 MiB" but `font_order = 10` allocates 4 MiB.
 
 ---
 
-### 8.4 `MSG_FB_PA_CHUNK` comment says 7, struct holds 6
+### 8.4 `MSG_FB_PA_CHUNK` comment says 7, struct holds 6 [FIXED]
 
 **File:** `libraries/protocol/lib.rs:123-124`
 
@@ -829,7 +829,7 @@ Doc comment says "up to 7 physical addresses" but `FbPaChunk` has `pas: [u64; 6]
 
 ---
 
-### 8.5 Protocol module comments stale after cpu-render merge
+### 8.5 Protocol module comments stale after cpu-render merge [FIXED]
 
 **File:** `libraries/protocol/lib.rs:8-18`
 
@@ -837,7 +837,7 @@ Still references "compositor" and "GPU driver" as separate processes. "input dri
 
 ---
 
-### 8.6 Core comments reference GPU-specific format
+### 8.6 Core comments reference GPU-specific format [FIXED]
 
 **File:** `services/core/scene_state.rs:1086, 358, 1072`
 
@@ -845,7 +845,7 @@ Comments mention "VIRGL_FORMAT_B8G8R8A8_UNORM" and "GPU" — the format is BGRA 
 
 ---
 
-### 8.7 `_scene_va` and `_doc_va` misleading underscore prefix
+### 8.7 `_scene_va` and `_doc_va` misleading underscore prefix [FIXED]
 
 **File:** `services/init/main.rs:212, 225`
 
@@ -869,7 +869,7 @@ Adds timer register access latency to critical section. Acceptable for <= 8 core
 
 ---
 
-### 8.10 `process_start` return values silently discarded
+### 8.10 `process_start` return values silently discarded [FIXED]
 
 **File:** `services/init/main.rs:308, 622, 629, 635`
 
