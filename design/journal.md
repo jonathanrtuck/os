@@ -4,9 +4,55 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Virgl Task 7: Image Rendering + Path Groundwork (2026-03-18)
+
+**Status:** Image rendering complete and visually verified. Path stencil-then-cover code written but blocked on ANGLE.
+
+### What was done
+
+**Content::Image — full pipeline working:**
+
+- Core (`scene_state.rs`): generates test 32×32 BGRA gradient, pushes to data buffer, creates `Content::Image` node
+- Scene walk (`scene_walk.rs`): detects `Content::Image`, records screen position + DataRef in `ImageBatch`
+- Driver (`main.rs`): creates BGRA8 GPU texture (IMG_RESOURCE_ID=5), copies pixel data from scene graph data buffer → DMA → `TRANSFER_TO_HOST_3D`, renders as textured quad with `TEXTURED_FS` (full RGBA sampling)
+- Visually verified: gradient image renders correctly in QEMU at 2× Retina scale
+
+**Content::Path — code complete, stencil blocked:**
+
+- Core: generates test star (5-pointed, LineTo only) and rounded rectangle (CubicTo curves)
+- Scene walk: full path command parser (MoveTo, LineTo, CubicTo, Close), de Casteljau cubic flattening, triangle fan generation from centroid, covering quad for stencil test pass
+- Protocol: stencil DSA states (write: front INCR_WRAP / back DECR_WRAP; test: NOTEQUAL with ZERO reset), no-color blend, stencil ref command, stencil clear
+- Driver: stencil pipeline setup separated into own SUBMIT_3D (can fail independently); `stencil_available` flag gates path rendering
+
+**Stencil blocked on virglrenderer/ANGLE:** `VIRGL_BIND_DEPTH_STENCIL` (0x100) rejected for PIPE_TEXTURE_2D resources. Error: "Buffer bind flags require the buffer target." This is an ANGLE Metal backend limitation — it doesn't expose depth/stencil as a sampler-view-compatible texture target through virglrenderer's resource creation path. The stencil-then-cover decision (2026-03-17) is architecturally correct but needs either real hardware or a CPU-rasterized fallback.
+
+### Key bugs found and fixed
+
+1. **Stack overflow from path flattening buffer:** `MAX_POINTS=2048` array (16 KiB) on a 16 KiB stack. Reduced to 256 (2 KiB). The 16 KiB stack constraint continues to be the #1 cause of crashes in userspace.
+
+2. **Context poisoning from failed stencil commands:** A failed `CREATE_OBJECT` (stencil surface) inside `SUBMIT_3D` sets a context error flag, causing ALL subsequent commands in the same batch to be rejected — including critical framebuffer/viewport setup. Fix: moved stencil setup to a separate `SUBMIT_3D` call that can fail independently.
+
+3. **VBO aliasing with deferred command submission:** Image vertices and glyph vertices both wrote to `TEXT_VB_RESOURCE_ID`. With two `submit_3d` calls per frame, the glyph upload overwrote image vertices before the GPU could draw them. This caused the image to flicker — appearing and disappearing every 1-5 seconds (whenever QEMU's display thread scanned out between submissions). Fix: pack image vertices at offset 0 and glyph vertices at offset 192 in the same VBO, upload once, and draw both with different `cmd_set_vertex_buffers` offsets in a single `SUBMIT_3D`.
+
+4. **Virgl bind flag divergence:** `VIRGL_BIND_DEPTH_STENCIL = 0x100` (bit 8), not `PIPE_BIND_DEPTH_STENCIL = 0x04` (bit 2). Most other bind flags match between virgl_hw.h and Gallium p_defines.h (RENDER_TARGET=0x02, SAMPLER_VIEW=0x08, VERTEX_BUFFER=0x10).
+
+### Architecture note: single SUBMIT_3D per frame
+
+The render loop now uses exactly one `SUBMIT_3D` per frame containing all draw commands (backgrounds, images, glyphs). VBO aliasing is solved by packing different vertex arrays at different offsets within the same buffer resource, then binding with the appropriate byte offset before each draw call. This eliminates intermediate-state flickering caused by QEMU's display thread scanning out between submissions.
+
+### Path rendering: fallback options
+
+The stencil-then-cover approach is blocked on the virgl/ANGLE stack but the code is ready for real hardware. For the prototype, two fallback options:
+
+1. **CPU-rasterized path → texture upload:** Rasterize paths to R8 coverage bitmap on CPU (the render library has a working scanline rasterizer), upload as texture, composite with GLYPH_FS. Same approach as glyph rendering but with path-derived coverage.
+
+2. **Triangle rendering without stencil:** For convex paths (rectangles, simple shapes), direct triangle rendering works without stencil. Only concave/self-intersecting paths need stencil winding.
+
+---
+
 ## GPU Path Rendering: Stencil-Then-Cover vs Compute (2026-03-17)
 
-**Status:** research complete, approach settled, implementation deferred (core doesn't emit paths yet).
+**Status:** research complete, approach settled, stencil-then-cover blocked on ANGLE (see 2026-03-18 entry above).
 
 ### The question
 
@@ -19,6 +65,7 @@ How should the GPU render filled vector paths (cubic Bezier contours)? Three app
 **B. Tessellate → triangles.** Flatten Bezier curves to line segments, triangulate the filled polygon, draw as colored triangles. Problem: correct triangulation of arbitrary concave, self-intersecting polygons with holes is a hard computational geometry problem (ear clipping is O(n²), constrained Delaunay is complex). Doesn't handle winding rules naturally.
 
 **C. Stencil-then-cover.** The dominant production technique — used by NanoVG, Pathfinder, Skia (Ganesh/Graphite), Chrome, Firefox (WebRender), Direct2D. Algorithm:
+
 1. Triangle fan from an arbitrary interior point into the **stencil buffer** (increment/decrement tracks winding count) — overlapping triangles are fine
 2. Covering quad reads stencil buffer — non-zero stencil (or odd for even-odd rule) gets filled
 
@@ -29,15 +76,17 @@ Handles self-intersections, complex winding rules, and concave shapes correctly 
 ### Decision: Stencil-then-cover (C) for current driver, compute (D) for future hardware drivers
 
 **Stencil-then-cover** is the right approach for virgil-render:
+
 - Works within ES 3.0 (our ceiling — ANGLE/Metal hardcodes `kMaxSupportedGLVersion = gl::Version(3, 0)`)
 - virglrenderer supports stencil buffers (standard Gallium3D)
 - Battle-tested in production by every major renderer
 - Implementation: depth/stencil surface (one-time), two passes per path
 
 **Compute is blocked** on the current QEMU stack:
+
 - Requires ES 3.1 (compute shaders) + SSBOs
 - ANGLE's Metal backend explicitly caps at ES 3.0, sets `maxPerStageStorageBuffers = 0`
-- virglrenderer's protocol *does* support compute (`VIRGL_CCMD_LAUNCH_GRID`, `SET_SHADER_BUFFERS`, `SET_SHADER_IMAGES`, `MEMORY_BARRIER`, `PIPE_SHADER_COMPUTE`), but the host-side GL doesn't
+- virglrenderer's protocol _does_ support compute (`VIRGL_CCMD_LAUNCH_GRID`, `SET_SHADER_BUFFERS`, `SET_SHADER_IMAGES`, `MEMORY_BARRIER`, `PIPE_SHADER_COMPUTE`), but the host-side GL doesn't
 
 **Compute becomes viable on real hardware:** When a native GPU driver replaces virglrenderer (no ANGLE translation layer), every modern GPU (Apple M-series, AMD RDNA, Intel Arc, Arm Mali) has compute as a fundamental capability. The thick driver architecture makes this a driver-internal choice — same scene graph interface, different rendering strategy.
 

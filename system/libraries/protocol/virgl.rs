@@ -53,6 +53,7 @@ pub const VIRGL_CCMD_SET_CONSTANT_BUFFER: u32 = 12;
 pub const VIRGL_CCMD_SET_SCISSOR_STATE: u32 = 15;
 pub const VIRGL_CCMD_BLIT: u32 = 16;
 pub const VIRGL_CCMD_BIND_SAMPLER_STATES: u32 = 18;
+pub const VIRGL_CCMD_SET_STENCIL_REF: u32 = 19;
 pub const VIRGL_CCMD_SET_UNIFORM_BUFFER: u32 = 27;
 pub const VIRGL_CCMD_BIND_SHADER: u32 = 31;
 
@@ -91,13 +92,34 @@ pub const PIPE_BLENDFACTOR_ZERO: u32 = 0x11;
 pub const PIPE_BLENDFACTOR_INV_SRC_ALPHA: u32 = 0x13;
 pub const PIPE_BLEND_ADD: u32 = 0;
 
+pub const PIPE_FUNC_NEVER: u32 = 0;
+pub const PIPE_FUNC_LESS: u32 = 1;
+pub const PIPE_FUNC_EQUAL: u32 = 2;
+pub const PIPE_FUNC_LEQUAL: u32 = 3;
+pub const PIPE_FUNC_GREATER: u32 = 4;
+pub const PIPE_FUNC_NOTEQUAL: u32 = 5;
+pub const PIPE_FUNC_GEQUAL: u32 = 6;
 pub const PIPE_FUNC_ALWAYS: u32 = 7;
 
 pub const PIPE_MASK_RGBA: u32 = 0x0F;
 
+pub const PIPE_STENCIL_OP_KEEP: u32 = 0;
+pub const PIPE_STENCIL_OP_ZERO: u32 = 1;
+pub const PIPE_STENCIL_OP_REPLACE: u32 = 2;
+pub const PIPE_STENCIL_OP_INCR_WRAP: u32 = 5;
+pub const PIPE_STENCIL_OP_DECR_WRAP: u32 = 6;
+
+/// virgl_hw.h bind flags. VIRGL_BIND_DEPTH_STENCIL = (1<<0) = 0x01.
+/// NOT 0x100 (that's VIRGL_BIND_COMMAND_ARGS, a buffer-only flag).
+/// NOT 0x04 (bit 2 is unused in virgl's bind enum).
+/// Happens to match Gallium's PIPE_BIND_DEPTH_STENCIL = 0x01.
+pub const VIRGL_BIND_DEPTH_STENCIL: u32 = 0x01;
+
 // virgl_hw.h format values — NOT the same as Mesa pipe_format!
 // Always verify against virglrenderer/src/virgl_hw.h.
 pub const VIRGL_FORMAT_B8G8R8A8_UNORM: u32 = 1;
+pub const VIRGL_FORMAT_Z24_UNORM_S8_UINT: u32 = 19; // Intel Mac only (not Apple Silicon!)
+pub const VIRGL_FORMAT_S8_UINT: u32 = 23; // Pure stencil-8, works on Apple Silicon
 pub const VIRGL_FORMAT_R8_UNORM: u32 = 64;
 pub const VIRGL_FORMAT_R32G32_FLOAT: u32 = 29;
 pub const VIRGL_FORMAT_R32G32B32A32_FLOAT: u32 = 31;
@@ -303,6 +325,116 @@ impl CommandBuffer {
         self.push(0); // S1: stencil[0] (disabled)
         self.push(0); // S2: stencil[1] (disabled)
         self.push(0); // S3: alpha ref + alpha func
+    }
+
+    /// Encode a single stencil face state dword.
+    ///
+    /// Bit layout (from virglrenderer `vrend_decode_ds_state`):
+    ///   bit 0:      enabled
+    ///   bits 1-3:   func (PIPE_FUNC_*)
+    ///   bits 4-6:   fail_op (PIPE_STENCIL_OP_*)
+    ///   bits 7-9:   zpass_op
+    ///   bits 10-12: zfail_op
+    ///   bits 13-20: valuemask
+    ///   bits 21-28: writemask
+    fn stencil_face(
+        func: u32,
+        fail_op: u32,
+        zpass_op: u32,
+        zfail_op: u32,
+        valuemask: u32,
+        writemask: u32,
+    ) -> u32 {
+        1 // enabled
+        | ((func & 7) << 1)
+        | ((fail_op & 7) << 4)
+        | ((zpass_op & 7) << 7)
+        | ((zfail_op & 7) << 10)
+        | ((valuemask & 0xFF) << 13)
+        | ((writemask & 0xFF) << 21)
+    }
+
+    /// Create a DSA state for stencil-then-cover: stencil write pass.
+    ///
+    /// Front faces increment, back faces decrement (non-zero winding).
+    /// No depth test, no alpha test. Stencil always passes.
+    pub fn cmd_create_dsa_stencil_write(&mut self, handle: u32) {
+        self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
+        self.push(handle);
+        self.push(PIPE_FUNC_ALWAYS << 2); // S0: depth disabled, func=ALWAYS
+                                          // S1: stencil[0] (front) — always pass, increment-wrap on pass
+        self.push(Self::stencil_face(
+            PIPE_FUNC_ALWAYS,
+            PIPE_STENCIL_OP_KEEP,
+            PIPE_STENCIL_OP_INCR_WRAP,
+            PIPE_STENCIL_OP_KEEP,
+            0xFF,
+            0xFF,
+        ));
+        // S2: stencil[1] (back) — always pass, decrement-wrap on pass
+        self.push(Self::stencil_face(
+            PIPE_FUNC_ALWAYS,
+            PIPE_STENCIL_OP_KEEP,
+            PIPE_STENCIL_OP_DECR_WRAP,
+            PIPE_STENCIL_OP_KEEP,
+            0xFF,
+            0xFF,
+        ));
+        self.push(0); // S3: alpha ref + alpha func
+    }
+
+    /// Create a DSA state for stencil-then-cover: cover pass.
+    ///
+    /// Passes where stencil != 0, resets stencil to 0 on pass.
+    pub fn cmd_create_dsa_stencil_test(&mut self, handle: u32) {
+        self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
+        self.push(handle);
+        self.push(PIPE_FUNC_ALWAYS << 2); // S0: depth disabled
+                                          // S1: stencil[0] (front) — pass if != 0, zero on pass
+        let face = Self::stencil_face(
+            PIPE_FUNC_NOTEQUAL,
+            PIPE_STENCIL_OP_KEEP,
+            PIPE_STENCIL_OP_ZERO,
+            PIPE_STENCIL_OP_KEEP,
+            0xFF,
+            0xFF,
+        );
+        self.push(face); // S1: front
+        self.push(face); // S2: back (same)
+        self.push(0); // S3: alpha
+    }
+
+    /// Create a blend state with color writes disabled (for stencil-only pass).
+    pub fn cmd_create_blend_no_color(&mut self, handle: u32) {
+        // Same structure as cmd_create_blend but colormask = 0.
+        self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_BLEND, 10));
+        self.push(handle);
+        self.push(0); // S0: independent_blend_enable=0, logicop_enable=0
+                      // RT0: blend disabled, colormask = 0 (no color write)
+        self.push(0);
+        for _ in 0..7 {
+            self.push(0);
+        }
+    }
+
+    /// VIRGL_CCMD_SET_STENCIL_REF — set stencil reference values.
+    pub fn cmd_set_stencil_ref(&mut self, front: u32, back: u32) {
+        self.push(virgl_cmd0(VIRGL_CCMD_SET_STENCIL_REF, 0, 2));
+        self.push(front);
+        self.push(back);
+    }
+
+    /// VIRGL_CCMD_CLEAR — clear stencil buffer.
+    pub fn cmd_clear_stencil(&mut self) {
+        self.push(virgl_cmd0(VIRGL_CCMD_CLEAR, 0, 8));
+        self.push(PIPE_CLEAR_STENCIL);
+        self.push(0); // color r
+        self.push(0); // color g
+        self.push(0); // color b
+        self.push(0); // color a
+        self.push(0); // depth lo
+        self.push(0); // depth hi
+        self.push(0); // stencil value = 0
     }
 
     /// VIRGL_CCMD_CREATE_OBJECT — create a rasterizer state.

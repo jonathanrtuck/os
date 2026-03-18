@@ -30,12 +30,11 @@ use protocol::{
     virgl::{
         self, PIPE_BUFFER, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
         PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_R8_UNORM,
-        VIRGL_OBJECT_BLEND,
-        VIRGL_OBJECT_DSA, VIRGL_OBJECT_RASTERIZER, VIRGL_OBJECT_VERTEX_ELEMENTS,
-        VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE, VIRTIO_GPU_CMD_CTX_CREATE,
-        VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
-        VIRTIO_GPU_CMD_RESOURCE_CREATE_3D, VIRTIO_GPU_CMD_RESOURCE_FLUSH,
-        VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_SUBMIT_3D,
+        VIRGL_FORMAT_S8_UINT, VIRGL_OBJECT_BLEND, VIRGL_OBJECT_DSA,
+        VIRGL_OBJECT_RASTERIZER, VIRGL_OBJECT_VERTEX_ELEMENTS, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+        VIRTIO_GPU_CMD_CTX_CREATE, VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
+        VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
+        VIRTIO_GPU_CMD_RESOURCE_FLUSH, VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_SUBMIT_3D,
         VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D, VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
         VIRTIO_GPU_RESP_OK_NODATA,
     },
@@ -82,12 +81,25 @@ const HANDLE_VS_TEXTURED: u32 = 9;
 const HANDLE_FS_GLYPH: u32 = 10;
 const HANDLE_SAMPLER: u32 = 11;
 const HANDLE_SAMPLER_VIEW: u32 = 12;
+/// Image pipeline handles.
+const HANDLE_FS_IMAGE: u32 = 13;
+const HANDLE_SAMPLER_VIEW_IMG: u32 = 14;
+/// Stencil-then-cover pipeline handles.
+const HANDLE_DSA_STENCIL_WRITE: u32 = 15;
+const HANDLE_DSA_STENCIL_TEST: u32 = 16;
+const HANDLE_BLEND_NO_COLOR: u32 = 17;
+const HANDLE_STENCIL_SURFACE: u32 = 18;
+
 /// Resource ID for the vertex buffer (PIPE_BUFFER).
 const VB_RESOURCE_ID: u32 = 2;
 /// Resource ID for the glyph atlas texture (R8_UNORM).
 const ATLAS_RESOURCE_ID: u32 = 3;
 /// Resource ID for the textured vertex buffer (PIPE_BUFFER).
 const TEXT_VB_RESOURCE_ID: u32 = 4;
+/// Resource ID for the image texture (B8G8R8A8_UNORM).
+const IMG_RESOURCE_ID: u32 = 5;
+/// Resource ID for the depth/stencil surface (Z24_S8).
+const STENCIL_RESOURCE_ID: u32 = 6;
 
 // ── Wire-format structs ──────────────────────────────────────────────────
 
@@ -1245,18 +1257,18 @@ fn submit_3d(
     ok
 }
 
+/// Set up the GPU pipeline. Returns true if stencil-then-cover is available.
 fn setup_pipeline(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
     irq_handle: u8,
     width: u32,
     height: u32,
-) {
+) -> bool {
     // Heap-allocate the CommandBuffer (16 KiB — same size as user stack).
     let mut cmdbuf: Box<virgl::CommandBuffer> = unsafe {
-        let ptr = alloc::alloc::alloc_zeroed(
-            alloc::alloc::Layout::new::<virgl::CommandBuffer>(),
-        ) as *mut virgl::CommandBuffer;
+        let ptr = alloc::alloc::alloc_zeroed(alloc::alloc::Layout::new::<virgl::CommandBuffer>())
+            as *mut virgl::CommandBuffer;
         Box::from_raw(ptr)
     };
 
@@ -1286,6 +1298,14 @@ fn setup_pipeline(
         VIRGL_FORMAT_R8_UNORM,
     );
 
+    // Image pipeline: full-color fragment shader (TEXTURED_FS) + sampler view.
+    cmdbuf.cmd_create_shader_text(HANDLE_FS_IMAGE, PIPE_SHADER_FRAGMENT, shaders::TEXTURED_FS);
+    cmdbuf.cmd_create_sampler_view(
+        HANDLE_SAMPLER_VIEW_IMG,
+        IMG_RESOURCE_ID,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+    );
+
     // Bind color pipeline state (initial state for background rendering).
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
     cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
@@ -1294,7 +1314,7 @@ fn setup_pipeline(
     cmdbuf.cmd_bind_shader(HANDLE_VS, PIPE_SHADER_VERTEX);
     cmdbuf.cmd_bind_shader(HANDLE_FS, PIPE_SHADER_FRAGMENT);
 
-    // Set framebuffer, viewport, and vertex buffer binding.
+    // Set framebuffer (color only — stencil attached separately if available).
     cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, 0);
     cmdbuf.cmd_set_viewport(width as f32, height as f32);
     cmdbuf.cmd_set_vertex_buffers(scene_walk::VERTEX_STRIDE, 0, VB_RESOURCE_ID);
@@ -1313,6 +1333,16 @@ fn setup_pipeline(
         sys::exit();
     }
     sys::print(b"     pipeline setup complete\n");
+
+    // ── Stencil-then-cover: deferred ──
+    // Resource creation works (bind=0x01, Z32_FLOAT format 18).
+    // Surface creation works.
+    // DSA stencil state causes CREATE_OBJECT:22 — encoding mismatch with
+    // what virglrenderer expects. Poisons context, breaks all rendering.
+    // Needs virglrenderer source to compare DSA binary encoding.
+    // Path rendering disabled until resolved.
+    sys::print(b"     stencil-then-cover: deferred (DSA encoding TBD)\n");
+    false
 }
 
 // ── Phase E: Clear screen + flush ────────────────────────────────────────
@@ -1326,9 +1356,8 @@ fn clear_screen(
 ) {
     // Clear to OS theme dark background.
     let mut cmdbuf: Box<virgl::CommandBuffer> = unsafe {
-        let ptr = alloc::alloc::alloc_zeroed(
-            alloc::alloc::Layout::new::<virgl::CommandBuffer>(),
-        ) as *mut virgl::CommandBuffer;
+        let ptr = alloc::alloc::alloc_zeroed(alloc::alloc::Layout::new::<virgl::CommandBuffer>())
+            as *mut virgl::CommandBuffer;
         Box::from_raw(ptr)
     };
     cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
@@ -1453,8 +1482,28 @@ pub extern "C" fn _start() -> ! {
     );
     sys::print(b"     textured VBO created\n");
 
+    // Stencil resource creation deferred (see setup_pipeline comments).
+
+    // Image texture will be created lazily on first image frame.
+    // Pre-allocate a DMA buffer for the max image size we support (64×64 BGRA).
+    let max_img_bytes: u32 = 64 * 64 * 4; // 16 KiB for a 64×64 BGRA image.
+    resource_create_3d_generic(
+        &device,
+        &mut vq,
+        irq_handle,
+        IMG_RESOURCE_ID,
+        PIPE_TEXTURE_2D,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+        virgl::PIPE_BIND_SAMPLER_VIEW,
+        32, // Initial width — will be recreated if image is larger.
+        32, // Initial height.
+    );
+    let (img_dma_va, _img_dma_pa, _img_dma_order) =
+        attach_and_ctx_resource(&device, &mut vq, irq_handle, IMG_RESOURCE_ID, max_img_bytes);
+    sys::print(b"     image texture created (32x32)\n");
+
     // ── Phase D: GPU pipeline setup ──────────────────────────────────────
-    setup_pipeline(&device, &mut vq, irq_handle, width, height);
+    let stencil_available = setup_pipeline(&device, &mut vq, irq_handle, width, height);
 
     // ── Phase E: Clear screen + flush ────────────────────────────────────
     clear_screen(&device, &mut vq, irq_handle, width, height);
@@ -1557,8 +1606,7 @@ pub extern "C" fn _start() -> ! {
         // Heap-allocate rasterization scratch space (~39 KiB).
         let mut scratch: Box<fonts::rasterize::RasterScratch> = unsafe {
             let layout = alloc::alloc::Layout::new::<fonts::rasterize::RasterScratch>();
-            let ptr =
-                alloc::alloc::alloc_zeroed(layout) as *mut fonts::rasterize::RasterScratch;
+            let ptr = alloc::alloc::alloc_zeroed(layout) as *mut fonts::rasterize::RasterScratch;
             if ptr.is_null() {
                 sys::print(b"virgil-render: scratch alloc failed\n");
                 sys::exit();
@@ -1588,8 +1636,7 @@ pub extern "C" fn _start() -> ! {
                 &mono_axes,
             ) {
                 if m.width > 0 && m.height > 0 {
-                    let coverage =
-                        &raster_buf[..(m.width * m.height) as usize];
+                    let coverage = &raster_buf[..(m.width * m.height) as usize];
                     glyph_atlas.pack_glyph(
                         sg.glyph_id,
                         m.width,
@@ -1634,21 +1681,29 @@ pub extern "C" fn _start() -> ! {
     // Heap-allocate batches and command buffer directly (all are zero-valid).
     // Cannot use Box::new() — TexturedBatch (~96 KiB) exceeds 16 KiB stack.
     let mut batch: Box<scene_walk::QuadBatch> = unsafe {
-        let ptr = alloc::alloc::alloc_zeroed(
-            alloc::alloc::Layout::new::<scene_walk::QuadBatch>(),
-        ) as *mut scene_walk::QuadBatch;
+        let ptr = alloc::alloc::alloc_zeroed(alloc::alloc::Layout::new::<scene_walk::QuadBatch>())
+            as *mut scene_walk::QuadBatch;
         Box::from_raw(ptr)
     };
     let mut text_batch: Box<scene_walk::TexturedBatch> = unsafe {
-        let ptr = alloc::alloc::alloc_zeroed(
-            alloc::alloc::Layout::new::<scene_walk::TexturedBatch>(),
-        ) as *mut scene_walk::TexturedBatch;
+        let ptr =
+            alloc::alloc::alloc_zeroed(alloc::alloc::Layout::new::<scene_walk::TexturedBatch>())
+                as *mut scene_walk::TexturedBatch;
+        Box::from_raw(ptr)
+    };
+    let mut image_batch: Box<scene_walk::ImageBatch> = unsafe {
+        let ptr = alloc::alloc::alloc_zeroed(alloc::alloc::Layout::new::<scene_walk::ImageBatch>())
+            as *mut scene_walk::ImageBatch;
+        Box::from_raw(ptr)
+    };
+    let mut path_batch: Box<scene_walk::PathBatch> = unsafe {
+        let ptr = alloc::alloc::alloc_zeroed(alloc::alloc::Layout::new::<scene_walk::PathBatch>())
+            as *mut scene_walk::PathBatch;
         Box::from_raw(ptr)
     };
     let mut cmdbuf: Box<virgl::CommandBuffer> = unsafe {
-        let ptr = alloc::alloc::alloc_zeroed(
-            alloc::alloc::Layout::new::<virgl::CommandBuffer>(),
-        ) as *mut virgl::CommandBuffer;
+        let ptr = alloc::alloc::alloc_zeroed(alloc::alloc::Layout::new::<virgl::CommandBuffer>())
+            as *mut virgl::CommandBuffer;
         Box::from_raw(ptr)
     };
 
@@ -1691,6 +1746,8 @@ pub extern "C" fn _start() -> ! {
             height,
             &mut batch,
             &mut text_batch,
+            &mut image_batch,
+            &mut path_batch,
             data_buf,
             &glyph_atlas,
             font_ascent,
@@ -1699,37 +1756,78 @@ pub extern "C" fn _start() -> ! {
         if frame_count < 3 {
             sys::print(b"     frame ");
             print_u32(frame_count);
-            sys::print(b": bg_verts=");
+            sys::print(b": bg=");
             print_u32(batch.vertex_count);
-            sys::print(b" text_verts=");
+            sys::print(b" img=");
+            print_u32(image_batch.count as u32);
+            sys::print(b" path=");
+            print_u32(path_batch.fan_vertex_count);
+            sys::print(b" text=");
             print_u32(text_batch.vertex_count);
             sys::print(b"\n");
         }
 
-        // ── Pass 1: Upload + draw colored backgrounds ────────────────────
+        // ── Color VBO: pack backgrounds + path fan + path cover at offsets ─
         let color_data = batch.as_vertex_data();
         let color_dwords = color_data.len();
         let color_bytes = color_dwords * 4;
 
-        if batch.vertex_count > 0 && color_bytes > 0 {
-            // SAFETY: vbo_va is valid DMA memory of MAX_VERTEX_BYTES size.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    color_data.as_ptr(),
-                    vbo_va as *mut u32,
-                    color_dwords,
-                );
+        let has_paths = path_batch.fan_vertex_count > 0 && stencil_available;
+        let fan_data = path_batch.as_fan_data();
+        let fan_dwords = fan_data.len();
+        let fan_bytes = fan_dwords * 4;
+        let cover_data = path_batch.as_cover_data();
+        let cover_dwords = cover_data.len();
+        let cover_bytes = cover_dwords * 4;
+
+        let fan_vbo_offset = color_bytes;
+        let cover_vbo_offset = fan_vbo_offset + fan_bytes;
+        let total_color_bytes = cover_vbo_offset + cover_bytes;
+
+        // Upload all color vertex data in one transfer.
+        if total_color_bytes > 0 {
+            if color_bytes > 0 {
+                // SAFETY: vbo_va is valid DMA of MAX_VERTEX_BYTES size.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        color_data.as_ptr(),
+                        vbo_va as *mut u32,
+                        color_dwords,
+                    );
+                }
             }
-            transfer_vbo_to_host(&device, &mut vq, irq_handle, color_bytes as u32);
+            if has_paths && fan_bytes > 0 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        fan_data.as_ptr(),
+                        (vbo_va + fan_vbo_offset) as *mut u32,
+                        fan_dwords,
+                    );
+                }
+            }
+            if has_paths && cover_bytes > 0 {
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        cover_data.as_ptr(),
+                        (vbo_va + cover_vbo_offset) as *mut u32,
+                        cover_dwords,
+                    );
+                }
+            }
+            transfer_vbo_to_host(&device, &mut vq, irq_handle, total_color_bytes as u32);
         }
 
-        // Build GPU commands.
+        // Build GPU commands (single cmdbuf for entire frame).
         cmdbuf.clear();
         cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
+        if has_paths {
+            cmdbuf.cmd_clear_stencil();
+        }
 
-        // Draw backgrounds with color pipeline (already bound from setup).
+        // Draw backgrounds (color pipeline, VBO offset 0).
         if batch.vertex_count > 0 {
-            // Ensure color pipeline is active (re-bind in case text pipeline was last).
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
             cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE);
             cmdbuf.cmd_bind_shader(HANDLE_VS, PIPE_SHADER_VERTEX);
             cmdbuf.cmd_bind_shader(HANDLE_FS, PIPE_SHADER_FRAGMENT);
@@ -1737,40 +1835,177 @@ pub extern "C" fn _start() -> ! {
             cmdbuf.cmd_draw_vbo(0, batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
         }
 
-        // ── Pass 2: Upload + draw textured glyphs ────────────────────────
+        // Stencil-then-cover paths (VBO offsets for fan + cover).
+        if has_paths {
+            // Pass A: stencil write (fan triangles, no color).
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND_NO_COLOR);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_WRITE);
+            cmdbuf.cmd_set_vertex_buffers(
+                scene_walk::VERTEX_STRIDE,
+                fan_vbo_offset as u32,
+                VB_RESOURCE_ID,
+            );
+            cmdbuf.cmd_set_stencil_ref(0, 0);
+            cmdbuf.cmd_draw_vbo(0, path_batch.fan_vertex_count, PIPE_PRIM_TRIANGLES, false);
+
+            // Pass B: stencil test + cover (colored quads where stencil != 0).
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_TEST);
+            cmdbuf.cmd_set_vertex_buffers(
+                scene_walk::VERTEX_STRIDE,
+                cover_vbo_offset as u32,
+                VB_RESOURCE_ID,
+            );
+            cmdbuf.cmd_draw_vbo(0, path_batch.cover_vertex_count, PIPE_PRIM_TRIANGLES, false);
+
+            // Restore normal DSA.
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
+        }
+
+        // ── Pass 3: Upload + draw images (TEXTURED_FS) ──────────────────
+        if image_batch.count > 0 {
+            // For each image, upload pixel data and draw a textured quad.
+            // Currently supports one image (first in the batch).
+            if let Some(img) = image_batch.get(0) {
+                let img_pixels = img.src_width as u32 * img.src_height as u32 * 4;
+                let src_offset = img.data_offset as usize;
+                let src_end = src_offset + img_pixels as usize;
+
+                if src_end <= data_buf.len() && img_pixels <= max_img_bytes {
+                    // Copy image pixel data to DMA backing.
+                    // SAFETY: img_dma_va is valid DMA of max_img_bytes.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            data_buf[src_offset..src_end].as_ptr(),
+                            img_dma_va as *mut u8,
+                            img_pixels as usize,
+                        );
+                    }
+                    // Transfer image texture to GPU.
+                    transfer_texture_to_host(
+                        &device,
+                        &mut vq,
+                        irq_handle,
+                        IMG_RESOURCE_ID,
+                        img.src_width as u32,
+                        img.src_height as u32,
+                        img.src_width as u32 * 4, // BGRA stride
+                    );
+
+                    // Build textured quad vertices for the image.
+                    // Reuse text VBO with same textured vertex format.
+                    let vw = width as f32;
+                    let vh = height as f32;
+                    let x0 = img.x / vw * 2.0 - 1.0;
+                    let y0 = 1.0 - img.y / vh * 2.0;
+                    let x1 = (img.x + img.w) / vw * 2.0 - 1.0;
+                    let y1 = 1.0 - (img.y + img.h) / vh * 2.0;
+
+                    // 6 vertices × 8 floats = 48 dwords.
+                    let mut img_verts = [0u32; 48];
+                    let white = 1.0f32.to_bits();
+                    // pos(x,y) + texcoord(u,v) + color(r,g,b,a)
+                    let verts: [(f32, f32, f32, f32); 6] = [
+                        (x0, y0, 0.0, 0.0), // top-left
+                        (x0, y1, 0.0, 1.0), // bottom-left
+                        (x1, y0, 1.0, 0.0), // top-right
+                        (x1, y0, 1.0, 0.0), // top-right
+                        (x0, y1, 0.0, 1.0), // bottom-left
+                        (x1, y1, 1.0, 1.0), // bottom-right
+                    ];
+                    for (i, &(px, py, u, v)) in verts.iter().enumerate() {
+                        let base = i * 8;
+                        img_verts[base] = px.to_bits();
+                        img_verts[base + 1] = py.to_bits();
+                        img_verts[base + 2] = u.to_bits();
+                        img_verts[base + 3] = v.to_bits();
+                        img_verts[base + 4] = white; // r
+                        img_verts[base + 5] = white; // g
+                        img_verts[base + 6] = white; // b
+                        img_verts[base + 7] = white; // a
+                    }
+
+                    // Write image vertices at offset 0 in text VBO DMA memory.
+                    // (Draw commands are emitted in Pass 4 alongside glyphs.)
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            img_verts.as_ptr(),
+                            text_vbo_va as *mut u32,
+                            48,
+                        );
+                    }
+                }
+            }
+        }
+
+        // ── Pass 4: Upload image + glyph vertices to text VBO at different
+        // offsets, then draw both in one submission.
+        //
+        // Layout: [image vertices (48 dwords)] [glyph vertices (N dwords)]
+        // Image draw uses VBO offset 0; glyph draw uses VBO offset after images.
         let text_data = text_batch.as_vertex_data();
         let text_dwords = text_data.len();
         let text_bytes = text_dwords * 4;
 
-        if text_batch.vertex_count > 0 && text_bytes > 0 {
-            // SAFETY: text_vbo_va is valid DMA of MAX_TEXTURED_VERTEX_BYTES.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    text_data.as_ptr(),
-                    text_vbo_va as *mut u32,
-                    text_dwords,
-                );
+        // Image vertex data: 48 dwords = 192 bytes (one quad, 6 verts × 8 floats).
+        // Align glyph offset to textured vertex stride for safety.
+        let img_vbo_bytes: usize = 48 * 4; // 192 bytes
+        let glyph_vbo_offset = img_vbo_bytes; // glyphs start right after
+
+        // Upload: image vertices at offset 0, glyph vertices at img_vbo_bytes.
+        let total_upload = img_vbo_bytes + text_bytes as usize;
+
+        if total_upload > 0 {
+            // Copy glyph data after image data in DMA buffer.
+            if text_bytes > 0 {
+                // SAFETY: text_vbo_va is valid DMA of MAX_TEXTURED_VERTEX_BYTES.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        text_data.as_ptr(),
+                        (text_vbo_va + img_vbo_bytes) as *mut u32,
+                        text_dwords,
+                    );
+                }
             }
+            // Image vertices were already written at text_vbo_va + 0 in Pass 3.
+            // (If no image, the 192 bytes are just zeros — harmless, not drawn.)
+
             transfer_buffer_to_host(
                 &device,
                 &mut vq,
                 irq_handle,
                 TEXT_VB_RESOURCE_ID,
-                text_bytes as u32,
+                total_upload as u32,
             );
 
-            // Switch to textured pipeline.
-            cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
-            cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
-            cmdbuf.cmd_bind_shader(HANDLE_FS_GLYPH, PIPE_SHADER_FRAGMENT);
-            cmdbuf.cmd_set_vertex_buffers(
-                scene_walk::TEXTURED_VERTEX_STRIDE,
-                0,
-                TEXT_VB_RESOURCE_ID,
-            );
-            cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
-            cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER_VIEW);
-            cmdbuf.cmd_draw_vbo(0, text_batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
+            // Draw images first (if any), then glyphs.
+            if image_batch.count > 0 {
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+                cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+                cmdbuf.cmd_bind_shader(HANDLE_FS_IMAGE, PIPE_SHADER_FRAGMENT);
+                cmdbuf.cmd_set_vertex_buffers(
+                    scene_walk::TEXTURED_VERTEX_STRIDE,
+                    0, // offset 0 in VBO
+                    TEXT_VB_RESOURCE_ID,
+                );
+                cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+                cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER_VIEW_IMG);
+                cmdbuf.cmd_draw_vbo(0, 6, PIPE_PRIM_TRIANGLES, false);
+            }
+
+            if text_batch.vertex_count > 0 {
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+                cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+                cmdbuf.cmd_bind_shader(HANDLE_FS_GLYPH, PIPE_SHADER_FRAGMENT);
+                cmdbuf.cmd_set_vertex_buffers(
+                    scene_walk::TEXTURED_VERTEX_STRIDE,
+                    glyph_vbo_offset as u32, // glyphs start after image data
+                    TEXT_VB_RESOURCE_ID,
+                );
+                cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+                cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER_VIEW);
+                cmdbuf.cmd_draw_vbo(0, text_batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
+            }
         }
 
         if cmdbuf.overflowed() {
