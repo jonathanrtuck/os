@@ -1046,10 +1046,7 @@ impl<'a> SceneReader<'a> {
     }
     /// Get a reference to a node by ID.
     pub fn node(&self, id: NodeId) -> &Node {
-        debug_assert!(
-            (id as usize) < MAX_NODES,
-            "NodeId out of bounds in reader"
-        );
+        debug_assert!((id as usize) < MAX_NODES, "NodeId out of bounds in reader");
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
         // SAFETY: `id` is a valid NodeId (bounded by node_count <= MAX_NODES),
@@ -1125,38 +1122,51 @@ const TRIPLE_CONTROL_OFFSET: usize = 3 * SCENE_SIZE;
 /// Sentinel value for `reader_buf` meaning no reader is active.
 const NO_READER: u32 = 0xFF;
 
-/// Read a u32 field from the control region at the given byte offset
-/// within the control region. Uses volatile to prevent reordering.
+/// Read a u32 field from the control region using atomic load.
 fn triple_read_ctrl(buf: &[u8], field_offset: usize) -> u32 {
     // SAFETY: TRIPLE_CONTROL_OFFSET + field_offset is within the
     // TRIPLE_SCENE_SIZE buffer. The field is a u32 at a 4-byte aligned
-    // offset (TRIPLE_CONTROL_OFFSET = 3 * SCENE_SIZE, a multiple of 4).
+    // offset. AtomicU32 is the correct model for cross-process shared
+    // memory — volatile alone is insufficient under LLVM's memory model.
     unsafe {
-        core::ptr::read_volatile(
-            buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *const u32
-        )
+        let ptr = buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+        core::sync::atomic::AtomicU32::from_ptr(ptr).load(core::sync::atomic::Ordering::Relaxed)
     }
 }
 
-/// Write a u32 field to the control region at the given byte offset
-/// within the control region. Uses volatile to prevent reordering.
+/// Read a u32 field from the control region with acquire ordering.
+/// Pairs with the writer's release store in `publish()`.
+fn triple_read_ctrl_acquire(buf: &[u8], field_offset: usize) -> u32 {
+    // SAFETY: Same alignment and bounds reasoning as triple_read_ctrl.
+    unsafe {
+        let ptr = buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+        core::sync::atomic::AtomicU32::from_ptr(ptr).load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Write a u32 field to the control region using atomic store.
 fn triple_write_ctrl(buf: &[u8], field_offset: usize, value: u32) {
-    // SAFETY: TRIPLE_CONTROL_OFFSET + field_offset is within the
-    // TRIPLE_SCENE_SIZE buffer. We cast away const because the control
-    // region is conceptually shared mutable state accessed via volatile
-    // (same pattern as the double-buffer's reader_done_gen).
+    // SAFETY: Same alignment and bounds reasoning as triple_read_ctrl.
+    // AtomicU32 allows mutation through shared references — this is its
+    // designed purpose, unlike the previous raw volatile write through &[u8].
     unsafe {
-        core::ptr::write_volatile(
-            buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32,
-            value,
-        )
+        let ptr = buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+        core::sync::atomic::AtomicU32::from_ptr(ptr)
+            .store(value, core::sync::atomic::Ordering::Relaxed)
     }
 }
 
-/// Write a u32 field to the control region with a preceding release fence.
+/// Write a u32 field to the control region with release ordering.
+/// Ensures all prior writes are visible before this store is observed.
 fn triple_write_ctrl_release(buf: &[u8], field_offset: usize, value: u32) {
-    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-    triple_write_ctrl(buf, field_offset, value);
+    // SAFETY: Same as triple_write_ctrl. Release ordering ensures all
+    // prior writes (scene data, node fields) are visible before this
+    // store is observed by an Acquire load in the reader.
+    unsafe {
+        let ptr = buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+        core::sync::atomic::AtomicU32::from_ptr(ptr)
+            .store(value, core::sync::atomic::Ordering::Release)
+    }
 }
 
 // Control region field offsets.
@@ -1479,13 +1489,10 @@ impl<'a> TripleReader<'a> {
     pub fn new(buf: &'a [u8]) -> Self {
         assert!(buf.len() >= TRIPLE_SCENE_SIZE);
 
-        // Read the latest buffer index published by the writer.
-        let latest = triple_read_ctrl(buf, CTRL_LATEST_BUF);
-
-        // Acquire fence: pairs with the writer's release fence in publish().
+        // Acquire load: pairs with the writer's release store in publish().
         // Ensures all scene data written before publish() is visible to us
         // before we access the buffer contents.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
+        let latest = triple_read_ctrl_acquire(buf, CTRL_LATEST_BUF);
 
         // Claim this buffer so the writer won't recycle it.
         triple_write_ctrl(buf, CTRL_READER_BUF, latest);
@@ -1577,6 +1584,8 @@ impl<'a> TripleReader<'a> {
 
     /// Signal that the reader has finished reading. Releases the buffer
     /// back to the free pool so the writer can acquire it.
+    ///
+    /// Note: `Drop` handles cleanup automatically if this is not called.
     pub fn finish_read(&self, gen: u32) {
         // Write reader_done_gen with release fence so writer sees it.
         triple_write_ctrl_release(self.buf, CTRL_READER_DONE_GEN, gen);
@@ -1585,67 +1594,14 @@ impl<'a> TripleReader<'a> {
     }
 }
 
-// ── Legacy double-buffered scene graph (deprecated) ─────────────────
-
-/// Byte offset of the reader state region, placed after both scene buffers.
-/// Contains `reader_done_gen: u32` — the generation the reader last finished
-/// reading. The writer checks this before overwriting the back buffer.
-pub const READER_STATE_OFFSET: usize = 2 * SCENE_SIZE;
-
-/// Total size for a double-buffered scene graph: two full scene buffers
-/// side by side, plus an 8-byte reader state region (4-byte generation +
-/// 4-byte padding for alignment).
-///
-/// **Deprecated:** Use `TRIPLE_SCENE_SIZE` instead.
-pub const DOUBLE_SCENE_SIZE: usize = 2 * SCENE_SIZE + 8;
-
-/// Mutable access to a double-buffered scene graph.
-///
-/// The OS service uses this to write scenes and publish them. It can
-/// also read the current front buffer (e.g. for diffing).
-pub struct DoubleWriter<'a> {
-    buf: &'a mut [u8],
-}
-/// Read-only access to a double-buffered scene graph.
-///
-/// The compositor uses this when reading from shared memory written by
-/// the OS service. Always reads the front buffer (higher generation).
-///
-/// The front buffer offset and generation are captured at construction
-/// time so that all reads within a single `DoubleReader` instance are
-/// consistent — they all reference the same physical buffer even if the
-/// writer swaps between method calls.
-pub struct DoubleReader<'a> {
-    buf: &'a [u8],
-    /// Cached byte offset of the front buffer (0 or SCENE_SIZE).
-    front_off: usize,
-    /// Cached generation of the front buffer.
-    front_gen: u32,
-}
-
-/// Return the byte offset of the back (lower-gen) buffer.
-fn back_offset_of(buf: &[u8]) -> usize {
-    let g0 = read_generation(buf, 0);
-    let g1 = read_generation(buf, SCENE_SIZE);
-
-    if g0 <= g1 {
-        0
-    } else {
-        SCENE_SIZE
+impl Drop for TripleReader<'_> {
+    fn drop(&mut self) {
+        // Release the reader buffer claim so the writer can reuse it.
+        triple_write_ctrl_release(self.buf, CTRL_READER_DONE_GEN, self.read_gen);
+        triple_write_ctrl(self.buf, CTRL_READER_BUF, NO_READER);
     }
 }
-/// Return the byte offset and generation of the front (higher-gen) buffer.
-/// When both generations are equal, buffer 0 is the front (arbitrary tiebreak).
-fn front_of(buf: &[u8]) -> (usize, u32) {
-    let g0 = read_generation(buf, 0);
-    let g1 = read_generation(buf, SCENE_SIZE);
 
-    if g1 > g0 {
-        (SCENE_SIZE, g1)
-    } else {
-        (0, g0)
-    }
-}
 /// Read the generation counter from a scene buffer at the given byte
 /// offset within the parent buffer. Uses volatile to prevent reordering
 /// past the read (important for cross-process shared memory).
@@ -1661,364 +1617,6 @@ fn write_generation(buf: &mut [u8], offset: usize, value: u32) {
 
     // SAFETY: SceneHeader starts at `offset`; generation is the first u32.
     unsafe { core::ptr::write_volatile(buf.as_mut_ptr().add(offset) as *mut u32, value) }
-}
-
-/// Read the `reader_done_gen` field from the reader state region.
-/// This is the generation the reader last finished reading. Uses volatile
-/// to prevent the compiler from reordering or caching the read.
-fn read_reader_done_gen(buf: &[u8]) -> u32 {
-    // SAFETY: READER_STATE_OFFSET is within the DOUBLE_SCENE_SIZE buffer
-    // (READER_STATE_OFFSET + 4 <= DOUBLE_SCENE_SIZE). The field is a u32
-    // aligned to a 4-byte boundary (READER_STATE_OFFSET = 2 * SCENE_SIZE
-    // which is a multiple of 4).
-    unsafe { core::ptr::read_volatile(buf.as_ptr().add(READER_STATE_OFFSET) as *const u32) }
-}
-
-/// Write the `reader_done_gen` field in the reader state region.
-/// Called by the reader after finishing a read cycle. Uses volatile +
-/// release fence to ensure the value is visible to the writer.
-fn write_reader_done_gen(buf: &[u8], value: u32) {
-    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-
-    // SAFETY: READER_STATE_OFFSET is within the DOUBLE_SCENE_SIZE buffer.
-    // The field is a u32 at a 4-byte aligned offset. We cast away const
-    // because the reader state region is conceptually "owned" by the reader
-    // even though the buffer is shared (reader writes this field, writer
-    // reads it). In the real system, this is shared memory with volatile
-    // access; the &[u8] immutability is a Rust-side convenience.
-    unsafe { core::ptr::write_volatile(buf.as_ptr().add(READER_STATE_OFFSET) as *mut u32, value) }
-}
-
-impl<'a> DoubleWriter<'a> {
-    pub fn new(buf: &'a mut [u8]) -> Self {
-        assert!(buf.len() >= DOUBLE_SCENE_SIZE);
-
-        // Initialize both scene buffer headers.
-        {
-            let (b0, rest) = buf.split_at_mut(SCENE_SIZE);
-            let _ = SceneWriter::new(b0);
-            let _ = SceneWriter::new(&mut rest[..SCENE_SIZE]);
-        }
-
-        // Initialize reader_done_gen to u32::MAX ("no reader connected").
-        // This allows the writer to freely swap buffers before a reader
-        // calls finish_read(). Once a reader starts acknowledging frames,
-        // the actual generation value constrains the writer.
-        // SAFETY: READER_STATE_OFFSET is within the buffer (asserted above).
-        unsafe {
-            core::ptr::write_volatile(
-                buf.as_mut_ptr().add(READER_STATE_OFFSET) as *mut u32,
-                u32::MAX,
-            );
-        }
-
-        Self { buf }
-    }
-
-    /// Get a `SceneWriter` for the back buffer (lower generation).
-    /// The caller writes the scene, then calls `swap()` to publish.
-    pub fn back(&mut self) -> SceneWriter<'_> {
-        let off = back_offset_of(self.buf);
-
-        SceneWriter::from_existing(&mut self.buf[off..off + SCENE_SIZE])
-    }
-    /// Copy the front buffer's node array and data buffer to the back
-    /// buffer, preserving the back buffer's generation counter. Resets
-    /// the back buffer's change list to empty. After this call, `back()`
-    /// returns a writer whose scene matches the current front — the
-    /// caller can then mutate individual nodes and call `swap()`.
-    ///
-    /// Returns `true` if the copy succeeded, `false` if the reader may
-    /// still be reading the back buffer (the reader has not yet called
-    /// `finish_read()` for the back buffer's generation). When `false`
-    /// is returned, the back buffer is not modified — the caller should
-    /// skip the update or fall back to a full rebuild.
-    pub fn copy_front_to_back(&mut self) -> bool {
-        let front_off = front_of(self.buf).0;
-        let back_off = back_offset_of(self.buf);
-
-        // Save back buffer's generation before overwriting.
-        let back_gen = read_generation(self.buf, back_off);
-
-        // Check if the reader has finished reading the back buffer.
-        // The reader writes `reader_done_gen` after completing a read.
-        // If reader_done_gen >= back_gen, the reader is done with the
-        // back buffer (it has since read a generation at or past the
-        // one stored in the back buffer). Safe to overwrite.
-        //
-        // If reader_done_gen < back_gen, the reader may still be
-        // reading the back buffer — return false to prevent torn reads.
-        let reader_done = read_reader_done_gen(self.buf);
-
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-
-        if back_gen > 0 && reader_done < back_gen {
-            return false;
-        }
-
-        // Read front header to determine how much to copy.
-        // SAFETY: front_off is 0 or SCENE_SIZE, within the DOUBLE_SCENE_SIZE
-        // buffer. SceneHeader is repr(C) at the start of each scene buffer.
-        let front_hdr =
-            unsafe { core::ptr::read(self.buf.as_ptr().add(front_off) as *const SceneHeader) };
-
-        let node_count = front_hdr.node_count;
-        let data_used = front_hdr.data_used;
-
-        // Copy node array (only the live nodes).
-        let node_bytes = node_count as usize * NODE_SIZE;
-
-        if node_bytes > 0 {
-            // SAFETY: Both front_off and back_off are valid scene buffer
-            // offsets (0 or SCENE_SIZE). NODES_OFFSET + node_bytes is within
-            // SCENE_SIZE (bounded by MAX_NODES * NODE_SIZE). src and dst do
-            // not overlap because front_off != back_off (one is 0, the other
-            // is SCENE_SIZE). Using copy_nonoverlapping for performance.
-            unsafe {
-                let src = self.buf.as_ptr().add(front_off + NODES_OFFSET);
-                let dst = self.buf.as_mut_ptr().add(back_off + NODES_OFFSET);
-
-                core::ptr::copy_nonoverlapping(src, dst, node_bytes);
-            }
-        }
-
-        // Copy data buffer (only the used portion).
-        let data_bytes = data_used as usize;
-
-        if data_bytes > 0 {
-            // SAFETY: Same reasoning — DATA_OFFSET + data_bytes is within
-            // SCENE_SIZE (bounded by DATA_BUFFER_SIZE). Non-overlapping
-            // because front and back buffers are SCENE_SIZE apart.
-            unsafe {
-                let src = self.buf.as_ptr().add(front_off + DATA_OFFSET);
-                let dst = self.buf.as_mut_ptr().add(back_off + DATA_OFFSET);
-
-                core::ptr::copy_nonoverlapping(src, dst, data_bytes);
-            }
-        }
-
-        // Write back header: copy front's metadata but preserve generation
-        // and reset change list.
-        // SAFETY: back_off is a valid scene buffer offset. SceneHeader is
-        // repr(C) at offset 0 of each scene buffer. Exclusive &mut borrow
-        // on self prevents aliasing.
-        let back_hdr = unsafe { &mut *(self.buf.as_mut_ptr().add(back_off) as *mut SceneHeader) };
-
-        back_hdr.node_count = node_count;
-        back_hdr.root = front_hdr.root;
-        back_hdr.data_used = data_used;
-        back_hdr.change_count = 0;
-        back_hdr.changed_nodes = [NULL; CHANGE_LIST_CAPACITY];
-
-        // Restore back buffer's generation (do NOT copy front's generation).
-        write_generation(self.buf, back_off, back_gen);
-
-        true
-    }
-    /// Wrap a previously initialized double buffer without resetting.
-    pub fn from_existing(buf: &'a mut [u8]) -> Self {
-        assert!(buf.len() >= DOUBLE_SCENE_SIZE);
-
-        Self { buf }
-    }
-    /// Resolve a `DataRef` against the current front buffer.
-    pub fn front_data(&self, dref: DataRef) -> &[u8] {
-        let (off, _) = front_of(self.buf);
-        // SAFETY: `off` is 0 or SCENE_SIZE (from `front_of`), both within
-        // the DOUBLE_SCENE_SIZE buffer. SceneHeader is repr(C) at the start
-        // of each scene buffer, so the cast is correctly aligned and in-bounds.
-        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
-        let start = off + DATA_OFFSET + dref.offset as usize;
-        let end = start + dref.length as usize;
-
-        if end <= self.buf.len() && dref.offset + dref.length <= hdr.data_used {
-            &self.buf[start..end]
-        } else {
-            &[]
-        }
-    }
-    /// Data buffer slice from the current front buffer.
-    pub fn front_data_buf(&self) -> &[u8] {
-        let (off, _) = front_of(self.buf);
-        // SAFETY: Same as front_data — `off` is a valid scene buffer offset,
-        // SceneHeader is repr(C) at the start of each scene buffer.
-        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
-        let used = hdr.data_used as usize;
-
-        &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
-    }
-    /// Generation counter of the current front buffer.
-    pub fn front_generation(&self) -> u32 {
-        let (_, g) = front_of(self.buf);
-
-        g
-    }
-    /// Node slice from the current front buffer.
-    pub fn front_nodes(&self) -> &[Node] {
-        let (off, _) = front_of(self.buf);
-        // SAFETY: `off` is a valid scene buffer offset. SceneHeader is repr(C)
-        // at the buffer start; reading node_count is in-bounds.
-        let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
-        let count = hdr.node_count as usize;
-        // SAFETY: NODES_OFFSET is within each SCENE_SIZE buffer. Node is repr(C)
-        // with size NODE_SIZE. `count` is bounded by MAX_NODES (checked at alloc).
-        let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
-
-        // SAFETY: `ptr` points to `count` contiguous Node-sized entries within
-        // the buffer. The slice borrows `self`, preventing concurrent mutation.
-        unsafe { core::slice::from_raw_parts(ptr, count) }
-    }
-    /// Interpret a DataRef from the front buffer as ShapedGlyph array.
-    pub fn front_shaped_glyphs(&self, dref: DataRef, glyph_count: u16) -> &[ShapedGlyph] {
-        let bytes = self.front_data(dref);
-        let glyph_size = core::mem::size_of::<ShapedGlyph>();
-
-        if bytes.is_empty() || bytes.len() < glyph_size {
-            return &[];
-        }
-
-        let available = bytes.len() / glyph_size;
-        let count = (glyph_count as usize).min(available);
-
-        // SAFETY: ShapedGlyph is #[repr(C)] with no padding. push_shaped_glyphs
-        // aligns the data buffer to ShapedGlyph alignment. `count` is bounded by
-        // available bytes. The slice borrows `self`, preventing concurrent mutation.
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
-    }
-    /// Publish the back buffer as the new front by setting its generation
-    /// above the current front's. A release fence ensures all scene data
-    /// written via `back()` is visible before the generation update.
-    pub fn swap(&mut self) {
-        let g0 = read_generation(self.buf, 0);
-        let g1 = read_generation(self.buf, SCENE_SIZE);
-        // The back buffer is the one with the lower generation (same
-        // tiebreak as back()). Set its generation above the front's.
-        let (back_off, max_gen) = if g0 <= g1 { (0, g1) } else { (SCENE_SIZE, g0) };
-
-        write_generation(self.buf, back_off, max_gen.wrapping_add(1));
-    }
-    /// Simulate the reader acknowledging a generation. Writes the
-    /// `reader_done_gen` field as if the reader called `finish_read()`.
-    ///
-    /// This is useful in single-address-space tests where the same buffer
-    /// is accessed by both writer and reader logic without requiring a
-    /// separate `DoubleReader` borrow.
-    pub fn ack_reader(&mut self, gen: u32) {
-        write_reader_done_gen(self.buf, gen);
-    }
-}
-impl<'a> DoubleReader<'a> {
-    pub fn new(buf: &'a [u8]) -> Self {
-        assert!(buf.len() >= DOUBLE_SCENE_SIZE);
-
-        // Capture the front buffer offset and generation once. All subsequent
-        // reads use this cached offset to ensure consistency even if the writer
-        // swaps buffers between our method calls.
-        let (front_off, front_gen) = front_of(buf);
-
-        // Acquire fence: ensures all node/data writes from the writer
-        // (which preceded the writer's release fence in swap/write_generation)
-        // are visible to us after this point.
-        core::sync::atomic::fence(core::sync::atomic::Ordering::Acquire);
-
-        Self {
-            buf,
-            front_off,
-            front_gen,
-        }
-    }
-
-    fn header(&self) -> &SceneHeader {
-        // SAFETY: front_off is 0 or SCENE_SIZE (from front_of), within the
-        // DOUBLE_SCENE_SIZE buffer. SceneHeader is repr(C) at the start of
-        // each scene buffer.
-        unsafe { &*(self.buf.as_ptr().add(self.front_off) as *const SceneHeader) }
-    }
-
-    /// Resolve a `DataRef` against the current front buffer.
-    pub fn front_data(&self, dref: DataRef) -> &[u8] {
-        let off = self.front_off;
-        let hdr = self.header();
-        let start = off + DATA_OFFSET + dref.offset as usize;
-        let end = start + dref.length as usize;
-
-        if end <= self.buf.len() && dref.offset + dref.length <= hdr.data_used {
-            &self.buf[start..end]
-        } else {
-            &[]
-        }
-    }
-    /// Data buffer slice from the current front buffer.
-    pub fn front_data_buf(&self) -> &[u8] {
-        let off = self.front_off;
-        let hdr = self.header();
-        let used = hdr.data_used as usize;
-
-        &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
-    }
-    /// Generation counter of the front buffer (captured at construction).
-    pub fn front_generation(&self) -> u32 {
-        self.front_gen
-    }
-    /// Node slice from the current front buffer.
-    pub fn front_nodes(&self) -> &[Node] {
-        let off = self.front_off;
-        let hdr = self.header();
-        let count = hdr.node_count as usize;
-        // SAFETY: NODES_OFFSET is within each SCENE_SIZE buffer. Node is repr(C)
-        // with size NODE_SIZE. `count` is bounded by MAX_NODES (checked at alloc).
-        let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
-
-        // SAFETY: `ptr` points to `count` contiguous Node-sized entries within
-        // the buffer. The slice borrows `self`, preventing concurrent mutation.
-        unsafe { core::slice::from_raw_parts(ptr, count) }
-    }
-    /// Interpret a DataRef from the front buffer as ShapedGlyph array.
-    pub fn front_shaped_glyphs(&self, dref: DataRef, glyph_count: u16) -> &[ShapedGlyph] {
-        let bytes = self.front_data(dref);
-        let glyph_size = core::mem::size_of::<ShapedGlyph>();
-
-        if bytes.is_empty() || bytes.len() < glyph_size {
-            return &[];
-        }
-
-        let available = bytes.len() / glyph_size;
-        let count = (glyph_count as usize).min(available);
-
-        // SAFETY: ShapedGlyph is #[repr(C)] with no padding. push_shaped_glyphs
-        // aligns the data buffer to ShapedGlyph alignment. `count` is bounded by
-        // available bytes. The acquire fence at construction ensures visibility.
-        unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
-    }
-    /// Returns the change list from the front buffer, or `None` if the
-    /// FULL_REPAINT sentinel is set (overflow or full rebuild).
-    pub fn change_list(&self) -> Option<&[NodeId]> {
-        let hdr = self.header();
-
-        if hdr.change_count == FULL_REPAINT {
-            return None;
-        }
-
-        let count = (hdr.change_count as usize).min(CHANGE_LIST_CAPACITY);
-
-        Some(&hdr.changed_nodes[..count])
-    }
-    /// Returns `true` if the front buffer's change list indicates a full
-    /// repaint is needed (FULL_REPAINT sentinel or clear() was called).
-    pub fn is_full_repaint(&self) -> bool {
-        let hdr = self.header();
-
-        hdr.change_count == FULL_REPAINT
-    }
-    /// Signal that the reader has finished reading the frame with the
-    /// given generation. The writer checks this value before overwriting
-    /// the back buffer (which may be the buffer the reader was reading).
-    ///
-    /// Call this after reading all nodes and data for the current frame.
-    /// The generation should be the value returned by `front_generation()`.
-    pub fn finish_read(&self, gen: u32) {
-        write_reader_done_gen(self.buf, gen);
-    }
 }
 
 // ── Scene diffing ───────────────────────────────────────────────────

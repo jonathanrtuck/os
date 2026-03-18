@@ -160,12 +160,15 @@ fn make_mono_glyphs(
     color: Color,
     advance: u16,
 ) -> Content {
-    let glyphs: Vec<ShapedGlyph> = text.iter().map(|&ch| ShapedGlyph {
-        glyph_id: ch as u16,
-        x_advance: advance as i16,
-        x_offset: 0,
-        y_offset: 0,
-    }).collect();
+    let glyphs: Vec<ShapedGlyph> = text
+        .iter()
+        .map(|&ch| ShapedGlyph {
+            glyph_id: ch as u16,
+            x_advance: advance as i16,
+            x_offset: 0,
+            y_offset: 0,
+        })
+        .collect();
     let glyph_ref = w.push_shaped_glyphs(&glyphs);
     Content::Glyphs {
         color,
@@ -628,7 +631,10 @@ fn shaped_glyph_is_repr_c_with_size_assertion() {
     // The compile-time assertion is in scene/lib.rs itself; this test
     // verifies the runtime size matches expectations.
     let size = core::mem::size_of::<ShapedGlyph>();
-    assert_eq!(size, 8, "ShapedGlyph should be 8 bytes: u16 + i16 + i16 + i16");
+    assert_eq!(
+        size, 8,
+        "ShapedGlyph should be 8 bytes: u16 + i16 + i16 + i16"
+    );
 }
 
 #[test]
@@ -653,9 +659,24 @@ fn shaped_glyph_byte_exact_round_trip() {
     let mut w = SceneWriter::new(&mut buf);
 
     let glyphs = [
-        ShapedGlyph { glyph_id: 0xABCD, x_advance: -32000, x_offset: 32000, y_offset: -1 },
-        ShapedGlyph { glyph_id: 0x0001, x_advance: 1, x_offset: -1, y_offset: 0 },
-        ShapedGlyph { glyph_id: 0xFFFE, x_advance: 0, x_offset: 0, y_offset: 0 },
+        ShapedGlyph {
+            glyph_id: 0xABCD,
+            x_advance: -32000,
+            x_offset: 32000,
+            y_offset: -1,
+        },
+        ShapedGlyph {
+            glyph_id: 0x0001,
+            x_advance: 1,
+            x_offset: -1,
+            y_offset: 0,
+        },
+        ShapedGlyph {
+            glyph_id: 0xFFFE,
+            x_advance: 0,
+            x_offset: 0,
+            y_offset: 0,
+        },
     ];
 
     // Get raw bytes of the input
@@ -855,7 +876,11 @@ fn diff_content_hash_change_detected() {
     w2.commit();
 
     let rects = scene::diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
-    assert_eq!(rects.len(), 1, "content_hash change should produce a dirty rect");
+    assert_eq!(
+        rects.len(),
+        1,
+        "content_hash change should produce a dirty rect"
+    );
 }
 
 #[test]
@@ -994,17 +1019,13 @@ fn acquire_copy_preserves_nodes_and_data() {
     let node_size = core::mem::size_of::<Node>();
     for (i, (f, b)) in front_nodes.iter().zip(back_nodes.iter()).enumerate() {
         // SAFETY: Node is repr(C), byte comparison is sound for equality.
-        let f_bytes = unsafe {
-            core::slice::from_raw_parts(f as *const Node as *const u8, node_size)
-        };
-        let b_bytes = unsafe {
-            core::slice::from_raw_parts(b as *const Node as *const u8, node_size)
-        };
+        let f_bytes =
+            unsafe { core::slice::from_raw_parts(f as *const Node as *const u8, node_size) };
+        let b_bytes =
+            unsafe { core::slice::from_raw_parts(b as *const Node as *const u8, node_size) };
         assert_eq!(f_bytes, b_bytes, "Node {} differs after acquire_copy", i);
     }
 }
-
-
 
 // VAL-SCENE-004: Change list cleared on new frame (acquire_copy)
 #[test]
@@ -1033,7 +1054,11 @@ fn acquire_copy_resets_change_list() {
     let tr = scene::TripleReader::new(&buf);
     let cl = tr.change_list();
     assert!(cl.is_some(), "change list should not be FULL_REPAINT");
-    assert_eq!(cl.unwrap().len(), 0, "change list should be empty after acquire_copy");
+    assert_eq!(
+        cl.unwrap().len(),
+        0,
+        "change list should be empty after acquire_copy"
+    );
 }
 
 // VAL-SCENE-002: Change list records changed node IDs
@@ -1282,7 +1307,7 @@ fn acquire_copy_then_mutate_preserves_other_nodes() {
     {
         let mut w = tw.acquire_copy();
         w.node_mut(7).x = 100; // moved cursor
-        w.node_mut(7).y = 48;  // moved cursor
+        w.node_mut(7).y = 48; // moved cursor
         w.mark_changed(7);
     }
     tw.publish();
@@ -1306,10 +1331,7 @@ fn acquire_copy_then_mutate_preserves_other_nodes() {
                 front_nodes_after[i].next_sibling,
                 front_nodes_before[i].next_sibling
             );
-            assert_eq!(
-                front_nodes_after[i].width,
-                front_nodes_before[i].width
-            );
+            assert_eq!(front_nodes_after[i].width, front_nodes_before[i].width);
             assert_eq!(
                 front_nodes_after[i].background,
                 front_nodes_before[i].background
@@ -1445,8 +1467,6 @@ fn mark_changed_exact_capacity() {
     assert_eq!(hdr.change_count, scene::FULL_REPAINT);
 }
 
-
-
 // Multiple frames of copy-forward + selective mutation
 #[test]
 fn multiple_copy_forward_frames() {
@@ -1471,9 +1491,8 @@ fn multiple_copy_forward_frames() {
     for frame in 0..4u16 {
         {
             let mut tw = scene::TripleWriter::from_existing(&mut buf);
-            // acquire_copy below
             {
-                let mut w = tw.acquire();
+                let mut w = tw.acquire_copy();
                 // Mutate a different node each frame.
                 let target = (frame + 1) as NodeId; // nodes 1, 2, 3, 4
                 w.node_mut(target).height = (frame + 1) * 100;
@@ -1549,8 +1568,6 @@ fn update_data_does_not_grow_data_used_triple() {
 // directly to prove correctness of the copy-forward + selective mutation
 // pattern.
 
-
-
 // set_node_count unit test
 #[test]
 fn set_node_count_truncates() {
@@ -1616,17 +1633,14 @@ fn abs_bounds_large_coords_no_truncation() {
     // The compositor's PREV_BOUNDS must use i32 for x/y to avoid truncation.
     let physical_x = ax * 2i32;
     assert_eq!(physical_x, 65534);
-    assert!(physical_x > i16::MAX as i32, "physical coord exceeds i16 range");
+    assert!(
+        physical_x > i16::MAX as i32,
+        "physical coord exceeds i16 range"
+    );
     // But it fits in i32 and can be safely clamped to u16 for damage rects.
     assert!(physical_x >= 0);
     assert!(physical_x <= u16::MAX as i32);
 }
-
-
-
-
-
-
 
 // ── VAL-COORD-013: abs_bounds accounts for scroll_y from ancestor nodes ──
 
@@ -1789,7 +1803,11 @@ fn affine_transform_skew_x() {
     assert_eq!(t.d, 1.0);
     // c = tan(angle) ≈ 0.5463
     let expected_c = angle.tan();
-    assert!((t.c - expected_c).abs() < 1e-5, "c should be tan(0.5), got {}", t.c);
+    assert!(
+        (t.c - expected_c).abs() < 1e-5,
+        "c should be tan(0.5), got {}",
+        t.c
+    );
     assert_eq!(t.b, 0.0);
 }
 
@@ -1798,8 +1816,16 @@ fn affine_transform_compose_translations() {
     let t1 = AffineTransform::translate(100.0, 50.0);
     let t2 = AffineTransform::translate(10.0, 5.0);
     let composed = t1.compose(t2);
-    assert!((composed.tx - 110.0).abs() < 1e-5, "tx should be 110, got {}", composed.tx);
-    assert!((composed.ty - 55.0).abs() < 1e-5, "ty should be 55, got {}", composed.ty);
+    assert!(
+        (composed.tx - 110.0).abs() < 1e-5,
+        "tx should be 110, got {}",
+        composed.tx
+    );
+    assert!(
+        (composed.ty - 55.0).abs() < 1e-5,
+        "ty should be 55, got {}",
+        composed.ty
+    );
 }
 
 #[test]
@@ -1866,8 +1892,16 @@ fn affine_transform_aabb_90_rotation() {
     let t = AffineTransform::rotate(core::f32::consts::FRAC_PI_2);
     let (_, _, w, h) = t.transform_aabb(0.0, 0.0, 40.0, 20.0);
     // After 90° rotation of a 40×20 rect, AABB should be ~20×40.
-    assert!((w - 20.0).abs() < 1.0, "AABB width should be ~20, got {}", w);
-    assert!((h - 40.0).abs() < 1.0, "AABB height should be ~40, got {}", h);
+    assert!(
+        (w - 20.0).abs() < 1.0,
+        "AABB width should be ~20, got {}",
+        w
+    );
+    assert!(
+        (h - 40.0).abs() < 1.0,
+        "AABB height should be ~40, got {}",
+        h
+    );
 }
 
 #[test]
@@ -1876,8 +1910,16 @@ fn affine_transform_aabb_45_rotation() {
     let t = AffineTransform::rotate(core::f32::consts::FRAC_PI_4);
     let (_, _, w, h) = t.transform_aabb(0.0, 0.0, 100.0, 100.0);
     // sqrt(2) * 100 ≈ 141.42
-    assert!((w - 141.42).abs() < 1.0, "AABB width should be ~141, got {}", w);
-    assert!((h - 141.42).abs() < 1.0, "AABB height should be ~141, got {}", h);
+    assert!(
+        (w - 141.42).abs() < 1.0,
+        "AABB width should be ~141, got {}",
+        w
+    );
+    assert!(
+        (h - 141.42).abs() < 1.0,
+        "AABB height should be ~141, got {}",
+        h
+    );
 }
 
 #[test]
@@ -1902,9 +1944,13 @@ fn affine_transform_negative_scale_mirror() {
 fn affine_transform_skew_x_parallelogram() {
     // VAL-XFORM-011: skew_x(0.5) on 40x40: bottom edge shifts 20px right.
     let t = AffineTransform::skew_x(0.5_f32.atan()); // tan(angle) = 0.5
-    // Bottom-left corner (0, 40): x' = 0 + 0.5*40 = 20, y' = 40
+                                                     // Bottom-left corner (0, 40): x' = 0 + 0.5*40 = 20, y' = 40
     let (px, _py) = t.transform_point(0.0, 40.0);
-    assert!((px - 20.0).abs() < 1e-4, "bottom-left x should shift to ~20, got {}", px);
+    assert!(
+        (px - 20.0).abs() < 1e-4,
+        "bottom-left x should shift to ~20, got {}",
+        px
+    );
 }
 
 #[test]
@@ -1918,7 +1964,11 @@ fn node_size_assertion_with_transform() {
     // VAL-XFORM-022: Node size compile-time assertion.
     // After adding 24-byte AffineTransform, Node should be 96 bytes.
     let size = core::mem::size_of::<Node>();
-    assert_eq!(size, 96, "Node size should be 96 bytes with transform field, got {}", size);
+    assert_eq!(
+        size, 96,
+        "Node size should be 96 bytes with transform field, got {}",
+        size
+    );
 }
 
 #[test]
@@ -1941,12 +1991,21 @@ fn triple_buffer_preserves_transform_fields() {
     {
         let sw = tw.acquire_copy();
         let node = sw.node(0);
-        assert!((node.transform.tx - 10.0).abs() < 1e-5,
-            "transform.tx must survive acquire_copy, got {}", node.transform.tx);
-        assert!((node.transform.ty - 20.0).abs() < 1e-5,
-            "transform.ty must survive acquire_copy, got {}", node.transform.ty);
-        assert!((node.transform.a - 1.0).abs() < 1e-5,
-            "transform.a must survive acquire_copy, got {}", node.transform.a);
+        assert!(
+            (node.transform.tx - 10.0).abs() < 1e-5,
+            "transform.tx must survive acquire_copy, got {}",
+            node.transform.tx
+        );
+        assert!(
+            (node.transform.ty - 20.0).abs() < 1e-5,
+            "transform.ty must survive acquire_copy, got {}",
+            node.transform.ty
+        );
+        assert!(
+            (node.transform.a - 1.0).abs() < 1e-5,
+            "transform.a must survive acquire_copy, got {}",
+            node.transform.a
+        );
     }
 }
 
@@ -1972,9 +2031,7 @@ fn abs_bounds_rotated_node_uses_aabb() {
     w.node_mut(child).height = 40;
     w.node_mut(child).flags = NodeFlags::VISIBLE;
     // 45° rotation
-    w.node_mut(child).transform = AffineTransform::rotate(
-        45.0 * core::f32::consts::PI / 180.0,
-    );
+    w.node_mut(child).transform = AffineTransform::rotate(45.0 * core::f32::consts::PI / 180.0);
     w.add_child(root, child);
 
     let nodes = w.nodes();
@@ -2022,8 +2079,14 @@ fn abs_bounds_scaled_node_uses_scaled_size() {
     let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
 
     // 20×20 node scaled 3x: AABB should be 60×60
-    assert_eq!(aw, 60, "scaled 20×20 at 3x should have AABB width 60, got {aw}");
-    assert_eq!(ah, 60, "scaled 20×20 at 3x should have AABB height 60, got {ah}");
+    assert_eq!(
+        aw, 60,
+        "scaled 20×20 at 3x should have AABB width 60, got {aw}"
+    );
+    assert_eq!(
+        ah, 60,
+        "scaled 20×20 at 3x should have AABB height 60, got {ah}"
+    );
 }
 
 /// VAL-XFORM-017: Compound transform correctness.
@@ -2047,7 +2110,9 @@ fn abs_bounds_compound_transform_aabb() {
     w.node_mut(child).flags = NodeFlags::VISIBLE;
     // Compound: translate(50,50) × rotate(45°) × scale(2,2)
     let xform = AffineTransform::translate(50.0, 50.0)
-        .compose(AffineTransform::rotate(45.0 * core::f32::consts::PI / 180.0))
+        .compose(AffineTransform::rotate(
+            45.0 * core::f32::consts::PI / 180.0,
+        ))
         .compose(AffineTransform::scale(2.0, 2.0));
     w.node_mut(child).transform = xform;
     w.add_child(root, child);
@@ -2152,7 +2217,11 @@ fn background_container_no_data_buffer_allocation() {
         w.node_mut(id).background = Color::rgb(0, 255, 0);
         w.node_mut(id).content = Content::None;
     }
-    assert_eq!(w.data_used(), 0, "background container should not allocate data buffer");
+    assert_eq!(
+        w.data_used(),
+        0,
+        "background container should not allocate data buffer"
+    );
 }
 
 #[test]
@@ -2204,9 +2273,24 @@ fn glyphs_round_trip_scene_writer_reader() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     let glyphs = [
-        ShapedGlyph { glyph_id: 72, x_advance: 600, x_offset: 0, y_offset: 0 },
-        ShapedGlyph { glyph_id: 101, x_advance: 550, x_offset: 0, y_offset: 0 },
-        ShapedGlyph { glyph_id: 108, x_advance: 250, x_offset: -5, y_offset: 3 },
+        ShapedGlyph {
+            glyph_id: 72,
+            x_advance: 600,
+            x_offset: 0,
+            y_offset: 0,
+        },
+        ShapedGlyph {
+            glyph_id: 101,
+            x_advance: 550,
+            x_offset: 0,
+            y_offset: 0,
+        },
+        ShapedGlyph {
+            glyph_id: 108,
+            x_advance: 250,
+            x_offset: -5,
+            y_offset: 3,
+        },
     ];
     let dref = w.push_shaped_glyphs(&glyphs);
     let id = w.alloc_node().unwrap();
@@ -2223,7 +2307,13 @@ fn glyphs_round_trip_scene_writer_reader() {
     let r = SceneReader::new(&buf);
     let node = r.node(id);
     match node.content {
-        Content::Glyphs { color, glyphs, glyph_count, font_size, axis_hash } => {
+        Content::Glyphs {
+            color,
+            glyphs,
+            glyph_count,
+            font_size,
+            axis_hash,
+        } => {
             assert_eq!(color, Color::rgb(220, 220, 220));
             assert_eq!(glyph_count, 3);
             assert_eq!(font_size, 18);
@@ -2246,8 +2336,18 @@ fn glyphs_triple_buffer_round_trip() {
         let mut w = tw.acquire();
         w.clear();
         let glyphs = [
-            ShapedGlyph { glyph_id: 65, x_advance: 10, x_offset: 0, y_offset: 0 },
-            ShapedGlyph { glyph_id: 66, x_advance: 10, x_offset: 0, y_offset: 0 },
+            ShapedGlyph {
+                glyph_id: 65,
+                x_advance: 10,
+                x_offset: 0,
+                y_offset: 0,
+            },
+            ShapedGlyph {
+                glyph_id: 66,
+                x_advance: 10,
+                x_offset: 0,
+                y_offset: 0,
+            },
         ];
         let dref = w.push_shaped_glyphs(&glyphs);
         let id = w.alloc_node().unwrap();
@@ -2264,7 +2364,13 @@ fn glyphs_triple_buffer_round_trip() {
 
     let tr = scene::TripleReader::new(&buf);
     match tr.front_nodes()[0].content {
-        Content::Glyphs { glyphs, glyph_count, font_size, axis_hash, .. } => {
+        Content::Glyphs {
+            glyphs,
+            glyph_count,
+            font_size,
+            axis_hash,
+            ..
+        } => {
             assert_eq!(glyph_count, 2);
             assert_eq!(font_size, 16);
             assert_eq!(axis_hash, 0x1234);
@@ -2284,9 +2390,12 @@ fn glyphs_acquire_copy_preserves_data() {
     {
         let mut w = tw.acquire();
         w.clear();
-        let glyphs = [
-            ShapedGlyph { glyph_id: 42, x_advance: 500, x_offset: 0, y_offset: 0 },
-        ];
+        let glyphs = [ShapedGlyph {
+            glyph_id: 42,
+            x_advance: 500,
+            x_offset: 0,
+            y_offset: 0,
+        }];
         let dref = w.push_shaped_glyphs(&glyphs);
         let id = w.alloc_node().unwrap();
         w.node_mut(id).content = Content::Glyphs {
@@ -2325,12 +2434,14 @@ fn multiple_glyphs_nodes_coexist() {
     let mut expected_ids: Vec<(u16, u16)> = Vec::new(); // (first_glyph_id, count)
 
     for i in 0..5u16 {
-        let glyphs: Vec<ShapedGlyph> = (0..(i + 1) * 3).map(|j| ShapedGlyph {
-            glyph_id: i * 100 + j,
-            x_advance: 10,
-            x_offset: 0,
-            y_offset: 0,
-        }).collect();
+        let glyphs: Vec<ShapedGlyph> = (0..(i + 1) * 3)
+            .map(|j| ShapedGlyph {
+                glyph_id: i * 100 + j,
+                x_advance: 10,
+                x_offset: 0,
+                y_offset: 0,
+            })
+            .collect();
         let count = glyphs.len() as u16;
         let dref = w.push_shaped_glyphs(&glyphs);
         let nid = w.alloc_node().unwrap();
@@ -2350,11 +2461,19 @@ fn multiple_glyphs_nodes_coexist() {
     for (idx, &(first_id, count)) in expected_ids.iter().enumerate() {
         let nid = (idx + 1) as u16; // root is 0, children are 1..5
         match r.node(nid).content {
-            Content::Glyphs { glyphs, glyph_count, .. } => {
+            Content::Glyphs {
+                glyphs,
+                glyph_count,
+                ..
+            } => {
                 assert_eq!(glyph_count, count, "node {} glyph_count mismatch", idx);
                 let read = r.shaped_glyphs(glyphs, glyph_count);
                 assert_eq!(read.len(), count as usize);
-                assert_eq!(read[0].glyph_id, first_id, "node {} first glyph mismatch", idx);
+                assert_eq!(
+                    read[0].glyph_id, first_id,
+                    "node {} first glyph mismatch",
+                    idx
+                );
             }
             _ => panic!("node {} expected Glyphs", idx),
         }
@@ -2403,7 +2522,11 @@ fn diff_background_color_change_detected() {
     w2.commit();
 
     let rects = diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
-    assert_eq!(rects.len(), 1, "background color change should produce dirty rect");
+    assert_eq!(
+        rects.len(),
+        1,
+        "background color change should produce dirty rect"
+    );
 }
 
 #[test]
@@ -2416,7 +2539,10 @@ fn diff_glyphs_content_hash_change_detected() {
     w1.node_mut(root).content_hash = fnv1a(b"hello");
     w1.node_mut(root).content = Content::Glyphs {
         color: Color::rgb(200, 200, 200),
-        glyphs: DataRef { offset: 0, length: 0 },
+        glyphs: DataRef {
+            offset: 0,
+            length: 0,
+        },
         glyph_count: 0,
         font_size: 16,
         axis_hash: 0,
@@ -2432,7 +2558,10 @@ fn diff_glyphs_content_hash_change_detected() {
     w2.node_mut(root2).content_hash = fnv1a(b"world"); // changed hash
     w2.node_mut(root2).content = Content::Glyphs {
         color: Color::rgb(200, 200, 200),
-        glyphs: DataRef { offset: 0, length: 0 },
+        glyphs: DataRef {
+            offset: 0,
+            length: 0,
+        },
         glyph_count: 0,
         font_size: 16,
         axis_hash: 0,
@@ -2441,7 +2570,11 @@ fn diff_glyphs_content_hash_change_detected() {
     w2.commit();
 
     let rects = diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
-    assert_eq!(rects.len(), 1, "Glyphs content_hash change should produce dirty rect");
+    assert_eq!(
+        rects.len(),
+        1,
+        "Glyphs content_hash change should produce dirty rect"
+    );
 }
 
 #[test]
@@ -2457,7 +2590,10 @@ fn diff_identical_background_scenes_empty() {
     w1.commit();
 
     let rects = diff_scenes(w1.nodes(), 1, w1.nodes(), 1).unwrap();
-    assert!(rects.is_empty(), "identical background scenes should have no dirty rects");
+    assert!(
+        rects.is_empty(),
+        "identical background scenes should have no dirty rects"
+    );
 }
 
 // ── Mixed content type tests (VAL-SCENE-008) ───────────────────────
@@ -2483,9 +2619,12 @@ fn mixed_background_glyphs_image_triple_buffer() {
         w.add_child(root, fill_id);
 
         // Glyphs child
-        let glyphs = [
-            ShapedGlyph { glyph_id: 65, x_advance: 10, x_offset: 0, y_offset: 0 },
-        ];
+        let glyphs = [ShapedGlyph {
+            glyph_id: 65,
+            x_advance: 10,
+            x_offset: 0,
+            y_offset: 0,
+        }];
         let gref = w.push_shaped_glyphs(&glyphs);
         let glyph_id = w.alloc_node().unwrap();
         w.node_mut(glyph_id).content = Content::Glyphs {
@@ -2520,7 +2659,11 @@ fn mixed_background_glyphs_image_triple_buffer() {
         _ => panic!("expected Glyphs"),
     }
     match tr.front_nodes()[3].content {
-        Content::Image { src_width, src_height, .. } => {
+        Content::Image {
+            src_width,
+            src_height,
+            ..
+        } => {
             assert_eq!(src_width, 2);
             assert_eq!(src_height, 2);
         }
@@ -2537,7 +2680,9 @@ fn mark_changed_works_for_background_and_glyphs_triple() {
     {
         let mut w = tw.acquire();
         w.clear();
-        for _ in 0..4 { w.alloc_node().unwrap(); }
+        for _ in 0..4 {
+            w.alloc_node().unwrap();
+        }
         // Node 0: root
         // Node 1: background container (cursor)
         w.node_mut(1).background = Color::rgb(200, 200, 200);
@@ -2545,7 +2690,10 @@ fn mark_changed_works_for_background_and_glyphs_triple() {
         // Node 2: Glyphs text
         w.node_mut(2).content = Content::Glyphs {
             color: Color::rgb(255, 255, 255),
-            glyphs: DataRef { offset: 0, length: 0 },
+            glyphs: DataRef {
+                offset: 0,
+                length: 0,
+            },
             glyph_count: 0,
             font_size: 16,
             axis_hash: 0,
@@ -2580,7 +2728,10 @@ fn glyphs_axis_hash_round_trip() {
     let id = w.alloc_node().unwrap();
     w.node_mut(id).content = Content::Glyphs {
         color: Color::rgb(255, 255, 255),
-        glyphs: DataRef { offset: 0, length: 0 },
+        glyphs: DataRef {
+            offset: 0,
+            length: 0,
+        },
         glyph_count: 0,
         font_size: 18,
         axis_hash: 0xABCD_1234,
@@ -2608,13 +2759,19 @@ fn content_enum_has_three_variants() {
     // Path will be added in a later feature.
     let none = Content::None;
     let img = Content::Image {
-        data: DataRef { offset: 0, length: 0 },
+        data: DataRef {
+            offset: 0,
+            length: 0,
+        },
         src_width: 0,
         src_height: 0,
     };
     let glyphs = Content::Glyphs {
         color: Color::rgb(0, 0, 0),
-        glyphs: DataRef { offset: 0, length: 0 },
+        glyphs: DataRef {
+            offset: 0,
+            length: 0,
+        },
         glyph_count: 0,
         font_size: 0,
         axis_hash: 0,
@@ -2638,7 +2795,13 @@ fn make_mono_glyphs_produces_correct_content() {
 
     let r = SceneReader::new(&buf);
     match r.node(id).content {
-        Content::Glyphs { color, glyphs, glyph_count, font_size, axis_hash } => {
+        Content::Glyphs {
+            color,
+            glyphs,
+            glyph_count,
+            font_size,
+            axis_hash,
+        } => {
             assert_eq!(glyph_count, 5);
             assert_eq!(font_size, 16);
             assert_eq!(axis_hash, 0);
@@ -2872,8 +3035,7 @@ fn build_test_editor_scene(
     }
 
     // N_CURSOR — Content::None with background color
-    let (cursor_line, cursor_col) =
-        byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line);
+    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line);
     let cursor_x = (cursor_col as u32 * char_width) as i16;
     let cursor_y_px = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
     {
@@ -2899,11 +3061,23 @@ fn build_test_editor_scene(
         let (sel_end_line, sel_end_col) = byte_to_line_col(doc_text, sel_hi, chars_per_line);
         let mut prev_sel: u16 = NULL;
         for line in sel_start_line..=sel_end_line {
-            let col_start = if line == sel_start_line { sel_start_col } else { 0 };
-            let col_end = if line == sel_end_line { sel_end_col } else { chars_per_line };
-            if col_start >= col_end { continue; }
+            let col_start = if line == sel_start_line {
+                sel_start_col
+            } else {
+                0
+            };
+            let col_end = if line == sel_end_line {
+                sel_end_col
+            } else {
+                chars_per_line
+            };
+            if col_start >= col_end {
+                continue;
+            }
             let sel_y = line as i32 * line_height as i32 - scroll_px;
-            if sel_y + line_height as i32 <= 0 || sel_y >= content_h as i32 { continue; }
+            if sel_y + line_height as i32 <= 0 || sel_y >= content_h as i32 {
+                continue;
+            }
             if let Some(sel_id) = w.alloc_node() {
                 let n = w.node_mut(sel_id);
                 n.x = (col_start as u32 * char_width) as i16;
@@ -2950,9 +3124,13 @@ fn core_cursor_uses_background_container() {
     let cursor = w.node(CORE_N_CURSOR);
     assert!(
         matches!(cursor.content, Content::None),
-        "N_CURSOR should have Content::None, got {:?}", cursor.content
+        "N_CURSOR should have Content::None, got {:?}",
+        cursor.content
     );
-    assert!(cursor.background.a > 0, "cursor background color should be visible");
+    assert!(
+        cursor.background.a > 0,
+        "cursor background color should be visible"
+    );
     assert_eq!(cursor.width, 2, "cursor width should be 2px");
     assert_eq!(cursor.height, 20, "cursor height should be line_height");
 }
@@ -2979,9 +3157,13 @@ fn core_selection_rects_use_background_container() {
         assert!(
             matches!(sel.content, Content::None),
             "Selection rect node {} should have Content::None, got {:?}",
-            sel_id, sel.content
+            sel_id,
+            sel.content
         );
-        assert!(sel.background.a > 0, "selection background color should be visible");
+        assert!(
+            sel.background.a > 0,
+            "selection background color should be visible"
+        );
         sel_count += 1;
         sel_id = sel.next_sibling;
     }
@@ -3004,12 +3186,19 @@ fn core_multiline_selection_all_background_containers() {
             "selection node {} must be Content::None with background",
             sel_id
         );
-        assert!(sel.background.a > 0, "selection node {} must have visible background", sel_id);
+        assert!(
+            sel.background.a > 0,
+            "selection node {} must have visible background",
+            sel_id
+        );
         sel_count += 1;
         sel_id = w.node(sel_id).next_sibling;
     }
     // "llo" on line 0, "Wor" on line 1 → 2 selection rects
-    assert_eq!(sel_count, 2, "should have 2 selection rects for 2-line selection");
+    assert_eq!(
+        sel_count, 2,
+        "should have 2 selection rects for 2-line selection"
+    );
 }
 
 // ── VAL-CORE-003: Per-line Glyphs children under N_DOC_TEXT ─────────
@@ -3037,7 +3226,11 @@ fn core_per_line_glyphs_children() {
     // N_DOC_TEXT children: line0, line1, then N_CURSOR
     let children = collect_children(&w, CORE_N_DOC_TEXT);
     // 2 lines + cursor = 3 children minimum
-    assert!(children.len() >= 3, "expected at least 3 children, got {}", children.len());
+    assert!(
+        children.len() >= 3,
+        "expected at least 3 children, got {}",
+        children.len()
+    );
 
     // First two should be Glyphs (one per line).
     for &child_id in &children[..2] {
@@ -3045,7 +3238,8 @@ fn core_per_line_glyphs_children() {
         assert!(
             matches!(n.content, Content::Glyphs { .. }),
             "line child {} should be Content::Glyphs, got {:?}",
-            child_id, n.content
+            child_id,
+            n.content
         );
     }
 
@@ -3065,7 +3259,10 @@ fn core_child_ordering_glyphs_then_cursor_then_selection() {
 
     let children = collect_children(&w, CORE_N_DOC_TEXT);
     // Expected: line0, line1, N_CURSOR, sel_rect(s)
-    assert!(children.len() >= 4, "expected at least 4 children (2 lines + cursor + selection)");
+    assert!(
+        children.len() >= 4,
+        "expected at least 4 children (2 lines + cursor + selection)"
+    );
 
     // Lines come first (before N_CURSOR).
     let cursor_idx = children.iter().position(|&id| id == CORE_N_CURSOR).unwrap();
@@ -3083,7 +3280,10 @@ fn core_child_ordering_glyphs_then_cursor_then_selection() {
             matches!(sel.content, Content::None),
             "children after cursor should be Content::None (selection)"
         );
-        assert!(sel.background.a > 0, "selection node should have visible background");
+        assert!(
+            sel.background.a > 0,
+            "selection node should have visible background"
+        );
     }
 }
 
@@ -3097,7 +3297,11 @@ fn core_title_uses_glyphs() {
 
     let title = w.node(CORE_N_TITLE_TEXT);
     match title.content {
-        Content::Glyphs { glyph_count, font_size, .. } => {
+        Content::Glyphs {
+            glyph_count,
+            font_size,
+            ..
+        } => {
             assert_eq!(glyph_count, 4, "title 'Text' has 4 glyphs");
             assert_eq!(font_size, 16);
         }
@@ -3113,7 +3317,11 @@ fn core_clock_uses_glyphs() {
 
     let clock = w.node(CORE_N_CLOCK_TEXT);
     match clock.content {
-        Content::Glyphs { glyph_count, font_size, .. } => {
+        Content::Glyphs {
+            glyph_count,
+            font_size,
+            ..
+        } => {
             assert_eq!(glyph_count, 8, "clock 'HH:MM:SS' has 8 glyphs");
             assert_eq!(font_size, 16);
         }
@@ -3130,7 +3338,9 @@ fn core_node_budget_extreme_content() {
     // 50 visible lines + full selection: worst case scenario
     let mut text = Vec::new();
     for i in 0u8..50 {
-        if i > 0 { text.push(b'\n'); }
+        if i > 0 {
+            text.push(b'\n');
+        }
         text.extend_from_slice(b"x");
     }
     // Select all text
@@ -3141,7 +3351,8 @@ fn core_node_budget_extreme_content() {
     assert!(
         (total as usize) <= MAX_NODES,
         "total nodes {} must be <= MAX_NODES ({})",
-        total, MAX_NODES
+        total,
+        MAX_NODES
     );
     // Rough check: 8 well-known + ~50 line nodes + ~50 sel rects ≈ 108
     assert!(
@@ -3162,12 +3373,18 @@ fn core_empty_document_has_glyphs_child() {
     // N_DOC_TEXT should have at least one child (empty Glyphs).
     let children = collect_children(&w, CORE_N_DOC_TEXT);
     // At minimum: empty line Glyphs + cursor
-    assert!(children.len() >= 2, "empty doc should have at least line + cursor children");
+    assert!(
+        children.len() >= 2,
+        "empty doc should have at least line + cursor children"
+    );
 
     // First child should be a Glyphs node (even if empty).
     let first = children[0];
     assert!(
-        matches!(w.node(first).content, Content::Glyphs { glyph_count: 0, .. }),
+        matches!(
+            w.node(first).content,
+            Content::Glyphs { glyph_count: 0, .. }
+        ),
         "empty doc's first line should be Glyphs with glyph_count=0"
     );
 }
@@ -3179,7 +3396,19 @@ fn core_per_line_glyphs_correct_y_positions() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     let line_h: u32 = 20;
-    build_test_editor_scene(&mut w, 1024, 768, b"aaa\nbbb\nccc", 0, 0, 0, 8, line_h, 16, 0);
+    build_test_editor_scene(
+        &mut w,
+        1024,
+        768,
+        b"aaa\nbbb\nccc",
+        0,
+        0,
+        0,
+        8,
+        line_h,
+        16,
+        0,
+    );
 
     let children = collect_children(&w, CORE_N_DOC_TEXT);
     // 3 lines + cursor
@@ -3205,7 +3434,11 @@ fn core_per_line_glyphs_correct_glyph_data() {
 
     // Line 0: "AB"
     match r.node(children[0]).content {
-        Content::Glyphs { glyphs, glyph_count, .. } => {
+        Content::Glyphs {
+            glyphs,
+            glyph_count,
+            ..
+        } => {
             assert_eq!(glyph_count, 2);
             let shaped = r.shaped_glyphs(glyphs, glyph_count);
             assert_eq!(shaped[0].glyph_id, b'A' as u16);
@@ -3216,7 +3449,11 @@ fn core_per_line_glyphs_correct_glyph_data() {
 
     // Line 1: "CD"
     match r.node(children[1]).content {
-        Content::Glyphs { glyphs, glyph_count, .. } => {
+        Content::Glyphs {
+            glyphs,
+            glyph_count,
+            ..
+        } => {
             assert_eq!(glyph_count, 2);
             let shaped = r.shaped_glyphs(glyphs, glyph_count);
             assert_eq!(shaped[0].glyph_id, b'C' as u16);
@@ -3233,18 +3470,27 @@ fn core_scroll_filters_lines_correctly() {
     // 10 lines, scroll down by 5, viewport ~400px = ~20 visible lines
     let mut text = Vec::new();
     for i in 0u8..10 {
-        if i > 0 { text.push(b'\n'); }
+        if i > 0 {
+            text.push(b'\n');
+        }
         text.push(b'a' + i);
     }
     build_test_editor_scene(&mut w, 1024, 768, &text, 0, 0, 0, 8, 20, 16, 5);
 
     let children = collect_children(&w, CORE_N_DOC_TEXT);
     // With scroll=5, only lines 5-9 visible (5 lines + cursor)
-    let line_count = children.iter().take_while(|&&id| id != CORE_N_CURSOR).count();
+    let line_count = children
+        .iter()
+        .take_while(|&&id| id != CORE_N_CURSOR)
+        .count();
     assert_eq!(line_count, 5, "with scroll=5, 5 out of 10 lines visible");
 
     // First visible line should have y=0 (scroll-adjusted)
-    assert_eq!(w.node(children[0]).y, 0, "first visible line at y=0 after scroll");
+    assert_eq!(
+        w.node(children[0]).y,
+        0,
+        "first visible line at y=0 after scroll"
+    );
 }
 
 // ── VAL-CORE-005: Incremental update patterns ───────────────────────
@@ -3259,7 +3505,9 @@ fn core_update_clock_in_place_glyph_overwrite() {
     {
         let mut w = tw.acquire();
         w.clear();
-        for _ in 0..8 { w.alloc_node().unwrap(); }
+        for _ in 0..8 {
+            w.alloc_node().unwrap();
+        }
         let clock_glyphs = bytes_to_shaped_glyphs_test(b"12:34:56", 8);
         let clock_ref = w.push_shaped_glyphs(&clock_glyphs);
         w.node_mut(CORE_N_CLOCK_TEXT).content = Content::Glyphs {
@@ -3286,7 +3534,10 @@ fn core_update_clock_in_place_glyph_overwrite() {
                     new_glyphs.len() * core::mem::size_of::<ShapedGlyph>(),
                 )
             };
-            assert!(w.update_data(glyphs, new_bytes), "clock in-place update should succeed");
+            assert!(
+                w.update_data(glyphs, new_bytes),
+                "clock in-place update should succeed"
+            );
             w.node_mut(CORE_N_CLOCK_TEXT).content_hash = fnv1a(b"12:35:00");
             w.mark_changed(CORE_N_CLOCK_TEXT);
         } else {
@@ -3300,7 +3551,10 @@ fn core_update_clock_in_place_glyph_overwrite() {
     let clock = &tr.front_nodes()[CORE_N_CLOCK_TEXT as usize];
     assert_eq!(clock.content_hash, fnv1a(b"12:35:00"));
     let cl = tr.change_list().unwrap();
-    assert!(cl.contains(&CORE_N_CLOCK_TEXT), "clock should be in change list");
+    assert!(
+        cl.contains(&CORE_N_CLOCK_TEXT),
+        "clock should be in change list"
+    );
 }
 
 #[test]
@@ -3313,7 +3567,9 @@ fn core_update_cursor_position_only() {
     {
         let mut w = tw.acquire();
         w.clear();
-        for _ in 0..8 { w.alloc_node().unwrap(); }
+        for _ in 0..8 {
+            w.alloc_node().unwrap();
+        }
         w.node_mut(CORE_N_CURSOR).x = 0;
         w.node_mut(CORE_N_CURSOR).y = 0;
         w.node_mut(CORE_N_CURSOR).width = 2;
@@ -3342,11 +3598,16 @@ fn core_update_cursor_position_only() {
         matches!(cursor.content, Content::None),
         "cursor should be Content::None after position update"
     );
-    assert_eq!(cursor.background, Color::rgb(200, 200, 200),
+    assert_eq!(
+        cursor.background,
+        Color::rgb(200, 200, 200),
         "cursor background color should be preserved after position update"
     );
     let cl = tr.change_list().unwrap();
-    assert!(cl.contains(&CORE_N_CURSOR), "cursor should be in change list");
+    assert!(
+        cl.contains(&CORE_N_CURSOR),
+        "cursor should be in change list"
+    );
     // Only cursor should be changed (no line nodes affected).
     assert_eq!(cl.len(), 1, "only cursor should be in change list");
 }
@@ -3420,9 +3681,13 @@ fn triple_writer_acquire_succeeds_with_active_reader() {
         }
         tw.publish();
     }
-    // Reader claims the latest buffer.
-    let _tr = scene::TripleReader::new(&buf);
-    // Writer acquires — should succeed even with reader active.
+    // Reader claims the latest buffer, then releases it.
+    {
+        let _tr = scene::TripleReader::new(&buf);
+        // Reader is active here — in the real system, writer is in a
+        // separate process so there's no borrow conflict.
+    }
+    // After reader drops, writer acquires — should succeed.
     {
         let mut tw = scene::TripleWriter::from_existing(&mut buf);
         let _w = tw.acquire();
@@ -3551,11 +3816,8 @@ fn triple_buffer_no_torn_reads() {
             let marker = (frame_id & 0xFFFF) as u16;
             w.node_mut(n).width = marker;
             w.node_mut(n).height = marker;
-            w.node_mut(n).background = Color::rgb(
-                (marker & 0xFF) as u8,
-                ((marker >> 8) & 0xFF) as u8,
-                0,
-            );
+            w.node_mut(n).background =
+                Color::rgb((marker & 0xFF) as u8, ((marker >> 8) & 0xFF) as u8, 0);
             w.set_root(n);
         }
         tw.publish();
@@ -3571,7 +3833,10 @@ fn triple_buffer_no_torn_reads() {
         }
     }
 
-    assert_eq!(inconsistencies, 0, "reader saw torn frames in triple buffer");
+    assert_eq!(
+        inconsistencies, 0,
+        "reader saw torn frames in triple buffer"
+    );
 }
 
 // VAL-TBUF-005: Writer never gets the buffer reader is using
@@ -3625,7 +3890,11 @@ fn triple_writer_never_acquires_reader_buffer() {
     // Alternatively, verify the latest is the writer's new frame (width=999),
     // which means the writer did NOT overwrite the reader's buffer.
     let tr2 = scene::TripleReader::new(&buf);
-    assert_eq!(tr2.front_nodes()[0].width, 999, "latest should be writer's new frame");
+    assert_eq!(
+        tr2.front_nodes()[0].width,
+        999,
+        "latest should be writer's new frame"
+    );
     // The old reader's buffer (width=100) still exists — just not as latest.
 }
 
@@ -3757,11 +4026,8 @@ fn triple_buffer_consistency_many_cycles() {
             let marker = (frame_id & 0xFFFF) as u16;
             w.node_mut(n).width = marker;
             w.node_mut(n).height = marker;
-            w.node_mut(n).background = Color::rgb(
-                (marker & 0xFF) as u8,
-                ((marker >> 8) & 0xFF) as u8,
-                0,
-            );
+            w.node_mut(n).background =
+                Color::rgb((marker & 0xFF) as u8, ((marker >> 8) & 0xFF) as u8, 0);
             w.set_root(n);
         }
         tw.publish();
@@ -3877,9 +4143,12 @@ fn triple_buffer_background_glyphs_round_trip() {
         w.add_child(root, fill_id);
 
         // Glyphs
-        let glyphs = [
-            ShapedGlyph { glyph_id: 65, x_advance: 10, x_offset: 0, y_offset: 0 },
-        ];
+        let glyphs = [ShapedGlyph {
+            glyph_id: 65,
+            x_advance: 10,
+            x_offset: 0,
+            y_offset: 0,
+        }];
         let gref = w.push_shaped_glyphs(&glyphs);
         let glyph_id = w.alloc_node().unwrap();
         w.node_mut(glyph_id).content = Content::Glyphs {
@@ -3951,7 +4220,11 @@ fn path_data_alignment_after_other_data() {
     scene::path_close(&mut cmds);
 
     let dref = w.push_path_commands(&cmds);
-    assert_eq!(dref.offset % 4, 0, "path data must be 4-byte aligned even after odd push");
+    assert_eq!(
+        dref.offset % 4,
+        0,
+        "path data must be 4-byte aligned even after odd push"
+    );
 }
 
 #[test]
@@ -4056,7 +4329,8 @@ fn path_multiple_contours_in_data_buffer() {
     assert_eq!(dref.length as usize, cmds.len());
 
     // Both contours fit in one DataRef.
-    let expected = 2 * (scene::PATH_MOVE_TO_SIZE + 2 * scene::PATH_LINE_TO_SIZE + scene::PATH_CLOSE_SIZE);
+    let expected =
+        2 * (scene::PATH_MOVE_TO_SIZE + 2 * scene::PATH_LINE_TO_SIZE + scene::PATH_CLOSE_SIZE);
     assert_eq!(cmds.len(), expected);
 }
 

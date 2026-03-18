@@ -3,13 +3,9 @@
 //! Verifies that render_node's child clip-skip check produces
 //! pixel-identical output to rendering without the optimisation.
 
-use render::scene_render;
-use render::surface_pool;
-use render::RenderBackend;
-
 use drawing::{Color, PixelFormat, Surface};
+use render::{scene_render, surface_pool, RenderBackend};
 use scene::Node;
-
 // NodeFlags is already imported by the scene_render module and its
 // #[path] inclusion makes it available. Use a direct re-import from scene.
 #[allow(unused_imports)]
@@ -398,7 +394,11 @@ fn clip_skips_entire_subtree_not_just_direct_child() {
 
     // Left half should also be black (root has no background)
     let (r, g, b, _a) = read_pixel(&buf, stride, 20, 50);
-    assert_eq!((r, g, b), (0, 0, 0), "left-half should be black (no child there)");
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "left-half should be black (no child there)"
+    );
 }
 
 /// Zero-dimension child should be skipped by clip check (no intersection possible).
@@ -434,7 +434,11 @@ fn zero_size_child_is_skipped() {
 
     // Pixel at (0,0) should be black — zero-size child produces no pixels
     let (r, g, b, _a) = read_pixel(&buf, 100 * 4, 0, 0);
-    assert_eq!((r, g, b), (0, 0, 0), "zero-size child should not draw anything");
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "zero-size child should not draw anything"
+    );
 }
 
 /// VAL-PIPE-012: When render_scene_clipped re-renders a dirty region where
@@ -725,11 +729,19 @@ fn fractional_scale_1_5_correct_physical_dimensions() {
 
     // Center of green child: physical (15 + 75, 30 + 37) = (90, 67)
     let (r, g, b, _a) = read_pixel(&buf, stride, 90, 67);
-    assert_eq!((r, g, b), (0, 255, 0), "center of child at 1.5x should be green");
+    assert_eq!(
+        (r, g, b),
+        (0, 255, 0),
+        "center of child at 1.5x should be green"
+    );
 
     // Just inside the top-left corner: physical (15, 30)
     let (r, g, b, _a) = read_pixel(&buf, stride, 15, 30);
-    assert_eq!((r, g, b), (0, 255, 0), "top-left corner of child at 1.5x should be green");
+    assert_eq!(
+        (r, g, b),
+        (0, 255, 0),
+        "top-left corner of child at 1.5x should be green"
+    );
 
     // Just inside the bottom-right corner: physical (15+150-1, 30+75-1) = (164, 104)
     let (r, g, b, _a) = read_pixel(&buf, stride, 164, 104);
@@ -822,8 +834,8 @@ fn fractional_scale_no_gap_between_adjacent_nodes() {
     // Node A covers physical pixel 5, Node B covers physical pixels 6-7.
     // No gap at any boundary.
     let row = 5u32;
-    let a_phys_start = (3.0f32 * 1.5).round() as u32;  // 5
-    let b_phys_end = ((4 + 1) as f32 * 1.5).round() as u32;  // round(7.5) = 8
+    let a_phys_start = (3.0f32 * 1.5).round() as u32; // 5
+    let b_phys_end = ((4 + 1) as f32 * 1.5).round() as u32; // round(7.5) = 8
 
     // Every pixel from A's start to B's end must be colored (no gap).
     for px in a_phys_start..b_phys_end {
@@ -925,11 +937,7 @@ fn f32_scale_factor_exact_representation() {
         // Verify exact round-trip: the value stored as f32 and read back is identical.
         let stored: f32 = v;
         let read: f32 = stored;
-        assert_eq!(
-            v, read,
-            "VAL-COORD-007: f32 must represent {} exactly",
-            v
-        );
+        assert_eq!(v, read, "VAL-COORD-007: f32 must represent {} exactly", v);
 
         // Also verify that arithmetic with f32 is exact for these values.
         // Multiplying a small integer by the scale factor should produce exact results.
@@ -1082,12 +1090,19 @@ fn scene_graph_node_struct_unchanged() {
 fn font_physical_pixel_size_at_fractional_scale() {
     // Simulate the render backend's computation.
     fn round_f32(x: f32) -> i32 {
-        if x >= 0.0 { (x + 0.5) as i32 } else { (x - 0.5) as i32 }
+        if x >= 0.0 {
+            (x + 0.5) as i32
+        } else {
+            (x - 0.5) as i32
+        }
     }
 
     // Scale 1.5, logical font size 16 → physical 24
     let physical = round_f32(16.0 * 1.5).max(1) as u32;
-    assert_eq!(physical, 24, "VAL-COORD-005: logical 16 at scale 1.5 = 24 physical px");
+    assert_eq!(
+        physical, 24,
+        "VAL-COORD-005: logical 16 at scale 1.5 = 24 physical px"
+    );
 
     // Scale 2.0, logical font size 16 → physical 32
     let physical_2 = round_f32(16.0 * 2.0).max(1) as u32;
@@ -1095,7 +1110,10 @@ fn font_physical_pixel_size_at_fractional_scale() {
 
     // Scale 1.25, logical font size 16 → physical 20
     let physical_125 = round_f32(16.0 * 1.25).max(1) as u32;
-    assert_eq!(physical_125, 20, "logical 16 at scale 1.25 = 20 physical px");
+    assert_eq!(
+        physical_125, 20,
+        "logical 16 at scale 1.25 = 20 physical px"
+    );
 
     // Scale 1.0, logical font size 18 → physical 18
     let physical_1 = round_f32(18.0 * 1.0).max(1) as u32;
@@ -1130,11 +1148,19 @@ fn glyph_cache_keyed_on_physical_pixel_size() {
     // Also verify via LRU cache: font_size is part of the key.
     let mut lru = fonts::cache::LruGlyphCache::new(64);
     let glyph_24 = fonts::cache::LruCachedGlyph {
-        width: 10, height: 20, bearing_x: 1, bearing_y: 15, advance: 12,
+        width: 10,
+        height: 20,
+        bearing_x: 1,
+        bearing_y: 15,
+        advance: 12,
         coverage: vec![0xAA; 30],
     };
     let glyph_32 = fonts::cache::LruCachedGlyph {
-        width: 14, height: 26, bearing_x: 1, bearing_y: 20, advance: 16,
+        width: 14,
+        height: 26,
+        bearing_x: 1,
+        bearing_y: 20,
+        advance: 16,
         coverage: vec![0xBB; 30],
     };
     // Same glyph_id=65 ('A'), different font sizes (physical px)
@@ -1180,7 +1206,10 @@ fn scroll_offset_fractional_scale() {
     nodes[2].flags = NodeFlags::VISIBLE;
 
     let data: Vec<u8> = vec![];
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
 
     // Physical framebuffer: 150×150
     let w = 150u32;
@@ -1189,10 +1218,19 @@ fn scroll_offset_fractional_scale() {
     let mut buf = vec![0u8; (w * h * 4) as usize];
     // Fill black
     for pixel in buf.chunks_exact_mut(4) {
-        pixel[0] = 0; pixel[1] = 0; pixel[2] = 0; pixel[3] = 255;
+        pixel[0] = 0;
+        pixel[1] = 0;
+        pixel[2] = 0;
+        pixel[3] = 255;
     }
     {
-        let mut fb = Surface { data: &mut buf, width: w, height: h, stride, format: PixelFormat::Bgra8888 };
+        let mut fb = Surface {
+            data: &mut buf,
+            width: w,
+            height: h,
+            stride,
+            format: PixelFormat::Bgra8888,
+        };
         scene_render::render_scene(&mut fb, &graph, &ctx);
     }
 
@@ -1204,7 +1242,10 @@ fn scroll_offset_fractional_scale() {
     let (r15, _, _, _) = read_pixel(&buf, stride, 0, 15);
 
     assert_eq!(r14, 0, "pixel at y=14 should be black (not yet child)");
-    assert_eq!(r15, 255, "pixel at y=15 should be red (child after scroll offset at 1.5x)");
+    assert_eq!(
+        r15, 255,
+        "pixel at y=15 should be red (child after scroll offset at 1.5x)"
+    );
 }
 
 // ── VAL-COORD-010: Dirty rect computation at fractional scale ──
@@ -1218,7 +1259,11 @@ fn dirty_rect_fractional_scale_full_coverage() {
     // Physical end: round(13*1.5)=20 (rounded from 19.5), round(13*1.5)=20 (rounded from 19.5)
     // Physical size: 20-5=15, 20-8=12
     fn round_f32(x: f32) -> i32 {
-        if x >= 0.0 { (x + 0.5) as i32 } else { (x - 0.5) as i32 }
+        if x >= 0.0 {
+            (x + 0.5) as i32
+        } else {
+            (x - 0.5) as i32
+        }
     }
     fn scale_coord(logical: i32, scale: f32) -> i32 {
         round_f32(logical as f32 * scale)
@@ -1284,13 +1329,20 @@ fn corner_radius_renders_rounded_background() {
 
     // Interior center: fully red.
     let (r, g, b, a) = read_pixel(&buf, stride, 50, 30);
-    assert_eq!((r, g, b, a), (255, 0, 0, 255), "interior center should be red");
+    assert_eq!(
+        (r, g, b, a),
+        (255, 0, 0, 255),
+        "interior center should be red"
+    );
 
     // The top-left corner pixel (0,0) should NOT be fully red — it's
     // outside the rounded corner arc, so it should be black or have
     // anti-aliased coverage (not fully red).
     let (r, _g, _b, _a) = read_pixel(&buf, stride, 0, 0);
-    assert_ne!(r, 255, "top-left corner (0,0) should not be fully red (rounded)");
+    assert_ne!(
+        r, 255,
+        "top-left corner (0,0) should not be fully red (rounded)"
+    );
 
     // A pixel just inside the arc (e.g., at (8, 8)) should be red.
     let (r, _g, _b, _a) = read_pixel(&buf, stride, 8, 8);
@@ -1328,7 +1380,11 @@ fn corner_radius_zero_falls_back_to_rect() {
 
     // The corner pixel (0,0) must be fully green (no rounding).
     let (r, g, b, _a) = read_pixel(&buf_sharp, 60 * 4, 0, 0);
-    assert_eq!((r, g, b), (0, 200, 0), "corner_radius=0: corner should be sharp (full green)");
+    assert_eq!(
+        (r, g, b),
+        (0, 200, 0),
+        "corner_radius=0: corner should be sharp (full green)"
+    );
 }
 
 /// VAL-PRIM-006: Corner-radius-aware clipping.
@@ -1434,11 +1490,19 @@ fn corner_radius_zero_clips_children_uses_rect_clip() {
 
     // The corner (0,0) should be green too (no rounding with radius=0).
     let (r, g, b, _a) = read_pixel(&buf, stride, 0, 0);
-    assert_eq!((r, g, b), (0, 255, 0), "corner_radius=0: corner should show child green (rect clip)");
+    assert_eq!(
+        (r, g, b),
+        (0, 255, 0),
+        "corner_radius=0: corner should show child green (rect clip)"
+    );
 
     // Outside parent (65, 25): should be black, not green.
     let (r, g, b, _a) = read_pixel(&buf, stride, 65, 25);
-    assert_eq!((r, g, b), (0, 0, 0), "outside parent: should be black (clipped)");
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "outside parent: should be black (clipped)"
+    );
 }
 
 /// VAL-PRIM-015: Border follows rounded contour.
@@ -1479,7 +1543,11 @@ fn rounded_border_follows_corner_contour() {
 
     // Interior (well inside border): should be background color.
     let (r, g, b, _a) = read_pixel(&buf, stride, 40, 30);
-    assert_eq!((r, g, b), (50, 50, 50), "interior should be background color");
+    assert_eq!(
+        (r, g, b),
+        (50, 50, 50),
+        "interior should be background color"
+    );
 
     // Corner (0,0): outside the rounded border. Should be black (framebuffer bg),
     // not the border color.
@@ -1528,11 +1596,17 @@ fn corner_radius_at_fractional_scale() {
 
     // Corner (0,0) should NOT be blue (outside rounded arc at radius 12).
     let (_r, _g, b, _a) = read_pixel(&buf, stride, 0, 0);
-    assert_ne!(b, 255, "VAL-PRIM-017: corner (0,0) should not be blue at 1.5x");
+    assert_ne!(
+        b, 255,
+        "VAL-PRIM-017: corner (0,0) should not be blue at 1.5x"
+    );
 
     // Pixel (12, 12) should be blue (inside arc).
     let (_r, _g, b, _a) = read_pixel(&buf, stride, 12, 12);
-    assert_eq!(b, 255, "VAL-PRIM-017: pixel (12,12) should be blue (inside physical arc)");
+    assert_eq!(
+        b, 255,
+        "VAL-PRIM-017: pixel (12,12) should be blue (inside physical arc)"
+    );
 }
 
 /// VAL-CROSS-003: Fractional scale preserves rounded corner symmetry.
@@ -1575,9 +1649,18 @@ fn fractional_scale_rounded_corner_symmetry() {
     let br = read_pixel(&buf, stride, w - 2, h - 2);
 
     // All four corners should have the same color (symmetry).
-    assert_eq!(tl, tr, "VAL-CROSS-003: top-left and top-right corners must match");
-    assert_eq!(tl, bl, "VAL-CROSS-003: top-left and bottom-left corners must match");
-    assert_eq!(tl, br, "VAL-CROSS-003: top-left and bottom-right corners must match");
+    assert_eq!(
+        tl, tr,
+        "VAL-CROSS-003: top-left and top-right corners must match"
+    );
+    assert_eq!(
+        tl, bl,
+        "VAL-CROSS-003: top-left and bottom-left corners must match"
+    );
+    assert_eq!(
+        tl, br,
+        "VAL-CROSS-003: top-left and bottom-right corners must match"
+    );
 }
 
 /// Rounded rect with semi-transparent background blends correctly.
@@ -1781,7 +1864,11 @@ fn opacity_255_bypasses_offscreen() {
     // And the pixel should be red.
     let stride = 60 * 4;
     let (r, g, b, _a) = read_pixel(&buf, stride, 30, 20);
-    assert_eq!((r, g, b), (255, 0, 0), "opacity=255 node should render directly");
+    assert_eq!(
+        (r, g, b),
+        (255, 0, 0),
+        "opacity=255 node should render directly"
+    );
 }
 
 /// VAL-COMP-003: Opacity 0 produces fully transparent output.
@@ -2142,15 +2229,16 @@ fn opacity_change_detected_by_damage() {
     );
 }
 
-/// VAL-CROSS-015: Double-buffer swap preserves opacity field.
+/// VAL-CROSS-015: Triple-buffer publish preserves opacity field.
 #[test]
-fn double_buffer_swap_preserves_opacity() {
-    let mut buf = vec![0u8; scene::DOUBLE_SCENE_SIZE];
-    let mut dw = scene::DoubleWriter::new(&mut buf);
+fn triple_buffer_publish_preserves_opacity() {
+    let mut buf = vec![0u8; scene::TRIPLE_SCENE_SIZE];
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Build scene with non-default opacity.
     {
-        let mut sw = dw.back();
+        let mut sw = tw.acquire();
+        sw.clear();
         let n = sw.alloc_node().unwrap();
         let node = sw.node_mut(n);
         node.opacity = 128;
@@ -2159,20 +2247,15 @@ fn double_buffer_swap_preserves_opacity() {
         node.flags = NodeFlags::VISIBLE;
         sw.commit();
     }
-    dw.swap();
+    tw.publish();
 
-    // Copy front to back (simulating incremental update).
-    dw.copy_front_to_back();
-
-    // Verify back buffer preserved the opacity.
-    {
-        let sw = dw.back();
-        let node = sw.node(0);
-        assert_eq!(
-            node.opacity, 128,
-            "VAL-CROSS-015: opacity must survive copy_front_to_back"
-        );
-    }
+    // Copy latest to acquired (simulating incremental update).
+    let sw = tw.acquire_copy();
+    let node = sw.node(0);
+    assert_eq!(
+        node.opacity, 128,
+        "VAL-CROSS-015: opacity must survive acquire_copy"
+    );
 }
 
 // ── Shadow rendering tests ──────────────────────────────────────────
@@ -2232,13 +2315,26 @@ fn shadow_renders_behind_source_with_offset() {
     // The shadow (with offset 5,5 and no blur) occupies (25,25)-(65,65).
     // At (30,30) — inside the source rect — the pixel should be red (source occludes shadow).
     let (r, g, b, _a) = read_pixel(&buf, stride, 30, 30);
-    assert_eq!((r, g, b), (255, 0, 0), "VAL-BLUR-008: source pixel should be red (occludes shadow)");
+    assert_eq!(
+        (r, g, b),
+        (255, 0, 0),
+        "VAL-BLUR-008: source pixel should be red (occludes shadow)"
+    );
 
     // At (62, 62) — inside shadow but outside source — pixel should have shadow color.
     let (r, g, b, a) = read_pixel(&buf, stride, 62, 62);
-    assert!(a > 0, "VAL-BLUR-008: shadow pixel at offset should be non-transparent, got a={}", a);
-    assert!(r < 200 && g < 200 && b < 200,
-        "VAL-BLUR-008: shadow pixel should be dark, got r={} g={} b={}", r, g, b);
+    assert!(
+        a > 0,
+        "VAL-BLUR-008: shadow pixel at offset should be non-transparent, got a={}",
+        a
+    );
+    assert!(
+        r < 200 && g < 200 && b < 200,
+        "VAL-BLUR-008: shadow pixel should be dark, got r={} g={} b={}",
+        r,
+        g,
+        b
+    );
 }
 
 /// VAL-BLUR-009: Shadow spread expands footprint.
@@ -2301,9 +2397,19 @@ fn shadow_spread_expands_footprint() {
     // should have shadow pixels. With spread=0, it should be white.
     let (r0, g0, b0, _a0) = read_pixel(&no_spread, stride, 26, 50);
     let (r4, g4, b4, a4) = read_pixel(&with_spread, stride, 26, 50);
-    assert_eq!((r0, g0, b0), (255, 255, 255), "VAL-BLUR-009: spread=0 should have no shadow at (26,50)");
-    assert!(a4 > 0 && (r4 < 255 || g4 < 255 || b4 < 255),
-        "VAL-BLUR-009: spread=4 should have shadow at (26,50), got r={} g={} b={} a={}", r4, g4, b4, a4);
+    assert_eq!(
+        (r0, g0, b0),
+        (255, 255, 255),
+        "VAL-BLUR-009: spread=0 should have no shadow at (26,50)"
+    );
+    assert!(
+        a4 > 0 && (r4 < 255 || g4 < 255 || b4 < 255),
+        "VAL-BLUR-009: spread=4 should have shadow at (26,50), got r={} g={} b={} a={}",
+        r4,
+        g4,
+        b4,
+        a4
+    );
 }
 
 /// VAL-BLUR-010: Shadow with zero blur = hard shadow.
@@ -2357,11 +2463,19 @@ fn shadow_zero_blur_is_hard_shadow() {
     // Hard shadow edge: pixel just inside shadow boundary should be opaque shadow.
     // Shadow rect = (35,35)-(75,75). At (72,72) inside shadow, outside source.
     let (_r, _g, _b, a) = read_pixel(&buf, stride, 72, 72);
-    assert_eq!(a, 255, "VAL-BLUR-010: hard shadow edge pixel should be fully opaque, got a={}", a);
+    assert_eq!(
+        a, 255,
+        "VAL-BLUR-010: hard shadow edge pixel should be fully opaque, got a={}",
+        a
+    );
 
     // Pixel just outside shadow boundary should be white background.
     let (r, g, b, _a) = read_pixel(&buf, stride, 76, 76);
-    assert_eq!((r, g, b), (255, 255, 255), "VAL-BLUR-010: pixel outside hard shadow should be white");
+    assert_eq!(
+        (r, g, b),
+        (255, 255, 255),
+        "VAL-BLUR-010: pixel outside hard shadow should be white"
+    );
 }
 
 /// VAL-BLUR-011: Shadow color applied correctly.
@@ -2419,11 +2533,23 @@ fn shadow_color_applied_correctly() {
     // higher than G and B (red-tinted). sRGB blending means the result
     // won't be a simple linear interpolation.
     let (r, g, b, _a) = read_pixel(&buf, stride, 55, 55);
-    assert!(r > g, "VAL-BLUR-011: red shadow pixel should have R > G: R={} G={}", r, g);
-    assert!(r > b, "VAL-BLUR-011: red shadow pixel should have R > B: R={} B={}", r, b);
+    assert!(
+        r > g,
+        "VAL-BLUR-011: red shadow pixel should have R > G: R={} G={}",
+        r,
+        g
+    );
+    assert!(
+        r > b,
+        "VAL-BLUR-011: red shadow pixel should have R > B: R={} B={}",
+        r,
+        b
+    );
     // The pixel should not be pure white (shadow must be visible).
-    assert!(r != 255 || g != 255 || b != 255,
-        "VAL-BLUR-011: shadow pixel should not be pure white");
+    assert!(
+        r != 255 || g != 255 || b != 255,
+        "VAL-BLUR-011: shadow pixel should not be pure white"
+    );
 }
 
 /// VAL-BLUR-012: Default shadow fields produce no shadow.
@@ -2495,7 +2621,10 @@ fn default_shadow_fields_no_shadow() {
         scene_render::render_scene(&mut fb, &graph_ex, &ctx);
     }
 
-    assert_eq!(buf_no, buf_ex, "VAL-BLUR-012: default shadow fields should produce identical output");
+    assert_eq!(
+        buf_no, buf_ex,
+        "VAL-BLUR-012: default shadow fields should produce identical output"
+    );
 }
 
 /// VAL-BLUR-015: Shadow falloff is smooth gradient, not solid rectangle.
@@ -2556,11 +2685,30 @@ fn shadow_falloff_is_smooth_gradient() {
     let (_, _, _, a_near) = read_pixel(&buf, stride, 93, 60);
     let (_, _, _, a_far) = read_pixel(&buf, stride, 97, 60);
 
-    assert!(a_edge > 0, "VAL-BLUR-015: shadow at edge should be non-transparent, got a={}", a_edge);
-    assert!(a_edge >= a_near, "VAL-BLUR-015: alpha should decrease with distance: edge={} >= near={}", a_edge, a_near);
-    assert!(a_near >= a_far, "VAL-BLUR-015: alpha should decrease with distance: near={} >= far={}", a_near, a_far);
+    assert!(
+        a_edge > 0,
+        "VAL-BLUR-015: shadow at edge should be non-transparent, got a={}",
+        a_edge
+    );
+    assert!(
+        a_edge >= a_near,
+        "VAL-BLUR-015: alpha should decrease with distance: edge={} >= near={}",
+        a_edge,
+        a_near
+    );
+    assert!(
+        a_near >= a_far,
+        "VAL-BLUR-015: alpha should decrease with distance: near={} >= far={}",
+        a_near,
+        a_far
+    );
     // The edge should not equal the far pixel (gradient, not flat).
-    assert!(a_edge > a_far, "VAL-BLUR-015: shadow should have falloff, not solid: edge={} > far={}", a_edge, a_far);
+    assert!(
+        a_edge > a_far,
+        "VAL-BLUR-015: shadow should have falloff, not solid: edge={} > far={}",
+        a_edge,
+        a_far
+    );
 }
 
 /// VAL-CROSS-004: Fractional scale preserved in blur radius.
@@ -2615,11 +2763,20 @@ fn fractional_scale_preserves_blur_radius() {
     // ~6 physical pixels beyond the node boundary.
     // Check that shadow exists at the right edge + 3 (inside blur zone).
     let (_, _, _, a_mid) = read_pixel(&buf, stride, 93, 60);
-    assert!(a_mid > 0, "VAL-CROSS-004: shadow should exist at edge+3px at 1.5x scale, got a={}", a_mid);
+    assert!(
+        a_mid > 0,
+        "VAL-CROSS-004: shadow should exist at edge+3px at 1.5x scale, got a={}",
+        a_mid
+    );
 
     // Check that shadow is gone well beyond blur radius.
     let (_, _, _, a_far) = read_pixel(&buf, stride, 100, 60);
-    assert!(a_mid > a_far, "VAL-CROSS-004: shadow should fall off at scale 1.5x: mid={} > far={}", a_mid, a_far);
+    assert!(
+        a_mid > a_far,
+        "VAL-CROSS-004: shadow should fall off at scale 1.5x: mid={} > far={}",
+        a_mid,
+        a_far
+    );
 }
 
 /// VAL-CROSS-006: Layer opacity applies to shadow output.
@@ -2683,10 +2840,18 @@ fn layer_opacity_applies_to_shadow() {
     let (_, _, _, a_full) = read_pixel(&buf_full, stride, 62, 62);
     let (_, _, _, a_half) = read_pixel(&buf_half, stride, 62, 62);
 
-    assert!(a_full > 0, "VAL-CROSS-006: full opacity shadow should be visible, a={}", a_full);
+    assert!(
+        a_full > 0,
+        "VAL-CROSS-006: full opacity shadow should be visible, a={}",
+        a_full
+    );
     // Shadow at 50% opacity should have roughly half the alpha of full.
-    assert!(a_half <= (a_full / 2) + 5,
-        "VAL-CROSS-006: shadow at opacity=128 should be ≤ half of full: half_a={} full_a={}", a_half, a_full);
+    assert!(
+        a_half <= (a_full / 2) + 5,
+        "VAL-CROSS-006: shadow at opacity=128 should be ≤ half of full: half_a={} full_a={}",
+        a_half,
+        a_full
+    );
 }
 
 /// VAL-CROSS-011: Shadow overflow included in damage rects.
@@ -2719,7 +2884,10 @@ fn shadow_overflow_in_damage_rects() {
 
     let rects = scene::diff_scenes(&prev_nodes, 2, &curr_nodes, 2);
     let rects = rects.expect("diff_scenes should return Some for same node count");
-    assert!(!rects.is_empty(), "VAL-CROSS-011: changing shadowed node should produce dirty rects");
+    assert!(
+        !rects.is_empty(),
+        "VAL-CROSS-011: changing shadowed node should produce dirty rects"
+    );
 
     // The dirty rect should extend beyond the node's logical bounds
     // to include the shadow. Shadow extends by: blur_radius + spread + offset.
@@ -2766,15 +2934,24 @@ fn identity_transform_pixel_identical() {
 
     let mut buf1 = vec![0u8; 100 * 100 * 4];
     let mut fb1 = black_surface(&mut buf1);
-    let graph1 = scene_render::SceneGraph { nodes: &nodes_no_xform, data: &data };
+    let graph1 = scene_render::SceneGraph {
+        nodes: &nodes_no_xform,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb1, &graph1, &ctx);
 
     let mut buf2 = vec![0u8; 100 * 100 * 4];
     let mut fb2 = black_surface(&mut buf2);
-    let graph2 = scene_render::SceneGraph { nodes: &nodes_identity, data: &data };
+    let graph2 = scene_render::SceneGraph {
+        nodes: &nodes_identity,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb2, &graph2, &ctx);
 
-    assert_eq!(buf1, buf2, "VAL-XFORM-001: identity transform must produce identical output");
+    assert_eq!(
+        buf1, buf2,
+        "VAL-XFORM-001: identity transform must produce identical output"
+    );
 }
 
 /// VAL-XFORM-002: translate(10, 5) shifts content by exactly (10, 5).
@@ -2802,19 +2979,28 @@ fn translate_shifts_content() {
     let data: Vec<u8> = vec![];
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = 100u32 * 4;
 
     // Original position (15,15) should NOT be red (shifted away).
     let (r, _, _, _) = read_pixel(&buf, stride, 15, 15);
-    assert_eq!(r, 0, "VAL-XFORM-002: original position should be background after translate");
+    assert_eq!(
+        r, 0,
+        "VAL-XFORM-002: original position should be background after translate"
+    );
 
     // New position (25,20) should be red (10+10=20 x, 10+5=15 y, center at 20+10=30, 15+10=25).
     // Node drawn at (20,15) with size 20x20, center at (30, 25).
     let (r, _, _, _) = read_pixel(&buf, stride, 25, 20);
-    assert_eq!(r, 255, "VAL-XFORM-002: translated position (25,20) should be red");
+    assert_eq!(
+        r, 255,
+        "VAL-XFORM-002: translated position (25,20) should be red"
+    );
 }
 
 /// VAL-XFORM-005: scale(2,2) doubles the effective area of a 10x10 node to 20x20.
@@ -2842,7 +3028,10 @@ fn scale_doubles_area() {
     let data: Vec<u8> = vec![];
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = 100u32 * 4;
@@ -2851,7 +3040,11 @@ fn scale_doubles_area() {
     // With scale(2,2) around the node's origin, the AABB becomes (10, 10, 20, 20).
     // Center at (20, 20) should be green.
     let (_, g, _, _) = read_pixel(&buf, stride, 20, 20);
-    assert!(g > 200, "VAL-XFORM-005: center of scaled node should be green, g={}", g);
+    assert!(
+        g > 200,
+        "VAL-XFORM-005: center of scaled node should be green, g={}",
+        g
+    );
 }
 
 /// VAL-XFORM-006: Non-uniform scale(3,1) on 10x10 node → 30x10.
@@ -2878,7 +3071,10 @@ fn non_uniform_scale() {
     let data: Vec<u8> = vec![];
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = 100u32 * 4;
@@ -2886,11 +3082,19 @@ fn non_uniform_scale() {
     // Node at (5,5) 10×10 with scale(3,1) → AABB 30×10 starting at (5,5).
     // Pixel at (20, 10) should be blue (inside the 30px wide region).
     let (_, _, b, _) = read_pixel(&buf, stride, 20, 10);
-    assert!(b > 200, "VAL-XFORM-006: inside scaled width should be blue, b={}", b);
+    assert!(
+        b > 200,
+        "VAL-XFORM-006: inside scaled width should be blue, b={}",
+        b
+    );
 
     // Pixel at (36, 10) should be black (outside the 30px wide + 5px offset).
     let (r, g, b, _) = read_pixel(&buf, stride, 36, 10);
-    assert_eq!((r, g, b), (0, 0, 0), "VAL-XFORM-006: outside scaled width should be black");
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "VAL-XFORM-006: outside scaled width should be black"
+    );
 }
 
 /// VAL-XFORM-007: Child transform composes with parent.
@@ -2943,7 +3147,10 @@ fn child_transform_composes_with_parent() {
         stride: w * 4,
         format: PixelFormat::Bgra8888,
     };
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx_scaled);
 
     let stride = w * 4;
@@ -2951,7 +3158,10 @@ fn child_transform_composes_with_parent() {
     // World position = parent translate(20,10) + child translate(5,3) = (25, 13).
     // Node is 10×10, so center is at (30, 18).
     let (r, _, _, _) = read_pixel(&buf, stride, 30, 18);
-    assert_eq!(r, 255, "VAL-XFORM-007: composed translation center should be red");
+    assert_eq!(
+        r, 255,
+        "VAL-XFORM-007: composed translation center should be red"
+    );
 
     // Origin (0,0) should not be red.
     let (r, _, _, _) = read_pixel(&buf, stride, 0, 0);
@@ -2994,7 +3204,10 @@ fn transform_does_not_affect_siblings() {
     let data: Vec<u8> = vec![];
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = 100u32 * 4;
@@ -3006,7 +3219,10 @@ fn transform_does_not_affect_siblings() {
     // Child B should NOT be displaced by child A's transform.
     // Position (35, 55) should NOT be green.
     let (_, g, _, _) = read_pixel(&buf, stride, 35, 55);
-    assert_eq!(g, 0, "VAL-XFORM-021: sibling should not be displaced by other's transform");
+    assert_eq!(
+        g, 0,
+        "VAL-XFORM-021: sibling should not be displaced by other's transform"
+    );
 }
 
 /// VAL-XFORM-003: 90° rotation of 40x20 node → ~20x40 bounding box.
@@ -3038,7 +3254,10 @@ fn rotation_90_aabb_clip() {
     let data: Vec<u8> = vec![];
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = 100u32 * 4;
@@ -3057,9 +3276,14 @@ fn rotation_90_aabb_clip() {
                 break;
             }
         }
-        if found_content { break; }
+        if found_content {
+            break;
+        }
     }
-    assert!(found_content, "VAL-XFORM-003: rotated node should have visible content via AABB clip");
+    assert!(
+        found_content,
+        "VAL-XFORM-003: rotated node should have visible content via AABB clip"
+    );
 }
 
 /// VAL-XFORM-010: Clip rect intersected with transformed AABB.
@@ -3102,7 +3326,10 @@ fn clip_rect_intersected_with_transformed_aabb() {
         stride: w * 4,
         format: PixelFormat::Bgra8888,
     };
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = w * 4;
@@ -3112,8 +3339,11 @@ fn clip_rect_intersected_with_transformed_aabb() {
         for x in 0..w {
             if x >= 50 || y >= 50 {
                 let (r, _, _, _) = read_pixel(&buf, stride, x, y);
-                assert_eq!(r, 0,
-                    "VAL-XFORM-010: pixel ({},{}) outside parent bounds should be black, r={}", x, y, r);
+                assert_eq!(
+                    r, 0,
+                    "VAL-XFORM-010: pixel ({},{}) outside parent bounds should be black, r={}",
+                    x, y, r
+                );
             }
         }
     }
@@ -3143,7 +3373,10 @@ fn scale_zero_no_output_no_panic() {
     let data: Vec<u8> = vec![];
     let mut buf = vec![0u8; 50 * 50 * 4];
     let mut fb = black_surface_sized(&mut buf, 50, 50);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     // Should not panic.
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3152,20 +3385,25 @@ fn scale_zero_no_output_no_panic() {
     for y in 0..50 {
         for x in 0..50 {
             let (r, _, _, _) = read_pixel(&buf, stride, x, y);
-            assert_eq!(r, 0, "VAL-XFORM-018: scale(0,0) should produce no output at ({},{})", x, y);
+            assert_eq!(
+                r, 0,
+                "VAL-XFORM-018: scale(0,0) should produce no output at ({},{})",
+                x, y
+            );
         }
     }
 }
 
-/// Double-buffer swap preserves shadow fields.
+/// Triple-buffer publish preserves shadow fields.
 #[test]
-fn double_buffer_swap_preserves_shadow_fields() {
-    let mut buf = vec![0u8; scene::DOUBLE_SCENE_SIZE];
-    let mut dw = scene::DoubleWriter::new(&mut buf);
+fn triple_buffer_publish_preserves_shadow_fields() {
+    let mut buf = vec![0u8; scene::TRIPLE_SCENE_SIZE];
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
     // Build scene with non-default shadow fields.
     {
-        let mut sw = dw.back();
+        let mut sw = tw.acquire();
+        sw.clear();
         let n = sw.alloc_node().unwrap();
         let node = sw.node_mut(n);
         node.width = 100;
@@ -3178,26 +3416,32 @@ fn double_buffer_swap_preserves_shadow_fields() {
         node.shadow_spread = 4;
         sw.commit();
     }
-    dw.swap();
+    tw.publish();
 
-    // Copy front to back (simulating incremental update).
-    dw.copy_front_to_back();
-
-    // Verify back buffer preserved shadow fields.
-    {
-        let sw = dw.back();
-        let node = sw.node(0);
-        assert_eq!(node.shadow_color, scene::Color::rgba(255, 0, 0, 128),
-            "shadow_color must survive copy_front_to_back");
-        assert_eq!(node.shadow_offset_x, 10,
-            "shadow_offset_x must survive copy_front_to_back");
-        assert_eq!(node.shadow_offset_y, -5,
-            "shadow_offset_y must survive copy_front_to_back");
-        assert_eq!(node.shadow_blur_radius, 8,
-            "shadow_blur_radius must survive copy_front_to_back");
-        assert_eq!(node.shadow_spread, 4,
-            "shadow_spread must survive copy_front_to_back");
-    }
+    // Copy latest to acquired (simulating incremental update).
+    let sw = tw.acquire_copy();
+    let node = sw.node(0);
+    assert_eq!(
+        node.shadow_color,
+        scene::Color::rgba(255, 0, 0, 128),
+        "shadow_color must survive acquire_copy"
+    );
+    assert_eq!(
+        node.shadow_offset_x, 10,
+        "shadow_offset_x must survive acquire_copy"
+    );
+    assert_eq!(
+        node.shadow_offset_y, -5,
+        "shadow_offset_y must survive acquire_copy"
+    );
+    assert_eq!(
+        node.shadow_blur_radius, 8,
+        "shadow_blur_radius must survive acquire_copy"
+    );
+    assert_eq!(
+        node.shadow_spread, 4,
+        "shadow_spread must survive acquire_copy"
+    );
 }
 
 // ── Transformed rendering tests ─────────────────────────────────────
@@ -3230,7 +3474,10 @@ fn bilinear_resampling_for_rotated_content() {
     let data: Vec<u8> = vec![];
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = 100u32 * 4;
@@ -3247,7 +3494,9 @@ fn bilinear_resampling_for_rotated_content() {
                 break;
             }
         }
-        if found_intermediate { break; }
+        if found_intermediate {
+            break;
+        }
     }
     assert!(found_intermediate,
         "VAL-XFORM-013: rotated content should have bilinear anti-aliased edge pixels (intermediate values)");
@@ -3304,7 +3553,10 @@ fn transformed_text_uses_axis_aligned_glyph_rendering() {
 
     nodes[1].content = scene::Content::Glyphs {
         color: scene::Color::rgba(255, 255, 255, 255),
-        glyphs: scene::DataRef { offset: 0, length: glyph_bytes.len() as u32 },
+        glyphs: scene::DataRef {
+            offset: 0,
+            length: glyph_bytes.len() as u32,
+        },
         glyph_count: 5,
         font_size: 16,
         axis_hash: 0,
@@ -3323,7 +3575,10 @@ fn transformed_text_uses_axis_aligned_glyph_rendering() {
         stride: w * 4,
         format: PixelFormat::Bgra8888,
     };
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     // Should not panic — glyph rendering in a transformed context must work.
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3343,7 +3598,9 @@ fn transformed_text_uses_axis_aligned_glyph_rendering() {
                 break;
             }
         }
-        if found_bg { break; }
+        if found_bg {
+            break;
+        }
     }
     assert!(found_bg,
         "VAL-XFORM-012: transformed text node should render background via axis-aligned offscreen path");
@@ -3377,7 +3634,10 @@ fn transform_plus_opacity_no_double_application() {
     let data: Vec<u8> = vec![];
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = 100u32 * 4;
@@ -3401,9 +3661,12 @@ fn transform_plus_opacity_no_double_application() {
     // With single opacity application (~50%), white over black in sRGB ≈ 188.
     // With double application (~25%), it would be ≈ 100 or less.
     // The value should be > 130 to confirm single application.
-    assert!(max_brightness > 130,
+    assert!(
+        max_brightness > 130,
         "VAL-XFORM-020: transform+opacity should apply opacity once, not double. \
-         max_brightness={}, expected >130 for single application", max_brightness);
+         max_brightness={}, expected >130 for single application",
+        max_brightness
+    );
 }
 
 /// VAL-CROSS-005: DPI scale composes with affine transform as single matrix.
@@ -3453,7 +3716,10 @@ fn dpi_scale_composes_with_affine_as_single_matrix() {
         stride: w * 4,
         format: PixelFormat::Bgra8888,
     };
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb_a, &graph, &ctx_a);
 
     // Verify that the render produced some colored output in the expected area.
@@ -3467,10 +3733,14 @@ fn dpi_scale_composes_with_affine_as_single_matrix() {
                 break;
             }
         }
-        if found_colored { break; }
+        if found_colored {
+            break;
+        }
     }
-    assert!(found_colored,
-        "VAL-CROSS-005: DPI scale + affine should produce visible output with composed transform");
+    assert!(
+        found_colored,
+        "VAL-CROSS-005: DPI scale + affine should produce visible output with composed transform"
+    );
 }
 
 /// VAL-CROSS-007: Group opacity on rotated content.
@@ -3509,7 +3779,10 @@ fn group_opacity_on_rotated_content() {
     let data: Vec<u8> = vec![];
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = 100u32 * 4;
@@ -3537,8 +3810,11 @@ fn group_opacity_on_rotated_content() {
 
     // Max brightness should reflect single group opacity application.
     // White at 50% over black in sRGB ≈ 188.
-    assert!(max_brightness > 130,
-        "VAL-CROSS-007: group opacity on rotated content should apply once. max_brightness={}", max_brightness);
+    assert!(
+        max_brightness > 130,
+        "VAL-CROSS-007: group opacity on rotated content should apply once. max_brightness={}",
+        max_brightness
+    );
 
     // Edge pixels should exist (anti-aliased edges within the opacity group).
     // NOTE: This check is soft — if the transform produces only solid interior pixels,
@@ -3602,7 +3878,10 @@ fn full_feature_composition() {
 
     nodes[1].content = scene::Content::Glyphs {
         color: scene::Color::rgba(255, 255, 255, 255),
-        glyphs: scene::DataRef { offset: 0, length: glyph_bytes.len() as u32 },
+        glyphs: scene::DataRef {
+            offset: 0,
+            length: glyph_bytes.len() as u32,
+        },
         glyph_count: 3,
         font_size: 16,
         axis_hash: 0,
@@ -3622,7 +3901,10 @@ fn full_feature_composition() {
         stride: w * 4,
         format: PixelFormat::Bgra8888,
     };
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     // Should not panic — all features compose correctly.
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3644,8 +3926,10 @@ fn full_feature_composition() {
         }
     }
 
-    assert!(found_colored,
-        "VAL-CROSS-008: full feature composition should produce visible output");
+    assert!(
+        found_colored,
+        "VAL-CROSS-008: full feature composition should produce visible output"
+    );
     // Shadow may be subtle — at least check for colored pixels.
     // The main point is that all features compose without panicking.
 }
@@ -3671,7 +3955,7 @@ fn content_image_downscaled_checkerboard_bilinear() {
             let off = (y * img_stride + x * 4) as usize;
             let is_white = (x + y) % 2 == 0;
             let val = if is_white { 255u8 } else { 0u8 };
-            img_data[off] = val;     // B
+            img_data[off] = val; // B
             img_data[off + 1] = val; // G
             img_data[off + 2] = val; // R
             img_data[off + 3] = 255; // A
@@ -3691,14 +3975,20 @@ fn content_image_downscaled_checkerboard_bilinear() {
     nodes[1].height = 20;
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].content = scene::Content::Image {
-        data: scene::DataRef { offset: 0, length: img_data.len() as u32 },
+        data: scene::DataRef {
+            offset: 0,
+            length: img_data.len() as u32,
+        },
         src_width: img_w,
         src_height: img_h,
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &img_data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &img_data,
+    };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
     let stride = 100u32 * 4;
@@ -3741,20 +4031,24 @@ fn diff_scenes_rotated_node_aabb_damage() {
     nodes1[1].width = 40;
     nodes1[1].height = 40;
     nodes1[1].flags = NodeFlags::VISIBLE;
-    nodes1[1].transform = scene::AffineTransform::rotate(
-        45.0 * core::f32::consts::PI / 180.0,
-    );
+    nodes1[1].transform = scene::AffineTransform::rotate(45.0 * core::f32::consts::PI / 180.0);
 
     // Frame 2: same node moved to (55, 50) — 5px rightward.
     let mut nodes2 = nodes1.clone();
     nodes2[1].x = 55;
 
     let rects = scene::diff_scenes(&nodes1, 2, &nodes2, 2);
-    assert!(rects.is_some(), "diff_scenes should return Some for same-count frames");
+    assert!(
+        rects.is_some(),
+        "diff_scenes should return Some for same-count frames"
+    );
 
     let rects = rects.unwrap();
     // Should have dirty rects for the changed node (old + new positions).
-    assert!(!rects.is_empty(), "should have dirty rects for moved rotated node");
+    assert!(
+        !rects.is_empty(),
+        "should have dirty rects for moved rotated node"
+    );
 
     // Each dirty rect should cover the AABB of the rotated 40×40 node (~57×57).
     for &(rx, ry, rw, rh) in &rects {
@@ -3810,26 +4104,38 @@ fn full_repaint_no_stale_pixel_artifacts() {
     // Frame 1: full repaint, node at (10, 10).
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
     backend.render(&graph, &mut fb);
 
     // Frame 2: move child to (60, 60), full repaint again.
     let mut nodes2 = nodes.clone();
     nodes2[1].x = 60;
     nodes2[1].y = 60;
-    let graph2 = scene_render::SceneGraph { nodes: &nodes2, data: &data };
+    let graph2 = scene_render::SceneGraph {
+        nodes: &nodes2,
+        data: &data,
+    };
     backend.render(&graph2, &mut fb);
 
     // Pixel at old position (20, 20) should be background, not red.
     let stride = 100 * 4;
     let (r, g, b, _a) = read_pixel(&buf, stride, 20, 20);
-    assert_eq!((r, g, b), (30, 30, 30),
-        "After full repaint, old position should show background, not stale red");
+    assert_eq!(
+        (r, g, b),
+        (30, 30, 30),
+        "After full repaint, old position should show background, not stale red"
+    );
 
     // Pixel at new position (70, 70) should be red.
     let (r, g, b, _a) = read_pixel(&buf, stride, 70, 70);
-    assert_eq!((r, g, b), (255, 0, 0),
-        "New position should show the moved red child");
+    assert_eq!(
+        (r, g, b),
+        (255, 0, 0),
+        "New position should show the moved red child"
+    );
 }
 
 // ── Content::Path rendering tests ───────────────────────────────────
@@ -3885,7 +4191,10 @@ fn path_triangle_fill_winding() {
         100,
         100,
     );
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
@@ -3895,15 +4204,27 @@ fn path_triangle_fill_winding() {
 
     // Interior center (50, 40): well inside the triangle.
     let (r, g, b, _a) = read_pixel(&buf, stride, 50, 40);
-    assert_eq!((r, g, b), (255, 0, 0), "VAL-PATH-03: interior should be red");
+    assert_eq!(
+        (r, g, b),
+        (255, 0, 0),
+        "VAL-PATH-03: interior should be red"
+    );
 
     // Exterior (5, 5): outside the triangle.
     let (r, g, b, _a) = read_pixel(&buf, stride, 5, 5);
-    assert_eq!((r, g, b), (0, 0, 0), "VAL-PATH-03: exterior should be unchanged (black)");
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "VAL-PATH-03: exterior should be unchanged (black)"
+    );
 
     // Exterior (95, 95): outside the triangle.
     let (r, g, b, _a) = read_pixel(&buf, stride, 95, 95);
-    assert_eq!((r, g, b), (0, 0, 0), "VAL-PATH-03: bottom-right exterior should be black");
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "VAL-PATH-03: bottom-right exterior should be black"
+    );
 }
 
 /// VAL-PATH-04: Winding and EvenOdd produce different results on overlapping contours.
@@ -3939,7 +4260,10 @@ fn path_fill_rule_winding_vs_evenodd() {
         100,
         100,
     );
-    let graph_w = scene_render::SceneGraph { nodes: &nodes_w, data: &data_w };
+    let graph_w = scene_render::SceneGraph {
+        nodes: &nodes_w,
+        data: &data_w,
+    };
     let mut buf_w = vec![0u8; 100 * 100 * 4];
     {
         let mut fb = black_surface(&mut buf_w);
@@ -3954,7 +4278,10 @@ fn path_fill_rule_winding_vs_evenodd() {
         100,
         100,
     );
-    let graph_e = scene_render::SceneGraph { nodes: &nodes_e, data: &data_e };
+    let graph_e = scene_render::SceneGraph {
+        nodes: &nodes_e,
+        data: &data_e,
+    };
     let mut buf_e = vec![0u8; 100 * 100 * 4];
     {
         let mut fb = black_surface(&mut buf_e);
@@ -3966,23 +4293,39 @@ fn path_fill_rule_winding_vs_evenodd() {
     // Outer ring (20, 20): inside outer square but outside inner square.
     // Both fill rules should fill this region.
     let (r_w_outer, _, _, _) = read_pixel(&buf_w, stride, 20, 20);
-    assert!(r_w_outer > 200, "Winding: outer ring should be filled, r={}", r_w_outer);
+    assert!(
+        r_w_outer > 200,
+        "Winding: outer ring should be filled, r={}",
+        r_w_outer
+    );
     let (r_e_outer, _, _, _) = read_pixel(&buf_e, stride, 20, 20);
-    assert!(r_e_outer > 200, "EvenOdd: outer ring should be filled, r={}", r_e_outer);
+    assert!(
+        r_e_outer > 200,
+        "EvenOdd: outer ring should be filled, r={}",
+        r_e_outer
+    );
 
     // Inner center (50, 50): inside both squares (wound twice).
     // Winding rule: fills (winding count = 2, non-zero).
     // EvenOdd rule: unfills (winding count = 2, even).
     let (r_w_inner, _, _, _) = read_pixel(&buf_w, stride, 50, 50);
     let (r_e_inner, _, _, _) = read_pixel(&buf_e, stride, 50, 50);
-    assert!(r_w_inner > 200,
-        "VAL-PATH-04: Winding should fill inner region (non-zero winding), r={}", r_w_inner);
-    assert!(r_e_inner < 50,
-        "VAL-PATH-04: EvenOdd should NOT fill inner region (even winding), r={}", r_e_inner);
+    assert!(
+        r_w_inner > 200,
+        "VAL-PATH-04: Winding should fill inner region (non-zero winding), r={}",
+        r_w_inner
+    );
+    assert!(
+        r_e_inner < 50,
+        "VAL-PATH-04: EvenOdd should NOT fill inner region (even winding), r={}",
+        r_e_inner
+    );
 
     // The two buffers must differ.
-    assert_ne!(buf_w, buf_e,
-        "VAL-PATH-04: Winding and EvenOdd must produce different output on overlapping contours");
+    assert_ne!(
+        buf_w, buf_e,
+        "VAL-PATH-04: Winding and EvenOdd must produce different output on overlapping contours"
+    );
 }
 
 /// VAL-PATH-05: CubicTo renders smooth curves (not a straight line).
@@ -3997,10 +4340,10 @@ fn path_cubic_bezier_smooth_curve() {
     // Bottom-left → bottom-right → top-right → CubicTo(top-left) → close.
     // The cubic bulges upward from the straight diagonal.
     let mut cmds = Vec::new();
-    scene::path_move_to(&mut cmds, 10.0, 90.0);  // bottom-left
-    scene::path_line_to(&mut cmds, 90.0, 90.0);  // bottom-right
-    scene::path_line_to(&mut cmds, 90.0, 50.0);  // top-right
-    // Cubic from (90,50) to (10,50) with control points bulging upward.
+    scene::path_move_to(&mut cmds, 10.0, 90.0); // bottom-left
+    scene::path_line_to(&mut cmds, 90.0, 90.0); // bottom-right
+    scene::path_line_to(&mut cmds, 90.0, 50.0); // top-right
+                                                // Cubic from (90,50) to (10,50) with control points bulging upward.
     scene::path_cubic_to(&mut cmds, 90.0, 10.0, 10.0, 10.0, 10.0, 50.0);
     scene::path_close(&mut cmds);
 
@@ -4011,7 +4354,10 @@ fn path_cubic_bezier_smooth_curve() {
         100,
         100,
     );
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
@@ -4021,17 +4367,29 @@ fn path_cubic_bezier_smooth_curve() {
 
     // At (50, 70) — well inside the rectangular body — should be green.
     let (_, g1, _, _) = read_pixel(&buf, stride, 50, 70);
-    assert!(g1 > 200, "VAL-PATH-05: pixel inside body should be green, g={}", g1);
+    assert!(
+        g1 > 200,
+        "VAL-PATH-05: pixel inside body should be green, g={}",
+        g1
+    );
 
     // At (50, 30) — inside the curve bulge area — should also be green
     // if the cubic bulges upward past y=30. With control points at y=10,
     // the curve apex is well above y=30.
     let (_, g2, _, _) = read_pixel(&buf, stride, 50, 30);
-    assert!(g2 > 200, "VAL-PATH-05: pixel inside curve bulge should be green, g={}", g2);
+    assert!(
+        g2 > 200,
+        "VAL-PATH-05: pixel inside curve bulge should be green, g={}",
+        g2
+    );
 
     // At (50, 5) — outside everything (above the curve) — should be black.
     let (r, g, b, _) = read_pixel(&buf, stride, 50, 5);
-    assert_eq!((r, g, b), (0, 0, 0), "VAL-PATH-05: outside (above curve) should be black");
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "VAL-PATH-05: outside (above curve) should be black"
+    );
 
     // Verify the curve makes a difference vs a straight line.
     // If we replaced the cubic with a straight LineTo from (90,50) to (10,50),
@@ -4056,7 +4414,10 @@ fn path_empty_no_crash() {
         100,
         100,
     );
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
@@ -4066,7 +4427,11 @@ fn path_empty_no_crash() {
     // All pixels should remain black.
     let stride = 100 * 4;
     let (r, g, b, _) = read_pixel(&buf, stride, 50, 50);
-    assert_eq!((r, g, b), (0, 0, 0), "VAL-PATH-06: empty path should not draw anything");
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "VAL-PATH-06: empty path should not draw anything"
+    );
 }
 
 /// VAL-PATH-06: Unclosed path — implicitly closed.
@@ -4090,7 +4455,10 @@ fn path_unclosed_implicitly_closed() {
         100,
         100,
     );
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
@@ -4100,7 +4468,11 @@ fn path_unclosed_implicitly_closed() {
 
     // Interior should be filled even without Close.
     let (_, _, b, _) = read_pixel(&buf, stride, 50, 40);
-    assert!(b > 200, "VAL-PATH-06: unclosed path should render (implicit close), b={}", b);
+    assert!(
+        b > 200,
+        "VAL-PATH-06: unclosed path should render (implicit close), b={}",
+        b
+    );
 }
 
 /// VAL-PATH-06: Degenerate cubic (collinear control points) renders like LineTo.
@@ -4141,8 +4513,14 @@ fn path_degenerate_cubic_collinear() {
         100,
     );
 
-    let graph_c = scene_render::SceneGraph { nodes: &nodes_c, data: &data_c };
-    let graph_l = scene_render::SceneGraph { nodes: &nodes_l, data: &data_l };
+    let graph_c = scene_render::SceneGraph {
+        nodes: &nodes_c,
+        data: &data_c,
+    };
+    let graph_l = scene_render::SceneGraph {
+        nodes: &nodes_l,
+        data: &data_l,
+    };
 
     let mut buf_c = vec![0u8; 100 * 100 * 4];
     {
@@ -4159,10 +4537,15 @@ fn path_degenerate_cubic_collinear() {
     let mut max_diff = 0u8;
     for (a, b) in buf_c.iter().zip(buf_l.iter()) {
         let diff = if *a > *b { *a - *b } else { *b - *a };
-        if diff > max_diff { max_diff = diff; }
+        if diff > max_diff {
+            max_diff = diff;
+        }
     }
-    assert!(max_diff <= 2,
-        "VAL-PATH-06: collinear cubic should render like LineTo, max pixel diff = {}", max_diff);
+    assert!(
+        max_diff <= 2,
+        "VAL-PATH-06: collinear cubic should render like LineTo, max pixel diff = {}",
+        max_diff
+    );
 }
 
 /// VAL-PATH-07: Multiple contours in one Path node — both fill.
@@ -4191,7 +4574,10 @@ fn path_multiple_contours_both_fill() {
         100,
         50,
     );
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
 
     let w = 100u32;
     let h = 50u32;
@@ -4202,18 +4588,29 @@ fn path_multiple_contours_both_fill() {
 
     // Interior of first triangle (25, 20).
     let (r1, g1, _, _) = read_pixel(&buf, stride, 25, 20);
-    assert!(r1 > 200 && g1 > 200,
-        "VAL-PATH-07: first contour should be yellow, r={} g={}", r1, g1);
+    assert!(
+        r1 > 200 && g1 > 200,
+        "VAL-PATH-07: first contour should be yellow, r={} g={}",
+        r1,
+        g1
+    );
 
     // Interior of second triangle (75, 20).
     let (r2, g2, _, _) = read_pixel(&buf, stride, 75, 20);
-    assert!(r2 > 200 && g2 > 200,
-        "VAL-PATH-07: second contour should be yellow, r={} g={}", r2, g2);
+    assert!(
+        r2 > 200 && g2 > 200,
+        "VAL-PATH-07: second contour should be yellow, r={} g={}",
+        r2,
+        g2
+    );
 
     // Gap between triangles (50, 20) — should be black.
     let (r, g, b, _) = read_pixel(&buf, stride, 50, 20);
-    assert_eq!((r, g, b), (0, 0, 0),
-        "VAL-PATH-07: gap between contours should be black");
+    assert_eq!(
+        (r, g, b),
+        (0, 0, 0),
+        "VAL-PATH-07: gap between contours should be black"
+    );
 }
 
 /// VAL-PATH-08: Edge pixels have fractional coverage (anti-aliasing).
@@ -4237,7 +4634,10 @@ fn path_edges_antialiased() {
         100,
         100,
     );
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
     let mut fb = black_surface(&mut buf);
@@ -4258,8 +4658,10 @@ fn path_edges_antialiased() {
             break;
         }
     }
-    assert!(found_intermediate,
-        "VAL-PATH-08: diagonal edge should have anti-aliased pixels with intermediate coverage");
+    assert!(
+        found_intermediate,
+        "VAL-PATH-08: diagonal edge should have anti-aliased pixels with intermediate coverage"
+    );
 }
 
 /// VAL-PATH-09: Scale factor applied to path coordinates.
@@ -4289,7 +4691,10 @@ fn path_scale_factor_applied() {
         50,
         50,
     );
-    let graph1 = scene_render::SceneGraph { nodes: &nodes1, data: &data1 };
+    let graph1 = scene_render::SceneGraph {
+        nodes: &nodes1,
+        data: &data1,
+    };
     let mut buf1 = vec![0u8; 50 * 50 * 4];
     {
         let mut fb = black_surface_sized(&mut buf1, 50, 50);
@@ -4309,7 +4714,10 @@ fn path_scale_factor_applied() {
         50,
         50,
     );
-    let graph2 = scene_render::SceneGraph { nodes: &nodes2, data: &data2 };
+    let graph2 = scene_render::SceneGraph {
+        nodes: &nodes2,
+        data: &data2,
+    };
     let mut buf2 = vec![0u8; 100 * 100 * 4];
     {
         let mut fb = black_surface_sized(&mut buf2, 100, 100);
@@ -4327,11 +4735,23 @@ fn path_scale_factor_applied() {
 
     // At scale=2, the triangle is drawn in a 4× larger pixel area.
     // The ratio should be approximately 4:1.
-    assert!(red1 > 50, "scale=1 should have significant red pixels, got {}", red1);
-    assert!(red2 > red1 * 3, "VAL-PATH-09: scale=2 should have ~4x red pixels: s1={} s2={}", red1, red2);
+    assert!(
+        red1 > 50,
+        "scale=1 should have significant red pixels, got {}",
+        red1
+    );
+    assert!(
+        red2 > red1 * 3,
+        "VAL-PATH-09: scale=2 should have ~4x red pixels: s1={} s2={}",
+        red1,
+        red2
+    );
     let ratio = red2 as f64 / red1 as f64;
-    assert!(ratio > 3.0 && ratio < 5.5,
-        "VAL-PATH-09: pixel area ratio should be ~4, got {:.2}", ratio);
+    assert!(
+        ratio > 3.0 && ratio < 5.5,
+        "VAL-PATH-09: pixel area ratio should be ~4, got {:.2}",
+        ratio
+    );
 }
 
 /// VAL-CROSS-02: Render backend exhaustively handles all Content variants.
@@ -4380,7 +4800,10 @@ fn all_content_types_render_in_one_scene() {
     w.node_mut(glyphs_node).flags = NodeFlags::VISIBLE;
     w.node_mut(glyphs_node).content = scene::Content::Glyphs {
         color: scene::Color::rgba(255, 255, 255, 255),
-        glyphs: scene::DataRef { offset: 0, length: 0 },
+        glyphs: scene::DataRef {
+            offset: 0,
+            length: 0,
+        },
         glyph_count: 0,
         font_size: 16,
         axis_hash: 0,
@@ -4391,8 +4814,8 @@ fn all_content_types_render_in_one_scene() {
     let mut pixels = vec![0u8; 4 * 4 * 4];
     for chunk in pixels.chunks_exact_mut(4) {
         chunk[0] = 255; // B
-        chunk[1] = 0;   // G
-        chunk[2] = 0;   // R
+        chunk[1] = 0; // G
+        chunk[2] = 0; // R
         chunk[3] = 255; // A
     }
     let img_ref = w.push_data(&pixels);
@@ -4410,7 +4833,10 @@ fn all_content_types_render_in_one_scene() {
 
     let nodes = w.nodes().to_vec();
     let data = w.data_buf().to_vec();
-    let graph = scene_render::SceneGraph { nodes: &nodes, data: &data };
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
 
     let mut buf = vec![0u8; 200 * 200 * 4];
     let mut fb = black_surface_sized(&mut buf, 200, 200);
@@ -4421,7 +4847,11 @@ fn all_content_types_render_in_one_scene() {
 
     // Background should be visible.
     let (r, g, b, _) = read_pixel(&buf, stride, 150, 150);
-    assert_eq!((r, g, b), (30, 30, 30), "VAL-CROSS-03: background should render");
+    assert_eq!(
+        (r, g, b),
+        (30, 30, 30),
+        "VAL-CROSS-03: background should render"
+    );
 
     // Path interior should be green.
     let (_, g, _, _) = read_pixel(&buf, stride, 50, 40);
