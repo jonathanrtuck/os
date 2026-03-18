@@ -15,7 +15,7 @@ use protocol::{
 };
 
 const FILE_FID: u32 = 1;
-const MSIZE: u32 = 4096;
+const MSIZE: u32 = 32768;
 const NOFID: u32 = 0xFFFF_FFFF;
 const ROOT_FID: u32 = 0;
 const TAG_NOTAG: u16 = 0xFFFF;
@@ -468,14 +468,15 @@ pub extern "C" fn _start() -> ! {
         vq.used_pa(),
     );
 
-    // Allocate T/R message buffers (2 pages: T at page 0, R at page 1).
+    // Allocate T/R message buffers (16 pages = 64 KiB: T at offset 0, R at MSIZE).
+    let msg_order = 4; // 2^4 = 16 pages = 64 KiB
     let mut msg_pa: u64 = 0;
-    let msg_va = sys::dma_alloc(1, &mut msg_pa).unwrap_or_else(|_| {
+    let msg_va = sys::dma_alloc(msg_order, &mut msg_pa).unwrap_or_else(|_| {
         sys::print(b"virtio-9p: dma_alloc (msg) failed\n");
         sys::exit();
     });
 
-    unsafe { core::ptr::write_bytes(msg_va as *mut u8, 0, 8192) };
+    unsafe { core::ptr::write_bytes(msg_va as *mut u8, 0, (MSIZE as usize) * 2) };
 
     device.driver_ok();
 
@@ -485,8 +486,8 @@ pub extern "C" fn _start() -> ! {
         irq_handle,
         t_va: msg_va,
         t_pa: msg_pa,
-        r_va: msg_va + 4096,
-        r_pa: msg_pa + 4096,
+        r_va: msg_va + MSIZE as usize,
+        r_pa: msg_pa + MSIZE as u64,
     };
 
     // 9P protocol init.
