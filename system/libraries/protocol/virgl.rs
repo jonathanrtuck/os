@@ -472,6 +472,49 @@ impl CommandBuffer {
         }
     }
 
+    /// VIRGL_CCMD_CREATE_OBJECT — create a shader from TGSI text.
+    ///
+    /// virglrenderer's `vrend_create_shader` always calls `tgsi_text_translate`,
+    /// so the wire payload is the shader source as UTF-8 text (null-terminated),
+    /// packed into u32 DWORDs (last DWORD zero-padded).
+    ///
+    /// The `offlen` field encodes the total byte length of the text (including
+    /// the null terminator) in bits [30:0]. Bit 31 is the continuation flag
+    /// (0 = new shader). `num_tokens` is a host-side allocation hint; 300 is
+    /// a safe value for the simple shaders we use.
+    ///
+    /// `text` must be a null-terminated byte slice (the final byte must be `\0`).
+    pub fn cmd_create_shader_text(&mut self, handle: u32, shader_type: u32, text: &[u8]) {
+        // text must be null-terminated; byte length includes the '\0'.
+        debug_assert!(!text.is_empty() && text[text.len() - 1] == 0);
+
+        // Pack bytes into DWORDs (4 bytes each, last one zero-padded).
+        let text_dwords = (text.len() + 3) / 4;
+        let payload_len = 5 + text_dwords as u32;
+
+        self.push(virgl_cmd0(
+            VIRGL_CCMD_CREATE_OBJECT,
+            VIRGL_OBJECT_SHADER,
+            payload_len,
+        ));
+        self.push(handle);
+        self.push(shader_type);
+        // offlen: total byte length of text in bits [30:0], bit 31 = 0 (new shader).
+        self.push(text.len() as u32 & 0x7FFF_FFFF);
+        self.push(300); // num_tokens: allocation hint for the host token array
+        self.push(0); // num_so_outputs
+
+        // Pack text bytes as little-endian u32 DWORDs.
+        let chunks = text.chunks(4);
+        for chunk in chunks {
+            let mut dword = 0u32;
+            for (i, &byte) in chunk.iter().enumerate() {
+                dword |= (byte as u32) << (i * 8);
+            }
+            self.push(dword);
+        }
+    }
+
     /// VIRGL_CCMD_SET_CONSTANT_BUFFER — upload uniform data to a shader stage.
     pub fn cmd_set_constant_buffer(&mut self, shader_type: u32, index: u32, data: &[u32]) {
         let payload_len = 2 + data.len() as u32;
