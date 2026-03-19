@@ -4,6 +4,7 @@ Design documents for the document-centric OS. This is the primary artifact of th
 
 ## Key Files
 
+- `philosophy.md` — **Read first.** Two root principles and their consequences. If you internalize these, you can predict why any component is structured the way it is.
 - `foundations.md` — Guiding beliefs, glossary, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness, dependency chains
 - `decision-map.mermaid` — Visual dependency graph of all decisions

@@ -23,10 +23,11 @@ This is a long-running exploration project with no deadline. Sessions may be day
 
 Read these before making any design suggestions:
 
+- `design/philosophy.md` — **Read first.** Two root principles and their consequences. The thinking framework behind every design decision.
 - `design/foundations.md` — Guiding beliefs, glossary, external boundaries, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `design/decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness table, dependency chains between decisions
 - `design/decision-map.mermaid` — Visual dependency graph of all decisions
-- `design/architecture.md` — **Read first.** The system's architectural narrative: one-way pipeline, what each component understands, where responsibilities live, decision checklist
+- `design/architecture.md` — The system's architectural narrative: one-way pipeline, what each component understands, where responsibilities live, decision checklist
 - `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
 - `design/journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document.
 - `system/DESIGN.md` — Userspace architecture: libraries, services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `system/kernel/DESIGN.md`.
@@ -95,7 +96,7 @@ Read these before making any design suggestions:
 
 **Post-cleanup architecture (updated 2026-03-18):**
 
-```
+```text
 Core (shaping, layout, scene building) → Scene Graph (shared memory) → Render Service (tree walk, rasterization/GPU, compositing, present) → Display
 ```
 
