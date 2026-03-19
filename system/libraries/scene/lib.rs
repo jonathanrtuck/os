@@ -933,6 +933,9 @@ impl<'a> SceneWriter<'a> {
         let aligned = (used + align - 1) & !(align - 1);
 
         if aligned > used && aligned <= DATA_BUFFER_SIZE {
+            // Zero the padding gap so byte-level comparisons (diff_scenes)
+            // produce consistent results regardless of alignment padding.
+            self.buf[DATA_OFFSET + used..DATA_OFFSET + aligned].fill(0);
             self.header_mut().data_used = aligned as u32;
         }
 

@@ -984,6 +984,21 @@ fn layout_mono_lines(
         };
     }
 
+    // If text ends with '\n', emit an empty run for the blank trailing line
+    // so the cursor can be positioned there.
+    if !text.is_empty() && text[text.len() - 1] == b'\n' {
+        runs.push(LayoutRun {
+            glyphs: DataRef {
+                offset: text.len() as u32,
+                length: 0,
+            },
+            glyph_count: 0,
+            y: line_y,
+            color,
+            font_size,
+        });
+    }
+
     if runs.is_empty() {
         runs.push(LayoutRun {
             glyphs: DataRef {
@@ -1022,7 +1037,7 @@ fn scroll_runs(
     let scroll_px = scroll_lines as i32 * line_height as i32;
 
     runs.into_iter()
-        .filter_map(|mut run| {
+        .filter_map(|run| {
             let adjusted_y = run.y as i32 - scroll_px;
 
             if adjusted_y + line_height as i32 <= 0 {
@@ -1032,9 +1047,10 @@ fn scroll_runs(
                 return None;
             }
 
-            run.y = adjusted_y as i16;
-
-            Some(run)
+            Some(LayoutRun {
+                y: adjusted_y as i16,
+                ..run
+            })
         })
         .collect()
 }

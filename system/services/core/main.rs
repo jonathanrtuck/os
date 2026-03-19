@@ -795,7 +795,8 @@ pub extern "C" fn _start() -> ! {
                     }
                     MSG_POINTER_BUTTON => {
                         let btn: PointerButton = unsafe { msg.payload_as() };
-
+                        // TODO: Handle right-click, middle-click, and button
+                        // release events (review 6.9). Currently only left-press.
                         if btn.button == 0 && btn.pressed == 1 {
                             let s = state();
                             let click_x = s.mouse_x;
