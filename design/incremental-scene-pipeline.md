@@ -92,7 +92,7 @@ Both the node array and data buffer follow the same lifecycle:
 | **Preserve** | `acquire_copy()` copies live nodes        | `acquire_copy()` copies all data              |
 | **Compact**  | Full rebuild reclaims dead slots          | Full rebuild repacks live data                |
 
-Dead space accumulates between compactions. The node array has 512 slots with ~60-70 in typical use (~440 headroom). The data buffer has 64 KiB with ~15 KiB live (~49 KiB headroom). Compaction is infrequent.
+Dead space accumulates between compactions. The bump allocator does not reuse dead slots — `alloc_node()` always allocates at the end, and dead slots from deleted lines remain until compaction reclaims them. This is acceptable because the node array has 512 slots with ~60-70 in typical use (~440 slots of headroom). Even heavy line deletion (200 lines deleted one at a time) consumes 200 dead slots, leaving ~240 for new allocations — well before node array pressure triggers compaction. The data buffer has 64 KiB with ~15 KiB live (~49 KiB headroom). Compaction is infrequent.
 
 ---
 
@@ -103,6 +103,10 @@ Dead space accumulates between compactions. The node array has 512 slots with ~6
 **Current:** Core pre-applies scroll via `scroll_runs()`. Line nodes have viewport-relative y positions. `scroll_y` on the container (N_DOC_TEXT) is always 0.
 
 **Proposed:** Line nodes are positioned at document-relative coordinates (`y = line_index × line_height`). The container node holds `scroll_y` — the scroll offset in pixels. The renderer applies scroll_y when compositing children: `visual_y = node.y - parent.scroll_y`.
+
+### Coordinate range
+
+The Node struct's `y: i16` field overflows at ~1,638 lines with 20px line height (32767 / 20). Document-relative positioning requires widening `y` to `i32` (and `x` for consistency). This changes the Node struct size from 96 bytes — the exact layout adjustment is an implementation detail, but the size change must be reflected in `NODE_SIZE`, `SCENE_SIZE`, and the scene buffer allocation in init. `scroll_y` is already `i32`, so the renderer math is consistent.
 
 ### Why this matters
 
@@ -130,17 +134,17 @@ No structural-change flags. No special-case paths.
 
 ### Complete operation table
 
-| Event                                 | Scene mutations                                                                                                                                                     | Dirty bits                                             |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
-| **Character typed** (same line count) | Reshape 1 line, push new glyphs, update line node's DataRef + content_hash. Update cursor x/y.                                                                      | Changed line + cursor                                  |
-| **Line insert** (Enter key)           | Update existing line's content (split). Alloc new node, shape new line, link into sibling chain. Update subsequent lines' y positions (property-only). Move cursor. | Modified line + new line + repositioned lines + cursor |
-| **Line delete** (Backspace at BOL)    | Update surviving line's content (merge). Unlink deleted node (mark invisible = dead slot). Update subsequent lines' y positions. Move cursor.                       | Merged line + dead node + repositioned lines + cursor  |
-| **Cursor move**                       | Update cursor x/y.                                                                                                                                                  | Cursor                                                 |
-| **Selection change**                  | Update cursor. Alloc/remove/resize selection rect nodes.                                                                                                            | Cursor + selection rects                               |
-| **Clock tick**                        | Reshape clock text, push new glyphs, update clock node.                                                                                                             | Clock node                                             |
-| **Scroll** (any size)                 | Update container `scroll_y`. Shape newly-visible edge lines (alloc nodes if needed, push glyph data). Update cursor y.                                              | Container + new line nodes + cursor                    |
-| **Property-only** (transform, opacity, background) | Update node properties. No data buffer work.                                                                                                          | Changed nodes                                          |
-| **Context switch**                    | Full rebuild: clear + reshape all. Set all dirty bits.                                                                                                              | All bits                                               |
+| Event                                              | Scene mutations                                                                                                                                                     | Dirty bits                                             |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| **Character typed** (same line count)              | Reshape 1 line, push new glyphs, update line node's DataRef + content_hash. Update cursor x/y.                                                                      | Changed line + cursor                                  |
+| **Line insert** (Enter key)                        | Update existing line's content (split). Alloc new node, shape new line, link into sibling chain. Update subsequent lines' y positions (property-only). Move cursor. | Modified line + new line + repositioned lines + cursor |
+| **Line delete** (Backspace at BOL)                 | Update surviving line's content (merge). Unlink deleted node (mark invisible = dead slot). Update subsequent lines' y positions. Move cursor.                       | Merged line + dead node + repositioned lines + cursor  |
+| **Cursor move**                                    | Update cursor x/y.                                                                                                                                                  | Cursor                                                 |
+| **Selection change**                               | Update cursor. Alloc/remove/resize selection rect nodes.                                                                                                            | Cursor + selection rects                               |
+| **Clock tick**                                     | Reshape clock text, push new glyphs, update clock node.                                                                                                             | Clock node                                             |
+| **Scroll** (any size)                              | Update container `scroll_y`. Shape newly-visible edge lines (alloc nodes if needed, push glyph data). Update cursor y.                                              | Container + new line nodes + cursor                    |
+| **Property-only** (transform, opacity, background) | Update node properties. No data buffer work.                                                                                                                        | Changed nodes                                          |
+| **Context switch**                                 | Full rebuild: clear + reshape all. Set all dirty bits.                                                                                                              | All bits                                               |
 
 ### Line insert/delete specifics
 
@@ -200,11 +204,12 @@ Total metadata: ~12 KiB. Render cache: bounded by viewport pixel area.
 
 Each node's rendered content is cached as a bitmap, keyed by node ID, invalidated when `content_hash` changes. This matters for compound documents: when a text edit causes layout reflow that shifts images and other content below, those shifted elements are property-only changes — their cached bitmaps are blit'd at new positions instead of re-rendering from source data.
 
-| Content type          | Re-render cost                           | With cache (property-only) |
-| --------------------- | ---------------------------------------- | -------------------------- |
-| **Glyphs**            | Moderate (glyph lookup + blend)          | Blit                       |
-| **Image**             | Expensive (decode + scale + interpolate) | Blit                       |
-| **Path**              | Expensive (rasterize contours + stencil) | Blit                       |
+| Content type | Re-render cost                           | With cache (property-only) |
+| ------------ | ---------------------------------------- | -------------------------- |
+| **Glyphs**   | Moderate (glyph lookup + blend)          | Blit                       |
+| **Image**    | Expensive (decode + scale + interpolate) | Blit                       |
+| **Path**     | Expensive (rasterize contours + stencil) | Blit                       |
+
 Nodes with `Content::None` (pure containers with only background/border) are not cached — `fill_rect` is cheaper than a bitmap blit. The cache applies only to nodes with content (Glyphs, Image, Path).
 
 The cache is bounded by viewport pixel area. Cache entries for nodes that leave the viewport (via scroll or layout change) are evicted. On compaction (full rebuild), the entire cache is invalidated and rebuilt.
@@ -238,7 +243,7 @@ Compaction is reactive, not periodic:
 
 ### Frequency
 
-With ~49 KiB of data buffer headroom and ~320 bytes of dead data per keystroke, compaction triggers after ~150+ keystrokes. Line insert/delete adds ~96 bytes of dead node space per operation. In practice, context switches (which trigger compaction naturally) will fire before buffer pressure in most editing sessions.
+With ~49 KiB of data buffer headroom and ~320 bytes of dead data per keystroke, data buffer pressure triggers compaction after ~150+ keystrokes. Line insert/delete adds ~96 bytes of dead node space per operation; node array pressure triggers after ~440 line operations (512 slots - ~70 live). Scrolling through ~150 lines triggers data buffer compaction (see Section 3). In practice, context switches (which trigger compaction naturally) will fire before buffer pressure in most editing sessions.
 
 The cost of compaction is identical to today's per-frame cost — one frame at current latency. Imperceptible.
 
