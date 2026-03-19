@@ -387,7 +387,7 @@ pub fn build_full_scene(
         scene_text_color,
         cfg.font_size,
     );
-    // Apply scroll: filter to visible viewport, adjust y positions.
+    // Apply scroll: filter to visible viewport.
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
