@@ -118,28 +118,36 @@ impl IncrementalState {
         Some(tracker)
     }
 
-    /// Detect content_transform changes on container nodes.
+    /// Detect pure-translation content_transform changes on container nodes.
     ///
-    /// Returns `Some((node_id, delta))` for the first dirty container
-    /// with a changed content_transform ty (scroll). `delta` is
-    /// `current.ty - previous.ty` (negative = scrolled down).
-    /// Only reports the first scrolled container -- sufficient for the
-    /// current single-document model.
+    /// Returns `Some((node_id, delta_tx, delta_ty))` for the first dirty
+    /// container whose content_transform changed and both the old and new
+    /// transforms are pure translations (no scale/rotation). Scale or
+    /// rotation changes are NOT reported as scroll — they affect the
+    /// entire container and should be handled as full dirty rects.
+    ///
+    /// Only reports the first scrolled container — sufficient for the
+    /// current single-document model. Multi-container scroll would
+    /// require returning an iterator or small array.
     pub fn detect_scroll(
         &self,
         nodes: &[Node],
         dirty_bits: &[u64; DIRTY_BITMAP_WORDS],
-    ) -> Option<(NodeId, i32)> {
+    ) -> Option<(NodeId, f32, f32)> {
         for i in iter_set_bits(dirty_bits) {
             if i >= nodes.len() {
                 break;
             }
             let node = &nodes[i];
-            if node.first_child != NULL && node.content_transform != self.prev_content_transform[i]
+            let prev = &self.prev_content_transform[i];
+            if node.first_child != NULL
+                && node.content_transform != *prev
+                && node.content_transform.is_pure_translation()
+                && prev.is_pure_translation()
             {
-                let delta =
-                    node.content_transform.ty as i32 - self.prev_content_transform[i].ty as i32;
-                return Some((i as NodeId, delta));
+                let delta_tx = node.content_transform.tx - prev.tx;
+                let delta_ty = node.content_transform.ty - prev.ty;
+                return Some((i as NodeId, delta_tx, delta_ty));
             }
         }
         None

@@ -48,8 +48,9 @@ pub fn abs_bounds(
         let p = &nodes[cur as usize];
         // Add parent position and content_transform translation.
         // For scroll: ty is negative, so this effectively subtracts the offset.
-        // Non-translation content_transforms are approximated with translation
-        // only for damage tracking (conservative -- may over-damage).
+        // Non-translation content_transforms (e.g. zoom/scale) are approximated
+        // with translation only — under-damages for zoomed content. Full AABB
+        // computation (transform_aabb) needed when zoom is implemented.
         ax += p.x as i32 + p.content_transform.tx as i32;
         ay += p.y as i32 + p.content_transform.ty as i32;
         cur = parent_map[cur as usize];

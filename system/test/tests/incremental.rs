@@ -225,9 +225,10 @@ fn scroll_detected_from_dirty_container() {
 
     let result = state.detect_scroll(&nodes, &dirty);
     assert!(result.is_some(), "should detect scroll change");
-    let (node_id, delta) = result.unwrap();
+    let (node_id, delta_tx, delta_ty) = result.unwrap();
     assert_eq!(node_id, 0);
-    assert_eq!(delta, -50);
+    assert_eq!(delta_tx, 0.0);
+    assert_eq!(delta_ty, -50.0);
 }
 
 #[test]
@@ -406,10 +407,11 @@ fn detect_scroll_negative_delta() {
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 0);
 
-    let (node_id, delta) = state.detect_scroll(&nodes, &dirty).unwrap();
+    let (node_id, delta_tx, delta_ty) = state.detect_scroll(&nodes, &dirty).unwrap();
     assert_eq!(node_id, 0);
+    assert_eq!(delta_tx, 0.0);
     assert_eq!(
-        delta, 30,
+        delta_ty, 30.0,
         "scroll up should produce positive delta (ty increases)"
     );
 }

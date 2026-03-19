@@ -102,11 +102,11 @@ Dead space accumulates between compactions. The bump allocator does not reuse de
 
 **Current:** Core pre-applies scroll via `scroll_runs()`. Line nodes have viewport-relative y positions. `scroll_y` on the container (N_DOC_TEXT) is always 0.
 
-**Proposed:** Line nodes are positioned at document-relative coordinates (`y = line_index × line_height`). The container node holds `scroll_y` — the scroll offset in pixels. The renderer applies scroll_y when compositing children: `visual_y = node.y - parent.scroll_y`.
+**Proposed:** Line nodes are positioned at document-relative coordinates (`y = line_index × line_height`). The container node holds a `content_transform` (AffineTransform) — a translation for scroll offset. The renderer composes `content_transform` into the child coordinate space: `content_world = node_world.compose(node.content_transform)`. See `design/content-transform.md` for the full design.
 
 ### Coordinate range
 
-The Node struct's `y: i16` field overflows at ~1,638 lines with 20px line height (32767 / 20). Document-relative positioning requires widening `y` to `i32` (and `x` for consistency). This changes the Node struct size from 96 bytes — the exact layout adjustment is an implementation detail, but the size change must be reflected in `NODE_SIZE`, `SCENE_SIZE`, and the scene buffer allocation in init. `scroll_y` is already `i32`, so the renderer math is consistent.
+The Node struct's `y: i16` field overflows at ~1,638 lines with 20px line height (32767 / 20). Document-relative positioning requires widening `y` to `i32` (and `x` for consistency). This changes the Node struct size from 96 bytes — the exact layout adjustment is an implementation detail, but the size change must be reflected in `NODE_SIZE`, `SCENE_SIZE`, and the scene buffer allocation in init. `content_transform` uses `f32` via `AffineTransform`, which accommodates any coordinate range.
 
 ### Why this matters
 
@@ -142,7 +142,7 @@ No structural-change flags. No special-case paths.
 | **Cursor move**                                    | Update cursor x/y.                                                                                                                                                  | Cursor                                                 |
 | **Selection change**                               | Update cursor. Alloc/remove/resize selection rect nodes.                                                                                                            | Cursor + selection rects                               |
 | **Clock tick**                                     | Reshape clock text, push new glyphs, update clock node.                                                                                                             | Clock node                                             |
-| **Scroll** (any size)                              | Update container `scroll_y`. Shape newly-visible edge lines (alloc nodes if needed, push glyph data). Update cursor y.                                              | Container + new line nodes + cursor                    |
+| **Scroll** (any size)                              | Update container `content_transform` (translation). Shape newly-visible edge lines (alloc nodes if needed, push glyph data). Update cursor y.                       | Container + new line nodes + cursor                    |
 | **Property-only** (transform, opacity, background) | Update node properties. No data buffer work.                                                                                                                        | Changed nodes                                          |
 | **Context switch**                                 | Full rebuild: clear + reshape all. Set all dirty bits.                                                                                                              | All bits                                               |
 
@@ -173,7 +173,7 @@ The renderer maintains per-node state that persists across frames:
 | ------------------------------------------------ | -------- | ------------------------------------------------ |
 | `prev_bounds: [(i32, i32, u32, u32); MAX_NODES]` | 8 KiB    | Previous frame's absolute visual bounds per node |
 | `prev_visible: [u64; 8]`                         | 64 B     | Bitmap: was node visible last frame?             |
-| `prev_scroll_y: [i32; MAX_NODES]`                | 2 KiB    | Previous frame's scroll_y per node               |
+| `prev_content_transform: [AffineTransform; MAX_NODES]` | 12 KiB | Previous frame's content_transform per node     |
 | `prev_content_hash: [u32; MAX_NODES]`            | 2 KiB    | Previous frame's content_hash per node           |
 | Per-node render cache (bitmaps)                  | ~2-8 MiB | Cached rendered output per node                  |
 
@@ -185,9 +185,9 @@ Total metadata: ~12 KiB. Render cache: bounded by viewport pixel area.
 
 1. **Read dirty bitmap.** All zeros → skip frame entirely. All ones → full repaint.
 
-2. **Compute dirty rects.** For each set bit: `dirty_rect = union(prev_bounds[i], curr_bounds[i])`. Detect node lifecycle via `prev_visible` bitmap: deleted nodes (prev_visible but now invisible) use `prev_bounds[i]` only; new nodes (not prev_visible but now visible) use `curr_bounds[i]` only. If a dirty node is a container whose position or size changed (not just scroll_y), mark its entire old and new bounding boxes as dirty rects — this implicitly covers all children without marking them individually dirty.
+2. **Compute dirty rects.** For each set bit: `dirty_rect = union(prev_bounds[i], curr_bounds[i])`. Detect node lifecycle via `prev_visible` bitmap: deleted nodes (prev_visible but now invisible) use `prev_bounds[i]` only; new nodes (not prev_visible but now visible) use `curr_bounds[i]` only. If a dirty node is a container whose position or size changed (not just content_transform), mark its entire old and new bounding boxes as dirty rects — this implicitly covers all children without marking them individually dirty.
 
-3. **Detect scroll.** For each dirty container node: compare `scroll_y` to `prev_scroll_y[i]`. If changed, compute delta. Blit-shift the container's existing rendered region by `-delta` pixels. Add the newly exposed strip to the dirty rect list.
+3. **Detect scroll.** For each dirty container node: compare `content_transform` to `prev_content_transform[i]`. If only translation changed (pure translation both before and after), compute delta. Blit-shift the container's existing rendered region by `-delta` points. Add the newly exposed strip to the dirty rect list.
 
 4. **Coalesce dirty rects.** Merge overlapping rects. If total dirty area exceeds a backend-tunable threshold (~75% for cpu-render, potentially higher for virgil-render where GPU scissor is nearly free), fall back to full repaint.
 
@@ -198,7 +198,7 @@ Total metadata: ~12 KiB. Render cache: bounded by viewport pixel area.
 
 6. **Transfer.** cpu-render: `transfer_to_host` with per-rect coordinates (virtio-gpu 2D supports partial transfer). virgil-render: scissor rects limit GPU fragment processing.
 
-7. **Update state.** Copy current bounds → `prev_bounds`, `scroll_y` → `prev_scroll_y`, `content_hash` → `prev_content_hash`. For scroll: shift all children's `prev_bounds` by the scroll delta.
+7. **Update state.** Copy current bounds → `prev_bounds`, `content_transform` → `prev_content_transform`, `content_hash` → `prev_content_hash`. For scroll: shift all children's `prev_bounds` by the scroll delta.
 
 ### Per-node render cache
 
@@ -268,7 +268,7 @@ The cost of compaction is identical to today's per-frame cost — one frame at c
 - Track `prev_line_count` and `prev_cursor_line` for detecting line insert/delete
 - Line insert: alloc node at bump pointer, link into sibling chain, update subsequent y positions
 - Line delete: unlink node, mark invisible, update subsequent y positions
-- Scroll: set `scroll_y` on container, shape newly-visible edge lines
+- Scroll: set `content_transform` translation on container, shape newly-visible edge lines
 - Compaction: triggered on buffer pressure or context switch, reuses existing full-rebuild code
 
 ### Render library (`libraries/render/`)
@@ -276,7 +276,7 @@ The cost of compaction is identical to today's per-frame cost — one frame at c
 - Wire `DamageTracker` into the render pipeline (currently exists but is unused). Increase `MAX_DIRTY_RECTS` — the current limit of 6 is insufficient for line insert/delete (which can produce 30+ dirty rects before coalescing). Coalescing reduces these to a few strips in practice, but the pre-coalescing capacity must handle the worst case
 - Add per-node render cache (offscreen surface pool, keyed by node ID, invalidated by content_hash)
 - `render_scene()` accepts dirty bitmap, computes dirty rects, renders only intersecting nodes
-- Scroll detection: compare scroll_y to previous, blit-shift + exposed strip
+- Scroll detection: compare content_transform to previous, blit-shift + exposed strip
 
 ### cpu-render (`services/drivers/cpu-render/`)
 
@@ -348,4 +348,4 @@ Verify that property-only changes (node moved but content_hash unchanged) produc
 
 ### Regression
 
-The existing ~1,816 tests continue to pass. Scene library tests updated for the dirty bitmap API. New tests cover: dirty bitmap set/clear/popcount, incremental node allocation with dead slots, data buffer accumulation and compaction, scroll_y-based child positioning.
+The existing ~1,816 tests continue to pass. Scene library tests updated for the dirty bitmap API. New tests cover: dirty bitmap set/clear/popcount, incremental node allocation with dead slots, data buffer accumulation and compaction, content_transform-based child positioning.
