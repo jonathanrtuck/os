@@ -1458,7 +1458,9 @@ impl<'a> Surface<'a> {
                 let p01 = sample_src(src_data, src_stride, sw, sh, sx_floor, sy_floor + 1);
                 let p11 = sample_src(src_data, src_stride, sw, sh, sx_floor + 1, sy_floor + 1);
 
-                // Bilinear blend in BGRA space.
+                // Bilinear blend in BGRA (sRGB gamma) space.
+                // TODO: Linearize before interpolation, re-encode after (review 7.16).
+                // Current approach introduces banding on rotated/scaled content.
                 let inv_fx = 256 - fx;
                 let inv_fy = 256 - fy;
 

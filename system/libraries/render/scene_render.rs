@@ -15,6 +15,8 @@ use scene::{Content, Node, NodeId, ShapedGlyph, NULL};
 use crate::surface_pool::SurfacePool;
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.
+/// Uses i32 for physical pixel math. virgil-render has an independent f32
+/// variant for NDC-space clipping — intentionally separate coordinate systems.
 #[derive(Clone, Copy)]
 struct ClipRect {
     x: i32,

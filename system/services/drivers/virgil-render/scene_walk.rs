@@ -7,15 +7,12 @@
 //! Each batch is uploaded to its own VBO and drawn with the appropriate
 //! shader pipeline (COLOR_VS/COLOR_FS vs TEXTURED_VS/GLYPH_FS).
 
-use scene::{Content, FillRule, Node, NodeFlags, NodeId, ShapedGlyph, NULL};
+use scene::{
+    Content, FillRule, Node, NodeFlags, NodeId, ShapedGlyph, NULL, PATH_CLOSE, PATH_CUBIC_TO,
+    PATH_LINE_TO, PATH_MOVE_TO,
+};
 
 use crate::atlas::{self, GlyphAtlas};
-
-// ── Path command tags (must match scene::PATH_*) ─────────────────────
-const PATH_MOVE_TO: u32 = 0;
-const PATH_LINE_TO: u32 = 1;
-const PATH_CUBIC_TO: u32 = 2;
-const PATH_CLOSE: u32 = 3;
 
 /// Maximum number of colored quads per frame.
 const MAX_QUADS: usize = 256;
@@ -27,9 +24,9 @@ pub const VERTEX_STRIDE: u32 = 24;
 pub const MAX_VERTEX_BYTES: usize = MAX_QUADS * 6 * VERTEX_STRIDE as usize;
 
 /// Maximum number of textured quads (glyphs) per frame.
-/// 512 glyphs covers ~32 lines × 16 chars. If more are needed per frame,
-/// a multi-pass approach would be required.
-const MAX_TEXT_QUADS: usize = 512;
+/// 4096 glyphs covers a full 1024×768 screen at ~80 chars × 48 lines
+/// with headroom for title, clock, and other UI text.
+const MAX_TEXT_QUADS: usize = 4096;
 
 /// Bytes per textured vertex: x(f32) + y(f32) + u(f32) + v(f32) + r + g + b + a = 32.
 pub const TEXTURED_VERTEX_STRIDE: u32 = 32;
@@ -44,6 +41,11 @@ pub const DWORDS_PER_IMAGE_QUAD: usize = 48;
 /// Image vertices occupy offset 0; glyphs start after all image data.
 pub const TOTAL_TEXTURED_VBO_BYTES: usize =
     MAX_TEXTURED_VERTEX_BYTES + MAX_IMAGES * DWORDS_PER_IMAGE_QUAD * 4;
+
+/// Total color VBO size: background quads + path fan triangles + path cover quads.
+/// All three regions are packed sequentially in the same VBO.
+pub const TOTAL_COLOR_VBO_BYTES: usize =
+    MAX_VERTEX_BYTES + MAX_PATH_FAN_DWORDS * 4 + MAX_PATH_COVER_DWORDS * 4;
 
 /// Maximum vertex data in u32 DWORDs (6 floats per vertex, 6 vertices per quad).
 const MAX_VERTEX_DWORDS: usize = MAX_QUADS * 6 * 6;
@@ -393,7 +395,9 @@ impl PathBatch {
     }
 }
 
-// ── Clip rectangle ───────────────────────────────────────────────────────
+// ── Clip rectangle (f32, NDC-space) ─────────────────────────────────────
+// render/scene_render.rs has an independent i32 variant for physical pixel
+// clipping — intentionally separate coordinate systems.
 
 #[derive(Clone, Copy)]
 struct ClipRect {

@@ -27,8 +27,9 @@ use protocol::{
     virgl::{
         self, PIPE_BUFFER, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
         PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_R8_UNORM, VIRGL_FORMAT_S8_UINT,
-        VIRGL_OBJECT_BLEND, VIRGL_OBJECT_DSA, VIRGL_OBJECT_RASTERIZER,
-        VIRGL_OBJECT_VERTEX_ELEMENTS, VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
+        VIRGL_FORMAT_Z32_FLOAT_S8X24_UINT, VIRGL_OBJECT_BLEND, VIRGL_OBJECT_DSA,
+        VIRGL_OBJECT_RASTERIZER, VIRGL_OBJECT_VERTEX_ELEMENTS,
+        VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
         VIRTIO_GPU_CMD_CTX_CREATE, VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
         VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
         VIRTIO_GPU_CMD_RESOURCE_FLUSH, VIRTIO_GPU_CMD_SET_SCANOUT, VIRTIO_GPU_CMD_SUBMIT_3D,
@@ -97,7 +98,7 @@ const ATLAS_RESOURCE_ID: u32 = 3;
 const TEXT_VB_RESOURCE_ID: u32 = 4;
 /// Resource ID for the image texture (B8G8R8A8_UNORM).
 const IMG_RESOURCE_ID: u32 = 5;
-/// Resource ID for the depth/stencil surface (Z24_S8).
+/// Resource ID for the depth/stencil surface (Z32_FLOAT_S8X24_UINT).
 const STENCIL_RESOURCE_ID: u32 = 6;
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -1315,7 +1316,7 @@ fn setup_pipeline(
     cmdbuf.cmd_create_surface(
         HANDLE_STENCIL_SURFACE,
         STENCIL_RESOURCE_ID,
-        126, // Z32_FLOAT_S8X24_UINT (depth32f + stencil8) (Apple Silicon compatible)
+        VIRGL_FORMAT_Z32_FLOAT_S8X24_UINT, // depth32f + stencil8 (Apple Silicon compatible)
     );
     cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, HANDLE_STENCIL_SURFACE);
     let stencil_ok = submit_3d(device, vq, irq_handle, &cmdbuf);
@@ -1417,8 +1418,8 @@ pub extern "C" fn _start() -> ! {
     ctx_attach_resource(&device, &mut vq, irq_handle);
     set_scanout(&device, &mut vq, irq_handle, width, height);
 
-    // Create color vertex buffer resource.
-    let vbo_size = scene_walk::MAX_VERTEX_BYTES as u32;
+    // Create color vertex buffer resource. Sized for backgrounds + path fan + path cover.
+    let vbo_size = scene_walk::TOTAL_COLOR_VBO_BYTES as u32;
     resource_create_vbo(&device, &mut vq, irq_handle, vbo_size);
     let (vbo_va, _vbo_pa, _vbo_order) = attach_backing_vbo(&device, &mut vq, irq_handle, vbo_size);
     ctx_attach_vbo(&device, &mut vq, irq_handle);
@@ -1473,7 +1474,7 @@ pub extern "C" fn _start() -> ! {
         irq_handle,
         STENCIL_RESOURCE_ID,
         PIPE_TEXTURE_2D,
-        126, // Z32_FLOAT_S8X24_UINT (depth32f + stencil8) (Apple Silicon; D24_S8 is Intel-only)
+        VIRGL_FORMAT_Z32_FLOAT_S8X24_UINT, // depth32f + stencil8 (Apple Silicon; D24_S8 is Intel-only)
         virgl::VIRGL_BIND_DEPTH_STENCIL,
         width,
         height,
@@ -1776,7 +1777,7 @@ pub extern "C" fn _start() -> ! {
         // Upload all color vertex data in one transfer.
         if total_color_bytes > 0 {
             if color_bytes > 0 {
-                // SAFETY: vbo_va is valid DMA of MAX_VERTEX_BYTES size.
+                // SAFETY: vbo_va is valid DMA of TOTAL_COLOR_VBO_BYTES size.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         color_data.as_ptr(),

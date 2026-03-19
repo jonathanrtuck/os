@@ -15,20 +15,18 @@ pub const SCANOUT_ID: u32 = 0;
 /// Bytes per pixel (BGRA8888).
 pub const FB_BPP: u32 = 4;
 
-// virtio-gpu command types.
-const CMD_GET_DISPLAY_INFO: u32 = 0x0100;
-const CMD_RESOURCE_CREATE_2D: u32 = 0x0101;
-const CMD_SET_SCANOUT: u32 = 0x0103;
-const CMD_RESOURCE_FLUSH: u32 = 0x0104;
-const CMD_TRANSFER_TO_HOST_2D: u32 = 0x0105;
-const CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
-
-// virtio-gpu response types.
-const RESP_OK_NODATA: u32 = 0x1100;
-const RESP_OK_DISPLAY_INFO: u32 = 0x1101;
-
-// virtio-gpu pixel format (B8G8R8A8_UNORM).
-const FORMAT_B8G8R8A8_UNORM: u32 = 1;
+// virtio-gpu command and response types — imported from protocol crate.
+use protocol::virgl::{
+    VIRGL_FORMAT_B8G8R8A8_UNORM as FORMAT_B8G8R8A8_UNORM,
+    VIRTIO_GPU_CMD_GET_DISPLAY_INFO as CMD_GET_DISPLAY_INFO,
+    VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING as CMD_RESOURCE_ATTACH_BACKING,
+    VIRTIO_GPU_CMD_RESOURCE_CREATE_2D as CMD_RESOURCE_CREATE_2D,
+    VIRTIO_GPU_CMD_RESOURCE_FLUSH as CMD_RESOURCE_FLUSH,
+    VIRTIO_GPU_CMD_SET_SCANOUT as CMD_SET_SCANOUT,
+    VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D as CMD_TRANSFER_TO_HOST_2D,
+    VIRTIO_GPU_RESP_OK_DISPLAY_INFO as RESP_OK_DISPLAY_INFO,
+    VIRTIO_GPU_RESP_OK_NODATA as RESP_OK_NODATA,
+};
 
 // ── Protocol structs ─────────────────────────────────────────────────────
 

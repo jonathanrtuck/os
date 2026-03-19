@@ -136,6 +136,7 @@ pub mod gpu {
         pub chunk_order: u8,
         pub _pad2: u8,
     }
+    const _: () = assert!(core::mem::size_of::<GpuConfig>() <= 60);
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -146,7 +147,7 @@ pub mod gpu {
     const _: () = assert!(core::mem::size_of::<DisplayInfoMsg>() <= 60);
 }
 
-// ── input: input driver -> compositor ───────────────────────────────
+// ── input: input driver -> core ─────────────────────────────────────
 
 pub mod input {
     pub const MSG_KEY_EVENT: u32 = 10;
@@ -180,7 +181,7 @@ pub mod input {
     const _: () = assert!(core::mem::size_of::<PointerButton>() <= 60);
 }
 
-// ── edit: compositor <-> text editor ────────────────────────────────
+// ── edit: core <-> text editor ──────────────────────────────────────
 
 pub mod edit {
     pub const MSG_WRITE_INSERT: u32 = 30;
@@ -233,11 +234,13 @@ pub mod edit {
 
 pub mod core_config {
     pub const MSG_CORE_CONFIG: u32 = 50;
+    /// Signal-only message (no payload). Core sends this after publishing a
+    /// new scene graph frame to notify the render service to read it.
     pub const MSG_SCENE_UPDATED: u32 = 51;
 
     /// Core process configuration. The core owns documents, layout, input
     /// routing, and scene graph building. It writes to the scene graph in
-    /// shared memory and signals the compositor when a new frame is ready.
+    /// shared memory and signals the render service when a new frame is ready.
     ///
     /// `fb_width` / `fb_height` are **logical** dimensions (physical / scale).
     /// The core lays out in logical coordinates; the compositor scales to physical.
@@ -259,17 +262,17 @@ pub mod core_config {
     const _: () = assert!(core::mem::size_of::<CoreConfig>() <= 60);
 }
 
-// ── compose: init -> compositor ─────────────────────────────────────
+// ── compose: init -> render service ─────────────────────────────────
 
 pub mod compose {
     pub const MSG_COMPOSITOR_CONFIG: u32 = 3;
     pub const MSG_IMAGE_CONFIG: u32 = 6;
     pub const MSG_RTC_CONFIG: u32 = 15;
 
-    /// Compositor configuration. The compositor delegates all rendering to
-    /// the render backend (CpuBackend), which owns glyph caches and
-    /// rasterization. The compositor reads the scene graph from shared
-    /// memory and calls backend.render() to produce pixels.
+    /// Render service configuration. The render service delegates rendering
+    /// to its backend (CpuBackend or Virgl3D), which owns glyph caches and
+    /// rasterization. It reads the scene graph from shared memory and
+    /// produces pixels for the display.
     ///
     /// `fb_width` / `fb_height` are **physical** framebuffer dimensions.
     /// `fb_stride` is always `fb_width * 4` (BGRA8888) — derived by
@@ -331,7 +334,7 @@ pub mod editor {
     const _: () = assert!(core::mem::size_of::<EditorConfig>() <= 60);
 }
 
-// ── present: compositor <-> GPU driver ──────────────────────────────
+// ── present: render service internal (legacy, unused) ──────────────
 
 pub mod present {
     use crate::DirtyRect;
@@ -359,7 +362,25 @@ pub mod present {
 // ── fs: init <-> 9p driver ──────────────────────────────────────────
 
 pub mod fs {
+    /// FS read request. Sent by init to the 9p driver.
+    ///
+    /// Payload layout (60 bytes, written via raw pointer arithmetic):
+    ///   [0..8]   u64  file offset
+    ///   [8..12]  u32  byte count to read
+    ///   [12..16] u32  path length (bytes, excluding null)
+    ///   [16..60] [u8] path (null-terminated, max 43 chars + null)
+    ///
+    /// Note: a `#[repr(C)]` struct with a `u64` first field requires 8-byte
+    /// alignment, causing 4 bytes of end-padding (64 bytes total). Callers
+    /// use `write_unaligned`/`read_unaligned` at known offsets instead.
     pub const MSG_FS_READ_REQUEST: u32 = 40;
+
+    /// FS read response. Sent by the 9p driver back to init.
+    ///
+    /// Payload layout (60 bytes):
+    ///   [0..8]   u64  file offset (echoed from request)
+    ///   [8..12]  u32  actual bytes read (may be less than requested)
+    ///   [12..60] [u8] data (up to 48 bytes per message)
     pub const MSG_FS_READ_RESPONSE: u32 = 41;
 }
 

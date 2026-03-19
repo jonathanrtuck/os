@@ -199,9 +199,9 @@ impl SurfacePool {
         self.total_bytes
     }
 
-    /// Number of entries currently in the pool (both free and in-use).
+    /// Number of active entries in the pool (excludes cleared slots).
     pub fn entry_count(&self) -> usize {
-        self.entries.len()
+        self.entries.iter().filter(|e| e.width > 0).count()
     }
 
     /// Cumulative count of new allocations (not reuses).

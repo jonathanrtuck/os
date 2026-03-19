@@ -299,7 +299,7 @@ fn content_text_layout(content_w: u32) -> TextLayout {
     TextLayout {
         char_width: s.char_w,
         line_height: s.line_h,
-        max_width: content_w - 2 * TEXT_INSET_X,
+        max_width: content_w.saturating_sub(2 * TEXT_INSET_X),
     }
 }
 fn create_clock_timer() -> bool {

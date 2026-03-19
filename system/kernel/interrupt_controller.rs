@@ -394,10 +394,13 @@ impl InterruptController for GicV3 {
         // SAFETY: Writing ICC_SGI1R_EL1 triggers an SGI to the target core —
         // a hardware side-effect. nomem intentionally omitted — MSR to ICC
         // register has observable side effects (generates an interrupt on
-        // the target core). nostack correct.
+        // the target core). nostack correct. DSB SY ensures the SGI write
+        // completes before we return (ARM ARM: DSB after SGI generation
+        // guarantees the redistributor has accepted the request).
         unsafe {
             core::arch::asm!(
                 "msr s3_0_c12_c11_5, {val}", // ICC_SGI1R_EL1
+                "dsb sy",
                 val = in(reg) target_list,
                 options(nostack)
             );
