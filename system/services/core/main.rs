@@ -705,6 +705,9 @@ pub extern "C" fn _start() -> ! {
 
     create_clock_timer();
 
+    // Track line count for incremental scene updates.
+    let mut prev_line_count = scene_state::count_lines(doc_content());
+
     sys::print(b"     entering event loop\n");
 
     let mut ctrl_pressed = false;
@@ -965,27 +968,63 @@ pub extern "C" fn _start() -> ! {
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
-                // update_document_content handles doc text, cursor, and
-                // selection. Compacts the data buffer on each call so
-                // data_used stays proportional to visible content.
-                // When timer_fired, also marks N_CLOCK_TEXT changed so
-                // both document and clock update in one frame.
                 if !timer_fired {
                     format_time_hms(clock_seconds(), &mut time_buf);
                 }
 
-                let s = state();
-                scene.update_document_content(
-                    &scene_cfg,
-                    doc_content(),
-                    s.cursor_pos as u32,
-                    s.sel_start as u32,
-                    s.sel_end as u32,
-                    b"Text",
-                    &time_buf,
-                    s.scroll_offset as i32,
-                    timer_fired,
-                );
+                let doc = doc_content();
+                let new_line_count = scene_state::count_lines(doc);
+
+                if new_line_count == prev_line_count {
+                    // Same line count — incremental single-line update.
+                    // Only reshapes the changed line, pushes new glyph data
+                    // at the bump pointer, and updates cursor/selection.
+                    let s = state();
+                    let changed_line = scene_state::byte_to_line_col(
+                        doc,
+                        s.cursor_pos,
+                        if s.char_w > 0 {
+                            ((scene_cfg.fb_width.saturating_sub(2 * TEXT_INSET_X)) / s.char_w)
+                                .max(1) as usize
+                        } else {
+                            80
+                        },
+                    )
+                    .0;
+                    scene.update_document_incremental(
+                        &scene_cfg,
+                        doc,
+                        s.cursor_pos as u32,
+                        s.sel_start as u32,
+                        s.sel_end as u32,
+                        changed_line,
+                        b"Text",
+                        &time_buf,
+                        s.scroll_offset as i32,
+                        timer_fired,
+                    );
+                } else {
+                    // Line count changed — full rebuild (compaction).
+                    // update_document_content handles doc text, cursor, and
+                    // selection. Compacts the data buffer on each call so
+                    // data_used stays proportional to visible content.
+                    // When timer_fired, also marks N_CLOCK_TEXT changed so
+                    // both document and clock update in one frame.
+                    let s = state();
+                    scene.update_document_content(
+                        &scene_cfg,
+                        doc,
+                        s.cursor_pos as u32,
+                        s.sel_start as u32,
+                        s.sel_end as u32,
+                        b"Text",
+                        &time_buf,
+                        s.scroll_offset as i32,
+                        timer_fired,
+                    );
+                }
+
+                prev_line_count = new_line_count;
             } else if selection_changed {
                 // Selection changed without text change (e.g., click
                 // to clear selection, shift-arrow to extend selection).

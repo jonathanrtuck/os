@@ -283,6 +283,10 @@ impl<'a> SceneWriter<'a> {
     pub fn push_data_replacing(&mut self, bytes: &[u8]) -> DataRef {
         self.push_data(bytes)
     }
+    /// Check if the data buffer has room for `bytes` more bytes.
+    pub fn has_data_space(&self, bytes: usize) -> bool {
+        (self.header().data_used as usize) + bytes <= DATA_BUFFER_SIZE
+    }
     /// Reset the data buffer usage counter (bump allocator rewind).
     pub fn reset_data(&mut self) {
         self.header_mut().data_used = 0;

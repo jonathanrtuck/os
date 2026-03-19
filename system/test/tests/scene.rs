@@ -4453,3 +4453,355 @@ fn node_supports_large_coordinates() {
     assert_eq!(w.node(id).x, 50000);
     assert_eq!(w.node(id).y, -40000);
 }
+
+// ── Incremental scene building primitives (Task 4) ──────────────────
+
+// VAL-INC-001: acquire_copy preserves nodes and data, dirty bits are zero.
+#[test]
+fn incremental_acquire_copy_preserves_nodes_data_clears_dirty() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
+
+    // Build a scene with multiple nodes and glyph data.
+    {
+        let mut w = tw.acquire();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.node_mut(root).width = 1024;
+        w.node_mut(root).height = 768;
+        w.set_root(root);
+
+        let child1 = w.alloc_node().unwrap();
+        w.node_mut(child1).x = 10;
+        w.node_mut(child1).y = 20;
+        w.node_mut(child1).content =
+            make_mono_glyphs(&mut w, b"Line one", 16, Color::rgb(220, 220, 220), 8);
+        w.add_child(root, child1);
+
+        let child2 = w.alloc_node().unwrap();
+        w.node_mut(child2).x = 10;
+        w.node_mut(child2).y = 40;
+        w.node_mut(child2).content =
+            make_mono_glyphs(&mut w, b"Line two", 16, Color::rgb(220, 220, 220), 8);
+        w.add_child(root, child2);
+
+        w.mark_dirty(root);
+        w.mark_dirty(child1);
+        w.mark_dirty(child2);
+    }
+    tw.publish();
+
+    // Capture front state for comparison.
+    let front_node_count = tw.latest_nodes().len();
+    let front_data = tw.latest_data_buf().to_vec();
+    assert!(front_node_count >= 3);
+    assert!(!front_data.is_empty());
+
+    // acquire_copy: back buffer should match front, dirty bits cleared.
+    let back = tw.acquire_copy();
+    assert_eq!(back.node_count() as usize, front_node_count);
+    assert_eq!(back.data_buf(), front_data.as_slice());
+
+    // Verify all dirty bits are zero.
+    assert_eq!(
+        back.dirty_count(),
+        0,
+        "dirty bits should be cleared after acquire_copy"
+    );
+
+    // Verify node properties survived the copy.
+    assert_eq!(back.node(0).width, 1024);
+    assert_eq!(back.node(1).x, 10);
+    assert_eq!(back.node(1).y, 20);
+    assert_eq!(back.node(2).x, 10);
+    assert_eq!(back.node(2).y, 40);
+}
+
+// VAL-INC-002: Pushing new data after acquire_copy preserves old DataRefs.
+#[test]
+fn incremental_data_push_preserves_old_data() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
+
+    // Build initial scene with glyph data for node A.
+    let original_glyphs = [
+        ShapedGlyph {
+            glyph_id: 72,
+            x_advance: 8,
+            x_offset: 0,
+            y_offset: 0,
+        },
+        ShapedGlyph {
+            glyph_id: 101,
+            x_advance: 8,
+            x_offset: 0,
+            y_offset: 0,
+        },
+        ShapedGlyph {
+            glyph_id: 108,
+            x_advance: 8,
+            x_offset: 0,
+            y_offset: 0,
+        },
+    ];
+    let mut original_ref = DataRef {
+        offset: 0,
+        length: 0,
+    };
+    {
+        let mut w = tw.acquire();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.set_root(root);
+
+        original_ref = w.push_shaped_glyphs(&original_glyphs);
+        w.node_mut(root).content = Content::Glyphs {
+            color: Color::rgb(255, 255, 255),
+            glyphs: original_ref,
+            glyph_count: 3,
+            font_size: 16,
+            axis_hash: 0,
+        };
+    }
+    tw.publish();
+
+    // acquire_copy, then push NEW data (simulating incremental update).
+    {
+        let mut w = tw.acquire_copy();
+
+        // Push new glyph data (for a different node, node B).
+        let new_glyphs = [
+            ShapedGlyph {
+                glyph_id: 87,
+                x_advance: 8,
+                x_offset: 0,
+                y_offset: 0,
+            },
+            ShapedGlyph {
+                glyph_id: 111,
+                x_advance: 8,
+                x_offset: 0,
+                y_offset: 0,
+            },
+        ];
+        let new_ref = w.push_shaped_glyphs(&new_glyphs);
+
+        // Verify the new data is at a higher offset (not overwriting old data).
+        assert!(
+            new_ref.offset > original_ref.offset,
+            "new data should be appended, not overlapping: new_off={}, old_off={}",
+            new_ref.offset,
+            original_ref.offset
+        );
+
+        // Verify old DataRef still resolves to valid data by reading
+        // the bytes at the original offset.
+        let data_buf = w.data_buf();
+        let old_start = original_ref.offset as usize;
+        let old_end = old_start + original_ref.length as usize;
+        assert!(
+            old_end <= data_buf.len(),
+            "old DataRef should still be in bounds"
+        );
+
+        // Verify the glyph data at the old offset matches the original.
+        let glyph_size = core::mem::size_of::<ShapedGlyph>();
+        let expected_bytes = unsafe {
+            core::slice::from_raw_parts(
+                original_glyphs.as_ptr() as *const u8,
+                original_glyphs.len() * glyph_size,
+            )
+        };
+        assert_eq!(
+            &data_buf[old_start..old_end],
+            expected_bytes,
+            "old glyph data should be preserved after pushing new data"
+        );
+
+        // Verify the data_used counter advanced (old + new).
+        assert!(w.data_used() as usize >= original_ref.length as usize + new_ref.length as usize);
+    }
+}
+
+// VAL-INC-003: has_data_space reports correctly near capacity.
+#[test]
+fn has_data_space_reports_correctly() {
+    let mut buf = vec![0u8; scene::SCENE_SIZE];
+    let mut w = scene::SceneWriter::new(&mut buf);
+
+    // Initially, full space available.
+    assert!(w.has_data_space(1));
+    assert!(w.has_data_space(scene::DATA_BUFFER_SIZE));
+    assert!(!w.has_data_space(scene::DATA_BUFFER_SIZE + 1));
+
+    // Fill most of the buffer.
+    let fill_size = scene::DATA_BUFFER_SIZE - 100;
+    let fill_data = vec![0xABu8; fill_size];
+    w.push_data(&fill_data);
+
+    // Now has_data_space should reflect remaining space.
+    assert!(w.has_data_space(100));
+    assert!(w.has_data_space(1));
+    assert!(!w.has_data_space(101));
+    assert!(!w.has_data_space(scene::DATA_BUFFER_SIZE));
+
+    // Fill the rest.
+    let remainder = vec![0xCDu8; 100];
+    w.push_data(&remainder);
+
+    // Buffer is full.
+    assert!(!w.has_data_space(1));
+    assert!(w.has_data_space(0));
+}
+
+// VAL-INC-004: Incremental update marks only changed nodes dirty.
+#[test]
+fn incremental_update_marks_only_changed_nodes_dirty() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
+
+    // Build a scene with a root + 3 line nodes + cursor (like the editor).
+    {
+        let mut w = tw.acquire();
+        w.clear();
+
+        // Allocate well-known-style structure:
+        // Node 0 = root, Node 1 = doc_text, Node 2 = cursor,
+        // Node 3/4/5 = line nodes
+        let _root = w.alloc_node().unwrap(); // 0
+        let _doc = w.alloc_node().unwrap(); // 1
+        let _cursor = w.alloc_node().unwrap(); // 2
+
+        // 3 line nodes as children of doc (node 1)
+        let line0 = w.alloc_node().unwrap(); // 3
+        let line1 = w.alloc_node().unwrap(); // 4
+        let line2 = w.alloc_node().unwrap(); // 5
+
+        w.set_root(0);
+
+        // Set up content for line nodes.
+        w.node_mut(line0).content =
+            make_mono_glyphs(&mut w, b"aaa", 16, Color::rgb(200, 200, 200), 8);
+        w.node_mut(line1).content =
+            make_mono_glyphs(&mut w, b"bbb", 16, Color::rgb(200, 200, 200), 8);
+        w.node_mut(line2).content =
+            make_mono_glyphs(&mut w, b"ccc", 16, Color::rgb(200, 200, 200), 8);
+
+        // Link: doc -> line0 -> line1 -> line2 -> cursor
+        w.node_mut(1).first_child = line0;
+        w.node_mut(line0).next_sibling = line1;
+        w.node_mut(line1).next_sibling = line2;
+        w.node_mut(line2).next_sibling = 2; // cursor
+        w.node_mut(2).next_sibling = NULL;
+
+        w.set_all_dirty();
+    }
+    tw.publish();
+
+    // Now simulate an incremental update: acquire_copy, update only line1.
+    {
+        let mut w = tw.acquire_copy();
+
+        // Dirty bits should be zero after acquire_copy.
+        assert_eq!(w.dirty_count(), 0);
+
+        // Push new data for line1 (node 4) — simulate incremental update.
+        let new_glyphs = [
+            ShapedGlyph {
+                glyph_id: 88,
+                x_advance: 8,
+                x_offset: 0,
+                y_offset: 0,
+            },
+            ShapedGlyph {
+                glyph_id: 89,
+                x_advance: 8,
+                x_offset: 0,
+                y_offset: 0,
+            },
+            ShapedGlyph {
+                glyph_id: 90,
+                x_advance: 8,
+                x_offset: 0,
+                y_offset: 0,
+            },
+        ];
+        let new_ref = w.push_shaped_glyphs(&new_glyphs);
+
+        w.node_mut(4).content = Content::Glyphs {
+            color: Color::rgb(200, 200, 200),
+            glyphs: new_ref,
+            glyph_count: 3,
+            font_size: 16,
+            axis_hash: 0,
+        };
+        w.mark_dirty(4); // Only mark the changed line.
+        w.mark_dirty(2); // Mark cursor as dirty too.
+
+        // Verify only nodes 2 and 4 are dirty.
+        assert!(w.is_dirty(4));
+        assert!(w.is_dirty(2));
+        assert!(!w.is_dirty(0)); // root not dirty
+        assert!(!w.is_dirty(1)); // doc_text not dirty
+        assert!(!w.is_dirty(3)); // line0 not dirty
+        assert!(!w.is_dirty(5)); // line2 not dirty
+        assert_eq!(w.dirty_count(), 2);
+    }
+}
+
+// VAL-INC-005: data_used grows monotonically across incremental updates.
+#[test]
+fn incremental_data_used_grows_monotonically() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
+
+    // Initial scene with some data.
+    {
+        let mut w = tw.acquire();
+        w.clear();
+        let root = w.alloc_node().unwrap();
+        w.set_root(root);
+        w.node_mut(root).content =
+            make_mono_glyphs(&mut w, b"hello world", 16, Color::rgb(200, 200, 200), 8);
+    }
+    tw.publish();
+
+    let initial_data = tw.latest_data_buf().len();
+    assert!(initial_data > 0);
+
+    // Simulate 5 incremental updates, each pushing more data.
+    let mut prev_used = initial_data;
+    for i in 0..5u8 {
+        {
+            let mut w = tw.acquire_copy();
+            let data_before = w.data_used() as usize;
+            assert_eq!(
+                data_before, prev_used,
+                "acquire_copy should preserve data_used from latest"
+            );
+
+            // Push new data (simulating single-line reshape).
+            let text = [b'A' + i; 10];
+            let glyphs: Vec<ShapedGlyph> = text
+                .iter()
+                .map(|&ch| ShapedGlyph {
+                    glyph_id: ch as u16,
+                    x_advance: 8,
+                    x_offset: 0,
+                    y_offset: 0,
+                })
+                .collect();
+            w.push_shaped_glyphs(&glyphs);
+
+            let data_after = w.data_used() as usize;
+            assert!(
+                data_after > data_before,
+                "data_used should grow: before={}, after={}",
+                data_before,
+                data_after
+            );
+            prev_used = data_after;
+        }
+        tw.publish();
+    }
+}

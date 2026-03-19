@@ -356,6 +356,200 @@ pub fn allocate_selection_rects(
     }
 }
 
+// ── Incremental scene update ─────────────────────────────────────────
+
+/// Count lines in a text buffer (newlines + 1).
+pub fn count_lines(text: &[u8]) -> usize {
+    let mut count: usize = 1;
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] == b'\n' {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Incrementally update a single line's glyph content in the scene.
+///
+/// Assumes `acquire_copy()` was already called (previous frame preserved).
+/// Returns `false` if data buffer is full (caller should fall back to
+/// compaction via `build_document_content`).
+///
+/// Walks the sibling chain from N_DOC_TEXT.first_child to find the node
+/// at position `changed_line`, reshapes only that line, pushes new glyph
+/// data at the bump pointer (does NOT reset the data buffer), and updates
+/// cursor position + optional clock.
+#[allow(clippy::too_many_arguments)]
+pub fn update_single_line(
+    w: &mut scene::SceneWriter<'_>,
+    cfg: &SceneConfig,
+    doc_text: &[u8],
+    changed_line: usize,
+    cursor_pos: u32,
+    sel_start: u32,
+    sel_end: u32,
+    scroll_y: i32,
+    clock_text: Option<&[u8]>,
+) -> bool {
+    let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
+    let scene_text_color = dc(cfg.text_color);
+
+    let doc_width = cfg.fb_width.saturating_sub(2 * cfg.text_inset_x);
+    let chars_per_line = if cfg.char_width > 0 {
+        (doc_width / cfg.char_width).max(1)
+    } else {
+        80
+    };
+
+    // Layout all lines to find the changed line's text boundaries.
+    let all_runs = layout_mono_lines(
+        doc_text,
+        chars_per_line as usize,
+        cfg.line_height as i32,
+        scene_text_color,
+        cfg.font_size,
+    );
+
+    // Determine which visible lines are in the viewport.
+    let content_y = cfg.title_bar_h + cfg.shadow_depth;
+    let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
+    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
+    let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
+
+    // Find the changed line's run index in the full list.
+    // Then figure out which visible-line index it corresponds to.
+    if changed_line >= all_runs.len() {
+        return false; // Line out of range, fall back.
+    }
+
+    // Check if the changed line is visible.
+    let changed_run = &all_runs[changed_line];
+    let run_y = changed_run.y;
+    let line_h = cfg.line_height as i32;
+    let is_visible = run_y + line_h > scroll_px && run_y < scroll_px + content_h;
+
+    if !is_visible {
+        // Changed line is off-screen. Only update cursor + clock.
+        // (Cursor/selection update below handles this case.)
+    } else {
+        // Find the visible-line index by counting visible runs before
+        // this one.
+        let mut visible_index: usize = 0;
+        for (i, run) in all_runs.iter().enumerate() {
+            if i == changed_line {
+                break;
+            }
+            let ry = run.y;
+            if ry + line_h > scroll_px && ry < scroll_px + content_h {
+                visible_index += 1;
+            }
+        }
+
+        // Walk sibling chain from N_DOC_TEXT.first_child to find the node
+        // at visible_index. Stop at N_CURSOR (it's in the chain after line
+        // nodes) or NULL.
+        let mut cur = w.node(N_DOC_TEXT).first_child;
+        let mut idx: usize = 0;
+        while cur != scene::NULL && cur != N_CURSOR && idx < visible_index {
+            cur = w.node(cur).next_sibling;
+            idx += 1;
+        }
+
+        if cur == scene::NULL || cur == N_CURSOR {
+            return false; // Node not found, fall back to compaction.
+        }
+
+        // Shape the changed line's text.
+        let line_text = line_bytes_for_run(doc_text, changed_run);
+        let shaped = shape_text(cfg.font_data, line_text, cfg.font_size, cfg.upem, cfg.axes);
+
+        // Check data space before pushing.
+        let glyph_bytes = shaped.len() * core::mem::size_of::<scene::ShapedGlyph>();
+        // Account for alignment padding (ShapedGlyph align is 2).
+        let needed = glyph_bytes + core::mem::align_of::<scene::ShapedGlyph>();
+        if !w.has_data_space(needed) {
+            return false; // Data buffer full, fall back to compaction.
+        }
+
+        // Push new glyph data (old data is abandoned in the bump allocator).
+        let new_ref = w.push_shaped_glyphs(&shaped);
+        let new_count = shaped.len() as u16;
+
+        // Update the line node.
+        let n = w.node_mut(cur);
+        n.content = Content::Glyphs {
+            color: scene_text_color,
+            glyphs: new_ref,
+            glyph_count: new_count,
+            font_size: cfg.font_size,
+            axis_hash: 0,
+        };
+        n.content_hash = scene::fnv1a(&new_ref.offset.to_le_bytes());
+        w.mark_dirty(cur);
+    }
+
+    // Update N_DOC_TEXT scroll offset (may have been unchanged but keep it
+    // consistent).
+    w.node_mut(N_DOC_TEXT).scroll_y = scroll_px;
+
+    // Update cursor position.
+    let (cursor_line, cursor_col) =
+        byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
+    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+
+    {
+        let n = w.node_mut(N_CURSOR);
+        n.x = cursor_x;
+        n.y = cursor_y;
+    }
+    w.mark_dirty(N_CURSOR);
+
+    // Truncate selection rects (same-line-count edits clear selection for
+    // simplicity — selection is re-applied on the next selection_changed event).
+    // Count per-line Glyphs children under N_DOC_TEXT (stop at N_CURSOR).
+    let mut line_count: u16 = 0;
+    let mut child = w.node(N_DOC_TEXT).first_child;
+    while child != scene::NULL && child != N_CURSOR {
+        line_count += 1;
+        child = w.node(child).next_sibling;
+    }
+    // Truncate selection rects only, keeping well-known + line nodes.
+    w.set_node_count(WELL_KNOWN_COUNT + line_count);
+    w.node_mut(N_CURSOR).next_sibling = scene::NULL;
+
+    // Rebuild selection rects if needed.
+    let (sel_lo, sel_hi) = if sel_start <= sel_end {
+        (sel_start as usize, sel_end as usize)
+    } else {
+        (sel_end as usize, sel_start as usize)
+    };
+    if sel_lo < sel_hi {
+        let content_h_u32 = cfg.fb_height.saturating_sub(content_y);
+        allocate_selection_rects(
+            w,
+            doc_text,
+            sel_lo,
+            sel_hi,
+            chars_per_line as usize,
+            cfg.char_width,
+            cfg.line_height,
+            dc(cfg.sel_color),
+            content_h_u32,
+            scroll_px,
+        );
+    }
+
+    // Update clock if requested.
+    if let Some(ct) = clock_text {
+        update_clock_inline(w, ct, cfg.font_data, cfg.font_size, cfg.upem, cfg.axes);
+    }
+
+    true
+}
+
 // ── Full scene builds (called by SceneState methods) ────────────────
 
 /// Build the full editor scene into a fresh (cleared) SceneWriter.
