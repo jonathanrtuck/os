@@ -251,9 +251,18 @@ pub unsafe fn neon_blend_const_4px(
     let v_src_g_lin = vdup_n_u16(src_g_lin);
     let v_src_b_lin = vdup_n_u16(src_b_lin);
 
-    let v_num_r = vaddq_u32(vmull_u16(v_src_r_lin, v_src_a), vmull_u16(v_dst_r, v_da_eff));
-    let v_num_g = vaddq_u32(vmull_u16(v_src_g_lin, v_src_a), vmull_u16(v_dst_g, v_da_eff));
-    let v_num_b = vaddq_u32(vmull_u16(v_src_b_lin, v_src_a), vmull_u16(v_dst_b, v_da_eff));
+    let v_num_r = vaddq_u32(
+        vmull_u16(v_src_r_lin, v_src_a),
+        vmull_u16(v_dst_r, v_da_eff),
+    );
+    let v_num_g = vaddq_u32(
+        vmull_u16(v_src_g_lin, v_src_a),
+        vmull_u16(v_dst_g, v_da_eff),
+    );
+    let v_num_b = vaddq_u32(
+        vmull_u16(v_src_b_lin, v_src_a),
+        vmull_u16(v_dst_b, v_da_eff),
+    );
 
     // Extract for scalar division and linear-to-sRGB lookup.
     let mut num_r = [0u32; 4];
@@ -321,7 +330,11 @@ unsafe fn neon_div255_u32x4(x: uint32x4_t) -> uint32x4_t {
 #[inline(always)]
 fn linear_to_idx_inline(v: u32) -> usize {
     let idx = v >> 4;
-    if idx > 4095 { 4095 } else { idx as usize }
+    if idx > 4095 {
+        4095
+    } else {
+        idx as usize
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -340,6 +353,10 @@ fn linear_to_idx_inline(v: u32) -> usize {
 ///
 /// Called internally by `blur_horizontal`. All pointer arithmetic is bounds-
 /// checked via the width/height/stride parameters.
+///
+/// NOTE: Despite the `_neon` suffix, this implementation uses scalar u64
+/// arithmetic, not NEON SIMD intrinsics. The vertical blur counterpart
+/// does use actual NEON. Consider renaming or porting to NEON (review 7.15).
 #[cfg(target_arch = "aarch64")]
 pub fn blur_horizontal_neon(
     src: &[u8],

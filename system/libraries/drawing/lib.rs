@@ -471,6 +471,8 @@ impl<'a> Surface<'a> {
                 let pixel_off = row_base + (px * 4) as usize;
 
                 // Effective alpha: color.a * coverage / 255 (uniform for all channels).
+                // NOTE: The +127 pre-rounds before div255 which also rounds —
+                // minor double-rounding discrepancy vs other blending paths (review 7.17).
                 let alpha = div255(color_a * cov as u32 + 127);
 
                 // Fast path: full coverage + opaque color.
@@ -1379,6 +1381,9 @@ impl<'a> Surface<'a> {
     ///
     /// Wrapper that defaults to `ResamplingMethod::Bilinear`. Use
     /// [`blit_blend_bilinear`] for explicit method selection.
+    /// NOTE: Bilinear interpolation blends in sRGB space while the rest
+    /// of the pipeline is gamma-correct. May cause banding/color shifts
+    /// on rotated or scaled content (review 7.16).
     pub fn blit_transformed_bilinear(
         &mut self,
         src_data: &[u8],

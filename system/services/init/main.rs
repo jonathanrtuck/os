@@ -1047,6 +1047,9 @@ pub extern "C" fn _start() -> ! {
     // Don't exit — child processes are still running their event loops.
     // Idle forever via yield. In the real OS, init would become the OS
     // service process (renderer, metadata DB, input router, compositor).
+    // TODO: Monitor child processes via wait() and restart crashed services
+    // (review 6.8). Currently if a render service crashes, the display
+    // freezes permanently with no recovery.
     loop {
         sys::yield_now();
     }

@@ -676,7 +676,7 @@ fn emit_glyphs(
     node_y: f32,
     scale: f32,
     ascent: u32,
-    _clip: ClipRect,
+    _clip: ClipRect, // TODO: Cull offscreen glyphs to save VBO space (review 6.3)
     vw: f32,
     vh: f32,
     color: scene::Color,

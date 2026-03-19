@@ -8,7 +8,6 @@
 use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use crate::rasterize;
-
 // ---------------------------------------------------------------------------
 // Stem darkening — non-linear coverage boost for thin strokes
 // ---------------------------------------------------------------------------
@@ -58,6 +57,10 @@ pub struct CachedGlyph {
 /// have up to a few thousand glyphs; 2048 covers most common fonts.
 const MAX_GLYPH_ID: usize = 2048;
 
+/// TODO: Wire LruGlyphCache as fallback for non-ASCII glyph IDs. Currently
+/// only the ASCII range (95 glyphs) is cached; non-ASCII glyphs return None
+/// from get() and don't render. LruGlyphCache exists below but isn't
+/// integrated into the render pipeline (review 6.2).
 pub struct GlyphCache {
     glyphs: [CachedGlyph; ASCII_CACHE_COUNT],
     coverage: [u8; ASCII_CACHE_COUNT * GLYPH_BUF_SIZE],

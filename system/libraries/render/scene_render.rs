@@ -1682,6 +1682,8 @@ fn render_path(
     max_y += 2;
 
     // Clamp to node bounds (physical pixels).
+    // NOTE: Clamping min to 0 may cause coverage buffer offset mismatch for
+    // paths with content at negative local coordinates (review 7.19).
     if min_x < 0 {
         min_x = 0;
     }
