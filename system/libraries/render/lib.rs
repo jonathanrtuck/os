@@ -5,15 +5,16 @@
 //! dependency on `sys` or `ipc` crates — it is a pure rendering library.
 //! Dependencies: `drawing`, `scene`, `protocol`, `fonts`.
 //!
-//! Always performs full repaints. Damage tracking was removed from this
-//! layer — see journal entry 2026-03-17. The `damage` module is retained
-//! as a building block for future backend-internal optimizations.
+//! Supports both full repaints and incremental rendering. The `damage`
+//! module tracks dirty rectangles, and `incremental` provides per-node
+//! state tracking and dirty rect computation from scene graph diffs.
 
 #![no_std]
 
 extern crate alloc;
 
 pub mod damage;
+pub mod incremental;
 pub mod scene_render;
 pub mod surface_pool;
 

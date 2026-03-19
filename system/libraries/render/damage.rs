@@ -2,10 +2,13 @@
 
 use protocol::DirtyRect;
 
-/// Maximum number of dirty rects that fit in a MSG_PRESENT payload.
-/// Payload = 60 bytes. buffer_index (4) + rect_count (4) + pad (4) = 12.
-/// Remaining = 48 bytes / 8 bytes per rect = 6 rects.
-pub const MAX_DIRTY_RECTS: usize = 6;
+/// Maximum number of dirty rects tracked per frame.
+///
+/// The incremental pipeline can produce many dirty rects (e.g., a line
+/// insert shifts 30+ nodes). Coalescing reduces these, but pre-coalescing
+/// capacity must handle the worst case. When exceeded, `full_screen`
+/// fallback kicks in.
+pub const MAX_DIRTY_RECTS: usize = 32;
 
 /// Collects dirty rectangles during a render pass.
 ///
