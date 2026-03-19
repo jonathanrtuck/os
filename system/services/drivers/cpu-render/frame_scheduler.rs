@@ -111,7 +111,7 @@ impl FrameScheduler {
         self.last_tick_ns = now;
 
         if !self.dirty {
-            self.idle_skip_count += 1;
+            self.idle_skip_count = self.idle_skip_count.wrapping_add(1);
             return false;
         }
 
@@ -119,7 +119,7 @@ impl FrameScheduler {
         // expected start time, the tick is overdue — skip it to avoid
         // back-to-back catch-up renders.
         if now > 0 && self.last_render_end_ns > now {
-            self.overrun_skip_count += 1;
+            self.overrun_skip_count = self.overrun_skip_count.wrapping_add(1);
             return false;
         }
 
@@ -138,8 +138,8 @@ impl FrameScheduler {
     /// with the current timestamp (ns).
     pub fn on_render_complete_at(&mut self, now: u64) {
         self.dirty = false;
-        self.render_count += 1;
-        self.gpu_present_count += 1;
+        self.render_count = self.render_count.wrapping_add(1);
+        self.gpu_present_count = self.gpu_present_count.wrapping_add(1);
         self.last_render_end_ns = now;
     }
 

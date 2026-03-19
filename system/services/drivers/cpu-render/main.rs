@@ -62,9 +62,10 @@ const CHUNK_BYTES: usize = CHUNK_PAGES * 4096;
 /// Maximum chunks per buffer (covers up to 8K resolution).
 const MAX_CHUNKS: usize = 512;
 
-fn channel_shm_va(idx: usize) -> usize {
-    protocol::channel_shm_va(idx)
-}
+/// Wrapper for Sync on statics containing UnsafeCell.
+struct SyncCell<T>(core::cell::UnsafeCell<T>);
+// SAFETY: Single-threaded userspace process.
+unsafe impl<T> Sync for SyncCell<T> {}
 
 #[inline]
 fn counter_to_ns(ticks: u64, freq: u64) -> u64 {
@@ -92,7 +93,7 @@ pub extern "C" fn _start() -> ! {
 
     // ── Phase A: Receive device config, init GPU hardware ────────────
     // SAFETY: Channel 0 shared memory is mapped by kernel before process start.
-    let ch = unsafe { ipc::Channel::from_base(channel_shm_va(0), ipc::PAGE_SIZE, 1) };
+    let ch = unsafe { ipc::Channel::from_base(protocol::channel_shm_va(0), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
     if !ch.try_recv(&mut msg) || msg.msg_type != MSG_DEVICE_CONFIG {
         sys::print(b"cpu-render: no device config message\n");
@@ -152,8 +153,10 @@ pub extern "C" fn _start() -> ! {
 
     // PA table for scatter-gather attach_backing. Static to avoid blowing
     // the 16 KiB stack (1024 × 8 = 8 KiB).
-    static mut PA_TABLE: [u64; MAX_CHUNKS * 2] = [0u64; MAX_CHUNKS * 2];
-    let pa_table = unsafe { &mut PA_TABLE };
+    static PA_TABLE: SyncCell<[u64; MAX_CHUNKS * 2]> =
+        SyncCell(core::cell::UnsafeCell::new([0u64; MAX_CHUNKS * 2]));
+    // SAFETY: Single-threaded process, no concurrent access to PA_TABLE.
+    let pa_table = unsafe { &mut *PA_TABLE.0.get() };
 
     // Front buffer (buffer 0).
     let mut fb_va0: usize = 0;
@@ -310,15 +313,20 @@ pub extern "C" fn _start() -> ! {
     };
 
     // ── Phase G: Framebuffer surfaces + scene graph ──────────────────
-    static mut FB_PTRS: [*mut u8; 2] = [core::ptr::null_mut(); 2];
-    // SAFETY: fb_va0 and fb_va1 are valid DMA allocations covering fb_size bytes.
+    static FB_PTRS: SyncCell<[*mut u8; 2]> =
+        SyncCell(core::cell::UnsafeCell::new([core::ptr::null_mut(); 2]));
+    // SAFETY: Single-threaded process. FB_PTRS written once, read in make_fb.
     unsafe {
-        FB_PTRS[0] = fb_va0 as *mut u8;
-        FB_PTRS[1] = fb_va1 as *mut u8;
+        (*FB_PTRS.0.get())[0] = fb_va0 as *mut u8;
+        (*FB_PTRS.0.get())[1] = fb_va1 as *mut u8;
     }
     let make_fb = |idx: usize| -> drawing::Surface<'static> {
-        let ptr = unsafe { FB_PTRS[idx] };
-        // SAFETY: the pointer covers fb_size bytes of valid DMA memory.
+        // SAFETY: Single-threaded process. FB_PTRS written once above.
+        let ptr = unsafe { (*FB_PTRS.0.get())[idx] };
+        // SAFETY: The kernel's DMA VA bump allocator returns sequential
+        // virtual addresses for consecutive dma_alloc calls. Multiple
+        // CHUNK_BYTES allocations form a contiguous VA range. The slice
+        // covers fb_size bytes starting at fb_va0 (or fb_va1).
         let data = unsafe { core::slice::from_raw_parts_mut(ptr, fb_size as usize) };
         drawing::Surface {
             data,
@@ -339,7 +347,8 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"     waiting for first scene\n");
     let _ = sys::wait(&[CORE_HANDLE], u64::MAX);
     // SAFETY: Channel 1 shared memory was set up by init before start.
-    let core_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
+    let core_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
     while core_ch.try_recv(&mut msg) {}
     {
         let tr = scene::TripleReader::new(scene_buf);
