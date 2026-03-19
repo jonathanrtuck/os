@@ -463,55 +463,67 @@ pub extern "C" fn _start() -> ! {
 
         // ── Present: transfer dirty rects + flush ────────────────
         let base_offset = (render_buf as u64) * buf_stride;
-        match damage.as_ref().and_then(|d| d.dirty_rects()) {
-            Some(rects) => {
-                // Partial transfer: only send changed regions to the GPU.
-                for r in rects {
-                    if r.w > 0 && r.h > 0 {
-                        gpu::transfer_to_host_reuse(
-                            &device,
-                            &mut vq,
-                            irq_handle,
-                            &present_cmd,
-                            gpu::FB_RESOURCE_ID,
-                            r.x as u32,
-                            r.y as u32,
-                            r.w as u32,
-                            r.h as u32,
-                            base_offset,
-                            stride,
-                        );
+
+        // Check for zero-count tracker (all dirty nodes were off-screen).
+        // DamageTracker::dirty_rects() returns None for both "full screen"
+        // and "zero rects" — distinguish here to avoid unnecessary transfer.
+        let skip_transfer = damage
+            .as_ref()
+            .map_or(false, |d| d.count == 0 && !d.full_screen);
+
+        if skip_transfer {
+            // All dirty nodes clipped to zero area — nothing to transfer.
+        } else {
+            match damage.as_ref().and_then(|d| d.dirty_rects()) {
+                Some(rects) => {
+                    // Partial transfer: only send changed regions to the GPU.
+                    for r in rects {
+                        if r.w > 0 && r.h > 0 {
+                            gpu::transfer_to_host_reuse(
+                                &device,
+                                &mut vq,
+                                irq_handle,
+                                &present_cmd,
+                                gpu::FB_RESOURCE_ID,
+                                r.x as u32,
+                                r.y as u32,
+                                r.w as u32,
+                                r.h as u32,
+                                base_offset,
+                                stride,
+                            );
+                        }
                     }
                 }
+                None => {
+                    // Full-screen transfer (first frame, overflow, or all-dirty).
+                    gpu::transfer_to_host_reuse(
+                        &device,
+                        &mut vq,
+                        irq_handle,
+                        &present_cmd,
+                        gpu::FB_RESOURCE_ID,
+                        0,
+                        0,
+                        width,
+                        height,
+                        base_offset,
+                        stride,
+                    );
+                }
             }
-            None => {
-                // Full-screen transfer (first frame, overflow, or all-dirty).
-                gpu::transfer_to_host_reuse(
-                    &device,
-                    &mut vq,
-                    irq_handle,
-                    &present_cmd,
-                    gpu::FB_RESOURCE_ID,
-                    0,
-                    0,
-                    width,
-                    height,
-                    base_offset,
-                    stride,
-                );
-            }
+            gpu::resource_flush_reuse(
+                &device,
+                &mut vq,
+                irq_handle,
+                &present_cmd,
+                gpu::FB_RESOURCE_ID,
+                0,
+                0,
+                width,
+                height,
+            );
         }
-        gpu::resource_flush_reuse(
-            &device,
-            &mut vq,
-            irq_handle,
-            &present_cmd,
-            gpu::FB_RESOURCE_ID,
-            0,
-            0,
-            width,
-            height,
-        );
 
         presented_buf = render_buf;
         sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
