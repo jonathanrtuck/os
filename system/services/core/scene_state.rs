@@ -912,7 +912,9 @@ fn allocate_selection_rects(
 // ── Monospace text layout helpers ───────────────────────────────────
 
 /// Convert a byte offset to (visual_line, column) with monospace wrapping.
-fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
+/// This is the single source of truth for line-breaking logic — used by
+/// both scene building (cursor/selection positioning) and scroll calculation.
+pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
     let mut line: usize = 0;
     let mut col: usize = 0;
     let mut pos: usize = 0;
@@ -1085,7 +1087,11 @@ fn shape_text(
         .collect()
 }
 
-// ── Test content generators (for GPU Content::Image + Content::Path) ──
+// ── Test content generators (scaffolding) ──────────────────────────────
+// These exercise Content::Image and Content::Path in the render pipeline.
+// Called unconditionally during build_editor_scene; dropped after first
+// incremental text edit (update_document_content truncates to WELL_KNOWN_COUNT).
+// Remove once dedicated image/path document types exist.
 
 /// Generate a 32×32 BGRA gradient image for testing.
 /// Returns pixel data in BGRA8 format (4 bytes/pixel, 4096 bytes total).

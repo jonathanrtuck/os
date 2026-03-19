@@ -585,8 +585,8 @@ fn render_shadow(
         return;
     }
 
-    let sx = draw_x + off_x - spread;
-    let sy = draw_y + off_y - spread;
+    let sx = (draw_x + off_x - spread).max(0) as u32;
+    let sy = (draw_y + off_y - spread).max(0) as u32;
 
     let shadow_color = scene_to_draw_color(node.shadow_color);
 
@@ -607,11 +607,11 @@ fn render_shadow(
     if blur_radius == 0 {
         // Hard shadow: just fill a rectangle (or rounded rect) at the offset.
         if phys_radius > 0 {
-            fb.fill_rounded_rect_blend(sx as u32, sy as u32, sw, sh, phys_radius, shadow_color);
+            fb.fill_rounded_rect_blend(sx, sy, sw, sh, phys_radius, shadow_color);
         } else if shadow_color.a == 255 {
-            fb.fill_rect(sx as u32, sy as u32, sw, sh, shadow_color);
+            fb.fill_rect(sx, sy, sw, sh, shadow_color);
         } else {
-            fb.fill_rect_blend(sx as u32, sy as u32, sw, sh, shadow_color);
+            fb.fill_rect_blend(sx, sy, sw, sh, shadow_color);
         }
     } else {
         // Blurred shadow: render the shadow shape to a temporary surface,
@@ -626,9 +626,9 @@ fn render_shadow(
         if buf_size > 4 * 1024 * 1024 {
             // Fallback to hard shadow for very large blur.
             if phys_radius > 0 {
-                fb.fill_rounded_rect_blend(sx as u32, sy as u32, sw, sh, phys_radius, shadow_color);
+                fb.fill_rounded_rect_blend(sx, sy, sw, sh, phys_radius, shadow_color);
             } else {
-                fb.fill_rect_blend(sx as u32, sy as u32, sw, sh, shadow_color);
+                fb.fill_rect_blend(sx, sy, sw, sh, shadow_color);
             }
             return;
         }
@@ -690,8 +690,8 @@ fn render_shadow(
 
         // Composite the blurred shadow onto the destination.
         // The shadow buffer's (pad, pad) corresponds to (sx, sy) in the dest.
-        let blit_x = (sx - pad as i32).max(0) as u32;
-        let blit_y = (sy - pad as i32).max(0) as u32;
+        let blit_x = sx.saturating_sub(pad);
+        let blit_y = sy.saturating_sub(pad);
 
         fb.blit_blend(&dst_buf, buf_w, buf_h, buf_stride, blit_x, blit_y);
     }

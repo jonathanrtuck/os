@@ -69,6 +69,12 @@ pub struct SurfacePool {
 }
 
 /// Opaque handle returned by `acquire()`. Pass to `release()` when done.
+///
+/// Handles are indices into the internal entries Vec. Entries are cleared
+/// in-place (not removed) by `end_frame()`, so indices stay valid. A stale
+/// handle from a prior frame may index a cleared or reused slot — the caller
+/// must not retain handles across frames. A generation counter would catch
+/// this, but the current single-frame usage pattern makes it unnecessary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PoolHandle(usize);
 

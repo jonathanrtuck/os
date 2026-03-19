@@ -184,42 +184,19 @@ impl TextLayout {
     }
 
     /// Return the visual line number (0-based) for a given byte offset.
+    /// Delegates to `byte_to_line_col` for a single wrapping implementation.
     fn byte_to_visual_line(&self, text: &[u8], offset: usize) -> u32 {
         let cols = self.cols();
-
         if cols == 0 || text.is_empty() {
             return 0;
         }
-
         let target = if offset > text.len() {
             text.len()
         } else {
             offset
         };
-        let mut col = 0usize;
-        let mut row = 0u32;
-
-        for (i, &byte) in text.iter().enumerate() {
-            if i == target {
-                return row;
-            }
-
-            if byte == b'\n' {
-                row += 1;
-                col = 0;
-
-                continue;
-            }
-
-            if col >= cols {
-                row += 1;
-                col = 0;
-            }
-
-            col += 1;
-        }
-
-        row
+        let (line, _col) = scene_state::byte_to_line_col(text, target, cols);
+        line as u32
     }
 
     /// Compute the scroll offset needed to keep the cursor visible.
