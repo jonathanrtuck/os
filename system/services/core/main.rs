@@ -30,8 +30,12 @@ extern crate scene;
 
 #[path = "fallback.rs"]
 mod fallback;
+#[path = "layout.rs"]
+mod layout;
 #[path = "scene_state.rs"]
 mod scene_state;
+#[path = "test_gen.rs"]
+mod test_gen;
 #[path = "typography.rs"]
 mod typography;
 
