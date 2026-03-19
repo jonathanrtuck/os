@@ -83,6 +83,10 @@ const DOC_BUF_HEADER: u32 = 64;
 const DOC_BUF_CAPACITY: u32 = (DOC_BUF_PAGES as u32 * 4096) - DOC_BUF_HEADER;
 /// Maximum number of virtio-input devices we can handle (keyboard + tablet).
 const MAX_INPUT_DEVICES: usize = 4;
+/// Boot-phase timeout: 10 seconds in nanoseconds.
+const BOOT_TIMEOUT_NS: u64 = 10_000_000_000;
+/// Font read timeout: 5 seconds in nanoseconds.
+const FONT_READ_TIMEOUT_NS: u64 = 5_000_000_000;
 
 fn channel_shm_va(channel_index: usize) -> usize {
     protocol::channel_shm_va(channel_index)
@@ -277,16 +281,40 @@ fn setup_render_pipeline(
 
     start_process(gpu_proc, b"render");
 
-    // Wait for display info from render service.
+    // Wait for display info from render service (with timeout).
     sys::print(b"     waiting for display info\n");
 
     let mut resp_msg = ipc::Message::new(0);
+    let mut display_ok = false;
 
-    loop {
-        let _ = sys::wait(&[gpu_ch_handle], u64::MAX);
+    {
+        let mut retries = 0u32;
 
-        if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_DISPLAY_INFO {
-            break;
+        loop {
+            match sys::wait(&[gpu_ch_handle], BOOT_TIMEOUT_NS) {
+                Ok(_) => {
+                    if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_DISPLAY_INFO {
+                        display_ok = true;
+                        break;
+                    }
+                }
+                Err(sys::SyscallError::WouldBlock) => {
+                    retries += 1;
+                    sys::print(b"init: timeout waiting for display info (retry)\n");
+                    if retries >= 3 {
+                        sys::print(b"init: FATAL - render service not responding (display info)\n");
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    if !display_ok {
+        sys::print(b"init: cannot continue without display info, halting\n");
+        loop {
+            sys::yield_now();
         }
     }
 
@@ -338,12 +366,37 @@ fn setup_render_pipeline(
 
     let _ = sys::channel_signal(gpu_ch_handle);
 
-    // Wait for GPU_READY.
-    loop {
-        let _ = sys::wait(&[gpu_ch_handle], u64::MAX);
+    // Wait for GPU_READY (with timeout).
+    let mut gpu_ready = false;
 
-        if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_GPU_READY {
-            break;
+    {
+        let mut retries = 0u32;
+
+        loop {
+            match sys::wait(&[gpu_ch_handle], BOOT_TIMEOUT_NS) {
+                Ok(_) => {
+                    if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_GPU_READY {
+                        gpu_ready = true;
+                        break;
+                    }
+                }
+                Err(sys::SyscallError::WouldBlock) => {
+                    retries += 1;
+                    sys::print(b"init: timeout waiting for GPU ready (retry)\n");
+                    if retries >= 3 {
+                        sys::print(b"init: FATAL - render service not responding (GPU ready)\n");
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+    }
+
+    if !gpu_ready {
+        sys::print(b"init: cannot continue without GPU ready, halting\n");
+        loop {
+            sys::yield_now();
         }
     }
 
@@ -897,13 +950,38 @@ pub extern "C" fn _start() -> ! {
 
                 let _ = sys::channel_signal(ch_handle);
                 let mut resp_msg = ipc::Message::new(0);
+                let mut got_response = false;
 
-                loop {
-                    let _ = sys::wait(&[ch_handle], u64::MAX);
+                {
+                    let mut retries = 0u32;
 
-                    if ch_obj.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_FS_READ_RESPONSE {
-                        break;
+                    loop {
+                        match sys::wait(&[ch_handle], FONT_READ_TIMEOUT_NS) {
+                            Ok(_) => {
+                                if ch_obj.try_recv(&mut resp_msg)
+                                    && resp_msg.msg_type == MSG_FS_READ_RESPONSE
+                                {
+                                    got_response = true;
+                                    break;
+                                }
+                            }
+                            Err(sys::SyscallError::WouldBlock) => {
+                                retries += 1;
+                                sys::print(b"init: timeout waiting for font read (retry)\n");
+                                if retries >= 3 {
+                                    sys::print(
+                                        b"init: font read timed out, using bitmap fallback\n",
+                                    );
+                                    break;
+                                }
+                            }
+                            _ => break,
+                        }
                     }
+                }
+
+                if !got_response {
+                    return 0;
                 }
 
                 let (len, status) = unsafe {
