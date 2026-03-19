@@ -527,15 +527,19 @@ pub fn update_single_line(
     w.mark_dirty(N_CURSOR);
 
     // Truncate selection rects and rebuild from current selection state.
-    // Count per-line Glyphs children under N_DOC_TEXT (stop at N_CURSOR).
-    let mut line_count: u16 = 0;
+    // Walk the chain to find the highest node index — bump-allocated nodes
+    // may have indices above WELL_KNOWN_COUNT + line_count (from prior
+    // insert_line calls that created gaps). Must use max_node_idx to avoid
+    // truncating live nodes at higher indices.
+    let mut max_node_idx: u16 = WELL_KNOWN_COUNT.saturating_sub(1);
     let mut child = w.node(N_DOC_TEXT).first_child;
     while child != scene::NULL && child != N_CURSOR {
-        line_count += 1;
+        if child >= WELL_KNOWN_COUNT && child > max_node_idx {
+            max_node_idx = child;
+        }
         child = w.node(child).next_sibling;
     }
-    // Truncate selection rects only, keeping well-known + line nodes.
-    w.set_node_count(WELL_KNOWN_COUNT + line_count);
+    w.set_node_count(max_node_idx + 1);
     w.node_mut(N_CURSOR).next_sibling = scene::NULL;
 
     // Rebuild selection rects if needed.
@@ -727,10 +731,10 @@ pub fn insert_line(
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
     let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
 
-    let visible_runs: Vec<&LayoutRun> = all_runs
+    let visible_run_count = all_runs
         .iter()
         .filter(|r| r.y + cfg.line_height as i32 > scroll_px && r.y < scroll_px + content_h)
-        .collect();
+        .count();
 
     // Count current line nodes in the sibling chain.
     let mut chain_len: usize = 0;
@@ -744,7 +748,7 @@ pub fn insert_line(
 
     // After insert, visible count should be chain_len + 1.
     // If not, something unexpected happened (soft wrap change). Fall back.
-    if visible_runs.len() != chain_len + 1 {
+    if visible_run_count != chain_len + 1 {
         return false;
     }
 
@@ -944,10 +948,10 @@ pub fn delete_line(
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
     let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
 
-    let visible_runs: Vec<&LayoutRun> = all_runs
+    let visible_run_count = all_runs
         .iter()
         .filter(|r| r.y + cfg.line_height as i32 > scroll_px && r.y < scroll_px + content_h)
-        .collect();
+        .count();
 
     // Count current line nodes in the sibling chain.
     let mut chain_nodes: Vec<u16> = Vec::new();
@@ -961,7 +965,7 @@ pub fn delete_line(
     let chain_len = chain_nodes.len();
 
     // After delete, visible count should be chain_len - 1.
-    if visible_runs.len() != chain_len.wrapping_sub(1) {
+    if visible_run_count != chain_len.wrapping_sub(1) {
         return false;
     }
 
