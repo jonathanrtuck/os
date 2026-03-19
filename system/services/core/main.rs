@@ -1003,13 +1003,37 @@ pub extern "C" fn _start() -> ! {
                         s.scroll_offset as i32,
                         timer_fired,
                     );
+                } else if new_line_count == prev_line_count + 1 {
+                    // Single line inserted (Enter key) — incremental insert.
+                    let s = state();
+                    scene.update_document_insert_line(
+                        &scene_cfg,
+                        doc,
+                        s.cursor_pos as u32,
+                        s.sel_start as u32,
+                        s.sel_end as u32,
+                        b"Text",
+                        &time_buf,
+                        s.scroll_offset as i32,
+                        timer_fired,
+                    );
+                } else if new_line_count + 1 == prev_line_count {
+                    // Single line deleted (Backspace at BOL) — incremental delete.
+                    let s = state();
+                    scene.update_document_delete_line(
+                        &scene_cfg,
+                        doc,
+                        s.cursor_pos as u32,
+                        s.sel_start as u32,
+                        s.sel_end as u32,
+                        b"Text",
+                        &time_buf,
+                        s.scroll_offset as i32,
+                        timer_fired,
+                    );
                 } else {
-                    // Line count changed — full rebuild (compaction).
-                    // update_document_content handles doc text, cursor, and
-                    // selection. Compacts the data buffer on each call so
-                    // data_used stays proportional to visible content.
-                    // When timer_fired, also marks N_CLOCK_TEXT changed so
-                    // both document and clock update in one frame.
+                    // Multi-line change (paste, delete selection spanning lines) —
+                    // full rebuild (compaction).
                     let s = state();
                     scene.update_document_content(
                         &scene_cfg,

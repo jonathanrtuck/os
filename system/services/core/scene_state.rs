@@ -13,7 +13,7 @@ use scene::{TripleWriter, TRIPLE_SCENE_SIZE};
 
 use super::layout::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_selection_update, update_single_line,
+    build_selection_update, delete_line, insert_line, update_single_line,
 };
 // Re-export layout types and constants used by main.rs.
 pub use super::layout::{
@@ -159,6 +159,98 @@ impl SceneState {
             );
             if !success {
                 // Compaction: fall back to full rebuild.
+                build_document_content(
+                    &mut w,
+                    cfg,
+                    doc_text,
+                    cursor_pos,
+                    sel_start,
+                    sel_end,
+                    title_label,
+                    clock_text,
+                    scroll_y,
+                    timer_fired,
+                );
+            }
+        }
+        tw.publish();
+    }
+
+    /// Incremental line insert (Enter key). Falls back to compaction if
+    /// the incremental path cannot allocate nodes or data.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_document_insert_line(
+        &mut self,
+        cfg: &SceneConfig,
+        doc_text: &[u8],
+        cursor_pos: u32,
+        sel_start: u32,
+        sel_end: u32,
+        title_label: &[u8],
+        clock_text: &[u8],
+        scroll_y: i32,
+        timer_fired: bool,
+    ) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            let success = insert_line(
+                &mut w,
+                cfg,
+                doc_text,
+                cursor_pos,
+                sel_start,
+                sel_end,
+                scroll_y,
+                if timer_fired { Some(clock_text) } else { None },
+            );
+            if !success {
+                build_document_content(
+                    &mut w,
+                    cfg,
+                    doc_text,
+                    cursor_pos,
+                    sel_start,
+                    sel_end,
+                    title_label,
+                    clock_text,
+                    scroll_y,
+                    timer_fired,
+                );
+            }
+        }
+        tw.publish();
+    }
+
+    /// Incremental line delete (Backspace at BOL). Falls back to compaction
+    /// if the incremental path cannot allocate data.
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_document_delete_line(
+        &mut self,
+        cfg: &SceneConfig,
+        doc_text: &[u8],
+        cursor_pos: u32,
+        sel_start: u32,
+        sel_end: u32,
+        title_label: &[u8],
+        clock_text: &[u8],
+        scroll_y: i32,
+        timer_fired: bool,
+    ) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            let success = delete_line(
+                &mut w,
+                cfg,
+                doc_text,
+                cursor_pos,
+                sel_start,
+                sel_end,
+                scroll_y,
+                if timer_fired { Some(clock_text) } else { None },
+            );
+            if !success {
                 build_document_content(
                     &mut w,
                     cfg,

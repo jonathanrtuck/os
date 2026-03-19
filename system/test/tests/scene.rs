@@ -1877,6 +1877,182 @@ fn affine_transform_aabb_90_rotation() {
     );
 }
 
+// ── Incremental line insert / delete tests ──────────────────────────
+
+/// Dead slot: unlinked node becomes invisible, chain skips it, node_count unchanged.
+#[test]
+fn dead_slot_node_invisible_after_unlink() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // Parent node.
+    let parent = w.alloc_node().unwrap(); // 0
+    w.set_root(parent);
+
+    // Three sibling children.
+    let n1 = w.alloc_node().unwrap(); // 1
+    let n2 = w.alloc_node().unwrap(); // 2
+    let n3 = w.alloc_node().unwrap(); // 3
+
+    w.node_mut(n1).flags = NodeFlags::VISIBLE;
+    w.node_mut(n2).flags = NodeFlags::VISIBLE;
+    w.node_mut(n3).flags = NodeFlags::VISIBLE;
+
+    // Link chain: parent.first_child = n1 -> n2 -> n3 -> NULL
+    w.node_mut(parent).first_child = n1;
+    w.node_mut(n1).next_sibling = n2;
+    w.node_mut(n2).next_sibling = n3;
+    w.node_mut(n3).next_sibling = NULL;
+
+    assert_eq!(w.node_count(), 4);
+
+    // "Delete" middle node n2: unlink from chain, clear VISIBLE.
+    w.node_mut(n1).next_sibling = w.node(n2).next_sibling; // n1 -> n3
+    w.node_mut(n2).flags = NodeFlags::empty(); // invisible
+
+    // Verify: middle node is invisible.
+    assert!(!w.node(n2).visible(), "deleted node should be invisible");
+
+    // Chain skips n2: parent -> n1 -> n3 -> NULL.
+    assert_eq!(w.node(parent).first_child, n1);
+    assert_eq!(w.node(n1).next_sibling, n3);
+    assert_eq!(w.node(n3).next_sibling, NULL);
+
+    // node_count unchanged (dead slot remains).
+    assert_eq!(w.node_count(), 4);
+}
+
+/// After creating dead slots, alloc_node bumps the count (doesn't reuse dead slots).
+#[test]
+fn alloc_node_after_dead_slots_bumps_count() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let _n0 = w.alloc_node().unwrap(); // 0
+    let n1 = w.alloc_node().unwrap(); // 1
+    let _n2 = w.alloc_node().unwrap(); // 2
+    assert_eq!(w.node_count(), 3);
+
+    // "Delete" n1 by clearing VISIBLE (simulate dead slot).
+    w.node_mut(n1).flags = NodeFlags::empty();
+
+    // Allocate a new node — should go at index 3 (bump pointer), NOT reuse index 1.
+    let n3 = w.alloc_node().unwrap();
+    assert_eq!(
+        n3, 3,
+        "new node should be at bump pointer, not reuse dead slot"
+    );
+    assert_eq!(w.node_count(), 4);
+}
+
+/// Insert a new node into the middle of a sibling chain.
+#[test]
+fn insert_line_node_links_into_chain() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    // Parent.
+    let parent = w.alloc_node().unwrap(); // 0
+    w.set_root(parent);
+
+    // Three children: line1, line2, line3.
+    let line1 = w.alloc_node().unwrap(); // 1
+    let line2 = w.alloc_node().unwrap(); // 2
+    let line3 = w.alloc_node().unwrap(); // 3
+
+    // Chain: parent -> line1 -> line2 -> line3 -> NULL
+    w.node_mut(parent).first_child = line1;
+    w.node_mut(line1).next_sibling = line2;
+    w.node_mut(line2).next_sibling = line3;
+    w.node_mut(line3).next_sibling = NULL;
+
+    // Set y positions.
+    w.node_mut(line1).y = 0;
+    w.node_mut(line2).y = 20;
+    w.node_mut(line3).y = 40;
+
+    // Insert a new node after line2.
+    let new_line = w.alloc_node().unwrap(); // 4
+    w.node_mut(new_line).y = 40; // same y as old line3 (it will be shifted)
+    w.node_mut(new_line).flags = NodeFlags::VISIBLE;
+
+    // Link: line2 -> new_line -> line3
+    w.node_mut(new_line).next_sibling = w.node(line2).next_sibling; // new -> line3
+    w.node_mut(line2).next_sibling = new_line; // line2 -> new
+
+    // Shift line3 y down by line_height (20).
+    w.node_mut(line3).y = 60;
+
+    // Verify chain order: parent -> line1 -> line2 -> new_line -> line3 -> NULL
+    assert_eq!(w.node(parent).first_child, line1);
+    assert_eq!(w.node(line1).next_sibling, line2);
+    assert_eq!(w.node(line2).next_sibling, new_line);
+    assert_eq!(w.node(new_line).next_sibling, line3);
+    assert_eq!(w.node(line3).next_sibling, NULL);
+
+    // Verify y positions after shift.
+    assert_eq!(w.node(line1).y, 0);
+    assert_eq!(w.node(line2).y, 20);
+    assert_eq!(w.node(new_line).y, 40);
+    assert_eq!(w.node(line3).y, 60);
+
+    assert_eq!(w.node_count(), 5);
+}
+
+/// Update line positions shifts y for all nodes in a chain.
+#[test]
+fn update_line_positions_shifts_y() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+
+    let parent = w.alloc_node().unwrap(); // 0
+    w.set_root(parent);
+
+    // Five line nodes.
+    let mut nodes = Vec::new();
+    for i in 0..5u16 {
+        let n = w.alloc_node().unwrap();
+        w.node_mut(n).y = (i as i32) * 20;
+        w.node_mut(n).flags = NodeFlags::VISIBLE;
+        w.node_mut(n).content_hash = 0xABCD; // mark with known hash
+        nodes.push(n);
+    }
+
+    // Link chain.
+    w.node_mut(parent).first_child = nodes[0];
+    for i in 0..4 {
+        w.node_mut(nodes[i]).next_sibling = nodes[i + 1];
+    }
+    w.node_mut(nodes[4]).next_sibling = NULL;
+
+    // Simulate shifting nodes[2..] down by 20 (line insert at index 2).
+    let line_height = 20i32;
+    let mut cur = nodes[2];
+    let mut idx = 2u32;
+    while cur != NULL {
+        w.node_mut(cur).y = (idx as i32) * line_height + line_height; // shift down
+        w.mark_dirty(cur);
+        cur = w.node(cur).next_sibling;
+        idx += 1;
+    }
+
+    // Verify shifted positions.
+    assert_eq!(w.node(nodes[0]).y, 0); // unchanged
+    assert_eq!(w.node(nodes[1]).y, 20); // unchanged
+    assert_eq!(w.node(nodes[2]).y, 60); // shifted
+    assert_eq!(w.node(nodes[3]).y, 80); // shifted
+    assert_eq!(w.node(nodes[4]).y, 100); // shifted
+
+    // Content hashes unchanged (property-only shift).
+    for &n in &nodes[2..] {
+        assert_eq!(
+            w.node(n).content_hash,
+            0xABCD,
+            "content_hash should be unchanged for shifted nodes"
+        );
+    }
+}
+
 #[test]
 fn affine_transform_aabb_45_rotation() {
     // VAL-XFORM-009: 100x100 node rotated 45° has AABB ~141x141
