@@ -471,9 +471,7 @@ impl<'a> Surface<'a> {
                 let pixel_off = row_base + (px * 4) as usize;
 
                 // Effective alpha: color.a * coverage / 255 (uniform for all channels).
-                // NOTE: The +127 pre-rounds before div255 which also rounds —
-                // minor double-rounding discrepancy vs other blending paths (review 7.17).
-                let alpha = div255(color_a * cov as u32 + 127);
+                let alpha = div255(color_a * cov as u32);
 
                 // Fast path: full coverage + opaque color.
                 if alpha >= 255 {
@@ -506,9 +504,9 @@ impl<'a> Surface<'a> {
 
                     // Blend uniformly in linear space (same alpha for all channels).
                     let inv_a = 255 - alpha;
-                    let out_r_lin = div255(dst_r_lin * inv_a + src_r_lin * alpha + 127);
-                    let out_g_lin = div255(dst_g_lin * inv_a + src_g_lin * alpha + 127);
-                    let out_b_lin = div255(dst_b_lin * inv_a + src_b_lin * alpha + 127);
+                    let out_r_lin = div255(dst_r_lin * inv_a + src_r_lin * alpha);
+                    let out_g_lin = div255(dst_g_lin * inv_a + src_g_lin * alpha);
+                    let out_b_lin = div255(dst_b_lin * inv_a + src_b_lin * alpha);
 
                     // Convert back to sRGB.
                     let out_r = LINEAR_TO_SRGB[linear_to_idx(out_r_lin)];

@@ -981,7 +981,10 @@ fn draw_line_aa_diagonal_has_smooth_edges() {
             }
         }
     }
-    assert!(has_full_alpha, "diagonal line should have fully opaque pixels");
+    assert!(
+        has_full_alpha,
+        "diagonal line should have fully opaque pixels"
+    );
     assert!(
         has_intermediate_alpha,
         "diagonal line should have intermediate alpha AA pixels"
@@ -1662,8 +1665,12 @@ fn rasterize_valid_glyph_produces_coverage() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch);
-    assert!(metrics.is_some(), "valid glyph should produce Some(metrics)");
+    let metrics =
+        fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch);
+    assert!(
+        metrics.is_some(),
+        "valid glyph should produce Some(metrics)"
+    );
     let m = metrics.unwrap();
     assert!(m.width > 0, "bitmap width should be > 0");
     assert!(m.height > 0, "bitmap height should be > 0");
@@ -1701,8 +1708,12 @@ fn rasterize_invalid_glyph_returns_none() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, u16::MAX, 18, &mut raster, &mut scratch);
-    assert!(metrics.is_none(), "glyph_id=u16::MAX should return None (no panic)");
+    let metrics =
+        fonts::rasterize::rasterize(SOURCE_CODE_PRO, u16::MAX, 18, &mut raster, &mut scratch);
+    assert!(
+        metrics.is_none(),
+        "glyph_id=u16::MAX should return None (no panic)"
+    );
 }
 
 #[test]
@@ -1717,7 +1728,8 @@ fn rasterize_a_glyph_reasonable_dimensions() {
         height: 128,
     };
 
-    let m = fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch).unwrap();
+    let m = fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch)
+        .unwrap();
     assert!(
         m.width >= 5 && m.width <= 20,
         "'A' at 18px width should be 5-20px, got {}",
@@ -1732,7 +1744,11 @@ fn rasterize_a_glyph_reasonable_dimensions() {
     // Verify non-trivial coverage
     let total = (m.width * m.height * 3) as usize;
     let coverage_sum: u64 = buf[..total].iter().map(|&b| b as u64).sum();
-    assert!(coverage_sum > 100, "coverage sum should be > 100, got {}", coverage_sum);
+    assert!(
+        coverage_sum > 100,
+        "coverage sum should be > 100, got {}",
+        coverage_sum
+    );
 }
 
 #[test]
@@ -1747,10 +1763,20 @@ fn rasterize_proportional_font_valid() {
         height: 128,
     };
 
-    let m = fonts::rasterize::rasterize(NUNITO_SANS, glyph_id, 18, &mut raster, &mut scratch).unwrap();
-    assert!(m.width > 0, "proportional font glyph should have non-zero width");
-    assert!(m.height > 0, "proportional font glyph should have non-zero height");
-    assert!(m.advance > 0, "proportional font glyph should have non-zero advance");
+    let m =
+        fonts::rasterize::rasterize(NUNITO_SANS, glyph_id, 18, &mut raster, &mut scratch).unwrap();
+    assert!(
+        m.width > 0,
+        "proportional font glyph should have non-zero width"
+    );
+    assert!(
+        m.height > 0,
+        "proportional font glyph should have non-zero height"
+    );
+    assert!(
+        m.advance > 0,
+        "proportional font glyph should have non-zero advance"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -2272,7 +2298,14 @@ fn grayscale_rasterize_produces_intermediate_coverage() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(
+        SOURCE_CODE_PRO,
+        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k').unwrap(),
+        24 as u16,
+        &mut raster,
+        &mut scratch,
+    )
+    .unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
 
     // Output is 1 byte per pixel (grayscale).
@@ -2298,7 +2331,14 @@ fn grayscale_diagonal_has_smooth_transitions() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'x').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(
+        SOURCE_CODE_PRO,
+        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'x').unwrap(),
+        24 as u16,
+        &mut raster,
+        &mut scratch,
+    )
+    .unwrap();
     let w = metrics.width;
     // Output is 1 byte per pixel (grayscale).
     let total = (w * metrics.height) as usize;
@@ -2330,7 +2370,14 @@ fn grayscale_curve_has_smooth_edges() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'o').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(
+        SOURCE_CODE_PRO,
+        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'o').unwrap(),
+        24 as u16,
+        &mut raster,
+        &mut scratch,
+    )
+    .unwrap();
     let w = metrics.width;
     // Output is 1 byte per pixel (grayscale).
     let total = (w * metrics.height) as usize;
@@ -2372,7 +2419,8 @@ fn grayscale_all_printable_ascii_still_rasterize() {
             Some(id) => id,
             None => continue,
         };
-        let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, gid, 24, &mut raster, &mut scratch);
+        let metrics =
+            fonts::rasterize::rasterize(SOURCE_CODE_PRO, gid, 24, &mut raster, &mut scratch);
         assert!(
             metrics.is_some(),
             "grayscale: should rasterize '{}' (0x{:02x}) at 24px",
@@ -2436,7 +2484,14 @@ fn grayscale_rasterizer_output_is_1_byte_per_pixel() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'H').unwrap(), 24 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(
+        SOURCE_CODE_PRO,
+        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'H').unwrap(),
+        24 as u16,
+        &mut raster,
+        &mut scratch,
+    )
+    .unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
 
     // Total output bytes should be width * height (1 byte per pixel).
@@ -2585,7 +2640,7 @@ fn stem_darkening_applied_to_rasterized_glyph() {
     // coverage values are boosted compared to the raw formula.
     // Since darkening is applied in the rasterizer, we verify the output
     // has higher coverage values than raw (undarkened) values would produce.
-    
+
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -2594,7 +2649,14 @@ fn stem_darkening_applied_to_rasterized_glyph() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(), 16 as u16, &mut raster, &mut scratch).unwrap();
+    let metrics = fonts::rasterize::rasterize(
+        SOURCE_CODE_PRO,
+        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(),
+        16 as u16,
+        &mut raster,
+        &mut scratch,
+    )
+    .unwrap();
     let w = metrics.width;
     let h = metrics.height;
     let total = (w * h) as usize; // 1 byte per pixel (grayscale)
@@ -3597,7 +3659,6 @@ fn image_surface_no_overflow_into_chrome_region() {
     assert_eq!(px.g, 255, "content should have green image pixels");
     assert_eq!(px.r, 0);
 }
-
 
 // ---------------------------------------------------------------------------
 // Clock time formatting tests
@@ -5559,12 +5620,48 @@ fn test_div255_boundaries() {
     assert_eq!(div255(254), 0);
     assert_eq!(div255(256), 1);
     assert_eq!(div255(65025), 255); // 255 * 255
-    // With rounding bias (+127):
+                                    // With rounding bias (+127):
     assert_eq!(div255(127), 0);
     assert_eq!(div255(128), 0);
     assert_eq!(div255(255), 1);
     // Typical alpha computation: (255 * 128 + 127) = 32767
     assert_eq!(div255(32767), 128);
+}
+
+/// Verify div255 produces correct results for alpha blending without +127 bias.
+/// The formula `div255(a * b)` where a,b ∈ 0..=255 must match `(a * b) / 255`
+/// for all representative values — no pre-rounding bias needed.
+#[test]
+fn test_div255_no_bias_needed_for_alpha_blending() {
+    // Exhaustively test all (a, b) pairs in 0..=255.
+    // div255(a * b) should equal (a * b) / 255 for all pairs, because
+    // a * b ∈ 0..=65025 and div255 is exact in that range.
+    for a in 0..=255u32 {
+        for b in 0..=255u32 {
+            let product = a * b;
+            let without_bias = div255(product);
+            let with_bias = div255(product + 127);
+            let exact = product / 255;
+
+            // div255 without bias must be exact.
+            assert_eq!(
+                without_bias, exact,
+                "div255({a} * {b}) = {without_bias}, expected {exact}"
+            );
+
+            // With bias, the result may differ (double-rounding). Document where.
+            // This is informational — the important thing is that without_bias == exact.
+            if with_bias != exact {
+                // The bias pushes some values over the rounding boundary.
+                // For example: a=1, b=1 → product=1 → exact=0, with_bias=div255(128)=0 (OK here)
+                // But for some values the +127 causes off-by-one.
+                assert!(
+                    with_bias == exact || with_bias == exact + 1,
+                    "bias should only cause +1 rounding: div255({product} + 127) = {with_bias}, exact = {exact}"
+                );
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5709,7 +5806,10 @@ fn test_draw_coverage_fully_outside() {
         let mut surf = make_surface(&mut buf, 8, 8);
         surf.draw_coverage(0, -10, &coverage, 2, 2, Color::WHITE);
         drop(surf);
-        assert!(buf.iter().all(|&b| b == 0), "above: buffer should be zeroed");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "above: buffer should be zeroed"
+        );
     }
 
     // Entirely below.
@@ -5718,7 +5818,10 @@ fn test_draw_coverage_fully_outside() {
         let mut surf = make_surface(&mut buf, 8, 8);
         surf.draw_coverage(0, 10, &coverage, 2, 2, Color::WHITE);
         drop(surf);
-        assert!(buf.iter().all(|&b| b == 0), "below: buffer should be zeroed");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "below: buffer should be zeroed"
+        );
     }
 
     // Entirely to the right.
@@ -5727,7 +5830,10 @@ fn test_draw_coverage_fully_outside() {
         let mut surf = make_surface(&mut buf, 8, 8);
         surf.draw_coverage(10, 0, &coverage, 2, 2, Color::WHITE);
         drop(surf);
-        assert!(buf.iter().all(|&b| b == 0), "right: buffer should be zeroed");
+        assert!(
+            buf.iter().all(|&b| b == 0),
+            "right: buffer should be zeroed"
+        );
     }
 }
 
@@ -5859,14 +5965,14 @@ fn draw_coverage_reference(
 #[test]
 fn test_draw_coverage_unsafe_vs_reference() {
     let test_cases: &[(i32, i32, u32, u32)] = &[
-        (0, 0, 4, 4),     // normal
-        (-1, -1, 4, 4),   // partial negative
+        (0, 0, 4, 4),      // normal
+        (-1, -1, 4, 4),    // partial negative
         (-500, 0, 520, 4), // large negative x
         (0, -500, 4, 520), // large negative y
-        (6, 6, 4, 4),     // partial clip right/bottom
-        (0, 0, 1, 1),     // single pixel
-        (0, 0, 8, 8),     // exact surface size
-        (7, 7, 2, 2),     // clip to 1x1
+        (6, 6, 4, 4),      // partial clip right/bottom
+        (0, 0, 1, 1),      // single pixel
+        (0, 0, 8, 8),      // exact surface size
+        (7, 7, 2, 2),      // clip to 1x1
     ];
 
     for &(x, y, cw, ch) in test_cases {
@@ -5881,7 +5987,15 @@ fn test_draw_coverage_unsafe_vs_reference() {
         let mut ref_buf = vec![0x80u8; 8 * 8 * 4]; // non-zero background
         let mut ref_surf = make_surface(&mut ref_buf, 8, 8);
         ref_surf.clear(Color::rgb(100, 50, 200));
-        draw_coverage_reference(&mut ref_surf, x, y, &coverage, cw, ch, Color::rgb(255, 128, 0));
+        draw_coverage_reference(
+            &mut ref_surf,
+            x,
+            y,
+            &coverage,
+            cw,
+            ch,
+            Color::rgb(255, 128, 0),
+        );
 
         // Optimized surface.
         let mut opt_buf = vec![0x80u8; 8 * 8 * 4];
@@ -5944,12 +6058,12 @@ fn test_blit_blend_unsafe_vs_reference() {
 
     let test_cases: &[(u32, u32, u32, u32, u32, u32)] = &[
         // (src_w, src_h, dst_x, dst_y, dst_w, dst_h)
-        (4, 4, 0, 0, 8, 8),   // fully inside
-        (4, 4, 6, 6, 8, 8),   // partial clip right/bottom
-        (4, 4, 0, 0, 2, 2),   // dst smaller than src
-        (1, 1, 0, 0, 8, 8),   // single pixel source
-        (8, 8, 0, 0, 8, 8),   // exact size
-        (4, 4, 7, 7, 8, 8),   // clip to 1x1
+        (4, 4, 0, 0, 8, 8), // fully inside
+        (4, 4, 6, 6, 8, 8), // partial clip right/bottom
+        (4, 4, 0, 0, 2, 2), // dst smaller than src
+        (1, 1, 0, 0, 8, 8), // single pixel source
+        (8, 8, 0, 0, 8, 8), // exact size
+        (4, 4, 7, 7, 8, 8), // clip to 1x1
     ];
 
     for &(sw, sh, dx, dy, dw, dh) in test_cases {
@@ -6026,14 +6140,7 @@ fn test_blit_blend_opaque_source() {
 // ---------------------------------------------------------------------------
 
 /// Reference (safe) implementation of fill_rect_blend for comparison.
-fn fill_rect_blend_reference(
-    surf: &mut Surface,
-    x: u32,
-    y: u32,
-    w: u32,
-    h: u32,
-    color: Color,
-) {
+fn fill_rect_blend_reference(surf: &mut Surface, x: u32, y: u32, w: u32, h: u32, color: Color) {
     if color.a == 255 {
         surf.fill_rect(x, y, w, h, color);
         return;
@@ -6057,9 +6164,9 @@ fn fill_rect_blend_reference(
 #[test]
 fn test_fill_rect_blend_unsafe_vs_reference() {
     let test_colors = [
-        Color::rgba(255, 0, 0, 128),   // semi-transparent red
-        Color::rgba(0, 255, 0, 64),    // quarter green
-        Color::rgba(128, 128, 128, 1), // nearly transparent grey
+        Color::rgba(255, 0, 0, 128),     // semi-transparent red
+        Color::rgba(0, 255, 0, 64),      // quarter green
+        Color::rgba(128, 128, 128, 1),   // nearly transparent grey
         Color::rgba(255, 255, 255, 200), // mostly opaque white
     ];
 
@@ -6157,7 +6264,10 @@ fn rounded_rect_zero_radius_equals_fill_rect() {
         surf.fill_rounded_rect(10, 5, 80, 40, 0, color);
     }
 
-    assert_eq!(ref_buf, rr_buf, "radius=0 rounded_rect should be pixel-identical to fill_rect");
+    assert_eq!(
+        ref_buf, rr_buf,
+        "radius=0 rounded_rect should be pixel-identical to fill_rect"
+    );
 }
 
 /// VAL-PRIM-001: corner_radius=0 fill_rounded_rect_blend pixel-identical to fill_rect_blend.
@@ -6184,7 +6294,10 @@ fn rounded_rect_blend_zero_radius_equals_fill_rect_blend() {
         surf.fill_rounded_rect_blend(10, 5, 80, 40, 0, color);
     }
 
-    assert_eq!(ref_buf, rr_buf, "radius=0 rounded_rect_blend should be pixel-identical to fill_rect_blend");
+    assert_eq!(
+        ref_buf, rr_buf,
+        "radius=0 rounded_rect_blend should be pixel-identical to fill_rect_blend"
+    );
 }
 
 /// VAL-PRIM-002: 100x50 with corner_radius=4 has smooth anti-aliased corners,
@@ -6276,7 +6389,10 @@ fn rounded_rect_aa_edges_gamma_correct() {
             break;
         }
     }
-    assert!(found_aa_pixel, "should find at least one anti-aliased edge pixel in corner");
+    assert!(
+        found_aa_pixel,
+        "should find at least one anti-aliased edge pixel in corner"
+    );
 }
 
 /// VAL-PRIM-005: NEON SIMD path for interior rows matches scalar exactly.
@@ -6335,7 +6451,10 @@ fn rounded_rect_zero_radius_no_overhead() {
         surf.fill_rounded_rect(0, 0, w, h, 0, color);
     }
 
-    assert_eq!(ref_buf, rr_buf, "zero radius on large surface should be identical to fill_rect");
+    assert_eq!(
+        ref_buf, rr_buf,
+        "zero radius on large surface should be identical to fill_rect"
+    );
 }
 
 /// Rounded rect clips to surface bounds.
@@ -6402,13 +6521,19 @@ fn rounded_rect_blend_semi_transparent_background() {
     // Interior pixel: fully covered, blended with semi-transparent bg.
     let interior = surf.get_pixel(30, 30).unwrap();
     let expected_interior = fg.blend_over(bg);
-    assert_eq!(interior, expected_interior, "interior should be exact blend_over result");
+    assert_eq!(
+        interior, expected_interior,
+        "interior should be exact blend_over result"
+    );
 
     // AA edge pixel should have intermediate values (not just fg or bg).
     // Check that alpha is properly computed (not clamped to 255).
     let corner = surf.get_pixel(5, 5).unwrap();
     // Corner should still show background influence.
-    assert!(corner.b > 0, "corner should retain some blue from background");
+    assert!(
+        corner.b > 0,
+        "corner should retain some blue from background"
+    );
 }
 
 /// Rounded rect blend: fully opaque foreground takes fast path to fill_rounded_rect.
@@ -6430,7 +6555,10 @@ fn rounded_rect_blend_opaque_matches_non_blend() {
         surf.fill_rounded_rect_blend(5, 5, 50, 50, 8, color);
     }
 
-    assert_eq!(buf1, buf2, "opaque rounded_rect_blend should match rounded_rect exactly");
+    assert_eq!(
+        buf1, buf2,
+        "opaque rounded_rect_blend should match rounded_rect exactly"
+    );
 }
 
 /// Rounded rect blend: transparent foreground is no-op.
@@ -6454,7 +6582,10 @@ fn rounded_rect_blend_transparent_noop() {
         };
         surf.fill_rounded_rect_blend(0, 0, w, h, 8, Color::TRANSPARENT);
     }
-    assert_eq!(buf, before, "transparent rounded_rect_blend should be no-op");
+    assert_eq!(
+        buf, before,
+        "transparent rounded_rect_blend should be no-op"
+    );
 }
 
 /// Small rounded rects (1x1, 2x2, 3x3) don't crash and produce reasonable output.
@@ -6471,9 +6602,18 @@ fn rounded_rect_tiny_dimensions() {
         surf.fill_rounded_rect(5, 5, 1, 1, 10, color);
     }
     // Should write something at (5,5).
-    let surf = Surface { data: &mut buf, width: w, height: h, stride: w * 4, format: PixelFormat::Bgra8888 };
+    let surf = Surface {
+        data: &mut buf,
+        width: w,
+        height: h,
+        stride: w * 4,
+        format: PixelFormat::Bgra8888,
+    };
     let p = surf.get_pixel(5, 5).unwrap();
-    assert!(p.r > 0, "1x1 rounded rect should produce at least some color");
+    assert!(
+        p.r > 0,
+        "1x1 rounded rect should produce at least some color"
+    );
 
     // 2x2 with radius 1
     let mut buf = vec![0u8; (w * h * 4) as usize];
@@ -6511,9 +6651,33 @@ fn rounded_rect_four_corner_symmetry() {
             let bl = surf.get_pixel(dx, h - 1 - dy).unwrap();
             let br = surf.get_pixel(w - 1 - dx, h - 1 - dy).unwrap();
 
-            assert_eq!(tl, tr, "TL ({},{}) should mirror TR ({},{})", dx, dy, w-1-dx, dy);
-            assert_eq!(tl, bl, "TL ({},{}) should mirror BL ({},{})", dx, dy, dx, h-1-dy);
-            assert_eq!(tl, br, "TL ({},{}) should mirror BR ({},{})", dx, dy, w-1-dx, h-1-dy);
+            assert_eq!(
+                tl,
+                tr,
+                "TL ({},{}) should mirror TR ({},{})",
+                dx,
+                dy,
+                w - 1 - dx,
+                dy
+            );
+            assert_eq!(
+                tl,
+                bl,
+                "TL ({},{}) should mirror BL ({},{})",
+                dx,
+                dy,
+                dx,
+                h - 1 - dy
+            );
+            assert_eq!(
+                tl,
+                br,
+                "TL ({},{}) should mirror BR ({},{})",
+                dx,
+                dy,
+                w - 1 - dx,
+                h - 1 - dy
+            );
         }
     }
 }
@@ -6621,7 +6785,7 @@ fn blur_single_pixel_symmetric() {
         let cx = w / 2;
         let cy = h / 2;
         let off = (cy * stride + cx * bpp) as usize;
-        src_buf[off] = 255;     // B
+        src_buf[off] = 255; // B
         src_buf[off + 1] = 255; // G
         src_buf[off + 2] = 255; // R
         src_buf[off + 3] = 255; // A
@@ -6799,7 +6963,10 @@ fn blur_large_radius_capped() {
     }
 
     // Both should produce the same result (clamped to same effective radius).
-    assert_eq!(dst_64_buf, dst_16_buf, "radius=64 should produce same result as radius=16 (clamped)");
+    assert_eq!(
+        dst_64_buf, dst_16_buf,
+        "radius=64 should produce same result as radius=16 (clamped)"
+    );
 }
 
 /// VAL-BLUR-007: sigma=4.0 produces wider spread than sigma=1.0.
@@ -6906,7 +7073,7 @@ fn blur_preserves_alpha_channel() {
     for y in 0..h {
         for x in 0..w {
             let off = (y * stride + x * bpp) as usize;
-            src_buf[off] = 255;     // B
+            src_buf[off] = 255; // B
             src_buf[off + 1] = 255; // G
             src_buf[off + 2] = 255; // R
             src_buf[off + 3] = if x >= w / 2 { 255 } else { 0 }; // A: step function
@@ -6974,7 +7141,8 @@ fn blur_uniform_surface_unchanged() {
             assert!(
                 dr <= 1 && dg <= 1 && db <= 1 && da <= 1,
                 "uniform blur at ({x},{y}): got {:?}, expected {:?}, diff=({dr},{dg},{db},{da})",
-                p, color
+                p,
+                color
             );
         }
     }
@@ -7010,7 +7178,7 @@ fn bilinear_downscale_checkerboard_produces_gray() {
             let off = (y * src_stride + x * 4) as usize;
             let is_white = (x + y) % 2 == 0;
             let val = if is_white { 255u8 } else { 0u8 };
-            src_buf[off] = val;     // B
+            src_buf[off] = val; // B
             src_buf[off + 1] = val; // G
             src_buf[off + 2] = val; // R
             src_buf[off + 3] = 255; // A (opaque)
@@ -7039,11 +7207,16 @@ fn bilinear_downscale_checkerboard_produces_gray() {
         src_w,
         src_h,
         src_stride,
-        0, 0,
-        dst_w, dst_h,
-        2.0, 0.0,  // inv_a, inv_b
-        0.0, 2.0,  // inv_c, inv_d
-        0.5, 0.5,  // inv_tx, inv_ty — offset to sample between pixels
+        0,
+        0,
+        dst_w,
+        dst_h,
+        2.0,
+        0.0, // inv_a, inv_b
+        0.0,
+        2.0, // inv_c, inv_d
+        0.5,
+        0.5, // inv_tx, inv_ty — offset to sample between pixels
         255,
         drawing::ResamplingMethod::Bilinear,
     );
@@ -7105,9 +7278,19 @@ fn bilinear_downscale_checkerboard_no_aliased_pixels() {
 
     fb.blit_blend_bilinear(
         &src_buf,
-        src_w, src_h, src_stride,
-        0, 0, dst_w, dst_h,
-        2.0, 0.0, 0.0, 2.0, 0.5, 0.5,
+        src_w,
+        src_h,
+        src_stride,
+        0,
+        0,
+        dst_w,
+        dst_h,
+        2.0,
+        0.0,
+        0.0,
+        2.0,
+        0.5,
+        0.5,
         255,
         drawing::ResamplingMethod::Bilinear,
     );
