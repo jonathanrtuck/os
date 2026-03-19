@@ -414,7 +414,9 @@ pub extern "C" fn _start() -> ! {
 
     // Heap-allocated because IncrementalState is ~12 KiB (too large for
     // the 16 KiB user stack). Persists across frames for dirty bitmap
-    // tracking and skip-frame detection.
+    // tracking and skip-frame detection. State is maintained now via
+    // update_from_frame; compute_dirty_rects/detect_scroll will be used
+    // by future scissor-based partial redraw support.
     let mut incr_state = Box::new(IncrementalState::new());
 
     let mut frame_count: u32 = 0;
