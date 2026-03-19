@@ -412,12 +412,18 @@ pub extern "C" fn _start() -> ! {
     let mut path_batch: Box<scene_walk::PathBatch> = box_zeroed();
     let mut cmdbuf: Box<virgl::CommandBuffer> = box_zeroed();
 
-    // Heap-allocated because IncrementalState is ~12 KiB (too large for
-    // the 16 KiB user stack). Persists across frames for dirty bitmap
-    // tracking and skip-frame detection. State is maintained now via
-    // update_from_frame; compute_dirty_rects/detect_scroll will be used
-    // by future scissor-based partial redraw support.
-    let mut incr_state = Box::new(IncrementalState::new());
+    // Heap-allocated via alloc_zeroed because IncrementalState is ~22 KiB
+    // (prev_bounds 8K + prev_content_transform 12K + prev_content_hash 2K),
+    // far exceeding the 16 KiB user stack. Box::new() would construct on
+    // the stack first, causing a stack overflow. box_zeroed() allocates
+    // directly on the heap. All fields are zero-initialized, which is
+    // correct (identity transforms are all-zeros except a/d which are 1.0,
+    // but first_frame=true triggers a full repaint on the first frame
+    // regardless, so zero prev state is fine).
+    // State is maintained via update_from_frame; compute_dirty_rects/
+    // detect_scroll will be used by future scissor-based partial redraw.
+    let mut incr_state: Box<IncrementalState> = box_zeroed();
+    incr_state.first_frame = true;
 
     let mut frame_count: u32 = 0;
     let mut sched = frame_scheduler::FrameScheduler::new(frame_rate_cfg);

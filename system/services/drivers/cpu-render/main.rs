@@ -350,10 +350,16 @@ pub extern "C" fn _start() -> ! {
     let buf_stride = (chunks_per_buf as u64) * (CHUNK_BYTES as u64);
 
     // ── Incremental rendering state ─────────────────────────────────
-    // Heap-allocated because IncrementalState is ~12 KiB (too large for
-    // the 16 KiB user stack). Persists across frames for dirty rect
-    // computation and skip-frame detection.
-    let mut incr_state = alloc::boxed::Box::new(IncrementalState::new());
+    // Heap-allocated via alloc_zeroed because IncrementalState is ~22 KiB
+    // (prev_bounds 8K + prev_content_transform 12K + prev_content_hash 2K),
+    // far exceeding the 16 KiB user stack. Box::new() would overflow.
+    let mut incr_state: alloc::boxed::Box<IncrementalState> = unsafe {
+        let layout = alloc::alloc::Layout::new::<IncrementalState>();
+        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut IncrementalState;
+        assert!(!ptr.is_null(), "IncrementalState allocation failed");
+        alloc::boxed::Box::from_raw(ptr)
+    };
+    incr_state.first_frame = true;
     let fb_w16 = fb_width as u16;
     let fb_h16 = fb_height as u16;
 
