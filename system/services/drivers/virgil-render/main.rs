@@ -39,6 +39,8 @@ use protocol::{
 
 #[path = "atlas.rs"]
 mod atlas;
+#[path = "frame_scheduler.rs"]
+mod frame_scheduler;
 #[path = "scene_walk.rs"]
 mod scene_walk;
 #[path = "shaders.rs"]
@@ -1671,8 +1673,21 @@ pub extern "C" fn _start() -> ! {
     let mut path_batch: Box<scene_walk::PathBatch> = box_zeroed();
     let mut cmdbuf: Box<virgl::CommandBuffer> = box_zeroed();
 
-    let mut last_gen: u32 = 0;
     let mut frame_count: u32 = 0;
+    let mut sched = frame_scheduler::FrameScheduler::new(60);
+    let cfreq = sys::counter_freq();
+
+    let counter_to_ns = |ticks: u64, freq: u64| -> u64 {
+        if freq == 0 {
+            return 0;
+        }
+        (ticks / freq) * 1_000_000_000 + (ticks % freq) * 1_000_000_000 / freq
+    };
+
+    let mut timer_h: u8 = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
+        sys::print(b"virgil-render: frame timer create failed\n");
+        sys::exit();
+    });
 
     sys::print(b"  \xF0\x9F\x8E\xAE virgil-render: render loop starting\n");
 
@@ -1680,24 +1695,33 @@ pub extern "C" fn _start() -> ! {
     let scene_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
 
     loop {
-        let _ = sys::wait(&[SCENE_HANDLE], u64::MAX);
+        let _ = sys::wait(&[SCENE_HANDLE, timer_h], u64::MAX);
+        let mut go = false;
 
-        // Drain scene update messages.
-        {
+        // Check for scene updates.
+        if sys::wait(&[SCENE_HANDLE], 0).is_ok() {
             let mut drain_msg = ipc::Message::new(0);
             while scene_ch.try_recv(&mut drain_msg) {}
+            go = sched.should_render_immediately(counter_to_ns(sys::counter(), cfreq));
+            sched.on_scene_update();
+        }
+        // Check for timer tick.
+        if sys::wait(&[timer_h], 0).is_ok() {
+            let _ = sys::handle_close(timer_h);
+            timer_h = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
+                sys::print(b"virgil-render: timer recreate failed\n");
+                sys::exit();
+            });
+            go |= sched.on_timer_tick_at(counter_to_ns(sys::counter(), cfreq));
+        }
+        if !go {
+            continue;
         }
 
         // Read the latest scene graph.
         let reader = scene::TripleReader::new(scene_buf);
         let nodes = reader.front_nodes();
         let gen = reader.front_generation();
-
-        if gen == last_gen && frame_count > 0 {
-            reader.finish_read(gen);
-            continue;
-        }
-        last_gen = gen;
 
         // Walk scene tree: accumulate colored quads (backgrounds) and
         // textured quads (glyphs) in a single pass.
@@ -2022,6 +2046,7 @@ pub extern "C" fn _start() -> ! {
         }
 
         reader.finish_read(gen);
+        sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
         frame_count = frame_count.wrapping_add(1);
     }
 }
