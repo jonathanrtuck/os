@@ -25,15 +25,15 @@
 #![no_main]
 
 extern crate alloc;
-extern crate scene;
 extern crate fonts;
+extern crate scene;
 
 #[path = "fallback.rs"]
 mod fallback;
-#[path = "typography.rs"]
-mod typography;
 #[path = "scene_state.rs"]
 mod scene_state;
+#[path = "typography.rs"]
+mod typography;
 
 use protocol::{
     compose::{ImageConfig, RtcConfig, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG},
@@ -62,27 +62,67 @@ const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_X: u32 = 12;
 const TITLE_BAR_H: u32 = 36;
 
-static mut BOOT_COUNTER: u64 = 0;
-static mut CHAR_W: u32 = 8;
-static mut COUNTER_FREQ: u64 = 0;
-static mut CURSOR_POS: usize = 0;
-static mut DOC_BUF: *mut u8 = core::ptr::null_mut();
-static mut DOC_CAPACITY: usize = 0;
-static mut DOC_LEN: usize = 0;
-static mut FONT_DATA_PTR: *const u8 = core::ptr::null();
-static mut FONT_DATA_LEN: usize = 0;
-static mut FONT_UPEM: u16 = 1000;
-static mut IMAGE_MODE: bool = false;
-static mut LINE_H: u32 = 20;
-static mut MOUSE_X: u32 = 0;
-static mut MOUSE_Y: u32 = 0;
-static mut RTC_MMIO_VA: usize = 0;
-static mut SAVED_EDITOR_SCROLL: u32 = 0;
-static mut SCROLL_OFFSET: u32 = 0;
-static mut SEL_END: usize = 0;
-static mut SEL_START: usize = 0;
-static mut TIMER_ACTIVE: bool = false;
-static mut TIMER_HANDLE: u8 = 0;
+struct CoreState {
+    boot_counter: u64,
+    char_w: u32,
+    counter_freq: u64,
+    cursor_pos: usize,
+    doc_buf: *mut u8,
+    doc_capacity: usize,
+    doc_len: usize,
+    font_data_ptr: *const u8,
+    font_data_len: usize,
+    font_upem: u16,
+    image_mode: bool,
+    line_h: u32,
+    mouse_x: u32,
+    mouse_y: u32,
+    rtc_mmio_va: usize,
+    saved_editor_scroll: u32,
+    scroll_offset: u32,
+    sel_end: usize,
+    sel_start: usize,
+    timer_active: bool,
+    timer_handle: u8,
+}
+
+impl CoreState {
+    const fn new() -> Self {
+        Self {
+            boot_counter: 0,
+            char_w: 8,
+            counter_freq: 0,
+            cursor_pos: 0,
+            doc_buf: core::ptr::null_mut(),
+            doc_capacity: 0,
+            doc_len: 0,
+            font_data_ptr: core::ptr::null(),
+            font_data_len: 0,
+            font_upem: 1000,
+            image_mode: false,
+            line_h: 20,
+            mouse_x: 0,
+            mouse_y: 0,
+            rtc_mmio_va: 0,
+            saved_editor_scroll: 0,
+            scroll_offset: 0,
+            sel_end: 0,
+            sel_start: 0,
+            timer_active: false,
+            timer_handle: 0,
+        }
+    }
+}
+
+struct SyncState(core::cell::UnsafeCell<CoreState>);
+// SAFETY: Single-threaded userspace process.
+unsafe impl Sync for SyncState {}
+static STATE: SyncState = SyncState(core::cell::UnsafeCell::new(CoreState::new()));
+
+fn state() -> &'static mut CoreState {
+    // SAFETY: Single-threaded userspace process. No concurrent access.
+    unsafe { &mut *STATE.0.get() }
+}
 
 struct KeyAction {
     changed: bool,
@@ -92,34 +132,29 @@ struct KeyAction {
     consumed: bool,
 }
 
-fn channel_shm_va(idx: usize) -> usize {
-    protocol::channel_shm_va(idx)
-}
 /// Access the font data slice from shared memory.
 fn font_data() -> &'static [u8] {
-    unsafe {
-        if FONT_DATA_PTR.is_null() || FONT_DATA_LEN == 0 {
-            &[]
-        } else {
-            core::slice::from_raw_parts(FONT_DATA_PTR, FONT_DATA_LEN)
-        }
+    let s = state();
+    if s.font_data_ptr.is_null() || s.font_data_len == 0 {
+        &[]
+    } else {
+        // SAFETY: font_data_ptr points to font_data_len bytes of shared memory.
+        unsafe { core::slice::from_raw_parts(s.font_data_ptr, s.font_data_len) }
     }
 }
-/// Get the font's units-per-em value.
-fn font_upem() -> u16 {
-    unsafe { FONT_UPEM }
-}
 fn clock_seconds() -> u64 {
-    let rtc_va = unsafe { RTC_MMIO_VA };
+    let s = state();
+    let rtc_va = s.rtc_mmio_va;
 
     if rtc_va != 0 {
+        // SAFETY: rtc_va points to memory-mapped PL031 RTC register.
         let epoch = unsafe { core::ptr::read_volatile(rtc_va as *const u32) };
 
         epoch as u64
     } else {
         let now = sys::counter();
-        let boot = unsafe { BOOT_COUNTER };
-        let freq = unsafe { COUNTER_FREQ };
+        let boot = s.boot_counter;
+        let freq = s.counter_freq;
 
         if freq == 0 {
             return 0;
@@ -260,17 +295,19 @@ impl TextLayout {
 }
 
 fn content_text_layout(content_w: u32) -> TextLayout {
+    let s = state();
     TextLayout {
-        char_width: unsafe { CHAR_W },
-        line_height: unsafe { LINE_H },
+        char_width: s.char_w,
+        line_height: s.line_h,
         max_width: content_w - 2 * TEXT_INSET_X,
     }
 }
 fn create_clock_timer() -> bool {
-    let freq = unsafe { COUNTER_FREQ };
+    let s = state();
+    let freq = s.counter_freq;
     let timeout_ns = if freq > 0 {
         let now = sys::counter();
-        let boot = unsafe { BOOT_COUNTER };
+        let boot = s.boot_counter;
         let elapsed_ticks = now - boot;
         let ticks_this_second = elapsed_ticks % freq;
         let remaining_ticks = freq - ticks_this_second;
@@ -287,85 +324,78 @@ fn create_clock_timer() -> bool {
 
     match sys::timer_create(timeout_ns) {
         Ok(handle) => {
-            unsafe {
-                TIMER_HANDLE = handle;
-                TIMER_ACTIVE = true;
-            }
+            let s = state();
+            s.timer_handle = handle;
+            s.timer_active = true;
             true
         }
         Err(_) => {
-            unsafe { TIMER_ACTIVE = false };
+            state().timer_active = false;
             false
         }
     }
 }
 fn doc_content() -> &'static [u8] {
-    unsafe { core::slice::from_raw_parts(DOC_BUF.add(DOC_HEADER_SIZE), DOC_LEN) }
+    let s = state();
+    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
+    unsafe { core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), s.doc_len) }
 }
 fn doc_delete(pos: usize) -> bool {
-    unsafe {
-        if DOC_LEN == 0 || pos >= DOC_LEN {
-            return false;
-        }
-
-        let base = DOC_BUF.add(DOC_HEADER_SIZE);
-
-        if pos + 1 < DOC_LEN {
-            core::ptr::copy(base.add(pos + 1), base.add(pos), DOC_LEN - pos - 1);
-        }
-
-        DOC_LEN -= 1;
-
-        doc_write_header();
-
-        true
+    let s = state();
+    if s.doc_len == 0 || pos >= s.doc_len {
+        return false;
     }
+    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
+    unsafe {
+        let base = s.doc_buf.add(DOC_HEADER_SIZE);
+        if pos + 1 < s.doc_len {
+            core::ptr::copy(base.add(pos + 1), base.add(pos), s.doc_len - pos - 1);
+        }
+    }
+    s.doc_len -= 1;
+    doc_write_header();
+    true
 }
 fn doc_delete_range(start: usize, end: usize) -> bool {
-    unsafe {
-        if start >= end || start >= DOC_LEN || end > DOC_LEN {
-            return false;
-        }
-
-        let base = DOC_BUF.add(DOC_HEADER_SIZE);
-        let del_count = end - start;
-
-        if end < DOC_LEN {
-            core::ptr::copy(base.add(end), base.add(start), DOC_LEN - end);
-        }
-
-        DOC_LEN -= del_count;
-
-        doc_write_header();
-
-        true
+    let s = state();
+    if start >= end || start >= s.doc_len || end > s.doc_len {
+        return false;
     }
+    let del_count = end - start;
+    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
+    unsafe {
+        let base = s.doc_buf.add(DOC_HEADER_SIZE);
+        if end < s.doc_len {
+            core::ptr::copy(base.add(end), base.add(start), s.doc_len - end);
+        }
+    }
+    s.doc_len -= del_count;
+    doc_write_header();
+    true
 }
 fn doc_insert(pos: usize, byte: u8) -> bool {
-    unsafe {
-        if DOC_LEN >= DOC_CAPACITY || pos > DOC_LEN {
-            return false;
-        }
-
-        let base = DOC_BUF.add(DOC_HEADER_SIZE);
-
-        if pos < DOC_LEN {
-            core::ptr::copy(base.add(pos), base.add(pos + 1), DOC_LEN - pos);
-        }
-
-        *base.add(pos) = byte;
-
-        DOC_LEN += 1;
-
-        doc_write_header();
-
-        true
+    let s = state();
+    if s.doc_len >= s.doc_capacity || pos > s.doc_len {
+        return false;
     }
+    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
+    unsafe {
+        let base = s.doc_buf.add(DOC_HEADER_SIZE);
+        if pos < s.doc_len {
+            core::ptr::copy(base.add(pos), base.add(pos + 1), s.doc_len - pos);
+        }
+        *base.add(pos) = byte;
+    }
+    s.doc_len += 1;
+    doc_write_header();
+    true
 }
 fn doc_write_header() {
+    let s = state();
+    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
     unsafe {
-        core::ptr::write_volatile(DOC_BUF as *mut u64, DOC_LEN as u64);
-        core::ptr::write_volatile(DOC_BUF.add(8) as *mut u64, CURSOR_POS as u64);
+        core::ptr::write_volatile(s.doc_buf as *mut u64, s.doc_len as u64);
+        core::ptr::write_volatile(s.doc_buf.add(8) as *mut u64, s.cursor_pos as u64);
     }
 }
 fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
@@ -402,16 +432,17 @@ fn process_key_event(
     }
     if key.keycode == KEY_TAB && key.pressed == 1 && *ctrl_pressed {
         if has_image {
-            let was_image = unsafe { IMAGE_MODE };
+            let s = state();
+            let was_image = s.image_mode;
 
             if !was_image {
-                unsafe { SAVED_EDITOR_SCROLL = SCROLL_OFFSET };
+                s.saved_editor_scroll = s.scroll_offset;
             }
 
-            unsafe { IMAGE_MODE = !was_image };
+            s.image_mode = !was_image;
 
             if was_image {
-                unsafe { SCROLL_OFFSET = SAVED_EDITOR_SCROLL };
+                s.scroll_offset = s.saved_editor_scroll;
             }
 
             return KeyAction {
@@ -431,7 +462,7 @@ fn process_key_event(
         };
     }
 
-    if !unsafe { IMAGE_MODE } {
+    if !state().image_mode {
         editor_ch.send(msg);
 
         let _ = sys::channel_signal(EDITOR_HANDLE);
@@ -454,14 +485,15 @@ fn update_scroll_offset(content_w: u32, content_h: u32) {
 
     let layout = content_text_layout(content_w);
     let text = doc_content();
-    let cursor = unsafe { CURSOR_POS };
-    let current = unsafe { SCROLL_OFFSET };
+    let s = state();
+    let cursor = s.cursor_pos;
+    let current = s.scroll_offset;
     let new_scroll = layout.scroll_for_cursor(text, cursor, current, vp_lines);
 
-    unsafe { SCROLL_OFFSET = new_scroll };
+    state().scroll_offset = new_scroll;
 }
 fn viewport_lines(content_h: u32) -> u32 {
-    let line_h = unsafe { LINE_H };
+    let line_h = state().line_h;
 
     if line_h == 0 {
         return 0;
@@ -474,15 +506,17 @@ fn viewport_lines(content_h: u32) -> u32 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    unsafe {
-        BOOT_COUNTER = sys::counter();
-        COUNTER_FREQ = sys::counter_freq();
+    {
+        let s = state();
+        s.boot_counter = sys::counter();
+        s.counter_freq = sys::counter_freq();
     }
 
     sys::print(b"  \xF0\x9F\xA7\xA0 core - starting\n");
 
     // Read core config from init channel.
-    let init_ch = unsafe { ipc::Channel::from_base(channel_shm_va(0), ipc::PAGE_SIZE, 1) };
+    let init_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(0), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
     if !init_ch.try_recv(&mut msg) || msg.msg_type != MSG_CORE_CONFIG {
@@ -499,10 +533,11 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    unsafe {
-        DOC_BUF = config.doc_va as *mut u8;
-        DOC_CAPACITY = config.doc_capacity as usize;
-        DOC_LEN = 0;
+    {
+        let s = state();
+        s.doc_buf = config.doc_va as *mut u8;
+        s.doc_capacity = config.doc_capacity as usize;
+        s.doc_len = 0;
     }
     doc_write_header();
 
@@ -516,15 +551,14 @@ pub extern "C" fn _start() -> ! {
             )
         };
         // Store font data pointer and length for shaping calls.
-        unsafe {
-            FONT_DATA_PTR = config.mono_font_va as *const u8;
-            FONT_DATA_LEN = config.mono_font_len as usize;
+        {
+            let s = state();
+            s.font_data_ptr = config.mono_font_va as *const u8;
+            s.font_data_len = config.mono_font_len as usize;
         }
         if let Some(fm) = fonts::rasterize::font_metrics(font_data) {
             let upem = fm.units_per_em;
-            unsafe {
-                FONT_UPEM = upem;
-            }
+            state().font_upem = upem;
             let asc = fm.ascent as i32;
             let desc = fm.descent as i32;
             let gap = fm.line_gap as i32;
@@ -555,9 +589,10 @@ pub extern "C" fn _start() -> ! {
                 (advance_fu as u32 * size + upem as u32 / 2) / upem as u32
             });
 
-            unsafe {
-                CHAR_W = if char_w > 0 { char_w } else { 8 };
-                LINE_H = if line_h > 0 { line_h } else { 20 };
+            {
+                let s = state();
+                s.char_w = if char_w > 0 { char_w } else { 8 };
+                s.line_h = if line_h > 0 { line_h } else { 20 };
             }
 
             sys::print(b"     font metrics loaded\n");
@@ -584,7 +619,7 @@ pub extern "C" fn _start() -> ! {
         if rtc_config.mmio_pa != 0 {
             match sys::device_map(rtc_config.mmio_pa, 4096) {
                 Ok(va) => {
-                    unsafe { RTC_MMIO_VA = va };
+                    state().rtc_mmio_va = va;
                     sys::print(b"     pl031 rtc mapped\n");
                 }
                 Err(_) => {
@@ -595,9 +630,12 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Set up IPC channels.
-    let input_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 1) };
-    let compositor_ch = unsafe { ipc::Channel::from_base(channel_shm_va(2), ipc::PAGE_SIZE, 0) };
-    let editor_ch = unsafe { ipc::Channel::from_base(channel_shm_va(3), ipc::PAGE_SIZE, 0) };
+    let input_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
+    let compositor_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(2), ipc::PAGE_SIZE, 0) };
+    let editor_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(3), ipc::PAGE_SIZE, 0) };
     let has_input2 = match sys::wait(&[INPUT2_HANDLE], 0) {
         Ok(_) => true,
         Err(sys::SyscallError::WouldBlock) => true,
@@ -605,7 +643,7 @@ pub extern "C" fn _start() -> ! {
     };
     let input2_ch = if has_input2 {
         sys::print(b"     tablet input channel detected\n");
-        Some(unsafe { ipc::Channel::from_base(channel_shm_va(4), ipc::PAGE_SIZE, 1) })
+        Some(unsafe { ipc::Channel::from_base(protocol::channel_shm_va(4), ipc::PAGE_SIZE, 1) })
     } else {
         None
     };
@@ -628,35 +666,38 @@ pub extern "C" fn _start() -> ! {
         value: 1.0,
     }];
 
-    scene.build_editor_scene(
-        fb_width,
-        fb_height,
-        TITLE_BAR_H,
-        SHADOW_DEPTH,
-        TEXT_INSET_X,
-        TEXT_INSET_TOP,
-        drawing::CHROME_BG,
-        drawing::CHROME_BORDER,
-        drawing::CHROME_TITLE,
-        drawing::CHROME_CLOCK,
-        drawing::BG_BASE,
-        drawing::TEXT_PRIMARY,
-        drawing::TEXT_CURSOR,
-        drawing::TEXT_SELECTION,
-        FONT_SIZE as u16,
-        unsafe { CHAR_W },
-        unsafe { LINE_H },
-        doc_content(),
-        unsafe { CURSOR_POS } as u32,
-        unsafe { SEL_START } as u32,
-        unsafe { SEL_END } as u32,
-        b"Text",
-        &time_buf,
-        0,
-        font_data(),
-        font_upem(),
-        &mono_shape_axes,
-    );
+    {
+        let s = state();
+        scene.build_editor_scene(
+            fb_width,
+            fb_height,
+            TITLE_BAR_H,
+            SHADOW_DEPTH,
+            TEXT_INSET_X,
+            TEXT_INSET_TOP,
+            drawing::CHROME_BG,
+            drawing::CHROME_BORDER,
+            drawing::CHROME_TITLE,
+            drawing::CHROME_CLOCK,
+            drawing::BG_BASE,
+            drawing::TEXT_PRIMARY,
+            drawing::TEXT_CURSOR,
+            drawing::TEXT_SELECTION,
+            FONT_SIZE as u16,
+            s.char_w,
+            s.line_h,
+            doc_content(),
+            s.cursor_pos as u32,
+            s.sel_start as u32,
+            s.sel_end as u32,
+            b"Text",
+            &time_buf,
+            0,
+            font_data(),
+            s.font_upem,
+            &mono_shape_axes,
+        );
+    }
 
     // Signal compositor that first frame is ready.
     let scene_msg = ipc::Message::new(MSG_SCENE_UPDATED);
@@ -672,8 +713,8 @@ pub extern "C" fn _start() -> ! {
     let mut ctrl_pressed = false;
 
     loop {
-        let timer_active = unsafe { TIMER_ACTIVE };
-        let timer_handle = unsafe { TIMER_HANDLE };
+        let timer_active = state().timer_active;
+        let timer_handle = state().timer_handle;
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
                 &[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE],
@@ -746,11 +787,9 @@ pub extern "C" fn _start() -> ! {
                     }
                     MSG_POINTER_ABS => {
                         let ptr: PointerAbs = unsafe { msg.payload_as() };
-
-                        unsafe {
-                            MOUSE_X = scale_pointer_coord(ptr.x, fb_width);
-                            MOUSE_Y = scale_pointer_coord(ptr.y, fb_height);
-                        }
+                        let s = state();
+                        s.mouse_x = scale_pointer_coord(ptr.x, fb_width);
+                        s.mouse_y = scale_pointer_coord(ptr.y, fb_height);
 
                         changed = true;
                     }
@@ -758,25 +797,27 @@ pub extern "C" fn _start() -> ! {
                         let btn: PointerButton = unsafe { msg.payload_as() };
 
                         if btn.button == 0 && btn.pressed == 1 {
-                            let click_x = unsafe { MOUSE_X };
-                            let click_y = unsafe { MOUSE_Y };
+                            let s = state();
+                            let click_x = s.mouse_x;
+                            let click_y = s.mouse_y;
 
-                            if click_y >= TITLE_BAR_H && !unsafe { IMAGE_MODE } {
+                            if click_y >= TITLE_BAR_H && !s.image_mode {
                                 let text_origin_x = TEXT_INSET_X;
                                 let text_origin_y = TEXT_INSET_TOP;
                                 let rel_x = click_x.saturating_sub(text_origin_x);
                                 let rel_y = click_y.saturating_sub(text_origin_y);
-                                let scroll = unsafe { SCROLL_OFFSET };
-                                let line_h = unsafe { LINE_H };
+                                let scroll = s.scroll_offset;
+                                let line_h = s.line_h;
                                 let adjusted_y = rel_y + scroll * line_h;
                                 let layout = content_text_layout(content_w);
                                 let text = doc_content();
                                 let byte_pos = layout.xy_to_byte(text, rel_x, adjusted_y);
 
-                                unsafe {
-                                    CURSOR_POS = byte_pos;
-                                    SEL_START = 0;
-                                    SEL_END = 0;
+                                {
+                                    let s = state();
+                                    s.cursor_pos = byte_pos;
+                                    s.sel_start = 0;
+                                    s.sel_end = 0;
                                 }
 
                                 doc_write_header();
@@ -811,7 +852,7 @@ pub extern "C" fn _start() -> ! {
                     let pos = insert.position as usize;
 
                     if doc_insert(pos, insert.byte) {
-                        unsafe { CURSOR_POS = pos + 1 };
+                        state().cursor_pos = pos + 1;
 
                         changed = true;
                         text_changed = true;
@@ -822,7 +863,7 @@ pub extern "C" fn _start() -> ! {
                     let pos = del.position as usize;
 
                     if doc_delete(pos) {
-                        unsafe { CURSOR_POS = pos };
+                        state().cursor_pos = pos;
 
                         changed = true;
                         text_changed = true;
@@ -832,8 +873,8 @@ pub extern "C" fn _start() -> ! {
                     let cm: CursorMove = unsafe { msg.payload_as() };
                     let pos = cm.position as usize;
 
-                    if pos <= unsafe { DOC_LEN } {
-                        unsafe { CURSOR_POS = pos };
+                    if pos <= state().doc_len {
+                        state().cursor_pos = pos;
 
                         doc_write_header();
 
@@ -843,11 +884,9 @@ pub extern "C" fn _start() -> ! {
                 }
                 MSG_SELECTION_UPDATE => {
                     let su: SelectionUpdate = unsafe { msg.payload_as() };
-
-                    unsafe {
-                        SEL_START = su.sel_start as usize;
-                        SEL_END = su.sel_end as usize;
-                    }
+                    let s = state();
+                    s.sel_start = su.sel_start as usize;
+                    s.sel_end = su.sel_end as usize;
 
                     changed = true;
                     selection_changed = true;
@@ -858,7 +897,7 @@ pub extern "C" fn _start() -> ! {
                     let end = dr.end as usize;
 
                     if doc_delete_range(start, end) {
-                        unsafe { CURSOR_POS = start };
+                        state().cursor_pos = start;
 
                         changed = true;
                         text_changed = true;
@@ -869,14 +908,14 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Update scroll offset for cursor/text changes.
-        if (changed || text_changed) && !unsafe { IMAGE_MODE } {
-            let old_scroll = unsafe { SCROLL_OFFSET };
+        if (changed || text_changed) && !state().image_mode {
+            let old_scroll = state().scroll_offset;
 
             update_scroll_offset(content_w, content_h);
 
             // If scroll changed, we need a full document content update
             // (visible lines changed) regardless of whether text changed.
-            let new_scroll = unsafe { SCROLL_OFFSET };
+            let new_scroll = state().scroll_offset;
 
             if old_scroll != new_scroll && !text_changed {
                 text_changed = true;
@@ -915,6 +954,7 @@ pub extern "C" fn _start() -> ! {
                     format_time_hms(clock_seconds(), &mut time_buf);
                 }
 
+                let s = state();
                 scene.build_editor_scene(
                     fb_width,
                     fb_height,
@@ -931,17 +971,17 @@ pub extern "C" fn _start() -> ! {
                     drawing::TEXT_CURSOR,
                     drawing::TEXT_SELECTION,
                     FONT_SIZE as u16,
-                    unsafe { CHAR_W },
-                    unsafe { LINE_H },
+                    s.char_w,
+                    s.line_h,
                     doc_content(),
-                    unsafe { CURSOR_POS } as u32,
-                    unsafe { SEL_START } as u32,
-                    unsafe { SEL_END } as u32,
+                    s.cursor_pos as u32,
+                    s.sel_start as u32,
+                    s.sel_end as u32,
                     b"Text",
                     &time_buf,
-                    unsafe { SCROLL_OFFSET } as i32,
+                    s.scroll_offset as i32,
                     font_data(),
-                    font_upem(),
+                    s.font_upem,
                     &mono_shape_axes,
                 );
             } else if text_changed {
@@ -955,6 +995,7 @@ pub extern "C" fn _start() -> ! {
                     format_time_hms(clock_seconds(), &mut time_buf);
                 }
 
+                let s = state();
                 scene.update_document_content(
                     fb_width,
                     fb_height,
@@ -971,18 +1012,18 @@ pub extern "C" fn _start() -> ! {
                     drawing::TEXT_CURSOR,
                     drawing::TEXT_SELECTION,
                     FONT_SIZE as u16,
-                    unsafe { CHAR_W },
-                    unsafe { LINE_H },
+                    s.char_w,
+                    s.line_h,
                     doc_content(),
-                    unsafe { CURSOR_POS } as u32,
-                    unsafe { SEL_START } as u32,
-                    unsafe { SEL_END } as u32,
+                    s.cursor_pos as u32,
+                    s.sel_start as u32,
+                    s.sel_end as u32,
                     b"Text",
                     &time_buf,
-                    unsafe { SCROLL_OFFSET } as i32,
+                    s.scroll_offset as i32,
                     timer_fired,
                     font_data(),
-                    font_upem(),
+                    s.font_upem,
                     &mono_shape_axes,
                 );
             } else if selection_changed {
@@ -991,42 +1032,36 @@ pub extern "C" fn _start() -> ! {
                 // Also updates cursor position in the scene graph so
                 // that click-to-reposition is immediately visible.
                 // When timer_fired, also updates clock in-place.
+                let s = state();
                 let content_y = TITLE_BAR_H + SHADOW_DEPTH;
                 let sel_content_h = fb_height.saturating_sub(content_y);
-                let scroll_lines = unsafe { SCROLL_OFFSET };
-                let line_h = unsafe { LINE_H };
-                let scroll_px = scroll_lines as i32 * line_h as i32;
-                let dc = |c: drawing::Color| -> scene::Color {
-                    scene::Color::rgba(c.r, c.g, c.b, c.a)
+                let scroll_px = s.scroll_offset as i32 * s.line_h as i32;
+                let dc =
+                    |c: drawing::Color| -> scene::Color { scene::Color::rgba(c.r, c.g, c.b, c.a) };
+                let chars_per_line = {
+                    let doc_width = fb_width.saturating_sub(2 * TEXT_INSET_X);
+                    if s.char_w > 0 {
+                        (doc_width / s.char_w).max(1)
+                    } else {
+                        80
+                    }
                 };
 
                 scene.update_selection(
-                    unsafe { CURSOR_POS } as u32,
-                    unsafe { SEL_START } as u32,
-                    unsafe { SEL_END } as u32,
+                    s.cursor_pos as u32,
+                    s.sel_start as u32,
+                    s.sel_end as u32,
                     doc_content(),
-                    {
-                        let doc_width = fb_width.saturating_sub(2 * TEXT_INSET_X);
-
-                        if unsafe { CHAR_W } > 0 {
-                            (doc_width / unsafe { CHAR_W }).max(1)
-                        } else {
-                            80
-                        }
-                    },
-                    unsafe { CHAR_W },
-                    unsafe { LINE_H },
+                    chars_per_line,
+                    s.char_w,
+                    s.line_h,
                     dc(drawing::TEXT_SELECTION),
                     sel_content_h,
                     scroll_px,
-                    if timer_fired {
-                        Some(&time_buf)
-                    } else {
-                        None
-                    },
+                    if timer_fired { Some(&time_buf) } else { None },
                     font_data(),
                     FONT_SIZE as u16,
-                    font_upem(),
+                    s.font_upem,
                     &mono_shape_axes,
                 );
             } else if changed {
@@ -1034,31 +1069,26 @@ pub extern "C" fn _start() -> ! {
                 // (e.g., arrow keys producing a MSG_CURSOR_MOVE
                 // that doesn't trigger scroll change).
                 // When timer_fired, also updates clock in-place.
+                let s = state();
                 let doc_width = fb_width.saturating_sub(2 * TEXT_INSET_X);
-                let chars_per_line = if unsafe { CHAR_W } > 0 {
-                    (doc_width / unsafe { CHAR_W }).max(1)
+                let chars_per_line = if s.char_w > 0 {
+                    (doc_width / s.char_w).max(1)
                 } else {
                     80
                 };
-                let scroll_lines = unsafe { SCROLL_OFFSET };
-                let line_h = unsafe { LINE_H };
-                let scroll_px = scroll_lines as i32 * line_h as i32;
+                let scroll_px = s.scroll_offset as i32 * s.line_h as i32;
 
                 scene.update_cursor(
-                    unsafe { CURSOR_POS } as u32,
+                    s.cursor_pos as u32,
                     doc_content(),
                     chars_per_line,
-                    unsafe { CHAR_W },
-                    unsafe { LINE_H },
+                    s.char_w,
+                    s.line_h,
                     scroll_px,
-                    if timer_fired {
-                        Some(&time_buf)
-                    } else {
-                        None
-                    },
+                    if timer_fired { Some(&time_buf) } else { None },
                     font_data(),
                     FONT_SIZE as u16,
-                    font_upem(),
+                    s.font_upem,
                     &mono_shape_axes,
                 );
             } else if timer_fired {
@@ -1067,7 +1097,7 @@ pub extern "C" fn _start() -> ! {
                     &time_buf,
                     font_data(),
                     FONT_SIZE as u16,
-                    font_upem(),
+                    state().font_upem,
                     &mono_shape_axes,
                 );
             }
