@@ -127,8 +127,14 @@ fn cache_lru_access_refreshes_entry() {
 
     // Insert glyph 4 — should evict glyph 2 (now the LRU).
     cache.insert(4, 18, dummy_glyph(4));
-    assert!(cache.get(1, 18).is_some(), "glyph 1 was accessed, should survive");
-    assert!(cache.get(2, 18).is_none(), "glyph 2 is LRU, should be evicted");
+    assert!(
+        cache.get(1, 18).is_some(),
+        "glyph 1 was accessed, should survive"
+    );
+    assert!(
+        cache.get(2, 18).is_none(),
+        "glyph 2 is LRU, should be evicted"
+    );
     assert!(cache.get(3, 18).is_some(), "glyph 3 should survive");
     assert!(cache.get(4, 18).is_some(), "glyph 4 should be present");
 }
@@ -148,8 +154,15 @@ fn cache_insert_existing_key_updates_and_refreshes() {
     // Insert glyph 4 — should evict glyph 2 (LRU since 1 was refreshed).
     cache.insert(4, 18, dummy_glyph(4));
     let r = cache.get(1, 18).unwrap();
-    assert_eq!(r.coverage, vec![99u8; 30], "glyph 1 should have updated data");
-    assert!(cache.get(2, 18).is_none(), "glyph 2 is LRU after 1 was refreshed");
+    assert_eq!(
+        r.coverage,
+        vec![99u8; 30],
+        "glyph 1 should have updated data"
+    );
+    assert!(
+        cache.get(2, 18).is_none(),
+        "glyph 2 is LRU after 1 was refreshed"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +237,10 @@ fn cache_large_capacity_stress() {
     // Insert one more — evicts glyph 0 (LRU).
     cache.insert(1000, 12, dummy_glyph(0));
     assert_eq!(cache.len(), max_cap);
-    assert!(cache.get(0, 12).is_none(), "glyph 0 should be evicted (LRU)");
+    assert!(
+        cache.get(0, 12).is_none(),
+        "glyph 0 should be evicted (LRU)"
+    );
     assert!(cache.get(1000, 12).is_some());
 }
 
@@ -252,4 +268,109 @@ fn cache_preserves_all_metrics_fields() {
     assert_eq!(r.bearing_y, 18);
     assert_eq!(r.advance, 12);
     assert_eq!(r.coverage, vec![128, 64, 32, 16]);
+}
+
+// ---------------------------------------------------------------------------
+// VAL-CACHE-004: Axis hash keying — same glyph at different axes are independent
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cache_axis_hash_independent_entries() {
+    let mut cache = LruGlyphCache::new(64);
+    let g_default = LruCachedGlyph {
+        width: 10,
+        height: 12,
+        bearing_x: 1,
+        bearing_y: 10,
+        advance: 8,
+        coverage: vec![100; 120],
+    };
+    let g_bold = LruCachedGlyph {
+        width: 11,
+        height: 13,
+        bearing_x: 2,
+        bearing_y: 11,
+        advance: 9,
+        coverage: vec![200; 143],
+    };
+
+    // Same glyph ID + font size, different axis hashes.
+    cache.insert_with_axes(42, 18, 0, g_default.clone());
+    cache.insert_with_axes(42, 18, 0xABCD, g_bold.clone());
+
+    let r_default = cache.get_with_axes(42, 18, 0).unwrap();
+    assert_eq!(r_default.width, 10);
+    assert_eq!(r_default.coverage[0], 100);
+
+    let r_bold = cache.get_with_axes(42, 18, 0xABCD).unwrap();
+    assert_eq!(r_bold.width, 11);
+    assert_eq!(r_bold.coverage[0], 200);
+}
+
+#[test]
+fn cache_axis_hash_miss_different_hash() {
+    let mut cache = LruGlyphCache::new(64);
+    let glyph = dummy_glyph(50);
+    cache.insert_with_axes(42, 18, 0, glyph);
+
+    // Same glyph ID + font size, different axis hash = miss.
+    assert!(cache.get_with_axes(42, 18, 1).is_none());
+}
+
+// ---------------------------------------------------------------------------
+// VAL-CACHE-005: LruRasterizer integration
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lru_rasterizer_struct_fields() {
+    // Verify LruRasterizer can be constructed and its cache accessed.
+    let lru = render::LruRasterizer::new_test(64);
+    assert_eq!(lru.cache.len(), 0);
+}
+
+#[test]
+fn lru_rasterizer_manual_insert_and_get() {
+    // Pre-populate the LRU cache manually and verify retrieval.
+    let mut lru = render::LruRasterizer::new_test(64);
+    let glyph = LruCachedGlyph {
+        width: 8,
+        height: 10,
+        bearing_x: 1,
+        bearing_y: 9,
+        advance: 7,
+        coverage: vec![255; 80],
+    };
+    lru.cache.insert(500, 18, glyph);
+    assert_eq!(lru.cache.len(), 1);
+    assert!(lru.cache.get(500, 18).is_some());
+}
+
+// ---------------------------------------------------------------------------
+// VAL-CACHE-006: CpuBackend has LRU cache initialized
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cpu_backend_lru_starts_empty() {
+    // Load the Recursive font embedded in the test binary.
+    let font_data = include_bytes!("../../share/source-code-pro.ttf");
+    let backend =
+        render::CpuBackend::new(font_data, None, 18, 96, 1.0, 1024, 768).expect("backend init");
+    assert_eq!(backend.lru.cache.len(), 0, "LRU cache should start empty");
+}
+
+#[test]
+fn cpu_backend_ascii_cache_populated() {
+    // Verify the fixed ASCII cache has entries after construction.
+    let font_data = include_bytes!("../../share/source-code-pro.ttf");
+    let backend =
+        render::CpuBackend::new(font_data, None, 18, 96, 1.0, 1024, 768).expect("backend init");
+
+    // 'A' (0x41) should be in the ASCII cache.
+    let glyph_id = fonts::rasterize::glyph_id_for_char(font_data, 'A');
+    assert!(glyph_id.is_some(), "font should have glyph for 'A'");
+    let glyph_id = glyph_id.unwrap();
+    assert!(
+        backend.mono_cache.get(glyph_id).is_some(),
+        "ASCII 'A' should be in the fixed cache"
+    );
 }

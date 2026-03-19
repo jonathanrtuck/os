@@ -37,6 +37,7 @@ fn test_ctx<'a>(
         mono_cache: mono,
         prop_cache: prop,
         scale: 1.0,
+        font_size_px: 18,
     }
 }
 
@@ -605,6 +606,7 @@ fn test_ctx_f32<'a>(
         mono_cache: mono,
         prop_cache: prop,
         scale,
+        font_size_px: 18,
     }
 }
 
@@ -3107,6 +3109,7 @@ fn child_transform_composes_with_parent() {
         mono_cache: &mono,
         prop_cache: &prop,
         scale: 1.0,
+        font_size_px: 18,
     };
 
     // Root: 200×200. Parent at (0,0) with translate(20,10).
@@ -3686,6 +3689,7 @@ fn dpi_scale_composes_with_affine_as_single_matrix() {
         mono_cache: &mono,
         prop_cache: &prop,
         scale: 1.5,
+        font_size_px: 18,
     };
 
     let mut nodes = vec![Node::EMPTY; 2];
@@ -3832,6 +3836,7 @@ fn full_feature_composition() {
         mono_cache: &mono,
         prop_cache: &prop,
         scale: 1.5,
+        font_size_px: 18,
     };
 
     // Scene: root → child with ALL features enabled.
@@ -4683,6 +4688,7 @@ fn path_scale_factor_applied() {
         mono_cache: &mono,
         prop_cache: &prop,
         scale: 1.0,
+        font_size_px: 18,
     };
     let (nodes1, data1) = build_path_scene(
         &cmds,
@@ -4706,6 +4712,7 @@ fn path_scale_factor_applied() {
         mono_cache: &mono,
         prop_cache: &prop,
         scale: 2.0,
+        font_size_px: 18,
     };
     let (nodes2, data2) = build_path_scene(
         &cmds,

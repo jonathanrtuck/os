@@ -11,24 +11,28 @@ use scene::{Content, Node, ShapedGlyph};
 use super::{
     coords::scale_coord,
     path_raster::{render_path, scene_to_draw_color},
-    SceneGraph,
+    RenderCtx, SceneGraph,
 };
+use crate::LruRasterizer;
 
 /// Render a node's content (path, glyphs, or image) into the target surface.
 ///
 /// `draw_x`, `draw_y` are the node's origin in the target surface.
 /// `nw`, `nh` are the node's physical pixel dimensions.
+/// `lru` is the optional LRU rasterizer for non-ASCII glyphs.
 pub(super) fn render_content(
     fb: &mut Surface,
     graph: &SceneGraph,
-    cache: &GlyphCache,
-    scale: f32,
+    ctx: &RenderCtx,
     node: &Node,
     draw_x: i32,
     draw_y: i32,
     nw: i32,
     nh: i32,
+    lru: Option<&mut LruRasterizer>,
 ) {
+    let cache = ctx.mono_cache;
+    let scale = ctx.scale;
     match node.content {
         Content::None => {}
         Content::Path {
@@ -44,7 +48,8 @@ pub(super) fn render_content(
             color,
             glyphs,
             glyph_count,
-            ..
+            font_size,
+            axis_hash,
         } => {
             render_glyphs(
                 fb,
@@ -56,6 +61,10 @@ pub(super) fn render_content(
                 glyph_count,
                 draw_x,
                 draw_y,
+                font_size,
+                axis_hash,
+                ctx.font_size_px,
+                lru,
             );
         }
         Content::Image {
@@ -71,6 +80,10 @@ pub(super) fn render_content(
 }
 
 /// Render shaped glyphs from the data buffer onto the surface.
+///
+/// First tries the fixed ASCII cache (fast path). On miss, falls back
+/// to the LRU cache. On LRU miss, rasterizes the glyph on demand,
+/// inserts it into the LRU cache, and renders it.
 fn render_glyphs(
     fb: &mut Surface,
     graph: &SceneGraph,
@@ -81,6 +94,10 @@ fn render_glyphs(
     glyph_count: u16,
     draw_x: i32,
     draw_y: i32,
+    _font_size: u16,
+    _axis_hash: u32,
+    font_size_px: u16,
+    mut lru: Option<&mut LruRasterizer>,
 ) {
     // Read ShapedGlyph array from the data buffer.
     let glyph_size = core::mem::size_of::<ShapedGlyph>();
@@ -100,12 +117,41 @@ fn render_glyphs(
 
     let mut cx = draw_x;
 
+    // Use the node's font_size from Content::Glyphs if non-zero,
+    // otherwise fall back to the backend's physical font size.
+    let lru_font_size = if _font_size > 0 {
+        _font_size
+    } else {
+        font_size_px
+    };
+    let lru_axis_hash = _axis_hash;
+
     for sg in shaped_glyphs {
+        // Fast path: fixed ASCII cache.
         if let Some((glyph, coverage)) = cache.get(sg.glyph_id) {
             let px = cx + glyph.bearing_x;
             let py = draw_y + (cache.ascent as i32 - glyph.bearing_y);
 
             fb.draw_coverage(px, py, coverage, glyph.width, glyph.height, glyph_color);
+        } else if let Some(lru) = lru.as_deref_mut() {
+            // LRU fallback: check cache hit first, then rasterize on demand.
+            if lru
+                .cache
+                .get_with_axes(sg.glyph_id, lru_font_size, lru_axis_hash)
+                .is_none()
+            {
+                // Cache miss — rasterize on demand and insert into LRU.
+                let _ = lru.rasterize_and_get(sg.glyph_id, lru_font_size, lru_axis_hash);
+            }
+            // Now fetch from LRU (either was already there, or just inserted).
+            if let Some(g) = lru
+                .cache
+                .get_with_axes(sg.glyph_id, lru_font_size, lru_axis_hash)
+            {
+                let px = cx + g.bearing_x;
+                let py = draw_y + (cache.ascent as i32 - g.bearing_y);
+                fb.draw_coverage(px, py, &g.coverage, g.width, g.height, glyph_color);
+            }
         }
 
         cx += scale_coord(sg.x_advance as i32, scale);

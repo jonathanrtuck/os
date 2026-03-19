@@ -11,12 +11,12 @@ mod coords;
 mod path_raster;
 mod walk;
 
-pub(crate) use coords::snap_border;
 pub use coords::{round_f32, scale_coord, scale_size};
 use fonts::cache::GlyphCache;
 use scene::Node;
 pub use walk::{
-    render_scene, render_scene_clipped, render_scene_clipped_with_pool, render_scene_with_pool,
+    render_scene, render_scene_clipped, render_scene_clipped_with_pool, render_scene_full,
+    render_scene_with_pool,
 };
 
 /// Rendering context passed through the recursive tree walk.
@@ -28,6 +28,9 @@ pub struct RenderCtx<'a> {
     /// physical pixel positions and sizes. Borders snap to whole physical
     /// pixels (round to nearest).
     pub scale: f32,
+    /// Physical font size in pixels (after scale). Used as the LRU cache
+    /// key's font_size component for on-demand rasterization.
+    pub font_size_px: u16,
 }
 
 /// Immutable scene graph data referenced during rendering.

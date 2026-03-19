@@ -14,7 +14,7 @@ use super::{
     path_raster::scene_to_draw_color,
     RenderCtx, SceneGraph,
 };
-use crate::surface_pool::SurfacePool;
+use crate::{surface_pool::SurfacePool, LruRasterizer};
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.
 /// Uses i32 for physical pixel math. virgil-render has an independent f32
@@ -63,6 +63,9 @@ impl ClipRect {
 /// `pool` provides offscreen buffers for group opacity rendering. When a
 /// node has `opacity < 255`, its subtree is rendered into an offscreen
 /// buffer (from the pool) and then composited at the specified opacity.
+///
+/// `lru` provides on-demand rasterization for non-ASCII glyphs via the
+/// LRU cache. When `None`, only the fixed ASCII cache is used.
 fn render_node(
     fb: &mut Surface,
     graph: &SceneGraph,
@@ -72,6 +75,7 @@ fn render_node(
     abs_y: i32,
     clip: ClipRect,
     pool: Option<&mut SurfacePool>,
+    lru: Option<&mut LruRasterizer>,
 ) {
     render_node_transformed(
         fb,
@@ -83,6 +87,7 @@ fn render_node(
         clip,
         pool,
         scene::AffineTransform::identity(),
+        lru,
     );
 }
 
@@ -97,6 +102,7 @@ fn render_node_transformed(
     clip: ClipRect,
     pool: Option<&mut SurfacePool>,
     parent_world: scene::AffineTransform,
+    lru: Option<&mut LruRasterizer>,
 ) {
     if node_id == NULL || node_id as usize >= graph.nodes.len() {
         return;
@@ -189,6 +195,7 @@ fn render_node_transformed(
                     },
                     None,
                     world_xform,
+                    lru,
                 );
             }
             let blit_x = (nx - sh_left).max(0) as u32;
@@ -220,6 +227,7 @@ fn render_node_transformed(
             visible,
             pool,
             world_xform,
+            lru,
         );
     } else {
         // Non-trivial transform (rotation, scale, skew):
@@ -328,6 +336,7 @@ fn render_node_transformed(
                 content_clip,
                 None,
                 scene::AffineTransform::identity(), // children rendered axis-aligned
+                lru,
             );
         }
 
@@ -567,17 +576,19 @@ fn render_shadow(
 /// position. For offscreen opacity rendering this is (0, 0).
 /// `visible` is the clipped visible rectangle in the target surface's coords.
 /// `world_xform` is the accumulated world transform for this node's subtree.
+/// `lru` is the optional LRU rasterizer for non-ASCII glyphs.
 fn render_node_content_translated(
     fb: &mut Surface,
     graph: &SceneGraph,
     ctx: &RenderCtx,
     node: &Node,
-    node_id: NodeId,
+    _node_id: NodeId,
     draw_x: i32,
     draw_y: i32,
     visible: ClipRect,
-    pool: Option<&mut SurfacePool>,
-    world_xform: scene::AffineTransform,
+    _pool: Option<&mut SurfacePool>,
+    _world_xform: scene::AffineTransform,
+    mut lru: Option<&mut LruRasterizer>,
 ) {
     let s = ctx.scale;
     let nw = scale_size(node.x as i32, node.width as i32, s);
@@ -699,7 +710,17 @@ fn render_node_content_translated(
     }
 
     // Draw content.
-    super::content::render_content(fb, graph, ctx.mono_cache, s, node, draw_x, draw_y, nw, nh);
+    super::content::render_content(
+        fb,
+        graph,
+        ctx,
+        node,
+        draw_x,
+        draw_y,
+        nw,
+        nh,
+        lru.as_deref_mut(),
+    );
 
     // Recurse into children.
     let use_rounded_clip =
@@ -737,6 +758,9 @@ fn render_node_content_translated(
             let child_origin_y_off = 0i32 - scale_coord(node.scroll_y, s);
             let mut child = node.first_child;
 
+            // Reborrow lru once for the entire child loop. Each child gets
+            // a reborrow of the same mutable reference.
+            let mut lru_ref = lru;
             while child != NULL {
                 if (child as usize) >= graph.nodes.len() {
                     break;
@@ -765,6 +789,7 @@ fn render_node_content_translated(
                         off_clip,
                         None,
                         scene::AffineTransform::identity(),
+                        lru_ref.as_deref_mut(),
                     );
                 }
 
@@ -799,6 +824,8 @@ fn render_node_content_translated(
         let child_origin_y = draw_y - scale_coord(node.scroll_y, s);
         let mut child = node.first_child;
 
+        // Reborrow lru once for the entire child loop.
+        let mut lru_ref = lru;
         while child != NULL {
             if (child as usize) >= graph.nodes.len() {
                 break;
@@ -828,6 +855,7 @@ fn render_node_content_translated(
                     child_clip,
                     None,
                     scene::AffineTransform::identity(),
+                    lru_ref.as_deref_mut(),
                 );
             }
 
@@ -849,7 +877,7 @@ pub fn render_scene(fb: &mut Surface, graph: &SceneGraph, ctx: &RenderCtx) {
         h: fb.height as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, None);
+    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None);
 }
 
 /// Render an entire scene graph with a SurfacePool for offscreen opacity.
@@ -870,7 +898,33 @@ pub fn render_scene_with_pool(
         h: fb.height as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool));
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), None);
+}
+
+/// Render an entire scene graph with SurfacePool + LRU glyph rasterizer.
+///
+/// This is the full CpuBackend entry point. Non-ASCII glyphs that miss
+/// the fixed ASCII cache are rasterized on demand and inserted into the
+/// LRU cache.
+pub fn render_scene_full(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    ctx: &RenderCtx,
+    pool: &mut SurfacePool,
+    lru: &mut LruRasterizer,
+) {
+    if graph.nodes.is_empty() {
+        return;
+    }
+
+    let clip = ClipRect {
+        x: 0,
+        y: 0,
+        w: fb.width as i32,
+        h: fb.height as i32,
+    };
+
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), Some(lru));
 }
 
 /// Render only the region within `dirty` (absolute pixel coordinates).
@@ -892,7 +946,7 @@ pub fn render_scene_clipped(
         h: dirty.h as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, None);
+    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None);
 }
 
 /// Render only the region within `dirty`, with SurfacePool for offscreen opacity.
@@ -914,5 +968,5 @@ pub fn render_scene_clipped_with_pool(
         h: dirty.h as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool));
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), None);
 }
