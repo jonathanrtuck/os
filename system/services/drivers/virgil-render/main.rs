@@ -247,6 +247,7 @@ pub extern "C" fn _start() -> ! {
     let mut font_va: u64 = 0;
     let mut font_len: u32 = 0;
     let mut scale_factor: f32 = 1.0;
+    let mut font_size_cfg: u16 = 18;
 
     loop {
         let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
@@ -257,6 +258,7 @@ pub extern "C" fn _start() -> ! {
             font_va = config.mono_font_va;
             font_len = config.mono_font_len;
             scale_factor = config.scale_factor;
+            font_size_cfg = config.font_size;
 
             sys::print(b"     render config: scene_va=");
             print_hex_u32((scene_va >> 32) as u32);
@@ -295,10 +297,10 @@ pub extern "C" fn _start() -> ! {
         let font_data =
             unsafe { core::slice::from_raw_parts(font_va as *const u8, font_len as usize) };
 
-        // Font size = core's FONT_SIZE (18px) in logical pixels.
-        // The scene graph x_advance/x_offset are in logical pixels at this size.
-        // Rasterize at the LOGICAL size — the scene_walk applies * scale for NDC.
-        let font_size_px: u32 = 18; // must match core/main.rs FONT_SIZE
+        // Font size from config (logical pixels). The scene graph x_advance/x_offset
+        // are in logical pixels at this size. Rasterize at the LOGICAL size —
+        // the scene_walk applies * scale for NDC.
+        let font_size_px: u32 = font_size_cfg as u32;
 
         // Axes must match core's shaping axes (MONO=1.0).
         let mono_axes = [fonts::rasterize::AxisValue {

@@ -361,8 +361,8 @@ fn setup_render_pipeline(
         mono_font_len,
         prop_font_len,
         scale_factor,
-        frame_rate: 60,
-        _pad: 0,
+        font_size: 18,
+        screen_dpi: 96,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &render_config) };
 

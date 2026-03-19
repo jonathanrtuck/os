@@ -282,7 +282,8 @@ pub mod compose {
     /// the 60-byte IPC payload. The scene graph is in logical coordinates
     /// (physical / scale); the compositor multiplies by scale_factor during
     /// rendering.
-    /// `frame_rate` is the target frames per second (0 = default 60fps).
+    /// `font_size` is the logical font size in pixels (e.g. 18).
+    /// `screen_dpi` is the display DPI (e.g. 96).
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CompositorConfig {
@@ -295,8 +296,8 @@ pub mod compose {
         pub mono_font_len: u32,
         pub prop_font_len: u32,
         pub scale_factor: f32,
-        pub frame_rate: u16,
-        pub _pad: u16,
+        pub font_size: u16,
+        pub screen_dpi: u16,
     }
 
     // Guard: must fit within the 60-byte IPC payload.

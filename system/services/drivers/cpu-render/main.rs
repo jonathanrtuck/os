@@ -50,10 +50,9 @@ use render::RenderBackend;
 const INIT_HANDLE: u8 = 0;
 const CORE_HANDLE: u8 = 1;
 
-/// Font configuration.
-// TODO: Receive from config message instead of hardcoding (review 7.10).
-const FONT_SIZE: u32 = 18;
-const SCREEN_DPI: u16 = 96;
+/// Default frame rate (fps). Previously sent via CompositorConfig.frame_rate;
+/// now a local constant since frame rate is not display-dependent.
+const DEFAULT_FPS: u32 = 60;
 
 /// Framebuffer chunk allocation order (256 KiB per chunk = 64 pages).
 const CHUNK_ORDER: u32 = 6;
@@ -297,11 +296,13 @@ pub extern "C" fn _start() -> ! {
     } else {
         None
     };
+    let font_size = config.font_size as u32;
+    let screen_dpi = config.screen_dpi;
     let mut backend = match render::CpuBackend::new(
         mono,
         prop,
-        FONT_SIZE,
-        SCREEN_DPI,
+        font_size,
+        screen_dpi,
         scale,
         fb_width as u16,
         fb_height as u16,
@@ -388,12 +389,7 @@ pub extern "C" fn _start() -> ! {
     );
 
     // ── Phase I: Render loop ─────────────────────────────────────────
-    let fps = if config.frame_rate > 0 {
-        config.frame_rate as u32
-    } else {
-        60
-    };
-    let mut sched = frame_scheduler::FrameScheduler::new(fps);
+    let mut sched = frame_scheduler::FrameScheduler::new(DEFAULT_FPS);
     let cfreq = sys::counter_freq();
     let mut timer_h: u8 = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
         sys::print(b"cpu-render: frame timer create failed\n");

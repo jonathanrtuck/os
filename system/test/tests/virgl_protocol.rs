@@ -561,3 +561,26 @@ fn cmd_set_scissor_rect_packing() {
     // max: (x+w) | ((y+h) << 16)
     assert_eq!(words[3], 110 | (70 << 16));
 }
+
+/// CompositorConfig includes font_size and screen_dpi fields and fits
+/// within the 60-byte IPC payload limit.
+#[test]
+fn compositor_config_includes_font_fields() {
+    use protocol::compose::CompositorConfig;
+    let config = CompositorConfig {
+        fb_va: 0,
+        fb_va2: 0,
+        scene_va: 0,
+        mono_font_va: 0,
+        fb_width: 1024,
+        fb_height: 768,
+        mono_font_len: 100,
+        prop_font_len: 0,
+        scale_factor: 1.0,
+        font_size: 18,
+        screen_dpi: 96,
+    };
+    assert_eq!(config.font_size, 18);
+    assert_eq!(config.screen_dpi, 96);
+    assert!(core::mem::size_of::<CompositorConfig>() <= 60);
+}
