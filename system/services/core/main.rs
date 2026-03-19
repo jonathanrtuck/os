@@ -1019,14 +1019,12 @@ pub extern "C" fn _start() -> ! {
                 } else {
                     80
                 };
-                let scroll_px = s.scroll_offset as i32 * s.line_h as i32;
 
                 scene.update_cursor(
                     &scene_cfg,
                     s.cursor_pos as u32,
                     doc_content(),
                     chars_per_line,
-                    scroll_px,
                     if timer_fired { Some(&time_buf) } else { None },
                 );
             } else if timer_fired {

@@ -120,7 +120,11 @@ fn line_bytes_for_run<'a>(text: &'a [u8], run: &TestLayoutRun) -> &'a [u8] {
     }
 }
 
-/// Filter and reposition runs for a scrolled viewport.
+/// Filter runs to those visible in a scrolled viewport.
+///
+/// Runs keep their document-relative y positions. The caller sets
+/// `scroll_y` on the container node so the renderer handles the
+/// viewport offset.
 fn scroll_runs(
     runs: Vec<TestLayoutRun>,
     scroll_lines: u32,
@@ -130,19 +134,19 @@ fn scroll_runs(
     let scroll_px = scroll_lines as i32 * line_height as i32;
 
     runs.into_iter()
-        .filter_map(|mut run| {
-            let adjusted_y = run.y as i32 - scroll_px;
+        .filter(|run| {
+            let doc_y = run.y;
 
-            if adjusted_y + line_height as i32 <= 0 {
-                return None;
+            // Above the scroll window?
+            if doc_y + line_height as i32 <= scroll_px {
+                return false;
             }
-            if adjusted_y >= viewport_height_px {
-                return None;
+            // Below the scroll window?
+            if doc_y >= scroll_px + viewport_height_px {
+                return false;
             }
 
-            run.y = adjusted_y as i32;
-
-            Some(run)
+            true
         })
         .collect()
 }
@@ -571,11 +575,12 @@ fn scroll_runs_filters_above_viewport() {
     let runs = layout_mono_lines(&text, 80, 20, WHITE, 8, 16);
     assert_eq!(runs.len(), 10);
     let visible = scroll_runs(runs, 5, 20, 60);
-    // Lines 5, 6, 7 visible (y = 0, 20, 40). Lines 0-4 above, 8-9 below.
+    // Lines 5, 6, 7 visible. Lines 0-4 above, 8-9 below.
+    // y values are document-relative (not viewport-relative).
     assert_eq!(visible.len(), 3);
-    assert_eq!(visible[0].y, 0);
-    assert_eq!(visible[1].y, 20);
-    assert_eq!(visible[2].y, 40);
+    assert_eq!(visible[0].y, 100); // line 5: 5 * 20 = 100
+    assert_eq!(visible[1].y, 120); // line 6: 6 * 20 = 120
+    assert_eq!(visible[2].y, 140); // line 7: 7 * 20 = 140
     assert_eq!(line_bytes_for_run(&text, &visible[0]), &[b'f']); // line 5 = 'f'
 }
 
@@ -592,14 +597,21 @@ fn scroll_runs_cursor_at_bottom_forces_scroll() {
     let runs = layout_mono_lines(&text, 80, 20, WHITE, 8, 16);
     assert_eq!(runs.len(), 40);
     let visible = scroll_runs(runs, 6, 20, 600); // 600px = 30 lines
-                                                 // First visible line should be line 6 at y=0.
-    assert_eq!(visible[0].y, 0);
-    // Last visible line should be line 35 at y = 29*20 = 580.
+                                                 // First visible line should be line 6 at document y = 6*20 = 120.
+    assert_eq!(visible[0].y, 120);
+    // Last visible line should be line 35 at document y = 35*20 = 700.
     let last = visible.last().unwrap();
-    assert_eq!(last.y, (visible.len() as i32 - 1) * 20);
-    // Nothing should have y >= 600 (viewport height).
+    assert_eq!(last.y, 700);
+    // All visible lines should be within the scroll window [120, 720).
+    let scroll_px = 6 * 20; // 120
     for run in &visible {
-        assert!(run.y < 600, "run.y={} exceeds viewport", run.y);
+        assert!(
+            run.y + 20 > scroll_px && run.y < scroll_px + 600,
+            "run.y={} outside scroll window [{}, {})",
+            run.y,
+            scroll_px,
+            scroll_px + 600
+        );
     }
 }
 
@@ -2850,13 +2862,14 @@ fn build_test_editor_scene(
         n.height = content_h as u16;
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     }
-    // N_DOC_TEXT — Content::None (pure container)
+    // N_DOC_TEXT — Content::None (pure container with scroll_y)
     {
         let n = w.node_mut(CORE_N_DOC_TEXT);
         n.x = text_inset_x as i32;
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h as u16;
+        n.scroll_y = scroll_px;
         n.content = Content::None;
         n.content_hash = fnv1a(doc_text);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -2897,10 +2910,10 @@ fn build_test_editor_scene(
         w.node_mut(prev_line_node).next_sibling = CORE_N_CURSOR;
     }
 
-    // N_CURSOR — Content::None with background color
+    // N_CURSOR — Content::None with background color (document-relative)
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line);
     let cursor_x = (cursor_col as u32 * char_width) as i32;
-    let cursor_y_px = (cursor_line as i32 * line_height as i32 - scroll_px) as i32;
+    let cursor_y_px = (cursor_line as i32 * line_height as i32) as i32;
     {
         let n = w.node_mut(CORE_N_CURSOR);
         n.x = cursor_x;
@@ -2937,8 +2950,8 @@ fn build_test_editor_scene(
             if col_start >= col_end {
                 continue;
             }
-            let sel_y = line as i32 * line_height as i32 - scroll_px;
-            if sel_y + line_height as i32 <= 0 || sel_y >= content_h as i32 {
+            let sel_y = line as i32 * line_height as i32;
+            if sel_y + line_height as i32 <= scroll_px || sel_y >= scroll_px + content_h as i32 {
                 continue;
             }
             if let Some(sel_id) = w.alloc_node() {
@@ -3348,11 +3361,139 @@ fn core_scroll_filters_lines_correctly() {
         .count();
     assert_eq!(line_count, 5, "with scroll=5, 5 out of 10 lines visible");
 
-    // First visible line should have y=0 (scroll-adjusted)
+    // First visible line should have document-relative y = 5 * 20 = 100
     assert_eq!(
         w.node(children[0]).y,
+        100,
+        "first visible line at document y=100 (line 5 * 20px)"
+    );
+
+    // N_DOC_TEXT.scroll_y should equal scroll_lines * line_height
+    assert_eq!(
+        w.node(CORE_N_DOC_TEXT).scroll_y,
+        100, // 5 * 20
+        "N_DOC_TEXT.scroll_y should be scroll_lines * line_height"
+    );
+}
+
+// ── VAL-CORE-004b: Document-relative scroll model ───────────────────
+
+#[test]
+fn core_scroll_model_document_relative_positions() {
+    // Verify the scroll model invariant: all children of N_DOC_TEXT are
+    // positioned at document-relative coordinates, and N_DOC_TEXT.scroll_y
+    // provides the viewport offset.
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let line_h: u32 = 20;
+    let scroll_lines: i32 = 3;
+    // 8 lines of text, scroll down 3 lines.
+    let text = b"aaa\nbbb\nccc\nddd\neee\nfff\nggg\nhhh";
+    build_test_editor_scene(
+        &mut w,
+        1024,
+        768,
+        text,
         0,
-        "first visible line at y=0 after scroll"
+        0,
+        0,
+        8,
+        line_h,
+        16,
+        scroll_lines,
+    );
+
+    let scroll_px = scroll_lines as i32 * line_h as i32; // 60
+
+    // 1. N_DOC_TEXT.scroll_y == scroll_lines * line_height
+    assert_eq!(
+        w.node(CORE_N_DOC_TEXT).scroll_y,
+        scroll_px,
+        "N_DOC_TEXT.scroll_y must equal scroll_lines * line_height"
+    );
+
+    // 2. Line nodes have document-relative y (not viewport-relative).
+    let children = collect_children(&w, CORE_N_DOC_TEXT);
+    let line_nodes: Vec<u16> = children
+        .iter()
+        .copied()
+        .take_while(|&id| id != CORE_N_CURSOR)
+        .collect();
+
+    // With 8 lines and scroll=3, lines 3-7 should be visible.
+    assert_eq!(line_nodes.len(), 5, "5 lines visible with scroll=3 of 8");
+
+    // First visible line (line 3) should be at document y = 3 * 20 = 60.
+    assert_eq!(w.node(line_nodes[0]).y, 60);
+    // Second visible line (line 4) at y = 80.
+    assert_eq!(w.node(line_nodes[1]).y, 80);
+
+    // 3. Cursor at position 0 (line 0, col 0) has document-relative y = 0
+    //    even though line 0 is above the scroll window.
+    let cursor = w.node(CORE_N_CURSOR);
+    assert_eq!(cursor.y, 0, "cursor y is document-relative (line 0 * 20)");
+}
+
+#[test]
+fn core_scroll_model_no_scroll_positions_unchanged() {
+    // With scroll=0, document-relative == viewport-relative,
+    // so behavior matches the old model.
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    build_test_editor_scene(&mut w, 1024, 768, b"aaa\nbbb\nccc", 0, 0, 0, 8, 20, 16, 0);
+
+    // scroll_y should be 0.
+    assert_eq!(w.node(CORE_N_DOC_TEXT).scroll_y, 0);
+
+    // Line positions: 0, 20, 40 (document == viewport when no scroll).
+    let children = collect_children(&w, CORE_N_DOC_TEXT);
+    let line_nodes: Vec<u16> = children
+        .iter()
+        .copied()
+        .take_while(|&id| id != CORE_N_CURSOR)
+        .collect();
+    assert_eq!(w.node(line_nodes[0]).y, 0);
+    assert_eq!(w.node(line_nodes[1]).y, 20);
+    assert_eq!(w.node(line_nodes[2]).y, 40);
+
+    // Cursor at pos 0 → y = 0.
+    assert_eq!(w.node(CORE_N_CURSOR).y, 0);
+}
+
+#[test]
+fn core_scroll_model_selection_rects_document_relative() {
+    // Selection rects should use document-relative y positions.
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    let line_h: u32 = 20;
+    // "aaa\nbbb\nccc\nddd" — select "bbb\nccc" (bytes 4..11), scroll=0
+    build_test_editor_scene(
+        &mut w,
+        1024,
+        768,
+        b"aaa\nbbb\nccc\nddd",
+        0,
+        4,
+        11,
+        8,
+        line_h,
+        16,
+        0,
+    );
+
+    // Selection rects are after cursor.
+    let mut sel_id = w.node(CORE_N_CURSOR).next_sibling;
+    let mut sel_ys = Vec::new();
+    while sel_id != NULL {
+        sel_ys.push(w.node(sel_id).y);
+        sel_id = w.node(sel_id).next_sibling;
+    }
+
+    // Line 1 ("bbb") at document y = 20, line 2 ("ccc") at document y = 40.
+    assert_eq!(
+        sel_ys,
+        vec![20, 40],
+        "selection rects at document-relative y"
     );
 }
 

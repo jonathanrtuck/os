@@ -191,7 +191,11 @@ pub fn line_bytes_for_run<'a>(text: &'a [u8], run: &LayoutRun) -> &'a [u8] {
     }
 }
 
-/// Filter and reposition runs for a scrolled viewport.
+/// Filter runs to those visible in a scrolled viewport.
+///
+/// Runs keep their document-relative y positions. The caller sets
+/// `scroll_y` on the container node so the renderer handles the
+/// viewport offset.
 pub fn scroll_runs(
     runs: Vec<LayoutRun>,
     scroll_lines: u32,
@@ -201,20 +205,19 @@ pub fn scroll_runs(
     let scroll_px = scroll_lines as i32 * line_height as i32;
 
     runs.into_iter()
-        .filter_map(|run| {
-            let adjusted_y = run.y as i32 - scroll_px;
+        .filter(|run| {
+            let doc_y = run.y;
 
-            if adjusted_y + line_height as i32 <= 0 {
-                return None;
+            // Above the scroll window?
+            if doc_y + line_height as i32 <= scroll_px {
+                return false;
             }
-            if adjusted_y >= viewport_height_px {
-                return None;
+            // Below the scroll window?
+            if doc_y >= scroll_px + viewport_height_px {
+                return false;
             }
 
-            Some(LayoutRun {
-                y: adjusted_y as i32,
-                ..run
-            })
+            true
         })
         .collect()
 }
@@ -285,6 +288,10 @@ pub fn update_clock_inline(
 
 /// Allocate selection rectangle nodes as children of N_DOC_TEXT (after
 /// the cursor node). Each line of the selection gets one rect node.
+///
+/// Selection rects use document-relative y positions. The renderer
+/// applies `scroll_y` from the parent container to offset them visually.
+/// `scroll_px` and `content_h` are used only for visibility culling.
 #[allow(clippy::too_many_arguments)]
 pub fn allocate_selection_rects(
     w: &mut scene::SceneWriter<'_>,
@@ -318,16 +325,18 @@ pub fn allocate_selection_rects(
             continue;
         }
 
-        let sel_y = line as i32 * line_height as i32 - scroll_px;
+        // Document-relative y for this selection line.
+        let sel_y = line as i32 * line_height as i32;
 
-        if sel_y + line_height as i32 <= 0 || sel_y >= content_h as i32 {
+        // Visibility culling: skip lines outside the scroll window.
+        if sel_y + line_height as i32 <= scroll_px || sel_y >= scroll_px + content_h as i32 {
             continue;
         }
 
         if let Some(sel_id) = w.alloc_node() {
             let n = w.node_mut(sel_id);
             n.x = (col_start as u32 * char_width) as i32;
-            n.y = sel_y as i32;
+            n.y = sel_y;
             n.width = ((col_end - col_start) as u32 * char_width) as u16;
             n.height = line_height as u16;
             n.background = sel_color;
@@ -538,7 +547,7 @@ pub fn build_full_scene(
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h as u16;
-        n.scroll_y = 0;
+        n.scroll_y = scroll_px;
         // N_DOC_TEXT is now a pure container — per-line Glyphs
         // child nodes hold the actual text content.
         n.content = Content::None;
@@ -586,9 +595,9 @@ pub fn build_full_scene(
     }
 
     // Cursor: positioned rectangle child of doc text node.
-    // Scroll-adjusted: cursor_line is absolute, subtract scroll.
+    // Document-relative: renderer applies scroll_y from N_DOC_TEXT.
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i32;
+    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     {
         let n = w.node_mut(N_CURSOR);
@@ -739,13 +748,12 @@ pub fn build_cursor_update(
     cursor_pos: u32,
     doc_text: &[u8],
     chars_per_line: u32,
-    scroll_px: i32,
     clock_text: Option<&[u8]>,
 ) {
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i32;
+    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     let n = w.node_mut(N_CURSOR);
     n.x = cursor_x;
@@ -798,7 +806,7 @@ pub fn build_selection_update(
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i32;
+    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     {
         let n = w.node_mut(N_CURSOR);
@@ -941,6 +949,7 @@ pub fn build_document_content(
     // offsets, causing ghost duplicates.
     w.node_mut(N_DOC_TEXT).first_child = NULL;
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
+    w.node_mut(N_DOC_TEXT).scroll_y = scroll_px;
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
     let mut prev_line_node: u16 = NULL;
@@ -979,11 +988,11 @@ pub fn build_document_content(
 
     w.mark_dirty(N_DOC_TEXT);
 
-    // Update cursor position.
+    // Update cursor position (document-relative).
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i32;
+    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     {
         let n = w.node_mut(N_CURSOR);

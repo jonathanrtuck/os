@@ -88,7 +88,6 @@ impl SceneState {
         cursor_pos: u32,
         doc_text: &[u8],
         chars_per_line: u32,
-        scroll_px: i32,
         clock_text: Option<&[u8]>,
     ) {
         let mut tw = self.triple();
@@ -100,7 +99,6 @@ impl SceneState {
                 cursor_pos,
                 doc_text,
                 chars_per_line,
-                scroll_px,
                 clock_text,
             );
         }
