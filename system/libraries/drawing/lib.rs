@@ -1456,29 +1456,47 @@ impl<'a> Surface<'a> {
                 let p01 = sample_src(src_data, src_stride, sw, sh, sx_floor, sy_floor + 1);
                 let p11 = sample_src(src_data, src_stride, sw, sh, sx_floor + 1, sy_floor + 1);
 
-                // Bilinear blend in BGRA (sRGB gamma) space.
-                // TODO: Linearize before interpolation, re-encode after (review 7.16).
-                // Current approach introduces banding on rotated/scaled content.
+                // Bilinear blend in linear light space (gamma-correct).
                 let inv_fx = 256 - fx;
                 let inv_fy = 256 - fy;
 
-                // Interpolate top row: lerp(p00, p10, fx).
-                let top_b = (p00.0 as u32 * inv_fx + p10.0 as u32 * fx) >> 8;
-                let top_g = (p00.1 as u32 * inv_fx + p10.1 as u32 * fx) >> 8;
-                let top_r = (p00.2 as u32 * inv_fx + p10.2 as u32 * fx) >> 8;
+                // Linearize B, G, R channels of all 4 samples via SRGB_TO_LINEAR.
+                // Alpha is already linear — interpolated directly in 0-255 space.
+                let p00_b = SRGB_TO_LINEAR[p00.0 as usize] as u32;
+                let p00_g = SRGB_TO_LINEAR[p00.1 as usize] as u32;
+                let p00_r = SRGB_TO_LINEAR[p00.2 as usize] as u32;
+                let p10_b = SRGB_TO_LINEAR[p10.0 as usize] as u32;
+                let p10_g = SRGB_TO_LINEAR[p10.1 as usize] as u32;
+                let p10_r = SRGB_TO_LINEAR[p10.2 as usize] as u32;
+                let p01_b = SRGB_TO_LINEAR[p01.0 as usize] as u32;
+                let p01_g = SRGB_TO_LINEAR[p01.1 as usize] as u32;
+                let p01_r = SRGB_TO_LINEAR[p01.2 as usize] as u32;
+                let p11_b = SRGB_TO_LINEAR[p11.0 as usize] as u32;
+                let p11_g = SRGB_TO_LINEAR[p11.1 as usize] as u32;
+                let p11_r = SRGB_TO_LINEAR[p11.2 as usize] as u32;
+
+                // Interpolate top row in linear space: lerp(p00, p10, fx).
+                let top_b = (p00_b * inv_fx + p10_b * fx) >> 8;
+                let top_g = (p00_g * inv_fx + p10_g * fx) >> 8;
+                let top_r = (p00_r * inv_fx + p10_r * fx) >> 8;
                 let top_a = (p00.3 as u32 * inv_fx + p10.3 as u32 * fx) >> 8;
 
-                // Interpolate bottom row: lerp(p01, p11, fx).
-                let bot_b = (p01.0 as u32 * inv_fx + p11.0 as u32 * fx) >> 8;
-                let bot_g = (p01.1 as u32 * inv_fx + p11.1 as u32 * fx) >> 8;
-                let bot_r = (p01.2 as u32 * inv_fx + p11.2 as u32 * fx) >> 8;
+                // Interpolate bottom row in linear space: lerp(p01, p11, fx).
+                let bot_b = (p01_b * inv_fx + p11_b * fx) >> 8;
+                let bot_g = (p01_g * inv_fx + p11_g * fx) >> 8;
+                let bot_r = (p01_r * inv_fx + p11_r * fx) >> 8;
                 let bot_a = (p01.3 as u32 * inv_fx + p11.3 as u32 * fx) >> 8;
 
-                // Interpolate columns: lerp(top, bot, fy).
-                let fin_b = ((top_b * inv_fy + bot_b * fy) >> 8) as u8;
-                let fin_g = ((top_g * inv_fy + bot_g * fy) >> 8) as u8;
-                let fin_r = ((top_r * inv_fy + bot_r * fy) >> 8) as u8;
+                // Interpolate columns in linear space: lerp(top, bot, fy).
+                let lin_b = (top_b * inv_fy + bot_b * fy) >> 8;
+                let lin_g = (top_g * inv_fy + bot_g * fy) >> 8;
+                let lin_r = (top_r * inv_fy + bot_r * fy) >> 8;
                 let mut fin_a = ((top_a * inv_fy + bot_a * fy) >> 8) as u8;
+
+                // Convert back from linear to sRGB.
+                let fin_b = LINEAR_TO_SRGB[linear_to_idx(lin_b)];
+                let fin_g = LINEAR_TO_SRGB[linear_to_idx(lin_g)];
+                let fin_r = LINEAR_TO_SRGB[linear_to_idx(lin_r)];
 
                 if fin_a == 0 {
                     continue;

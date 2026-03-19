@@ -7221,7 +7221,10 @@ fn bilinear_downscale_checkerboard_produces_gray() {
         drawing::ResamplingMethod::Bilinear,
     );
 
-    // Sample center pixels: should be blended gray (approximately 128).
+    // Sample center pixels: should be gamma-correct blended gray.
+    // The gamma-correct average of sRGB 0 (black) and sRGB 255 (white) is ~188,
+    // NOT the naive sRGB average of 128. This is because sRGB is perceptually
+    // encoded — linear 50% gray encodes to sRGB ~188.
     let center_x = 25u32;
     let center_y = 25u32;
     let off = (center_y * dst_stride + center_x * 4) as usize;
@@ -7230,16 +7233,16 @@ fn bilinear_downscale_checkerboard_produces_gray() {
     let b = dst_buf[off];
 
     assert!(
-        r >= 98 && r <= 158,
-        "VAL-XFORM-014: downscaled checkerboard center R should be ~128, got {r}"
+        r >= 158 && r <= 218,
+        "VAL-XFORM-014: downscaled checkerboard center R should be ~188 (gamma-correct), got {r}"
     );
     assert!(
-        g >= 98 && g <= 158,
-        "VAL-XFORM-014: downscaled checkerboard center G should be ~128, got {g}"
+        g >= 158 && g <= 218,
+        "VAL-XFORM-014: downscaled checkerboard center G should be ~188 (gamma-correct), got {g}"
     );
     assert!(
-        b >= 98 && b <= 158,
-        "VAL-XFORM-014: downscaled checkerboard center B should be ~128, got {b}"
+        b >= 158 && b <= 218,
+        "VAL-XFORM-014: downscaled checkerboard center B should be ~188 (gamma-correct), got {b}"
     );
 }
 
@@ -7314,5 +7317,102 @@ fn bilinear_downscale_checkerboard_no_aliased_pixels() {
     assert!(
         gray_count > extreme_count,
         "bilinear downscale should produce more gray than B/W pixels: gray={gray_count}, extreme={extreme_count}"
+    );
+}
+
+/// VAL-XFORM-016: Bilinear interpolation must be gamma-correct.
+///
+/// A 2x2 source with sRGB values 50 and 200, sampled at the exact midpoint,
+/// should produce the gamma-correct average (~150), NOT the naive sRGB
+/// average (125). The difference of ~25 is large enough to detect reliably.
+#[test]
+fn bilinear_interpolation_is_gamma_correct() {
+    let val_a: u8 = 50;
+    let val_b: u8 = 200;
+
+    // 2x2 source: diagonal pattern (a on 00/11, b on 10/01).
+    let src_w = 2u32;
+    let src_h = 2u32;
+    let src_stride = src_w * 4;
+    let mut src_buf = vec![0u8; (src_stride * src_h) as usize];
+
+    // p00 = val_a, p10 = val_b, p01 = val_b, p11 = val_a
+    let set_pixel = |buf: &mut Vec<u8>, x: u32, y: u32, v: u8| {
+        let off = (y * src_stride + x * 4) as usize;
+        buf[off] = v; // B
+        buf[off + 1] = v; // G
+        buf[off + 2] = v; // R
+        buf[off + 3] = 255; // A (opaque)
+    };
+    set_pixel(&mut src_buf, 0, 0, val_a);
+    set_pixel(&mut src_buf, 1, 0, val_b);
+    set_pixel(&mut src_buf, 0, 1, val_b);
+    set_pixel(&mut src_buf, 1, 1, val_a);
+
+    // 1x1 destination — sample a single pixel at the exact midpoint.
+    let dst_w = 1u32;
+    let dst_h = 1u32;
+    let dst_stride = dst_w * 4;
+    let mut dst_buf = vec![0u8; (dst_stride * dst_h) as usize];
+    let mut fb = Surface {
+        data: &mut dst_buf,
+        width: dst_w,
+        height: dst_h,
+        stride: dst_stride,
+        format: PixelFormat::Bgra8888,
+    };
+
+    // Identity transform with 0.5 offset lands the dst pixel center at
+    // source (0.5, 0.5) — the exact midpoint of the 2x2 grid.
+    fb.blit_blend_bilinear(
+        &src_buf,
+        src_w,
+        src_h,
+        src_stride,
+        0,
+        0,
+        dst_w,
+        dst_h,
+        1.0,
+        0.0, // inv_a, inv_b
+        0.0,
+        1.0, // inv_c, inv_d
+        0.5,
+        0.5, // inv_tx, inv_ty — sample at midpoint
+        255,
+        drawing::ResamplingMethod::Bilinear,
+    );
+
+    let out_b = dst_buf[0];
+    let out_g = dst_buf[1];
+    let out_r = dst_buf[2];
+
+    // Gamma-correct average of sRGB 50 and 200:
+    //   linearize: SRGB_TO_LINEAR[50]=2090, SRGB_TO_LINEAR[200]=37852
+    //   average in linear: (2090+37852)/2 = 19971
+    //   re-encode: LINEAR_TO_SRGB[19971>>4] = LINEAR_TO_SRGB[1248] = 150
+    // Naive sRGB average would be (50+200)/2 = 125.
+    let expected: u8 = 150;
+    let naive: u8 = 125;
+    let tolerance: i16 = 2;
+
+    // The result must be close to the gamma-correct value, NOT the naive one.
+    assert!(
+        (out_r as i16 - expected as i16).abs() <= tolerance,
+        "bilinear R should be gamma-correct ~{expected}, got {out_r} (naive would be {naive})"
+    );
+    assert!(
+        (out_g as i16 - expected as i16).abs() <= tolerance,
+        "bilinear G should be gamma-correct ~{expected}, got {out_g} (naive would be {naive})"
+    );
+    assert!(
+        (out_b as i16 - expected as i16).abs() <= tolerance,
+        "bilinear B should be gamma-correct ~{expected}, got {out_b} (naive would be {naive})"
+    );
+
+    // Sanity: result must be far from naive average.
+    assert!(
+        (out_r as i16 - naive as i16).abs() > 10,
+        "bilinear R={out_r} is suspiciously close to naive average {naive}"
     );
 }
