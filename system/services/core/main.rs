@@ -935,7 +935,7 @@ pub extern "C" fn _start() -> ! {
         // When timer_fired coincides with an input change, the clock
         // is updated alongside the primary change within the same
         // copy/swap cycle — no full rebuild needed. The clock is just
-        // another node to mark_changed alongside the document nodes.
+        // another node to mark_dirty alongside the document nodes.
 
         let needs_scene_update = changed || text_changed || selection_changed || timer_fired;
 

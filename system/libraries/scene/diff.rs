@@ -1,6 +1,4 @@
-//! Scene graph diffing — compare two snapshots and produce dirty rects.
-
-use alloc::vec::Vec;
+//! Scene graph diffing — parent map and absolute bounds computation.
 
 use crate::node::{Node, NodeId, MAX_NODES, NULL};
 
@@ -127,53 +125,4 @@ fn ceil_f32(x: f32) -> f32 {
     } else {
         f
     }
-}
-
-// ── Scene diffing ───────────────────────────────────────────────────
-
-/// Compare two scene snapshots and return dirty rectangles.
-///
-/// `prev_nodes` / `curr_nodes` are the node arrays from the previous and
-/// current frames. If node counts differ, returns `None` (full repaint).
-/// Otherwise, returns a list of `(x, y, w, h)` absolute bounding rects
-/// for all changed nodes. The caller unions these into DirtyRects.
-// NOTE: Byte comparison of Node structs may produce false positives when
-// Content enum variants change size (e.g., Glyphs → None leaves stale tail
-// bytes). This causes extra repaints but never missed repaints.
-pub fn diff_scenes(
-    prev_nodes: &[Node],
-    prev_count: usize,
-    curr_nodes: &[Node],
-    curr_count: usize,
-) -> Option<Vec<(i32, i32, u32, u32)>> {
-    if prev_count != curr_count || prev_count == 0 {
-        return None;
-    }
-    let n = prev_count
-        .min(prev_nodes.len())
-        .min(curr_nodes.len())
-        .min(MAX_NODES);
-    let curr_parents = build_parent_map(curr_nodes, n);
-    let prev_parents = build_parent_map(prev_nodes, n);
-    let node_size = core::mem::size_of::<Node>();
-    let mut rects = Vec::new();
-    for i in 0..n {
-        // SAFETY: Node is repr(C), fixed size — byte comparison is sound.
-        let prev_bytes = unsafe {
-            core::slice::from_raw_parts(&prev_nodes[i] as *const Node as *const u8, node_size)
-        };
-        let curr_bytes = unsafe {
-            core::slice::from_raw_parts(&curr_nodes[i] as *const Node as *const u8, node_size)
-        };
-        if prev_bytes != curr_bytes {
-            // Damage both old and new positions (handles node movement).
-            let old_rect = abs_bounds(prev_nodes, &prev_parents, i);
-            let new_rect = abs_bounds(curr_nodes, &curr_parents, i);
-            rects.push(old_rect);
-            if old_rect != new_rect {
-                rects.push(new_rect);
-            }
-        }
-    }
-    Some(rects)
 }

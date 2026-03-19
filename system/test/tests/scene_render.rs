@@ -2862,45 +2862,34 @@ fn layer_opacity_applies_to_shadow() {
 fn shadow_overflow_in_damage_rects() {
     // A node with shadow has a larger effective bounds than its logical
     // bounds. The abs_bounds function (used for damage tracking) must
-    // account for shadow overflow. Test this via the diff_scenes function.
-    let mut prev_nodes = vec![Node::EMPTY; 2];
-    prev_nodes[0].width = 200;
-    prev_nodes[0].height = 200;
-    prev_nodes[0].first_child = 1;
-    prev_nodes[0].flags = NodeFlags::VISIBLE;
+    // account for shadow overflow.
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 200;
+    nodes[0].height = 200;
+    nodes[0].first_child = 1;
+    nodes[0].flags = NodeFlags::VISIBLE;
 
-    prev_nodes[1].x = 50;
-    prev_nodes[1].y = 50;
-    prev_nodes[1].width = 40;
-    prev_nodes[1].height = 40;
-    prev_nodes[1].flags = NodeFlags::VISIBLE;
-    prev_nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 200);
-    prev_nodes[1].shadow_offset_x = 5;
-    prev_nodes[1].shadow_offset_y = 5;
-    prev_nodes[1].shadow_blur_radius = 8;
-    prev_nodes[1].shadow_spread = 4;
+    nodes[1].x = 50;
+    nodes[1].y = 50;
+    nodes[1].width = 40;
+    nodes[1].height = 40;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 200);
+    nodes[1].shadow_offset_x = 5;
+    nodes[1].shadow_offset_y = 5;
+    nodes[1].shadow_blur_radius = 8;
+    nodes[1].shadow_spread = 4;
 
-    // Modify node 1 (e.g., change background color).
-    let mut curr_nodes = prev_nodes.clone();
-    curr_nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
-
-    let rects = scene::diff_scenes(&prev_nodes, 2, &curr_nodes, 2);
-    let rects = rects.expect("diff_scenes should return Some for same node count");
-    assert!(
-        !rects.is_empty(),
-        "VAL-CROSS-011: changing shadowed node should produce dirty rects"
-    );
+    let parent_map = scene::build_parent_map(&nodes, 2);
+    let (ax, ay, aw, ah) = scene::abs_bounds(&nodes, &parent_map, 1);
+    let right = ax + aw as i32;
+    let bottom = ay + ah as i32;
 
     // The dirty rect should extend beyond the node's logical bounds
     // to include the shadow. Shadow extends by: blur_radius + spread + offset.
     // Max extent: offset_x + blur_radius + spread = 5 + 8 + 4 = 17 on right/bottom.
-    // Node logical bounds: (50, 50, 40, 40) → right edge at 90, bottom at 90.
+    // Node logical bounds: (50, 50, 40, 40) -> right edge at 90, bottom at 90.
     // With shadow: right edge should be at least 90 + 17 = 107.
-    let (ax, ay, aw, ah) = rects[0];
-    let right = ax + aw as i32;
-    let bottom = ay + ah as i32;
-
-    // The dirty rect must be larger than just the node bounds.
     assert!(aw > 40 || ah > 40 || right > 90 || bottom > 90,
         "VAL-CROSS-011: dirty rect should include shadow overflow: rect=({},{},{},{}), expected larger than (50,50,40,40)",
         ax, ay, aw, ah);
@@ -4020,52 +4009,34 @@ fn content_image_downscaled_checkerboard_bilinear() {
 }
 
 /// VAL-XFORM-016: Transform-aware damage tracking.
-/// A rotated 40×40 node diff_scenes should produce dirty rects
-/// that cover the AABB (~57×57).
+/// A rotated 40x40 node abs_bounds should produce an AABB (~57x57).
 #[test]
-fn diff_scenes_rotated_node_aabb_damage() {
-    // Frame 1: node at position (50, 50) with 45° rotation.
-    let mut nodes1 = vec![Node::EMPTY; 2];
-    nodes1[0].width = 200;
-    nodes1[0].height = 200;
-    nodes1[0].flags = NodeFlags::VISIBLE;
-    nodes1[0].first_child = 1;
+fn rotated_node_aabb_damage() {
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 200;
+    nodes[0].height = 200;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].first_child = 1;
 
-    nodes1[1].x = 50;
-    nodes1[1].y = 50;
-    nodes1[1].width = 40;
-    nodes1[1].height = 40;
-    nodes1[1].flags = NodeFlags::VISIBLE;
-    nodes1[1].transform = scene::AffineTransform::rotate(45.0 * core::f32::consts::PI / 180.0);
+    nodes[1].x = 50;
+    nodes[1].y = 50;
+    nodes[1].width = 40;
+    nodes[1].height = 40;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].transform = scene::AffineTransform::rotate(45.0 * core::f32::consts::PI / 180.0);
 
-    // Frame 2: same node moved to (55, 50) — 5px rightward.
-    let mut nodes2 = nodes1.clone();
-    nodes2[1].x = 55;
+    let parent_map = scene::build_parent_map(&nodes, 2);
+    let (_rx, _ry, rw, rh) = scene::abs_bounds(&nodes, &parent_map, 1);
 
-    let rects = scene::diff_scenes(&nodes1, 2, &nodes2, 2);
+    // The AABB of the rotated 40x40 node should be ~57x57.
     assert!(
-        rects.is_some(),
-        "diff_scenes should return Some for same-count frames"
+        rw >= 55,
+        "VAL-XFORM-016: rotated 40x40 dirty rect width should be >= 55, got {rw}"
     );
-
-    let rects = rects.unwrap();
-    // Should have dirty rects for the changed node (old + new positions).
     assert!(
-        !rects.is_empty(),
-        "should have dirty rects for moved rotated node"
+        rh >= 55,
+        "VAL-XFORM-016: rotated 40x40 dirty rect height should be >= 55, got {rh}"
     );
-
-    // Each dirty rect should cover the AABB of the rotated 40×40 node (~57×57).
-    for &(rx, ry, rw, rh) in &rects {
-        assert!(
-            rw >= 55,
-            "VAL-XFORM-016: rotated 40×40 dirty rect width should be >= 55, got {rw}"
-        );
-        assert!(
-            rh >= 55,
-            "VAL-XFORM-016: rotated 40×40 dirty rect height should be >= 55, got {rh}"
-        );
-    }
 }
 
 // ── Damage tracking with skipped frames (VAL-DMG-001 through VAL-DMG-004) ──

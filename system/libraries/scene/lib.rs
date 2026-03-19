@@ -10,11 +10,11 @@
 //! ```text
 //! ┌──────────┬─────────────────────┬──────────────────────┐
 //! │  Header  │  Node array         │  Data buffer          │
-//! │  64 B    │  N × NODE_SIZE      │  variable-length      │
+//! │  80 B    │  N × NODE_SIZE      │  variable-length      │
 //! └──────────┴─────────────────────┴──────────────────────┘
 //! ```
 //!
-//! - **Header:** generation counter, node count, data buffer usage.
+//! - **Header:** generation counter, node count, data buffer usage, dirty bitmap.
 //! - **Node array:** fixed-size entries, indexed by `NodeId`.
 //! - **Data buffer:** text strings and path commands referenced by
 //!   offset+length from nodes.

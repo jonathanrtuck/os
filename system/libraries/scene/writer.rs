@@ -2,8 +2,8 @@
 
 use crate::{
     node::{
-        Node, NodeId, SceneHeader, CHANGE_LIST_CAPACITY, DATA_BUFFER_SIZE, DATA_OFFSET,
-        FULL_REPAINT, MAX_NODES, NODES_OFFSET, NULL, SCENE_SIZE,
+        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES,
+        NODES_OFFSET, NULL, SCENE_SIZE,
     },
     primitives::{DataRef, ShapedGlyph},
 };
@@ -33,8 +33,7 @@ impl<'a> SceneWriter<'a> {
         hdr.node_count = 0;
         hdr.root = NULL;
         hdr.data_used = 0;
-        hdr.change_count = 0;
-        hdr.changed_nodes = [NULL; CHANGE_LIST_CAPACITY];
+        hdr.dirty_bits = [0u64; DIRTY_BITMAP_WORDS];
 
         Self { buf }
     }
@@ -100,13 +99,28 @@ impl<'a> SceneWriter<'a> {
         Some(id)
     }
     /// Reset node count and data usage. Preserves generation.
-    /// Sets change_count to FULL_REPAINT — a full rebuild means the
-    /// compositor must repaint the entire screen.
+    /// Sets all dirty bits — a full rebuild means the render service
+    /// must repaint the entire screen.
     pub fn clear(&mut self) {
         self.header_mut().node_count = 0;
         self.header_mut().data_used = 0;
         self.header_mut().root = NULL;
-        self.header_mut().change_count = FULL_REPAINT;
+        self.set_all_dirty();
+    }
+    /// Zero all dirty bits (no nodes marked dirty).
+    pub fn clear_dirty(&mut self) {
+        self.header_mut().dirty_bits = [0u64; DIRTY_BITMAP_WORDS];
+    }
+    /// Count the number of dirty bits set (popcount across all words).
+    pub fn dirty_count(&self) -> u32 {
+        let bits = &self.header().dirty_bits;
+        let mut count = 0u32;
+        let mut i = 0;
+        while i < DIRTY_BITMAP_WORDS {
+            count += bits[i].count_ones();
+            i += 1;
+        }
+        count
     }
     /// Increment the generation counter (signals a complete update).
     pub fn commit(&mut self) {
@@ -132,26 +146,25 @@ impl<'a> SceneWriter<'a> {
     pub fn generation(&self) -> u32 {
         self.header().generation
     }
-    /// Record a node ID in the change list. If the list is already at
-    /// capacity, sets the FULL_REPAINT sentinel instead. Duplicate IDs
-    /// are stored as-is (the compositor treats them as a set).
-    pub fn mark_changed(&mut self, node_id: NodeId) {
-        let hdr = self.header_mut();
-
-        if hdr.change_count == FULL_REPAINT {
-            return; // already overflowed
+    /// Test whether a node is marked dirty.
+    pub fn is_dirty(&self, node_id: NodeId) -> bool {
+        let idx = node_id as usize;
+        if idx >= MAX_NODES {
+            return false;
         }
-
-        let idx = hdr.change_count as usize;
-
-        if idx >= CHANGE_LIST_CAPACITY {
-            hdr.change_count = FULL_REPAINT;
-
+        let word = idx / 64;
+        let bit = idx % 64;
+        (self.header().dirty_bits[word] & (1u64 << bit)) != 0
+    }
+    /// Mark a single node as dirty in the bitmap.
+    pub fn mark_dirty(&mut self, node_id: NodeId) {
+        let idx = node_id as usize;
+        if idx >= MAX_NODES {
             return;
         }
-
-        hdr.changed_nodes[idx] = node_id;
-        hdr.change_count = (idx + 1) as u16;
+        let word = idx / 64;
+        let bit = idx % 64;
+        self.header_mut().dirty_bits[word] |= 1u64 << bit;
     }
     /// Get a shared reference to a node by ID.
     pub fn node(&self, id: NodeId) -> &Node {
@@ -229,8 +242,8 @@ impl<'a> SceneWriter<'a> {
         let aligned = (used + align - 1) & !(align - 1);
 
         if aligned > used && aligned <= DATA_BUFFER_SIZE {
-            // Zero the padding gap so byte-level comparisons (diff_scenes)
-            // produce consistent results regardless of alignment padding.
+            // Zero the padding gap so byte-level comparisons produce
+            // consistent results regardless of alignment padding.
             self.buf[DATA_OFFSET + used..DATA_OFFSET + aligned].fill(0);
             self.header_mut().data_used = aligned as u32;
         }
@@ -276,6 +289,11 @@ impl<'a> SceneWriter<'a> {
     }
     pub fn root(&self) -> NodeId {
         self.header().root
+    }
+    /// Set all dirty bits to `u64::MAX` (every node slot marked dirty).
+    /// Used after `clear()` to signal a full repaint.
+    pub fn set_all_dirty(&mut self) {
+        self.header_mut().dirty_bits = [u64::MAX; DIRTY_BITMAP_WORDS];
     }
     pub fn set_root(&mut self, id: NodeId) {
         self.header_mut().root = id;

@@ -761,168 +761,138 @@ fn content_hash_is_deterministic() {
     assert_eq!(scene::fnv1a(b"test"), scene::fnv1a(b"test"));
 }
 
-// ── scene diffing tests ─────────────────────────────────────────────
+// ── dirty bitmap tests ──────────────────────────────────────────────
 
 #[test]
-fn diff_identical_scenes_returns_empty() {
+fn dirty_bitmap_mark_and_test() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
-    let root = w.alloc_node().unwrap();
-    w.node_mut(root).width = 100;
-    w.node_mut(root).height = 50;
-    w.node_mut(root).background = Color::rgb(30, 30, 30);
-    w.set_root(root);
-    w.commit();
-    let nodes = w.nodes();
-    let count = w.node_count() as usize;
-    let rects = scene::diff_scenes(nodes, count, nodes, count);
-    assert!(rects.is_some());
-    assert!(rects.unwrap().is_empty());
+    // Allocate a node so the scene is valid, but we're testing raw bitmap ops.
+    for _ in 0..512 {
+        // Fill all 512 node slots to make boundary tests valid.
+        if w.alloc_node().is_none() {
+            break;
+        }
+    }
+    w.clear_dirty();
+
+    // Mark specific bits.
+    w.mark_dirty(0);
+    w.mark_dirty(42);
+    w.mark_dirty(511);
+
+    // Verify set bits.
+    assert!(w.is_dirty(0), "bit 0 should be set");
+    assert!(w.is_dirty(42), "bit 42 should be set");
+    assert!(w.is_dirty(511), "bit 511 should be set");
+
+    // Verify unset bits.
+    assert!(!w.is_dirty(1), "bit 1 should not be set");
+    assert!(!w.is_dirty(41), "bit 41 should not be set");
+    assert!(!w.is_dirty(43), "bit 43 should not be set");
+    assert!(!w.is_dirty(510), "bit 510 should not be set");
+    assert!(!w.is_dirty(100), "bit 100 should not be set");
 }
 
 #[test]
-fn diff_different_node_count_returns_none() {
-    let mut buf1 = make_buf();
-    let mut w1 = SceneWriter::new(&mut buf1);
-    let _ = w1.alloc_node().unwrap();
-    w1.commit();
+fn dirty_bitmap_clear() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    for _ in 0..10 {
+        w.alloc_node().unwrap();
+    }
 
-    let mut buf2 = make_buf();
-    let mut w2 = SceneWriter::new(&mut buf2);
-    let _ = w2.alloc_node().unwrap();
-    let _ = w2.alloc_node().unwrap();
-    w2.commit();
+    w.mark_dirty(0);
+    w.mark_dirty(5);
+    w.mark_dirty(9);
+    assert_eq!(w.dirty_count(), 3);
 
-    let result = scene::diff_scenes(w1.nodes(), 1, w2.nodes(), 2);
-    assert!(result.is_none());
+    w.clear_dirty();
+    assert_eq!(w.dirty_count(), 0);
+    assert!(!w.is_dirty(0));
+    assert!(!w.is_dirty(5));
+    assert!(!w.is_dirty(9));
 }
 
 #[test]
-fn diff_changed_background_returns_dirty_rect() {
-    let mut buf1 = make_buf();
-    let mut w1 = SceneWriter::new(&mut buf1);
-    let root = w1.alloc_node().unwrap();
-    w1.node_mut(root).x = 10;
-    w1.node_mut(root).y = 20;
-    w1.node_mut(root).width = 100;
-    w1.node_mut(root).height = 50;
-    w1.node_mut(root).background = Color::rgb(30, 30, 30);
-    w1.set_root(root);
-    w1.commit();
+fn dirty_bitmap_set_all() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    for _ in 0..10 {
+        w.alloc_node().unwrap();
+    }
+    w.clear_dirty();
+    assert_eq!(w.dirty_count(), 0);
 
-    let mut buf2 = make_buf();
-    let mut w2 = SceneWriter::new(&mut buf2);
-    let root2 = w2.alloc_node().unwrap();
-    w2.node_mut(root2).x = 10;
-    w2.node_mut(root2).y = 20;
-    w2.node_mut(root2).width = 100;
-    w2.node_mut(root2).height = 50;
-    w2.node_mut(root2).background = Color::rgb(50, 50, 50); // changed
-    w2.set_root(root2);
-    w2.commit();
-
-    let rects = scene::diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
-    assert_eq!(rects.len(), 1);
-    assert_eq!(rects[0], (10, 20, 100, 50));
+    w.set_all_dirty();
+    // All 512 bits should be set (8 words * 64 bits).
+    assert_eq!(w.dirty_count(), 512);
+    assert!(w.is_dirty(0));
+    assert!(w.is_dirty(255));
+    assert!(w.is_dirty(511));
 }
 
 #[test]
-fn diff_moved_node_returns_old_and_new_rects() {
-    let mut buf1 = make_buf();
-    let mut w1 = SceneWriter::new(&mut buf1);
-    let root = w1.alloc_node().unwrap();
-    w1.node_mut(root).x = 10;
-    w1.node_mut(root).y = 20;
-    w1.node_mut(root).width = 50;
-    w1.node_mut(root).height = 30;
-    w1.set_root(root);
-    w1.commit();
+fn dirty_bitmap_popcount() {
+    let mut buf = make_buf();
+    let mut w = SceneWriter::new(&mut buf);
+    for _ in 0..10 {
+        w.alloc_node().unwrap();
+    }
+    w.clear_dirty();
 
-    let mut buf2 = make_buf();
-    let mut w2 = SceneWriter::new(&mut buf2);
-    let root2 = w2.alloc_node().unwrap();
-    w2.node_mut(root2).x = 100; // moved
-    w2.node_mut(root2).y = 200; // moved
-    w2.node_mut(root2).width = 50;
-    w2.node_mut(root2).height = 30;
-    w2.set_root(root2);
-    w2.commit();
+    w.mark_dirty(1);
+    w.mark_dirty(100);
+    w.mark_dirty(300);
+    assert_eq!(w.dirty_count(), 3);
 
-    let rects = scene::diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
-    // Both old and new positions should be dirty.
-    assert_eq!(rects.len(), 2);
-    assert_eq!(rects[0], (10, 20, 50, 30));
-    assert_eq!(rects[1], (100, 200, 50, 30));
+    // Marking same bits again should not change count.
+    w.mark_dirty(1);
+    w.mark_dirty(100);
+    assert_eq!(w.dirty_count(), 3);
 }
 
 #[test]
-fn diff_content_hash_change_detected() {
-    let mut buf1 = make_buf();
-    let mut w1 = SceneWriter::new(&mut buf1);
-    let root = w1.alloc_node().unwrap();
-    w1.node_mut(root).width = 200;
-    w1.node_mut(root).height = 100;
-    w1.node_mut(root).content_hash = scene::fnv1a(b"hello");
-    w1.set_root(root);
-    w1.commit();
+fn triple_reader_exposes_dirty_bits() {
+    let mut buf = make_triple_buf();
+    let mut tw = scene::TripleWriter::new(&mut buf);
 
-    let mut buf2 = make_buf();
-    let mut w2 = SceneWriter::new(&mut buf2);
-    let root2 = w2.alloc_node().unwrap();
-    w2.node_mut(root2).width = 200;
-    w2.node_mut(root2).height = 100;
-    w2.node_mut(root2).content_hash = scene::fnv1a(b"world"); // different content
-    w2.set_root(root2);
-    w2.commit();
+    // Frame 1: initial scene.
+    {
+        let mut w = tw.acquire();
+        w.clear();
+        for _ in 0..10 {
+            w.alloc_node().unwrap();
+        }
+        w.set_root(0);
+    }
+    tw.publish();
 
-    let rects = scene::diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
-    assert_eq!(
-        rects.len(),
-        1,
-        "content_hash change should produce a dirty rect"
-    );
-}
+    // Frame 2: copy-forward, mark specific nodes dirty.
+    {
+        let mut w = tw.acquire_copy();
+        w.mark_dirty(3);
+        w.mark_dirty(7);
+        w.mark_dirty(9);
+    }
+    tw.publish();
 
-#[test]
-fn diff_child_node_includes_parent_offset() {
-    let mut buf1 = make_buf();
-    let mut w1 = SceneWriter::new(&mut buf1);
-    let root = w1.alloc_node().unwrap();
-    w1.node_mut(root).x = 50;
-    w1.node_mut(root).y = 100;
-    w1.node_mut(root).width = 500;
-    w1.node_mut(root).height = 400;
-    let child = w1.alloc_node().unwrap();
-    w1.node_mut(child).x = 10;
-    w1.node_mut(child).y = 20;
-    w1.node_mut(child).width = 80;
-    w1.node_mut(child).height = 40;
-    w1.node_mut(child).background = Color::rgb(255, 0, 0);
-    w1.add_child(root, child);
-    w1.set_root(root);
-    w1.commit();
+    // TripleReader should expose the dirty bits from the published buffer.
+    let tr = scene::TripleReader::new(&buf);
+    let bits = tr.dirty_bits();
 
-    let mut buf2 = make_buf();
-    let mut w2 = SceneWriter::new(&mut buf2);
-    let root2 = w2.alloc_node().unwrap();
-    w2.node_mut(root2).x = 50;
-    w2.node_mut(root2).y = 100;
-    w2.node_mut(root2).width = 500;
-    w2.node_mut(root2).height = 400;
-    let child2 = w2.alloc_node().unwrap();
-    w2.node_mut(child2).x = 10;
-    w2.node_mut(child2).y = 20;
-    w2.node_mut(child2).width = 80;
-    w2.node_mut(child2).height = 40;
-    w2.node_mut(child2).background = Color::rgb(0, 255, 0); // changed
-    w2.add_child(root2, child2);
-    w2.set_root(root2);
-    w2.commit();
+    // Check specific bits.
+    assert_ne!(bits[0] & (1u64 << 3), 0, "bit 3 should be set");
+    assert_ne!(bits[0] & (1u64 << 7), 0, "bit 7 should be set");
+    assert_ne!(bits[0] & (1u64 << 9), 0, "bit 9 should be set");
 
-    let rects = scene::diff_scenes(w1.nodes(), 2, w2.nodes(), 2).unwrap();
-    assert_eq!(rects.len(), 1);
-    // Child absolute position: parent(50,100) + child(10,20) = (60,120)
-    assert_eq!(rects[0], (60, 120, 80, 40));
+    // Total popcount should be 3.
+    let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
+    assert_eq!(popcount, 3);
+
+    // Other bits should be clear.
+    assert_eq!(bits[0] & (1u64 << 0), 0, "bit 0 should not be set");
+    assert_eq!(bits[0] & (1u64 << 4), 0, "bit 4 should not be set");
 }
 
 #[test]
@@ -1027,9 +997,9 @@ fn acquire_copy_preserves_nodes_and_data() {
     }
 }
 
-// VAL-SCENE-004: Change list cleared on new frame (acquire_copy)
+// VAL-SCENE-004: Dirty bitmap cleared on new frame (acquire_copy)
 #[test]
-fn acquire_copy_resets_change_list() {
+fn acquire_copy_resets_dirty_bits() {
     let mut buf = make_triple_buf();
     let mut tw = scene::TripleWriter::new(&mut buf);
 
@@ -1039,31 +1009,25 @@ fn acquire_copy_resets_change_list() {
         w.clear();
         let n = w.alloc_node().unwrap();
         w.set_root(n);
-        w.mark_changed(0);
+        w.mark_dirty(0);
     }
     tw.publish();
 
-    // Copy front to back — change list should be empty in back.
+    // Copy front to back — dirty bits should be cleared in back.
     {
         let back = tw.acquire_copy();
-        // Back header should have change_count = 0.
         assert_eq!(back.generation(), 0); // back gen preserved
     }
-    // Now swap to make back the new front, then verify change list is empty.
+    // Now swap to make back the new front, then verify dirty bits are empty.
     tw.publish();
     let tr = scene::TripleReader::new(&buf);
-    let cl = tr.change_list();
-    assert!(cl.is_some(), "change list should not be FULL_REPAINT");
-    assert_eq!(
-        cl.unwrap().len(),
-        0,
-        "change list should be empty after acquire_copy"
-    );
+    let bits = tr.dirty_bits();
+    assert_eq!(*bits, [0u64; scene::DIRTY_BITMAP_WORDS]);
 }
 
-// VAL-SCENE-002: Change list records changed node IDs
+// VAL-SCENE-002: Dirty bitmap records changed node IDs
 #[test]
-fn mark_changed_records_node_ids() {
+fn mark_dirty_records_node_ids() {
     let mut buf = make_triple_buf();
     let mut tw = scene::TripleWriter::new(&mut buf);
 
@@ -1081,25 +1045,25 @@ fn mark_changed_records_node_ids() {
     // Frame 2: copy forward, mark specific nodes.
     {
         let mut w = tw.acquire_copy();
-        w.mark_changed(3); // clock
-        w.mark_changed(7); // cursor
+        w.mark_dirty(3); // clock
+        w.mark_dirty(7); // cursor
     }
     tw.publish();
 
-    // Read the change list from the new front.
+    // Read the dirty bits from the new front.
     let tr = scene::TripleReader::new(&buf);
-    let cl = tr.change_list();
-    assert!(cl.is_some());
-    let changes = cl.unwrap();
-    assert_eq!(changes.len(), 2);
-    assert_eq!(changes[0], 3);
-    assert_eq!(changes[1], 7);
-    assert!(!tr.is_full_repaint());
+    let bits = tr.dirty_bits();
+    // Bit 3 and bit 7 should be set.
+    assert_ne!(bits[0] & (1u64 << 3), 0, "bit 3 should be set");
+    assert_ne!(bits[0] & (1u64 << 7), 0, "bit 7 should be set");
+    // Only 2 bits should be set.
+    let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
+    assert_eq!(popcount, 2);
 }
 
-// VAL-SCENE-003: Change list is readable by TripleReader
+// VAL-SCENE-003: Dirty bitmap is readable by TripleReader
 #[test]
-fn triple_reader_reads_change_list_from_front() {
+fn triple_reader_reads_dirty_bits_from_front() {
     let mut buf = make_triple_buf();
     let mut tw = scene::TripleWriter::new(&mut buf);
 
@@ -1116,51 +1080,48 @@ fn triple_reader_reads_change_list_from_front() {
     {
         let mut w = tw.acquire_copy();
         w.node_mut(0).background = Color::rgb(255, 0, 0);
-        w.mark_changed(0);
+        w.mark_dirty(0);
     }
     tw.publish();
 
-    // Now TripleReader on the same buffer should see the change list.
+    // Now TripleReader on the same buffer should see the dirty bit.
     let tr = scene::TripleReader::new(&buf);
-    assert!(!tr.is_full_repaint());
-    let cl = tr.change_list().unwrap();
-    assert_eq!(cl.len(), 1);
-    assert_eq!(cl[0], 0);
+    let bits = tr.dirty_bits();
+    assert_ne!(bits[0] & 1, 0, "bit 0 should be set");
+    let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
+    assert_eq!(popcount, 1);
 }
 
-// VAL-SCENE-008: Change list capacity handles full screen update (overflow)
+// VAL-SCENE-008: Dirty bitmap handles marking many nodes
 #[test]
-fn mark_changed_overflow_sets_full_repaint() {
+fn mark_dirty_many_nodes() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
 
-    // Allocate enough nodes.
+    // Allocate 30 nodes.
     for _ in 0..30 {
         w.alloc_node().unwrap();
     }
     w.set_root(0);
 
-    // Mark more nodes than CHANGE_LIST_CAPACITY (24).
+    // Mark 25 nodes dirty — bitmap handles this without overflow.
     for i in 0..25 {
-        w.mark_changed(i as NodeId);
+        w.mark_dirty(i as NodeId);
     }
 
-    // 25th mark should have caused overflow → FULL_REPAINT sentinel.
-    let r = SceneReader::new(&buf);
-    let hdr = r.node_count(); // just verifying reader works
-    assert_eq!(hdr, 30);
-
-    // Read the header directly to check change_count.
-    // We need TripleWriter to test TripleReader, but we can also verify
-    // via the raw header.
-    let hdr_ptr = buf.as_ptr() as *const scene::SceneHeader;
-    let hdr = unsafe { &*hdr_ptr };
-    assert_eq!(hdr.change_count, scene::FULL_REPAINT);
+    // All 25 bits should be set.
+    assert_eq!(w.dirty_count(), 25);
+    for i in 0..25 {
+        assert!(w.is_dirty(i as NodeId), "node {} should be dirty", i);
+    }
+    for i in 25..30 {
+        assert!(!w.is_dirty(i as NodeId), "node {} should not be dirty", i);
+    }
 }
 
-// VAL-SCENE-008: overflow via TripleReader
+// VAL-SCENE-008: Dirty bitmap via TripleReader handles many nodes
 #[test]
-fn triple_reader_full_repaint_on_overflow() {
+fn triple_reader_dirty_bits_many_nodes() {
     let mut buf = make_triple_buf();
     let mut tw = scene::TripleWriter::new(&mut buf);
 
@@ -1175,23 +1136,24 @@ fn triple_reader_full_repaint_on_overflow() {
     }
     tw.publish();
 
-    // Frame 2: copy-forward, mark 25 nodes (overflow).
+    // Frame 2: copy-forward, mark 25 nodes dirty.
     {
         let mut w = tw.acquire_copy();
         for i in 0..25 {
-            w.mark_changed(i as NodeId);
+            w.mark_dirty(i as NodeId);
         }
     }
     tw.publish();
 
     let tr = scene::TripleReader::new(&buf);
-    assert!(tr.is_full_repaint());
-    assert!(tr.change_list().is_none());
+    let bits = tr.dirty_bits();
+    let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
+    assert_eq!(popcount, 25);
 }
 
-// SceneWriter::clear sets FULL_REPAINT sentinel
+// SceneWriter::clear sets all dirty bits
 #[test]
-fn clear_sets_full_repaint() {
+fn clear_sets_all_dirty() {
     let mut buf = make_triple_buf();
     let mut tw = scene::TripleWriter::new(&mut buf);
 
@@ -1204,7 +1166,7 @@ fn clear_sets_full_repaint() {
     }
     tw.publish();
 
-    // Frame 2: clear (full rebuild) should signal full repaint.
+    // Frame 2: clear (full rebuild) should set all dirty bits.
     {
         let mut w = tw.acquire();
         w.clear();
@@ -1214,13 +1176,13 @@ fn clear_sets_full_repaint() {
     tw.publish();
 
     let tr = scene::TripleReader::new(&buf);
-    assert!(tr.is_full_repaint());
-    assert!(tr.change_list().is_none());
+    let bits = tr.dirty_bits();
+    assert_eq!(*bits, [u64::MAX; scene::DIRTY_BITMAP_WORDS]);
 }
 
-// Already-overflowed mark_changed is a no-op
+// Marking an already-dirty node is idempotent
 #[test]
-fn mark_changed_after_overflow_is_noop() {
+fn mark_dirty_idempotent() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
 
@@ -1228,17 +1190,14 @@ fn mark_changed_after_overflow_is_noop() {
         w.alloc_node().unwrap();
     }
 
-    // Overflow the change list.
-    for i in 0..25 {
-        w.mark_changed(i as NodeId);
-    }
+    w.mark_dirty(5);
+    w.mark_dirty(5); // duplicate
+    w.mark_dirty(10);
+    w.mark_dirty(5); // triple
 
-    // Further marks should be a no-op (still FULL_REPAINT, no crash).
-    w.mark_changed(29);
-    w.mark_changed(0);
-
-    let hdr = unsafe { &*(buf.as_ptr() as *const scene::SceneHeader) };
-    assert_eq!(hdr.change_count, scene::FULL_REPAINT);
+    assert_eq!(w.dirty_count(), 2, "only 2 distinct nodes should be dirty");
+    assert!(w.is_dirty(5));
+    assert!(w.is_dirty(10));
 }
 
 // VAL-SCENE-007: Node mutation via copy-then-mutate preserves tree structure
@@ -1308,7 +1267,7 @@ fn acquire_copy_then_mutate_preserves_other_nodes() {
         let mut w = tw.acquire_copy();
         w.node_mut(7).x = 100; // moved cursor
         w.node_mut(7).y = 48; // moved cursor
-        w.mark_changed(7);
+        w.mark_dirty(7);
     }
     tw.publish();
 
@@ -1358,11 +1317,12 @@ fn acquire_copy_then_mutate_preserves_other_nodes() {
         }
     }
 
-    // Verify change list only has cursor.
+    // Verify only cursor is dirty.
     let tr = scene::TripleReader::new(&buf);
-    let cl = tr.change_list().unwrap();
-    assert_eq!(cl.len(), 1);
-    assert_eq!(cl[0], 7);
+    let bits = tr.dirty_bits();
+    assert_ne!(bits[0] & (1u64 << 7), 0, "cursor (node 7) should be dirty");
+    let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
+    assert_eq!(popcount, 1, "only cursor should be dirty");
 }
 
 // VAL-SCENE-009: Data buffer exhaustion detection
@@ -1423,7 +1383,7 @@ fn update_data_in_place_after_acquire_copy() {
         assert!(w.update_data(clock_dref, b"12:35:00"));
         // Wrong length should fail.
         assert!(!w.update_data(clock_dref, b"ABC"));
-        w.mark_changed(0); // mark root changed (for demo)
+        w.mark_dirty(0); // mark root changed (for demo)
     }
     tw.publish();
 
@@ -1433,38 +1393,30 @@ fn update_data_in_place_after_acquire_copy() {
     assert_eq!(data, b"12:35:00");
 }
 
-// Verify mark_changed at exact capacity (24 entries)
+// Verify dirty bitmap handles boundary node indices correctly
 #[test]
-fn mark_changed_exact_capacity() {
+fn dirty_bitmap_boundary_indices() {
     let mut buf = make_buf();
-    {
-        let mut w = SceneWriter::new(&mut buf);
+    let mut w = SceneWriter::new(&mut buf);
 
-        for _ in 0..30 {
-            w.alloc_node().unwrap();
-        }
-
-        // Mark exactly CHANGE_LIST_CAPACITY nodes.
-        for i in 0..scene::CHANGE_LIST_CAPACITY {
-            w.mark_changed(i as NodeId);
-        }
+    for _ in 0..100 {
+        w.alloc_node().unwrap();
     }
 
-    let hdr = unsafe { &*(buf.as_ptr() as *const scene::SceneHeader) };
-    assert_eq!(hdr.change_count, scene::CHANGE_LIST_CAPACITY as u16);
+    // Mark nodes at u64 word boundaries.
+    w.mark_dirty(0); // first bit of word 0
+    w.mark_dirty(63); // last bit of word 0
+    w.mark_dirty(64); // first bit of word 1
+    w.mark_dirty(127); // last bit of word 1
 
-    // Verify all entries.
-    for i in 0..scene::CHANGE_LIST_CAPACITY {
-        assert_eq!(hdr.changed_nodes[i], i as NodeId);
-    }
-
-    // One more should overflow.
-    {
-        let mut w = SceneWriter::from_existing(&mut buf);
-        w.mark_changed(24);
-    }
-    let hdr = unsafe { &*(buf.as_ptr() as *const scene::SceneHeader) };
-    assert_eq!(hdr.change_count, scene::FULL_REPAINT);
+    assert_eq!(w.dirty_count(), 4);
+    assert!(w.is_dirty(0));
+    assert!(w.is_dirty(63));
+    assert!(w.is_dirty(64));
+    assert!(w.is_dirty(127));
+    assert!(!w.is_dirty(1));
+    assert!(!w.is_dirty(62));
+    assert!(!w.is_dirty(65));
 }
 
 // Multiple frames of copy-forward + selective mutation
@@ -1496,16 +1448,25 @@ fn multiple_copy_forward_frames() {
                 // Mutate a different node each frame.
                 let target = (frame + 1) as NodeId; // nodes 1, 2, 3, 4
                 w.node_mut(target).height = (frame + 1) * 100;
-                w.mark_changed(target);
+                w.mark_dirty(target);
             }
             tw.publish();
         }
 
         // Verify change list has exactly one entry.
         let tr = scene::TripleReader::new(&buf);
-        let cl = tr.change_list().unwrap();
-        assert_eq!(cl.len(), 1, "Frame {}: expected 1 change", frame + 2);
-        assert_eq!(cl[0], (frame + 1) as NodeId);
+        let bits = tr.dirty_bits();
+        let target_id = (frame + 1) as NodeId;
+        let word = target_id as usize / 64;
+        let bit = target_id as usize % 64;
+        assert_ne!(
+            bits[word] & (1u64 << bit),
+            0,
+            "Frame {}: target node should be dirty",
+            frame + 2
+        );
+        let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
+        assert_eq!(popcount, 1, "Frame {}: expected 1 dirty node", frame + 2);
 
         // Verify the mutation stuck.
         assert_eq!(
@@ -2488,112 +2449,13 @@ fn node_size_is_96_bytes() {
 }
 
 #[test]
-fn scene_header_size_is_64_bytes() {
-    assert_eq!(core::mem::size_of::<SceneHeader>(), 64);
+fn scene_header_size_is_80_bytes() {
+    assert_eq!(core::mem::size_of::<SceneHeader>(), 80);
 }
 
 #[test]
 fn shaped_glyph_size_is_8_bytes() {
     assert_eq!(core::mem::size_of::<ShapedGlyph>(), 8);
-}
-
-// ── Scene diffing with new types (VAL-SCENE-007) ────────────────────
-
-#[test]
-fn diff_background_color_change_detected() {
-    let mut buf1 = make_buf();
-    let mut w1 = SceneWriter::new(&mut buf1);
-    let root = w1.alloc_node().unwrap();
-    w1.node_mut(root).width = 100;
-    w1.node_mut(root).height = 50;
-    w1.node_mut(root).background = Color::rgb(255, 0, 0);
-    w1.node_mut(root).content = Content::None;
-    w1.set_root(root);
-    w1.commit();
-
-    let mut buf2 = make_buf();
-    let mut w2 = SceneWriter::new(&mut buf2);
-    let root2 = w2.alloc_node().unwrap();
-    w2.node_mut(root2).width = 100;
-    w2.node_mut(root2).height = 50;
-    w2.node_mut(root2).background = Color::rgb(0, 255, 0); // changed
-    w2.node_mut(root2).content = Content::None;
-    w2.set_root(root2);
-    w2.commit();
-
-    let rects = diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
-    assert_eq!(
-        rects.len(),
-        1,
-        "background color change should produce dirty rect"
-    );
-}
-
-#[test]
-fn diff_glyphs_content_hash_change_detected() {
-    let mut buf1 = make_buf();
-    let mut w1 = SceneWriter::new(&mut buf1);
-    let root = w1.alloc_node().unwrap();
-    w1.node_mut(root).width = 200;
-    w1.node_mut(root).height = 20;
-    w1.node_mut(root).content_hash = fnv1a(b"hello");
-    w1.node_mut(root).content = Content::Glyphs {
-        color: Color::rgb(200, 200, 200),
-        glyphs: DataRef {
-            offset: 0,
-            length: 0,
-        },
-        glyph_count: 0,
-        font_size: 16,
-        axis_hash: 0,
-    };
-    w1.set_root(root);
-    w1.commit();
-
-    let mut buf2 = make_buf();
-    let mut w2 = SceneWriter::new(&mut buf2);
-    let root2 = w2.alloc_node().unwrap();
-    w2.node_mut(root2).width = 200;
-    w2.node_mut(root2).height = 20;
-    w2.node_mut(root2).content_hash = fnv1a(b"world"); // changed hash
-    w2.node_mut(root2).content = Content::Glyphs {
-        color: Color::rgb(200, 200, 200),
-        glyphs: DataRef {
-            offset: 0,
-            length: 0,
-        },
-        glyph_count: 0,
-        font_size: 16,
-        axis_hash: 0,
-    };
-    w2.set_root(root2);
-    w2.commit();
-
-    let rects = diff_scenes(w1.nodes(), 1, w2.nodes(), 1).unwrap();
-    assert_eq!(
-        rects.len(),
-        1,
-        "Glyphs content_hash change should produce dirty rect"
-    );
-}
-
-#[test]
-fn diff_identical_background_scenes_empty() {
-    let mut buf1 = make_buf();
-    let mut w1 = SceneWriter::new(&mut buf1);
-    let root = w1.alloc_node().unwrap();
-    w1.node_mut(root).width = 50;
-    w1.node_mut(root).height = 30;
-    w1.node_mut(root).background = Color::rgb(128, 128, 128);
-    w1.node_mut(root).content = Content::None;
-    w1.set_root(root);
-    w1.commit();
-
-    let rects = diff_scenes(w1.nodes(), 1, w1.nodes(), 1).unwrap();
-    assert!(
-        rects.is_empty(),
-        "identical background scenes should have no dirty rects"
-    );
 }
 
 // ── Mixed content type tests (VAL-SCENE-008) ───────────────────────
@@ -2671,10 +2533,10 @@ fn mixed_background_glyphs_image_triple_buffer() {
     }
 }
 
-// ── mark_changed works with background and Glyphs (VAL-SCENE-008) ──
+// ── mark_dirty works with background and Glyphs (VAL-SCENE-008) ──
 
 #[test]
-fn mark_changed_works_for_background_and_glyphs_triple() {
+fn mark_dirty_works_for_background_and_glyphs_triple() {
     let mut buf = make_triple_buf();
     let mut tw = scene::TripleWriter::new(&mut buf);
     {
@@ -2706,17 +2568,18 @@ fn mark_changed_works_for_background_and_glyphs_triple() {
     {
         let mut w = tw.acquire_copy();
         w.node_mut(1).background = Color::rgb(100, 100, 100);
-        w.mark_changed(1);
+        w.mark_dirty(1);
         w.node_mut(2).content_hash = fnv1a(b"new text");
-        w.mark_changed(2);
+        w.mark_dirty(2);
     }
     tw.publish();
 
     let tr = scene::TripleReader::new(&buf);
-    let cl = tr.change_list().unwrap();
-    assert_eq!(cl.len(), 2);
-    assert!(cl.contains(&1));
-    assert!(cl.contains(&2));
+    let bits = tr.dirty_bits();
+    assert_ne!(bits[0] & (1u64 << 1), 0, "node 1 should be dirty");
+    assert_ne!(bits[0] & (1u64 << 2), 0, "node 2 should be dirty");
+    let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
+    assert_eq!(popcount, 2);
 }
 
 // ── Glyphs axis_hash round-trip (VAL-SCENE-002) ────────────────────
@@ -3093,7 +2956,7 @@ fn build_test_editor_scene(
                 } else {
                     w.node_mut(prev_sel).next_sibling = sel_id;
                 }
-                w.mark_changed(sel_id);
+                w.mark_dirty(sel_id);
                 prev_sel = sel_id;
             }
         }
@@ -3539,7 +3402,7 @@ fn core_update_clock_in_place_glyph_overwrite() {
                 "clock in-place update should succeed"
             );
             w.node_mut(CORE_N_CLOCK_TEXT).content_hash = fnv1a(b"12:35:00");
-            w.mark_changed(CORE_N_CLOCK_TEXT);
+            w.mark_dirty(CORE_N_CLOCK_TEXT);
         } else {
             panic!("clock should have Glyphs content");
         }
@@ -3550,10 +3413,12 @@ fn core_update_clock_in_place_glyph_overwrite() {
     let tr = scene::TripleReader::new(&buf);
     let clock = &tr.front_nodes()[CORE_N_CLOCK_TEXT as usize];
     assert_eq!(clock.content_hash, fnv1a(b"12:35:00"));
-    let cl = tr.change_list().unwrap();
-    assert!(
-        cl.contains(&CORE_N_CLOCK_TEXT),
-        "clock should be in change list"
+    let bits = tr.dirty_bits();
+    let idx = CORE_N_CLOCK_TEXT as usize;
+    assert_ne!(
+        bits[idx / 64] & (1u64 << (idx % 64)),
+        0,
+        "clock should be dirty"
     );
 }
 
@@ -3585,7 +3450,7 @@ fn core_update_cursor_position_only() {
         let mut w = tw.acquire_copy();
         w.node_mut(CORE_N_CURSOR).x = 40;
         w.node_mut(CORE_N_CURSOR).y = 20;
-        w.mark_changed(CORE_N_CURSOR);
+        w.mark_dirty(CORE_N_CURSOR);
     }
     tw.publish();
 
@@ -3603,13 +3468,16 @@ fn core_update_cursor_position_only() {
         Color::rgb(200, 200, 200),
         "cursor background color should be preserved after position update"
     );
-    let cl = tr.change_list().unwrap();
-    assert!(
-        cl.contains(&CORE_N_CURSOR),
-        "cursor should be in change list"
+    let bits = tr.dirty_bits();
+    let idx = CORE_N_CURSOR as usize;
+    assert_ne!(
+        bits[idx / 64] & (1u64 << (idx % 64)),
+        0,
+        "cursor should be dirty"
     );
-    // Only cursor should be changed (no line nodes affected).
-    assert_eq!(cl.len(), 1, "only cursor should be in change list");
+    // Only cursor should be dirty (no line nodes affected).
+    let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
+    assert_eq!(popcount, 1, "only cursor should be dirty");
 }
 
 // ── TripleWriter / TripleReader (VAL-TBUF) ──────────────────────────
@@ -3978,8 +3846,8 @@ fn triple_buffer_scene_writer_api_unchanged() {
         w.node_mut(child).content =
             make_mono_glyphs(&mut w, b"Hello, world!", 16, Color::rgb(220, 220, 220), 8);
         w.add_child(root, child);
-        w.mark_changed(root);
-        w.mark_changed(child);
+        w.mark_dirty(root);
+        w.mark_dirty(child);
     }
     tw.publish();
 
@@ -3994,8 +3862,8 @@ fn triple_buffer_scene_writer_api_unchanged() {
         Content::Glyphs { glyph_count, .. } => assert_eq!(glyph_count, 13),
         _ => panic!("expected Glyphs content"),
     }
-    // After clear() the change list is FULL_REPAINT sentinel.
-    assert!(tr.is_full_repaint());
+    // After clear() all dirty bits should be set.
+    assert_eq!(*tr.dirty_bits(), [u64::MAX; scene::DIRTY_BITMAP_WORDS]);
 }
 
 // VAL-TBUF-011: Legacy double-buffer code removed from production

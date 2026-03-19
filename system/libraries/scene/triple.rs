@@ -7,8 +7,8 @@
 
 use crate::{
     node::{
-        Node, NodeId, SceneHeader, CHANGE_LIST_CAPACITY, DATA_BUFFER_SIZE, DATA_OFFSET, MAX_NODES,
-        NODES_OFFSET, NULL, SCENE_SIZE,
+        Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, NODES_OFFSET,
+        SCENE_SIZE,
     },
     primitives::{DataRef, ShapedGlyph},
     writer::SceneWriter,
@@ -333,7 +333,7 @@ impl<'a> TripleWriter<'a> {
     /// `copy_front_to_back()`, this always succeeds — the acquired buffer
     /// is always free (not held by the reader).
     ///
-    /// The acquired buffer's change list is reset to empty. The generation
+    /// The acquired buffer's dirty bits are reset to zero. The generation
     /// is NOT copied — it will be set by the next `publish()` call.
     ///
     /// Must be called after `select_free_buffer()` / `acquire()` and
@@ -377,15 +377,14 @@ impl<'a> TripleWriter<'a> {
             }
         }
 
-        // Write destination header: copy source metadata, reset change list.
+        // Write destination header: copy source metadata, reset dirty bits.
         // SAFETY: dst_off is a valid scene buffer offset. SceneHeader is
         // repr(C) at offset 0. Exclusive &mut borrow prevents aliasing.
         let dst_hdr = unsafe { &mut *(self.buf.as_mut_ptr().add(dst_off) as *mut SceneHeader) };
         dst_hdr.node_count = node_count;
         dst_hdr.root = src_hdr.root;
         dst_hdr.data_used = data_used;
-        dst_hdr.change_count = 0;
-        dst_hdr.changed_nodes = [NULL; CHANGE_LIST_CAPACITY];
+        dst_hdr.dirty_bits = [0u64; DIRTY_BITMAP_WORDS];
     }
 
     /// Get the index of the buffer currently acquired by the writer.
@@ -494,20 +493,11 @@ impl<'a> TripleReader<'a> {
         unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
     }
 
-    /// Returns the change list from the buffer, or `None` if the
-    /// FULL_REPAINT sentinel is set.
-    pub fn change_list(&self) -> Option<&[NodeId]> {
-        let hdr = self.header();
-        if hdr.change_count == crate::node::FULL_REPAINT {
-            return None;
-        }
-        let count = (hdr.change_count as usize).min(CHANGE_LIST_CAPACITY);
-        Some(&hdr.changed_nodes[..count])
-    }
-
-    /// Returns `true` if the buffer's change list indicates a full repaint.
-    pub fn is_full_repaint(&self) -> bool {
-        self.header().change_count == crate::node::FULL_REPAINT
+    /// Returns the dirty bitmap from the claimed buffer.
+    /// Each bit corresponds to a node slot: bit `i` is set if node `i`
+    /// was modified since the last frame.
+    pub fn dirty_bits(&self) -> &[u64; DIRTY_BITMAP_WORDS] {
+        &self.header().dirty_bits
     }
 
     /// Signal that the reader has finished reading. Releases the buffer

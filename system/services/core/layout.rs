@@ -279,7 +279,7 @@ pub fn update_clock_inline(
             axis_hash: 0,
         };
         n.content_hash = fnv1a(clock_text);
-        w.mark_changed(N_CLOCK_TEXT);
+        w.mark_dirty(N_CLOCK_TEXT);
     }
 }
 
@@ -341,7 +341,7 @@ pub fn allocate_selection_rects(
                 w.node_mut(prev_sel_node).next_sibling = sel_id;
             }
 
-            w.mark_changed(sel_id);
+            w.mark_dirty(sel_id);
             prev_sel_node = sel_id;
         }
     }
@@ -727,7 +727,7 @@ pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clo
             axis_hash: 0,
         };
         n.content_hash = fnv1a(clock_text);
-        w.mark_changed(N_CLOCK_TEXT);
+        w.mark_dirty(N_CLOCK_TEXT);
     }
 }
 
@@ -751,7 +751,7 @@ pub fn build_cursor_update(
     n.x = cursor_x;
     n.y = cursor_y;
 
-    w.mark_changed(N_CURSOR);
+    w.mark_dirty(N_CURSOR);
 
     if let Some(ct) = clock_text {
         update_clock_inline(w, ct, cfg.font_data, cfg.font_size, cfg.upem, cfg.axes);
@@ -806,7 +806,7 @@ pub fn build_selection_update(
         n.y = cursor_y;
         n.next_sibling = NULL;
     }
-    w.mark_changed(N_CURSOR);
+    w.mark_dirty(N_CURSOR);
 
     let (sel_lo, sel_hi) = if sel_start <= sel_end {
         (sel_start as usize, sel_end as usize)
@@ -927,7 +927,7 @@ pub fn build_document_content(
         n.content_hash = fnv1a(clock_text);
     }
     if mark_clock_changed {
-        w.mark_changed(N_CLOCK_TEXT);
+        w.mark_dirty(N_CLOCK_TEXT);
     }
 
     // Re-create per-line Glyphs children under N_DOC_TEXT.
@@ -977,7 +977,7 @@ pub fn build_document_content(
         w.node_mut(prev_line_node).next_sibling = N_CURSOR;
     }
 
-    w.mark_changed(N_DOC_TEXT);
+    w.mark_dirty(N_DOC_TEXT);
 
     // Update cursor position.
     let (cursor_line, cursor_col) =
@@ -991,7 +991,7 @@ pub fn build_document_content(
         n.y = cursor_y;
         n.next_sibling = NULL;
     }
-    w.mark_changed(N_CURSOR);
+    w.mark_dirty(N_CURSOR);
 
     // Build selection rects.
     let (sel_lo, sel_hi) = if sel_start <= sel_end {

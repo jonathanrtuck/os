@@ -138,17 +138,10 @@ pub const NODES_OFFSET: usize = core::mem::size_of::<SceneHeader>();
 pub const DATA_OFFSET: usize = NODES_OFFSET + MAX_NODES * core::mem::size_of::<Node>();
 pub const SCENE_SIZE: usize = DATA_OFFSET + DATA_BUFFER_SIZE;
 
-const _: () = assert!(core::mem::size_of::<SceneHeader>() == 64);
+/// Number of u64 words in the dirty bitmap (512 bits / 64 = 8 words).
+pub const DIRTY_BITMAP_WORDS: usize = 8;
 
-/// Maximum number of changed node IDs that fit in the scene header's
-/// change list. Sized to fill the 52-byte reserved area alongside
-/// `change_count` (u16) and 2 bytes padding: (52 - 2 - 2) / 2 = 24.
-pub const CHANGE_LIST_CAPACITY: usize = 24;
-
-/// Sentinel value for `SceneHeader::change_count` indicating that the
-/// change list overflowed (or a full rebuild occurred) and the compositor
-/// must repaint the entire screen.
-pub const FULL_REPAINT: u16 = u16::MAX;
+const _: () = assert!(core::mem::size_of::<SceneHeader>() == 80);
 
 /// Header at the start of the shared memory region.
 #[derive(Clone, Copy, Debug)]
@@ -162,9 +155,8 @@ pub struct SceneHeader {
     pub root: NodeId,
     /// Bytes used in the data buffer.
     pub data_used: u32,
-    /// Number of entries in `changed_nodes`, or `FULL_REPAINT` sentinel.
-    pub change_count: u16,
-    /// Node IDs that changed this frame (valid entries: `0..change_count`).
-    pub changed_nodes: [NodeId; CHANGE_LIST_CAPACITY],
-    pub _reserved2: [u8; 2],
+    /// 512-bit dirty bitmap: one bit per node slot. Bit `i` is set if
+    /// node `i` was modified since the last frame. All bits set means
+    /// full repaint (e.g., after `clear()`).
+    pub dirty_bits: [u64; DIRTY_BITMAP_WORDS],
 }
