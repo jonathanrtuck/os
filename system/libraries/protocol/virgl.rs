@@ -438,7 +438,7 @@ impl CommandBuffer {
         self.push(0); // color g
         self.push(0); // color b
         self.push(0); // color a
-        // depth = 1.0 (standard clear value — far plane).
+                      // depth = 1.0 (standard clear value — far plane).
         let depth_bits = 1.0f64.to_bits();
         self.push(depth_bits as u32); // depth lo
         self.push((depth_bits >> 32) as u32); // depth hi
