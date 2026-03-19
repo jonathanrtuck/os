@@ -194,7 +194,7 @@ pub fn line_bytes_for_run<'a>(text: &'a [u8], run: &LayoutRun) -> &'a [u8] {
 /// Filter runs to those visible in a scrolled viewport.
 ///
 /// Runs keep their document-relative y positions. The caller sets
-/// `scroll_y` on the container node so the renderer handles the
+/// `content_transform` on the container node so the renderer handles the
 /// viewport offset.
 pub fn scroll_runs(
     runs: Vec<LayoutRun>,
@@ -290,8 +290,9 @@ pub fn update_clock_inline(
 /// the cursor node). Each line of the selection gets one rect node.
 ///
 /// Selection rects use document-relative y positions. The renderer
-/// applies `scroll_y` from the parent container to offset them visually.
-/// `scroll_px` and `content_h` are used only for visibility culling.
+/// applies `content_transform` from the parent container to offset them
+/// visually. `scroll_px` and `content_h` are used only for visibility
+/// culling.
 #[allow(clippy::too_many_arguments)]
 pub fn allocate_selection_rects(
     w: &mut scene::SceneWriter<'_>,
@@ -508,10 +509,11 @@ pub fn update_single_line(
         w.mark_dirty(cur);
     }
 
-    // Update N_DOC_TEXT: scroll offset, content_hash, and clear stale
+    // Update N_DOC_TEXT: content_transform, content_hash, and clear stale
     // next_sibling (build_full_scene links test content as siblings
     // that survive acquire_copy but are truncated on first compaction).
-    w.node_mut(N_DOC_TEXT).scroll_y = scroll_px;
+    w.node_mut(N_DOC_TEXT).content_transform =
+        scene::AffineTransform::translate(0.0, -(scroll_px as f32));
     w.node_mut(N_DOC_TEXT).next_sibling = scene::NULL;
     w.node_mut(N_DOC_TEXT).content_hash = scene::fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
@@ -601,8 +603,8 @@ fn update_line_positions(
     }
 }
 
-/// Shared tail: update cursor, selection, scroll_y, N_DOC_TEXT hash, and
-/// optionally the clock. Truncates old selection rects before rebuilding.
+/// Shared tail: update cursor, selection, content_transform, N_DOC_TEXT hash,
+/// and optionally the clock. Truncates old selection rects before rebuilding.
 #[allow(clippy::too_many_arguments)]
 fn finish_line_update(
     w: &mut scene::SceneWriter<'_>,
@@ -628,12 +630,13 @@ fn finish_line_update(
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
     let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
 
-    // Update N_DOC_TEXT scroll and content hash.
+    // Update N_DOC_TEXT content_transform and content hash.
     // Clear next_sibling to prevent stale pointers (the initial
     // build_full_scene links test content as siblings of N_DOC_TEXT
-    // under N_CONTENT — those nodes are gone after the first compaction
+    // under N_CONTENT -- those nodes are gone after the first compaction
     // but the pointer survives acquire_copy).
-    w.node_mut(N_DOC_TEXT).scroll_y = scroll_px;
+    w.node_mut(N_DOC_TEXT).content_transform =
+        scene::AffineTransform::translate(0.0, -(scroll_px as f32));
     w.node_mut(N_DOC_TEXT).next_sibling = scene::NULL;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
@@ -1256,8 +1259,8 @@ pub fn build_full_scene(
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h as u16;
-        n.scroll_y = scroll_px;
-        // N_DOC_TEXT is now a pure container — per-line Glyphs
+        n.content_transform = scene::AffineTransform::translate(0.0, -(scroll_px as f32));
+        // N_DOC_TEXT is now a pure container -- per-line Glyphs
         // child nodes hold the actual text content.
         n.content = Content::None;
         n.content_hash = fnv1a(doc_text);
@@ -1304,7 +1307,7 @@ pub fn build_full_scene(
     }
 
     // Cursor: positioned rectangle child of doc text node.
-    // Document-relative: renderer applies scroll_y from N_DOC_TEXT.
+    // Document-relative: renderer applies content_transform from N_DOC_TEXT.
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
@@ -1658,7 +1661,8 @@ pub fn build_document_content(
     // offsets, causing ghost duplicates.
     w.node_mut(N_DOC_TEXT).first_child = NULL;
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
-    w.node_mut(N_DOC_TEXT).scroll_y = scroll_px;
+    w.node_mut(N_DOC_TEXT).content_transform =
+        scene::AffineTransform::translate(0.0, -(scroll_px as f32));
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
     let mut prev_line_node: u16 = NULL;

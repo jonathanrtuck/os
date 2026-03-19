@@ -21,7 +21,7 @@
 ///   `y' = b*x + d*y + ty`
 ///
 /// Identity by default (a=1, d=1, all others 0).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct AffineTransform {
     pub a: f32,
@@ -153,6 +153,12 @@ impl AffineTransform {
             && self.d == 1.0
             && self.tx == (self.tx as i32) as f32
             && self.ty == (self.ty as i32) as f32
+    }
+
+    /// Returns true if this is a pure translation (no rotation, scale, or skew).
+    /// Both identity and non-zero translations return true.
+    pub fn is_pure_translation(&self) -> bool {
+        self.a == 1.0 && self.b == 0.0 && self.c == 0.0 && self.d == 1.0
     }
 
     /// Transform a point `(x, y)` by this matrix.

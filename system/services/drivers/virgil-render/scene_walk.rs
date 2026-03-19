@@ -658,7 +658,8 @@ fn walk_node(
         return;
     }
 
-    let scroll_y = (node.scroll_y as f32) * scale;
+    let ct_tx = node.content_transform.tx * scale;
+    let ct_ty = node.content_transform.ty * scale;
 
     let mut child = node.first_child;
     while child != NULL {
@@ -669,8 +670,8 @@ fn walk_node(
         walk_node(
             nodes,
             child,
-            abs_x,
-            abs_y - scroll_y,
+            abs_x + ct_tx,
+            abs_y + ct_ty,
             scale,
             child_clip,
             vw,

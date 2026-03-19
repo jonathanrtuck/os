@@ -5,7 +5,10 @@
 //! dirty bitmap from the scene header is compared against previous state to
 //! produce a minimal set of dirty rectangles for partial repaint.
 
-use scene::{abs_bounds, build_parent_map, Node, NodeId, DIRTY_BITMAP_WORDS, MAX_NODES, NULL};
+use scene::{
+    abs_bounds, build_parent_map, AffineTransform, Node, NodeId, DIRTY_BITMAP_WORDS, MAX_NODES,
+    NULL,
+};
 
 use crate::damage::DamageTracker;
 
@@ -17,8 +20,8 @@ pub struct IncrementalState {
     pub prev_bounds: [(i32, i32, u32, u32); MAX_NODES],
     /// Bitmap: was node visible last frame? One bit per node.
     pub prev_visible: [u64; DIRTY_BITMAP_WORDS],
-    /// Per-node scroll_y from the previous frame.
-    pub prev_scroll_y: [i32; MAX_NODES],
+    /// Per-node content_transform from the previous frame.
+    pub prev_content_transform: [AffineTransform; MAX_NODES],
     /// Per-node content_hash from the previous frame. Used by the render
     /// backends (Tasks 7/8) to detect property-only changes: if a node is
     /// dirty but content_hash is unchanged, the backend can blit from its
@@ -33,7 +36,7 @@ impl IncrementalState {
         Self {
             prev_bounds: [(0, 0, 0, 0); MAX_NODES],
             prev_visible: [0u64; DIRTY_BITMAP_WORDS],
-            prev_scroll_y: [0i32; MAX_NODES],
+            prev_content_transform: [AffineTransform::identity(); MAX_NODES],
             prev_content_hash: [0u32; MAX_NODES],
             first_frame: true,
         }
@@ -115,13 +118,13 @@ impl IncrementalState {
         Some(tracker)
     }
 
-    /// Detect scroll_y changes on container nodes.
+    /// Detect content_transform changes on container nodes.
     ///
     /// Returns `Some((node_id, delta))` for the first dirty container
-    /// with a changed scroll_y. `delta` is `current - previous`.
-    /// Only reports the first scrolled container — sufficient for the
-    /// current single-document model. Multi-container scroll would
-    /// require returning an iterator or small array.
+    /// with a changed content_transform ty (scroll). `delta` is
+    /// `current.ty - previous.ty` (negative = scrolled down).
+    /// Only reports the first scrolled container -- sufficient for the
+    /// current single-document model.
     pub fn detect_scroll(
         &self,
         nodes: &[Node],
@@ -132,8 +135,10 @@ impl IncrementalState {
                 break;
             }
             let node = &nodes[i];
-            if node.first_child != NULL && node.scroll_y != self.prev_scroll_y[i] {
-                let delta = node.scroll_y - self.prev_scroll_y[i];
+            if node.first_child != NULL && node.content_transform != self.prev_content_transform[i]
+            {
+                let delta =
+                    node.content_transform.ty as i32 - self.prev_content_transform[i].ty as i32;
                 return Some((i as NodeId, delta));
             }
         }
@@ -160,14 +165,14 @@ impl IncrementalState {
             } else {
                 self.prev_bounds[i] = (0, 0, 0, 0);
             }
-            self.prev_scroll_y[i] = nodes[i].scroll_y;
+            self.prev_content_transform[i] = nodes[i].content_transform;
             self.prev_content_hash[i] = nodes[i].content_hash;
         }
 
         // Clear state for nodes beyond the current count.
         for i in count..MAX_NODES {
             self.prev_bounds[i] = (0, 0, 0, 0);
-            self.prev_scroll_y[i] = 0;
+            self.prev_content_transform[i] = AffineTransform::identity();
             self.prev_content_hash[i] = 0;
             // prev_visible already cleared above.
         }

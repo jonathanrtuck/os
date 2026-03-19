@@ -25,10 +25,11 @@ pub fn build_parent_map(nodes: &[Node], count: usize) -> [NodeId; MAX_NODES] {
 /// Compute absolute bounding rect of a node by walking up the parent chain.
 /// Returns `(x, y, width, height)` in absolute logical coordinates.
 ///
-/// Each parent's `scroll_y` is subtracted from the y accumulator because
-/// scroll offsets its *children* upward by `scroll_y` pixels. Without this,
-/// damage tracking would compute incorrect dirty rects for nodes inside
-/// scrolled containers.
+/// Each parent's `content_transform` translation is added to the accumulator
+/// because the content transform offsets a node's children. For scroll,
+/// `content_transform.ty` is negative (content shifts up), so adding it
+/// effectively subtracts the scroll offset. Without this, damage tracking
+/// would compute incorrect dirty rects for nodes inside scrolled containers.
 ///
 /// When a node has a non-identity transform, the returned bounding rect is
 /// the axis-aligned bounding box (AABB) of the transformed node bounds.
@@ -45,9 +46,12 @@ pub fn abs_bounds(
     let mut cur = parent_map[id];
     while cur != NULL && (cur as usize) < nodes.len() {
         let p = &nodes[cur as usize];
-        ax += p.x as i32;
-        // Subtract scroll_y: a parent's scroll offsets its children upward.
-        ay += p.y as i32 - p.scroll_y;
+        // Add parent position and content_transform translation.
+        // For scroll: ty is negative, so this effectively subtracts the offset.
+        // Non-translation content_transforms are approximated with translation
+        // only for damage tracking (conservative -- may over-damage).
+        ax += p.x as i32 + p.content_transform.tx as i32;
+        ay += p.y as i32 + p.content_transform.ty as i32;
         cur = parent_map[cur as usize];
     }
 

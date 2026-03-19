@@ -277,7 +277,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - One `Node` type with geometric content variants: `None`, `FillRect`, `Glyphs`, `Image` (no semantic content types — the scene graph is purely geometric).
 - Tree encoded via `first_child` / `next_sibling` (left-child right-sibling representation).
 - Cursor and selection are `FillRect` content nodes (explicit geometry, not implicit text properties).
-- Relative positioning with `scroll_y` for scrolling.
+- `content_transform` (AffineTransform) for scrolling and zoom.
 - The scene graph is a **compiled output** of the document model, not the document model itself.
 
 **Shared memory layout:**

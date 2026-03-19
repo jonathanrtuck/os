@@ -211,16 +211,15 @@ fn all_dirty_bits_set_returns_none() {
 fn scroll_detected_from_dirty_container() {
     let mut state = IncrementalState::new();
 
-    // Frame 1: container at node 0 with child at node 1, scroll_y=0.
+    // Frame 1: container at node 0 with child at node 1, no scroll.
     let mut nodes = vec![Node::EMPTY; 2];
     nodes[0] = container_node(0, 0, 800, 600, 1);
-    nodes[0].scroll_y = 0;
     nodes[1] = visible_node(10, 20, 100, 18);
 
     state.update_from_frame(&nodes, 2);
 
-    // Frame 2: scroll_y changed to 50.
-    nodes[0].scroll_y = 50;
+    // Frame 2: scroll down 50 (content_transform ty = -50).
+    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -50.0);
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 0);
 
@@ -228,21 +227,20 @@ fn scroll_detected_from_dirty_container() {
     assert!(result.is_some(), "should detect scroll change");
     let (node_id, delta) = result.unwrap();
     assert_eq!(node_id, 0);
-    assert_eq!(delta, 50);
+    assert_eq!(delta, -50);
 }
 
 #[test]
 fn scroll_not_detected_when_no_children() {
     let mut state = IncrementalState::new();
 
-    // Node 0 is a leaf (no children), even if scroll_y changes.
+    // Node 0 is a leaf (no children), even if content_transform changes.
     let mut nodes = vec![Node::EMPTY; 1];
     nodes[0] = visible_node(0, 0, 800, 600);
-    nodes[0].scroll_y = 0;
 
     state.update_from_frame(&nodes, 1);
 
-    nodes[0].scroll_y = 50;
+    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -50.0);
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 0);
 
@@ -261,7 +259,7 @@ fn update_from_frame_populates_prev_state() {
     // Set up 3 nodes: root + 2 children.
     let mut nodes = vec![Node::EMPTY; 3];
     nodes[0] = container_node(0, 0, 800, 600, 1);
-    nodes[0].scroll_y = 10;
+    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -10.0);
     nodes[0].content_hash = 42;
     nodes[1] = visible_node(50, 100, 200, 30);
     nodes[1].content_hash = 99;
@@ -282,16 +280,19 @@ fn update_from_frame_populates_prev_state() {
         "nodes 0-2 should be visible in bitmap"
     );
 
-    // Check prev_bounds for node 1 (child of root at (0,0) with scroll_y=10).
-    // abs_bounds: child at (50, 100), parent adds (0, 0 - 10) = (50, 90).
+    // Check prev_bounds for node 1 (child of root at (0,0) with content_transform ty=-10).
+    // abs_bounds: child at (50, 100), parent adds (0, 0 + (-10)) = (50, 90).
     let (bx, by, bw, bh) = state.prev_bounds[1];
     assert_eq!(bx, 50);
-    assert_eq!(by, 90, "should account for parent scroll_y");
+    assert_eq!(by, 90, "should account for parent content_transform");
     assert_eq!(bw, 200);
     assert_eq!(bh, 30);
 
-    // Check scroll_y and content_hash.
-    assert_eq!(state.prev_scroll_y[0], 10);
+    // Check content_transform and content_hash.
+    assert_eq!(
+        state.prev_content_transform[0],
+        scene::AffineTransform::translate(0.0, -10.0)
+    );
     assert_eq!(state.prev_content_hash[0], 42);
     assert_eq!(state.prev_content_hash[1], 99);
     assert_eq!(state.prev_content_hash[2], 77);
@@ -395,19 +396,22 @@ fn detect_scroll_negative_delta() {
 
     let mut nodes = vec![Node::EMPTY; 2];
     nodes[0] = container_node(0, 0, 800, 600, 1);
-    nodes[0].scroll_y = 100;
+    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -100.0);
     nodes[1] = visible_node(10, 20, 100, 18);
 
     state.update_from_frame(&nodes, 2);
 
-    // Scroll up by 30.
-    nodes[0].scroll_y = 70;
+    // Scroll up by 30 (ty goes from -100 to -70).
+    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -70.0);
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 0);
 
     let (node_id, delta) = state.detect_scroll(&nodes, &dirty).unwrap();
     assert_eq!(node_id, 0);
-    assert_eq!(delta, -30, "scroll up should produce negative delta");
+    assert_eq!(
+        delta, 30,
+        "scroll up should produce positive delta (ty increases)"
+    );
 }
 
 #[test]

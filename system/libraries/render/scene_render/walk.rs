@@ -754,8 +754,8 @@ fn render_node_content_translated(
                 w: nw,
                 h: nh,
             };
-            let child_origin_x_off = 0i32;
-            let child_origin_y_off = 0i32 - scale_coord(node.scroll_y, s);
+            let child_origin_x_off = round_f32(node.content_transform.tx * s);
+            let child_origin_y_off = round_f32(node.content_transform.ty * s);
             let mut child = node.first_child;
 
             // Reborrow lru once for the entire child loop. Each child gets
@@ -820,8 +820,8 @@ fn render_node_content_translated(
         } else {
             visible
         };
-        let child_origin_x = draw_x;
-        let child_origin_y = draw_y - scale_coord(node.scroll_y, s);
+        let child_origin_x = draw_x + round_f32(node.content_transform.tx * s);
+        let child_origin_y = draw_y + round_f32(node.content_transform.ty * s);
         let mut child = node.first_child;
 
         // Reborrow lru once for the entire child loop.

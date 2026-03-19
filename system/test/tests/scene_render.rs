@@ -1177,30 +1177,30 @@ fn glyph_cache_keyed_on_physical_pixel_size() {
 
 // ── VAL-COORD-009: Scroll offset correct at fractional scale ──
 
-/// At scale 1.5, scroll_y=10 should offset children by 15 physical pixels.
+/// At scale 1.5, content_transform ty=-10 should offset children by -15 physical pixels.
 #[test]
 fn scroll_offset_fractional_scale() {
     let mono = zeroed_glyph_cache();
     let prop = zeroed_glyph_cache();
     let ctx = test_ctx_f32(&mono, &prop, 1.5);
 
-    // Build scene: root → container (scroll_y=10) → child (red, y=0)
+    // Build scene: root -> container (content_transform ty=-10) -> child (red, y=20)
     let mut nodes = vec![Node::EMPTY; 3];
 
-    // Root: 150×150 physical (100×100 logical at 1.5x)
+    // Root: 150x150 physical (100x100 logical at 1.5x)
     nodes[0].width = 100;
     nodes[0].height = 100;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    // Container: full size, scroll_y = 10
+    // Container: full size, content_transform ty = -10 (scroll down 10)
     nodes[1].width = 100;
     nodes[1].height = 100;
-    nodes[1].scroll_y = 10;
+    nodes[1].content_transform = scene::AffineTransform::translate(0.0, -10.0);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].first_child = 2;
 
-    // Child: 20×20 at y=0 (logical), background = RED
+    // Child: 20x20 at y=20 (logical), background = RED
     nodes[2].y = 20; // Logical y = 20
     nodes[2].width = 20;
     nodes[2].height = 20;
@@ -1213,7 +1213,7 @@ fn scroll_offset_fractional_scale() {
         data: &data,
     };
 
-    // Physical framebuffer: 150×150
+    // Physical framebuffer: 150x150
     let w = 150u32;
     let h = 150u32;
     let stride = w * 4;
@@ -1236,8 +1236,8 @@ fn scroll_offset_fractional_scale() {
         scene_render::render_scene(&mut fb, &graph, &ctx);
     }
 
-    // Child is at logical y=20, container scroll_y=10.
-    // Effective logical y = 20 - 10 = 10.
+    // Child is at logical y=20, container content_transform.ty=-10.
+    // Effective logical y = 20 + (-10) = 10.
     // Physical y = round(10 * 1.5) = 15.
     // So the red child should start at physical y=15.
     let (r14, _, _, _) = read_pixel(&buf, stride, 0, 14);
@@ -1716,13 +1716,13 @@ fn rounded_rect_semi_transparent_blends() {
 #[test]
 fn node_size_compile_time_assertion_exists() {
     // The compile-time assertion is in scene/lib.rs:
-    //   const _: () = assert!(size_of::<Node>() == 100);
+    //   const _: () = assert!(size_of::<Node>() == 120);
     // If the Node layout changes, the build will fail.
     // At runtime, verify the size matches.
     let size = core::mem::size_of::<Node>();
     assert_eq!(
-        size, 100,
-        "VAL-CROSS-012: Node must be exactly 100 bytes for shared-memory layout stability"
+        size, 120,
+        "VAL-CROSS-012: Node must be exactly 120 bytes for shared-memory layout stability"
     );
 }
 
@@ -2101,15 +2101,15 @@ fn offscreen_opacity_respects_clip() {
 }
 
 /// VAL-COMP-011: Scroll offset applied within offscreen buffer.
-/// scroll_y != 0 + opacity: scroll applied correctly within offscreen rendering.
+/// content_transform ty=-10 + opacity: scroll applied correctly within offscreen rendering.
 #[test]
 fn offscreen_opacity_respects_scroll() {
     let mono = zeroed_glyph_cache();
     let prop = zeroed_glyph_cache();
     let ctx = test_ctx(&mono, &prop);
 
-    // Parent: 60×40, opacity=128, scroll_y=10, clips_children.
-    // Child: 60×40 at y=0.
+    // Parent: 60x40, opacity=128, content_transform ty=-10, clips_children.
+    // Child: 60x40 at y=0.
     let mut nodes = vec![Node::EMPTY; 3];
 
     nodes[0].width = 60;
@@ -2120,12 +2120,12 @@ fn offscreen_opacity_respects_scroll() {
     nodes[1].width = 60;
     nodes[1].height = 40;
     nodes[1].opacity = 128;
-    nodes[1].scroll_y = 10;
+    nodes[1].content_transform = scene::AffineTransform::translate(0.0, -10.0);
     nodes[1].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[1].first_child = 2;
 
-    // Child at y=0, height 40. With scroll_y=10, the first 10 pixels
-    // of the child should be scrolled off the top.
+    // Child at y=0, height 40. With content_transform ty=-10, the first
+    // 10 pixels of the child should be scrolled off the top.
     nodes[2].y = 0;
     nodes[2].width = 60;
     nodes[2].height = 40;
@@ -2147,10 +2147,9 @@ fn offscreen_opacity_respects_scroll() {
         scene_render::render_scene(&mut fb, &graph, &ctx);
     }
 
-    // The child is scrolled by 10 pixels, so the red should start at y=0
-    // in the parent (which is at y=0 in the fb). But with scroll_y=10,
-    // the child's effective position is y=-10 (scroll offsets children upward).
-    // So the child visible from y=0..30 in the offscreen buffer.
+    // The child is scrolled by content_transform ty=-10, so the child's
+    // effective position is y=-10 (content shifts up).
+    // The child is visible from y=0..30 in the offscreen buffer.
     // At y=0 in the parent, the child's row 10 is visible.
 
     // Inside the parent region: should show red at reduced opacity.
