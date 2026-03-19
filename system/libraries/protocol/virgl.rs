@@ -365,7 +365,7 @@ impl CommandBuffer {
         // S0: depth DISABLED — for 2D stencil-then-cover, depth testing is unnecessary.
         // When depth is disabled, zpass_op triggers on stencil pass (depth "always passes").
         self.push(0);
-                                          // S1: stencil[0] (front) — always pass, increment-wrap on pass
+        // S1: stencil[0] (front) — always pass, increment-wrap on pass
         self.push(Self::stencil_face(
             PIPE_FUNC_ALWAYS,
             PIPE_STENCIL_OP_KEEP,
@@ -394,7 +394,7 @@ impl CommandBuffer {
         self.push(handle);
         // S0: depth DISABLED — stencil test only, no depth involvement.
         self.push(0);
-                                          // S1: stencil[0] (front) — pass if != 0, zero on pass
+        // S1: stencil[0] (front) — pass if != 0, zero on pass
         let face = Self::stencil_face(
             PIPE_FUNC_NOTEQUAL,
             PIPE_STENCIL_OP_KEEP,

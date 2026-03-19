@@ -12,11 +12,11 @@
 //! (0=proportional sans, 1=monospace) and CASL axis (0=linear, 1=casual).
 //! Content type drives axis values, not font selection.
 
-use alloc::string::String;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
+
+use fonts::rasterize::AxisValue;
 
 use super::fallback::ContentType;
-use fonts::rasterize::AxisValue;
 
 /// Font family preference for a content type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,8 +84,14 @@ impl TypographyConfig {
             tracking: 0.0,
             optical_sizing: false,
             axis_overrides: alloc::vec![
-                AxisValue { tag: *b"MONO", value: 1.0 }, // monospace
-                AxisValue { tag: *b"CASL", value: 0.0 }, // linear (clean)
+                AxisValue {
+                    tag: *b"MONO",
+                    value: 1.0
+                }, // monospace
+                AxisValue {
+                    tag: *b"CASL",
+                    value: 0.0
+                }, // linear (clean)
             ],
         }
     }
@@ -101,8 +107,14 @@ impl TypographyConfig {
             tracking: 0.0,
             optical_sizing: false, // Recursive has no opsz axis
             axis_overrides: alloc::vec![
-                AxisValue { tag: *b"MONO", value: 0.0 }, // proportional sans
-                AxisValue { tag: *b"CASL", value: 0.0 }, // linear
+                AxisValue {
+                    tag: *b"MONO",
+                    value: 0.0
+                }, // proportional sans
+                AxisValue {
+                    tag: *b"CASL",
+                    value: 0.0
+                }, // linear
             ],
         }
     }
@@ -116,8 +128,14 @@ impl TypographyConfig {
             tracking: 0.0,
             optical_sizing: false,
             axis_overrides: alloc::vec![
-                AxisValue { tag: *b"MONO", value: 0.0 }, // proportional sans
-                AxisValue { tag: *b"CASL", value: 0.0 }, // linear
+                AxisValue {
+                    tag: *b"MONO",
+                    value: 0.0
+                }, // proportional sans
+                AxisValue {
+                    tag: *b"CASL",
+                    value: 0.0
+                }, // linear
             ],
         }
     }

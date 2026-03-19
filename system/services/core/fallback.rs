@@ -10,8 +10,7 @@
 
 use alloc::vec::Vec;
 
-use fonts::rasterize::AxisValue;
-use fonts::{shape, Feature, ShapedGlyph};
+use fonts::{rasterize::AxisValue, shape, Feature, ShapedGlyph};
 
 // ---------------------------------------------------------------------------
 // Public types
