@@ -8,7 +8,7 @@
 
 use alloc::vec;
 
-use drawing::{Color, PixelFormat, Surface};
+use drawing::{isqrt_fp, Color, PixelFormat, Surface};
 use fonts::cache::GlyphCache;
 use scene::{Content, Node, NodeId, ShapedGlyph, NULL};
 
@@ -108,7 +108,11 @@ fn snap_border(logical_width: u32, scale: f32) -> u32 {
         return 0;
     }
     let phys = round_f32(logical_width as f32 * scale);
-    if phys <= 0 { 1 } else { phys as u32 }
+    if phys <= 0 {
+        1
+    } else {
+        phys as u32
+    }
 }
 
 /// Recursively render a node and its children.
@@ -133,7 +137,17 @@ fn render_node(
     clip: ClipRect,
     pool: Option<&mut SurfacePool>,
 ) {
-    render_node_transformed(fb, graph, ctx, node_id, abs_x, abs_y, clip, pool, scene::AffineTransform::identity());
+    render_node_transformed(
+        fb,
+        graph,
+        ctx,
+        node_id,
+        abs_x,
+        abs_y,
+        clip,
+        pool,
+        scene::AffineTransform::identity(),
+    );
 }
 
 /// Inner render function that carries the accumulated world transform.
@@ -224,9 +238,19 @@ fn render_node_transformed(
                     render_shadow(&mut off_fb, node, sh_left, sh_top, nw, nh, s);
                 }
                 render_node_content_translated(
-                    &mut off_fb, graph, ctx, node, node_id,
-                    sh_left, sh_top,
-                    ClipRect { x: 0, y: 0, w: total_w as i32, h: total_h as i32 },
+                    &mut off_fb,
+                    graph,
+                    ctx,
+                    node,
+                    node_id,
+                    sh_left,
+                    sh_top,
+                    ClipRect {
+                        x: 0,
+                        y: 0,
+                        w: total_w as i32,
+                        h: total_h as i32,
+                    },
                     None,
                     world_xform,
                 );
@@ -234,8 +258,13 @@ fn render_node_transformed(
             let blit_x = (nx - sh_left).max(0) as u32;
             let blit_y = (ny - sh_top).max(0) as u32;
             fb.blit_blend_with_opacity(
-                &offscreen_buf, total_w, total_h, ostride,
-                blit_x, blit_y, node.opacity,
+                &offscreen_buf,
+                total_w,
+                total_h,
+                ostride,
+                blit_x,
+                blit_y,
+                node.opacity,
             );
             return;
         }
@@ -244,7 +273,18 @@ fn render_node_transformed(
         if has_shadow {
             render_shadow(fb, node, nx, ny, nw, nh, s);
         }
-        render_node_content_translated(fb, graph, ctx, node, node_id, nx, ny, visible, pool, world_xform);
+        render_node_content_translated(
+            fb,
+            graph,
+            ctx,
+            node,
+            node_id,
+            nx,
+            ny,
+            visible,
+            pool,
+            world_xform,
+        );
     } else {
         // Non-trivial transform (rotation, scale, skew):
         //
@@ -266,7 +306,8 @@ fn render_node_transformed(
         }
 
         // Compute AABB of the transformed node bounds for culling.
-        let (aabb_x, aabb_y, aabb_w, aabb_h) = world_xform.transform_aabb(0.0, 0.0, nw as f32, nh as f32);
+        let (aabb_x, aabb_y, aabb_w, aabb_h) =
+            world_xform.transform_aabb(0.0, 0.0, nw as f32, nh as f32);
         let aabb_xi = round_f32(aabb_x) + base_nx;
         let aabb_yi = round_f32(aabb_y) + base_ny;
         let aabb_wi = round_f32(aabb_w).max(0);
@@ -341,8 +382,13 @@ fn render_node_transformed(
                 h: total_h as i32,
             };
             render_node_content_translated(
-                &mut render_fb, graph, ctx, node, node_id,
-                sh_left, sh_top,
+                &mut render_fb,
+                graph,
+                ctx,
+                node,
+                node_id,
+                sh_left,
+                sh_top,
                 content_clip,
                 None,
                 scene::AffineTransform::identity(), // children rendered axis-aligned
@@ -455,8 +501,14 @@ fn render_node_transformed(
         // in the expanded AABB. We offset accordingly.
         let clip_dx = (clipped_aabb.x - exp_aabb_xi) as f32;
         let clip_dy = (clipped_aabb.y - exp_aabb_yi) as f32;
-        let adj_inv_tx = inv.a * (adj_aabb_x + clip_dx) + inv.c * (adj_aabb_y + clip_dy) + inv.tx + sh_left as f32;
-        let adj_inv_ty = inv.b * (adj_aabb_x + clip_dx) + inv.d * (adj_aabb_y + clip_dy) + inv.ty + sh_top as f32;
+        let adj_inv_tx = inv.a * (adj_aabb_x + clip_dx)
+            + inv.c * (adj_aabb_y + clip_dy)
+            + inv.tx
+            + sh_left as f32;
+        let adj_inv_ty = inv.b * (adj_aabb_x + clip_dx)
+            + inv.d * (adj_aabb_y + clip_dy)
+            + inv.ty
+            + sh_top as f32;
 
         let eff_opacity = node.opacity;
 
@@ -541,7 +593,11 @@ fn render_shadow(
         let r = round_f32(node.corner_radius as f32 * scale);
         let max_r = (sw.min(sh) / 2) as i32;
         let sr = r + spread; // Spread expands the radius too.
-        if sr < 0 { 0u32 } else { (sr as u32).min(max_r as u32) }
+        if sr < 0 {
+            0u32
+        } else {
+            (sr as u32).min(max_r as u32)
+        }
     } else {
         0u32
     };
@@ -622,21 +678,20 @@ fn render_shadow(
             format: PixelFormat::Bgra8888,
         };
 
-        drawing::blur_surface(&src_read, &mut dst_surface, &mut tmp_buf, blur_radius, sigma_fp);
+        drawing::blur_surface(
+            &src_read,
+            &mut dst_surface,
+            &mut tmp_buf,
+            blur_radius,
+            sigma_fp,
+        );
 
         // Composite the blurred shadow onto the destination.
         // The shadow buffer's (pad, pad) corresponds to (sx, sy) in the dest.
         let blit_x = (sx - pad as i32).max(0) as u32;
         let blit_y = (sy - pad as i32).max(0) as u32;
 
-        fb.blit_blend(
-            &dst_buf,
-            buf_w,
-            buf_h,
-            buf_stride,
-            blit_x,
-            blit_y,
-        );
+        fb.blit_blend(&dst_buf, buf_w, buf_h, buf_stride, blit_x, blit_y);
     }
 }
 
@@ -675,7 +730,11 @@ fn render_node_content_translated(
     // Scale corner radius from logical to physical pixels.
     let phys_radius = if node.corner_radius > 0 {
         let r = round_f32(node.corner_radius as f32 * s);
-        if r < 0 { 0u32 } else { r as u32 }
+        if r < 0 {
+            0u32
+        } else {
+            r as u32
+        }
     } else {
         0u32
     };
@@ -743,7 +802,12 @@ fn render_node_content_translated(
 
                 if inner_color.a > 0 {
                     fb.fill_rounded_rect_blend(
-                        inner_x, inner_y, inner_w, inner_h, inner_r, inner_color,
+                        inner_x,
+                        inner_y,
+                        inner_w,
+                        inner_h,
+                        inner_r,
+                        inner_color,
                     );
                 }
             }
@@ -780,7 +844,9 @@ fn render_node_content_translated(
             fill_rule,
             contours,
         } => {
-            render_path(fb, graph, ctx, contours, color, fill_rule, draw_x, draw_y, nw, nh);
+            render_path(
+                fb, graph, ctx, contours, color, fill_rule, draw_x, draw_y, nw, nh,
+            );
         }
         Content::Glyphs {
             color,
@@ -794,14 +860,11 @@ fn render_node_content_translated(
                 && (glyphs.offset as usize + glyphs.length as usize) <= graph.data.len()
                 && glyphs.length as usize >= glyph_size
             {
-                let bytes =
-                    &graph.data[glyphs.offset as usize..][..glyphs.length as usize];
+                let bytes = &graph.data[glyphs.offset as usize..][..glyphs.length as usize];
                 let count = (glyph_count as usize).min(bytes.len() / glyph_size);
                 // SAFETY: ShapedGlyph is #[repr(C)], data buffer is aligned
                 // by push_shaped_glyphs to ShapedGlyph alignment.
-                unsafe {
-                    core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count)
-                }
+                unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const ShapedGlyph, count) }
             } else {
                 &[]
             };
@@ -839,7 +902,8 @@ fn render_node_content_translated(
                 // boards instead of aliased black/white.
                 let phys_nw = nw.max(0) as u32;
                 let phys_nh = nh.max(0) as u32;
-                if phys_nw > 0 && phys_nh > 0
+                if phys_nw > 0
+                    && phys_nh > 0
                     && (src_width as u32 != phys_nw || src_height as u32 != phys_nh)
                 {
                     let inv_a = src_width as f32 / phys_nw as f32;
@@ -879,8 +943,8 @@ fn render_node_content_translated(
     }
 
     // Recurse into children.
-    let use_rounded_clip = node.clips_children() && phys_radius > 0
-        && nw > 0 && nh > 0 && node.first_child != NULL;
+    let use_rounded_clip =
+        node.clips_children() && phys_radius > 0 && nw > 0 && nh > 0 && node.first_child != NULL;
 
     if use_rounded_clip {
         // Corner-radius-aware clipping: render children into an offscreen
@@ -1036,7 +1100,7 @@ fn mask_rounded_rect(buf: &mut [u8], w: u32, h: u32, stride: u32, radius: u32) {
         let dy_sq = (dy_fp * dy_fp) as u64;
         let r_sq = (r as u64 * 256) * (r as u64 * 256);
         let x_arc_sq = if r_sq > dy_sq { r_sq - dy_sq } else { 0 };
-        let x_arc_fp = isqrt_fp_mask(x_arc_sq);
+        let x_arc_fp = isqrt_fp(x_arc_sq);
 
         let x_arc_int = (x_arc_fp >> 8) as u32;
         let x_arc_frac = (x_arc_fp & 0xFF) as u32; // 0..255
@@ -1053,7 +1117,11 @@ fn mask_rounded_rect(buf: &mut [u8], w: u32, h: u32, stride: u32, radius: u32) {
 
             // Clear pixels to the left of the arc (outside the rounded corner).
             let clear_end = if left_solid > 0 {
-                if x_arc_frac > 0 { left_solid - 1 } else { left_solid }
+                if x_arc_frac > 0 {
+                    left_solid - 1
+                } else {
+                    left_solid
+                }
             } else {
                 0
             };
@@ -1106,26 +1174,6 @@ fn mask_rounded_rect(buf: &mut [u8], w: u32, h: u32, stride: u32, radius: u32) {
             }
         }
     }
-}
-
-/// Integer square root (same algorithm as drawing library's isqrt_fp).
-fn isqrt_fp_mask(x: u64) -> u64 {
-    if x == 0 {
-        return 0;
-    }
-    let mut result: u64 = 0;
-    let mut bit: u64 = 1u64 << 30;
-    while bit > x {
-        bit >>= 2;
-    }
-    while bit != 0 {
-        let candidate = result + bit;
-        if x >= candidate * candidate {
-            result = candidate;
-        }
-        bit >>= 1;
-    }
-    result
 }
 
 // ── Path rasterization ──────────────────────────────────────────────
@@ -1221,8 +1269,7 @@ fn flatten_cubic(
         max_d as i128 <= threshold_fp
     } else {
         depth >= 8
-            || (max_d as i128 * max_d as i128)
-                <= threshold_fp * threshold_fp * chord_len_sq as i128
+            || (max_d as i128 * max_d as i128) <= threshold_fp * threshold_fp * chord_len_sq as i128
     };
 
     if flat || depth >= 10 {
@@ -1252,8 +1299,32 @@ fn flatten_cubic(
     let mx = (m012x + m123x) >> 1;
     let my = (m012y + m123y) >> 1;
 
-    flatten_cubic(x0, y0, m01x, m01y, m012x, m012y, mx, my, segments, num_segments, depth + 1);
-    flatten_cubic(mx, my, m123x, m123y, m23x, m23y, x3, y3, segments, num_segments, depth + 1);
+    flatten_cubic(
+        x0,
+        y0,
+        m01x,
+        m01y,
+        m012x,
+        m012y,
+        mx,
+        my,
+        segments,
+        num_segments,
+        depth + 1,
+    );
+    flatten_cubic(
+        mx,
+        my,
+        m123x,
+        m123y,
+        m23x,
+        m23y,
+        x3,
+        y3,
+        segments,
+        num_segments,
+        depth + 1,
+    );
 }
 
 /// Rasterize path contours to a coverage buffer using scanline sweep.
@@ -1451,7 +1522,15 @@ fn render_path(
     let s = ctx.scale;
 
     // Parse path commands and build segment list in physical pixel fixed-point.
-    let mut segments = vec![PathSegment { x0: 0, y0: 0, x1: 0, y1: 0 }; PATH_MAX_SEGMENTS];
+    let mut segments = vec![
+        PathSegment {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0
+        };
+        PATH_MAX_SEGMENTS
+    ];
     let mut num_segments = 0usize;
 
     let mut cursor_x = 0i32;
@@ -1571,14 +1650,30 @@ fn render_path(
         let sy0 = seg.y0 >> PATH_FP_SHIFT;
         let sx1 = seg.x1 >> PATH_FP_SHIFT;
         let sy1 = seg.y1 >> PATH_FP_SHIFT;
-        if sx0 < min_x { min_x = sx0; }
-        if sx1 < min_x { min_x = sx1; }
-        if sy0 < min_y { min_y = sy0; }
-        if sy1 < min_y { min_y = sy1; }
-        if sx0 > max_x { max_x = sx0; }
-        if sx1 > max_x { max_x = sx1; }
-        if sy0 > max_y { max_y = sy0; }
-        if sy1 > max_y { max_y = sy1; }
+        if sx0 < min_x {
+            min_x = sx0;
+        }
+        if sx1 < min_x {
+            min_x = sx1;
+        }
+        if sy0 < min_y {
+            min_y = sy0;
+        }
+        if sy1 < min_y {
+            min_y = sy1;
+        }
+        if sx0 > max_x {
+            max_x = sx0;
+        }
+        if sx1 > max_x {
+            max_x = sx1;
+        }
+        if sy0 > max_y {
+            max_y = sy0;
+        }
+        if sy1 > max_y {
+            max_y = sy1;
+        }
     }
     // Add 1-pixel margin for AA.
     min_x -= 1;
@@ -1587,8 +1682,12 @@ fn render_path(
     max_y += 2;
 
     // Clamp to node bounds (physical pixels).
-    if min_x < 0 { min_x = 0; }
-    if min_y < 0 { min_y = 0; }
+    if min_x < 0 {
+        min_x = 0;
+    }
+    if min_y < 0 {
+        min_y = 0;
+    }
 
     let cov_w = (max_x - min_x) as u32;
     let cov_h = (max_y - min_y) as u32;

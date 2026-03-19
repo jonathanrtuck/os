@@ -169,37 +169,8 @@ fn gpu_command(
     unsafe { core::ptr::read_volatile(resp_va as *const u32) }
 }
 
-/// Format a u32 into a buffer, returning the number of bytes written.
-pub fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
-    if n == 0 {
-        buf[0] = b'0';
-        return 1;
-    }
-    let mut tmp = [0u8; 10];
-    let mut i = 10;
-    while n > 0 {
-        i -= 1;
-        tmp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    let len = 10 - i;
-    buf[..len].copy_from_slice(&tmp[i..]);
-    len
-}
-
-pub fn print_u32(mut n: u32) {
-    if n == 0 {
-        sys::print(b"0");
-        return;
-    }
-    let mut buf = [0u8; 10];
-    let mut i = 10;
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-    sys::print(&buf[i..]);
+fn print_u32(n: u32) {
+    sys::print_u32(n);
 }
 
 // ── Device initialization ────────────────────────────────────────────────

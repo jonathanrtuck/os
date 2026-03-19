@@ -432,9 +432,17 @@ impl<'a> Surface<'a> {
         let cov_h = cov_height as i64;
 
         let start_row = if yi < 0 { -yi } else { 0 };
-        let end_row = if cov_h < surf_h - yi { cov_h } else { surf_h - yi };
+        let end_row = if cov_h < surf_h - yi {
+            cov_h
+        } else {
+            surf_h - yi
+        };
         let start_col = if xi < 0 { -xi } else { 0 };
-        let end_col = if cov_w < surf_w - xi { cov_w } else { surf_w - xi };
+        let end_col = if cov_w < surf_w - xi {
+            cov_w
+        } else {
+            surf_w - xi
+        };
 
         if start_row >= end_row || start_col >= end_col || end_row <= 0 || end_col <= 0 {
             return;
@@ -506,8 +514,7 @@ impl<'a> Surface<'a> {
                     let out_b = LINEAR_TO_SRGB[linear_to_idx(out_b_lin)];
 
                     // Alpha compositing.
-                    let out_a = dst_a_byte as u32
-                        + div255(alpha * (255 - dst_a_byte as u32));
+                    let out_a = dst_a_byte as u32 + div255(alpha * (255 - dst_a_byte as u32));
                     let out_a = if out_a > 255 { 255u8 } else { out_a as u8 };
 
                     // Write BGRA pixel.
@@ -888,9 +895,7 @@ impl<'a> Surface<'a> {
                     // Scalar tail.
                     for i in tail_start..pixel_count {
                         let p = row_ptr.add(i * 4);
-                        fill_rect_blend_scalar_1px(
-                            p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa,
-                        );
+                        fill_rect_blend_scalar_1px(p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa);
                     }
                 }
 
@@ -898,9 +903,7 @@ impl<'a> Surface<'a> {
                 {
                     for i in 0..pixel_count {
                         let p = row_ptr.add(i * 4);
-                        fill_rect_blend_scalar_1px(
-                            p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa,
-                        );
+                        fill_rect_blend_scalar_1px(p, src_r_lin, src_g_lin, src_b_lin, sa, inv_sa);
                     }
                 }
             }
@@ -914,15 +917,7 @@ impl<'a> Surface<'a> {
     ///
     /// `radius` is clamped to `min(w, h) / 2`. Zero radius delegates to `fill_rect`.
     /// Anti-aliased edge pixels use gamma-correct sRGB blending.
-    pub fn fill_rounded_rect(
-        &mut self,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-        radius: u32,
-        color: Color,
-    ) {
+    pub fn fill_rounded_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32, color: Color) {
         if w == 0 || h == 0 {
             return;
         }
@@ -998,8 +993,16 @@ impl<'a> Surface<'a> {
                         // Pixel offset is within the surface data bounds.
                         unsafe {
                             rounded_rect_write_aa_pixel(
-                                ptr, lx, py, stride, bpp,
-                                src_r_lin, src_g_lin, src_b_lin, color.a as u32, cov,
+                                ptr,
+                                lx,
+                                py,
+                                stride,
+                                bpp,
+                                src_r_lin,
+                                src_g_lin,
+                                src_b_lin,
+                                color.a as u32,
+                                cov,
                             );
                         }
                     }
@@ -1013,8 +1016,16 @@ impl<'a> Surface<'a> {
                         // SAFETY: rx < surf_w and py < surf_h (checked above).
                         unsafe {
                             rounded_rect_write_aa_pixel(
-                                ptr, rx, py, stride, bpp,
-                                src_r_lin, src_g_lin, src_b_lin, color.a as u32, cov,
+                                ptr,
+                                rx,
+                                py,
+                                stride,
+                                bpp,
+                                src_r_lin,
+                                src_g_lin,
+                                src_b_lin,
+                                color.a as u32,
+                                cov,
                             );
                         }
                     }
@@ -1022,7 +1033,11 @@ impl<'a> Surface<'a> {
 
                 // Solid interior pixels for this arc row.
                 let fill_x0 = if left_solid < x { x } else { left_solid };
-                let fill_x1 = if right_solid > x + w { x + w } else { right_solid };
+                let fill_x1 = if right_solid > x + w {
+                    x + w
+                } else {
+                    right_solid
+                };
 
                 if fill_x0 < fill_x1 {
                     let clipped_x0 = if fill_x0 >= surf_w { continue } else { fill_x0 };
@@ -1161,7 +1176,11 @@ impl<'a> Surface<'a> {
 
                 // Solid interior pixels — blend with full source alpha.
                 let fill_x0 = if left_solid < x { x } else { left_solid };
-                let fill_x1 = if right_solid > x + w { x + w } else { right_solid };
+                let fill_x1 = if right_solid > x + w {
+                    x + w
+                } else {
+                    right_solid
+                };
 
                 if fill_x0 < fill_x1 {
                     let clipped_x0 = if fill_x0 >= surf_w { continue } else { fill_x0 };
@@ -1406,8 +1425,16 @@ impl<'a> Surface<'a> {
                 let sy_f = inv_b * col as f32 + inv_d * row as f32 + inv_ty;
 
                 // Bilinear interpolation: sample the 4 surrounding source pixels.
-                let sx_floor = if sx_f >= 0.0 { sx_f as i32 } else { sx_f as i32 - 1 };
-                let sy_floor = if sy_f >= 0.0 { sy_f as i32 } else { sy_f as i32 - 1 };
+                let sx_floor = if sx_f >= 0.0 {
+                    sx_f as i32
+                } else {
+                    sx_f as i32 - 1
+                };
+                let sy_floor = if sy_f >= 0.0 {
+                    sy_f as i32
+                } else {
+                    sy_f as i32 - 1
+                };
 
                 // Skip if completely outside source bounds.
                 if sx_floor + 1 < 0 || sx_floor >= sw || sy_floor + 1 < 0 || sy_floor >= sh {
@@ -1466,12 +1493,22 @@ impl<'a> Surface<'a> {
                     continue;
                 }
 
-                let src_color = Color { r: fin_r, g: fin_g, b: fin_b, a: fin_a };
+                let src_color = Color {
+                    r: fin_r,
+                    g: fin_g,
+                    b: fin_b,
+                    a: fin_a,
+                };
                 let dst_b = self.data[fb_off];
                 let dst_g = self.data[fb_off + 1];
                 let dst_r = self.data[fb_off + 2];
                 let dst_a = self.data[fb_off + 3];
-                let dst_color = Color { r: dst_r, g: dst_g, b: dst_b, a: dst_a };
+                let dst_color = Color {
+                    r: dst_r,
+                    g: dst_g,
+                    b: dst_b,
+                    a: dst_a,
+                };
 
                 let blended = src_color.blend_over(dst_color);
 
@@ -1519,10 +1556,8 @@ impl<'a> Surface<'a> {
         match _method {
             ResamplingMethod::Bilinear => {
                 self.blit_transformed_bilinear(
-                    src_data, src_width, src_height, src_stride,
-                    dst_x, dst_y, dst_w, dst_h,
-                    inv_a, inv_b, inv_c, inv_d, inv_tx, inv_ty,
-                    opacity,
+                    src_data, src_width, src_height, src_stride, dst_x, dst_y, dst_w, dst_h, inv_a,
+                    inv_b, inv_c, inv_d, inv_tx, inv_ty, opacity,
                 );
             }
         }
@@ -1754,7 +1789,7 @@ fn min(a: u32, b: u32) -> u32 {
 /// Given `x` in 16.16 fixed-point (i.e., the value `n * 256 * n * 256` where
 /// `n` is in 8.8 fixed-point), returns `sqrt(x)` in 8.8 fixed-point.
 /// Uses binary search with bit-at-a-time refinement. Never panics.
-fn isqrt_fp(x: u64) -> u64 {
+pub fn isqrt_fp(x: u64) -> u64 {
     if x == 0 {
         return 0;
     }
@@ -2058,7 +2093,11 @@ impl BlurStrategy for CpuBlur {
 ///
 /// Uses integer-only Gaussian approximation: `exp(-x²/(2σ²))` is approximated
 /// via a piecewise polynomial in fixed-point.
-pub fn compute_kernel(kernel: &mut [u32; MAX_KERNEL_DIAMETER], radius: u32, sigma_fp: u32) -> usize {
+pub fn compute_kernel(
+    kernel: &mut [u32; MAX_KERNEL_DIAMETER],
+    radius: u32,
+    sigma_fp: u32,
+) -> usize {
     let r = if radius > MAX_CPU_BLUR_RADIUS {
         MAX_CPU_BLUR_RADIUS
     } else {
@@ -2413,11 +2452,15 @@ fn blur_horizontal(
 ) {
     #[cfg(target_arch = "aarch64")]
     {
-        blur_horizontal_neon(src, dst, width, height, src_stride, dst_stride, radius, kernel);
+        blur_horizontal_neon(
+            src, dst, width, height, src_stride, dst_stride, radius, kernel,
+        );
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
-        blur_horizontal_scalar(src, dst, width, height, src_stride, dst_stride, radius, kernel);
+        blur_horizontal_scalar(
+            src, dst, width, height, src_stride, dst_stride, radius, kernel,
+        );
     }
 }
 
@@ -2434,12 +2477,14 @@ fn blur_vertical(
 ) {
     #[cfg(target_arch = "aarch64")]
     {
-        blur_vertical_neon(src, dst, width, height, src_stride, dst_stride, radius, kernel);
+        blur_vertical_neon(
+            src, dst, width, height, src_stride, dst_stride, radius, kernel,
+        );
     }
     #[cfg(not(target_arch = "aarch64"))]
     {
-        blur_vertical_scalar(src, dst, width, height, src_stride, dst_stride, radius, kernel);
+        blur_vertical_scalar(
+            src, dst, width, height, src_stride, dst_stride, radius, kernel,
+        );
     }
 }
-
-

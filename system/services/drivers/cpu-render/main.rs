@@ -114,10 +114,10 @@ pub extern "C" fn _start() -> ! {
         let prefix = b"     display ";
         buf[..prefix.len()].copy_from_slice(prefix);
         let mut pos = prefix.len();
-        pos += gpu::format_u32(width, &mut buf[pos..]);
+        pos += sys::format_u32(width, &mut buf[pos..]);
         buf[pos] = b'x';
         pos += 1;
-        pos += gpu::format_u32(height, &mut buf[pos..]);
+        pos += sys::format_u32(height, &mut buf[pos..]);
         buf[pos] = b'\n';
         pos += 1;
         sys::print(&buf[..pos]);
@@ -195,14 +195,14 @@ pub extern "C" fn _start() -> ! {
         let prefix = b"     framebuffer: ";
         buf[..prefix.len()].copy_from_slice(prefix);
         let mut pos = prefix.len();
-        pos += gpu::format_u32(fb_width, &mut buf[pos..]);
+        pos += sys::format_u32(fb_width, &mut buf[pos..]);
         buf[pos] = b'x';
         pos += 1;
-        pos += gpu::format_u32(fb_height, &mut buf[pos..]);
+        pos += sys::format_u32(fb_height, &mut buf[pos..]);
         let mid = b" x2 (";
         buf[pos..pos + mid.len()].copy_from_slice(mid);
         pos += mid.len();
-        pos += gpu::format_u32(
+        pos += sys::format_u32(
             (chunks_per_buf * CHUNK_BYTES * 2) as u32 / 1024,
             &mut buf[pos..],
         );

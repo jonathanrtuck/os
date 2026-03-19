@@ -87,28 +87,6 @@ const MAX_INPUT_DEVICES: usize = 4;
 fn channel_shm_va(channel_index: usize) -> usize {
     protocol::channel_shm_va(channel_index)
 }
-/// Format a u32 into a buffer, returning the number of bytes written.
-fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
-    if n == 0 {
-        buf[0] = b'0';
-        return 1;
-    }
-
-    let mut tmp = [0u8; 10];
-    let mut i = 10;
-
-    while n > 0 {
-        i -= 1;
-        tmp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    let len = 10 - i;
-
-    buf[..len].copy_from_slice(&tmp[i..]);
-
-    len
-}
 /// Create an IPC channel for a given channel index. Init is always endpoint 0.
 fn init_channel(channel_index: usize) -> ipc::Channel {
     let ch = unsafe { ipc::Channel::from_base(channel_shm_va(channel_index), ipc::PAGE_SIZE, 0) };
@@ -117,23 +95,8 @@ fn init_channel(channel_index: usize) -> ipc::Channel {
 
     ch
 }
-fn print_u32(mut n: u32) {
-    if n == 0 {
-        sys::print(b"0");
-
-        return;
-    }
-
-    let mut buf = [0u8; 10];
-    let mut i = 10;
-
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    sys::print(&buf[i..]);
+fn print_u32(n: u32) {
+    sys::print_u32(n);
 }
 fn start_process(handle: u8, name: &[u8]) {
     if sys::process_start(handle).is_err() {
@@ -344,10 +307,10 @@ fn setup_render_pipeline(
 
         let mut pos = prefix.len();
 
-        pos += format_u32(fb_width, &mut buf[pos..]);
+        pos += sys::format_u32(fb_width, &mut buf[pos..]);
         buf[pos] = b'x';
         pos += 1;
-        pos += format_u32(fb_height, &mut buf[pos..]);
+        pos += sys::format_u32(fb_height, &mut buf[pos..]);
         buf[pos] = b'\n';
         pos += 1;
 
@@ -699,7 +662,7 @@ pub extern "C" fn _start() -> ! {
 
         let mut pos = prefix.len();
 
-        pos += format_u32(device_count, &mut buf[pos..]);
+        pos += sys::format_u32(device_count, &mut buf[pos..]);
 
         let suffix = b" devices in manifest\n";
 
@@ -737,14 +700,14 @@ pub extern "C" fn _start() -> ! {
 
             let mut pos = prefix.len();
 
-            pos += format_u32(i as u32, &mut buf[pos..]);
+            pos += sys::format_u32(i as u32, &mut buf[pos..]);
 
             let mid = b": id=";
 
             buf[pos..pos + mid.len()].copy_from_slice(mid);
 
             pos += mid.len();
-            pos += format_u32(dev_id, &mut buf[pos..]);
+            pos += sys::format_u32(dev_id, &mut buf[pos..]);
             buf[pos] = b'\n';
             pos += 1;
 
@@ -787,7 +750,7 @@ pub extern "C" fn _start() -> ! {
 
                 let mut pos = prefix.len();
 
-                pos += format_u32(dev_id, &mut buf[pos..]);
+                pos += sys::format_u32(dev_id, &mut buf[pos..]);
                 buf[pos] = b'\n';
                 pos += 1;
 
@@ -805,7 +768,7 @@ pub extern "C" fn _start() -> ! {
 
             let mut pos = prefix.len();
 
-            pos += format_u32(elf.len() as u32, &mut buf[pos..]);
+            pos += sys::format_u32(elf.len() as u32, &mut buf[pos..]);
 
             let suffix = b" bytes)\n";
 
@@ -978,7 +941,7 @@ pub extern "C" fn _start() -> ! {
 
                 let mut pos = prefix.len();
 
-                pos += format_u32(mono_len, &mut buf[pos..]);
+                pos += sys::format_u32(mono_len, &mut buf[pos..]);
 
                 let suffix = b" bytes\n";
 
@@ -1012,7 +975,7 @@ pub extern "C" fn _start() -> ! {
 
                 let mut pos = prefix.len();
 
-                pos += format_u32(png_len, &mut buf[pos..]);
+                pos += sys::format_u32(png_len, &mut buf[pos..]);
 
                 let suffix = b" bytes\n";
 
