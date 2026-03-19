@@ -508,8 +508,11 @@ pub fn update_single_line(
         w.mark_dirty(cur);
     }
 
-    // Update N_DOC_TEXT: scroll offset and content_hash.
+    // Update N_DOC_TEXT: scroll offset, content_hash, and clear stale
+    // next_sibling (build_full_scene links test content as siblings
+    // that survive acquire_copy but are truncated on first compaction).
     w.node_mut(N_DOC_TEXT).scroll_y = scroll_px;
+    w.node_mut(N_DOC_TEXT).next_sibling = scene::NULL;
     w.node_mut(N_DOC_TEXT).content_hash = scene::fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
 
@@ -600,7 +603,6 @@ fn update_line_positions(
 
 /// Shared tail: update cursor, selection, scroll_y, N_DOC_TEXT hash, and
 /// optionally the clock. Truncates old selection rects before rebuilding.
-/// Returns the computed chars_per_line for caller use.
 #[allow(clippy::too_many_arguments)]
 fn finish_line_update(
     w: &mut scene::SceneWriter<'_>,
