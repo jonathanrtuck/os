@@ -19,7 +19,10 @@ pub struct IncrementalState {
     pub prev_visible: [u64; DIRTY_BITMAP_WORDS],
     /// Per-node scroll_y from the previous frame.
     pub prev_scroll_y: [i32; MAX_NODES],
-    /// Per-node content_hash from the previous frame.
+    /// Per-node content_hash from the previous frame. Used by the render
+    /// backends (Tasks 7/8) to detect property-only changes: if a node is
+    /// dirty but content_hash is unchanged, the backend can blit from its
+    /// per-node cache instead of re-rasterizing.
     pub prev_content_hash: [u32; MAX_NODES],
     /// True until the first frame has been rendered.
     pub first_frame: bool,
@@ -116,6 +119,9 @@ impl IncrementalState {
     ///
     /// Returns `Some((node_id, delta))` for the first dirty container
     /// with a changed scroll_y. `delta` is `current - previous`.
+    /// Only reports the first scrolled container — sufficient for the
+    /// current single-document model. Multi-container scroll would
+    /// require returning an iterator or small array.
     pub fn detect_scroll(
         &self,
         nodes: &[Node],
@@ -269,8 +275,12 @@ fn union_bounds(
 ) -> (i32, i32, u32, u32) {
     let min_x = ax.min(bx);
     let min_y = ay.min(by);
-    let max_x = (ax + aw as i32).max(bx + bw as i32);
-    let max_y = (ay + ah as i32).max(by + bh as i32);
+    let max_x = ax
+        .saturating_add(aw.min(i32::MAX as u32) as i32)
+        .max(bx.saturating_add(bw.min(i32::MAX as u32) as i32));
+    let max_y = ay
+        .saturating_add(ah.min(i32::MAX as u32) as i32)
+        .max(by.saturating_add(bh.min(i32::MAX as u32) as i32));
     let w = (max_x - min_x).max(0) as u32;
     let h = (max_y - min_y).max(0) as u32;
     (min_x, min_y, w, h)
