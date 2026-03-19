@@ -418,8 +418,28 @@ pub fn update_single_line(
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
     let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
 
+    // Count visible runs and compare against the sibling chain length.
+    // If they differ, a soft-wrap change occurred — fall back to compaction
+    // to avoid stale line nodes rendering old glyphs.
+    let visible_run_count = all_runs
+        .iter()
+        .filter(|r| {
+            r.y + cfg.line_height as i32 > scroll_px && r.y < scroll_px + content_h
+        })
+        .count();
+    let mut chain_line_count: usize = 0;
+    {
+        let mut c = w.node(N_DOC_TEXT).first_child;
+        while c != scene::NULL && c != N_CURSOR {
+            chain_line_count += 1;
+            c = w.node(c).next_sibling;
+        }
+    }
+    if visible_run_count != chain_line_count {
+        return false; // Visual line count changed (soft-wrap), fall back.
+    }
+
     // Find the changed line's run index in the full list.
-    // Then figure out which visible-line index it corresponds to.
     if changed_line >= all_runs.len() {
         return false; // Line out of range, fall back.
     }
@@ -490,9 +510,10 @@ pub fn update_single_line(
         w.mark_dirty(cur);
     }
 
-    // Update N_DOC_TEXT scroll offset (may have been unchanged but keep it
-    // consistent).
+    // Update N_DOC_TEXT: scroll offset and content_hash.
     w.node_mut(N_DOC_TEXT).scroll_y = scroll_px;
+    w.node_mut(N_DOC_TEXT).content_hash = scene::fnv1a(doc_text);
+    w.mark_dirty(N_DOC_TEXT);
 
     // Update cursor position.
     let (cursor_line, cursor_col) =
@@ -507,8 +528,7 @@ pub fn update_single_line(
     }
     w.mark_dirty(N_CURSOR);
 
-    // Truncate selection rects (same-line-count edits clear selection for
-    // simplicity — selection is re-applied on the next selection_changed event).
+    // Truncate selection rects and rebuild from current selection state.
     // Count per-line Glyphs children under N_DOC_TEXT (stop at N_CURSOR).
     let mut line_count: u16 = 0;
     let mut child = w.node(N_DOC_TEXT).first_child;
