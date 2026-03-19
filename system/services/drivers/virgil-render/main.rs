@@ -16,6 +16,7 @@
 
 extern crate alloc;
 extern crate fonts;
+extern crate render;
 extern crate scene;
 
 use alloc::boxed::Box;
@@ -30,6 +31,7 @@ use protocol::{
         VIRGL_OBJECT_VERTEX_ELEMENTS,
     },
 };
+use render::incremental::{all_bits_zero, IncrementalState};
 
 #[path = "atlas.rs"]
 mod atlas;
@@ -410,6 +412,11 @@ pub extern "C" fn _start() -> ! {
     let mut path_batch: Box<scene_walk::PathBatch> = box_zeroed();
     let mut cmdbuf: Box<virgl::CommandBuffer> = box_zeroed();
 
+    // Heap-allocated because IncrementalState is ~12 KiB (too large for
+    // the 16 KiB user stack). Persists across frames for dirty bitmap
+    // tracking and skip-frame detection.
+    let mut incr_state = Box::new(IncrementalState::new());
+
     let mut frame_count: u32 = 0;
     let mut sched = frame_scheduler::FrameScheduler::new(frame_rate_cfg);
     let cfreq = sys::counter_freq();
@@ -456,10 +463,19 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
-        // Read the latest scene graph.
+        // Read the latest scene graph and dirty bitmap.
         let reader = scene::TripleReader::new(scene_buf);
         let nodes = reader.front_nodes();
+        let node_count = nodes.len() as u16;
         let gen = reader.front_generation();
+        let dirty_bits = *reader.dirty_bits();
+
+        // Skip-frame: nothing changed since last render.
+        if all_bits_zero(&dirty_bits) {
+            reader.finish_read(gen);
+            sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
+            continue;
+        }
 
         // Walk scene tree: accumulate colored quads (backgrounds) and
         // textured quads (glyphs) in a single pass.
@@ -790,6 +806,8 @@ pub extern "C" fn _start() -> ! {
             resources::flush_resource(&device, &mut vq, irq_handle, width, height);
         }
 
+        // Update incremental state before releasing the reader.
+        incr_state.update_from_frame(nodes, node_count);
         reader.finish_read(gen);
         sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
         frame_count = frame_count.wrapping_add(1);
