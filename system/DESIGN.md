@@ -301,11 +301,11 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Incremental update support (2026-03-15 rendering pipeline optimization):**
 
-- **Change list in SceneHeader:** 24-entry array of changed `NodeId`s plus a `FULL_REPAINT` sentinel (0xFFFF) for when the list overflows or a full rebuild is needed. The OS service records which nodes changed; the compositor reads the list to drive damage tracking.
-- `DoubleWriter::copy_front_to_back()` — copies the current front buffer to the back buffer before mutation (copy-forward pattern). Enables incremental updates: the OS service copies the previous frame, modifies only changed nodes, and swaps. Avoids rebuilding the entire scene graph on every event.
-- `SceneWriter::mark_changed(node_id)` — appends a node to the change list. If the list is full (>24 entries), sets the `FULL_REPAINT` sentinel so the compositor falls back to full-frame rendering.
-- **SceneState targeted update methods:** `update_clock` (updates clock text, 0 allocations), `update_cursor` (updates cursor position/blink, 0 allocations), `update_document_content` (rebuilds text runs and selection after edits), `update_selection` (updates selection overlay). Each method uses `copy_front_to_back()` → modify specific nodes → `mark_changed()` → `swap()`.
-- **Data buffer exhaustion fallback:** When the data buffer exceeds 75% capacity, the scene triggers a full rebuild to compact data references.
+- **Dirty bitmap in SceneHeader:** 512-bit bitmap (`[u64; 8]`), one bit per `MAX_NODES`. The OS service marks changed nodes via `mark_dirty(node_id)`; render services read `dirty_bits()` to drive damage tracking. Never overflows — replaces the former 24-entry change list and `FULL_REPAINT` fallback.
+- `TripleWriter::acquire_copy()` — copies the latest published buffer to the acquired buffer (copy-forward pattern). Enables incremental updates: the OS service copies the previous frame, modifies only changed nodes, and publishes. The dirty bitmap is zeroed in the copy so only newly-dirtied nodes are flagged.
+- `SceneWriter::mark_dirty(node_id)` — sets one bit in the dirty bitmap. O(1), idempotent. Complemented by `clear_dirty()`, `set_all_dirty()`, `is_dirty()`, `dirty_count()`.
+- **SceneState targeted update methods:** `update_clock` (updates clock text, 0 allocations), `update_cursor` (updates cursor position/blink, 0 allocations), `update_document_content` (rebuilds text runs and selection after edits), `update_selection` (updates selection overlay). Each method uses `acquire_copy()` → modify specific nodes → `mark_dirty()` → `publish()`.
+- **Data buffer compaction:** When the data buffer is full, the scene triggers a full rebuild to compact data references. See `design/incremental-scene-pipeline.md` for the complete incremental pipeline design.
 
 **No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the buffer. ~1584 lines, host-side tests in `system/test/`. The scene library is purely geometric — no content-aware code (no monospace assumptions, no line breaking, no character encoding knowledge). Content-aware layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) live in core where they belong.
 
