@@ -12,11 +12,15 @@ The scene graph is the interface. All rendering complexity (tree walk, GPU state
 
 ## Key Files
 
-- `main.rs` — entry point, event loop, virtio-gpu device init
-- `shaders.rs` — TGSI shader text (color + textured vertex/fragment)
-- `virgl.rs` — VirglContext: GPU state management (future)
-- `atlas.rs` — glyph texture atlas (future)
-- `scene_walk.rs` — scene graph tree walk emitting GPU draw calls (future)
+- `main.rs` — entry point, constants, event loop, render loop orchestration
+- `wire.rs` — FFI wire-format structs (`#[repr(C)]`), DmaBuf, `box_zeroed`, ctrl_header helpers
+- `device.rs` — Phase A (virtio-gpu init, VIRGL feature negotiation) + Phase B (display query, init handshake)
+- `resources.rs` — Phase C (virgl context, render target, VBO, texture resources), gpu_command/gpu_cmd_ok helpers
+- `pipeline.rs` — Phase D (Gallium3D pipeline setup: blend, DSA, rasterizer, shaders, surface) + Phase E (initial clear)
+- `shaders.rs` — TGSI shader text (color + textured vertex/fragment + glyph + stencil)
+- `atlas.rs` — glyph texture atlas with row-based packing
+- `scene_walk.rs` — scene graph tree walk emitting GPU draw calls (backgrounds, glyphs, images, paths)
+- `frame_scheduler.rs` — configurable-cadence frame scheduling with event coalescing
 
 ## Dependencies
 
