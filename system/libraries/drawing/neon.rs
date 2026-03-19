@@ -338,14 +338,14 @@ fn linear_to_idx_inline(v: u32) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// NEON-accelerated Gaussian blur convolution
+// Gaussian blur convolution (horizontal: scalar 4x, vertical: NEON)
 // ---------------------------------------------------------------------------
 
-/// Horizontal blur pass using NEON SIMD.
+/// Horizontal blur pass using scalar u64 arithmetic.
 ///
-/// Processes 4 output pixels at a time along each row. For each group of 4
-/// output pixels, accumulates the weighted sum across the kernel in 4 parallel
-/// u64 accumulators per channel (using NEON widening multiply-accumulate).
+/// Processes 4 pixels at a time via scalar accumulators. A NEON SIMD
+/// port (matching `blur_vertical_neon`) would provide ~2-3x speedup
+/// but is deferred — see `design/rendering-pipeline-completion.md` B3.
 ///
 /// Falls back to scalar for the tail pixels (< 4 remaining in the row).
 ///
@@ -353,12 +353,8 @@ fn linear_to_idx_inline(v: u32) -> usize {
 ///
 /// Called internally by `blur_horizontal`. All pointer arithmetic is bounds-
 /// checked via the width/height/stride parameters.
-///
-/// NOTE: Despite the `_neon` suffix, this implementation uses scalar u64
-/// arithmetic, not NEON SIMD intrinsics. The vertical blur counterpart
-/// does use actual NEON. Consider renaming or porting to NEON (review 7.15).
 #[cfg(target_arch = "aarch64")]
-pub fn blur_horizontal_neon(
+pub fn blur_horizontal_scalar_4x(
     src: &[u8],
     dst: &mut [u8],
     width: u32,
@@ -377,7 +373,7 @@ pub fn blur_horizontal_neon(
         let src_row = (y * src_stride) as usize;
         let dst_row = (y * dst_stride) as usize;
 
-        // NEON path: process 4 output pixels at a time.
+        // Chunked path: process 4 output pixels at a time.
         for chunk in 0..chunks {
             let base_x = chunk * 4;
             let mut sums_b = [0u64; 4];

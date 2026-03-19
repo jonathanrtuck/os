@@ -2457,7 +2457,7 @@ fn blur_horizontal(
 ) {
     #[cfg(target_arch = "aarch64")]
     {
-        blur_horizontal_neon(
+        blur_horizontal_scalar_4x(
             src, dst, width, height, src_stride, dst_stride, radius, kernel,
         );
     }
