@@ -158,6 +158,7 @@ fn probe_virgl(gpu_pa: u64) -> bool {
 /// Set up the full render pipeline (scene graph, shared memory, core, editor,
 /// input channels, render service). Used for both virgil-render and cpu-render —
 /// the `name` parameter controls diagnostic output only.
+/// Returns (core_proc_handle, editor_proc_handle) for monitoring.
 fn setup_render_pipeline(
     name: &[u8], // e.g. b"virgl" or b"cpu-render"
     gpu_proc: u8,
@@ -169,7 +170,7 @@ fn setup_render_pipeline(
     font_buf: Option<(u64, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len)
     rtc_pa: u64,                             // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
-) {
+) -> (u8, u8) {
     sys::print(b"     setting up ");
     sys::print(name);
     sys::print(b" pipeline\n");
@@ -662,6 +663,8 @@ fn setup_render_pipeline(
     sys::print(b"     ");
     sys::print(name);
     sys::print(b" pipeline running\n");
+
+    (core_proc, editor_proc)
 }
 /// Spawn a suspended process, create a channel to it, and send one endpoint.
 ///
@@ -1076,9 +1079,14 @@ pub extern "C" fn _start() -> ! {
         };
 
     // Phase 2: Display pipeline — select based on virgl probe result.
+    // Collect all child process handles for monitoring.
+    let mut child_handles: [u8; 8] = [0; 8];
+    let mut child_names: [&[u8]; 8] = [b""; 8];
+    let mut child_count: usize = 0;
+
     if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq, has_virgl)) = gpu {
         let render_name: &[u8] = if has_virgl { b"virgl" } else { b"cpu-render" };
-        setup_render_pipeline(
+        let (core_proc, editor_proc) = setup_render_pipeline(
             render_name,
             gpu_proc,
             gpu_ch_handle,
@@ -1090,6 +1098,39 @@ pub extern "C" fn _start() -> ! {
             rtc_pa,
             &mut next_channel,
         );
+
+        // Register render service.
+        child_handles[child_count] = gpu_proc;
+        child_names[child_count] = render_name;
+        child_count += 1;
+
+        // Register core.
+        child_handles[child_count] = core_proc;
+        child_names[child_count] = b"core";
+        child_count += 1;
+
+        // Register editor.
+        child_handles[child_count] = editor_proc;
+        child_names[child_count] = b"editor";
+        child_count += 1;
+
+        // Register input drivers.
+        for i in 0..input_count {
+            if child_count < child_handles.len() {
+                child_handles[child_count] = input_devices[i].0;
+                child_names[child_count] = b"input";
+                child_count += 1;
+            }
+        }
+
+        // Register 9p driver (if spawned).
+        if let Some((p9_proc, _, _, _, _)) = p9 {
+            if child_count < child_handles.len() {
+                child_handles[child_count] = p9_proc;
+                child_names[child_count] = b"9p";
+                child_count += 1;
+            }
+        }
     } else {
         sys::print(b"     no gpu found\n");
     }
@@ -1120,14 +1161,39 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    sys::print(b"  \xF0\x9F\x94\xA7 init - running (idle)\n");
+    // Monitor child processes — detect and report crashes.
+    if child_count > 0 {
+        sys::print(b"  init: monitoring child processes\n");
 
-    // Don't exit — child processes are still running their event loops.
-    // Idle forever via yield. In the real OS, init would become the OS
-    // service process (renderer, metadata DB, input router, compositor).
-    // TODO: Monitor child processes via wait() and restart crashed services
-    // (review 6.8). Currently if a render service crashes, the display
-    // freezes permanently with no recovery.
+        loop {
+            match sys::wait(&child_handles[..child_count], u64::MAX) {
+                Ok(idx) => {
+                    sys::print(b"  init: CHILD PROCESS EXITED: ");
+                    sys::print(child_names[idx]);
+                    sys::print(b"\n");
+
+                    // Remove exited handle by swapping with last.
+                    child_count -= 1;
+                    if idx < child_count {
+                        child_handles[idx] = child_handles[child_count];
+                        child_names[idx] = child_names[child_count];
+                    }
+
+                    if child_count == 0 {
+                        sys::print(b"  init: all child processes exited\n");
+                        break;
+                    }
+                }
+                Err(_) => {
+                    // Spurious wakeup — continue monitoring.
+                }
+            }
+        }
+    }
+
+    sys::print(b"  init: no children left, idling\n");
+
+    // Nothing left to monitor.
     loop {
         sys::yield_now();
     }
