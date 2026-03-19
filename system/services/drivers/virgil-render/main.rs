@@ -251,8 +251,17 @@ impl DmaBuf {
         DmaBuf { va, pa, order }
     }
 
-    fn free(self) {
-        let _ = sys::dma_free(self.va as u64, self.order);
+    fn free(&mut self) {
+        if self.va != 0 {
+            let _ = sys::dma_free(self.va as u64, self.order);
+            self.va = 0;
+        }
+    }
+}
+
+impl Drop for DmaBuf {
+    fn drop(&mut self) {
+        self.free();
     }
 }
 
@@ -419,7 +428,7 @@ fn get_display_info(
     vq: &mut virtio::Virtqueue,
     irq_handle: u8,
 ) -> (u32, u32) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page, writing CtrlHeader at start.
     unsafe {
         core::ptr::write(
@@ -513,7 +522,7 @@ fn init_handshake(
 // ── Phase C: Virgl 3D initialization ─────────────────────────────────────
 
 fn ctx_create(device: &virtio::Device, vq: &mut virtio::Virtqueue, irq_handle: u8) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page, writing CtxCreate at start.
     unsafe {
         core::ptr::write(
@@ -547,7 +556,7 @@ fn resource_create_3d(
     width: u32,
     height: u32,
 ) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page, writing ResourceCreate3d.
     unsafe {
         core::ptr::write(
@@ -605,7 +614,7 @@ fn attach_backing(
     let total_cmd_bytes = header_size + chunks_needed * entry_size;
     let cmd_pages = (total_cmd_bytes + 4095) / 4096;
     let cmd_order = (cmd_pages.next_power_of_two().trailing_zeros()) as u32;
-    let cmd = DmaBuf::alloc(cmd_order);
+    let mut cmd = DmaBuf::alloc(cmd_order);
 
     // Allocate backing DMA memory and build scatter-gather entries.
     let ptr = cmd.va as *mut u8;
@@ -648,7 +657,7 @@ fn attach_backing(
     let (resp_pa, resp_va, resp_buf) = if resp_offset + 64 <= (1 << cmd_order) * 4096 {
         (cmd.pa + resp_offset as u64, cmd.va + resp_offset, None)
     } else {
-        let rb = DmaBuf::alloc(0);
+        let mut rb = DmaBuf::alloc(0);
         (rb.pa, rb.va, Some(rb))
     };
 
@@ -670,7 +679,7 @@ fn attach_backing(
         sys::exit();
     }
 
-    if let Some(rb) = resp_buf {
+    if let Some(mut rb) = resp_buf {
         rb.free();
     }
     cmd.free();
@@ -681,7 +690,7 @@ fn attach_backing(
 }
 
 fn ctx_attach_resource(device: &virtio::Device, vq: &mut virtio::Virtqueue, irq_handle: u8) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
     unsafe {
         core::ptr::write(
@@ -714,7 +723,7 @@ fn set_scanout(
     width: u32,
     height: u32,
 ) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
     unsafe {
         core::ptr::write(
@@ -753,7 +762,7 @@ fn resource_create_vbo(
     irq_handle: u8,
     size_bytes: u32,
 ) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page, writing ResourceCreate3d.
     unsafe {
         core::ptr::write(
@@ -797,7 +806,7 @@ fn attach_backing_vbo(
     irq_handle: u8,
     size_bytes: u32,
 ) -> (usize, u64, u32) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     let header_size = core::mem::size_of::<AttachBacking>();
     let entry_size = core::mem::size_of::<MemEntry>();
 
@@ -851,7 +860,7 @@ fn transfer_vbo_to_host(
     irq_handle: u8,
     data_bytes: u32,
 ) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
     unsafe {
         core::ptr::write(
@@ -886,7 +895,7 @@ fn transfer_vbo_to_host(
 
 /// Attach VBO resource to the virgl context.
 fn ctx_attach_vbo(device: &virtio::Device, vq: &mut virtio::Virtqueue, irq_handle: u8) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
     unsafe {
         core::ptr::write(
@@ -924,7 +933,7 @@ fn resource_create_3d_generic(
     width: u32,
     height: u32,
 ) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page, writing ResourceCreate3d.
     unsafe {
         core::ptr::write(
@@ -967,7 +976,7 @@ fn attach_and_ctx_resource(
     resource_id: u32,
     size_bytes: u32,
 ) -> (usize, u64, u32) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     let header_size = core::mem::size_of::<AttachBacking>();
     let entry_size = core::mem::size_of::<MemEntry>();
 
@@ -1009,7 +1018,7 @@ fn attach_and_ctx_resource(
     cmd.free();
 
     // Context attach.
-    let cmd2 = DmaBuf::alloc(0);
+    let mut cmd2 = DmaBuf::alloc(0);
     // SAFETY: cmd2.va points to zeroed DMA page.
     unsafe {
         core::ptr::write(
@@ -1045,7 +1054,7 @@ fn transfer_texture_to_host(
     height: u32,
     stride: u32,
 ) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
     unsafe {
         core::ptr::write(
@@ -1086,7 +1095,7 @@ fn transfer_buffer_to_host(
     resource_id: u32,
     data_bytes: u32,
 ) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
     unsafe {
         core::ptr::write(
@@ -1127,7 +1136,7 @@ fn flush_resource(
     width: u32,
     height: u32,
 ) {
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
     unsafe {
         core::ptr::write(
@@ -1172,7 +1181,7 @@ fn submit_3d(
     let total_with_resp = total_cmd_bytes + 4096; // leave room for response
     let cmd_pages = (total_with_resp + 4095) / 4096;
     let cmd_order = (cmd_pages.next_power_of_two().trailing_zeros()) as u32;
-    let cmd = DmaBuf::alloc(cmd_order);
+    let mut cmd = DmaBuf::alloc(cmd_order);
 
     // Write Submit3dHeader.
     // SAFETY: cmd.va points to zeroed DMA memory, writing header at start.
@@ -1342,7 +1351,7 @@ fn clear_screen(
     sys::print(b"     clear submitted\n");
 
     // Flush the render target to display.
-    let cmd = DmaBuf::alloc(0);
+    let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
     unsafe {
         core::ptr::write(

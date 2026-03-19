@@ -441,7 +441,8 @@ pub fn transfer_to_host_reuse(
             },
         );
     }
-    gpu_command(
+    // TODO: Check GPU response type for errors (review 6.5).
+    let _ = gpu_command(
         device,
         vq,
         irq_handle,
@@ -482,7 +483,8 @@ pub fn resource_flush_reuse(
             },
         );
     }
-    gpu_command(
+    // TODO: Check GPU response type for errors (review 6.5).
+    let _ = gpu_command(
         device,
         vq,
         irq_handle,

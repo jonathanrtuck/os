@@ -425,14 +425,14 @@ fn reader_data_invalid_ref_returns_empty() {
     assert_eq!(r.data(bad).len(), 0);
 }
 
-// ── replace_data ────────────────────────────────────────────────────
+// ── push_data_replacing ────────────────────────────────────────────────────
 
 #[test]
-fn writer_replace_data_appends_new() {
+fn writer_push_data_replacing_appends_new() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     let d1 = w.push_data(b"old");
-    let d2 = w.replace_data(b"new content");
+    let d2 = w.push_data_replacing(b"new content");
     // Old data abandoned, new data appended.
     assert_eq!(d2.offset, 3);
     assert_eq!(d2.length, 11);
