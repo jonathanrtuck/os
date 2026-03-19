@@ -1716,13 +1716,13 @@ fn rounded_rect_semi_transparent_blends() {
 #[test]
 fn node_size_compile_time_assertion_exists() {
     // The compile-time assertion is in scene/lib.rs:
-    //   const _: () = assert!(size_of::<Node>() == 96);
+    //   const _: () = assert!(size_of::<Node>() == 100);
     // If the Node layout changes, the build will fail.
     // At runtime, verify the size matches.
     let size = core::mem::size_of::<Node>();
     assert_eq!(
-        size, 96,
-        "VAL-CROSS-012: Node must be exactly 96 bytes for shared-memory layout stability"
+        size, 100,
+        "VAL-CROSS-012: Node must be exactly 100 bytes for shared-memory layout stability"
     );
 }
 

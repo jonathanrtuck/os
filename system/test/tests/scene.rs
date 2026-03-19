@@ -1923,11 +1923,11 @@ fn node_has_transform_field() {
 #[test]
 fn node_size_assertion_with_transform() {
     // VAL-XFORM-022: Node size compile-time assertion.
-    // After adding 24-byte AffineTransform, Node should be 96 bytes.
+    // After widening x/y to i32, Node is 100 bytes.
     let size = core::mem::size_of::<Node>();
     assert_eq!(
-        size, 96,
-        "Node size should be 96 bytes with transform field, got {}",
+        size, 100,
+        "Node size should be 100 bytes with i32 x/y, got {}",
         size
     );
 }
@@ -2444,8 +2444,8 @@ fn multiple_glyphs_nodes_coexist() {
 // ── Node size unchanged (VAL-SCENE-006) ─────────────────────────────
 
 #[test]
-fn node_size_is_96_bytes() {
-    assert_eq!(core::mem::size_of::<Node>(), 96);
+fn node_size_is_100_bytes() {
+    assert_eq!(core::mem::size_of::<Node>(), 100);
 }
 
 #[test]
@@ -4172,7 +4172,7 @@ fn path_cubic_to_encoding() {
 fn node_size_unchanged_with_path() {
     // VAL-CROSS-01: Node size assertion passes after adding Content::Path.
     let size = core::mem::size_of::<Node>();
-    assert_eq!(size, 96, "Node must remain 96 bytes with Path variant");
+    assert_eq!(size, 100, "Node must remain 100 bytes with Path variant");
 }
 
 #[test]
