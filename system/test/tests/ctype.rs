@@ -10,11 +10,17 @@ mod fallback;
 mod typography;
 
 use fallback::ContentType;
-use typography::{FontFamily, TypographyConfig};
 use fonts::Feature;
+use typography::{FontFamily, TypographyConfig};
 
 const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
 const SOURCE_CODE_PRO_VARIABLE: &[u8] = include_bytes!("../../share/source-code-pro-variable.ttf");
+
+/// Convert a 4-byte OpenType tag to a Feature (enabled, full range).
+fn tag_to_feature(tag: &[u8; 4]) -> Feature {
+    let s = core::str::from_utf8(tag).unwrap_or("    ");
+    format!("+{}", s).parse::<Feature>().unwrap()
+}
 
 // ===========================================================================
 // VAL-CTYPE-001: Code typography defaults
@@ -33,22 +39,22 @@ fn ctype_code_uses_monospace_font() {
 #[test]
 fn ctype_code_has_calt_feature() {
     let config = TypographyConfig::for_content_type(ContentType::Code);
-    let feature_strs: Vec<&str> = config.features.iter().map(|s| s.as_str()).collect();
+    let features = config.features;
     assert!(
-        feature_strs.contains(&"+calt"),
+        features.contains(&&b"calt"),
         "code typography should include +calt for programming ligatures, got {:?}",
-        feature_strs
+        features
     );
 }
 
 #[test]
 fn ctype_code_has_tnum_feature() {
     let config = TypographyConfig::for_content_type(ContentType::Code);
-    let feature_strs: Vec<&str> = config.features.iter().map(|s| s.as_str()).collect();
+    let features = config.features;
     assert!(
-        feature_strs.contains(&"+tnum"),
+        features.contains(&&b"tnum"),
         "code typography should include +tnum for tabular figures, got {:?}",
-        feature_strs
+        features
     );
 }
 
@@ -69,11 +75,11 @@ fn ctype_prose_uses_proportional_font() {
 #[test]
 fn ctype_prose_has_onum_feature() {
     let config = TypographyConfig::for_content_type(ContentType::Prose);
-    let feature_strs: Vec<&str> = config.features.iter().map(|s| s.as_str()).collect();
+    let features = config.features;
     assert!(
-        feature_strs.contains(&"+onum"),
+        features.contains(&&b"onum"),
         "prose typography should include +onum for oldstyle figures, got {:?}",
-        feature_strs
+        features
     );
 }
 
@@ -138,16 +144,15 @@ fn ctype_code_vs_prose_different_shaped_output() {
     let code_font = SOURCE_CODE_PRO_VARIABLE; // monospace for code
     let prose_font = NUNITO_SANS_VARIABLE; // proportional for prose
 
-    // Parse features.
     let code_features: Vec<Feature> = code_config
         .features
         .iter()
-        .filter_map(|s| s.parse::<Feature>().ok())
+        .map(|t| tag_to_feature(t))
         .collect();
     let prose_features: Vec<Feature> = prose_config
         .features
         .iter()
-        .filter_map(|s| s.parse::<Feature>().ok())
+        .map(|t| tag_to_feature(t))
         .collect();
 
     let code_glyphs = fonts::shape(code_font, text, &code_features);
@@ -173,7 +178,7 @@ fn ctype_code_features_are_parseable_and_applied() {
     let code_features: Vec<Feature> = code_config
         .features
         .iter()
-        .filter_map(|s| s.parse::<Feature>().ok())
+        .map(|t| tag_to_feature(t))
         .collect();
 
     // All configured features should be parseable.
@@ -404,8 +409,12 @@ fn cross_003_auto_perceptual_combined_differs_from_fixed() {
     combined_axes.extend_from_slice(&auto_axis_values_for_opsz(NUNITO_SANS_VARIABLE, 14, 96));
     combined_axes.extend_from_slice(&auto_weight_correction_axes(
         NUNITO_SANS_VARIABLE,
-        255, 255, 255, // white fg
-        0, 0, 0,       // black bg
+        255,
+        255,
+        255, // white fg
+        0,
+        0,
+        0, // black bg
     ));
 
     assert!(

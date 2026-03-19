@@ -463,6 +463,8 @@ fn process_key_event(
     }
 
     if !state().image_mode {
+        // TODO: Construct a core→editor message instead of forwarding the
+        // raw input driver message. Fragile if input format changes (review 6.10).
         editor_ch.send(msg);
 
         let _ = sys::channel_signal(EDITOR_HANDLE);

@@ -51,6 +51,7 @@ const INIT_HANDLE: u8 = 0;
 const CORE_HANDLE: u8 = 1;
 
 /// Font configuration.
+// TODO: Receive from config message instead of hardcoding (review 7.10).
 const FONT_SIZE: u32 = 18;
 const SCREEN_DPI: u16 = 96;
 

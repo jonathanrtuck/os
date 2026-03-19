@@ -12,7 +12,7 @@
 //! (0=proportional sans, 1=monospace) and CASL axis (0=linear, 1=casual).
 //! Content type drives axis values, not font selection.
 
-use alloc::{string::String, vec::Vec};
+use alloc::vec::Vec;
 
 use fonts::rasterize::AxisValue;
 
@@ -36,8 +36,9 @@ pub struct TypographyConfig {
     /// Preferred font family (monospace or proportional).
     pub font_family: FontFamily,
 
-    /// OpenType feature flags to enable during shaping.
-    pub features: Vec<String>,
+    /// OpenType feature tags to enable during shaping (e.g., b"calt", b"tnum").
+    /// Fixed-capacity array avoids heap allocation for 4-byte tags.
+    pub features: &'static [&'static [u8; 4]],
 
     /// Preferred font weight (in CSS-like units: 100–900).
     ///
@@ -76,10 +77,7 @@ impl TypographyConfig {
     fn code_defaults() -> Self {
         TypographyConfig {
             font_family: FontFamily::Monospace,
-            features: alloc::vec![
-                String::from("+calt"), // contextual alternates (!=, =>, ->)
-                String::from("+tnum"), // tabular figures
-            ],
+            features: &[b"calt", b"tnum"],
             weight_preference: 400.0,
             tracking: 0.0,
             optical_sizing: false,
@@ -100,9 +98,7 @@ impl TypographyConfig {
     fn prose_defaults() -> Self {
         TypographyConfig {
             font_family: FontFamily::Proportional,
-            features: alloc::vec![
-                String::from("+onum"), // oldstyle figures
-            ],
+            features: &[b"onum"],
             weight_preference: 400.0,
             tracking: 0.0,
             optical_sizing: false, // Recursive has no opsz axis
@@ -123,7 +119,7 @@ impl TypographyConfig {
     fn ui_defaults() -> Self {
         TypographyConfig {
             font_family: FontFamily::Proportional,
-            features: alloc::vec![],
+            features: &[],
             weight_preference: 500.0,
             tracking: 0.0,
             optical_sizing: false,
