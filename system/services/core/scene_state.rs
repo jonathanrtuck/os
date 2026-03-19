@@ -118,14 +118,12 @@ impl SceneState {
         doc_text: &[u8],
         content_h: u32,
         scroll_px: i32,
-        clock_text: Option<&[u8]>,
     ) {
         let mut tw = self.triple();
         {
             let mut w = tw.acquire_copy();
             build_selection_update(
                 &mut w, cfg, cursor_pos, sel_start, sel_end, doc_text, content_h, scroll_px,
-                clock_text,
             );
         }
         tw.publish();

@@ -759,7 +759,7 @@ pub fn build_cursor_update(
 }
 
 /// Update cursor position and selection rects in an already-open back
-/// buffer. Optionally updates the clock if `clock_text` is provided.
+/// buffer.
 #[allow(clippy::too_many_arguments)]
 pub fn build_selection_update(
     w: &mut scene::SceneWriter<'_>,
@@ -770,7 +770,6 @@ pub fn build_selection_update(
     doc_text: &[u8],
     content_h: u32,
     scroll_px: i32,
-    clock_text: Option<&[u8]>,
 ) {
     let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
     let doc_width = cfg.fb_width.saturating_sub(2 * cfg.text_inset_x);
@@ -780,12 +779,8 @@ pub fn build_selection_update(
         80
     };
 
-    // TODO: data buffer leaks on selection-only updates (~64 bytes per
-    // update from push_shaped_glyphs for clock text). Acceptable because
-    // text changes call update_document_content which resets the data
-    // buffer via reset_data(). Selection-only updates without intervening
-    // text changes are rare enough that the leak is bounded well within
-    // the DATA_BUFFER_SIZE budget before the next compaction.
+    // Clock text is updated only by update_document_content (timer-driven).
+    // Skipping here prevents data buffer leak (~64 bytes per selection update).
 
     // Count per-line Glyphs children under N_DOC_TEXT (stop at
     // N_CURSOR). These must be preserved — only selection rects
@@ -812,10 +807,6 @@ pub fn build_selection_update(
         n.next_sibling = NULL;
     }
     w.mark_changed(N_CURSOR);
-
-    if let Some(ct) = clock_text {
-        update_clock_inline(w, ct, cfg.font_data, cfg.font_size, cfg.upem, cfg.axes);
-    }
 
     let (sel_lo, sel_hi) = if sel_start <= sel_end {
         (sel_start as usize, sel_end as usize)

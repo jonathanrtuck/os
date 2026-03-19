@@ -991,7 +991,8 @@ pub extern "C" fn _start() -> ! {
                 // to clear selection, shift-arrow to extend selection).
                 // Also updates cursor position in the scene graph so
                 // that click-to-reposition is immediately visible.
-                // When timer_fired, also updates clock in-place.
+                // Clock text is updated only by update_document_content
+                // (timer-driven) to prevent data buffer leak.
                 let s = state();
                 let content_y = TITLE_BAR_H + SHADOW_DEPTH;
                 let sel_content_h = fb_height.saturating_sub(content_y);
@@ -1005,7 +1006,6 @@ pub extern "C" fn _start() -> ! {
                     doc_content(),
                     sel_content_h,
                     scroll_px,
-                    if timer_fired { Some(&time_buf) } else { None },
                 );
             } else if changed {
                 // Cursor moved without text or selection change
