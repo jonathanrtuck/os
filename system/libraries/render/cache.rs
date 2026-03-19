@@ -111,6 +111,10 @@ impl NodeCache {
     }
 
     /// Invalidate a single entry. Out-of-bounds `node_id` is a no-op.
+    ///
+    /// The pixel buffer allocation is retained for potential reuse by a
+    /// subsequent `store()` to the same slot. To release memory, drop
+    /// the entire `NodeCache`.
     pub fn evict(&mut self, node_id: u16) {
         let idx = node_id as usize;
         if idx >= self.entries.len() {
@@ -120,6 +124,7 @@ impl NodeCache {
     }
 
     /// Invalidate all entries (e.g., on compaction or full rebuild).
+    /// Pixel buffer allocations are retained for reuse.
     pub fn clear(&mut self) {
         for entry in self.entries.iter_mut() {
             entry.valid = false;
