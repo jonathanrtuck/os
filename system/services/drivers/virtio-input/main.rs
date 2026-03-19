@@ -226,7 +226,9 @@ pub extern "C" fn _start() -> ! {
                     };
                     let msg = unsafe { ipc::Message::from_payload(MSG_POINTER_BUTTON, &ptr_btn) };
 
-                    comp_ch.send(&msg);
+                    if !comp_ch.send(&msg) {
+                        // Ring buffer full — event dropped.
+                    }
 
                     let _ = sys::channel_signal(1);
                 } else {
@@ -239,7 +241,9 @@ pub extern "C" fn _start() -> ! {
                     };
                     let msg = unsafe { ipc::Message::from_payload(MSG_KEY_EVENT, &key_event) };
 
-                    comp_ch.send(&msg);
+                    if !comp_ch.send(&msg) {
+                        // Ring buffer full — event dropped.
+                    }
 
                     let _ = sys::channel_signal(1);
                 }
@@ -277,7 +281,9 @@ pub extern "C" fn _start() -> ! {
             };
             let msg = unsafe { ipc::Message::from_payload(MSG_POINTER_ABS, &ptr_abs) };
 
-            comp_ch.send(&msg);
+            if !comp_ch.send(&msg) {
+                // Ring buffer full — event dropped.
+            }
 
             let _ = sys::channel_signal(1);
         }
