@@ -232,3 +232,332 @@ fn cmd_create_shader_text_encoding() {
         "packed bytes must round-trip to original text"
     );
 }
+
+// ── DSA state encoding tests ────────────────────────────────────────
+
+#[test]
+fn cmd_create_dsa_basic_encoding() {
+    // Default DSA: depth disabled, no stencil, depth_func=ALWAYS.
+    let mut buf = CommandBuffer::new();
+    buf.cmd_create_dsa(42);
+    let words = buf.as_dwords();
+
+    // Header: CREATE_OBJECT, DSA, 5 dwords payload
+    assert_eq!(words[0] & 0xFF, VIRGL_CCMD_CREATE_OBJECT);
+    assert_eq!((words[0] >> 8) & 0xFF, VIRGL_OBJECT_DSA);
+    assert_eq!((words[0] >> 16) & 0xFFFF, 5);
+
+    assert_eq!(words[1], 42, "handle");
+
+    // S0: depth_enabled=0, depth_writemask=0, depth_func=ALWAYS(7) at bits 2-4
+    // ALWAYS=7, shifted left by 2 = 28 = 0x1C
+    let s0 = words[2];
+    let depth_enabled = s0 & 1;
+    let depth_writemask = (s0 >> 1) & 1;
+    let depth_func = (s0 >> 2) & 7;
+    assert_eq!(depth_enabled, 0, "depth should be disabled");
+    assert_eq!(depth_writemask, 0, "depth write should be disabled");
+    assert_eq!(depth_func, PIPE_FUNC_ALWAYS, "depth_func should be ALWAYS");
+
+    // S1, S2: stencil disabled (0)
+    assert_eq!(words[3], 0, "stencil[0] should be 0 (disabled)");
+    assert_eq!(words[4], 0, "stencil[1] should be 0 (disabled)");
+
+    // S3: alpha ref + alpha func = 0
+    assert_eq!(words[5], 0, "alpha state should be 0");
+}
+
+#[test]
+fn cmd_create_dsa_stencil_write_encoding() {
+    // Stencil write DSA: depth disabled, front=incr_wrap, back=decr_wrap.
+    let mut buf = CommandBuffer::new();
+    buf.cmd_create_dsa_stencil_write(10);
+    let words = buf.as_dwords();
+
+    assert_eq!(words[1], 10, "handle");
+    assert_eq!(words[2], 0, "S0: depth disabled entirely");
+
+    // S1: stencil[0] (front face)
+    let s1 = words[3];
+    let enabled = s1 & 1;
+    let func = (s1 >> 1) & 7;
+    let fail_op = (s1 >> 4) & 7;
+    let zpass_op = (s1 >> 7) & 7;
+    let zfail_op = (s1 >> 10) & 7;
+    let valuemask = (s1 >> 13) & 0xFF;
+    let writemask = (s1 >> 21) & 0xFF;
+    assert_eq!(enabled, 1, "front stencil should be enabled");
+    assert_eq!(func, PIPE_FUNC_ALWAYS, "front func should be ALWAYS");
+    assert_eq!(
+        fail_op, PIPE_STENCIL_OP_KEEP,
+        "front fail_op should be KEEP"
+    );
+    assert_eq!(
+        zpass_op, PIPE_STENCIL_OP_INCR_WRAP,
+        "front zpass_op should be INCR_WRAP"
+    );
+    assert_eq!(
+        zfail_op, PIPE_STENCIL_OP_KEEP,
+        "front zfail_op should be KEEP"
+    );
+    assert_eq!(valuemask, 0xFF, "front valuemask should be 0xFF");
+    assert_eq!(writemask, 0xFF, "front writemask should be 0xFF");
+
+    // S2: stencil[1] (back face) — same except DECR_WRAP
+    let s2 = words[4];
+    let back_enabled = s2 & 1;
+    let back_func = (s2 >> 1) & 7;
+    let back_zpass_op = (s2 >> 7) & 7;
+    assert_eq!(back_enabled, 1, "back stencil should be enabled");
+    assert_eq!(back_func, PIPE_FUNC_ALWAYS, "back func should be ALWAYS");
+    assert_eq!(
+        back_zpass_op, PIPE_STENCIL_OP_DECR_WRAP,
+        "back zpass_op should be DECR_WRAP"
+    );
+
+    assert_eq!(words[5], 0, "S3: alpha should be 0");
+}
+
+#[test]
+fn cmd_create_dsa_stencil_test_encoding() {
+    // Stencil test DSA: pass where stencil != 0, zero on pass.
+    let mut buf = CommandBuffer::new();
+    buf.cmd_create_dsa_stencil_test(20);
+    let words = buf.as_dwords();
+
+    assert_eq!(words[1], 20, "handle");
+    assert_eq!(words[2], 0, "S0: depth disabled");
+
+    // S1 and S2 should be identical (front and back same).
+    assert_eq!(words[3], words[4], "front and back stencil should match");
+
+    let face = words[3];
+    let enabled = face & 1;
+    let func = (face >> 1) & 7;
+    let fail_op = (face >> 4) & 7;
+    let zpass_op = (face >> 7) & 7;
+    let zfail_op = (face >> 10) & 7;
+    let valuemask = (face >> 13) & 0xFF;
+    let writemask = (face >> 21) & 0xFF;
+    assert_eq!(enabled, 1, "stencil should be enabled");
+    assert_eq!(func, PIPE_FUNC_NOTEQUAL, "func should be NOTEQUAL");
+    assert_eq!(fail_op, PIPE_STENCIL_OP_KEEP, "fail_op should be KEEP");
+    assert_eq!(zpass_op, PIPE_STENCIL_OP_ZERO, "zpass_op should be ZERO");
+    assert_eq!(zfail_op, PIPE_STENCIL_OP_KEEP, "zfail_op should be KEEP");
+    assert_eq!(valuemask, 0xFF);
+    assert_eq!(writemask, 0xFF);
+}
+
+// ── Blend state encoding tests ──────────────────────────────────────
+
+#[test]
+fn cmd_create_blend_alpha_encoding() {
+    // Standard Porter-Duff source-over blend.
+    let mut buf = CommandBuffer::new();
+    buf.cmd_create_blend(30);
+    let words = buf.as_dwords();
+
+    // Header: CREATE_OBJECT, BLEND, 11 dwords payload
+    assert_eq!(words[0] & 0xFF, VIRGL_CCMD_CREATE_OBJECT);
+    assert_eq!((words[0] >> 8) & 0xFF, VIRGL_OBJECT_BLEND);
+    assert_eq!((words[0] >> 16) & 0xFFFF, 11);
+
+    assert_eq!(words[1], 30, "handle");
+    assert_eq!(
+        words[2], 0,
+        "S0: no independent blend, no logicop, no dither"
+    );
+    assert_eq!(words[3], 0, "S1: logicop_func = 0");
+
+    // RT0 blend state (words[4])
+    let rt0 = words[4];
+    let blend_enable = rt0 & 1;
+    let rgb_func = (rt0 >> 1) & 7;
+    let rgb_src = (rt0 >> 4) & 0x1F;
+    let rgb_dst = (rt0 >> 9) & 0x1F;
+    let alpha_func = (rt0 >> 14) & 7;
+    let alpha_src = (rt0 >> 17) & 0x1F;
+    let alpha_dst = (rt0 >> 22) & 0x1F;
+    let colormask = (rt0 >> 27) & 0xF;
+
+    assert_eq!(blend_enable, 1, "blend should be enabled");
+    assert_eq!(rgb_func, PIPE_BLEND_ADD, "rgb_func should be ADD");
+    assert_eq!(
+        rgb_src, PIPE_BLENDFACTOR_SRC_ALPHA,
+        "rgb_src should be SRC_ALPHA"
+    );
+    assert_eq!(
+        rgb_dst, PIPE_BLENDFACTOR_INV_SRC_ALPHA,
+        "rgb_dst should be INV_SRC_ALPHA"
+    );
+    assert_eq!(alpha_func, PIPE_BLEND_ADD, "alpha_func should be ADD");
+    assert_eq!(
+        alpha_src, PIPE_BLENDFACTOR_SRC_ALPHA,
+        "alpha_src should be SRC_ALPHA"
+    );
+    assert_eq!(
+        alpha_dst, PIPE_BLENDFACTOR_INV_SRC_ALPHA,
+        "alpha_dst should be INV_SRC_ALPHA"
+    );
+    assert_eq!(colormask, PIPE_MASK_RGBA, "colormask should be RGBA");
+
+    // RT1-RT7 should all be zero.
+    for i in 5..12 {
+        assert_eq!(words[i], 0, "RT{} should be zero", i - 4);
+    }
+}
+
+#[test]
+fn cmd_create_blend_no_color_encoding() {
+    // Blend with color writes disabled (for stencil-only pass).
+    let mut buf = CommandBuffer::new();
+    buf.cmd_create_blend_no_color(50);
+    let words = buf.as_dwords();
+
+    assert_eq!(words[0] & 0xFF, VIRGL_CCMD_CREATE_OBJECT);
+    assert_eq!((words[0] >> 8) & 0xFF, VIRGL_OBJECT_BLEND);
+    assert_eq!((words[0] >> 16) & 0xFFFF, 11);
+
+    assert_eq!(words[1], 50, "handle");
+    assert_eq!(words[2], 0, "S0");
+    assert_eq!(words[3], 0, "S1 logicop");
+
+    // RT0-RT7: all zero (blend disabled, colormask = 0).
+    for i in 4..12 {
+        assert_eq!(words[i], 0, "RT{}: all zero means no color write", i - 4);
+    }
+}
+
+#[test]
+fn cmd_create_blend_rt0_bit_packing_round_trip() {
+    // Verify that the RT0 u32 value can be decoded back to the original
+    // blend factors by direct bit extraction, ensuring no field overlaps.
+    let mut buf = CommandBuffer::new();
+    buf.cmd_create_blend(1);
+    let rt0 = buf.as_dwords()[4];
+
+    // Reconstruct the expected value.
+    let expected = 1 // blend_enable
+        | (PIPE_BLEND_ADD << 1)
+        | (PIPE_BLENDFACTOR_SRC_ALPHA << 4)
+        | (PIPE_BLENDFACTOR_INV_SRC_ALPHA << 9)
+        | (PIPE_BLEND_ADD << 14)
+        | (PIPE_BLENDFACTOR_SRC_ALPHA << 17)
+        | (PIPE_BLENDFACTOR_INV_SRC_ALPHA << 22)
+        | (PIPE_MASK_RGBA << 27);
+
+    assert_eq!(
+        rt0, expected,
+        "RT0 should match reconstructed value: got {rt0:#010x}, expected {expected:#010x}"
+    );
+}
+
+// ── Stencil face bit layout test ────────────────────────────────────
+
+#[test]
+fn stencil_face_bit_layout_no_overlap() {
+    // Verify that setting each field to its maximum value doesn't overlap
+    // with adjacent fields. Each field has a known bit width:
+    //   enabled:   1 bit  (0)
+    //   func:      3 bits (1-3)
+    //   fail_op:   3 bits (4-6)
+    //   zpass_op:  3 bits (7-9)
+    //   zfail_op:  3 bits (10-12)
+    //   valuemask: 8 bits (13-20)
+    //   writemask: 8 bits (21-28)
+    //
+    // The stencil_face function is private, so we reconstruct and verify
+    // through the stencil write DSA which exercises it.
+    let mut buf = CommandBuffer::new();
+    buf.cmd_create_dsa_stencil_write(1);
+    let front = buf.as_dwords()[3];
+
+    // Verify no bits above bit 28 are set (bits 29-31 should be 0).
+    assert_eq!(
+        front & 0xE000_0000,
+        0,
+        "bits 29-31 should be unused, got {front:#010x}"
+    );
+
+    // Verify each field is individually addressable.
+    // Front face uses: ALWAYS(7), KEEP(0), INCR_WRAP(5), KEEP(0), 0xFF, 0xFF
+    let expected = 1
+        | (PIPE_FUNC_ALWAYS << 1)
+        | (PIPE_STENCIL_OP_KEEP << 4)
+        | (PIPE_STENCIL_OP_INCR_WRAP << 7)
+        | (PIPE_STENCIL_OP_KEEP << 10)
+        | (0xFF << 13)
+        | (0xFF << 21);
+    assert_eq!(
+        front, expected,
+        "front face encoding: got {front:#010x}, expected {expected:#010x}"
+    );
+}
+
+// ── Rasterizer state tests ──────────────────────────────────────────
+
+#[test]
+fn cmd_create_rasterizer_scissor_bit() {
+    let mut buf_no_scissor = CommandBuffer::new();
+    buf_no_scissor.cmd_create_rasterizer(1, false);
+    let s0_no = buf_no_scissor.as_dwords()[2];
+
+    let mut buf_scissor = CommandBuffer::new();
+    buf_scissor.cmd_create_rasterizer(2, true);
+    let s0_yes = buf_scissor.as_dwords()[2];
+
+    // Scissor is bit 8.
+    assert_eq!(s0_no & (1 << 8), 0, "scissor should be off");
+    assert_eq!(s0_yes & (1 << 8), 1 << 8, "scissor should be on");
+
+    // Depth clip bits (1, 2) should be set in both.
+    assert_eq!(s0_no & 0x06, 0x06, "depth_clip_near/far should be set");
+    assert_eq!(s0_yes & 0x06, 0x06, "depth_clip_near/far should be set");
+}
+
+#[test]
+fn cmd_set_stencil_ref_packing() {
+    let mut buf = CommandBuffer::new();
+    buf.cmd_set_stencil_ref(0x42, 0xAB);
+    let words = buf.as_dwords();
+
+    assert_eq!(words[0] & 0xFF, VIRGL_CCMD_SET_STENCIL_REF);
+    let packed = words[1];
+    assert_eq!(packed & 0xFF, 0x42, "front ref");
+    assert_eq!((packed >> 8) & 0xFF, 0xAB, "back ref");
+}
+
+#[test]
+fn cmd_clear_stencil_encoding() {
+    let mut buf = CommandBuffer::new();
+    buf.cmd_clear_stencil();
+    let words = buf.as_dwords();
+
+    assert_eq!(words[0] & 0xFF, VIRGL_CCMD_CLEAR);
+    assert_eq!(words[1], PIPE_CLEAR_DEPTH | PIPE_CLEAR_STENCIL);
+    // Color should be zero.
+    assert_eq!(words[2], 0);
+    assert_eq!(words[3], 0);
+    assert_eq!(words[4], 0);
+    assert_eq!(words[5], 0);
+    // Depth = 1.0 as f64 bits split into two u32s.
+    let depth_bits = 1.0f64.to_bits();
+    assert_eq!(words[6], depth_bits as u32, "depth lo");
+    assert_eq!(words[7], (depth_bits >> 32) as u32, "depth hi");
+    // Stencil = 0.
+    assert_eq!(words[8], 0, "stencil clear value");
+}
+
+#[test]
+fn cmd_set_scissor_rect_packing() {
+    let mut buf = CommandBuffer::new();
+    buf.cmd_set_scissor(10, 20, 100, 50);
+    let words = buf.as_dwords();
+
+    assert_eq!(words[0] & 0xFF, VIRGL_CCMD_SET_SCISSOR_STATE);
+    assert_eq!(words[1], 0, "start_slot");
+    // min: x | (y << 16)
+    assert_eq!(words[2], 10 | (20 << 16));
+    // max: (x+w) | ((y+h) << 16)
+    assert_eq!(words[3], 110 | (70 << 16));
+}

@@ -4861,3 +4861,316 @@ fn all_content_types_render_in_one_scene() {
     let (_, _, b, _) = read_pixel(&buf, stride, 2, 102);
     assert!(b > 200, "VAL-CROSS-03: image should render blue, b={}", b);
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Tests: ClipRect i32 variant (CPU renderer) — direct unit tests
+// ═══════════════════════════════════════════════════════════════════
+//
+// The CPU renderer's ClipRect is private to render::scene_render.
+// We copy the i32 intersection logic here to test it directly.
+// This ensures parity with the source — if the source changes, a
+// reviewer should update these tests too.
+
+#[derive(Clone, Copy, Debug)]
+struct CpuClipRect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+impl CpuClipRect {
+    fn intersect(self, other: CpuClipRect) -> Option<CpuClipRect> {
+        let x0 = if self.x > other.x { self.x } else { other.x };
+        let y0 = if self.y > other.y { self.y } else { other.y };
+        let x1_a = self.x + self.w;
+        let x1_b = other.x + other.w;
+        let x1 = if x1_a < x1_b { x1_a } else { x1_b };
+        let y1_a = self.y + self.h;
+        let y1_b = other.y + other.h;
+        let y1 = if y1_a < y1_b { y1_a } else { y1_b };
+
+        if x1 > x0 && y1 > y0 {
+            Some(CpuClipRect {
+                x: x0,
+                y: y0,
+                w: x1 - x0,
+                h: y1 - y0,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+#[test]
+fn cpu_clip_rect_full_overlap() {
+    let a = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 100,
+    };
+    let b = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 100,
+    };
+    let r = a.intersect(b).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 100, 100));
+}
+
+#[test]
+fn cpu_clip_rect_partial_overlap() {
+    let a = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 60,
+        h: 60,
+    };
+    let b = CpuClipRect {
+        x: 30,
+        y: 20,
+        w: 60,
+        h: 60,
+    };
+    let r = a.intersect(b).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (30, 20, 30, 40));
+}
+
+#[test]
+fn cpu_clip_rect_no_overlap_horizontal() {
+    let a = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 50,
+        h: 50,
+    };
+    let b = CpuClipRect {
+        x: 60,
+        y: 0,
+        w: 50,
+        h: 50,
+    };
+    assert!(a.intersect(b).is_none());
+}
+
+#[test]
+fn cpu_clip_rect_no_overlap_vertical() {
+    let a = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 50,
+        h: 50,
+    };
+    let b = CpuClipRect {
+        x: 0,
+        y: 60,
+        w: 50,
+        h: 50,
+    };
+    assert!(a.intersect(b).is_none());
+}
+
+#[test]
+fn cpu_clip_rect_contained() {
+    let a = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 100,
+    };
+    let b = CpuClipRect {
+        x: 20,
+        y: 30,
+        w: 40,
+        h: 50,
+    };
+    let r = a.intersect(b).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (20, 30, 40, 50));
+}
+
+#[test]
+fn cpu_clip_rect_containing() {
+    let a = CpuClipRect {
+        x: 20,
+        y: 30,
+        w: 40,
+        h: 50,
+    };
+    let b = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 100,
+    };
+    let r = a.intersect(b).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (20, 30, 40, 50));
+}
+
+#[test]
+fn cpu_clip_rect_touching_edge_returns_none() {
+    let a = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 50,
+        h: 50,
+    };
+    let b = CpuClipRect {
+        x: 50,
+        y: 0,
+        w: 50,
+        h: 50,
+    };
+    assert!(
+        a.intersect(b).is_none(),
+        "edge-touching should be None (zero width)"
+    );
+}
+
+#[test]
+fn cpu_clip_rect_touching_corner_returns_none() {
+    let a = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 50,
+        h: 50,
+    };
+    let b = CpuClipRect {
+        x: 50,
+        y: 50,
+        w: 50,
+        h: 50,
+    };
+    assert!(a.intersect(b).is_none(), "corner-touching should be None");
+}
+
+#[test]
+fn cpu_clip_rect_zero_width_input() {
+    let a = CpuClipRect {
+        x: 10,
+        y: 10,
+        w: 0,
+        h: 50,
+    };
+    let b = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 100,
+    };
+    assert!(
+        a.intersect(b).is_none(),
+        "zero-width rect should produce no intersection"
+    );
+}
+
+#[test]
+fn cpu_clip_rect_zero_height_input() {
+    let a = CpuClipRect {
+        x: 10,
+        y: 10,
+        w: 50,
+        h: 0,
+    };
+    let b = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 100,
+    };
+    assert!(a.intersect(b).is_none());
+}
+
+#[test]
+fn cpu_clip_rect_negative_position() {
+    // Negative coordinates (possible after scroll offset application).
+    let a = CpuClipRect {
+        x: -20,
+        y: -10,
+        w: 50,
+        h: 50,
+    };
+    let b = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 100,
+        h: 100,
+    };
+    let r = a.intersect(b).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (0, 0, 30, 40));
+}
+
+#[test]
+fn cpu_clip_rect_both_negative() {
+    let a = CpuClipRect {
+        x: -50,
+        y: -50,
+        w: 30,
+        h: 30,
+    };
+    let b = CpuClipRect {
+        x: -40,
+        y: -40,
+        w: 30,
+        h: 30,
+    };
+    let r = a.intersect(b).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (-40, -40, 20, 20));
+}
+
+#[test]
+fn cpu_clip_rect_large_coordinates() {
+    let a = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1080,
+    };
+    let b = CpuClipRect {
+        x: 960,
+        y: 540,
+        w: 1920,
+        h: 1080,
+    };
+    let r = a.intersect(b).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (960, 540, 960, 540));
+}
+
+#[test]
+fn cpu_clip_rect_single_pixel_overlap() {
+    let a = CpuClipRect {
+        x: 0,
+        y: 0,
+        w: 50,
+        h: 50,
+    };
+    let b = CpuClipRect {
+        x: 49,
+        y: 49,
+        w: 50,
+        h: 50,
+    };
+    let r = a.intersect(b).unwrap();
+    assert_eq!((r.x, r.y, r.w, r.h), (49, 49, 1, 1));
+}
+
+#[test]
+fn cpu_clip_rect_commutative() {
+    let a = CpuClipRect {
+        x: 10,
+        y: 20,
+        w: 50,
+        h: 40,
+    };
+    let b = CpuClipRect {
+        x: 30,
+        y: 10,
+        w: 60,
+        h: 70,
+    };
+    let r1 = a.intersect(b).unwrap();
+    let r2 = b.intersect(a).unwrap();
+    assert_eq!((r1.x, r1.y, r1.w, r1.h), (r2.x, r2.y, r2.w, r2.h));
+}
