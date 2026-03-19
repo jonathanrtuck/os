@@ -15,7 +15,9 @@ Two render backends: `cpu-render` (software) and `virgil-render` (GPU via Virgl3
 
 ---
 
-## A. Performance Architecture
+## A. Performance Architecture — SUBSUMED (2026-03-19)
+
+**All items below are subsumed by the incremental scene pipeline design.** See `design/incremental-scene-pipeline.md` (spec) and `design/plan-incremental-scene-pipeline.md` (implementation plan). The incremental pipeline addresses A1 (dirty rects), A2 (hot-path allocations via incremental building), A3 (full reshaping via per-line updates), A4 (shadow caching via per-node render cache), and A5 (change list overflow via dirty bitmap).
 
 The pipeline's data flow is correct but has structural performance issues that would be painful to retrofit later.
 
