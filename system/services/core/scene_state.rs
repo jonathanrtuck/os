@@ -13,6 +13,32 @@ use scene::{
     DATA_BUFFER_SIZE, NULL, TRIPLE_SCENE_SIZE,
 };
 
+/// Shared configuration for scene building functions. Avoids passing
+/// 25+ parameters individually to build_editor_scene, update_document_content,
+/// update_selection, and update_clock.
+pub struct SceneConfig<'a> {
+    pub fb_width: u32,
+    pub fb_height: u32,
+    pub title_bar_h: u32,
+    pub shadow_depth: u32,
+    pub text_inset_x: u32,
+    pub text_inset_top: u32,
+    pub chrome_bg: drawing::Color,
+    pub chrome_border: drawing::Color,
+    pub chrome_title_color: drawing::Color,
+    pub chrome_clock_color: drawing::Color,
+    pub bg_color: drawing::Color,
+    pub text_color: drawing::Color,
+    pub cursor_color: drawing::Color,
+    pub sel_color: drawing::Color,
+    pub font_size: u16,
+    pub char_width: u32,
+    pub line_height: u32,
+    pub font_data: &'a [u8],
+    pub upem: u16,
+    pub axes: &'a [fonts::rasterize::AxisValue],
+}
+
 /// Local layout run type — used for line-breaking before writing to
 /// the scene graph. Each LayoutRun describes one visual text line.
 struct LayoutRun {
@@ -67,26 +93,9 @@ impl SceneState {
     /// Text layout (line breaking, cursor/selection positioning) happens
     /// here. Each visible text line becomes a Content::Glyphs child node
     /// under N_DOC_TEXT. Title and clock are single Content::Glyphs nodes.
-    #[allow(clippy::too_many_arguments)]
     pub fn build_editor_scene(
         &mut self,
-        fb_width: u32,
-        fb_height: u32,
-        title_bar_h: u32,
-        shadow_depth: u32,
-        text_inset_x: u32,
-        _text_inset_top: u32,
-        chrome_bg: drawing::Color,
-        chrome_border: drawing::Color,
-        chrome_title_color: drawing::Color,
-        chrome_clock_color: drawing::Color,
-        bg_color: drawing::Color,
-        text_color: drawing::Color,
-        cursor_color: drawing::Color,
-        sel_color: drawing::Color,
-        font_size: u16,
-        char_width: u32,
-        line_height: u32,
+        cfg: &SceneConfig,
         doc_text: &[u8],
         cursor_pos: u32,
         sel_start: u32,
@@ -94,33 +103,30 @@ impl SceneState {
         title_label: &[u8],
         clock_text: &[u8],
         scroll_y: i32,
-        font_data: &[u8],
-        upem: u16,
-        axes: &[fonts::rasterize::AxisValue],
     ) {
         let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
-        let scene_text_color = dc(text_color);
+        let scene_text_color = dc(cfg.text_color);
         // Layout document text into visual lines (monospace line-breaking).
-        let doc_width = fb_width.saturating_sub(2 * text_inset_x);
-        let chars_per_line = if char_width > 0 {
-            (doc_width / char_width).max(1)
+        let doc_width = cfg.fb_width.saturating_sub(2 * cfg.text_inset_x);
+        let chars_per_line = if cfg.char_width > 0 {
+            (doc_width / cfg.char_width).max(1)
         } else {
             80
         };
         let all_runs = layout_mono_lines(
             doc_text,
             chars_per_line as usize,
-            line_height as i16,
+            cfg.line_height as i16,
             scene_text_color,
-            font_size,
+            cfg.font_size,
         );
         // Apply scroll: filter to visible viewport, adjust y positions.
-        let content_y = title_bar_h + shadow_depth;
-        let content_h = fb_height.saturating_sub(content_y) as i32;
+        let content_y = cfg.title_bar_h + cfg.shadow_depth;
+        let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
         let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-        let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, content_h);
+        let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, content_h);
         // Scroll offset in pixels for cursor/selection positioning.
-        let scroll_px = scroll_lines as i32 * line_height as i32;
+        let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
         // Compute cursor line/col for positioning.
         let cursor_byte = cursor_pos as usize;
         let (cursor_line, cursor_col) =
@@ -141,9 +147,16 @@ impl SceneState {
             w.clear();
 
             // Push shaped glyph arrays for title and clock.
-            let title_glyphs = shape_text(font_data, title_label, font_size, upem, axes);
+            let title_glyphs = shape_text(
+                cfg.font_data,
+                title_label,
+                cfg.font_size,
+                cfg.upem,
+                cfg.axes,
+            );
             let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-            let clock_glyphs = shape_text(font_data, clock_text, font_size, upem, axes);
+            let clock_glyphs =
+                shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
             let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
             // Push visible line glyph data.
@@ -152,7 +165,8 @@ impl SceneState {
 
             for run in &visible_runs {
                 let line_text = line_bytes_for_run(doc_text, run);
-                let shaped = shape_text(font_data, line_text, font_size, upem, axes);
+                let shaped =
+                    shape_text(cfg.font_data, line_text, cfg.font_size, cfg.upem, cfg.axes);
                 let glyph_ref = w.push_shaped_glyphs(&shaped);
 
                 line_glyph_refs.push((glyph_ref, shaped.len() as u16, run.y));
@@ -172,9 +186,9 @@ impl SceneState {
                 let n = w.node_mut(N_ROOT);
 
                 n.first_child = N_TITLE_BAR;
-                n.width = fb_width as u16;
-                n.height = fb_height as u16;
-                n.background = dc(bg_color);
+                n.width = cfg.fb_width as u16;
+                n.height = cfg.fb_height as u16;
+                n.background = dc(cfg.bg_color);
                 n.flags = NodeFlags::VISIBLE;
             }
             {
@@ -182,11 +196,11 @@ impl SceneState {
 
                 n.first_child = N_TITLE_TEXT;
                 n.next_sibling = N_SHADOW;
-                n.width = fb_width as u16;
-                n.height = title_bar_h as u16;
-                n.background = dc(chrome_bg);
+                n.width = cfg.fb_width as u16;
+                n.height = cfg.title_bar_h as u16;
+                n.background = dc(cfg.chrome_bg);
                 n.border = Border {
-                    color: dc(chrome_border),
+                    color: dc(cfg.chrome_border),
                     width: 1,
                     _pad: [0; 3],
                 };
@@ -194,12 +208,12 @@ impl SceneState {
                 // Real blurred shadow below the title bar.
                 n.shadow_color = Color::rgba(0, 0, 0, 60);
                 n.shadow_offset_x = 0;
-                n.shadow_offset_y = shadow_depth as i16;
-                n.shadow_blur_radius = (shadow_depth as u8).min(8);
+                n.shadow_offset_y = cfg.shadow_depth as i16;
+                n.shadow_blur_radius = (cfg.shadow_depth as u8).min(8);
                 n.shadow_spread = 0;
             }
 
-            let text_y_offset = (title_bar_h.saturating_sub(line_height)) / 2;
+            let text_y_offset = (cfg.title_bar_h.saturating_sub(cfg.line_height)) / 2;
 
             {
                 let n = w.node_mut(N_TITLE_TEXT);
@@ -207,20 +221,20 @@ impl SceneState {
                 n.next_sibling = N_CLOCK_TEXT;
                 n.x = 12;
                 n.y = text_y_offset as i16;
-                n.width = (fb_width / 2) as u16;
-                n.height = line_height as u16;
+                n.width = (cfg.fb_width / 2) as u16;
+                n.height = cfg.line_height as u16;
                 n.content = Content::Glyphs {
-                    color: dc(chrome_title_color),
+                    color: dc(cfg.chrome_title_color),
                     glyphs: title_glyph_ref,
                     glyph_count: title_glyphs.len() as u16,
-                    font_size,
+                    font_size: cfg.font_size,
                     axis_hash: 0,
                 };
                 n.content_hash = fnv1a(title_label);
                 n.flags = NodeFlags::VISIBLE;
             }
 
-            let clock_x = (fb_width - 12 - 80) as i16;
+            let clock_x = (cfg.fb_width - 12 - 80) as i16;
 
             {
                 let n = w.node_mut(N_CLOCK_TEXT);
@@ -228,12 +242,12 @@ impl SceneState {
                 n.x = clock_x;
                 n.y = text_y_offset as i16;
                 n.width = 80;
-                n.height = line_height as u16;
+                n.height = cfg.line_height as u16;
                 n.content = Content::Glyphs {
-                    color: dc(chrome_clock_color),
+                    color: dc(cfg.chrome_clock_color),
                     glyphs: clock_glyph_ref,
                     glyph_count: clock_glyphs.len() as u16,
-                    font_size,
+                    font_size: cfg.font_size,
                     axis_hash: 0,
                 };
                 n.content_hash = fnv1a(clock_text);
@@ -246,15 +260,15 @@ impl SceneState {
                 let n = w.node_mut(N_SHADOW);
 
                 n.next_sibling = N_CONTENT;
-                n.y = title_bar_h as i16;
-                n.width = fb_width as u16;
+                n.y = cfg.title_bar_h as i16;
+                n.width = cfg.fb_width as u16;
                 n.height = 0;
                 n.background = Color::TRANSPARENT;
                 n.flags = NodeFlags::VISIBLE;
             }
 
-            let content_y = title_bar_h + shadow_depth;
-            let content_h = fb_height.saturating_sub(content_y);
+            let content_y = cfg.title_bar_h + cfg.shadow_depth;
+            let content_h = cfg.fb_height.saturating_sub(content_y);
 
             {
                 let n = w.node_mut(N_CONTENT);
@@ -262,14 +276,14 @@ impl SceneState {
                 n.first_child = N_DOC_TEXT;
                 n.next_sibling = NULL;
                 n.y = content_y as i16;
-                n.width = fb_width as u16;
+                n.width = cfg.fb_width as u16;
                 n.height = content_h as u16;
                 n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
             }
             {
                 let n = w.node_mut(N_DOC_TEXT);
 
-                n.x = text_inset_x as i16;
+                n.x = cfg.text_inset_x as i16;
                 n.y = 8;
                 n.width = doc_width as u16;
                 n.height = content_h as u16;
@@ -292,12 +306,12 @@ impl SceneState {
                     let n = w.node_mut(line_id);
                     n.y = y;
                     n.width = doc_width as u16;
-                    n.height = line_height as u16;
+                    n.height = cfg.line_height as u16;
                     n.content = Content::Glyphs {
                         color: scene_text_color,
                         glyphs: glyph_ref,
                         glyph_count,
-                        font_size,
+                        font_size: cfg.font_size,
                         axis_hash: 0,
                     };
                     n.content_hash = fnv1a(&glyph_ref.offset.to_le_bytes());
@@ -322,8 +336,8 @@ impl SceneState {
 
             // Cursor: positioned rectangle child of doc text node.
             // Scroll-adjusted: cursor_line is absolute, subtract scroll.
-            let cursor_x = (cursor_col as u32 * char_width) as i16;
-            let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+            let cursor_x = (cursor_col as u32 * cfg.char_width) as i16;
+            let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i16;
 
             {
                 let n = w.node_mut(N_CURSOR);
@@ -331,8 +345,8 @@ impl SceneState {
                 n.x = cursor_x;
                 n.y = cursor_y;
                 n.width = 2;
-                n.height = line_height as u16;
-                n.background = dc(cursor_color);
+                n.height = cfg.line_height as u16;
+                n.background = dc(cfg.cursor_color);
                 n.content = Content::None;
                 n.flags = NodeFlags::VISIBLE;
                 n.next_sibling = NULL;
@@ -346,9 +360,9 @@ impl SceneState {
                     sel_lo,
                     sel_hi,
                     chars_per_line as usize,
-                    char_width,
-                    line_height,
-                    dc(sel_color),
+                    cfg.char_width,
+                    cfg.line_height,
+                    dc(cfg.sel_color),
                     content_h,
                     scroll_px,
                 );
@@ -363,7 +377,7 @@ impl SceneState {
             let img_ref = w.push_data(&test_img);
             if let Some(img_id) = w.alloc_node() {
                 let n = w.node_mut(img_id);
-                n.x = (fb_width as i16).saturating_sub(160);
+                n.x = (cfg.fb_width as i16).saturating_sub(160);
                 n.y = 8;
                 n.width = 64; // Display at 2× for visibility.
                 n.height = 64;
@@ -392,7 +406,7 @@ impl SceneState {
             let star_ref = w.push_path_commands(&star_cmds);
             if let Some(star_id) = w.alloc_node() {
                 let n = w.node_mut(star_id);
-                n.x = (fb_width as i16).saturating_sub(90);
+                n.x = (cfg.fb_width as i16).saturating_sub(90);
                 n.y = 8;
                 n.width = 60;
                 n.height = 60;
@@ -419,7 +433,7 @@ impl SceneState {
             let rrect_ref = w.push_path_commands(&rrect_cmds);
             if let Some(rr_id) = w.alloc_node() {
                 let n = w.node_mut(rr_id);
-                n.x = (fb_width as i16).saturating_sub(160);
+                n.x = (cfg.fb_width as i16).saturating_sub(160);
                 n.y = 78;
                 n.width = 80;
                 n.height = 40;
@@ -453,14 +467,7 @@ impl SceneState {
     /// produce different glyph counts for different clock strings, so
     /// in-place overwrite is no longer safe. Instead, push new shaped
     /// data and update the Content::Glyphs reference.
-    pub fn update_clock(
-        &mut self,
-        clock_text: &[u8],
-        font_data: &[u8],
-        font_size: u16,
-        upem: u16,
-        axes: &[fonts::rasterize::AxisValue],
-    ) {
+    pub fn update_clock(&mut self, cfg: &SceneConfig, clock_text: &[u8]) {
         let mut tw = self.triple();
 
         {
@@ -468,7 +475,8 @@ impl SceneState {
 
             let clock_node = w.node(N_CLOCK_TEXT);
             if let Content::Glyphs { color, .. } = clock_node.content {
-                let new_glyphs = shape_text(font_data, clock_text, font_size, upem, axes);
+                let new_glyphs =
+                    shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
                 let new_ref = w.push_shaped_glyphs(&new_glyphs);
                 let new_count = new_glyphs.len() as u16;
 
@@ -477,7 +485,7 @@ impl SceneState {
                     color,
                     glyphs: new_ref,
                     glyph_count: new_count,
-                    font_size,
+                    font_size: cfg.font_size,
                     axis_hash: 0,
                 };
                 n.content_hash = fnv1a(clock_text);
@@ -492,17 +500,12 @@ impl SceneState {
     /// Only N_CURSOR is marked changed.
     pub fn update_cursor(
         &mut self,
+        cfg: &SceneConfig,
         cursor_pos: u32,
         doc_text: &[u8],
         chars_per_line: u32,
-        char_width: u32,
-        line_height: u32,
         scroll_px: i32,
         clock_text: Option<&[u8]>,
-        font_data: &[u8],
-        font_size: u16,
-        upem: u16,
-        axes: &[fonts::rasterize::AxisValue],
     ) {
         let mut tw = self.triple();
 
@@ -511,8 +514,8 @@ impl SceneState {
 
             let (cursor_line, cursor_col) =
                 byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
-            let cursor_x = (cursor_col as u32 * char_width) as i16;
-            let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+            let cursor_x = (cursor_col as u32 * cfg.char_width) as i16;
+            let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i16;
 
             let n = w.node_mut(N_CURSOR);
             n.x = cursor_x;
@@ -521,7 +524,7 @@ impl SceneState {
             w.mark_changed(N_CURSOR);
 
             if let Some(ct) = clock_text {
-                update_clock_inline(&mut w, ct, font_data, font_size, upem, axes);
+                update_clock_inline(&mut w, ct, cfg.font_data, cfg.font_size, cfg.upem, cfg.axes);
             }
         }
 
@@ -529,25 +532,24 @@ impl SceneState {
     }
 
     /// Update cursor position and selection rects.
-    #[allow(clippy::too_many_arguments)]
     pub fn update_selection(
         &mut self,
+        cfg: &SceneConfig,
         cursor_pos: u32,
         sel_start: u32,
         sel_end: u32,
         doc_text: &[u8],
-        chars_per_line: u32,
-        char_width: u32,
-        line_height: u32,
-        sel_color: Color,
         content_h: u32,
         scroll_px: i32,
         clock_text: Option<&[u8]>,
-        font_data: &[u8],
-        font_size: u16,
-        upem: u16,
-        axes: &[fonts::rasterize::AxisValue],
     ) {
+        let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
+        let doc_width = cfg.fb_width.saturating_sub(2 * cfg.text_inset_x);
+        let chars_per_line = if cfg.char_width > 0 {
+            (doc_width / cfg.char_width).max(1)
+        } else {
+            80
+        };
         let mut tw = self.triple();
 
         {
@@ -568,8 +570,8 @@ impl SceneState {
 
             let (cursor_line, cursor_col) =
                 byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
-            let cursor_x = (cursor_col as u32 * char_width) as i16;
-            let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+            let cursor_x = (cursor_col as u32 * cfg.char_width) as i16;
+            let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i16;
 
             {
                 let n = w.node_mut(N_CURSOR);
@@ -580,7 +582,7 @@ impl SceneState {
             w.mark_changed(N_CURSOR);
 
             if let Some(ct) = clock_text {
-                update_clock_inline(&mut w, ct, font_data, font_size, upem, axes);
+                update_clock_inline(&mut w, ct, cfg.font_data, cfg.font_size, cfg.upem, cfg.axes);
             }
 
             let (sel_lo, sel_hi) = if sel_start <= sel_end {
@@ -596,9 +598,9 @@ impl SceneState {
                     sel_lo,
                     sel_hi,
                     chars_per_line as usize,
-                    char_width,
-                    line_height,
-                    sel_color,
+                    cfg.char_width,
+                    cfg.line_height,
+                    dc(cfg.sel_color),
                     content_h,
                     scroll_px,
                 );
@@ -610,26 +612,9 @@ impl SceneState {
 
     /// Update document content (line nodes + cursor + selection).
     /// Compacts the data buffer by resetting it and re-pushing all data.
-    #[allow(clippy::too_many_arguments)]
     pub fn update_document_content(
         &mut self,
-        fb_width: u32,
-        fb_height: u32,
-        title_bar_h: u32,
-        shadow_depth: u32,
-        text_inset_x: u32,
-        _text_inset_top: u32,
-        _chrome_bg: drawing::Color,
-        _chrome_border: drawing::Color,
-        chrome_title_color: drawing::Color,
-        chrome_clock_color: drawing::Color,
-        _bg_color: drawing::Color,
-        text_color: drawing::Color,
-        _cursor_color: drawing::Color,
-        sel_color: drawing::Color,
-        font_size: u16,
-        char_width: u32,
-        line_height: u32,
+        cfg: &SceneConfig,
         doc_text: &[u8],
         cursor_pos: u32,
         sel_start: u32,
@@ -638,23 +623,20 @@ impl SceneState {
         clock_text: &[u8],
         scroll_y: i32,
         mark_clock_changed: bool,
-        font_data_bytes: &[u8],
-        upem: u16,
-        axes: &[fonts::rasterize::AxisValue],
     ) {
         let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
-        let scene_text_color = dc(text_color);
+        let scene_text_color = dc(cfg.text_color);
 
-        let doc_width = fb_width.saturating_sub(2 * text_inset_x);
-        let chars_per_line = if char_width > 0 {
-            (doc_width / char_width).max(1)
+        let doc_width = cfg.fb_width.saturating_sub(2 * cfg.text_inset_x);
+        let chars_per_line = if cfg.char_width > 0 {
+            (doc_width / cfg.char_width).max(1)
         } else {
             80
         };
-        let content_y = title_bar_h + shadow_depth;
-        let content_h = fb_height.saturating_sub(content_y);
+        let content_y = cfg.title_bar_h + cfg.shadow_depth;
+        let content_h = cfg.fb_height.saturating_sub(content_y);
         let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-        let scroll_px = scroll_lines as i32 * line_height as i32;
+        let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
 
         let mut tw = self.triple();
 
@@ -668,23 +650,31 @@ impl SceneState {
             w.reset_data();
 
             // Re-push title glyph data.
-            let title_glyphs = shape_text(font_data_bytes, title_label, font_size, upem, axes);
+            let title_glyphs = shape_text(
+                cfg.font_data,
+                title_label,
+                cfg.font_size,
+                cfg.upem,
+                cfg.axes,
+            );
             let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
 
             // Re-push clock glyph data.
-            let clock_glyphs = shape_text(font_data_bytes, clock_text, font_size, upem, axes);
+            let clock_glyphs =
+                shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
             let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
             // Re-layout visible document text lines.
             let all_runs = layout_mono_lines(
                 doc_text,
                 chars_per_line as usize,
-                line_height as i16,
+                cfg.line_height as i16,
                 scene_text_color,
-                font_size,
+                cfg.font_size,
             );
             let viewport_height_px = content_h as i32;
-            let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, viewport_height_px);
+            let visible_runs =
+                scroll_runs(all_runs, scroll_lines, cfg.line_height, viewport_height_px);
 
             // Push visible line glyph data.
             let mut line_glyph_refs: Vec<(DataRef, u16, i16)> =
@@ -692,7 +682,8 @@ impl SceneState {
 
             for run in &visible_runs {
                 let line_text = line_bytes_for_run(doc_text, run);
-                let shaped = shape_text(font_data_bytes, line_text, font_size, upem, axes);
+                let shaped =
+                    shape_text(cfg.font_data, line_text, cfg.font_size, cfg.upem, cfg.axes);
                 let glyph_ref = w.push_shaped_glyphs(&shaped);
 
                 line_glyph_refs.push((glyph_ref, shaped.len() as u16, run.y));
@@ -702,10 +693,10 @@ impl SceneState {
             {
                 let n = w.node_mut(N_TITLE_TEXT);
                 n.content = Content::Glyphs {
-                    color: dc(chrome_title_color),
+                    color: dc(cfg.chrome_title_color),
                     glyphs: title_glyph_ref,
                     glyph_count: title_glyphs.len() as u16,
-                    font_size,
+                    font_size: cfg.font_size,
                     axis_hash: 0,
                 };
                 n.content_hash = fnv1a(title_label);
@@ -715,10 +706,10 @@ impl SceneState {
             {
                 let n = w.node_mut(N_CLOCK_TEXT);
                 n.content = Content::Glyphs {
-                    color: dc(chrome_clock_color),
+                    color: dc(cfg.chrome_clock_color),
                     glyphs: clock_glyph_ref,
                     glyph_count: clock_glyphs.len() as u16,
-                    font_size,
+                    font_size: cfg.font_size,
                     axis_hash: 0,
                 };
                 n.content_hash = fnv1a(clock_text);
@@ -747,12 +738,12 @@ impl SceneState {
                     let n = w.node_mut(line_id);
                     n.y = y;
                     n.width = doc_width as u16;
-                    n.height = line_height as u16;
+                    n.height = cfg.line_height as u16;
                     n.content = Content::Glyphs {
                         color: scene_text_color,
                         glyphs: glyph_ref,
                         glyph_count,
-                        font_size,
+                        font_size: cfg.font_size,
                         axis_hash: 0,
                     };
                     n.flags = NodeFlags::VISIBLE;
@@ -779,8 +770,8 @@ impl SceneState {
             // Update cursor position.
             let (cursor_line, cursor_col) =
                 byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
-            let cursor_x = (cursor_col as u32 * char_width) as i16;
-            let cursor_y = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+            let cursor_x = (cursor_col as u32 * cfg.char_width) as i16;
+            let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i16;
 
             {
                 let n = w.node_mut(N_CURSOR);
@@ -804,9 +795,9 @@ impl SceneState {
                     sel_lo,
                     sel_hi,
                     chars_per_line as usize,
-                    char_width,
-                    line_height,
-                    dc(sel_color),
+                    cfg.char_width,
+                    cfg.line_height,
+                    dc(cfg.sel_color),
                     content_h,
                     scroll_px,
                 );
@@ -1067,11 +1058,13 @@ fn shape_text(
     upem: u16,
     axes: &[fonts::rasterize::AxisValue],
 ) -> Vec<ShapedGlyph> {
-    let s = core::str::from_utf8(text).unwrap_or("");
+    // Use lossy conversion so invalid UTF-8 bytes render as replacement
+    // characters instead of causing the entire line to disappear (review 6.7).
+    let s = alloc::string::String::from_utf8_lossy(text);
     if s.is_empty() || font_data.is_empty() || upem == 0 {
         return Vec::new();
     }
-    let shaped = fonts::shape_with_variations(font_data, s, &[], axes);
+    let shaped = fonts::shape_with_variations(font_data, &s, &[], axes);
     let ps = point_size as i32;
     let u = upem as i32;
     shaped

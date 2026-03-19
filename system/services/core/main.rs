@@ -668,26 +668,36 @@ pub extern "C" fn _start() -> ! {
         value: 1.0,
     }];
 
+    let scene_cfg = {
+        let s = state();
+        scene_state::SceneConfig {
+            fb_width,
+            fb_height,
+            title_bar_h: TITLE_BAR_H,
+            shadow_depth: SHADOW_DEPTH,
+            text_inset_x: TEXT_INSET_X,
+            text_inset_top: TEXT_INSET_TOP,
+            chrome_bg: drawing::CHROME_BG,
+            chrome_border: drawing::CHROME_BORDER,
+            chrome_title_color: drawing::CHROME_TITLE,
+            chrome_clock_color: drawing::CHROME_CLOCK,
+            bg_color: drawing::BG_BASE,
+            text_color: drawing::TEXT_PRIMARY,
+            cursor_color: drawing::TEXT_CURSOR,
+            sel_color: drawing::TEXT_SELECTION,
+            font_size: FONT_SIZE as u16,
+            char_width: s.char_w,
+            line_height: s.line_h,
+            font_data: font_data(),
+            upem: s.font_upem,
+            axes: &mono_shape_axes,
+        }
+    };
+
     {
         let s = state();
         scene.build_editor_scene(
-            fb_width,
-            fb_height,
-            TITLE_BAR_H,
-            SHADOW_DEPTH,
-            TEXT_INSET_X,
-            TEXT_INSET_TOP,
-            drawing::CHROME_BG,
-            drawing::CHROME_BORDER,
-            drawing::CHROME_TITLE,
-            drawing::CHROME_CLOCK,
-            drawing::BG_BASE,
-            drawing::TEXT_PRIMARY,
-            drawing::TEXT_CURSOR,
-            drawing::TEXT_SELECTION,
-            FONT_SIZE as u16,
-            s.char_w,
-            s.line_h,
+            &scene_cfg,
             doc_content(),
             s.cursor_pos as u32,
             s.sel_start as u32,
@@ -695,9 +705,6 @@ pub extern "C" fn _start() -> ! {
             b"Text",
             &time_buf,
             0,
-            font_data(),
-            s.font_upem,
-            &mono_shape_axes,
         );
     }
 
@@ -959,23 +966,7 @@ pub extern "C" fn _start() -> ! {
 
                 let s = state();
                 scene.build_editor_scene(
-                    fb_width,
-                    fb_height,
-                    TITLE_BAR_H,
-                    SHADOW_DEPTH,
-                    TEXT_INSET_X,
-                    TEXT_INSET_TOP,
-                    drawing::CHROME_BG,
-                    drawing::CHROME_BORDER,
-                    drawing::CHROME_TITLE,
-                    drawing::CHROME_CLOCK,
-                    drawing::BG_BASE,
-                    drawing::TEXT_PRIMARY,
-                    drawing::TEXT_CURSOR,
-                    drawing::TEXT_SELECTION,
-                    FONT_SIZE as u16,
-                    s.char_w,
-                    s.line_h,
+                    &scene_cfg,
                     doc_content(),
                     s.cursor_pos as u32,
                     s.sel_start as u32,
@@ -983,9 +974,6 @@ pub extern "C" fn _start() -> ! {
                     b"Text",
                     &time_buf,
                     s.scroll_offset as i32,
-                    font_data(),
-                    s.font_upem,
-                    &mono_shape_axes,
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
@@ -1000,23 +988,7 @@ pub extern "C" fn _start() -> ! {
 
                 let s = state();
                 scene.update_document_content(
-                    fb_width,
-                    fb_height,
-                    TITLE_BAR_H,
-                    SHADOW_DEPTH,
-                    TEXT_INSET_X,
-                    TEXT_INSET_TOP,
-                    drawing::CHROME_BG,
-                    drawing::CHROME_BORDER,
-                    drawing::CHROME_TITLE,
-                    drawing::CHROME_CLOCK,
-                    drawing::BG_BASE,
-                    drawing::TEXT_PRIMARY,
-                    drawing::TEXT_CURSOR,
-                    drawing::TEXT_SELECTION,
-                    FONT_SIZE as u16,
-                    s.char_w,
-                    s.line_h,
+                    &scene_cfg,
                     doc_content(),
                     s.cursor_pos as u32,
                     s.sel_start as u32,
@@ -1025,9 +997,6 @@ pub extern "C" fn _start() -> ! {
                     &time_buf,
                     s.scroll_offset as i32,
                     timer_fired,
-                    font_data(),
-                    s.font_upem,
-                    &mono_shape_axes,
                 );
             } else if selection_changed {
                 // Selection changed without text change (e.g., click
@@ -1039,33 +1008,16 @@ pub extern "C" fn _start() -> ! {
                 let content_y = TITLE_BAR_H + SHADOW_DEPTH;
                 let sel_content_h = fb_height.saturating_sub(content_y);
                 let scroll_px = s.scroll_offset as i32 * s.line_h as i32;
-                let dc =
-                    |c: drawing::Color| -> scene::Color { scene::Color::rgba(c.r, c.g, c.b, c.a) };
-                let chars_per_line = {
-                    let doc_width = fb_width.saturating_sub(2 * TEXT_INSET_X);
-                    if s.char_w > 0 {
-                        (doc_width / s.char_w).max(1)
-                    } else {
-                        80
-                    }
-                };
 
                 scene.update_selection(
+                    &scene_cfg,
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
                     doc_content(),
-                    chars_per_line,
-                    s.char_w,
-                    s.line_h,
-                    dc(drawing::TEXT_SELECTION),
                     sel_content_h,
                     scroll_px,
                     if timer_fired { Some(&time_buf) } else { None },
-                    font_data(),
-                    FONT_SIZE as u16,
-                    s.font_upem,
-                    &mono_shape_axes,
                 );
             } else if changed {
                 // Cursor moved without text or selection change
@@ -1082,27 +1034,16 @@ pub extern "C" fn _start() -> ! {
                 let scroll_px = s.scroll_offset as i32 * s.line_h as i32;
 
                 scene.update_cursor(
+                    &scene_cfg,
                     s.cursor_pos as u32,
                     doc_content(),
                     chars_per_line,
-                    s.char_w,
-                    s.line_h,
                     scroll_px,
                     if timer_fired { Some(&time_buf) } else { None },
-                    font_data(),
-                    FONT_SIZE as u16,
-                    s.font_upem,
-                    &mono_shape_axes,
                 );
             } else if timer_fired {
                 // Timer only — just update the clock text.
-                scene.update_clock(
-                    &time_buf,
-                    font_data(),
-                    FONT_SIZE as u16,
-                    state().font_upem,
-                    &mono_shape_axes,
-                );
+                scene.update_clock(&scene_cfg, &time_buf);
             }
 
             // Signal compositor.
