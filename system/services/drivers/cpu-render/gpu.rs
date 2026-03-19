@@ -439,8 +439,7 @@ pub fn transfer_to_host_reuse(
             },
         );
     }
-    // TODO: Check GPU response type for errors (review 6.5).
-    let _ = gpu_command(
+    let resp = gpu_command(
         device,
         vq,
         irq_handle,
@@ -450,6 +449,9 @@ pub fn transfer_to_host_reuse(
         cmd.va + 512,
         core::mem::size_of::<CtrlHeader>() as u32,
     );
+    if resp != RESP_OK_NODATA {
+        sys::print(b"gpu: unexpected transfer_to_host response\n");
+    }
 }
 
 /// Flush resource to display using a pre-allocated DMA buffer.
@@ -481,8 +483,7 @@ pub fn resource_flush_reuse(
             },
         );
     }
-    // TODO: Check GPU response type for errors (review 6.5).
-    let _ = gpu_command(
+    let resp = gpu_command(
         device,
         vq,
         irq_handle,
@@ -492,4 +493,7 @@ pub fn resource_flush_reuse(
         cmd.va + 512,
         core::mem::size_of::<CtrlHeader>() as u32,
     );
+    if resp != RESP_OK_NODATA {
+        sys::print(b"gpu: unexpected resource_flush response\n");
+    }
 }

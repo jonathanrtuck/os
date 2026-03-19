@@ -93,6 +93,9 @@ impl<'a> FallbackChain<'a> {
     ///
     /// When all fonts are exhausted for a character, .notdef (glyph_id 0)
     /// is returned and shaping continues for subsequent characters.
+    // NOTE: Shapes full text with each fallback font — O(fonts × text_length).
+    // Acceptable for current use (short UI labels). For large documents,
+    // optimize to only reshape runs with missing glyphs.
     pub fn shape(&self, text: &str, features: &[Feature]) -> Vec<FallbackGlyph> {
         if text.is_empty() || self.fonts.is_empty() {
             return Vec::new();

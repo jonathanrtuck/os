@@ -416,9 +416,9 @@ impl AffineTransform {
             && self.ty == 0.0
     }
 
-    /// Returns `true` if this is a pure integer translation (no rotation,
-    /// scale, or skew). Integer translations can be applied as an exact
-    /// pixel shift with no resampling.
+    /// Returns true if this is a pure integer translation (no rotation/scale/skew).
+    /// Note: for |tx| or |ty| > 2^31, the f32→i32 cast saturates, which may
+    /// produce incorrect results. Not reachable in practice (scene coords are i16).
     pub fn is_integer_translation(&self) -> bool {
         self.a == 1.0
             && self.b == 0.0
@@ -1610,20 +1610,30 @@ impl Drop for TripleReader<'_> {
 }
 
 /// Read the generation counter from a scene buffer at the given byte
-/// offset within the parent buffer. Uses volatile to prevent reordering
-/// past the read (important for cross-process shared memory).
+/// offset within the parent buffer. Uses AtomicU32 for correct
+/// cross-process shared memory semantics.
 fn read_generation(buf: &[u8], offset: usize) -> u32 {
     // SAFETY: SceneHeader starts at `offset`; generation is the first u32.
-    unsafe { core::ptr::read_volatile(buf.as_ptr().add(offset) as *const u32) }
+    // The offset is 4-byte aligned. AtomicU32 is the correct model for
+    // cross-process shared memory — volatile alone is insufficient under
+    // LLVM's memory model.
+    unsafe {
+        let ptr = buf.as_ptr().add(offset) as *mut u32;
+        core::sync::atomic::AtomicU32::from_ptr(ptr).load(core::sync::atomic::Ordering::Acquire)
+    }
 }
 /// Write a generation counter to a scene buffer at the given offset.
-/// Uses volatile + release fence to ensure all prior writes (node data,
-/// text content) are visible before the generation update is published.
+/// Release ordering ensures all prior writes (node data, text content)
+/// are visible before the generation update is published.
 fn write_generation(buf: &mut [u8], offset: usize, value: u32) {
-    core::sync::atomic::fence(core::sync::atomic::Ordering::Release);
-
     // SAFETY: SceneHeader starts at `offset`; generation is the first u32.
-    unsafe { core::ptr::write_volatile(buf.as_mut_ptr().add(offset) as *mut u32, value) }
+    // The offset is 4-byte aligned. AtomicU32 allows mutation through the
+    // pointer — Release ordering replaces the previous fence+volatile pattern.
+    unsafe {
+        let ptr = buf.as_mut_ptr().add(offset) as *mut u32;
+        core::sync::atomic::AtomicU32::from_ptr(ptr)
+            .store(value, core::sync::atomic::Ordering::Release)
+    }
 }
 
 // ── Scene diffing ───────────────────────────────────────────────────
@@ -1753,6 +1763,9 @@ fn ceil_f32(x: f32) -> f32 {
 /// current frames. If node counts differ, returns `None` (full repaint).
 /// Otherwise, returns a list of `(x, y, w, h)` absolute bounding rects
 /// for all changed nodes. The caller unions these into DirtyRects.
+// NOTE: Byte comparison of Node structs may produce false positives when
+// Content enum variants change size (e.g., Glyphs → None leaves stale tail
+// bytes). This causes extra repaints but never missed repaints.
 pub fn diff_scenes(
     prev_nodes: &[Node],
     prev_count: usize,

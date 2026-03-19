@@ -555,6 +555,13 @@ impl SceneState {
         {
             let mut w = tw.acquire_copy();
 
+            // TODO: data buffer leaks on selection-only updates (~64 bytes per
+            // update from push_shaped_glyphs for clock text). Acceptable because
+            // text changes call update_document_content which resets the data
+            // buffer via reset_data(). Selection-only updates without intervening
+            // text changes are rare enough that the leak is bounded well within
+            // the DATA_BUFFER_SIZE budget before the next compaction.
+
             // Count per-line Glyphs children under N_DOC_TEXT (stop at
             // N_CURSOR). These must be preserved — only selection rects
             // (allocated after cursor) are truncated.

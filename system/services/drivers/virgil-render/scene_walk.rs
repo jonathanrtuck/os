@@ -61,6 +61,8 @@ pub struct QuadBatch {
     vertex_len: usize,
     /// Number of vertices accumulated.
     pub vertex_count: u32,
+    /// Number of vertices silently dropped due to batch overflow.
+    dropped: u32,
 }
 
 impl QuadBatch {
@@ -69,21 +71,27 @@ impl QuadBatch {
             vertex_data: [0; MAX_VERTEX_DWORDS],
             vertex_len: 0,
             vertex_count: 0,
+            dropped: 0,
         }
     }
 
     pub fn clear(&mut self) {
         self.vertex_len = 0;
         self.vertex_count = 0;
+        self.dropped = 0;
     }
 
     pub fn as_vertex_data(&self) -> &[u32] {
         &self.vertex_data[..self.vertex_len]
     }
 
+    pub fn dropped_count(&self) -> u32 {
+        self.dropped
+    }
+
     fn push_vertex(&mut self, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32) {
         if self.vertex_len + 6 > MAX_VERTEX_DWORDS {
-            // FIXME: silently drops vertices when batch full (review 6.4)
+            self.dropped += 1;
             return;
         }
         self.vertex_data[self.vertex_len] = x.to_bits();
@@ -135,6 +143,8 @@ pub struct TexturedBatch {
     vertex_data: [u32; MAX_TEXTURED_DWORDS],
     vertex_len: usize,
     pub vertex_count: u32,
+    /// Number of vertices silently dropped due to batch overflow.
+    dropped: u32,
 }
 
 impl TexturedBatch {
@@ -143,22 +153,28 @@ impl TexturedBatch {
             vertex_data: [0; MAX_TEXTURED_DWORDS],
             vertex_len: 0,
             vertex_count: 0,
+            dropped: 0,
         }
     }
 
     pub fn clear(&mut self) {
         self.vertex_len = 0;
         self.vertex_count = 0;
+        self.dropped = 0;
     }
 
     pub fn as_vertex_data(&self) -> &[u32] {
         &self.vertex_data[..self.vertex_len]
     }
 
+    pub fn dropped_count(&self) -> u32 {
+        self.dropped
+    }
+
     /// Push a textured vertex: position(f32×2) + texcoord(f32×2) + color(f32×4).
     fn push_vertex(&mut self, x: f32, y: f32, u: f32, v: f32, r: f32, g: f32, b: f32, a: f32) {
         if self.vertex_len + 8 > MAX_TEXTURED_DWORDS {
-            // FIXME: silently drops vertices when batch full (review 6.4)
+            self.dropped += 1;
             return;
         }
         self.vertex_data[self.vertex_len] = x.to_bits();
@@ -303,6 +319,8 @@ pub struct PathBatch {
     cover_data: [u32; MAX_PATH_COVER_DWORDS],
     cover_len: usize,
     pub cover_vertex_count: u32,
+    /// Number of vertices silently dropped due to batch overflow.
+    dropped: u32,
 }
 
 impl PathBatch {
@@ -314,6 +332,7 @@ impl PathBatch {
             cover_data: [0; MAX_PATH_COVER_DWORDS],
             cover_len: 0,
             cover_vertex_count: 0,
+            dropped: 0,
         }
     }
 
@@ -322,6 +341,7 @@ impl PathBatch {
         self.fan_vertex_count = 0;
         self.cover_len = 0;
         self.cover_vertex_count = 0;
+        self.dropped = 0;
     }
 
     pub fn as_fan_data(&self) -> &[u32] {
@@ -332,13 +352,17 @@ impl PathBatch {
         &self.cover_data[..self.cover_len]
     }
 
+    pub fn dropped_count(&self) -> u32 {
+        self.dropped
+    }
+
     /// Push a fan vertex (position + dummy color, for stencil write).
     /// Color is not written (colormask=0 in stencil pass), but alpha MUST be
     /// non-zero: ANGLE/Metal's early fragment discard optimization skips
     /// per-fragment operations (including stencil writes) for alpha=0 fragments.
     fn push_fan_vertex(&mut self, x: f32, y: f32) {
         if self.fan_len + 6 > MAX_PATH_FAN_DWORDS {
-            // FIXME: silently drops vertices when batch full (review 6.4)
+            self.dropped += 1;
             return;
         }
         self.fan_data[self.fan_len] = x.to_bits();
@@ -354,7 +378,7 @@ impl PathBatch {
     /// Push a cover vertex (position + color, for stencil test + fill).
     fn push_cover_vertex(&mut self, x: f32, y: f32, r: f32, g: f32, b: f32, a: f32) {
         if self.cover_len + 6 > MAX_PATH_COVER_DWORDS {
-            // FIXME: silently drops vertices when batch full (review 6.4)
+            self.dropped += 1;
             return;
         }
         self.cover_data[self.cover_len] = x.to_bits();
@@ -680,7 +704,7 @@ fn emit_glyphs(
     node_y: f32,
     scale: f32,
     ascent: u32,
-    _clip: ClipRect, // TODO: Cull offscreen glyphs to save VBO space (review 6.3)
+    clip: ClipRect,
     vw: f32,
     vh: f32,
     color: scene::Color,
@@ -720,6 +744,16 @@ fn emit_glyphs(
             let gy = baseline_y - (entry.bearing_y as f32) * scale + (sg.y_offset as f32) * scale;
             let gw = (entry.width as f32) * scale;
             let gh = (entry.height as f32) * scale;
+
+            // Cull glyphs entirely outside the clip rect.
+            if gx + gw <= clip.x
+                || gy + gh <= clip.y
+                || gx >= clip.x + clip.w
+                || gy >= clip.y + clip.h
+            {
+                pen_x += (sg.x_advance as f32) * scale;
+                continue;
+            }
 
             let u0 = entry.u as f32 / atlas_w;
             let v0 = entry.v as f32 / atlas_h;

@@ -338,7 +338,14 @@ fn create_clock_timer() -> bool {
 fn doc_content() -> &'static [u8] {
     let s = state();
     // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    unsafe { core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), s.doc_len) }
+    // doc_len is always <= doc_capacity - DOC_HEADER_SIZE (maintained by
+    // doc_insert/doc_delete/doc_delete_range). doc_buf is set once during
+    // init and never null after that point.
+    unsafe {
+        debug_assert!(!s.doc_buf.is_null());
+        debug_assert!(s.doc_len <= s.doc_capacity - DOC_HEADER_SIZE);
+        core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), s.doc_len)
+    }
 }
 fn doc_delete(pos: usize) -> bool {
     let s = state();

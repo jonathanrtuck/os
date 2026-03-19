@@ -1757,6 +1757,13 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"\n");
         }
 
+        if batch.dropped_count() > 0
+            || text_batch.dropped_count() > 0
+            || path_batch.dropped_count() > 0
+        {
+            sys::print(b"WARN: vertices dropped\n");
+        }
+
         // ── Color VBO: pack backgrounds + path fan + path cover at offsets ─
         let color_data = batch.as_vertex_data();
         let color_dwords = color_data.len();
