@@ -248,6 +248,7 @@ pub extern "C" fn _start() -> ! {
     let mut font_len: u32 = 0;
     let mut scale_factor: f32 = 1.0;
     let mut font_size_cfg: u16 = 18;
+    let mut frame_rate_cfg: u32 = 60;
 
     loop {
         let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
@@ -259,6 +260,11 @@ pub extern "C" fn _start() -> ! {
             font_len = config.mono_font_len;
             scale_factor = config.scale_factor;
             font_size_cfg = config.font_size;
+            frame_rate_cfg = if config.frame_rate > 0 {
+                config.frame_rate as u32
+            } else {
+                60
+            };
 
             sys::print(b"     render config: scene_va=");
             print_hex_u32((scene_va >> 32) as u32);
@@ -405,7 +411,7 @@ pub extern "C" fn _start() -> ! {
     let mut cmdbuf: Box<virgl::CommandBuffer> = box_zeroed();
 
     let mut frame_count: u32 = 0;
-    let mut sched = frame_scheduler::FrameScheduler::new(60);
+    let mut sched = frame_scheduler::FrameScheduler::new(frame_rate_cfg);
     let cfreq = sys::counter_freq();
 
     let counter_to_ns = |ticks: u64, freq: u64| -> u64 {

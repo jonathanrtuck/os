@@ -568,8 +568,6 @@ fn cmd_set_scissor_rect_packing() {
 fn compositor_config_includes_font_fields() {
     use protocol::compose::CompositorConfig;
     let config = CompositorConfig {
-        fb_va: 0,
-        fb_va2: 0,
         scene_va: 0,
         mono_font_va: 0,
         fb_width: 1024,
@@ -577,9 +575,12 @@ fn compositor_config_includes_font_fields() {
         mono_font_len: 100,
         prop_font_len: 0,
         scale_factor: 1.0,
+        frame_rate: 60,
         font_size: 18,
         screen_dpi: 96,
+        _pad: 0,
     };
+    assert_eq!(config.frame_rate, 60);
     assert_eq!(config.font_size, 18);
     assert_eq!(config.screen_dpi, 96);
     assert!(core::mem::size_of::<CompositorConfig>() <= 60);

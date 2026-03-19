@@ -403,11 +403,8 @@ fn setup_render_pipeline(
 
     // -----------------------------------------------------------------------
     // Phase 6: Send render config (CompositorConfig) to render service.
-    // Both services ignore fb_va/fb_va2 (they own their own framebuffers).
     // -----------------------------------------------------------------------
     let render_config = CompositorConfig {
-        fb_va: 0,
-        fb_va2: 0,
         scene_va: render_scene_va as u64,
         mono_font_va: render_font_va,
         fb_width,
@@ -415,8 +412,10 @@ fn setup_render_pipeline(
         mono_font_len,
         prop_font_len,
         scale_factor,
+        frame_rate: 60,
         font_size: 18,
         screen_dpi: 96,
+        _pad: 0,
     };
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &render_config) };
 

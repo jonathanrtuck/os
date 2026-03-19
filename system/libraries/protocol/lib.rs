@@ -276,19 +276,21 @@ pub mod compose {
     ///
     /// `fb_width` / `fb_height` are **physical** framebuffer dimensions.
     /// `fb_stride` is always `fb_width * 4` (BGRA8888) — derived by
-    /// the compositor, not stored in the config.
+    /// the render service, not stored in the config.
     /// `scale_factor` is the fractional display scale (1.0, 1.25, 1.5, 2.0).
     /// f32 represents all common scale factors exactly and fits within
     /// the 60-byte IPC payload. The scene graph is in logical coordinates
-    /// (physical / scale); the compositor multiplies by scale_factor during
-    /// rendering.
+    /// (physical / scale); the render service multiplies by scale_factor
+    /// during rendering.
     /// `font_size` is the logical font size in pixels (e.g. 18).
     /// `screen_dpi` is the display DPI (e.g. 96).
+    /// `frame_rate` is the target frames per second (e.g. 60).
+    ///
+    /// Framebuffer VAs are not included — both render services self-allocate
+    /// framebuffers via `dma_alloc`.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CompositorConfig {
-        pub fb_va: u64,
-        pub fb_va2: u64,
         pub scene_va: u64,
         pub mono_font_va: u64,
         pub fb_width: u32,
@@ -296,8 +298,10 @@ pub mod compose {
         pub mono_font_len: u32,
         pub prop_font_len: u32,
         pub scale_factor: f32,
+        pub frame_rate: u16,
         pub font_size: u16,
         pub screen_dpi: u16,
+        pub _pad: u16,
     }
 
     // Guard: must fit within the 60-byte IPC payload.
