@@ -1063,12 +1063,12 @@ fn fractional_scale_extreme_clamped() {
 /// haven't changed from the baseline.
 #[test]
 fn scene_graph_node_struct_unchanged() {
-    // Node coordinates remain i16/u16.
+    // Node coordinates: x/y are i32, width/height are u16.
     let n = Node::EMPTY;
-    // Verify the types by assigning known i16/u16 values.
+    // Verify the types by assigning known values.
     let mut node = n;
-    node.x = -100i16; // x is i16
-    node.y = 32000i16; // y is i16
+    node.x = -100i32; // x is i32
+    node.y = 32000i32; // y is i32
     node.width = 65535u16; // width is u16
     node.height = 1u16; // height is u16
 

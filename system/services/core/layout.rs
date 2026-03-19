@@ -66,7 +66,7 @@ pub struct LayoutRun {
     /// Number of glyphs (= bytes for monospace ASCII).
     pub glyph_count: u16,
     /// Starting pixel position relative to the parent node.
-    pub y: i16,
+    pub y: i32,
     /// Text color.
     pub color: Color,
     /// Font size in pixels.
@@ -106,12 +106,12 @@ pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) 
 pub fn layout_mono_lines(
     text: &[u8],
     chars_per_line: usize,
-    line_height: i16,
+    line_height: i32,
     color: Color,
     font_size: u16,
 ) -> Vec<LayoutRun> {
     let mut runs = Vec::new();
-    let mut line_y: i16 = 0;
+    let mut line_y: i32 = 0;
     let mut pos: usize = 0;
 
     while pos < text.len() {
@@ -212,7 +212,7 @@ pub fn scroll_runs(
             }
 
             Some(LayoutRun {
-                y: adjusted_y as i16,
+                y: adjusted_y as i32,
                 ..run
             })
         })
@@ -326,8 +326,8 @@ pub fn allocate_selection_rects(
 
         if let Some(sel_id) = w.alloc_node() {
             let n = w.node_mut(sel_id);
-            n.x = (col_start as u32 * char_width) as i16;
-            n.y = sel_y as i16;
+            n.x = (col_start as u32 * char_width) as i32;
+            n.y = sel_y as i32;
             n.width = ((col_end - col_start) as u32 * char_width) as u16;
             n.height = line_height as u16;
             n.background = sel_color;
@@ -374,7 +374,7 @@ pub fn build_full_scene(
     let all_runs = layout_mono_lines(
         doc_text,
         chars_per_line as usize,
-        cfg.line_height as i16,
+        cfg.line_height as i32,
         scene_text_color,
         cfg.font_size,
     );
@@ -413,7 +413,7 @@ pub fn build_full_scene(
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
     // Push visible line glyph data.
-    let mut line_glyph_refs: Vec<(DataRef, u16, i16)> = Vec::with_capacity(visible_runs.len());
+    let mut line_glyph_refs: Vec<(DataRef, u16, i32)> = Vec::with_capacity(visible_runs.len());
 
     for run in &visible_runs {
         let line_text = line_bytes_for_run(doc_text, run);
@@ -471,7 +471,7 @@ pub fn build_full_scene(
 
         n.next_sibling = N_CLOCK_TEXT;
         n.x = 12;
-        n.y = text_y_offset as i16;
+        n.y = text_y_offset as i32;
         n.width = (cfg.fb_width / 2) as u16;
         n.height = cfg.line_height as u16;
         n.content = Content::Glyphs {
@@ -485,13 +485,13 @@ pub fn build_full_scene(
         n.flags = NodeFlags::VISIBLE;
     }
 
-    let clock_x = (cfg.fb_width - 12 - 80) as i16;
+    let clock_x = (cfg.fb_width - 12 - 80) as i32;
 
     {
         let n = w.node_mut(N_CLOCK_TEXT);
 
         n.x = clock_x;
-        n.y = text_y_offset as i16;
+        n.y = text_y_offset as i32;
         n.width = 80;
         n.height = cfg.line_height as u16;
         n.content = Content::Glyphs {
@@ -511,7 +511,7 @@ pub fn build_full_scene(
         let n = w.node_mut(N_SHADOW);
 
         n.next_sibling = N_CONTENT;
-        n.y = cfg.title_bar_h as i16;
+        n.y = cfg.title_bar_h as i32;
         n.width = cfg.fb_width as u16;
         n.height = 0;
         n.background = Color::TRANSPARENT;
@@ -526,7 +526,7 @@ pub fn build_full_scene(
 
         n.first_child = N_DOC_TEXT;
         n.next_sibling = NULL;
-        n.y = content_y as i16;
+        n.y = content_y as i32;
         n.width = cfg.fb_width as u16;
         n.height = content_h as u16;
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -534,7 +534,7 @@ pub fn build_full_scene(
     {
         let n = w.node_mut(N_DOC_TEXT);
 
-        n.x = cfg.text_inset_x as i16;
+        n.x = cfg.text_inset_x as i32;
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h as u16;
@@ -587,8 +587,8 @@ pub fn build_full_scene(
 
     // Cursor: positioned rectangle child of doc text node.
     // Scroll-adjusted: cursor_line is absolute, subtract scroll.
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i16;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i16;
+    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i32;
 
     {
         let n = w.node_mut(N_CURSOR);
@@ -628,7 +628,7 @@ pub fn build_full_scene(
     let img_ref = w.push_data(&test_img);
     if let Some(img_id) = w.alloc_node() {
         let n = w.node_mut(img_id);
-        n.x = (cfg.fb_width as i16).saturating_sub(160);
+        n.x = (cfg.fb_width as i32).saturating_sub(160);
         n.y = 8;
         n.width = 64; // Display at 2x for visibility.
         n.height = 64;
@@ -657,7 +657,7 @@ pub fn build_full_scene(
     let star_ref = w.push_path_commands(&star_cmds);
     if let Some(star_id) = w.alloc_node() {
         let n = w.node_mut(star_id);
-        n.x = (cfg.fb_width as i16).saturating_sub(90);
+        n.x = (cfg.fb_width as i32).saturating_sub(90);
         n.y = 8;
         n.width = 60;
         n.height = 60;
@@ -684,7 +684,7 @@ pub fn build_full_scene(
     let rrect_ref = w.push_path_commands(&rrect_cmds);
     if let Some(rr_id) = w.alloc_node() {
         let n = w.node_mut(rr_id);
-        n.x = (cfg.fb_width as i16).saturating_sub(160);
+        n.x = (cfg.fb_width as i32).saturating_sub(160);
         n.y = 78;
         n.width = 80;
         n.height = 40;
@@ -744,8 +744,8 @@ pub fn build_cursor_update(
 ) {
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i16;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i16;
+    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i32;
 
     let n = w.node_mut(N_CURSOR);
     n.x = cursor_x;
@@ -797,8 +797,8 @@ pub fn build_selection_update(
 
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i16;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i16;
+    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i32;
 
     {
         let n = w.node_mut(N_CURSOR);
@@ -883,7 +883,7 @@ pub fn build_document_content(
     let all_runs = layout_mono_lines(
         doc_text,
         chars_per_line as usize,
-        cfg.line_height as i16,
+        cfg.line_height as i32,
         scene_text_color,
         cfg.font_size,
     );
@@ -891,7 +891,7 @@ pub fn build_document_content(
     let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, viewport_height_px);
 
     // Push visible line glyph data.
-    let mut line_glyph_refs: Vec<(DataRef, u16, i16)> = Vec::with_capacity(visible_runs.len());
+    let mut line_glyph_refs: Vec<(DataRef, u16, i32)> = Vec::with_capacity(visible_runs.len());
 
     for run in &visible_runs {
         let line_text = line_bytes_for_run(doc_text, run);
@@ -982,8 +982,8 @@ pub fn build_document_content(
     // Update cursor position.
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i16;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i16;
+    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_y = (cursor_line as i32 * cfg.line_height as i32 - scroll_px) as i32;
 
     {
         let n = w.node_mut(N_CURSOR);

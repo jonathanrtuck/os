@@ -35,8 +35,8 @@ pub struct Node {
     pub first_child: NodeId,
     pub next_sibling: NodeId,
     // ── geometry (relative to parent content area) ──
-    pub x: i16,
-    pub y: i16,
+    pub x: i32,
+    pub y: i32,
     pub width: u16,
     pub height: u16,
     // ── scrolling ──
@@ -125,10 +125,10 @@ impl Node {
     }
 }
 
-// Compile-time size assertion: Node must be exactly 96 bytes.
+// Compile-time size assertion: Node must be exactly 100 bytes.
 // This prevents silent shared-memory layout drift between core and compositor.
 // If you add a field, update this assertion and verify both sides agree.
-const _: () = assert!(core::mem::size_of::<Node>() == 96);
+const _: () = assert!(core::mem::size_of::<Node>() == 100);
 
 // ── Shared memory layout ────────────────────────────────────────────
 

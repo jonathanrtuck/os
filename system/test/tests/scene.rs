@@ -9,7 +9,7 @@ use scene::*;
 struct TestLayoutRun {
     glyphs: DataRef,
     glyph_count: u16,
-    y: i16,
+    y: i32,
     color: Color,
     advance: u16,
     font_size: u16,
@@ -45,13 +45,13 @@ fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (
 fn layout_mono_lines(
     text: &[u8],
     chars_per_line: usize,
-    line_height: i16,
+    line_height: i32,
     color: Color,
     advance: u16,
     font_size: u16,
 ) -> Vec<TestLayoutRun> {
     let mut runs = Vec::new();
-    let mut line_y: i16 = 0;
+    let mut line_y: i32 = 0;
     let mut pos: usize = 0;
 
     while pos < text.len() {
@@ -140,7 +140,7 @@ fn scroll_runs(
                 return None;
             }
 
-            run.y = adjusted_y as i16;
+            run.y = adjusted_y as i32;
 
             Some(run)
         })
@@ -596,7 +596,7 @@ fn scroll_runs_cursor_at_bottom_forces_scroll() {
     assert_eq!(visible[0].y, 0);
     // Last visible line should be line 35 at y = 29*20 = 580.
     let last = visible.last().unwrap();
-    assert_eq!(last.y, (visible.len() as i16 - 1) * 20);
+    assert_eq!(last.y, (visible.len() as i32 - 1) * 20);
     // Nothing should have y >= 600 (viewport height).
     for run in &visible {
         assert!(run.y < 600, "run.y={} exceeds viewport", run.y);
@@ -1573,8 +1573,8 @@ fn abs_bounds_large_coords_no_truncation() {
     w.set_root(root);
 
     let child = w.alloc_node().unwrap();
-    w.node_mut(child).x = i16::MAX; // 32767
-    w.node_mut(child).y = i16::MAX;
+    w.node_mut(child).x = 32767; // was i16::MAX, now fits in i32
+    w.node_mut(child).y = 32767;
     w.node_mut(child).width = 100;
     w.node_mut(child).height = 50;
     w.add_child(root, child);
@@ -2753,7 +2753,7 @@ fn build_test_editor_scene(
     let all_runs = layout_mono_lines(
         doc_text,
         chars_per_line,
-        line_height as i16,
+        line_height as i32,
         text_color,
         char_width as u16,
         font_size,
@@ -2765,7 +2765,7 @@ fn build_test_editor_scene(
     let scroll_px = scroll_lines as i32 * line_height as i32;
 
     // Push line glyph data.
-    let mut line_glyph_refs: Vec<(DataRef, u16, i16)> = Vec::with_capacity(visible_runs.len());
+    let mut line_glyph_refs: Vec<(DataRef, u16, i32)> = Vec::with_capacity(visible_runs.len());
     for run in &visible_runs {
         let line_text = line_bytes_for_run(doc_text, &run);
         let shaped = bytes_to_shaped_glyphs_test(line_text, char_width as u16);
@@ -2818,7 +2818,7 @@ fn build_test_editor_scene(
     // N_CLOCK_TEXT — Content::Glyphs
     {
         let n = w.node_mut(CORE_N_CLOCK_TEXT);
-        n.x = (fb_width - 12 - 80) as i16;
+        n.x = (fb_width - 12 - 80) as i32;
         n.y = 8;
         n.width = 80;
         n.height = line_height as u16;
@@ -2836,7 +2836,7 @@ fn build_test_editor_scene(
     {
         let n = w.node_mut(CORE_N_SHADOW);
         n.next_sibling = CORE_N_CONTENT;
-        n.y = title_bar_h as i16;
+        n.y = title_bar_h as i32;
         n.width = fb_width as u16;
         n.flags = NodeFlags::VISIBLE;
     }
@@ -2845,7 +2845,7 @@ fn build_test_editor_scene(
         let n = w.node_mut(CORE_N_CONTENT);
         n.first_child = CORE_N_DOC_TEXT;
         n.next_sibling = NULL;
-        n.y = content_y as i16;
+        n.y = content_y as i32;
         n.width = fb_width as u16;
         n.height = content_h as u16;
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -2853,7 +2853,7 @@ fn build_test_editor_scene(
     // N_DOC_TEXT — Content::None (pure container)
     {
         let n = w.node_mut(CORE_N_DOC_TEXT);
-        n.x = text_inset_x as i16;
+        n.x = text_inset_x as i32;
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h as u16;
@@ -2899,8 +2899,8 @@ fn build_test_editor_scene(
 
     // N_CURSOR — Content::None with background color
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line);
-    let cursor_x = (cursor_col as u32 * char_width) as i16;
-    let cursor_y_px = (cursor_line as i32 * line_height as i32 - scroll_px) as i16;
+    let cursor_x = (cursor_col as u32 * char_width) as i32;
+    let cursor_y_px = (cursor_line as i32 * line_height as i32 - scroll_px) as i32;
     {
         let n = w.node_mut(CORE_N_CURSOR);
         n.x = cursor_x;
@@ -2943,8 +2943,8 @@ fn build_test_editor_scene(
             }
             if let Some(sel_id) = w.alloc_node() {
                 let n = w.node_mut(sel_id);
-                n.x = (col_start as u32 * char_width) as i16;
-                n.y = sel_y as i16;
+                n.x = (col_start as u32 * char_width) as i32;
+                n.y = sel_y as i32;
                 n.width = ((col_end - col_start) as u32 * char_width) as u16;
                 n.height = line_height as u16;
                 n.background = sel_color;
@@ -3279,8 +3279,8 @@ fn core_per_line_glyphs_correct_y_positions() {
 
     // Check y positions: 0, 20, 40
     assert_eq!(w.node(children[0]).y, 0);
-    assert_eq!(w.node(children[1]).y, line_h as i16);
-    assert_eq!(w.node(children[2]).y, (2 * line_h) as i16);
+    assert_eq!(w.node(children[1]).y, line_h as i32);
+    assert_eq!(w.node(children[2]).y, (2 * line_h) as i32);
 }
 
 #[test]
@@ -4299,4 +4299,16 @@ fn clock_repush_120_times_no_overflow() {
         "120 clock re-pushes should use ~7,680 bytes, got {}",
         clock_data_total
     );
+}
+
+#[test]
+fn node_supports_large_coordinates() {
+    let mut buf = vec![0u8; scene::SCENE_SIZE];
+    let mut w = scene::SceneWriter::new(&mut buf);
+    let id = w.alloc_node().unwrap();
+    let n = w.node_mut(id);
+    n.x = 50000; // exceeds i16::MAX (32767)
+    n.y = -40000; // exceeds i16::MIN (-32768)
+    assert_eq!(w.node(id).x, 50000);
+    assert_eq!(w.node(id).y, -40000);
 }
