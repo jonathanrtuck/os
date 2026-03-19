@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+pub mod cache;
 pub mod damage;
 pub mod incremental;
 pub mod scene_render;

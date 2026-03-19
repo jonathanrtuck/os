@@ -462,3 +462,134 @@ fn node_fully_off_screen_produces_no_rect() {
         "fully off-screen node should produce no dirty rect"
     );
 }
+
+// ── NodeCache tests ─────────────────────────────────────────────────
+
+use render::cache::NodeCache;
+
+#[test]
+fn node_cache_stores_and_retrieves() {
+    let mut cache = NodeCache::new();
+    let data = vec![0xAA_u8; 100 * 20 * 4]; // 100x20 BGRA
+    cache.store(5, 0xABCD, 100, 20, &data);
+    let result = cache.get(5, 0xABCD);
+    assert!(result.is_some());
+    let (w, h, pixels) = result.unwrap();
+    assert_eq!(w, 100);
+    assert_eq!(h, 20);
+    assert_eq!(pixels.len(), data.len());
+    assert_eq!(pixels[0], 0xAA);
+}
+
+#[test]
+fn node_cache_invalidates_on_hash_change() {
+    let mut cache = NodeCache::new();
+    cache.store(5, 0xABCD, 10, 10, &[0u8; 400]);
+    // Different hash — miss.
+    assert!(cache.get(5, 0x1234).is_none());
+    // Same hash — hit.
+    assert!(cache.get(5, 0xABCD).is_some());
+}
+
+#[test]
+fn node_cache_clear_removes_all() {
+    let mut cache = NodeCache::new();
+    cache.store(1, 0x1111, 10, 1, &[0u8; 40]);
+    cache.store(2, 0x2222, 10, 1, &[0u8; 40]);
+    assert_eq!(cache.valid_count(), 2);
+    cache.clear();
+    assert_eq!(cache.valid_count(), 0);
+    assert!(cache.get(1, 0x1111).is_none());
+}
+
+#[test]
+fn node_cache_evict_single_entry() {
+    let mut cache = NodeCache::new();
+    cache.store(5, 0xABCD, 10, 10, &[0u8; 400]);
+    cache.evict(5);
+    assert!(cache.get(5, 0xABCD).is_none());
+}
+
+#[test]
+fn node_cache_store_reuses_allocation_same_size() {
+    let mut cache = NodeCache::new();
+    cache.store(5, 0x1111, 100, 20, &[0xAA; 8000]);
+    cache.store(5, 0x2222, 100, 20, &[0xBB; 8000]);
+    let (_, _, pixels) = cache.get(5, 0x2222).unwrap();
+    assert_eq!(pixels[0], 0xBB);
+}
+
+#[test]
+fn node_cache_total_bytes() {
+    let mut cache = NodeCache::new();
+    cache.store(0, 0x1111, 10, 10, &[0u8; 400]);
+    cache.store(1, 0x2222, 20, 20, &[0u8; 1600]);
+    assert_eq!(cache.total_bytes(), 2000);
+}
+
+#[test]
+fn node_cache_out_of_bounds_node_id() {
+    let mut cache = NodeCache::new();
+    // node_id >= MAX_NODES should not panic — just no-op/miss.
+    cache.store(600, 0x1111, 10, 10, &[0u8; 400]);
+    assert!(cache.get(600, 0x1111).is_none());
+}
+
+#[test]
+fn node_cache_evict_out_of_bounds_no_panic() {
+    let mut cache = NodeCache::new();
+    // Out-of-bounds evict should not panic.
+    cache.evict(600);
+    assert_eq!(cache.valid_count(), 0);
+}
+
+#[test]
+fn node_cache_store_different_sizes_reallocates() {
+    let mut cache = NodeCache::new();
+    // First store: 400 bytes.
+    cache.store(3, 0x1111, 10, 10, &[0xAA; 400]);
+    assert_eq!(cache.total_bytes(), 400);
+
+    // Second store for same node: 1600 bytes (different size).
+    cache.store(3, 0x2222, 20, 20, &[0xBB; 1600]);
+    assert_eq!(cache.total_bytes(), 1600);
+    let (w, h, pixels) = cache.get(3, 0x2222).unwrap();
+    assert_eq!(w, 20);
+    assert_eq!(h, 20);
+    assert_eq!(pixels.len(), 1600);
+    assert_eq!(pixels[0], 0xBB);
+}
+
+#[test]
+fn node_cache_valid_count_after_mixed_operations() {
+    let mut cache = NodeCache::new();
+    cache.store(0, 0x1111, 5, 5, &[0u8; 100]);
+    cache.store(1, 0x2222, 5, 5, &[0u8; 100]);
+    cache.store(2, 0x3333, 5, 5, &[0u8; 100]);
+    assert_eq!(cache.valid_count(), 3);
+
+    cache.evict(1);
+    assert_eq!(cache.valid_count(), 2);
+
+    // Re-store into evicted slot.
+    cache.store(1, 0x4444, 5, 5, &[0u8; 100]);
+    assert_eq!(cache.valid_count(), 3);
+
+    cache.clear();
+    assert_eq!(cache.valid_count(), 0);
+}
+
+#[test]
+fn node_cache_total_bytes_excludes_evicted() {
+    let mut cache = NodeCache::new();
+    cache.store(0, 0x1111, 10, 10, &[0u8; 400]);
+    cache.store(1, 0x2222, 10, 10, &[0u8; 400]);
+    assert_eq!(cache.total_bytes(), 800);
+
+    cache.evict(0);
+    assert_eq!(
+        cache.total_bytes(),
+        400,
+        "evicted entry bytes should not be counted"
+    );
+}
