@@ -42,7 +42,10 @@ use protocol::{
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
     gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
 };
-use render::RenderBackend;
+use render::{
+    incremental::{all_bits_zero, IncrementalState},
+    RenderBackend,
+};
 
 // ── Constants ────────────────────────────────────────────────────────────
 
@@ -346,6 +349,14 @@ pub extern "C" fn _start() -> ! {
     // Byte stride of one buffer in the GPU backing memory.
     let buf_stride = (chunks_per_buf as u64) * (CHUNK_BYTES as u64);
 
+    // ── Incremental rendering state ─────────────────────────────────
+    // Heap-allocated because IncrementalState is ~12 KiB (too large for
+    // the 16 KiB user stack). Persists across frames for dirty rect
+    // computation and skip-frame detection.
+    let mut incr_state = alloc::boxed::Box::new(IncrementalState::new());
+    let fb_w16 = fb_width as u16;
+    let fb_h16 = fb_height as u16;
+
     // ── Phase H: First frame ─────────────────────────────────────────
     sys::print(b"     waiting for first scene\n");
     let _ = sys::wait(&[CORE_HANDLE], u64::MAX);
@@ -361,6 +372,8 @@ pub extern "C" fn _start() -> ! {
             data: tr.front_data_buf(),
         };
         backend.render(&graph, &mut make_fb(0));
+        // Update incremental state from first frame.
+        incr_state.update_from_frame(nodes, nodes.len() as u16);
         tr.finish_read(gen);
     }
     // Present first frame: full-screen transfer + flush.
@@ -420,32 +433,74 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
-        // Render to the non-displayed buffer.
+        // ── Read scene + dirty bitmap ────────────────────────────
         let render_buf = 1 - presented_buf;
         let tr = scene::TripleReader::new(scene_buf);
+        let dirty_bits = *tr.dirty_bits();
         let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
+        let node_count = nodes.len() as u16;
+
+        // ── Skip-frame: nothing changed ──────────────────────────
+        if all_bits_zero(&dirty_bits) {
+            tr.finish_read(gen);
+            sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
+            continue;
+        }
+
+        // ── Compute dirty rects for partial GPU transfer ─────────
+        let damage = incr_state.compute_dirty_rects(nodes, node_count, &dirty_bits, fb_w16, fb_h16);
+
+        // ── Render (full scene — CPU still does complete tree walk) ─
         let graph = render::scene_render::SceneGraph {
             nodes,
             data: tr.front_data_buf(),
         };
         backend.render(&graph, &mut make_fb(render_buf));
+
+        // ── Update incremental state before releasing the reader ──
+        incr_state.update_from_frame(nodes, node_count);
         tr.finish_read(gen);
 
-        // Present: transfer + flush (synchronous — no IPC needed).
+        // ── Present: transfer dirty rects + flush ────────────────
         let base_offset = (render_buf as u64) * buf_stride;
-        gpu::transfer_to_host_reuse(
-            &device,
-            &mut vq,
-            irq_handle,
-            &present_cmd,
-            gpu::FB_RESOURCE_ID,
-            0,
-            0,
-            width,
-            height,
-            base_offset,
-            stride,
-        );
+        match damage.as_ref().and_then(|d| d.dirty_rects()) {
+            Some(rects) => {
+                // Partial transfer: only send changed regions to the GPU.
+                for r in rects {
+                    if r.w > 0 && r.h > 0 {
+                        gpu::transfer_to_host_reuse(
+                            &device,
+                            &mut vq,
+                            irq_handle,
+                            &present_cmd,
+                            gpu::FB_RESOURCE_ID,
+                            r.x as u32,
+                            r.y as u32,
+                            r.w as u32,
+                            r.h as u32,
+                            base_offset,
+                            stride,
+                        );
+                    }
+                }
+            }
+            None => {
+                // Full-screen transfer (first frame, overflow, or all-dirty).
+                gpu::transfer_to_host_reuse(
+                    &device,
+                    &mut vq,
+                    irq_handle,
+                    &present_cmd,
+                    gpu::FB_RESOURCE_ID,
+                    0,
+                    0,
+                    width,
+                    height,
+                    base_offset,
+                    stride,
+                );
+            }
+        }
         gpu::resource_flush_reuse(
             &device,
             &mut vq,

@@ -199,7 +199,7 @@ fn set_bit(bitmap: &mut [u64; DIRTY_BITMAP_WORDS], i: usize) {
 }
 
 /// Are all dirty bits zero?
-fn all_bits_zero(bits: &[u64; DIRTY_BITMAP_WORDS]) -> bool {
+pub fn all_bits_zero(bits: &[u64; DIRTY_BITMAP_WORDS]) -> bool {
     bits.iter().all(|&w| w == 0)
 }
 
