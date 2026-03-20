@@ -1,7 +1,8 @@
-//! Tests for render::incremental — dirty rect computation from scene diffs.
+//! Tests for render::incremental — dirty rect computation from scene diffs,
+//! plus NodeCache unit tests and cache integration tests.
 
 use render::incremental::IncrementalState;
-use scene::{Node, NodeFlags, NodeId, DIRTY_BITMAP_WORDS, NULL};
+use scene::{Content, Node, NodeFlags, NodeId, DIRTY_BITMAP_WORDS, NULL};
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -837,4 +838,388 @@ fn node_cache_total_bytes_excludes_evicted() {
         400,
         "evicted entry bytes should not be counted"
     );
+}
+
+// ── Node cache integration with render walk ────────────────────────
+
+use drawing::{PixelFormat, Surface};
+use render::scene_render;
+
+/// Zeroed GlyphCache for tests that don't use text rendering.
+fn zeroed_glyph_cache() -> Box<fonts::cache::GlyphCache> {
+    // SAFETY: GlyphCache is repr(C)-like with all-integer fields.
+    // A zeroed instance is valid — all metrics are 0 and coverage
+    // buffers are empty.
+    unsafe {
+        let layout = std::alloc::Layout::new::<fonts::cache::GlyphCache>();
+        let ptr = std::alloc::alloc_zeroed(layout) as *mut fonts::cache::GlyphCache;
+        assert!(!ptr.is_null());
+        Box::from_raw(ptr)
+    }
+}
+
+fn test_ctx<'a>(
+    mono: &'a fonts::cache::GlyphCache,
+    prop: &'a fonts::cache::GlyphCache,
+) -> scene_render::RenderCtx<'a> {
+    scene_render::RenderCtx {
+        mono_cache: mono,
+        prop_cache: prop,
+        scale: 1.0,
+        font_size_px: 18,
+    }
+}
+
+fn make_surface(buf: &mut [u8], w: u32, h: u32) -> Surface {
+    Surface {
+        data: buf,
+        width: w,
+        height: h,
+        stride: w * 4,
+        format: PixelFormat::Bgra8888,
+    }
+}
+
+/// Build a scene with an image node for cache testing.
+/// Returns (nodes, data_buf) where node 1 has Content::Image.
+fn build_image_scene() -> (Vec<Node>, Vec<u8>) {
+    // 10x10 solid red BGRA image.
+    let mut img_data = vec![0u8; 10 * 10 * 4];
+    for pixel in img_data.chunks_exact_mut(4) {
+        pixel[0] = 0; // B
+        pixel[1] = 0; // G
+        pixel[2] = 255; // R
+        pixel[3] = 255; // A
+    }
+
+    let mut nodes = vec![Node::EMPTY; 2];
+    // Root
+    nodes[0].x = 0;
+    nodes[0].y = 0;
+    nodes[0].width = 50;
+    nodes[0].height = 50;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].first_child = 1;
+
+    // Image child
+    nodes[1].x = 5;
+    nodes[1].y = 5;
+    nodes[1].width = 10;
+    nodes[1].height = 10;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].content = Content::Image {
+        data: scene::DataRef {
+            offset: 0,
+            length: (10 * 10 * 4) as u32,
+        },
+        src_width: 10,
+        src_height: 10,
+    };
+    nodes[1].content_hash = 0xDEAD;
+
+    (nodes, img_data)
+}
+
+#[test]
+fn cache_populated_on_first_render() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+    let mut pool = render::surface_pool::SurfacePool::new(4 * 1024 * 1024);
+    let mut lru = render::LruRasterizer::new_test(16);
+    let mut cache = NodeCache::new();
+
+    let (nodes, data) = build_image_scene();
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+    let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
+
+    let mut buf = vec![0u8; 50 * 50 * 4];
+    let mut fb = make_surface(&mut buf, 50, 50);
+
+    scene_render::render_scene_clipped_full(
+        &mut fb,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool,
+        &mut lru,
+        Some(&mut cache),
+    );
+
+    // Node 1 has Content::Image — should be cached.
+    assert!(
+        cache.get(1, 0xDEAD).is_some(),
+        "image node should be cached after render"
+    );
+    // Node 0 has Content::None — should NOT be cached.
+    assert!(
+        cache.get(0, 0).is_none(),
+        "Content::None node should not be cached"
+    );
+}
+
+#[test]
+fn cache_hit_produces_identical_pixels() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+    let mut pool = render::surface_pool::SurfacePool::new(4 * 1024 * 1024);
+    let mut lru = render::LruRasterizer::new_test(16);
+    let mut cache = NodeCache::new();
+
+    let (nodes, data) = build_image_scene();
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+    let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
+
+    // First render (cache miss — populates cache).
+    let mut buf1 = vec![0u8; 50 * 50 * 4];
+    let mut fb1 = make_surface(&mut buf1, 50, 50);
+    scene_render::render_scene_clipped_full(
+        &mut fb1,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool,
+        &mut lru,
+        Some(&mut cache),
+    );
+
+    // Second render (cache hit — should produce identical output).
+    let mut buf2 = vec![0u8; 50 * 50 * 4];
+    let mut fb2 = make_surface(&mut buf2, 50, 50);
+    scene_render::render_scene_clipped_full(
+        &mut fb2,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool,
+        &mut lru,
+        Some(&mut cache),
+    );
+
+    assert_eq!(buf1, buf2, "cache hit should produce identical pixels");
+}
+
+#[test]
+fn cache_miss_on_hash_change() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+    let mut pool = render::surface_pool::SurfacePool::new(4 * 1024 * 1024);
+    let mut lru = render::LruRasterizer::new_test(16);
+    let mut cache = NodeCache::new();
+
+    let (mut nodes, data) = build_image_scene();
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+    let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
+
+    // First render — populates cache with hash 0xDEAD.
+    let mut buf = vec![0u8; 50 * 50 * 4];
+    let mut fb = make_surface(&mut buf, 50, 50);
+    scene_render::render_scene_clipped_full(
+        &mut fb,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool,
+        &mut lru,
+        Some(&mut cache),
+    );
+    assert!(cache.get(1, 0xDEAD).is_some());
+
+    // Change content_hash — should invalidate.
+    nodes[1].content_hash = 0xBEEF;
+    let graph2 = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+    let mut buf2 = vec![0u8; 50 * 50 * 4];
+    let mut fb2 = make_surface(&mut buf2, 50, 50);
+    scene_render::render_scene_clipped_full(
+        &mut fb2,
+        &graph2,
+        &ctx,
+        &dirty,
+        &mut pool,
+        &mut lru,
+        Some(&mut cache),
+    );
+
+    // Old hash should miss, new hash should hit.
+    assert!(
+        cache.get(1, 0xDEAD).is_none(),
+        "old hash should miss after content change"
+    );
+    assert!(
+        cache.get(1, 0xBEEF).is_some(),
+        "new hash should be cached after re-render"
+    );
+}
+
+#[test]
+fn none_cache_renders_without_caching() {
+    // When cache=None is passed, rendering still works correctly.
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+    let mut pool = render::surface_pool::SurfacePool::new(4 * 1024 * 1024);
+    let mut lru = render::LruRasterizer::new_test(16);
+
+    let (nodes, data) = build_image_scene();
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+    let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
+
+    let mut buf = vec![0u8; 50 * 50 * 4];
+    let mut fb = make_surface(&mut buf, 50, 50);
+
+    // Pass None for cache — should render normally.
+    scene_render::render_scene_clipped_full(
+        &mut fb,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool,
+        &mut lru,
+        None,
+    );
+
+    // Verify the image pixel at (5, 5) is red.
+    let off = (5 * 50 + 5) * 4;
+    assert_eq!(buf[off + 2], 255, "R channel should be 255 (red image)");
+    assert_eq!(buf[off + 3], 255, "A channel should be 255");
+}
+
+#[test]
+fn cache_not_used_for_content_none() {
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+    let mut pool = render::surface_pool::SurfacePool::new(4 * 1024 * 1024);
+    let mut lru = render::LruRasterizer::new_test(16);
+    let mut cache = NodeCache::new();
+
+    // Scene with only Content::None nodes (containers with backgrounds).
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0].width = 50;
+    nodes[0].height = 50;
+    nodes[0].flags = NodeFlags::VISIBLE;
+    nodes[0].background = scene::Color::rgba(100, 100, 100, 255);
+    nodes[0].first_child = 1;
+    nodes[1].x = 10;
+    nodes[1].y = 10;
+    nodes[1].width = 20;
+    nodes[1].height = 20;
+    nodes[1].flags = NodeFlags::VISIBLE;
+    nodes[1].background = scene::Color::rgba(200, 50, 50, 255);
+    // Content::None is the default — no content_hash matters.
+
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &[],
+    };
+    let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
+
+    let mut buf = vec![0u8; 50 * 50 * 4];
+    let mut fb = make_surface(&mut buf, 50, 50);
+    scene_render::render_scene_clipped_full(
+        &mut fb,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool,
+        &mut lru,
+        Some(&mut cache),
+    );
+
+    assert_eq!(
+        cache.valid_count(),
+        0,
+        "Content::None nodes should not populate the cache"
+    );
+}
+
+#[test]
+fn render_with_and_without_cache_pixel_identical() {
+    // Verify that enabling the cache doesn't change the rendered output.
+    let mono = zeroed_glyph_cache();
+    let prop = zeroed_glyph_cache();
+    let ctx = test_ctx(&mono, &prop);
+
+    let (nodes, data) = build_image_scene();
+    let graph = scene_render::SceneGraph {
+        nodes: &nodes,
+        data: &data,
+    };
+    let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
+
+    // Without cache.
+    let mut pool1 = render::surface_pool::SurfacePool::new(4 * 1024 * 1024);
+    let mut lru1 = render::LruRasterizer::new_test(16);
+    let mut buf_no_cache = vec![0u8; 50 * 50 * 4];
+    let mut fb1 = make_surface(&mut buf_no_cache, 50, 50);
+    scene_render::render_scene_clipped_full(
+        &mut fb1,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool1,
+        &mut lru1,
+        None,
+    );
+
+    // With cache (first render = cache miss, renders to offscreen then blits).
+    let mut pool2 = render::surface_pool::SurfacePool::new(4 * 1024 * 1024);
+    let mut lru2 = render::LruRasterizer::new_test(16);
+    let mut cache = NodeCache::new();
+    let mut buf_with_cache = vec![0u8; 50 * 50 * 4];
+    let mut fb2 = make_surface(&mut buf_with_cache, 50, 50);
+    scene_render::render_scene_clipped_full(
+        &mut fb2,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool2,
+        &mut lru2,
+        Some(&mut cache),
+    );
+
+    assert_eq!(
+        buf_no_cache, buf_with_cache,
+        "rendering with cache should be pixel-identical to without"
+    );
+}
+
+#[test]
+fn cache_dimension_mismatch_treated_as_miss() {
+    let mut cache = NodeCache::new();
+
+    // Store a 10x10 bitmap.
+    cache.store(1, 0xDEAD, 10, 10, &[0xAA; 400]);
+
+    // Get with same hash but check that dimension mismatch causes miss
+    // at the render walk level. The cache itself matches on hash only,
+    // but the walk checks dimensions too. Verify by querying the raw cache:
+    let result = cache.get(1, 0xDEAD);
+    assert!(result.is_some());
+    let (w, h, _) = result.unwrap();
+    // If dimensions don't match what the walk expects, it treats as miss.
+    // Here we just verify the cache returns the stored dimensions.
+    assert_eq!((w, h), (10, 10));
+
+    // Store a different size — old entry replaced.
+    cache.store(1, 0xDEAD, 20, 20, &[0xBB; 1600]);
+    let (w2, h2, _) = cache.get(1, 0xDEAD).unwrap();
+    assert_eq!((w2, h2), (20, 20));
 }

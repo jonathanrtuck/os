@@ -153,7 +153,7 @@ impl LruRasterizer {
 ///
 /// Encapsulates all rendering state: glyph caches (fixed ASCII + LRU
 /// for non-ASCII), font data for on-demand rasterization, scale factor,
-/// and offscreen buffer pool.
+/// offscreen buffer pool, and per-node content cache.
 pub struct CpuBackend {
     pub mono_cache: Box<fonts::cache::GlyphCache>,
     pub prop_cache: Box<fonts::cache::GlyphCache>,
@@ -162,6 +162,10 @@ pub struct CpuBackend {
     /// On-demand LRU rasterizer for non-ASCII glyphs. Separated from
     /// the immutable caches to allow split borrows.
     pub lru: LruRasterizer,
+    /// Per-node content cache for incremental rendering. Stores
+    /// rendered bitmaps keyed by (node_id, content_hash). On cache
+    /// hit, the cached bitmap is blitted instead of re-rasterizing.
+    pub node_cache: cache::NodeCache,
     /// Physical font size in pixels (after scale).
     font_size_px: u32,
 }
@@ -274,9 +278,9 @@ impl CpuBackend {
         // SAFETY: Layout::new::<CpuBackend>() produces correct size and
         // alignment. alloc_zeroed returns valid zeroed memory (null-checked).
         // ptr::write is used for Drop-bearing fields (Box, Vec, LruRasterizer,
-        // SurfacePool) — these types whose drop glue must not run on the zeroed
-        // memory, so ptr::write overwrites them without dropping the
-        // destination. Primitive fields (scale, font_size_px) are safe to
+        // SurfacePool, NodeCache) — these types whose drop glue must not run
+        // on the zeroed memory, so ptr::write overwrites them without dropping
+        // the destination. Primitive fields (scale, font_size_px) are safe to
         // assign directly (no Drop). Box::from_raw takes ownership of the
         // fully-initialized CpuBackend with matching layout.
         unsafe {
@@ -293,6 +297,7 @@ impl CpuBackend {
                 surface_pool::SurfacePool::new(surface_pool::DEFAULT_BUDGET),
             );
             core::ptr::write(&mut (*ptr).lru, lru);
+            core::ptr::write(&mut (*ptr).node_cache, cache::NodeCache::new());
             (*ptr).font_size_px = physical_size;
             Some(Box::from_raw(ptr))
         }
@@ -304,6 +309,11 @@ impl CpuBackend {
     /// incremental rendering where the caller has already copied the
     /// presented buffer into the render target (unchanged pixels are
     /// correct) and only needs to repaint dirty regions.
+    ///
+    /// The per-node content cache is passed through the tree walk. On
+    /// cache hit (same content_hash), the cached bitmap is blitted
+    /// instead of re-rasterizing. On miss, content is rendered to an
+    /// offscreen buffer, blitted to the target, and stored in the cache.
     pub fn render_clipped(
         &mut self,
         scene: &scene_render::SceneGraph,
@@ -311,7 +321,7 @@ impl CpuBackend {
         dirty: &protocol::DirtyRect,
     ) {
         // Split borrow: immutable caches for RenderCtx, mutable lru + pool
-        // for the tree walk. These are disjoint fields — no aliasing.
+        // + node_cache for the tree walk. These are disjoint fields — no aliasing.
         let ctx = scene_render::RenderCtx {
             mono_cache: &self.mono_cache,
             prop_cache: &self.prop_cache,
@@ -325,12 +335,23 @@ impl CpuBackend {
             dirty,
             &mut self.pool,
             &mut self.lru,
+            Some(&mut self.node_cache),
         );
+    }
+
+    /// Invalidate all cached content bitmaps.
+    ///
+    /// Called on full repaint (all content is re-rendered, so any cached
+    /// bitmaps are stale). Pixel buffer allocations are retained for reuse.
+    pub fn clear_cache(&mut self) {
+        self.node_cache.clear();
     }
 }
 
 impl RenderBackend for CpuBackend {
     fn render(&mut self, scene: &scene_render::SceneGraph, target: &mut Surface) {
+        // Full repaint: clear the node cache (all content is re-rendered).
+        self.node_cache.clear();
         // Split borrow: immutable caches for RenderCtx, mutable lru + pool
         // for the tree walk. These are disjoint fields — no aliasing.
         let ctx = scene_render::RenderCtx {

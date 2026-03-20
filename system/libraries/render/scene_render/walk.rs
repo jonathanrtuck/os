@@ -7,14 +7,14 @@
 use alloc::vec;
 
 use drawing::{Color, PixelFormat, Surface};
-use scene::{Node, NodeId, NULL};
+use scene::{Content, Node, NodeId, NULL};
 
 use super::{
     coords::{round_f32, scale_coord, scale_size, snap_border},
     path_raster::scene_to_draw_color,
     RenderCtx, SceneGraph,
 };
-use crate::{surface_pool::SurfacePool, LruRasterizer};
+use crate::{cache::NodeCache, surface_pool::SurfacePool, LruRasterizer};
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.
 /// Uses i32 for physical pixel math. virgil-render has an independent f32
@@ -76,6 +76,7 @@ fn render_node(
     clip: ClipRect,
     pool: Option<&mut SurfacePool>,
     lru: Option<&mut LruRasterizer>,
+    cache: Option<&mut NodeCache>,
 ) {
     render_node_transformed(
         fb,
@@ -88,6 +89,7 @@ fn render_node(
         pool,
         scene::AffineTransform::identity(),
         lru,
+        cache,
     );
 }
 
@@ -103,6 +105,7 @@ fn render_node_transformed(
     pool: Option<&mut SurfacePool>,
     parent_world: scene::AffineTransform,
     lru: Option<&mut LruRasterizer>,
+    mut cache: Option<&mut NodeCache>,
 ) {
     if node_id == NULL || node_id as usize >= graph.nodes.len() {
         return;
@@ -196,6 +199,7 @@ fn render_node_transformed(
                     None,
                     world_xform,
                     lru,
+                    cache.as_deref_mut(),
                 );
             }
             let blit_x = (nx - sh_left).max(0) as u32;
@@ -228,6 +232,7 @@ fn render_node_transformed(
             pool,
             world_xform,
             lru,
+            cache,
         );
     } else {
         // Non-trivial transform (rotation, scale, skew):
@@ -337,6 +342,7 @@ fn render_node_transformed(
                 None,
                 scene::AffineTransform::identity(), // children rendered axis-aligned
                 lru,
+                cache.as_deref_mut(),
             );
         }
 
@@ -582,13 +588,14 @@ fn render_node_content_translated(
     graph: &SceneGraph,
     ctx: &RenderCtx,
     node: &Node,
-    _node_id: NodeId,
+    node_id: NodeId,
     draw_x: i32,
     draw_y: i32,
     visible: ClipRect,
     _pool: Option<&mut SurfacePool>,
     _world_xform: scene::AffineTransform,
     mut lru: Option<&mut LruRasterizer>,
+    mut cache: Option<&mut NodeCache>,
 ) {
     let s = ctx.scale;
     let nw = scale_size(node.x as i32, node.width as i32, s);
@@ -709,18 +716,83 @@ fn render_node_content_translated(
         }
     }
 
-    // Draw content.
-    super::content::render_content(
-        fb,
-        graph,
-        ctx,
-        node,
-        draw_x,
-        draw_y,
-        nw,
-        nh,
-        lru.as_deref_mut(),
-    );
+    // Draw content, with per-node cache for incremental rendering.
+    //
+    // Content::None (pure containers) skip caching — fill_rect is cheaper
+    // than a bitmap blit. For Glyphs/Image/Path, check the cache first.
+    // On cache hit: blit the cached bitmap at (draw_x, draw_y).
+    // On cache miss: render to an offscreen buffer, blit to fb, store.
+    let has_content = !matches!(node.content, Content::None);
+    let mut content_rendered = false;
+
+    if has_content {
+        if let Some(ref mut nc) = cache {
+            let nw_u32 = nw.max(0) as u32;
+            let nh_u32 = nh.max(0) as u32;
+
+            // Cache lookup: check (node_id, content_hash) and dimension match.
+            let is_hit = nc
+                .get(node_id, node.content_hash)
+                .map_or(false, |(cw, ch, _)| cw == nw_u32 && ch == nh_u32);
+
+            if is_hit {
+                // Cache HIT: blit cached content onto framebuffer.
+                // Re-fetch after the bool check to get the pixel data with
+                // a clean borrow (the previous borrow ended with map_or).
+                let (cw, ch, pixels) = nc.get(node_id, node.content_hash).unwrap();
+                blit_cached_content(fb, pixels, cw, ch, draw_x, draw_y, &visible);
+                content_rendered = true;
+            } else if nw_u32 > 0 && nh_u32 > 0 {
+                // Cache MISS: render to offscreen, blit to fb, store in cache.
+                let byte_count = (nw_u32 as usize) * (nh_u32 as usize) * 4;
+                // Cap at 1 MiB to avoid excessive allocation for very large nodes.
+                if byte_count > 0 && byte_count <= 1024 * 1024 {
+                    let mut offscreen = vec![0u8; byte_count];
+                    {
+                        let mut off_surface = Surface {
+                            data: &mut offscreen,
+                            width: nw_u32,
+                            height: nh_u32,
+                            stride: nw_u32 * 4,
+                            format: PixelFormat::Bgra8888,
+                        };
+                        // Render content at (0, 0) within the offscreen buffer.
+                        super::content::render_content(
+                            &mut off_surface,
+                            graph,
+                            ctx,
+                            node,
+                            0,
+                            0,
+                            nw,
+                            nh,
+                            lru.as_deref_mut(),
+                        );
+                    }
+                    // Blit offscreen to framebuffer at the node's position.
+                    blit_cached_content(fb, &offscreen, nw_u32, nh_u32, draw_x, draw_y, &visible);
+                    // Store in cache for future frames.
+                    nc.store(node_id, node.content_hash, nw_u32, nh_u32, &offscreen);
+                    content_rendered = true;
+                }
+            }
+        }
+    }
+
+    // Fallback: render content directly when caching was not used.
+    if !content_rendered && has_content {
+        super::content::render_content(
+            fb,
+            graph,
+            ctx,
+            node,
+            draw_x,
+            draw_y,
+            nw,
+            nh,
+            lru.as_deref_mut(),
+        );
+    }
 
     // Recurse into children.
     let use_rounded_clip =
@@ -790,6 +862,7 @@ fn render_node_content_translated(
                         None,
                         scene::AffineTransform::identity(),
                         lru_ref.as_deref_mut(),
+                        cache.as_deref_mut(),
                     );
                 }
 
@@ -856,10 +929,93 @@ fn render_node_content_translated(
                     None,
                     scene::AffineTransform::identity(),
                     lru_ref.as_deref_mut(),
+                    cache.as_deref_mut(),
                 );
             }
 
             child = child_node.next_sibling;
+        }
+    }
+}
+
+/// Blit cached BGRA content onto the framebuffer at `(draw_x, draw_y)`,
+/// clipped to `visible`. Uses per-pixel alpha blending (source-over).
+///
+/// The cached bitmap was rendered at (0, 0) in node-local coordinates.
+/// `cw` and `ch` are the cached bitmap dimensions.
+fn blit_cached_content(
+    fb: &mut Surface,
+    pixels: &[u8],
+    cw: u32,
+    ch: u32,
+    draw_x: i32,
+    draw_y: i32,
+    visible: &ClipRect,
+) {
+    // Compute the intersection of the cached rect with the visible clip.
+    let cache_rect = ClipRect {
+        x: draw_x,
+        y: draw_y,
+        w: cw as i32,
+        h: ch as i32,
+    };
+    let clipped = match visible.intersect(cache_rect) {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Offset within the cached bitmap to start reading from.
+    let src_x = (clipped.x - draw_x).max(0) as u32;
+    let src_y = (clipped.y - draw_y).max(0) as u32;
+    let blit_w = clipped.w as u32;
+    let blit_h = clipped.h as u32;
+    let src_stride = cw * 4;
+    let dst_x = clipped.x.max(0) as u32;
+    let dst_y = clipped.y.max(0) as u32;
+    let bpp = 4u32;
+
+    for row in 0..blit_h {
+        let sy = src_y + row;
+        let dy = dst_y + row;
+        if dy >= fb.height || sy >= ch {
+            break;
+        }
+        let src_off = (sy * src_stride + src_x * bpp) as usize;
+        let dst_off = (dy * fb.stride + dst_x * bpp) as usize;
+
+        for col in 0..blit_w {
+            let dx = dst_x + col;
+            if dx >= fb.width {
+                break;
+            }
+            let si = src_off + (col * bpp) as usize;
+            let di = dst_off + (col * bpp) as usize;
+            if si + 4 > pixels.len() || di + 4 > fb.data.len() {
+                break;
+            }
+
+            let sa = pixels[si + 3] as u32;
+            if sa == 0 {
+                continue; // Fully transparent — skip.
+            }
+            if sa == 255 {
+                // Fully opaque — overwrite.
+                fb.data[di] = pixels[si];
+                fb.data[di + 1] = pixels[si + 1];
+                fb.data[di + 2] = pixels[si + 2];
+                fb.data[di + 3] = 255;
+            } else {
+                // Alpha blend (source-over).
+                let inv_sa = 255 - sa;
+                let db = fb.data[di] as u32;
+                let dg = fb.data[di + 1] as u32;
+                let dr = fb.data[di + 2] as u32;
+                let da = fb.data[di + 3] as u32;
+                fb.data[di] = ((pixels[si] as u32 * sa + db * inv_sa + 127) / 255) as u8;
+                fb.data[di + 1] = ((pixels[si + 1] as u32 * sa + dg * inv_sa + 127) / 255) as u8;
+                fb.data[di + 2] = ((pixels[si + 2] as u32 * sa + dr * inv_sa + 127) / 255) as u8;
+                fb.data[di + 3] = ((sa * 255 + da * inv_sa + 127) / 255) as u8;
+            }
         }
     }
 }
@@ -877,7 +1033,7 @@ pub fn render_scene(fb: &mut Surface, graph: &SceneGraph, ctx: &RenderCtx) {
         h: fb.height as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None);
+    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None, None);
 }
 
 /// Render an entire scene graph with a SurfacePool for offscreen opacity.
@@ -898,7 +1054,7 @@ pub fn render_scene_with_pool(
         h: fb.height as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), None);
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), None, None);
 }
 
 /// Render an entire scene graph with SurfacePool + LRU glyph rasterizer.
@@ -924,7 +1080,7 @@ pub fn render_scene_full(
         h: fb.height as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), Some(lru));
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), Some(lru), None);
 }
 
 /// Render only the region within `dirty` (absolute pixel coordinates).
@@ -946,7 +1102,7 @@ pub fn render_scene_clipped(
         h: dirty.h as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None);
+    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None, None);
 }
 
 /// Render only the region within `dirty`, with SurfacePool for offscreen opacity.
@@ -968,7 +1124,7 @@ pub fn render_scene_clipped_with_pool(
         h: dirty.h as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), None);
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), None, None);
 }
 
 /// Render only the region within `dirty`, with SurfacePool + LRU rasterizer.
@@ -980,6 +1136,7 @@ pub fn render_scene_clipped_full(
     dirty: &protocol::DirtyRect,
     pool: &mut SurfacePool,
     lru: &mut LruRasterizer,
+    cache: Option<&mut NodeCache>,
 ) {
     if graph.nodes.is_empty() || dirty.w == 0 || dirty.h == 0 {
         return;
@@ -992,5 +1149,5 @@ pub fn render_scene_clipped_full(
         h: dirty.h as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), Some(lru));
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), Some(lru), cache);
 }
