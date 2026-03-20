@@ -224,7 +224,7 @@ fn css_ease_at_half_matches_reference() {
     // Reference value from Chrome DevTools: ≈ 0.8024.
     let y = ease(Easing::Ease, 0.5);
     assert!(
-        (y - 0.8024).abs() < 0.02,
+        (y - 0.8024).abs() < 0.005,
         "CSS ease at t=0.5: got {}, expected ~0.8024",
         y
     );

@@ -127,14 +127,14 @@ pub enum Easing {
 ///
 /// NaN input is treated as 0.0 (returns 0.0) after the clamp step.
 pub fn ease(easing: Easing, t: f32) -> f32 {
-    // Clamp — NaN comparisons are always false, so NaN falls through to 0.0.
-    let t = if t < 0.0 {
+    // NaN guard first — NaN comparisons are always false, so it must be
+    // checked before the range tests.  Then clamp to [0, 1].
+    let t = if t != t {
+        0.0
+    } else if t < 0.0 {
         0.0
     } else if t > 1.0 {
         1.0
-    } else if t != t {
-        // NaN guard: t != t is true only for NaN
-        0.0
     } else {
         t
     };
@@ -422,10 +422,6 @@ fn sin(x: f32) -> f32 {
 }
 
 /// Cosine via phase shift: `cos(x) = sin(x + π/2)`.
-#[allow(dead_code)]
-fn cos(x: f32) -> f32 {
-    sin(x + PI / 2.0)
-}
 
 /// Fast `2^x` approximation accurate to < 0.0002 absolute error on `[−10, 10]`.
 ///
