@@ -2,7 +2,7 @@
 
 extern crate animation;
 
-use animation::{ease, Easing, Spring};
+use animation::{ease, Easing, Lerp, LerpColor, Spring, Transform2D};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -654,6 +654,98 @@ fn spring_custom_settle_threshold() {
         !s2.settled(),
         "with threshold=0.00001 the spring should not be settled after 30 frames"
     );
+}
+
+// ── Lerp trait ────────────────────────────────────────────────────────────────
+
+#[test]
+fn lerp_f32_midpoint() {
+    assert_eq!(f32::lerp(0.0, 10.0, 0.5), 5.0);
+}
+
+#[test]
+fn lerp_f32_boundaries() {
+    assert_eq!(f32::lerp(0.0, 10.0, 0.0), 0.0);
+    assert_eq!(f32::lerp(0.0, 10.0, 1.0), 10.0);
+}
+
+#[test]
+fn lerp_i32() {
+    assert_eq!(i32::lerp(0, 100, 0.5), 50);
+    assert_eq!(i32::lerp(-10, 10, 0.5), 0);
+}
+
+#[test]
+fn lerp_u8() {
+    assert_eq!(u8::lerp(0, 255, 0.5), 128);
+    assert_eq!(u8::lerp(0, 255, 0.0), 0);
+    assert_eq!(u8::lerp(0, 255, 1.0), 255);
+}
+
+// ── Gamma-correct color interpolation ────────────────────────────────────────
+
+#[test]
+fn lerp_color_gamma_correct() {
+    // Black to white at midpoint: in linear space 0.5 maps to sRGB ~188
+    // (NOT 128, which is what naive byte lerp produces)
+    let mid = LerpColor::lerp_srgb([0, 0, 0, 255], [255, 255, 255, 255], 0.5);
+    assert!(
+        mid[0] > 160 && mid[0] < 210,
+        "Gamma-correct midpoint should be ~188, got {}",
+        mid[0]
+    );
+    assert_eq!(mid[3], 255, "Alpha at t=0.5 of 255,255 should be 255");
+}
+
+#[test]
+fn lerp_color_boundaries() {
+    let a = [10, 20, 30, 40];
+    let b = [200, 210, 220, 230];
+    let at_zero = LerpColor::lerp_srgb(a, b, 0.0);
+    let at_one = LerpColor::lerp_srgb(a, b, 1.0);
+    assert_eq!(at_zero, a);
+    assert_eq!(at_one, b);
+}
+
+#[test]
+fn lerp_color_alpha_is_linear() {
+    // Alpha is NOT gamma-corrected — it's linear.
+    let mid = LerpColor::lerp_srgb([0, 0, 0, 0], [0, 0, 0, 200], 0.5);
+    assert_eq!(mid[3], 100, "Alpha should be linearly interpolated");
+}
+
+// ── Transform2D lerp ─────────────────────────────────────────────────────────
+
+#[test]
+fn lerp_transform2d_midpoint() {
+    let a = Transform2D::identity();
+    let b = Transform2D {
+        a: 2.0,
+        b: 0.0,
+        c: 0.0,
+        d: 2.0,
+        tx: 100.0,
+        ty: 200.0,
+    };
+    let mid = Transform2D::lerp(a, b, 0.5);
+    assert!((mid.a - 1.5).abs() < 0.001);
+    assert!((mid.tx - 50.0).abs() < 0.001);
+    assert!((mid.ty - 100.0).abs() < 0.001);
+}
+
+#[test]
+fn lerp_transform2d_identity_at_zero() {
+    let a = Transform2D::identity();
+    let b = Transform2D {
+        a: 3.0,
+        b: 1.0,
+        c: 1.0,
+        d: 3.0,
+        tx: 50.0,
+        ty: 50.0,
+    };
+    let result = Transform2D::lerp(a, b, 0.0);
+    assert_eq!(result, a);
 }
 
 // ── General quality checks ────────────────────────────────────────────────────
