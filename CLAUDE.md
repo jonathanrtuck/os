@@ -71,7 +71,11 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-18 (latest):** Virgl implementation plan COMPLETE (all 8 tasks) + Phase 5 COMPLETE (cpu-render merge). Both render pipelines are now single-process: `virgil-render` (GPU-accelerated) and `cpu-render` (CPU software). Init auto-detects at boot. 1,816+ total tests pass.
+**Session 2026-03-20 (latest):** v0.3 Phase 1 (Motion) COMPLETE. New `libraries/animation/` library (475+ lines): 24 easing functions, spring physics (4 presets), Lerp trait with gamma-correct sRGB color interpolation, Transform2D, 32-slot Timeline. Integrated into core: smooth scroll (spring physics, pixel-space f32 model), animated cursor blink (4-phase state machine with smooth fade), selection fade-in, document switch fade transition, demo scenes (bouncing ball, easing sampler). 11 commits, 2,004 total tests pass. Next: v0.3 Phase 2 (Composition) — path clipping, backdrop blur, pointer cursor, document switching fix. Spec: `design/v0.3-spec.md`. Phase 2 plan: to be written.
+
+**Session 2026-03-20 (earlier):** Design folder cleanup (8 files deleted, concept.md merged into foundations.md, research/ subfolder, rendering-capabilities.md moved to system/). README and 4 CLAUDE.md files updated. v0.3 spec written and approved (`design/v0.3-spec.md`). Phase 1 plan written (`design/plan-v0.3-phase1.md`).
+
+**Session 2026-03-18:** Virgl implementation plan COMPLETE (all 8 tasks) + Phase 5 COMPLETE (cpu-render merge). Both render pipelines are now single-process: `virgil-render` (GPU-accelerated) and `cpu-render` (CPU software). Init auto-detects at boot. 1,816+ total tests pass.
 
 **Phase 5: cpu-render merge (2026-03-18):** Merged `compositor/` + `virtio-gpu/` into single `cpu-render/` process. Key insight: cpu-render self-allocates framebuffers via `dma_alloc`, making its init handshake identical to virgil-render's. Eliminated compositor→GPU IPC channel, MSG_PRESENT/MSG_PRESENT_DONE protocol, one process boundary. Old compositor/ and virtio-gpu/ deleted (no parallel implementations). Init's two pipeline functions (`setup_virgl_pipeline()` / `setup_display_pipeline()`) unified into a single `setup_render_pipeline(name, ...)` — the `name` parameter (`b"virgl"` or `b"cpu-render"`) drives diagnostic output only.
 
