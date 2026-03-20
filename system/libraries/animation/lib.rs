@@ -18,7 +18,7 @@
 //!   minimax polynomial, Horner form).
 //! * `exp2` approximation: < 0.0002 absolute error on `[−10, 10]` (integer
 //!   exponent via bit manipulation + 4th-order polynomial for the fraction).
-//! * Cubic-bezier solver: ≤ 6 Newton–Raphson iterations + bisection fallback;
+//! * Cubic-bezier solver: up to 8 Newton–Raphson iterations + bisection fallback;
 //!   error < 0.0001 in y.
 //!
 //! Back, Elastic, and Bounce easings intentionally produce values outside
@@ -341,11 +341,11 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t_x: f32) -> f32 {
 
         for _ in 0..32 {
             let mid = (lo + hi) * 0.5;
+            u = mid; // always update — final iteration's mid is our best guess
             let x = sample_x(ax, bx, cx, mid);
 
             if (x - t_x).abs() < 1e-5 {
-                u = mid;
-                break;
+                break; // converged to 1e-5 (tighter than Newton's 1e-4 accept)
             }
 
             if x < t_x {
@@ -353,8 +353,6 @@ fn cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, t_x: f32) -> f32 {
             } else {
                 hi = mid;
             }
-
-            u = mid;
         }
     }
 
@@ -391,8 +389,13 @@ fn bounce_out(t: f32) -> f32 {
 ///
 /// Implemented via integer truncation: truncate toward zero, then subtract 1
 /// if the input was negative and not already an integer.
+///
+/// Precondition: `x` must be in `[i32::MIN as f32, i32::MAX as f32]` (roughly
+/// `±2.1 billion`).  Callers in this library satisfy this: `sin` passes a value
+/// in approximately `[-1, 1]` after dividing by TAU, and `exp2` clamps to
+/// `[-126, 126]` before calling.
 fn floor_f32(x: f32) -> f32 {
-    // Cast to i32 truncates toward zero.
+    // Cast to i32 truncates toward zero (saturating from Rust 1.45).
     let t = x as i32 as f32;
 
     // If x was negative and truncation moved away from negative infinity,
@@ -420,8 +423,6 @@ fn sin(x: f32) -> f32 {
     // sin(x) ≈ x * (1 - x²/6 * (1 - x²/20 * (1 - x²/42)))
     x * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0)))
 }
-
-/// Cosine via phase shift: `cos(x) = sin(x + π/2)`.
 
 /// Fast `2^x` approximation accurate to < 0.0002 absolute error on `[−10, 10]`.
 ///
