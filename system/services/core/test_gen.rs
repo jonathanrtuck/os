@@ -87,6 +87,44 @@ pub fn generate_test_rounded_rect(w: f32, h: f32, r: f32) -> Vec<u8> {
     cmds
 }
 
+/// Generate path commands for a standard arrow pointer cursor.
+/// 10 × 16 pt. Tip at (0, 0), body extends down-right.
+pub fn generate_arrow_cursor() -> Vec<u8> {
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 0.0, 14.0);
+    scene::path_line_to(&mut cmds, 4.0, 11.0);
+    scene::path_line_to(&mut cmds, 7.0, 17.0);
+    scene::path_line_to(&mut cmds, 9.0, 16.0);
+    scene::path_line_to(&mut cmds, 6.0, 10.0);
+    scene::path_line_to(&mut cmds, 10.0, 10.0);
+    scene::path_close(&mut cmds);
+    cmds
+}
+
+/// Generate path commands for an I-beam text cursor.
+/// 8 × 18 pt. Vertical bar with small top and bottom serifs.
+pub fn generate_ibeam_cursor() -> Vec<u8> {
+    let mut cmds = Vec::new();
+    // Top serif.
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 8.0, 0.0);
+    scene::path_line_to(&mut cmds, 8.0, 2.0);
+    scene::path_line_to(&mut cmds, 5.0, 2.0);
+    // Vertical bar.
+    scene::path_line_to(&mut cmds, 5.0, 16.0);
+    // Bottom serif.
+    scene::path_line_to(&mut cmds, 8.0, 16.0);
+    scene::path_line_to(&mut cmds, 8.0, 18.0);
+    scene::path_line_to(&mut cmds, 0.0, 18.0);
+    scene::path_line_to(&mut cmds, 0.0, 16.0);
+    scene::path_line_to(&mut cmds, 3.0, 16.0);
+    scene::path_line_to(&mut cmds, 3.0, 2.0);
+    scene::path_line_to(&mut cmds, 0.0, 2.0);
+    scene::path_close(&mut cmds);
+    cmds
+}
+
 /// Approximate sine (avoids pulling in libm for no_std).
 fn sin_approx(x: f32) -> f32 {
     // Normalize to [-pi, pi].

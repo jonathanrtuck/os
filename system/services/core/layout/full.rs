@@ -12,8 +12,8 @@ use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
     layout_mono_lines, line_bytes_for_run, round_f32, scroll_runs, shape_text, shape_visible_runs,
     update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DEMO_BALL,
-    N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT, N_ROOT,
-    N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT, N_POINTER,
+    N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 use crate::test_gen::{generate_test_image, generate_test_rounded_rect, generate_test_star};
 
@@ -64,6 +64,9 @@ pub fn build_full_scene(
     clock_text: &[u8],
     scroll_y: f32,
     cursor_opacity: u8,
+    mouse_x: u32,
+    mouse_y: u32,
+    pointer_opacity: u8,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
@@ -136,6 +139,8 @@ pub fn build_full_scene(
     let _demo_ease2 = w.alloc_node().unwrap(); // 11
     let _demo_ease3 = w.alloc_node().unwrap(); // 12
     let _demo_ease4 = w.alloc_node().unwrap(); // 13
+                                                // Pointer cursor node (top-level, highest z-order).
+    let _pointer = w.alloc_node().unwrap(); // 14
 
     {
         let n = w.node_mut(N_ROOT);
@@ -458,6 +463,31 @@ pub fn build_full_scene(
             }
             w.node_mut(last).next_sibling = N_DEMO_BALL;
         }
+    }
+
+    // Link pointer cursor as a top-level sibling after N_CONTENT so it
+    // renders above all document content (highest z-order in root).
+    w.node_mut(N_CONTENT).next_sibling = N_POINTER;
+
+    // Pointer cursor node: arrow shape rendered at mouse position.
+    {
+        let arrow_cmds = crate::test_gen::generate_arrow_cursor();
+        let arrow_ref = w.push_path_commands(&arrow_cmds);
+        let arrow_hash = scene::fnv1a(&arrow_cmds);
+        let n = w.node_mut(N_POINTER);
+        n.x = mouse_x as i32;
+        n.y = mouse_y as i32;
+        n.width = 10;
+        n.height = 18;
+        n.content = Content::Path {
+            color: Color::rgb(255, 255, 255),
+            fill_rule: FillRule::Winding,
+            contours: arrow_ref,
+        };
+        n.content_hash = arrow_hash;
+        n.opacity = pointer_opacity;
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = NULL;
     }
 
     w.set_root(N_ROOT);

@@ -59,8 +59,15 @@ pub const N_DEMO_EASE_2: u16 = 11;
 pub const N_DEMO_EASE_3: u16 = 12;
 pub const N_DEMO_EASE_4: u16 = 13;
 
-/// Number of well-known nodes (indices 0..13). Dynamic nodes start at 14.
-pub const WELL_KNOWN_COUNT: u16 = 14;
+// ── Pointer cursor node (14) ──────────────────────────────────────────
+//
+// Top-level node rendered above all content. Position updated each
+// frame from MSG_POINTER_ABS. Auto-hides after 3 s of inactivity with
+// a 300 ms EaseOut fade.
+pub const N_POINTER: u16 = 14;
+
+/// Number of well-known nodes (indices 0..14). Dynamic nodes start at 15.
+pub const WELL_KNOWN_COUNT: u16 = 15;
 
 // ── Configuration ───────────────────────────────────────────────────
 

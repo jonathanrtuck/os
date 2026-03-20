@@ -228,6 +228,14 @@ struct CoreState {
     mouse_y: u32,
     /// True while fading out before a document context switch.
     pending_context_switch: bool,
+    /// Animation ID for the pointer fade-out (255→0, 300ms EaseOut).
+    pointer_fade_id: Option<animation::AnimationId>,
+    /// Timestamp (ms) of the last pointer movement event.
+    pointer_last_event_ms: u64,
+    /// Current pointer cursor opacity (0 = hidden, 255 = fully visible).
+    pointer_opacity: u8,
+    /// True when the pointer cursor is currently shown (recently moved).
+    pointer_visible: bool,
     /// Root node opacity for document switch fade transitions.
     root_opacity: u8,
     rtc_mmio_va: usize,
@@ -277,6 +285,10 @@ impl CoreState {
             mouse_x: 0,
             mouse_y: 0,
             pending_context_switch: false,
+            pointer_fade_id: None,
+            pointer_last_event_ms: 0,
+            pointer_opacity: 0,
+            pointer_visible: false,
             root_opacity: 255,
             rtc_mmio_va: 0,
             saved_editor_scroll: 0.0,
@@ -908,6 +920,9 @@ pub extern "C" fn _start() -> ! {
             &time_buf,
             0.0,
             s.cursor_opacity,
+            s.mouse_x,
+            s.mouse_y,
+            s.pointer_opacity,
         );
     }
 
@@ -1052,6 +1067,15 @@ pub extern "C" fn _start() -> ! {
                         let s = state();
                         s.mouse_x = scale_pointer_coord(ptr.x, fb_width);
                         s.mouse_y = scale_pointer_coord(ptr.y, fb_height);
+
+                        // Show pointer immediately (cancel any pending fade-out).
+                        if let Some(id) = s.pointer_fade_id {
+                            s.timeline.cancel(id);
+                            s.pointer_fade_id = None;
+                        }
+                        s.pointer_visible = true;
+                        s.pointer_opacity = 255;
+                        s.pointer_last_event_ms = now_ms;
 
                         changed = true;
                     }
@@ -1345,6 +1369,47 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
+        // ── Pointer auto-hide ─────────────────────────────────────
+        //
+        // After 3 s of inactivity, start a 300 ms EaseOut fade-out.
+        // When the fade completes, mark the pointer hidden (opacity 0).
+        // On any pointer move, the handler above cancels the fade and
+        // restores full opacity immediately.
+        {
+            const POINTER_HIDE_MS: u64 = 3000;
+            const POINTER_FADE_MS: u32 = 300;
+
+            let s = state();
+
+            // Start fade-out after 3 s of inactivity.
+            if s.pointer_visible && s.pointer_fade_id.is_none() && s.pointer_opacity == 255 {
+                let idle_ms = now_ms.saturating_sub(s.pointer_last_event_ms);
+                if idle_ms >= POINTER_HIDE_MS {
+                    s.pointer_fade_id = s
+                        .timeline
+                        .start(255.0, 0.0, POINTER_FADE_MS, animation::Easing::EaseOut, now_ms)
+                        .ok();
+                }
+            }
+
+            // Tick pointer fade animation.
+            if let Some(id) = s.pointer_fade_id {
+                if s.timeline.is_active(id) {
+                    let new_opacity = s.timeline.value(id) as u8;
+                    if new_opacity != s.pointer_opacity {
+                        s.pointer_opacity = new_opacity;
+                        changed = true;
+                    }
+                } else {
+                    // Fade complete — pointer is now hidden.
+                    s.pointer_opacity = 0;
+                    s.pointer_visible = false;
+                    s.pointer_fade_id = None;
+                    changed = true;
+                }
+            }
+        }
+
         // ── Demo animation tick ───────────────────────────────────
         //
         // Advance the bouncing-ball spring and tick the easing-sampler
@@ -1467,6 +1532,9 @@ pub extern "C" fn _start() -> ! {
                     &time_buf,
                     s.scroll_offset,
                     s.cursor_opacity,
+                    s.mouse_x,
+                    s.mouse_y,
+                    s.pointer_opacity,
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
@@ -1635,6 +1703,12 @@ pub extern "C" fn _start() -> ! {
                 scene.apply_demo(s.demo_ball_y, &s.demo_ease_x);
             }
 
+            // Apply pointer cursor position and opacity.
+            {
+                let s = state();
+                scene.apply_pointer(s.mouse_x, s.mouse_y, s.pointer_opacity);
+            }
+
             // Signal compositor.
             compositor_ch.send(&scene_msg);
 
@@ -1645,6 +1719,12 @@ pub extern "C" fn _start() -> ! {
             {
                 let s = state();
                 scene.apply_demo(s.demo_ball_y, &s.demo_ease_x);
+            }
+
+            // Apply pointer cursor position and opacity (may be animating fade).
+            {
+                let s = state();
+                scene.apply_pointer(s.mouse_x, s.mouse_y, s.pointer_opacity);
             }
 
             compositor_ch.send(&scene_msg);

@@ -18,8 +18,8 @@ use super::layout::{
 // Re-export layout types and constants used by main.rs.
 pub use super::layout::{
     byte_to_line_col, count_lines, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DEMO_BALL,
-    N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT, N_ROOT,
-    N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT,
+    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 
 pub struct SceneState {
@@ -54,6 +54,9 @@ impl SceneState {
         clock_text: &[u8],
         scroll_y: f32,
         cursor_opacity: u8,
+        mouse_x: u32,
+        mouse_y: u32,
+        pointer_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -69,6 +72,9 @@ impl SceneState {
                 clock_text,
                 scroll_y,
                 cursor_opacity,
+                mouse_x,
+                mouse_y,
+                pointer_opacity,
             );
         }
         tw.publish();
@@ -367,6 +373,24 @@ impl SceneState {
         {
             let mut w = tw.acquire_copy();
             update_demo_nodes(&mut w, ball_y, ease_x);
+        }
+        tw.publish();
+    }
+
+    /// Apply pointer cursor position and opacity to the latest published scene.
+    ///
+    /// Updates N_POINTER's x, y, and opacity in-place via an acquire_copy +
+    /// publish cycle. Called every frame when the pointer state changes (move
+    /// or fade tick). Cheap — only one well-known node changes.
+    pub fn apply_pointer(&mut self, mouse_x: u32, mouse_y: u32, opacity: u8) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            let n = w.node_mut(N_POINTER);
+            n.x = mouse_x as i32;
+            n.y = mouse_y as i32;
+            n.opacity = opacity;
+            w.mark_dirty(N_POINTER);
         }
         tw.publish();
     }
