@@ -59,8 +59,9 @@ pub struct BlurRequest {
 pub const TOTAL_TEXTURED_VBO_BYTES: usize =
     batch_text::MAX_TEXTURED_VERTEX_BYTES + MAX_IMAGES * DWORDS_PER_IMAGE_QUAD * 4;
 
-/// Total color VBO size: background quads + path fan triangles + path cover quads
-/// + clip path fan triangles. All four regions are packed sequentially in the same VBO.
+/// Total color VBO size: background quads (non-clipped + clipped) + path fan
+/// triangles + path cover quads + clip path fan triangles. All five regions
+/// are packed sequentially in the same VBO.
 pub const TOTAL_COLOR_VBO_BYTES: usize = batch_quad::MAX_VERTEX_BYTES
     + batch_path::MAX_PATH_FAN_DWORDS * 4
     + batch_path::MAX_PATH_COVER_DWORDS * 4
@@ -159,10 +160,16 @@ pub fn walk_scene(
         atlas,
         ascent,
         blur_requests,
+        false, // root is not inside a clip region
     );
 }
 
 /// Recursive depth-first walk of the scene tree.
+///
+/// `inside_clip` is true when this node is a descendant of a node that
+/// has a `clip_path`. Content emitted while `inside_clip` is true goes
+/// into the "clipped" batch sections, which the render loop draws with
+/// stencil test enabled.
 #[allow(clippy::too_many_arguments)]
 fn walk_node(
     nodes: &[Node],
@@ -181,6 +188,7 @@ fn walk_node(
     atlas: &GlyphAtlas,
     ascent: u32,
     blur_requests: &mut Vec<BlurRequest>,
+    inside_clip: bool,
 ) {
     let idx = id as usize;
     if idx >= nodes.len() {
@@ -237,18 +245,33 @@ fn walk_node(
             let g = bg.g as f32 / 255.0;
             let b = bg.b as f32 / 255.0;
             let a = bg.a as f32 / 255.0;
-            batch.push_quad(
-                quad_clip.x,
-                quad_clip.y,
-                quad_clip.w,
-                quad_clip.h,
-                vw,
-                vh,
-                r,
-                g,
-                b,
-                a,
-            );
+            if inside_clip {
+                batch.push_clip_quad(
+                    quad_clip.x,
+                    quad_clip.y,
+                    quad_clip.w,
+                    quad_clip.h,
+                    vw,
+                    vh,
+                    r,
+                    g,
+                    b,
+                    a,
+                );
+            } else {
+                batch.push_quad(
+                    quad_clip.x,
+                    quad_clip.y,
+                    quad_clip.w,
+                    quad_clip.h,
+                    vw,
+                    vh,
+                    r,
+                    g,
+                    b,
+                    a,
+                );
+            }
         }
     }
 
@@ -274,6 +297,7 @@ fn walk_node(
                 vw,
                 vh,
                 color,
+                inside_clip,
             );
         }
         Content::Image {
@@ -291,6 +315,7 @@ fn walk_node(
                     data_length: data.length,
                     src_width,
                     src_height,
+                    clipped: inside_clip,
                 });
             }
         }
@@ -351,6 +376,10 @@ fn walk_node(
         return;
     }
 
+    // Children are inside a clip region if this node has a clip_path,
+    // or if we were already inside one from an ancestor.
+    let children_clipped = inside_clip || !node.clip_path.is_empty();
+
     let ct_tx = node.content_transform.tx * scale;
     let ct_ty = node.content_transform.ty * scale;
 
@@ -377,6 +406,7 @@ fn walk_node(
             atlas,
             ascent,
             blur_requests,
+            children_clipped,
         );
         child = nodes[child_idx].next_sibling;
     }
@@ -403,6 +433,7 @@ fn emit_glyphs(
     vw: f32,
     vh: f32,
     color: scene::Color,
+    inside_clip: bool,
 ) {
     let glyph_size = core::mem::size_of::<ShapedGlyph>();
     let offset = glyph_ref.offset as usize;
@@ -455,7 +486,12 @@ fn emit_glyphs(
             let u1 = (entry.u as f32 + entry.width as f32) / atlas_w;
             let v1 = (entry.v as f32 + entry.height as f32) / atlas_h;
 
-            text_batch.push_textured_quad(gx, gy, gw, gh, vw, vh, u0, v0, u1, v1, r, g, b, a);
+            if inside_clip {
+                text_batch
+                    .push_clip_textured_quad(gx, gy, gw, gh, vw, vh, u0, v0, u1, v1, r, g, b, a);
+            } else {
+                text_batch.push_textured_quad(gx, gy, gw, gh, vw, vh, u0, v0, u1, v1, r, g, b, a);
+            }
         }
 
         pen_x += (sg.x_advance as f32) * scale;

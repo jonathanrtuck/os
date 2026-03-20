@@ -409,6 +409,32 @@ impl CommandBuffer {
         self.push(0); // S3: alpha
     }
 
+    /// Create a DSA state for clip-path stencil test.
+    ///
+    /// Passes where stencil != 0, but KEEPS the stencil value on pass
+    /// (unlike `cmd_create_dsa_stencil_test` which zeros it). This allows
+    /// multiple clipped draws to all test against the same stencil mask.
+    /// The caller must clear the stencil buffer explicitly after all
+    /// clipped content is drawn.
+    pub fn cmd_create_dsa_clip_test(&mut self, handle: u32) {
+        self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
+        self.push(handle);
+        // S0: depth DISABLED — stencil test only.
+        self.push(0);
+        // S1: stencil[0] (front) — pass if != 0, KEEP stencil on pass
+        let face = Self::stencil_face(
+            PIPE_FUNC_NOTEQUAL,
+            PIPE_STENCIL_OP_KEEP, // stencil fail
+            PIPE_STENCIL_OP_KEEP, // stencil pass (KEEP, not ZERO)
+            PIPE_STENCIL_OP_KEEP, // depth fail
+            0xFF,
+            0xFF,
+        );
+        self.push(face); // S1: front
+        self.push(face); // S2: back (same)
+        self.push(0); // S3: alpha
+    }
+
     /// Create a blend state with color writes disabled (for stencil-only pass).
     pub fn cmd_create_blend_no_color(&mut self, handle: u32) {
         // Payload = handle(1) + S0(1) + S1/logicop(1) + RT0-RT7(8) = 11.

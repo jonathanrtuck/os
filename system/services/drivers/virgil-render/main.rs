@@ -106,6 +106,10 @@ pub(crate) const HANDLE_BLUR_CAPTURE_VIEW: u32 = 22;
 pub(crate) const HANDLE_BLUR_INTERMEDIATE_SURFACE: u32 = 23;
 /// Sampler view for the blur intermediate texture (input to V-blur pass).
 pub(crate) const HANDLE_BLUR_INTERMEDIATE_VIEW: u32 = 24;
+/// DSA for clip-path stencil test: pass if != 0, KEEP stencil value on pass.
+/// Unlike HANDLE_DSA_STENCIL_TEST (which zeros stencil on pass for path cover),
+/// this preserves the stencil so multiple clipped draws can all test against it.
+pub(crate) const HANDLE_DSA_CLIP_TEST: u32 = 25;
 
 /// Resource ID for the vertex buffer (PIPE_BUFFER).
 pub(crate) const VB_RESOURCE_ID: u32 = 2;
@@ -618,11 +622,15 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"WARN: vertices dropped\n");
         }
 
-        // ── Color VBO: pack backgrounds + path fan + path cover + clip fan ─
-        // Layout: [bg quads][path fan][path cover][clip fan]
+        // ── Color VBO: pack backgrounds + clipped bgs + path fan + path cover + clip fan ─
+        // Layout: [bg quads][clipped bg quads][path fan][path cover][clip fan]
         let color_data = batch.as_vertex_data();
         let color_dwords = color_data.len();
         let color_bytes = color_dwords * 4;
+
+        let clip_bg_data = batch.as_clip_vertex_data();
+        let clip_bg_dwords = clip_bg_data.len();
+        let clip_bg_bytes = clip_bg_dwords * 4;
 
         let has_paths = path_batch.fan_vertex_count > 0 && stencil_available;
         let fan_data = path_batch.as_fan_data();
@@ -637,7 +645,8 @@ pub extern "C" fn _start() -> ! {
         let clip_fan_dwords = clip_fan_data.len();
         let clip_fan_bytes = clip_fan_dwords * 4;
 
-        let fan_vbo_offset = color_bytes;
+        let clip_bg_vbo_offset = color_bytes;
+        let fan_vbo_offset = clip_bg_vbo_offset + clip_bg_bytes;
         let cover_vbo_offset = fan_vbo_offset + fan_bytes;
         let clip_fan_vbo_offset = cover_vbo_offset + cover_bytes;
         let total_color_bytes = clip_fan_vbo_offset + clip_fan_bytes;
@@ -651,6 +660,16 @@ pub extern "C" fn _start() -> ! {
                         color_data.as_ptr(),
                         vbo_va as *mut u32,
                         color_dwords,
+                    );
+                }
+            }
+            if clip_bg_bytes > 0 {
+                // SAFETY: vbo_va is valid DMA of TOTAL_COLOR_VBO_BYTES.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        clip_bg_data.as_ptr(),
+                        (vbo_va + clip_bg_vbo_offset) as *mut u32,
+                        clip_bg_dwords,
                     );
                 }
             }
@@ -745,36 +764,7 @@ pub extern "C" fn _start() -> ! {
             cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
         }
 
-        // Clip path stencil write (after Content::Path, before text/images).
-        // Writes the clip fan geometry to the stencil buffer. This proves
-        // the stencil geometry is correct but does NOT activate stencil test
-        // for subsequent rendering — the batched architecture renders ALL
-        // text/images in one pass, so a global stencil test would clip
-        // title bar text and document text that are outside clip regions.
-        // True per-node stencil clipping requires tree-order rendering.
-        // The CpuBackend handles actual clipping via offscreen buffers.
-        if has_clip {
-            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND_NO_COLOR);
-            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_WRITE);
-            cmdbuf.cmd_set_vertex_buffers(
-                scene_walk::VERTEX_STRIDE,
-                clip_fan_vbo_offset as u32,
-                VB_RESOURCE_ID,
-            );
-            cmdbuf.cmd_set_stencil_ref(0, 0);
-            cmdbuf.cmd_draw_vbo(
-                0,
-                path_batch.clip_fan_vertex_count,
-                PIPE_PRIM_TRIANGLES,
-                false,
-            );
-
-            // Restore normal blend + DSA (no stencil test).
-            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
-            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
-        }
-
-        // ── Pass 3: Upload + draw images (TEXTURED_FS) ──────────────────
+        // ── Pass 3: Draw non-clipped images ──────────────────────────────
         // Each image shares a single GPU texture resource, so we must
         // upload, transfer, and draw each image individually.  Vertices
         // are written sequentially into the text VBO (image 0 at offset
@@ -786,11 +776,15 @@ pub extern "C" fn _start() -> ! {
             let vh = height as f32;
             let white = 1.0f32.to_bits();
 
+            // First pass: draw non-clipped images only.
             for idx in 0..image_batch.count {
                 let img = match image_batch.get(idx) {
                     Some(i) => i,
                     None => break,
                 };
+                if img.clipped {
+                    continue; // Deferred to clipped pass.
+                }
                 let img_pixels = img.src_width as u32 * img.src_height as u32 * 4;
                 let src_offset = img.data_offset as usize;
                 let src_end = src_offset + img_pixels as usize;
@@ -900,37 +894,53 @@ pub extern "C" fn _start() -> ! {
                 cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf);
                 cmdbuf.cmd_set_viewport(width as f32, height as f32);
                 cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
-                // Note: clip path stencil is not used for per-draw clipping
-                // in the batched architecture. See clip stencil write comment.
 
                 images_drawn += 1;
             }
         }
 
-        // ── Pass 4: Upload glyph vertices to text VBO and draw.
+        // ── Pass 4: Upload + draw non-clipped glyph vertices ────────────
         //
-        // Layout: [image vertices (MAX_IMAGES * 192 bytes)] [glyph vertices]
-        // Glyph draw uses VBO offset after all image data.
+        // Layout: [image vertices (MAX_IMAGES * 192 bytes)] [glyph vertices] [clipped glyphs]
+        // Non-clipped glyph draw uses VBO offset after all image data.
         let text_data = text_batch.as_vertex_data();
         let text_dwords = text_data.len();
         let text_bytes = text_dwords * 4;
 
+        let clip_text_data = text_batch.as_clip_vertex_data();
+        let clip_text_dwords = clip_text_data.len();
+        let clip_text_bytes = clip_text_dwords * 4;
+
         // Reserve space for MAX_IMAGES image quads so glyph offset is stable.
         let img_vbo_bytes: usize = scene_walk::MAX_IMAGES * scene_walk::DWORDS_PER_IMAGE_QUAD * 4;
-        let glyph_vbo_offset = img_vbo_bytes; // glyphs start after all image slots
+        let glyph_vbo_offset = img_vbo_bytes; // non-clipped glyphs start after all image slots
+        let clip_glyph_vbo_offset = glyph_vbo_offset + text_bytes; // clipped glyphs follow
 
-        if text_bytes > 0 {
-            // Copy glyph data after image region in DMA buffer.
-            // SAFETY: text_vbo_va is valid DMA of TOTAL_TEXTURED_VBO_BYTES.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    text_data.as_ptr(),
-                    (text_vbo_va + img_vbo_bytes) as *mut u32,
-                    text_dwords,
-                );
+        if text_bytes > 0 || clip_text_bytes > 0 {
+            // Copy non-clipped glyph data after image region in DMA buffer.
+            if text_bytes > 0 {
+                // SAFETY: text_vbo_va is valid DMA of TOTAL_TEXTURED_VBO_BYTES.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        text_data.as_ptr(),
+                        (text_vbo_va + img_vbo_bytes) as *mut u32,
+                        text_dwords,
+                    );
+                }
+            }
+            // Copy clipped glyph data after non-clipped glyphs.
+            if clip_text_bytes > 0 {
+                // SAFETY: text_vbo_va is valid DMA of TOTAL_TEXTURED_VBO_BYTES.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        clip_text_data.as_ptr(),
+                        (text_vbo_va + clip_glyph_vbo_offset) as *mut u32,
+                        clip_text_dwords,
+                    );
+                }
             }
 
-            let total_upload = img_vbo_bytes + text_bytes;
+            let total_upload = clip_glyph_vbo_offset + clip_text_bytes;
             resources::transfer_buffer_to_host(
                 &device,
                 &mut vq,
@@ -939,6 +949,7 @@ pub extern "C" fn _start() -> ! {
                 total_upload as u32,
             );
 
+            // Draw non-clipped glyphs.
             if text_batch.vertex_count > 0 {
                 cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
                 cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
@@ -954,8 +965,195 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Clear stencil buffer if clip geometry was written.
+        // ── Pass 5: Clip path stencil write + clipped content ───────────
+        //
+        // Write the clip fan geometry to the stencil buffer, then draw
+        // all clipped content (backgrounds, images, glyphs) with stencil
+        // test enabled, then clear the stencil buffer.
         if has_clip {
+            // Step A: Write clip fan to stencil buffer (no color output).
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND_NO_COLOR);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_WRITE);
+            cmdbuf.cmd_set_vertex_buffers(
+                scene_walk::VERTEX_STRIDE,
+                clip_fan_vbo_offset as u32,
+                VB_RESOURCE_ID,
+            );
+            cmdbuf.cmd_set_stencil_ref(0, 0);
+            cmdbuf.cmd_draw_vbo(
+                0,
+                path_batch.clip_fan_vertex_count,
+                PIPE_PRIM_TRIANGLES,
+                false,
+            );
+
+            // Step B: Enable stencil test for clipped content.
+            // Use HANDLE_DSA_CLIP_TEST (not HANDLE_DSA_STENCIL_TEST) because
+            // clip test KEEPs the stencil value on pass, allowing multiple
+            // clipped draws to all test against the same stencil mask.
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_CLIP_TEST);
+
+            // Step C: Draw clipped backgrounds.
+            if batch.clip_vertex_count > 0 {
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE);
+                cmdbuf.cmd_bind_shader(HANDLE_VS, PIPE_SHADER_VERTEX);
+                cmdbuf.cmd_bind_shader(HANDLE_FS, PIPE_SHADER_FRAGMENT);
+                cmdbuf.cmd_set_vertex_buffers(
+                    scene_walk::VERTEX_STRIDE,
+                    clip_bg_vbo_offset as u32,
+                    VB_RESOURCE_ID,
+                );
+                cmdbuf.cmd_draw_vbo(0, batch.clip_vertex_count, PIPE_PRIM_TRIANGLES, false);
+            }
+
+            // Step D: Draw clipped images (with stencil test still active).
+            // Must submit current cmdbuf first since images need per-image
+            // texture upload cycles.
+            if !cmdbuf.overflowed() {
+                submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+            }
+            cmdbuf.clear();
+            let zsurf_clip = if stencil_available {
+                HANDLE_STENCIL_SURFACE
+            } else {
+                0
+            };
+            cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf_clip);
+            cmdbuf.cmd_set_viewport(width as f32, height as f32);
+            cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
+
+            {
+                let vw = width as f32;
+                let vh = height as f32;
+                let white = 1.0f32.to_bits();
+
+                for idx in 0..image_batch.count {
+                    let img = match image_batch.get(idx) {
+                        Some(i) => i,
+                        None => break,
+                    };
+                    if !img.clipped {
+                        continue; // Already drawn in non-clipped pass.
+                    }
+                    let img_pixels = img.src_width as u32 * img.src_height as u32 * 4;
+                    let src_offset = img.data_offset as usize;
+                    let src_end = src_offset + img_pixels as usize;
+
+                    if src_end > data_buf.len() || img_pixels > max_img_bytes {
+                        continue;
+                    }
+
+                    // SAFETY: img_dma_va is valid DMA of max_img_bytes.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            data_buf[src_offset..src_end].as_ptr(),
+                            img_dma_va as *mut u8,
+                            img_pixels as usize,
+                        );
+                    }
+                    resources::transfer_texture_to_host(
+                        &device,
+                        &mut vq,
+                        irq_handle,
+                        IMG_RESOURCE_ID,
+                        img.src_width as u32,
+                        img.src_height as u32,
+                        img.src_width as u32 * 4,
+                    );
+
+                    let x0 = img.x / vw * 2.0 - 1.0;
+                    let y0 = 1.0 - img.y / vh * 2.0;
+                    let x1 = (img.x + img.w) / vw * 2.0 - 1.0;
+                    let y1 = 1.0 - (img.y + img.h) / vh * 2.0;
+
+                    let dwords = scene_walk::DWORDS_PER_IMAGE_QUAD;
+                    let mut img_verts = [0u32; 48];
+                    let verts: [(f32, f32, f32, f32); 6] = [
+                        (x0, y0, 0.0, 0.0),
+                        (x0, y1, 0.0, 1.0),
+                        (x1, y0, 1.0, 0.0),
+                        (x1, y0, 1.0, 0.0),
+                        (x0, y1, 0.0, 1.0),
+                        (x1, y1, 1.0, 1.0),
+                    ];
+                    for (i, &(px, py, u, v)) in verts.iter().enumerate() {
+                        let base = i * 8;
+                        img_verts[base] = px.to_bits();
+                        img_verts[base + 1] = py.to_bits();
+                        img_verts[base + 2] = u.to_bits();
+                        img_verts[base + 3] = v.to_bits();
+                        img_verts[base + 4] = white;
+                        img_verts[base + 5] = white;
+                        img_verts[base + 6] = white;
+                        img_verts[base + 7] = white;
+                    }
+
+                    let vbo_dword_offset = images_drawn * dwords;
+                    // SAFETY: text_vbo_va is valid DMA, bounded by MAX_IMAGES.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            img_verts.as_ptr(),
+                            (text_vbo_va as *mut u32).add(vbo_dword_offset),
+                            dwords,
+                        );
+                    }
+
+                    let vbo_byte_offset = (vbo_dword_offset * 4) as u32;
+                    let vbo_byte_len = (dwords * 4) as u32;
+                    resources::transfer_buffer_to_host(
+                        &device,
+                        &mut vq,
+                        irq_handle,
+                        TEXT_VB_RESOURCE_ID,
+                        vbo_byte_offset + vbo_byte_len,
+                    );
+
+                    // Re-bind clip test DSA (lost after cmdbuf.clear above).
+                    cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+                    cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+                    cmdbuf.cmd_bind_shader(HANDLE_FS_IMAGE, PIPE_SHADER_FRAGMENT);
+                    cmdbuf.cmd_set_vertex_buffers(
+                        scene_walk::TEXTURED_VERTEX_STRIDE,
+                        vbo_byte_offset,
+                        TEXT_VB_RESOURCE_ID,
+                    );
+                    cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+                    cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER_VIEW_IMG);
+                    cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_CLIP_TEST);
+                    cmdbuf.cmd_draw_vbo(0, 6, PIPE_PRIM_TRIANGLES, false);
+
+                    if !cmdbuf.overflowed() {
+                        submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+                    }
+                    cmdbuf.clear();
+                    cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf_clip);
+                    cmdbuf.cmd_set_viewport(width as f32, height as f32);
+                    cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
+
+                    images_drawn += 1;
+                }
+            }
+
+            // Step E: Draw clipped glyphs (stencil test still active).
+            if text_batch.clip_vertex_count > 0 {
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_CLIP_TEST);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+                cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+                cmdbuf.cmd_bind_shader(HANDLE_FS_GLYPH, PIPE_SHADER_FRAGMENT);
+                cmdbuf.cmd_set_vertex_buffers(
+                    scene_walk::TEXTURED_VERTEX_STRIDE,
+                    clip_glyph_vbo_offset as u32,
+                    TEXT_VB_RESOURCE_ID,
+                );
+                cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+                cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER_VIEW);
+                cmdbuf.cmd_draw_vbo(0, text_batch.clip_vertex_count, PIPE_PRIM_TRIANGLES, false);
+            }
+
+            // Step F: Restore normal DSA and clear stencil.
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
             cmdbuf.cmd_clear_stencil();
         }
 
