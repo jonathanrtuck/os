@@ -11,8 +11,8 @@ use scene::{fnv1a, Color, Content, NodeFlags, NULL};
 
 use super::{
     allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width, layout_mono_lines,
-    line_bytes_for_run, shape_text, update_clock_inline, SceneConfig, N_CURSOR, N_DOC_TEXT,
-    WELL_KNOWN_COUNT,
+    line_bytes_for_run, round_f32, shape_text, update_clock_inline, SceneConfig, N_CURSOR,
+    N_DOC_TEXT, WELL_KNOWN_COUNT,
 };
 
 // ── Incremental scene update ─────────────────────────────────────────
@@ -36,7 +36,7 @@ pub fn update_single_line(
     cursor_pos: u32,
     sel_start: u32,
     sel_end: u32,
-    scroll_y: i32,
+    scroll_y: f32,
     clock_text: Option<&[u8]>,
 ) -> bool {
     let scene_text_color = dc(cfg.text_color);
@@ -54,8 +54,7 @@ pub fn update_single_line(
     // Determine which visible lines are in the viewport.
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = round_f32(scroll_y);
 
     // Count visible runs and compare against the sibling chain length.
     // If they differ, a soft-wrap change occurred — fall back to compaction
@@ -150,15 +149,13 @@ pub fn update_single_line(
     // Update N_DOC_TEXT: content_transform, content_hash, and clear stale
     // next_sibling (build_full_scene links test content as siblings
     // that survive acquire_copy but are truncated on first compaction).
-    w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
+    w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
     w.node_mut(N_DOC_TEXT).next_sibling = scene::NULL;
     w.node_mut(N_DOC_TEXT).content_hash = scene::fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
 
     // Update cursor position.
-    let (cursor_line, cursor_col) =
-        byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
+    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
@@ -251,30 +248,27 @@ fn finish_line_update(
     cursor_pos: u32,
     sel_start: u32,
     sel_end: u32,
-    scroll_y: i32,
+    scroll_y: f32,
     clock_text: Option<&[u8]>,
 ) {
     let cpl = chars_per_line(cfg);
 
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y);
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = round_f32(scroll_y);
 
     // Update N_DOC_TEXT content_transform and content hash.
     // Clear next_sibling to prevent stale pointers (the initial
     // build_full_scene links test content as siblings of N_DOC_TEXT
     // under N_CONTENT -- those nodes are gone after the first compaction
     // but the pointer survives acquire_copy).
-    w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
+    w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
     w.node_mut(N_DOC_TEXT).next_sibling = scene::NULL;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
 
     // Update cursor position.
-    let (cursor_line, cursor_col) =
-        byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
+    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
@@ -339,7 +333,7 @@ pub fn insert_line(
     cursor_pos: u32,
     sel_start: u32,
     sel_end: u32,
-    scroll_y: i32,
+    scroll_y: f32,
     clock_text: Option<&[u8]>,
 ) -> bool {
     let scene_text_color = dc(cfg.text_color);
@@ -358,8 +352,7 @@ pub fn insert_line(
     // Determine visible runs.
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = round_f32(scroll_y);
 
     let visible_run_count = all_runs
         .iter()
@@ -550,7 +543,7 @@ pub fn delete_line(
     cursor_pos: u32,
     sel_start: u32,
     sel_end: u32,
-    scroll_y: i32,
+    scroll_y: f32,
     clock_text: Option<&[u8]>,
 ) -> bool {
     let scene_text_color = dc(cfg.text_color);
@@ -568,8 +561,7 @@ pub fn delete_line(
     // Determine visible runs.
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = round_f32(scroll_y);
 
     let visible_run_count = all_runs
         .iter()

@@ -53,6 +53,17 @@ use protocol::{
     },
 };
 
+/// Round a float to the nearest integer (round-half-away-from-zero).
+/// Manual implementation for `no_std` (where `f32::round()` isn't available).
+#[inline]
+fn round_f32(x: f32) -> i32 {
+    if x >= 0.0 {
+        (x + 0.5) as i32
+    } else {
+        (x - 0.5) as i32
+    }
+}
+
 const COMPOSITOR_HANDLE: u8 = 2;
 const DOC_HEADER_SIZE: usize = 64;
 const EDITOR_HANDLE: u8 = 3;
@@ -83,8 +94,8 @@ struct CoreState {
     mouse_x: u32,
     mouse_y: u32,
     rtc_mmio_va: usize,
-    saved_editor_scroll: u32,
-    scroll_offset: u32,
+    saved_editor_scroll: f32,
+    scroll_offset: f32,
     sel_end: usize,
     sel_start: usize,
     timer_active: bool,
@@ -109,8 +120,8 @@ impl CoreState {
             mouse_x: 0,
             mouse_y: 0,
             rtc_mmio_va: 0,
-            saved_editor_scroll: 0,
-            scroll_offset: 0,
+            saved_editor_scroll: 0.0,
+            scroll_offset: 0.0,
             sel_end: 0,
             sel_start: 0,
             timer_active: false,
@@ -204,28 +215,30 @@ impl TextLayout {
         line as u32
     }
 
-    /// Compute the scroll offset needed to keep the cursor visible.
+    /// Compute the scroll offset (in pixels) needed to keep the cursor visible.
     fn scroll_for_cursor(
         &self,
         text: &[u8],
         cursor_offset: usize,
-        current_scroll: u32,
+        current_scroll: f32,
         viewport_lines: u32,
-    ) -> u32 {
-        if viewport_lines == 0 {
-            return 0;
+    ) -> f32 {
+        if viewport_lines == 0 || self.line_height == 0 {
+            return 0.0;
         }
 
         let cursor_line = self.byte_to_visual_line(text, cursor_offset);
+        let cursor_px = cursor_line as f32 * self.line_height as f32;
+        let viewport_px = viewport_lines as f32 * self.line_height as f32;
 
-        if cursor_line < current_scroll {
-            return cursor_line;
+        if cursor_px < current_scroll {
+            return cursor_px;
         }
 
-        let last_visible = current_scroll + viewport_lines - 1;
+        let last_visible_top = current_scroll + viewport_px - self.line_height as f32;
 
-        if cursor_line > last_visible {
-            return cursor_line - (viewport_lines - 1);
+        if cursor_px > last_visible_top {
+            return cursor_px - viewport_px + self.line_height as f32;
         }
 
         current_scroll
@@ -705,7 +718,7 @@ pub extern "C" fn _start() -> ! {
             s.sel_end as u32,
             b"Text",
             &time_buf,
-            0,
+            0.0,
         );
     }
 
@@ -827,9 +840,7 @@ pub extern "C" fn _start() -> ! {
                                 let text_origin_y = TEXT_INSET_TOP;
                                 let rel_x = click_x.saturating_sub(text_origin_x);
                                 let rel_y = click_y.saturating_sub(text_origin_y);
-                                let scroll = s.scroll_offset;
-                                let line_h = s.line_h;
-                                let adjusted_y = rel_y + scroll * line_h;
+                                let adjusted_y = rel_y + round_f32(s.scroll_offset) as u32;
                                 let layout = content_text_layout(content_w);
                                 let text = doc_content();
                                 let byte_pos = layout.xy_to_byte(text, rel_x, adjusted_y);
@@ -948,7 +959,9 @@ pub extern "C" fn _start() -> ! {
             // (visible lines changed) regardless of whether text changed.
             let new_scroll = state().scroll_offset;
 
-            if old_scroll != new_scroll {
+            let diff = old_scroll - new_scroll;
+            let abs_diff = if diff < 0.0 { -diff } else { diff };
+            if abs_diff > 0.5 {
                 scroll_changed = true;
 
                 if !text_changed {
@@ -998,7 +1011,7 @@ pub extern "C" fn _start() -> ! {
                     s.sel_end as u32,
                     b"Text",
                     &time_buf,
-                    s.scroll_offset as i32,
+                    s.scroll_offset,
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
@@ -1022,7 +1035,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
                     );
                 } else if new_line_count == prev_line_count {
@@ -1050,7 +1063,7 @@ pub extern "C" fn _start() -> ! {
                         changed_line,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
                     );
                 } else if new_line_count == prev_line_count + 1 {
@@ -1064,7 +1077,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
                     );
                 } else if new_line_count + 1 == prev_line_count {
@@ -1078,7 +1091,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
                     );
                 } else {
@@ -1093,7 +1106,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
                     );
                 }
@@ -1109,7 +1122,7 @@ pub extern "C" fn _start() -> ! {
                 let s = state();
                 let content_y = TITLE_BAR_H + SHADOW_DEPTH;
                 let sel_content_h = fb_height.saturating_sub(content_y);
-                let scroll_pt = s.scroll_offset as i32 * s.line_h as i32;
+                let scroll_pt = round_f32(s.scroll_offset);
 
                 scene.update_selection(
                     &scene_cfg,

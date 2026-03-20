@@ -10,7 +10,7 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
-    layout_mono_lines, line_bytes_for_run, scroll_runs, shape_text, shape_visible_runs,
+    layout_mono_lines, line_bytes_for_run, round_f32, scroll_runs, shape_text, shape_visible_runs,
     update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT, N_ROOT,
     N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
@@ -29,7 +29,7 @@ pub fn build_full_scene(
     sel_end: u32,
     title_label: &[u8],
     clock_text: &[u8],
-    scroll_y: i32,
+    scroll_y: f32,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
@@ -46,10 +46,9 @@ pub fn build_full_scene(
     // Apply scroll: filter to visible viewport.
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, content_h);
+    let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, content_h);
     // Scroll offset in points for cursor/selection positioning.
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = round_f32(scroll_y);
     // Compute cursor line/col for positioning.
     let cursor_byte = cursor_pos as usize;
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_byte, cpl as usize);
@@ -65,7 +64,13 @@ pub fn build_full_scene(
     w.clear();
 
     // Push shaped glyph arrays for title and clock.
-    let title_glyphs = shape_text(cfg.font_data, title_label, cfg.font_size, cfg.upem, cfg.axes);
+    let title_glyphs = shape_text(
+        cfg.font_data,
+        title_label,
+        cfg.font_size,
+        cfg.upem,
+        cfg.axes,
+    );
     let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
     let clock_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
@@ -196,7 +201,7 @@ pub fn build_full_scene(
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h_u32 as u16;
-        n.content_transform = scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
+        n.content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
         // N_DOC_TEXT is now a pure container -- per-line Glyphs
         // child nodes hold the actual text content.
         n.content = Content::None;
@@ -426,8 +431,7 @@ pub fn build_selection_update(
     // Truncate selection rects only, keeping well-known + line nodes.
     w.set_node_count(WELL_KNOWN_COUNT + line_count);
 
-    let (cursor_line, cursor_col) =
-        byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
+    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
@@ -473,7 +477,7 @@ pub fn build_document_content(
     sel_end: u32,
     title_label: &[u8],
     clock_text: &[u8],
-    scroll_y: i32,
+    scroll_y: f32,
     mark_clock_changed: bool,
 ) {
     let scene_text_color = dc(cfg.text_color);
@@ -482,8 +486,7 @@ pub fn build_document_content(
 
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y);
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = round_f32(scroll_y);
 
     // Remove old dynamic nodes (line nodes + selection rects).
     w.set_node_count(WELL_KNOWN_COUNT);
@@ -492,7 +495,13 @@ pub fn build_document_content(
     w.reset_data();
 
     // Re-push title glyph data.
-    let title_glyphs = shape_text(cfg.font_data, title_label, cfg.font_size, cfg.upem, cfg.axes);
+    let title_glyphs = shape_text(
+        cfg.font_data,
+        title_label,
+        cfg.font_size,
+        cfg.upem,
+        cfg.axes,
+    );
     let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
 
     // Re-push clock glyph data.
@@ -508,7 +517,7 @@ pub fn build_document_content(
         cfg.font_size,
     );
     let viewport_height_pt = content_h as i32;
-    let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, viewport_height_pt);
+    let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, viewport_height_pt);
 
     // Push visible line glyph data.
     let line_glyph_refs = shape_visible_runs(
@@ -560,8 +569,7 @@ pub fn build_document_content(
     // N_DOC_TEXT, once as sibling) with different parent Y
     // offsets, causing ghost duplicates.
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
-    w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
+    w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
 
@@ -584,8 +592,7 @@ pub fn build_document_content(
     w.mark_dirty(N_DOC_TEXT);
 
     // Update cursor position (document-relative).
-    let (cursor_line, cursor_col) =
-        byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
+    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 

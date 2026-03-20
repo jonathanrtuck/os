@@ -51,7 +51,7 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
     ) {
         let mut tw = self.triple();
         {
@@ -140,7 +140,7 @@ impl SceneState {
         changed_line: usize,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
         timer_fired: bool,
     ) {
         let mut tw = self.triple();
@@ -188,7 +188,7 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
         timer_fired: bool,
     ) {
         let mut tw = self.triple();
@@ -234,7 +234,7 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
         timer_fired: bool,
     ) {
         let mut tw = self.triple();
@@ -280,7 +280,7 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
         mark_clock_changed: bool,
     ) {
         let mut tw = self.triple();
