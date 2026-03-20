@@ -166,10 +166,9 @@ impl Message {
     ///
     /// `T` must be `#[repr(C)]` and `size_of::<T>() <= PAYLOAD_SIZE`.
     pub unsafe fn from_payload<T: Copy>(msg_type: u32, value: &T) -> Self {
+        const { assert!(core::mem::size_of::<T>() <= PAYLOAD_SIZE) }
         let mut msg = Self::new(msg_type);
         let size = core::mem::size_of::<T>();
-
-        debug_assert!(size <= PAYLOAD_SIZE);
 
         let src = value as *const T as *const u8;
 
@@ -187,7 +186,7 @@ impl Message {
     /// payload must contain a valid `T` (written via `from_payload` with the
     /// same type).
     pub unsafe fn payload_as<T: Copy>(&self) -> T {
-        debug_assert!(core::mem::size_of::<T>() <= PAYLOAD_SIZE);
+        const { assert!(core::mem::size_of::<T>() <= PAYLOAD_SIZE) }
 
         unsafe { core::ptr::read_unaligned(self.payload.as_ptr() as *const T) }
     }
@@ -291,7 +290,9 @@ impl RingBuf {
         true
     }
 }
-// RingBuf is conceptually owned by one thread on each side (producer/consumer).
-// The atomic operations on head/tail provide the necessary synchronization.
+// SAFETY: RingBuf can be transferred between threads (Send) — the new thread
+// becomes the sole producer or consumer. Sync is intentionally NOT implemented:
+// SPSC correctness requires exactly one producer and one consumer. If RingBuf
+// were Sync, multiple threads could concurrently call send() or try_recv(),
+// racing on the head/tail counters and corrupting the ring.
 unsafe impl Send for RingBuf {}
-unsafe impl Sync for RingBuf {}

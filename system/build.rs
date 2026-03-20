@@ -247,7 +247,19 @@ fn main() {
     println!("cargo:rerun-if-changed={}", sys_src.display());
     println!("cargo:rerun-if-changed={}", virtio_src.display());
     println!("cargo:rerun-if-changed={}", drawing_src.display());
-    for inc in &["palette.rs", "gamma_tables.rs"] {
+    for inc in &[
+        "palette.rs",
+        "gamma_tables.rs",
+        "neon.rs",
+        "blend.rs",
+        "blit.rs",
+        "blur.rs",
+        "coverage.rs",
+        "fill.rs",
+        "gradient.rs",
+        "line.rs",
+        "transform.rs",
+    ] {
         println!(
             "cargo:rerun-if-changed={}",
             manifest_dir.join("libraries/drawing").join(inc).display()
@@ -263,6 +275,7 @@ fn main() {
         "surface_pool.rs",
         "damage.rs",
         "cursor.rs",
+        "frame_scheduler.rs",
     ] {
         println!(
             "cargo:rerun-if-changed={}",

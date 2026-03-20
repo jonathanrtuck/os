@@ -349,10 +349,12 @@ fn scheduler_deadline_ticks(
         }
     }
 
-    // Source 2: earliest replenish_at across all active contexts.
+    // Source 2: replenishment deadlines for exhausted contexts (any time)
+    // or non-exhausted contexts with future replenishment. The latter
+    // causes harmless spurious timer wakeups — the scheduler will find
+    // no work and return to idle.
     for slot in contexts.iter().flatten() {
         if !slot.context.has_budget() || slot.context.replenish_at > now_ns_val {
-            // Only consider replenishment deadlines that are in the future.
             let replenish = slot.context.replenish_at;
 
             earliest_ns = Some(earliest_ns.map_or(replenish, |e| e.min(replenish)));

@@ -15,6 +15,7 @@ extern crate alloc;
 
 pub mod cache;
 pub mod damage;
+pub mod frame_scheduler;
 pub mod incremental;
 pub mod scene_render;
 pub mod surface_pool;

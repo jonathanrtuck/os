@@ -473,6 +473,18 @@ pub fn counter_freq() -> u64 {
 
     val
 }
+/// Convert a counter tick count to nanoseconds.
+///
+/// Uses the split multiply-then-remainder form to avoid u64 overflow:
+/// `(ticks / freq) * 1e9 + (ticks % freq) * 1e9 / freq`.
+#[inline]
+pub fn counter_to_ns(ticks: u64, freq: u64) -> u64 {
+    if freq == 0 {
+        return 0;
+    }
+    (ticks / freq) * 1_000_000_000 + (ticks % freq) * 1_000_000_000 / freq
+}
+
 /// Map a device's MMIO region into this process's address space.
 ///
 /// The kernel maps `size` bytes starting at physical address `pa` with device

@@ -96,7 +96,10 @@ impl GlyphCache {
 
         let i = idx as usize;
         let g = &self.glyphs[i];
-        let len = (g.width * g.height) as usize; // 1 byte per pixel (grayscale)
+        let len = (g.width as usize) * (g.height as usize);
+        if g.buf_offset + len > self.coverage.len() {
+            return None; // defensive: glyph data doesn't fit in coverage buffer
+        }
         let cov = &self.coverage[g.buf_offset..g.buf_offset + len];
 
         Some((g, cov))

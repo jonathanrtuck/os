@@ -34,8 +34,7 @@ extern crate scene;
 #[path = "gpu.rs"]
 mod gpu;
 
-#[path = "frame_scheduler.rs"]
-mod frame_scheduler;
+use render::frame_scheduler;
 
 use protocol::{
     compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG},
@@ -65,14 +64,6 @@ const MAX_CHUNKS: usize = 512;
 struct SyncCell<T>(core::cell::UnsafeCell<T>);
 // SAFETY: Single-threaded userspace process.
 unsafe impl<T> Sync for SyncCell<T> {}
-
-#[inline]
-fn counter_to_ns(ticks: u64, freq: u64) -> u64 {
-    if freq == 0 {
-        return 0;
-    }
-    (ticks / freq) * 1_000_000_000 + (ticks % freq) * 1_000_000_000 / freq
-}
 
 fn clamp_scale(raw: f32) -> f32 {
     if raw <= 0.0 || raw.is_nan() {
@@ -289,6 +280,7 @@ pub extern "C" fn _start() -> ! {
     };
     let prop = if config.prop_font_len > 0 {
         let off = config.mono_font_va as usize + config.mono_font_len as usize;
+        // SAFETY: same as above — init mapped font pages before starting us.
         Some(unsafe {
             core::slice::from_raw_parts(off as *const u8, config.prop_font_len as usize)
         })
@@ -343,8 +335,10 @@ pub extern "C" fn _start() -> ! {
         }
     };
     // SAFETY: scene_va is mapped into our address space by init via memory_share.
-    let scene_buf =
-        unsafe { core::slice::from_raw_parts(scene_va as *const u8, scene::TRIPLE_SCENE_SIZE) };
+    // Uses *mut u8 (not &[u8]) because TripleReader must write to the control
+    // region via atomic operations — deriving *mut from &[u8] would be aliasing UB.
+    let scene_ptr = scene_va as *mut u8;
+    let scene_len = scene::TRIPLE_SCENE_SIZE;
 
     // Byte stride of one buffer in the GPU backing memory.
     let buf_stride = (chunks_per_buf as u64) * (CHUNK_BYTES as u64);
@@ -353,6 +347,9 @@ pub extern "C" fn _start() -> ! {
     // Heap-allocated via alloc_zeroed because IncrementalState is ~22 KiB
     // (prev_bounds 8K + prev_content_transform 12K + prev_content_hash 2K),
     // far exceeding the 16 KiB user stack. Box::new() would overflow.
+    // SAFETY: Layout matches IncrementalState. alloc_zeroed returns a valid,
+    // zero-initialized allocation (all_bits_zero is a valid state). Non-null
+    // asserted. Box::from_raw takes ownership of the allocation.
     let mut incr_state: alloc::boxed::Box<IncrementalState> = unsafe {
         let layout = alloc::alloc::Layout::new::<IncrementalState>();
         let ptr = alloc::alloc::alloc_zeroed(layout) as *mut IncrementalState;
@@ -367,11 +364,13 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"     waiting for first scene\n");
     let _ = sys::wait(&[CORE_HANDLE], u64::MAX);
     // SAFETY: Channel 1 shared memory was set up by init before start.
+    // SAFETY: Channel 1 shared memory is mapped by kernel at page-aligned boundaries.
     let core_ch =
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
     while core_ch.try_recv(&mut msg) {}
     {
-        let tr = scene::TripleReader::new(scene_buf);
+        // SAFETY: scene_ptr is mapped into our address space by init; scene_len matches allocation.
+        let tr = unsafe { scene::TripleReader::new(scene_ptr, scene_len) };
         let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
         let graph = render::scene_render::SceneGraph {
             nodes,
@@ -424,7 +423,7 @@ pub extern "C" fn _start() -> ! {
 
         if sys::wait(&[CORE_HANDLE], 0).is_ok() {
             while core_ch.try_recv(&mut msg) {}
-            go = sched.should_render_immediately(counter_to_ns(sys::counter(), cfreq));
+            go = sched.should_render_immediately(sys::counter_to_ns(sys::counter(), cfreq));
             sched.on_scene_update();
         }
         if sys::wait(&[timer_h], 0).is_ok() {
@@ -433,7 +432,7 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b"cpu-render: timer recreate failed\n");
                 sys::exit();
             });
-            go |= sched.on_timer_tick_at(counter_to_ns(sys::counter(), cfreq));
+            go |= sched.on_timer_tick_at(sys::counter_to_ns(sys::counter(), cfreq));
         }
         if !go {
             continue;
@@ -441,7 +440,8 @@ pub extern "C" fn _start() -> ! {
 
         // ── Read scene + dirty bitmap ────────────────────────────
         let render_buf = 1 - presented_buf;
-        let tr = scene::TripleReader::new(scene_buf);
+        // SAFETY: same as above — scene_ptr mapped by init, scene_len matches allocation.
+        let tr = unsafe { scene::TripleReader::new(scene_ptr, scene_len) };
         let dirty_bits = *tr.dirty_bits();
         let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
         let node_count = nodes.len() as u16;
@@ -449,7 +449,7 @@ pub extern "C" fn _start() -> ! {
         // ── Skip-frame: nothing changed ──────────────────────────
         if all_bits_zero(&dirty_bits) {
             tr.finish_read(gen);
-            sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
+            sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
             continue;
         }
 
@@ -623,6 +623,6 @@ pub extern "C" fn _start() -> ! {
         }
 
         presented_buf = render_buf;
-        sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
+        sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
     }
 }

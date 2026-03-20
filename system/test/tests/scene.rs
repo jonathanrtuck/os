@@ -890,7 +890,7 @@ fn triple_reader_exposes_dirty_bits() {
     tw.publish();
 
     // TripleReader should expose the dirty bits from the published buffer.
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let bits = tr.dirty_bits();
 
     // Check specific bits.
@@ -1032,7 +1032,7 @@ fn acquire_copy_resets_dirty_bits() {
     }
     // Now swap to make back the new front, then verify dirty bits are empty.
     tw.publish();
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let bits = tr.dirty_bits();
     assert_eq!(*bits, [0u64; scene::DIRTY_BITMAP_WORDS]);
 }
@@ -1063,7 +1063,7 @@ fn mark_dirty_records_node_ids() {
     tw.publish();
 
     // Read the dirty bits from the new front.
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let bits = tr.dirty_bits();
     // Bit 3 and bit 7 should be set.
     assert_ne!(bits[0] & (1u64 << 3), 0, "bit 3 should be set");
@@ -1097,7 +1097,7 @@ fn triple_reader_reads_dirty_bits_from_front() {
     tw.publish();
 
     // Now TripleReader on the same buffer should see the dirty bit.
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let bits = tr.dirty_bits();
     assert_ne!(bits[0] & 1, 0, "bit 0 should be set");
     let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
@@ -1157,7 +1157,7 @@ fn triple_reader_dirty_bits_many_nodes() {
     }
     tw.publish();
 
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let bits = tr.dirty_bits();
     let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
     assert_eq!(popcount, 25);
@@ -1187,7 +1187,7 @@ fn clear_sets_all_dirty() {
     }
     tw.publish();
 
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let bits = tr.dirty_bits();
     assert_eq!(*bits, [u64::MAX; scene::DIRTY_BITMAP_WORDS]);
 }
@@ -1330,7 +1330,7 @@ fn acquire_copy_then_mutate_preserves_other_nodes() {
     }
 
     // Verify only cursor is dirty.
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let bits = tr.dirty_bits();
     assert_ne!(bits[0] & (1u64 << 7), 0, "cursor (node 7) should be dirty");
     let popcount: u32 = bits.iter().map(|w| w.count_ones()).sum();
@@ -1400,7 +1400,7 @@ fn update_data_in_place_after_acquire_copy() {
     tw.publish();
 
     // Verify the updated data is readable.
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let data = tr.front_data(clock_dref);
     assert_eq!(data, b"12:35:00");
 }
@@ -1466,7 +1466,7 @@ fn multiple_copy_forward_frames() {
         }
 
         // Verify change list has exactly one entry.
-        let tr = scene::TripleReader::new(&buf);
+        let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
         let bits = tr.dirty_bits();
         let target_id = (frame + 1) as NodeId;
         let word = target_id as usize / 64;
@@ -1529,7 +1529,7 @@ fn update_data_does_not_grow_data_used_triple() {
     }
 
     // data_used should be unchanged.
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     assert_eq!(tr.front_data_buf().len(), front_data_before);
 }
 
@@ -2424,7 +2424,7 @@ fn background_container_triple_buffer_round_trip() {
     }
     tw.publish();
 
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let nodes = tr.front_nodes();
     assert_eq!(nodes.len(), 1);
     assert!(matches!(nodes[0].content, Content::None));
@@ -2546,7 +2546,7 @@ fn glyphs_triple_buffer_round_trip() {
     }
     tw.publish();
 
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     match tr.front_nodes()[0].content {
         Content::Glyphs {
             glyphs,
@@ -2735,7 +2735,7 @@ fn mixed_background_glyphs_image_triple_buffer() {
     tw.publish();
 
     // Verify all survive the swap
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     assert_eq!(tr.front_nodes().len(), 4);
     assert!(matches!(tr.front_nodes()[1].content, Content::None));
     assert_eq!(tr.front_nodes()[1].background.a, 128);
@@ -2797,7 +2797,7 @@ fn mark_dirty_works_for_background_and_glyphs_triple() {
     }
     tw.publish();
 
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let bits = tr.dirty_bits();
     assert_ne!(bits[0] & (1u64 << 1), 0, "node 1 should be dirty");
     assert_ne!(bits[0] & (1u64 << 2), 0, "node 2 should be dirty");
@@ -3765,7 +3765,7 @@ fn core_update_clock_in_place_glyph_overwrite() {
     tw.publish();
 
     // Verify updated clock data.
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let clock = &tr.front_nodes()[CORE_N_CLOCK_TEXT as usize];
     assert_eq!(clock.content_hash, fnv1a(b"12:35:00"));
     let bits = tr.dirty_bits();
@@ -3810,7 +3810,7 @@ fn core_update_cursor_position_only() {
     tw.publish();
 
     // Verify cursor position and content preserved.
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     let cursor = &tr.front_nodes()[CORE_N_CURSOR as usize];
     assert_eq!(cursor.x, 40);
     assert_eq!(cursor.y, 20);
@@ -3906,7 +3906,7 @@ fn triple_writer_acquire_succeeds_with_active_reader() {
     }
     // Reader claims the latest buffer, then releases it.
     {
-        let _tr = scene::TripleReader::new(&buf);
+        let _tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
         // Reader is active here — in the real system, writer is in a
         // separate process so there's no borrow conflict.
     }
@@ -3972,7 +3972,7 @@ fn triple_reader_sees_published_buffer() {
         }
         tw.publish();
     }
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     assert_eq!(tr.front_generation(), 1);
     assert_eq!(tr.front_nodes().len(), 1);
     assert_eq!(tr.front_nodes()[0].width, 800);
@@ -4013,7 +4013,7 @@ fn triple_reader_sees_latest_skipping_intermediate() {
         tw.publish();
     }
     // Reader should see gen 3 (latest), skipping gen 1 and 2.
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     assert_eq!(tr.front_generation(), 3);
     assert_eq!(tr.front_nodes()[0].width, 300);
 }
@@ -4083,7 +4083,7 @@ fn triple_writer_never_acquires_reader_buffer() {
     }
     // Reader claims the latest buffer (sets reader_buf in control region).
     {
-        let tr = scene::TripleReader::new(&buf);
+        let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
         assert_eq!(tr.front_nodes()[0].width, 100);
         // Don't call finish_read — keep the buffer claimed.
         // TripleReader drops but the reader_buf control field persists.
@@ -4112,7 +4112,7 @@ fn triple_writer_never_acquires_reader_buffer() {
     //
     // Alternatively, verify the latest is the writer's new frame (width=999),
     // which means the writer did NOT overwrite the reader's buffer.
-    let tr2 = scene::TripleReader::new(&buf);
+    let tr2 = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     assert_eq!(
         tr2.front_nodes()[0].width,
         999,
@@ -4139,7 +4139,7 @@ fn triple_reader_finish_read_releases_buffer() {
 
     // Reader claims and finishes.
     {
-        let tr = scene::TripleReader::new(&buf);
+        let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
         let gen = tr.front_generation();
         tr.finish_read(gen);
     }
@@ -4208,7 +4208,7 @@ fn triple_buffer_scene_writer_api_unchanged() {
 
     // Drop writer, read as TripleReader.
     drop(tw);
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     assert_eq!(tr.front_nodes().len(), 2);
     assert_eq!(tr.front_nodes()[0].width, 1024);
     assert_eq!(tr.front_nodes()[0].background, Color::rgb(30, 30, 30));
@@ -4229,7 +4229,7 @@ fn triple_types_exist() {
     let mut buf = make_triple_buf();
     let _tw: scene::TripleWriter = scene::TripleWriter::new(&mut buf);
     drop(_tw);
-    let _tr: scene::TripleReader = scene::TripleReader::new(&buf);
+    let _tr: scene::TripleReader = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
 }
 
 // VAL-CROSS-001: End-to-end write-read cycles with triple buffer
@@ -4293,7 +4293,7 @@ fn triple_buffer_reader_writer_alternating() {
 
         // Read and finish.
         {
-            let tr = scene::TripleReader::new(&buf);
+            let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
             assert_eq!(tr.front_nodes()[0].width, frame as u16);
             let gen = tr.front_generation();
             tr.finish_read(gen);
@@ -4323,7 +4323,7 @@ fn triple_buffer_writer_publishes_multiple_reader_sees_latest() {
 
     // Reader sees frame 3 (latest), frames 1 and 2 are skipped.
     {
-        let tr = scene::TripleReader::new(&buf);
+        let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
         assert_eq!(tr.front_nodes()[0].width, 300);
         assert_eq!(tr.front_generation(), 3);
         tr.finish_read(3);
@@ -4343,7 +4343,7 @@ fn triple_buffer_writer_publishes_multiple_reader_sees_latest() {
     }
 
     // New reader sees frame 4.
-    let tr2 = scene::TripleReader::new(&buf);
+    let tr2 = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     assert_eq!(tr2.front_nodes()[0].width, 400);
     assert_eq!(tr2.front_generation(), 4);
 }
@@ -4386,7 +4386,7 @@ fn triple_buffer_background_glyphs_round_trip() {
     tw.publish();
 
     drop(tw);
-    let tr = scene::TripleReader::new(&buf);
+    let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
     assert_eq!(tr.front_nodes().len(), 3);
     assert!(matches!(tr.front_nodes()[1].content, Content::None));
     assert_eq!(tr.front_nodes()[1].background.a, 180);

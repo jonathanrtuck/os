@@ -26,7 +26,7 @@
 /// Nanoseconds per frame at a given FPS. Computed as `1_000_000_000 / fps`.
 pub const fn frame_period_ns(fps: u32) -> u64 {
     if fps == 0 {
-        return 16_666_667; // fallback to 60fps
+        return 1_000_000_000 / 60; // fallback to 60fps
     }
     1_000_000_000 / fps as u64
 }

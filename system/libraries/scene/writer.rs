@@ -168,7 +168,7 @@ impl<'a> SceneWriter<'a> {
     }
     /// Get a shared reference to a node by ID.
     pub fn node(&self, id: NodeId) -> &Node {
-        debug_assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
+        assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
         // SAFETY: `id` is a NodeId returned by `alloc_node` (bounded by
@@ -190,7 +190,7 @@ impl<'a> SceneWriter<'a> {
     }
     /// Get a mutable reference to a node by ID.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
-        debug_assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
+        assert!((id as usize) < MAX_NODES, "NodeId out of bounds");
         let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
 
         // SAFETY: Same bounds reasoning as `node()`. Exclusive borrow on

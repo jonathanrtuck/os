@@ -37,8 +37,7 @@ use render::incremental::{all_bits_zero, IncrementalState};
 mod atlas;
 #[path = "device.rs"]
 mod device;
-#[path = "frame_scheduler.rs"]
-mod frame_scheduler;
+use render::frame_scheduler;
 #[path = "pipeline.rs"]
 mod pipeline;
 #[path = "resources.rs"]
@@ -398,11 +397,13 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Scene graph shared memory.
-    let scene_buf = unsafe {
-        // SAFETY: scene_va is mapped into our address space by init via
-        // memory_share before process start. Size is TRIPLE_SCENE_SIZE.
-        core::slice::from_raw_parts(scene_va as *const u8, scene::TRIPLE_SCENE_SIZE)
-    };
+    // SAFETY: scene_va is mapped into our address space by init via
+    // memory_share before process start. Size is TRIPLE_SCENE_SIZE.
+    // Uses *mut u8 (not &[u8]) because TripleReader must write to the
+    // control region via atomic operations — deriving *mut from &[u8]
+    // would be aliasing UB.
+    let scene_ptr = scene_va as *mut u8;
+    let scene_len = scene::TRIPLE_SCENE_SIZE;
 
     // Heap-allocate batches and command buffer directly (all are zero-valid).
     // Cannot use Box::new() — TexturedBatch (~96 KiB) exceeds 16 KiB stack.
@@ -429,13 +430,6 @@ pub extern "C" fn _start() -> ! {
     let mut sched = frame_scheduler::FrameScheduler::new(frame_rate_cfg);
     let cfreq = sys::counter_freq();
 
-    let counter_to_ns = |ticks: u64, freq: u64| -> u64 {
-        if freq == 0 {
-            return 0;
-        }
-        (ticks / freq) * 1_000_000_000 + (ticks % freq) * 1_000_000_000 / freq
-    };
-
     let mut timer_h: u8 = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
         sys::print(b"virgil-render: frame timer create failed\n");
         sys::exit();
@@ -455,7 +449,7 @@ pub extern "C" fn _start() -> ! {
         if sys::wait(&[SCENE_HANDLE], 0).is_ok() {
             let mut drain_msg = ipc::Message::new(0);
             while scene_ch.try_recv(&mut drain_msg) {}
-            go = sched.should_render_immediately(counter_to_ns(sys::counter(), cfreq));
+            go = sched.should_render_immediately(sys::counter_to_ns(sys::counter(), cfreq));
             sched.on_scene_update();
         }
         // Check for timer tick.
@@ -465,14 +459,14 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b"virgil-render: timer recreate failed\n");
                 sys::exit();
             });
-            go |= sched.on_timer_tick_at(counter_to_ns(sys::counter(), cfreq));
+            go |= sched.on_timer_tick_at(sys::counter_to_ns(sys::counter(), cfreq));
         }
         if !go {
             continue;
         }
 
         // Read the latest scene graph and dirty bitmap.
-        let reader = scene::TripleReader::new(scene_buf);
+        let reader = unsafe { scene::TripleReader::new(scene_ptr, scene_len) };
         let nodes = reader.front_nodes();
         let node_count = nodes.len() as u16;
         let gen = reader.front_generation();
@@ -481,7 +475,7 @@ pub extern "C" fn _start() -> ! {
         // Skip-frame: nothing changed since last render.
         if all_bits_zero(&dirty_bits) {
             reader.finish_read(gen);
-            sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
+            sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
             continue;
         }
 
@@ -500,7 +494,7 @@ pub extern "C" fn _start() -> ! {
                 // All dirty nodes off-screen — skip frame entirely.
                 reader.finish_read(gen);
                 incr_state.update_from_frame(nodes, node_count);
-                sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
+                sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
                 continue;
             }
             let bbox = d.bounding_box();
@@ -844,7 +838,7 @@ pub extern "C" fn _start() -> ! {
         // Update incremental state before releasing the reader.
         incr_state.update_from_frame(nodes, node_count);
         reader.finish_read(gen);
-        sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
+        sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
         frame_count = frame_count.wrapping_add(1);
     }
 }

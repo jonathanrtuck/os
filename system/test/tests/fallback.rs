@@ -12,8 +12,7 @@ use fallback::{ContentType, FallbackChain};
 const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
 const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
 const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf");
-const SOURCE_CODE_PRO_VARIABLE: &[u8] =
-    include_bytes!("../../share/source-code-pro-variable.ttf");
+const SOURCE_CODE_PRO_VARIABLE: &[u8] = include_bytes!("../../share/source-code-pro-variable.ttf");
 
 // ---------------------------------------------------------------------------
 // VAL-FALLBACK-001: Primary font glyph resolution
@@ -68,49 +67,107 @@ fn fallback_not_triggered_for_common_latin() {
 
 #[test]
 fn fallback_missing_glyph_uses_secondary() {
-    // Use a codepoint that is absent from the primary but present in the
-    // secondary font. If primary shapes to .notdef (glyph_id 0), fallback
-    // should find a valid glyph in the secondary.
+    // Verify that when the primary font produces .notdef (glyph_id 0) for a
+    // codepoint, the fallback chain tries the secondary font and returns its
+    // glyph with font_index > 0.
     //
-    // We create a synthetic scenario: use a two-font chain where the primary
-    // is a font known to lack a specific glyph. For real fonts, we test by
-    // verifying the fallback API works correctly with the chain mechanism.
-    //
-    // Strategy: Shape text containing a rare codepoint. If the primary font
-    // produces glyph_id 0, the fallback chain should try the secondary.
-    // We verify by checking that the result has glyph_id > 0 when the
-    // secondary font has the glyph.
+    // Strategy: use shape_char on a range of rare codepoints to discover one
+    // that the primary font lacks but the secondary font has. If no such
+    // codepoint exists among the candidates, verify at minimum that the
+    // fallback mechanism returns .notdef with proper chain exhaustion.
 
-    // Test the mechanism: shape with a chain where primary produces .notdef
-    // for a specific character. We'll use shape_with_fallback which tries
-    // each font in order.
+    let primary_only = FallbackChain::new(&[SOURCE_CODE_PRO_VARIABLE]);
     let chain = FallbackChain::new(&[SOURCE_CODE_PRO_VARIABLE, NUNITO_SANS_VARIABLE]);
 
-    // Shape a string - the key behavior is that for any glyph where primary
-    // returns .notdef, fallback tries the secondary.
-    let result = chain.shape("A", &[]);
+    // Candidate codepoints that proportional fonts sometimes cover but
+    // monospace fonts often lack: arrows, math symbols, box drawings, misc.
+    let candidates = [
+        '\u{2603}', // snowman
+        '\u{2764}', // heavy black heart
+        '\u{2122}', // trade mark sign
+        '\u{2205}', // empty set
+        '\u{2260}', // not equal to
+        '\u{00B5}', // micro sign
+        '\u{0192}', // latin small f with hook
+        '\u{2013}', // en dash
+        '\u{2014}', // em dash
+        '\u{201C}', // left double quotation mark
+    ];
 
-    // 'A' exists in both fonts, so primary is used.
-    assert!(!result.is_empty());
-    assert_eq!(result[0].font_index, 0, "'A' should come from primary");
-    assert!(result[0].glyph.glyph_id > 0, "'A' should have valid glyph ID");
+    let mut found_fallback = false;
+    for &ch in &candidates {
+        let (primary_glyph, _) = primary_only.shape_char(ch);
+        if primary_glyph.glyph_id == 0 {
+            // Primary lacks this glyph — check if the chain finds it.
+            let (chain_glyph, font_idx) = chain.shape_char(ch);
+            if chain_glyph.glyph_id > 0 {
+                assert!(
+                    font_idx > 0,
+                    "glyph for U+{:04X} resolved by chain but font_index is 0 (should be secondary)",
+                    ch as u32,
+                );
+                found_fallback = true;
+                break;
+            }
+        }
+    }
+
+    if !found_fallback {
+        // If no candidate triggered secondary fallback (both fonts have the
+        // same coverage), verify the mechanism at least does not crash and
+        // returns sensible results for chain exhaustion.
+        let (glyph, _) = chain.shape_char('\u{10FFFD}');
+        assert_eq!(
+            glyph.glyph_id, 0,
+            "chain exhaustion should return .notdef when neither font has the glyph"
+        );
+    }
 }
 
 #[test]
 fn fallback_returns_valid_glyph_from_secondary_when_primary_lacks() {
-    // Verify the per-character fallback: shape each character individually
-    // and check that fallback correctly provides valid glyphs.
-    // Both Nunito Sans and Source Code Pro have basic Latin, so we test
-    // the mechanism by verifying that when glyph_id is 0 from primary,
-    // the chain tries the next font.
+    // Same test as above but with the font order reversed: Nunito Sans as
+    // primary, Source Code Pro as fallback. Verifies fallback is symmetric.
 
-    // Test with explicit glyph_id checking via shape_char_with_fallback.
+    let primary_only = FallbackChain::new(&[NUNITO_SANS_VARIABLE]);
     let chain = FallbackChain::new(&[NUNITO_SANS_VARIABLE, SOURCE_CODE_PRO_VARIABLE]);
 
-    // For a character both fonts have, we get primary font.
-    let (glyph, font_idx) = chain.shape_char('A');
-    assert!(glyph.glyph_id > 0);
-    assert_eq!(font_idx, 0);
+    // Candidate codepoints that the primary (proportional) may lack.
+    let candidates = [
+        '\u{2500}', // box drawings light horizontal
+        '\u{2502}', // box drawings light vertical
+        '\u{250C}', // box drawings light down and right
+        '\u{2603}', // snowman
+        '\u{2764}', // heavy black heart
+        '\u{2122}', // trade mark sign
+        '\u{2205}', // empty set
+        '\u{2260}', // not equal to
+    ];
+
+    let mut found_fallback = false;
+    for &ch in &candidates {
+        let (primary_glyph, _) = primary_only.shape_char(ch);
+        if primary_glyph.glyph_id == 0 {
+            // Primary lacks this glyph — check if the chain finds it.
+            let (chain_glyph, font_idx) = chain.shape_char(ch);
+            if chain_glyph.glyph_id > 0 {
+                assert!(
+                    font_idx > 0,
+                    "glyph for U+{:04X} resolved by chain but font_index is 0 (should be secondary)",
+                    ch as u32,
+                );
+                found_fallback = true;
+                break;
+            }
+        }
+    }
+
+    if !found_fallback {
+        // Verify at least that common ASCII uses primary (font_index 0).
+        let (glyph, font_idx) = chain.shape_char('A');
+        assert!(glyph.glyph_id > 0, "'A' should have valid glyph ID");
+        assert_eq!(font_idx, 0, "'A' should come from primary font");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -346,10 +403,7 @@ fn fallback_empty_chain_returns_empty() {
 fn fallback_single_font_chain_works() {
     let chain = FallbackChain::new(&[NUNITO_SANS_VARIABLE]);
     let result = chain.shape("Hello", &[]);
-    assert!(
-        result.len() >= 5,
-        "single-font chain should shape normally"
-    );
+    assert!(result.len() >= 5, "single-font chain should shape normally");
 }
 
 #[test]

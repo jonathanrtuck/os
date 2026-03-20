@@ -1008,3 +1008,63 @@ Per coding style: "200-400 lines typical, 800 max."
 | `services/core/scene_state.rs`                 | 1,178  |                                                        |
 | `services/core/main.rs`                        | 1,097  |                                                        |
 | `services/init/main.rs`                        | ~1,083 |                                                        |
+
+---
+
+## Review Fix Pass (2026-03-19)
+
+**Method:** 4-stream parallel review (kernel, libraries, services, tests) followed by 5-phase fix pass.
+
+### Resolved (22 items)
+
+**Phase 1 — Soundness (4 items):**
+- C1: `scene/triple.rs` — fixed aliasing UB. `TripleReader` now stores `*mut u8` instead of `&[u8]`; ctrl helpers take raw pointers.
+- C2: `drawing/lib.rs` — added `Surface::is_valid()` + `assert!` at all 6 unsafe pixel-write sites.
+- H4: `ipc/lib.rs` — removed unsound `unsafe impl Sync for RingBuf` (SPSC contract).
+- H5: `scene/writer.rs` — `debug_assert!` → `assert!` in `node()`/`node_mut()` to prevent release-mode OOB.
+
+**Phase 2 — Safety-net (9 items):**
+- H1: `render/walk.rs` — saturating arithmetic in `render_shadow` geometry.
+- H3: `fonts/cache.rs` — bounds check in `GlyphCache::get` before slice access.
+- M3: `kernel/syscall.rs` — saturating arithmetic in `is_user_range_readable`.
+- M6: `init/main.rs` — `assert!(filename.len() <= 44)` before `copy_nonoverlapping`.
+- M7: `core/main.rs` — fixed misleading `debug_assert` bound on `doc_len`.
+- M8: `virtio-input/main.rs` — `used.id` bounds check + diagnostic on ring-full drop.
+- M9: `ipc/lib.rs` — compile-time `const { assert! }` on payload size.
+- L9: `test/fallback.rs` — rewrote tests to actually trigger secondary-font fallback.
+- `frame_scheduler.rs` — fixed 1ns 0fps fallback inconsistency (both drivers + test).
+
+**Phase 3 — Deduplication (2 items):**
+- H10: `frame_scheduler.rs` moved from both render services into `libraries/render/`.
+- H11: `counter_to_ns` extracted to `libraries/sys/lib.rs`.
+
+**Phase 4 — Documentation (3 items):**
+- H12: ~57 `// SAFETY:` comments added across core, init, cpu-render, virtio-input.
+- M1: `kernel/scheduler.rs` — fixed misleading comment on `scheduler_deadline_ticks` Source 2.
+- M2: `kernel/HARDENING.md` — updated stale unsafe block count to reflect ~100% coverage.
+
+**Phase 5 — File splits (5 items):**
+- H6: `fonts/rasterize.rs` (1,918 → 7 files: metrics, outline, scale, scanline, gvar, optical).
+- H7: `drawing/lib.rs` (2,513 → 8 files: blend, blit, blur, coverage, fill, gradient, line, transform).
+- H8: `core/layout.rs` (1,739 → 3 files: mod, full, incremental). `scene_walk.rs` (1,043 → 5 files: walk + 4 batch types).
+- H9: Partially addressed by file splits. Full `_start()` extraction deferred.
+- H13: `render/walk.rs` `render_node_content_translated` (353 → 90-line orchestrator + 11 helpers).
+
+### Remaining (deferred)
+
+| ID | Severity | File | Issue | Why Deferred |
+|----|----------|------|-------|--------------|
+| H2 | HIGH | render/path_raster.rs:527 | Negative local-x coordinate clamp produces incorrect path placement | Requires coordinate-system redesign in scanline rasterizer |
+| H9 | HIGH | 4 service main.rs files | `_start()` functions 500-737 lines | Bare-metal entry points interleave init + event loop; extraction needs context-struct design per service |
+| M4 | MEDIUM | fonts/rasterize.rs:854 | `bmp_w`/`bmp_h` from i32 subtraction without underflow guard | Degenerate glyphs only; rasterizer already returns None for oversized |
+| M5 | MEDIUM | scene/triple.rs:416 | Non-atomic reader_buf claim in `TripleReader::new` | Single-reader architecture prevents the race; adding CAS is over-engineering |
+| M10 | MEDIUM | fonts/rasterize.rs:543 | Off-curve start point may double-count arc endpoint | Subtle rendering edge case for rare font contour structures |
+| M11 | MEDIUM | fonts/rasterize.rs:981 | `iup_contour` O(n²) worst case | Only affects complex variable fonts with many untouched points |
+| L1 | LOW | kernel/interrupt_controller.rs:239 | GICv3 redistributor wakeup poll unbounded | QEMU-only; real hardware would need timeout |
+| L2 | LOW | kernel/scheduler.rs | `schedule_inner` (148 lines), `kill_process` (145 lines) | Well-commented, justified complexity |
+| L3 | LOW | scene/triple.rs:123 | `free_index(a, b)` no runtime check for a==b | `select_free_buffer` guards this; `from_existing` doesn't |
+| L4 | LOW | drawing/lib.rs:661 | `y_int` shadowed immediately (dead binding) | Cosmetic |
+| L5 | LOW | render/walk.rs | `_pool`, `_world_xform` params unused | Planned for future feature |
+| L6 | LOW | scene/writer.rs | `push_shaped_glyphs` doesn't zero alignment padding | Non-deterministic content hashes possible |
+| L7 | LOW | init/main.rs | `_font_va` naming suggests unused | Cosmetic |
+| L8 | LOW | core/main.rs:454 | TODO: construct core→editor MSG_KEY_EVENT | Raw forwarding works because wire formats happen to match |

@@ -93,6 +93,7 @@ fn channel_shm_va(channel_index: usize) -> usize {
 }
 /// Create an IPC channel for a given channel index. Init is always endpoint 0.
 fn init_channel(channel_index: usize) -> ipc::Channel {
+    // SAFETY: channel_shm_va returns the base of a kernel-mapped SHM region at page-aligned boundaries.
     let ch = unsafe { ipc::Channel::from_base(channel_shm_va(channel_index), ipc::PAGE_SIZE, 0) };
 
     ch.init();
@@ -141,6 +142,7 @@ fn probe_virgl(gpu_pa: u64) -> bool {
         core::ptr::write_volatile((base + MMIO_DEVICE_FEATURES_SEL) as *mut u32, 0);
     }
 
+    // SAFETY: same MMIO probe as above — reading DeviceFeatures at +0x10.
     let features = unsafe { core::ptr::read_volatile((base + MMIO_DEVICE_FEATURES) as *const u32) };
 
     // VIRTIO_GPU_F_VIRGL = bit 0
@@ -189,6 +191,7 @@ fn setup_render_pipeline(
         sys::exit();
     });
 
+    // SAFETY: scene_va..scene_va+scene_alloc_bytes is the DMA region just allocated above; zeroing is valid.
     unsafe { core::ptr::write_bytes(scene_va as *mut u8, 0, scene_alloc_bytes) };
 
     sys::print(b"     scene graph: shared memory allocated\n");
@@ -202,6 +205,7 @@ fn setup_render_pipeline(
         sys::exit();
     });
 
+    // SAFETY: doc_va is a 1-page DMA region just allocated above; zeroing 4096 bytes is within bounds.
     unsafe { core::ptr::write_bytes(doc_va as *mut u8, 0, 4096) };
 
     sys::print(b"     document buffer: 4 KiB shared\n");
@@ -272,6 +276,7 @@ fn setup_render_pipeline(
         irq: gpu_irq,
         _pad: 0,
     };
+    // SAFETY: DeviceConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
 
     gpu_ch.send(&msg);
@@ -319,6 +324,7 @@ fn setup_render_pipeline(
         }
     }
 
+    // SAFETY: DisplayInfoMsg fits within 60-byte payload; msg_type was verified as MSG_DISPLAY_INFO above.
     let display_info: DisplayInfoMsg = unsafe { resp_msg.payload_as() };
     let fb_width = display_info.width;
     let fb_height = display_info.height;
@@ -361,6 +367,7 @@ fn setup_render_pipeline(
         chunk_order: 0,
         _pad2: 0,
     };
+    // SAFETY: GpuConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_GPU_CONFIG, &gpu_config) };
 
     gpu_ch.send(&msg);
@@ -417,6 +424,7 @@ fn setup_render_pipeline(
         screen_dpi: 96,
         _pad: 0,
     };
+    // SAFETY: CompositorConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &render_config) };
 
     gpu_ch.send(&msg);
@@ -472,6 +480,7 @@ fn setup_render_pipeline(
         prop_font_len,
         _pad: 0,
     };
+    // SAFETY: CoreConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_CORE_CONFIG, &core_config) };
 
     core_ch.send(&msg);
@@ -484,6 +493,7 @@ fn setup_render_pipeline(
             image_len: png_len,
             _pad: 0,
         };
+        // SAFETY: ImageConfig fits within 60-byte payload; msg_type matches the payload type.
         let img_msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_CONFIG, &img_config) };
 
         core_ch.send(&img_msg);
@@ -492,6 +502,7 @@ fn setup_render_pipeline(
     // Send RTC config to core.
     if rtc_pa != 0 {
         let rtc_config = RtcConfig { mmio_pa: rtc_pa };
+        // SAFETY: RtcConfig fits within 60-byte payload; msg_type matches the payload type.
         let rtc_msg = unsafe { ipc::Message::from_payload(MSG_RTC_CONFIG, &rtc_config) };
 
         core_ch.send(&rtc_msg);
@@ -538,6 +549,7 @@ fn setup_render_pipeline(
             irq: input_irq,
             _pad: 0,
         };
+        // SAFETY: same as DeviceConfig from_payload above.
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
 
         input_ch.send(&msg);
@@ -577,6 +589,7 @@ fn setup_render_pipeline(
         doc_capacity: DOC_BUF_CAPACITY,
         _pad: 0,
     };
+    // SAFETY: EditorConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_EDITOR_CONFIG, &editor_config) };
 
     editor_ch.send(&msg);
@@ -629,6 +642,7 @@ fn setup_render_pipeline(
             irq: input_irq,
             _pad: 0,
         };
+        // SAFETY: same as DeviceConfig from_payload above.
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
 
         input_ch.send(&msg);
@@ -707,6 +721,7 @@ pub extern "C" fn _start() -> ! {
 
     // Kernel channel (channel 0) uses raw bytes — kernel writes directly.
     let kernel_shm = protocol::CHANNEL_SHM_BASE as *const u8;
+    // SAFETY: kernel_shm points to kernel channel SHM; volatile ensures visibility of kernel writes.
     let device_count = unsafe { core::ptr::read_volatile(kernel_shm as *const u32) };
 
     {
@@ -742,6 +757,8 @@ pub extern "C" fn _start() -> ! {
     let actual = if device_count > 8 { 8 } else { device_count };
 
     for i in 0..actual as usize {
+        // SAFETY: kernel_shm + 8 + i*16 lies within the kernel channel SHM page (capped at 8 devices);
+        // volatile ensures visibility of kernel writes. Each device entry is 16 bytes at 8-byte alignment.
         let base = unsafe { kernel_shm.add(8 + i * 16) };
         let dev_pa = unsafe { core::ptr::read_volatile(base as *const u64) };
         let dev_irq = unsafe { core::ptr::read_volatile(base.add(8) as *const u32) };
@@ -865,6 +882,7 @@ pub extern "C" fn _start() -> ! {
                     irq: dev_irq,
                     _pad: 0,
                 };
+                // SAFETY: same as DeviceConfig from_payload above.
                 let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &config) };
 
                 ch.send(&msg);
@@ -902,6 +920,7 @@ pub extern "C" fn _start() -> ! {
             });
             let font_capacity: u32 = (font_page_count as u32) * 4096; // 4 MiB
 
+            // SAFETY: _font_va..+font_capacity is the DMA region just allocated above; zeroing is within bounds.
             unsafe { core::ptr::write_bytes(_font_va as *mut u8, 0, font_capacity as usize) };
 
             // Share font buffer with 9p driver (read-write).
@@ -917,6 +936,7 @@ pub extern "C" fn _start() -> ! {
                 irq: p9_irq,
                 _pad: 0,
             };
+            // SAFETY: same as DeviceConfig from_payload above.
             let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
 
             p9_ch_obj.send(&cfg_msg);
@@ -936,6 +956,9 @@ pub extern "C" fn _start() -> ! {
              -> u32 {
                 let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
 
+                // SAFETY: payload is 60 bytes; writes at offsets 0..8 (u64), 8..12 (u32), 12..16 (u32),
+                // 16..60 (filename) stay within bounds. Unaligned writes used because payload is [u8].
+                // copy_nonoverlapping: src (filename) and dst (payload+16) do not overlap; len asserted <= 44.
                 unsafe {
                     let p = req_msg.payload.as_mut_ptr();
 
@@ -945,6 +968,7 @@ pub extern "C" fn _start() -> ! {
 
                     // Zero-fill filename area first.
                     core::ptr::write_bytes(p.add(16), 0, 44);
+                    assert!(filename.len() <= 44, "filename too long for IPC payload");
                     core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
                 }
 
@@ -986,6 +1010,8 @@ pub extern "C" fn _start() -> ! {
                     return 0;
                 }
 
+                // SAFETY: payload is 60 bytes; reads at offsets 0..4 (len) and 4..8 (status) are in bounds.
+                // Unaligned reads used because payload is [u8]. msg_type verified as MSG_FS_READ_RESPONSE.
                 let (len, status) = unsafe {
                     let p = resp_msg.payload.as_ptr();
                     let len = core::ptr::read_unaligned(p as *const u32);

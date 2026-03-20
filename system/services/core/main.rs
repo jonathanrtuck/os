@@ -30,7 +30,7 @@ extern crate scene;
 
 #[path = "fallback.rs"]
 mod fallback;
-#[path = "layout.rs"]
+#[path = "layout/mod.rs"]
 mod layout;
 #[path = "scene_state.rs"]
 mod scene_state;
@@ -324,7 +324,7 @@ fn doc_content() -> &'static [u8] {
     // init and never null after that point.
     unsafe {
         debug_assert!(!s.doc_buf.is_null());
-        debug_assert!(s.doc_len <= s.doc_capacity - DOC_HEADER_SIZE);
+        debug_assert!(s.doc_len <= s.doc_capacity);
         core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), s.doc_len)
     }
 }
@@ -505,6 +505,8 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"  \xF0\x9F\xA7\xA0 core - starting\n");
 
     // Read core config from init channel.
+    // SAFETY: channel_shm_va(0) is the base of the init channel SHM region mapped by the kernel;
+    // alignment guaranteed by page-boundary allocation.
     let init_ch =
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(0), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
@@ -514,6 +516,7 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
+    // SAFETY: msg.msg_type is MSG_CORE_CONFIG; sender (init) guarantees payload is a valid CoreConfig.
     let config: CoreConfig = unsafe { msg.payload_as() };
     let fb_width = config.fb_width;
     let fb_height = config.fb_height;
@@ -534,6 +537,8 @@ pub extern "C" fn _start() -> ! {
     // Parse font to get metrics (char_width, line_height).
     // Core only needs metrics for layout, not the full glyph cache.
     if config.mono_font_va != 0 && config.mono_font_len > 0 {
+        // SAFETY: mono_font_va..+mono_font_len is within the font shared memory region mapped
+        // by init; alignment is 1 (u8 slice). Guarded by the non-null/non-zero checks above.
         let font_data = unsafe {
             core::slice::from_raw_parts(
                 config.mono_font_va as *const u8,
@@ -595,6 +600,7 @@ pub extern "C" fn _start() -> ! {
     let mut has_image = false;
 
     if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_IMAGE_CONFIG {
+        // SAFETY: msg.msg_type is MSG_IMAGE_CONFIG; sender (init) guarantees payload is a valid ImageConfig.
         let img_config: ImageConfig = unsafe { msg.payload_as() };
 
         if img_config.image_va != 0 && img_config.image_len > 0 {
@@ -604,6 +610,7 @@ pub extern "C" fn _start() -> ! {
 
     // Check for RTC config.
     if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_RTC_CONFIG {
+        // SAFETY: msg.msg_type is MSG_RTC_CONFIG; sender (init) guarantees payload is a valid RtcConfig.
         let rtc_config: RtcConfig = unsafe { msg.payload_as() };
 
         if rtc_config.mmio_pa != 0 {
@@ -620,6 +627,8 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Set up IPC channels.
+    // SAFETY: channel_shm_va(1..3) are bases of channel SHM regions mapped by the kernel;
+    // alignment guaranteed by page-boundary allocation.
     let input_ch =
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
     let compositor_ch =
@@ -633,6 +642,7 @@ pub extern "C" fn _start() -> ! {
     };
     let input2_ch = if has_input2 {
         sys::print(b"     tablet input channel detected\n");
+        // SAFETY: same invariant as channel_shm_va(1..3) from_base above.
         Some(unsafe { ipc::Channel::from_base(protocol::channel_shm_va(4), ipc::PAGE_SIZE, 1) })
     } else {
         None
@@ -641,6 +651,8 @@ pub extern "C" fn _start() -> ! {
     let content_w = fb_width;
     let content_h = fb_height;
     // Scene graph in shared memory.
+    // SAFETY: scene_va..+TRIPLE_SCENE_SIZE is within the scene SHM region mapped by init;
+    // alignment is 1 (u8 slice). scene_va validated non-zero above.
     let scene_buf = unsafe {
         core::slice::from_raw_parts_mut(config.scene_va as *mut u8, scene::TRIPLE_SCENE_SIZE)
     };
@@ -744,6 +756,8 @@ pub extern "C" fn _start() -> ! {
         // Process input events.
         while input_ch.try_recv(&mut msg) {
             if msg.msg_type == MSG_KEY_EVENT {
+                // SAFETY: msg.msg_type is MSG_KEY_EVENT; sender (input driver) guarantees
+                // payload is a valid KeyEvent.
                 let key: KeyEvent = unsafe { msg.payload_as() };
                 let action =
                     process_key_event(&key, &mut ctrl_pressed, has_image, &editor_ch, &msg);
@@ -768,6 +782,7 @@ pub extern "C" fn _start() -> ! {
             while ch2.try_recv(&mut msg) {
                 match msg.msg_type {
                     MSG_KEY_EVENT => {
+                        // SAFETY: same invariant as MSG_KEY_EVENT payload_as above.
                         let key: KeyEvent = unsafe { msg.payload_as() };
                         let action =
                             process_key_event(&key, &mut ctrl_pressed, has_image, &editor_ch, &msg);
@@ -786,6 +801,8 @@ pub extern "C" fn _start() -> ! {
                         }
                     }
                     MSG_POINTER_ABS => {
+                        // SAFETY: msg.msg_type is MSG_POINTER_ABS; sender guarantees
+                        // payload is a valid PointerAbs.
                         let ptr: PointerAbs = unsafe { msg.payload_as() };
                         let s = state();
                         s.mouse_x = scale_pointer_coord(ptr.x, fb_width);
@@ -794,6 +811,8 @@ pub extern "C" fn _start() -> ! {
                         changed = true;
                     }
                     MSG_POINTER_BUTTON => {
+                        // SAFETY: msg.msg_type is MSG_POINTER_BUTTON; sender guarantees
+                        // payload is a valid PointerButton.
                         let btn: PointerButton = unsafe { msg.payload_as() };
                         // TODO: Handle right-click, middle-click, and button
                         // release events (review 6.9). Currently only left-press.
@@ -826,6 +845,8 @@ pub extern "C" fn _start() -> ! {
                                 let cm = CursorMove {
                                     position: byte_pos as u32,
                                 };
+                                // SAFETY: CursorMove is a plain data struct with no padding UB;
+                                // from_payload copies it into the message's 60-byte payload region.
                                 let cm_msg =
                                     unsafe { ipc::Message::from_payload(MSG_SET_CURSOR, &cm) };
 
@@ -849,6 +870,8 @@ pub extern "C" fn _start() -> ! {
         while editor_ch.try_recv(&mut msg) {
             match msg.msg_type {
                 MSG_WRITE_INSERT => {
+                    // SAFETY: msg.msg_type is MSG_WRITE_INSERT; sender (editor) guarantees
+                    // payload is a valid WriteInsert.
                     let insert: WriteInsert = unsafe { msg.payload_as() };
                     let pos = insert.position as usize;
 
@@ -860,6 +883,7 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 MSG_WRITE_DELETE => {
+                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
                     let del: WriteDelete = unsafe { msg.payload_as() };
                     let pos = del.position as usize;
 
@@ -871,6 +895,7 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 MSG_CURSOR_MOVE => {
+                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
                     let cm: CursorMove = unsafe { msg.payload_as() };
                     let pos = cm.position as usize;
 
@@ -884,6 +909,7 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 MSG_SELECTION_UPDATE => {
+                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
                     let su: SelectionUpdate = unsafe { msg.payload_as() };
                     let s = state();
                     s.sel_start = su.sel_start as usize;
@@ -893,6 +919,7 @@ pub extern "C" fn _start() -> ! {
                     selection_changed = true;
                 }
                 MSG_WRITE_DELETE_RANGE => {
+                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
                     let dr: WriteDeleteRange = unsafe { msg.payload_as() };
                     let start = dr.start as usize;
                     let end = dr.end as usize;

@@ -47,34 +47,41 @@ const NO_READER: u32 = 0xFF;
 // ── Control region helpers ──────────────────────────────────────────
 
 /// Read a u32 field from the control region using atomic load.
-fn triple_read_ctrl(buf: &[u8], field_offset: usize) -> u32 {
-    // SAFETY: TRIPLE_CONTROL_OFFSET + field_offset is within the
-    // TRIPLE_SCENE_SIZE buffer. The field is a u32 at a 4-byte aligned
-    // offset. AtomicU32 is the correct model for cross-process shared
-    // memory — volatile alone is insufficient under LLVM's memory model.
+///
+/// Takes a raw `*mut u8` instead of `&[u8]` because the underlying memory
+/// is cross-process shared memory where both sides may read/write
+/// concurrently. Deriving `*mut` from a shared `&[u8]` reference would be
+/// aliasing UB; raw pointers preserve the necessary write provenance.
+fn triple_read_ctrl(buf: *mut u8, field_offset: usize) -> u32 {
+    // SAFETY: Caller guarantees `buf` points to a TRIPLE_SCENE_SIZE region.
+    // TRIPLE_CONTROL_OFFSET + field_offset is within that region. The field
+    // is a u32 at a 4-byte aligned offset. AtomicU32 is the correct model
+    // for cross-process shared memory.
     unsafe {
-        let ptr = buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+        let ptr = buf.add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
         core::sync::atomic::AtomicU32::from_ptr(ptr).load(core::sync::atomic::Ordering::Relaxed)
     }
 }
 
 /// Read a u32 field from the control region with acquire ordering.
 /// Pairs with the writer's release store in `publish()`.
-fn triple_read_ctrl_acquire(buf: &[u8], field_offset: usize) -> u32 {
+fn triple_read_ctrl_acquire(buf: *mut u8, field_offset: usize) -> u32 {
     // SAFETY: Same alignment and bounds reasoning as triple_read_ctrl.
     unsafe {
-        let ptr = buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+        let ptr = buf.add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
         core::sync::atomic::AtomicU32::from_ptr(ptr).load(core::sync::atomic::Ordering::Acquire)
     }
 }
 
 /// Write a u32 field to the control region using atomic store.
-fn triple_write_ctrl(buf: &[u8], field_offset: usize, value: u32) {
-    // SAFETY: Same alignment and bounds reasoning as triple_read_ctrl.
-    // AtomicU32 allows mutation through shared references — this is its
-    // designed purpose, unlike the previous raw volatile write through &[u8].
+///
+/// Takes `*mut u8` — write provenance flows from the raw pointer, not
+/// from a shared reference. This is sound for cross-process shared memory.
+fn triple_write_ctrl(buf: *mut u8, field_offset: usize, value: u32) {
+    // SAFETY: Caller guarantees `buf` points to a TRIPLE_SCENE_SIZE region.
+    // Same alignment and bounds reasoning as triple_read_ctrl.
     unsafe {
-        let ptr = buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+        let ptr = buf.add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
         core::sync::atomic::AtomicU32::from_ptr(ptr)
             .store(value, core::sync::atomic::Ordering::Relaxed)
     }
@@ -82,12 +89,12 @@ fn triple_write_ctrl(buf: &[u8], field_offset: usize, value: u32) {
 
 /// Write a u32 field to the control region with release ordering.
 /// Ensures all prior writes are visible before this store is observed.
-fn triple_write_ctrl_release(buf: &[u8], field_offset: usize, value: u32) {
+fn triple_write_ctrl_release(buf: *mut u8, field_offset: usize, value: u32) {
     // SAFETY: Same as triple_write_ctrl. Release ordering ensures all
     // prior writes (scene data, node fields) are visible before this
     // store is observed by an Acquire load in the reader.
     unsafe {
-        let ptr = buf.as_ptr().add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
+        let ptr = buf.add(TRIPLE_CONTROL_OFFSET + field_offset) as *mut u32;
         core::sync::atomic::AtomicU32::from_ptr(ptr)
             .store(value, core::sync::atomic::Ordering::Release)
     }
@@ -166,8 +173,8 @@ impl<'a> TripleWriter<'a> {
         assert!(buf.len() >= TRIPLE_SCENE_SIZE);
 
         // Determine a free buffer to use as initial acquired slot.
-        let latest = triple_read_ctrl(buf, CTRL_LATEST_BUF);
-        let reader = triple_read_ctrl(buf, CTRL_READER_BUF);
+        let latest = triple_read_ctrl(buf.as_mut_ptr(), CTRL_LATEST_BUF);
+        let reader = triple_read_ctrl(buf.as_mut_ptr(), CTRL_READER_BUF);
         let free = if reader == NO_READER || reader > 2 || reader == latest {
             // Pick any buffer that isn't latest.
             if latest == 0 {
@@ -207,8 +214,8 @@ impl<'a> TripleWriter<'a> {
     /// Use this before `copy_latest_to_acquired()` when you need to
     /// copy first and then get a writer via a second `acquire()` call.
     fn select_free_buffer(&mut self) {
-        let latest = triple_read_ctrl(self.buf, CTRL_LATEST_BUF);
-        let reader = triple_read_ctrl(self.buf, CTRL_READER_BUF);
+        let latest = triple_read_ctrl(self.buf.as_mut_ptr(), CTRL_LATEST_BUF);
+        let reader = triple_read_ctrl(self.buf.as_mut_ptr(), CTRL_READER_BUF);
 
         // Find a free buffer (not latest, not reader).
         // When reader == latest or reader is inactive (NO_READER),
@@ -235,27 +242,29 @@ impl<'a> TripleWriter<'a> {
     /// A release fence ensures all scene data written via the `SceneWriter`
     /// returned by `acquire()` is visible before the latest pointer update.
     pub fn publish(&mut self) {
+        let ptr = self.buf.as_mut_ptr();
+
         // Increment global generation.
-        let gen = triple_read_ctrl(self.buf, CTRL_GENERATION).wrapping_add(1);
+        let gen = triple_read_ctrl(ptr, CTRL_GENERATION).wrapping_add(1);
 
         // Write generation into the acquired buffer's header.
-        write_generation(self.buf, buf_offset(self.acquired), gen);
+        write_generation(ptr, buf_offset(self.acquired), gen);
 
         // Update control region: generation first, then publish latest_buf
         // with a release fence so all scene data + generation are visible
         // before the reader sees the new latest_buf pointer.
-        triple_write_ctrl(self.buf, CTRL_GENERATION, gen);
-        triple_write_ctrl_release(self.buf, CTRL_LATEST_BUF, self.acquired);
+        triple_write_ctrl(ptr, CTRL_GENERATION, gen);
+        triple_write_ctrl_release(ptr, CTRL_LATEST_BUF, self.acquired);
     }
 
     /// Read the current global generation counter.
     pub fn generation(&self) -> u32 {
-        triple_read_ctrl(self.buf, CTRL_GENERATION)
+        triple_read_ctrl(self.buf.as_ptr() as *mut u8, CTRL_GENERATION)
     }
 
     /// Get a read-only view of the latest published buffer's nodes.
     pub fn latest_nodes(&self) -> &[Node] {
-        let latest = triple_read_ctrl(self.buf, CTRL_LATEST_BUF);
+        let latest = triple_read_ctrl(self.buf.as_ptr() as *mut u8, CTRL_LATEST_BUF);
         let off = buf_offset(latest);
         // SAFETY: `off` is a valid scene buffer offset. SceneHeader is repr(C)
         // at the buffer start.
@@ -269,13 +278,14 @@ impl<'a> TripleWriter<'a> {
 
     /// Generation counter of the latest published buffer.
     pub fn latest_generation(&self) -> u32 {
-        let latest = triple_read_ctrl(self.buf, CTRL_LATEST_BUF);
-        read_generation(self.buf, buf_offset(latest))
+        let ptr = self.buf.as_ptr() as *mut u8;
+        let latest = triple_read_ctrl(ptr, CTRL_LATEST_BUF);
+        read_generation(ptr as *const u8, buf_offset(latest))
     }
 
     /// Data buffer slice from the latest published buffer.
     pub fn latest_data_buf(&self) -> &[u8] {
-        let latest = triple_read_ctrl(self.buf, CTRL_LATEST_BUF);
+        let latest = triple_read_ctrl(self.buf.as_ptr() as *mut u8, CTRL_LATEST_BUF);
         let off = buf_offset(latest);
         // SAFETY: Same as latest_nodes.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
@@ -285,7 +295,7 @@ impl<'a> TripleWriter<'a> {
 
     /// Resolve a DataRef against the latest published buffer.
     pub fn latest_data(&self, dref: DataRef) -> &[u8] {
-        let latest = triple_read_ctrl(self.buf, CTRL_LATEST_BUF);
+        let latest = triple_read_ctrl(self.buf.as_ptr() as *mut u8, CTRL_LATEST_BUF);
         let off = buf_offset(latest);
         // SAFETY: Same as latest_nodes.
         let hdr = unsafe { &*(self.buf.as_ptr().add(off) as *const SceneHeader) };
@@ -339,7 +349,7 @@ impl<'a> TripleWriter<'a> {
     /// Must be called after `select_free_buffer()` / `acquire()` and
     /// before `publish()`.
     fn copy_latest_to_acquired_inner(&mut self) {
-        let latest = triple_read_ctrl(self.buf, CTRL_LATEST_BUF);
+        let latest = triple_read_ctrl(self.buf.as_mut_ptr(), CTRL_LATEST_BUF);
         let src_off = buf_offset(latest);
         let dst_off = buf_offset(self.acquired);
 
@@ -401,20 +411,48 @@ impl<'a> TripleWriter<'a> {
 /// the OS service. Construction atomically claims the latest published
 /// buffer. All reads within a single `TripleReader` instance reference
 /// the same physical buffer.
-pub struct TripleReader<'a> {
-    buf: &'a [u8],
+///
+/// Stores a raw `*mut u8` instead of `&[u8]` because the reader must
+/// write to the control region (claiming/releasing buffers) while the
+/// writer process may concurrently write to other parts of the same
+/// shared memory. Using `&[u8]` and deriving `*mut` from it would be
+/// aliasing UB under Rust's rules.
+pub struct TripleReader {
+    /// Raw pointer to the start of the TRIPLE_SCENE_SIZE shared memory
+    /// region. Must remain valid for the lifetime of this reader.
+    // SAFETY: This is cross-process shared memory mapped by the kernel.
+    // The pointer has write provenance because the underlying memory is
+    // mutable (mapped read-write by both processes). Atomic operations
+    // on the control region are the only writes performed through this
+    // pointer by the reader; all other accesses are reads.
+    buf: *mut u8,
+    /// Total length of the buffer (>= TRIPLE_SCENE_SIZE).
+    len: usize,
     /// Byte offset of the buffer being read (0, SCENE_SIZE, or 2*SCENE_SIZE).
     read_off: usize,
     /// Generation of the buffer being read.
     read_gen: u32,
 }
 
-impl<'a> TripleReader<'a> {
+// SAFETY: TripleReader's raw pointer points to cross-process shared memory
+// that outlives any single thread. The atomic access discipline (acquire/
+// release on control fields) ensures correct visibility across cores.
+unsafe impl Send for TripleReader {}
+
+impl TripleReader {
     /// Claim the latest published buffer for reading. The reader atomically
     /// takes ownership of the latest buffer — the writer will not write to
     /// it. All reads within this `TripleReader` reference the same buffer.
-    pub fn new(buf: &'a [u8]) -> Self {
-        assert!(buf.len() >= TRIPLE_SCENE_SIZE);
+    ///
+    /// # Safety
+    ///
+    /// `buf` must point to a region of at least `TRIPLE_SCENE_SIZE` bytes
+    /// that remains valid and mapped for the lifetime of the returned
+    /// `TripleReader`. The pointer must have been derived from a mutable
+    /// source (e.g. `&mut [u8]` or a raw mapping) so that writes to the
+    /// control region through atomic operations are well-defined.
+    pub unsafe fn new(buf: *mut u8, len: usize) -> Self {
+        assert!(len >= TRIPLE_SCENE_SIZE);
 
         // Acquire load: pairs with the writer's release store in publish().
         // Ensures all scene data written before publish() is visible to us
@@ -425,10 +463,11 @@ impl<'a> TripleReader<'a> {
         triple_write_ctrl(buf, CTRL_READER_BUF, latest);
 
         let read_off = buf_offset(latest);
-        let read_gen = read_generation(buf, read_off);
+        let read_gen = read_generation(buf as *const u8, read_off);
 
         Self {
             buf,
+            len,
             read_off,
             read_gen,
         }
@@ -436,8 +475,9 @@ impl<'a> TripleReader<'a> {
 
     fn header(&self) -> &SceneHeader {
         // SAFETY: read_off is a valid scene buffer offset. SceneHeader is
-        // repr(C) at the start of each scene buffer.
-        unsafe { &*(self.buf.as_ptr().add(self.read_off) as *const SceneHeader) }
+        // repr(C) at the start of each scene buffer. The pointer is valid
+        // for the lifetime of `self` (caller contract on `new`).
+        unsafe { &*((self.buf as *const u8).add(self.read_off) as *const SceneHeader) }
     }
 
     /// Resolve a `DataRef` against the claimed buffer.
@@ -446,8 +486,9 @@ impl<'a> TripleReader<'a> {
         let hdr = self.header();
         let start = off + DATA_OFFSET + dref.offset as usize;
         let end = start + dref.length as usize;
-        if end <= self.buf.len() && dref.offset + dref.length <= hdr.data_used {
-            &self.buf[start..end]
+        if end <= self.len && dref.offset + dref.length <= hdr.data_used {
+            // SAFETY: start..end is within the valid buffer region.
+            unsafe { core::slice::from_raw_parts((self.buf as *const u8).add(start), end - start) }
         } else {
             &[]
         }
@@ -458,7 +499,8 @@ impl<'a> TripleReader<'a> {
         let off = self.read_off;
         let hdr = self.header();
         let used = (hdr.data_used as usize).min(DATA_BUFFER_SIZE);
-        &self.buf[off + DATA_OFFSET..off + DATA_OFFSET + used]
+        // SAFETY: off + DATA_OFFSET + used is within the valid buffer region.
+        unsafe { core::slice::from_raw_parts((self.buf as *const u8).add(off + DATA_OFFSET), used) }
     }
 
     /// Generation of the buffer being read.
@@ -476,7 +518,9 @@ impl<'a> TripleReader<'a> {
         let off = self.read_off;
         let hdr = self.header();
         let count = hdr.node_count as usize;
-        let ptr = unsafe { self.buf.as_ptr().add(off + NODES_OFFSET) as *const Node };
+        // SAFETY: NODES_OFFSET is within each SCENE_SIZE buffer. Node is repr(C).
+        let ptr = unsafe { (self.buf as *const u8).add(off + NODES_OFFSET) as *const Node };
+        // SAFETY: `ptr` points to `count` contiguous Node-sized entries.
         unsafe { core::slice::from_raw_parts(ptr, count) }
     }
 
@@ -512,7 +556,7 @@ impl<'a> TripleReader<'a> {
     }
 }
 
-impl Drop for TripleReader<'_> {
+impl Drop for TripleReader {
     fn drop(&mut self) {
         // Release the reader buffer claim so the writer can reuse it.
         triple_write_ctrl_release(self.buf, CTRL_READER_DONE_GEN, self.read_gen);
@@ -525,25 +569,28 @@ impl Drop for TripleReader<'_> {
 /// Read the generation counter from a scene buffer at the given byte
 /// offset within the parent buffer. Uses AtomicU32 for correct
 /// cross-process shared memory semantics.
-fn read_generation(buf: &[u8], offset: usize) -> u32 {
-    // SAFETY: SceneHeader starts at `offset`; generation is the first u32.
-    // The offset is 4-byte aligned. AtomicU32 is the correct model for
-    // cross-process shared memory — volatile alone is insufficient under
-    // LLVM's memory model.
+///
+/// Takes `*const u8` — reads only, no write provenance needed.
+fn read_generation(buf: *const u8, offset: usize) -> u32 {
+    // SAFETY: Caller guarantees `buf + offset` points to a valid SceneHeader.
+    // Generation is the first u32, 4-byte aligned. AtomicU32 is the correct
+    // model for cross-process shared memory.
     unsafe {
-        let ptr = buf.as_ptr().add(offset) as *mut u32;
+        let ptr = buf.add(offset) as *mut u32;
         core::sync::atomic::AtomicU32::from_ptr(ptr).load(core::sync::atomic::Ordering::Acquire)
     }
 }
+
 /// Write a generation counter to a scene buffer at the given offset.
 /// Release ordering ensures all prior writes (node data, text content)
 /// are visible before the generation update is published.
-fn write_generation(buf: &mut [u8], offset: usize, value: u32) {
-    // SAFETY: SceneHeader starts at `offset`; generation is the first u32.
-    // The offset is 4-byte aligned. AtomicU32 allows mutation through the
-    // pointer — Release ordering replaces the previous fence+volatile pattern.
+///
+/// Takes `*mut u8` — write provenance flows from the raw pointer.
+fn write_generation(buf: *mut u8, offset: usize, value: u32) {
+    // SAFETY: Caller guarantees `buf + offset` points to a valid SceneHeader.
+    // Generation is the first u32, 4-byte aligned.
     unsafe {
-        let ptr = buf.as_mut_ptr().add(offset) as *mut u32;
+        let ptr = buf.add(offset) as *mut u32;
         core::sync::atomic::AtomicU32::from_ptr(ptr)
             .store(value, core::sync::atomic::Ordering::Release)
     }

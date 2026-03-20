@@ -4,7 +4,7 @@
 //! and render/present counting. The frame scheduler is a pure state machine
 //! that can be tested without kernel syscalls.
 
-#[path = "../../services/drivers/cpu-render/frame_scheduler.rs"]
+#[path = "../../libraries/render/frame_scheduler.rs"]
 mod frame_scheduler;
 
 use frame_scheduler::FrameScheduler;
@@ -34,7 +34,7 @@ fn frame_period_ns_120fps() {
 fn frame_period_ns_0fps_fallback() {
     // 0fps is invalid → defaults to 60fps period
     let ns = frame_scheduler::frame_period_ns(0);
-    assert_eq!(ns, 16_666_667);
+    assert_eq!(ns, 16_666_666);
 }
 
 /// Simulate 1 second of timer ticks at 60fps with continuous dirty scene.

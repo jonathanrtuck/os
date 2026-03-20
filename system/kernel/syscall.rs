@@ -230,7 +230,8 @@ fn is_user_range_readable(start: u64, len: u64) -> bool {
 
     let page_mask = !(paging::PAGE_SIZE - 1);
     let first_page = start & page_mask;
-    let last_page = (start + len - 1) & page_mask;
+    // start + len - 1 cannot overflow: callers verify start + len <= USER_VA_END via checked_add
+    let last_page = start.saturating_add(len).saturating_sub(1) & page_mask;
     let mut page = first_page;
 
     while page <= last_page {

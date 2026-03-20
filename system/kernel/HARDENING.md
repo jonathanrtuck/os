@@ -13,7 +13,7 @@ These are genuine strengths — not just "works," but differentiated:
 - **Two-layer scheduling (EEVDF + scheduling contexts with donation).** No other open kernel combines proportional-fair EEVDF selection with seL4-style scheduling contexts and context donation (borrowing a client's budget when servicing its IPC). QNX's partition inheritance is the closest commercial equivalent.
 - **Content-type-aware scheduling policy.** The kernel provides temporal isolation mechanisms; the OS service sets budgets by document mimetype. No other kernel has this separation.
 - **Capability-to-code ratio.** ~8,900 lines of Rust for: 4-core SMP, 28 syscalls, EEVDF+contexts, demand paging, buddy/slab/linked-list allocators, userspace drivers with interrupt forwarding + DMA, DTB parsing, unified wait multiplexing, process create/kill, handle-based access control.
-- **Unsafe discipline.** ~115 SAFETY comments for ~157 unsafe blocks. 7-category taxonomy (DESIGN.md §7.1). No `static mut`, no `transmute`, no unsafe in EL0 code.
+- **Unsafe discipline.** ~124 SAFETY comments for ~115 unsafe blocks — every unsafe block has an accompanying SAFETY comment. 7-category taxonomy (DESIGN.md §7.1). No `static mut`, no `transmute`, no unsafe in EL0 code.
 - **Clean-room EEVDF.** 146 lines, zero unsafe, pure stateless logic. Easier to study than Linux's (CFS legacy) or seL4's MCS (capability overhead).
 - **Design documentation.** Every decision has rationale, alternatives considered, and rejection reasons. The repo is a teaching artifact for kernel design, not just an implementation.
 
