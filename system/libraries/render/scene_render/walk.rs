@@ -594,6 +594,96 @@ fn render_shadow_blurred(
     fb.blit_blend(&dst_buf, buf_w, buf_h, buf_stride, blit_x, blit_y);
 }
 
+/// Maximum backdrop blur radius in physical pixels. Capped here; the drawing
+/// library further clamps to MAX_CPU_BLUR_RADIUS (16 px).
+const MAX_BACKDROP_BLUR_PX: u32 = 32;
+
+/// Apply backdrop blur: extract the framebuffer region behind a node,
+/// blur it, and composite the result back. Must be called before the
+/// node's own background/content is drawn.
+fn apply_backdrop_blur(
+    fb: &mut Surface,
+    draw_x: i32,
+    draw_y: i32,
+    nw: i32,
+    nh: i32,
+    blur_radius_pt: u8,
+    scale: f32,
+) {
+    // Scale blur radius from points to physical pixels, clamped.
+    let blur_px = ((blur_radius_pt as f32 * scale) as u32).min(MAX_BACKDROP_BLUR_PX);
+    if blur_px == 0 {
+        return;
+    }
+
+    // Clamp extraction region to framebuffer bounds.
+    let x0 = (draw_x.max(0) as u32).min(fb.width);
+    let y0 = (draw_y.max(0) as u32).min(fb.height);
+    let x1 = ((draw_x + nw).max(0) as u32).min(fb.width);
+    let y1 = ((draw_y + nh).max(0) as u32).min(fb.height);
+    let region_w = x1 - x0;
+    let region_h = y1 - y0;
+    if region_w == 0 || region_h == 0 {
+        return;
+    }
+
+    let region_stride = region_w * 4;
+    let buf_size = (region_stride * region_h) as usize;
+
+    // Cap allocation to prevent OOM (same 4 MiB limit as shadow blur).
+    if buf_size > 4 * 1024 * 1024 {
+        return;
+    }
+
+    // 1. Extract the region from the framebuffer into a temporary buffer.
+    let mut src_buf = vec![0u8; buf_size];
+    for row in 0..region_h {
+        let fb_offset = ((y0 + row) * fb.stride + x0 * 4) as usize;
+        let src_offset = (row * region_stride) as usize;
+        let row_bytes = (region_w * 4) as usize;
+        if fb_offset + row_bytes <= fb.data.len() && src_offset + row_bytes <= src_buf.len() {
+            src_buf[src_offset..src_offset + row_bytes]
+                .copy_from_slice(&fb.data[fb_offset..fb_offset + row_bytes]);
+        }
+    }
+
+    // 2. Apply Gaussian blur (two-pass separable).
+    let mut tmp_buf = vec![0u8; buf_size];
+    let mut dst_buf = vec![0u8; buf_size];
+
+    // sigma proportional to radius (CSS convention: sigma ~ radius/2).
+    // 8.8 fixed-point: fp = sigma * 256.
+    let sigma_fp = ((blur_px * 256) / 2).max(128);
+
+    let src_read = drawing::ReadSurface {
+        data: &src_buf,
+        width: region_w,
+        height: region_h,
+        stride: region_stride,
+        format: drawing::PixelFormat::Bgra8888,
+    };
+    let mut dst_surface = Surface {
+        data: &mut dst_buf,
+        width: region_w,
+        height: region_h,
+        stride: region_stride,
+        format: PixelFormat::Bgra8888,
+    };
+
+    drawing::blur_surface(&src_read, &mut dst_surface, &mut tmp_buf, blur_px, sigma_fp);
+
+    // 3. Write the blurred region back to the framebuffer (overwrite, not blend).
+    for row in 0..region_h {
+        let fb_offset = ((y0 + row) * fb.stride + x0 * 4) as usize;
+        let dst_offset = (row * region_stride) as usize;
+        let row_bytes = (region_w * 4) as usize;
+        if fb_offset + row_bytes <= fb.data.len() && dst_offset + row_bytes <= dst_buf.len() {
+            fb.data[fb_offset..fb_offset + row_bytes]
+                .copy_from_slice(&dst_buf[dst_offset..dst_offset + row_bytes]);
+        }
+    }
+}
+
 /// Render a node's background, content, and children into a target surface.
 ///
 /// This is the inner rendering logic used by both the direct path (opacity=255)
@@ -641,6 +731,12 @@ fn render_node_content_translated(
     } else {
         0u32
     };
+
+    // Backdrop blur: blur the framebuffer region behind this node before
+    // drawing the node's own background/content on top.
+    if node.backdrop_blur_radius > 0 && nw > 0 && nh > 0 {
+        apply_backdrop_blur(fb, draw_x, draw_y, nw, nh, node.backdrop_blur_radius, s);
+    }
 
     render_background(fb, node, draw_x, draw_y, nw, nh, phys_radius, &visible);
     render_borders(fb, node, draw_x, draw_y, nw, nh, phys_radius, s);
