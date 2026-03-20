@@ -5,9 +5,13 @@
 //! - **TexturedBatch** (textured): glyph quads from Content::Glyphs nodes
 //! - **ImageBatch**: image texture draw requests
 //! - **PathBatch**: stencil-then-cover path rendering
+//! - **BlurRequest** (post-processing): backdrop blur regions collected for
+//!   two-pass GPU Gaussian blur after all normal rendering is complete
 //!
 //! Each batch is uploaded to its own VBO region and drawn with the appropriate
-//! shader pipeline.
+//! shader pipeline. Blur requests are post-processed after all normal rendering.
+
+use alloc::vec::Vec;
 
 use scene::{Content, Node, NodeFlags, NodeId, ShapedGlyph, NULL};
 
@@ -27,16 +31,40 @@ pub use batch_path::PathBatch;
 pub use batch_quad::{QuadBatch, VERTEX_STRIDE};
 pub use batch_text::{TexturedBatch, TEXTURED_VERTEX_STRIDE};
 
+/// Maximum backdrop blur requests per frame.
+/// In typical use there are 0–2 blurred panels per frame.
+pub const MAX_BLUR_REQUESTS: usize = 8;
+
+/// A request to blur the framebuffer region behind a node.
+///
+/// Collected during the scene walk and executed after all normal rendering
+/// using a two-pass separable Gaussian blur (horizontal then vertical).
+/// Coordinates are in physical pixels (post-scale).
+#[derive(Clone, Copy)]
+pub struct BlurRequest {
+    /// Left edge in physical pixels.
+    pub x: f32,
+    /// Top edge in physical pixels.
+    pub y: f32,
+    /// Width in physical pixels.
+    pub w: f32,
+    /// Height in physical pixels.
+    pub h: f32,
+    /// Blur radius in scene points (drives kernel selection).
+    pub radius: u8,
+}
+
 /// Total textured VBO size: image quads (MAX_IMAGES x 192 bytes) + glyph quads.
 /// Image vertices occupy offset 0; glyphs start after all image data.
 pub const TOTAL_TEXTURED_VBO_BYTES: usize =
     batch_text::MAX_TEXTURED_VERTEX_BYTES + MAX_IMAGES * DWORDS_PER_IMAGE_QUAD * 4;
 
-/// Total color VBO size: background quads + path fan triangles + path cover quads.
-/// All three regions are packed sequentially in the same VBO.
+/// Total color VBO size: background quads + path fan triangles + path cover quads
+/// + clip path fan triangles. All four regions are packed sequentially in the same VBO.
 pub const TOTAL_COLOR_VBO_BYTES: usize = batch_quad::MAX_VERTEX_BYTES
     + batch_path::MAX_PATH_FAN_DWORDS * 4
-    + batch_path::MAX_PATH_COVER_DWORDS * 4;
+    + batch_path::MAX_PATH_COVER_DWORDS * 4
+    + batch_path::MAX_CLIP_FAN_DWORDS * 4;
 
 // -- Clip rectangle (f32, NDC-space) --------------------------------------
 // render/scene_render.rs has an independent i32 variant for physical pixel
@@ -77,6 +105,9 @@ impl ClipRect {
 /// `glyphs_data` is the scene graph's data buffer (for resolving DataRef).
 /// `atlas` provides glyph->texture-coordinate lookups.
 /// `ascent` is the font ascent in points (for baseline positioning).
+/// `blur_requests` is cleared and filled with any nodes that have
+/// `backdrop_blur_radius > 0`; the render loop executes them post-frame.
+#[allow(clippy::too_many_arguments)]
 pub fn walk_scene(
     nodes: &[Node],
     root: NodeId,
@@ -90,11 +121,13 @@ pub fn walk_scene(
     glyphs_data: &[u8],
     atlas: &GlyphAtlas,
     ascent: u32,
+    blur_requests: &mut Vec<BlurRequest>,
 ) {
     batch.clear();
     text_batch.clear();
     image_batch.clear();
     path_batch.clear();
+    blur_requests.clear();
 
     if root == NULL || nodes.is_empty() {
         return;
@@ -125,6 +158,7 @@ pub fn walk_scene(
         glyphs_data,
         atlas,
         ascent,
+        blur_requests,
     );
 }
 
@@ -146,6 +180,7 @@ fn walk_node(
     glyphs_data: &[u8],
     atlas: &GlyphAtlas,
     ascent: u32,
+    blur_requests: &mut Vec<BlurRequest>,
 ) {
     let idx = id as usize;
     if idx >= nodes.len() {
@@ -162,6 +197,29 @@ fn walk_node(
     let abs_y = parent_y + (node.y as f32) * scale;
     let w = (node.width as f32) * scale;
     let h = (node.height as f32) * scale;
+
+    // Collect backdrop blur request before drawing the node itself.
+    // The render loop executes blur passes after all normal rendering,
+    // blurring the fully-rendered scene at this region. The node's own
+    // background and content are drawn on top.
+    if node.backdrop_blur_radius > 0 && blur_requests.len() < MAX_BLUR_REQUESTS {
+        let region = ClipRect {
+            x: abs_x,
+            y: abs_y,
+            w,
+            h,
+        }
+        .intersect(clip);
+        if !region.is_empty() {
+            blur_requests.push(BlurRequest {
+                x: region.x,
+                y: region.y,
+                w: region.w,
+                h: region.h,
+                radius: node.backdrop_blur_radius,
+            });
+        }
+    }
 
     // Draw background if non-transparent.
     let bg = node.background;
@@ -261,6 +319,22 @@ fn walk_node(
         Content::None => {}
     }
 
+    // Emit clip path fan into the stencil buffer region (before children).
+    // When clip_path is non-empty, children will be clipped to this path shape
+    // via the GPU stencil test in the render loop.
+    if !node.clip_path.is_empty() {
+        batch_path::emit_clip_fan(
+            path_batch,
+            glyphs_data,
+            node.clip_path,
+            abs_x,
+            abs_y,
+            scale,
+            vw,
+            vh,
+        );
+    }
+
     // Compute clip rect for children.
     let child_clip = if node.flags.contains(NodeFlags::CLIPS_CHILDREN) {
         clip.intersect(ClipRect {
@@ -302,6 +376,7 @@ fn walk_node(
             glyphs_data,
             atlas,
             ascent,
+            blur_requests,
         );
         child = nodes[child_idx].next_sibling;
     }

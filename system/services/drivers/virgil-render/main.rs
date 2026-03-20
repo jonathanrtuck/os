@@ -19,7 +19,7 @@ extern crate fonts;
 extern crate render;
 extern crate scene;
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 
 use protocol::{
     compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG},
@@ -95,6 +95,17 @@ pub(crate) const HANDLE_DSA_STENCIL_WRITE: u32 = 15;
 pub(crate) const HANDLE_DSA_STENCIL_TEST: u32 = 16;
 pub(crate) const HANDLE_BLEND_NO_COLOR: u32 = 17;
 pub(crate) const HANDLE_STENCIL_SURFACE: u32 = 18;
+/// Backdrop blur pipeline handles.
+pub(crate) const HANDLE_FS_BLUR_H: u32 = 19;
+pub(crate) const HANDLE_FS_BLUR_V: u32 = 20;
+/// Surface handle for the blur capture texture (used as render target).
+pub(crate) const HANDLE_BLUR_CAPTURE_SURFACE: u32 = 21;
+/// Sampler view for the blur capture texture (input to H-blur pass).
+pub(crate) const HANDLE_BLUR_CAPTURE_VIEW: u32 = 22;
+/// Surface handle for the blur intermediate texture (H-blur output).
+pub(crate) const HANDLE_BLUR_INTERMEDIATE_SURFACE: u32 = 23;
+/// Sampler view for the blur intermediate texture (input to V-blur pass).
+pub(crate) const HANDLE_BLUR_INTERMEDIATE_VIEW: u32 = 24;
 
 /// Resource ID for the vertex buffer (PIPE_BUFFER).
 pub(crate) const VB_RESOURCE_ID: u32 = 2;
@@ -106,6 +117,16 @@ pub(crate) const TEXT_VB_RESOURCE_ID: u32 = 4;
 pub(crate) const IMG_RESOURCE_ID: u32 = 5;
 /// Resource ID for the depth/stencil surface (Z32_FLOAT_S8X24_UINT).
 pub(crate) const STENCIL_RESOURCE_ID: u32 = 6;
+/// Resource ID for the blur capture texture (copy of framebuffer region).
+/// Sized to the framebuffer so any region fits. B8G8R8A8_UNORM.
+pub(crate) const BLUR_CAPTURE_RESOURCE_ID: u32 = 7;
+/// Resource ID for the blur intermediate texture (horizontal blur output).
+/// Same dimensions as BLUR_CAPTURE_RESOURCE_ID. B8G8R8A8_UNORM.
+pub(crate) const BLUR_INTERMEDIATE_RESOURCE_ID: u32 = 8;
+
+/// Maximum framebuffer dimension used for blur texture sizing.
+/// Actual display may be smaller; this is the worst-case allocation.
+pub(crate) const BLUR_MAX_DIM: u32 = 1024;
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
@@ -234,6 +255,55 @@ pub extern "C" fn _start() -> ! {
         max_img_bytes,
     );
     sys::print(b"     image texture created (64x64)\n");
+
+    // ── Blur textures (two full-framebuffer BGRA textures for two-pass blur) ──
+    //
+    // BLUR_CAPTURE: holds a copy of the framebuffer region behind a blurred node.
+    //   Bound as a render target for the blit pass, then as a sampler for H-blur.
+    // BLUR_INTERMEDIATE: holds the horizontal-blur output.
+    //   Bound as a render target for H-blur, then as a sampler for V-blur.
+    //
+    // Both need PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW so the same
+    // resource can be used both as a framebuffer attachment and a sampler input.
+    let blur_bind = virgl::PIPE_BIND_RENDER_TARGET | virgl::PIPE_BIND_SAMPLER_VIEW;
+    let blur_bytes = BLUR_MAX_DIM * BLUR_MAX_DIM * 4;
+    resources::resource_create_3d_generic(
+        &device,
+        &mut vq,
+        irq_handle,
+        BLUR_CAPTURE_RESOURCE_ID,
+        PIPE_TEXTURE_2D,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+        blur_bind,
+        BLUR_MAX_DIM,
+        BLUR_MAX_DIM,
+    );
+    let (_blur_cap_va, _blur_cap_pa, _blur_cap_order) = resources::attach_and_ctx_resource(
+        &device,
+        &mut vq,
+        irq_handle,
+        BLUR_CAPTURE_RESOURCE_ID,
+        blur_bytes,
+    );
+    resources::resource_create_3d_generic(
+        &device,
+        &mut vq,
+        irq_handle,
+        BLUR_INTERMEDIATE_RESOURCE_ID,
+        PIPE_TEXTURE_2D,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+        blur_bind,
+        BLUR_MAX_DIM,
+        BLUR_MAX_DIM,
+    );
+    let (_blur_int_va, _blur_int_pa, _blur_int_order) = resources::attach_and_ctx_resource(
+        &device,
+        &mut vq,
+        irq_handle,
+        BLUR_INTERMEDIATE_RESOURCE_ID,
+        blur_bytes,
+    );
+    sys::print(b"     blur textures created (1024x1024 each)\n");
 
     // ── Phase D: GPU pipeline setup ──────────────────────────────────────
     let stencil_available = pipeline::setup_pipeline(&device, &mut vq, irq_handle, width, height);
@@ -412,6 +482,9 @@ pub extern "C" fn _start() -> ! {
     let mut image_batch: Box<scene_walk::ImageBatch> = box_zeroed();
     let mut path_batch: Box<scene_walk::PathBatch> = box_zeroed();
     let mut cmdbuf: Box<virgl::CommandBuffer> = box_zeroed();
+    // Blur requests collected per-frame during scene walk.
+    let mut blur_requests: Vec<scene_walk::BlurRequest> =
+        Vec::with_capacity(scene_walk::MAX_BLUR_REQUESTS);
 
     // Heap-allocated via alloc_zeroed because IncrementalState is ~22 KiB
     // (prev_bounds 8K + prev_content_transform 12K + prev_content_hash 2K),
@@ -521,6 +594,7 @@ pub extern "C" fn _start() -> ! {
             data_buf,
             &glyph_atlas,
             font_ascent,
+            &mut blur_requests,
         );
 
         if frame_count < 3 {
@@ -544,7 +618,8 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"WARN: vertices dropped\n");
         }
 
-        // ── Color VBO: pack backgrounds + path fan + path cover at offsets ─
+        // ── Color VBO: pack backgrounds + path fan + path cover + clip fan ─
+        // Layout: [bg quads][path fan][path cover][clip fan]
         let color_data = batch.as_vertex_data();
         let color_dwords = color_data.len();
         let color_bytes = color_dwords * 4;
@@ -557,9 +632,15 @@ pub extern "C" fn _start() -> ! {
         let cover_dwords = cover_data.len();
         let cover_bytes = cover_dwords * 4;
 
+        let has_clip = path_batch.clip_fan_vertex_count > 0 && stencil_available;
+        let clip_fan_data = path_batch.as_clip_fan_data();
+        let clip_fan_dwords = clip_fan_data.len();
+        let clip_fan_bytes = clip_fan_dwords * 4;
+
         let fan_vbo_offset = color_bytes;
         let cover_vbo_offset = fan_vbo_offset + fan_bytes;
-        let total_color_bytes = cover_vbo_offset + cover_bytes;
+        let clip_fan_vbo_offset = cover_vbo_offset + cover_bytes;
+        let total_color_bytes = clip_fan_vbo_offset + clip_fan_bytes;
 
         // Upload all color vertex data in one transfer.
         if total_color_bytes > 0 {
@@ -591,6 +672,17 @@ pub extern "C" fn _start() -> ! {
                     );
                 }
             }
+            if has_clip && clip_fan_bytes > 0 {
+                // SAFETY: vbo_va is valid DMA of TOTAL_COLOR_VBO_BYTES; clip_fan_vbo_offset
+                // is bounded by the layout computation above.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        clip_fan_data.as_ptr(),
+                        (vbo_va + clip_fan_vbo_offset) as *mut u32,
+                        clip_fan_dwords,
+                    );
+                }
+            }
             resources::transfer_vbo_to_host(&device, &mut vq, irq_handle, total_color_bytes as u32);
         }
 
@@ -608,7 +700,7 @@ pub extern "C" fn _start() -> ! {
         cmdbuf.cmd_set_viewport(width as f32, height as f32);
         cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
         cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
-        if has_paths {
+        if has_paths || has_clip {
             cmdbuf.cmd_clear_stencil();
         }
 
@@ -624,6 +716,9 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Stencil-then-cover paths (VBO offsets for fan + cover).
+        // Content::Path uses the stencil buffer and then zeroes it via the
+        // stencil test DSA (zero-on-pass). Clip stencil is written AFTER this
+        // pass so it is not consumed by the path cover draw.
         if has_paths {
             // Pass A: stencil write (fan triangles, no color).
             cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND_NO_COLOR);
@@ -646,8 +741,34 @@ pub extern "C" fn _start() -> ! {
             );
             cmdbuf.cmd_draw_vbo(0, path_batch.cover_vertex_count, PIPE_PRIM_TRIANGLES, false);
 
-            // Restore normal DSA.
+            // Restore normal DSA after path rendering.
             cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
+        }
+
+        // Clip path stencil write (after Content::Path, before text/images).
+        // Writes the clip fan geometry to the stencil buffer so subsequent
+        // image and text draws are clipped to the path shape.  HANDLE_DSA_STENCIL_TEST
+        // is activated here and remains bound for all content passes below.
+        // The stencil is cleared back to 0 after all content has been drawn.
+        if has_clip {
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND_NO_COLOR);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_WRITE);
+            cmdbuf.cmd_set_vertex_buffers(
+                scene_walk::VERTEX_STRIDE,
+                clip_fan_vbo_offset as u32,
+                VB_RESOURCE_ID,
+            );
+            cmdbuf.cmd_set_stencil_ref(0, 0);
+            cmdbuf.cmd_draw_vbo(
+                0,
+                path_batch.clip_fan_vertex_count,
+                PIPE_PRIM_TRIANGLES,
+                false,
+            );
+
+            // Activate stencil test for all subsequent content draws.
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_TEST);
         }
 
         // ── Pass 3: Upload + draw images (TEXTURED_FS) ──────────────────
@@ -776,6 +897,11 @@ pub extern "C" fn _start() -> ! {
                 cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf);
                 cmdbuf.cmd_set_viewport(width as f32, height as f32);
                 cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
+                // Re-bind stencil test DSA after the mid-frame cmdbuf clear so
+                // the next image is still clipped to the active clip region.
+                if has_clip {
+                    cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_TEST);
+                }
 
                 images_drawn += 1;
             }
@@ -826,6 +952,13 @@ pub extern "C" fn _start() -> ! {
                 cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER_VIEW);
                 cmdbuf.cmd_draw_vbo(0, text_batch.vertex_count, PIPE_PRIM_TRIANGLES, false);
             }
+        }
+
+        // Clear stencil and restore normal DSA after all clipped content.
+        // This leaves the stencil buffer clean for the next frame.
+        if has_clip {
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
+            cmdbuf.cmd_clear_stencil();
         }
 
         if cmdbuf.overflowed() {
