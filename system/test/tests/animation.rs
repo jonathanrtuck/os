@@ -2,7 +2,7 @@
 
 extern crate animation;
 
-use animation::{ease, Easing};
+use animation::{ease, Easing, Spring};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -500,6 +500,160 @@ fn ease_out_back_overshoots_before_settling() {
     // Should exceed 1.0 before settling at exactly 1.0 at t=1.
     let overshoots = (50..99u32).any(|i| ease(Easing::EaseOutBack, i as f32 / 100.0) > 1.0);
     assert!(overshoots, "EaseOutBack should overshoot above 1.0");
+}
+
+// ── Spring physics tests ──────────────────────────────────────────────────────
+
+#[test]
+fn spring_default_settles_at_target() {
+    let mut s = Spring::default_preset(1.0);
+    for _ in 0..120 {
+        s.tick(1.0 / 60.0);
+    }
+    assert!(
+        (s.value() - 1.0).abs() < 0.001,
+        "spring did not reach target: value = {}",
+        s.value()
+    );
+    assert!(s.settled(), "spring is not settled after 2 seconds");
+}
+
+#[test]
+fn spring_snappy_settles_faster_than_gentle() {
+    let mut snappy = Spring::snappy(1.0);
+    let mut gentle = Spring::gentle(1.0);
+    let mut snappy_settled_at = None;
+    let mut gentle_settled_at = None;
+
+    for i in 0..300 {
+        snappy.tick(1.0 / 60.0);
+        gentle.tick(1.0 / 60.0);
+        if snappy.settled() && snappy_settled_at.is_none() {
+            snappy_settled_at = Some(i);
+        }
+        if gentle.settled() && gentle_settled_at.is_none() {
+            gentle_settled_at = Some(i);
+        }
+    }
+
+    let snappy_frame = snappy_settled_at.expect("snappy spring never settled");
+    let gentle_frame = gentle_settled_at.expect("gentle spring never settled");
+    assert!(
+        snappy_frame < gentle_frame,
+        "snappy settled at frame {} but gentle settled at frame {} — snappy should be faster",
+        snappy_frame,
+        gentle_frame
+    );
+}
+
+#[test]
+fn spring_bouncy_overshoots_target() {
+    let mut s = Spring::bouncy(1.0);
+    let mut max_value = 0.0f32;
+
+    for _ in 0..120 {
+        s.tick(1.0 / 60.0);
+        if s.value() > max_value {
+            max_value = s.value();
+        }
+    }
+
+    assert!(
+        max_value > 1.0,
+        "bouncy spring should overshoot target 1.0, max_value = {}",
+        max_value
+    );
+}
+
+#[test]
+fn spring_retarget_changes_destination() {
+    let mut s = Spring::default_preset(1.0);
+    for _ in 0..30 {
+        s.tick(1.0 / 60.0);
+    }
+    s.set_target(2.0);
+    for _ in 0..120 {
+        s.tick(1.0 / 60.0);
+    }
+    assert!(
+        (s.value() - 2.0).abs() < 0.001,
+        "spring did not reach new target 2.0 after retarget: value = {}",
+        s.value()
+    );
+}
+
+#[test]
+fn spring_zero_dt_is_noop() {
+    let mut s = Spring::default_preset(1.0);
+    let v_before = s.value();
+    s.tick(0.0);
+    assert_eq!(
+        s.value(),
+        v_before,
+        "zero dt should not change value: before = {}, after = {}",
+        v_before,
+        s.value()
+    );
+}
+
+#[test]
+fn spring_negative_dt_is_noop() {
+    let mut s = Spring::default_preset(1.0);
+    // Advance a few frames so there is velocity to check.
+    s.tick(1.0 / 60.0);
+    s.tick(1.0 / 60.0);
+    let val_before = s.value();
+    let vel_before = s.velocity();
+    s.tick(-0.016);
+    assert_eq!(s.value(), val_before, "negative dt should not change value");
+    assert_eq!(
+        s.velocity(),
+        vel_before,
+        "negative dt should not change velocity"
+    );
+}
+
+#[test]
+fn spring_non_zero_initial_value() {
+    // Start the spring with value already at target — it should stay settled.
+    let s = Spring::new(1.0, 300.0, 20.0, 1.0);
+    // Spring starts at value=0.0 with target=1.0 — not settled.
+    assert!(
+        !s.settled(),
+        "spring starting at 0 with target 1 should not be settled"
+    );
+
+    // A spring created with target == initial value (both 0) should be settled
+    // immediately.
+    let s_at_rest = Spring::new(0.0, 300.0, 20.0, 1.0);
+    assert!(
+        s_at_rest.settled(),
+        "spring with target == value == 0 should be settled immediately"
+    );
+}
+
+#[test]
+fn spring_custom_settle_threshold() {
+    let mut s = Spring::default_preset(1.0);
+    // Use a very large threshold — the spring should settle almost immediately.
+    s.set_settle_threshold(10.0);
+    s.tick(1.0 / 60.0);
+    assert!(
+        s.settled(),
+        "with threshold=10 the spring should be settled after one tick"
+    );
+
+    // Use a tiny threshold — the spring should take many frames.
+    let mut s2 = Spring::default_preset(1.0);
+    s2.set_settle_threshold(0.00001);
+    // After only 30 frames (~0.5s) it should NOT yet be settled.
+    for _ in 0..30 {
+        s2.tick(1.0 / 60.0);
+    }
+    assert!(
+        !s2.settled(),
+        "with threshold=0.00001 the spring should not be settled after 30 frames"
+    );
 }
 
 // ── General quality checks ────────────────────────────────────────────────────

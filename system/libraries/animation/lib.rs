@@ -451,6 +451,114 @@ fn exp2(x: f32) -> f32 {
     int_pow * frac_pow
 }
 
+// ── Spring physics ───────────────────────────────────────────────────────────
+
+/// Damped spring physics simulation.
+///
+/// Models a critically/under/over-damped spring system for smooth animations.
+/// Tick-based: call `tick(dt)` each frame with delta time in seconds.
+///
+/// Physics: F = -stiffness * displacement - damping * velocity
+/// Integration: semi-implicit Euler (stable for game-loop dt values).
+///
+/// The spring starts at rest at `value = 0.0` and animates toward `target`.
+pub struct Spring {
+    target: f32,
+    value: f32,
+    velocity: f32,
+    stiffness: f32,
+    damping: f32,
+    mass: f32,
+    settle_threshold: f32,
+}
+
+impl Spring {
+    /// Create a new spring with explicit physical parameters.
+    ///
+    /// Initial state: `value = 0.0`, `velocity = 0.0` — at rest at the origin.
+    pub fn new(target: f32, stiffness: f32, damping: f32, mass: f32) -> Self {
+        Self {
+            target,
+            value: 0.0,
+            velocity: 0.0,
+            stiffness,
+            damping,
+            mass,
+            settle_threshold: 0.01,
+        }
+    }
+
+    /// Balanced preset — smooth general-purpose UI motion.
+    pub fn default_preset(target: f32) -> Self {
+        Self::new(target, 300.0, 20.0, 1.0)
+    }
+
+    /// Snappy preset — fast, tight response with minimal overshoot.
+    pub fn snappy(target: f32) -> Self {
+        Self::new(target, 600.0, 35.0, 1.0)
+    }
+
+    /// Gentle preset — slow, soft approach with no overshoot.
+    pub fn gentle(target: f32) -> Self {
+        Self::new(target, 120.0, 14.0, 1.0)
+    }
+
+    /// Bouncy preset — low damping produces visible overshoot oscillation.
+    pub fn bouncy(target: f32) -> Self {
+        Self::new(target, 300.0, 10.0, 1.0)
+    }
+
+    /// Advance the simulation by `dt` seconds.
+    ///
+    /// Non-positive `dt` is a no-op (guards against zero-division and
+    /// time-reversal).
+    pub fn tick(&mut self, dt: f32) {
+        if dt <= 0.0 {
+            return;
+        }
+        let displacement = self.value - self.target;
+        let force = -self.stiffness * displacement - self.damping * self.velocity;
+        let acceleration = force / self.mass;
+        // Semi-implicit Euler: update velocity first, then position.
+        // This ordering is energy-conserving and unconditionally stable for
+        // spring systems, unlike standard (explicit) Euler.
+        self.velocity += acceleration * dt;
+        self.value += self.velocity * dt;
+    }
+
+    /// Current animated value.
+    pub fn value(&self) -> f32 {
+        self.value
+    }
+
+    /// Current velocity (units per second).
+    pub fn velocity(&self) -> f32 {
+        self.velocity
+    }
+
+    /// Current target the spring is moving toward.
+    pub fn target(&self) -> f32 {
+        self.target
+    }
+
+    /// Update the target without resetting velocity (smooth retargeting).
+    pub fn set_target(&mut self, target: f32) {
+        self.target = target;
+    }
+
+    /// Returns `true` when both displacement and velocity are below the settle
+    /// threshold, indicating the spring has effectively come to rest.
+    pub fn settled(&self) -> bool {
+        (self.value - self.target).abs() < self.settle_threshold
+            && self.velocity.abs() < self.settle_threshold
+    }
+
+    /// Override the settle threshold (default: `0.01`).
+    pub fn set_settle_threshold(&mut self, threshold: f32) {
+        self.settle_threshold = threshold;
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
