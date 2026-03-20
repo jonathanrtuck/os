@@ -12,8 +12,8 @@ use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
     layout_mono_lines, line_bytes_for_run, round_f32, scroll_runs, shape_text, shape_visible_runs,
     update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DEMO_BALL,
-    N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT, N_POINTER,
-    N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT,
+    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 use crate::test_gen::{
     generate_circle_clip, generate_test_image, generate_test_rounded_rect, generate_test_star,
@@ -75,8 +75,7 @@ pub fn build_full_scene(
             let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, content_h);
             let scroll_pt = round_f32(scroll_y);
             let cursor_byte = cursor_pos as usize;
-            let (cursor_line, cursor_col) =
-                byte_to_line_col(doc_text, cursor_byte, cpl as usize);
+            let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_byte, cpl as usize);
             let (sel_lo, sel_hi) = if sel_start <= sel_end {
                 (sel_start as usize, sel_end as usize)
             } else {
@@ -141,7 +140,7 @@ pub fn build_full_scene(
     let _demo_ease2 = w.alloc_node().unwrap(); // 11
     let _demo_ease3 = w.alloc_node().unwrap(); // 12
     let _demo_ease4 = w.alloc_node().unwrap(); // 13
-                                                // Pointer cursor node (top-level, highest z-order).
+                                               // Pointer cursor node (top-level, highest z-order).
     let _pointer = w.alloc_node().unwrap(); // 14
 
     {
@@ -556,7 +555,44 @@ pub fn build_full_scene(
         }
     }
 
-    // Demo 3: Frosted glass panel (backdrop blur).
+    // Colorful background rectangles behind the frosted glass panel.
+    // These render BEFORE the glass (earlier in sibling chain) so the
+    // backdrop blur has visible colorful content to blur.
+    // Reorder chain: EASE_0 → EASE_2 → EASE_3 → EASE_4 → EASE_1 (glass on top).
+    w.node_mut(N_DEMO_EASE_0).next_sibling = N_DEMO_EASE_2;
+
+    {
+        let n = w.node_mut(N_DEMO_EASE_2);
+        n.x = demo_x - 5;
+        n.y = 265;
+        n.width = 70;
+        n.height = 70;
+        n.background = Color::rgba(220, 50, 50, 255); // Red
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_EASE_3;
+    }
+    {
+        let n = w.node_mut(N_DEMO_EASE_3);
+        n.x = demo_x + 40;
+        n.y = 275;
+        n.width = 60;
+        n.height = 60;
+        n.background = Color::rgba(50, 180, 80, 255); // Green
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_EASE_4;
+    }
+    {
+        let n = w.node_mut(N_DEMO_EASE_4);
+        n.x = demo_x + 80;
+        n.y = 260;
+        n.width = 50;
+        n.height = 70;
+        n.background = Color::rgba(60, 100, 240, 255); // Blue
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_EASE_1;
+    }
+
+    // Demo 3: Frosted glass panel (backdrop blur), renders on top of colors.
     {
         let n = w.node_mut(N_DEMO_EASE_1);
         n.x = demo_x;
@@ -567,14 +603,7 @@ pub fn build_full_scene(
         n.backdrop_blur_radius = 8;
         n.corner_radius = 8;
         n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_EASE_2;
-    }
-
-    // Remaining demo nodes: hidden.
-    for &nid in &[N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4] {
-        let n = w.node_mut(nid);
-        n.flags = NodeFlags::empty();
-        n.next_sibling = if nid == N_DEMO_EASE_4 { NULL } else { nid + 1 };
+        n.next_sibling = NULL;
     }
 
     // Link demo siblings: last dynamic node → N_DEMO_BALL.
