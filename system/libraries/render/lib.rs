@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod cache;
+pub mod clip_mask;
 pub mod damage;
 pub mod frame_scheduler;
 pub mod incremental;
@@ -22,6 +23,7 @@ pub mod surface_pool;
 
 use alloc::{boxed::Box, vec, vec::Vec};
 
+pub use clip_mask::ClipMaskCache;
 use drawing::Surface;
 // Re-export helper functions at the crate root for external use.
 pub use scene_render::{round_f32, scale_coord, scale_size};

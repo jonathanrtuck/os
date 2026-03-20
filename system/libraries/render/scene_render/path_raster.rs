@@ -3,7 +3,7 @@
 //!
 //! Dependencies: `alloc`, `drawing`, `scene`, and the `coords` sibling module.
 
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
 use drawing::{Color, Surface};
 
@@ -334,6 +334,165 @@ fn path_fill_span(
         let val = coverage[idx] as u16 + cov;
         coverage[idx] = if val > 255 { 255 } else { val as u8 };
     }
+}
+
+/// Parse path commands from `path_data`, flatten cubics, and fill into a
+/// coverage buffer using the scanline sweep algorithm.
+///
+/// Returns a `Vec<u8>` of `width * height` bytes (one byte per pixel,
+/// row-major). Returns an empty `Vec` if the path is empty, dimensions
+/// are zero, or the allocation would exceed 4 MiB.
+///
+/// This is the low-level primitive used by both `render_path` (which
+/// composites BGRA pixels) and `ClipMaskCache` (which keeps the 8bpp
+/// alpha buffer for clip masking).
+pub fn rasterize_path_to_coverage(
+    path_data: &[u8],
+    width: u32,
+    height: u32,
+    fill_rule: scene::FillRule,
+) -> Vec<u8> {
+    if path_data.is_empty() || width == 0 || height == 0 {
+        return Vec::new();
+    }
+
+    // Parse path commands and build segment list in fixed-point coordinates.
+    // Coordinates are treated as already in physical pixels (scale = 1.0).
+    let mut segments = vec![
+        PathSegment {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+        };
+        PATH_MAX_SEGMENTS
+    ];
+    let mut num_segments = 0usize;
+
+    let mut cursor_x = 0i32;
+    let mut cursor_y = 0i32;
+    let mut contour_start_x = 0i32;
+    let mut contour_start_y = 0i32;
+
+    let mut offset = 0usize;
+    while offset < path_data.len() {
+        let tag = read_u32_le(path_data, offset);
+        match tag {
+            scene::PATH_MOVE_TO => {
+                if offset + scene::PATH_MOVE_TO_SIZE > path_data.len() {
+                    break;
+                }
+                let x = read_f32_le(path_data, offset + 4);
+                let y = read_f32_le(path_data, offset + 8);
+                cursor_x = f32_to_fp(x);
+                cursor_y = f32_to_fp(y);
+                contour_start_x = cursor_x;
+                contour_start_y = cursor_y;
+                offset += scene::PATH_MOVE_TO_SIZE;
+            }
+            scene::PATH_LINE_TO => {
+                if offset + scene::PATH_LINE_TO_SIZE > path_data.len() {
+                    break;
+                }
+                let x = read_f32_le(path_data, offset + 4);
+                let y = read_f32_le(path_data, offset + 8);
+                let nx = f32_to_fp(x);
+                let ny = f32_to_fp(y);
+                if cursor_y != ny && num_segments < PATH_MAX_SEGMENTS {
+                    segments[num_segments] = PathSegment {
+                        x0: cursor_x,
+                        y0: cursor_y,
+                        x1: nx,
+                        y1: ny,
+                    };
+                    num_segments += 1;
+                }
+                cursor_x = nx;
+                cursor_y = ny;
+                offset += scene::PATH_LINE_TO_SIZE;
+            }
+            scene::PATH_CUBIC_TO => {
+                if offset + scene::PATH_CUBIC_TO_SIZE > path_data.len() {
+                    break;
+                }
+                let c1x = read_f32_le(path_data, offset + 4);
+                let c1y = read_f32_le(path_data, offset + 8);
+                let c2x = read_f32_le(path_data, offset + 12);
+                let c2y = read_f32_le(path_data, offset + 16);
+                let x = read_f32_le(path_data, offset + 20);
+                let y = read_f32_le(path_data, offset + 24);
+                flatten_cubic(
+                    cursor_x,
+                    cursor_y,
+                    f32_to_fp(c1x),
+                    f32_to_fp(c1y),
+                    f32_to_fp(c2x),
+                    f32_to_fp(c2y),
+                    f32_to_fp(x),
+                    f32_to_fp(y),
+                    &mut segments,
+                    &mut num_segments,
+                    0,
+                );
+                cursor_x = f32_to_fp(x);
+                cursor_y = f32_to_fp(y);
+                offset += scene::PATH_CUBIC_TO_SIZE;
+            }
+            scene::PATH_CLOSE => {
+                if cursor_y != contour_start_y && num_segments < PATH_MAX_SEGMENTS {
+                    segments[num_segments] = PathSegment {
+                        x0: cursor_x,
+                        y0: cursor_y,
+                        x1: contour_start_x,
+                        y1: contour_start_y,
+                    };
+                    num_segments += 1;
+                }
+                cursor_x = contour_start_x;
+                cursor_y = contour_start_y;
+                offset += scene::PATH_CLOSE_SIZE;
+            }
+            _ => break,
+        }
+    }
+
+    // Implicit close.
+    if (cursor_x != contour_start_x || cursor_y != contour_start_y)
+        && cursor_y != contour_start_y
+        && num_segments < PATH_MAX_SEGMENTS
+    {
+        segments[num_segments] = PathSegment {
+            x0: cursor_x,
+            y0: cursor_y,
+            x1: contour_start_x,
+            y1: contour_start_y,
+        };
+        num_segments += 1;
+    }
+
+    if num_segments == 0 {
+        return Vec::new();
+    }
+
+    // Clamp all segments to the requested [0, width) × [0, height) region.
+    // Translate so that the coverage buffer origin is (0, 0).
+    let cov_w = width;
+    let cov_h = height;
+    let cov_size = cov_w as usize * cov_h as usize;
+    if cov_size > 4 * 1024 * 1024 {
+        return Vec::new();
+    }
+
+    let mut coverage = vec![0u8; cov_size];
+    path_scanline_fill(
+        &segments,
+        num_segments,
+        &mut coverage,
+        cov_w,
+        cov_h,
+        fill_rule,
+    );
+    coverage
 }
 
 /// Render a `Content::Path` node: read contour commands, flatten cubics,
