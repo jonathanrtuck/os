@@ -25,6 +25,7 @@
 #![no_main]
 
 extern crate alloc;
+extern crate animation;
 extern crate fonts;
 extern crate scene;
 

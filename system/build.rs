@@ -86,6 +86,11 @@ fn main() {
 
     rustc_rlib(&rustc, &protocol_src, &protocol_rlib, "protocol", &[]);
 
+    let animation_src = manifest_dir.join("libraries/animation/lib.rs");
+    let animation_rlib = out_dir.join("libanimation.rlib");
+
+    rustc_rlib(&rustc, &animation_src, &animation_rlib, "animation", &[]);
+
     let virtio_src = manifest_dir.join("libraries/virtio/lib.rs");
     let virtio_rlib = out_dir.join("libvirtio.rlib");
 
@@ -163,6 +168,9 @@ fn main() {
         }
         if name == "cpu-render" || name == "virgil-render" {
             externs.push(("render", render_rlib.clone()));
+        }
+        if name == "core" {
+            externs.push(("animation", animation_rlib.clone()));
         }
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
@@ -267,6 +275,7 @@ fn main() {
     }
     println!("cargo:rerun-if-changed={}", ipc_src.display());
     println!("cargo:rerun-if-changed={}", protocol_src.display());
+    println!("cargo:rerun-if-changed={}", animation_src.display());
     println!("cargo:rerun-if-changed={}", scene_src.display());
     println!("cargo:rerun-if-changed={}", render_src.display());
     for render_mod in &[
