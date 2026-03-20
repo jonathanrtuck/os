@@ -420,8 +420,8 @@ pub extern "C" fn _start() -> ! {
     // correct (identity transforms are all-zeros except a/d which are 1.0,
     // but first_frame=true triggers a full repaint on the first frame
     // regardless, so zero prev state is fine).
-    // State is maintained via update_from_frame; compute_dirty_rects/
-    // detect_scroll will be used by future scissor-based partial redraw.
+    // State maintained via update_from_frame; compute_dirty_rects drives
+    // scissor-rect clipping to limit GPU fragment work to dirty regions.
     let mut incr_state: Box<IncrementalState> = box_zeroed();
     incr_state.first_frame = true;
 
@@ -484,6 +484,31 @@ pub extern "C" fn _start() -> ! {
             sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
             continue;
         }
+
+        // Compute dirty rects from incremental state for scissor clipping.
+        let damage = incr_state.compute_dirty_rects(
+            nodes,
+            node_count,
+            &dirty_bits,
+            width as u16,
+            height as u16,
+        );
+
+        // Compute scissor rect: bounding box of dirty rects, or full viewport.
+        let (scissor_x, scissor_y, scissor_w, scissor_h) = if let Some(ref d) = damage {
+            if d.count == 0 && !d.full_screen {
+                // All dirty nodes off-screen — skip frame entirely.
+                reader.finish_read(gen);
+                incr_state.update_from_frame(nodes, node_count);
+                sched.on_render_complete_at(counter_to_ns(sys::counter(), cfreq));
+                continue;
+            }
+            let bbox = d.bounding_box();
+            (bbox.x, bbox.y, bbox.w, bbox.h)
+        } else {
+            // First frame or all-dirty: full viewport.
+            (0u16, 0u16, width as u16, height as u16)
+        };
 
         // Walk scene tree: accumulate colored quads (backgrounds) and
         // textured quads (glyphs) in a single pass.
@@ -587,6 +612,7 @@ pub extern "C" fn _start() -> ! {
         };
         cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf);
         cmdbuf.cmd_set_viewport(width as f32, height as f32);
+        cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
         cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
         if has_paths {
             cmdbuf.cmd_clear_stencil();
@@ -755,6 +781,7 @@ pub extern "C" fn _start() -> ! {
                 };
                 cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf);
                 cmdbuf.cmd_set_viewport(width as f32, height as f32);
+                cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
 
                 images_drawn += 1;
             }
