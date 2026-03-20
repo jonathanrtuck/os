@@ -13,8 +13,7 @@ use alloc::vec::Vec;
 // Re-export all public items from submodules.
 pub use full::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_selection_update, update_demo_nodes, DEMO_BALL_Y_BOT, DEMO_BALL_Y_TOP, DEMO_BAR_GAP,
-    DEMO_BAR_H, DEMO_EASE_TRAVEL, DEMO_EASE_Y0,
+    build_selection_update,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
 use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};

@@ -87,6 +87,29 @@ pub fn generate_test_rounded_rect(w: f32, h: f32, r: f32) -> Vec<u8> {
     cmds
 }
 
+/// Generate path commands for a circle (approximated with 4 cubic beziers).
+/// Circle is centered at (radius, radius) with the given radius.
+pub fn generate_circle_clip(radius: f32) -> Vec<u8> {
+    let mut cmds = Vec::new();
+    let cx = radius;
+    let cy = radius;
+    // Magic number for circular arcs via cubic beziers.
+    let k = radius * 0.5522847;
+
+    // Start at rightmost point.
+    scene::path_move_to(&mut cmds, cx + radius, cy);
+    // Bottom-right arc.
+    scene::path_cubic_to(&mut cmds, cx + radius, cy + k, cx + k, cy + radius, cx, cy + radius);
+    // Bottom-left arc.
+    scene::path_cubic_to(&mut cmds, cx - k, cy + radius, cx - radius, cy + k, cx - radius, cy);
+    // Top-left arc.
+    scene::path_cubic_to(&mut cmds, cx - radius, cy - k, cx - k, cy - radius, cx, cy - radius);
+    // Top-right arc.
+    scene::path_cubic_to(&mut cmds, cx + k, cy - radius, cx + radius, cy - k, cx + radius, cy);
+    scene::path_close(&mut cmds);
+    cmds
+}
+
 /// Generate path commands for a standard arrow pointer cursor.
 /// 10 × 16 pt. Tip at (0, 0), body extends down-right.
 pub fn generate_arrow_cursor() -> Vec<u8> {

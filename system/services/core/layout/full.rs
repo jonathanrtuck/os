@@ -15,33 +15,17 @@ use super::{
     N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT, N_POINTER,
     N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
-use crate::test_gen::{generate_test_image, generate_test_rounded_rect, generate_test_star};
+use crate::test_gen::{
+    generate_circle_clip, generate_test_image, generate_test_rounded_rect, generate_test_star,
+};
 
-// ── Demo animation constants ─────────────────────────────────────────
+// ── Demo panel positioning ────────────────────────────────────────────
 //
-// All positions are content-area-relative (i.e., relative to N_CONTENT's
-// top-left corner, which sits just below the title bar and shadow).
+// The Phase 2 composition demos are positioned in the right margin,
+// relative to N_CONTENT's top-left corner.
 
 /// Width of the demo panel in points.
-pub const DEMO_W: u32 = 160;
-/// Height of each easing-sampler bar in points.
-pub const DEMO_BAR_H: i32 = 8;
-/// Vertical gap between easing-sampler bars in points.
-pub const DEMO_BAR_GAP: i32 = 4;
-/// Width of each easing-sampler travel range in points.
-pub const DEMO_EASE_TRAVEL: i32 = 100;
-/// X of the left edge of the demo panel (from content-area left = 0).
-/// Set at runtime from fb_width; see `demo_left_x`.
-// (No compile-time constant because fb_width is dynamic.)
-
-/// Ball side length in points.
-pub const DEMO_BALL_SIZE: u32 = 16;
-/// Top Y of the bouncing ball's upper target position (content-area-relative).
-pub const DEMO_BALL_Y_TOP: i32 = 130;
-/// Bottom Y of the bouncing ball's lower target position (content-area-relative).
-pub const DEMO_BALL_Y_BOT: i32 = 220;
-/// Y of the first easing-sampler bar (content-area-relative).
-pub const DEMO_EASE_Y0: i32 = 260;
+const DEMO_W: u32 = 160;
 
 /// Compute the left X of the demo panel given the framebuffer width.
 #[inline]
@@ -492,63 +476,108 @@ pub fn build_full_scene(
         }
     }
 
-    // ── Demo nodes: bouncing ball + easing sampler ─────────────────
+    // ── Demo nodes: Phase 2 composition demos ─────────────────────────
     //
-    // These well-known nodes (N_DEMO_BALL, N_DEMO_EASE_0..4) are
-    // initialized here and updated in-place every animation frame by
-    // `update_demo_nodes` via `apply_demo`. They are direct children
-    // of N_CONTENT and never removed or reallocated.
+    // Three static composition demos using well-known node indices 8-13.
+    // Demo 1 (N_DEMO_BALL = 8): star-shaped clip containing an image.
+    // Demo 2 (N_DEMO_EASE_0 = 9): circular clip containing text.
+    // Demo 3 (N_DEMO_EASE_1 = 10): frosted glass panel (backdrop blur).
+    // Nodes 11-13: hidden (unused in Phase 2).
     let demo_x = demo_left_x(cfg.fb_width);
 
-    // Bouncing ball — cyan square, initial Y at top target.
+    // Demo 1: Star-shaped clip containing an image.
     {
+        let star_clip_cmds = generate_test_star(60.0);
+        let star_clip_ref = w.push_path_commands(&star_clip_cmds);
+        let test_img = generate_test_image();
+        let img_ref = w.push_data(&test_img);
+
         let n = w.node_mut(N_DEMO_BALL);
-        n.x = demo_x + DEMO_EASE_TRAVEL / 2 - DEMO_BALL_SIZE as i32 / 2;
-        n.y = DEMO_BALL_Y_TOP;
-        n.width = DEMO_BALL_SIZE as u16;
-        n.height = DEMO_BALL_SIZE as u16;
-        n.background = Color::rgba(0, 220, 220, 255);
-        n.content = Content::None;
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_EASE_0;
-    }
-
-    // Easing-sampler bars: five colors, stacked vertically.
-    // Each bar starts at x = demo_x (travel = 0) and animates to
-    // x = demo_x + DEMO_EASE_TRAVEL.
-    let bar_colors = [
-        Color::rgba(255, 100, 100, 255), // Linear   — red
-        Color::rgba(255, 180, 50, 255),  // EaseOut  — orange
-        Color::rgba(100, 220, 100, 255), // EaseInOut — green
-        Color::rgba(80, 160, 255, 255),  // EaseInBack — blue
-        Color::rgba(220, 80, 220, 255),  // EaseOutBounce — magenta
-    ];
-    let ease_node_ids = [
-        N_DEMO_EASE_0,
-        N_DEMO_EASE_1,
-        N_DEMO_EASE_2,
-        N_DEMO_EASE_3,
-        N_DEMO_EASE_4,
-    ];
-
-    for (i, &nid) in ease_node_ids.iter().enumerate() {
-        let bar_y = DEMO_EASE_Y0 + i as i32 * (DEMO_BAR_H + DEMO_BAR_GAP);
-        let n = w.node_mut(nid);
         n.x = demo_x;
-        n.y = bar_y;
-        n.width = DEMO_EASE_TRAVEL as u16;
-        n.height = DEMO_BAR_H as u16;
-        n.background = bar_colors[i];
-        n.content = Content::None;
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = if i + 1 < ease_node_ids.len() {
-            ease_node_ids[i + 1]
-        } else {
-            NULL
-        };
+        n.y = 130;
+        n.width = 60;
+        n.height = 60;
+        n.clip_path = star_clip_ref;
+        n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+        n.next_sibling = N_DEMO_EASE_0;
+
+        // Child: test image filling the clip container.
+        if let Some(img_id) = w.alloc_node() {
+            let n = w.node_mut(img_id);
+            n.width = 60;
+            n.height = 60;
+            n.content = Content::Image {
+                data: img_ref,
+                src_width: 32,
+                src_height: 32,
+            };
+            n.flags = NodeFlags::VISIBLE;
+            n.next_sibling = NULL;
+            w.node_mut(N_DEMO_BALL).first_child = img_id;
+        }
     }
 
-    // Link demo siblings: last dynamic node (rr_id) → N_DEMO_BALL.
+    // Demo 2: Circular clip containing text.
+    {
+        let circle_cmds = generate_circle_clip(30.0);
+        let circle_ref = w.push_path_commands(&circle_cmds);
+
+        let n = w.node_mut(N_DEMO_EASE_0);
+        n.x = demo_x;
+        n.y = 200;
+        n.width = 60;
+        n.height = 60;
+        n.clip_path = circle_ref;
+        n.background = Color::rgba(40, 40, 50, 255);
+        n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
+        n.next_sibling = N_DEMO_EASE_1;
+
+        // Child: text glyphs inside the circle.
+        let demo_text = b"Hello";
+        let shaped = shape_text(cfg.font_data, demo_text, cfg.font_size, cfg.upem, cfg.axes);
+        let glyph_ref = w.push_shaped_glyphs(&shaped);
+        if let Some(txt_id) = w.alloc_node() {
+            let n = w.node_mut(txt_id);
+            n.x = 4;
+            n.y = 22;
+            n.width = 56;
+            n.height = 20;
+            n.content = Content::Glyphs {
+                color: Color::rgb(255, 255, 255),
+                glyphs: glyph_ref,
+                glyph_count: shaped.len() as u16,
+                font_size: cfg.font_size,
+                axis_hash: 0,
+            };
+            n.content_hash = scene::fnv1a(demo_text);
+            n.flags = NodeFlags::VISIBLE;
+            n.next_sibling = NULL;
+            w.node_mut(N_DEMO_EASE_0).first_child = txt_id;
+        }
+    }
+
+    // Demo 3: Frosted glass panel (backdrop blur).
+    {
+        let n = w.node_mut(N_DEMO_EASE_1);
+        n.x = demo_x;
+        n.y = 270;
+        n.width = 120;
+        n.height = 60;
+        n.background = Color::rgba(255, 255, 255, 180);
+        n.backdrop_blur_radius = 8;
+        n.corner_radius = 8;
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_EASE_2;
+    }
+
+    // Remaining demo nodes: hidden.
+    for &nid in &[N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4] {
+        let n = w.node_mut(nid);
+        n.flags = NodeFlags::empty();
+        n.next_sibling = if nid == N_DEMO_EASE_4 { NULL } else { nid + 1 };
+    }
+
+    // Link demo siblings: last dynamic node → N_DEMO_BALL.
     // Walk N_CONTENT children to find the last one.
     {
         let mut last = w.node(N_CONTENT).first_child;
@@ -588,42 +617,6 @@ pub fn build_full_scene(
     }
 
     w.set_root(N_ROOT);
-}
-
-/// Update demo node positions in an already-open back buffer.
-///
-/// Called every animation frame via `SceneState::apply_demo`. Only updates
-/// the Y of the bouncing ball and the X of each easing-sampler bar — no
-/// heap allocation, no data-buffer changes.
-///
-/// - `ball_y`: content-area-relative Y for the ball node centre (rounded to i32)
-/// - `ease_x`: per-bar X offset from the panel's left edge
-pub fn update_demo_nodes(w: &mut scene::SceneWriter<'_>, ball_y: i32, ease_x: &[i32; 5]) {
-    w.node_mut(N_DEMO_BALL).y = ball_y;
-    w.mark_dirty(N_DEMO_BALL);
-
-    let demo_base_x = {
-        // Reconstruct demo_left_x from the ball's current absolute x
-        // (ball.x is demo_x + offset, where offset is fixed).
-        // Simpler: store demo_x in the ball's x relative form.
-        // We know ball.x = demo_x + DEMO_EASE_TRAVEL/2 - DEMO_BALL_SIZE/2
-        // so demo_x = ball.x - DEMO_EASE_TRAVEL/2 + DEMO_BALL_SIZE/2.
-        let ball_x = w.node(N_DEMO_BALL).x;
-        ball_x - DEMO_EASE_TRAVEL / 2 + DEMO_BALL_SIZE as i32 / 2
-    };
-
-    let ease_node_ids = [
-        N_DEMO_EASE_0,
-        N_DEMO_EASE_1,
-        N_DEMO_EASE_2,
-        N_DEMO_EASE_3,
-        N_DEMO_EASE_4,
-    ];
-
-    for (i, &nid) in ease_node_ids.iter().enumerate() {
-        w.node_mut(nid).x = demo_base_x + ease_x[i];
-        w.mark_dirty(nid);
-    }
 }
 
 /// Update only the clock text in an already-open back buffer, then
