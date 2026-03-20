@@ -17,11 +17,14 @@ use crate::{
     wire::{
         box_zeroed, ctrl_header, ctrl_header_ctx, CtrlHeader, DmaBuf, ResourceFlush, Submit3dHeader,
     },
-    ATLAS_RESOURCE_ID, HANDLE_BLEND, HANDLE_BLEND_NO_COLOR, HANDLE_DSA, HANDLE_DSA_STENCIL_TEST,
-    HANDLE_DSA_STENCIL_WRITE, HANDLE_FS, HANDLE_FS_GLYPH, HANDLE_FS_IMAGE, HANDLE_RASTERIZER,
-    HANDLE_SAMPLER, HANDLE_SAMPLER_VIEW, HANDLE_SAMPLER_VIEW_IMG, HANDLE_STENCIL_SURFACE,
-    HANDLE_SURFACE, HANDLE_VE, HANDLE_VE_TEXTURED, HANDLE_VS, HANDLE_VS_TEXTURED, IMG_RESOURCE_ID,
-    RT_RESOURCE_ID, STENCIL_RESOURCE_ID, VB_RESOURCE_ID, VIRGL_CTX_ID, VIRTQ_CONTROL,
+    ATLAS_RESOURCE_ID, BLUR_CAPTURE_RESOURCE_ID, BLUR_INTERMEDIATE_RESOURCE_ID, HANDLE_BLEND,
+    HANDLE_BLEND_NO_COLOR, HANDLE_BLUR_CAPTURE_SURFACE, HANDLE_BLUR_CAPTURE_VIEW,
+    HANDLE_BLUR_INTERMEDIATE_SURFACE, HANDLE_BLUR_INTERMEDIATE_VIEW, HANDLE_DSA,
+    HANDLE_DSA_STENCIL_TEST, HANDLE_DSA_STENCIL_WRITE, HANDLE_FS, HANDLE_FS_BLUR_H,
+    HANDLE_FS_BLUR_V, HANDLE_FS_GLYPH, HANDLE_FS_IMAGE, HANDLE_RASTERIZER, HANDLE_SAMPLER,
+    HANDLE_SAMPLER_VIEW, HANDLE_SAMPLER_VIEW_IMG, HANDLE_STENCIL_SURFACE, HANDLE_SURFACE,
+    HANDLE_VE, HANDLE_VE_TEXTURED, HANDLE_VS, HANDLE_VS_TEXTURED, IMG_RESOURCE_ID, RT_RESOURCE_ID,
+    STENCIL_RESOURCE_ID, VB_RESOURCE_ID, VIRGL_CTX_ID, VIRTQ_CONTROL,
 };
 
 // ── Phase D: GPU pipeline setup via CMD_SUBMIT_3D ────────────────────────
@@ -198,6 +201,51 @@ pub(crate) fn setup_pipeline(
         cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, 0);
         cmdbuf.cmd_set_viewport(width as f32, height as f32);
         let _ = submit_3d(device, vq, irq_handle, &cmdbuf);
+    }
+
+    // ── Blur pipeline setup (separate submission — shaders are large) ────
+    //
+    // Two 9-tap Gaussian blur fragment shaders (~400 DWORDs each) and four
+    // pipeline objects (two surfaces + two sampler views). Placed in their
+    // own SUBMIT_3D to avoid overflowing the main pipeline command buffer.
+    cmdbuf.clear();
+    cmdbuf.cmd_create_shader_text(
+        HANDLE_FS_BLUR_H,
+        PIPE_SHADER_FRAGMENT,
+        crate::shaders::BLUR_H_FS,
+    );
+    cmdbuf.cmd_create_shader_text(
+        HANDLE_FS_BLUR_V,
+        PIPE_SHADER_FRAGMENT,
+        crate::shaders::BLUR_V_FS,
+    );
+    cmdbuf.cmd_create_surface(
+        HANDLE_BLUR_CAPTURE_SURFACE,
+        BLUR_CAPTURE_RESOURCE_ID,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+    );
+    cmdbuf.cmd_create_sampler_view(
+        HANDLE_BLUR_CAPTURE_VIEW,
+        BLUR_CAPTURE_RESOURCE_ID,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+    );
+    cmdbuf.cmd_create_surface(
+        HANDLE_BLUR_INTERMEDIATE_SURFACE,
+        BLUR_INTERMEDIATE_RESOURCE_ID,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+    );
+    cmdbuf.cmd_create_sampler_view(
+        HANDLE_BLUR_INTERMEDIATE_VIEW,
+        BLUR_INTERMEDIATE_RESOURCE_ID,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+    );
+    if cmdbuf.overflowed() {
+        sys::print(b"virgil-render: blur pipeline command buffer overflowed!\n");
+        // Blur is non-fatal — continue without it.
+    } else if submit_3d(device, vq, irq_handle, &cmdbuf) {
+        sys::print(b"     blur pipeline ready\n");
+    } else {
+        sys::print(b"     blur pipeline FAILED\n");
     }
 
     stencil_ok

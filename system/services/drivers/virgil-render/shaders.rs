@@ -6,11 +6,14 @@
 //! in the CREATE_OBJECT command encodes the total byte length (including the
 //! null terminator) of the text buffer.
 //!
-//! We need exactly 4 shaders:
+//! Shaders defined here:
 //! 1. `COLOR_VS`: vertex shader — position + color passthrough
 //! 2. `COLOR_FS`: fragment shader — color passthrough
 //! 3. `TEXTURED_VS`: vertex shader — position + texcoord + color passthrough
 //! 4. `TEXTURED_FS`: fragment shader — texture sample × vertex color
+//! 5. `GLYPH_FS`: R8 glyph atlas with coverage × vertex alpha
+//! 6. `BLUR_H_FS`: 9-tap horizontal Gaussian blur
+//! 7. `BLUR_V_FS`: 9-tap vertical Gaussian blur
 //!
 //! TGSI text format reference: virglrenderer `src/gallium/auxiliary/tgsi/tgsi_text.c`
 //! and the test suite in `tests/test_virgl_cmd.c`.
@@ -22,6 +25,7 @@
 //!   - Interpolation: `CONSTANT`, `LINEAR`, `PERSPECTIVE`
 //!   - TEX instruction: `TEX dst, coord, samp, 2D`
 //!   - Each instruction prefixed with `  N: ` (index + colon + space)
+//!   - Source modifier: `-SRC` negates; `.xyzw` swizzles
 //!   - Must end with `END`
 
 // ── Color vertex shader ──────────────────────────────────────────────────
@@ -135,3 +139,115 @@ DCL TEMP[1]\n\
   2: MUL TEMP[1].w, IN[1].wwww, TEMP[0].xxxx\n\
   3: MOV OUT[0], TEMP[1]\n\
   4: END\n\0";
+
+// ── Horizontal 9-tap Gaussian blur fragment shader ───────────────────────
+//
+// Samples 9 texels along the X axis, weighted by a Gaussian kernel (σ≈2).
+// Kernel: [0.0162, 0.0540, 0.1216, 0.1945, 0.2270, 0.1945, 0.1216, 0.0540, 0.0162]
+// Sum = 1.0 (normalised).
+//
+// Inputs:
+//   IN[0]  = GENERIC[0]  — UV texcoord (PERSPECTIVE)
+//   SAMP[0]              — source texture to blur
+//   CONST[0].x           — horizontal texel size (1.0 / texture_width)
+//
+// TEMP layout:
+//   TEMP[0] — running accumulator (RGBA)
+//   TEMP[1] — single texel sample (RGBA)
+//   TEMP[2] — mutable UV for off-centre taps (xy used, zw ignored)
+//
+// Instruction numbering is sequential (TGSI text requires it).
+
+pub const BLUR_H_FS: &[u8] = b"FRAG\n\
+DCL IN[0], GENERIC[0], PERSPECTIVE\n\
+DCL OUT[0], COLOR\n\
+DCL SAMP[0]\n\
+DCL CONST[0]\n\
+DCL TEMP[0]\n\
+DCL TEMP[1]\n\
+DCL TEMP[2]\n\
+IMM[0] FLT32 { 0.2270, 0.1945, 0.1216, 0.0540 }\n\
+IMM[1] FLT32 { 0.0162, 1.0, 2.0, 3.0 }\n\
+IMM[2] FLT32 { 4.0, 0.0, 0.0, 0.0 }\n\
+  0: MOV TEMP[2], IN[0]\n\
+  1: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+  2: MUL TEMP[0], TEMP[1], IMM[0].xxxx\n\
+  3: MAD TEMP[2].x, CONST[0].xxxx, IMM[1].yyyy, IN[0].xxxx\n\
+  4: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+  5: MAD TEMP[0], TEMP[1], IMM[0].yyyy, TEMP[0]\n\
+  6: MAD TEMP[2].x, -CONST[0].xxxx, IMM[1].yyyy, IN[0].xxxx\n\
+  7: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+  8: MAD TEMP[0], TEMP[1], IMM[0].yyyy, TEMP[0]\n\
+  9: MAD TEMP[2].x, CONST[0].xxxx, IMM[1].zzzz, IN[0].xxxx\n\
+ 10: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 11: MAD TEMP[0], TEMP[1], IMM[0].zzzz, TEMP[0]\n\
+ 12: MAD TEMP[2].x, -CONST[0].xxxx, IMM[1].zzzz, IN[0].xxxx\n\
+ 13: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 14: MAD TEMP[0], TEMP[1], IMM[0].zzzz, TEMP[0]\n\
+ 15: MAD TEMP[2].x, CONST[0].xxxx, IMM[1].wwww, IN[0].xxxx\n\
+ 16: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 17: MAD TEMP[0], TEMP[1], IMM[0].wwww, TEMP[0]\n\
+ 18: MAD TEMP[2].x, -CONST[0].xxxx, IMM[1].wwww, IN[0].xxxx\n\
+ 19: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 20: MAD TEMP[0], TEMP[1], IMM[0].wwww, TEMP[0]\n\
+ 21: MAD TEMP[2].x, CONST[0].xxxx, IMM[2].xxxx, IN[0].xxxx\n\
+ 22: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 23: MAD TEMP[0], TEMP[1], IMM[1].xxxx, TEMP[0]\n\
+ 24: MAD TEMP[2].x, -CONST[0].xxxx, IMM[2].xxxx, IN[0].xxxx\n\
+ 25: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 26: MAD TEMP[0], TEMP[1], IMM[1].xxxx, TEMP[0]\n\
+ 27: MOV OUT[0], TEMP[0]\n\
+ 28: END\n\0";
+
+// ── Vertical 9-tap Gaussian blur fragment shader ─────────────────────────
+//
+// Same Gaussian kernel as BLUR_H_FS but samples along the Y axis.
+//
+// Inputs:
+//   IN[0]  = GENERIC[0]  — UV texcoord (PERSPECTIVE)
+//   SAMP[0]              — horizontal-blurred intermediate texture
+//   CONST[0].y           — vertical texel size (1.0 / texture_height)
+//
+// Identical structure to BLUR_H_FS; only the swizzle component changes
+// from .x to .y in the MAD offset computations.
+
+pub const BLUR_V_FS: &[u8] = b"FRAG\n\
+DCL IN[0], GENERIC[0], PERSPECTIVE\n\
+DCL OUT[0], COLOR\n\
+DCL SAMP[0]\n\
+DCL CONST[0]\n\
+DCL TEMP[0]\n\
+DCL TEMP[1]\n\
+DCL TEMP[2]\n\
+IMM[0] FLT32 { 0.2270, 0.1945, 0.1216, 0.0540 }\n\
+IMM[1] FLT32 { 0.0162, 1.0, 2.0, 3.0 }\n\
+IMM[2] FLT32 { 4.0, 0.0, 0.0, 0.0 }\n\
+  0: MOV TEMP[2], IN[0]\n\
+  1: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+  2: MUL TEMP[0], TEMP[1], IMM[0].xxxx\n\
+  3: MAD TEMP[2].y, CONST[0].yyyy, IMM[1].yyyy, IN[0].yyyy\n\
+  4: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+  5: MAD TEMP[0], TEMP[1], IMM[0].yyyy, TEMP[0]\n\
+  6: MAD TEMP[2].y, -CONST[0].yyyy, IMM[1].yyyy, IN[0].yyyy\n\
+  7: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+  8: MAD TEMP[0], TEMP[1], IMM[0].yyyy, TEMP[0]\n\
+  9: MAD TEMP[2].y, CONST[0].yyyy, IMM[1].zzzz, IN[0].yyyy\n\
+ 10: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 11: MAD TEMP[0], TEMP[1], IMM[0].zzzz, TEMP[0]\n\
+ 12: MAD TEMP[2].y, -CONST[0].yyyy, IMM[1].zzzz, IN[0].yyyy\n\
+ 13: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 14: MAD TEMP[0], TEMP[1], IMM[0].zzzz, TEMP[0]\n\
+ 15: MAD TEMP[2].y, CONST[0].yyyy, IMM[1].wwww, IN[0].yyyy\n\
+ 16: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 17: MAD TEMP[0], TEMP[1], IMM[0].wwww, TEMP[0]\n\
+ 18: MAD TEMP[2].y, -CONST[0].yyyy, IMM[1].wwww, IN[0].yyyy\n\
+ 19: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 20: MAD TEMP[0], TEMP[1], IMM[0].wwww, TEMP[0]\n\
+ 21: MAD TEMP[2].y, CONST[0].yyyy, IMM[2].xxxx, IN[0].yyyy\n\
+ 22: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 23: MAD TEMP[0], TEMP[1], IMM[1].xxxx, TEMP[0]\n\
+ 24: MAD TEMP[2].y, -CONST[0].yyyy, IMM[2].xxxx, IN[0].yyyy\n\
+ 25: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 26: MAD TEMP[0], TEMP[1], IMM[1].xxxx, TEMP[0]\n\
+ 27: MOV OUT[0], TEMP[0]\n\
+ 28: END\n\0";

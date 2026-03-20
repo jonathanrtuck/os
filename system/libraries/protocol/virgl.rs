@@ -697,4 +697,60 @@ impl CommandBuffer {
             self.push(dw);
         }
     }
+
+    /// VIRGL_CCMD_BLIT — GPU-side resource copy (no CPU round-trip).
+    ///
+    /// Copies a rectangular region from `src_res` (at `sx,sy` with size `w×h`)
+    /// to `dst_res` (at `dx,dy`). Both resources must be attached to the virgl
+    /// context. Uses NEAREST filter for pixel-exact copies.
+    ///
+    /// Payload layout (21 dwords, indices 1–21 per virgl_protocol.h):
+    ///   [1]  mask      — PIPE_MASK_RGBA (0x0F)
+    ///   [2]  filter    — PIPE_TEX_FILTER_NEAREST (0)
+    ///   [3]  scissor_enable / alpha_blend / render_condition_enable — all 0
+    ///   [4]  dst_res_handle
+    ///   [5]  dst_level (0)
+    ///   [6]  dst_format (VIRGL_FORMAT_B8G8R8A8_UNORM)
+    ///   [7..12] dst box: x, y, z, w, h, d
+    ///   [13] src_res_handle
+    ///   [14] src_level (0)
+    ///   [15] src_format (VIRGL_FORMAT_B8G8R8A8_UNORM)
+    ///   [16..21] src box: x, y, z, w, h, d
+    #[allow(clippy::too_many_arguments)]
+    pub fn cmd_blit_region(
+        &mut self,
+        dst_res: u32,
+        dst_x: u32,
+        dst_y: u32,
+        src_res: u32,
+        src_x: u32,
+        src_y: u32,
+        w: u32,
+        h: u32,
+    ) {
+        self.push(virgl_cmd0(VIRGL_CCMD_BLIT, 0, 21));
+        self.push(PIPE_MASK_RGBA); // [1] mask
+        self.push(0); // [2] filter = NEAREST
+        self.push(0); // [3] scissor_enable=0, alpha_blend=0, render_condition_enable=0
+                      // Dst box:
+        self.push(dst_res); // [4] dst_res_handle
+        self.push(0); // [5] dst_level
+        self.push(VIRGL_FORMAT_B8G8R8A8_UNORM); // [6] dst_format
+        self.push(dst_x); // [7] dst.x
+        self.push(dst_y); // [8] dst.y
+        self.push(0); // [9] dst.z
+        self.push(w); // [10] dst.w
+        self.push(h); // [11] dst.h
+        self.push(1); // [12] dst.d
+                      // Src box:
+        self.push(src_res); // [13] src_res_handle
+        self.push(0); // [14] src_level
+        self.push(VIRGL_FORMAT_B8G8R8A8_UNORM); // [15] src_format
+        self.push(src_x); // [16] src.x
+        self.push(src_y); // [17] src.y
+        self.push(0); // [18] src.z
+        self.push(w); // [19] src.w
+        self.push(h); // [20] src.h
+        self.push(1); // [21] src.d
+    }
 }

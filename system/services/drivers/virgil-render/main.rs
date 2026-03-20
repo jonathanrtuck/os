@@ -961,12 +961,208 @@ pub extern "C" fn _start() -> ! {
             cmdbuf.cmd_clear_stencil();
         }
 
+        // Submit all normal rendering before blur passes.
+        // Blur operates on the fully-rendered framebuffer.
         if cmdbuf.overflowed() {
             sys::print(b"virgil-render: command buffer overflow!\n");
         } else {
             submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
-            resources::flush_resource(&device, &mut vq, irq_handle, width, height);
         }
+
+        // ── Pass 5: Two-pass GPU backdrop blur ───────────────────────────
+        //
+        // For each node with backdrop_blur_radius > 0 (collected during scene walk):
+        //   Step A: Blit the main framebuffer region to BLUR_CAPTURE texture.
+        //   Step B: Render BLUR_CAPTURE through BLUR_H_FS → BLUR_INTERMEDIATE
+        //           (horizontal Gaussian blur; texel size = 1/w in constant buffer).
+        //   Step C: Render BLUR_INTERMEDIATE through BLUR_V_FS → main framebuffer
+        //           (vertical Gaussian blur; texel size = 1/h in constant buffer).
+        //
+        // The final output is written back to the main framebuffer at the same
+        // position, so the node's own background and content render on top.
+        //
+        // Vertex layout for blur quads: same TEXTURED_VS as image rendering
+        // (position + texcoord + color). Texcoords are [0..1] over the blur region.
+        for blur in &blur_requests {
+            // Skip degenerate regions.
+            if blur.w < 1.0 || blur.h < 1.0 {
+                continue;
+            }
+
+            let bx = blur.x as u32;
+            let by = blur.y as u32;
+            let bw = blur.w as u32;
+            let bh = blur.h as u32;
+
+            // ── Step A: Blit main framebuffer region → BLUR_CAPTURE ──────
+            cmdbuf.clear();
+            cmdbuf.cmd_blit_region(
+                BLUR_CAPTURE_RESOURCE_ID,
+                0,
+                0,
+                RT_RESOURCE_ID,
+                bx,
+                by,
+                bw,
+                bh,
+            );
+            if !cmdbuf.overflowed() {
+                submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+            }
+
+            // ── Step B: H-blur — render BLUR_CAPTURE → BLUR_INTERMEDIATE ─
+            // Viewport and framebuffer set to BLUR_INTERMEDIATE (same size).
+            // Constant buffer[0].x = 1.0 / bw (horizontal texel step).
+            let texel_w = 1.0f32 / (bw as f32);
+            let texel_h = 1.0f32 / (bh as f32);
+            let cb_data = [texel_w.to_bits(), texel_h.to_bits(), 0u32, 0u32];
+
+            // Fullscreen quad vertices in NDC covering [0..bw, 0..bh] mapped
+            // to [-1..1, 1..-1]. Texcoords cover [0..1, 0..1].
+            let vw_f = width as f32;
+            let vh_f = height as f32;
+            // Normalise the blur region to the BLUR_INTERMEDIATE texture space.
+            // The H-blur renders into a texture of size bw x bh, but the
+            // GPU viewport is set to bw x bh so NDC [-1..1] maps exactly.
+            // Texcoords for sampling BLUR_CAPTURE cover [0..1, 0..1] (the whole
+            // capture texture contains exactly the captured region).
+            let white = 1.0f32.to_bits();
+            let mut blur_verts = [0u32; 48]; // 6 verts × 8 floats
+            let verts_ndc: [(f32, f32, f32, f32); 6] = [
+                (-1.0, 1.0, 0.0, 0.0),  // top-left
+                (-1.0, -1.0, 0.0, 1.0), // bottom-left
+                (1.0, 1.0, 1.0, 0.0),   // top-right
+                (1.0, 1.0, 1.0, 0.0),   // top-right
+                (-1.0, -1.0, 0.0, 1.0), // bottom-left
+                (1.0, -1.0, 1.0, 1.0),  // bottom-right
+            ];
+            for (i, &(px, py, u, v)) in verts_ndc.iter().enumerate() {
+                let base = i * 8;
+                blur_verts[base] = px.to_bits();
+                blur_verts[base + 1] = py.to_bits();
+                blur_verts[base + 2] = u.to_bits();
+                blur_verts[base + 3] = v.to_bits();
+                blur_verts[base + 4] = white;
+                blur_verts[base + 5] = white;
+                blur_verts[base + 6] = white;
+                blur_verts[base + 7] = white;
+            }
+
+            // Write blur quad vertices to image slot 0 in the text VBO.
+            // By the time blur executes, all image draws have been submitted and
+            // the GPU has consumed image slot 0, so reusing it is safe.
+            let blur_vbo_offset = 0usize;
+            // SAFETY: text_vbo_va is valid DMA of TOTAL_TEXTURED_VBO_BYTES;
+            // blur_vbo_offset leaves room for one quad (48 dwords = 192 bytes).
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    blur_verts.as_ptr(),
+                    (text_vbo_va + blur_vbo_offset) as *mut u32,
+                    48,
+                );
+            }
+            resources::transfer_buffer_to_host(
+                &device,
+                &mut vq,
+                irq_handle,
+                TEXT_VB_RESOURCE_ID,
+                (blur_vbo_offset + 48 * 4) as u32,
+            );
+
+            // H-blur: BLUR_CAPTURE → BLUR_INTERMEDIATE.
+            cmdbuf.clear();
+            cmdbuf.cmd_set_framebuffer_state(HANDLE_BLUR_INTERMEDIATE_SURFACE, 0);
+            cmdbuf.cmd_set_viewport(bw as f32, bh as f32);
+            cmdbuf.cmd_set_scissor(0, 0, bw as u16, bh as u16);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+            cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+            cmdbuf.cmd_bind_shader(HANDLE_FS_BLUR_H, PIPE_SHADER_FRAGMENT);
+            cmdbuf.cmd_set_vertex_buffers(
+                scene_walk::TEXTURED_VERTEX_STRIDE,
+                blur_vbo_offset as u32,
+                TEXT_VB_RESOURCE_ID,
+            );
+            cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+            cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_BLUR_CAPTURE_VIEW);
+            cmdbuf.cmd_set_constant_buffer(PIPE_SHADER_FRAGMENT, 0, &cb_data);
+            cmdbuf.cmd_draw_vbo(0, 6, PIPE_PRIM_TRIANGLES, false);
+            if !cmdbuf.overflowed() {
+                submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+            }
+
+            // ── Step C: V-blur — render BLUR_INTERMEDIATE → main FB ──────
+            // Viewport returns to full display size; we blit into the blur region.
+            // Vertices in NDC space addressing only the blur region on the main FB.
+            let x0 = blur.x / vw_f * 2.0 - 1.0;
+            let y0 = 1.0 - blur.y / vh_f * 2.0;
+            let x1 = (blur.x + blur.w) / vw_f * 2.0 - 1.0;
+            let y1 = 1.0 - (blur.y + blur.h) / vh_f * 2.0;
+            let verts_main: [(f32, f32, f32, f32); 6] = [
+                (x0, y0, 0.0, 0.0),
+                (x0, y1, 0.0, 1.0),
+                (x1, y0, 1.0, 0.0),
+                (x1, y0, 1.0, 0.0),
+                (x0, y1, 0.0, 1.0),
+                (x1, y1, 1.0, 1.0),
+            ];
+            for (i, &(px, py, u, v)) in verts_main.iter().enumerate() {
+                let base = i * 8;
+                blur_verts[base] = px.to_bits();
+                blur_verts[base + 1] = py.to_bits();
+                blur_verts[base + 2] = u.to_bits();
+                blur_verts[base + 3] = v.to_bits();
+                blur_verts[base + 4] = white;
+                blur_verts[base + 5] = white;
+                blur_verts[base + 6] = white;
+                blur_verts[base + 7] = white;
+            }
+            // SAFETY: same DMA slot, same bounds.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    blur_verts.as_ptr(),
+                    (text_vbo_va + blur_vbo_offset) as *mut u32,
+                    48,
+                );
+            }
+            resources::transfer_buffer_to_host(
+                &device,
+                &mut vq,
+                irq_handle,
+                TEXT_VB_RESOURCE_ID,
+                (blur_vbo_offset + 48 * 4) as u32,
+            );
+
+            let zsurf = if stencil_available {
+                HANDLE_STENCIL_SURFACE
+            } else {
+                0
+            };
+            cmdbuf.clear();
+            cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf);
+            cmdbuf.cmd_set_viewport(width as f32, height as f32);
+            cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+            cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+            cmdbuf.cmd_bind_shader(HANDLE_FS_BLUR_V, PIPE_SHADER_FRAGMENT);
+            cmdbuf.cmd_set_vertex_buffers(
+                scene_walk::TEXTURED_VERTEX_STRIDE,
+                blur_vbo_offset as u32,
+                TEXT_VB_RESOURCE_ID,
+            );
+            cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+            cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_BLUR_INTERMEDIATE_VIEW);
+            cmdbuf.cmd_set_constant_buffer(PIPE_SHADER_FRAGMENT, 0, &cb_data);
+            cmdbuf.cmd_draw_vbo(0, 6, PIPE_PRIM_TRIANGLES, false);
+            if !cmdbuf.overflowed() {
+                submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+            }
+        }
+
+        resources::flush_resource(&device, &mut vq, irq_handle, width, height);
 
         // Update incremental state before releasing the reader.
         incr_state.update_from_frame(nodes, node_count);
