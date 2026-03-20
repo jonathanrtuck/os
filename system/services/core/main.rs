@@ -923,6 +923,7 @@ pub extern "C" fn _start() -> ! {
             s.mouse_x,
             s.mouse_y,
             s.pointer_opacity,
+            false,
         );
     }
 
@@ -1522,19 +1523,21 @@ pub extern "C" fn _start() -> ! {
                 }
 
                 let s = state();
+                let title: &[u8] = if s.image_mode { b"Image" } else { b"Text" };
                 scene.build_editor_scene(
                     &scene_cfg,
                     doc_content(),
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
-                    b"Text",
+                    title,
                     &time_buf,
                     s.scroll_offset,
                     s.cursor_opacity,
                     s.mouse_x,
                     s.mouse_y,
                     s.pointer_opacity,
+                    s.image_mode,
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).

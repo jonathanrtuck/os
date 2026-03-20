@@ -52,6 +52,9 @@ pub(crate) fn demo_left_x(fb_width: u32) -> i32 {
 // ── Full scene builds (called by SceneState methods) ────────────────
 
 /// Build the full editor scene into a fresh (cleared) SceneWriter.
+///
+/// When `image_mode` is true, the content area shows a centered test image
+/// instead of the document text, cursor, selection, and demo nodes.
 #[allow(clippy::too_many_arguments)]
 pub fn build_full_scene(
     w: &mut scene::SceneWriter<'_>,
@@ -67,36 +70,47 @@ pub fn build_full_scene(
     mouse_x: u32,
     mouse_y: u32,
     pointer_opacity: u8,
+    image_mode: bool,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
     let cpl = chars_per_line(cfg);
 
-    // Layout document text into visual lines (monospace line-breaking).
-    let all_runs = layout_mono_lines(
-        doc_text,
-        cpl as usize,
-        cfg.line_height as i32,
-        scene_text_color,
-        cfg.font_size,
-    );
-    // Apply scroll: filter to visible viewport.
-    let content_y = cfg.title_bar_h + cfg.shadow_depth;
-    let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, content_h);
-    // Scroll offset in points for cursor/selection positioning.
-    let scroll_pt = round_f32(scroll_y);
-    // Compute cursor line/col for positioning.
-    let cursor_byte = cursor_pos as usize;
-    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_byte, cpl as usize);
-
-    // Compute selection rectangles.
-    let (sel_lo, sel_hi) = if sel_start <= sel_end {
-        (sel_start as usize, sel_end as usize)
-    } else {
-        (sel_end as usize, sel_start as usize)
-    };
-    let has_selection = sel_lo < sel_hi;
+    // Editor-mode-only layout computation — skipped in image mode.
+    let (visible_runs, scroll_pt, cursor_line, cursor_col, has_selection, sel_lo, sel_hi) =
+        if !image_mode {
+            let all_runs = layout_mono_lines(
+                doc_text,
+                cpl as usize,
+                cfg.line_height as i32,
+                scene_text_color,
+                cfg.font_size,
+            );
+            let content_y = cfg.title_bar_h + cfg.shadow_depth;
+            let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
+            let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, content_h);
+            let scroll_pt = round_f32(scroll_y);
+            let cursor_byte = cursor_pos as usize;
+            let (cursor_line, cursor_col) =
+                byte_to_line_col(doc_text, cursor_byte, cpl as usize);
+            let (sel_lo, sel_hi) = if sel_start <= sel_end {
+                (sel_start as usize, sel_end as usize)
+            } else {
+                (sel_end as usize, sel_start as usize)
+            };
+            let has_selection = sel_lo < sel_hi;
+            (
+                visible_runs,
+                scroll_pt,
+                cursor_line,
+                cursor_col,
+                has_selection,
+                sel_lo,
+                sel_hi,
+            )
+        } else {
+            (alloc::vec![], 0, 0, 0, false, 0, 0)
+        };
 
     w.clear();
 
@@ -112,16 +126,20 @@ pub fn build_full_scene(
     let clock_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
-    // Push visible line glyph data.
-    let line_glyph_refs = shape_visible_runs(
-        w,
-        &visible_runs,
-        doc_text,
-        cfg.font_data,
-        cfg.font_size,
-        cfg.upem,
-        cfg.axes,
-    );
+    // Push visible line glyph data (editor mode only).
+    let line_glyph_refs = if !image_mode {
+        shape_visible_runs(
+            w,
+            &visible_runs,
+            doc_text,
+            cfg.font_data,
+            cfg.font_size,
+            cfg.upem,
+            cfg.axes,
+        )
+    } else {
+        alloc::vec![]
+    };
 
     // Allocate well-known nodes in order (sequential IDs).
     let _root = w.alloc_node().unwrap(); // 0
@@ -240,6 +258,85 @@ pub fn build_full_scene(
         n.height = content_h_u32 as u16;
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     }
+
+    // ── Image mode: centered test image, no document text ─────────────
+    if image_mode {
+        let test_img = generate_test_image();
+        let img_ref = w.push_data(&test_img);
+
+        let img_display_w: u16 = 128;
+        let img_display_h: u16 = 128;
+        let center_x = ((cfg.fb_width as i32 - img_display_w as i32) / 2).max(0);
+        let center_y = ((content_h_u32 as i32 - img_display_h as i32) / 2).max(0);
+
+        {
+            let n = w.node_mut(N_DOC_TEXT);
+            n.x = center_x;
+            n.y = center_y;
+            n.width = img_display_w;
+            n.height = img_display_h;
+            n.content = Content::Image {
+                data: img_ref,
+                src_width: 32,
+                src_height: 32,
+            };
+            n.content_hash = fnv1a(&test_img);
+            n.flags = NodeFlags::VISIBLE;
+            n.first_child = NULL;
+            n.next_sibling = NULL;
+            n.content_transform = scene::AffineTransform::identity();
+        }
+
+        // Cursor: hidden in image mode.
+        {
+            let n = w.node_mut(N_CURSOR);
+            n.flags = NodeFlags::empty();
+            n.next_sibling = NULL;
+        }
+
+        // Demo nodes: hidden in image mode (well-known indices must exist).
+        for &nid in &[
+            N_DEMO_BALL,
+            N_DEMO_EASE_0,
+            N_DEMO_EASE_1,
+            N_DEMO_EASE_2,
+            N_DEMO_EASE_3,
+            N_DEMO_EASE_4,
+        ] {
+            let n = w.node_mut(nid);
+            n.flags = NodeFlags::empty();
+            n.next_sibling = NULL;
+        }
+
+        // Link N_CONTENT → N_POINTER so the pointer renders on top.
+        w.node_mut(N_CONTENT).next_sibling = N_POINTER;
+
+        // Pointer cursor node.
+        {
+            let arrow_cmds = crate::test_gen::generate_arrow_cursor();
+            let arrow_ref = w.push_path_commands(&arrow_cmds);
+            let arrow_hash = scene::fnv1a(&arrow_cmds);
+            let n = w.node_mut(N_POINTER);
+            n.x = mouse_x as i32;
+            n.y = mouse_y as i32;
+            n.width = 10;
+            n.height = 18;
+            n.content = Content::Path {
+                color: Color::rgb(255, 255, 255),
+                fill_rule: FillRule::Winding,
+                contours: arrow_ref,
+            };
+            n.content_hash = arrow_hash;
+            n.opacity = pointer_opacity;
+            n.flags = NodeFlags::VISIBLE;
+            n.next_sibling = NULL;
+        }
+
+        w.set_root(N_ROOT);
+        return;
+    }
+    // ── End image mode ────────────────────────────────────────────────
+
     {
         let n = w.node_mut(N_DOC_TEXT);
 

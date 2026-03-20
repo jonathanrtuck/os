@@ -40,7 +40,12 @@ impl SceneState {
         TripleWriter::from_existing(self.buf)
     }
 
-    /// Build the full scene tree for the text editor screen layout.
+    /// Build the full scene tree for the editor or image viewer screen layout.
+    ///
+    /// When `image_mode` is false, builds the text editor scene.
+    /// When `image_mode` is true, builds an image viewer scene with a centered
+    /// test image, no cursor/selection/demo nodes, and "Image" in the title bar.
+    ///
     /// Writes to the back buffer and swaps to publish as the new front.
     #[allow(clippy::too_many_arguments)]
     pub fn build_editor_scene(
@@ -57,6 +62,7 @@ impl SceneState {
         mouse_x: u32,
         mouse_y: u32,
         pointer_opacity: u8,
+        image_mode: bool,
     ) {
         let mut tw = self.triple();
         {
@@ -75,6 +81,7 @@ impl SceneState {
                 mouse_x,
                 mouse_y,
                 pointer_opacity,
+                image_mode,
             );
         }
         tw.publish();
