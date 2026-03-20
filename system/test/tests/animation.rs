@@ -2,7 +2,7 @@
 
 extern crate animation;
 
-use animation::{ease, Easing, Lerp, LerpColor, Spring, Transform2D};
+use animation::{ease, Easing, Lerp, LerpColor, Spring, Timeline, Transform2D};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -746,6 +746,107 @@ fn lerp_transform2d_identity_at_zero() {
     };
     let result = Transform2D::lerp(a, b, 0.0);
     assert_eq!(result, a);
+}
+
+// ── Timeline tests ────────────────────────────────────────────────────────────
+
+#[test]
+fn animation_completes_after_duration() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 500, Easing::Linear, 1000).unwrap();
+    assert!(tl.is_active(id));
+
+    // Halfway
+    tl.tick(1250);
+    let v = tl.value(id);
+    assert!((v - 0.5).abs() < 0.01, "at halfway: {}", v);
+
+    // Complete
+    tl.tick(1500);
+    assert!(!tl.is_active(id)); // removed by tick
+}
+
+#[test]
+fn timeline_manages_multiple_animations() {
+    let mut tl = Timeline::new();
+    let id1 = tl.start(0.0, 1.0, 500, Easing::Linear, 0).unwrap();
+    let id2 = tl.start(10.0, 20.0, 1000, Easing::EaseOut, 0).unwrap();
+    assert!(tl.is_active(id1));
+    assert!(tl.is_active(id2));
+
+    tl.tick(500);
+    assert!(!tl.is_active(id1)); // completed
+    assert!(tl.is_active(id2)); // still running
+
+    tl.tick(1000);
+    assert!(!tl.is_active(id2)); // completed
+}
+
+#[test]
+fn timeline_capacity_limit() {
+    let mut tl = Timeline::new();
+    for i in 0..32u64 {
+        assert!(tl.start(0.0, 1.0, 1000, Easing::Linear, i).is_ok());
+    }
+    // 33rd should fail
+    assert!(tl.start(0.0, 1.0, 1000, Easing::Linear, 32).is_err());
+}
+
+#[test]
+fn timeline_cancel_frees_slot() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 1000, Easing::Linear, 0).unwrap();
+    tl.cancel(id);
+    assert!(!tl.is_active(id));
+    // Slot should be free
+    assert!(tl.start(0.0, 1.0, 1000, Easing::Linear, 0).is_ok());
+}
+
+#[test]
+fn timeline_value_returns_current() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 100.0, 1000, Easing::Linear, 0).unwrap();
+    tl.tick(500);
+    let v = tl.value(id);
+    assert!((v - 50.0).abs() < 1.0, "at t=500: {}", v);
+}
+
+#[test]
+fn timeline_any_active() {
+    let mut tl = Timeline::new();
+    assert!(!tl.any_active());
+    let _id = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
+    assert!(tl.any_active());
+    tl.tick(100);
+    assert!(!tl.any_active());
+}
+
+#[test]
+fn zero_duration_animation() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 0, Easing::Linear, 100).unwrap();
+    tl.tick(100);
+    // Zero duration: should complete immediately
+    assert!(!tl.is_active(id));
+}
+
+#[test]
+fn animation_before_start_returns_start_value() {
+    let mut tl = Timeline::new();
+    let id = tl.start(5.0, 10.0, 1000, Easing::Linear, 500).unwrap();
+    tl.tick(0); // before start time
+    let v = tl.value(id);
+    assert!((v - 5.0).abs() < 0.01, "before start: {}", v);
+}
+
+#[test]
+fn animation_with_easing() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 1000, Easing::EaseInQuad, 0).unwrap();
+    tl.tick(500);
+    let v = tl.value(id);
+    // EaseInQuad at t=0.5 → 0.25 (t*t)
+    assert!((v - 0.25).abs() < 0.05, "EaseInQuad at t=0.5: {}", v);
 }
 
 // ── General quality checks ────────────────────────────────────────────────────

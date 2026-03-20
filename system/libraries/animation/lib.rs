@@ -1167,6 +1167,127 @@ impl Lerp for Transform2D {
     }
 }
 
+// ── Animation and Timeline ───────────────────────────────────────────────────
+
+/// Unique identifier for a running animation in a Timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnimationId(u8);
+
+/// A single property animation from start_value to end_value over duration_ms.
+/// Uses f32 values. For type-generic interpolation, use the Lerp trait at the
+/// call site to convert between the animated f32 and the target type.
+#[derive(Clone, Copy)]
+struct Animation {
+    start_value: f32,
+    end_value: f32,
+    start_time_ms: u64,
+    duration_ms: u32,
+    easing: Easing,
+}
+
+impl Animation {
+    fn value_at(&self, now_ms: u64) -> f32 {
+        if now_ms <= self.start_time_ms {
+            return self.start_value;
+        }
+        let elapsed = (now_ms - self.start_time_ms) as f32;
+        let t = (elapsed / self.duration_ms as f32).min(1.0);
+        let eased = ease(self.easing, t);
+        f32::lerp(self.start_value, self.end_value, eased)
+    }
+
+    fn is_complete_at(&self, now_ms: u64) -> bool {
+        now_ms >= self.start_time_ms + self.duration_ms as u64
+    }
+}
+
+const MAX_ANIMATIONS: usize = 32;
+
+/// Fixed-capacity animation manager. No heap allocation.
+///
+/// Manages up to 32 concurrent animations. Each animation interpolates a single
+/// f32 value from start to end over a duration with an easing curve. The Timeline
+/// tracks time and automatically removes completed animations.
+///
+/// 32 slots supports: cursor blink (1) + scroll animation (1) + pointer fade (1)
+/// + transition (1) + per-node property animations (up to 28 concurrent).
+pub struct Timeline {
+    slots: [Option<Animation>; MAX_ANIMATIONS],
+    now_ms: u64,
+}
+
+impl Timeline {
+    pub const fn new() -> Self {
+        Self {
+            slots: [None; MAX_ANIMATIONS],
+            now_ms: 0,
+        }
+    }
+
+    /// Start a new animation. Returns AnimationId or Err if at capacity.
+    pub fn start(
+        &mut self,
+        from: f32,
+        to: f32,
+        duration_ms: u32,
+        easing: Easing,
+        now_ms: u64,
+    ) -> Result<AnimationId, ()> {
+        for (i, slot) in self.slots.iter_mut().enumerate() {
+            if slot.is_none() {
+                *slot = Some(Animation {
+                    start_value: from,
+                    end_value: to,
+                    start_time_ms: now_ms,
+                    duration_ms,
+                    easing,
+                });
+                return Ok(AnimationId(i as u8));
+            }
+        }
+        Err(()) // at capacity
+    }
+
+    /// Advance time. Completed animations are removed, freeing their slots.
+    pub fn tick(&mut self, now_ms: u64) {
+        self.now_ms = now_ms;
+        for slot in self.slots.iter_mut() {
+            if let Some(anim) = slot {
+                if anim.is_complete_at(now_ms) {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
+    /// Get the current value of an animation. Returns 0.0 if the animation
+    /// completed (and was cleaned up) or if the id is invalid.
+    pub fn value(&self, id: AnimationId) -> f32 {
+        match &self.slots[id.0 as usize] {
+            Some(anim) => anim.value_at(self.now_ms),
+            None => 0.0, // animation completed and was removed
+        }
+    }
+
+    /// Cancel an animation, freeing its slot immediately.
+    pub fn cancel(&mut self, id: AnimationId) {
+        if (id.0 as usize) < MAX_ANIMATIONS {
+            self.slots[id.0 as usize] = None;
+        }
+    }
+
+    /// Check if an animation is still running (not completed or cancelled).
+    pub fn is_active(&self, id: AnimationId) -> bool {
+        (id.0 as usize) < MAX_ANIMATIONS && self.slots[id.0 as usize].is_some()
+    }
+
+    /// Returns true if any animation is active (useful for frame scheduling —
+    /// when true, the event loop should tick at 60fps instead of blocking).
+    pub fn any_active(&self) -> bool {
+        self.slots.iter().any(|s| s.is_some())
+    }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
