@@ -14,7 +14,8 @@ cd system/test && cargo test -- --test-threads=1      # 632 host-side tests
 
 - **Boot:** `boot.S` → EL2→EL1 transition → MMU enable → `main.rs:kernel_main`
 - **Memory:** Split TTBR (kernel TTBR1, user TTBR0), W^X enforcement, buddy allocator, slab+linked-list heap
-- **Scheduling:** Preemptive EEVDF on 4 SMP cores, handle-based scheduling contexts
+- **Interrupts:** GICv3 interrupt controller, tickless idle with IPI cross-core wakeup
+- **Scheduling:** Preemptive EEVDF on 4 SMP cores, handle-based scheduling contexts, tickless deadline reprogramming
 - **IPC:** Kernel-managed channels (two shared pages per channel, SPSC ring buffers)
 - **Processes:** Microkernel pattern — kernel spawns init, init spawns everything else
 

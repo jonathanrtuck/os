@@ -18,25 +18,27 @@ This project explores inverting that: **OS → Document → Tool.** Documents ha
 
 ## Status
 
-The project has a working interactive demo running on a bare-metal aarch64 microkernel in QEMU. The display pipeline renders text with LCD subpixel anti-aliasing and stem darkening, composites z-ordered surfaces with rounded corners, Gaussian-blurred box shadows, and layer opacity over a radial gradient background, decodes PNG images, rasterizes SVG paths and cubic bezier curves, and supports a text editor with selection, scrolling, and mouse click-to-position plus an image viewer — switchable at runtime with context-aware icons. A hardware RTC clock ticks in the title bar. The rendering pipeline uses a configurable-cadence frame scheduler (60/30/120fps) with event coalescing and idle optimization, incremental scene graph updates with change-list-driven damage tracking, 2D affine transforms, fractional DPI scaling, and bilinear image resampling — only dirty screen regions are re-rendered and transferred to the GPU.
+The project has a working interactive demo running on a bare-metal aarch64 microkernel in QEMU. The display pipeline renders text with LCD subpixel anti-aliasing, stem darkening, and variable font axes, composites z-ordered surfaces with rounded corners, Gaussian-blurred box shadows, and layer opacity over a radial gradient background, decodes PNG images, renders cubic bezier paths, and supports a text editor with selection, scrolling, and mouse click-to-position plus an image viewer — switchable at runtime with context-aware glyph icons. A hardware RTC clock ticks in the title bar. Two render services are available: CPU software rendering (`cpu-render`) and GPU-accelerated Virgil3D rendering (`virgil-render`), auto-selected at boot. The rendering pipeline uses a configurable-cadence frame scheduler (60/30/120fps) with event coalescing and idle optimization, triple-buffered incremental scene graph updates with change-list-driven damage tracking, 2D affine transforms, fractional DPI scaling, and bilinear image resampling — only dirty screen regions are re-rendered and transferred to the GPU.
 
 For the full design landscape, see the [decision register](design/decisions.md) and the [exploration journal](design/journal.md).
 
 ## What's Implemented
 
-**Kernel** — Bare-metal aarch64 microkernel. 28 syscalls, EEVDF scheduler, 4 SMP cores, demand-paged memory, channel-based IPC with shared memory.
+**Kernel** — Bare-metal aarch64 microkernel. 28 syscalls, EEVDF scheduler with scheduling contexts, 4 SMP cores (GICv3 interrupt controller, tickless idle with IPI wakeup), demand-paged memory, channel-based IPC with shared memory.
 
-**Display pipeline** — Five-process architecture: virtio-input driver → core (OS service) → compositor → text editor → virtio-gpu driver. Scene graph in shared memory connects core (document semantics) to compositor (pixels). Configurable-cadence frame scheduler (60/30/120fps) with event coalescing, frame budgeting, and idle optimization. Incremental scene graph updates — clock ticks and cursor moves are zero-allocation mutations; only changed nodes are recorded in a change list. Change-list-driven damage tracking replaces byte-level scene diffing. Subtree clip skipping avoids visiting nodes outside dirty regions. Dirty-rectangle GPU transfers (only changed regions sent to the host).
+**Display pipeline** — Core builds a scene graph in shared memory; a render service reads it, rasterizes, and presents to the display. Init auto-detects GPU capabilities at boot and selects between `virgil-render` (Virgil3D/Gallium3D GPU acceleration) and `cpu-render` (software rendering via virtio-gpu 2D). Triple-buffered scene graph with mailbox semantics (writer never blocks, reader always gets latest frame). Configurable-cadence frame scheduler (60/30/120fps) with event coalescing, frame budgeting, and idle optimization. Incremental scene graph updates — clock ticks and cursor moves are zero-allocation mutations; only changed nodes are recorded in a change list. Change-list-driven damage tracking with subtree clip skipping. Dirty-rectangle GPU transfers (only changed regions sent to the host).
 
 **Core (OS service)** — Sole writer to document state. Builds a scene graph describing the visual structure of the document. Routes input to the active editor. Editors are read-only consumers that send write requests via IPC.
 
-**Compositor** — Reads the scene graph and renders it to pixels. Z-ordered surface compositing with translucent chrome (alpha ~170), Gaussian-blurred box shadows (configurable blur radius, offset, spread), and per-subtree layer opacity via offscreen compositing. Rounded corners with SDF-based anti-aliased fill and corner-radius-aware child clipping. 2D affine transforms (3×3 matrix per node, composition through tree, transform-aware clipping). Fractional DPI scaling (f32 scale factors: 1.0, 1.25, 1.5, 2.0, etc.) with pixel-snapped borders and fractional font sizing. Bilinear image resampling for scaled/rotated content. Radial gradient background with noise texture. Title bar with context-aware document/image icons and hardware RTC wall-clock (PL031, UTC). Pure monochrome palette. Procedural arrow cursor rendered at top z-order. SVG icon rasterization. Damage tracking for incremental re-rendering.
+**Render services** — Two interchangeable render backends behind the same scene graph interface. `cpu-render`: CpuBackend software rasterizer + virtio-gpu 2D presentation. `virgil-render`: GPU-accelerated rendering via Gallium3D command streams (virtio-gpu 3D mode) with glyph atlas, image textures, and stencil-then-cover path rendering. Both are single-process thick drivers that handle the full pipeline: tree walk, rasterization/GPU commands, compositing, and present. Shared capabilities: Z-ordered surface compositing with translucent chrome, Gaussian-blurred box shadows (configurable blur radius, offset, spread), per-subtree layer opacity via offscreen compositing, rounded corners with SDF-based anti-aliased fill and corner-radius-aware child clipping, 2D affine transforms (3x3 matrix per node, composition through tree, transform-aware clipping), fractional DPI scaling (f32 scale factors) with pixel-snapped borders and fractional font sizing, bilinear image resampling, radial gradient background with noise texture, title bar with glyph icons and hardware RTC wall-clock (PL031, UTC), pure monochrome palette, procedural arrow cursor, damage tracking for incremental re-rendering.
+
+**Render library** — Shared rendering infrastructure used by `cpu-render`: scene graph tree walk, CpuBackend (full scene rasterization), incremental rendering with per-node state tracking, frame scheduler, surface pool, damage rect computation.
 
 **Drawing library** — Surfaces, colors, Porter-Duff compositing, gamma-correct sRGB blending. NEON SIMD acceleration for fill, blend, rounded-corner, and blur operations. Anti-aliased lines (Wu's algorithm). Path rendering (MoveTo/LineTo/CurveTo/Close, fill and stroke, cubic beziers). Separable Gaussian blur (two-pass horizontal/vertical, configurable radius/sigma). PNG decoder (DEFLATE, all filter types). Bilinear image resampling. Monochrome palette system.
 
-**Font library** — TrueType font rasterizer with LCD subpixel rendering (per-channel RGB coverage, 6× horizontal oversampling), stem darkening for heavier strokes, GPOS kerning, proper hhea baseline metrics, and glyph cache. Two fonts: Source Code Pro (monospace, editor) and Nunito Sans (proportional, chrome) at 20px.
+**Font library** — TrueType/OpenType rasterizer with LCD subpixel rendering (per-channel RGB coverage, 6x horizontal oversampling), stem darkening for heavier strokes, variable font axis support (weight, optical size, MONO), HarfBuzz-level shaping, and glyph cache. Three variable fonts: Source Code Pro (monospace, editor), Nunito Sans (proportional, chrome), Recursive (proportional, variable).
 
-**Scene graph library** — Typed visual node tree in shared memory. Double-buffered for lock-free producer/consumer across processes. Change list for incremental damage tracking. Copy-forward with selective mutation for zero-allocation updates. Per-node 2D affine transforms, corner radius, layer opacity, box shadows, and path content. Monospace text layout helpers.
+**Scene graph library** — Typed visual node tree in shared memory. Triple-buffered with mailbox semantics for lock-free producer/consumer across processes. Four geometric content types: `None` (containers/solid fills), `Image` (pixel buffers), `Path` (cubic bezier contours), `Glyphs` (shaped glyph runs). Change list for incremental damage tracking. Copy-forward with selective mutation for zero-allocation updates. Per-node 2D affine transforms, corner radius, layer opacity, box shadows. Monospace text layout helpers.
 
 **Text editor** — Cursor movement, text selection (shift+arrow), scrolling, mouse click-to-position, insert and delete. Communicates with core via IPC write requests.
 
@@ -46,7 +48,7 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Assets via 9P** — Fonts, images, and icons loaded at boot from the host filesystem via virtio-9p passthrough.
 
-**Tests** — 1,785 tests (1,764 system + 21 prototype).
+**Tests** — 1,964 tests (1,943 system + 21 prototype).
 
 ## Running the Demo
 
@@ -86,20 +88,24 @@ This builds the kernel and launches QEMU with the correct device configuration (
 ```text
 os/
 ├── design/                          # Design documentation
+│   ├── philosophy.md                # Two root principles and their consequences
 │   ├── concept.md                   # The core idea: OS → Document → Tool
 │   ├── foundations.md               # Glossary, guiding beliefs, content model
 │   ├── decisions.md                 # 17 tiered design decisions with tradeoffs
+│   ├── architecture.md              # Architectural narrative and decision checklist
+│   ├── architecture.mermaid         # System architecture diagram
 │   ├── decision-map.mermaid         # Visual dependency graph
-│   ├── journal.md                   # Open threads, insights, research spikes
-│   └── architecture.mermaid         # System architecture diagram
+│   ├── rendering-pipeline.mermaid   # Rendering pipeline diagram
+│   ├── rendering-capabilities.md    # Honest audit of pipeline capabilities
+│   └── journal.md                   # Open threads, insights, research spikes
 ├── system/                          # OS implementation (Rust, no_std)
-│   ├── kernel/                      # Microkernel (28 syscalls, EEVDF, SMP)
+│   ├── kernel/                      # Microkernel (28 syscalls, EEVDF, GICv3, SMP)
 │   ├── services/
 │   │   ├── init/                    # Root task — spawns everything, wires IPC
 │   │   ├── core/                    # OS service — sole writer, scene graph builder, input router
-│   │   ├── compositor/              # Scene graph renderer, surface compositing, damage tracking
 │   │   └── drivers/
-│   │       ├── virtio-gpu/          # Display output (2D commands, present loop)
+│   │       ├── cpu-render/          # CPU render service (CpuBackend + virtio-gpu 2D)
+│   │       ├── virgil-render/       # GPU render service (Virgil3D/Gallium3D)
 │   │       ├── virtio-input/        # Keyboard + tablet input (evdev translation)
 │   │       ├── virtio-blk/          # Block device (sector reads)
 │   │       ├── virtio-9p/           # Host filesystem passthrough
@@ -107,6 +113,7 @@ os/
 │   ├── libraries/
 │   │   ├── drawing/                 # Surfaces, colors, PNG, compositing, palette
 │   │   ├── fonts/                   # TrueType rasterizer, subpixel rendering, glyph cache
+│   │   ├── render/                  # Render backend (CpuBackend, damage, incremental, frame scheduler)
 │   │   ├── scene/                   # Scene graph nodes, shared memory layout, text layout
 │   │   ├── ipc/                     # Lock-free SPSC ring buffers
 │   │   ├── protocol/                # IPC message types + payload structs (all protocols)
@@ -119,7 +126,7 @@ os/
 │   │   ├── stress/                  # IPC stress test program
 │   │   ├── fuzz/                    # Fuzzing harness
 │   │   └── fuzz-helper/             # Fuzzing helper
-│   ├── test/                        # Host-side unit + integration tests (54 files)
+│   ├── test/                        # Host-side unit + integration tests (62 files)
 │   └── share/                       # Runtime assets (fonts, images, icons)
 ├── prototype/
 │   └── files/                       # Files interface prototype (macOS-backed)
@@ -132,10 +139,12 @@ os/
 
 If you're curious about the design, read in this order:
 
-1. **[Concept](design/concept.md)** — The document-centric model, mimetype evolution, layered rendering
-2. **[Foundations](design/foundations.md)** — Glossary of terms, guiding beliefs, external boundaries, content model, editing model
-3. **[Decisions](design/decisions.md)** — All 17 design decisions: settled positions with reasoning, open questions with tradeoffs, considered-and-rejected alternatives
-4. **[Journal](design/journal.md)** — Where the design exploration is right now: open threads, discussion backlog, insights
+1. **[Philosophy](design/philosophy.md)** — Two root principles and their consequences. The thinking framework behind every design decision.
+2. **[Concept](design/concept.md)** — The document-centric model, mimetype evolution, layered rendering
+3. **[Foundations](design/foundations.md)** — Glossary of terms, guiding beliefs, external boundaries, content model, editing model
+4. **[Decisions](design/decisions.md)** — All 17 design decisions: settled positions with reasoning, open questions with tradeoffs, considered-and-rejected alternatives
+5. **[Architecture](design/architecture.md)** — The system's architectural narrative: pipeline, responsibilities, decision checklist
+6. **[Journal](design/journal.md)** — Where the design exploration is right now: open threads, discussion backlog, insights
 
 ## Influences
 
