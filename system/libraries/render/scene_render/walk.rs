@@ -55,7 +55,7 @@ impl ClipRect {
 ///
 /// `abs_x`, `abs_y` are the absolute **physical** pixel position of this
 /// node's origin in the framebuffer. `clip` is in physical pixels.
-/// Scene graph coordinates are logical; scaled by `ctx.scale` (f32).
+/// Scene graph coordinates are in points; scaled by `ctx.scale` (f32).
 ///
 /// `world_transform` is the accumulated transform from all ancestors.
 /// Each node's world transform = parent_world x node_local.
@@ -607,7 +607,7 @@ fn render_node_content_translated(
         h: nh,
     };
 
-    // Scale corner radius from logical to physical pixels.
+    // Scale corner radius from points to physical pixels.
     let phys_radius = if node.corner_radius > 0 {
         let r = round_f32(node.corner_radius as f32 * s);
         if r < 0 {

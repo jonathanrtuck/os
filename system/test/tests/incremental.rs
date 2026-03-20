@@ -476,8 +476,8 @@ use render::incremental::{blit_shift_vertical, compute_scroll_blit};
 
 #[test]
 fn scroll_blit_params_vertical_down() {
-    // Container at (10, 20, 400, 300) in logical coords, scale=1.0.
-    // Scroll delta: (0, -50) logical = content moves up (scroll down).
+    // Container at (10, 20, 400, 300) in point coords, scale=1.0.
+    // Scroll delta: (0, -50) point = content moves up (scroll down).
     let params = compute_scroll_blit(0, 0.0, -50.0, (10, 20, 400, 300), 1.0, 800, 600);
     let p = params.expect("should produce blit params");
     assert_eq!(p.cx, 10);
@@ -495,7 +495,7 @@ fn scroll_blit_params_vertical_down() {
 #[test]
 fn scroll_blit_params_vertical_up() {
     // Container at (10, 20, 400, 300), scale=1.0.
-    // Scroll delta: (0, 50) logical = content moves down (scroll up).
+    // Scroll delta: (0, 50) point = content moves down (scroll up).
     let params = compute_scroll_blit(0, 0.0, 50.0, (10, 20, 400, 300), 1.0, 800, 600);
     let p = params.expect("should produce blit params");
     assert_eq!(p.dy_px, 50);
@@ -508,9 +508,9 @@ fn scroll_blit_params_vertical_up() {
 
 #[test]
 fn scroll_blit_params_with_scale() {
-    // Container at (10, 20, 400, 300) logical, scale=2.0.
+    // Container at (10, 20, 400, 300) point, scale=2.0.
     // Physical container: (20, 40, 800, 600).
-    // Scroll delta: (0, -25) logical = -50 physical.
+    // Scroll delta: (0, -25) point = -50 physical.
     let params = compute_scroll_blit(0, 0.0, -25.0, (10, 20, 400, 300), 2.0, 1600, 1200);
     let p = params.expect("should produce blit params");
     assert_eq!(p.cx, 20);
@@ -646,7 +646,7 @@ fn blit_shift_vertical_partial_width() {
 #[test]
 fn compute_scroll_blit_clamps_to_framebuffer() {
     // Container extends beyond framebuffer bottom.
-    // Container at (0, 500, 800, 200) logical, fb is 800x600, scale=1.
+    // Container at (0, 500, 800, 200) point, fb is 800x600, scale=1.
     // Container bottom is at 700, but fb only goes to 600.
     let params = compute_scroll_blit(0, 0.0, -50.0, (0, 500, 800, 200), 1.0, 800, 600);
     let p = params.expect("should produce blit params");
@@ -1086,13 +1086,7 @@ fn none_cache_renders_without_caching() {
 
     // Pass None for cache — should render normally.
     scene_render::render_scene_clipped_full(
-        &mut fb,
-        &graph,
-        &ctx,
-        &dirty,
-        &mut pool,
-        &mut lru,
-        None,
+        &mut fb, &graph, &ctx, &dirty, &mut pool, &mut lru, None,
     );
 
     // Verify the image pixel at (5, 5) is red.
@@ -1170,13 +1164,7 @@ fn render_with_and_without_cache_pixel_identical() {
     let mut buf_no_cache = vec![0u8; 50 * 50 * 4];
     let mut fb1 = make_surface(&mut buf_no_cache, 50, 50);
     scene_render::render_scene_clipped_full(
-        &mut fb1,
-        &graph,
-        &ctx,
-        &dirty,
-        &mut pool1,
-        &mut lru1,
-        None,
+        &mut fb1, &graph, &ctx, &dirty, &mut pool1, &mut lru1, None,
     );
 
     // With cache (first render = cache miss, renders to offscreen then blits).

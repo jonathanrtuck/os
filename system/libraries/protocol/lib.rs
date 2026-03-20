@@ -242,8 +242,8 @@ pub mod core_config {
     /// routing, and scene graph building. It writes to the scene graph in
     /// shared memory and signals the render service when a new frame is ready.
     ///
-    /// `fb_width` / `fb_height` are **logical** dimensions (physical / scale).
-    /// The core lays out in logical coordinates; the compositor scales to physical.
+    /// `fb_width` / `fb_height` are dimensions in points (physical / scale).
+    /// The core lays out in point coordinates; the render service scales to pixels.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CoreConfig {
@@ -274,15 +274,15 @@ pub mod compose {
     /// rasterization. It reads the scene graph from shared memory and
     /// produces pixels for the display.
     ///
-    /// `fb_width` / `fb_height` are **physical** framebuffer dimensions.
+    /// `fb_width` / `fb_height` are physical framebuffer dimensions in pixels.
     /// `fb_stride` is always `fb_width * 4` (BGRA8888) — derived by
     /// the render service, not stored in the config.
     /// `scale_factor` is the fractional display scale (1.0, 1.25, 1.5, 2.0).
     /// f32 represents all common scale factors exactly and fits within
-    /// the 60-byte IPC payload. The scene graph is in logical coordinates
+    /// the 60-byte IPC payload. The scene graph is in point coordinates
     /// (physical / scale); the render service multiplies by scale_factor
     /// during rendering.
-    /// `font_size` is the logical font size in pixels (e.g. 18).
+    /// `font_size` is the font size in points (e.g. 18).
     /// `screen_dpi` is the display DPI (e.g. 96).
     /// `frame_rate` is the target frames per second (e.g. 60).
     ///

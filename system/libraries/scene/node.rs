@@ -55,13 +55,13 @@ pub struct Node {
     // ── shadow ──
     /// Shadow color (TRANSPARENT = no shadow).
     pub shadow_color: Color,
-    /// Horizontal shadow offset in logical pixels.
+    /// Horizontal shadow offset in points.
     pub shadow_offset_x: i16,
-    /// Vertical shadow offset in logical pixels.
+    /// Vertical shadow offset in points.
     pub shadow_offset_y: i16,
-    /// Shadow blur radius in logical pixels (0 = hard shadow).
+    /// Shadow blur radius in points (0 = hard shadow).
     pub shadow_blur_radius: u8,
-    /// Shadow spread in logical pixels (positive expands, negative shrinks).
+    /// Shadow spread in points (positive expands, negative shrinks).
     pub shadow_spread: i8,
     pub _shadow_pad: [u8; 2],
     // ── transform ──

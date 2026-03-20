@@ -553,14 +553,14 @@ pub extern "C" fn _start() -> ! {
             let desc = fm.descent as i32;
             let gap = fm.line_gap as i32;
             let size = FONT_SIZE;
-            let ascent_px = ((asc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
-            let descent_px = ((-desc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
-            let gap_px = if gap > 0 {
+            let ascent_pt = ((asc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
+            let descent_pt = ((-desc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
+            let gap_pt = if gap > 0 {
                 (gap * size as i32 / upem as i32) as u32
             } else {
                 0
             };
-            let line_h = ascent_px + descent_px + gap_px;
+            let line_h = ascent_pt + descent_pt + gap_pt;
             // For monospace: use axis-adjusted advance of space glyph (MONO=1).
             let space_gid = fonts::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
             let mono_axes = [fonts::rasterize::AxisValue {
@@ -1081,7 +1081,7 @@ pub extern "C" fn _start() -> ! {
                 let s = state();
                 let content_y = TITLE_BAR_H + SHADOW_DEPTH;
                 let sel_content_h = fb_height.saturating_sub(content_y);
-                let scroll_px = s.scroll_offset as i32 * s.line_h as i32;
+                let scroll_pt = s.scroll_offset as i32 * s.line_h as i32;
 
                 scene.update_selection(
                     &scene_cfg,
@@ -1090,7 +1090,7 @@ pub extern "C" fn _start() -> ! {
                     s.sel_end as u32,
                     doc_content(),
                     sel_content_h,
-                    scroll_px,
+                    scroll_pt,
                 );
             } else if changed {
                 // Cursor moved without text or selection change

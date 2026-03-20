@@ -25,13 +25,13 @@ use drawing::Surface;
 // Re-export helper functions at the crate root for external use.
 pub use scene_render::{round_f32, scale_coord, scale_size};
 
-/// Compute gap-free physical size from logical position and size.
+/// Compute gap-free physical pixel size from point position and size.
 ///
 /// Returns the result as `u16`, clamped to non-negative.
 #[inline]
-pub fn scale_size_u16(logical_pos: i32, logical_size: u32, scale: f32) -> u16 {
-    let phys_start = round_f32(logical_pos as f32 * scale);
-    let phys_end = round_f32((logical_pos as f32 + logical_size as f32) * scale);
+pub fn scale_size_u16(pt_pos: i32, pt_size: u32, scale: f32) -> u16 {
+    let phys_start = round_f32(pt_pos as f32 * scale);
+    let phys_end = round_f32((pt_pos as f32 + pt_size as f32) * scale);
     (phys_end - phys_start).max(0) as u16
 }
 
@@ -176,7 +176,7 @@ impl CpuBackend {
     /// `mono_font_data` — raw font file bytes for the monospace face.
     /// `prop_font_data` — optional raw font file bytes for the proportional
     ///   face. When `None`, the monospace font is reused with `MONO=0`.
-    /// `font_size` — logical font size in pixels (before scale).
+    /// `font_size` — font size in points (before scale).
     /// `dpi` — display DPI for optical sizing.
     /// `scale` — fractional display scale factor (1.0, 1.5, 2.0, etc.).
     /// `fb_width`, `fb_height` — physical framebuffer dimensions (unused
@@ -197,7 +197,7 @@ impl CpuBackend {
             return None;
         }
 
-        // Physical pixel size: logical font_size x scale.
+        // Physical pixel size: font_size (points) × scale.
         let physical_size = round_f32(font_size as f32 * scale).max(1) as u32;
 
         // Allocate and populate monospace glyph cache (MONO=1).

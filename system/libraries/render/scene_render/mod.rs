@@ -24,7 +24,7 @@ pub struct RenderCtx<'a> {
     pub mono_cache: &'a GlyphCache,
     pub prop_cache: &'a GlyphCache,
     /// Fractional display scale factor (1.0, 1.25, 1.5, 2.0, etc.).
-    /// Scene graph is in logical coordinates; multiply by this to get
+    /// Scene graph is in point coordinates; multiply by this to get
     /// physical pixel positions and sizes. Borders snap to whole physical
     /// pixels (round to nearest).
     pub scale: f32,

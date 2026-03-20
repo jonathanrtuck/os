@@ -4,6 +4,55 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Points and Pixels: Coordinate System Terminology (2026-03-19)
+
+**Status:** Settled.
+
+### The question
+
+The OS uses resolution-independent coordinates internally (scene graph, core layout, font sizing) and physical framebuffer coordinates at the rendering edge. What should we call these two units?
+
+### Decision: Points and Pixels
+
+**Point (pt)** = 1/72 inch. The OS's internal resolution-independent unit. Used everywhere above the render boundary: scene graph node positions and sizes, font sizes, layout constants, shadow offsets. One coordinate system for both spatial layout and typography.
+
+**Pixel (px)** = one physical display element. Used only by the render backends and drawing library — the final stage of the pipeline where points are converted to hardware coordinates.
+
+**Scale factor** = `physical_dpi / 72`. Derived from hardware (EDID) or user preference. The render library applies it during the scene tree walk via `scale_coord()` and `scale_size()` in `render/scene_render/coords.rs`.
+
+### Why points, not some other unit?
+
+- **Granularity:** At typical desktop DPIs (96–220), 1pt maps to ~1–3 physical pixels. Integer point values give near-pixel-level control without requiring fractional coordinates.
+- **Typography alignment:** Points are the native unit of font metrics (advance widths, ascent/descent, kerning). Since the OS is document-centric and text is a primary content type, aligning the coordinate system with typographic conventions means font metrics can be used directly without conversion.
+- **Self-documenting terminology:** "Points" and "pixels" are unambiguous. Anyone reading the code knows immediately which coordinate space they're in. "Logical pixels" invited confusion because the word "pixel" suggests a physical thing.
+- **Physical meaning:** 1pt = 1/72 inch gives the unit a real-world anchor. "18pt font" means 0.25 inches tall, matching designer/typographer expectations. The scale factor becomes a derivable property of the display hardware, not an arbitrary knob.
+
+### DPI detection
+
+The scale factor is derived from display DPI: `scale = physical_dpi / 72`. Three sources, in priority order:
+
+1. **User preference** — always wins. Accessibility, viewing distance, personal taste.
+2. **EDID** — monitor broadcasts physical dimensions + native resolution. Compute `dpi = resolution_px / (size_mm / 25.4)`. Most desktop monitors have EDID.
+3. **Default** — assume 96 DPI when detection fails (`scale = 96/72 ≈ 1.33`). Universal desktop assumption.
+
+Detection lives in the render driver (it owns the display hardware). The OS service combines detected DPI with user preference and sends the final scale factor via `CompositorConfig`. The scene graph and core never know about DPI.
+
+### Rejected alternatives
+
+- **Millimeters:** Too coarse (1mm ≈ 3.78px at 96 DPI). Would require fractional coordinates (`f32`) everywhere, introducing floating-point accumulation errors in layout.
+- **CSS px (1/96 inch):** Finer than points and 1:1 at 96 DPI, but an arbitrary web-era convention. Calling them "pixels" reintroduces the naming confusion.
+- **Abstract logical pixels (no physical anchor):** Simpler (no DPI detection needed), but "18pt" has no physical meaning — just relatively bigger than "14pt". Loses the self-documenting property.
+
+### Terminology audit required
+
+All code, comments, documentation, and variable names must consistently use "points" for resolution-independent values and "pixels" for physical framebuffer values. Key locations: scene graph node fields, protocol config structs, render library coord functions, core layout constants, architecture docs.
+
+### Key insight
+
+There are exactly two spatial units in this system. Points (abstract, physical meaning, used by everything above the render boundary) and pixels (concrete, hardware-dependent, used only at the rendering edge). The render library's `scale_coord()` and `scale_size()` are the single conversion boundary. No third unit exists — font sizing is points, the same unit as coordinates.
+
+---
+
 ## Phase 5: CPU Render Service Merge (2026-03-18)
 
 **Status:** Complete. Compositor + virtio-gpu merged into single `cpu-render/` process.

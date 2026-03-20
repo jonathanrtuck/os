@@ -23,7 +23,7 @@ graph LR
     HW(["Hardware Events\n(evdev interrupts:\ntype, code, value)"])
     KE(["Key Events\n(logical key +\nmodifier set)"])
     WR(["Write Requests\n(insert, delete,\nmove_cursor,\nset_selection)"])
-    ST(["Scene Tree\n(containers, rects,\nglyphs, images —\nlogical coordinates)"])
+    ST(["Scene Tree\n(containers, rects,\nglyphs, images —\npoint coordinates)"])
     DS(["Display\n(pixels on screen)"])
 
     HW -->|"Input Driver"| KE

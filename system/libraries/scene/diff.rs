@@ -23,7 +23,7 @@ pub fn build_parent_map(nodes: &[Node], count: usize) -> [NodeId; MAX_NODES] {
 // ── Absolute bounds ─────────────────────────────────────────────────
 
 /// Compute absolute bounding rect of a node by walking up the parent chain.
-/// Returns `(x, y, width, height)` in absolute logical coordinates.
+/// Returns `(x, y, width, height)` in absolute point coordinates.
 ///
 /// Each parent's `content_transform` translation is added to the accumulator
 /// because the content transform offsets a node's children. For scroll,
@@ -56,7 +56,7 @@ pub fn abs_bounds(
         cur = parent_map[cur as usize];
     }
 
-    // Start with the node's logical size.
+    // Start with the node's point-based size.
     let mut bw = node.width as u32;
     let mut bh = node.height as u32;
     let mut bx = ax;

@@ -457,7 +457,7 @@ impl ClipRect {
 ///
 /// `glyphs_data` is the scene graph's data buffer (for resolving DataRef).
 /// `atlas` provides glyph→texture-coordinate lookups.
-/// `ascent` is the font ascent in logical pixels (for baseline positioning).
+/// `ascent` is the font ascent in points (for baseline positioning).
 pub fn walk_scene(
     nodes: &[Node],
     root: NodeId,
@@ -728,7 +728,7 @@ fn emit_glyphs(
     let atlas_w = atlas::ATLAS_WIDTH as f32;
     let atlas_h = atlas::ATLAS_HEIGHT as f32;
 
-    // Baseline position: node_y + ascent (logical pixels, scaled).
+    // Baseline position: node_y + ascent (points, scaled).
     let baseline_y = node_y + (ascent as f32) * scale;
     let mut pen_x = node_x;
 
@@ -799,7 +799,7 @@ fn read_u32_le(data: &[u8], offset: usize) -> u32 {
 }
 
 /// Flatten a cubic Bezier to line segments via de Casteljau subdivision.
-/// Appends to `points` (x, y pairs in logical pixels).
+/// Appends to `points` (x, y pairs in points).
 fn flatten_cubic(
     x0: f32,
     y0: f32,
@@ -828,7 +828,7 @@ fn flatten_cubic(
     let d2 = ((c2x - x0) * dy - (c2y - y0) * dx).abs();
     let max_d = if d1 > d2 { d1 } else { d2 };
     let chord_sq = dx * dx + dy * dy;
-    // threshold: 0.5 logical pixels
+    // threshold: 0.5 points
     let threshold = 0.5;
 
     if max_d * max_d <= threshold * threshold * chord_sq || chord_sq < 0.001 {

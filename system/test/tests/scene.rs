@@ -129,20 +129,20 @@ fn scroll_runs(
     runs: Vec<TestLayoutRun>,
     scroll_lines: u32,
     line_height: u32,
-    viewport_height_px: i32,
+    viewport_height_pt: i32,
 ) -> Vec<TestLayoutRun> {
-    let scroll_px = scroll_lines as i32 * line_height as i32;
+    let scroll_pt = scroll_lines as i32 * line_height as i32;
 
     runs.into_iter()
         .filter(|run| {
             let doc_y = run.y;
 
             // Above the scroll window?
-            if doc_y + line_height as i32 <= scroll_px {
+            if doc_y + line_height as i32 <= scroll_pt {
                 return false;
             }
             // Below the scroll window?
-            if doc_y >= scroll_px + viewport_height_px {
+            if doc_y >= scroll_pt + viewport_height_pt {
                 return false;
             }
 
@@ -603,14 +603,14 @@ fn scroll_runs_cursor_at_bottom_forces_scroll() {
     let last = visible.last().unwrap();
     assert_eq!(last.y, 700);
     // All visible lines should be within the scroll window [120, 720).
-    let scroll_px = 6 * 20; // 120
+    let scroll_pt = 6 * 20; // 120
     for run in &visible {
         assert!(
-            run.y + 20 > scroll_px && run.y < scroll_px + 600,
+            run.y + 20 > scroll_pt && run.y < scroll_pt + 600,
             "run.y={} outside scroll window [{}, {})",
             run.y,
-            scroll_px,
-            scroll_px + 600
+            scroll_pt,
+            scroll_pt + 600
         );
     }
 }
@@ -1572,11 +1572,11 @@ fn set_node_count_truncates() {
 /// type (i32 for x/y) to avoid truncation.
 #[test]
 fn abs_bounds_large_coords_no_truncation() {
-    // Node at logical position (500, 400) with scale=2 → physical (1000, 800).
+    // Node at point position (500, 400) with scale=2 → physical (1000, 800).
     // These fit in i16 (max 32767). But at scale=2 with a 2048-wide display,
-    // a node at logical x=16000 would overflow i16.
+    // a node at point x=16000 would overflow i16.
     //
-    // Test: verify abs_bounds returns correct values for large logical coords.
+    // Test: verify abs_bounds returns correct values for large point coords.
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     let root = w.alloc_node().unwrap();
@@ -2985,7 +2985,7 @@ fn build_test_editor_scene(
     let content_h = fb_height.saturating_sub(content_y);
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
     let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, content_h as i32);
-    let scroll_px = scroll_lines as i32 * line_height as i32;
+    let scroll_pt = scroll_lines as i32 * line_height as i32;
 
     // Push line glyph data.
     let mut line_glyph_refs: Vec<(DataRef, u16, i32)> = Vec::with_capacity(visible_runs.len());
@@ -3080,7 +3080,7 @@ fn build_test_editor_scene(
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h as u16;
-        n.content_transform = AffineTransform::translate(0.0, -(scroll_px as f32));
+        n.content_transform = AffineTransform::translate(0.0, -(scroll_pt as f32));
         n.content = Content::None;
         n.content_hash = fnv1a(doc_text);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -3162,7 +3162,7 @@ fn build_test_editor_scene(
                 continue;
             }
             let sel_y = line as i32 * line_height as i32;
-            if sel_y + line_height as i32 <= scroll_px || sel_y >= scroll_px + content_h as i32 {
+            if sel_y + line_height as i32 <= scroll_pt || sel_y >= scroll_pt + content_h as i32 {
                 continue;
             }
             if let Some(sel_id) = w.alloc_node() {
@@ -3614,12 +3614,12 @@ fn core_scroll_model_document_relative_positions() {
         scroll_lines,
     );
 
-    let scroll_px = scroll_lines as i32 * line_h as i32; // 60
+    let scroll_pt = scroll_lines as i32 * line_h as i32; // 60
 
     // 1. N_DOC_TEXT.content_transform.ty == -(scroll_lines * line_height)
     assert_eq!(
         w.node(CORE_N_DOC_TEXT).content_transform.ty,
-        -(scroll_px as f32),
+        -(scroll_pt as f32),
         "N_DOC_TEXT.content_transform.ty must equal -(scroll_lines * line_height)"
     );
 

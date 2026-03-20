@@ -86,7 +86,7 @@ fn read_pixel(data: &[u8], stride: u32, x: u32, y: u32) -> (u8, u8, u8, u8) {
 /// Build a minimal scene graph with a root and colored child nodes at
 /// known positions. Returns (nodes, data_buf).
 ///
-/// Layout (100×100 logical, scale=1):
+/// Layout (100×100 point, scale=1):
 ///   root: (0,0) 100×100, clips children
 ///     child_a: (0,0)   30×30, background=RED   (top-left)
 ///     child_b: (70,0)  30×30, background=GREEN (top-right)
@@ -533,7 +533,7 @@ fn scaled_clip_skips_correctly() {
     let mut ctx = test_ctx(&mono, &prop);
     ctx.scale = 2.0;
 
-    // With scale=2, a 100×100 logical scene needs a 200×200 pixel surface
+    // With scale=2, a 100×100 point scene needs a 200×200 pixel surface
     let w = 200u32;
     let h = 200u32;
     let stride = w * 4;
@@ -561,8 +561,8 @@ fn scaled_clip_skips_correctly() {
         };
 
         // Clip to only the top-left quadrant in physical pixels (0,0)-(70,70)
-        // At scale=2, child_a (logical 0,0 30×30) occupies physical (0,0)-(60,60)
-        // child_b (logical 70,0 30×30) occupies physical (140,0)-(200,60) — outside clip
+        // At scale=2, child_a (point 0,0 30×30) occupies physical (0,0)-(60,60)
+        // child_b (point 70,0 30×30) occupies physical (140,0)-(200,60) — outside clip
         let dirty = protocol::DirtyRect::new(0, 0, 70, 70);
         scene_render::render_scene_clipped(&mut fb, &graph, &ctx, &dirty);
     }
@@ -690,7 +690,7 @@ fn fractional_scale_2_0_matches_integer_scale_2() {
 }
 
 /// VAL-COORD-002: Fractional scale 1.5x produces correct physical dimensions.
-/// Node at logical (10,20) size (100,50) at scale 1.5 → physical (15,30) size (150,75).
+/// Node at (10,20) pt size (100,50) pt at scale 1.5 → physical (15,30) px size (150,75) px.
 #[test]
 fn fractional_scale_1_5_correct_physical_dimensions() {
     let mono = zeroed_glyph_cache();
@@ -700,13 +700,13 @@ fn fractional_scale_1_5_correct_physical_dimensions() {
     let green = scene::Color::rgba(0, 255, 0, 255);
     let mut nodes = vec![Node::EMPTY; 2];
 
-    // Root: 200×150 logical → 300×225 physical
+    // Root: 200×150 point → 300×225 physical
     nodes[0].width = 200;
     nodes[0].height = 150;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    // Child: logical (10,20) 100×50 → physical (15,30) 150×75
+    // Child: point (10,20) 100×50 → physical (15,30) 150×75
     nodes[1].x = 10;
     nodes[1].y = 20;
     nodes[1].width = 100;
@@ -771,7 +771,7 @@ fn fractional_scale_1_5_correct_physical_dimensions() {
 }
 
 /// VAL-COORD-003: No pixel gaps between adjacent nodes at fractional scale.
-/// Two adjacent nodes at logical x=3,w=1 and x=4,w=1 at scale 1.5
+/// Two adjacent nodes at point x=3,w=1 and x=4,w=1 at scale 1.5
 /// produce no gap or overlap in physical pixels.
 #[test]
 fn fractional_scale_no_gap_between_adjacent_nodes() {
@@ -784,13 +784,13 @@ fn fractional_scale_no_gap_between_adjacent_nodes() {
 
     let mut nodes = vec![Node::EMPTY; 3];
 
-    // Root: logical width 20 → physical 30
+    // Root: point width 20 → physical 30
     nodes[0].width = 20;
     nodes[0].height = 10;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    // Node A: logical x=3, w=1 → physical x=round(3*1.5)=4, w=round(1*1.5)=2
+    // Node A: point x=3, w=1 → physical x=round(3*1.5)=4, w=round(1*1.5)=2
     // But careful: we need to check the actual physical coverage.
     // At 1.5: x_phys=floor(3*1.5)=4, w_phys=floor(1*1.5)=1 (or round?)
     // Key: node B at x=4, w=1 → x_phys=floor(4*1.5)=6, w_phys=1
@@ -803,7 +803,7 @@ fn fractional_scale_no_gap_between_adjacent_nodes() {
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].next_sibling = 2;
 
-    // Node B: logical x=4, w=1
+    // Node B: point x=4, w=1
     nodes[2].x = 4;
     nodes[2].y = 0;
     nodes[2].width = 1;
@@ -860,21 +860,21 @@ fn fractional_scale_no_gap_between_adjacent_nodes() {
 }
 
 /// VAL-COORD-004: Pixel-snapped borders at fractional scales.
-/// A 1-logical-pixel border at scale 1.5 snaps to whole physical pixel width.
+/// A 1-point-pixel border at scale 1.5 snaps to whole physical pixel width.
 #[test]
 fn fractional_scale_border_pixel_snapped() {
     let mono = zeroed_glyph_cache();
     let prop = zeroed_glyph_cache();
 
     let test_cases: &[(f32, u32, u32)] = &[
-        // (scale, logical_border_width, expected_min_physical_border_width)
+        // (scale, point_border_width, expected_min_physical_border_width)
         (1.0, 1, 1),
         (1.25, 1, 1), // round(1.25) = 1, but at least 1
         (1.5, 1, 1),  // round(1.5) = 2, or at least 1
         (2.0, 1, 2),
     ];
 
-    for &(scale, logical_bw, min_phys_bw) in test_cases {
+    for &(scale, point_bw, min_phys_bw) in test_cases {
         let ctx = test_ctx_f32(&mono, &prop, scale);
 
         let phys_w = (60.0 * scale) as u32;
@@ -885,7 +885,7 @@ fn fractional_scale_border_pixel_snapped() {
         nodes[0].height = 40;
         nodes[0].background = scene::Color::rgba(0, 0, 0, 255);
         nodes[0].border = scene::Border {
-            width: logical_bw as u8,
+            width: point_bw as u8,
             color: scene::Color::rgba(255, 0, 0, 255),
             _pad: [0; 3],
         };
@@ -943,8 +943,8 @@ fn f32_scale_factor_exact_representation() {
 
         // Also verify that arithmetic with f32 is exact for these values.
         // Multiplying a small integer by the scale factor should produce exact results.
-        let logical: f32 = 100.0;
-        let physical = logical * v;
+        let point: f32 = 100.0;
+        let physical = point * v;
         let expected = (100.0f64 * v as f64) as f32;
         assert_eq!(
             physical, expected,
@@ -1085,9 +1085,9 @@ fn scene_graph_node_struct_unchanged() {
 
 // ── VAL-COORD-005 / VAL-COORD-006: Font rasterization at physical pixel size ──
 
-/// VAL-COORD-005: At scale 1.5 with logical font_size=16, glyphs are
+/// VAL-COORD-005: At scale 1.5 with font_size (points)=16, glyphs are
 /// rasterized at 24 physical pixels. The render backend computes physical_font_size
-/// as round(logical_font_size * scale_factor).
+/// as round(point_font_size * scale_factor).
 #[test]
 fn font_physical_pixel_size_at_fractional_scale() {
     // Simulate the render backend's computation.
@@ -1099,30 +1099,27 @@ fn font_physical_pixel_size_at_fractional_scale() {
         }
     }
 
-    // Scale 1.5, logical font size 16 → physical 24
+    // Scale 1.5, point-based font size 16 → physical 24
     let physical = round_f32(16.0 * 1.5).max(1) as u32;
     assert_eq!(
         physical, 24,
-        "VAL-COORD-005: logical 16 at scale 1.5 = 24 physical px"
+        "VAL-COORD-005: point 16 at scale 1.5 = 24 physical px"
     );
 
-    // Scale 2.0, logical font size 16 → physical 32
+    // Scale 2.0, point-based font size 16 → physical 32
     let physical_2 = round_f32(16.0 * 2.0).max(1) as u32;
-    assert_eq!(physical_2, 32, "logical 16 at scale 2.0 = 32 physical px");
+    assert_eq!(physical_2, 32, "point 16 at scale 2.0 = 32 physical px");
 
-    // Scale 1.25, logical font size 16 → physical 20
+    // Scale 1.25, point-based font size 16 → physical 20
     let physical_125 = round_f32(16.0 * 1.25).max(1) as u32;
-    assert_eq!(
-        physical_125, 20,
-        "logical 16 at scale 1.25 = 20 physical px"
-    );
+    assert_eq!(physical_125, 20, "point 16 at scale 1.25 = 20 physical px");
 
-    // Scale 1.0, logical font size 18 → physical 18
+    // Scale 1.0, point-based font size 18 → physical 18
     let physical_1 = round_f32(18.0 * 1.0).max(1) as u32;
-    assert_eq!(physical_1, 18, "logical 18 at scale 1.0 = 18 physical px");
+    assert_eq!(physical_1, 18, "point 18 at scale 1.0 = 18 physical px");
 }
 
-/// VAL-COORD-006: Same logical font size at scales 1.5 and 2.0 produces
+/// VAL-COORD-006: Same point-based font size at scales 1.5 and 2.0 produces
 /// different glyph cache entries. The cache is keyed on physical pixel size.
 #[test]
 fn glyph_cache_keyed_on_physical_pixel_size() {
@@ -1144,7 +1141,7 @@ fn glyph_cache_keyed_on_physical_pixel_size() {
     };
     assert_ne!(
         cache_24, cache_32,
-        "VAL-COORD-006: same logical size at different scales produces different cache entries"
+        "VAL-COORD-006: same point size at different scales produces different cache entries"
     );
 
     // Also verify via LRU cache: font_size is part of the key.
@@ -1187,7 +1184,7 @@ fn scroll_offset_fractional_scale() {
     // Build scene: root -> container (content_transform ty=-10) -> child (red, y=20)
     let mut nodes = vec![Node::EMPTY; 3];
 
-    // Root: 150x150 physical (100x100 logical at 1.5x)
+    // Root: 150x150 physical (100x100 point at 1.5x)
     nodes[0].width = 100;
     nodes[0].height = 100;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -1200,7 +1197,7 @@ fn scroll_offset_fractional_scale() {
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].first_child = 2;
 
-    // Child: 20x20 at y=20 (logical), background = RED
+    // Child: 20x20 at y=20 (point), background = RED
     nodes[2].y = 20; // Logical y = 20
     nodes[2].width = 20;
     nodes[2].height = 20;
@@ -1236,8 +1233,8 @@ fn scroll_offset_fractional_scale() {
         scene_render::render_scene(&mut fb, &graph, &ctx);
     }
 
-    // Child is at logical y=20, container content_transform.ty=-10.
-    // Effective logical y = 20 + (-10) = 10.
+    // Child is at point y=20, container content_transform.ty=-10.
+    // Effective point y = 20 + (-10) = 10.
     // Physical y = round(10 * 1.5) = 15.
     // So the red child should start at physical y=15.
     let (r14, _, _, _) = read_pixel(&buf, stride, 0, 14);
@@ -1256,7 +1253,7 @@ fn scroll_offset_fractional_scale() {
 /// the physical extent. No stale edge pixels.
 #[test]
 fn dirty_rect_fractional_scale_full_coverage() {
-    // Node at logical (3, 5) size (10, 8) at scale 1.5
+    // Node at point (3, 5) size (10, 8) at scale 1.5
     // Physical start: round(3*1.5)=5 (rounded from 4.5), round(5*1.5)=8 (rounded from 7.5)
     // Physical end: round(13*1.5)=20 (rounded from 19.5), round(13*1.5)=20 (rounded from 19.5)
     // Physical size: 20-5=15, 20-8=12
@@ -1267,12 +1264,12 @@ fn dirty_rect_fractional_scale_full_coverage() {
             (x - 0.5) as i32
         }
     }
-    fn scale_coord(logical: i32, scale: f32) -> i32 {
-        round_f32(logical as f32 * scale)
+    fn scale_coord(pt: i32, scale: f32) -> i32 {
+        round_f32(pt as f32 * scale)
     }
-    fn scale_size(logical_pos: i32, logical_size: i32, scale: f32) -> i32 {
-        let phys_start = round_f32(logical_pos as f32 * scale);
-        let phys_end = round_f32((logical_pos + logical_size) as f32 * scale);
+    fn scale_size(pt_pos: i32, pt_size: i32, scale: f32) -> i32 {
+        let phys_start = round_f32(pt_pos as f32 * scale);
+        let phys_end = round_f32((pt_pos + pt_size) as f32 * scale);
         phys_end - phys_start
     }
 
@@ -2759,8 +2756,8 @@ fn fractional_scale_preserves_blur_radius() {
         scene_render::render_scene(&mut fb, &graph, &ctx);
     }
 
-    // At scale 1.5: logical node (20,20,40,40) → physical ~(30,30,60,60).
-    // Blur radius 4 logical → 6 physical pixels. Shadow should extend
+    // At scale 1.5: point node (20,20,40,40) → physical ~(30,30,60,60).
+    // Blur radius 4 point → 6 physical pixels. Shadow should extend
     // ~6 physical pixels beyond the node boundary.
     // Check that shadow exists at the right edge + 3 (inside blur zone).
     let (_, _, _, a_mid) = read_pixel(&buf, stride, 93, 60);
@@ -2859,7 +2856,7 @@ fn layer_opacity_applies_to_shadow() {
 /// Shadowed node change: dirty rect includes shadow extent beyond node bounds.
 #[test]
 fn shadow_overflow_in_damage_rects() {
-    // A node with shadow has a larger effective bounds than its logical
+    // A node with shadow has a larger effective bounds than its point
     // bounds. The abs_bounds function (used for damage tracking) must
     // account for shadow overflow.
     let mut nodes = vec![Node::EMPTY; 2];
@@ -2884,10 +2881,10 @@ fn shadow_overflow_in_damage_rects() {
     let right = ax + aw as i32;
     let bottom = ay + ah as i32;
 
-    // The dirty rect should extend beyond the node's logical bounds
+    // The dirty rect should extend beyond the node's point bounds
     // to include the shadow. Shadow extends by: blur_radius + spread + offset.
     // Max extent: offset_x + blur_radius + spread = 5 + 8 + 4 = 17 on right/bottom.
-    // Node logical bounds: (50, 50, 40, 40) -> right edge at 90, bottom at 90.
+    // Node point bounds: (50, 50, 40, 40) -> right edge at 90, bottom at 90.
     // With shadow: right edge should be at least 90 + 17 = 107.
     assert!(aw > 40 || ah > 40 || right > 90 || bottom > 90,
         "VAL-CROSS-011: dirty rect should include shadow overflow: rect=({},{},{},{}), expected larger than (50,50,40,40)",
@@ -3695,7 +3692,7 @@ fn dpi_scale_composes_with_affine_as_single_matrix() {
     nodes[1].transform = scene::AffineTransform::rotate(core::f32::consts::FRAC_PI_4);
 
     let data: Vec<u8> = vec![];
-    let w = 150u32; // at 1.5x, 100 logical → 150 physical
+    let w = 150u32; // at 1.5x, 100 point → 150 physical
     let h = 150u32;
     let mut buf_a = vec![0u8; (w * h * 4) as usize];
     for pixel in buf_a.chunks_exact_mut(4) {
@@ -4646,7 +4643,7 @@ fn path_scale_factor_applied() {
     let mono = zeroed_glyph_cache();
     let prop = zeroed_glyph_cache();
 
-    // Triangle occupying (10,10)-(40,40) in logical coords.
+    // Triangle occupying (10,10)-(40,40) in point coords.
     let mut cmds = Vec::new();
     scene::path_move_to(&mut cmds, 10.0, 10.0);
     scene::path_line_to(&mut cmds, 40.0, 10.0);

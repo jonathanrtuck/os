@@ -304,7 +304,7 @@ pub struct ScrollBlitParams {
 /// - scroll amount >= container height
 /// - container is zero-sized or off-screen
 ///
-/// `bounds` is the container's previous absolute bounds in logical coords
+/// `bounds` is the container's previous absolute bounds in point coords
 /// (from `IncrementalState::prev_bounds`).
 pub fn compute_scroll_blit(
     container_id: scene::NodeId,
@@ -323,7 +323,7 @@ pub fn compute_scroll_blit(
         return None;
     }
 
-    // Scale logical bounds to physical pixels.
+    // Scale point bounds to physical pixels.
     let cx = crate::round_f32(bounds.0 as f32 * scale).max(0) as u32;
     let cy = crate::round_f32(bounds.1 as f32 * scale).max(0) as u32;
     let cw = crate::scale_size(bounds.0, bounds.2 as i32, scale).max(0) as u32;

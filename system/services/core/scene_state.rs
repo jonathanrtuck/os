@@ -115,13 +115,13 @@ impl SceneState {
         sel_end: u32,
         doc_text: &[u8],
         content_h: u32,
-        scroll_px: i32,
+        scroll_pt: i32,
     ) {
         let mut tw = self.triple();
         {
             let mut w = tw.acquire_copy();
             build_selection_update(
-                &mut w, cfg, cursor_pos, sel_start, sel_end, doc_text, content_h, scroll_px,
+                &mut w, cfg, cursor_pos, sel_start, sel_end, doc_text, content_h, scroll_pt,
             );
         }
         tw.publish();

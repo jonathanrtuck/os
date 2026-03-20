@@ -113,7 +113,7 @@ Scroll is discrete — integer line jumps with no sub-pixel offset, no momentum,
 
 2D affine transforms are now supported: 3×3 matrix per node, transform composition through the tree, transform-aware clipping. Supports rotation, scaling, skew, and translation. Bilinear image resampling for transformed content.
 
-**Remaining gaps:** No rotated text rendering (text is always axis-aligned). No perspective transforms (3D). Coordinate system still uses `i16` (±32,767 logical pixels).
+**Remaining gaps:** No rotated text rendering (text is always axis-aligned). No perspective transforms (3D). Coordinate system still uses `i16` (±32,767 points).
 
 ### ~~No layer opacity~~ ✅ Implemented
 

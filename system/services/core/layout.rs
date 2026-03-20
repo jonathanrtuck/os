@@ -65,11 +65,11 @@ pub struct LayoutRun {
     pub glyphs: DataRef,
     /// Number of glyphs (= bytes for monospace ASCII).
     pub glyph_count: u16,
-    /// Starting pixel position relative to the parent node.
+    /// Starting point position relative to the parent node.
     pub y: i32,
     /// Text color.
     pub color: Color,
-    /// Font size in pixels.
+    /// Font size in points.
     pub font_size: u16,
 }
 
@@ -200,20 +200,20 @@ pub fn scroll_runs(
     runs: Vec<LayoutRun>,
     scroll_lines: u32,
     line_height: u32,
-    viewport_height_px: i32,
+    viewport_height_pt: i32,
 ) -> Vec<LayoutRun> {
-    let scroll_px = scroll_lines as i32 * line_height as i32;
+    let scroll_pt = scroll_lines as i32 * line_height as i32;
 
     runs.into_iter()
         .filter(|run| {
             let doc_y = run.y;
 
             // Above the scroll window?
-            if doc_y + line_height as i32 <= scroll_px {
+            if doc_y + line_height as i32 <= scroll_pt {
                 return false;
             }
             // Below the scroll window?
-            if doc_y >= scroll_px + viewport_height_px {
+            if doc_y >= scroll_pt + viewport_height_pt {
                 return false;
             }
 
@@ -291,7 +291,7 @@ pub fn update_clock_inline(
 ///
 /// Selection rects use document-relative y positions. The renderer
 /// applies `content_transform` from the parent container to offset them
-/// visually. `scroll_px` and `content_h` are used only for visibility
+/// visually. `scroll_pt` and `content_h` are used only for visibility
 /// culling.
 #[allow(clippy::too_many_arguments)]
 pub fn allocate_selection_rects(
@@ -304,7 +304,7 @@ pub fn allocate_selection_rects(
     line_height: u32,
     sel_color: Color,
     content_h: u32,
-    scroll_px: i32,
+    scroll_pt: i32,
 ) {
     let (sel_start_line, sel_start_col) = byte_to_line_col(doc_text, sel_lo, chars_per_line);
     let (sel_end_line, sel_end_col) = byte_to_line_col(doc_text, sel_hi, chars_per_line);
@@ -330,7 +330,7 @@ pub fn allocate_selection_rects(
         let sel_y = line as i32 * line_height as i32;
 
         // Visibility culling: skip lines outside the scroll window.
-        if sel_y + line_height as i32 <= scroll_px || sel_y >= scroll_px + content_h as i32 {
+        if sel_y + line_height as i32 <= scroll_pt || sel_y >= scroll_pt + content_h as i32 {
             continue;
         }
 
@@ -417,14 +417,14 @@ pub fn update_single_line(
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
 
     // Count visible runs and compare against the sibling chain length.
     // If they differ, a soft-wrap change occurred — fall back to compaction
     // to avoid stale line nodes rendering old glyphs.
     let visible_run_count = all_runs
         .iter()
-        .filter(|r| r.y + cfg.line_height as i32 > scroll_px && r.y < scroll_px + content_h)
+        .filter(|r| r.y + cfg.line_height as i32 > scroll_pt && r.y < scroll_pt + content_h)
         .count();
     let mut chain_line_count: usize = 0;
     {
@@ -447,7 +447,7 @@ pub fn update_single_line(
     let changed_run = &all_runs[changed_line];
     let run_y = changed_run.y;
     let line_h = cfg.line_height as i32;
-    let is_visible = run_y + line_h > scroll_px && run_y < scroll_px + content_h;
+    let is_visible = run_y + line_h > scroll_pt && run_y < scroll_pt + content_h;
 
     if !is_visible {
         // Changed line is off-screen. Only update cursor + clock.
@@ -461,7 +461,7 @@ pub fn update_single_line(
                 break;
             }
             let ry = run.y;
-            if ry + line_h > scroll_px && ry < scroll_px + content_h {
+            if ry + line_h > scroll_pt && ry < scroll_pt + content_h {
                 visible_index += 1;
             }
         }
@@ -513,7 +513,7 @@ pub fn update_single_line(
     // next_sibling (build_full_scene links test content as siblings
     // that survive acquire_copy but are truncated on first compaction).
     w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -(scroll_px as f32));
+        scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
     w.node_mut(N_DOC_TEXT).next_sibling = scene::NULL;
     w.node_mut(N_DOC_TEXT).content_hash = scene::fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
@@ -565,7 +565,7 @@ pub fn update_single_line(
             cfg.line_height,
             dc(cfg.sel_color),
             content_h_u32,
-            scroll_px,
+            scroll_pt,
         );
     }
 
@@ -628,7 +628,7 @@ fn finish_line_update(
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y);
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
 
     // Update N_DOC_TEXT content_transform and content hash.
     // Clear next_sibling to prevent stale pointers (the initial
@@ -636,7 +636,7 @@ fn finish_line_update(
     // under N_CONTENT -- those nodes are gone after the first compaction
     // but the pointer survives acquire_copy).
     w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -(scroll_px as f32));
+        scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
     w.node_mut(N_DOC_TEXT).next_sibling = scene::NULL;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
@@ -686,7 +686,7 @@ fn finish_line_update(
             cfg.line_height,
             dc(cfg.sel_color),
             content_h,
-            scroll_px,
+            scroll_pt,
         );
     }
 
@@ -734,11 +734,11 @@ pub fn insert_line(
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
 
     let visible_run_count = all_runs
         .iter()
-        .filter(|r| r.y + cfg.line_height as i32 > scroll_px && r.y < scroll_px + content_h)
+        .filter(|r| r.y + cfg.line_height as i32 > scroll_pt && r.y < scroll_pt + content_h)
         .count();
 
     // Count current line nodes in the sibling chain.
@@ -767,7 +767,7 @@ pub fn insert_line(
     // Build a map from full run index to visible run index.
     let mut visible_indices: Vec<usize> = Vec::new();
     for (i, r) in all_runs.iter().enumerate() {
-        if r.y + cfg.line_height as i32 > scroll_px && r.y < scroll_px + content_h {
+        if r.y + cfg.line_height as i32 > scroll_pt && r.y < scroll_pt + content_h {
             visible_indices.push(i);
         }
     }
@@ -951,11 +951,11 @@ pub fn delete_line(
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
 
     let visible_run_count = all_runs
         .iter()
-        .filter(|r| r.y + cfg.line_height as i32 > scroll_px && r.y < scroll_px + content_h)
+        .filter(|r| r.y + cfg.line_height as i32 > scroll_pt && r.y < scroll_pt + content_h)
         .count();
 
     // Count current line nodes in the sibling chain.
@@ -980,7 +980,7 @@ pub fn delete_line(
     // Map cursor_line to visible index.
     let mut visible_indices: Vec<usize> = Vec::new();
     for (i, r) in all_runs.iter().enumerate() {
-        if r.y + cfg.line_height as i32 > scroll_px && r.y < scroll_px + content_h {
+        if r.y + cfg.line_height as i32 > scroll_pt && r.y < scroll_pt + content_h {
             visible_indices.push(i);
         }
     }
@@ -1104,8 +1104,8 @@ pub fn build_full_scene(
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
     let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, content_h);
-    // Scroll offset in pixels for cursor/selection positioning.
-    let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
+    // Scroll offset in points for cursor/selection positioning.
+    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
     // Compute cursor line/col for positioning.
     let cursor_byte = cursor_pos as usize;
     let (cursor_line, cursor_col) =
@@ -1259,7 +1259,7 @@ pub fn build_full_scene(
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h as u16;
-        n.content_transform = scene::AffineTransform::translate(0.0, -(scroll_px as f32));
+        n.content_transform = scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
         // N_DOC_TEXT is now a pure container -- per-line Glyphs
         // child nodes hold the actual text content.
         n.content = Content::None;
@@ -1336,7 +1336,7 @@ pub fn build_full_scene(
             cfg.line_height,
             dc(cfg.sel_color),
             content_h,
-            scroll_px,
+            scroll_pt,
         );
     }
 
@@ -1489,7 +1489,7 @@ pub fn build_selection_update(
     sel_end: u32,
     doc_text: &[u8],
     content_h: u32,
-    scroll_px: i32,
+    scroll_pt: i32,
 ) {
     let dc = |c: drawing::Color| -> Color { Color::rgba(c.r, c.g, c.b, c.a) };
     let doc_width = cfg.fb_width.saturating_sub(2 * cfg.text_inset_x);
@@ -1545,7 +1545,7 @@ pub fn build_selection_update(
             cfg.line_height,
             dc(cfg.sel_color),
             content_h,
-            scroll_px,
+            scroll_pt,
         );
     }
 }
@@ -1577,7 +1577,7 @@ pub fn build_document_content(
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y);
     let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_px = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
 
     // Remove old dynamic nodes (line nodes + selection rects).
     w.set_node_count(WELL_KNOWN_COUNT);
@@ -1607,8 +1607,8 @@ pub fn build_document_content(
         scene_text_color,
         cfg.font_size,
     );
-    let viewport_height_px = content_h as i32;
-    let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, viewport_height_px);
+    let viewport_height_pt = content_h as i32;
+    let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, viewport_height_pt);
 
     // Push visible line glyph data.
     let mut line_glyph_refs: Vec<(DataRef, u16, i32)> = Vec::with_capacity(visible_runs.len());
@@ -1662,7 +1662,7 @@ pub fn build_document_content(
     w.node_mut(N_DOC_TEXT).first_child = NULL;
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
     w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -(scroll_px as f32));
+        scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
     let mut prev_line_node: u16 = NULL;
@@ -1733,7 +1733,7 @@ pub fn build_document_content(
             cfg.line_height,
             dc(cfg.sel_color),
             content_h,
-            scroll_px,
+            scroll_pt,
         );
     }
 }

@@ -305,10 +305,10 @@ pub extern "C" fn _start() -> ! {
         let font_data =
             unsafe { core::slice::from_raw_parts(font_va as *const u8, font_len as usize) };
 
-        // Font size from config (logical pixels). The scene graph x_advance/x_offset
-        // are in logical pixels at this size. Rasterize at the LOGICAL size —
+        // Font size from config (points). The scene graph x_advance/x_offset
+        // are in points at this size. Rasterize at the point size —
         // the scene_walk applies * scale for NDC.
-        let font_size_px: u32 = font_size_cfg as u32;
+        let font_size_pt: u32 = font_size_cfg as u32;
 
         // Axes must match core's shaping axes (MONO=1.0).
         let mono_axes = [fonts::rasterize::AxisValue {
@@ -321,13 +321,13 @@ pub extern "C" fn _start() -> ! {
         if let Some(metrics) = fonts::rasterize::font_metrics(font_data) {
             let upem = metrics.units_per_em as i32;
             let asc = metrics.ascent as i32;
-            let size = font_size_px as i32;
+            let size = font_size_pt as i32;
             font_ascent = ((asc * size + upem - 1) / upem) as u32;
 
             sys::print(b"     font ascent=");
             print_u32(font_ascent);
             sys::print(b" size=");
-            print_u32(font_size_px);
+            print_u32(font_size_pt);
             sys::print(b"\n");
         }
 
@@ -356,7 +356,7 @@ pub extern "C" fn _start() -> ! {
             if let Some(m) = fonts::rasterize::rasterize_with_axes(
                 font_data,
                 sg.glyph_id,
-                font_size_px as u16,
+                font_size_pt as u16,
                 &mut rb,
                 &mut scratch,
                 &mono_axes,
