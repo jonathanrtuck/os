@@ -909,6 +909,8 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Update scroll offset for cursor/text changes.
+        let mut scroll_changed = false;
+
         if (changed || text_changed) && !state().image_mode {
             let old_scroll = state().scroll_offset;
 
@@ -918,8 +920,12 @@ pub extern "C" fn _start() -> ! {
             // (visible lines changed) regardless of whether text changed.
             let new_scroll = state().scroll_offset;
 
-            if old_scroll != new_scroll && !text_changed {
-                text_changed = true;
+            if old_scroll != new_scroll {
+                scroll_changed = true;
+
+                if !text_changed {
+                    text_changed = true;
+                }
             }
         }
 
@@ -975,7 +981,23 @@ pub extern "C" fn _start() -> ! {
                 let doc = doc_content();
                 let new_line_count = scene_state::count_lines(doc);
 
-                if new_line_count == prev_line_count {
+                if scroll_changed {
+                    // Scroll changed — visible lines differ, incremental
+                    // paths would leave stale line-node y positions from
+                    // the previous frame. Full rebuild.
+                    let s = state();
+                    scene.update_document_content(
+                        &scene_cfg,
+                        doc,
+                        s.cursor_pos as u32,
+                        s.sel_start as u32,
+                        s.sel_end as u32,
+                        b"Text",
+                        &time_buf,
+                        s.scroll_offset as i32,
+                        timer_fired,
+                    );
+                } else if new_line_count == prev_line_count {
                     // Same line count — incremental single-line update.
                     // Only reshapes the changed line, pushes new glyph data
                     // at the bump pointer, and updates cursor/selection.
