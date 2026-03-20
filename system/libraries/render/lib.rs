@@ -297,9 +297,7 @@ impl CpuBackend {
             Some(Box::from_raw(ptr))
         }
     }
-}
 
-impl CpuBackend {
     /// Render only the region within `dirty` (absolute pixel coordinates).
     ///
     /// Nodes outside the dirty rect are clipped and skipped. Used for
