@@ -35,8 +35,13 @@
 #![no_std]
 #![no_main]
 
-/// Channel shared memory base.
-const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+use protocol::{
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    input::{
+        KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
+    },
+};
+
 /// Linux evdev event type for key press/release.
 const EV_KEY: u16 = 1;
 /// Linux evdev event type for absolute axis events (touch/tablet).
@@ -49,46 +54,9 @@ const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
 /// Size of a virtio_input_event struct (8 bytes).
 const EVENT_SIZE: u32 = 8;
-/// Protocol message types (must match init/compositor definitions).
-const MSG_DEVICE_CONFIG: u32 = 1;
-const MSG_KEY_EVENT: u32 = 10;
-const MSG_POINTER_ABS: u32 = 11;
-const MSG_POINTER_BUTTON: u32 = 12;
 /// Event virtqueue index.
 const VIRTQ_EVENT: u32 = 0;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DeviceConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-}
-/// Key event sent to the compositor via IPC.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KeyEvent {
-    keycode: u16,
-    pressed: u8,
-    ascii: u8,
-}
-/// Absolute pointer position sent to the compositor via IPC.
-/// Coordinates are in the raw [0, 32767] range; the compositor scales them.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PointerAbs {
-    x: u32,
-    y: u32,
-}
-/// Pointer button event sent to the compositor via IPC.
-/// button: 0 = left, 1 = right. pressed: 1 = down, 0 = up.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PointerButton {
-    button: u8,
-    pressed: u8,
-    _pad: [u8; 2],
-}
 /// A virtio-input event (matches Linux's input_event without timeval).
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -100,7 +68,7 @@ struct VirtioInputEvent {
 
 /// Compute the base VA of channel N's shared pages.
 fn channel_shm_va(idx: usize) -> usize {
-    CHANNEL_SHM_BASE + idx * 2 * 4096
+    protocol::channel_shm_va(idx)
 }
 /// Translate a Linux evdev keycode to ASCII.
 ///
@@ -140,6 +108,7 @@ fn keycode_to_ascii(code: u16) -> u8 {
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Channel 0: init config (endpoint 1).
+    // SAFETY: addr is the base of channel SHM region mapped by kernel at page-aligned boundaries.
     let init_ch = unsafe { ipc::Channel::from_base(channel_shm_va(0), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
@@ -148,6 +117,7 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
+    // SAFETY: msg.msg_type is MSG_DEVICE_CONFIG; sender (init) guarantees payload is valid DeviceConfig.
     let config: DeviceConfig = unsafe { msg.payload_as() };
     // Map MMIO region (sub-page offset for virtio-mmio slots).
     let page_offset = config.mmio_pa & 0xFFF;
@@ -181,6 +151,7 @@ pub extern "C" fn _start() -> ! {
     });
     let vq_bytes = (1usize << vq_order) * 4096;
 
+    // SAFETY: vq_va is a valid DMA allocation of vq_bytes; zeroing virtqueue memory before use.
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_bytes) };
 
     let mut vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
@@ -205,6 +176,7 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     });
 
+    // SAFETY: event_va is a valid DMA page allocation; zeroing event buffer memory before use.
     unsafe { core::ptr::write_bytes(event_va as *mut u8, 0, 4096) };
 
     // Pre-post all event buffers (each 8 bytes, device-writable).
@@ -217,6 +189,7 @@ pub extern "C" fn _start() -> ! {
     device.notify(VIRTQ_EVENT);
 
     // Channel 1: compositor events (endpoint 0 = send direction).
+    // SAFETY: same as above — channel SHM region mapped by kernel at page-aligned boundaries.
     let comp_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 0) };
 
     sys::print(b"  \xE2\x8C\xA8\xEF\xB8\x8F  virtio-input ready\n");
@@ -239,11 +212,16 @@ pub extern "C" fn _start() -> ! {
         let mut pointer_moved = false;
 
         while let Some(used) = vq.pop_used() {
+            let idx = used.id as usize;
+            if idx >= NUM_EVENT_BUFS {
+                continue; // malformed completion from device
+            }
             // Compute buffer VA from descriptor index (each buffer = 8 bytes).
-            let buf_offset = used.id as usize * EVENT_SIZE as usize;
+            let buf_offset = idx * EVENT_SIZE as usize;
             let buf_va = event_va + buf_offset;
             let buf_pa = event_pa + buf_offset as u64;
             // Read the event from the DMA buffer.
+            // SAFETY: buf_va points to DMA buffer written by device; volatile required for device visibility.
             let event: VirtioInputEvent =
                 unsafe { core::ptr::read_volatile(buf_va as *const VirtioInputEvent) };
 
@@ -256,9 +234,12 @@ pub extern "C" fn _start() -> ! {
                         pressed: event.value as u8,
                         _pad: [0; 2],
                     };
+                    // SAFETY: PointerButton fits within 60-byte IPC payload.
                     let msg = unsafe { ipc::Message::from_payload(MSG_POINTER_BUTTON, &ptr_btn) };
 
-                    comp_ch.send(&msg);
+                    if !comp_ch.send(&msg) {
+                        sys::print(b"virtio-input: ring full, event dropped\n");
+                    }
 
                     let _ = sys::channel_signal(1);
                 } else {
@@ -269,9 +250,12 @@ pub extern "C" fn _start() -> ! {
                         pressed: event.value as u8,
                         ascii,
                     };
+                    // SAFETY: KeyEvent fits within 60-byte IPC payload.
                     let msg = unsafe { ipc::Message::from_payload(MSG_KEY_EVENT, &key_event) };
 
-                    comp_ch.send(&msg);
+                    if !comp_ch.send(&msg) {
+                        sys::print(b"virtio-input: ring full, event dropped\n");
+                    }
 
                     let _ = sys::channel_signal(1);
                 }
@@ -291,6 +275,7 @@ pub extern "C" fn _start() -> ! {
             }
 
             // Re-post this buffer for reuse.
+            // SAFETY: buf_va points to DMA buffer of EVENT_SIZE bytes; zeroing before repost.
             unsafe {
                 core::ptr::write_bytes(buf_va as *mut u8, 0, EVENT_SIZE as usize);
             };
@@ -307,9 +292,12 @@ pub extern "C" fn _start() -> ! {
                 x: pointer_x,
                 y: pointer_y,
             };
+            // SAFETY: PointerAbs fits within 60-byte IPC payload.
             let msg = unsafe { ipc::Message::from_payload(MSG_POINTER_ABS, &ptr_abs) };
 
-            comp_ch.send(&msg);
+            if !comp_ch.send(&msg) {
+                sys::print(b"virtio-input: ring full, event dropped\n");
+            }
 
             let _ = sys::channel_signal(1);
         }

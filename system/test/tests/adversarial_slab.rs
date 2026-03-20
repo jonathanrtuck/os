@@ -26,8 +26,10 @@ mod paging {
 }
 
 mod sync {
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
+    use core::{
+        cell::UnsafeCell,
+        ops::{Deref, DerefMut},
+    };
     pub struct IrqGuard<'a, T> {
         data: &'a UnsafeCell<T>,
     }
@@ -73,17 +75,24 @@ fn fuzz_size_class_all_sizes() {
             if let Some(class) = result {
                 assert!(
                     class < slab_sizes.len(),
-                    "class {} out of range for size={}, align={}", class, size, align
+                    "class {} out of range for size={}, align={}",
+                    class,
+                    size,
+                    align
                 );
                 assert!(
                     slab_sizes[class] >= size,
                     "class {} ({}B) too small for size={}",
-                    class, slab_sizes[class], size
+                    class,
+                    slab_sizes[class],
+                    size
                 );
                 assert!(
                     slab_sizes[class] >= align,
                     "class {} ({}B) alignment insufficient for align={}",
-                    class, slab_sizes[class], align
+                    class,
+                    slab_sizes[class],
+                    align
                 );
             }
             // None is valid for sizes > 2048 or alignment > 2048.
@@ -98,8 +107,11 @@ fn power_of_two_size_boundaries() {
 
     for &(size, class) in &expected {
         assert_eq!(
-            slab::size_class(size, 8), Some(class),
-            "size {} with align 8 should be class {}", size, class
+            slab::size_class(size, 8),
+            Some(class),
+            "size {} with align 8 should be class {}",
+            size,
+            class
         );
     }
 }
@@ -111,8 +123,11 @@ fn just_above_power_of_two() {
 
     for &(size, class) in &transitions {
         assert_eq!(
-            slab::size_class(size, 8), Some(class),
-            "size {} should round up to class {}", size, class
+            slab::size_class(size, 8),
+            Some(class),
+            "size {} should round up to class {}",
+            size,
+            class
         );
     }
 }
@@ -122,8 +137,10 @@ fn just_above_power_of_two() {
 fn above_max_slab_size() {
     for size in 2049..=8192 {
         assert_eq!(
-            slab::size_class(size, 8), None,
-            "size {} should return None (too large for slab)", size
+            slab::size_class(size, 8),
+            None,
+            "size {} should return None (too large for slab)",
+            size
         );
     }
 }

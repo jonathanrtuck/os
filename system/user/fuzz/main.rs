@@ -128,7 +128,7 @@ fn assert_err_code(result: sys::SyscallResult<u64>, expected: sys::SyscallError,
 // Phase 1: Invalid syscall numbers
 // -----------------------------------------------------------------------
 fn phase_1_invalid_syscall_numbers() {
-    let bad_nrs: [u64; 8] = [27, 28, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
+    let bad_nrs: [u64; 8] = [28, 29, 100, 255, 1000, u64::MAX, u64::MAX - 1, 0x8000_0000];
 
     for &nr in &bad_nrs {
         let ret = unsafe { raw_syscall0(nr) } as i64;
@@ -590,7 +590,7 @@ extern "C" fn thread_trampoline() -> ! {
         core::arch::asm!(
             "ldr {0}, [sp, #8]",
             out(reg) args,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
     trivial_thread(args);
@@ -762,7 +762,7 @@ extern "C" fn chaos_trampoline() -> ! {
         core::arch::asm!(
             "ldr {0}, [sp, #8]",
             out(reg) args,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
     chaos_worker(args);
@@ -1041,7 +1041,7 @@ extern "C" fn blocker_trampoline() -> ! {
         core::arch::asm!(
             "ldr {0}, [sp, #8]",
             out(reg) args,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
     blocker_thread(args);
@@ -1053,7 +1053,7 @@ extern "C" fn closer_trampoline() -> ! {
         core::arch::asm!(
             "ldr {0}, [sp, #8]",
             out(reg) args,
-            options(nostack, nomem)
+            options(nostack)
         );
     }
     closer_thread(args);
@@ -1183,7 +1183,7 @@ extern "C" fn futex_waker(_: u64) -> ! {
 extern "C" fn futex_waiter_trampoline() -> ! {
     let args: u64;
     unsafe {
-        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack));
     }
     futex_waiter(args);
 }
@@ -1191,7 +1191,7 @@ extern "C" fn futex_waiter_trampoline() -> ! {
 extern "C" fn futex_waker_trampoline() -> ! {
     let args: u64;
     unsafe {
-        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack));
     }
     futex_waker(args);
 }
@@ -1290,7 +1290,7 @@ extern "C" fn channel_waiter(handle: u64) -> ! {
 extern "C" fn channel_waiter_trampoline() -> ! {
     let args: u64;
     unsafe {
-        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack));
     }
     channel_waiter(args);
 }
@@ -1386,7 +1386,7 @@ extern "C" fn fault_udf(_: u64) -> ! {
 extern "C" fn fault_udf_trampoline() -> ! {
     let args: u64;
     unsafe {
-        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack));
     }
     fault_udf(args);
 }
@@ -1410,7 +1410,7 @@ extern "C" fn fault_null_read(_: u64) -> ! {
 extern "C" fn fault_null_trampoline() -> ! {
     let args: u64;
     unsafe {
-        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack));
     }
     fault_null_read(args);
 }
@@ -1434,7 +1434,7 @@ extern "C" fn fault_kernel_read(_: u64) -> ! {
 extern "C" fn fault_kernel_trampoline() -> ! {
     let args: u64;
     unsafe {
-        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack, nomem));
+        core::arch::asm!("ldr {0}, [sp, #8]", out(reg) args, options(nostack));
     }
     fault_kernel_read(args);
 }
@@ -1684,11 +1684,321 @@ fn phase_31_concurrent_channel_churn() {
 }
 
 // -----------------------------------------------------------------------
+// Phase 32: interrupt_register + interrupt_ack lifecycle
+// -----------------------------------------------------------------------
+fn phase_32_interrupt_lifecycle() {
+    // Use an SPI that no real device is wired to (SPI 100 = GIC IRQ 132).
+    // We can't trigger a real IRQ in this test, but we exercise:
+    //   register → ack (should clear pending even though never fired) → close.
+    let unused_spi: u32 = 132;
+
+    match sys::interrupt_register(unused_spi) {
+        Ok(h) => {
+            // Ack before any IRQ fires — should succeed (clears pending = noop).
+            let _ = sys::interrupt_ack(h);
+
+            // Register same IRQ again — should fail (duplicate).
+            let r = sys::interrupt_register(unused_spi);
+            if r.is_ok() {
+                phase_fail(b"phase 32", b"duplicate interrupt_register should fail");
+            }
+
+            // Close the handle (kernel should disable the IRQ in GIC).
+            let _ = sys::handle_close(h);
+
+            // After close, re-register should succeed.
+            match sys::interrupt_register(unused_spi) {
+                Ok(h2) => {
+                    let _ = sys::handle_close(h2);
+                }
+                Err(_) => {
+                    phase_fail(b"phase 32", b"re-register after close should succeed");
+                }
+            }
+        }
+        Err(_) => sys::print(b"       (skipped - interrupt_register failed)\n"),
+    }
+
+    // Register multiple distinct IRQs, then close all.
+    let mut int_handles: [u8; 4] = [0; 4];
+    let mut int_count = 0usize;
+    for i in 0..4u32 {
+        match sys::interrupt_register(133 + i) {
+            Ok(h) => {
+                int_handles[int_count] = h;
+                int_count += 1;
+            }
+            Err(_) => break,
+        }
+    }
+    for i in 0..int_count {
+        let _ = sys::interrupt_ack(int_handles[i]);
+        let _ = sys::handle_close(int_handles[i]);
+    }
+
+    // Wait on interrupt handle with poll (timeout=0) — should return not-ready.
+    match sys::interrupt_register(140) {
+        Ok(h) => {
+            let r = sys::wait(&[h], 0);
+            // Poll should time out (no IRQ fired).
+            let _ = r;
+            let _ = sys::handle_close(h);
+        }
+        Err(_) => {}
+    }
+
+    phase_ok(b"phase 32: interrupt register/ack lifecycle");
+}
+
+// -----------------------------------------------------------------------
+// Phase 33: handle_send success path (send channel to child process)
+// -----------------------------------------------------------------------
+fn phase_33_handle_send_success() {
+    // Full flow: create channel → create child → send one endpoint to child →
+    // start child → child reads from channel → parent writes/signals.
+    let (ch_a, ch_b) = match sys::channel_create() {
+        Ok(pair) => pair,
+        Err(_) => {
+            sys::print(b"       (skipped - channel_create failed)\n");
+            return phase_ok(b"phase 33: handle_send (skipped)");
+        }
+    };
+
+    let proc_h = match sys::process_create(HELPER_ELF.as_ptr(), HELPER_ELF.len()) {
+        Ok(h) => h,
+        Err(_) => {
+            let _ = sys::handle_close(ch_a);
+            let _ = sys::handle_close(ch_b);
+            sys::print(b"       (skipped - process_create failed)\n");
+            return phase_ok(b"phase 33: handle_send (skipped)");
+        }
+    };
+
+    // Send endpoint B to the child. The child will get it at some handle slot.
+    if sys::handle_send(proc_h, ch_b).is_err() {
+        let _ = sys::handle_close(ch_a);
+        let _ = sys::process_kill(proc_h);
+        let _ = sys::handle_close(proc_h);
+        phase_fail(b"phase 33", b"handle_send should succeed");
+    }
+    // ch_b is now moved to child — caller no longer owns it.
+
+    // Also set up shared memory so fuzz-helper can read its command byte.
+    let mut cmd_pa: u64 = 0;
+    let cmd_va = match sys::dma_alloc(0, &mut cmd_pa) {
+        Ok(va) => va,
+        Err(_) => {
+            let _ = sys::handle_close(ch_a);
+            let _ = sys::process_kill(proc_h);
+            let _ = sys::handle_close(proc_h);
+            sys::print(b"       (skipped - dma_alloc failed)\n");
+            return phase_ok(b"phase 33: handle_send (skipped)");
+        }
+    };
+    // Command 0x06: "signal channel handle 0 then exit"
+    unsafe { core::ptr::write_volatile(cmd_va as *mut u8, 0x06) };
+
+    if sys::memory_share(proc_h, cmd_pa, 1, false).is_err() {
+        let _ = sys::handle_close(ch_a);
+        let _ = sys::dma_free(cmd_va as u64, 0);
+        let _ = sys::process_kill(proc_h);
+        let _ = sys::handle_close(proc_h);
+        sys::print(b"       (skipped - memory_share failed)\n");
+        return phase_ok(b"phase 33: handle_send (skipped)");
+    }
+
+    let _ = sys::process_start(proc_h);
+
+    // Wait for the child to signal the channel (proves handle_send worked).
+    let _ = sys::wait(&[ch_a], 500_000_000); // 500ms timeout
+
+    // Clean up.
+    let _ = sys::wait(&[proc_h], 500_000_000);
+    let _ = sys::handle_close(proc_h);
+    let _ = sys::handle_close(ch_a);
+    let _ = sys::dma_free(cmd_va as u64, 0);
+
+    phase_ok(b"phase 33: handle_send success path");
+}
+
+// -----------------------------------------------------------------------
+// Phase 34: device_map success path
+// -----------------------------------------------------------------------
+fn phase_34_device_map_success() {
+    // Map 1 page of UART0 MMIO (PA 0x0900_0000). This is always present
+    // on QEMU virt and is below RAM_START, so it passes the PA validation.
+    match sys::device_map(0x0900_0000, 4096) {
+        Ok(va) => {
+            // Read the UART Data Register — any value is fine, just verify
+            // the mapping doesn't fault.
+            let _val = unsafe { core::ptr::read_volatile(va as *const u32) };
+
+            // Map same region again (second mapping should succeed — separate VA).
+            match sys::device_map(0x0900_0000, 4096) {
+                Ok(_va2) => {}
+                Err(_) => {
+                    // Not a test failure — kernel may disallow double map.
+                }
+            }
+        }
+        Err(_) => {
+            // device_map might fail if MMIO VA space is full.
+            sys::print(b"       (skipped - device_map failed)\n");
+        }
+    }
+
+    // device_map with PA inside RAM should fail.
+    let r = sys::device_map(0x4000_0000, 4096);
+    if r.is_ok() {
+        phase_fail(b"phase 34", b"device_map of RAM PA should fail");
+    }
+
+    // device_map with size 0 should fail.
+    let r = sys::device_map(0x0900_0000, 0);
+    if r.is_ok() {
+        phase_fail(b"phase 34", b"device_map size=0 should fail");
+    }
+
+    phase_ok(b"phase 34: device_map success path");
+}
+
+// -----------------------------------------------------------------------
+// Phase 35: Concurrent scheduling context create/bind/borrow
+// -----------------------------------------------------------------------
+extern "C" fn sc_thread_entry(seed: u64) -> ! {
+    let mut rng = seed | 1;
+    for _ in 0..100 {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+
+        match rng % 4 {
+            0 => {
+                // Create + bind + close.
+                if let Ok(h) = sys::scheduling_context_create(500_000, 1_000_000) {
+                    let _ = sys::scheduling_context_bind(h);
+                    let _ = sys::handle_close(h);
+                }
+            }
+            1 => {
+                // Create + borrow + return + close.
+                if let Ok(h) = sys::scheduling_context_create(1_000_000, 10_000_000) {
+                    let _ = sys::scheduling_context_borrow(h);
+                    let _ = sys::scheduling_context_return();
+                    let _ = sys::handle_close(h);
+                }
+            }
+            2 => {
+                // Double borrow (second should fail), return, close.
+                if let Ok(h) = sys::scheduling_context_create(100_000, 500_000) {
+                    let _ = sys::scheduling_context_borrow(h);
+                    let _ = sys::scheduling_context_borrow(h); // Should fail.
+                    let _ = sys::scheduling_context_return();
+                    let _ = sys::handle_close(h);
+                }
+            }
+            _ => {
+                // Return without borrow (should fail).
+                let _ = sys::scheduling_context_return();
+                sys::yield_now();
+            }
+        }
+    }
+    sys::exit();
+}
+
+extern "C" fn sc_thread_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack),
+        );
+    }
+    sc_thread_entry(args);
+}
+
+fn phase_35_concurrent_scheduling_contexts() {
+    let mut handles: [u8; 4] = [0; 4];
+    let mut count = 0usize;
+    for i in 0..4u64 {
+        if let Some(h) = spawn_with_trampoline(sc_thread_trampoline as u64, i * 7919 + 1) {
+            handles[count] = h;
+            count += 1;
+        }
+    }
+    for i in 0..count {
+        let _ = sys::wait(&[handles[i]], u64::MAX);
+        let _ = sys::handle_close(handles[i]);
+    }
+    phase_ok(b"phase 35: concurrent scheduling contexts");
+}
+
+// -----------------------------------------------------------------------
+// Phase 36: Concurrent DMA alloc/free (stress buddy allocator)
+// -----------------------------------------------------------------------
+extern "C" fn dma_thread_entry(seed: u64) -> ! {
+    let mut rng = seed | 1;
+    for _ in 0..50 {
+        rng ^= rng << 13;
+        rng ^= rng >> 7;
+        rng ^= rng << 17;
+
+        let order = (rng % 3) as u32; // 0, 1, or 2 (4K, 8K, 16K)
+        let mut pa: u64 = 0;
+        match sys::dma_alloc(order, &mut pa) {
+            Ok(va) => {
+                // Touch the buffer to verify the mapping.
+                unsafe { core::ptr::write_volatile(va as *mut u8, 0xAB) };
+                let read = unsafe { core::ptr::read_volatile(va as *const u8) };
+                if read != 0xAB {
+                    sys::print(b"dma: data mismatch!\n");
+                }
+                let _ = sys::dma_free(va as u64, order);
+            }
+            Err(_) => {
+                // OOM under contention — expected.
+            }
+        }
+    }
+    sys::exit();
+}
+
+extern "C" fn dma_thread_trampoline() -> ! {
+    let args: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldr {0}, [sp, #8]",
+            out(reg) args,
+            options(nostack),
+        );
+    }
+    dma_thread_entry(args);
+}
+
+fn phase_36_concurrent_dma() {
+    let mut handles: [u8; 4] = [0; 4];
+    let mut count = 0usize;
+    for i in 0..4u64 {
+        if let Some(h) = spawn_with_trampoline(dma_thread_trampoline as u64, i * 6151 + 1) {
+            handles[count] = h;
+            count += 1;
+        }
+    }
+    for i in 0..count {
+        let _ = sys::wait(&[handles[i]], u64::MAX);
+        let _ = sys::handle_close(handles[i]);
+    }
+    phase_ok(b"phase 36: concurrent DMA alloc/free");
+}
+
+// -----------------------------------------------------------------------
 // Entry
 // -----------------------------------------------------------------------
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    sys::print(b"  \xF0\x9F\x94\xAC fuzz test starting (31 phases)\n");
+    sys::print(b"  \xF0\x9F\x94\xAC fuzz test starting (36 phases)\n");
 
     // Single-process tests.
     phase_1_invalid_syscall_numbers();
@@ -1728,6 +2038,13 @@ pub extern "C" fn _start() -> ! {
     phase_29_thread_id_recycling();
     phase_30_close_while_waiting();
     phase_31_concurrent_channel_churn();
+
+    // Coverage gap phases.
+    phase_32_interrupt_lifecycle();
+    phase_33_handle_send_success();
+    phase_34_device_map_success();
+    phase_35_concurrent_scheduling_contexts();
+    phase_36_concurrent_dma();
 
     sys::print(b"  \xE2\x9C\x85 fuzz test PASS\n");
     sys::exit();

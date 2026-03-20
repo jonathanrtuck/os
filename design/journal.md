@@ -4,6 +4,1508 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Points and Pixels: Coordinate System Terminology (2026-03-19)
+
+**Status:** Settled.
+
+### The question
+
+The OS uses resolution-independent coordinates internally (scene graph, core layout, font sizing) and physical framebuffer coordinates at the rendering edge. What should we call these two units?
+
+### Decision: Points and Pixels
+
+**Point (pt)** = 1/72 inch. The OS's internal resolution-independent unit. Used everywhere above the render boundary: scene graph node positions and sizes, font sizes, layout constants, shadow offsets. One coordinate system for both spatial layout and typography.
+
+**Pixel (px)** = one physical display element. Used only by the render backends and drawing library — the final stage of the pipeline where points are converted to hardware coordinates.
+
+**Scale factor** = `physical_dpi / 72`. Derived from hardware (EDID) or user preference. The render library applies it during the scene tree walk via `scale_coord()` and `scale_size()` in `render/scene_render/coords.rs`.
+
+### Why points, not some other unit?
+
+- **Granularity:** At typical desktop DPIs (96–220), 1pt maps to ~1–3 physical pixels. Integer point values give near-pixel-level control without requiring fractional coordinates.
+- **Typography alignment:** Points are the native unit of font metrics (advance widths, ascent/descent, kerning). Since the OS is document-centric and text is a primary content type, aligning the coordinate system with typographic conventions means font metrics can be used directly without conversion.
+- **Self-documenting terminology:** "Points" and "pixels" are unambiguous. Anyone reading the code knows immediately which coordinate space they're in. "Logical pixels" invited confusion because the word "pixel" suggests a physical thing.
+- **Physical meaning:** 1pt = 1/72 inch gives the unit a real-world anchor. "18pt font" means 0.25 inches tall, matching designer/typographer expectations. The scale factor becomes a derivable property of the display hardware, not an arbitrary knob.
+
+### DPI detection
+
+The scale factor is derived from display DPI: `scale = physical_dpi / 72`. Three sources, in priority order:
+
+1. **User preference** — always wins. Accessibility, viewing distance, personal taste.
+2. **EDID** — monitor broadcasts physical dimensions + native resolution. Compute `dpi = resolution_px / (size_mm / 25.4)`. Most desktop monitors have EDID.
+3. **Default** — assume 96 DPI when detection fails (`scale = 96/72 ≈ 1.33`). Universal desktop assumption.
+
+Detection lives in the render driver (it owns the display hardware). The OS service combines detected DPI with user preference and sends the final scale factor via `CompositorConfig`. The scene graph and core never know about DPI.
+
+### Rejected alternatives
+
+- **Millimeters:** Too coarse (1mm ≈ 3.78px at 96 DPI). Would require fractional coordinates (`f32`) everywhere, introducing floating-point accumulation errors in layout.
+- **CSS px (1/96 inch):** Finer than points and 1:1 at 96 DPI, but an arbitrary web-era convention. Calling them "pixels" reintroduces the naming confusion.
+- **Abstract logical pixels (no physical anchor):** Simpler (no DPI detection needed), but "18pt" has no physical meaning — just relatively bigger than "14pt". Loses the self-documenting property.
+
+### Terminology audit required
+
+All code, comments, documentation, and variable names must consistently use "points" for resolution-independent values and "pixels" for physical framebuffer values. Key locations: scene graph node fields, protocol config structs, render library coord functions, core layout constants, architecture docs.
+
+### Key insight
+
+There are exactly two spatial units in this system. Points (abstract, physical meaning, used by everything above the render boundary) and pixels (concrete, hardware-dependent, used only at the rendering edge). The render library's `scale_coord()` and `scale_size()` are the single conversion boundary. No third unit exists — font sizing is points, the same unit as coordinates.
+
+---
+
+## Phase 5: CPU Render Service Merge (2026-03-18)
+
+**Status:** Complete. Compositor + virtio-gpu merged into single `cpu-render/` process.
+
+### What was done
+
+Merged `services/compositor/` and `services/drivers/virtio-gpu/` into a single `services/drivers/cpu-render/` process — a sibling to `virgil-render`. The two-process pipeline (compositor → MSG_PRESENT → virtio-gpu) is replaced by a single process that does CPU rendering and GPU presentation in the same event loop.
+
+**Key design decision:** cpu-render self-allocates framebuffers via `dma_alloc` instead of receiving them from init. This makes its init handshake identical to virgil-render's (MSG_DEVICE_CONFIG → MSG_DISPLAY_INFO → MSG_GPU_CONFIG → MSG_GPU_READY → MSG_COMPOSITOR_CONFIG). Init's `setup_display_pipeline()` was rewritten to mirror `setup_virgl_pipeline()`.
+
+**Eliminated:**
+
+- Compositor→GPU IPC channel (no MSG_PRESENT/MSG_PRESENT_DONE)
+- One process boundary (one fewer context switch per frame)
+- Framebuffer allocation in init (~24 dma_alloc calls moved to cpu-render)
+- Scatter-gather PA table messaging (MSG_FB_PA_CHUNK)
+- ~175 lines of init code
+
+**Files:**
+
+- Created: `cpu-render/main.rs` (457 lines), `cpu-render/gpu.rs` (524 lines), `cpu-render/frame_scheduler.rs` (173 lines, copied from compositor)
+- Modified: `build.rs` (replaced compositor+virtio-gpu with cpu-render), `init/main.rs` (rewritten setup_display_pipeline)
+- Deleted: `services/compositor/`, `services/drivers/virtio-gpu/` (no parallel implementations)
+
+### Architecture (post-merge)
+
+```text
+Init probes GPU features
+  ├── VIRTIO_GPU_F_VIRGL set:
+  │   Core → Scene Graph → virgil-render (Gallium3D → virglrenderer → ANGLE → Metal → GPU)
+  └── No virgl:
+      Core → Scene Graph → cpu-render (CpuBackend + virtio-gpu 2D) → Display
+```
+
+Both render services follow the same pattern: single process, same handshake, scene graph as sole input interface. The only difference is what happens inside (Gallium3D commands vs CPU rasterization + 2D transfer).
+
+### Testing
+
+- 1,816 host-side tests pass
+- QEMU visual verification: all content types render correctly (text, images, paths, backgrounds, clock)
+- Stress test: no crashes under 4 SMP cores
+- Boot serial output confirms clean handshake sequence
+
+### Remaining deferred work
+
+- **Remove test content** from `scene_state.rs` once real Image/Path producers exist.
+- ~~**Extract common handshake** from setup_virgl_pipeline and setup_display_pipeline.~~ **Done (2026-03-18).** Unified into single `setup_render_pipeline(name, ...)` function. The `name` parameter (`b"virgl"` or `b"cpu-render"`) drives diagnostic output only. Reduced init from ~1,500 lines to ~1,076 lines.
+
+---
+
+## Virgl Task 8: Init Integration — Render Service Selection (2026-03-18)
+
+**Status:** Complete. Virgl implementation plan fully executed (all 8 tasks).
+
+---
+
+## Virgl Task 7: Image Rendering + Path Groundwork (2026-03-18)
+
+**Status:** Image rendering complete and visually verified. Path stencil-then-cover code written but blocked on ANGLE.
+
+### What was done
+
+**Content::Image — full pipeline working:**
+
+- Core (`scene_state.rs`): generates test 32×32 BGRA gradient, pushes to data buffer, creates `Content::Image` node
+- Scene walk (`scene_walk.rs`): detects `Content::Image`, records screen position + DataRef in `ImageBatch`
+- Driver (`main.rs`): creates BGRA8 GPU texture (IMG_RESOURCE_ID=5), copies pixel data from scene graph data buffer → DMA → `TRANSFER_TO_HOST_3D`, renders as textured quad with `TEXTURED_FS` (full RGBA sampling)
+- Visually verified: gradient image renders correctly in QEMU at 2× Retina scale
+
+**Content::Path — code complete, stencil blocked:**
+
+- Core: generates test star (5-pointed, LineTo only) and rounded rectangle (CubicTo curves)
+- Scene walk: full path command parser (MoveTo, LineTo, CubicTo, Close), de Casteljau cubic flattening, triangle fan generation from centroid, covering quad for stencil test pass
+- Protocol: stencil DSA states (write: front INCR_WRAP / back DECR_WRAP; test: NOTEQUAL with ZERO reset), no-color blend, stencil ref command, stencil clear
+- Driver: stencil pipeline setup separated into own SUBMIT_3D (can fail independently); `stencil_available` flag gates path rendering
+
+**Stencil blocked on virglrenderer/ANGLE:** `VIRGL_BIND_DEPTH_STENCIL` (0x100) rejected for PIPE_TEXTURE_2D resources. Error: "Buffer bind flags require the buffer target." This is an ANGLE Metal backend limitation — it doesn't expose depth/stencil as a sampler-view-compatible texture target through virglrenderer's resource creation path. The stencil-then-cover decision (2026-03-17) is architecturally correct but needs either real hardware or a CPU-rasterized fallback.
+
+### Key bugs found and fixed
+
+1. **Stack overflow from path flattening buffer:** `MAX_POINTS=2048` array (16 KiB) on a 16 KiB stack. Reduced to 256 (2 KiB). The 16 KiB stack constraint continues to be the #1 cause of crashes in userspace.
+
+2. **Context poisoning from failed stencil commands:** A failed `CREATE_OBJECT` (stencil surface) inside `SUBMIT_3D` sets a context error flag, causing ALL subsequent commands in the same batch to be rejected — including critical framebuffer/viewport setup. Fix: moved stencil setup to a separate `SUBMIT_3D` call that can fail independently.
+
+3. **VBO aliasing with deferred command submission:** Image vertices and glyph vertices both wrote to `TEXT_VB_RESOURCE_ID`. With two `submit_3d` calls per frame, the glyph upload overwrote image vertices before the GPU could draw them. This caused the image to flicker — appearing and disappearing every 1-5 seconds (whenever QEMU's display thread scanned out between submissions). Fix: pack image vertices at offset 0 and glyph vertices at offset 192 in the same VBO, upload once, and draw both with different `cmd_set_vertex_buffers` offsets in a single `SUBMIT_3D`.
+
+4. **Virgl bind flag divergence:** `VIRGL_BIND_DEPTH_STENCIL = 0x100` (bit 8), not `PIPE_BIND_DEPTH_STENCIL = 0x04` (bit 2). Most other bind flags match between virgl_hw.h and Gallium p_defines.h (RENDER_TARGET=0x02, SAMPLER_VIEW=0x08, VERTEX_BUFFER=0x10).
+
+### Architecture note: single SUBMIT_3D per frame
+
+The render loop now uses exactly one `SUBMIT_3D` per frame containing all draw commands (backgrounds, images, glyphs). VBO aliasing is solved by packing different vertex arrays at different offsets within the same buffer resource, then binding with the appropriate byte offset before each draw call. This eliminates intermediate-state flickering caused by QEMU's display thread scanning out between submissions.
+
+### Path rendering: fallback options
+
+The stencil-then-cover approach is blocked on the virgl/ANGLE stack but the code is ready for real hardware. For the prototype, two fallback options:
+
+1. **CPU-rasterized path → texture upload:** Rasterize paths to R8 coverage bitmap on CPU (the render library has a working scanline rasterizer), upload as texture, composite with GLYPH_FS. Same approach as glyph rendering but with path-derived coverage.
+
+2. **Triangle rendering without stencil:** For convex paths (rectangles, simple shapes), direct triangle rendering works without stencil. Only concave/self-intersecting paths need stencil winding.
+
+---
+
+## GPU Path Rendering: Stencil-Then-Cover vs Compute (2026-03-17)
+
+**Status:** research complete, approach settled, stencil-then-cover blocked on ANGLE (see 2026-03-18 entry above).
+
+### The question
+
+How should the GPU render filled vector paths (cubic Bezier contours)? Three approaches evaluated:
+
+### Approaches considered
+
+**A. CPU rasterize → texture upload.** Rasterize path to coverage bitmap on CPU, upload as GPU texture, composite as textured quad. What Cairo and older Skia did. Defeats the purpose of GPU acceleration — CPU does the hard work, GPU just blits. Also requires per-path texture resource management.
+
+**B. Tessellate → triangles.** Flatten Bezier curves to line segments, triangulate the filled polygon, draw as colored triangles. Problem: correct triangulation of arbitrary concave, self-intersecting polygons with holes is a hard computational geometry problem (ear clipping is O(n²), constrained Delaunay is complex). Doesn't handle winding rules naturally.
+
+**C. Stencil-then-cover.** The dominant production technique — used by NanoVG, Pathfinder, Skia (Ganesh/Graphite), Chrome, Firefox (WebRender), Direct2D. Algorithm:
+
+1. Triangle fan from an arbitrary interior point into the **stencil buffer** (increment/decrement tracks winding count) — overlapping triangles are fine
+2. Covering quad reads stencil buffer — non-zero stencil (or odd for even-odd rule) gets filled
+
+Handles self-intersections, complex winding rules, and concave shapes correctly without correct triangulation. Requires only a stencil buffer (standard since ES 2.0).
+
+**D. Compute shader (Vello-style).** GPU-native path rendering via compute shaders. CPU flattens curves → SSBO → compute shader does scanline coverage → output texture. No stencil, no tessellation. The frontier (Raph Levien / Linebender project, 2024-2025).
+
+### Decision: Stencil-then-cover (C) for current driver, compute (D) for future hardware drivers
+
+**Stencil-then-cover** is the right approach for virgil-render:
+
+- Works within ES 3.0 (our ceiling — ANGLE/Metal hardcodes `kMaxSupportedGLVersion = gl::Version(3, 0)`)
+- virglrenderer supports stencil buffers (standard Gallium3D)
+- Battle-tested in production by every major renderer
+- Implementation: depth/stencil surface (one-time), two passes per path
+
+**Compute is blocked** on the current QEMU stack:
+
+- Requires ES 3.1 (compute shaders) + SSBOs
+- ANGLE's Metal backend explicitly caps at ES 3.0, sets `maxPerStageStorageBuffers = 0`
+- virglrenderer's protocol _does_ support compute (`VIRGL_CCMD_LAUNCH_GRID`, `SET_SHADER_BUFFERS`, `SET_SHADER_IMAGES`, `MEMORY_BARRIER`, `PIPE_SHADER_COMPUTE`), but the host-side GL doesn't
+
+**Compute becomes viable on real hardware:** When a native GPU driver replaces virglrenderer (no ANGLE translation layer), every modern GPU (Apple M-series, AMD RDNA, Intel Arc, Arm Mali) has compute as a fundamental capability. The thick driver architecture makes this a driver-internal choice — same scene graph interface, different rendering strategy.
+
+### Key insight: the prototype validates the interface, not the rendering technique
+
+The scene graph is the stable boundary. Stencil-then-cover on QEMU proves paths work through the pipeline. Compute on real hardware would be a performance upgrade behind the same interface. Both are invisible to core, editors, and the rest of the OS.
+
+### Implementation plan (when paths are needed)
+
+1. Add a depth/stencil renderbuffer to the framebuffer setup in `setup_pipeline`
+2. Create a DSA state with stencil test enabled (increment on front-face, decrement on back-face)
+3. Per path: triangle fan from centroid → stencil pass (no color write), then covering quad → stencil test + color write
+4. Reset stencil to zero between paths
+
+Not implementing now — `Content::Path` exists in the scene graph enum but core never emits it. The Phase 2 rendering redesign (2026-03-16) eliminated SVG paths; icons use the glyph cache.
+
+---
+
+## GPU Rendering Architecture: Thick Drivers (2026-03-17)
+
+**Status:** settled design, ready to implement.
+
+### The decision
+
+GPU drivers are **thick**: they read the scene graph from shared memory, perform the full tree walk, and produce pixels using hardware-accelerated rendering. The scene graph is the interface between the OS service (core) and the GPU driver. There is no intermediate command list or display list abstraction.
+
+### Architecture
+
+```text
+Core (layout + scene build) → Scene Graph (shared memory) → GPU Driver (tree walk + render + present) → Display
+```
+
+The current pipeline splits rendering across two processes:
+
+```text
+Core → Scene Graph → Compositor (CpuBackend tree walk + rasterization) → virtio-gpu 2D driver (dumb blit) → Display
+```
+
+The new architecture collapses compositor + GPU driver into a single **render service** process per display backend:
+
+```text
+Core → Scene Graph → virgil-render (tree walk + Virgil3D commands + present) → Display
+Core → Scene Graph → cpu-render (tree walk + software rasterization + present) → Display
+```
+
+Init selects which render service to launch. Only one runs at a time per display.
+
+### Why thick drivers
+
+The key question was where to put complexity in the `compositor → driver` pipeline. Three options were evaluated:
+
+1. **Thin driver (current).** Compositor does all rendering, GPU driver is a dumb blitter. Works for CPU rendering but means a GPU-accelerated path would still do all rendering in the compositor, then serialize GPU commands across a process boundary. Cross-process command buffer protocol adds a new interface in the hot path.
+
+2. **Hybrid: command list intermediate representation.** Tree walk emits a flat command list (fill rect, blit glyph, blend surface), backends execute it. Shares the tree walk across backends, but the command list becomes a committed interface — a mini graphics API in the middle of the pipeline. If it needs to change (new content type, GPU-specific optimization), every backend and the tree walk layer must update. This is complexity in the connective tissue, which violates the design principle: connective tissue must be simple.
+
+3. **Thick driver (chosen).** Each driver reads the scene graph directly and does whatever it needs. The scene graph is the only interface. Drivers are leaf nodes — complex inside, simple boundary. Duplication of tree walk logic across drivers is mitigated by a shared utility library when needed (not before a second driver exists).
+
+The thick driver approach was chosen because:
+
+- **The scene graph is the interface.** It's already designed, already in shared memory, already stable. No new interface to design or maintain.
+- **Complexity at the edges.** Essential rendering complexity (tree walk, clipping, batching, hardware commands) lives inside the driver — a leaf node behind the scene graph interface. This is exactly where "push complexity to the edges" says it should go.
+- **No connective tissue coupling.** A command list in the middle would couple all backends to a shared format. Thick drivers are independent — a Virgil3D driver and a future Metal driver don't need to agree on anything except the scene graph.
+- **GPU-specific optimization without abstraction leaks.** A GPU driver can batch glyphs, reorder draws, use native texture atlases — all internal decisions. A command list would either be too simple (preventing optimizations) or too complex (leaking GPU concerns upward).
+
+### What about code duplication?
+
+Multiple thick drivers would duplicate tree walk and clipping logic. Mitigations:
+
+- **Don't solve it prematurely.** Today there's one GPU driver (Virgil3D) and one CPU fallback. Extract shared code when a second GPU driver appears, not before.
+- **Shared utility library (`render-util`) when needed.** Common building blocks (tree walk skeleton, clipping math, coordinate scaling, glyph atlas management) as a toolkit — composable functions, not a framework. Each driver picks what it needs.
+- **The render library (`libraries/render/`) already exists.** Its `scene_render.rs` (tree walk, clipping, compositing) and utility modules can be reused by any driver that wants them. The `CpuBackend` is just one consumer.
+
+### Visual effects are node properties, not content types
+
+Shadows, blur, opacity, transforms, and rounded corners are properties on `Node`, not `Content` variants. This is correct: they're visual modifiers derived from the node's shape, not independent content. A thick driver renders these properties however it wants — CPU does box blur in software, GPU does it with a shader. The scene graph interface doesn't change.
+
+Content types remain: `None`, `Path`, `Glyphs`, `Image`.
+
+### Terminology
+
+- **Render service** — a process that reads the scene graph and produces display output. Encompasses tree walk, rendering, and hardware presentation.
+- **GPU driver** — a render service backed by GPU hardware. "Driver" conveys hardware abstraction; "thick" conveys the higher abstraction level of the interface (scene graph vs draw calls).
+- **CPU render** — the existing `CpuBackend` path, restructured as a standalone render service (merging the current compositor + virtio-gpu 2D driver).
+
+### Implementation plan (Virgil3D render service)
+
+**Phase 1: Virgil3D driver scaffolding.**
+Create `services/drivers/virgil-render/`. Initialize virtio-gpu in 3D mode (Virgl context). Establish a rendering context that can submit Gallium3D commands to the host GPU via virtio-gpu capsets. Verify basic operation: clear screen to a solid color.
+
+**Phase 2: Scene graph rendering.**
+Read the scene graph from shared memory (same `TripleReader` the compositor uses). Implement tree walk: `Path` → tessellate to triangles + GPU fill (or stencil-then-cover), `Glyphs` → texture atlas + textured quads, `Image` → texture upload + blit. Handle clipping, transforms, opacity. Present to display.
+
+**Phase 3: Glyph atlas.**
+Upload rasterized glyphs to a GPU texture atlas. The fonts library rasterizes (CPU-side, same as today); the driver uploads coverage bitmaps to GPU memory and composites them via textured quads or blits.
+
+**Phase 4: Init integration.**
+Init selects the render service at boot (Virgil3D if available, CPU fallback otherwise). The scene graph shared memory setup is identical for both paths — init doesn't know or care which driver reads it.
+
+**Phase 5: CPU render service restructure.**
+Merge the existing compositor + virtio-gpu 2D driver into a single `services/drivers/cpu-render/` process — sibling to `virgil-render/`. Same shape, same interface (reads scene graph, produces display output). The current `services/compositor/` and `services/drivers/virtio-gpu/` are then deleted — no parallel implementations. The render library (`libraries/render/`) and its `CpuBackend` move into the new process.
+
+```text
+services/drivers/
+  cpu-render/       (merges compositor + virtio-gpu 2D)
+  virgil-render/    (thick Virgil3D driver)
+```
+
+### Unforeseen issues audit
+
+Reviewed potential problems with the thick driver approach:
+
+- **Video playback:** `Image` nodes in shared memory, driver composites via texture upload. Actually better than thin drivers — decoder and renderer in same process, zero-copy possible.
+- **Hardware video decode:** GPU often does decoding too. Thick driver has both decoder and renderer — no cross-process transfer.
+- **Shader effects:** New node properties (blur, shadow already exist), not new content types. Driver implements however it wants.
+- **Multiple displays / mixed DPI:** Each display gets its own driver instance reading the same scene graph, rendering at its own scale. Works naturally.
+- **Multiple GPUs simultaneously:** Scene graph is in shared memory, multiple drivers can read it. No issue.
+- **Something above the scene graph needing direct GPU access:** Architecture prevents this. Editors don't render. Core builds the scene graph. The scene graph is expressive enough to add new visual operations via new content types or node properties.
+
+No architectural problems identified.
+
+---
+
+## Text Shaping Pipeline: HarfBuzz Integration (2026-03-17)
+
+**Status:** Complete. Core calls `fonts::shape_with_variations()` via `shape_text()`. The fake monospace shaper (`bytes_to_shaped_glyphs`) remains in test code only. The open items below document the original analysis and remaining edge cases.
+
+### The problem
+
+There are **two `ShapedGlyph` types** that don't talk to each other:
+
+1. **`fonts::ShapedGlyph`** (shaping library output): `glyph_id: u16`, `x_advance: i32`, `y_advance: i32`, `x_offset: i32`, `y_offset: i32`, `cluster: u32`. Values in **font units** (design units, an arbitrary grid per font — typically 1000 or 2048 units per em). Produced by `fonts::shape()` / `fonts::shape_with_variations()` which wrap HarfBuzz (harfrust). This is the real shaping pipeline.
+
+2. **`scene::ShapedGlyph`** (scene graph wire format): `glyph_id: u16`, `x_advance: i16`, `x_offset: i16`, `y_offset: i16`. Values in **points** (the scene graph's logical coordinate unit, 1pt = 1/110"). 8 bytes total, `#[repr(C)]`. This is what the render backend reads.
+
+Core previously bypassed `fonts::shape()` entirely, using `bytes_to_shaped_glyphs(text, advance)` — a fake shaper that treated each ASCII byte as a glyph ID. This was replaced by `shape_text()` in `scene_state.rs`, which calls `fonts::shape_with_variations()` (HarfBuzz via harfrust), converts font units to pixel units, and produces `scene::ShapedGlyph` values for the scene graph. The fake shaper remains in test code only.
+
+### Unit chain
+
+```text
+font units × (point_size / units_per_em) = points
+points × scale_factor = physical pixels
+```
+
+- **Font units → points**: Core's responsibility. Core calls the shaper, gets font units, converts to points using the font's `units_per_em` and the requested point size.
+- **Points → physical pixels**: Render backend's responsibility. The backend reads `scene::ShapedGlyph` values in points and multiplies by the display scale factor.
+
+Currently the scene graph comments say "scaled pixel units" — this should say "points" to match the settled terminology (journal entry on logical unit definition).
+
+### What needs to change
+
+**1. Core calls `fonts::shape_with_variations()` instead of `bytes_to_shaped_glyphs()`.**
+
+Core already has the font data in shared memory and the axis values (MONO=1). It needs to:
+
+- Call `fonts::shape_with_variations(font_data, text, features, axes)`
+- Convert the returned `fonts::ShapedGlyph` array from font units to points: `value_pt = value_fu * point_size / units_per_em`
+- Write the results as `scene::ShapedGlyph` into the scene graph data buffer
+
+**2. `scene::ShapedGlyph` field widths may need revisiting.**
+
+Currently `i16` for advances/offsets. At point size 18 with upem=1000, a typical advance is ~10pt, which fits easily. But at larger point sizes or with fonts that have large design units, `i16` (max 32767) could overflow. Check: `max_advance_fu * max_point_size / min_upem` — if this exceeds 32767, widen to `i32`. The tradeoff is glyph data size in the scene graph data buffer (8 bytes vs 14 bytes per glyph).
+
+At point size 18, upem 1000, max reasonable advance ~600fu: `600 * 18 / 1000 = 10.8pt`. Even at point size 72: `600 * 72 / 1000 = 43.2pt`. `i16` is fine for any practical point size. Keep `i16`.
+
+**3. The clock's in-place update path needs rethinking.**
+
+Currently `update_clock` / `update_clock_inline` overwrite glyph data in-place, assuming the new text produces the same number of glyphs with the same byte layout. With real shaping this assumption breaks — different clock strings could produce different glyph counts (ligatures) or different advances (kerning pairs like "1:" vs "2:"). The in-place path should be replaced with a re-shape + re-push into the data buffer, or the clock update should go through `update_document_content` which already re-pushes all data.
+
+**4. `bytes_to_shaped_glyphs` is deleted.**
+
+It's the fake shaper. Once core calls real shaping, it has no purpose.
+
+**5. `fonts::ShapedGlyph` may be unnecessary as a separate type.**
+
+If core converts font units to points immediately after shaping, the intermediate `fonts::ShapedGlyph` is just a transient. The shaping function could return `scene::ShapedGlyph` directly (with the conversion baked in) if we pass `point_size` and `upem` to the shaping call. Or keep them separate to maintain the library boundary — the fonts library shouldn't depend on the scene library. Keeping them separate is cleaner: `fonts` is a pure shaping/rasterization library, `scene` is the IPC wire format.
+
+### What doesn't change
+
+- The render backend reads `scene::ShapedGlyph` from the data buffer and uses `x_advance` (in points) to position glyphs. It multiplies by scale to get physical pixels. This is correct.
+- The glyph cache in the render backend is keyed by glyph ID and rasterizes at physical pixel size. This is correct — it doesn't care about advances.
+- The scene graph's `Content::Glyphs` node type carries a `DataRef` to the shaped glyph array. This is correct.
+- Core's scene-building functions (`build_editor_scene`, `update_document_content`) already re-push glyph data on each call. They just need to call the real shaper instead of the fake one.
+
+### Why not fix it now
+
+The monospace fake shaper works for the prototype. The interesting design questions (document model, compound documents, editor protocol) don't depend on text shaping. Fixing it is straightforward but touches the core→scene data flow at every text-producing call site. Better to do it as a focused session when: (a) proportional text is needed, (b) non-ASCII text is needed, or (c) the clock kerning hack becomes untenable.
+
+### Dependency: font data access in core
+
+Core needs font data bytes to call `fonts::shape_with_variations()`. It currently has font data mapped in shared memory (loaded via 9p in init, mapped into core's address space). This is sufficient. The `units_per_em` value should be cached at startup alongside `CHAR_W` and `LINE_H` so it doesn't need to be re-parsed on every frame.
+
+---
+
+## Framebuffer Stale-Buffer Bug: Remove Damage Tracking from Compositor (2026-03-17)
+
+**Status:** FIXED. Damage tracking removed from compositor, always full repaint. Serial interleaving and clock kerning also fixed in the same commit. 1,786 tests pass, QEMU visual verified.
+
+### The bug
+
+After the triple buffering mission completed, the display flickers every clock tick: the titlebar, document title, cursor, and trailing text characters appear and disappear each second. One screenshot shows the full UI (titlebar with "Text", clock, cursor). The next shows only the clock on a black background. The clock is always visible because it's the only dirty region being re-rendered each tick.
+
+### Root cause: double-buffered framebuffers with no copy-forward
+
+The compositor double-buffers its pixel framebuffers (`fb_va`, `fb_va2`). On each frame it renders into `1 - presented_buf` (the non-displayed buffer), then presents and swaps. When the render backend does a **partial update** (only dirty rectangles), it only repaints those regions into the target framebuffer. The rest of that framebuffer still contains whatever was last rendered into it — which was **two frames ago**, not one.
+
+Timeline:
+
+1. Frame N: full repaint into FB0. Present FB0. `presented_buf = 0`.
+2. Frame N+1 (clock tick): partial update, renders only the clock rect into FB1. But FB1 still has stale content from frame N-1 (or is black from boot). Titlebar, text, cursor are not in the dirty region, so they're never painted. Present FB1.
+3. Frame N+2 (clock tick): partial update into FB0. FB0 still has the full scene from step 1. Everything is visible. Present FB0.
+4. Repeat: alternating between a complete FB0 and an incomplete FB1.
+
+The scene graph's triple-buffer `acquire_copy` correctly copies scene data forward before mutation. But the compositor's framebuffer double-buffer has no equivalent copy-forward step. The discipline that makes triple buffering correct was never applied to the pixel output layer below it.
+
+### Design discussion: should we fix damage tracking or remove it?
+
+**Game engines vs. compositors.** Game engines (Unity, Unreal, Vulkan apps) never do partial updates — every frame is a full redraw. The GPU fills pixels so fast that damage tracking isn't worth the complexity. Desktop compositors (Wayland/Weston, macOS Core Animation, Android SurfaceFlinger) do partial updates because compositing multiple overlapping windows with alpha blending, blur, and shadows is expensive, and 99% of frames only change a tiny region.
+
+**Where this system sits.** Right now: a single full-screen document, a titlebar, a cursor, a clock. CPU software rasterizer. QEMU runs at the host Mac's physical resolution (3456x2234 on the development machine — the run script detects this via `system_profiler` and passes it to virtio-gpu). At that resolution, each framebuffer is ~30.8MB and full repaints touch 7.7 million pixels. Damage tracking would meaningfully help the CPU path at this resolution — a clock tick touching ~200 pixels vs 7.7M is a 38,000x difference. But the damage tracking is in the wrong layer (compositor, not render backend), causing the stale-buffer bug.
+
+**The CPU rasterizer is temporary.** virtio-gpu with Virgil 3D provides GPU-accelerated rendering inside QEMU. The architecture should assume a GPU backend as the primary path, with the CPU rasterizer as a fallback. A GPU backend would do full repaints trivially (like game engines). Damage tracking only makes sense as an optimization internal to the CPU fallback path — not in the compositor's render loop where it creates layer-boundary bugs.
+
+**Damage tracking was in the wrong layer.** The compositor shouldn't decide whether to skip pixels — it should always ask for a full render. If a `CpuBackend` internally wants to optimize by tracking damage and doing copy-forward on its own managed buffers, that's its business. The compositor's framebuffer management doesn't support partial updates correctly (no copy-forward), which is the root cause of the bug.
+
+### Decision: remove damage tracking entirely for now
+
+1. **Compositor always does full repaints.** Read the scene, call `backend.render()`, present. No skip logic, no dirty rect tracking, no `FrameAction::Partial`.
+2. **`RenderBackend` trait simplifies.** Remove `prepare_frame`, `finish_frame`, `update_bounds_for_skip`, `dirty_rects`, `FrameAction`. The trait is just `render()`.
+3. **`CpuBackend` strips damage internals.** Remove `damage: DamageTracker`, `prev_bounds`, `prev_node_count`. Keep glyph caches, scale, surface pool.
+4. **`damage.rs` module stays in the tree.** It's a standalone building block for future use — either inside a future `CpuBackend` optimization or for a compositor that properly manages its own buffer copies.
+5. **GPU driver receives full-screen transfers.** Always `rect_count = 0`. The partial transfer path stays in the GPU driver (it's correct and tested) but won't be exercised until damage tracking is reintroduced at the right layer.
+6. **Scene graph change list stays.** Core's incremental updates (`update_clock`, `update_cursor`, `mark_changed`, `acquire_copy`) are still valuable for minimizing scene _building_ work. That's independent of how the compositor _renders_ it.
+
+### When to reintroduce damage tracking
+
+At 3456x2234, full CPU repaints are expensive enough that damage tracking will likely be needed soon. But the reintroduction should be:
+
+- Inside the `CpuBackend`, not the compositor — the backend manages its own buffer copies and damage state
+- With proper copy-forward: the backend maintains its own previous-frame buffer and copies it to the render target before partial updates
+- Or not at all if a `GpuBackend` handles the workload (GPU full repaints are effectively free)
+
+### Design for GPU, fall back to CPU
+
+The `RenderBackend` trait supports this cleanly:
+
+- **`GpuBackend`:** full repaints every frame, no damage tracking, GPU handles it trivially
+- **`CpuBackend`:** could internally optimize with damage tracking + copy-forward, because CPU pixel-filling is expensive enough to justify the complexity
+- Damage tracking becomes a backend-internal optimization, not a compositor-level protocol
+
+---
+
+## Scene Graph Content Type Revision: Path + Subpixel Removal + FillRect Removal (2026-03-17)
+
+**Status:** design-settled, not yet implemented (blocked by in-progress transport bugs mission).
+
+### Context
+
+The Phase 2 rendering redesign (2026-03-16) replaced semantic content types (`Text`, `Path`) with geometric ones (`FillRect`, `Glyphs`, `Image`). This eliminated the SVG parser and routed icons through the glyph cache. But the redesign left a gap: the render backend already IS a path rasterizer (Bezier flattening + scanline coverage for font outlines), yet the scene graph has no way to express arbitrary vector content. Editors would have to pre-rasterize vector content to `Image`, splitting rasterization across both sides of the interface and losing resolution independence.
+
+### Decisions
+
+**1. Add `Path` content type.** Arbitrary filled Bezier contours as a first-class scene graph primitive. The render backend rasterizes them with the same scanline engine it uses for glyphs. No editor does its own pixel work. Vector content scales cleanly at any display density.
+
+```rust
+Path {
+    color: Color,
+    fill_rule: FillRule,          // Winding | EvenOdd
+    contours: DataRef,            // cubic Bezier commands in data buffer
+    stroke: Option<StrokeParams>, // width, cap, join — backend handles expansion
+}
+```
+
+**2. ~~Remove `FillRect` content type.~~** **Done.** `FillRect` removed from `Content` enum. Solid rectangles use `Content::None` with `node.background` color. Cursor and selection highlights use this pattern. Tests validate (`content_enum_has_three_variants`, `core_cursor_uses_background_container`).
+
+**3. Cubic Beziers only at the interface.** The scene graph mandates one contour format: cubic Beziers. Quadratics (TrueType font outlines) are converted to cubics losslessly when Core builds the scene graph (`cp1 = p0 + 2/3*(c-p0)`, `cp2 = p1 + 2/3*(c-p1)`). One format, one flattening algorithm in the backend. If the rasterizer wants to detect degenerate cubics and fast-path them as quadratics internally, that's its business — implementation detail behind the interface.
+
+**4. Logical coordinates, not pixels.** Core does layout in device-independent logical units. The scene graph carries logical coordinates. The render backend multiplies by a display scale factor to get physical pixels for rasterization. Path contour coordinates are in the same logical space as node x/y/width/height. This keeps the entire pipeline above the render backend density-agnostic — Core doesn't know or care whether it's 1x or 2x. What "logical unit" means precisely (points, CSS px, abstract scene units) is a scene-graph-wide decision, not Path-specific.
+
+**5. Stroke in the render backend.** The render backend handles stroke expansion (offset curves + caps + joins) internally. Stroke parameters (width, cap style, join style) live on the Path node as optional fields. This follows the principle of pushing complexity to the leaf nodes — the render backend is the leaf. Centralizing stroke logic in the backend avoids duplicating it across editors.
+
+**6. Remove subpixel (LCD) rendering.** macOS dropped it in 2018. Android/iOS never used it on HiDPI. The OS targets Retina-class displays (220+ PPI) where individual pixels are below the eye's resolving power. Subpixel rendering adds complexity (color fringing, display-technology dependence) for imperceptible benefit at HiDPI. Switch to grayscale antialiasing with vertical oversampling only. This simplifies the rasterizer and eliminates the only remaining difference between glyph rasterization and general path rasterization.
+
+### Content types after this revision
+
+- `None` — pure container (decoration via background_color, border, corner_radius, opacity)
+- `Path` — filled (and optionally stroked) cubic Bezier contours
+- `Glyphs` — batched font glyph run (glyph IDs + advances + font reference). Distinct from Path because text is a fundamentally different data shape: batched references with shaping metadata, not inline contours. The render backend uses the same rasterizer internally.
+- `Image` — pixel data reference
+
+### Why Glyphs stays separate from Path
+
+A page of text has ~5,000 characters but currently ~50 scene graph nodes (one `Glyphs` per line, carrying an array of glyph_id + x_advance). Unifying Glyphs into Path would either: (a) emit 5,000 individual Path nodes (massive scene graph bloat), or (b) require a batching mechanism — an array of (PathId, position) pairs in one node — which is exactly what Glyphs already is. The distinction is batched-references-with-shaping-metadata vs. inline-contours. These are different data shapes at the interface, not an optimization leak.
+
+### Caching
+
+Caching is an implementation detail behind the interface. The render backend can cache rasterized coverage maps for any contour, keyed by (contour identity, scale). For `Glyphs`, contour identity comes from (glyph_id, font). For `Path`, it can come from the DataRef offset or a contour hash. Multiple scene graph nodes can reference the same DataRef in the data buffer (e.g., repeated shapes). The scene graph expresses what to render; the backend decides what to cache.
+
+### Relationship to rendering pipeline architecture
+
+The settled pipeline remains:
+
+```text
+Core (shaping, layout, scene building) → Scene Graph (shared memory) → Compositor (thin event loop) → Render Backend (tree walk, rasterization, compositing) → GPU Driver → Display
+```
+
+Path doesn't change any component boundaries. Core writes contour data into the scene graph. The render backend rasterizes it. The compositor never sees or cares about content types.
+
+### Resolved: Logical unit definition (points)
+
+The scene graph's logical unit is a **point**, matching the macOS convention: 1pt = 1/110" at the reference density. The render backend applies `scale = physical_PPI / 110` to convert to physical pixels (~2.0 on Retina, 1.0 on QEMU's virtual framebuffer). Core, editors, and the scene graph never deal in physical pixels — the entire pipeline above the render backend is density-agnostic.
+
+Font sizes, node positions, path coordinates all use the same unit. "Font size 16" = 16 points. A 200pt-wide panel = 200 points. The only thing that changes between displays is the scale factor.
+
+Why not viewport-relative (vh/vw): a point-based unit maintains roughly consistent perceived size across display sizes and densities. Viewport-relative units make content tiny on small screens and huge on large ones — they solve the aspect ratio problem but create a sizing problem. Every modern system (macOS pt, iOS pt, Android dp, CSS px) converges on density-based logical units with per-device scale factors for this reason.
+
+### Resolved: Path command encoding
+
+**Commands:** four cubic Bezier commands — MoveTo, LineTo, CubicTo, Close. Same as SVG/PostScript/Skia/Cairo. Higher-level constructs (arcs, rounded rects) decompose to these in Core before the scene graph.
+
+**Coordinates:** f32. Sub-point precision for smooth curves. Natural for AArch64 (full FPU). IEEE 754, well-defined in shared memory. The rasterizer converts to its internal integer math during Bezier flattening anyway. No benefit to fixed-point when hardware has an FPU.
+
+**Layout:** variable-size commands, sequential in the data buffer. Referenced by a `DataRef` on the Path node.
+
+```text
+MoveTo:  [tag: u32, x: f32, y: f32]                                          = 12 bytes
+LineTo:  [tag: u32, x: f32, y: f32]                                          = 12 bytes
+CubicTo: [tag: u32, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32]  = 28 bytes
+Close:   [tag: u32]                                                          =  4 bytes
+```
+
+Variable-size is compact and matches access patterns — the rasterizer walks commands sequentially for flattening, never needs random access by index. u32 tag ensures 4-byte alignment for all f32 fields.
+
+---
+
+## Rendering Pipeline Transport Bugs (2026-03-17)
+
+**Status:** FIXED. All six bugs fixed via triple buffering + GPU completion flow control. TripleWriter/TripleReader replace DoubleWriter/DoubleReader with mailbox semantics (acquire always succeeds, reader gets latest). MSG_PRESENT_DONE adds GPU→compositor backpressure. Dirty rect coalescing unions all rects. Damage tracking handles skipped frames. 23 new tests, 1,791 total pass. QEMU visual + 68s stress test verified.
+
+**Original problem:** Six related issues across the rendering pipeline, all stemming from unsynchronized shared-memory transport between pipeline stages. No backpressure, no flow control. The pipeline assumes each stage is faster than the previous one and never falls behind. When that assumption breaks: dropped frames, torn reads, stale data.
+
+The pipeline architecture (data shapes and translators) is sound. The problems are all in the _transport_ between translators.
+
+### Bug 1: Scene graph double-buffering drops frames (core → compositor)
+
+The scene graph uses double buffering in shared memory between core (writer) and compositor (reader). When the writer gets 2+ frames ahead of the reader, there is no safe buffer to write to — the front is what the reader will read, and the back may be what the reader is currently reading. `copy_front_to_back()` correctly detects this and returns `false`, but the scene update is then silently dropped. The character is in the document but never rendered until a future event produces a successful `copy_front_to_back`.
+
+The `reader_done_gen` check is conservative by design: it tracks the last generation the reader _finished_, not what it's _currently_ reading. When `reader_done_gen < back_gen`, the back buffer might be in use. This is correct — the alternative is torn reads.
+
+With two buffers, the writer can get exactly one frame ahead. Any further writes require the reader to have finished. This is a fundamental constraint of the protocol, not a bug in the implementation. The failure manifests under fast typing because core processes input → editor → document mutation → scene build faster than the compositor renders the previous frame.
+
+Attempted fixes that failed:
+
+- **Spin-loop (`wait_for_back`):** Blocks core until compositor finishes. Violates "event-driven over polling." Can deadlock if core and compositor share a CPU core.
+- **Retry timer (2ms):** Event-driven but adds complexity and doesn't prevent the initial dropped frame. Still drops the first attempt; latency depends on timer granularity.
+- **Always render immediately in compositor:** Removed valid frame coalescing without fixing the root cause.
+
+**Files:** `libraries/scene/lib.rs` (double-buffer protocol), `services/core/scene_state.rs` (all `copy_front_to_back` call sites return early on failure), `services/core/main.rs` (scene dispatch silently drops failed updates).
+
+### Bug 2: Framebuffer tearing (compositor → GPU driver)
+
+The compositor has `presented_buf` toggling between framebuffers 0 and 1. On full repaint it renders to `1 - presented_buf` (the non-displayed buffer), then presents — correct double-buffer usage. But on partial update it renders _into the currently displayed buffer_ (`presented_buf`). There is no synchronization with the GPU driver — the compositor writes pixels to a framebuffer while the GPU driver may be in the middle of `transfer_to_host` reading those same pixels. This is tearing. It works visually because virtio-gpu on QEMU is fast enough that the race window is small, but it's the same class of problem as Bug 1: unsynchronized shared memory between producer and consumer.
+
+**Files:** `services/compositor/main.rs` (lines 153-161, the `presented_buf` logic), `services/drivers/virtio-gpu/main.rs` (present loop reads framebuffer without synchronization).
+
+### Bug 3: Compositor frame scheduling can defer scene updates
+
+When core signals a scene update, the compositor calls `should_render_immediately()`, which returns `true` only if the last timer tick was more than half a frame period ago. Otherwise it sets `dirty = true` and waits for the next timer tick. If core writes another scene update before the tick fires, the scene data in shared memory is overwritten. The first update's frame was never rendered.
+
+This is usually fine — only the latest state matters for rendering. But combined with Bug 1, it means the compositor can defer rendering a frame that then gets overwritten before it's ever read, compounding the dropped-frame problem.
+
+**Files:** `services/compositor/frame_scheduler.rs` (`should_render_immediately`), `services/compositor/main.rs` (line 130).
+
+### Bug 4: GPU driver present coalescing loses dirty rects
+
+The GPU driver drains all pending `MSG_PRESENT` messages and uses the _last_ one (`last_payload`). If the compositor sends two presents with different dirty rects before the GPU driver wakes up, only the last set of dirty rects is transferred to the host. The pixels from the first present's dirty region are not transferred, causing partial screen corruption until the next full repaint.
+
+**Files:** `services/drivers/virtio-gpu/main.rs` (present loop around line 831 — "coalesce: use the last one").
+
+### Bug 5: No backpressure from GPU to compositor
+
+The compositor sends `MSG_PRESENT` and immediately continues to the next frame. It never waits for the GPU driver to finish the transfer. If the compositor produces frames faster than the GPU can transfer, presents pile up in the IPC ring buffer and get coalesced (see Bug 4). There's no flow control signal. In a real GPU pipeline you'd have a fence or semaphore — the compositor waits until the GPU is done with a framebuffer before writing to it again.
+
+**Files:** `services/compositor/main.rs` (present is fire-and-forget), `services/drivers/virtio-gpu/main.rs` (no completion signal back to compositor).
+
+### Bug 6: Damage tracking uses stale bounds after skipped frames
+
+`PREV_BOUNDS` in the render backend stores the previous frame's node positions so the damage tracker can mark both old and new positions as dirty when a node moves. But if a frame is skipped (due to Bug 1 or Bug 3), `PREV_BOUNDS` doesn't update, so the next frame's damage calculation uses stale bounds. This can cause rendering artifacts — old content not cleared, or new content not drawn in the right region.
+
+**Files:** `libraries/render/lib.rs` (`prev_bounds` array, `finish_frame` method).
+
+### The structural fix: triple buffering + flow control
+
+All six bugs are instances of the same pattern: unsynchronized producer-consumer shared memory with no backpressure. The fix is the same at each interface boundary.
+
+**Triple buffering** adds a third buffer so the writer always has a free buffer. The protocol becomes:
+
+- **Writer:** acquire the free buffer, write, publish (atomically make it the latest). Never blocks, never fails.
+- **Reader:** always read the most recently published buffer. Intermediate frames are silently skipped (the reader always sees the latest state).
+- **The third buffer** is whichever one neither the writer nor reader is currently using.
+
+The writer never blocks, the reader never sees torn data, and frame skipping is the natural behavior when the writer is faster (which is correct — only the latest state matters for rendering).
+
+**Flow control** (fences/semaphores) at the compositor → GPU boundary ensures the compositor doesn't write to a framebuffer the GPU is still reading. The GPU signals completion; the compositor waits for it before reusing that buffer.
+
+### Prior art
+
+Triple buffering is the standard solution in graphics pipelines:
+
+- **Android (SurfaceFlinger):** Triple buffering by default since 4.1 (Project Butter, 2012). `BufferQueue` manages a pool of typically 3 buffers.
+- **Wayland/Weston:** `wl_surface` protocol designed around multi-buffer attach/commit.
+- **macOS (Core Animation):** Triple-buffered internally via CALayer buffer pools.
+- **Windows (DWM/DXGI):** Desktop Window Manager uses triple-buffered composition. DXGI swap chains default to 2-3 buffers.
+- **Fuchsia (Scenic):** `BufferCollection` with configurable count, typically 3.
+- **Vulkan/Metal/DX12:** All expose explicit swap chain buffer counts; 3 is the standard recommendation.
+
+### Presentation model: mailbox, not FIFO
+
+Triple buffering has two flavors (see [Triple Buffering in Rendering APIs](https://www.4rknova.com/blog/2025/09/12/triple-buffering)):
+
+- **FIFO (queue):** Frames are consumed in order. Every frame produced is eventually displayed. Latency increases under load because frames queue up. Correct for video playback and sequential animation where every frame matters.
+- **Mailbox (flip):** The writer publishes to a slot; the reader always takes the latest. Intermediate frames are silently replaced. No latency buildup. Correct for interactive UI where only the latest state matters.
+
+**The scene graph transport should use mailbox.** The scene represents the current document state. If core produces three updates before the compositor renders, the compositor should see the latest, not replay intermediates. Showing stale intermediate states adds latency with no benefit.
+
+**Video and animation use FIFO, but at the leaf level, not the transport level.** A video node in the scene tree would own its own FIFO buffer pool for decoded frames. The compositor composites the latest scene tree (mailbox) but reads whichever video frame the player has marked current (FIFO, controlled by the player process via presentation timestamps). The two models compose -- they don't conflict. This is exactly how Android (SurfaceFlinger + MediaCodec), macOS (Core Animation + AVSampleBufferDisplayLayer), and Wayland (wl_surface + wp_linux_dmabuf) work.
+
+### Implementation plan
+
+1. ~~**Revert** all session changes (retry timer, `is_back_available`, `scene_pending` flag, `bool` return types on scene update methods). Return to clean baseline.~~
+2. **Triple-buffer the scene graph** (`libraries/scene/lib.rs`). `DoubleWriter`/`DoubleReader` become `TripleWriter`/`TripleReader`. `back()` becomes `acquire()` (always succeeds), `swap()` becomes `publish()`, `copy_front_to_back()` is eliminated. Cost: ~48 KiB extra shared memory.
+3. **Fix scene dispatch in core** (`services/core/main.rs`). Try incremental update, fall back to full rebuild. Both always succeed with triple buffering. No retry logic needed.
+4. **Add GPU completion signal** (`services/drivers/virtio-gpu/main.rs` → `services/compositor/main.rs`). GPU driver sends `MSG_PRESENT_DONE` after transfer+flush. Compositor waits for it before reusing a framebuffer.
+5. **Fix dirty rect coalescing** in GPU driver. Union the dirty rects from all coalesced presents instead of discarding earlier ones.
+6. **Fix damage tracking** in render backend. When a frame is skipped (`FrameAction::Skip`), `PREV_BOUNDS` should still be valid for the next frame. Verify this is the case, or update bounds even on skip.
+
+---
+
+## Tickless Idle + Inter-Processor Interrupts (2026-03-16)
+
+**Status:** Design discussion complete. Ready to implement when desired.
+
+### Context
+
+While evaluating what it would take to run the OS on real M1 hardware, the interrupt controller abstraction and cross-core wakeup model came into focus. The current kernel has zero IPI usage — cross-core wakeups are indirect: `try_wake` moves a thread from `blocked` to `ready` in shared scheduler state, and the destination core discovers it on its next 250 Hz timer tick (worst case 4ms). This works but leaves two gaps:
+
+1. **Idle power waste** — all 4 cores burn cycles on 250 Hz ticks even when they have no runnable threads.
+2. **Wakeup latency** — 4ms worst case is fine for interactive text editing but blocks future low-latency IPC or real-time audio.
+
+IPIs (Inter-Processor Interrupts) are the mechanism: one core writes to a hardware register, the target core gets an interrupt immediately. On GICv3 these are system register writes to ICC_SGI1R_EL1 (no MMIO, fast). On Apple AIC (M1) they're dedicated IPI trigger registers delivered as FIQs. Different mechanism, same concept.
+
+IPIs alone are pointless without tickless idle — if the 250 Hz tick is still running, it does the wakeup work. The real scope is tickless + IPIs together.
+
+### GICv2 → GICv3 migration (decided)
+
+The kernel currently uses GICv2, inherited from the reference project (`bahree/rust-microkernel`) and QEMU virt's default. There's no reason to stay on it:
+
+- **GICv2 is a dead end.** No modern AArch64 SoC ships it. Every non-Apple ARM chip (RPi 4/5, Qualcomm, server ARM) uses GICv3. The GICv2 code has zero future utility.
+- **GICv3 is strictly better.** CPU interface via system registers (`mrs`/`msr`) instead of MMIO loads/stores — faster acknowledge/EOI on the hot path. Affinity routing scales beyond 8 cores. MSI/LPI support needed for PCIe on real hardware.
+- **QEMU supports it trivially.** Change `gic-version=2` to `gic-version=3`.
+- **"When you build a new way, kill the old way."** Write the trait, implement `GicV3` as the only GIC backend, drop GICv2 entirely.
+
+Key implementation differences from GICv2:
+
+| Operation         | GICv2 (current)                 | GICv3 (target)                                                          |
+| ----------------- | ------------------------------- | ----------------------------------------------------------------------- |
+| Acknowledge       | MMIO read from GICC+IAR         | `mrs x0, ICC_IAR1_EL1`                                                  |
+| End of interrupt  | MMIO write to GICC+EOIR         | `msr ICC_EOIR1_EL1, x0`                                                 |
+| Per-core init     | MMIO writes to GICC (PMR, CTLR) | System registers: ICC_SRE_EL1, ICC_PMR_EL1, ICC_CTLR_EL1, ICC_IGRP1_EL1 |
+| IRQ routing       | 8-bit CPU mask (ITARGETSR)      | 32-bit affinity (IROUTER) per SPI                                       |
+| Send IPI          | MMIO write to GICD_SGIR         | `msr ICC_SGI1R_EL1, x0` (affinity encoding)                             |
+| Distributor       | GICD MMIO (same base layout)    | GICD MMIO (extended) + per-core Redistributor (GICR)                    |
+| DTB compat string | `arm,cortex-a15-gic`            | `arm,gic-v3`                                                            |
+| MSI/LPI support   | No                              | Yes (important for PCIe — future)                                       |
+
+The Redistributor (GICR) is the main new concept: each core has a 128 KiB MMIO region for per-core configuration (PPIs, SGIs, LPIs). Replaces what GICv2 did through banked registers.
+
+### Design
+
+**Tickless idle:** When a core has no runnable threads and no pending timers, it enters WFI (Wait For Interrupt) instead of spinning on a fixed tick. The timer is reprogrammed per-core to fire at the next deadline (nearest timer object or scheduler quantum expiry) rather than at a fixed 250 Hz interval.
+
+**IPI-driven wakeup:** When `try_wake` makes a thread runnable and the target core is idle (in WFI), it sends an IPI to kick that core out of sleep. The core re-evaluates its run queue and picks up the newly-ready thread with sub-microsecond latency instead of waiting up to 4ms.
+
+**InterruptController trait:** Abstract the GIC-specific free functions behind a trait so the kernel can target both GIC (QEMU) and AIC (M1) without conditional compilation in the scheduler/timer/interrupt forwarding code.
+
+```rust
+pub trait InterruptController {
+    fn init_distributor(&self);
+    fn init_per_core(&self);
+    fn acknowledge(&self) -> Option<u32>;
+    fn end_of_interrupt(&self, token: u32);
+    fn enable_irq(&self, id: u32);
+    fn disable_irq(&self, id: u32);
+    fn send_ipi(&self, target_core: u32);
+}
+```
+
+The current `interrupt_controller.rs` is already this shape — free functions that map 1:1 to trait methods. The refactor is mechanical.
+
+### Current kernel state (reference)
+
+- `interrupt_controller.rs` — GICv2 only. Free functions: `acknowledge`, `end_of_interrupt`, `enable_irq`, `disable_irq`, `init_distributor`, `init_cpu_interface`, `set_base_addresses`. No SGI/IPI support. All MMIO-based.
+- `timer.rs` — Fixed 250 Hz tick (`TICKS_PER_SEC = 250`). `reprogram()` always writes `freq / 250` to CNTP_TVAL. `check_expired()` scans all timer objects on every tick. Timer PPI is IRQ 30 (per-core, doesn't route through distributor).
+- `scheduler.rs` — `try_wake` / `try_wake_for_handle` move threads from blocked to ready. No IPI send. No per-core idle state tracking. `set_wake_pending` handles the case where the target thread hasn't blocked yet.
+- `interrupt.rs` — Forwards device IRQs to userspace via waitable handles. Mask-on-fire, unmask-on-ack. Not affected by tickless (device IRQs are independent of the tick).
+- `main.rs` — DTB parsing looks for `arm,cortex-a15-gic` (GICv2). `irq_handler` dispatches on IRQ ID (30 = timer, else forward to userspace).
+- QEMU scripts (`run-qemu.sh`, `test-qemu.sh`, `test/smoke.sh`, `test/stress.sh`, `test/crash.sh`, `test/integration.sh`) — all hardcode `gic-version=2`.
+
+### Implementation plan
+
+**Phase 1: InterruptController trait + GICv3 (replace GICv2)**
+
+- Define `InterruptController` trait
+- Implement `GicV3` — system register CPU interface, GICD+GICR MMIO for distributor/redistributor
+- Delete `interrupt_controller.rs` (GICv2 code) entirely — no parallel implementations
+- Update DTB parsing in `main.rs`: look for `arm,gic-v3`, extract GICD + GICR base addresses
+- Update all QEMU scripts: `gic-version=2` → `gic-version=3`
+- Kernel references the trait via static dispatch
+- All existing tests pass on GICv3 — functional equivalence verified
+
+**Phase 2: Per-core idle tracking**
+
+- Add `is_idle: bool` to per-core scheduler state
+- Set `is_idle = true` when a core has no runnable threads (before WFI)
+- Clear on timer tick or any interrupt that makes a thread runnable
+- No behavioral change yet — just bookkeeping
+
+**Phase 3: IPI send on wake**
+
+- Implement `send_ipi` on GicV3 (`msr ICC_SGI1R_EL1` with target affinity encoding)
+- `try_wake_impl`: after moving thread to ready queue, if target core is idle, send IPI
+- Handle SGI 0 in `irq_handler` — just acknowledge it, the scheduler re-evaluation happens naturally on return from interrupt
+- This alone improves wakeup latency even with the fixed tick still running
+
+**Phase 4: Tickless idle**
+
+- Replace fixed `reprogram(freq)` with `reprogram_next_deadline(core_id)` — computes earliest of: next timer object deadline, scheduler quantum expiry, or "no timer" (infinite sleep)
+- When no deadline exists, skip timer programming entirely → core enters WFI after EOI
+- WFI exit: either IPI (new work), device IRQ (forwarded normally), or timer (deadline expired)
+- Remove `TICKS_PER_SEC` constant and `TICKS` counter (or keep TICKS as a debug diagnostic)
+
+### Risks
+
+- **SMP timing bugs.** The kernel's history includes TPIDR races, use-after-free in thread drops, and aliasing UB in syscall dispatch — all surfaced only under concurrent load. Tickless changes the timing profile and may surface latent bugs. Stress testing is mandatory at every phase.
+- **Lock ordering.** IPI delivery in `try_wake_impl` happens while the scheduler lock is held. The IPI handler on the target core must NOT acquire the scheduler lock (it just returns from interrupt and re-evaluates). If the handler tried to lock, deadlock.
+- **Timer reprogramming correctness.** Off-by-one in deadline calculation → missed wakeups or busy-spinning. The fixed tick is self-correcting (fires again in 4ms); tickless has no safety net.
+
+### Interrupt controller landscape (AArch64)
+
+Three interrupt controllers exist in the AArch64 world. The trait must support all three, but only GICv3 and AIC need implementations:
+
+|               | GICv2 (legacy, dropping) | GICv3 (target)                | Apple AIC (M1, future)                   |
+| ------------- | ------------------------ | ----------------------------- | ---------------------------------------- |
+| CPU interface | MMIO                     | System registers (fast)       | MMIO                                     |
+| IPI mechanism | MMIO write to GICD_SGIR  | Sysreg write to ICC_SGI1R_EL1 | Dedicated register, delivered as FIQ     |
+| IRQ routing   | 8-bit CPU mask           | 32-bit affinity (IROUTER)     | Hardware decides (not software-routable) |
+| Max cores     | 8                        | Thousands                     | ~dozens                                  |
+| MSI/LPI       | No                       | Yes (PCIe)                    | Own mechanism                            |
+| Per-core init | CPU interface MMIO       | Redistributor + sysregs       | Single init                              |
+| Shipped on    | Nothing modern           | Every non-Apple ARM SoC       | Apple Silicon                            |
+
+Apple AIC specifics:
+
+- Centralized controller, one MMIO register block (not per-core distributed)
+- IRQs delivered to a single core chosen by hardware
+- IPIs use dedicated registers, delivered as FIQ (faster entry than IRQ). Asahi Linux found this slightly faster than GIC SGIs.
+- Timer interrupts also delivered as FIQ on M1
+- The `InterruptController` trait gets an `AppleAic` implementation when M1 work begins
+
+MSI/LPI note: GICv3's LPI (Locality-specific Peripheral Interrupt) support is needed for PCIe devices. This is a separate concern from the core trait — it would be a trait extension or separate trait when PCIe support is added (storage, USB, networking on real hardware all come through PCIe).
+
+### Connection to M1 bare metal (broader)
+
+Full M1 support requires replacing every driver (AIC, UART, SPI keyboard, ANS storage, DCP/AGX display). The interrupt controller trait is the first piece and has standalone value (cleaner kernel code, testability). See session discussion 2026-03-16 for the full M1 gap analysis:
+
+- **MVP (boots, shows pixels, takes input):** 2-4 months. m1n1 framebuffer, AIC, UART, USB/SPI keyboard.
+- **Feature parity with QEMU demo:** 4-8 months. Add ANS storage, proper display, reliable input.
+- **Usable (networking, power, Thunderbolt):** 1+ year.
+
+The kernel core (scheduler, syscalls, memory management, IPC), all of userspace, and the entire rendering pipeline are unchanged — they sit above the driver layer.
+
+---
+
+## Rendering Architecture: Path-Centric Pipeline (2026-03-16)
+
+**Status:** COMPLETE. All three implementation phases shipped (2026-03-16). Design settled, implemented, and verified.
+
+### Context
+
+Systematic top-down audit of the rendering stack revealed architectural problems that can't be fixed incrementally. The compositor (~4,800 lines) is not the "content-agnostic pixel pump" the architecture document describes — it has font knowledge, SVG parsing, content-type dispatch, and glyph rasterization. Two incompatible rendering visions (path-centric and content-type-dispatching) coexist. Responsibilities leak across boundaries. Optimization complexity (change lists, PREV_BOUNDS, copy-forward) compensates for missing structural simplicity.
+
+Researched Vello (Google/Linebender) — Raph Levien's GPU-compute-centric 2D renderer. Key findings: (1) Vello's Scene API matches the path-centric interface proposed here. (2) Vello now has three backends — GPU compute (production), CPU "sparse strips" (alpha), and hybrid CPU/GPU (experimental). (3) Raph's March 2025 blog post reveals frustration with GPU bounded-memory limitations. (4) Vello's implementation assumes host-OS infrastructure (wgpu, multithreading, std) incompatible with bare metal. (5) The architectural _principles_ and _API shape_ are proven and adoptable without the implementation.
+
+### Decision: Path-Centric Rendering
+
+**The rendering pipeline is a series of data shape transformations. Each component is a translator — data of one shape goes in, data of another shape goes out. The logic is fully encapsulated.**
+
+```text
+Hardware Events → Input Driver → Key Events → Editor → Write Requests
+→ Core → Scene Tree → Render Backend → Pixel Buffer → GPU Driver → Display
+```
+
+Five data shapes (interfaces):
+
+1. **Hardware Events** — evdev interrupts (type, code, value)
+2. **Key Events** — logical key + modifier set
+3. **Write Requests** — insert(pos, data), delete(pos, len), move_cursor(pos), set_selection(start, end)
+4. **Scene Tree** — tree of containers, rects, glyphs, images in logical coordinates
+5. **Pixel Buffer** — BGRA8888 framebuffer
+
+Four translators (black boxes):
+
+1. **Input Driver** — Hardware Events → Key Events
+2. **Editor** — Key Events → Write Requests (with read-only document access)
+3. **Core** — Write Requests → Scene Tree (owns document state, text shaping, layout)
+4. **Render Backend** — Scene Tree → Pixel Buffer (owns tree walk, rasterization, compositing)
+
+See `design/rendering-pipeline.mermaid` for the visual diagram.
+
+### Sub-Decisions
+
+**1. Glyph rasterization lives in the render backend, not core.**
+Core does shaping (harfrust) and layout (line breaking, wrapping, cursor positioning). Core knows what text says and where it goes. The render backend knows what text looks like — it rasterizes glyph outlines, manages the glyph cache, handles subpixel rendering. Core submits glyph IDs + positions + font reference. This preserves the logical-coordinate model (core doesn't know the scale factor) and allows a future GPU backend to do SDF or outline rendering directly.
+
+**2. Scene tree with geometric content types.**
+The tree structure is retained (not a flat command stream) because: damage tracking needs stable node IDs, the tree maps naturally to document structure, and bare-metal CPU rendering isn't fast enough to repaint every pixel every frame at Retina resolution. The tree walk moves from the compositor into the render backend — push complexity to the leaf.
+
+Node types:
+
+- **Container** — geometry (x, y, w, h), decoration (background, border, corner_radius, opacity), flags (clips_children, visible), children (first_child, next_sibling). Like SVG `<g>`.
+- **FillRect** — positioned rectangle with color. Optimization of a rectangular path.
+- **Glyphs** — font reference + array of (glyph_id, x, y) + paint. "Cached vector shapes looked up by ID." Text is the common case, but monochrome icons are the same — an icon set is structurally identical to a font. This eliminates the 795-line SVG parser in the current compositor.
+- **Image** — pixel data reference + bounds. Escape hatch for inherently raster content (photos, video frames).
+
+The compositor doesn't dispatch on content type to _interpret_ data — it calls `backend.render(scene, surface)` and the backend handles everything.
+
+**3. Explicit `RenderBackend` trait.**
+
+```rust
+trait RenderBackend {
+    fn render(&mut self, scene: &SceneReader, target: &mut Surface);
+    fn dirty_rects(&self) -> &[DirtyRect];
+}
+```
+
+One call — the backend owns the tree walk, transform/clip stack, glyph cache, rasterization, compositing, and damage tracking. The compositor becomes ~30 lines: event loop, scene read, `backend.render()`, present.
+
+**4. Multi-core rasterization is internal to the render backend.**
+The kernel supports 4 SMP cores. The render backend can divide the framebuffer into horizontal strips and rasterize in parallel. This is an implementation detail of the leaf node — no interface changes, nothing above it knows or cares.
+
+### What Changes From Today
+
+| Responsibility              | Current location                             | New location                                   |
+| --------------------------- | -------------------------------------------- | ---------------------------------------------- |
+| Tree walk + compositing     | Compositor (scene_render.rs, 1807 lines)     | Render backend                                 |
+| Glyph rasterization + cache | Compositor (scene_render.rs)                 | Render backend                                 |
+| SVG parsing                 | Compositor (svg.rs, 795 lines)               | Eliminated — icons become Glyphs               |
+| Damage tracking             | Compositor (damage.rs) + Core (change lists) | Render backend (internal)                      |
+| Transform/clip stack        | Compositor (scene_render.rs)                 | Render backend                                 |
+| Font metrics for layout     | Core (typography.rs)                         | Core (unchanged)                               |
+| Text shaping                | Core (harfrust)                              | Core (unchanged)                               |
+| Scene graph content types   | Text, Image, Path (semantic)                 | Container, FillRect, Glyphs, Image (geometric) |
+
+### What the Compositor Becomes
+
+```rust
+fn main() {
+    let backend = CpuBackend::new(scale_factor, fonts);
+    let scene = DoubleReader::from_buf(scene_shm);
+    let mut fb = Surface::from_buf(fb_shm, w, h, stride, format);
+    loop {
+        wait(&[core_handle, timer_handle]);
+        if frame_scheduler.should_render() {
+            backend.render(&scene.read(), &mut fb);
+            send_present(gpu_handle, backend.dirty_rects());
+        }
+    }
+}
+```
+
+### Connection to Vello
+
+Adopting Vello's **architectural principles** and **API shape**, not its implementation. Vello assumes host-OS infrastructure (wgpu, multithreading, std) that doesn't exist on bare metal. What transfers:
+
+- Vello's Scene API design validates the path-centric interface
+- Vello's `vello_cpu` sparse strips algorithm is worth studying for the CPU backend
+- Vello's three-backend architecture validates the explicit trait approach
+- Existing code (NEON SIMD, scanline rasterizer, gamma-correct blending, glyph cache) becomes the CPU backend implementation
+
+### Research Findings: Vello (Raph Levien / Google Linebender)
+
+**Architecture:** GPU-compute-centric. CPU uploads scene in binary SVG-like format, compute shader pipeline handles everything: path flattening → binning → coarse rasterization → fine rasterization. Sort-middle architecture — paths stay sorted for compositing order, segments within paths are unsorted (winding number is commutative).
+
+**Scene API:** `fill(shape, brush)`, `stroke(shape, brush, style)`, `push_layer(blend, clip)` / `pop_layer()`, `draw_image(image, transform)`, `draw_glyphs(font, glyphs)`. No specialized primitives — rectangles are rectangular paths, everything goes through the same pipeline.
+
+**Three backends (as of late 2025):** GPU (production, requires WebGPU compute), CPU "sparse strips" (alpha, SIMD-oriented), Hybrid (experimental, CPU path processing + GPU fine rasterization for WebGL2).
+
+**Limitations relevant to us:** Unbounded memory usage (intermediate buffers depend on scene complexity in unpredictable ways). Raph is frustrated with the GPU execution model's inability to use bounded queues between stages. GPU backend requires WebGPU — not available on bare-metal aarch64 with virtio-gpu 2D. CPU backend is alpha and designed for multithreaded host CPUs with wide SIMD.
+
+**Performance:** GPU rendering is 10-100x faster than CPU for complex scenes. Intel HD 630 renders dense vector text at 7.6ms (60fps viable). The performance gap is the virtio-gpu VM boundary (guest→host copy), not our architecture — real hardware with DMA scanout eliminates this.
+
+### Open Questions (deferred, don't block implementation)
+
+1. Hinting — unnecessary at 2x Retina (~220 PPI). Additive later, no architectural impact.
+2. Subpixel positioning (fractional x-advances for proportional text) — additive, render backend concern.
+3. Complex script support (Arabic, Devanagari, CJK) — harfrust handles shaping, render backend needs compound glyph support.
+4. Color emoji — would use Image content type, or OpenType COLR/CPAL layered glyphs (same pipeline).
+5. Wide gamut color (Display P3) — render backend concern, additive.
+
+### Implementation Plan — Three Phases
+
+Each phase is independently shippable and testable. No big-bang rewrite.
+
+**Phase 1: Extract** — Create render backend as wrapper around existing code. _(Mission-scale)_ ✅ Complete (2026-03-16)
+
+Goal: Decouple the compositor from rendering without changing any behavior. Pure extract-and-encapsulate refactor.
+
+- [x] Create `libraries/render/` with `trait RenderBackend { fn render(&mut self, scene: &SceneReader, target: &mut Surface); fn dirty_rects(&self) -> ...; }`
+- [x] Implement `CpuBackend` by **moving** tree walk, compositing, glyph rasterization, damage tracking, and transform/clip stack code from compositor into it
+- [x] Compositor calls `backend.render()` instead of doing rendering inline
+- [x] Scene graph format UNCHANGED. Content types UNCHANGED. Behavior UNCHANGED.
+- [x] All existing tests pass identically. QEMU visual verification unchanged.
+
+What moved: `scene_render.rs` (~1807 lines), `damage.rs` (~81 lines), `compositing.rs` (~242 lines), `cursor.rs` (~85 lines), `svg.rs` (~795 lines), glyph cache setup. What stayed in compositor: event loop (~30 lines), frame scheduler, config handling, present signaling.
+
+**Phase 2: Redesign** — Change the scene graph interface to geometric content types. _(Mission-scale)_ ✅ Complete (2026-03-16)
+
+Goal: Replace semantic content types with geometric ones. This is the real architectural change.
+
+- [x] Change scene `Content` from `{Text, Image, Path}` to `{FillRect, Glyphs, Image}`
+- [x] Update `CpuBackend` to handle the new content types
+- [x] Update Core's scene builder to produce the new content types
+- [x] Update scene library: node structure, writer/reader APIs
+- [x] Update all scene tests. QEMU visual verification unchanged.
+
+Phase 1 meant only three things changed in coordination: scene library (interface), core (producer), render backend (consumer). The compositor was already decoupled. SVG parser and all path rendering code eliminated atomically. Core emits one `Glyphs` node per visible text line, `FillRect` for cursor and selection. Icons use the glyph cache.
+
+**Phase 3: Clean up** — Eliminate dead code and boundary violations. ✅ Complete (2026-03-16)
+
+Goal: Harvest the architectural benefits. Remove everything that doesn't belong.
+
+- [x] Remove SVG parser (icons become Glyphs via icon font) — eliminated in Phase 2
+- [x] Verify layout helpers in core, not scene library — `layout_mono_lines`, `byte_to_line_col`, `scroll_runs` confirmed in `core/scene_state.rs`
+- [x] Minimize compositor — 174 lines, zero font knowledge, zero content dispatch, no SVG
+- [x] Consolidate font handling: core owns shaping + metrics, render backend owns rasterization + glyph caching
+- [x] Final test pass, QEMU visual verification — all tests pass, visual output identical
+
+**All three phases complete.** The rendering pipeline now achieves the settled architecture: Core produces geometric scene trees, the render backend consumes them, and no component above the render backend has content-type knowledge.
+
+---
+
+## Rendering Pipeline Optimization (2026-03-15)
+
+**Status:** Complete. Three milestones shipped and verified. 93 new tests (1462 → 1555). QEMU visual verification passes.
+
+### Context
+
+The rendering pipeline rebuilt the entire scene graph and repainted the full framebuffer on every event — keystroke, cursor blink, clock tick. At high resolution this produced visible lag. The optimization was delivered in three incremental milestones, each independently shippable and testable, following the design breadboarded in the "Resolution-Independent Rendering + Dirty-Rect Optimization" journal entry.
+
+### Milestone 1 — Incremental Scene Graph Updates (OS service)
+
+**Problem:** Core rebuilt the entire scene graph (~500 nodes, 64 KiB data buffer) on every event, even when only a clock digit or cursor position changed.
+
+**Solution:** Copy-forward pattern + targeted update dispatch.
+
+- `SceneHeader` extended with a **change list**: 24-entry array of changed `NodeId`s plus a `FULL_REPAINT` sentinel (0xFFFF) for overflow.
+- `DoubleWriter::copy_front_to_back()` copies the current front buffer to back before mutation, enabling incremental edits instead of full rebuilds.
+- `SceneWriter::mark_changed(node_id)` records which nodes were modified for the compositor to read.
+- `SceneState` gained targeted update methods: `update_clock` (0 allocations — modifies clock text node in-place), `update_cursor` (0 allocations — repositions cursor node), `update_document_content` (rebuilds text runs after edits), `update_selection` (updates selection overlay).
+- Core's event loop classifies each event and dispatches to the narrowest method. Timer ticks → `update_clock`. Cursor blink → `update_cursor`. Keypresses → `update_document_content`.
+- **Data buffer exhaustion fallback:** when data buffer exceeds 75% capacity, triggers a full rebuild to compact references.
+
+### Milestone 2 — Compositor Damage Tracking
+
+**Problem:** Compositor repainted the entire framebuffer from the scene graph on every frame, even when only one node changed.
+
+**Solution:** Change-list-driven damage + subtree clip skipping.
+
+- Compositor reads the change list from the scene header instead of diffing the full scene.
+- **PREV_BOUNDS tracking:** stores each node's previous bounding rect. Damage includes both old and new positions, preventing ghost artifacts when nodes move (e.g., cursor repositioning leaves no trail).
+- `render_node` checks each child's bounds against the clip rect before recursing — children outside the clip region are skipped entirely.
+- **Empty change list → skip rendering entirely.** No wasted work when nothing changed.
+- Removed the old `diff_scenes` byte comparison from the render loop (replaced by change list).
+
+### Milestone 3 — Pixel-Level SIMD and Unsafe Optimization (Drawing Library)
+
+**Problem:** Per-pixel blending operations were the remaining bottleneck for damage-clipped rendering of large regions.
+
+**Solution:** Three tiers of optimization, all behind unchanged public interfaces.
+
+1. **Scalar optimizations:** `x / 255` replaced with `(x + 1 + (x >> 8)) >> 8` (exact for all u16 inputs). Pre-clipped iteration ranges computed up front in `draw_coverage`, `blit_blend`, `fill_rect_blend` — handles negative coordinates and large offsets without per-pixel bounds checks.
+2. **Unsafe inner loops:** `draw_coverage`, `blit_blend`, `fill_rect_blend` use raw pointer access after row-level bounds verification. Eliminates redundant bounds checks.
+3. **NEON SIMD (aarch64):** `fill_rect` writes 4 pixels per instruction via `vst1q_u32`. Alpha blending uses scalar sRGB gamma table lookups combined with NEON vector operations for linear-space blend math. Constant-color blends use a dedicated NEON fast path. All SIMD paths have scalar fallbacks and are validated against reference implementations.
+
+### Results
+
+- **93 new tests** across all three milestones (1462 → 1555 total). All pass.
+- **QEMU integration test** passes (19/19 visual checks).
+- **Pressure points §5.1 (NEON blending) and §5.2 (damage tracking)** in DESIGN.md resolved.
+- The public interfaces (`blit_blend`, `fill_rect`, `draw_coverage`, `SceneWriter`, `SceneReader`) are unchanged — all optimization is internal to leaf nodes, as the design predicted.
+
+### Files Changed
+
+- `libraries/scene/lib.rs` — change list in header, `copy_front_to_back`, `mark_changed`, targeted update types
+- `services/core/scene_state.rs` — `update_clock`, `update_cursor`, `update_document_content`, `update_selection`, event dispatch
+- `services/core/main.rs` — event loop wired to targeted dispatch
+- `services/compositor/damage.rs` — change-list reader, PREV_BOUNDS tracking
+- `services/compositor/scene_render.rs` — subtree clip skipping, damage-clipped rendering
+- `libraries/drawing/lib.rs` — div255, pre-clipped iteration, unsafe inner loops, NEON SIMD paths
+- `test/tests/` — 93 new tests across scene, compositor, and drawing test files
+
+---
+
+## Input Handling Architecture (2026-03-15)
+
+**Status:** Complete. Core architecture implemented and validated. The three-layer input pipeline (physical → logical → semantic) is proven end-to-end: core tracks modifier state and delivers logical key + modifiers via IPC, editors resolve characters and compute cursor positions, cursor/selection are OS primitives. Demonstrated through text editor with shift+arrow selection, mouse click-to-position, and Ctrl+Tab system shortcuts. Remaining keybindings (Cmd+arrows, Option+word-boundaries, clipboard) are incremental implementation work on settled patterns.
+
+### Context
+
+Text input support is minimal — only lowercase characters, no modifier handling. Designing "full" keyboard input (shift, capslock, Cmd+arrow navigation, selection, etc.) to match the macOS editing experience. This required settling where each layer of input interpretation lives in the system.
+
+### Design Decisions
+
+**1. Three-layer input pipeline: physical → logical → semantic.**
+
+- **OS: physical keycode → logical key + modifiers.** The OS tracks modifier state (Shift, Ctrl, Option, Cmd held; Caps Lock toggled) from raw evdev key-down/key-up events. It resolves physical keycodes through the active keyboard layout to produce logical keys. Output is always (logical key, modifier set) — never characters.
+- **OS → Editor: logical key + modifiers via IPC.** The OS delivers the same event format to every editor regardless of content type. The OS never interprets what a key combination means semantically.
+- **Editor: key + modifiers → characters and/or operations on OS primitives.** The editor decides what keys mean. A text editor resolves (key=A, modifiers=Shift) to character 'A' and calls write-insert. It resolves (key=Left, modifiers=Cmd) to "start of line" and calls move-cursor-to. An image editor interprets the same keys differently.
+
+**2. Character resolution lives in the editor, not the OS.**
+
+The OS does NOT resolve keys to characters. The editor is the input method. This means:
+
+- Switching from English to Japanese input is switching editors, not changing a system setting. The Japanese editor handles romaji → hiragana → kanji conversion internally.
+- Different editors can produce different characters for the same key combinations (virtual keyboards, language-specific editors).
+- The OS stays simpler — it only needs keyboard layout knowledge (physical → logical key) for its own system shortcuts.
+
+**3. Cursor and selection remain OS primitives (reinforced).**
+
+Cursor position and selection state are owned by the OS, not by editors. This was questioned during the discussion but holds for two reasons:
+
+- **View mode:** Cursor and selection exist without any editor active (text selection for copy, playhead in video). No editor means cursor can't be editor state.
+- **Editor swap continuity:** When switching from an English editor to a Japanese editor on the same document, the cursor position survives because it's OS state. The new editor picks up exactly where the old one left off.
+
+The editor computes cursor movement (it knows what "start of line" means at byte offset 247) and tells the OS where to put the cursor. The OS stores the position and renders it.
+
+**4. System-wide shortcuts are intercepted by the OS before reaching editors.**
+
+Cmd+Q, Cmd+Tab, and other system gestures are handled at the OS level. The OS needs keyboard layout resolution for this (it must know that a physical key + Cmd is "Q"), which it already has from layer 1. Editors never see system shortcuts.
+
+**5. System UI text fields use the editor framework.**
+
+The command bar, search fields, and dialogs need character input but aren't documents with editors. Rather than duplicating character resolution in the OS, these use the same editor framework — system text fields are mini-documents with an editor attached. Consistent architecture, even if it's more work initially.
+
+**6. Coarse undo via COW snapshots is sufficient.**
+
+Cmd+Z triggers OS-level undo (restore previous COW snapshot at operation boundary). No per-character undo. Editors define operation granularity via beginOperation/endOperation. This works regardless of which editor is active — no editor needs to implement undo logic.
+
+**7. macOS Emacs bindings (Ctrl+A/E/K/D/F/B/N/P) are excluded.**
+
+These legacy terminal shortcuts add complexity for no value. Cmd+arrows cover the same navigation.
+
+### Interface Summary
+
+```text
+OS → Editor (IPC):
+  key_event(logical_key, modifiers)    // always this, never characters
+
+Editor → OS (IPC):
+  move_cursor_to(position)             // navigation
+  set_selection(start, end)            // selection
+  write_insert(data)                   // character/text input
+  write_delete(range)                  // backspace, forward delete, etc.
+```
+
+### Target Keybindings (text editor, first implementation)
+
+**Navigation (editor computes position, calls move_cursor_to):**
+
+- Arrow keys: character left/right, line up/down
+- Cmd+Left/Right: line start/end
+- Cmd+Up/Down: document start/end
+- Option+Left/Right: word boundaries
+- Page Up/Down (when scrolling views exist)
+
+**Selection (editor computes range, calls set_selection):**
+
+- Shift + any navigation key
+- Cmd+A: select all
+
+**Editing (editor resolves characters, calls write_insert/write_delete):**
+
+- Shift/Caps Lock for uppercase + symbols
+- Backspace: delete backward
+- Delete (fn+Backspace): delete forward
+- Option+Backspace: delete word backward
+- Option+Delete: delete word forward
+- Cmd+Backspace: delete to line start
+- Enter, Tab
+
+**Clipboard (OS-level):**
+
+- Cmd+C/X/V: copy/cut/paste
+- Cmd+Z: undo (COW snapshot restore)
+
+### Design Implications
+
+- **Word boundary detection** requires the editor to understand word segmentation for the content it's editing. For text, this means Unicode word boundaries. Since the editor already does text layout (settled 2026-03-13), it has the text content and can compute word boundaries.
+- **The "editor is the input method" model** means content-type registration metadata should declare the editor's input capabilities (what languages/scripts it supports), enabling the OS to present appropriate editor choices.
+- **Emoji input** is a future concern — likely a system-level picker that inserts via the active editor's write_insert path.
+
+---
+
+## Boot Display via ramfb (2026-03-15)
+
+**Status:** Design validated, implementation deferred. See findings below.
+
+### Context
+
+Currently the OS outputs diagnostic text to the host terminal (serial) and renders the UI in the QEMU window (virtio-gpu). The QEMU window is blank during boot because virtio-gpu requires userspace driver initialization. On real ARM hardware with UEFI, firmware provides an immediate framebuffer (EFI GOP) that the kernel can write to from its first instruction — boot text on the physical display is the natural default.
+
+### Design Decisions (Validated)
+
+**1. Firmware framebuffer for early boot display.**
+The kernel writes to a pre-GPU framebuffer early in boot, then the GPU driver takes over. No virtio negotiation required. This mirrors the real-hardware pattern of firmware framebuffer → GPU driver handoff.
+
+**2. Serial and boot display are independent, simultaneous channels.**
+They serve different audiences. Both are active during boot; neither suppresses the other.
+
+- **Serial (host terminal):** Full structured diagnostic log. Everything verbose — memory map, page table setup, SMP core bringup, interrupt controller init, subsystem lifecycle, timing data, warnings/errors with full context. The developer/operator channel. Survives display driver crashes.
+- **Boot display (physical display):** Curated user-facing narrative. A small number of milestone messages conveying boot progress at a human-meaningful level. Not implementation details.
+
+**3. Curated milestone messages (not wall-of-text, not just a logo).**
+Each message corresponds to a phase where, if it hangs, the user knows _where_ it hung. That's the practical utility beyond aesthetics. Approximate milestones:
+
+1. "Starting up" — kernel entry, MMU, memory
+2. "Starting processors" — SMP bringup (perceptible latency on real multi-core hardware)
+3. "Connecting devices" — virtio probing, storage, input (can stall on missing/slow hardware)
+4. "Loading fonts" — font file I/O; signals "about to show you something"
+5. "Preparing your workspace" — OS service, compositor init, document pipeline ready
+6. UI appears (compositor takes over via virtio-gpu)
+
+**4. Growing list with visual dimming.**
+Messages accumulate as a list. The current (most recent) message renders bright; previous messages dim to grey. This provides:
+
+- Forward-motion feel without explicit animation — contrast shift as each new line appears
+- "Where did it stop" diagnostic value — the full list is visible if boot hangs
+- Visual weight stays on the current phase, not the history
+
+**5. Hard cut to compositor.**
+When the GPU driver takes over, the boot display content is simply replaced. No fade, no transition. This matches what real hardware does (GPU driver takes over the display). Revisit later only if it feels wrong in practice.
+
+### Implementation Spike — ramfb on QEMU (2026-03-15)
+
+Fully implemented and working: fw_cfg MMIO driver, DMA-based ramfb initialization, 8x16 bitmap font, milestone display with dimming. Three milestones visible on screen, correct visual hierarchy. **Then discarded** — the QEMU display model makes this unusable in practice.
+
+#### What worked
+
+- **fw_cfg MMIO protocol:** Selector register (16-bit BE write at base+0x08), data register (byte reads at base+0x00), DMA register (two 32-bit BE writes at base+0x10). Signature verification ("QEMU"), feature bitmap check (DMA bit), file directory enumeration to find "etc/ramfb".
+- **DMA descriptor construction:** 16-byte descriptor (control u32 BE, length u32 BE, address u64 BE) + 28-byte RAMFBCfg payload (addr u64 BE, fourcc u32 BE, flags u32 BE, width u32 BE, height u32 BE, stride u32 BE). Must be in a stable allocated page — stack-based descriptors fail. Trigger via two 32-bit writes to DMA register; each write independently `.to_be()`.
+- **Bitmap font:** 8x16 VGA font (95 printable ASCII glyphs, 1520 bytes). `draw_char`/`draw_string` writing BGRA8888 directly to framebuffer memory.
+- **Milestone display:** IrqMutex-protected state, redraw on each milestone with bright current / grey previous.
+
+#### What broke (and fixes)
+
+1. **Data abort (EC=0x25):** fw_cfg selector register requires exactly 2-byte access. QEMU enforces `max_access_size=2`; a 4-byte write triggers a bus abort. Fix: `write16` MMIO helper.
+2. **DMA error (ctl=0x01):** Stack-based DMA descriptor instability. Fix: allocate dedicated 4KB page, build descriptor with `copy_nonoverlapping` at known offsets.
+3. **DMA timeout:** Endianness on DMA trigger — each of the two 32-bit writes needs independent `.to_be()`, not a single `.to_be()` on the 64-bit value.
+
+#### Why it was discarded
+
+**QEMU's `-device ramfb` and `-device virtio-gpu-device` register as two independent display consoles.** ramfb is console 0, virtio-gpu is console 1. QEMU's display window shows console 0 by default. When virtio-gpu calls `set_scanout` and flushes its first frame, it updates console 1 — but the user still sees console 0 (ramfb) unless they manually switch (Ctrl+Alt+2 in GTK).
+
+There is no guest-accessible mechanism to disable ramfb's console or switch the active display from inside the kernel. A combined `virtio-ramfb` device exists in QEMU (shares one console, handles the handoff internally) but it's PCI-only — not available on the `virt` machine with virtio-mmio transport.
+
+**On real hardware this problem doesn't exist.** There's one physical display. The firmware framebuffer (EFI GOP, simplefb, etc.) occupies it. When the GPU driver does modesetting, the GPU's output replaces the firmware framebuffer on the same physical display. One output, one screen — the handoff is automatic.
+
+#### Decision
+
+Defer boot display until either: (a) targeting real hardware with EFI GOP / simplefb, or (b) QEMU adds `virtio-ramfb` support for the `virt` machine / virtio-mmio transport. The design is validated, the protocol details are documented above, and the implementation was proven to work. ramfb is a QEMU-only device that doesn't work well on QEMU — not worth the UX cost of requiring manual console switching.
+
+Waiting for virtio-gpu to be ready before showing boot milestones defeats the purpose — by the time the GPU pipeline is live, boot is already over.
+
+---
+
+## Resolution-Independent Rendering + Dirty-Rect Optimization (2026-03-15)
+
+**Status:** Pieces 1-2 shipped (see "Rendering Pipeline Optimization" entry). Piece 3 (logical coordinate model) remains open.
+
+### Problem
+
+The UI is noticeably laggy at host-native resolution (3456×2234 on Retina). Root cause: the compositor repaints the entire 31 MB framebuffer and the GPU driver transfers the entire 31 MB through virtio MMIO on every frame — even when only a cursor blink or single keystroke changed. The dirty rect infrastructure already exists end-to-end (DirtyRect type, DamageTracker, PresentPayload with 6 rects, GPU driver partial TRANSFER_TO_HOST_2D) but the compositor always sends `rect_count: 0` (full-screen transfer).
+
+Additionally, the scene graph uses physical pixel coordinates. The OS service receives `fb_width`/`fb_height` from init and lays out directly to those values. There is no logical/physical coordinate distinction — layout is resolution-specific.
+
+### Design Discussion
+
+**Scene graph coordinate model — logical vs physical:**
+
+Two options: (A) scene graph in logical coordinates (points), compositor applies scale factor; or (B) scene graph in physical pixels, OS service pre-applies scale.
+
+Decision: **Logical coordinates (option A).** Rationale:
+
+- Isolate uncertain decisions behind interfaces (founder claim). The OS service shouldn't know or care about the display's physical resolution. It thinks in points.
+- The scene graph is rebuilt on every state change anyway (keystroke, scroll, cursor move), so "resolution change requires a scene rebuild" isn't an extra cost.
+- Clean separation: OS service declares _what_ to render (in its coordinate space), compositor decides _how_ (at the physical resolution it knows).
+- Font rendering: compositor rasterizes glyphs at physical pixel size (`logical_font_size × scale_factor`). Optical sizing uses physical DPI. Both are compositor concerns.
+- Integer precision at i16 logical coordinates with 2× scale: every logical pixel maps to 2 physical pixels. Sub-pixel glyph positioning is a compositor concern (during rasterization), not a scene graph concern. macOS uses the same model.
+- Pixel-snapping for borders/dividers: compositor rounds to nearest physical pixel. Not purely multiply-by-scale — it makes snapping decisions too.
+
+The scale factor becomes compositor config (alongside DPI), received from init. The OS service never sees it.
+
+**Dirty-rect optimization — scene diffing vs damage declaration:**
+
+Two approaches: (A) compositor diffs old vs new scene graph, derives dirty rects automatically; or (B) OS service declares damage regions explicitly (Wayland model).
+
+Decision: **Scene diffing (option A).** Rationale:
+
+- The scene graph is a flat array of fixed-size repr(C) nodes — diffing is `memcmp` per slot. Cheap.
+- As the OS service grows in complexity (compound documents, multiple editors, layout engine), requiring it to perfectly track damage is a maintenance burden that compounds. Diffing absorbs that — the OS service just rebuilds the scene graph however it wants, and the compositor figures out what changed.
+- Same reasoning as React: developers stopped manually tracking DOM mutations and let the framework diff. The expensive operation is pixel rendering, not scene construction.
+- The compositor already keeps the scene in shared memory. Double-buffering the scene (keeping the previous version) adds one memcpy of the node array per frame — negligible vs the rendering cost.
+
+### Incremental Delivery
+
+Pieces chain together, each independently shippable and testable:
+
+**Piece 1 — Activate existing dirty-rect GPU transfer.**
+The compositor already repaints everything. Add a scene diff step: compositor keeps a copy of the previous scene graph, compares per-node, computes bounding rects of changed nodes, passes dirty rects in PresentPayload. The GPU driver already handles `rect_count > 0`. Highest leverage (cuts 31 MB MMIO transfer to a few KB for a keystroke), lowest risk (no interface changes, no scene graph format changes).
+
+But: the compositor also repaints the entire framebuffer from the scene graph. Even with partial GPU transfer, every frame still touches every pixel in the back buffer. Piece 2 addresses this.
+
+**Piece 2 — Dirty-rect clipped rendering.**
+Compositor clips its rendering to the dirty region. `render_scene` currently takes a full-framebuffer clip rect — narrow it to the dirty rect union. Nodes outside the dirty region are skipped. Overlapping nodes within the dirty region are repainted (back-to-front within the rect). Requires copying the previous framebuffer's clean regions to the back buffer (or using the same buffer with dirty-rect writes only).
+
+**Piece 3 — Logical coordinate model.**
+Change scene graph Node.x/y/width/height to logical coordinates. Add scale_factor to compositor config. Compositor multiplies all positions and sizes by scale_factor during rendering. OS service lays out in points. Font sizes in scene graph are logical; compositor computes `physical_px = logical_size × scale_factor` for rasterization. This is the interface/structural change.
+
+### Breadboard — Piece 1: Scene Diff + Partial GPU Transfer
+
+```text
+compositor render loop (current):
+  wait for scene update
+  render_scene(back_fb, scene_graph)         ← repaints everything
+  send MSG_PRESENT(buffer_index, rect_count=0) ← full transfer
+  swap buffers
+
+compositor render loop (piece 1):
+  wait for scene update
+  diff(prev_scene_nodes, curr_scene_nodes)   ← NEW: per-node memcmp
+    → collect changed node indices
+    → compute bounding rects of changed nodes (in abs coords)
+    → union into dirty region (up to 6 DirtyRects)
+  render_scene(back_fb, scene_graph)         ← still repaints everything (piece 2 fixes this)
+  send MSG_PRESENT(buffer_index, rect_count=N, rects=[...])  ← partial transfer
+  memcpy curr_scene_nodes → prev_scene_nodes ← save for next diff
+  swap buffers
+```
+
+**Scene diff algorithm:**
+
+```rust
+fn diff_scenes(
+    prev: &[Node; MAX_NODES],
+    curr: &[Node; MAX_NODES],
+    node_count: usize,
+) -> DamageTracker {
+    let mut damage = DamageTracker::new(fb_width, fb_height);
+    for i in 0..node_count {
+        // Fixed-size repr(C) — byte comparison is correct and fast.
+        let prev_bytes = &prev[i] as *const Node as *const [u8; NODE_SIZE];
+        let curr_bytes = &curr[i] as *const Node as *const [u8; NODE_SIZE];
+        if prev_bytes != curr_bytes {
+            // Node changed. Compute its absolute bounding rect
+            // by walking parent chain (or: store abs coords in prev pass).
+            let rect = abs_bounds(curr, i);
+            damage.add(rect.x, rect.y, rect.w, rect.h);
+            // Also damage the OLD position if the node moved.
+            let old_rect = abs_bounds(prev, i);
+            damage.add(old_rect.x, old_rect.y, old_rect.w, old_rect.h);
+        }
+    }
+    damage
+}
+```
+
+**Pressure point — computing absolute bounds:** Nodes store positions relative to parent. To get the absolute bounding rect for a changed node, you need to walk up the parent chain. But the scene graph uses left-child/right-sibling (no parent pointer). Options:
+
+1. Pre-compute absolute positions during the render walk and cache them.
+2. Add a `parent: NodeId` field to Node (4 bytes, increases node size).
+3. Walk the tree once to build a parent map (array of NodeId, indexed by node index).
+
+Option 3 is cheapest — one pass over the node array building `parent[i]` from `first_child`/`next_sibling`, then `abs_bounds` walks up via `parent[]`. The parent map is the same size as the node array (512 × 2 bytes = 1 KB) and rebuilt each frame.
+
+**Pressure point — nodes added/removed:** If the node count changes between frames, new nodes have no prev entry and removed nodes leave stale prev entries. Handle by: if `curr_node_count != prev_node_count`, dirty the entire screen (fall back to full repaint). This is rare (only on document open/close, not on typing). Alternatively, diff up to `min(prev_count, curr_count)` and dirty any nodes beyond that range.
+
+**Pressure point — data buffer changes:** A node's text content can change without the node struct changing (if the text is referenced by DataRef with same offset/length but different bytes). This means struct-level memcmp can miss text edits. Fix: include a content hash in the node, or always diff data buffer contents for Text/Path nodes. The simpler approach: the OS service already writes new text at new data buffer offsets (append-only within a frame), so the DataRef offset will differ, which the memcmp catches.
+
+### Implementation Status
+
+All three pieces are implemented and running:
+
+- **Piece 1 (scene diff + partial GPU transfer):** `diff_scenes()` in scene library, `DamageTracker` in compositor (`damage.rs`), change-list-driven damage in render loop, partial `MSG_PRESENT` with dirty rects. Uses `content_hash` (FNV-1a) in nodes to catch text edits where DataRef metadata is identical.
+- **Piece 2 (dirty-rect clipped rendering):** Compositor renders only within dirty rects when `damage.dirty_rects()` returns `Some`. Full-screen fallback when node count changes between frames.
+- **Piece 3 (logical coordinate model):** `scale_factor` flows from init → `CompositorConfig` → compositor. Scene graph is in logical coordinates; compositor multiplies by `scale_factor` during rendering. Font rasterization uses `physical_font_size = round(logical_size × scale_factor)`. Init auto-detects scale: ≥2048px wide → 2.0×, otherwise 1.0×.
+
+### Remaining Open Questions
+
+- Interaction between dirty-rect rendering and subpixel font rendering (dirty rect slicing through a glyph)
+- Whether the DamageTracker's 6-rect limit is sufficient or needs a smarter merge strategy
+
+---
+
+## Scene Scroll Fix + Kernel TPIDR Race Fix (2026-03-14)
+
+**Status:** Two bugs fixed. Both committed.
+
+### Bug 1: Text overflow + cursor misalignment in scene builder
+
+**Symptom:** Text runs extended past the viewport bottom (no scroll clipping). Cursor and selection rects positioned at absolute coordinates, misaligned when scrolled.
+
+**Root cause:** `build_editor_scene` in core's `scene_state.rs` created text runs at absolute y positions (0, 20, 40...) without applying scroll. The compositor's `node.scroll_y` only offset children as a pixel value, but the runs were already at absolute positions. Cursor/selection used absolute `line * line_height` without subtracting scroll offset.
+
+**Fix:** Extracted layout helpers from `scene_state.rs` to scene library as public functions: `layout_mono_lines`, `byte_to_line_col`, `line_bytes_for_run`, `scroll_runs`. Core now calls `scroll_runs(all_runs, scroll_lines, line_height, content_h)` to filter runs to the visible viewport and adjust y positions. Cursor y = `cursor_line * line_height - scroll_px` (viewport-relative). Selection rects clipped to viewport bounds. Compositor renders with `scroll_y = 0` and `CLIPS_CHILDREN` — core pre-applies all scrolling.
+
+**Tests:** 11 new tests: monospace layout (basic, trailing newline, soft wrap, empty), byte-to-line-col (basic, soft wrap, cursor consistency with layout), scroll filtering (no scroll, filters above viewport, cursor at bottom, empty text). 943 total pass.
+
+**Files:** `libraries/scene/lib.rs` (+125 lines), `services/core/scene_state.rs` (-19 net), `test/tests/scene.rs` (+140 lines).
+
+### Bug 2: Kernel EC=0x21 instruction abort under SMP (TPIDR_EL1 race)
+
+**Symptom:** Intermittent kernel crash — EC=0x21 (instruction abort at current EL) with ELR=FAR=0x0A003A00 (virtio MMIO physical address range, level 0 translation fault). Only manifested under concurrent load with 4 SMP cores and 5+ processes.
+
+**Root cause:** `schedule_inner` parks the old thread in the ready queue and returns the new thread's context pointer. But `TPIDR_EL1` (used by `save_context` in exception.S to locate the write target) was only updated by exception.S _after_ the Rust handler returned — which is after the `IrqMutex` lock drops and re-enables IRQs. If a pending timer IRQ fires in that window (between lock release and the `msr tpidr_el1` in exception.S), `save_context` reads the stale TPIDR and overwrites the **old** thread's Context with kernel-mode state (SPSR=EL1h, ELR=kernel addr, SP from the wrong thread's stack). When the old thread is later scheduled from the ready queue, `eret` restores EL1 mode with a garbage low address as ELR, causing the instruction abort.
+
+**Why the address was `0x0A003A00`:** This is a user-range VA (low address). With SPSR=EL1h, the eret returns to EL1 which uses TTBR0 for lower-half VA walks. If TTBR0 is the empty L0 table (kernel/idle thread) or any table without a mapping at that address, the walk fails at level 0 — exactly matching ESR=0x86000004 (IFSC=4, level 0 translation fault).
+
+**Fix:** Set `TPIDR_EL1` to the new thread's Context pointer inside `schedule_inner`, while the scheduler lock is held and IRQs are masked. This ensures `save_context` always writes to the correct (current) thread's Context, even if an IRQ fires immediately after the lock drops. The `msr tpidr_el1` in exception.S is now redundant but kept as defense-in-depth. Also added `validate_context_before_eret` — checks ELR/SPSR/SP consistency before every eret return (catches EL1-to-user-VA, EL0-to-kernel-VA, and EL1-with-bad-SP).
+
+This is the same class of bug as Fix 5 (aliasing UB) and Fix 6 (nomem on DAIF) — an SMP timing window that only manifests under concurrent scheduling pressure. The window was ~3-5 instructions wide (lock release → TPIDR write in asm), but with 4 cores running 250 Hz timers, it was hittable.
+
+**Stress tested:** 3000 keys at 1ms intervals, 5 processes on 4 SMP cores. No crash. 943 tests pass.
+
+**Files:** `kernel/scheduler.rs` (+21 lines), `kernel/main.rs` (+71 lines), `kernel/exception.S` (+6 lines comments).
+
+---
+
+## Compositor Split + Scene Graph Design (2026-03-13)
+
+**Status:** Design conversation in progress. Key architectural decisions settling.
+
+### Context
+
+Reviewed the full userspace architecture above the kernel. The compositor (`services/compositor/`, 2260 lines) had accumulated two fundamentally different responsibilities: OS service work (document ownership, input routing, edit protocol) and rendering work (surface management, compositing, GPU presentation). These need to separate into distinct processes.
+
+### Protocol Crate (completed)
+
+Created `libraries/protocol/` as the single source of truth for all IPC message types and payload structs. 8 modules organized by protocol boundary (device, gpu, input, edit, compose, editor, present, fs). All 22 message type constants centralized; zero duplicates remain across the codebase. Net -333 lines.
+
+Also fixed test infrastructure: libraries now have proper Cargo.toml files so the test crate uses normal Cargo dependencies instead of `#[path]` source includes. This eliminated a duplicate `DirtyRect` definition that existed solely to work around the test build limitation.
+
+### Design Decisions Reached
+
+**1. OS service and compositor are separate processes.**
+Not a code-organization split — a process boundary with IPC. The OS service owns document semantics; the compositor owns pixels. This matches the design principle of simple connective tissue between components, and validates the IPC protocol at a real boundary.
+
+**2. The interface between them is a scene graph.**
+Evaluated three options:
+
+- **Buffer-based (Wayland model):** OS service renders content into pixel buffers, compositor just composites. Simple but puts all rendering work in the OS service.
+- **Scene-graph-based (Fuchsia Scenic, Core Animation, game engines):** OS service sends a tree of typed visual nodes, compositor renders and composites. More capable.
+- **Command-based (X11, Plan 9 draw):** OS service sends drawing commands. Historical — every modern system moved away from this.
+
+Chose scene graph because:
+
+- "OS renders everything" means the OS _layer_ (everything in `/services` and `/libraries`), not specifically the OS service process. The compositor IS part of the OS.
+- Layout and compositing are the same pipeline: document structure → positioned visual elements → pixels. The scene graph is the intermediate representation between those two stages.
+- It naturally supports compound documents (Decision #14): the document's spatial/temporal/logical relationships compile to a scene tree.
+- It doesn't artificially prevent game-engine-level rendering later (3D, animation, transforms) — you just add node types.
+
+**3. The scene graph is NOT the document structure — it's a compiled output.**
+The document model has semantic content (logical relationships, metadata, temporal sync) that the compositor doesn't need. The screen has visual elements (chrome, cursor, selection) that aren't in any document. The OS service _compiles_ document structure into a scene graph, like a compiler turns source into machine code.
+
+**4. The scene graph lives in shared memory.**
+Written by the OS service, read by the compositor. The compositor is a pure function from scene graph to pixels. No scene graph state inside the compositor — if it crashes, the graph is still there, just restart and re-render. Same pattern as the existing document buffer.
+
+**5. The screen is the root compound document.**
+The entire visual output can be thought of as a compound document with system chrome and document content as its parts. The compositor doesn't know it's rendering "the screen" — it renders a scene graph, and the screen is just the root node. No special case for "the desktop." Multi-document views are just different layout types for the root document.
+
+### Research: Prior Art Surveyed
+
+- **Fuchsia FIDL + Scenic:** Full IDL for IPC (FIDL), scene-graph compositor (Scenic). Validated the typed-channel approach and scene-graph-at-OS-level pattern.
+- **Singularity OS contracts:** State-machine-typed channels. Too complex for single-language Rust OS, but the insight that channels should be typed per-protocol is applicable.
+- **seL4 CAmkES:** Framework-generated typed interfaces. Userspace typing over untyped kernel transport — same pattern we're following.
+- **Wayland:** Buffer-based compositor protocol. Good surface lifecycle model but doesn't match "OS renders everything."
+- **Core Animation:** Property-based layer tree with animations. The hybrid model (pre-rendered backing stores in a scene tree) is close to the right answer.
+- **Game engines (Unity, Godot, Bevy):** Scene tree of typed nodes with transforms and components. The compositor is essentially a document rendering engine — same structure.
+
+### Additional Decisions (continued discussion)
+
+**6. Interaction state (cursor, selection) belongs to the View, not to individual document nodes.**
+The cursor navigates the compound document's flow layout, crossing content-type boundaries. The text editor owns "cursor within text" but the OS service owns "cursor within the compound document." When the cursor reaches the boundary of one content part (e.g., top of a paragraph), the OS service consults the layout to determine what's above/below and moves focus accordingly. Editors signal boundary-hit; the OS service navigates between content parts.
+
+**7. Focus path model for compound document editing.**
+The View tracks a focus path (stack) through the compound document tree. Each level has its own cursor state. "Zooming into" a sub-document pushes onto the stack; returning pops. Whether child cursor state is preserved on pop is a UX policy decision, not structural -- the architecture supports both.
+
+**8. One node type with content variants (Core Animation model).**
+Rejected separate types for Container, Text, Image, Path. Instead: one Node type with a rich visual base and an optional Content variant (None, Text, Image, Path). Inspired by CALayer.
+
+Rationale:
+
+- In compound documents, almost every container also needs visual properties (background, border, corner radius). Separate types force wrapper nodes everywhere.
+- Fixed-size nodes in shared memory: one flat array, one allocation strategy, indices work uniformly.
+- Core Animation proved this works at scale -- CALayer handles 95% of cases.
+- Starting with four types, you'd gradually merge them anyway as each gains the others' properties.
+
+Node carries: tree links (first_child, next_sibling as indices), geometry (x, y, width, height relative to parent), scroll_y, visual decoration (background, border, corner_radius, opacity), flags (clips_children, visible), and a content variant.
+
+Content variants:
+
+- None: pure container
+- Text: string ref (offset+len into data buffer), font_size, color
+- Image: pixel data ref (shm offset), source dimensions
+- Path: command ref (offset+len into data buffer), fill, stroke
+
+Variable-length data (text strings, path commands) lives in a separate data buffer region of shared memory, referenced by offset+length from the node.
+
+**9. Relative positioning with scroll_offset solves scrolling immediately.**
+Children are positioned relative to parent's content area. Scrolling = changing one scroll_y value on a clipping container. Compositor offsets all children during render. No OS service round-trip. Full declarative layout (flex, column, row) is the right end state but can be added later as a field on Node without structural change.
+
+**10. The View is an OS service concept, not a scene graph concept.**
+The View (focus path, cursor state, document binding) lives entirely in the OS service. The OS service translates View state into scene graph mutations (position cursor node, update text content, set scroll_y). The compositor never knows about Views, documents, or editing. It renders a tree of Nodes. Clean separation: scene graph = rendering interface, View = document interaction model.
+
+**11. ~~Compositor owns text layout.~~ REVERSED (2026-03-14): OS service owns text layout.**
+~~The compositor has the font rasterizer; it also owns line breaking, word wrapping, and glyph positioning.~~
+
+**Revised (2026-03-14):** The OS service owns all text layout (line breaking, wrapping, glyph positioning, hit testing). The compositor is content-agnostic — it renders positioned visual elements without knowing what "text" is. This is consistent with the architecture: the OS service will house the layout engine for all content types (text, images, compound documents), so text is not a special case. The scene graph carries pre-laid-out content (positioned glyphs or pre-computed line breaks), not raw strings. The OS service needs font metrics (advance widths, line height — a few hundred bytes) but not the full rasterized glyph cache.
+
+Prior art is unanimous: Core Animation, Wayland, Fuchsia Scenic, web browsers, game engines — all put text layout above the compositor, never inside it. Reason: text layout is content understanding, and the design axiom "OS natively understands content types" means that understanding belongs in the OS service, not the pixel pump.
+
+Cursor and selection remain properties of the Text content variant for now. The OS service knows glyph positions (it did the layout) so it can position cursor and selection rects directly. The compositor renders them without understanding what they mean.
+
+~~**TODO:** Redesign the Text content variant to carry positioned/pre-laid-out text instead of raw strings + width constraints.~~ **Done.** `TextRun` struct carries positioned runs with (x, y), `DataRef` to glyph data, `glyph_count`, `advance` width, `font_size`, and `axis_hash`. `Content::Text` holds a `DataRef` to an array of `TextRun`s plus `run_count`. `ShapedGlyph` struct supports per-glyph advances for proportional text (future). Cursor and selection are positioned pixel-coordinate rects (regular scene graph nodes with backgrounds). `push_text_runs()` / `text_runs()` / `front_text_runs()` APIs on `SceneWriter` / `SceneReader` / `DoubleReader`.
+
+**TODO:** Better name for "View" (the thing that holds document + focus path + overlays).
+
+### Scene Graph TODOs
+
+- ~~**Ctrl+Tab image viewer**: Scene graph only builds text editor view. Need Image content node support or hybrid approach for image mode.~~ **Done.** `Content::Image` variant in scene graph with `DataRef` to pixel data and source dimensions.
+- **Text editor keystrokes**: Up/Down arrows (line navigation), Cmd+arrow (start/end of line/document), Shift+key (uppercase), Delete (forward delete). ~100-150 lines in text-editor/main.rs. All mechanical — patterns established.
+
+### Open Questions
+
+1. **How do typed channels work?** `Channel<P>` API design, multiplexing across different protocol types with `wait()`.
+2. ~~**Shared memory double-buffering.**~~ **Done (2026-03-14).** `DoubleWriter`/`DoubleReader` in scene library. Two `SCENE_SIZE` regions, generation-counter-based swap with release/acquire fences. Compositor `SceneState` migrated.
+3. ~~**Scene graph shared memory layout.**~~ **Done (2026-03-14).** `SceneWriter`/`SceneReader` in scene library. Header (64 B) + node array (512 × Node) + data buffer (64 KiB). 34 host-side tests.
+4. ~~**Text content variant redesign — settled on A' (positioned text runs).**~~ **Done.** `TextRun` struct with (x, y), glyph DataRef, advance width, font_size, axis_hash. `Content::Text` holds DataRef to TextRun array + run_count. `ShapedGlyph` for per-glyph advances (proportional future). Cursor/selection are positioned rects. Both core and compositor scene builders use the new representation.
+
+### Implications for Existing Decisions
+
+- **Decision #11 (Rendering Technology):** The "existing web engine" leaning may shift. If the compositor is a scene-graph renderer, a web engine becomes a content-type translator that produces scene graph nodes, not the rendering substrate. The scene graph IS the rendering engine.
+- **Decision #15 (Layout Engine):** The layout engine compiles document structure into the scene graph. The "CSS for spatial" option still works — CSS layout produces positioned nodes that become scene graph nodes. But the layout engine is now clearly upstream of the compositor, not inside it.
+- **Decision #14 (Compound Documents):** The three-axis relationship model (spatial, temporal, logical) maps to the scene graph. Spatial relationships become positions/transforms. Temporal and logical relationships may need scene graph support beyond static trees (animation timelines, visibility state).
+
+---
+
+## Kernel Bug Investigation Follow-up (2026-03-13)
+
+**Status:** Resolved. Root cause of the EC=0x21 crash identified and fixed in 2026-03-14 session (Fix 17: TPIDR_EL1 race in `schedule_inner`). Fixes 12-16 below addressed contributing factors and separate bugs found during the same investigation.
+
+**Context:** User reported kernel crash (EC=0x21, ELR=0x0) during normal typing speed (not rapid input as in the 2026-03-11 crash). The crash signature was identical — instruction abort at EL1 with null ELR — but the trigger conditions differed. The scene graph compositor migration had changed the userspace event loop structure.
+
+### Bugs Found and Fixed
+
+**Fix 12: Stale waiter registrations (correctness bug).**
+When `sys_wait` takes the `BlockResult::Blocked` path, the thread is context-switched away. Unfired handle registrations (channel, timer, interrupt, thread exit, process exit waiters) remained live even after the thread was woken. On subsequent signals to those handles, the stale registrations could cause: (a) spurious wakeups with incorrect return values, (b) redundant wake attempts. The spurious wakeup issue explains the "spurious wakeup from sys_wait" bug noted in the Virtio-9P section — init's `wait(&[channel])` returning before the response was the stale waiter bug in action.
+
+Fix: Added `stale_waiters` field to Thread. `complete_wait_for` now copies unfired entries to `stale_waiters` before clearing `wait_set`. At the start of the next `sys_wait`, stale waiters are unregistered from all handle types. Added `scheduler::take_stale_waiters()` to support this deferred cleanup pattern.
+
+**Fix 13: Per-ASID TLB invalidation (performance + correctness hardening).**
+`swap_ttbr0` used `TLBI VMALLE1IS` which flushes ALL TLB entries (both TTBR0 and TTBR1) across ALL cores on every context switch between different address spaces. This unnecessarily flushed kernel I-TLB entries on all cores, causing every core to re-walk page tables for kernel code. Under high context-switch rates (~400/sec), this created sustained TLB pressure that could transiently affect instruction fetch timing. While not a correctness bug per se, the unnecessary full flush was wasteful and the per-ASID alternative (`TLBI ASIDE1IS`) was already used correctly elsewhere in `address_space.rs::invalidate_tlb()`.
+
+Fix: Changed `swap_ttbr0` to use `TLBI ASIDE1IS, <old_asid>` — invalidates only the outgoing ASID's TLB entries. Kernel TTBR1 entries and other processes' TTBR0 entries are preserved.
+
+**Fix 14: Diagnostic assertions in exception handlers.**
+Added `debug_assert` checks for null context pointers in `irq_handler`, `svc_handler`, and `user_fault_handler`. These will catch the null pointer at its source rather than manifesting as EC=0x21 in the exception vector. Also added a null check on the `schedule_inner` return value.
+
+### Analysis
+
+The original crash (ELR=0x0 at EL1) and the later variant (ELR=0x0A003A00) share the same root cause: **Fix 17 (TPIDR_EL1 race in `schedule_inner`, 2026-03-14).** When the scheduler lock drops after `schedule_inner` returns, IRQs are re-enabled. If a timer IRQ fires before exception.S updates TPIDR_EL1, `save_context` overwrites the old (parked) thread's Context with kernel-mode state. Fixes 12-14 addressed contributing factors but not the root cause. Fixes 5/6 (aliasing UB, nomem on DAIF) changed the timing enough to suppress most occurrences but didn't close the window.
+
+Stress tested: 14,484 keys over 120 seconds (pre-Fix 17), 3000 keys at 1ms (post-Fix 17). No crash after Fix 17.
+
+### Proactive Bug Hunting (continued, same session)
+
+**Fix 15: sys::counter() nomem removed.** `mrs cntvct_el0` had `nomem` — same class as Fix 6. The counter is monotonically increasing hardware state; with `nomem`, LLVM could CSE or hoist repeated reads, returning stale timestamps.
+
+**Fix 16: Trampoline `ldr [sp, #8]` nomem removed.** 18 thread trampolines across fuzz/fuzz-helper/stress used `options(nostack, nomem)` on `ldr [sp, #8]` — a memory read falsely declared non-memory. LLVM could reorder the preceding `write_volatile` of the argument past the load.
+
+**Coverage analysis** identified critical gaps: `interrupt_register` (zero coverage), `handle_send` success path (zero), `interrupt_ack` success path (zero), `device_map` success path (zero), 9 syscalls never tested under concurrency. Addressed with 5 new fuzz phases (32–36):
+
+- Phase 32: interrupt register/ack full lifecycle (register, ack, duplicate rejection, re-register after close, multi-IRQ, poll)
+- Phase 33: handle_send success path (create channel → create child → send endpoint → child signals back via received handle)
+- Phase 34: device_map success path (map UART0 MMIO, read register, error cases)
+- Phase 35: concurrent scheduling context create/bind/borrow/return (4 threads, 100 ops each)
+- Phase 36: concurrent DMA alloc/free (4 threads, 50 ops each, varied orders)
+
+**Unsafe audit** reviewed all kernel modules with `unsafe` blocks: scheduler, address_space, memory, paging, per_core, thread_exit, process_exit. No new bugs found. Lock ordering verified correct.
+
+**Kernel Change Protocol** codified in CLAUDE.md: nomem default-deny, SAFETY comments required, stress test mandate, anomaly tracking.
+
+All 36 fuzz phases pass. 896 host tests pass. Build clean.
+
+---
+
 ## Virtio-9P Host Filesystem Passthrough (2026-03-11)
 
 **Status:** Working. Font loading end-to-end via 9P2000.L protocol over virtio transport.
@@ -12,8 +1514,8 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 **Bugs found and fixed:**
 
-1. **`payload_as`/`from_payload` hangs for large structs on aarch64 bare metal.** Both init and the 9p driver hung when using these helpers with FsReadRequest (60 bytes — full payload). Root cause unclear (possibly compiler-generated stack alignment code interacting badly with the bare-metal environment). Fix: manual `read_unaligned`/`write_unaligned` for individual fields. This is a systematic issue — any IPC message struct near the 60-byte limit should use manual construction.
-2. **Spurious wakeup from `sys_wait`.** Init's `wait(&[channel])` returned before the 9p driver sent its response. Fix: loop on wait+try_recv until the expected response message type arrives. Root cause of the spurious wakeup not fully diagnosed — the channel pending_signal logic appears correct but something wakes init prematurely. Not a blocking issue with the retry loop.
+1. **`payload_as`/`from_payload` hangs for large structs on aarch64 bare metal.** Both init and the 9p driver hung when using these helpers with FsReadRequest (60 bytes — full payload). ~~Root cause unclear.~~ **Retrospective (2026-03-13):** Likely caused by kernel Fix 5 (aliasing UB) or Fix 6 (`nomem` on DAIF) — both produced timing-dependent miscompilation at opt-level 3 that could manifest as hangs in userspace syscall paths. Evidence: `payload_as` uses `read_unaligned` internally and works correctly for 56-byte `CompositorConfig` structs in the compositor (added after the kernel fixes). The manual field-by-field workaround remains in the 9P driver and init but is no longer believed necessary. **Status: resolved** (root cause was kernel UB, not `payload_as`).
+2. **Spurious wakeup from `sys_wait`.** Init's `wait(&[channel])` returned before the 9p driver sent its response. Fix: loop on wait+try_recv until the expected response message type arrives. ~~Root cause of the spurious wakeup not fully diagnosed.~~ **Retrospective (2026-03-13):** Root cause identified as kernel Fix 12 (stale waiter registrations). When `sys_wait` takes the `BlockResult::Blocked` path, unfired handle registrations remained live. A subsequent signal to one of those stale handles would spuriously wake the thread. The retry loop remains correct as defense-in-depth. **Status: resolved.**
 
 **Architecture notes:**
 
@@ -124,7 +1626,7 @@ Total: 20 scheduler state machine tests, all passing.
 
 ### How to Test
 
-```bash
+```sh
 cd system
 ./crash-test.sh 120   # Automated: 120 seconds of rapid keyboard input
 ./stress-test.sh 30   # Headless stress test (no display needed)
@@ -171,6 +1673,12 @@ Active questions we've started exploring but haven't resolved. Each thread links
 4. **Compound document editing tension.** "Editors bind to content types" + "one editor per document" conflict for compound documents. Initial instinct: editor nesting (same text editor used within presentations, standalone text docs, etc.). But nesting creates complexity. Unresolved — needs dedicated exploration.
 
 Open questions: system gesture vs shell input boundary, compound editor nesting model, whether content-type interaction primitives (cursor/selection/playhead from OS service) need to become richer editing primitives for compound documents to work.
+
+### GPU path rendering via stencil-then-cover
+
+**Informs:** Decision #11 (Rendering Technology), virgil-render driver
+**Status:** Approach settled, implementation deferred until core emits `Content::Path`
+**Context:** Researched four approaches to GPU path rendering (2026-03-17). Stencil-then-cover is the right technique for the current virgl stack (ES 3.0 ceiling from ANGLE/Metal). Compute-shader rendering (Vello-style) requires ES 3.1 + SSBOs, blocked by ANGLE's hardcoded `kMaxSupportedGLVersion = 3.0`. virglrenderer's protocol supports compute (`VIRGL_CCMD_LAUNCH_GRID`, `SET_SHADER_BUFFERS`) but the host GL doesn't expose it. Compute becomes viable on real hardware with a native driver (no ANGLE translation). Currently deferred: core never emits `Content::Path` — the Phase 2 rendering redesign eliminated SVG paths, icons use the glyph cache. See full journal entry above for details and implementation plan.
 
 ### View/edit in the CLI
 
@@ -315,6 +1823,18 @@ Topics to explore, roughly prioritized by which unsettled decisions they'd infor
 ## Insights Log
 
 Non-obvious realizations worth preserving. These are the "aha moments" that should inform future design thinking.
+
+### The prototype validates the interface, not the technique (2026-03-17)
+
+The thick driver architecture means rendering strategy is a driver-internal choice invisible to the rest of the OS. Stencil-then-cover on QEMU/virglrenderer proves paths flow correctly through the scene graph → driver → display pipeline. A native GPU driver on real hardware could switch to compute-shader path rendering without changing a single line outside the driver. This is the same principle as "settle the approach, not the technology" (Decision #11) — the scene graph interface is the design artifact, the rendering technique is a leaf node behind it. Prototyping with ANGLE's ES 3.0 ceiling doesn't constrain the design; it only constrains which rendering techniques the prototype can validate.
+
+### The architecture is the interfaces, not the components (2026-03-16)
+
+A rendering pipeline is a series of data shape transformations. Each data shape (Hardware Events, Key Events, Write Requests, Scene Tree, Pixel Buffer) is an interface — the contract between two components. The "components" (Input Driver, Editor, Core, Render Backend) are just translation layers between interfaces. Data of one shape goes in, data of another shape goes out, the logic is fully encapsulated. This framing eliminates confusion about "where does X live?" — if it transforms the data shape, it's inside the translator. If it changes the shape itself, it's an interface redesign. Thinking in interfaces rather than components also makes it obvious when a component is doing too much: the compositor was translating Scene Tree → Pixels while also understanding text, parsing SVG, and managing font caches. That's not one translation — it's several, jammed into one box.
+
+### Glyphs are cached vector shapes, not text (2026-03-16)
+
+The `Glyphs` scene graph content type isn't "text" — it's "cached vector shapes looked up by ID from a collection." Text is the most common use case, but monochrome icons are structurally identical: a collection of vector outlines indexed by ID. An icon set goes through the exact same pipeline as a font — same glyph cache, same rasterization, same compositing. This eliminated the 795-line SVG parser in the compositor. When an abstraction naturally absorbs use cases you didn't explicitly design for, the boundary is probably in the right place.
 
 ### Decomposition is a spectrum, not a binary (2026-03-05)
 

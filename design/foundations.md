@@ -46,6 +46,16 @@ The traditional distinction (simple = one file, compound = many) becomes an inte
 - Which relationship axes are used (a text file has none; a slide deck has spatial + temporal + logical)
 - Whether a layout engine is involved (single-content documents are rendered directly)
 
+### Coordinate units
+
+The OS uses exactly two spatial units:
+
+**Point (pt)** — 1/72 inch. The resolution-independent coordinate unit used everywhere above the render boundary: node positions, node sizes, font sizes, layout constants, shadow offsets. One unit for both spatial layout and typography. Integer points give near-pixel-level control at typical desktop DPIs (96–220 DPI → 1–3 physical pixels per point).
+
+**Pixel (px)** — one physical display element. Used only by the render backends and drawing library — the final stage where points are converted to hardware coordinates.
+
+The scale factor (`physical_dpi / 72`) bridges them. It is derived from display hardware (EDID), user preference, or a sensible default (96 DPI → scale ≈ 1.33). The render library applies the scale during the scene tree walk. Core and the scene graph never know about pixels or DPI.
+
 ### Open terminology questions
 
 - ~~**Referenced vs owned parts.**~~ **SETTLED: Copy semantics.** Embedding content in a compound document creates an independent copy. No reference tracking, no broken links, no cascading deletes. COW at the filesystem level shares physical blocks until copies diverge. The original document's ID is stored as provenance metadata, enabling explicit "update to latest" (user-initiated pull). One-directional knowledge: compound knows about original, original doesn't know about compound.

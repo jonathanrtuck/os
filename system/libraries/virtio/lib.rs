@@ -136,6 +136,29 @@ impl Device {
 
         self.write(REG_STATUS, status | STATUS_DRIVER_OK);
     }
+    /// Read device features (both 32-bit words combined into u64).
+    pub fn read_device_features(&self) -> u64 {
+        self.write(REG_DEVICE_FEATURES_SEL, 0);
+        let lo = self.read(REG_DEVICE_FEATURES) as u64;
+        self.write(REG_DEVICE_FEATURES_SEL, 1);
+        let hi = self.read(REG_DEVICE_FEATURES) as u64;
+        lo | (hi << 32)
+    }
+    /// Read the current device status register.
+    pub fn read_status(&self) -> u32 {
+        self.read(REG_STATUS)
+    }
+    /// Write the device status register.
+    pub fn set_status(&self, status: u32) {
+        self.write(REG_STATUS, status);
+    }
+    /// Write driver features (both 32-bit words from a u64).
+    pub fn write_driver_features(&self, features: u64) {
+        self.write(REG_DRIVER_FEATURES_SEL, 0);
+        self.write(REG_DRIVER_FEATURES, features as u32);
+        self.write(REG_DRIVER_FEATURES_SEL, 1);
+        self.write(REG_DRIVER_FEATURES, (features >> 32) as u32);
+    }
     /// Perform feature negotiation. Accepts no device-specific features.
     pub fn negotiate(&self) -> bool {
         self.reset();

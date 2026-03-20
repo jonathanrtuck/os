@@ -30,18 +30,17 @@
 #![no_std]
 #![no_main]
 
-const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+use protocol::{
+    edit::{
+        CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE,
+        MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE,
+        MSG_WRITE_INSERT,
+    },
+    editor::{EditorConfig, MSG_EDITOR_CONFIG},
+    input::{KeyEvent, MSG_KEY_EVENT},
+};
+
 const DOC_HEADER_SIZE: usize = 64;
-// Message types — shared with compositor.
-const MSG_KEY_EVENT: u32 = 10;
-const MSG_WRITE_INSERT: u32 = 30;
-const MSG_WRITE_DELETE: u32 = 31;
-const MSG_CURSOR_MOVE: u32 = 32;
-const MSG_SELECTION_UPDATE: u32 = 33;
-const MSG_WRITE_DELETE_RANGE: u32 = 34;
-/// Compositor → editor: set cursor position from click-to-position.
-const MSG_SET_CURSOR: u32 = 35;
-const MSG_EDITOR_CONFIG: u32 = 4;
 // Keycodes (Linux evdev).
 const KEY_LEFT: u16 = 105;
 const KEY_RIGHT: u16 = 106;
@@ -50,51 +49,8 @@ const KEY_END: u16 = 107;
 const KEY_LSHIFT: u16 = 42;
 const KEY_RSHIFT: u16 = 54;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CursorMove {
-    position: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct EditorConfig {
-    doc_va: u64,
-    doc_capacity: u32,
-    _pad: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct KeyEvent {
-    keycode: u16,
-    pressed: u8,
-    ascii: u8,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SelectionUpdate {
-    sel_start: u32,
-    sel_end: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct WriteDelete {
-    position: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct WriteDeleteRange {
-    start: u32,
-    end: u32,
-}
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct WriteInsert {
-    position: u32,
-    byte: u8,
-}
-
 fn channel_shm_va(idx: usize) -> usize {
-    CHANNEL_SHM_BASE + idx * 2 * 4096
+    protocol::channel_shm_va(idx)
 }
 /// Read the document length from the shared buffer header.
 fn doc_len(doc_buf: *const u8) -> usize {

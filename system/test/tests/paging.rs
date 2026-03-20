@@ -61,7 +61,10 @@ fn align_up_overflow_wraps_without_panic() {
 #[test]
 fn align_up_u64_overflow_wraps_without_panic() {
     let result = align_up_u64(u64::MAX, 4096);
-    assert!(result < u64::MAX, "wrapping produces a value less than input");
+    assert!(
+        result < u64::MAX,
+        "wrapping produces a value less than input"
+    );
 }
 
 // --- Constant relationship checks ---
@@ -102,11 +105,20 @@ fn user_va_regions_do_not_overlap() {
     assert!(USER_CODE_BASE < HEAP_BASE, "code before heap");
     assert!(HEAP_END <= DMA_BUFFER_BASE, "heap before DMA");
     assert!(DMA_BUFFER_END <= DEVICE_MMIO_BASE, "DMA before MMIO");
-    assert!(DEVICE_MMIO_END <= CHANNEL_SHM_BASE, "MMIO before channel SHM");
+    assert!(
+        DEVICE_MMIO_END <= CHANNEL_SHM_BASE,
+        "MMIO before channel SHM"
+    );
     assert!(CHANNEL_SHM_END <= USER_STACK_VA, "channel SHM before stack");
     assert!(USER_STACK_VA < USER_STACK_TOP, "stack VA before stack top");
-    assert!(USER_STACK_TOP <= SHARED_MEMORY_BASE, "stack before shared memory");
-    assert!(SHARED_MEMORY_END <= USER_VA_END, "shared memory within VA range");
+    assert!(
+        USER_STACK_TOP <= SHARED_MEMORY_BASE,
+        "stack before shared memory"
+    );
+    assert!(
+        SHARED_MEMORY_END <= USER_VA_END,
+        "shared memory within VA range"
+    );
 }
 
 #[test]

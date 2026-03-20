@@ -1,6 +1,9 @@
 // AUDIT: 2026-03-11 — 4 unsafe blocks verified, 6-category checklist applied.
 // Fix: added SAFETY comments to swap_ttbr0 and block_current_unless_woken.
 // Idle thread park fix (Fix 1) re-verified sound.
+// Fix 17 (2026-03-14): TPIDR_EL1 set in schedule_inner before lock drops.
+// 5 unsafe blocks total (swap_ttbr0, block_current_unless_woken, schedule_inner TPIDR,
+// init TPIDR, init_secondary TPIDR).
 //! SMP-aware EEVDF scheduler with scheduling contexts.
 //!
 //! Two-layer design:
@@ -15,17 +18,17 @@
 //! (one per core) are never enqueued; they run as fallback when no threads
 //! are runnable.
 
-use super::handle::HandleObject;
-use super::memory;
-use super::metrics;
-use super::per_core;
-use super::process::{Process, ProcessId};
-use super::scheduling_context::{self, SchedulingContext, SchedulingContextId};
-use super::sync::IrqMutex;
-use super::thread::{Thread, ThreadId, WaitEntry};
-use super::timer;
-use super::Context;
 use alloc::{boxed::Box, vec::Vec};
+
+use super::{
+    handle::HandleObject,
+    memory, metrics, per_core,
+    process::{Process, ProcessId},
+    scheduling_context::{self, SchedulingContext, SchedulingContextId},
+    sync::IrqMutex,
+    thread::{Thread, ThreadId, WaitEntry},
+    timer, Context,
+};
 
 /// Initialize the scheduler with core 0's boot thread.
 /// Default scheduling context: 10ms budget per 50ms period (20% of one core).
@@ -41,6 +44,7 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
         const INIT: PerCoreState = PerCoreState {
             current: None,
             idle: None,
+            is_idle: false,
         };
         [INIT; per_core::MAX_CORES]
     },
@@ -55,6 +59,10 @@ static STATE: IrqMutex<State> = IrqMutex::new(State {
 struct PerCoreState {
     current: Option<Box<Thread>>,
     idle: Option<Box<Thread>>,
+    /// True when this core is running its idle thread (no runnable work).
+    /// Set in `schedule_inner` under the STATE lock. Used by `try_wake_impl`
+    /// (Phase 3: IPI) to decide whether to send an inter-processor interrupt.
+    is_idle: bool,
 }
 /// Single run queue — linear scan for EEVDF selection.
 #[allow(clippy::vec_box)]
@@ -97,6 +105,10 @@ pub struct KillInfo {
     pub handles: HandleCategories,
     /// Address space for immediate cleanup (None if deferred due to running threads).
     pub address_space: Option<Box<super::address_space::AddressSpace>>,
+    /// Internal timeout timers from threads that were blocked in `wait` with a
+    /// finite timeout. These are NOT tracked in the handle table and must be
+    /// explicitly destroyed to avoid leaking timer table slots.
+    pub timeout_timers: Vec<timer::TimerId>,
 }
 /// Handles sorted by type for cleanup outside the scheduler lock.
 pub struct HandleCategories {
@@ -124,6 +136,19 @@ enum ExitInfo {
     },
 }
 
+impl ExitInfo {
+    fn process_id(&self) -> ProcessId {
+        match self {
+            ExitInfo::Last { process_id, .. } | ExitInfo::NonLast { process_id, .. } => *process_id,
+        }
+    }
+    fn thread_id(&self) -> ThreadId {
+        match self {
+            ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id, .. } => *thread_id,
+        }
+    }
+}
+
 /// Result of `block_current_unless_woken`.
 ///
 /// Distinguishes the two return paths so callers know whether post-block
@@ -136,19 +161,6 @@ pub enum BlockResult {
     /// Thread blocked, `schedule_inner` selected another thread.
     /// Caller must NOT run cleanup (wrong thread identity).
     Blocked(*const Context),
-}
-
-impl ExitInfo {
-    fn process_id(&self) -> ProcessId {
-        match self {
-            ExitInfo::Last { process_id, .. } | ExitInfo::NonLast { process_id, .. } => *process_id,
-        }
-    }
-    fn thread_id(&self) -> ThreadId {
-        match self {
-            ExitInfo::Last { thread_id, .. } | ExitInfo::NonLast { thread_id, .. } => *thread_id,
-        }
-    }
 }
 
 /// Bind the default scheduling context to a kernel-spawned user thread.
@@ -299,6 +311,69 @@ fn replenish_contexts(contexts: &mut [Option<SchedulingContextSlot>], now: u64) 
         entry.context = entry.context.maybe_replenish(now);
     }
 }
+/// Compute the scheduler's next deadline in counter ticks.
+///
+/// Considers:
+/// 1. The current thread's remaining scheduling context budget (quantum expiry).
+/// 2. The earliest `replenish_at` across all active scheduling contexts.
+///
+/// Returns `None` if there are no scheduler-driven deadlines (e.g., idle thread
+/// with no scheduling contexts, or thread with unlimited budget).
+///
+/// `now_ns_val`: current time in nanoseconds (already computed by caller).
+fn scheduler_deadline_ticks(
+    thread: &Thread,
+    contexts: &[Option<SchedulingContextSlot>],
+    now_ns_val: u64,
+) -> Option<u64> {
+    let freq = timer::counter_freq();
+
+    if freq == 0 {
+        return None;
+    }
+
+    let now_ticks = timer::counter();
+    let mut earliest_ns: Option<u64> = None;
+
+    // Source 1: current thread's remaining budget → quantum expiry deadline.
+    if !thread.is_idle() {
+        if let Some(ctx_id) = thread.scheduling.context_id {
+            if let Some(Some(slot)) = contexts.get(ctx_id.0 as usize) {
+                if slot.context.has_budget() && slot.context.remaining > 0 {
+                    // Quantum expires at now + remaining budget.
+                    let deadline_ns = now_ns_val.saturating_add(slot.context.remaining);
+
+                    earliest_ns = Some(deadline_ns);
+                }
+            }
+        }
+    }
+
+    // Source 2: replenishment deadlines for exhausted contexts (any time)
+    // or non-exhausted contexts with future replenishment. The latter
+    // causes harmless spurious timer wakeups — the scheduler will find
+    // no work and return to idle.
+    for slot in contexts.iter().flatten() {
+        if !slot.context.has_budget() || slot.context.replenish_at > now_ns_val {
+            let replenish = slot.context.replenish_at;
+
+            earliest_ns = Some(earliest_ns.map_or(replenish, |e| e.min(replenish)));
+        }
+    }
+
+    // Convert from nanoseconds to counter ticks.
+    earliest_ns.map(|deadline_ns| {
+        if deadline_ns <= now_ns_val {
+            // Already passed — return current tick count (will fire immediately).
+            now_ticks
+        } else {
+            let delta_ns = deadline_ns - now_ns_val;
+            let delta_ticks = (delta_ns as u128 * freq as u128 / 1_000_000_000) as u64;
+
+            now_ticks.saturating_add(delta_ticks)
+        }
+    })
+}
 #[inline(never)]
 fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Context {
     // Drop threads deferred from the previous schedule_inner. Safe now because
@@ -365,6 +440,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         park_old(s, old_thread, core);
 
         s.cores[core].current = Some(new_thread);
+        s.cores[core].is_idle = false;
 
         new_ctx
     } else if old_thread.is_ready() && has_budget(&old_thread, &s.scheduling_contexts) {
@@ -375,6 +451,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         let old_ctx = old_thread.context_ptr();
 
         s.cores[core].current = Some(old_thread);
+        s.cores[core].is_idle = false;
 
         old_ctx
     } else {
@@ -393,6 +470,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
         park_old(s, old_thread, core);
 
         s.cores[core].current = Some(idle);
+        s.cores[core].is_idle = true;
 
         idle_ctx
     };
@@ -400,6 +478,43 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     // Deferred cleanup: if the old thread was from a killed process, decrement
     // the running count and free the address space when it reaches zero.
     maybe_cleanup_killed_process(s, old_pid, old_exited);
+
+    // Tickless timer: reprogram the hardware timer for the next deadline.
+    // Compute the scheduler's next deadline from the current thread's quantum
+    // and context replenishment, then delegate to timer::reprogram_next_deadline
+    // which also considers timer objects.
+    let sched_deadline = s.cores[core]
+        .current
+        .as_ref()
+        .map(|t| scheduler_deadline_ticks(t, &s.scheduling_contexts, now))
+        .flatten();
+    timer::reprogram_next_deadline(sched_deadline);
+
+    debug_assert!(
+        !result.is_null(),
+        "schedule_inner returned null context pointer"
+    );
+
+    // Update TPIDR_EL1 to point at the new thread's Context while the
+    // scheduler lock is held and IRQs are masked. This is critical: when the
+    // lock drops, IRQs are re-enabled. If a timer IRQ fires before the caller
+    // (exception.S) updates TPIDR, save_context would write to the OLD
+    // thread's Context — which has been parked in the ready queue. That
+    // corrupts the old thread's saved state with kernel-mode registers
+    // (SPSR=EL1h, ELR=kernel addr, SP=wrong stack), causing an EC=0x21
+    // instruction abort when the old thread is later restored.
+    //
+    // SAFETY: `result` is a valid Context pointer from context_ptr() (stable
+    // heap address). TPIDR_EL1 is always valid to write at EL1. `nostack`
+    // is correct. No `nomem` — the compiler must not reorder this past the
+    // lock release (which restores DAIF and re-enables IRQs).
+    unsafe {
+        core::arch::asm!(
+            "msr tpidr_el1, {ctx}",
+            ctx = in(reg) result,
+            options(nostack),
+        );
+    }
 
     result
 }
@@ -486,31 +601,68 @@ fn set_wake_pending_inner(s: &mut State, id: ThreadId) {
 /// stale TLB entries from the old process remain cached — if a physical
 /// page is freed and reused (e.g., as a kernel stack), the stale entry
 /// creates a memory alias that corrupts the new allocation.
+///
+/// Uses per-ASID invalidation (TLBI ASIDE1IS) instead of full flush
+/// (TLBI VMALLE1IS) to avoid unnecessarily flushing kernel I-TLB entries
+/// on all cores, which could cause transient performance issues and
+/// interact badly with speculative execution.
 #[inline(never)]
 fn swap_ttbr0(old: &Thread, new: &Thread) {
     let old_ttbr0 = ttbr0_for(old);
     let new_ttbr0 = ttbr0_for(new);
 
     if old_ttbr0 != new_ttbr0 {
+        // Extract old ASID from TTBR0 bits [63:48].
+        let old_asid = old_ttbr0 >> 48;
+
         // SAFETY: Inline assembly for TLB invalidation and TTBR0 switch.
         // This sequence is correct per the ARMv8 architecture:
         //   1. DSB ISHST — ensures prior page table writes are visible
-        //   2. TLBI VMALLE1IS — invalidates ALL TLB entries (inner-shareable)
+        //   2. TLBI ASIDE1IS, <old_asid> — invalidates only the old ASID's
+        //      TLB entries (inner-shareable). The ASID is placed in bits
+        //      [63:48] of the Xt operand per ARMv8 TLBI encoding.
         //   3. DSB ISH — ensures TLB invalidation completes before TTBR0 write
         //   4. MSR TTBR0_EL1 — switches the user address space
         //   5. ISB — ensures subsequent fetches use the new TTBR0
         // `new_ttbr0` is a valid TTBR0 value from the thread's address space.
         // `nostack` is correct — no stack operations in the asm block.
         unsafe {
+            // ASIDE1IS Xt encoding: ASID in bits [63:48], other bits RES0.
+            let aside_arg = old_asid << 48;
+
             core::arch::asm!(
                 "dsb ishst",
-                "tlbi vmalle1is",
+                "tlbi aside1is, {asid}",
                 "dsb ish",
                 "msr ttbr0_el1, {new}",
                 "isb",
+                asid = in(reg) aside_arg,
                 new = in(reg) new_ttbr0,
                 options(nostack)
             );
+        }
+    }
+}
+/// Send an IPI to a single idle core (if any), skipping `current_core`.
+///
+/// Called under the STATE lock after adding a thread to the ready queue.
+/// The `send_ipi` call is a raw `msr ICC_SGI1R_EL1` — it acquires no lock,
+/// so it is safe to call while holding the scheduler lock. The IPI handler
+/// on the target core will acquire the scheduler lock independently (after
+/// the sender releases it, since IRQs are masked while the lock is held
+/// and IPI delivery is asynchronous).
+fn ipi_kick_idle_core(s: &State, current_core: usize) {
+    use super::interrupt_controller::{InterruptController, GIC};
+
+    for (i, core) in s.cores.iter().enumerate() {
+        if i == current_core {
+            continue; // No self-IPI
+        }
+
+        if core.is_idle {
+            GIC.send_ipi(i as u32);
+
+            return; // One IPI is enough — the woken core will pick up the thread.
         }
     }
 }
@@ -532,6 +684,9 @@ fn try_wake_impl(s: &mut State, id: ThreadId, reason: Option<&HandleObject>) -> 
             thread.scheduling.eevdf = thread.scheduling.eevdf.mark_eligible();
 
             s.queue.ready.push(thread);
+
+            // IPI an idle core so it picks up the newly-ready thread.
+            ipi_kick_idle_core(s, per_core::core_id() as usize);
 
             return true;
         }
@@ -907,6 +1062,21 @@ pub fn exit_current_from_syscall(ctx: *mut Context) -> *const Context {
             }
         }
     };
+    // Phase 1b: collect internal timeout timer from the exiting thread.
+    // This timer is NOT tracked in the handle table — it's an internal
+    // resource from `wait` with a finite timeout. Must be destroyed
+    // explicitly or the 32-slot timer table leaks a slot.
+    let timeout_timer = {
+        let mut s = STATE.lock();
+        let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+        thread.timeout_timer.take()
+    };
+
+    if let Some(timer_id) = timeout_timer {
+        timer::destroy(timer_id);
+    }
+
     // Phase 2: notify thread exit (acquires thread_exit lock, then scheduler lock).
     let thread_id = exit_info.thread_id();
     let process_id = exit_info.process_id();
@@ -1041,6 +1211,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
     }
 
     let mut killed_threads = Vec::new();
+    let mut timeout_timers = Vec::new();
     let mut running_count: u32 = 0;
     // Remove target threads from ready queue.
     let mut i = 0;
@@ -1050,6 +1221,11 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
             let mut thread = s.queue.ready.swap_remove(i);
 
             release_thread_context_ids(&mut s, &mut thread);
+
+            // Collect internal timeout timer (not tracked in handle table).
+            if let Some(timer_id) = thread.timeout_timer.take() {
+                timeout_timers.push(timer_id);
+            }
 
             killed_threads.push(thread.id());
         } else {
@@ -1066,6 +1242,11 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
             release_thread_context_ids(&mut s, &mut thread);
 
+            // Collect internal timeout timer (not tracked in handle table).
+            if let Some(timer_id) = thread.timeout_timer.take() {
+                timeout_timers.push(timer_id);
+            }
+
             killed_threads.push(thread.id());
         } else {
             i += 1;
@@ -1081,15 +1262,21 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
 
             release_thread_context_ids(&mut s, &mut thread);
 
+            // Suspended threads should never have timeout timers (they haven't
+            // started running yet), but take it defensively.
+            if let Some(timer_id) = thread.timeout_timer.take() {
+                timeout_timers.push(timer_id);
+            }
+
             killed_threads.push(thread.id());
         } else {
             i += 1;
         }
     }
 
-    // Mark running threads on other cores as Exited. Collect context IDs to
-    // release after the loop (can't call release_context_inner while iterating
-    // s.cores due to borrow conflict).
+    // Mark running threads on other cores as Exited. Collect context IDs and
+    // timeout timers to release after the loop (can't call release_context_inner
+    // while iterating s.cores due to borrow conflict).
     let mut deferred_context_releases: Vec<SchedulingContextId> = Vec::new();
 
     for core_state in s.cores.iter_mut() {
@@ -1102,6 +1289,11 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
                 }
                 if let Some(id) = t.scheduling.saved_context_id.take() {
                     deferred_context_releases.push(id);
+                }
+
+                // Collect internal timeout timer from running thread.
+                if let Some(timer_id) = t.timeout_timer.take() {
+                    timeout_timers.push(timer_id);
                 }
 
                 t.mark_exited();
@@ -1147,6 +1339,7 @@ pub fn kill_process(target_pid: ProcessId) -> Option<KillInfo> {
         thread_ids: killed_threads,
         handles,
         address_space,
+        timeout_timers,
     })
 }
 /// Release a scheduling context handle (decrement ref count, free if zero).
@@ -1272,6 +1465,9 @@ pub fn spawn_user(process_id: ProcessId, entry_va: u64, user_stack_top: u64) -> 
 
     s.queue.ready.push(thread);
 
+    // IPI an idle core so it picks up the newly-spawned thread.
+    ipi_kick_idle_core(&s, per_core::core_id() as usize);
+
     Some(ThreadId(id))
 }
 /// Like `spawn_user`, but the thread is placed in the suspended list instead
@@ -1329,6 +1525,9 @@ pub fn start_suspended_threads(process_id: ProcessId) -> bool {
         if let Some(Some(process)) = s.processes.get_mut(process_id.0 as usize) {
             process.started = true;
         }
+
+        // IPI an idle core so it picks up the newly-ready threads.
+        ipi_kick_idle_core(&s, per_core::core_id() as usize);
     }
 
     started
@@ -1344,6 +1543,17 @@ pub fn push_wait_entry(entry: WaitEntry) {
     let thread = s.cores[core].current.as_mut().expect("no current thread");
 
     thread.wait_set.push(entry);
+}
+/// Take and return stale waiter entries from the current thread.
+/// Called at the start of `sys_wait` to clean up registrations from a
+/// previous wait that took the BlockResult::Blocked path.
+#[inline(never)]
+pub fn take_stale_waiters() -> Vec<WaitEntry> {
+    let mut s = STATE.lock();
+    let core = per_core::core_id() as usize;
+    let thread = s.cores[core].current.as_mut().expect("no current thread");
+
+    core::mem::take(&mut thread.stale_waiters)
 }
 /// Take and return any stale timeout timer from the current thread.
 /// Called at the start of `sys_wait` to clean up from a previous blocked wait.

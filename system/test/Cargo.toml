@@ -7,3 +7,11 @@ edition = "2021"
 # VMA, buddy allocator, slab). Separate crate because ../.cargo/config.toml
 # forces aarch64-unknown-none; tests must compile for the host target.
 # Run with `cargo test -- --test-threads=1` from this directory.
+
+[dev-dependencies]
+protocol = { path = "../libraries/protocol" }
+ipc = { path = "../libraries/ipc" }
+drawing = { path = "../libraries/drawing" }
+scene = { path = "../libraries/scene" }
+fonts = { path = "../libraries/fonts" }
+render = { path = "../libraries/render" }

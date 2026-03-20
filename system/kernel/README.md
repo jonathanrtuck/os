@@ -18,7 +18,7 @@ cd system && cargo build
 cd system/test && cargo test -- --test-threads=1
 ```
 
-632 tests covering memory management, scheduling, IPC, processes, ELF loading, interrupt handling, syscalls, OOM fault injection, and adversarial stress/fuzz scenarios.
+1,462 tests covering memory management, scheduling, IPC, processes, ELF loading, interrupt handling, syscalls, OOM fault injection, adversarial stress/fuzz scenarios, drawing, fonts, scene graph, and compositing.
 
 ### Stress testing
 
@@ -116,7 +116,7 @@ process_exit.rs          — process exit notification (waitable handles)
 thread_exit.rs           — thread exit notification (waitable handles)
 waitable.rs              — generic WaitableRegistry<Id> (shared pattern for exit/timer/interrupt)
 interrupt.rs             — interrupt registration table (IRQ forwarding to userspace handles)
-syscall.rs               — syscall dispatcher (27 syscalls)
+syscall.rs               — syscall dispatcher (28 syscalls)
 per_core.rs              — per-core data structures (online flag, core ID via MPIDR)
 power.rs                 — PSCI CPU_ON wrapper (HVC #0) for secondary core boot
 interrupt_controller.rs  — GICv2 distributor + CPU interface (per-core init)

@@ -16,7 +16,7 @@ use paging::*;
 
 // --- Duplicated constants from syscall.rs ---
 
-const MAX_DMA_ORDER: u64 = 11;
+const MAX_DMA_ORDER: u64 = (RAM_SIZE / PAGE_SIZE).ilog2() as u64;
 const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -35,6 +35,7 @@ enum Error {
     AlreadyBound = -7,
     WouldBlock = -8,
     OutOfMemory = -9,
+    SyscallBlocked = -15,
 }
 
 #[repr(i64)]
@@ -174,7 +175,8 @@ fn validate_device_map(pa: u64, size: u64) -> Result<(), Error> {
 
 /// Validates memory_share PA range exactly as sys_memory_share does.
 fn validate_memory_share(pa: u64, page_count: u64) -> Result<(), Error> {
-    if page_count == 0 || page_count > 2048 {
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
     if pa & (PAGE_SIZE - 1) != 0 {
@@ -254,6 +256,7 @@ fn error_codes_are_negative() {
     assert_eq!(Error::AlreadyBound as i64, -7);
     assert_eq!(Error::WouldBlock as i64, -8);
     assert_eq!(Error::OutOfMemory as i64, -9);
+    assert_eq!(Error::SyscallBlocked as i64, -15);
 }
 
 #[test]
@@ -404,10 +407,7 @@ fn elf_buffer_overflow_u64() {
 
 #[test]
 fn wait_zero_count_rejected() {
-    assert_eq!(
-        validate_wait_buffer(0x1000, 0),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_wait_buffer(0x1000, 0), Err(Error::InvalidArgument));
 }
 
 #[test]
@@ -425,10 +425,7 @@ fn wait_valid_buffer() {
 
 #[test]
 fn wait_ptr_overflow_u64() {
-    assert_eq!(
-        validate_wait_buffer(u64::MAX, 1),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_wait_buffer(u64::MAX, 1), Err(Error::BadAddress));
 }
 
 #[test]
@@ -454,10 +451,7 @@ fn dma_ptr_unaligned() {
 
 #[test]
 fn dma_ptr_at_user_va_end() {
-    assert_eq!(
-        validate_dma_pa_out_ptr(USER_VA_END),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_dma_pa_out_ptr(USER_VA_END), Err(Error::BadAddress));
 }
 
 #[test]
@@ -534,8 +528,9 @@ fn memory_share_zero_pages_rejected() {
 
 #[test]
 fn memory_share_too_many_pages_rejected() {
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
     assert_eq!(
-        validate_memory_share(RAM_START, 2049),
+        validate_memory_share(RAM_START, MAX_SHARE_PAGES + 1),
         Err(Error::InvalidArgument)
     );
 }
@@ -550,34 +545,26 @@ fn memory_share_unaligned_pa_rejected() {
 
 #[test]
 fn memory_share_below_ram_rejected() {
-    assert_eq!(
-        validate_memory_share(0, 1),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_memory_share(0, 1), Err(Error::BadAddress));
 }
 
 #[test]
 fn memory_share_above_ram_rejected() {
-    assert_eq!(
-        validate_memory_share(RAM_END, 1),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_memory_share(RAM_END, 1), Err(Error::BadAddress));
 }
 
 #[test]
 fn memory_share_valid() {
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
     assert!(validate_memory_share(RAM_START, 1).is_ok());
-    assert!(validate_memory_share(RAM_START, 2048).is_ok());
+    assert!(validate_memory_share(RAM_START, MAX_SHARE_PAGES).is_ok());
 }
 
 #[test]
 fn memory_share_end_exceeds_ram() {
     // Start within RAM, but start + count * PAGE_SIZE > RAM_END.
     let almost_end = RAM_END - PAGE_SIZE;
-    assert_eq!(
-        validate_memory_share(almost_end, 2),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_memory_share(almost_end, 2), Err(Error::BadAddress));
 }
 
 // ==========================================================================
@@ -682,18 +669,12 @@ fn memory_free_below_heap() {
 
 #[test]
 fn memory_free_above_heap() {
-    assert_eq!(
-        validate_memory_free(HEAP_END),
-        Err(Error::InvalidArgument)
-    );
+    assert_eq!(validate_memory_free(HEAP_END), Err(Error::InvalidArgument));
 }
 
 #[test]
 fn memory_free_unaligned() {
-    assert_eq!(
-        validate_memory_free(HEAP_BASE + 1),
-        Err(Error::BadAddress)
-    );
+    assert_eq!(validate_memory_free(HEAP_BASE + 1), Err(Error::BadAddress));
 }
 
 // ==========================================================================
@@ -800,17 +781,17 @@ fn range_readable_unaligned_start_covers_correct_pages() {
 #[test]
 fn syscall_numbers_are_unique_and_contiguous() {
     let numbers = [
-        0u64, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22,
-        23, 24, 25, 26,
+        0u64, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+        24, 25, 26, 27,
     ];
 
     // All unique.
     let mut sorted = numbers.to_vec();
     sorted.sort();
     sorted.dedup();
-    assert_eq!(sorted.len(), 27, "27 unique syscall numbers expected");
+    assert_eq!(sorted.len(), 28, "28 unique syscall numbers expected");
 
-    // Contiguous from 0 to 26.
+    // Contiguous from 0 to 27.
     for (i, &n) in sorted.iter().enumerate() {
         assert_eq!(n, i as u64, "syscall numbers should be contiguous");
     }
@@ -822,8 +803,8 @@ fn syscall_numbers_are_unique_and_contiguous() {
 
 #[test]
 fn max_dma_order_matches_page_allocator() {
-    // MAX_DMA_ORDER must be <= 11 (page_allocator::MAX_ORDER).
-    assert!(MAX_DMA_ORDER <= 11);
+    // MAX_DMA_ORDER = log2(RAM pages), derived from RAM geometry.
+    assert_eq!(MAX_DMA_ORDER, (RAM_SIZE / PAGE_SIZE).ilog2() as u64);
 }
 
 #[test]

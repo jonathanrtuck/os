@@ -285,7 +285,12 @@ fn virtual_deadline_saturates_on_overflow() {
     // eligible_at near u64::MAX: deadline addition must not wrap to a small value.
     // Without saturating arithmetic, eligible_at + slice would wrap around to a
     // small number, giving an unfairly early deadline.
-    let s = state(u64::MAX - 100, DEFAULT_WEIGHT, DEFAULT_SLICE_NS, u64::MAX - 100);
+    let s = state(
+        u64::MAX - 100,
+        DEFAULT_WEIGHT,
+        DEFAULT_SLICE_NS,
+        u64::MAX - 100,
+    );
     let deadline = s.virtual_deadline();
 
     // Must be >= eligible_at (saturated to u64::MAX, not wrapped to a small value).
@@ -327,8 +332,14 @@ fn select_with_near_max_vruntimes_no_wrap() {
     // Two threads with vruntime near u64::MAX. Deadline calculation must not
     // wrap around and cause incorrect ordering.
     let threads = [
-        (state(u64::MAX - 1000, DEFAULT_WEIGHT, 1_000_000, u64::MAX - 1000), true),
-        (state(u64::MAX - 2000, DEFAULT_WEIGHT, 4_000_000, u64::MAX - 2000), true),
+        (
+            state(u64::MAX - 1000, DEFAULT_WEIGHT, 1_000_000, u64::MAX - 1000),
+            true,
+        ),
+        (
+            state(u64::MAX - 2000, DEFAULT_WEIGHT, 4_000_000, u64::MAX - 2000),
+            true,
+        ),
     ];
     let avg = u64::MAX - 1500;
 
@@ -337,7 +348,10 @@ fn select_with_near_max_vruntimes_no_wrap() {
     // deadline saturates to u64::MAX and the selection is still correct.
     let result = select_next(&threads, avg);
 
-    assert!(result.is_some(), "should select a thread even near u64::MAX");
+    assert!(
+        result.is_some(),
+        "should select a thread even near u64::MAX"
+    );
 }
 
 #[test]

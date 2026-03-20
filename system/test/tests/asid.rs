@@ -5,8 +5,10 @@
 //! on the host. IrqMutex is stubbed with a simple UnsafeCell wrapper.
 
 mod sync {
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
+    use core::{
+        cell::UnsafeCell,
+        ops::{Deref, DerefMut},
+    };
 
     pub struct IrqGuard<'a, T> {
         data: &'a UnsafeCell<T>,

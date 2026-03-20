@@ -33,11 +33,9 @@
 //! gets an entry that becomes permanently ready on exit (level-triggered).
 //! Two-phase wake: collect waiter under own lock, wake under scheduler lock.
 
-use super::handle::HandleObject;
-use super::scheduler;
-use super::sync::IrqMutex;
-use super::thread::ThreadId;
-use super::waitable::WaitableRegistry;
+use super::{
+    handle::HandleObject, scheduler, sync::IrqMutex, thread::ThreadId, waitable::WaitableRegistry,
+};
 
 static STATE: IrqMutex<WaitableRegistry<ThreadId>> = IrqMutex::new(WaitableRegistry::new());
 

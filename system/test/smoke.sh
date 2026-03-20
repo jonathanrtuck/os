@@ -50,7 +50,7 @@ echo -n "HELLO VIRTIO BLK" | dd of="$DISK_IMG" bs=1 count=16 conv=notrunc 2>/dev
 # QEMU HVF on macOS doesn't inject the DTB into guest RAM automatically,
 # so we dump it and load it explicitly at 0x40000000 (pre-kernel area).
 qemu-system-aarch64 \
-    -machine virt,gic-version=2,dumpdtb="$DTB_FILE" \
+    -machine virt,gic-version=3,dumpdtb="$DTB_FILE" \
     -cpu cortex-a53 \
     -smp 4 \
     -m 256M \
@@ -66,7 +66,7 @@ printf '\x00\x01\x00\x00' | dd of="${DTB_FILE}.trim" bs=1 seek=4 count=4 conv=no
 mv "${DTB_FILE}.trim" "$DTB_FILE"
 
 qemu-system-aarch64 \
-    -machine virt,gic-version=2 \
+    -machine virt,gic-version=3 \
     -cpu cortex-a53 \
     -smp 4 \
     -m 256M \

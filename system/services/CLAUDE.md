@@ -2,14 +2,16 @@
 
 Platform services that run as userspace processes. Each is a `#![no_std]` ELF binary embedded into init at build time.
 
-| Service                   | Purpose                                                                                | Status      |
-| ------------------------- | -------------------------------------------------------------------------------------- | ----------- |
-| `init/`                   | Proto-OS-service: reads device manifest, spawns drivers, orchestrates display pipeline | Scaffolding |
-| `compositor/`             | Event loop: receives input via IPC, renders text demo, signals GPU                     | Scaffolding |
-| `drivers/virtio-blk/`     | Block device driver (reads sector 0 as proof of life)                                  | Scaffolding |
-| `drivers/virtio-console/` | Console driver (placeholder)                                                           | Scaffolding |
-| `drivers/virtio-gpu/`     | GPU driver: allocates framebuffer, runs present loop                                   | Scaffolding |
-| `drivers/virtio-input/`   | Keyboard driver: reads evdev events, forwards to compositor via IPC                    | Scaffolding |
+| Service                   | Purpose                                                                           | Status      |
+| ------------------------- | --------------------------------------------------------------------------------- | ----------- |
+| `init/`                   | Root task: reads device manifest, spawns drivers, orchestrates display pipeline   | Scaffolding |
+| `core/`                   | OS service: sole writer to document state, scene graph builder, input router      | Scaffolding |
+| `drivers/cpu-render/`     | CPU render service: CpuBackend + virtio-gpu 2D present (no-virgl fallback)        | Scaffolding |
+| `drivers/virgil-render/`  | GPU render service: Gallium3D via virglrenderer (virgl-capable QEMU)              | Scaffolding |
+| `drivers/virtio-blk/`     | Block device driver (reads sector 0 as proof of life)                             | Scaffolding |
+| `drivers/virtio-console/` | Console driver (placeholder)                                                      | Scaffolding |
+| `drivers/virtio-input/`   | Keyboard + tablet driver: reads evdev events, forwards to core via IPC            | Scaffolding |
+| `drivers/virtio-9p/`      | Host filesystem passthrough: 9P2000.L protocol, loads fonts/images/icons          | Scaffolding |
 
 ## Conventions
 

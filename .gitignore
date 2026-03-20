@@ -1,11 +1,12 @@
 .claude/
 .DS_Store
-.factory/missions/
-.factory/research/
+.factory/
+.superpowers/
 .vscode/
 *.swo
 *.swp
 *~
 design/drafts/
+docs/
 reference/
 target/

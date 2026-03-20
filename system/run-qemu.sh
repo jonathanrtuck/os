@@ -16,6 +16,15 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DTB_FILE="${SCRIPT_DIR}/virt.dtb"
 DISK_IMG="${SCRIPT_DIR}/test.img"
 
+# Detect host display resolution (physical pixels) for Retina rendering.
+# Falls back to 1280x800 if detection fails.
+if RES=$(system_profiler SPDisplaysDataType 2>/dev/null | grep "Resolution:" | head -1); then
+    SCREEN_W=$(echo "$RES" | sed 's/.*: \([0-9]*\) x .*/\1/')
+    SCREEN_H=$(echo "$RES" | sed 's/.* x \([0-9]*\).*/\1/')
+fi
+SCREEN_W="${SCREEN_W:-1280}"
+SCREEN_H="${SCREEN_H:-800}"
+
 # Kill any lingering QEMU that holds our disk image lock.
 pkill -f "qemu-system-aarch64.*${DISK_IMG}" 2>/dev/null && sleep 0.2
 
@@ -25,18 +34,52 @@ if [ ! -f "$DISK_IMG" ]; then
     echo -n "HELLO VIRTIO BLK" | dd of="$DISK_IMG" bs=1 count=16 conv=notrunc 2>/dev/null
 fi
 
-QEMU_MACHINE="virt,gic-version=2"
+# Virgl (GPU-accelerated) mode: VIRGL=1 uses a custom QEMU build with
+# virtio-gpu-gl-device backed by virglrenderer + ANGLE (OpenGL ES via Metal).
+# Built from https://github.com/akihikodaki/v — see docs/superpowers/plans/.
+VIRGL_QEMU_DIR="${VIRGL_QEMU_DIR:-${SCRIPT_DIR}/bin/qemu}"
+VIRGL_QEMU="${VIRGL_QEMU_DIR}/qemu-system-aarch64"
+
+# Default to virgl mode — virgil-render requires it. Set VIRGL=0 to force
+# standard QEMU (only works if init is changed back to spawn virtio-gpu).
+if [ "${VIRGL:-1}" = "1" ]; then
+    if [ ! -x "$VIRGL_QEMU" ]; then
+        echo "error: virgl QEMU not found at $VIRGL_QEMU" >&2
+        echo "       build it from https://github.com/akihikodaki/v" >&2
+        echo "       or set VIRGL_QEMU_DIR to the install path" >&2
+        exit 1
+    fi
+    QEMU_BIN="$VIRGL_QEMU"
+    GPU_DEVICE="virtio-gpu-gl-device,xres=${SCREEN_W},yres=${SCREEN_H}"
+    DISPLAY_OPT="-display cocoa,gl=es,full-screen=on,zoom-to-fit=on"
+else
+    QEMU_BIN="qemu-system-aarch64"
+    GPU_DEVICE="virtio-gpu-device,xres=${SCREEN_W},yres=${SCREEN_H}"
+    DISPLAY_OPT="-display cocoa,full-screen=on,zoom-to-fit=on"
+fi
+
+# Use HVF (Apple Hypervisor.framework) when available for native-speed
+# execution. Falls back to TCG (software emulation) on non-macOS or when
+# HVF is unavailable. HVF requires the virtual timer (CNTV_*) and
+# ISV-safe MMIO instructions — see timer.rs and memory_mapped_io.rs.
+if "$QEMU_BIN" -accel help 2>&1 | grep -q hvf; then
+    QEMU_MACHINE="virt,gic-version=3,accel=hvf"
+    QEMU_CPU="host"
+else
+    QEMU_MACHINE="virt,gic-version=3"
+    QEMU_CPU="cortex-a53"
+fi
 SHARE_DIR="${SCRIPT_DIR}/share"
 
 QEMU_COMMON=(
-    -cpu cortex-a53
+    -cpu "$QEMU_CPU"
     -smp 4
     -m 256M
     -rtc base=localtime
     -global virtio-mmio.force-legacy=false
     -drive "file=$DISK_IMG,if=none,format=raw,id=hd0"
     -device virtio-blk-device,drive=hd0
-    -device virtio-gpu-device
+    -device "$GPU_DEVICE"
     -device virtio-keyboard-device
     -device virtio-tablet-device
     -fsdev "local,id=fsdev0,path=$SHARE_DIR,security_model=none"
@@ -46,9 +89,9 @@ QEMU_COMMON=(
 # Generate DTB if missing. Uses minimal machine config (no disk needed —
 # virtio-mmio slots are part of the virt machine definition).
 if [ ! -f "$DTB_FILE" ]; then
-    qemu-system-aarch64 \
+    "$QEMU_BIN" \
         -machine "${QEMU_MACHINE},dumpdtb=${DTB_FILE}" \
-        -cpu cortex-a53 -smp 4 -m 256M -nographic 2>/dev/null
+        -cpu "$QEMU_CPU" -smp 4 -m 256M -nographic 2>/dev/null
 
     # QEMU pads totalsize to 1MB; truncate to 64KB and fix header.
     dd if="$DTB_FILE" of="${DTB_FILE}.trim" bs=65536 count=1 2>/dev/null
@@ -59,7 +102,7 @@ fi
 # With virtio-gpu, we need a graphical display window. Use -nographic only
 # when GPU_DISPLAY=0 (headless mode, e.g. CI). Default: display enabled.
 if [ "${GPU_DISPLAY:-1}" = "0" ]; then
-    exec qemu-system-aarch64 \
+    exec "$QEMU_BIN" \
         -machine "$QEMU_MACHINE" \
         "${QEMU_COMMON[@]}" \
         -nographic \
@@ -67,9 +110,10 @@ if [ "${GPU_DISPLAY:-1}" = "0" ]; then
         -device "loader,file=$DTB_FILE,addr=0x40000000,force-raw=on" \
         -kernel "$KERNEL"
 else
-    exec qemu-system-aarch64 \
+    exec "$QEMU_BIN" \
         -machine "$QEMU_MACHINE" \
         "${QEMU_COMMON[@]}" \
+        $DISPLAY_OPT \
         -serial mon:stdio \
         -device "loader,file=$DTB_FILE,addr=0x40000000,force-raw=on" \
         -kernel "$KERNEL"

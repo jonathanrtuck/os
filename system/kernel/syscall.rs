@@ -55,6 +55,7 @@
 //! | 24 | memory_share              | x0=target_handle, x1=pa, x2=page_count, x3=flags | target VA   |
 //! | 25 | memory_alloc              | x0=page_count                           | user VA     |
 //! | 26 | memory_free               | x0=va, x1=page_count                   | 0           |
+//! | 27 | process_set_syscall_filter | x0=handle, x1=mask                     | 0           |
 //!
 //! # Error codes
 //!
@@ -72,29 +73,25 @@
 //! | -10  | InvalidHandle       | `HandleError` |
 //! | -12  | InsufficientRights  | `HandleError` |
 //! | -13  | TableFull           | `HandleError` |
+//! | -15  | SyscallBlocked      | `Error`       |
 
-use super::channel;
-use super::futex;
-use super::handle::{ChannelId, Handle, HandleError, HandleObject, Rights};
-use super::interrupt;
-use super::interrupt::InterruptId;
-use super::memory;
-use super::metrics;
-use super::page_allocator;
-use super::paging;
-use super::paging::USER_VA_END;
-use super::process;
-use super::process::ProcessId;
-use super::process_exit;
-use super::scheduler;
-use super::serial;
-use super::thread::ThreadId;
-use super::thread::WaitEntry;
-use super::thread_exit;
-use super::timer;
-use super::timer::TimerId;
-use super::Context;
 use alloc::vec::Vec;
+
+use super::{
+    channel, futex,
+    handle::{ChannelId, Handle, HandleError, HandleObject, Rights},
+    interrupt,
+    interrupt::InterruptId,
+    memory, metrics, page_allocator, paging,
+    paging::USER_VA_END,
+    process,
+    process::ProcessId,
+    process_exit, scheduler, serial,
+    thread::{ThreadId, WaitEntry},
+    thread_exit, timer,
+    timer::TimerId,
+    Context,
+};
 
 pub mod nr {
     pub const EXIT: u64 = 0;
@@ -124,15 +121,15 @@ pub mod nr {
     pub const MEMORY_SHARE: u64 = 24;
     pub const MEMORY_ALLOC: u64 = 25;
     pub const MEMORY_FREE: u64 = 26;
+    pub const PROCESS_SET_SYSCALL_FILTER: u64 = 27;
 }
 
-/// Maximum DMA allocation order (2^11 pages = 8 MiB).
-/// Must match page_allocator::MAX_ORDER. Needed for GPU framebuffers
-/// (1920×1080×4 = ~7.9 MiB requires order 11).
-const MAX_DMA_ORDER: u64 = 11;
-/// Maximum ELF size for process_create (2 MiB).
-/// ELF files include debug info and symbol tables beyond loadable segments.
-const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
+/// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
+/// Derived from RAM geometry so resolution changes never require kernel updates.
+const MAX_DMA_ORDER: u64 = (paging::RAM_SIZE / paging::PAGE_SIZE).ilog2() as u64;
+/// Maximum ELF size for process_create (4 MiB).
+/// Increased from 2 MiB to accommodate real HarfBuzz text shaping in core.
+const MAX_ELF_SIZE: u64 = 4 * 1024 * 1024;
 /// Maximum number of handles in a single `wait` call.
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -162,6 +159,7 @@ pub enum Error {
     AlreadyBound = -7,
     WouldBlock = -8,
     OutOfMemory = -9,
+    SyscallBlocked = -15,
 }
 
 impl From<HandleError> for u64 {
@@ -232,7 +230,8 @@ fn is_user_range_readable(start: u64, len: u64) -> bool {
 
     let page_mask = !(paging::PAGE_SIZE - 1);
     let first_page = start & page_mask;
-    let last_page = (start + len - 1) & page_mask;
+    // start + len - 1 cannot overflow: callers verify start + len <= USER_VA_END via checked_add
+    let last_page = start.saturating_add(len).saturating_sub(1) & page_mask;
     let mut page = first_page;
 
     while page <= last_page {
@@ -262,16 +261,38 @@ fn sys_channel_create() -> Result<u64, Error> {
             Ok(handle_b) => {
                 // Both handles inserted — now map both shared pages using the
                 // per-process channel SHM bump allocator.
-                let pages = channel::shared_pages(ch_a).ok_or(HandleError::InvalidHandle)?;
+                let pages = match channel::shared_pages(ch_a) {
+                    Some(p) => p,
+                    None => {
+                        let _ = process.handles.close(handle_a);
+                        let _ = process.handles.close(handle_b);
 
-                process
-                    .address_space
-                    .map_channel_page(pages[0].as_u64())
-                    .ok_or(HandleError::TableFull)?;
-                process
+                        return Err(HandleError::InvalidHandle);
+                    }
+                };
+
+                let va_a = match process.address_space.map_channel_page(pages[0].as_u64()) {
+                    Some(va) => va,
+                    None => {
+                        let _ = process.handles.close(handle_a);
+                        let _ = process.handles.close(handle_b);
+
+                        return Err(HandleError::TableFull);
+                    }
+                };
+
+                if process
                     .address_space
                     .map_channel_page(pages[1].as_u64())
-                    .ok_or(HandleError::TableFull)?;
+                    .is_none()
+                {
+                    // Second map failed — unmap the first page's PTE.
+                    process.address_space.unmap_channel_page(va_a);
+                    let _ = process.handles.close(handle_a);
+                    let _ = process.handles.close(handle_b);
+
+                    return Err(HandleError::TableFull);
+                }
 
                 Ok((handle_a, handle_b))
             }
@@ -546,22 +567,34 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
         // For Channel handles, map both shared pages into the target's address
         // space using the target's per-process channel SHM bump allocator. This
         // ensures the first channel received maps at CHANNEL_SHM_BASE regardless
-        // of the global channel index.
+        // of the global channel index. Track mapped VAs for rollback on failure.
         if let Some(pages) = channel_pages {
-            target
+            let va_a = target
                 .address_space
                 .map_channel_page(pages[0].as_u64())
                 .ok_or(Error::OutOfMemory)?;
-            target
-                .address_space
-                .map_channel_page(pages[1].as_u64())
-                .ok_or(Error::OutOfMemory)?;
-        }
 
-        target
-            .handles
-            .insert(source_obj, source_rights)
-            .map_err(|_| Error::InvalidArgument)?;
+            let va_b = match target.address_space.map_channel_page(pages[1].as_u64()) {
+                Some(va) => va,
+                None => {
+                    // Second map failed — unmap the first page.
+                    target.address_space.unmap_channel_page(va_a);
+                    return Err(Error::OutOfMemory);
+                }
+            };
+
+            if let Err(_) = target.handles.insert(source_obj, source_rights) {
+                // Handle insert failed — unmap both pages.
+                target.address_space.unmap_channel_page(va_a);
+                target.address_space.unmap_channel_page(va_b);
+                return Err(Error::InvalidArgument);
+            }
+        } else {
+            target
+                .handles
+                .insert(source_obj, source_rights)
+                .map_err(|_| Error::InvalidArgument)?;
+        }
 
         Ok(())
     })
@@ -625,7 +658,8 @@ fn sys_memory_share(
     if target_handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
-    if page_count == 0 || page_count > 2048 {
+    const MAX_SHARE_PAGES: u64 = paging::RAM_SIZE / paging::PAGE_SIZE / 2;
+    if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
     if pa & (paging::PAGE_SIZE - 1) != 0 {
@@ -735,6 +769,9 @@ fn sys_process_create(elf_ptr: u64, elf_len: u64) -> Result<u64, Error> {
             for id in kill_info.handles.process_handles {
                 process_exit::destroy(id);
             }
+            for id in kill_info.timeout_timers {
+                timer::destroy(id);
+            }
 
             if let Some(mut addr_space) = kill_info.address_space {
                 addr_space.invalidate_tlb();
@@ -799,6 +836,13 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
     for id in kill_info.handles.process_handles {
         super::process_exit::destroy(id);
     }
+    // Phase 3a: destroy internal timeout timers that were NOT in the handle table.
+    // These are internal resources from `wait` with a finite timeout. Without this,
+    // the 32-slot global timer table leaks a slot per killed thread with an active
+    // timeout.
+    for id in kill_info.timeout_timers {
+        super::timer::destroy(id);
+    }
 
     // Phase 4: free address space (immediate path — no threads were running).
     if let Some(mut addr_space) = kill_info.address_space {
@@ -809,6 +853,30 @@ fn sys_process_kill(handle_nr: u64) -> Result<u64, Error> {
     }
 
     Ok(0)
+}
+fn sys_process_set_syscall_filter(handle_nr: u64, mask: u64) -> Result<u64, Error> {
+    if handle_nr > u8::MAX as u64 {
+        return Err(Error::InvalidArgument);
+    }
+
+    let process_id = scheduler::current_process_do(|p| {
+        match p.handles.get(Handle(handle_nr as u8), Rights::WRITE) {
+            Ok(HandleObject::Process(id)) => Ok(id),
+            Ok(_) => Err(Error::InvalidArgument),
+            Err(_) => Err(Error::InvalidArgument),
+        }
+    })?;
+
+    scheduler::with_process(process_id, |target| {
+        if target.started {
+            return Err(Error::InvalidArgument);
+        }
+
+        target.syscall_mask = mask as u32;
+
+        Ok(0)
+    })
+    .unwrap_or(Err(Error::InvalidArgument))
 }
 fn sys_process_start(handle_nr: u64) -> Result<u64, Error> {
     if handle_nr > u8::MAX as u64 {
@@ -874,7 +942,12 @@ fn sys_scheduling_context_create(budget: u64, period: u64) -> Result<u64, Error>
             .handles
             .insert(HandleObject::SchedulingContext(ctx_id), Rights::READ_WRITE)
     })
-    .map_err(|_| Error::InvalidArgument)?;
+    .map_err(|_| {
+        // Handle table full — release the scheduling context to avoid leaking
+        // it (ref_count=1 would never reach 0 without a handle to close).
+        scheduler::release_scheduling_context(ctx_id);
+        Error::InvalidArgument
+    })?;
 
     Ok(handle.0 as u64)
 }
@@ -955,6 +1028,25 @@ fn sys_wait(ctx: *mut Context) -> *const Context {
     if let Some(stale_timer) = scheduler::take_timeout_timer() {
         timer::destroy(stale_timer);
     }
+
+    // Clean up stale waiter registrations from a previous blocked wait.
+    // When sys_wait takes the BlockResult::Blocked path, unfired handles
+    // still have this thread registered as a waiter. Those registrations
+    // can cause spurious wakeups with incorrect results on subsequent waits.
+    let stale = scheduler::take_stale_waiters();
+
+    for entry in &stale {
+        match entry.object {
+            HandleObject::Channel(id) => channel::unregister_waiter(id),
+            HandleObject::Timer(id) => timer::unregister_waiter(id),
+            HandleObject::Interrupt(id) => interrupt::unregister_waiter(id),
+            HandleObject::Thread(id) => thread_exit::unregister_waiter(id),
+            HandleObject::Process(id) => process_exit::unregister_waiter(id),
+            HandleObject::SchedulingContext(_) => {}
+        }
+    }
+
+    drop(stale);
 
     // Validate count.
     if count == 0 || count > MAX_WAIT_HANDLES {
@@ -1204,9 +1296,7 @@ fn sys_write(buf_ptr: u64, len: u64) -> Result<u64, Error> {
     // (verified via AT S1E0R hardware translation check).
     let slice = unsafe { core::slice::from_raw_parts(buf_ptr as *const u8, len as usize) };
 
-    for &byte in slice {
-        serial::putc(byte);
-    }
+    serial::write_bytes(slice);
 
     Ok(len)
 }
@@ -1308,6 +1398,22 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         (x.add(8).read(), x.add(0).read(), x.add(1).read())
     };
 
+    // Syscall filtering: check caller's per-process mask.
+    // EXIT is always allowed (can't trap a process with no way out).
+    // Syscall numbers >= 32 skip the filter (future-proofing — they fall
+    // through to the UnknownSyscall arm naturally).
+    if syscall_nr != nr::EXIT && syscall_nr < 32 {
+        let allowed =
+            scheduler::current_process_do(|p| p.syscall_mask & (1u32 << syscall_nr as u32) != 0);
+
+        if !allowed {
+            return dispatch_ok(
+                ctx,
+                result_to_u64!(Err::<u64, Error>(Error::SyscallBlocked)),
+            );
+        }
+    }
+
     match syscall_nr {
         // Special cases: these manipulate ctx directly (may block/switch threads).
         nr::EXIT => sys_exit(ctx),
@@ -1354,6 +1460,9 @@ pub fn dispatch(ctx: *mut Context) -> *const Context {
         }
         nr::MEMORY_ALLOC => dispatch_ok(ctx, result_to_u64!(sys_memory_alloc(x0))),
         nr::MEMORY_FREE => dispatch_ok(ctx, result_to_u64!(sys_memory_free(x0, x1))),
+        nr::PROCESS_SET_SYSCALL_FILTER => {
+            dispatch_ok(ctx, result_to_u64!(sys_process_set_syscall_filter(x0, x1)))
+        }
 
         _ => dispatch_ok(
             ctx,

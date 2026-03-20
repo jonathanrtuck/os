@@ -23,9 +23,11 @@ This is a long-running exploration project with no deadline. Sessions may be day
 
 Read these before making any design suggestions:
 
+- `design/philosophy.md` — **Read first.** Two root principles and their consequences. The thinking framework behind every design decision.
 - `design/foundations.md` — Guiding beliefs, glossary, external boundaries, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `design/decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness table, dependency chains between decisions
 - `design/decision-map.mermaid` — Visual dependency graph of all decisions
+- `design/architecture.md` — The system's architectural narrative: one-way pipeline, what each component understands, where responsibilities live, decision checklist
 - `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
 - `design/journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document.
 - `system/DESIGN.md` — Userspace architecture: libraries, services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `system/kernel/DESIGN.md`.
@@ -70,7 +72,51 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-11 (latest):** Filesystem design session. Major edit protocol revision + Files interface designed. Kernel bug audit mission running in parallel.
+**Session 2026-03-18 (latest):** Virgl implementation plan COMPLETE (all 8 tasks) + Phase 5 COMPLETE (cpu-render merge). Both render pipelines are now single-process: `virgil-render` (GPU-accelerated) and `cpu-render` (CPU software). Init auto-detects at boot. 1,816+ total tests pass.
+
+**Phase 5: cpu-render merge (2026-03-18):** Merged `compositor/` + `virtio-gpu/` into single `cpu-render/` process. Key insight: cpu-render self-allocates framebuffers via `dma_alloc`, making its init handshake identical to virgil-render's. Eliminated compositor→GPU IPC channel, MSG_PRESENT/MSG_PRESENT_DONE protocol, one process boundary. Old compositor/ and virtio-gpu/ deleted (no parallel implementations). Init's two pipeline functions (`setup_virgl_pipeline()` / `setup_display_pipeline()`) unified into a single `setup_render_pipeline(name, ...)` — the `name` parameter (`b"virgl"` or `b"cpu-render"`) drives diagnostic output only.
+
+**Task 8: Init integration (2026-03-18):** Added `probe_virgl()` to init — maps GPU MMIO region, reads virtio feature bits, checks `VIRTIO_GPU_F_VIRGL` (bit 0). Selects `VIRGIL_RENDER_ELF` or `CPU_RENDER_ELF` accordingly, then calls `setup_render_pipeline()` for either backend. No new IPC messages needed — simpler than planned.
+
+**Virgl Tasks 1-7 (2026-03-17/18):** Virgil3D GPU driver (`virgil-render`) built from scratch. All four content types render via GPU: backgrounds (color quads), text (glyph atlas), images (BGRA textures), paths (stencil-then-cover). See `project_virgl_progress.md` memory for details.
+
+**Triple buffering + flow control (2026-03-17, earlier):** Replaced double-buffered scene graph with triple buffering (mailbox semantics). `TripleWriter`/`TripleReader` replace `DoubleWriter`/`DoubleReader` — `acquire()` always succeeds (writer never blocks), `publish()` atomically makes buffer latest, reader always gets most recent (intermediate frames silently skipped). `copy_front_to_back()` eliminated entirely. Core scene dispatch simplified: all update paths use acquire/publish, no retry logic. `MSG_PRESENT_DONE` (ID 21) added for GPU→compositor completion signaling — compositor tracks in-flight framebuffers, waits for GPU before reuse. Compositor always renders to non-displayed buffer (fixes tearing on partial updates). GPU driver dirty rect coalescing now unions all rects instead of keeping only the last. Damage tracking `update_bounds_for_skip()` keeps `prev_bounds` consistent across skipped frames. Init allocates `TRIPLE_SCENE_SIZE` shared memory. 23 new tests, 1,791 total pass. QEMU visual verified + 68s stress test on 4 SMP cores.
+
+**Session 2026-03-16:** Tickless idle + IPI wakeup mission COMPLETE — GICv3 migration, cross-core IPI wakeup, tickless idle scheduling. 70 new tests, 1,768 total pass.
+
+**GICv3 migration + tickless idle (2026-03-16):** Full interrupt controller migration from GICv2 to GICv3. `InterruptController` trait with `GicV3` implementation using system register CPU interface (ICC\_\*) and MMIO distributor/redistributor. GICv2 code deleted entirely — no parallel implementations. boot.S updated for ICC_SRE_EL2 during EL2→EL1 transition. All QEMU scripts updated to `gic-version=3`. IPI-driven cross-core wakeup: `try_wake` sends SGI 0 via ICC_SGI1R_EL1 to idle cores blocked in WFI. Per-core idle tracking (`is_idle` in `PerCoreState`). Tickless idle: `reprogram_next_deadline` replaces fixed 250Hz tick — deadline computed from timer objects, quantum expiry, and context replenishment. `TICKS_PER_SEC` removed. Lock-free deadline cache (AtomicU64) avoids STATE→TIMERS lock ordering. Fuzz test updated (syscall 27 now valid). 70 new tests (33 GICv3 + 7 idle tracking + 13 IPI + 17 tickless), 1,768 total pass.
+
+**Session 2026-03-16:** Rendering architecture redesign COMPLETE — all three phases shipped.
+
+**Rendering architecture Phases 1–3 (2026-03-16):** The full rendering pipeline redesign is done. Three phases delivered in sequence:
+
+- **Phase 1: Extract Render Backend.** Created `libraries/render/` with `RenderBackend` trait and `CpuBackend` implementation. Moved ~3,100 lines of rendering code from compositor into the standalone library: scene_render.rs (tree walk, content rendering, transforms), compositing.rs, surface_pool.rs, damage.rs, cursor.rs. CpuBackend encapsulates all rendering state (glyph caches, damage tracker, surface pool, PREV_BOUNDS).
+- **Phase 2: Geometric Content Types.** Replaced semantic scene graph content types (`Text`, `Path`) with geometric primitives (`Glyphs`). `Image` unchanged. `FillRect` was initially added but subsequently removed — solid fills now use `Content::None` with `node.background` color. Core emits one `Glyphs` node per visible text line, background-colored containers for cursor and selection highlights. SVG parser and all path rendering code eliminated — icons use the glyph cache. Render backend updated for new content types. QEMU visual output pixel-identical before and after.
+- **Phase 3: Architecture Cleanup.** Compositor minimized to 174 lines — content-agnostic pixel pump with zero font knowledge, zero content dispatch, no SVG. Layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) confirmed in core (not scene library). Font handling boundary clean: core owns shaping + metrics, render backend owns rasterization + glyph caching. Scene library is purely geometric (no content-aware code).
+
+**Post-cleanup architecture (updated 2026-03-18):**
+
+```text
+Core (shaping, layout, scene building) → Scene Graph (shared memory) → Render Service (tree walk, rasterization/GPU, compositing, present) → Display
+```
+
+Content types: `None`, `Path`, `Glyphs`, `Image`. Each render service (`cpu-render` or `virgil-render`) is a single process that reads the scene graph and produces display output. The render library (`libraries/render/`, ~2,194 lines) provides `CpuBackend` used by cpu-render. See `design/rendering-pipeline.mermaid` and journal entry.
+
+**Rendering architecture design (2026-03-16, earlier):** Top-down audit of the rendering stack committed to path-centric rendering: the pipeline is a series of data shape transformations (Hardware Events → Key Events → Write Requests → Scene Tree → Pixel Buffer → Display Signal) with four translators (Input Driver, Editor, Core, Render Backend). Key decisions: (1) glyph rasterization in the render backend, (2) tree-structured scene graph with geometric content types (Container, Glyphs, Image, Path), (3) explicit `RenderBackend` trait with `fn render(scene, surface)` — backend owns tree walk, rasterization, compositing, (4) multi-core rasterization internal to backend, (5) Glyphs type serves both text and monochrome icons (eliminates SVG parser), (6) render service is a single process (tree walk + render + present). See `design/rendering-pipeline.mermaid` and full journal entry.
+
+**Session 2026-03-14:** Scene scroll fix + kernel TPIDR race fix (EC=0x21 crash resolved).
+
+**Scene scroll fix (2026-03-14):** Text runs were positioned at absolute y coords without scroll adjustment — content overflowed viewport, cursor misaligned. Extracted layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) from core into scene library. Core pre-applies scroll via `scroll_runs`, positions cursor/selection viewport-relative. 11 new tests, 943 total pass.
+
+**Kernel TPIDR race fix (2026-03-14, Fix 17):** Root cause of intermittent EC=0x21 crash under SMP. `schedule_inner` returned the new thread's context, but `TPIDR_EL1` was updated by exception.S _after_ the scheduler lock dropped (re-enabling IRQs). A timer IRQ in that window caused `save_context` to overwrite the old thread's Context with kernel-mode state. Fix: set `TPIDR_EL1` inside `schedule_inner` while the lock is held. Added `validate_context_before_eret` for defense-in-depth. 3000-key stress test passes, 943 tests pass.
+
+**Session 2026-03-13:** Compositor split + scene graph design. Protocol crate refactor.
+
+**Protocol crate (2026-03-13):** Created `libraries/protocol/` as single source of truth for all IPC message types and payload structs. 8 modules by protocol boundary. Zero duplicated constants or structs remain. Libraries now have proper Cargo.toml files; test crate uses normal Cargo dependencies instead of `#[path]` source includes.
+
+**Compositor split design (2026-03-13, in progress):** The compositor (2260 lines) splits into OS service (document semantics) and compositor (pixels). Interface between them: a **scene graph in shared memory** — the OS service compiles document structure into a tree of typed visual nodes, the compositor renders them. Key insight: the screen is the root compound document. Layout and compositing are the same pipeline: document → scene graph → pixels. Prior art surveyed: Fuchsia Scenic, Core Animation, Wayland, game engines (Unity/Godot/Bevy). **Next:** scene graph node type design.
+
+**Session 2026-03-11:** Filesystem design session. Major edit protocol revision + Files interface designed. Kernel bug audit mission running in parallel.
 
 **Filesystem design (2026-03-11):** Comprehensive filesystem discussion settling several open questions. Key decisions: (1) **Editors are read-only consumers** — all writes go through the OS service via IPC. "Never make the wrong path the happy path": undo is automatic and non-circumventable, no editor cooperation required. (2) **Compound documents use copy semantics** — embedding creates an independent copy, COW shares physical blocks, provenance metadata enables "update to latest." (3) **Files interface designed** — 12 operations, files by opaque ID, no paths/permissions/locking/links. A dumb file store; all semantics live above. (4) **Prototype-on-host strategy** — implement Files against macOS during prototyping, build real COW FS later. (5) **Compound atomicity solved** — OS service as sole writer sequences multi-file writes, no FS transactions needed. (6) **Snapshot scope punted** — per-document vs global vs time-correlated still open, doesn't block interface.
 
@@ -82,7 +128,7 @@ Read these before making any design suggestions:
 
 2. **Structured IPC designed.** Four sub-decisions settled: (a) one mechanism — ring buffers for everything, config = first message (Singularity pattern), no separate config path; (b) separate pages per direction — each channel has two 4 KiB pages, each a SPSC ring buffer; (c) fixed 64-byte messages — one AArch64 cache line, 4-byte type + 60-byte payload, 62 slots per ring; (d) split architecture — shared `ipc` library for ring mechanics, per-protocol payload definitions. Ring buffer layout designed in `system/DESIGN.md` §1.5. Kernel change: `channel::create()` allocates 2 pages. Pressure point documented: messages >60 bytes use shared-memory reference pattern. Prior art: io_uring, LMAX Disruptor, Singularity contracts. Implementation next.
 
-3. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables). Scanline rasterizer with 4× oversampling. ProggyClean.ttf embedded. 21 new tests (83 total).
+3. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables). Scanline rasterizer with 4× vertical and 6× horizontal (subpixel) oversampling. GPOS kerning. Fonts: Source Code Pro (mono) and Nunito Sans (proportional), loaded from host via 9p. 21 new tests (83 total).
 
 4. **Alpha blending + compositor rewrite.** Porter-Duff source-over compositing. Three panels with per-pixel alpha, composited back-to-front. TrueType text demo.
 
@@ -102,7 +148,7 @@ Read these before making any design suggestions:
 
 **Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, unblocked by prototype-on-host strategy). GUI track: input + event loops done → editor process separation done → **read-only document mapping next** (give editor zero-copy read access) → text layout. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: Files prototype complete → integrate with OS service when document pipeline reaches that point.
 
-**System code:** `system/kernel/` (35 source files), `system/services/{init,compositor,drivers/{virtio-blk,virtio-console,virtio-gpu,virtio-input}}/`, `system/libraries/{sys,virtio,drawing,ipc}/`, `system/user/{echo,text-editor}/`, `system/test/` (83 drawing + 221 kernel = 304 tests across 16 files). `prototype/files/` (21 tests). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with editor process separation. 27 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (33 .rs files + 2 .S + link.ld), `system/services/{init,core,drivers/{cpu-render,virgil-render,virtio-blk,virtio-console,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`. `prototype/files/` (21 tests). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with scene graph + render services. 28 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 
@@ -112,6 +158,66 @@ Read these before making any design suggestions:
 - Reference the decision register tiers and dependency chains
 - New decisions should be recorded in the appropriate reference documents
 
+## Kernel Change Protocol (MANDATORY)
+
+**Every change to the kernel MUST follow this protocol.** These rules exist because 14 kernel bugs were found in a single investigation — most were latent bugs that only manifested under concurrent load. The kernel is the foundation; a bug here corrupts everything above.
+
+### Unsafe code and inline assembly
+
+- Every `unsafe` block MUST have a `// SAFETY:` comment explaining the invariant it relies on and what would break if violated.
+- Inline asm `options()`: **never use `nomem` by default.** Only add `nomem` with explicit justification citing the instruction's side effects from the ARM architecture manual. `nomem` tells LLVM the instruction doesn't access memory — if that's a lie, LLVM will reorder memory accesses past it, creating races that only manifest at higher optimization levels or under SMP load.
+  - **Safe to use `nomem`:** `mrs` of truly immutable registers (MPIDR_EL1, CNTFRQ_EL0), `wfe`/`wfi` hints.
+  - **Never use `nomem`:** `msr` to any system register (DAIF, TTBR, TPIDR, timer registers), `dsb`/`isb` barriers, `hvc`/`smc` calls, `tlbi` instructions, any `ldr`/`str` (obviously reads/writes memory).
+- When editing existing `unsafe` blocks, re-verify the SAFETY comment still holds with the change.
+
+### Testing requirements
+
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~1,816 tests).
+- Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
+  ```sh
+  # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
+  # Verify no crash (💥) or panic in serial output
+  ```
+- Property-based scheduler tests (`cargo test scheduler_state`) cover state machine invariants — run after scheduler changes.
+
+### Anomaly tracking
+
+- Any unexplained kernel behavior (spurious wakeups, unexpected fault codes, timing anomalies) MUST be documented in `design/journal.md` with `Status: open-bug`.
+- Workarounds (retry loops, defensive checks) are acceptable as defense-in-depth but do NOT close the bug. The root cause investigation continues.
+- Check for `Status: open-bug` entries in the journal at session start.
+
+## Rust Formatting Convention (MANDATORY)
+
+All `.rs` files follow standard Rust community conventions. Mechanical formatting is handled by `rustfmt` (config in `system/rustfmt.toml`); file layout is enforced by convention.
+
+### Mechanical formatting (rustfmt)
+
+A PostToolUse hook (`.claude/hooks/rustfmt-post-edit.sh`) runs `rustfmt --edition 2021` on every `.rs` file after Edit or Write. Manual runs: `rustfmt --edition 2021 <file>` or `cargo +nightly fmt` from `system/`.
+
+`system/rustfmt.toml` enables two nightly features:
+
+- `group_imports = "StdExternalCrate"` — separates std, external, and local imports with blank lines
+- `imports_granularity = "Crate"` — merges imports from the same crate into one `use` statement
+
+### File layout convention
+
+Every `.rs` file follows this order:
+
+1. **Module doc comment** (`//!`)
+2. **Imports** (`use` statements, grouped by rustfmt)
+3. **Constants and statics**
+4. **Types in dependency order, each co-located with its `impl` blocks** — define a type, then immediately its `impl` block(s), before the next type. Within `impl` blocks: constructors first (`new`, `from_*`), then public methods, then private methods.
+5. **Free functions**
+6. **Tests** (`#[cfg(test)]` module)
+
+**Co-located, not types-first.** Do NOT group all type definitions at the top with all `impl` blocks below (C header style). Each type lives next to its implementation. Types appear in dependency order: if type B uses type A, define A first.
+
+### What this means in practice
+
+- When creating a new file, follow the layout above.
+- When editing an existing file, match its current layout. If the file uses the old types-first pattern, re-lay it out to co-located style while you're there.
+- `rustfmt` handles all whitespace, indentation, line wrapping, trailing commas, and brace placement. Do not fight it.
+
 ## Visual Testing (MANDATORY)
 
 **Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself.
@@ -120,13 +226,13 @@ Read these before making any design suggestions:
 
 The test harness is `system/test-qemu.sh`. For visual verification, use this workflow directly:
 
-```bash
+```sh
 # 1. Build
 cd system && cargo build --release
 
 # 2. Launch QEMU (headless, monitor socket for control, serial to file)
 qemu-system-aarch64 \
-    -machine virt,gic-version=2 -cpu cortex-a53 -smp 4 -m 256M \
+    -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 256M \
     -global virtio-mmio.force-legacy=false \
     -drive "file=test.img,if=none,format=raw,id=hd0" \
     -device virtio-blk-device,drive=hd0 \

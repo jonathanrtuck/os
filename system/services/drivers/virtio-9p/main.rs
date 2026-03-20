@@ -9,17 +9,17 @@
 #![no_std]
 #![no_main]
 
-const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+use protocol::{
+    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
+};
+
 const FILE_FID: u32 = 1;
-const MSIZE: u32 = 4096;
+const MSIZE: u32 = 32768;
 const NOFID: u32 = 0xFFFF_FFFF;
 const ROOT_FID: u32 = 0;
 const TAG_NOTAG: u16 = 0xFFFF;
 const VIRTQ_REQUEST: u32 = 0;
-// IPC protocol (shared with init).
-const MSG_DEVICE_CONFIG: u32 = 1;
-const MSG_FS_READ_REQUEST: u32 = 40;
-const MSG_FS_READ_RESPONSE: u32 = 41;
 // 9P2000.L message types.
 const P9_RLERROR: u8 = 7;
 const P9_TLOPEN: u8 = 12;
@@ -35,13 +35,6 @@ const P9_RREAD: u8 = 117;
 const P9_TCLUNK: u8 = 120;
 const P9_RCLUNK: u8 = 121;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct DeviceConfig {
-    mmio_pa: u64,
-    irq: u32,
-    _pad: u32,
-}
 struct MsgReader {
     buf: *const u8,
     pos: usize,
@@ -160,7 +153,7 @@ impl P9Client {
 
                 let mut pos = prefix.len();
 
-                pos += format_u32(ecode, &mut buf[pos..]);
+                pos += sys::format_u32(ecode, &mut buf[pos..]);
                 buf[pos] = b'\n';
                 pos += 1;
 
@@ -218,7 +211,7 @@ impl P9Client {
 
                 let mut pos = prefix.len();
 
-                pos += format_u32(ecode, &mut buf[pos..]);
+                pos += sys::format_u32(ecode, &mut buf[pos..]);
                 buf[pos] = b'\n';
                 pos += 1;
 
@@ -360,7 +353,7 @@ impl P9Client {
 
                 let mut pos = prefix.len();
 
-                pos += format_u32(ecode, &mut buf[pos..]);
+                pos += sys::format_u32(ecode, &mut buf[pos..]);
                 buf[pos] = b'\n';
                 pos += 1;
 
@@ -374,46 +367,8 @@ impl P9Client {
     }
 }
 
-/// Format a u32 into a buffer, returning the number of bytes written.
-fn format_u32(mut n: u32, buf: &mut [u8]) -> usize {
-    if n == 0 {
-        buf[0] = b'0';
-
-        return 1;
-    }
-
-    let mut tmp = [0u8; 10];
-    let mut i = 10;
-
-    while n > 0 {
-        i -= 1;
-        tmp[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    let len = 10 - i;
-
-    buf[..len].copy_from_slice(&tmp[i..]);
-
-    len
-}
-fn print_u32(mut n: u32) {
-    if n == 0 {
-        sys::print(b"0");
-
-        return;
-    }
-
-    let mut buf = [0u8; 10];
-    let mut i = 10;
-
-    while n > 0 {
-        i -= 1;
-        buf[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-    }
-
-    sys::print(&buf[i..]);
+fn print_u32(n: u32) {
+    sys::print_u32(n);
 }
 
 #[unsafe(no_mangle)]
@@ -421,7 +376,7 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"  \xF0\x9F\x93\x82 virtio-9p - starting\n");
 
     // Read device config from ring buffer (channel 0 = init).
-    let ch = unsafe { ipc::Channel::from_base(CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
+    let ch = unsafe { ipc::Channel::from_base(protocol::CHANNEL_SHM_BASE, ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
     if !ch.try_recv(&mut msg) || msg.msg_type != MSG_DEVICE_CONFIG {
@@ -475,14 +430,15 @@ pub extern "C" fn _start() -> ! {
         vq.used_pa(),
     );
 
-    // Allocate T/R message buffers (2 pages: T at page 0, R at page 1).
+    // Allocate T/R message buffers (16 pages = 64 KiB: T at offset 0, R at MSIZE).
+    let msg_order = 4; // 2^4 = 16 pages = 64 KiB
     let mut msg_pa: u64 = 0;
-    let msg_va = sys::dma_alloc(1, &mut msg_pa).unwrap_or_else(|_| {
+    let msg_va = sys::dma_alloc(msg_order, &mut msg_pa).unwrap_or_else(|_| {
         sys::print(b"virtio-9p: dma_alloc (msg) failed\n");
         sys::exit();
     });
 
-    unsafe { core::ptr::write_bytes(msg_va as *mut u8, 0, 8192) };
+    unsafe { core::ptr::write_bytes(msg_va as *mut u8, 0, (MSIZE as usize) * 2) };
 
     device.driver_ok();
 
@@ -492,8 +448,8 @@ pub extern "C" fn _start() -> ! {
         irq_handle,
         t_va: msg_va,
         t_pa: msg_pa,
-        r_va: msg_va + 4096,
-        r_pa: msg_pa + 4096,
+        r_va: msg_va + MSIZE as usize,
+        r_pa: msg_pa + MSIZE as u64,
     };
 
     // 9P protocol init.
@@ -606,7 +562,7 @@ pub extern "C" fn _start() -> ! {
 
                 let mut pos = prefix.len();
 
-                pos += format_u32(len, &mut buf[pos..]);
+                pos += sys::format_u32(len, &mut buf[pos..]);
 
                 let suffix = b" bytes\n";
 

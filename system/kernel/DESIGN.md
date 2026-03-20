@@ -42,6 +42,10 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 **Why Context at offset 0:** `TPIDR_EL1` → `Thread` → `Context` with zero offset computation. Simple, fast. A compile-time assertion (`offset_of!(Thread, context) == 0`) enforces this invariant.
 
+**TPIDR_EL1 update timing (Fix 17, 2026-03-14):** `TPIDR_EL1` must be updated to the new thread's Context _before_ the scheduler lock drops. Originally, exception.S set `TPIDR_EL1` after the Rust handler returned (`msr tpidr_el1, x0`). But the Rust handler drops the `IrqMutex` guard on return, which re-enables IRQs. If a pending timer IRQ fires in the ~3-instruction window between lock release and the `msr tpidr_el1`, `save_context` reads the stale TPIDR and overwrites the old thread's Context (now in the ready queue) with kernel-mode state, corrupting it. Fix: `schedule_inner` writes `msr tpidr_el1` while the lock is held. The exception.S write is now redundant but kept for defense-in-depth.
+
+**Eret validation (2026-03-14):** `validate_context_before_eret` in `main.rs` checks ELR/SPSR/SP consistency before every handler return: (1) EL1 return with user-range ELR (would crash with EC=0x21), (2) EL0 return with kernel-range ELR (privilege escalation), (3) EL1 return with non-kernel SP (stack corruption). Panics with detailed diagnostics instead of an opaque exception.
+
 ---
 
 ## 0.4 Page Tables & W^X Enforcement
@@ -177,7 +181,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 - PSCI (Power State Coordination Interface) via `hvc` to bring up secondary cores. QEMU `virt` supports PSCI. Core 0 calls `CPU_ON` for each secondary with a boot address and context ID.
 - Secondary core trampoline: enable MMU (shared TTBR1, empty TTBR0), set own kernel stack, configure `TPIDR_EL1`, init GIC CPU interface + timer, enter scheduler idle loop.
 - Per-CPU data: `[PerCpu; MAX_CORES]` array (`MAX_CORES` = 8, QEMU `virt` max). Holds current thread pointer, core ID, idle thread, local scheduling state. Indexed by MPIDR affinity.
-- `TPIDR_EL1` per-core points to that core's current thread context.
+- `TPIDR_EL1` per-core points to that core's current thread context. **Critical invariant (Fix 17):** `TPIDR_EL1` must be updated inside `schedule_inner` (under the scheduler lock, IRQs masked) when switching threads — not deferred to exception.S after the Rust handler returns.
 
 **Why PSCI over spin-table:** PSCI is the ARM-standard firmware interface. Works on QEMU, real hardware with UEFI/ATF, and most hypervisors. Spin-table is QEMU-specific.
 
@@ -377,6 +381,58 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 **Prior art:** Linux EEVDF (kernel 6.6+, Stoica & Abdel-Wahab 1995 paper), seL4 MCS scheduling contexts (Lyons et al.), QNX adaptive partitioning (partition inheritance = context donation), Apple Clutch (thread groups = content-type grouping).
 
 **Depends on:** 1.1 (sync primitives), 1.3 (SMP scheduler infrastructure), 0.8 (handle table for scheduling context handles).
+
+### Accepted limitation: `reprogram_next_deadline` inside scheduler lock
+
+`reprogram_next_deadline` is called from `schedule_inner` while holding the global scheduler `IrqMutex`. This means timer reprogramming (reading the timer heap, computing the minimum deadline, writing `CNTV_TVAL`) extends the lock hold time by tens of nanoseconds per context switch.
+
+**Why this is acceptable:** The target is a personal workstation (≤32 cores). Scheduler lock contention scales roughly O(n²) with core count, but the constant factor for a ~50ns hold-time extension is negligible at this scale — worst case ~1.5μs total stall across all cores, invisible in practice.
+
+**What a production multi-core kernel would do:** Per-CPU timer management. Compute the deadline under the lock, store it in `PerCoreState`, release the lock, then program the timer register. This is what Linux does — each core manages its own timer wheel independently, and `__schedule()` drops its per-CPU runqueue lock before the timer path runs. The kernel already has `PerCoreState` infrastructure to support this if needed.
+
+**When to revisit:** If this kernel ever targets server-class hardware (64+ cores) or NUMA topologies where cache-line bouncing on the scheduler lock adds microseconds per access. Not applicable for the personal workstation target.
+
+---
+
+## 6.2 GICv3 Migration, Tickless Idle & IPI Wakeup
+
+**Goal:** Replace the fixed-rate 250 Hz timer tick with demand-driven scheduling. Idle cores sleep in WFI and consume near-zero power. Woken cores are kicked by IPI when work arrives. Requires GICv3 for software-generated interrupts (SGIs) via system registers.
+
+### GICv3 migration
+
+**Previous:** GICv2 with MMIO CPU interface (GICC). **Current:** GICv3 with system register CPU interface (ICC\_\*\_EL1) and MMIO distributor (GICD) + redistributor (GICR).
+
+**Why GICv3:** GICv2's SGI mechanism writes to GICD_SGIR (a distributor MMIO register), which is shared and requires synchronization. GICv3 uses ICC_SGI1R_EL1 — a per-core system register write, no lock, no MMIO. This is essential for sending IPIs from inside the scheduler lock without adding a lock dependency.
+
+**Implementation:** `interrupt_controller.rs` provides the `InterruptController` trait (7 methods: `init_distributor`, `init_per_core`, `acknowledge`, `end_of_interrupt`, `enable_irq`, `disable_irq`, `send_ipi`) with a concrete `GicV3` implementation. Static dispatch only — the global `GIC` instance is a concrete `GicV3`, no vtable. GICv2 code deleted entirely (no parallel implementations). `boot.S` updated: EL2→EL1 transition enables ICC_SRE_EL2 (system register interface) before dropping to EL1. All QEMU scripts use `-machine virt,gic-version=3`.
+
+**Key hardware details:**
+
+- CPU interface: ICC_IAR1_EL1 (acknowledge), ICC_EOIR1_EL1 (EOI), ICC_PMR_EL1 (priority mask), ICC_IGRPEN1_EL1 (group enable), ICC_SGI1R_EL1 (software-generated interrupt)
+- Distributor (GICD): base address from DTB. GICD_CTLR, GICD_ISENABLER, GICD_ICENABLER, GICD_IPRIORITYR, GICD_IROUTER for SPI configuration
+- Redistributor (GICR): base address from DTB (GIC node reg property, second range). Per-core GICR frame (64 KiB stride). GICR_WAKER for core wake, SGI/PPI configuration via GICR_ISENABLER0/GICR_IPRIORITYR
+
+### Tickless idle
+
+**Previous:** Fixed 250 Hz timer tick (`TICKS_PER_SEC`). Every core interrupted 250 times/sec regardless of work. Idle cores burned power servicing empty timer interrupts.
+
+**Current:** `reprogram_next_deadline()` computes the earliest deadline from three sources — timer objects (AtomicU64 cache for lock-free reads), current thread's scheduling context budget expiry, and scheduling context replenishment times — then programs CNTV_TVAL_EL0 for exactly that deadline. If no deadlines exist, programs u32::MAX ticks (~68 seconds at 62.5 MHz).
+
+**Deadline cache:** `EARLIEST_DEADLINE` is an `AtomicU64` updated on timer create/destroy/expire. `earliest_timer_deadline()` reads it with `Acquire` ordering — no lock needed on the hot path. The timer lock is only held when mutating the timer table.
+
+**`TICKS_PER_SEC` removed.** No fixed tick rate. The hardware timer fires only when something needs attention.
+
+### IPI wakeup
+
+**Problem:** With tickless idle, a core sleeping in WFI won't wake until its own timer fires. If another core enqueues a thread, the sleeping core doesn't know.
+
+**Solution:** `ipi_kick_idle_core()` is called from `try_wake` (under the scheduler lock) after enqueuing a thread. It scans `PerCoreState.is_idle` flags and sends SGI 0 via `GIC.send_ipi(core_id)` to the first idle core found. One IPI is sufficient — the woken core picks up the thread from the global ready queue.
+
+**Race prevention:** Both the idle-entry path (sets `is_idle = true`, enters WFI) and `try_wake` (reads `is_idle`, pushes to queue) execute under the scheduler `STATE` lock. This prevents the race where core A reads `is_idle = false` for core B, then core B sets `is_idle = true` and sleeps, stranding the thread. See `LOCK-ORDERING.md` for the full analysis.
+
+**WFI not WFE:** IPIs (SGI 0 via ICC_SGI1R_EL1) wake WFI but not WFE. WFE requires an explicit SEV event, which GICv3 IPIs do not generate.
+
+**Depends on:** 6.1 (scheduling contexts for budget deadline computation), 1.1 (IrqMutex for scheduler lock), 1.2 (SMP infrastructure, per-core state).
 
 ---
 

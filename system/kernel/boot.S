@@ -116,6 +116,15 @@ _start:
   bic x0, x0, #(1 << 10)       // TFP = 0
   msr cptr_el2, x0
 
+  // GICv3: enable system register access at EL1.
+  // ICC_SRE_EL2: SRE=1 (bit 0) enables system register interface at EL2,
+  // Enable=1 (bit 3) allows EL1 to use ICC system registers.
+  // Without Enable=1, ICC_SRE_EL1 writes are ignored and EL1 cannot use
+  // the GICv3 system register CPU interface.
+  mov x0, #0x9                 // SRE=1 | Enable=1 (bits 0 and 3)
+  msr s3_4_c12_c9_5, x0       // ICC_SRE_EL2
+  isb
+
   ldr x0, =__stack_top_phys
   msr sp_el1, x0
   mov x0, #0b0101              // EL1h

@@ -31,12 +31,14 @@
 //!
 //! Waiter registration and readiness tracking are delegated to `WaitableRegistry`.
 
-use super::handle::HandleObject;
-use super::interrupt_controller;
-use super::scheduler;
-use super::sync::IrqMutex;
-use super::thread::ThreadId;
-use super::waitable::{WaitableId, WaitableRegistry};
+use super::{
+    handle::HandleObject,
+    interrupt_controller::{self, InterruptController},
+    scheduler,
+    sync::IrqMutex,
+    thread::ThreadId,
+    waitable::{WaitableId, WaitableRegistry},
+};
 
 /// Maximum concurrent registered interrupts across all processes.
 const MAX_INTERRUPTS: usize = 32;
@@ -73,7 +75,7 @@ pub fn acknowledge(id: InterruptId) {
     table.waiters.clear_ready(id);
 
     if let Some(&irq) = table.slots[id.0 as usize].as_ref() {
-        interrupt_controller::enable_irq(irq);
+        interrupt_controller::GIC.enable_irq(irq);
     }
 }
 /// Check whether an interrupt is pending (for `sys_wait` readiness check).
@@ -94,7 +96,7 @@ pub fn destroy(id: InterruptId) {
     };
 
     if let Some(irq) = irq {
-        interrupt_controller::disable_irq(irq);
+        interrupt_controller::GIC.disable_irq(irq);
     }
 
     if let Some(waiter_id) = waiter {
@@ -128,7 +130,7 @@ pub fn handle_irq(irq: u32) -> bool {
                 let id = InterruptId(i as u8);
 
                 // Mask the IRQ until the driver acknowledges.
-                interrupt_controller::disable_irq(irq);
+                interrupt_controller::GIC.disable_irq(irq);
 
                 if let Some(waiter) = table.waiters.notify(id) {
                     to_wake = Some((id, waiter));
@@ -171,7 +173,7 @@ pub fn register(irq: u32) -> Option<InterruptId> {
             table.waiters.create(id);
 
             // Enable the IRQ in the GIC so the hardware delivers it to us.
-            interrupt_controller::enable_irq(irq);
+            interrupt_controller::GIC.enable_irq(irq);
 
             return Some(id);
         }

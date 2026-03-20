@@ -28,6 +28,7 @@ KEY_DELAY=0.05
 WAIT_AFTER=3
 BOOT_WAIT=4
 BOOT_ONLY=false
+VIRGL="${VIRGL:-0}"
 
 # Parse arguments.
 while [[ $# -gt 0 ]]; do
@@ -37,6 +38,7 @@ while [[ $# -gt 0 ]]; do
         --wait)      WAIT_AFTER="$2"; shift 2 ;;
         --boot-wait) BOOT_WAIT="$2"; shift 2 ;;
         --boot-only) BOOT_ONLY=true; shift ;;
+        --virgl)     VIRGL=1; shift ;;
         *)           echo "Unknown option: $1" >&2; exit 1 ;;
     esac
 done
@@ -64,22 +66,38 @@ rm -f "$MON_SOCK" "$SERIAL_LOG"
 # Launch QEMU:
 #   - Serial output → file (clean, no monitor noise)
 #   - Monitor → Unix socket (for sending keys)
-#   - No display window (-nographic)
+#   - No display window (-nographic) unless virgl mode
 SHARE_DIR="${SCRIPT_DIR}/share"
 
-qemu-system-aarch64 \
-    -machine virt,gic-version=2 \
+# Virgl mode: use custom QEMU build with GPU acceleration.
+VIRGL_QEMU_DIR="${VIRGL_QEMU_DIR:-${SCRIPT_DIR}/bin/qemu}"
+VIRGL_QEMU="${VIRGL_QEMU_DIR}/qemu-system-aarch64"
+
+if [ "$VIRGL" = "1" ]; then
+    if [ ! -x "$VIRGL_QEMU" ]; then
+        echo "error: virgl QEMU not found at $VIRGL_QEMU" >&2
+        exit 1
+    fi
+    QEMU_BIN="$VIRGL_QEMU"
+    GPU_DEV="virtio-gpu-gl-device"
+else
+    QEMU_BIN="qemu-system-aarch64"
+    GPU_DEV="virtio-gpu-device"
+fi
+
+"$QEMU_BIN" \
+    -machine virt,gic-version=3 \
     -cpu cortex-a53 -smp 4 -m 256M \
     -rtc base=localtime \
     -global virtio-mmio.force-legacy=false \
     -drive "file=$DISK_IMG,if=none,format=raw,id=hd0" \
     -device virtio-blk-device,drive=hd0 \
-    -device virtio-gpu-device \
+    -device "$GPU_DEV" \
     -device virtio-keyboard-device \
     -device virtio-tablet-device \
     -fsdev "local,id=fsdev0,path=$SHARE_DIR,security_model=none" \
     -device "virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare" \
-    -nographic \
+    $(if [ "$VIRGL" = "1" ]; then echo "-display cocoa,gl=es"; else echo "-nographic"; fi) \
     -serial file:"$SERIAL_LOG" \
     -monitor unix:"$MON_SOCK",server,nowait \
     -device "loader,file=$DTB_FILE,addr=0x40000000,force-raw=on" \

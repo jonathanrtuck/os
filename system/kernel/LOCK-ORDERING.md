@@ -3,8 +3,8 @@
 Cross-file analysis of every lock in the kernel. Documents all `IrqMutex` instances,
 acquisition order constraints, and interrupt-safety properties.
 
-**Audit date:** 2026-03-11
-**Scope:** All 35 source files in `system/kernel/`
+**Audit date:** 2026-03-14 (line numbers updated; structure re-verified)
+**Scope:** All 33 source files in `system/kernel/`
 **Method:** Traced every `IrqMutex` static, every `.lock()` call, and every code path
 that acquires multiple locks (directly or transitively).
 
@@ -17,18 +17,18 @@ acquire, restored on release). There are no bare `Mutex` or other lock types.
 
 | #   | Lock Name                 | File                   | Type                                    | Purpose                                                                                       |
 | --- | ------------------------- | ---------------------- | --------------------------------------- | --------------------------------------------------------------------------------------------- |
-| 1   | `scheduler::STATE`        | scheduler.rs:127       | `IrqMutex<State>`                       | Global run queue, per-core state, process table, scheduling contexts, blocked/suspended lists |
-| 2   | `channel::STATE`          | channel.rs:64          | `IrqMutex<State>`                       | Channel table (endpoints, shared pages, pending signals, waiters)                             |
-| 3   | `timer::TIMERS`           | timer.rs:56            | `IrqMutex<TimerTable>`                  | Timer objects (deadlines, waiter registry)                                                    |
-| 4   | `interrupt::TABLE`        | interrupt.rs:55        | `IrqMutex<InterruptTable>`              | Interrupt registrations (IRQ→slot mapping, waiter registry)                                   |
+| 1   | `scheduler::STATE`        | scheduler.rs:38        | `IrqMutex<State>`                       | Global run queue, per-core state, process table, scheduling contexts, blocked/suspended lists |
+| 2   | `channel::STATE`          | channel.rs:63          | `IrqMutex<State>`                       | Channel table (endpoints, shared pages, pending signals, waiters)                             |
+| 3   | `timer::TIMERS`           | timer.rs:45            | `IrqMutex<TimerTable>`                  | Timer objects (deadlines, waiter registry)                                                    |
+| 4   | `interrupt::TABLE`        | interrupt.rs:44        | `IrqMutex<InterruptTable>`              | Interrupt registrations (IRQ→slot mapping, waiter registry)                                   |
 | 5   | `futex::WAIT_TABLE`       | futex.rs:47            | `IrqMutex<WaitTable>`                   | Futex wait queues (64 hash buckets, PA-keyed)                                                 |
 | 6   | `thread_exit::STATE`      | thread_exit.rs:42      | `IrqMutex<WaitableRegistry<ThreadId>>`  | Thread exit notification (readiness + waiters)                                                |
 | 7   | `process_exit::STATE`     | process_exit.rs:21     | `IrqMutex<WaitableRegistry<ProcessId>>` | Process exit notification (readiness + waiters)                                               |
-| 8   | `page_allocator::STATE`   | page_allocator.rs:36   | `IrqMutex<State>`                       | Buddy allocator free lists (physical page frames)                                             |
-| 9   | `slab::SLAB`              | slab.rs:32             | `IrqMutex<SlabState>`                   | Slab allocator caches (6 size classes)                                                        |
-| 10  | `heap::ALLOC_LOCK`        | heap.rs:41             | `IrqMutex<()>`                          | Linked-list allocator free list                                                               |
-| 11  | `memory::KERNEL_PT_LOCK`  | memory.rs:39           | `IrqMutex<()>`                          | Kernel TTBR1 page table modifications (break-block, guard pages)                              |
-| 12  | `serial::LOCK`            | serial.rs:22           | `IrqMutex<()>`                          | UART output serialization (prevents interleaved multi-core output)                            |
+| 8   | `page_allocator::STATE`   | page_allocator.rs:25   | `IrqMutex<State>`                       | Buddy allocator free lists (physical page frames)                                             |
+| 9   | `slab::SLAB`              | slab.rs:28             | `IrqMutex<SlabState>`                   | Slab allocator caches (6 size classes)                                                        |
+| 10  | `heap::ALLOC_LOCK`        | heap.rs:47             | `IrqMutex<()>`                          | Linked-list allocator free list                                                               |
+| 11  | `memory::KERNEL_PT_LOCK`  | memory.rs:101          | `IrqMutex<()>`                          | Kernel TTBR1 page table modifications (break-block, guard pages)                              |
+| 12  | `serial::LOCK`            | serial.rs:25           | `IrqMutex<()>`                          | UART output serialization (prevents interleaved multi-core output)                            |
 | 13  | `address_space_id::STATE` | address_space_id.rs:32 | `IrqMutex<State>`                       | ASID bitmap and generation counter                                                            |
 
 **Total: 13 distinct IrqMutex instances across 13 files.**
@@ -183,7 +183,7 @@ KERNEL_PT_LOCK.lock() (level 3)
   → page_allocator::alloc_frame() (level 2)
 ```
 
-The documented ordering comment in `memory.rs:38` says:
+The documented ordering comment in `memory.rs:100` says:
 `"Lock ordering: KERNEL_PT_LOCK → page allocator lock (never the reverse)."`
 
 Note: This is level 3 → 2, which appears to violate the level hierarchy.
@@ -335,7 +335,85 @@ and no reverse path exists.
 
 ---
 
-## 6. Summary
+## 6. IPI (Inter-Processor Interrupt) and Scheduler Lock Interaction
+
+### send_ipi under the scheduler lock
+
+`scheduler::ipi_kick_idle_core()` calls `GIC.send_ipi(core_id)`, which is a
+raw `msr ICC_SGI1R_EL1`. This inline asm instruction writes to a GICv3 system
+register — it acquires **no lock**. It is safe to execute while holding the
+scheduler lock.
+
+The call sites are:
+
+- `try_wake_impl()` — after moving a thread from blocked to ready
+- `spawn_user()` — after adding a new thread to the ready queue
+- `start_suspended_threads()` — after moving suspended threads to the ready queue
+
+All three execute under `STATE.lock()`. The `send_ipi` is a fire-and-forget
+write; it does not wait for the target core to acknowledge the interrupt.
+
+### IPI handler on the target core
+
+When core N receives SGI 0 (IPI), it exits WFI and enters `irq_handler()`:
+
+```text
+irq_handler():
+  interrupt_controller::GIC.acknowledge()  → no lock (system register read)
+  if id == 0 (SGI/IPI):
+    scheduler::schedule()  → acquires STATE lock → release
+  interrupt_controller::GIC.end_of_interrupt()  → no lock (system register write)
+```
+
+The handler acquires the scheduler lock **independently** — the sending core
+has already released its lock (or will release before the IPI is delivered,
+because IRQs are masked while the lock is held and IPI delivery is asynchronous).
+
+### No deadlock possible
+
+1. **Sender path:** `STATE.lock()` → `send_ipi()` (no lock) → release `STATE`
+2. **Handler path:** (IRQ fires after sender releases) → `STATE.lock()` → release
+
+The sender holds the scheduler lock when it calls `send_ipi()`. The IPI is
+delivered asynchronously. The target core's IRQ handler fires only when IRQs
+are unmasked on the target. If the target core holds the scheduler lock, its
+IRQs are masked (IrqMutex), so the IPI is pending — not delivered until the
+lock drops. No additional lock is acquired by `send_ipi()`. No inversion.
+
+### Race prevention: is_idle and queue insertion
+
+Both `try_wake_impl` (queue push + is_idle read) and the idle entry path in
+`schedule_inner` (is_idle write + WFI) execute under the `STATE` lock. This
+prevents the race where:
+
+1. Core A checks is_idle for core B → reads false
+2. Core B sets is_idle = true and enters WFI
+3. Thread is stranded in the queue (no IPI sent, core B sleeping)
+
+Under the lock, step 2 cannot interleave between step 1 and the queue push.
+
+### Tickless timer: scheduler → timer deadline cache
+
+With tickless idle, `schedule_inner()` calls `timer::reprogram_next_deadline()`
+after selecting a thread. This reads the cached `EARLIEST_DEADLINE` atomic
+(lock-free) and programs CNTV_TVAL. No TIMERS lock is acquired from inside
+the scheduler lock — the earliest deadline is maintained via an `AtomicU64`
+updated under the TIMERS lock on timer create/destroy/expire.
+
+```text
+schedule_inner() [holds STATE]:
+  timer::reprogram_next_deadline(sched_deadline)
+    → reads EARLIEST_DEADLINE (AtomicU64, lock-free)
+    → programs CNTV_TVAL (hardware register, no lock)
+```
+
+The TIMERS lock is only acquired from timer module functions (create, destroy,
+check_expired) which never hold it when calling scheduler functions (two-phase
+pattern). No new lock ordering edge is introduced.
+
+---
+
+## 7. Summary
 
 | Property                 | Status                                                 |
 | ------------------------ | ------------------------------------------------------ |

@@ -1,17 +1,22 @@
-// AUDIT: 2026-03-11 — All 19 unsafe blocks enumerated and verified.
+// AUDIT: 2026-03-14 — All 24 unsafe blocks enumerated and verified.
 // Each has a // SAFETY: comment explaining the invariant. Categories:
-//   - Linker symbol address (4): __kernel_end, boot_tt0_l0..l2_1
-//   - System register read (3): mrs esr_el1/far_el1/elr_el1
-//   - Inline asm barrier (1): dsb ish (no nomem — intentional, Fix 6/9)
-//   - Inline asm hint (2): wfe idle loops (nomem correct)
-//   - Volatile read (7): SECONDARY_ENTRY_PA, FDT magic scan, Context
-//     diagnostics, stack walk
+//   - Linker symbol address (4): __kernel_end (×3), boot_tt0_l0..l2_1
+//   - Context read — Fix 17 eret validation (5): validate_context_before_eret
+//     reads elr, spsr, sp, x30, thread_id via addr_of!/read_volatile. Sound:
+//     ctx from scheduler is valid, no mutation, no aliasing.
+//   - Volatile read (8): SECONDARY_ENTRY_PA, FDT magic scan, kernel_fault_handler
+//     Context diagnostics (5), stack walk
 //   - Volatile write (1): write_device_manifest
+//   - Inline asm barrier (1): dsb ish (no nomem — intentional, Fix 6/9)
+//   - Inline asm hint (2): wfi idle loops (nomem correct)
+//   - System register read (1): mrs esr_el1/far_el1/elr_el1 (1 block, 3 reads)
 //   - from_raw_parts (1): DTB blob slice
 //   - from_utf8_unchecked (1): secondary_main message
 // Fix 6/Fix 9 (nomem removal from DAIF/system register asm) re-verified:
-//   DSB at line 132 correctly omits nomem. WFE and MRS correctly use nomem.
-// Doc comment fix: write_device_manifest offset 4→8 (matches init reader).
+//   DSB correctly omits nomem. WFE and MRS correctly use nomem.
+// Fix 17 (TPIDR race, 5 blocks): formally reviewed 2026-03-14. All 5 blocks
+//   use addr_of! to avoid aliasing UB, read from documented Context/Thread
+//   offsets, execute only in validation/error paths. Sound.
 // No code bugs found.
 //!
 //! Bare-metal aarch64 kernel for QEMU `virt`.
@@ -21,7 +26,7 @@
 //! ## Physical (QEMU virt, 256 MiB RAM at 0x4000_0000)
 //!
 //! ```text
-//! 0x0800_0000  GICv2 (distributor + CPU interface)
+//! 0x0800_0000  GICv3 (distributor + redistributor, CPU interface via system registers)
 //! 0x0900_0000  PL011 UART
 //! 0x0A00_0000  Virtio MMIO (32 slots, 0x200 stride)
 //! 0x4000_0000  RAM_START ─── kernel image (.text/.rodata/.data/.bss)
@@ -60,8 +65,9 @@
 
 extern crate alloc;
 
-use context::Context;
 use core::panic::PanicInfo;
+
+use context::Context;
 
 core::arch::global_asm!(include_str!("boot.S"));
 core::arch::global_asm!(include_str!("exception.S"));
@@ -355,6 +361,69 @@ fn try_parse_dtb_at(pa: u64) -> Option<device_tree::DeviceTable> {
 
     device_tree::parse(blob)
 }
+/// Validate a context pointer before returning to exception.S for eret.
+///
+/// Catches corruption early: if SPSR says EL1 but ELR is in user VA range
+/// (or vice versa), the eret would crash. This check detects the mismatch
+/// before the eret, providing better diagnostics.
+#[inline(always)]
+fn validate_context_before_eret(ctx: *const Context) {
+    // SAFETY: ctx was returned by the scheduler and is a valid Context pointer.
+    // Reading elr and spsr for validation — no mutation, no aliasing concern.
+    let elr = unsafe { core::ptr::addr_of!((*ctx).elr).read() };
+    let spsr = unsafe { core::ptr::addr_of!((*ctx).spsr).read() };
+    let sp = unsafe { core::ptr::addr_of!((*ctx).sp).read() };
+    let mode = spsr & 0xF; // M[3:0]
+    let is_el1 = mode == 0x4 || mode == 0x5; // EL1t or EL1h
+    let is_kernel_va = elr >= 0xFFFF_0000_0000_0000;
+
+    // EL1 return with user-range ELR: the eret would try to fetch instructions
+    // from a lower-half VA at EL1, using TTBR0 (which may be empty for idle
+    // threads). This is the EC=0x21 crash pattern.
+    if is_el1 && !is_kernel_va && elr != 0 {
+        serial::panic_puts("\n🛑 eret validation: EL1 return to user VA\n  elr=0x");
+        serial::panic_put_hex(elr);
+        serial::panic_puts(" spsr=0x");
+        serial::panic_put_hex(spsr);
+        serial::panic_puts(" sp=0x");
+        serial::panic_put_hex(sp);
+        serial::panic_puts(" ctx=0x");
+        serial::panic_put_hex(ctx as u64);
+
+        // Dump more context: x30 (link register), thread ID
+        let x30 = unsafe { core::ptr::addr_of!((*ctx).x).cast::<u64>().add(30).read() };
+        let thread_id =
+            unsafe { core::ptr::read_volatile((ctx as *const u8).add(0x330) as *const u64) };
+
+        serial::panic_puts("\n  x30=0x");
+        serial::panic_put_hex(x30);
+        serial::panic_puts(" thread_id=0x");
+        serial::panic_put_hex(thread_id);
+        serial::panic_puts("\n");
+
+        panic!("corrupt context: EL1 eret to user VA");
+    }
+    // EL0 return with kernel-range ELR: would give user code kernel access.
+    if !is_el1 && is_kernel_va {
+        serial::panic_puts("\n🛑 eret validation: EL0 return to kernel VA\n  elr=0x");
+        serial::panic_put_hex(elr);
+        serial::panic_puts(" spsr=0x");
+        serial::panic_put_hex(spsr);
+        serial::panic_puts("\n");
+
+        panic!("corrupt context: EL0 eret to kernel VA");
+    }
+    // EL1 return with invalid kernel SP: stack corruption.
+    if is_el1 && (sp < 0xFFFF_0000_0000_0000 || sp == 0) {
+        serial::panic_puts("\n🛑 eret validation: EL1 return with bad SP\n  sp=0x");
+        serial::panic_put_hex(sp);
+        serial::panic_puts(" elr=0x");
+        serial::panic_put_hex(elr);
+        serial::panic_puts("\n");
+
+        panic!("corrupt context: EL1 eret with non-kernel SP");
+    }
+}
 /// Write a device manifest to a channel shared page.
 ///
 /// The manifest lists all discovered virtio devices so init can spawn
@@ -396,14 +465,24 @@ fn write_device_manifest(
     }
 }
 
+/// SGI 0 is used as the inter-processor interrupt (IPI) for cross-core wakeup.
+const SGI_IPI: u32 = 0;
+
 #[unsafe(no_mangle)]
 pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
+    use interrupt_controller::InterruptController;
+
+    debug_assert!(!ctx.is_null(), "irq_handler: ctx is null (TPIDR_EL1 was 0)");
+
     let mut next: *const Context = ctx;
 
-    if let Some(iar) = interrupt_controller::acknowledge() {
-        let id = iar & 0x3FF;
-
-        if id == timer::IRQ_ID {
+    if let Some(id) = interrupt_controller::GIC.acknowledge() {
+        if id == SGI_IPI {
+            // IPI wakeup: just acknowledge and reschedule.
+            // Do NOT call timer::handle_irq or increment TICKS — SGI 0 is
+            // distinct from the virtual timer PPI (IRQ 27). The scheduler will pick
+            // up the newly-ready thread that triggered this IPI.
+        } else if id == timer::IRQ_ID {
             metrics::inc_timer_ticks();
             timer::handle_irq();
         } else {
@@ -411,11 +490,18 @@ pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
             interrupt::handle_irq(id);
         }
 
-        // Reschedule after any IRQ — timer tick or woken driver thread.
+        // Reschedule after any IRQ — timer tick, IPI, or woken driver thread.
         next = scheduler::schedule(ctx);
 
-        interrupt_controller::end_of_interrupt(iar);
+        interrupt_controller::GIC.end_of_interrupt(id);
     }
+
+    debug_assert!(
+        !next.is_null(),
+        "irq_handler: returning null context pointer"
+    );
+
+    validate_context_before_eret(next);
 
     next
 }
@@ -554,9 +640,10 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
 
     // Wire DTB into device initialization.
     let gic_from_dtb = if let Some(ref dt) = device_table {
-        // GIC: look for "arm,cortex-a15-gic" (QEMU virt GICv2).
-        // The reg property has two entries: [distributor, CPU interface].
-        if let Some(gic) = dt.find_first("arm,cortex-a15-gic") {
+        // GIC: look for "arm,gic-v3" (QEMU virt GICv3).
+        // The reg property has 2+ entries: [distributor, redistributor, ...].
+        // A 3rd entry (GICv2 compat region) may be present — handle gracefully.
+        if let Some(gic) = dt.find_first("arm,gic-v3") {
             if gic.regs.len() >= 2 {
                 interrupt_controller::set_base_addresses(gic.regs[0].0, gic.regs[1].0);
 
@@ -574,9 +661,9 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     interrupt_controller::init();
 
     if gic_from_dtb {
-        serial::puts("  ⚡ interrupts - gic v2 (dtb)\n");
+        serial::puts("  ⚡ interrupts - gic v3 (dtb)\n");
     } else {
-        serial::puts("  ⚡ interrupts - gic v2 (hardcoded)\n");
+        serial::puts("  ⚡ interrupts - gic v3 (hardcoded)\n");
     }
 
     scheduler::init();
@@ -637,14 +724,16 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     boot_secondaries();
 
     timer::init();
-    serial::puts("  ⏱️  timer - 250hz\n");
+    serial::puts("  ⏱️  timer - tickless\n");
     serial::puts("🥾 booted.\n");
 
     loop {
-        // SAFETY: WFE is a hint instruction that puts the core into a
-        // low-power wait state until an event (SEV/interrupt). Does not
-        // access memory or use the stack. nomem is correct.
-        unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
+        // SAFETY: WFI puts the core into a low-power wait state until an
+        // interrupt (timer, IPI, or device IRQ). Does not access memory or
+        // use the stack. nomem is correct. WFI is used instead of WFE
+        // because IPIs (SGI 0 via ICC_SGI1R_EL1) wake WFI but not WFE
+        // (WFE requires a SEV event which GICv3 IPIs do not generate).
+        unsafe { core::arch::asm!("wfi", options(nostack, nomem)) };
     }
 }
 /// Entry point for secondary cores (called from boot.S secondary_entry).
@@ -653,7 +742,9 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
 /// Initializes per-core GIC, scheduler state, and timer, then enters idle.
 #[unsafe(no_mangle)]
 pub extern "C" fn secondary_main(core_id: u64) -> ! {
-    interrupt_controller::init_cpu_interface();
+    use interrupt_controller::InterruptController;
+
+    interrupt_controller::GIC.init_per_core(core_id as u32);
     scheduler::init_secondary(core_id as u32);
 
     // Print before marking online — core 0 waits for online flags, so this
@@ -673,14 +764,27 @@ pub extern "C" fn secondary_main(core_id: u64) -> ! {
     timer::init();
 
     loop {
-        // SAFETY: WFE is a hint instruction — low-power wait for event.
-        // No memory access, no stack usage. nomem is correct.
-        unsafe { core::arch::asm!("wfe", options(nostack, nomem)) };
+        // SAFETY: WFI puts the core into a low-power wait state until an
+        // interrupt (timer, IPI, or device IRQ). No memory access, no stack
+        // usage. nomem is correct. WFI is used instead of WFE because IPIs
+        // (SGI 0) wake WFI but not WFE.
+        unsafe { core::arch::asm!("wfi", options(nostack, nomem)) };
     }
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
-    syscall::dispatch(ctx)
+    debug_assert!(!ctx.is_null(), "svc_handler: ctx is null (TPIDR_EL1 was 0)");
+
+    let result = syscall::dispatch(ctx);
+
+    debug_assert!(
+        !result.is_null(),
+        "svc_handler: returning null context pointer"
+    );
+
+    validate_context_before_eret(result);
+
+    result
 }
 /// Handle non-SVC synchronous exceptions from EL0 (user faults).
 ///
@@ -695,6 +799,11 @@ pub extern "C" fn svc_handler(ctx: *mut Context) -> *const Context {
 /// and create an infinite fault loop with a one-page-per-iteration leak.
 #[unsafe(no_mangle)]
 pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
+    debug_assert!(
+        !ctx.is_null(),
+        "user_fault_handler: ctx is null (TPIDR_EL1 was 0)"
+    );
+
     let esr: u64;
     let far: u64;
     let elr: u64;
@@ -739,7 +848,11 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     serial::panic_puts(" FAR=0x");
     serial::panic_put_hex(far);
     serial::panic_puts("\n");
-    scheduler::exit_current_from_syscall(ctx)
+    let result = scheduler::exit_current_from_syscall(ctx);
+
+    validate_context_before_eret(result);
+
+    result
 }
 
 #[panic_handler]

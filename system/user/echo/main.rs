@@ -11,7 +11,7 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 
-const SHM: *mut u8 = 0x4000_0000 as *mut u8; // must match kernel paging::CHANNEL_SHM_BASE
+const SHM: *mut u8 = protocol::CHANNEL_SHM_BASE as *mut u8;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {

@@ -18,21 +18,27 @@ This project explores inverting that: **OS → Document → Tool.** Documents ha
 
 ## Status
 
-The project has a working interactive demo running on a bare-metal aarch64 microkernel in QEMU. The display pipeline renders text with LCD subpixel anti-aliasing and stem darkening, composites z-ordered surfaces with translucent chrome and drop shadows over a radial gradient background, decodes PNG images, rasterizes SVG paths, and supports a text editor with selection, scrolling, and mouse click-to-position plus an image viewer — switchable at runtime with context-aware icons. A hardware RTC clock ticks in the title bar. Only dirty screen regions are transferred to the GPU.
+The project has a working interactive demo running on a bare-metal aarch64 microkernel in QEMU. The display pipeline renders text with LCD subpixel anti-aliasing and stem darkening, composites z-ordered surfaces with rounded corners, Gaussian-blurred box shadows, and layer opacity over a radial gradient background, decodes PNG images, rasterizes SVG paths and cubic bezier curves, and supports a text editor with selection, scrolling, and mouse click-to-position plus an image viewer — switchable at runtime with context-aware icons. A hardware RTC clock ticks in the title bar. The rendering pipeline uses a configurable-cadence frame scheduler (60/30/120fps) with event coalescing and idle optimization, incremental scene graph updates with change-list-driven damage tracking, 2D affine transforms, fractional DPI scaling, and bilinear image resampling — only dirty screen regions are re-rendered and transferred to the GPU.
 
 For the full design landscape, see the [decision register](design/decisions.md) and the [exploration journal](design/journal.md).
 
 ## What's Implemented
 
-**Kernel** — Bare-metal aarch64 microkernel. 27 syscalls, EEVDF scheduler, 4 SMP cores, demand-paged memory, channel-based IPC with shared memory.
+**Kernel** — Bare-metal aarch64 microkernel. 28 syscalls, EEVDF scheduler, 4 SMP cores, demand-paged memory, channel-based IPC with shared memory.
 
-**Display pipeline** — Four-process architecture: virtio-input driver → compositor → text editor → virtio-gpu driver. Dirty-rectangle GPU transfers (only changed regions sent, not the full framebuffer) and incremental content rendering (only changed text lines re-rendered).
+**Display pipeline** — Five-process architecture: virtio-input driver → core (OS service) → compositor → text editor → virtio-gpu driver. Scene graph in shared memory connects core (document semantics) to compositor (pixels). Configurable-cadence frame scheduler (60/30/120fps) with event coalescing, frame budgeting, and idle optimization. Incremental scene graph updates — clock ticks and cursor moves are zero-allocation mutations; only changed nodes are recorded in a change list. Change-list-driven damage tracking replaces byte-level scene diffing. Subtree clip skipping avoids visiting nodes outside dirty regions. Dirty-rectangle GPU transfers (only changed regions sent to the host).
 
-**Compositor** — Z-ordered surface compositing with translucent chrome (alpha ~170) and drop shadows (12px depth). Radial gradient background with noise texture. Title bar with context-aware document/image icons and hardware RTC wall-clock (PL031, UTC). Pure monochrome palette. Sole writer to document state — editors are read-only consumers. Procedural arrow cursor rendered at top z-order.
+**Core (OS service)** — Sole writer to document state. Builds a scene graph describing the visual structure of the document. Routes input to the active editor. Editors are read-only consumers that send write requests via IPC.
 
-**Drawing library** — TrueType font rasterizer with LCD subpixel rendering (per-channel RGB coverage, 6× horizontal oversampling), stem darkening for heavier strokes, GPOS kerning, and proper hhea baseline metrics. PNG decoder (DEFLATE, all filter types). SVG path parser and rasterizer. Porter-Duff compositing. Two fonts: Source Code Pro (monospace, editor) and Nunito Sans (proportional, chrome) at 20px.
+**Compositor** — Reads the scene graph and renders it to pixels. Z-ordered surface compositing with translucent chrome (alpha ~170), Gaussian-blurred box shadows (configurable blur radius, offset, spread), and per-subtree layer opacity via offscreen compositing. Rounded corners with SDF-based anti-aliased fill and corner-radius-aware child clipping. 2D affine transforms (3×3 matrix per node, composition through tree, transform-aware clipping). Fractional DPI scaling (f32 scale factors: 1.0, 1.25, 1.5, 2.0, etc.) with pixel-snapped borders and fractional font sizing. Bilinear image resampling for scaled/rotated content. Radial gradient background with noise texture. Title bar with context-aware document/image icons and hardware RTC wall-clock (PL031, UTC). Pure monochrome palette. Procedural arrow cursor rendered at top z-order. SVG icon rasterization. Damage tracking for incremental re-rendering.
 
-**Text editor** — Cursor movement, text selection (shift+arrow), scrolling, mouse click-to-position, insert and delete. Communicates with compositor via IPC write requests.
+**Drawing library** — Surfaces, colors, Porter-Duff compositing, gamma-correct sRGB blending. NEON SIMD acceleration for fill, blend, rounded-corner, and blur operations. Anti-aliased lines (Wu's algorithm). Path rendering (MoveTo/LineTo/CurveTo/Close, fill and stroke, cubic beziers). Separable Gaussian blur (two-pass horizontal/vertical, configurable radius/sigma). PNG decoder (DEFLATE, all filter types). Bilinear image resampling. Monochrome palette system.
+
+**Font library** — TrueType font rasterizer with LCD subpixel rendering (per-channel RGB coverage, 6× horizontal oversampling), stem darkening for heavier strokes, GPOS kerning, proper hhea baseline metrics, and glyph cache. Two fonts: Source Code Pro (monospace, editor) and Nunito Sans (proportional, chrome) at 20px.
+
+**Scene graph library** — Typed visual node tree in shared memory. Double-buffered for lock-free producer/consumer across processes. Change list for incremental damage tracking. Copy-forward with selective mutation for zero-allocation updates. Per-node 2D affine transforms, corner radius, layer opacity, box shadows, and path content. Monospace text layout helpers.
+
+**Text editor** — Cursor movement, text selection (shift+arrow), scrolling, mouse click-to-position, insert and delete. Communicates with core via IPC write requests.
 
 **Image viewer** — Decodes and displays a PNG image. Toggle between editor and viewer with Ctrl+Tab (title bar icon updates to reflect current mode).
 
@@ -40,7 +46,7 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Assets via 9P** — Fonts, images, and icons loaded at boot from the host filesystem via virtio-9p passthrough.
 
-**Tests** — 921 tests (900 system + 21 prototype).
+**Tests** — 1,785 tests (1,764 system + 21 prototype).
 
 ## Running the Demo
 
@@ -52,16 +58,16 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 ### Build
 
-```bash
+```sh
 cd system
-cargo build --release
+cargo build -r
 ```
 
 ### Run
 
-```bash
+```sh
 cd system
-cargo run --release
+cargo run -r
 ```
 
 This builds the kernel and launches QEMU with the correct device configuration (see `run-qemu.sh` for details). `Ctrl-A X` to exit QEMU.
@@ -87,10 +93,11 @@ os/
 │   ├── journal.md                   # Open threads, insights, research spikes
 │   └── architecture.mermaid         # System architecture diagram
 ├── system/                          # OS implementation (Rust, no_std)
-│   ├── kernel/                      # Microkernel (27 syscalls, EEVDF, SMP)
+│   ├── kernel/                      # Microkernel (28 syscalls, EEVDF, SMP)
 │   ├── services/
 │   │   ├── init/                    # Root task — spawns everything, wires IPC
-│   │   ├── compositor/              # Sole writer, renderer, input router
+│   │   ├── core/                    # OS service — sole writer, scene graph builder, input router
+│   │   ├── compositor/              # Scene graph renderer, surface compositing, damage tracking
 │   │   └── drivers/
 │   │       ├── virtio-gpu/          # Display output (2D commands, present loop)
 │   │       ├── virtio-input/        # Keyboard + tablet input (evdev translation)
@@ -98,15 +105,21 @@ os/
 │   │       ├── virtio-9p/           # Host filesystem passthrough
 │   │       └── virtio-console/      # Serial console (minimal)
 │   ├── libraries/
-│   │   ├── drawing/                 # Surfaces, fonts, PNG, SVG, compositing
+│   │   ├── drawing/                 # Surfaces, colors, PNG, compositing, palette
+│   │   ├── fonts/                   # TrueType rasterizer, subpixel rendering, glyph cache
+│   │   ├── scene/                   # Scene graph nodes, shared memory layout, text layout
 │   │   ├── ipc/                     # Lock-free SPSC ring buffers
+│   │   ├── protocol/                # IPC message types + payload structs (all protocols)
 │   │   ├── sys/                     # Syscall wrappers + userspace allocator
 │   │   ├── virtio/                  # MMIO transport + split virtqueue
 │   │   └── link.ld                  # Shared userspace linker script
 │   ├── user/
 │   │   ├── text-editor/             # Editor process (input → write requests)
-│   │   └── echo/                    # IPC test program
-│   ├── test/                        # Integration + stress tests
+│   │   ├── echo/                    # IPC test program
+│   │   ├── stress/                  # IPC stress test program
+│   │   ├── fuzz/                    # Fuzzing harness
+│   │   └── fuzz-helper/             # Fuzzing helper
+│   ├── test/                        # Host-side unit + integration tests (54 files)
 │   └── share/                       # Runtime assets (fonts, images, icons)
 ├── prototype/
 │   └── files/                       # Files interface prototype (macOS-backed)

@@ -10,6 +10,7 @@
 
 mod paging {
     pub const PAGE_SIZE: u64 = 4096;
+    pub const RAM_SIZE: u64 = 256 * 1024 * 1024;
 
     pub const fn align_up(addr: usize, align: usize) -> usize {
         (addr + align - 1) & !(align - 1)
@@ -36,8 +37,10 @@ mod memory {
 }
 
 mod sync {
-    use core::cell::UnsafeCell;
-    use core::ops::{Deref, DerefMut};
+    use core::{
+        cell::UnsafeCell,
+        ops::{Deref, DerefMut},
+    };
 
     pub struct IrqMutex<T> {
         data: UnsafeCell<T>,

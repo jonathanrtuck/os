@@ -347,10 +347,7 @@ enum GicOp {
 
 /// Mirrors the FIXED init_distributor: write CTLR=1, then DSB+ISB.
 fn init_distributor_fixed() -> Vec<GicOp> {
-    vec![
-        GicOp::Write("GICD_CTLR", 1),
-        GicOp::DsbIsb,
-    ]
+    vec![GicOp::Write("GICD_CTLR", 1), GicOp::DsbIsb]
 }
 
 /// Mirrors the FIXED init_cpu_interface: write PMR=0xFF, CTLR=1, then DSB+ISB.
@@ -369,10 +366,7 @@ fn init_distributor_buggy() -> Vec<GicOp> {
 
 /// Mirrors the BUGGY init_cpu_interface: write PMR=0xFF, CTLR=1, NO barrier.
 fn init_cpu_interface_buggy() -> Vec<GicOp> {
-    vec![
-        GicOp::Write("GICC_PMR", 0xFF),
-        GicOp::Write("GICC_CTLR", 1),
-    ]
+    vec![GicOp::Write("GICC_PMR", 0xFF), GicOp::Write("GICC_CTLR", 1)]
 }
 
 /// Check that the last operation in a GIC init sequence is a barrier.
@@ -414,4 +408,300 @@ fn gic_init_cpu_interface_fixed_has_barrier() {
         ends_with_barrier(&ops),
         "Fixed init_cpu_interface must end with DSB+ISB barrier"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Tickless idle — reprogram_next_deadline logic
+// ---------------------------------------------------------------------------
+// These tests model the deadline computation that reprogram_next_deadline
+// must perform: pick the minimum of timer objects, scheduler quantum expiry,
+// and scheduling context replenishment deadlines.
+
+/// Maximum CNTP_TVAL value for "no deadline" (long sleep).
+/// u32::MAX ticks ≈ 68s at 62.5 MHz.
+const MAX_TVAL: u64 = u32::MAX as u64;
+
+/// Result of computing the next deadline.
+#[derive(Debug, PartialEq)]
+enum TimerAction {
+    /// Fire immediately (deadline is in the past).
+    Immediate,
+    /// Program CNTP_TVAL with this many ticks.
+    Program(u64),
+    /// No deadline — program long interval (u32::MAX ticks).
+    LongSleep,
+}
+
+/// Model of reprogram_next_deadline logic.
+///
+/// `timer_deadlines`: active timer object deadlines in counter ticks.
+/// `quantum_deadline`: current thread's quantum expiry in counter ticks (None if idle/unlimited).
+/// `replenish_deadline`: earliest scheduling context replenish_at in counter ticks (None if none).
+/// `now`: current counter value.
+fn compute_next_deadline(
+    timer_deadlines: &[u64],
+    quantum_deadline: Option<u64>,
+    replenish_deadline: Option<u64>,
+    now: u64,
+) -> TimerAction {
+    // Find earliest timer object deadline.
+    let earliest_timer = timer_deadlines.iter().copied().min();
+
+    // Collect all deadline sources.
+    let mut earliest: Option<u64> = earliest_timer;
+
+    if let Some(q) = quantum_deadline {
+        earliest = Some(earliest.map_or(q, |e| e.min(q)));
+    }
+    if let Some(r) = replenish_deadline {
+        earliest = Some(earliest.map_or(r, |e| e.min(r)));
+    }
+
+    match earliest {
+        None => TimerAction::LongSleep,
+        Some(deadline) if deadline <= now => TimerAction::Immediate,
+        Some(deadline) => {
+            let delta = deadline - now;
+            if delta > MAX_TVAL {
+                TimerAction::Program(MAX_TVAL)
+            } else {
+                TimerAction::Program(delta)
+            }
+        }
+    }
+}
+
+#[test]
+fn tickless_selects_earliest_of_timer_objects() {
+    // VAL-TICK-002: Given timer objects with various deadlines, selects minimum.
+    let now = 1_000_000u64;
+    let timers = [now + 500, now + 100, now + 300];
+
+    let action = compute_next_deadline(&timers, None, None, now);
+
+    assert_eq!(action, TimerAction::Program(100));
+}
+
+#[test]
+fn tickless_empty_timer_table_long_sleep() {
+    // VAL-TICK-003: No timer objects, no scheduler deadline → long sleep.
+    let now = 1_000_000u64;
+
+    let action = compute_next_deadline(&[], None, None, now);
+
+    assert_eq!(action, TimerAction::LongSleep);
+}
+
+#[test]
+fn tickless_past_deadline_fires_immediately() {
+    // VAL-TICK-006: Deadline in the past → immediate fire.
+    let now = 1_000_000u64;
+    let timers = [now - 100]; // Already expired
+
+    let action = compute_next_deadline(&timers, None, None, now);
+
+    assert_eq!(action, TimerAction::Immediate);
+}
+
+#[test]
+fn tickless_deadline_exactly_at_now_fires_immediately() {
+    // Edge case: deadline == now → fires immediately (>= comparison).
+    let now = 1_000_000u64;
+    let timers = [now];
+
+    let action = compute_next_deadline(&timers, None, None, now);
+
+    assert_eq!(action, TimerAction::Immediate);
+}
+
+#[test]
+fn tickless_quantum_shorter_than_timer() {
+    // VAL-TICK-004: Quantum expiry (2ms) shorter than nearest timer (500ms).
+    let freq = 62_500_000u64;
+    let now = 1_000_000u64;
+    let quantum_2ms = now + (freq * 2 / 1000); // 2ms in ticks = 125_000
+    let timer_500ms = now + (freq / 2); // 500ms in ticks = 31_250_000
+
+    let action = compute_next_deadline(&[timer_500ms], Some(quantum_2ms), None, now);
+
+    assert_eq!(action, TimerAction::Program(quantum_2ms - now));
+}
+
+#[test]
+fn tickless_timer_shorter_than_quantum() {
+    // VAL-TICK-005: Timer deadline shorter than quantum.
+    let freq = 62_500_000u64;
+    let now = 1_000_000u64;
+    let timer_1ms = now + (freq / 1000); // 1ms = 62_500 ticks
+    let quantum_10ms = now + (freq * 10 / 1000); // 10ms
+
+    let action = compute_next_deadline(&[timer_1ms], Some(quantum_10ms), None, now);
+
+    assert_eq!(action, TimerAction::Program(timer_1ms - now));
+}
+
+#[test]
+fn tickless_minimum_of_timer_and_quantum() {
+    // VAL-TICK-005: picks the earliest of timer deadline and quantum expiry.
+    let now = 1_000_000u64;
+
+    // Case A: timer is earlier
+    let action_a = compute_next_deadline(&[now + 100], Some(now + 200), None, now);
+    assert_eq!(action_a, TimerAction::Program(100));
+
+    // Case B: quantum is earlier
+    let action_b = compute_next_deadline(&[now + 200], Some(now + 100), None, now);
+    assert_eq!(action_b, TimerAction::Program(100));
+}
+
+#[test]
+fn tickless_replenishment_is_earliest() {
+    // VAL-TICK-018: replenishment deadline earlier than timer and quantum.
+    let now = 1_000_000u64;
+    let replenish = now + 50;
+    let timer = now + 200;
+    let quantum = now + 300;
+
+    let action = compute_next_deadline(&[timer], Some(quantum), Some(replenish), now);
+
+    assert_eq!(action, TimerAction::Program(50));
+}
+
+#[test]
+fn tickless_replenishment_with_no_other_deadlines() {
+    // VAL-TICK-018: replenishment is the ONLY deadline.
+    let now = 1_000_000u64;
+    let replenish = now + 1_000;
+
+    let action = compute_next_deadline(&[], None, Some(replenish), now);
+
+    assert_eq!(action, TimerAction::Program(1_000));
+}
+
+#[test]
+fn tickless_huge_delta_capped_to_max_tval() {
+    // Deadline very far in the future → cap to u32::MAX ticks.
+    let now = 1_000_000u64;
+    let far_future = now + MAX_TVAL + 1_000;
+
+    let action = compute_next_deadline(&[far_future], None, None, now);
+
+    assert_eq!(action, TimerAction::Program(MAX_TVAL));
+}
+
+#[test]
+fn tickless_quantum_only_no_timers() {
+    // Only quantum deadline, no timer objects.
+    let now = 1_000_000u64;
+    let quantum = now + 625_000; // 10ms at 62.5 MHz
+
+    let action = compute_next_deadline(&[], Some(quantum), None, now);
+
+    assert_eq!(action, TimerAction::Program(625_000));
+}
+
+#[test]
+fn tickless_multiple_timers_with_quantum() {
+    // Multiple timer objects + quantum: picks absolute minimum.
+    let now = 1_000_000u64;
+    let timers = [now + 500, now + 100, now + 300];
+    let quantum = now + 50;
+
+    let action = compute_next_deadline(&timers, Some(quantum), None, now);
+
+    assert_eq!(action, TimerAction::Program(50));
+}
+
+#[test]
+fn tickless_all_three_sources_quantum_wins() {
+    // All three sources present, quantum is earliest.
+    let now = 1_000_000u64;
+
+    let action = compute_next_deadline(&[now + 300], Some(now + 100), Some(now + 200), now);
+
+    assert_eq!(action, TimerAction::Program(100));
+}
+
+#[test]
+fn tickless_past_quantum_fires_immediately() {
+    // Quantum already expired → immediate fire.
+    let now = 1_000_000u64;
+
+    let action = compute_next_deadline(&[], Some(now - 10), None, now);
+
+    assert_eq!(action, TimerAction::Immediate);
+}
+
+#[test]
+fn tickless_past_replenishment_fires_immediately() {
+    // Replenishment already due → immediate fire.
+    let now = 1_000_000u64;
+
+    let action = compute_next_deadline(&[], None, Some(now - 5), now);
+
+    assert_eq!(action, TimerAction::Immediate);
+}
+
+// ---------------------------------------------------------------------------
+// Tests: Scheduling context budget + replenishment under tickless
+// ---------------------------------------------------------------------------
+
+#[path = "../../kernel/scheduling_context.rs"]
+mod scheduling_context;
+
+#[test]
+fn tickless_context_budget_enforcement() {
+    // VAL-TICK-015: Thread with 10ms/50ms context, timer fires at quantum boundary.
+    use scheduling_context::SchedulingContext;
+
+    let budget_ns = 10_000_000u64; // 10ms
+    let period_ns = 50_000_000u64; // 50ms
+    let ctx = SchedulingContext::new(budget_ns, period_ns, 0);
+    let freq = 62_500_000u64;
+
+    // After running for 5ms, 5ms remaining.
+    let after_5ms = ctx.charge(5_000_000);
+    assert!(after_5ms.has_budget());
+    assert_eq!(after_5ms.remaining, 5_000_000);
+
+    // The quantum deadline should be now + 5ms in counter ticks.
+    let quantum_deadline_ticks = (after_5ms.remaining as u128 * freq as u128 / 1_000_000_000) as u64;
+    // 5ms at 62.5 MHz = 312_500 ticks
+    assert_eq!(quantum_deadline_ticks, 312_500);
+
+    // After running the full 10ms, budget exhausted.
+    let exhausted = ctx.charge(10_000_000);
+    assert!(!exhausted.has_budget());
+    assert_eq!(exhausted.remaining, 0);
+}
+
+#[test]
+fn tickless_context_replenishment_after_period() {
+    // VAL-TICK-015 + VAL-TICK-018: Budget replenishes after period even with no other deadlines.
+    use scheduling_context::SchedulingContext;
+
+    let ctx = SchedulingContext::new(10_000_000, 50_000_000, 0);
+
+    // Exhaust budget.
+    let exhausted = ctx.charge(10_000_000);
+    assert!(!exhausted.has_budget());
+    assert_eq!(exhausted.replenish_at, 50_000_000); // replenish at 50ms
+
+    // Replenish at 50ms.
+    let replenished = exhausted.maybe_replenish(50_000_000);
+    assert!(replenished.has_budget());
+    assert_eq!(replenished.remaining, 10_000_000);
+    assert_eq!(replenished.replenish_at, 100_000_000); // next replenish at 100ms
+
+    // Under tickless, the timer must fire at replenish_at so the scheduler
+    // can replenish the context and schedule the thread. Convert to ticks:
+    let freq = 62_500_000u64;
+    let replenish_ticks = (exhausted.replenish_at as u128 * freq as u128 / 1_000_000_000) as u64;
+    // 50ms at 62.5 MHz = 3_125_000 ticks
+    assert_eq!(replenish_ticks, 3_125_000);
+
+    // reprogram_next_deadline should program this deadline.
+    let now_ticks = 0u64;
+    let action = compute_next_deadline(&[], None, Some(replenish_ticks), now_ticks);
+    assert_eq!(action, TimerAction::Program(replenish_ticks));
 }

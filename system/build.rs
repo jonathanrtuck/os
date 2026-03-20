@@ -5,6 +5,7 @@
 //! # Build order
 //!
 //! 1. Shared libraries: sys, virtio, drawing (rlibs)
+//! 1b. Cargo-managed libraries: fonts (with harfrust dependency tree)
 //! 2. All user/driver/compositor programs (ELFs)
 //! 3. Generate `init_embedded.rs` with `include_bytes!` for ELFs init needs
 //! 4. Compile init last (depends on all other ELFs via init_embedded.rs)
@@ -13,18 +14,30 @@
 //! Init is the proto-OS-service: it embeds all other ELFs so it can spawn
 //! them at runtime. The kernel spawns only init (microkernel pattern).
 
-use std::env;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+/// Output of building a Cargo-managed library for the bare-metal target.
+#[allow(dead_code)]
+struct CargoLibOutput {
+    /// Path to the main rlib file.
+    rlib: PathBuf,
+    /// Path to the deps directory containing transitive dependency rlibs.
+    deps_dir: PathBuf,
+}
 
 /// ELFs that init embeds (must be a subset of PROGRAMS names).
 const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("virtio-blk", "VIRTIO_BLK_ELF"),
     ("virtio-console", "VIRTIO_CONSOLE_ELF"),
-    ("virtio-gpu", "VIRTIO_GPU_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
     ("virtio-9p", "VIRTIO_9P_ELF"),
-    ("compositor", "COMPOSITOR_ELF"),
+    ("core", "CORE_ELF"),
+    ("cpu-render", "CPU_RENDER_ELF"),
+    ("virgil-render", "VIRGIL_RENDER_ELF"),
     ("text-editor", "TEXT_EDITOR_ELF"),
     ("stress", "STRESS_ELF"),
     ("fuzz", "FUZZ_ELF"),
@@ -41,10 +54,16 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
         true,
         false,
     ),
-    ("virtio-gpu", "services/drivers/virtio-gpu", true, false),
     ("virtio-input", "services/drivers/virtio-input", true, false),
     ("virtio-9p", "services/drivers/virtio-9p", true, false),
-    ("compositor", "services/compositor", false, true),
+    ("core", "services/core", false, true),
+    ("cpu-render", "services/drivers/cpu-render", true, true),
+    (
+        "virgil-render",
+        "services/drivers/virgil-render",
+        true,
+        true,
+    ),
     ("text-editor", "user/text-editor", false, false),
     ("stress", "user/stress", false, false),
     ("fuzz-helper", "user/fuzz-helper", false, false),
@@ -62,6 +81,11 @@ fn main() {
 
     rustc_rlib(&rustc, &sys_src, &sys_rlib, "sys", &[]);
 
+    let protocol_src = manifest_dir.join("libraries/protocol/lib.rs");
+    let protocol_rlib = out_dir.join("libprotocol.rlib");
+
+    rustc_rlib(&rustc, &protocol_src, &protocol_rlib, "protocol", &[]);
+
     let virtio_src = manifest_dir.join("libraries/virtio/lib.rs");
     let virtio_rlib = out_dir.join("libvirtio.rlib");
 
@@ -73,15 +97,49 @@ fn main() {
         &[("sys", &sys_rlib)],
     );
 
-    let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
-    let drawing_rlib = out_dir.join("libdrawing.rlib");
+    let scene_src = manifest_dir.join("libraries/scene/lib.rs");
+    let scene_rlib = out_dir.join("libscene.rlib");
 
-    rustc_rlib(&rustc, &drawing_src, &drawing_rlib, "drawing", &[]);
+    rustc_rlib(&rustc, &scene_src, &scene_rlib, "scene", &[]);
 
     let ipc_src = manifest_dir.join("libraries/ipc/lib.rs");
     let ipc_rlib = out_dir.join("libipc.rlib");
 
     rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[]);
+
+    // Step 1b: Build Cargo-managed libraries (libraries with external deps).
+    // These use `cargo build` to resolve dependency graphs, then we link the
+    // resulting rlibs alongside hand-compiled libraries.
+    let fonts_output = cargo_lib(&manifest_dir.join("libraries/fonts"));
+
+    // Drawing library depends on protocol and fonts (for rasterize API).
+    // The fonts library has transitive dependencies (read-fonts, etc.) in
+    // deps_dir (aarch64-unknown-none), plus proc-macro dependencies in the
+    // host release deps dir.
+    let drawing_src = manifest_dir.join("libraries/drawing/lib.rs");
+    let drawing_rlib = out_dir.join("libdrawing.rlib");
+    let fonts_host_deps = manifest_dir.join("libraries/fonts/target/release/deps");
+
+    rustc_rlib_with_search(&rustc, &drawing_src, &drawing_rlib, "drawing", &[], &[]);
+
+    // Render library: scene graph rendering, compositing, glyph rasterization.
+    // Depends on drawing, scene, protocol, fonts (no sys, no ipc).
+    let render_src = manifest_dir.join("libraries/render/lib.rs");
+    let render_rlib = out_dir.join("librender.rlib");
+
+    rustc_rlib_with_search(
+        &rustc,
+        &render_src,
+        &render_rlib,
+        "render",
+        &[
+            ("drawing", &drawing_rlib),
+            ("scene", &scene_rlib),
+            ("protocol", &protocol_rlib),
+            ("fonts", &fonts_output.rlib),
+        ],
+        &[&fonts_output.deps_dir, &fonts_host_deps],
+    );
 
     // Step 2: Compile all non-init programs.
     // fuzz-helper must be compiled before fuzz (fuzz embeds it).
@@ -89,13 +147,22 @@ fn main() {
         let src_dir = manifest_dir.join(dir);
         let main_rs = src_dir.join("main.rs");
         let elf_path = out_dir.join(format!("{name}.elf"));
-        let mut externs = vec![("sys", sys_rlib.clone()), ("ipc", ipc_rlib.clone())];
+        let mut externs = vec![
+            ("sys", sys_rlib.clone()),
+            ("ipc", ipc_rlib.clone()),
+            ("protocol", protocol_rlib.clone()),
+        ];
 
         if needs_virtio {
             externs.push(("virtio", virtio_rlib.clone()));
         }
         if needs_drawing {
             externs.push(("drawing", drawing_rlib.clone()));
+            externs.push(("scene", scene_rlib.clone()));
+            externs.push(("fonts", fonts_output.rlib.clone()));
+        }
+        if name == "cpu-render" || name == "virgil-render" {
+            externs.push(("render", render_rlib.clone()));
         }
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
@@ -117,7 +184,22 @@ fn main() {
             ));
         }
 
-        rustc_bin(&rustc, &main_rs, &elf_path, &link_ld, &externs, &env_vars);
+        // Add fonts library search paths for programs that need drawing.
+        let search_paths: Vec<&Path> = if needs_drawing {
+            vec![&fonts_output.deps_dir, &fonts_host_deps]
+        } else {
+            vec![]
+        };
+
+        rustc_bin(
+            &rustc,
+            &main_rs,
+            &elf_path,
+            &link_ld,
+            &externs,
+            &env_vars,
+            &search_paths,
+        );
         println!("cargo:rerun-if-changed={}", main_rs.display());
     }
 
@@ -151,21 +233,75 @@ fn main() {
         &init_src,
         &init_elf,
         &link_ld,
-        &[("sys", sys_rlib.clone()), ("ipc", ipc_rlib.clone())],
+        &[
+            ("sys", sys_rlib.clone()),
+            ("ipc", ipc_rlib.clone()),
+            ("protocol", protocol_rlib.clone()),
+            ("scene", scene_rlib.clone()),
+        ],
         &init_env,
+        &[],
     );
     println!("cargo:rerun-if-changed={}", init_src.display());
     println!("cargo:rerun-if-changed={}", link_ld.display());
     println!("cargo:rerun-if-changed={}", sys_src.display());
     println!("cargo:rerun-if-changed={}", virtio_src.display());
     println!("cargo:rerun-if-changed={}", drawing_src.display());
-    for inc in &["truetype.rs", "rasterizer.rs"] {
+    for inc in &[
+        "palette.rs",
+        "gamma_tables.rs",
+        "neon.rs",
+        "blend.rs",
+        "blit.rs",
+        "blur.rs",
+        "coverage.rs",
+        "fill.rs",
+        "gradient.rs",
+        "line.rs",
+        "transform.rs",
+    ] {
         println!(
             "cargo:rerun-if-changed={}",
             manifest_dir.join("libraries/drawing").join(inc).display()
         );
     }
     println!("cargo:rerun-if-changed={}", ipc_src.display());
+    println!("cargo:rerun-if-changed={}", protocol_src.display());
+    println!("cargo:rerun-if-changed={}", scene_src.display());
+    println!("cargo:rerun-if-changed={}", render_src.display());
+    for render_mod in &[
+        "scene_render.rs",
+        "compositing.rs",
+        "surface_pool.rs",
+        "damage.rs",
+        "cursor.rs",
+        "frame_scheduler.rs",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir
+                .join("libraries/render")
+                .join(render_mod)
+                .display()
+        );
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("libraries/fonts/src/lib.rs").display()
+    );
+    for fonts_src in &["rasterize.rs", "cache.rs"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir
+                .join("libraries/fonts/src")
+                .join(fonts_src)
+                .display()
+        );
+    }
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("libraries/fonts/Cargo.toml").display()
+    );
 }
 /// Compile a Rust source file as a binary ELF.
 fn rustc_bin(
@@ -175,6 +311,7 @@ fn rustc_bin(
     link_ld: &Path,
     externs: &[(&str, PathBuf)],
     env_vars: &[(&str, String)],
+    extra_search_paths: &[&Path],
 ) {
     let mut cmd = Command::new(rustc);
 
@@ -184,6 +321,16 @@ fn rustc_bin(
         .args(["-C", "panic=abort"])
         .args(["-C", "opt-level=s"])
         .arg(format!("-Clink-arg=-T{}", link_ld.display()));
+
+    // Add search path so rustc can resolve transitive rlib dependencies.
+    if let Some(first) = externs.first() {
+        if let Some(dir) = first.1.parent() {
+            cmd.arg(format!("-L{}", dir.display()));
+        }
+    }
+    for path in extra_search_paths {
+        cmd.arg(format!("-L{}", path.display()));
+    }
 
     for (name, path) in externs {
         cmd.arg(format!("--extern={name}={}", path.display()));
@@ -210,6 +357,47 @@ fn rustc_bin(
         output.file_name().unwrap().to_str().unwrap()
     );
 }
+/// Compile a Rust source file as an rlib with additional library search paths.
+fn rustc_rlib_with_search(
+    rustc: &str,
+    src: &PathBuf,
+    output: &PathBuf,
+    crate_name: &str,
+    externs: &[(&str, &PathBuf)],
+    search_paths: &[&Path],
+) {
+    let mut cmd = Command::new(rustc);
+
+    cmd.arg("--target=aarch64-unknown-none")
+        .arg("--edition=2021")
+        .arg("--crate-type=rlib")
+        .arg(format!("--crate-name={crate_name}"))
+        .args(["-C", "panic=abort"])
+        .args(["-C", "opt-level=s"]);
+
+    if let Some(first) = externs.first() {
+        if let Some(dir) = first.1.parent() {
+            cmd.arg(format!("-L{}", dir.display()));
+        }
+    }
+
+    for path in search_paths {
+        cmd.arg(format!("-L{}", path.display()));
+    }
+
+    for &(name, path) in externs {
+        cmd.arg(format!("--extern={name}={}", path.display()));
+    }
+
+    let status = cmd
+        .arg("-o")
+        .arg(output)
+        .arg(src)
+        .status()
+        .unwrap_or_else(|e| panic!("failed to invoke rustc for {crate_name}: {e}"));
+
+    assert!(status.success(), "failed to build {crate_name}.rlib");
+}
 /// Compile a Rust source file as an rlib.
 fn rustc_rlib(
     rustc: &str,
@@ -227,6 +415,12 @@ fn rustc_rlib(
         .args(["-C", "panic=abort"])
         .args(["-C", "opt-level=s"]);
 
+    if let Some(first) = externs.first() {
+        if let Some(dir) = first.1.parent() {
+            cmd.arg(format!("-L{}", dir.display()));
+        }
+    }
+
     for &(name, path) in externs {
         cmd.arg(format!("--extern={name}={}", path.display()));
     }
@@ -239,4 +433,32 @@ fn rustc_rlib(
         .unwrap_or_else(|e| panic!("failed to invoke rustc for {crate_name}: {e}"));
 
     assert!(status.success(), "failed to build {crate_name}.rlib");
+}
+
+/// Build a Cargo-managed library for the bare-metal target.
+///
+/// Invokes `cargo build --target aarch64-unknown-none --release` inside the
+/// library's directory. Returns the path to the main rlib and the deps
+/// directory containing transitive dependency rlibs.
+fn cargo_lib(crate_dir: &Path) -> CargoLibOutput {
+    let cargo = env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let crate_name = crate_dir.file_name().unwrap().to_str().unwrap();
+
+    let status = Command::new(&cargo)
+        .current_dir(crate_dir)
+        .arg("build")
+        .arg("--target=aarch64-unknown-none")
+        .arg("--release")
+        .status()
+        .unwrap_or_else(|e| panic!("failed to invoke cargo for {crate_name}: {e}"));
+
+    assert!(status.success(), "cargo build failed for {crate_name}");
+
+    let target_dir = crate_dir.join("target/aarch64-unknown-none/release");
+    let rlib = target_dir.join(format!("lib{crate_name}.rlib"));
+    let deps_dir = target_dir.join("deps");
+
+    assert!(rlib.exists(), "rlib not found at {}", rlib.display());
+
+    CargoLibOutput { rlib, deps_dir }
 }
