@@ -746,10 +746,13 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Clip path stencil write (after Content::Path, before text/images).
-        // Writes the clip fan geometry to the stencil buffer so subsequent
-        // image and text draws are clipped to the path shape.  HANDLE_DSA_STENCIL_TEST
-        // is activated here and remains bound for all content passes below.
-        // The stencil is cleared back to 0 after all content has been drawn.
+        // Writes the clip fan geometry to the stencil buffer. This proves
+        // the stencil geometry is correct but does NOT activate stencil test
+        // for subsequent rendering — the batched architecture renders ALL
+        // text/images in one pass, so a global stencil test would clip
+        // title bar text and document text that are outside clip regions.
+        // True per-node stencil clipping requires tree-order rendering.
+        // The CpuBackend handles actual clipping via offscreen buffers.
         if has_clip {
             cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND_NO_COLOR);
             cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_WRITE);
@@ -766,9 +769,9 @@ pub extern "C" fn _start() -> ! {
                 false,
             );
 
-            // Activate stencil test for all subsequent content draws.
+            // Restore normal blend + DSA (no stencil test).
             cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
-            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_TEST);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
         }
 
         // ── Pass 3: Upload + draw images (TEXTURED_FS) ──────────────────
@@ -897,11 +900,8 @@ pub extern "C" fn _start() -> ! {
                 cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf);
                 cmdbuf.cmd_set_viewport(width as f32, height as f32);
                 cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
-                // Re-bind stencil test DSA after the mid-frame cmdbuf clear so
-                // the next image is still clipped to the active clip region.
-                if has_clip {
-                    cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_TEST);
-                }
+                // Note: clip path stencil is not used for per-draw clipping
+                // in the batched architecture. See clip stencil write comment.
 
                 images_drawn += 1;
             }
@@ -954,10 +954,8 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Clear stencil and restore normal DSA after all clipped content.
-        // This leaves the stencil buffer clean for the next frame.
+        // Clear stencil buffer if clip geometry was written.
         if has_clip {
-            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
             cmdbuf.cmd_clear_stencil();
         }
 
