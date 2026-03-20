@@ -1,7 +1,7 @@
 //! Scene graph node type, header, and memory layout constants.
 
 use crate::{
-    primitives::{bitflags, Border, Color, Content},
+    primitives::{bitflags, Border, Color, Content, DataRef},
     transform::AffineTransform,
 };
 
@@ -51,7 +51,7 @@ pub struct Node {
     pub opacity: u8,
     // ── flags ──
     pub flags: NodeFlags,
-    pub _pad: u8,
+    pub backdrop_blur_radius: u8,
     // ── shadow ──
     /// Shadow color (TRANSPARENT = no shadow).
     pub shadow_color: Color,
@@ -75,6 +75,13 @@ pub struct Node {
     /// uses this for scene diffing — a changed hash means the data buffer
     /// content changed even if the DataRef is identical.
     pub content_hash: u32,
+    // ── clip path ──
+    /// Reference to serialized path commands in the data buffer that define
+    /// a clip region for this node and its children. `DataRef::EMPTY` means
+    /// no path clip (rectangular clip via `CLIPS_CHILDREN` flag still applies).
+    pub clip_path: DataRef,
+    /// Reserved for future fields. Must be zero.
+    pub _reserved: [u8; 8],
     // ── content ──
     pub content: Content,
 }
@@ -97,7 +104,7 @@ impl Node {
         corner_radius: 0,
         opacity: 255,
         flags: NodeFlags::VISIBLE,
-        _pad: 0,
+        backdrop_blur_radius: 0,
         shadow_color: Color::TRANSPARENT,
         shadow_offset_x: 0,
         shadow_offset_y: 0,
@@ -106,6 +113,8 @@ impl Node {
         _shadow_pad: [0; 2],
         transform: AffineTransform::identity(),
         content_hash: 0,
+        clip_path: DataRef::EMPTY,
+        _reserved: [0; 8],
         content: Content::None,
     };
 
@@ -127,10 +136,11 @@ impl Node {
     }
 }
 
-// Compile-time size assertion: Node must be exactly 120 bytes.
+// Compile-time size assertion: Node must be exactly 136 bytes.
 // This prevents silent shared-memory layout drift between core and compositor.
 // If you add a field, update this assertion and verify both sides agree.
-const _: () = assert!(core::mem::size_of::<Node>() == 120);
+// Layout: 96 bytes pre-content + clip_path (8) + _reserved (8) + content (24) = 136.
+const _: () = assert!(core::mem::size_of::<Node>() == 136);
 
 // ── Shared memory layout ────────────────────────────────────────────
 

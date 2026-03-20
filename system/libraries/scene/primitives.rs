@@ -89,6 +89,14 @@ pub struct DataRef {
     pub length: u32,
 }
 
+impl DataRef {
+    pub const EMPTY: Self = Self { offset: 0, length: 0 };
+
+    pub const fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+}
+
 // ── Content hashing ─────────────────────────────────────────────────
 
 const FNV1A_OFFSET: u32 = 0x811c_9dc5;
