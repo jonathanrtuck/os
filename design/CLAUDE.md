@@ -5,14 +5,17 @@ Design documents for the document-centric OS. This is the primary artifact of th
 ## Key Files
 
 - `philosophy.md` — **Read first.** Two root principles and their consequences. If you internalize these, you can predict why any component is structured the way it is.
-- `foundations.md` — Guiding beliefs, glossary, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
+- `foundations.md` — The core idea, guiding beliefs, glossary, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness, dependency chains
-- `decision-map.mermaid` — Visual dependency graph of all decisions
-- `architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
-- `concept.md` — The core idea: OS -> Document -> Tool, mimetype evolution, layered rendering, compound documents
+- `architecture.md` — The system's architectural narrative: pipeline, responsibilities, decision checklist
 - `journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document
-- `research-cow-filesystems.md` — Research on COW filesystem designs (ZFS, Btrfs, WAFL, etc.)
-- `research-os-landscape.md` — Survey of prior art (BeOS, Plan 9, Mercury OS, Ideal OS, OpenDoc, Xerox Star)
+- `research/` — COW filesystems, OS landscape, font rendering research
+
+## Diagrams
+
+- `architecture.mermaid` — System architecture (process layers, IPC, memory mapping)
+- `decision-map.mermaid` — Visual dependency graph of all decisions
+- `rendering-pipeline.mermaid` — Rendering pipeline data shapes and translators
 
 ## Conventions
 

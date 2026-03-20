@@ -1,6 +1,6 @@
 # system
 
-Bare-metal aarch64 system for QEMU's `virt` machine. Microkernel architecture: the kernel provides memory, scheduling, and IPC; everything else runs in userspace. Part of a [document-centric OS](../design/concept.md).
+Bare-metal aarch64 system for QEMU's `virt` machine. Microkernel architecture: the kernel provides memory, scheduling, and IPC; everything else runs in userspace. Part of a [document-centric OS](../design/foundations.md).
 
 Boots with 4 SMP cores, spawns a single init process (proto-OS-service) which reads a device manifest, spawns virtio drivers and a compositor, and orchestrates a full display pipeline — compositor draws a demo scene with TrueType text, GPU driver presents it to the screen.
 

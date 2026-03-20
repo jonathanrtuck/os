@@ -89,15 +89,14 @@ This builds the kernel and launches QEMU with the correct device configuration (
 os/
 ├── design/                          # Design documentation
 │   ├── philosophy.md                # Two root principles and their consequences
-│   ├── concept.md                   # The core idea: OS → Document → Tool
-│   ├── foundations.md               # Glossary, guiding beliefs, content model
+│   ├── foundations.md               # The core idea, glossary, guiding beliefs, content model
 │   ├── decisions.md                 # 17 tiered design decisions with tradeoffs
 │   ├── architecture.md              # Architectural narrative and decision checklist
+│   ├── journal.md                   # Open threads, insights, research spikes
+│   ├── research/                    # COW filesystems, OS landscape, font rendering
 │   ├── architecture.mermaid         # System architecture diagram
 │   ├── decision-map.mermaid         # Visual dependency graph
-│   ├── rendering-pipeline.mermaid   # Rendering pipeline diagram
-│   ├── rendering-capabilities.md    # Honest audit of pipeline capabilities
-│   └── journal.md                   # Open threads, insights, research spikes
+│   └── rendering-pipeline.mermaid   # Rendering pipeline diagram
 ├── system/                          # OS implementation (Rust, no_std)
 │   ├── kernel/                      # Microkernel (28 syscalls, EEVDF, GICv3, SMP)
 │   ├── services/
@@ -140,11 +139,10 @@ os/
 If you're curious about the design, read in this order:
 
 1. **[Philosophy](design/philosophy.md)** — Two root principles and their consequences. The thinking framework behind every design decision.
-2. **[Concept](design/concept.md)** — The document-centric model, mimetype evolution, layered rendering
-3. **[Foundations](design/foundations.md)** — Glossary of terms, guiding beliefs, external boundaries, content model, editing model
-4. **[Decisions](design/decisions.md)** — All 17 design decisions: settled positions with reasoning, open questions with tradeoffs, considered-and-rejected alternatives
-5. **[Architecture](design/architecture.md)** — The system's architectural narrative: pipeline, responsibilities, decision checklist
-6. **[Journal](design/journal.md)** — Where the design exploration is right now: open threads, discussion backlog, insights
+2. **[Foundations](design/foundations.md)** — The core idea, glossary of terms, guiding beliefs, external boundaries, content model, editing model
+3. **[Decisions](design/decisions.md)** — All 17 design decisions: settled positions with reasoning, open questions with tradeoffs, considered-and-rejected alternatives
+4. **[Architecture](design/architecture.md)** — The system's architectural narrative: pipeline, responsibilities, decision checklist
+5. **[Journal](design/journal.md)** — Where the design exploration is right now: open threads, discussion backlog, insights
 
 ## Influences
 
