@@ -90,10 +90,117 @@ const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_X: u32 = 12;
 const TITLE_BAR_H: u32 = 36;
 
+// ── Cursor blink state machine ──────────────────────────────────────
+
+/// Phase of the cursor blink cycle: visible hold → fade out → hidden hold → fade in.
+#[derive(Clone, Copy, PartialEq)]
+enum BlinkPhase {
+    /// Cursor fully visible for 500ms.
+    VisibleHold,
+    /// Fading from opacity 255→0 over 150ms.
+    FadeOut,
+    /// Cursor fully hidden for 300ms.
+    HiddenHold,
+    /// Fading from opacity 0→255 over 150ms.
+    FadeIn,
+}
+
+/// Duration of each blink phase in milliseconds.
+const BLINK_VISIBLE_MS: u64 = 500;
+const BLINK_FADE_OUT_MS: u64 = 150;
+const BLINK_HIDDEN_MS: u64 = 300;
+const BLINK_FADE_IN_MS: u64 = 150;
+
+/// Advance the blink state machine. Returns `true` if `cursor_opacity` changed.
+fn advance_blink(state: &mut CoreState, now_ms: u64) -> bool {
+    let elapsed = now_ms.saturating_sub(state.blink_phase_start_ms);
+    let mut changed = false;
+
+    match state.blink_phase {
+        BlinkPhase::VisibleHold => {
+            state.cursor_opacity = 255;
+            if elapsed >= BLINK_VISIBLE_MS {
+                state.cursor_blink_id = state
+                    .timeline
+                    .start(255.0, 0.0, 150, animation::Easing::EaseInOut, now_ms)
+                    .ok();
+                state.blink_phase = BlinkPhase::FadeOut;
+                state.blink_phase_start_ms = now_ms;
+                changed = true;
+            }
+        }
+        BlinkPhase::FadeOut => {
+            if let Some(id) = state.cursor_blink_id {
+                let new_opacity = if state.timeline.is_active(id) {
+                    state.timeline.value(id) as u8
+                } else {
+                    0
+                };
+                if new_opacity != state.cursor_opacity {
+                    state.cursor_opacity = new_opacity;
+                    changed = true;
+                }
+            }
+            if elapsed >= BLINK_FADE_OUT_MS {
+                state.blink_phase = BlinkPhase::HiddenHold;
+                state.blink_phase_start_ms = now_ms;
+                state.cursor_opacity = 0;
+                changed = true;
+            }
+        }
+        BlinkPhase::HiddenHold => {
+            state.cursor_opacity = 0;
+            if elapsed >= BLINK_HIDDEN_MS {
+                state.cursor_blink_id = state
+                    .timeline
+                    .start(0.0, 255.0, 150, animation::Easing::EaseInOut, now_ms)
+                    .ok();
+                state.blink_phase = BlinkPhase::FadeIn;
+                state.blink_phase_start_ms = now_ms;
+                changed = true;
+            }
+        }
+        BlinkPhase::FadeIn => {
+            if let Some(id) = state.cursor_blink_id {
+                let new_opacity = if state.timeline.is_active(id) {
+                    state.timeline.value(id) as u8
+                } else {
+                    255
+                };
+                if new_opacity != state.cursor_opacity {
+                    state.cursor_opacity = new_opacity;
+                    changed = true;
+                }
+            }
+            if elapsed >= BLINK_FADE_IN_MS {
+                state.blink_phase = BlinkPhase::VisibleHold;
+                state.blink_phase_start_ms = now_ms;
+                state.cursor_opacity = 255;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Reset blink to fully visible (called on user input).
+fn reset_blink(state: &mut CoreState, now_ms: u64) {
+    if let Some(id) = state.cursor_blink_id {
+        state.timeline.cancel(id);
+    }
+    state.blink_phase = BlinkPhase::VisibleHold;
+    state.blink_phase_start_ms = now_ms;
+    state.cursor_opacity = 255;
+}
+
 struct CoreState {
+    blink_phase: BlinkPhase,
+    blink_phase_start_ms: u64,
     boot_counter: u64,
     char_w: u32,
     counter_freq: u64,
+    cursor_blink_id: Option<animation::AnimationId>,
+    cursor_opacity: u8,
     cursor_pos: usize,
     doc_buf: *mut u8,
     doc_capacity: usize,
@@ -113,6 +220,7 @@ struct CoreState {
     scroll_target: f32,
     sel_end: usize,
     sel_start: usize,
+    timeline: animation::Timeline,
     timer_active: bool,
     timer_handle: u8,
 }
@@ -120,9 +228,13 @@ struct CoreState {
 impl CoreState {
     const fn new() -> Self {
         Self {
+            blink_phase: BlinkPhase::VisibleHold,
+            blink_phase_start_ms: 0,
             boot_counter: 0,
             char_w: 8,
             counter_freq: 0,
+            cursor_blink_id: None,
+            cursor_opacity: 255,
             cursor_pos: 0,
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
@@ -142,6 +254,7 @@ impl CoreState {
             scroll_target: 0.0,
             sel_end: 0,
             sel_start: 0,
+            timeline: animation::Timeline::new(),
             timer_active: false,
             timer_handle: 0,
         }
@@ -758,6 +871,7 @@ pub extern "C" fn _start() -> ! {
             b"Text",
             &time_buf,
             0.0,
+            s.cursor_opacity,
         );
     }
 
@@ -780,14 +894,45 @@ pub extern "C" fn _start() -> ! {
     loop {
         let timer_active = state().timer_active;
         let timer_handle = state().timer_handle;
-        // When animations are active, tick at ~60fps instead of blocking
-        // indefinitely. 16ms matches a single 60Hz frame interval.
-        let animating = state().scroll_animating;
-        let timeout_ns = if animating {
-            16_000_000u64 // 16ms ~ 60fps
-        } else {
-            u64::MAX // block until event
+        // Compute wait timeout from active animations and blink phase.
+        //
+        // Scroll animation: 16ms (60fps) while active.
+        // Blink fade (FadeOut/FadeIn): 16ms for smooth opacity changes.
+        // Blink holds (VisibleHold/HiddenHold): sleep until next phase transition.
+        let now_ms = {
+            let s = state();
+            let freq = s.counter_freq;
+            if freq > 0 {
+                sys::counter() * 1000 / freq
+            } else {
+                0
+            }
         };
+        let scroll_timeout_ns: u64 = if state().scroll_animating {
+            16_000_000 // 16ms ~ 60fps
+        } else {
+            u64::MAX
+        };
+        let blink_timeout_ns: u64 = {
+            let s = state();
+            if s.timeline.any_active() {
+                16_000_000 // 16ms for smooth fade animation
+            } else {
+                let elapsed = now_ms.saturating_sub(s.blink_phase_start_ms);
+                let remaining_ms = match s.blink_phase {
+                    BlinkPhase::VisibleHold => BLINK_VISIBLE_MS.saturating_sub(elapsed),
+                    BlinkPhase::FadeOut => BLINK_FADE_OUT_MS.saturating_sub(elapsed),
+                    BlinkPhase::HiddenHold => BLINK_HIDDEN_MS.saturating_sub(elapsed),
+                    BlinkPhase::FadeIn => BLINK_FADE_IN_MS.saturating_sub(elapsed),
+                };
+                if remaining_ms == 0 {
+                    1_000_000 // 1ms — transition imminent
+                } else {
+                    remaining_ms.saturating_mul(1_000_000)
+                }
+            }
+        };
+        let timeout_ns = scroll_timeout_ns.min(blink_timeout_ns);
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
                 &[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE],
@@ -802,6 +947,7 @@ pub extern "C" fn _start() -> ! {
         let mut selection_changed = false;
         let mut context_switched = false;
         let mut timer_fired = false;
+        let mut had_user_input = false;
 
         // Check timer.
         if timer_active {
@@ -835,6 +981,7 @@ pub extern "C" fn _start() -> ! {
                 if action.context_switched {
                     context_switched = true;
                 }
+                had_user_input = true;
             }
         }
 
@@ -860,6 +1007,7 @@ pub extern "C" fn _start() -> ! {
                         if action.context_switched {
                             context_switched = true;
                         }
+                        had_user_input = true;
                     }
                     MSG_POINTER_ABS => {
                         // SAFETY: msg.msg_type is MSG_POINTER_ABS; sender guarantees
@@ -917,6 +1065,7 @@ pub extern "C" fn _start() -> ! {
                                 // Click moves cursor, clears selection.
                                 // Treat as cursor-move + selection clear.
                                 selection_changed = true;
+                                had_user_input = true;
                             }
                         }
                     }
@@ -997,6 +1146,30 @@ pub extern "C" fn _start() -> ! {
         // Update scroll spring target for cursor/text changes.
         if (changed || text_changed) && !state().image_mode {
             update_scroll_offset(content_w, content_h);
+        }
+
+        // ── Cursor blink ─────────────────────────────────────────────
+        //
+        // Reset blink to fully visible on any user input (keystroke or
+        // click). Then advance the blink state machine — may produce a
+        // scene update even when no events arrived (phase transition or
+        // fade frame).
+        let now_ms = {
+            let s = state();
+            let freq = s.counter_freq;
+            if freq > 0 {
+                sys::counter() * 1000 / freq
+            } else {
+                0
+            }
+        };
+        if had_user_input {
+            reset_blink(state(), now_ms);
+        }
+        state().timeline.tick(now_ms);
+        let blink_changed = advance_blink(state(), now_ms);
+        if blink_changed {
+            changed = true;
         }
 
         // ── Animation tick ───────────────────────────────────────────
@@ -1081,6 +1254,7 @@ pub extern "C" fn _start() -> ! {
                     b"Text",
                     &time_buf,
                     s.scroll_offset,
+                    s.cursor_opacity,
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
@@ -1106,6 +1280,7 @@ pub extern "C" fn _start() -> ! {
                         &time_buf,
                         s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count {
                     // Same line count — incremental single-line update.
@@ -1134,6 +1309,7 @@ pub extern "C" fn _start() -> ! {
                         &time_buf,
                         s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count + 1 {
                     // Single line inserted (Enter key) — incremental insert.
@@ -1148,6 +1324,7 @@ pub extern "C" fn _start() -> ! {
                         &time_buf,
                         s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else if new_line_count + 1 == prev_line_count {
                     // Single line deleted (Backspace at BOL) — incremental delete.
@@ -1162,6 +1339,7 @@ pub extern "C" fn _start() -> ! {
                         &time_buf,
                         s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else {
                     // Multi-line change (paste, delete selection spanning lines) —
@@ -1177,6 +1355,7 @@ pub extern "C" fn _start() -> ! {
                         &time_buf,
                         s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 }
 
@@ -1201,6 +1380,7 @@ pub extern "C" fn _start() -> ! {
                     doc_content(),
                     sel_content_h,
                     scroll_pt,
+                    s.cursor_opacity,
                 );
             } else if changed {
                 // Cursor moved without text or selection change
@@ -1221,6 +1401,7 @@ pub extern "C" fn _start() -> ! {
                     doc_content(),
                     chars_per_line,
                     if timer_fired { Some(&time_buf) } else { None },
+                    s.cursor_opacity,
                 );
             } else if timer_fired {
                 // Timer only — just update the clock text.

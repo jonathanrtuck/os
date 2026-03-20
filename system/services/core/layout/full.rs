@@ -30,6 +30,7 @@ pub fn build_full_scene(
     title_label: &[u8],
     clock_text: &[u8],
     scroll_y: f32,
+    cursor_opacity: u8,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
@@ -240,6 +241,7 @@ pub fn build_full_scene(
         n.width = 2;
         n.height = cfg.line_height as u16;
         n.background = dc(cfg.cursor_color);
+        n.opacity = cursor_opacity;
         n.content = Content::None;
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
@@ -382,6 +384,7 @@ pub fn build_cursor_update(
     doc_text: &[u8],
     chars_per_line: u32,
     clock_text: Option<&[u8]>,
+    cursor_opacity: u8,
 ) {
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
@@ -391,6 +394,7 @@ pub fn build_cursor_update(
     let n = w.node_mut(N_CURSOR);
     n.x = cursor_x;
     n.y = cursor_y;
+    n.opacity = cursor_opacity;
 
     w.mark_dirty(N_CURSOR);
 
@@ -411,6 +415,7 @@ pub fn build_selection_update(
     doc_text: &[u8],
     content_h: u32,
     scroll_pt: i32,
+    cursor_opacity: u8,
 ) {
     let doc_width = doc_width(cfg);
     let cpl = chars_per_line(cfg);
@@ -439,6 +444,7 @@ pub fn build_selection_update(
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_x;
         n.y = cursor_y;
+        n.opacity = cursor_opacity;
         n.next_sibling = NULL;
     }
     w.mark_dirty(N_CURSOR);
@@ -479,6 +485,7 @@ pub fn build_document_content(
     clock_text: &[u8],
     scroll_y: f32,
     mark_clock_changed: bool,
+    cursor_opacity: u8,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
@@ -600,6 +607,7 @@ pub fn build_document_content(
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_x;
         n.y = cursor_y;
+        n.opacity = cursor_opacity;
         n.next_sibling = NULL;
     }
     w.mark_dirty(N_CURSOR);

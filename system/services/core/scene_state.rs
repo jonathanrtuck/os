@@ -52,6 +52,7 @@ impl SceneState {
         title_label: &[u8],
         clock_text: &[u8],
         scroll_y: f32,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -66,6 +67,7 @@ impl SceneState {
                 title_label,
                 clock_text,
                 scroll_y,
+                cursor_opacity,
             );
         }
         tw.publish();
@@ -89,6 +91,7 @@ impl SceneState {
         doc_text: &[u8],
         chars_per_line: u32,
         clock_text: Option<&[u8]>,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -100,6 +103,7 @@ impl SceneState {
                 doc_text,
                 chars_per_line,
                 clock_text,
+                cursor_opacity,
             );
         }
         tw.publish();
@@ -116,12 +120,21 @@ impl SceneState {
         doc_text: &[u8],
         content_h: u32,
         scroll_pt: i32,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
             let mut w = tw.acquire_copy();
             build_selection_update(
-                &mut w, cfg, cursor_pos, sel_start, sel_end, doc_text, content_h, scroll_pt,
+                &mut w,
+                cfg,
+                cursor_pos,
+                sel_start,
+                sel_end,
+                doc_text,
+                content_h,
+                scroll_pt,
+                cursor_opacity,
             );
         }
         tw.publish();
@@ -142,6 +155,7 @@ impl SceneState {
         clock_text: &[u8],
         scroll_y: f32,
         timer_fired: bool,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -156,6 +170,7 @@ impl SceneState {
                 sel_end,
                 scroll_y,
                 if timer_fired { Some(clock_text) } else { None },
+                cursor_opacity,
             );
             if !success {
                 // Compaction: fall back to full rebuild.
@@ -170,6 +185,7 @@ impl SceneState {
                     clock_text,
                     scroll_y,
                     timer_fired,
+                    cursor_opacity,
                 );
             }
         }
@@ -190,6 +206,7 @@ impl SceneState {
         clock_text: &[u8],
         scroll_y: f32,
         timer_fired: bool,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -203,6 +220,7 @@ impl SceneState {
                 sel_end,
                 scroll_y,
                 if timer_fired { Some(clock_text) } else { None },
+                cursor_opacity,
             );
             if !success {
                 build_document_content(
@@ -216,6 +234,7 @@ impl SceneState {
                     clock_text,
                     scroll_y,
                     timer_fired,
+                    cursor_opacity,
                 );
             }
         }
@@ -236,6 +255,7 @@ impl SceneState {
         clock_text: &[u8],
         scroll_y: f32,
         timer_fired: bool,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -249,6 +269,7 @@ impl SceneState {
                 sel_end,
                 scroll_y,
                 if timer_fired { Some(clock_text) } else { None },
+                cursor_opacity,
             );
             if !success {
                 build_document_content(
@@ -262,6 +283,7 @@ impl SceneState {
                     clock_text,
                     scroll_y,
                     timer_fired,
+                    cursor_opacity,
                 );
             }
         }
@@ -282,6 +304,7 @@ impl SceneState {
         clock_text: &[u8],
         scroll_y: f32,
         mark_clock_changed: bool,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -297,6 +320,7 @@ impl SceneState {
                 clock_text,
                 scroll_y,
                 mark_clock_changed,
+                cursor_opacity,
             );
         }
         tw.publish();

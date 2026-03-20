@@ -38,6 +38,7 @@ pub fn update_single_line(
     sel_end: u32,
     scroll_y: f32,
     clock_text: Option<&[u8]>,
+    cursor_opacity: u8,
 ) -> bool {
     let scene_text_color = dc(cfg.text_color);
     let cpl = chars_per_line(cfg);
@@ -163,6 +164,7 @@ pub fn update_single_line(
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_x;
         n.y = cursor_y;
+        n.opacity = cursor_opacity;
     }
     w.mark_dirty(N_CURSOR);
 
@@ -250,6 +252,7 @@ fn finish_line_update(
     sel_end: u32,
     scroll_y: f32,
     clock_text: Option<&[u8]>,
+    cursor_opacity: u8,
 ) {
     let cpl = chars_per_line(cfg);
 
@@ -276,6 +279,7 @@ fn finish_line_update(
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_x;
         n.y = cursor_y;
+        n.opacity = cursor_opacity;
     }
     w.mark_dirty(N_CURSOR);
 
@@ -335,6 +339,7 @@ pub fn insert_line(
     sel_end: u32,
     scroll_y: f32,
     clock_text: Option<&[u8]>,
+    cursor_opacity: u8,
 ) -> bool {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
@@ -525,7 +530,15 @@ pub fn insert_line(
 
     // Shared tail: cursor, selection, clock.
     finish_line_update(
-        w, cfg, doc_text, cursor_pos, sel_start, sel_end, scroll_y, clock_text,
+        w,
+        cfg,
+        doc_text,
+        cursor_pos,
+        sel_start,
+        sel_end,
+        scroll_y,
+        clock_text,
+        cursor_opacity,
     );
 
     true
@@ -545,6 +558,7 @@ pub fn delete_line(
     sel_end: u32,
     scroll_y: f32,
     clock_text: Option<&[u8]>,
+    cursor_opacity: u8,
 ) -> bool {
     let scene_text_color = dc(cfg.text_color);
     let cpl = chars_per_line(cfg);
@@ -672,7 +686,15 @@ pub fn delete_line(
 
     // Shared tail: cursor, selection, clock.
     finish_line_update(
-        w, cfg, doc_text, cursor_pos, sel_start, sel_end, scroll_y, clock_text,
+        w,
+        cfg,
+        doc_text,
+        cursor_pos,
+        sel_start,
+        sel_end,
+        scroll_y,
+        clock_text,
+        cursor_opacity,
     );
 
     true
