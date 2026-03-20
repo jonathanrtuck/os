@@ -1,0 +1,536 @@
+//! Host-side tests for the animation easing library.
+
+extern crate animation;
+
+use animation::{ease, Easing};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// All 24 easing variants, including one `CubicBezier` sample.
+fn all_easings() -> [Easing; 24] {
+    [
+        Easing::Linear,
+        Easing::Ease,
+        Easing::EaseIn,
+        Easing::EaseOut,
+        Easing::EaseInOut,
+        Easing::CubicBezier(0.17, 0.67, 0.83, 0.67),
+        Easing::EaseInQuad,
+        Easing::EaseOutQuad,
+        Easing::EaseInOutQuad,
+        Easing::EaseInCubic,
+        Easing::EaseOutCubic,
+        Easing::EaseInOutCubic,
+        Easing::EaseInExpo,
+        Easing::EaseOutExpo,
+        Easing::EaseInOutExpo,
+        Easing::EaseInBack,
+        Easing::EaseOutBack,
+        Easing::EaseInOutBack,
+        Easing::EaseInElastic,
+        Easing::EaseOutElastic,
+        Easing::EaseInBounce,
+        Easing::EaseOutBounce,
+        Easing::StepStart,
+        Easing::StepEnd,
+    ]
+}
+
+// ── Boundary tests ────────────────────────────────────────────────────────────
+
+#[test]
+fn all_easings_start_at_zero() {
+    for easing in all_easings() {
+        let y = ease(easing, 0.0);
+        assert!(
+            y.abs() < 0.01,
+            "{:?} at t=0 returned {}, expected ~0.0",
+            easing,
+            y
+        );
+    }
+}
+
+#[test]
+fn all_easings_end_at_one() {
+    for easing in all_easings() {
+        let y = ease(easing, 1.0);
+        assert!(
+            (y - 1.0).abs() < 0.01,
+            "{:?} at t=1 returned {}, expected ~1.0",
+            easing,
+            y
+        );
+    }
+}
+
+#[test]
+fn linear_is_identity() {
+    for i in 0..=100 {
+        let t = i as f32 / 100.0;
+        let y = ease(Easing::Linear, t);
+        assert!(
+            (y - t).abs() < 1e-6,
+            "Linear at t={} returned {}, expected {}",
+            t,
+            y,
+            t
+        );
+    }
+}
+
+// ── Clamp tests ───────────────────────────────────────────────────────────────
+
+#[test]
+fn negative_t_clamps_to_zero() {
+    for easing in all_easings() {
+        let y = ease(easing, -0.5);
+        // Compare against t=0 result, which we already verified is ~0.
+        let y0 = ease(easing, 0.0);
+        assert!(
+            (y - y0).abs() < 1e-6,
+            "{:?}: ease(-0.5)={} != ease(0.0)={}",
+            easing,
+            y,
+            y0
+        );
+    }
+}
+
+#[test]
+fn t_above_one_clamps_to_one() {
+    for easing in all_easings() {
+        let y = ease(easing, 2.0);
+        let y1 = ease(easing, 1.0);
+        assert!(
+            (y - y1).abs() < 1e-6,
+            "{:?}: ease(2.0)={} != ease(1.0)={}",
+            easing,
+            y,
+            y1
+        );
+    }
+}
+
+// ── NaN safety ────────────────────────────────────────────────────────────────
+
+#[test]
+fn nan_input_returns_finite_value() {
+    for easing in all_easings() {
+        let y = ease(easing, f32::NAN);
+        assert!(
+            y.is_finite(),
+            "{:?}: ease(NaN) returned non-finite {}",
+            easing,
+            y
+        );
+    }
+}
+
+// ── Monotonicity tests ────────────────────────────────────────────────────────
+
+/// Easings that must be strictly non-decreasing on (0, 1) — no overshoot.
+fn monotone_easings() -> [Easing; 14] {
+    [
+        Easing::Linear,
+        Easing::Ease,
+        Easing::EaseIn,
+        Easing::EaseOut,
+        Easing::EaseInOut,
+        Easing::EaseInQuad,
+        Easing::EaseOutQuad,
+        Easing::EaseInOutQuad,
+        Easing::EaseInCubic,
+        Easing::EaseOutCubic,
+        Easing::EaseInOutCubic,
+        Easing::EaseInExpo,
+        Easing::EaseOutExpo,
+        Easing::EaseInOutExpo,
+    ]
+}
+
+#[test]
+fn monotone_easings_are_non_decreasing() {
+    const SAMPLES: usize = 200;
+
+    for easing in monotone_easings() {
+        let mut prev = ease(easing, 0.0);
+
+        for i in 1..=SAMPLES {
+            let t = i as f32 / SAMPLES as f32;
+            let y = ease(easing, t);
+
+            assert!(
+                y >= prev - 1e-5,
+                "{:?} is not non-decreasing: ease({})={} < ease({})={}",
+                easing,
+                t,
+                y,
+                (i - 1) as f32 / SAMPLES as f32,
+                prev
+            );
+
+            prev = y;
+        }
+    }
+}
+
+// ── Overshoot tests ───────────────────────────────────────────────────────────
+
+#[test]
+fn ease_in_back_undershoots_near_start() {
+    // EaseInBack should dip below 0 somewhere in the early range.
+    let min_y = (1..20)
+        .map(|i| ease(Easing::EaseInBack, i as f32 / 100.0))
+        .fold(f32::INFINITY, f32::min);
+
+    assert!(
+        min_y < 0.0,
+        "EaseInBack should undershoot (go below 0) near t=0.2, min_y={}",
+        min_y
+    );
+}
+
+#[test]
+fn ease_out_elastic_oscillates() {
+    // EaseOutElastic should exceed 1.0 or go below 0.0 at some point.
+    let oscillates = (1..99).any(|i| {
+        let y = ease(Easing::EaseOutElastic, i as f32 / 100.0);
+        y > 1.0 || y < 0.0
+    });
+
+    assert!(oscillates, "EaseOutElastic should oscillate outside [0, 1]");
+}
+
+#[test]
+fn ease_out_back_overshoots_near_end() {
+    // EaseOutBack should exceed 1.0 somewhere before the end.
+    let max_y = (50..99)
+        .map(|i| ease(Easing::EaseOutBack, i as f32 / 100.0))
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    assert!(
+        max_y > 1.0,
+        "EaseOutBack should overshoot (go above 1) near t=0.9, max_y={}",
+        max_y
+    );
+}
+
+// ── CSS reference values ──────────────────────────────────────────────────────
+
+#[test]
+fn css_ease_at_half_matches_reference() {
+    // CSS `ease` (0.25, 0.1, 0.25, 1.0) at t=0.5.
+    // Reference value from Chrome DevTools: ≈ 0.8024.
+    let y = ease(Easing::Ease, 0.5);
+    assert!(
+        (y - 0.8024).abs() < 0.02,
+        "CSS ease at t=0.5: got {}, expected ~0.8024",
+        y
+    );
+}
+
+#[test]
+fn css_ease_in_is_slow_at_start() {
+    // EaseIn should be well below 0.5 at the midpoint.
+    let y = ease(Easing::EaseIn, 0.5);
+    assert!(y < 0.5, "EaseIn at t=0.5 should be < 0.5, got {}", y);
+}
+
+#[test]
+fn css_ease_out_is_fast_at_start() {
+    // EaseOut should be well above 0.5 at the midpoint.
+    let y = ease(Easing::EaseOut, 0.5);
+    assert!(y > 0.5, "EaseOut at t=0.5 should be > 0.5, got {}", y);
+}
+
+#[test]
+fn css_ease_in_out_is_symmetric() {
+    // EaseInOut should satisfy: ease(t) + ease(1-t) ≈ 1.
+    for i in 1..50 {
+        let t = i as f32 / 100.0;
+        let a = ease(Easing::EaseInOut, t);
+        let b = ease(Easing::EaseInOut, 1.0 - t);
+        assert!(
+            (a + b - 1.0).abs() < 0.01,
+            "EaseInOut symmetry failed at t={}: {:.4} + {:.4} = {:.4}",
+            t,
+            a,
+            b,
+            a + b
+        );
+    }
+}
+
+// ── Polynomial shape tests ────────────────────────────────────────────────────
+
+#[test]
+fn ease_in_quad_matches_formula() {
+    for i in 0..=10 {
+        let t = i as f32 / 10.0;
+        let expected = t * t;
+        let got = ease(Easing::EaseInQuad, t);
+        assert!(
+            (got - expected).abs() < 1e-5,
+            "EaseInQuad at t={}: got {}, expected {}",
+            t,
+            got,
+            expected
+        );
+    }
+}
+
+#[test]
+fn ease_in_cubic_matches_formula() {
+    for i in 0..=10 {
+        let t = i as f32 / 10.0;
+        let expected = t * t * t;
+        let got = ease(Easing::EaseInCubic, t);
+        assert!(
+            (got - expected).abs() < 1e-5,
+            "EaseInCubic at t={}: got {}, expected {}",
+            t,
+            got,
+            expected
+        );
+    }
+}
+
+#[test]
+fn ease_in_out_quad_midpoint() {
+    // At t=0.5, EaseInOutQuad should equal exactly 0.5.
+    let y = ease(Easing::EaseInOutQuad, 0.5);
+    assert!((y - 0.5).abs() < 1e-5, "EaseInOutQuad at 0.5: got {}", y);
+}
+
+#[test]
+fn ease_in_out_cubic_midpoint() {
+    // At t=0.5, EaseInOutCubic should equal exactly 0.5.
+    let y = ease(Easing::EaseInOutCubic, 0.5);
+    assert!((y - 0.5).abs() < 1e-5, "EaseInOutCubic at 0.5: got {}", y);
+}
+
+// ── Exponential shape tests ───────────────────────────────────────────────────
+
+#[test]
+fn ease_in_expo_exact_endpoints() {
+    assert_eq!(ease(Easing::EaseInExpo, 0.0), 0.0);
+    assert!(
+        (ease(Easing::EaseInExpo, 1.0) - 1.0).abs() < 0.001,
+        "EaseInExpo at t=1"
+    );
+}
+
+#[test]
+fn ease_out_expo_exact_endpoints() {
+    assert!(
+        (ease(Easing::EaseOutExpo, 0.0)).abs() < 0.001,
+        "EaseOutExpo at t=0"
+    );
+    assert_eq!(ease(Easing::EaseOutExpo, 1.0), 1.0);
+}
+
+#[test]
+fn ease_in_out_expo_exact_endpoints() {
+    assert_eq!(ease(Easing::EaseInOutExpo, 0.0), 0.0);
+    assert_eq!(ease(Easing::EaseInOutExpo, 1.0), 1.0);
+}
+
+#[test]
+fn ease_in_expo_is_convex() {
+    // Second half should advance more than first half.
+    let first_half = ease(Easing::EaseInExpo, 0.5) - ease(Easing::EaseInExpo, 0.0);
+    let second_half = ease(Easing::EaseInExpo, 1.0) - ease(Easing::EaseInExpo, 0.5);
+    assert!(
+        second_half > first_half,
+        "EaseInExpo: second half ({}) should advance more than first half ({})",
+        second_half,
+        first_half
+    );
+}
+
+// ── Step tests ────────────────────────────────────────────────────────────────
+
+#[test]
+fn step_start_jumps_at_t_gt_0() {
+    assert_eq!(ease(Easing::StepStart, 0.0), 0.0, "StepStart at t=0");
+    assert_eq!(ease(Easing::StepStart, 0.01), 1.0, "StepStart at t=0.01");
+    assert_eq!(ease(Easing::StepStart, 0.5), 1.0, "StepStart at t=0.5");
+    assert_eq!(ease(Easing::StepStart, 1.0), 1.0, "StepStart at t=1.0");
+}
+
+#[test]
+fn step_end_jumps_at_t_eq_1() {
+    assert_eq!(ease(Easing::StepEnd, 0.0), 0.0, "StepEnd at t=0");
+    assert_eq!(ease(Easing::StepEnd, 0.5), 0.0, "StepEnd at t=0.5");
+    assert_eq!(ease(Easing::StepEnd, 0.99), 0.0, "StepEnd at t=0.99");
+    assert_eq!(ease(Easing::StepEnd, 1.0), 1.0, "StepEnd at t=1.0");
+}
+
+// ── Bounce tests ──────────────────────────────────────────────────────────────
+
+#[test]
+fn ease_out_bounce_has_multiple_bounces() {
+    // The output should reach above 0.9 at least three times (three bounces
+    // plus the final settlement).
+    let peaks: usize = (1..99)
+        .filter(|&i| {
+            let t = i as f32 / 100.0;
+            let prev = ease(Easing::EaseOutBounce, (i - 1) as f32 / 100.0);
+            let curr = ease(Easing::EaseOutBounce, t);
+            let next = ease(Easing::EaseOutBounce, (i + 1) as f32 / 100.0);
+            curr > prev && curr > next && curr > 0.5
+        })
+        .count();
+
+    assert!(
+        peaks >= 2,
+        "EaseOutBounce should have at least 2 detectable peaks above 0.5, found {}",
+        peaks
+    );
+}
+
+#[test]
+fn ease_in_bounce_mirrors_ease_out_bounce() {
+    // ease_in(t) = 1 - ease_out(1 - t)
+    for i in 0..=100 {
+        let t = i as f32 / 100.0;
+        let in_val = ease(Easing::EaseInBounce, t);
+        let out_mirror = 1.0 - ease(Easing::EaseOutBounce, 1.0 - t);
+        assert!(
+            (in_val - out_mirror).abs() < 1e-5,
+            "EaseInBounce({}) = {}, mirror = {}",
+            t,
+            in_val,
+            out_mirror
+        );
+    }
+}
+
+#[test]
+fn ease_out_bounce_stays_in_unit_interval() {
+    for i in 0..=100 {
+        let t = i as f32 / 100.0;
+        let y = ease(Easing::EaseOutBounce, t);
+        assert!(
+            y >= -0.001 && y <= 1.001,
+            "EaseOutBounce({}) = {} is outside [0, 1]",
+            t,
+            y
+        );
+    }
+}
+
+// ── CubicBezier tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn cubic_bezier_identity_is_linear() {
+    // CubicBezier(0,0,1,1) should behave identically to Linear.
+    for i in 0..=20 {
+        let t = i as f32 / 20.0;
+        let linear = ease(Easing::Linear, t);
+        let cb = ease(Easing::CubicBezier(0.0, 0.0, 1.0, 1.0), t);
+        assert!(
+            (cb - linear).abs() < 0.002,
+            "CubicBezier(0,0,1,1) at t={}: got {}, expected {}",
+            t,
+            cb,
+            linear
+        );
+    }
+}
+
+#[test]
+fn cubic_bezier_custom_endpoints() {
+    // Any valid CubicBezier must start at 0 and end at 1.
+    let cb = Easing::CubicBezier(0.3, 0.8, 0.7, 0.2);
+    assert!((ease(cb, 0.0)).abs() < 0.01);
+    assert!((ease(cb, 1.0) - 1.0).abs() < 0.01);
+}
+
+// ── Elastic shape tests ───────────────────────────────────────────────────────
+
+#[test]
+fn ease_in_elastic_oscillates_then_arrives() {
+    // Elastic-in oscillates (goes negative) through most of its range,
+    // then arrives at 1.0 by t=1.0.
+    //
+    // At t=0.25 the amplitude of oscillation should be small (< 0.1).
+    let y_at_quarter = ease(Easing::EaseInElastic, 0.25);
+    assert!(
+        y_at_quarter.abs() < 0.1,
+        "EaseInElastic(0.25) = {} — amplitude should be small",
+        y_at_quarter
+    );
+
+    // The curve oscillates — it will go negative somewhere in [0.5, 1.0).
+    let goes_negative = (50..99u32).any(|i| ease(Easing::EaseInElastic, i as f32 / 100.0) < -0.1);
+    assert!(
+        goes_negative,
+        "EaseInElastic should have negative oscillations before t=1"
+    );
+
+    // Despite oscillations, it must end exactly at 1.0.
+    assert!(
+        (ease(Easing::EaseInElastic, 1.0) - 1.0).abs() < 0.001,
+        "EaseInElastic must end at 1.0"
+    );
+}
+
+#[test]
+fn ease_out_elastic_settles_at_one() {
+    // EaseOutElastic should end exactly at 1.
+    assert!(
+        (ease(Easing::EaseOutElastic, 1.0) - 1.0).abs() < 0.001,
+        "EaseOutElastic at t=1 should be 1.0"
+    );
+}
+
+// ── Back shape tests ──────────────────────────────────────────────────────────
+
+#[test]
+fn ease_in_back_goes_negative_before_positive() {
+    // Should dip below zero before rising.
+    let dips = (1..50u32).any(|i| ease(Easing::EaseInBack, i as f32 / 100.0) < 0.0);
+    assert!(dips, "EaseInBack should dip below 0");
+}
+
+#[test]
+fn ease_out_back_overshoots_before_settling() {
+    // Should exceed 1.0 before settling at exactly 1.0 at t=1.
+    let overshoots = (50..99u32).any(|i| ease(Easing::EaseOutBack, i as f32 / 100.0) > 1.0);
+    assert!(overshoots, "EaseOutBack should overshoot above 1.0");
+}
+
+// ── General quality checks ────────────────────────────────────────────────────
+
+#[test]
+fn all_easings_return_finite_values_across_range() {
+    for easing in all_easings() {
+        for i in 0..=100 {
+            let t = i as f32 / 100.0;
+            let y = ease(easing, t);
+            assert!(
+                y.is_finite(),
+                "{:?} at t={} returned non-finite {}",
+                easing,
+                t,
+                y
+            );
+        }
+    }
+}
+
+#[test]
+fn all_easings_handle_exact_midpoint() {
+    // Every easing must not crash or produce NaN at t=0.5.
+    for easing in all_easings() {
+        let y = ease(easing, 0.5);
+        assert!(
+            y.is_finite(),
+            "{:?} at t=0.5 returned non-finite {}",
+            easing,
+            y
+        );
+    }
+}
