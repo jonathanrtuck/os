@@ -476,7 +476,7 @@ impl Spring {
     /// Create a new spring with explicit physical parameters.
     ///
     /// Initial state: `value = 0.0`, `velocity = 0.0` — at rest at the origin.
-    pub fn new(target: f32, stiffness: f32, damping: f32, mass: f32) -> Self {
+    pub const fn new(target: f32, stiffness: f32, damping: f32, mass: f32) -> Self {
         Self {
             target,
             value: 0.0,
@@ -489,22 +489,22 @@ impl Spring {
     }
 
     /// Balanced preset — smooth general-purpose UI motion.
-    pub fn default_preset(target: f32) -> Self {
+    pub const fn default_preset(target: f32) -> Self {
         Self::new(target, 300.0, 20.0, 1.0)
     }
 
     /// Snappy preset — fast, tight response with minimal overshoot.
-    pub fn snappy(target: f32) -> Self {
+    pub const fn snappy(target: f32) -> Self {
         Self::new(target, 600.0, 35.0, 1.0)
     }
 
     /// Gentle preset — slow, soft approach with no overshoot.
-    pub fn gentle(target: f32) -> Self {
+    pub const fn gentle(target: f32) -> Self {
         Self::new(target, 120.0, 14.0, 1.0)
     }
 
     /// Bouncy preset — low damping produces visible overshoot oscillation.
-    pub fn bouncy(target: f32) -> Self {
+    pub const fn bouncy(target: f32) -> Self {
         Self::new(target, 300.0, 10.0, 1.0)
     }
 
@@ -544,6 +544,14 @@ impl Spring {
     /// Update the target without resetting velocity (smooth retargeting).
     pub fn set_target(&mut self, target: f32) {
         self.target = target;
+    }
+
+    /// Reset the spring to rest at the given position (value = target = position,
+    /// velocity = 0). Use this when teleporting to a position without animation.
+    pub fn reset_to(&mut self, position: f32) {
+        self.value = position;
+        self.target = position;
+        self.velocity = 0.0;
     }
 
     /// Returns `true` when both displacement and velocity are below the settle

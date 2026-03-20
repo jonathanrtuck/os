@@ -53,6 +53,18 @@ use protocol::{
     },
 };
 
+/// Clamp a float to [min, max]. Manual implementation for `no_std`.
+#[inline]
+fn clamp_f32(x: f32, min: f32, max: f32) -> f32 {
+    if x < min {
+        min
+    } else if x > max {
+        max
+    } else {
+        x
+    }
+}
+
 /// Round a float to the nearest integer (round-half-away-from-zero).
 /// Manual implementation for `no_std` (where `f32::round()` isn't available).
 #[inline]
@@ -95,7 +107,10 @@ struct CoreState {
     mouse_y: u32,
     rtc_mmio_va: usize,
     saved_editor_scroll: f32,
+    scroll_animating: bool,
     scroll_offset: f32,
+    scroll_spring: animation::Spring,
+    scroll_target: f32,
     sel_end: usize,
     sel_start: usize,
     timer_active: bool,
@@ -121,7 +136,10 @@ impl CoreState {
             mouse_y: 0,
             rtc_mmio_va: 0,
             saved_editor_scroll: 0.0,
+            scroll_animating: false,
             scroll_offset: 0.0,
+            scroll_spring: animation::Spring::snappy(0.0),
+            scroll_target: 0.0,
             sel_end: 0,
             sel_start: 0,
             timer_active: false,
@@ -444,7 +462,12 @@ fn process_key_event(
             s.image_mode = !was_image;
 
             if was_image {
+                // Restore scroll position instantly (no animation) when
+                // switching back to the editor via Ctrl+Tab.
                 s.scroll_offset = s.saved_editor_scroll;
+                s.scroll_target = s.saved_editor_scroll;
+                s.scroll_spring.reset_to(s.saved_editor_scroll);
+                s.scroll_animating = false;
             }
 
             return KeyAction {
@@ -494,7 +517,23 @@ fn update_scroll_offset(content_w: u32, content_h: u32) {
     let current = s.scroll_offset;
     let new_scroll = layout.scroll_for_cursor(text, cursor, current, vp_lines);
 
-    state().scroll_offset = new_scroll;
+    // Drive scroll changes through the spring instead of jumping instantly.
+    // Clamp to valid scroll range (allow 50pt overscroll for bounce effect).
+    let total_lines = layout.byte_to_visual_line(text, text.len()) + 1;
+    let max_scroll = if total_lines > vp_lines {
+        (total_lines - vp_lines) as f32 * s.line_h as f32
+    } else {
+        0.0
+    };
+    let clamped = clamp_f32(new_scroll, -50.0, max_scroll + 50.0);
+
+    let diff = s.scroll_target - clamped;
+    let abs_diff = if diff < 0.0 { -diff } else { diff };
+    if abs_diff > 0.5 {
+        s.scroll_target = clamped;
+        s.scroll_spring.set_target(clamped);
+        s.scroll_animating = true;
+    }
 }
 fn viewport_lines(content_h: u32) -> u32 {
     let line_h = state().line_h;
@@ -741,14 +780,22 @@ pub extern "C" fn _start() -> ! {
     loop {
         let timer_active = state().timer_active;
         let timer_handle = state().timer_handle;
+        // When animations are active, tick at ~60fps instead of blocking
+        // indefinitely. 16ms matches a single 60Hz frame interval.
+        let animating = state().scroll_animating;
+        let timeout_ns = if animating {
+            16_000_000u64 // 16ms ~ 60fps
+        } else {
+            u64::MAX // block until event
+        };
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
                 &[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE],
-                u64::MAX,
+                timeout_ns,
             ),
-            (true, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], u64::MAX),
-            (false, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, INPUT2_HANDLE], u64::MAX),
-            (false, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX),
+            (true, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], timeout_ns),
+            (false, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, INPUT2_HANDLE], timeout_ns),
+            (false, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], timeout_ns),
         };
         let mut changed = false;
         let mut text_changed = false;
@@ -947,18 +994,39 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Update scroll offset for cursor/text changes.
+        // Update scroll spring target for cursor/text changes.
+        if (changed || text_changed) && !state().image_mode {
+            update_scroll_offset(content_w, content_h);
+        }
+
+        // ── Animation tick ───────────────────────────────────────────
+        //
+        // Advance the scroll spring toward its target. This must happen
+        // after event processing (which may update the target) and before
+        // scene dispatch (which reads scroll_offset).
         let mut scroll_changed = false;
 
-        if (changed || text_changed) && !state().image_mode {
+        if state().scroll_animating {
             let old_scroll = state().scroll_offset;
+            let dt = 1.0 / 60.0; // frame delta (TODO: use actual elapsed from sys::counter)
+            let s = state();
+            s.scroll_spring.tick(dt);
+            s.scroll_offset = s.scroll_spring.value();
 
-            update_scroll_offset(content_w, content_h);
+            if s.scroll_spring.settled() {
+                // Snap to exact target (rounded to integer point) to avoid
+                // persistent sub-pixel jitter.
+                let target = s.scroll_target;
+                let rounded = if target >= 0.0 {
+                    ((target + 0.5) as i32) as f32
+                } else {
+                    ((target - 0.5) as i32) as f32
+                };
+                s.scroll_offset = rounded;
+                s.scroll_animating = false;
+            }
 
-            // If scroll changed, we need a full document content update
-            // (visible lines changed) regardless of whether text changed.
             let new_scroll = state().scroll_offset;
-
             let diff = old_scroll - new_scroll;
             let abs_diff = if diff < 0.0 { -diff } else { diff };
             if abs_diff > 0.5 {
@@ -968,6 +1036,7 @@ pub extern "C" fn _start() -> ! {
                     text_changed = true;
                 }
             }
+            changed = true; // trigger scene update
         }
 
         // ── Scene update dispatch ──────────────────────────────────
