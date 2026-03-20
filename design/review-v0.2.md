@@ -1064,12 +1064,12 @@ Per coding style: "200-400 lines typical, 800 max."
 
 ### Remaining (deferred)
 
-| ID  | Severity | File                               | Issue                                                               | Why Deferred                                                                                             |
-| --- | -------- | ---------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| H9  | HIGH     | 4 service main.rs files            | `_start()` functions 500-737 lines                                  | Bare-metal entry points interleave init + event loop; extraction needs context-struct design per service |
-| M10 | MEDIUM   | fonts/rasterize.rs:543             | Off-curve start point may double-count arc endpoint                 | Subtle rendering edge case for rare font contour structures; needs TrueType spec research                |
-| M11 | MEDIUM   | fonts/rasterize.rs:981             | `iup_contour` O(n²) worst case                                      | Only affects complex variable fonts with many untouched points; profile first                            |
-| L1  | LOW      | kernel/interrupt_controller.rs:239 | GICv3 redistributor wakeup poll unbounded                           | QEMU-only; real hardware would need timeout                                                              |
-| L2  | LOW      | kernel/scheduler.rs                | `schedule_inner` (148 lines), `kill_process` (145 lines)            | Well-commented, justified complexity for scheduler dispatch                                              |
-| L5  | LOW      | render/walk.rs                     | `_pool`, `_world_xform` params unused                               | Planned for future feature                                                                               |
-| L8  | LOW      | core/main.rs:454                   | TODO: construct core→editor MSG_KEY_EVENT                           | Raw forwarding works because wire formats happen to match; needs protocol design                         |
+| ID  | Severity | File                               | Issue                                                    | Why Deferred                                                                                             |
+| --- | -------- | ---------------------------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
+| H9  | HIGH     | 4 service main.rs files            | `_start()` functions 500-737 lines                       | Bare-metal entry points interleave init + event loop; extraction needs context-struct design per service |
+| M10 | MEDIUM   | fonts/rasterize.rs:543             | Off-curve start point may double-count arc endpoint      | Subtle rendering edge case for rare font contour structures; needs TrueType spec research                |
+| M11 | MEDIUM   | fonts/rasterize.rs:981             | `iup_contour` O(n²) worst case                           | Only affects complex variable fonts with many untouched points; profile first                            |
+| L1  | LOW      | kernel/interrupt_controller.rs:239 | GICv3 redistributor wakeup poll unbounded                | QEMU-only; real hardware would need timeout                                                              |
+| L2  | LOW      | kernel/scheduler.rs                | `schedule_inner` (148 lines), `kill_process` (145 lines) | Well-commented, justified complexity for scheduler dispatch                                              |
+| L5  | LOW      | render/walk.rs                     | `_pool`, `_world_xform` params unused                    | Planned for future feature                                                                               |
+| L8  | LOW      | core/main.rs:454                   | TODO: construct core→editor MSG_KEY_EVENT                | Raw forwarding works because wire formats happen to match; needs protocol design                         |
