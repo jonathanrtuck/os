@@ -469,6 +469,245 @@ fn node_fully_off_screen_produces_no_rect() {
     );
 }
 
+// ── Scroll blit-shift tests ─────────────────────────────────────────
+
+use render::incremental::{blit_shift_vertical, compute_scroll_blit};
+
+#[test]
+fn scroll_blit_params_vertical_down() {
+    // Container at (10, 20, 400, 300) in logical coords, scale=1.0.
+    // Scroll delta: (0, -50) logical = content moves up (scroll down).
+    let params = compute_scroll_blit(0, 0.0, -50.0, (10, 20, 400, 300), 1.0, 800, 600);
+    let p = params.expect("should produce blit params");
+    assert_eq!(p.cx, 10);
+    assert_eq!(p.cy, 20);
+    assert_eq!(p.cw, 400);
+    assert_eq!(p.ch, 300);
+    assert_eq!(p.dy_px, -50);
+    // Exposed strip at bottom: (10, 20 + 300 - 50, 400, 50) = (10, 270, 400, 50)
+    assert_eq!(p.exposed.x, 10);
+    assert_eq!(p.exposed.y, 270);
+    assert_eq!(p.exposed.w, 400);
+    assert_eq!(p.exposed.h, 50);
+}
+
+#[test]
+fn scroll_blit_params_vertical_up() {
+    // Container at (10, 20, 400, 300), scale=1.0.
+    // Scroll delta: (0, 50) logical = content moves down (scroll up).
+    let params = compute_scroll_blit(0, 0.0, 50.0, (10, 20, 400, 300), 1.0, 800, 600);
+    let p = params.expect("should produce blit params");
+    assert_eq!(p.dy_px, 50);
+    // Exposed strip at top: (10, 20, 400, 50)
+    assert_eq!(p.exposed.x, 10);
+    assert_eq!(p.exposed.y, 20);
+    assert_eq!(p.exposed.w, 400);
+    assert_eq!(p.exposed.h, 50);
+}
+
+#[test]
+fn scroll_blit_params_with_scale() {
+    // Container at (10, 20, 400, 300) logical, scale=2.0.
+    // Physical container: (20, 40, 800, 600).
+    // Scroll delta: (0, -25) logical = -50 physical.
+    let params = compute_scroll_blit(0, 0.0, -25.0, (10, 20, 400, 300), 2.0, 1600, 1200);
+    let p = params.expect("should produce blit params");
+    assert_eq!(p.cx, 20);
+    assert_eq!(p.cy, 40);
+    assert_eq!(p.cw, 800);
+    assert_eq!(p.ch, 600);
+    assert_eq!(p.dy_px, -50);
+    // Exposed at bottom: (20, 40 + 600 - 50, 800, 50) = (20, 590, 800, 50)
+    assert_eq!(p.exposed.x, 20);
+    assert_eq!(p.exposed.y, 590);
+    assert_eq!(p.exposed.w, 800);
+    assert_eq!(p.exposed.h, 50);
+}
+
+#[test]
+fn scroll_blit_params_horizontal_returns_none() {
+    // Horizontal scroll: dx != 0 — not supported, should return None.
+    let params = compute_scroll_blit(0, 10.0, -50.0, (0, 0, 800, 600), 1.0, 800, 600);
+    assert!(params.is_none(), "horizontal scroll should return None");
+}
+
+#[test]
+fn scroll_blit_params_subpixel_returns_none() {
+    // Subpixel scroll: after rounding, dy_px = 0.
+    let params = compute_scroll_blit(0, 0.0, 0.3, (0, 0, 800, 600), 1.0, 800, 600);
+    assert!(
+        params.is_none(),
+        "subpixel scroll should return None (dy rounds to 0)"
+    );
+}
+
+#[test]
+fn scroll_blit_params_exceeds_height_returns_none() {
+    // Scroll amount >= container height: nothing to shift.
+    let params = compute_scroll_blit(0, 0.0, -300.0, (0, 0, 800, 300), 1.0, 800, 600);
+    assert!(
+        params.is_none(),
+        "scroll >= container height should return None"
+    );
+}
+
+#[test]
+fn blit_shift_vertical_scroll_down() {
+    // 4x4 pixel framebuffer, BGRA (stride = 16 bytes).
+    // Container covers rows 0-3 (full buffer), shift dy=-2 (content up 2 rows).
+    let mut buf = vec![0u8; 4 * 4 * 4]; // 4x4 BGRA
+                                        // Fill row 0 with 0x10, row 1 with 0x20, row 2 with 0x30, row 3 with 0x40.
+    for x in 0..16 {
+        buf[0 * 16 + x] = 0x10;
+    }
+    for x in 0..16 {
+        buf[1 * 16 + x] = 0x20;
+    }
+    for x in 0..16 {
+        buf[2 * 16 + x] = 0x30;
+    }
+    for x in 0..16 {
+        buf[3 * 16 + x] = 0x40;
+    }
+
+    // dy=-2: rows shift up by 2. Row 2→0, row 3→1. Rows 2-3 become exposed.
+    blit_shift_vertical(&mut buf, 0, 0, 4, 4, 4, -2);
+
+    // Row 0 should now have row 2's data (0x30).
+    assert_eq!(buf[0], 0x30, "row 0 should contain old row 2");
+    // Row 1 should now have row 3's data (0x40).
+    assert_eq!(buf[16], 0x40, "row 1 should contain old row 3");
+    // Rows 2-3 are exposed (stale data, will be rendered over).
+}
+
+#[test]
+fn blit_shift_vertical_scroll_up() {
+    // 4x4 pixel framebuffer, BGRA (stride = 16 bytes).
+    // Container covers rows 0-3 (full buffer), shift dy=2 (content down 2 rows).
+    let mut buf = vec![0u8; 4 * 4 * 4];
+    for x in 0..16 {
+        buf[0 * 16 + x] = 0x10;
+    }
+    for x in 0..16 {
+        buf[1 * 16 + x] = 0x20;
+    }
+    for x in 0..16 {
+        buf[2 * 16 + x] = 0x30;
+    }
+    for x in 0..16 {
+        buf[3 * 16 + x] = 0x40;
+    }
+
+    // dy=+2: rows shift down by 2. Row 0→2, row 1→3. Rows 0-1 become exposed.
+    blit_shift_vertical(&mut buf, 0, 0, 4, 4, 4, 2);
+
+    // Row 2 should now have row 0's data (0x10).
+    assert_eq!(buf[2 * 16], 0x10, "row 2 should contain old row 0");
+    // Row 3 should now have row 1's data (0x20).
+    assert_eq!(buf[3 * 16], 0x20, "row 3 should contain old row 1");
+    // Rows 0-1 are exposed (stale data).
+}
+
+#[test]
+fn blit_shift_vertical_partial_width() {
+    // 8-pixel wide framebuffer, container is columns 2-5 (4 pixels wide).
+    // 4 rows tall, container covers all rows.
+    let stride: u32 = 8 * 4; // 32 bytes
+    let mut buf = vec![0u8; 4 * stride as usize];
+
+    // Fill each row's container region (columns 2-5) with distinct values.
+    for row in 0..4u32 {
+        for col in 2..6u32 {
+            let offset = (row * stride + col * 4) as usize;
+            buf[offset] = (row + 1) as u8 * 0x10; // 0x10, 0x20, 0x30, 0x40
+        }
+    }
+
+    // dy=-1: shift up by 1 within container columns.
+    blit_shift_vertical(&mut buf, 2, 0, 4, 4, 8, -1);
+
+    // Row 0, cols 2-5 should have row 1's data (0x20).
+    assert_eq!(
+        buf[(0 * stride + 2 * 4) as usize],
+        0x20,
+        "row 0 col 2 should have old row 1"
+    );
+    // Row 2, cols 2-5 should have row 3's data (0x40).
+    assert_eq!(
+        buf[(2 * stride + 2 * 4) as usize],
+        0x40,
+        "row 2 col 2 should have old row 3"
+    );
+    // Pixels OUTSIDE container (col 0-1, col 6-7) should be untouched.
+    assert_eq!(buf[0], 0, "pixels outside container should be unchanged");
+}
+
+#[test]
+fn compute_scroll_blit_clamps_to_framebuffer() {
+    // Container extends beyond framebuffer bottom.
+    // Container at (0, 500, 800, 200) logical, fb is 800x600, scale=1.
+    // Container bottom is at 700, but fb only goes to 600.
+    let params = compute_scroll_blit(0, 0.0, -50.0, (0, 500, 800, 200), 1.0, 800, 600);
+    let p = params.expect("should produce blit params");
+    // Container should be clipped to fb: ch = 600 - 500 = 100.
+    assert_eq!(p.ch, 100);
+    assert_eq!(p.cy, 500);
+    // dy=-50, exposed at bottom: (0, 500 + 100 - 50, 800, 50) = (0, 550, 800, 50)
+    assert_eq!(p.exposed.y, 550);
+    assert_eq!(p.exposed.h, 50);
+}
+
+#[test]
+fn compute_scroll_damage_replaces_container_rect() {
+    use render::incremental::compute_scroll_damage;
+
+    let mut state = IncrementalState::new();
+
+    // Frame 1: container(0) at (0,0,800,600), child(1) at (10,20,100,18).
+    let mut nodes = vec![Node::EMPTY; 2];
+    nodes[0] = container_node(0, 0, 800, 600, 1);
+    nodes[1] = visible_node(10, 20, 100, 18);
+    state.update_from_frame(&nodes, 2);
+
+    // Frame 2: scroll down 50 (content_transform ty = -50).
+    nodes[0].content_transform = scene::AffineTransform::translate(0.0, -50.0);
+    let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
+    set_dirty_bit(&mut dirty, 0); // Container is dirty.
+
+    // Compute original damage (without blit-shift optimization).
+    let original = state
+        .compute_dirty_rects(&nodes, 2, &dirty, 800, 600)
+        .unwrap();
+    // The original has the full container as a dirty rect.
+    assert!(original.count >= 1, "original should have at least 1 rect");
+
+    // Now compute scroll-adjusted damage.
+    let scroll = state.detect_scroll(&nodes, &dirty).unwrap();
+    let blit = compute_scroll_blit(
+        scroll.0,
+        scroll.1,
+        scroll.2,
+        state.prev_bounds[scroll.0 as usize],
+        1.0,
+        800,
+        600,
+    );
+    let blit = blit.unwrap();
+    let adjusted = compute_scroll_damage(&original, &blit, 800, 600);
+
+    // Adjusted damage should have the exposed strip, not the full container.
+    assert!(adjusted.count >= 1, "adjusted should have at least 1 rect");
+    // The exposed strip for scroll down 50px: (0, 550, 800, 50).
+    let found_strip = (0..adjusted.count).any(|i| {
+        let r = &adjusted.rects[i];
+        r.y == 550 && r.h == 50
+    });
+    assert!(
+        found_strip,
+        "adjusted damage should include the exposed strip at bottom"
+    );
+}
+
 // ── NodeCache tests ─────────────────────────────────────────────────
 
 use render::cache::NodeCache;

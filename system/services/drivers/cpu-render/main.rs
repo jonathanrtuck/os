@@ -456,6 +456,36 @@ pub extern "C" fn _start() -> ! {
         // ── Compute dirty rects for partial GPU transfer ─────────
         let damage = incr_state.compute_dirty_rects(nodes, node_count, &dirty_bits, fb_w16, fb_h16);
 
+        // ── Scroll blit-shift optimization ───────────────────────
+        // If the scene scrolled vertically, shift existing framebuffer
+        // pixels via memmove instead of re-rendering the entire container.
+        // Only the newly-exposed strip needs rendering.
+        let scroll_blit = damage.as_ref().and_then(|d| {
+            if d.full_screen {
+                return None;
+            }
+            let (cid, dtx, dty) = incr_state.detect_scroll(nodes, &dirty_bits)?;
+            render::incremental::compute_scroll_blit(
+                cid,
+                dtx,
+                dty,
+                incr_state.prev_bounds[cid as usize],
+                scale,
+                fb_w16,
+                fb_h16,
+            )
+        });
+
+        // Build scroll-adjusted damage when blit-shift applies: replaces
+        // the container's full dirty rect with just the exposed strip.
+        let effective_damage = match (&damage, &scroll_blit) {
+            (Some(orig), Some(blit)) => Some(render::incremental::compute_scroll_damage(
+                orig, blit, fb_w16, fb_h16,
+            )),
+            _ => None,
+        };
+        let damage_ref = effective_damage.as_ref().or(damage.as_ref());
+
         // ── Render: clipped per dirty rect (incremental) or full ──
         let graph = render::scene_render::SceneGraph {
             nodes,
@@ -463,10 +493,10 @@ pub extern "C" fn _start() -> ! {
         };
 
         // Determine incremental vs full repaint.
-        // - damage is None → full (first incremental frame or all-dirty)
+        // - damage_ref is None → full (first incremental frame or all-dirty)
         // - dirty_rects() is None → full (overflow / zero count)
         // - dirty_rects() is Some(rects) → incremental per rect
-        let incremental_rects = damage.as_ref().and_then(|d| {
+        let incremental_rects = damage_ref.and_then(|d| {
             // Zero-count with !full_screen means all dirty nodes were
             // off-screen — no rendering needed at all (handled by
             // skip_transfer below). Treat as full=false so we don't
@@ -495,6 +525,20 @@ pub extern "C" fn _start() -> ! {
                         fb_bytes,
                     );
                 }
+
+                // Apply blit-shift if detected: move existing pixels within
+                // the container region, avoiding a full re-render.
+                if let Some(blit) = &scroll_blit {
+                    // SAFETY: render_buf is a valid DMA allocation of
+                    // fb_bytes. Single-threaded — no concurrent access.
+                    let fb_slice = unsafe {
+                        core::slice::from_raw_parts_mut((*FB_PTRS.0.get())[render_buf], fb_bytes)
+                    };
+                    render::incremental::blit_shift_vertical(
+                        fb_slice, blit.cx, blit.cy, blit.cw, blit.ch, fb_width, blit.dy_px,
+                    );
+                }
+
                 let mut fb = make_fb(render_buf);
                 for r in rects {
                     if r.w > 0 && r.h > 0 {
@@ -522,14 +566,12 @@ pub extern "C" fn _start() -> ! {
         // Check for zero-count tracker (all dirty nodes were off-screen).
         // DamageTracker::dirty_rects() returns None for both "full screen"
         // and "zero rects" — distinguish here to avoid unnecessary transfer.
-        let skip_transfer = damage
-            .as_ref()
-            .map_or(false, |d| d.count == 0 && !d.full_screen);
+        let skip_transfer = damage_ref.map_or(false, |d| d.count == 0 && !d.full_screen);
 
         if skip_transfer {
             // All dirty nodes clipped to zero area — nothing to transfer.
         } else {
-            match damage.as_ref().and_then(|d| d.dirty_rects()) {
+            match damage_ref.and_then(|d| d.dirty_rects()) {
                 Some(rects) => {
                     // Partial transfer: only send changed regions to the GPU.
                     for r in rects {

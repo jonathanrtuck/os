@@ -273,6 +273,228 @@ impl Iterator for SetBitIter<'_> {
     }
 }
 
+// ── Scroll blit-shift ───────────────────────────────────────────────
+
+/// Parameters for a vertical blit-shift operation on the framebuffer.
+///
+/// All coordinates are in physical pixels. The `exposed` rect describes
+/// the newly-revealed strip that must be re-rendered after the shift.
+pub struct ScrollBlitParams {
+    /// Container's physical x position.
+    pub cx: u32,
+    /// Container's physical y position.
+    pub cy: u32,
+    /// Container's physical width.
+    pub cw: u32,
+    /// Container's physical height (clipped to framebuffer).
+    pub ch: u32,
+    /// Vertical pixel delta (negative = content moves up / scroll down).
+    pub dy_px: i32,
+    /// The exposed strip that needs re-rendering.
+    pub exposed: protocol::DirtyRect,
+    /// The scrolled container's node ID.
+    pub container_id: scene::NodeId,
+}
+
+/// Compute physical pixel blit-shift parameters from a detected scroll.
+///
+/// Returns `None` if the scroll cannot be optimized via blit-shift:
+/// - horizontal scroll (`dx != 0`)
+/// - subpixel scroll (rounds to 0 pixels)
+/// - scroll amount >= container height
+/// - container is zero-sized or off-screen
+///
+/// `bounds` is the container's previous absolute bounds in logical coords
+/// (from `IncrementalState::prev_bounds`).
+pub fn compute_scroll_blit(
+    container_id: scene::NodeId,
+    delta_tx: f32,
+    delta_ty: f32,
+    bounds: (i32, i32, u32, u32),
+    scale: f32,
+    fb_width: u16,
+    fb_height: u16,
+) -> Option<ScrollBlitParams> {
+    let dx_px = crate::round_f32(delta_tx * scale);
+    let dy_px = crate::round_f32(delta_ty * scale);
+
+    // Only vertical scroll for now.
+    if dx_px != 0 || dy_px == 0 {
+        return None;
+    }
+
+    // Scale logical bounds to physical pixels.
+    let cx = crate::round_f32(bounds.0 as f32 * scale).max(0) as u32;
+    let cy = crate::round_f32(bounds.1 as f32 * scale).max(0) as u32;
+    let cw = crate::scale_size(bounds.0, bounds.2 as i32, scale).max(0) as u32;
+    let raw_ch = crate::scale_size(bounds.1, bounds.3 as i32, scale).max(0) as u32;
+
+    // Clip container to framebuffer bounds.
+    let fb_w = fb_width as u32;
+    let fb_h = fb_height as u32;
+    let cx = cx.min(fb_w);
+    let cy = cy.min(fb_h);
+    let cw = cw.min(fb_w.saturating_sub(cx));
+    let ch = raw_ch.min(fb_h.saturating_sub(cy));
+
+    if cw == 0 || ch == 0 {
+        return None;
+    }
+
+    let abs_dy = (dy_px as i32).unsigned_abs();
+    if abs_dy >= ch {
+        return None;
+    }
+
+    // Compute exposed strip.
+    let exposed = if dy_px < 0 {
+        // Scroll down (content moves up): exposed at bottom.
+        protocol::DirtyRect::new(
+            cx as u16,
+            (cy + ch - abs_dy) as u16,
+            cw as u16,
+            abs_dy as u16,
+        )
+    } else {
+        // Scroll up (content moves down): exposed at top.
+        protocol::DirtyRect::new(cx as u16, cy as u16, cw as u16, abs_dy as u16)
+    };
+
+    Some(ScrollBlitParams {
+        cx,
+        cy,
+        cw,
+        ch,
+        dy_px,
+        exposed,
+        container_id,
+    })
+}
+
+/// Shift scanlines vertically within a container region of the framebuffer.
+///
+/// `buf` is the raw BGRA framebuffer. `fb_stride` is the full framebuffer
+/// width in pixels (not bytes). Container region: `(cx, cy, cw, ch)` in
+/// pixels. `dy` is the pixel shift: negative = content moves up (scroll
+/// down), positive = content moves down (scroll up).
+///
+/// Uses `copy` (memmove semantics) for overlapping source/destination
+/// within each scanline band. Copy direction is chosen to avoid
+/// overwriting source data before it's read.
+pub fn blit_shift_vertical(
+    buf: &mut [u8],
+    cx: u32,
+    cy: u32,
+    cw: u32,
+    ch: u32,
+    fb_stride: u32,
+    dy: i32,
+) {
+    if dy == 0 || cw == 0 || ch == 0 {
+        return;
+    }
+
+    let abs_dy = dy.unsigned_abs();
+    if abs_dy >= ch {
+        return;
+    }
+
+    let bpp: u32 = 4; // BGRA
+    let row_bytes = (cw * bpp) as usize;
+    let stride_bytes = (fb_stride * bpp) as usize;
+
+    if dy < 0 {
+        // Content moves up (scroll down): copy from higher rows to lower.
+        // Process top-to-bottom to avoid overwriting source.
+        for row in 0..(ch - abs_dy) {
+            let src_y = cy + row + abs_dy;
+            let dst_y = cy + row;
+            let src_off = (src_y as usize) * stride_bytes + (cx as usize) * (bpp as usize);
+            let dst_off = (dst_y as usize) * stride_bytes + (cx as usize) * (bpp as usize);
+
+            if src_off + row_bytes > buf.len() || dst_off + row_bytes > buf.len() {
+                break;
+            }
+
+            // SAFETY: src and dst may overlap (same buffer). Use copy_within
+            // for safe overlapping copy (memmove semantics).
+            buf.copy_within(src_off..src_off + row_bytes, dst_off);
+        }
+    } else {
+        // Content moves down (scroll up): copy from lower rows to higher.
+        // Process bottom-to-top to avoid overwriting source.
+        for i in 0..(ch - abs_dy) {
+            let row = ch - abs_dy - 1 - i;
+            let src_y = cy + row;
+            let dst_y = cy + row + abs_dy;
+            let src_off = (src_y as usize) * stride_bytes + (cx as usize) * (bpp as usize);
+            let dst_off = (dst_y as usize) * stride_bytes + (cx as usize) * (bpp as usize);
+
+            if src_off + row_bytes > buf.len() || dst_off + row_bytes > buf.len() {
+                break;
+            }
+
+            buf.copy_within(src_off..src_off + row_bytes, dst_off);
+        }
+    }
+}
+
+/// Build scroll-adjusted damage: replace the scrolled container's full
+/// dirty rect with just the exposed strip.
+///
+/// Iterates the original damage rects. Any rect that overlaps the blit-
+/// shifted container region is excluded (the blit-shift already placed
+/// those pixels correctly). The exposed strip is added. Non-overlapping
+/// rects (e.g., cursor, other dirty nodes) are kept as-is.
+///
+/// Note: the overlap test uses the container's CLIPPED physical bounds
+/// from `ScrollBlitParams`. A rect is considered "container-overlap" if
+/// it is fully contained within the container bounds — partially
+/// overlapping rects are kept (conservative: renders more, never less).
+pub fn compute_scroll_damage(
+    original: &DamageTracker,
+    blit: &ScrollBlitParams,
+    fb_width: u16,
+    fb_height: u16,
+) -> DamageTracker {
+    let mut adjusted = DamageTracker::new(fb_width, fb_height);
+
+    // Add the exposed strip.
+    adjusted.add(
+        blit.exposed.x,
+        blit.exposed.y,
+        blit.exposed.w,
+        blit.exposed.h,
+    );
+
+    // Container bounds for overlap test.
+    let c_x0 = blit.cx as u16;
+    let c_y0 = blit.cy as u16;
+    let c_x1 = c_x0.saturating_add(blit.cw as u16);
+    let c_y1 = c_y0.saturating_add(blit.ch as u16);
+
+    // Copy non-container rects from the original tracker.
+    for i in 0..original.count {
+        let r = &original.rects[i];
+        if r.w == 0 || r.h == 0 {
+            continue;
+        }
+
+        let r_x1 = r.x.saturating_add(r.w);
+        let r_y1 = r.y.saturating_add(r.h);
+
+        // Skip rects fully contained within the container (the blit-shift
+        // already moved those pixels into place).
+        if r.x >= c_x0 && r.y >= c_y0 && r_x1 <= c_x1 && r_y1 <= c_y1 {
+            continue;
+        }
+
+        adjusted.add(r.x, r.y, r.w, r.h);
+    }
+
+    adjusted
+}
+
 // ── Geometry helpers ────────────────────────────────────────────────
 
 /// Compute the union (bounding box) of two rectangles in (x, y, w, h) form.
