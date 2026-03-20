@@ -970,3 +970,27 @@ pub fn render_scene_clipped_with_pool(
 
     render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), None);
 }
+
+/// Render only the region within `dirty`, with SurfacePool + LRU rasterizer.
+/// This is the incremental rendering entry point for CpuBackend.
+pub fn render_scene_clipped_full(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    ctx: &RenderCtx,
+    dirty: &protocol::DirtyRect,
+    pool: &mut SurfacePool,
+    lru: &mut LruRasterizer,
+) {
+    if graph.nodes.is_empty() || dirty.w == 0 || dirty.h == 0 {
+        return;
+    }
+
+    let clip = ClipRect {
+        x: dirty.x as i32,
+        y: dirty.y as i32,
+        w: dirty.w as i32,
+        h: dirty.h as i32,
+    };
+
+    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), Some(lru));
+}
