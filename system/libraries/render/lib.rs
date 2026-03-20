@@ -169,6 +169,10 @@ pub struct CpuBackend {
     /// rendered bitmaps keyed by (node_id, content_hash). On cache
     /// hit, the cached bitmap is blitted instead of re-rasterizing.
     pub node_cache: cache::NodeCache,
+    /// LRU cache of rasterized clip masks. Keyed by (path DataRef +
+    /// node dimensions). Masks are rasterized once and reused across
+    /// frames as long as the path data and dimensions are unchanged.
+    pub clip_cache: ClipMaskCache,
     /// Physical font size in pixels (after scale).
     font_size_px: u32,
 }
@@ -281,11 +285,12 @@ impl CpuBackend {
         // SAFETY: Layout::new::<CpuBackend>() produces correct size and
         // alignment. alloc_zeroed returns valid zeroed memory (null-checked).
         // ptr::write is used for Drop-bearing fields (Box, Vec, LruRasterizer,
-        // SurfacePool, NodeCache) — these types whose drop glue must not run
-        // on the zeroed memory, so ptr::write overwrites them without dropping
-        // the destination. Primitive fields (scale, font_size_px) are safe to
-        // assign directly (no Drop). Box::from_raw takes ownership of the
-        // fully-initialized CpuBackend with matching layout.
+        // SurfacePool, NodeCache, ClipMaskCache) — these types whose drop glue
+        // must not run on the zeroed memory, so ptr::write overwrites them
+        // without dropping the destination. Primitive fields (scale,
+        // font_size_px) are safe to assign directly (no Drop). Box::from_raw
+        // takes ownership of the fully-initialized CpuBackend with matching
+        // layout.
         unsafe {
             let layout = alloc::alloc::Layout::new::<CpuBackend>();
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut CpuBackend;
@@ -301,6 +306,7 @@ impl CpuBackend {
             );
             core::ptr::write(&mut (*ptr).lru, lru);
             core::ptr::write(&mut (*ptr).node_cache, cache::NodeCache::new());
+            core::ptr::write(&mut (*ptr).clip_cache, ClipMaskCache::new());
             (*ptr).font_size_px = physical_size;
             Some(Box::from_raw(ptr))
         }
@@ -339,6 +345,7 @@ impl CpuBackend {
             &mut self.pool,
             &mut self.lru,
             Some(&mut self.node_cache),
+            &mut self.clip_cache,
         );
     }
 
@@ -363,6 +370,13 @@ impl RenderBackend for CpuBackend {
             scale: self.scale,
             font_size_px: self.font_size_px as u16,
         };
-        scene_render::render_scene_full(target, scene, &ctx, &mut self.pool, &mut self.lru);
+        scene_render::render_scene_full(
+            target,
+            scene,
+            &ctx,
+            &mut self.pool,
+            &mut self.lru,
+            &mut self.clip_cache,
+        );
     }
 }

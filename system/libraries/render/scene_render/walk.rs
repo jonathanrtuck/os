@@ -4,7 +4,7 @@
 //! Dependencies: `alloc`, `drawing`, `scene`, `protocol`, and the sibling
 //! `coords`, `content`, and `path_raster` modules.
 
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
 use drawing::{Color, PixelFormat, Surface};
 use scene::{Content, Node, NodeId, NULL};
@@ -14,7 +14,7 @@ use super::{
     path_raster::scene_to_draw_color,
     RenderCtx, SceneGraph,
 };
-use crate::{cache::NodeCache, surface_pool::SurfacePool, LruRasterizer};
+use crate::{cache::NodeCache, surface_pool::SurfacePool, ClipMaskCache, LruRasterizer};
 
 /// Axis-aligned clip rectangle in absolute (framebuffer) coordinates.
 /// Uses i32 for physical pixel math. virgil-render has an independent f32
@@ -77,6 +77,7 @@ fn render_node(
     pool: Option<&mut SurfacePool>,
     lru: Option<&mut LruRasterizer>,
     cache: Option<&mut NodeCache>,
+    clip_cache: &mut ClipMaskCache,
 ) {
     render_node_transformed(
         fb,
@@ -90,6 +91,7 @@ fn render_node(
         scene::AffineTransform::identity(),
         lru,
         cache,
+        clip_cache,
     );
 }
 
@@ -106,6 +108,7 @@ fn render_node_transformed(
     parent_world: scene::AffineTransform,
     lru: Option<&mut LruRasterizer>,
     mut cache: Option<&mut NodeCache>,
+    clip_cache: &mut ClipMaskCache,
 ) {
     if node_id == NULL || node_id as usize >= graph.nodes.len() {
         return;
@@ -200,6 +203,7 @@ fn render_node_transformed(
                     world_xform,
                     lru,
                     cache.as_deref_mut(),
+                    clip_cache,
                 );
             }
             let blit_x = (nx - sh_left).max(0) as u32;
@@ -233,6 +237,7 @@ fn render_node_transformed(
             world_xform,
             lru,
             cache,
+            clip_cache,
         );
     } else {
         // Non-trivial transform (rotation, scale, skew):
@@ -343,6 +348,7 @@ fn render_node_transformed(
                 scene::AffineTransform::identity(), // children rendered axis-aligned
                 lru,
                 cache.as_deref_mut(),
+                clip_cache,
             );
         }
 
@@ -612,6 +618,7 @@ fn render_node_content_translated(
     _world_xform: scene::AffineTransform,
     mut lru: Option<&mut LruRasterizer>,
     mut cache: Option<&mut NodeCache>,
+    clip_cache: &mut ClipMaskCache,
 ) {
     let s = ctx.scale;
     let nw = scale_size(node.x as i32, node.width as i32, s);
@@ -653,10 +660,16 @@ fn render_node_content_translated(
     );
 
     // Recurse into children.
+    // Priority: clip_path > rounded clip > standard clip.
+    let has_clip_path = !node.clip_path.is_empty() && nw > 0 && nh > 0 && node.first_child != NULL;
     let use_rounded_clip =
         node.clips_children() && phys_radius > 0 && nw > 0 && nh > 0 && node.first_child != NULL;
 
-    if use_rounded_clip {
+    if has_clip_path {
+        render_clip_path_children(
+            fb, graph, ctx, node, draw_x, draw_y, nw, nh, s, clip_cache, lru, cache,
+        );
+    } else if use_rounded_clip {
         render_rounded_clip_children(
             fb,
             graph,
@@ -670,20 +683,11 @@ fn render_node_content_translated(
             s,
             lru,
             cache,
+            clip_cache,
         );
     } else {
         render_children_standard(
-            fb,
-            graph,
-            ctx,
-            node,
-            draw_x,
-            draw_y,
-            visible,
-            node_rect,
-            s,
-            lru,
-            cache,
+            fb, graph, ctx, node, draw_x, draw_y, visible, node_rect, s, lru, cache, clip_cache,
         );
     }
 }
@@ -866,13 +870,36 @@ fn render_content(
 
     // Try cached path first.
     if let Some(ref mut nc) = cache {
-        if try_render_cached(fb, graph, ctx, node, node_id, draw_x, draw_y, nw, nh, visible, lru.as_deref_mut(), nc) {
+        if try_render_cached(
+            fb,
+            graph,
+            ctx,
+            node,
+            node_id,
+            draw_x,
+            draw_y,
+            nw,
+            nh,
+            visible,
+            lru.as_deref_mut(),
+            nc,
+        ) {
             return;
         }
     }
 
     // Fallback: render content directly when caching was not used.
-    super::content::render_content(fb, graph, ctx, node, draw_x, draw_y, nw, nh, lru.as_deref_mut());
+    super::content::render_content(
+        fb,
+        graph,
+        ctx,
+        node,
+        draw_x,
+        draw_y,
+        nw,
+        nh,
+        lru.as_deref_mut(),
+    );
 }
 
 /// Attempt to render content via the node cache.
@@ -950,6 +977,167 @@ fn try_render_cached(
     true
 }
 
+/// Compute a u64 cache key for a clip mask from the DataRef and node dimensions.
+///
+/// Combines path data offset, length, width, and height using a multiplicative
+/// hash chain. Collisions are acceptable — a false hit is detected by the
+/// cache's key+dimensions check.
+fn compute_clip_cache_key(clip_path: scene::DataRef, width: u32, height: u32) -> u64 {
+    let mut key = clip_path.offset as u64;
+    key = key
+        .wrapping_mul(0x517c_c1b7_2722_0a95)
+        .wrapping_add(clip_path.length as u64);
+    key = key
+        .wrapping_mul(0x517c_c1b7_2722_0a95)
+        .wrapping_add(width as u64);
+    key = key
+        .wrapping_mul(0x517c_c1b7_2722_0a95)
+        .wrapping_add(height as u64);
+    key
+}
+
+/// Multiply each pixel's alpha (and all channels) in an BGRA offscreen buffer
+/// by the corresponding 8bpp coverage value from the mask.
+///
+/// `offscreen` is BGRA8888, `mask` is 8bpp, both `width × height` pixels.
+/// The mask width may differ from `stride / 4` if the mask was stored
+/// with a different row pitch; `mask_width` is the mask's row pitch in pixels.
+fn apply_coverage_mask(
+    offscreen: &mut [u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    mask: &[u8],
+    mask_width: u32,
+) {
+    for y in 0..height {
+        for x in 0..width {
+            let px_offset = (y * stride + x * 4) as usize;
+            let mask_offset = (y * mask_width + x) as usize;
+            if px_offset + 3 < offscreen.len() && mask_offset < mask.len() {
+                let coverage = mask[mask_offset] as u32;
+                // Multiply all BGRA channels by coverage/255.
+                offscreen[px_offset] =
+                    ((offscreen[px_offset] as u32 * coverage) / 255) as u8;
+                offscreen[px_offset + 1] =
+                    ((offscreen[px_offset + 1] as u32 * coverage) / 255) as u8;
+                offscreen[px_offset + 2] =
+                    ((offscreen[px_offset + 2] as u32 * coverage) / 255) as u8;
+                offscreen[px_offset + 3] =
+                    ((offscreen[px_offset + 3] as u32 * coverage) / 255) as u8;
+            }
+        }
+    }
+}
+
+/// Render children into an offscreen buffer clipped to an arbitrary path mask.
+///
+/// Children are rasterized into a temporary BGRA buffer, then each pixel's
+/// alpha is multiplied by the path clip mask coverage (anti-aliased, 8bpp).
+/// The result is composited onto the main framebuffer via source-over.
+///
+/// Falls back to unclipped child rendering when path data is empty or
+/// rasterization fails.
+fn render_clip_path_children(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    ctx: &RenderCtx,
+    node: &Node,
+    draw_x: i32,
+    draw_y: i32,
+    nw: i32,
+    nh: i32,
+    scale: f32,
+    clip_cache: &mut ClipMaskCache,
+    mut lru: Option<&mut LruRasterizer>,
+    mut cache: Option<&mut NodeCache>,
+) {
+    let ow = nw as u32;
+    let oh = nh as u32;
+
+    // Get the clip path data from the scene graph data buffer.
+    let clip_start = node.clip_path.offset as usize;
+    let clip_end = clip_start + node.clip_path.length as usize;
+    let clip_data = if clip_end <= graph.data.len() {
+        &graph.data[clip_start..clip_end]
+    } else {
+        &[]
+    };
+
+    if clip_data.is_empty() {
+        // No valid clip data: render children normally without clipping.
+        let child_clip = ClipRect { x: draw_x, y: draw_y, w: nw, h: nh };
+        let child_ox = draw_x + round_f32(node.content_transform.tx * scale);
+        let child_oy = draw_y + round_f32(node.content_transform.ty * scale);
+        traverse_children(
+            fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache, clip_cache,
+        );
+        return;
+    }
+
+    // Compute cache key and get or rasterize the clip mask.
+    let cache_key = compute_clip_cache_key(node.clip_path, ow, oh);
+    let mask_coverage: Vec<u8> = match clip_cache.get_or_rasterize(
+        clip_data,
+        ow,
+        oh,
+        scene::FillRule::Winding,
+        cache_key,
+    ) {
+        Some(slice) => {
+            // Copy the coverage slice out so we can later mutably borrow
+            // clip_cache again when recursing into children.
+            Vec::from(slice)
+        }
+        None => {
+            // Rasterization failed: render children unclipped.
+            let child_clip = ClipRect { x: draw_x, y: draw_y, w: nw, h: nh };
+            let child_ox = draw_x + round_f32(node.content_transform.tx * scale);
+            let child_oy = draw_y + round_f32(node.content_transform.ty * scale);
+            traverse_children(
+                fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache,
+                clip_cache,
+            );
+            return;
+        }
+    };
+
+    // 1. Render children into an offscreen BGRA buffer.
+    let ostride = ow * 4;
+    let mut offscreen_buf = vec![0u8; (ostride * oh) as usize];
+    {
+        let mut off_fb = Surface {
+            data: &mut offscreen_buf,
+            width: ow,
+            height: oh,
+            stride: ostride,
+            format: PixelFormat::Bgra8888,
+        };
+        let off_clip = ClipRect { x: 0, y: 0, w: nw, h: nh };
+        let child_ox = round_f32(node.content_transform.tx * scale);
+        let child_oy = round_f32(node.content_transform.ty * scale);
+        traverse_children(
+            &mut off_fb,
+            graph,
+            ctx,
+            node,
+            child_ox,
+            child_oy,
+            off_clip,
+            scale,
+            lru.as_deref_mut(),
+            cache.as_deref_mut(),
+            clip_cache,
+        );
+    }
+
+    // 2. Apply the clip mask: multiply each pixel by mask coverage.
+    apply_coverage_mask(&mut offscreen_buf, ow, oh, ostride, &mask_coverage, ow);
+
+    // 3. Blit masked result onto the main framebuffer.
+    fb.blit_blend(&offscreen_buf, ow, oh, ostride, draw_x as u32, draw_y as u32);
+}
+
 /// Render children into an offscreen buffer with rounded-rect masking.
 ///
 /// Used when a node has both `clips_children` and a non-zero `corner_radius`.
@@ -968,6 +1156,7 @@ fn render_rounded_clip_children(
     scale: f32,
     mut lru: Option<&mut LruRasterizer>,
     mut cache: Option<&mut NodeCache>,
+    clip_cache: &mut ClipMaskCache,
 ) {
     let ow = nw as u32;
     let oh = nh as u32;
@@ -1006,6 +1195,7 @@ fn render_rounded_clip_children(
             scale,
             lru.as_deref_mut(),
             cache.as_deref_mut(),
+            clip_cache,
         );
     }
 
@@ -1038,6 +1228,7 @@ fn render_children_standard(
     scale: f32,
     lru: Option<&mut LruRasterizer>,
     cache: Option<&mut NodeCache>,
+    clip_cache: &mut ClipMaskCache,
 ) {
     let child_clip = if node.clips_children() {
         match visible.intersect(node_rect) {
@@ -1050,7 +1241,9 @@ fn render_children_standard(
     let child_ox = draw_x + round_f32(node.content_transform.tx * scale);
     let child_oy = draw_y + round_f32(node.content_transform.ty * scale);
 
-    traverse_children(fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache);
+    traverse_children(
+        fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache, clip_cache,
+    );
 }
 
 /// Walk a node's child linked list, culling by bounding-box intersection,
@@ -1066,6 +1259,7 @@ fn traverse_children(
     scale: f32,
     mut lru: Option<&mut LruRasterizer>,
     mut cache: Option<&mut NodeCache>,
+    clip_cache: &mut ClipMaskCache,
 ) {
     let mut child = node.first_child;
 
@@ -1099,6 +1293,7 @@ fn traverse_children(
                 scene::AffineTransform::identity(),
                 lru.as_deref_mut(),
                 cache.as_deref_mut(),
+                clip_cache,
             );
         }
 
@@ -1201,7 +1396,8 @@ pub fn render_scene(fb: &mut Surface, graph: &SceneGraph, ctx: &RenderCtx) {
         h: fb.height as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None, None);
+    let mut clip_cache = ClipMaskCache::new();
+    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None, None, &mut clip_cache);
 }
 
 /// Render an entire scene graph with a SurfacePool for offscreen opacity.
@@ -1222,7 +1418,20 @@ pub fn render_scene_with_pool(
         h: fb.height as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), None, None);
+    let mut clip_cache = ClipMaskCache::new();
+    render_node(
+        fb,
+        graph,
+        ctx,
+        0,
+        0,
+        0,
+        clip,
+        Some(pool),
+        None,
+        None,
+        &mut clip_cache,
+    );
 }
 
 /// Render an entire scene graph with SurfacePool + LRU glyph rasterizer.
@@ -1236,6 +1445,7 @@ pub fn render_scene_full(
     ctx: &RenderCtx,
     pool: &mut SurfacePool,
     lru: &mut LruRasterizer,
+    clip_cache: &mut ClipMaskCache,
 ) {
     if graph.nodes.is_empty() {
         return;
@@ -1248,7 +1458,19 @@ pub fn render_scene_full(
         h: fb.height as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), Some(lru), None);
+    render_node(
+        fb,
+        graph,
+        ctx,
+        0,
+        0,
+        0,
+        clip,
+        Some(pool),
+        Some(lru),
+        None,
+        clip_cache,
+    );
 }
 
 /// Render only the region within `dirty` (absolute pixel coordinates).
@@ -1270,7 +1492,8 @@ pub fn render_scene_clipped(
         h: dirty.h as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None, None);
+    let mut clip_cache = ClipMaskCache::new();
+    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None, None, &mut clip_cache);
 }
 
 /// Render only the region within `dirty`, with SurfacePool for offscreen opacity.
@@ -1292,7 +1515,20 @@ pub fn render_scene_clipped_with_pool(
         h: dirty.h as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), None, None);
+    let mut clip_cache = ClipMaskCache::new();
+    render_node(
+        fb,
+        graph,
+        ctx,
+        0,
+        0,
+        0,
+        clip,
+        Some(pool),
+        None,
+        None,
+        &mut clip_cache,
+    );
 }
 
 /// Render only the region within `dirty`, with SurfacePool + LRU rasterizer.
@@ -1305,6 +1541,7 @@ pub fn render_scene_clipped_full(
     pool: &mut SurfacePool,
     lru: &mut LruRasterizer,
     cache: Option<&mut NodeCache>,
+    clip_cache: &mut ClipMaskCache,
 ) {
     if graph.nodes.is_empty() || dirty.w == 0 || dirty.h == 0 {
         return;
@@ -1317,5 +1554,17 @@ pub fn render_scene_clipped_full(
         h: dirty.h as i32,
     };
 
-    render_node(fb, graph, ctx, 0, 0, 0, clip, Some(pool), Some(lru), cache);
+    render_node(
+        fb,
+        graph,
+        ctx,
+        0,
+        0,
+        0,
+        clip,
+        Some(pool),
+        Some(lru),
+        cache,
+        clip_cache,
+    );
 }
