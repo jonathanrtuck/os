@@ -522,15 +522,10 @@ pub(super) fn render_path(
     max_x += 2;
     max_y += 2;
 
-    // Clamp to node bounds (physical pixels).
-    // NOTE: Clamping min to 0 may cause coverage buffer offset mismatch for
-    // paths with content at negative local coordinates (review 7.19).
-    if min_x < 0 {
-        min_x = 0;
-    }
-    if min_y < 0 {
-        min_y = 0;
-    }
+    // min_x/min_y may be negative (e.g., glyphs with negative bearing_x).
+    // The coverage buffer is sized to the full bbox; the translation on
+    // lines below shifts all segments so the buffer origin is at (min_x, min_y).
+    // draw_coverage handles negative blit coordinates via pre-clipping.
 
     let cov_w = (max_x - min_x) as u32;
     let cov_h = (max_y - min_y) as u32;
