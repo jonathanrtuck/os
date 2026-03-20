@@ -260,6 +260,13 @@ impl<'a> SceneWriter<'a> {
         let aligned = (used + align - 1) & !(align - 1);
 
         if aligned > used && aligned <= DATA_BUFFER_SIZE {
+            // Zero the alignment gap so content hashes are deterministic.
+            let gap = aligned - used;
+            let base = DATA_OFFSET + used;
+            // SAFETY: base..base+gap is within the data buffer (checked above).
+            unsafe {
+                core::ptr::write_bytes(self.buf.as_mut_ptr().add(base), 0, gap);
+            }
             self.header_mut().data_used = aligned as u32;
         }
 

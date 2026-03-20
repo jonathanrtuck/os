@@ -920,8 +920,9 @@ pub extern "C" fn _start() -> ! {
             });
             let font_capacity: u32 = (font_page_count as u32) * 4096; // 4 MiB
 
-            // SAFETY: _font_va..+font_capacity is the DMA region just allocated above; zeroing is within bounds.
-            unsafe { core::ptr::write_bytes(_font_va as *mut u8, 0, font_capacity as usize) };
+            // SAFETY: font_zeroed_va..+font_capacity is the DMA region just allocated above; zeroing is within bounds.
+            let font_zeroed_va = _font_va;
+            unsafe { core::ptr::write_bytes(font_zeroed_va as *mut u8, 0, font_capacity as usize) };
 
             // Share font buffer with 9p driver (read-write).
             let p9_font_va = sys::memory_share(p9_proc, font_pa, font_page_count, false)

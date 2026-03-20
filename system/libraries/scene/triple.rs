@@ -131,6 +131,8 @@ fn buf_offset(idx: u32) -> usize {
 /// Precondition: a != b, both in {0, 1, 2}.
 #[inline]
 fn free_index(a: u32, b: u32) -> u32 {
+    debug_assert!(a != b, "free_index: a == b == {}", a);
+    debug_assert!(a < 3 && b < 3, "free_index: out of range a={} b={}", a, b);
     // 0 + 1 + 2 = 3. The free one is 3 - a - b.
     3 - a - b
 }
@@ -460,6 +462,12 @@ impl TripleReader {
         let latest = triple_read_ctrl_acquire(buf, CTRL_LATEST_BUF);
 
         // Claim this buffer so the writer won't recycle it.
+        // NOTE: The load of latest_buf and store of reader_buf are not a single
+        // atomic operation. A concurrent publish() between them could make the
+        // writer pick `latest` as its free buffer before we claim it. This is
+        // safe because: (1) only one reader exists per scene graph (architectural
+        // invariant), and (2) the writer's next acquire() re-reads reader_buf
+        // and will see our claim before writing.
         triple_write_ctrl(buf, CTRL_READER_BUF, latest);
 
         let read_off = buf_offset(latest);

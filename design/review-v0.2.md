@@ -1055,21 +1055,21 @@ Per coding style: "200-400 lines typical, 800 max."
 - H9: Partially addressed by file splits. Full `_start()` extraction deferred.
 - H13: `render/walk.rs` `render_node_content_translated` (353 → 90-line orchestrator + 11 helpers).
 - H2: `render/path_raster.rs` — removed incorrect min_x/min_y clamp-to-zero. The coverage buffer, segment translation, and `draw_coverage` all handle negative coordinates correctly; the clamp was breaking the math.
+- M4: `fonts/rasterize/{scanline,gvar}.rs` — added underflow guard before `bmp_w`/`bmp_h` cast to u32.
+- M5: `scene/triple.rs` — documented non-atomic reader_buf claim as safe under single-reader invariant.
+- L3: `scene/triple.rs` — added `debug_assert!(a != b)` in `free_index`.
+- L4: Already resolved during Phase 5 drawing/lib.rs split (dead binding removed).
+- L6: `scene/writer.rs` — zero alignment gap in `push_shaped_glyphs` for deterministic content hashes.
+- L7: `init/main.rs` — renamed `_font_va` to `font_zeroed_va` to reflect actual usage.
 
 ### Remaining (deferred)
 
 | ID  | Severity | File                               | Issue                                                               | Why Deferred                                                                                             |
 | --- | -------- | ---------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | H9  | HIGH     | 4 service main.rs files            | `_start()` functions 500-737 lines                                  | Bare-metal entry points interleave init + event loop; extraction needs context-struct design per service |
-| M4  | MEDIUM   | fonts/rasterize.rs:854             | `bmp_w`/`bmp_h` from i32 subtraction without underflow guard        | Degenerate glyphs only; rasterizer already returns None for oversized                                    |
-| M5  | MEDIUM   | scene/triple.rs:416                | Non-atomic reader_buf claim in `TripleReader::new`                  | Single-reader architecture prevents the race; adding CAS is over-engineering                             |
-| M10 | MEDIUM   | fonts/rasterize.rs:543             | Off-curve start point may double-count arc endpoint                 | Subtle rendering edge case for rare font contour structures                                              |
-| M11 | MEDIUM   | fonts/rasterize.rs:981             | `iup_contour` O(n²) worst case                                      | Only affects complex variable fonts with many untouched points                                           |
+| M10 | MEDIUM   | fonts/rasterize.rs:543             | Off-curve start point may double-count arc endpoint                 | Subtle rendering edge case for rare font contour structures; needs TrueType spec research                |
+| M11 | MEDIUM   | fonts/rasterize.rs:981             | `iup_contour` O(n²) worst case                                      | Only affects complex variable fonts with many untouched points; profile first                            |
 | L1  | LOW      | kernel/interrupt_controller.rs:239 | GICv3 redistributor wakeup poll unbounded                           | QEMU-only; real hardware would need timeout                                                              |
-| L2  | LOW      | kernel/scheduler.rs                | `schedule_inner` (148 lines), `kill_process` (145 lines)            | Well-commented, justified complexity                                                                     |
-| L3  | LOW      | scene/triple.rs:123                | `free_index(a, b)` no runtime check for a==b                        | `select_free_buffer` guards this; `from_existing` doesn't                                                |
-| L4  | LOW      | drawing/lib.rs:661                 | `y_int` shadowed immediately (dead binding)                         | Cosmetic                                                                                                 |
+| L2  | LOW      | kernel/scheduler.rs                | `schedule_inner` (148 lines), `kill_process` (145 lines)            | Well-commented, justified complexity for scheduler dispatch                                              |
 | L5  | LOW      | render/walk.rs                     | `_pool`, `_world_xform` params unused                               | Planned for future feature                                                                               |
-| L6  | LOW      | scene/writer.rs                    | `push_shaped_glyphs` doesn't zero alignment padding                 | Non-deterministic content hashes possible                                                                |
-| L7  | LOW      | init/main.rs                       | `_font_va` naming suggests unused                                   | Cosmetic                                                                                                 |
-| L8  | LOW      | core/main.rs:454                   | TODO: construct core→editor MSG_KEY_EVENT                           | Raw forwarding works because wire formats happen to match                                                |
+| L8  | LOW      | core/main.rs:454                   | TODO: construct core→editor MSG_KEY_EVENT                           | Raw forwarding works because wire formats happen to match; needs protocol design                         |

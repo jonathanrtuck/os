@@ -7,8 +7,10 @@
 //!
 //! All math is integer/fixed-point. No floating point.
 
-use super::outline::{GlyphOutline, GlyphPoint, MAX_GLYPH_POINTS};
-use super::scale::{scale_fu, scale_fu_ceil, scale_fu_floor, FP_ONE, FP_SHIFT};
+use super::{
+    outline::{GlyphOutline, GlyphPoint, MAX_GLYPH_POINTS},
+    scale::{scale_fu, scale_fu_ceil, scale_fu_floor, FP_ONE, FP_SHIFT},
+};
 
 // ---------------------------------------------------------------------------
 // Scanline rasterizer constants and types
@@ -381,9 +383,12 @@ pub(crate) fn rasterize_segments(
 // Public API: rasterize a glyph by ID
 // ---------------------------------------------------------------------------
 
-use super::metrics::{GlyphMetrics, RasterBuffer};
-use super::outline::extract_outline;
 use read_fonts::{FontRef, TableProvider};
+
+use super::{
+    metrics::{GlyphMetrics, RasterBuffer},
+    outline::extract_outline,
+};
 
 /// Rasterize a glyph by its ID from font data into a coverage buffer.
 ///
@@ -463,6 +468,9 @@ pub fn rasterize(
     let x_max_px = scale_fu_ceil(x_max_fu as i32, size_px, upem) + 1;
     let y_max_px = scale_fu_ceil(y_max_fu as i32, size_px, upem) + 1;
     let _ = y_min_px;
+    if x_max_px < x_min_px || y_max_px < y_min_px {
+        return None;
+    }
     let bmp_w = (x_max_px - x_min_px) as u32;
     let bmp_h = (y_max_px - y_min_px) as u32;
 

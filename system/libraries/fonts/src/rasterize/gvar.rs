@@ -7,11 +7,13 @@
 
 use read_fonts::{FontRef, TableProvider};
 
-use super::metrics::{font_axes, AxisValue, GlyphMetrics, RasterBuffer};
-use super::outline::{extract_outline, GlyphOutline, GlyphPoint, MAX_CONTOURS, MAX_GLYPH_POINTS};
-use super::scale::{scale_fu, scale_fu_ceil, scale_fu_floor};
-use super::scanline::{
-    flatten_outline_from_scratch, rasterize_segments, RasterScratch, STEM_DARKENING_LUT,
+use super::{
+    metrics::{font_axes, AxisValue, GlyphMetrics, RasterBuffer},
+    outline::{extract_outline, GlyphOutline, GlyphPoint, MAX_CONTOURS, MAX_GLYPH_POINTS},
+    scale::{scale_fu, scale_fu_ceil, scale_fu_floor},
+    scanline::{
+        flatten_outline_from_scratch, rasterize_segments, RasterScratch, STEM_DARKENING_LUT,
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -195,8 +197,7 @@ fn iup_contour(
                         // Linear interpolation.
                         let t_num = (p_coord - lo_coord) as i64;
                         let t_den = (hi_coord - lo_coord) as i64;
-                        (lo_delta as i64
-                            + (hi_delta as i64 - lo_delta as i64) * t_num / t_den)
+                        (lo_delta as i64 + (hi_delta as i64 - lo_delta as i64) * t_num / t_den)
                             as i32
                     }
                 };
@@ -397,8 +398,14 @@ pub(crate) fn extract_outline_with_axes(
                 _ => return Some((advance_fu, lsb_fu, upem)),
             };
 
-            let (new_advance, new_lsb) =
-                apply_gvar_simple(outline, &orig_points, &var_data, &coords, advance_fu, lsb_fu);
+            let (new_advance, new_lsb) = apply_gvar_simple(
+                outline,
+                &orig_points,
+                &var_data,
+                &coords,
+                advance_fu,
+                lsb_fu,
+            );
 
             Some((new_advance, new_lsb, upem))
         }
@@ -468,12 +475,8 @@ pub(crate) fn extract_outline_with_axes(
                     alloc::boxed::Box::from_raw(ptr)
                 };
 
-                let comp_result = extract_outline_with_axes(
-                    font_data,
-                    comp_gid,
-                    axis_values,
-                    &mut comp_outline,
-                );
+                let comp_result =
+                    extract_outline_with_axes(font_data, comp_gid, axis_values, &mut comp_outline);
                 if comp_result.is_none() {
                     // Fall back to default outline for this component.
                     if extract_outline(font_data, comp_gid, &mut comp_outline).is_none() {
@@ -630,6 +633,9 @@ pub fn rasterize_with_axes(
     let x_max_px = scale_fu_ceil(x_max_fu as i32, size_px_u32, upem) + 1;
     let y_max_px = scale_fu_ceil(y_max_fu as i32, size_px_u32, upem) + 1;
     let _ = y_min_px;
+    if x_max_px < x_min_px || y_max_px < y_min_px {
+        return None;
+    }
     let bmp_w = (x_max_px - x_min_px) as u32;
     let bmp_h = (y_max_px - y_min_px) as u32;
 
