@@ -290,6 +290,36 @@ impl SceneState {
         tw.publish();
     }
 
+    /// Apply post-build opacity adjustments to the latest published scene.
+    ///
+    /// Copies the latest published buffer, sets root node opacity, walks
+    /// selection nodes (siblings after N_CURSOR) and sets their opacity,
+    /// then publishes. This is a lightweight operation: only a few bytes
+    /// change in the node array.
+    pub fn apply_opacity(&mut self, root_opacity: u8, selection_opacity: u8) {
+        // Skip the extra copy/publish cycle when both are fully opaque.
+        if root_opacity == 255 && selection_opacity == 255 {
+            return;
+        }
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            // Root opacity.
+            w.node_mut(N_ROOT).opacity = root_opacity;
+            w.mark_dirty(N_ROOT);
+            // Selection node opacity: walk siblings after N_CURSOR.
+            if selection_opacity < 255 {
+                let mut sel_id = w.node(N_CURSOR).next_sibling;
+                while sel_id != scene::NULL {
+                    w.node_mut(sel_id).opacity = selection_opacity;
+                    w.mark_dirty(sel_id);
+                    sel_id = w.node(sel_id).next_sibling;
+                }
+            }
+        }
+        tw.publish();
+    }
+
     /// Update document content (line nodes + cursor + selection).
     /// Compacts the data buffer by resetting it and re-pushing all data.
     #[allow(clippy::too_many_arguments)]

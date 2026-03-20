@@ -205,6 +205,10 @@ struct CoreState {
     doc_buf: *mut u8,
     doc_capacity: usize,
     doc_len: usize,
+    /// Animation ID for the document switch fade-out (255→0).
+    fade_out_id: Option<animation::AnimationId>,
+    /// Animation ID for the document switch fade-in (0→255).
+    fade_in_id: Option<animation::AnimationId>,
     font_data_ptr: *const u8,
     font_data_len: usize,
     font_upem: u16,
@@ -212,6 +216,10 @@ struct CoreState {
     line_h: u32,
     mouse_x: u32,
     mouse_y: u32,
+    /// True while fading out before a document context switch.
+    pending_context_switch: bool,
+    /// Root node opacity for document switch fade transitions.
+    root_opacity: u8,
     rtc_mmio_va: usize,
     saved_editor_scroll: f32,
     scroll_animating: bool,
@@ -219,6 +227,10 @@ struct CoreState {
     scroll_spring: animation::Spring,
     scroll_target: f32,
     sel_end: usize,
+    /// Animation ID for the selection highlight fade-in (0→255).
+    selection_fade_id: Option<animation::AnimationId>,
+    /// Current selection highlight opacity (animated on selection change).
+    selection_opacity: u8,
     sel_start: usize,
     timeline: animation::Timeline,
     timer_active: bool,
@@ -239,6 +251,8 @@ impl CoreState {
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
             doc_len: 0,
+            fade_out_id: None,
+            fade_in_id: None,
             font_data_ptr: core::ptr::null(),
             font_data_len: 0,
             font_upem: 1000,
@@ -246,6 +260,8 @@ impl CoreState {
             line_h: 20,
             mouse_x: 0,
             mouse_y: 0,
+            pending_context_switch: false,
+            root_opacity: 255,
             rtc_mmio_va: 0,
             saved_editor_scroll: 0.0,
             scroll_animating: false,
@@ -253,6 +269,8 @@ impl CoreState {
             scroll_spring: animation::Spring::snappy(0.0),
             scroll_target: 0.0,
             sel_end: 0,
+            selection_fade_id: None,
+            selection_opacity: 255,
             sel_start: 0,
             timeline: animation::Timeline::new(),
             timer_active: false,
@@ -566,28 +584,30 @@ fn process_key_event(
     if key.keycode == KEY_TAB && key.pressed == 1 && *ctrl_pressed {
         if has_image {
             let s = state();
-            let was_image = s.image_mode;
-
-            if !was_image {
-                s.saved_editor_scroll = s.scroll_offset;
-            }
-
-            s.image_mode = !was_image;
-
-            if was_image {
-                // Restore scroll position instantly (no animation) when
-                // switching back to the editor via Ctrl+Tab.
-                s.scroll_offset = s.saved_editor_scroll;
-                s.scroll_target = s.saved_editor_scroll;
-                s.scroll_spring.reset_to(s.saved_editor_scroll);
-                s.scroll_animating = false;
+            // Don't switch immediately — start fade out. The actual switch
+            // happens when the fade-out animation completes (in the animation
+            // tick section of the event loop).
+            if !s.pending_context_switch {
+                let now_ms = {
+                    let freq = s.counter_freq;
+                    if freq > 0 {
+                        sys::counter() * 1000 / freq
+                    } else {
+                        0
+                    }
+                };
+                s.fade_out_id = s
+                    .timeline
+                    .start(255.0, 0.0, 120, animation::Easing::EaseOut, now_ms)
+                    .ok();
+                s.pending_context_switch = true;
             }
 
             return KeyAction {
                 changed: true,
-                text_changed: true,
+                text_changed: false,
                 selection_changed: false,
-                context_switched: true,
+                context_switched: false,
                 consumed: true,
             };
         }
@@ -1212,6 +1232,103 @@ pub extern "C" fn _start() -> ! {
             changed = true; // trigger scene update
         }
 
+        // ── Selection fade animation ────────────────────────────────
+        //
+        // When the selection changes, start a fade-in animation from
+        // opacity 0→255 over 100ms. The animation value is applied to
+        // selection nodes after each scene build.
+        if selection_changed {
+            let s = state();
+            // Cancel any previous selection fade in progress.
+            if let Some(old_id) = s.selection_fade_id {
+                s.timeline.cancel(old_id);
+            }
+            s.selection_fade_id = s
+                .timeline
+                .start(0.0, 255.0, 100, animation::Easing::EaseOut, now_ms)
+                .ok();
+            s.selection_opacity = 0;
+        }
+        // Tick the selection fade (if active).
+        {
+            let s = state();
+            if let Some(id) = s.selection_fade_id {
+                if s.timeline.is_active(id) {
+                    let new_val = s.timeline.value(id) as u8;
+                    if new_val != s.selection_opacity {
+                        s.selection_opacity = new_val;
+                        changed = true;
+                    }
+                } else {
+                    s.selection_opacity = 255;
+                    s.selection_fade_id = None;
+                }
+            }
+        }
+
+        // ── Document switch fade animation ──────────────────────────
+        //
+        // Ctrl+Tab starts a fade-out (255→0). When complete, the actual
+        // context switch happens, followed by a fade-in (0→255). This
+        // prevents the jarring instant switch between editor and image.
+        if state().pending_context_switch {
+            let s = state();
+            if let Some(id) = s.fade_out_id {
+                if s.timeline.is_active(id) {
+                    let new_val = s.timeline.value(id) as u8;
+                    if new_val != s.root_opacity {
+                        s.root_opacity = new_val;
+                        changed = true;
+                    }
+                } else {
+                    // Fade out complete — do the actual switch.
+                    s.root_opacity = 0;
+                    s.fade_out_id = None;
+                    s.pending_context_switch = false;
+
+                    // Perform the context switch (same logic as the
+                    // old immediate Ctrl+Tab path).
+                    let was_image = s.image_mode;
+                    if !was_image {
+                        s.saved_editor_scroll = s.scroll_offset;
+                    }
+                    s.image_mode = !was_image;
+                    if was_image {
+                        s.scroll_offset = s.saved_editor_scroll;
+                        s.scroll_target = s.saved_editor_scroll;
+                        s.scroll_spring.reset_to(s.saved_editor_scroll);
+                        s.scroll_animating = false;
+                    }
+
+                    // Start fade in.
+                    s.fade_in_id = s
+                        .timeline
+                        .start(0.0, 255.0, 120, animation::Easing::EaseIn, now_ms)
+                        .ok();
+
+                    context_switched = true;
+                    text_changed = true;
+                    changed = true;
+                }
+            }
+        }
+        // Tick fade-in (runs independently of pending_context_switch).
+        {
+            let s = state();
+            if let Some(id) = s.fade_in_id {
+                if s.timeline.is_active(id) {
+                    let new_val = s.timeline.value(id) as u8;
+                    if new_val != s.root_opacity {
+                        s.root_opacity = new_val;
+                        changed = true;
+                    }
+                } else {
+                    s.root_opacity = 255;
+                    s.fade_in_id = None;
+                }
+            }
+        }
+
         // ── Scene update dispatch ──────────────────────────────────
         //
         // Use targeted updates for incremental changes instead of
@@ -1406,6 +1523,13 @@ pub extern "C" fn _start() -> ! {
             } else if timer_fired {
                 // Timer only — just update the clock text.
                 scene.update_clock(&scene_cfg, &time_buf);
+            }
+
+            // Apply post-build opacity adjustments (root fade for
+            // document switch, selection fade-in for selection changes).
+            {
+                let s = state();
+                scene.apply_opacity(s.root_opacity, s.selection_opacity);
             }
 
             // Signal compositor.
