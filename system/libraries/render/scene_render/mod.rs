@@ -15,8 +15,8 @@ pub use coords::{round_f32, scale_coord, scale_size};
 use fonts::cache::GlyphCache;
 use scene::Node;
 pub use walk::{
-    render_scene, render_scene_clipped, render_scene_clipped_with_pool, render_scene_full,
-    render_scene_with_pool,
+    render_scene, render_scene_clipped, render_scene_clipped_full, render_scene_clipped_with_pool,
+    render_scene_full, render_scene_with_pool,
 };
 
 /// Rendering context passed through the recursive tree walk.

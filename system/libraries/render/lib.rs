@@ -299,6 +299,38 @@ impl CpuBackend {
     }
 }
 
+impl CpuBackend {
+    /// Render only the region within `dirty` (absolute pixel coordinates).
+    ///
+    /// Nodes outside the dirty rect are clipped and skipped. Used for
+    /// incremental rendering where the caller has already copied the
+    /// presented buffer into the render target (unchanged pixels are
+    /// correct) and only needs to repaint dirty regions.
+    pub fn render_clipped(
+        &mut self,
+        scene: &scene_render::SceneGraph,
+        target: &mut Surface,
+        dirty: &protocol::DirtyRect,
+    ) {
+        // Split borrow: immutable caches for RenderCtx, mutable lru + pool
+        // for the tree walk. These are disjoint fields — no aliasing.
+        let ctx = scene_render::RenderCtx {
+            mono_cache: &self.mono_cache,
+            prop_cache: &self.prop_cache,
+            scale: self.scale,
+            font_size_px: self.font_size_px as u16,
+        };
+        scene_render::render_scene_clipped_full(
+            target,
+            scene,
+            &ctx,
+            dirty,
+            &mut self.pool,
+            &mut self.lru,
+        );
+    }
+}
+
 impl RenderBackend for CpuBackend {
     fn render(&mut self, scene: &scene_render::SceneGraph, target: &mut Surface) {
         // Split borrow: immutable caches for RenderCtx, mutable lru + pool

@@ -456,12 +456,61 @@ pub extern "C" fn _start() -> ! {
         // ── Compute dirty rects for partial GPU transfer ─────────
         let damage = incr_state.compute_dirty_rects(nodes, node_count, &dirty_bits, fb_w16, fb_h16);
 
-        // ── Render (full scene — CPU still does complete tree walk) ─
+        // ── Render: clipped per dirty rect (incremental) or full ──
         let graph = render::scene_render::SceneGraph {
             nodes,
             data: tr.front_data_buf(),
         };
-        backend.render(&graph, &mut make_fb(render_buf));
+
+        // Determine incremental vs full repaint.
+        // - damage is None → full (first incremental frame or all-dirty)
+        // - dirty_rects() is None → full (overflow / zero count)
+        // - dirty_rects() is Some(rects) → incremental per rect
+        let incremental_rects = damage.as_ref().and_then(|d| {
+            // Zero-count with !full_screen means all dirty nodes were
+            // off-screen — no rendering needed at all (handled by
+            // skip_transfer below). Treat as full=false so we don't
+            // needlessly do a full render.
+            if d.count == 0 && !d.full_screen {
+                // Return empty slice — loop body won't execute.
+                Some(&d.rects[..0])
+            } else {
+                d.dirty_rects()
+            }
+        });
+
+        match incremental_rects {
+            Some(rects) if !rects.is_empty() => {
+                // Incremental frame: copy presented buffer → render buffer
+                // so unchanged regions have correct pixels, then render
+                // only within each dirty rect.
+                //
+                // SAFETY: Both buffers are valid DMA allocations of
+                // fb_bytes. They do not overlap (allocated separately).
+                // Single-threaded process — no concurrent access.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        (*FB_PTRS.0.get())[presented_buf],
+                        (*FB_PTRS.0.get())[render_buf],
+                        fb_bytes,
+                    );
+                }
+                let mut fb = make_fb(render_buf);
+                for r in rects {
+                    if r.w > 0 && r.h > 0 {
+                        backend.render_clipped(&graph, &mut fb, r);
+                    }
+                }
+            }
+            Some(_) => {
+                // Zero rects (all dirty nodes off-screen) — nothing to render.
+                // The skip_transfer logic below handles the GPU side.
+            }
+            None => {
+                // Full repaint: first frame, overflow, or all-dirty bitmap.
+                backend.render(&graph, &mut make_fb(render_buf));
+            }
+        }
 
         // ── Update incremental state before releasing the reader ──
         incr_state.update_from_frame(nodes, node_count);
