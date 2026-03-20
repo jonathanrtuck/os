@@ -13,7 +13,8 @@ use alloc::vec::Vec;
 // Re-export all public items from submodules.
 pub use full::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_selection_update,
+    build_selection_update, update_demo_nodes, DEMO_BALL_Y_BOT, DEMO_BALL_Y_TOP, DEMO_BAR_GAP,
+    DEMO_BAR_H, DEMO_EASE_TRAVEL, DEMO_EASE_Y0,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
 use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};
@@ -43,8 +44,23 @@ pub const N_CONTENT: u16 = 5;
 pub const N_DOC_TEXT: u16 = 6;
 pub const N_CURSOR: u16 = 7;
 
-/// Number of well-known nodes (indices 0..7). Dynamic nodes start at 8.
-pub const WELL_KNOWN_COUNT: u16 = 8;
+// ── Demo / scaffolding nodes (8..13) ─────────────────────────────────
+//
+// Bouncing-ball demo: one small square that animates vertically using
+// a spring. The spring alternates between two Y targets each time it
+// settles, producing a perpetual bounce.
+pub const N_DEMO_BALL: u16 = 8;
+
+// Easing-curve sampler: five bars that each run a different easing
+// function left → right over 2 s, then reset and repeat.
+pub const N_DEMO_EASE_0: u16 = 9;
+pub const N_DEMO_EASE_1: u16 = 10;
+pub const N_DEMO_EASE_2: u16 = 11;
+pub const N_DEMO_EASE_3: u16 = 12;
+pub const N_DEMO_EASE_4: u16 = 13;
+
+/// Number of well-known nodes (indices 0..13). Dynamic nodes start at 14.
+pub const WELL_KNOWN_COUNT: u16 = 14;
 
 // ── Configuration ───────────────────────────────────────────────────
 

@@ -202,6 +202,16 @@ struct CoreState {
     cursor_blink_id: Option<animation::AnimationId>,
     cursor_opacity: u8,
     cursor_pos: usize,
+    /// Demo: bouncing-ball spring (Y position).
+    demo_ball_spring: animation::Spring,
+    /// Demo: true when ball is targeting the top position; false → bottom.
+    demo_ball_at_top: bool,
+    /// Demo: current ball Y (content-area-relative, integer pixels).
+    demo_ball_y: i32,
+    /// Demo: timeline IDs for the five easing-sampler bars.
+    demo_ease_ids: [Option<animation::AnimationId>; 5],
+    /// Demo: current X offset for each easing-sampler bar.
+    demo_ease_x: [i32; 5],
     doc_buf: *mut u8,
     doc_capacity: usize,
     doc_len: usize,
@@ -248,6 +258,12 @@ impl CoreState {
             cursor_blink_id: None,
             cursor_opacity: 255,
             cursor_pos: 0,
+            // Demo: bouncy spring targeting the top Y position initially.
+            demo_ball_spring: animation::Spring::bouncy(layout::DEMO_BALL_Y_TOP as f32),
+            demo_ball_at_top: true,
+            demo_ball_y: layout::DEMO_BALL_Y_TOP,
+            demo_ease_ids: [None; 5],
+            demo_ease_x: [0; 5],
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
             doc_len: 0,
@@ -1329,6 +1345,85 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
+        // ── Demo animation tick ───────────────────────────────────
+        //
+        // Advance the bouncing-ball spring and tick the easing-sampler
+        // timeline animations. When either changes, set `demo_changed`
+        // to trigger a `apply_demo` pass after the main scene update.
+        let mut demo_changed = false;
+        {
+            // Bouncing-ball spring tick.
+            let dt = 1.0 / 60.0;
+            let s = state();
+            s.demo_ball_spring.tick(dt);
+            let new_y = {
+                let v = s.demo_ball_spring.value();
+                if v >= 0.0 {
+                    (v + 0.5) as i32
+                } else {
+                    (v - 0.5) as i32
+                }
+            };
+            if new_y != s.demo_ball_y {
+                s.demo_ball_y = new_y;
+                demo_changed = true;
+            }
+            // Retarget spring when it has settled to create perpetual bounce.
+            if s.demo_ball_spring.settled() {
+                let new_target = if s.demo_ball_at_top {
+                    layout::DEMO_BALL_Y_BOT as f32
+                } else {
+                    layout::DEMO_BALL_Y_TOP as f32
+                };
+                s.demo_ball_spring.set_target(new_target);
+                s.demo_ball_at_top = !s.demo_ball_at_top;
+            }
+        }
+        {
+            // Easing-sampler bars: read timeline values and restart when done.
+            let s = state();
+            let easings = [
+                animation::Easing::Linear,
+                animation::Easing::EaseOut,
+                animation::Easing::EaseInOut,
+                animation::Easing::EaseInBack,
+                animation::Easing::EaseOutBounce,
+            ];
+            for i in 0..5 {
+                let new_x = match s.demo_ease_ids[i] {
+                    Some(id) if s.timeline.is_active(id) => {
+                        let v = s.timeline.value(id);
+                        let xi = if v >= 0.0 {
+                            (v + 0.5) as i32
+                        } else {
+                            (v - 0.5) as i32
+                        };
+                        // Clamp to travel range.
+                        xi.max(0).min(layout::DEMO_EASE_TRAVEL)
+                    }
+                    _ => {
+                        // Animation completed or not started — restart it.
+                        let id = s
+                            .timeline
+                            .start(
+                                0.0,
+                                layout::DEMO_EASE_TRAVEL as f32,
+                                2000,
+                                easings[i],
+                                now_ms,
+                            )
+                            .ok();
+                        s.demo_ease_ids[i] = id;
+                        0
+                    }
+                };
+                if new_x != s.demo_ease_x[i] {
+                    s.demo_ease_x[i] = new_x;
+                    demo_changed = true;
+                }
+            }
+        }
+
         // ── Scene update dispatch ──────────────────────────────────
         //
         // Use targeted updates for incremental changes instead of
@@ -1532,7 +1627,26 @@ pub extern "C" fn _start() -> ! {
                 scene.apply_opacity(s.root_opacity, s.selection_opacity);
             }
 
+            // Apply demo node positions (bouncing ball + easing bars).
+            // Always called when a scene update is dispatched so demo
+            // positions are never stale.
+            {
+                let s = state();
+                scene.apply_demo(s.demo_ball_y, &s.demo_ease_x);
+            }
+
             // Signal compositor.
+            compositor_ch.send(&scene_msg);
+
+            let _ = sys::channel_signal(COMPOSITOR_HANDLE);
+        } else if demo_changed {
+            // Demo animation changed but no other scene update was needed.
+            // Emit a minimal scene update with just the demo positions.
+            {
+                let s = state();
+                scene.apply_demo(s.demo_ball_y, &s.demo_ease_x);
+            }
+
             compositor_ch.send(&scene_msg);
 
             let _ = sys::channel_signal(COMPOSITOR_HANDLE);

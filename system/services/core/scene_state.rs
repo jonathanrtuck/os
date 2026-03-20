@@ -13,12 +13,13 @@ use scene::{TripleWriter, TRIPLE_SCENE_SIZE};
 
 use super::layout::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_selection_update, delete_line, insert_line, update_single_line,
+    build_selection_update, delete_line, insert_line, update_demo_nodes, update_single_line,
 };
 // Re-export layout types and constants used by main.rs.
 pub use super::layout::{
-    byte_to_line_col, count_lines, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT,
-    N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    byte_to_line_col, count_lines, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DEMO_BALL,
+    N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT, N_ROOT,
+    N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 
 pub struct SceneState {
@@ -352,6 +353,20 @@ impl SceneState {
                 mark_clock_changed,
                 cursor_opacity,
             );
+        }
+        tw.publish();
+    }
+
+    /// Apply demo animation positions to the latest published scene.
+    ///
+    /// Updates the bouncing-ball Y coordinate and the five easing-sampler
+    /// X offsets in-place via an acquire_copy + publish cycle. Cheap —
+    /// only 6 well-known node positions change.
+    pub fn apply_demo(&mut self, ball_y: i32, ease_x: &[i32; 5]) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            update_demo_nodes(&mut w, ball_y, ease_x);
         }
         tw.publish();
     }
