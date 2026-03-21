@@ -57,8 +57,7 @@ pub fn box_blur_widths(sigma: f32) -> [u32; 3] {
     let twelve_sigma_sq = 12 * sigma_fp * sigma_fp; // 16.16
     let wl_i64 = wl as i64;
     // Convert wl terms to 16.16: multiply by 65536.
-    let num = twelve_sigma_sq as i64
-        - (3 * wl_i64 * wl_i64 + 12 * wl_i64 + 9) * 65536;
+    let num = twelve_sigma_sq as i64 - (3 * wl_i64 * wl_i64 + 12 * wl_i64 + 9) * 65536;
     let den = (-4 * wl_i64 - 4) * 65536;
 
     let m = if den == 0 {
@@ -93,4 +92,184 @@ pub fn box_blur_widths(sigma: f32) -> [u32; 3] {
 pub fn box_blur_pad(sigma: f32) -> u32 {
     let h = box_blur_widths(sigma);
     h[0] + h[1] + h[2]
+}
+
+// ── CPU three-pass box blur ──────────────────────────────────────────────
+
+use crate::{ReadSurface, Surface};
+
+/// Apply three-pass box blur to a surface, converging to a Gaussian with
+/// σ = `sigma`. Uses O(1)-per-pixel running sums for each pass.
+///
+/// `tmp` must be at least `2 * src.stride * src.height` bytes (scratch for
+/// two intermediate surfaces during the 3-iteration ping-pong).
+///
+/// Edge handling: clamp to surface bounds (equivalent to CLAMP_TO_EDGE).
+///
+/// Uses rounded integer division (`(sum + diameter/2) / diameter`) to
+/// prevent systematic darkening from truncation bias over 3 passes.
+pub fn box_blur_3pass(src: &ReadSurface, dst: &mut Surface, tmp: &mut [u8], sigma: f32) {
+    let w = src.width;
+    let h = src.height;
+    if w == 0 || h == 0 {
+        return;
+    }
+
+    let halves = box_blur_widths(sigma);
+    let stride = src.stride;
+    let buf_size = (stride * h) as usize;
+
+    // Need two scratch buffers for ping-pong between passes.
+    if tmp.len() < buf_size * 2 {
+        return;
+    }
+    let (tmp_a, tmp_b) = tmp.split_at_mut(buf_size);
+
+    // Pass 1: src → tmp_a (H) → tmp_b (V)
+    box_blur_h(src.data, tmp_a, w, h, stride, halves[0]);
+    box_blur_v(tmp_a, tmp_b, w, h, stride, halves[0]);
+
+    // Pass 2: tmp_b → tmp_a (H) → tmp_b (V)
+    box_blur_h(tmp_b, tmp_a, w, h, stride, halves[1]);
+    box_blur_v(tmp_a, tmp_b, w, h, stride, halves[1]);
+
+    // Pass 3: tmp_b → tmp_a (H) → dst (V)
+    box_blur_h(tmp_b, tmp_a, w, h, stride, halves[2]);
+    box_blur_v(tmp_a, dst.data, w, h, stride, halves[2]);
+}
+
+/// Horizontal box blur: running-sum average across each row.
+///
+/// For each pixel (x, y): output = average of src[x-half..=x+half, y],
+/// all 4 BGRA channels processed together per pixel.
+/// Out-of-bounds indices clamp to the nearest edge pixel.
+/// Uses rounded division to prevent truncation bias.
+fn box_blur_h(src: &[u8], dst: &mut [u8], width: u32, height: u32, stride: u32, half: u32) {
+    let w = width as usize;
+    let h = height as usize;
+    let s = stride as usize;
+    let diameter = (2 * half + 1) as usize;
+    let half_diam = diameter / 2; // for rounding
+
+    for y in 0..h {
+        let row_off = y * s;
+
+        // Initialize 4-channel running sum for first output pixel (x=0).
+        let mut sum = [0u32; 4];
+        for i in 0..diameter {
+            let sx = clamp_idx(i as i32 - half as i32, w);
+            let off = row_off + sx * 4;
+            for c in 0..4 {
+                sum[c] += src[off + c] as u32;
+            }
+        }
+        for c in 0..4 {
+            dst[row_off + c] = ((sum[c] + half_diam as u32) / diameter as u32) as u8;
+        }
+
+        // Slide the window right.
+        for x in 1..w {
+            let old_x = clamp_idx(x as i32 - half as i32 - 1, w);
+            let new_x = clamp_idx(x as i32 + half as i32, w);
+            let old_off = row_off + old_x * 4;
+            let new_off = row_off + new_x * 4;
+            let dst_off = row_off + x * 4;
+            for c in 0..4 {
+                sum[c] -= src[old_off + c] as u32;
+                sum[c] += src[new_off + c] as u32;
+                dst[dst_off + c] = ((sum[c] + half_diam as u32) / diameter as u32) as u8;
+            }
+        }
+    }
+}
+
+/// Column tile width for V-pass cache optimization.
+///
+/// With TILE_COLS=8, each y iteration loads 32 contiguous bytes from two
+/// rows (leaving and entering) and writes 32 bytes. All three spans fit
+/// within one aarch64 cache line (64 bytes). The running-sum state for
+/// the tile (8 columns × 4 channels × 4 bytes = 128 bytes) fits in 2
+/// cache lines and stays hot across all y iterations.
+const TILE_COLS: usize = 8;
+
+/// Vertical box blur: tiled running-sum average down columns.
+///
+/// Processes columns in tiles of TILE_COLS (8) for cache friendliness.
+/// Within each tile, maintains 8 independent 4-channel running sums.
+/// Each y step reads two contiguous 32-byte spans (leaving row + entering
+/// row at the tile's x range) instead of striding across the buffer
+/// one pixel at a time.
+fn box_blur_v(src: &[u8], dst: &mut [u8], width: u32, height: u32, stride: u32, half: u32) {
+    let w = width as usize;
+    let h = height as usize;
+    let s = stride as usize;
+    let diameter = (2 * half + 1) as usize;
+    let half_diam = diameter / 2;
+
+    // Process columns in tiles.
+    let mut tile_x = 0usize;
+    while tile_x < w {
+        let cols = if tile_x + TILE_COLS <= w {
+            TILE_COLS
+        } else {
+            w - tile_x
+        };
+
+        // Running sums: [col][channel].
+        let mut sums = [[0u32; 4]; TILE_COLS];
+
+        // Initialize sums for y=0: accumulate the initial window.
+        for i in 0..diameter {
+            let sy = clamp_idx(i as i32 - half as i32, h);
+            let row_base = sy * s + tile_x * 4;
+            for cx in 0..cols {
+                let off = row_base + cx * 4;
+                for c in 0..4 {
+                    sums[cx][c] += src[off + c] as u32;
+                }
+            }
+        }
+
+        // Write y=0 output.
+        for cx in 0..cols {
+            let off = tile_x * 4 + cx * 4;
+            for c in 0..4 {
+                dst[off + c] = ((sums[cx][c] + half_diam as u32) / diameter as u32) as u8;
+            }
+        }
+
+        // Slide window down for y=1..h.
+        for y in 1..h {
+            let old_y = clamp_idx(y as i32 - half as i32 - 1, h);
+            let new_y = clamp_idx(y as i32 + half as i32, h);
+            let old_base = old_y * s + tile_x * 4;
+            let new_base = new_y * s + tile_x * 4;
+            let dst_base = y * s + tile_x * 4;
+
+            for cx in 0..cols {
+                let old_off = old_base + cx * 4;
+                let new_off = new_base + cx * 4;
+                let dst_off = dst_base + cx * 4;
+                for c in 0..4 {
+                    sums[cx][c] -= src[old_off + c] as u32;
+                    sums[cx][c] += src[new_off + c] as u32;
+                    dst[dst_off + c] = ((sums[cx][c] + half_diam as u32) / diameter as u32) as u8;
+                }
+            }
+        }
+
+        tile_x += TILE_COLS;
+    }
+}
+
+/// Clamp an index to [0, max-1]. Used for edge handling (CLAMP_TO_EDGE).
+#[inline(always)]
+fn clamp_idx(i: i32, max: usize) -> usize {
+    if i < 0 {
+        0
+    } else if i >= max as i32 {
+        max - 1
+    } else {
+        i as usize
+    }
 }
