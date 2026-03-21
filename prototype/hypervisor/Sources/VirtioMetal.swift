@@ -38,6 +38,9 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
 
     var verbose = false
 
+    /// Tracks unknown command IDs already logged (log each ID only once).
+    private var loggedUnknownCommands: Set<UInt16> = []
+
     // Display dimensions
     var displayWidth: UInt32 = 1024
     var displayHeight: UInt32 = 768
@@ -195,7 +198,8 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             dispatchRenderCommand(methodId: methodId, payload: payload, size: size)
         } else if MetalSetupCommand(rawValue: methodId) != nil {
             dispatchSetupCommand(methodId: methodId, payload: payload, size: size)
-        } else if verbose {
+        } else if loggedUnknownCommands.insert(methodId).inserted {
+            // Log each unknown command ID exactly once (regardless of verbose mode).
             print("VirtioMetal: unknown command 0x\(String(methodId, radix: 16))")
         }
     }
@@ -348,6 +352,14 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let _ = payload.loadUnaligned(fromByteOffset: 9, as: UInt8.self) // texture type (reserved)
             let samples = payload.loadUnaligned(fromByteOffset: 10, as: UInt8.self)
             let usage   = payload.loadUnaligned(fromByteOffset: 11, as: UInt8.self)
+
+            // SECURITY: Reject unreasonably large textures to prevent VRAM exhaustion.
+            // 8192×8192 is the limit for most Metal GPUs and far beyond our display size.
+            let maxDim: UInt16 = 8192
+            guard width > 0 && height > 0 && width <= maxDim && height <= maxDim else {
+                print("VirtioMetal: REJECTED texture \(handle) — dimensions \(width)×\(height) exceed \(maxDim)×\(maxDim) limit")
+                return
+            }
 
             let desc = MTLTextureDescriptor()
             desc.width = Int(width)
@@ -513,6 +525,13 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             if let s = samplers[handle] {
                 currentRenderEncoder?.setFragmentSamplerState(s, index: Int(idx))
             }
+
+        case .setFragmentBytes:
+            guard size >= 8 else { return }
+            let bufIdx = payload.loadUnaligned(fromByteOffset: 0, as: UInt8.self)
+            let dataLen = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
+            guard size >= 8 + Int(dataLen) else { return }
+            currentRenderEncoder?.setFragmentBytes(payload + 8, length: Int(dataLen), index: Int(bufIdx))
 
         case .drawPrimitives:
             guard size >= 12 else { return }

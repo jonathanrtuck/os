@@ -47,6 +47,7 @@ pub const CMD_SET_SCISSOR: u16 = 0x0113;
 pub const CMD_SET_VERTEX_BYTES: u16 = 0x0120;
 pub const CMD_SET_FRAGMENT_TEXTURE: u16 = 0x0121;
 pub const CMD_SET_FRAGMENT_SAMPLER: u16 = 0x0122;
+pub const CMD_SET_FRAGMENT_BYTES: u16 = 0x0123;
 pub const CMD_DRAW_PRIMITIVES: u16 = 0x0130;
 pub const CMD_BEGIN_COMPUTE_PASS: u16 = 0x0200;
 pub const CMD_END_COMPUTE_PASS: u16 = 0x0201;
@@ -108,6 +109,7 @@ pub const CMP_NOT_EQUAL: u8 = 3;
 pub const STENCIL_KEEP: u8 = 0;
 pub const STENCIL_ZERO: u8 = 1;
 pub const STENCIL_REPLACE: u8 = 2;
+pub const STENCIL_INVERT: u8 = 5;
 
 // ── Filter modes ────────────────────────────────────────────────────────
 
@@ -363,6 +365,17 @@ impl CommandBuffer {
         self.push_u8(index);
         self.push_u8(0);
         self.push_u16(0);
+    }
+
+    /// Set inline fragment shader data (uniform buffer).
+    pub fn set_fragment_bytes(&mut self, index: u8, data: &[u8]) {
+        let payload_size = 8 + data.len() as u32;
+        self.push_header(CMD_SET_FRAGMENT_BYTES, payload_size);
+        self.push_u8(index);
+        self.push_u8(0);
+        self.push_u16(0);
+        self.push_u32(data.len() as u32);
+        self.push_bytes(data);
     }
 
     /// Bind a sampler to a fragment shader slot.

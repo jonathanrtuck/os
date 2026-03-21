@@ -65,8 +65,20 @@ pub const N_DEMO_EASE_4: u16 = 13;
 // a 300 ms EaseOut fade.
 pub const N_POINTER: u16 = 14;
 
-/// Number of well-known nodes (indices 0..14). Dynamic nodes start at 15.
-pub const WELL_KNOWN_COUNT: u16 = 15;
+// ── Audit feature demo nodes (15..22) ─────────────────────────────────
+//
+// Static demo nodes showcasing corner_radius, borders, and transforms.
+pub const N_DEMO_ROUNDED: u16 = 15; // Rounded rect (corner_radius only)
+pub const N_DEMO_BORDER: u16 = 16; // Border + corner_radius
+pub const N_DEMO_SCALE: u16 = 17; // Scale transform
+pub const N_DEMO_ROTATE: u16 = 18; // Rotation transform
+pub const N_DEMO_SKEW: u16 = 19; // Skew transform
+pub const N_DEMO_COMBINED: u16 = 20; // Combined: scale + rotate
+pub const N_DEMO_TRANSLATE: u16 = 21; // Translation transform
+pub const N_DEMO_BORDER_ONLY: u16 = 22; // Border-only (no fill)
+
+/// Number of well-known nodes (indices 0..22). Dynamic nodes start at 23.
+pub const WELL_KNOWN_COUNT: u16 = 23;
 
 // ── Configuration ───────────────────────────────────────────────────
 

@@ -118,7 +118,7 @@ final class VirtioMMIOTransport {
             return backend.deviceId
 
         case REG_VENDOR_ID:
-            return 0x554D_4551  // "QEMU"
+            return 0x4143_4F53  // "ACOS" — Arts & Crafts OS hypervisor
 
         case REG_DEVICE_FEATURES:
             if deviceFeaturesSel == 0 {

@@ -18,8 +18,10 @@ use super::layout::{
 // Re-export layout types and constants used by main.rs.
 pub use super::layout::{
     byte_to_line_col, count_lines, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DEMO_BALL,
-    N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT,
-    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_DEMO_BORDER, N_DEMO_BORDER_ONLY, N_DEMO_COMBINED, N_DEMO_EASE_0, N_DEMO_EASE_1,
+    N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DEMO_ROTATE, N_DEMO_ROUNDED, N_DEMO_SCALE,
+    N_DEMO_SKEW, N_DEMO_TRANSLATE, N_DOC_TEXT, N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR,
+    N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 
 pub struct SceneState {

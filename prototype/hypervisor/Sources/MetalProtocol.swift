@@ -131,6 +131,10 @@ enum MetalRenderCommand: UInt16 {
     /// Payload: [u32 sampler_handle] [u8 index] [u8 pad] [u16 pad]
     case setFragmentSampler   = 0x0122
 
+    /// Set inline fragment shader data (uniform buffer).
+    /// Payload: [u8 index] [u8 pad] [u16 pad] [u32 data_len] [data...]
+    case setFragmentBytes     = 0x0123
+
     /// Draw primitives.
     /// Payload: [u8 primitive_type] [u8 pad] [u16 pad]
     ///          [u32 vertex_start] [u32 vertex_count]

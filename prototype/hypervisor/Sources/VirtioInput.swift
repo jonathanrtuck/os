@@ -46,7 +46,9 @@ final class VirtioInputBackend: VirtioDeviceBackend {
     private var lastAvailIdx: UInt16 = 0
 
     /// Pending events to be delivered when buffers become available.
+    /// Capped at 256 entries — if the guest isn't consuming buffers, oldest events are dropped.
     private var pendingEvents: [(UInt16, UInt16, UInt32)] = []  // (type, code, value)
+    private let maxPendingEvents = 256
 
     init(name: String, keyboard: Bool) {
         self.deviceName = name
@@ -148,6 +150,10 @@ final class VirtioInputBackend: VirtioDeviceBackend {
     /// If guest buffers are available, delivers immediately. Otherwise queues.
     func injectEvent(type: UInt16, code: UInt16, value: UInt32,
                      state: VirtqueueState, vm: VirtualMachine) {
+        // Drop oldest events if the queue is full (guest not consuming buffers).
+        if pendingEvents.count >= maxPendingEvents {
+            pendingEvents.removeFirst()
+        }
         pendingEvents.append((type, code, value))
         deliverPendingEvents(state: state, vm: vm)
     }

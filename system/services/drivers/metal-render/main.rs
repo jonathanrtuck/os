@@ -56,16 +56,18 @@ const FN_BLUR_H: u32 = 15;
 const FN_BLUR_V: u32 = 16;
 const FN_COPY_SRGB_TO_LINEAR: u32 = 17;
 const FN_COPY_LINEAR_TO_SRGB: u32 = 18;
+const FN_FRAGMENT_ROUNDED_RECT: u32 = 19;
 
 const PIPE_SOLID: u32 = 20;
 const PIPE_TEXTURED: u32 = 21;
 const PIPE_GLYPH: u32 = 22;
 const PIPE_STENCIL_WRITE: u32 = 23;
 const PIPE_SOLID_NO_MSAA: u32 = 24;
-const CPIPE_BLUR_H: u32 = 25;
-const CPIPE_BLUR_V: u32 = 26;
-const CPIPE_SRGB_TO_LINEAR: u32 = 27;
-const CPIPE_LINEAR_TO_SRGB: u32 = 28;
+const PIPE_ROUNDED_RECT: u32 = 25;
+const CPIPE_BLUR_H: u32 = 26;
+const CPIPE_BLUR_V: u32 = 27;
+const CPIPE_SRGB_TO_LINEAR: u32 = 28;
+const CPIPE_LINEAR_TO_SRGB: u32 = 29;
 
 const DSS_NONE: u32 = 30;
 const DSS_STENCIL_WRITE: u32 = 31;
@@ -73,6 +75,8 @@ const DSS_STENCIL_TEST: u32 = 32;
 /// Clip test: pass where stencil != 0, KEEP stencil value (don't zero on pass).
 /// Used for clip paths where multiple children need the same stencil mask.
 const DSS_CLIP_TEST: u32 = 33;
+/// Even-odd fill: INVERT stencil on each triangle overlap, then test for odd count.
+const DSS_STENCIL_INVERT: u32 = 34;
 
 const SAMPLER_NEAREST: u32 = 41;
 const SAMPLER_LINEAR: u32 = 42;
@@ -150,6 +154,64 @@ fragment float4 fragment_glyph(
 
 vertex float4 vertex_stencil(VertexIn in [[stage_in]]) {
     return float4(in.position, 0.0, 1.0);
+}
+
+// -- SDF rounded rectangle ---------------------------------------------------
+// Evaluates the signed distance from a point to a rounded rectangle.
+// Negative inside, positive outside, zero on the boundary.
+// p: point relative to rect center
+// b: half-extents of the rect (before corner rounding)
+// r: corner radius
+
+float sd_rounded_rect(float2 p, float2 b, float r) {
+    float2 q = abs(p) - b + r;
+    return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - r;
+}
+
+struct RoundedRectParams {
+    float half_w;     // half-width in pixels
+    float half_h;     // half-height in pixels
+    float radius;     // corner radius in pixels
+    float border_w;   // border width in pixels (0 = no border)
+    float border_r;   // border color RGBA
+    float border_g;
+    float border_b;
+    float border_a;
+};
+
+fragment float4 fragment_rounded_rect(
+    VertexOut in [[stage_in]],
+    constant RoundedRectParams& params [[buffer(0)]]
+) {
+    // texCoord carries local position relative to rect center (in pixels).
+    float2 local_pos = in.texCoord;
+    float2 half_ext = float2(params.half_w, params.half_h);
+    float r = min(params.radius, min(params.half_w, params.half_h));
+
+    float dist = sd_rounded_rect(local_pos, half_ext, r);
+
+    // Anti-alias the outer edge: 1px transition zone.
+    float fill_alpha = 1.0 - smoothstep(-0.5, 0.5, dist);
+
+    float4 result;
+    if (params.border_w > 0.0) {
+        // Border: the border region is where dist is between -border_w and 0.
+        float inner_dist = dist + params.border_w;
+        float border_alpha = 1.0 - smoothstep(-0.5, 0.5, inner_dist);
+        float border_mask = fill_alpha - border_alpha; // 1 in border, 0 elsewhere
+        float4 border_color = float4(params.border_r, params.border_g,
+                                      params.border_b, params.border_a);
+        // Composite: border over fill.
+        result = float4(in.color.rgb * in.color.a * border_alpha
+                       + border_color.rgb * border_color.a * border_mask,
+                       in.color.a * border_alpha + border_color.a * border_mask);
+        // Apply outer edge AA.
+        result.a = min(result.a, fill_alpha);
+    } else {
+        // No border: just fill with AA edge.
+        result = float4(in.color.rgb, in.color.a * fill_alpha);
+    }
+    return result;
 }
 
 // -- sRGB <-> linear conversion (IEC 61966-2-1) -------------------------
@@ -673,6 +735,7 @@ pub extern "C" fn _start() -> ! {
     cmdbuf.get_function(FN_BLUR_V, LIB_SHADERS, b"blur_v");
     cmdbuf.get_function(FN_COPY_SRGB_TO_LINEAR, LIB_SHADERS, b"copy_srgb_to_linear");
     cmdbuf.get_function(FN_COPY_LINEAR_TO_SRGB, LIB_SHADERS, b"copy_linear_to_srgb");
+    cmdbuf.get_function(FN_FRAGMENT_ROUNDED_RECT, LIB_SHADERS, b"fragment_rounded_rect");
     send_setup(&device, &mut setup_vq, irq_handle, &setup_dma, &cmdbuf);
     sys::print(b"     functions loaded\n");
 
@@ -728,6 +791,16 @@ pub extern "C" fn _start() -> ! {
         false,
         1, // sample_count = 1 (no MSAA)
     );
+    // Rounded rect pipeline (SDF fragment shader, with blending, MSAA, stencil).
+    cmdbuf.create_render_pipeline(
+        PIPE_ROUNDED_RECT,
+        FN_VERTEX_MAIN,
+        FN_FRAGMENT_ROUNDED_RECT,
+        true,
+        0x0F,
+        true,
+        SAMPLE_COUNT,
+    );
     // Compute pipelines for blur + color space conversion.
     cmdbuf.create_compute_pipeline(CPIPE_BLUR_H, FN_BLUR_H);
     cmdbuf.create_compute_pipeline(CPIPE_BLUR_V, FN_BLUR_V);
@@ -765,6 +838,14 @@ pub extern "C" fn _start() -> ! {
         true,
         metal::CMP_NOT_EQUAL,
         metal::STENCIL_KEEP, // keep stencil — multiple children share the mask
+        metal::STENCIL_KEEP,
+    );
+    // Even-odd fill: INVERT stencil on every triangle, then odd stencil = inside.
+    cmdbuf.create_depth_stencil_state(
+        DSS_STENCIL_INVERT,
+        true,
+        metal::CMP_ALWAYS,
+        metal::STENCIL_INVERT,
         metal::STENCIL_KEEP,
     );
     send_setup(&device, &mut setup_vq, irq_handle, &setup_dma, &cmdbuf);
@@ -879,6 +960,7 @@ pub extern "C" fn _start() -> ! {
 
         let mut raster_buf = [0u8; 50 * 50];
         let mut packed = 0u32;
+        let mut atlas_full_warned = false;
 
         for sg in &shaped {
             if glyph_atlas.lookup(sg.glyph_id).is_some() {
@@ -906,6 +988,9 @@ pub extern "C" fn _start() -> ! {
                     &raster_buf[..m.width as usize * m.height as usize],
                 ) {
                     packed += 1;
+                } else if !atlas_full_warned {
+                    sys::print(b"WARNING: glyph atlas full - remaining glyphs will not render\n");
+                    atlas_full_warned = true;
                 }
             }
         }
@@ -1066,10 +1151,11 @@ pub extern "C" fn _start() -> ! {
             let pad = halves[0] + halves[1] + halves[2];
 
             // Padded capture region, clamped to framebuffer bounds.
-            let cap_x = if px >= pad { px - pad } else { 0 };
-            let cap_y = if py >= pad { py - pad } else { 0 };
-            let cap_w = (px + pw + pad).min(width) - cap_x;
-            let cap_h = (py + ph + pad).min(height) - cap_y;
+            // Saturating arithmetic prevents overflow on large blur radii.
+            let cap_x = px.saturating_sub(pad);
+            let cap_y = py.saturating_sub(pad);
+            let cap_w = px.saturating_add(pw).saturating_add(pad).min(width) - cap_x;
+            let cap_h = py.saturating_add(ph).saturating_add(pad).min(height) - cap_y;
             if cap_w == 0 || cap_h == 0 {
                 continue;
             }
@@ -1206,7 +1292,10 @@ fn pack_copy_params(
 
 // ── Path flattening + fan tessellation ───────────────────────────────────
 
-const MAX_PATH_POINTS: usize = 256;
+const MAX_PATH_POINTS: usize = 512;
+
+/// One-time warning for path truncation.
+static mut PATH_TRUNCATION_WARNED: bool = false;
 
 fn read_f32_le(data: &[u8], offset: usize) -> f32 {
     if offset + 4 > data.len() {
@@ -1307,6 +1396,17 @@ fn parse_path_to_points(data: &[u8], out: &mut [(f32, f32); MAX_PATH_POINTS]) ->
             _ => break,
         }
     }
+    if n >= MAX_PATH_POINTS {
+        // SAFETY: single-threaded driver, no data race possible.
+        unsafe {
+            if !PATH_TRUNCATION_WARNED {
+                PATH_TRUNCATION_WARNED = true;
+                sys::print(b"WARNING: path flattening hit MAX_PATH_POINTS (");
+                print_u32(MAX_PATH_POINTS as u32);
+                sys::print(b") - complex paths may lose detail\n");
+            }
+        }
+    }
     n
 }
 
@@ -1317,6 +1417,7 @@ fn draw_path_stencil_cover(
     data_buf: &[u8],
     contours: scene::DataRef,
     color: scene::Color,
+    fill_rule: scene::FillRule,
     node_x: f32,
     node_y: f32,
     node_w: f32,
@@ -1369,12 +1470,22 @@ fn draw_path_stencil_cover(
     }
 
     // Pass 1: Stencil write (fan triangles, no color).
+    // Winding rule: REPLACE sets stencil to ref (nonzero everywhere inside).
+    // Even-odd rule: INVERT flips stencil bit on each triangle overlap,
+    //   so odd overlap count = 1 (inside), even = 0 (outside/hole).
     cmdbuf.set_render_pipeline(PIPE_STENCIL_WRITE);
-    cmdbuf.set_depth_stencil_state(DSS_STENCIL_WRITE);
-    cmdbuf.set_stencil_ref(1);
+    match fill_rule {
+        scene::FillRule::Winding => {
+            cmdbuf.set_depth_stencil_state(DSS_STENCIL_WRITE);
+            cmdbuf.set_stencil_ref(1);
+        }
+        scene::FillRule::EvenOdd => {
+            cmdbuf.set_depth_stencil_state(DSS_STENCIL_INVERT);
+            cmdbuf.set_stencil_ref(0); // ref unused for INVERT, but set for clarity
+        }
+    }
 
     // Flush fan in 4KB chunks.
-    let fan_count = fan_verts.len() / VERTEX_BYTES;
     let mut sent = 0;
     while sent < fan_verts.len() {
         let chunk_end = core::cmp::min(sent + MAX_INLINE_BYTES, fan_verts.len());
@@ -1478,10 +1589,26 @@ fn walk_scene(
     }
 
     // Compute absolute position in points.
-    let abs_x = parent_x + node.x as f32;
-    let abs_y = parent_y + node.y as f32;
+    // node.transform applies around the node's own origin (node.x, node.y in parent space).
+    // For identity/pure-translation transforms, this collapses to a simple offset.
+    let t = &node.transform;
+    let node_origin_x = parent_x + node.x as f32;
+    let node_origin_y = parent_y + node.y as f32;
     let w = node.width as f32;
     let h = node.height as f32;
+    // abs_x/abs_y: for identity transforms, same as before. For non-trivial transforms,
+    // we use the AABB of the transformed rect for clip/scissor purposes, but vertex
+    // positions are computed per-corner through the transform.
+    let (abs_x, abs_y) = if t.is_identity() {
+        (node_origin_x, node_origin_y)
+    } else if t.is_pure_translation() {
+        (node_origin_x + t.tx, node_origin_y + t.ty)
+    } else {
+        // For rotation/scale/skew, abs_x/abs_y is the AABB top-left for clip purposes.
+        let (bx, by, _, _) = t.transform_aabb(0.0, 0.0, w, h);
+        (node_origin_x + bx, node_origin_y + by)
+    };
+    let has_nontrivial_transform = !t.is_identity() && !t.is_pure_translation();
 
     // Collect backdrop blur request (processed after initial render pass).
     let is_blur_node = node.backdrop_blur_radius > 0;
@@ -1529,17 +1656,88 @@ fn walk_scene(
     // Draw background if not transparent. Skip for blur nodes and clip_path
     // nodes — clip_path backgrounds are drawn after the stencil is set up.
     let bg = node.background;
+    let corner_r = node.corner_radius;
+    let has_border = node.border.width > 0 && node.border.color.a > 0;
     if bg.a > 0 && !is_blur_node && !has_clip_path {
         let r = bg.r as f32 / 255.0;
         let g = bg.g as f32 / 255.0;
         let b = bg.b as f32 / 255.0;
         let a = (bg.a as f32 / 255.0) * opacity;
-        emit_quad(solid_verts, abs_x, abs_y, w, h, vw, vh, scale, r, g, b, a);
 
-        // Flush if we're close to the 4KB limit.
-        if solid_verts.len() + 6 * VERTEX_BYTES > MAX_INLINE_BYTES {
+        if corner_r > 0 || has_border {
+            // SDF rounded rect: flush pending solid verts, switch pipeline,
+            // set uniform params, draw, then switch back.
             flush_solid_vertices(cmdbuf, solid_verts);
+            let half_w_px = w * scale * 0.5;
+            let half_h_px = h * scale * 0.5;
+            let radius_px = corner_r as f32 * scale;
+            let (bw_px, br, bg_b, bb, ba) = if has_border {
+                let bc = node.border.color;
+                (
+                    node.border.width as f32 * scale,
+                    bc.r as f32 / 255.0,
+                    bc.g as f32 / 255.0,
+                    bc.b as f32 / 255.0,
+                    (bc.a as f32 / 255.0) * opacity,
+                )
+            } else {
+                (0.0, 0.0, 0.0, 0.0, 0.0)
+            };
+            let params = pack_rounded_rect_params(
+                half_w_px, half_h_px, radius_px, bw_px, br, bg_b, bb, ba,
+            );
+            cmdbuf.set_render_pipeline(PIPE_ROUNDED_RECT);
+            cmdbuf.set_fragment_bytes(0, &params);
+            let mut rrect_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
+            emit_rounded_rect_quad(
+                &mut rrect_verts, abs_x, abs_y, w, h, vw, vh, scale, r, g, b, a,
+            );
+            cmdbuf.set_vertex_bytes(0, &rrect_verts);
+            cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
+            cmdbuf.set_render_pipeline(PIPE_SOLID);
+        } else if has_nontrivial_transform {
+            // Transformed quad: flush pending, emit per-vertex transformed positions.
+            flush_solid_vertices(cmdbuf, solid_verts);
+            let mut xf_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
+            emit_transformed_quad(
+                &mut xf_verts, node_origin_x, node_origin_y, w, h, t,
+                vw, vh, scale, r, g, b, a,
+            );
+            cmdbuf.set_vertex_bytes(0, &xf_verts);
+            cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
+        } else {
+            emit_quad(solid_verts, abs_x, abs_y, w, h, vw, vh, scale, r, g, b, a);
+            // Flush if we're close to the 4KB limit.
+            if solid_verts.len() + 6 * VERTEX_BYTES > MAX_INLINE_BYTES {
+                flush_solid_vertices(cmdbuf, solid_verts);
+            }
         }
+    } else if bg.a == 0 && has_border && !is_blur_node && !has_clip_path {
+        // Border-only node (no fill): draw with transparent fill.
+        flush_solid_vertices(cmdbuf, solid_verts);
+        let half_w_px = w * scale * 0.5;
+        let half_h_px = h * scale * 0.5;
+        let radius_px = corner_r as f32 * scale;
+        let bc = node.border.color;
+        let params = pack_rounded_rect_params(
+            half_w_px,
+            half_h_px,
+            radius_px,
+            node.border.width as f32 * scale,
+            bc.r as f32 / 255.0,
+            bc.g as f32 / 255.0,
+            bc.b as f32 / 255.0,
+            (bc.a as f32 / 255.0) * opacity,
+        );
+        cmdbuf.set_render_pipeline(PIPE_ROUNDED_RECT);
+        cmdbuf.set_fragment_bytes(0, &params);
+        let mut rrect_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
+        emit_rounded_rect_quad(
+            &mut rrect_verts, abs_x, abs_y, w, h, vw, vh, scale, 0.0, 0.0, 0.0, 0.0,
+        );
+        cmdbuf.set_vertex_bytes(0, &rrect_verts);
+        cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
+        cmdbuf.set_render_pipeline(PIPE_SOLID);
     }
 
     // Draw content.
@@ -1596,12 +1794,12 @@ fn walk_scene(
         }
         Content::Path {
             color,
-            fill_rule: _,
+            fill_rule,
             contours,
         } => {
             if contours.length > 0 {
                 draw_path_stencil_cover(
-                    cmdbuf, solid_verts, data_buf, contours, color,
+                    cmdbuf, solid_verts, data_buf, contours, color, fill_rule,
                     abs_x, abs_y, w, h, vw, vh, scale, opacity,
                 );
             }
@@ -1881,6 +2079,124 @@ fn emit_textured_quad(
             buf.extend_from_slice(&f.to_le_bytes());
         }
     }
+}
+
+/// Push a solid-color quad with an affine transform applied to each vertex.
+/// The transform maps local coordinates (0,0)→(w,h) to parent space at (ox, oy).
+fn emit_transformed_quad(
+    buf: &mut Vec<u8>,
+    ox: f32,
+    oy: f32,
+    w: f32,
+    h: f32,
+    t: &scene::AffineTransform,
+    vw: f32,
+    vh: f32,
+    scale: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) {
+    // Transform 4 corners of the local rect through the affine, then offset to parent space.
+    let corners = [
+        (0.0f32, 0.0f32),
+        (w, 0.0),
+        (0.0, h),
+        (w, h),
+    ];
+    let mut tc = [(0.0f32, 0.0f32); 4];
+    for (i, &(lx, ly)) in corners.iter().enumerate() {
+        let (tx, ty) = t.transform_point(lx, ly);
+        tc[i] = (ox + tx, oy + ty);
+    }
+    // Convert to NDC.
+    let to_ndc = |px: f32, py: f32| -> (f32, f32) {
+        ((px * scale / vw) * 2.0 - 1.0, 1.0 - (py * scale / vh) * 2.0)
+    };
+    let (x0, y0) = to_ndc(tc[0].0, tc[0].1);
+    let (x1, y1) = to_ndc(tc[1].0, tc[1].1);
+    let (x2, y2) = to_ndc(tc[2].0, tc[2].1);
+    let (x3, y3) = to_ndc(tc[3].0, tc[3].1);
+
+    // Two triangles: (0,1,2) and (1,3,2).
+    let verts: [[f32; 8]; 6] = [
+        [x0, y0, 0.0, 0.0, r, g, b, a],
+        [x1, y1, 1.0, 0.0, r, g, b, a],
+        [x2, y2, 0.0, 1.0, r, g, b, a],
+        [x1, y1, 1.0, 0.0, r, g, b, a],
+        [x3, y3, 1.0, 1.0, r, g, b, a],
+        [x2, y2, 0.0, 1.0, r, g, b, a],
+    ];
+    for v in &verts {
+        for f in v {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+}
+
+/// Push a rounded-rect quad. texCoord carries local pixel coordinates
+/// relative to the rect center (the SDF evaluates per-pixel in local space).
+fn emit_rounded_rect_quad(
+    buf: &mut Vec<u8>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    vw: f32,
+    vh: f32,
+    scale: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) {
+    let l = (x * scale / vw) * 2.0 - 1.0;
+    let r_ndc = ((x + w) * scale / vw) * 2.0 - 1.0;
+    let t = 1.0 - (y * scale / vh) * 2.0;
+    let b_ndc = 1.0 - ((y + h) * scale / vh) * 2.0;
+
+    // Local pixel coords: center of rect = (0,0), corners at (±half_w_px, ±half_h_px).
+    let half_w_px = w * scale * 0.5;
+    let half_h_px = h * scale * 0.5;
+
+    let verts: [[f32; 8]; 6] = [
+        [l, t, -half_w_px, -half_h_px, r, g, b, a],
+        [r_ndc, t, half_w_px, -half_h_px, r, g, b, a],
+        [l, b_ndc, -half_w_px, half_h_px, r, g, b, a],
+        [r_ndc, t, half_w_px, -half_h_px, r, g, b, a],
+        [r_ndc, b_ndc, half_w_px, half_h_px, r, g, b, a],
+        [l, b_ndc, -half_w_px, half_h_px, r, g, b, a],
+    ];
+    for v in &verts {
+        for f in v {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+}
+
+/// Pack RoundedRectParams for the fragment_rounded_rect shader.
+/// Layout: { half_w, half_h, radius, border_w, border_r, border_g, border_b, border_a } (8 × f32 = 32 bytes).
+fn pack_rounded_rect_params(
+    half_w: f32,
+    half_h: f32,
+    radius: f32,
+    border_w: f32,
+    border_r: f32,
+    border_g: f32,
+    border_b: f32,
+    border_a: f32,
+) -> [u8; 32] {
+    let mut buf = [0u8; 32];
+    buf[0..4].copy_from_slice(&half_w.to_le_bytes());
+    buf[4..8].copy_from_slice(&half_h.to_le_bytes());
+    buf[8..12].copy_from_slice(&radius.to_le_bytes());
+    buf[12..16].copy_from_slice(&border_w.to_le_bytes());
+    buf[16..20].copy_from_slice(&border_r.to_le_bytes());
+    buf[20..24].copy_from_slice(&border_g.to_le_bytes());
+    buf[24..28].copy_from_slice(&border_b.to_le_bytes());
+    buf[28..32].copy_from_slice(&border_a.to_le_bytes());
+    buf
 }
 
 /// Flush accumulated solid-color vertices: set_vertex_bytes + draw.

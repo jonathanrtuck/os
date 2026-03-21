@@ -145,8 +145,9 @@ func main() throws {
         dtbDevices.append(DTB.DeviceInfo(slot: slot, deviceId: transport.backend.deviceId))
     }
 
+    let cpuCount = 4
     let dtb = DTB.minimal(ramBase: 0x4000_0000, ramSize: 256 * 1024 * 1024,
-                          virtioDevices: dtbDevices)
+                          cpuCount: cpuCount, virtioDevices: dtbDevices)
     let dtbAddr: UInt64 = 0x4000_0000
     vm.writeGuest(at: dtbAddr, data: dtb)
     print("  DTB loaded at 0x\(String(dtbAddr, radix: 16)) (\(dtb.count) bytes)")
@@ -162,7 +163,7 @@ func main() throws {
         // Boot VM on background thread
         let vmThread = Thread {
             do {
-                try vm.run(entryPoint: entry, dtbAddress: dtbAddr, cpuCount: 4)
+                try vm.run(entryPoint: entry, dtbAddress: dtbAddr, cpuCount: cpuCount)
             } catch {
                 print("VM error: \(error)")
                 exit(1)
@@ -205,7 +206,7 @@ func main() throws {
         // No GPU: run VM directly on main thread (serial-only mode)
         print("── Booting kernel (serial mode) ──")
         print("")
-        try vm.run(entryPoint: entry, dtbAddress: dtbAddr, cpuCount: 4)
+        try vm.run(entryPoint: entry, dtbAddress: dtbAddr, cpuCount: cpuCount)
     }
 }
 

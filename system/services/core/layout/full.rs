@@ -12,8 +12,10 @@ use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
     layout_mono_lines, line_bytes_for_run, round_f32, scroll_runs, shape_text, shape_visible_runs,
     update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DEMO_BALL,
-    N_DEMO_EASE_0, N_DEMO_EASE_1, N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DOC_TEXT,
-    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_DEMO_BORDER, N_DEMO_BORDER_ONLY, N_DEMO_COMBINED, N_DEMO_EASE_0, N_DEMO_EASE_1,
+    N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DEMO_ROTATE, N_DEMO_ROUNDED, N_DEMO_SCALE,
+    N_DEMO_SKEW, N_DEMO_TRANSLATE, N_DOC_TEXT, N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR,
+    N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 use crate::test_gen::{
     generate_circle_clip, generate_test_image, generate_test_rounded_rect, generate_test_star,
@@ -142,6 +144,15 @@ pub fn build_full_scene(
     let _demo_ease4 = w.alloc_node().unwrap(); // 13
                                                // Pointer cursor node (top-level, highest z-order).
     let _pointer = w.alloc_node().unwrap(); // 14
+    // Audit feature demo nodes.
+    let _demo_rounded = w.alloc_node().unwrap(); // 15
+    let _demo_border = w.alloc_node().unwrap(); // 16
+    let _demo_scale = w.alloc_node().unwrap(); // 17
+    let _demo_rotate = w.alloc_node().unwrap(); // 18
+    let _demo_skew = w.alloc_node().unwrap(); // 19
+    let _demo_combined = w.alloc_node().unwrap(); // 20
+    let _demo_translate = w.alloc_node().unwrap(); // 21
+    let _demo_border_only = w.alloc_node().unwrap(); // 22
 
     {
         let n = w.node_mut(N_ROOT);
@@ -602,6 +613,129 @@ pub fn build_full_scene(
         n.background = Color::rgba(255, 255, 255, 180);
         n.backdrop_blur_radius = 8;
         n.corner_radius = 8;
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_ROUNDED;
+    }
+
+    // ── Audit feature demos ─────────────────────────────────────────
+    //
+    // Showcase: corner_radius, borders, transforms (all types).
+    // Positioned in a column below the Phase 2 demos.
+
+    // Demo 4: Rounded rectangle (corner_radius, no border).
+    {
+        let n = w.node_mut(N_DEMO_ROUNDED);
+        n.x = demo_x;
+        n.y = 350;
+        n.width = 60;
+        n.height = 40;
+        n.background = Color::rgba(90, 130, 230, 255);
+        n.corner_radius = 12;
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_BORDER;
+    }
+
+    // Demo 5: Rounded rect with border.
+    {
+        let n = w.node_mut(N_DEMO_BORDER);
+        n.x = demo_x + 70;
+        n.y = 350;
+        n.width = 60;
+        n.height = 40;
+        n.background = Color::rgba(240, 240, 245, 255);
+        n.corner_radius = 8;
+        n.border = Border {
+            color: Color::rgba(60, 60, 80, 255),
+            width: 2,
+            _pad: [0; 3],
+        };
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_BORDER_ONLY;
+    }
+
+    // Demo 6: Border-only (no fill, transparent background).
+    {
+        let n = w.node_mut(N_DEMO_BORDER_ONLY);
+        n.x = demo_x;
+        n.y = 400;
+        n.width = 50;
+        n.height = 50;
+        n.corner_radius = 25; // Fully circular
+        n.border = Border {
+            color: Color::rgba(220, 60, 90, 255),
+            width: 3,
+            _pad: [0; 3],
+        };
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_TRANSLATE;
+    }
+
+    // Demo 7: Translation transform.
+    {
+        let n = w.node_mut(N_DEMO_TRANSLATE);
+        n.x = demo_x + 70;
+        n.y = 400;
+        n.width = 40;
+        n.height = 40;
+        n.background = Color::rgba(60, 180, 120, 255);
+        n.transform = scene::AffineTransform::translate(10.0, 5.0);
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_SCALE;
+    }
+
+    // Demo 8: Scale transform (1.5x horizontal, 0.8x vertical).
+    {
+        let n = w.node_mut(N_DEMO_SCALE);
+        n.x = demo_x;
+        n.y = 460;
+        n.width = 40;
+        n.height = 40;
+        n.background = Color::rgba(200, 140, 50, 255);
+        n.corner_radius = 6;
+        n.transform = scene::AffineTransform::scale(1.5, 0.8);
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_ROTATE;
+    }
+
+    // Demo 9: Rotation transform (15 degrees).
+    {
+        let n = w.node_mut(N_DEMO_ROTATE);
+        n.x = demo_x + 80;
+        n.y = 460;
+        n.width = 40;
+        n.height = 40;
+        n.background = Color::rgba(180, 60, 200, 255);
+        n.corner_radius = 4;
+        n.transform = scene::AffineTransform::rotate(0.26); // ~15 degrees
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_SKEW;
+    }
+
+    // Demo 10: Skew transform (horizontal shear).
+    {
+        let n = w.node_mut(N_DEMO_SKEW);
+        n.x = demo_x;
+        n.y = 520;
+        n.width = 50;
+        n.height = 30;
+        n.background = Color::rgba(240, 180, 60, 255);
+        n.transform = scene::AffineTransform::skew_x(0.3); // ~17 degrees
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = N_DEMO_COMBINED;
+    }
+
+    // Demo 11: Combined transform (scale + rotate).
+    {
+        let rot = scene::AffineTransform::rotate(-0.35); // ~-20 degrees
+        let scl = scene::AffineTransform::scale(1.2, 1.2);
+        let n = w.node_mut(N_DEMO_COMBINED);
+        n.x = demo_x + 80;
+        n.y = 520;
+        n.width = 40;
+        n.height = 40;
+        n.background = Color::rgba(100, 200, 220, 255);
+        n.corner_radius = 10;
+        n.transform = scl.compose(rot);
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
     }

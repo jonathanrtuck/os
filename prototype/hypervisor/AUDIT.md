@@ -2,7 +2,7 @@
 
 Audit date: 2026-03-21. Both the Swift hypervisor host and the Rust metal-render guest driver were reviewed for correctness, robustness, security, performance, and feature completeness.
 
-Findings are prioritized. Fix the top ones first; the rest are improvements for when the relevant code is next touched.
+All findings resolved 2026-03-21.
 
 ---
 
@@ -10,21 +10,21 @@ Findings are prioritized. Fix the top ones first; the rest are improvements for 
 
 ### Critical
 
-- [ ] **9P path traversal** — `Virtio9P.swift` builds file paths with `appendingPathComponent()` without sanitizing `..` segments. A guest can walk to `../../../etc/passwd` and read arbitrary host files. Fix: reject any path component that is `..` or contains path separators.
+- [x] **9P path traversal** — Two-layer defense: (1) reject `..`, `.`, `/`, `\0` in walk components, (2) resolve symlinks and verify path stays within rootPath. Returns EPERM on violation.
 
 ### High
 
-- [ ] **Texture size DoS** — `VirtioMetal.swift` `createTexture` accepts guest-supplied width/height without upper bounds. A malicious guest can request 65535x65535 textures, allocating gigabytes of VRAM. Fix: cap max texture dimensions (e.g., 4096x4096).
+- [x] **Texture size DoS** — Capped at 8192x8192. Rejects zero-dimension or oversized textures with a log message.
 
 ### Medium
 
-- [ ] **Event queue overflow** — `VirtioInput.swift` `pendingEvents` grows unbounded if the guest never posts receive buffers. Fix: cap at ~256 entries, drop oldest.
-- [ ] **Unknown command logging** — `VirtioMetal.swift` silently skips unknown command IDs without logging (even in non-verbose mode). Fix: always log unknown commands at least once.
+- [x] **Event queue overflow** — Capped `pendingEvents` at 256 entries. Drops oldest when full.
+- [x] **Unknown command logging** — Logs each unknown command ID exactly once (deduplicated via `Set<UInt16>`), regardless of verbose mode.
 
 ### Low
 
-- [ ] **DTB hardcodes 4 CPUs** — `DTB.swift` `minimal()` loops `0..<4` regardless of the actual `cpuCount` parameter. Fix: pass and use `cpuCount`.
-- [ ] **Vendor ID string** — `VirtioMMIO.swift` reports vendor ID `0x554D4551` ("QEMU"). Should use a custom identifier since this isn't QEMU.
+- [x] **DTB hardcodes 4 CPUs** — `cpuCount` parameter added to `DTB.minimal()`. `main.swift` uses a shared `cpuCount` constant for both DTB and VM boot.
+- [x] **Vendor ID string** — Changed from `0x554D4551` ("QEMU") to `0x4143_4F53` ("ACOS" — Arts & Crafts OS hypervisor).
 
 ---
 
@@ -32,19 +32,19 @@ Findings are prioritized. Fix the top ones first; the rest are improvements for 
 
 ### High
 
-- [ ] **`node.transform` not applied** — The full 2D affine transform (`node.transform`) is completely ignored during scene walk. Only `content_transform.tx/ty` (scroll offset) is used. Any node with rotation, scale, or skew will render at wrong position/size. Not currently used by the core service, but the field exists and will break when transforms are introduced.
-- [ ] **`corner_radius` not rendered** — `node.corner_radius` is present in the scene graph but never applied. All rectangles render with sharp corners. Visibly wrong: the frosted glass demo panel has `corner_radius: 8` but renders as a sharp rectangle. Options: SDF fragment shader, or reuse stencil clip infrastructure with a rounded-rect path.
+- [x] **`node.transform` not applied** — Full 2D affine transform now applied during scene walk. Identity and pure-translation take the fast path. Non-trivial transforms (rotation, scale, skew) generate per-vertex transformed positions via `emit_transformed_quad()`. AABB computed for clip/scissor purposes. 8 demo scenes showcase each transform type.
+- [x] **`corner_radius` not rendered** — Implemented via SDF (signed distance field) fragment shader `fragment_rounded_rect`. Evaluates `sd_rounded_rect()` per pixel for subpixel-accurate anti-aliased corners at any radius. New pipeline `PIPE_ROUNDED_RECT` with uniform buffer for rect params. The frosted glass demo now renders with correct rounded corners.
 
 ### Medium
 
-- [ ] **`border` not rendered** — `node.border` (color, width, padding) is ignored. No border quads are emitted. Will be needed for text input frames and UI chrome.
-- [ ] **`FillRule` ignored** — `Content::Path` match arm uses `fill_rule: _` wildcard. Always assumes winding rule. Paths with holes or self-intersections render incorrectly under even-odd rule. Fix: use XOR stencil operation for even-odd, current replace for winding.
-- [ ] **Blur bounds could overflow** — `px + pw + pad` in blur capture region calculation uses plain u32 arithmetic. While unlikely to overflow in practice (max framebuffer 1024x768), saturating arithmetic (`saturating_add`) would be defensive. Same for `py + ph + pad`.
+- [x] **`border` not rendered** — Handled by the same SDF rounded-rect shader. The `RoundedRectParams` uniform includes border width and color. Border region computed as the SDF annulus between the outer edge and `dist + border_width`. Composited as border-over-fill in a single fragment shader pass. Demo scenes include bordered rects, border+corner_radius, and border-only (no fill) nodes.
+- [x] **`FillRule` ignored** — Added `DSS_STENCIL_INVERT` depth-stencil state with `STENCIL_INVERT` operation (added to metal protocol). Winding rule uses `STENCIL_REPLACE` (nonzero everywhere), even-odd uses `STENCIL_INVERT` (XOR flips on overlap, odd count = inside). `draw_path_stencil_cover()` selects based on `fill_rule` parameter.
+- [x] **Blur bounds could overflow** — All `px + pw + pad` calculations now use `saturating_add()` / `saturating_sub()`.
 
 ### Low
 
-- [ ] **Atlas overflow is silent** — When the glyph atlas fills up (512x512, ~95 ASCII glyphs), `pack()` returns false and the glyph is silently skipped. No warning is printed. Fix: log a one-time warning when the atlas is full.
-- [ ] **Path flattening truncation** — Cubic Bezier flattening stops at MAX_PATH_POINTS (256). Complex paths silently lose segments. Fix: increase constant or log a warning.
+- [x] **Atlas overflow is silent** — One-time warning printed via serial when `pack()` returns false.
+- [x] **Path flattening truncation** — `MAX_PATH_POINTS` increased from 256 to 512. One-time warning printed when the limit is reached.
 
 ---
 

@@ -26,7 +26,7 @@ enum DTB {
     }
 
     /// Generate a DTB with memory, UART, PSCI, CPUs, and virtio devices.
-    static func minimal(ramBase: UInt64, ramSize: Int, virtioDevices: [DeviceInfo] = []) -> Data {
+    static func minimal(ramBase: UInt64, ramSize: Int, cpuCount: Int = 4, virtioDevices: [DeviceInfo] = []) -> Data {
         var b = FDTBuilder()
 
         // Root node
@@ -64,7 +64,7 @@ enum DTB {
         b.beginNode("cpus")
         b.prop_u32("#address-cells", 1)
         b.prop_u32("#size-cells", 0)
-        for i in 0..<4 {
+        for i in 0..<cpuCount {
             b.beginNode("cpu@\(i)")
             b.prop_string("device_type", "cpu")
             b.prop_string("compatible", "arm,cortex-a53")

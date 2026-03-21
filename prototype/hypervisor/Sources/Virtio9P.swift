@@ -171,7 +171,6 @@ final class Virtio9PBackend: VirtioDeviceBackend {
         let fid = tBuf.loadUnaligned(fromByteOffset: 7, as: UInt32.self)
         let newfid = tBuf.loadUnaligned(fromByteOffset: 11, as: UInt32.self)
         let nwname = tBuf.loadUnaligned(fromByteOffset: 15, as: UInt16.self)
-        // Debug: fputs("[9p] walk: fid=\(fid) newfid=\(newfid) nwname=\(nwname)\n", stderr)
 
         guard let basePath = fids[fid] else {
             writeError(&writer, tag: tag, errno: 2)  // ENOENT
@@ -191,8 +190,25 @@ final class Virtio9PBackend: VirtioDeviceBackend {
             let name = String(bytes: UnsafeRawBufferPointer(start: namePtr, count: Int(nameLen)), encoding: .utf8) ?? ""
             offset += Int(nameLen)
 
+            // SECURITY: Reject path traversal and invalid components.
+            // Layer 1: Component-level validation — no "..", ".", path separators, or null bytes.
+            if name == ".." || name == "." || name.contains("/") || name.contains("\0") || name.isEmpty {
+                fputs("[9p] REJECTED path component: '\(name)' (traversal attempt)\n", stderr)
+                writeError(&writer, tag: tag, errno: 1)  // EPERM
+                return
+            }
+
             currentPath = (currentPath as NSString).appendingPathComponent(name)
-            // Debug: fputs("[9p] component: '\(name)' → '\(currentPath)'\n", stderr)
+
+            // SECURITY: Layer 2 — Resolve symlinks and verify the path stays within the root.
+            // This catches symlink-based escapes that component validation alone cannot prevent.
+            let resolvedPath = (currentPath as NSString).resolvingSymlinksInPath
+            let resolvedRoot = (rootPath as NSString).resolvingSymlinksInPath
+            guard resolvedPath.hasPrefix(resolvedRoot + "/") || resolvedPath == resolvedRoot else {
+                fputs("[9p] REJECTED path escape: '\(resolvedPath)' outside root '\(resolvedRoot)'\n", stderr)
+                writeError(&writer, tag: tag, errno: 1)  // EPERM
+                return
+            }
 
             // Check if the path exists on the host
             var isDir: ObjCBool = false
