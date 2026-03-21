@@ -227,62 +227,49 @@ Every `.rs` file follows this order:
 
 ## Visual Testing (MANDATORY)
 
-**Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself.
+**Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself. If you cannot close the verification loop, say so explicitly — do not declare success.
 
-### How to visually test the OS in QEMU
+### Two display modes, two testing methods
 
-The test harness is `system/test-qemu.sh`. For visual verification, use this workflow directly:
+**cpu-render (non-virgl):** Uses `screendump` via the QEMU monitor socket. This captures the guest framebuffer directly and works reliably.
 
 ```sh
-# 1. Build
-cd system && cargo build --release
-
-# 2. Launch QEMU (headless, monitor socket for control, serial to file)
-qemu-system-aarch64 \
-    -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 256M \
-    -global virtio-mmio.force-legacy=false \
-    -drive "file=test.img,if=none,format=raw,id=hd0" \
-    -device virtio-blk-device,drive=hd0 \
-    -device virtio-gpu-device -device virtio-keyboard-device \
-    -nographic \
-    -serial file:/tmp/qemu-serial.log \
-    -monitor unix:/tmp/qemu-mon.sock,server,nowait \
-    -device "loader,file=virt.dtb,addr=0x40000000,force-raw=on" \
-    -kernel target/aarch64-unknown-none/release/kernel &
-
-# 3. Wait for boot (~5s)
-sleep 5
-
-# 4. Send keystrokes via monitor socket
-echo "sendkey h" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
-
-# 5. Capture framebuffer screenshot (PPM format)
-echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2 >/dev/null 2>&1
-
-# 6. Convert PPM → PNG and view it
+cd system && VIRGL=1 ./test-qemu.sh --keys "h e l l o" --boot-wait 8 --wait 3
+# For cpu-render (no VIRGL=1): screendump works:
+echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2
 python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"
-# Then use the Read tool on /tmp/qemu-screen.png to SEE the display
-
-# 7. Check serial output
-cat /tmp/qemu-serial.log
-
-# 8. Kill QEMU when done
-kill $QPID
+# Then Read /tmp/qemu-screen.png
 ```
 
-### What "visually verified" means
+**virgil-render (virgl): `screendump` DOES NOT WORK.** It produces stale/cached images because the virgl cocoa display renders via the host GPU, not the guest framebuffer. Instead:
 
-- Take a screenshot of the QEMU framebuffer AFTER sending input
-- View the screenshot with the Read tool (it can display PNG images)
-- Confirm the expected pixels are on screen (text appeared, cursor moved, etc.)
-- If debugging latency: take screenshots at multiple time points to measure when content appears
-- Serial output alone is NOT sufficient — it only proves messages flow, not that pixels update
+1. Launch with `VIRGL=1 cargo run --release` (opens a cocoa window)
+2. Focus the QEMU window
+3. Use macOS screenshot: `screencapture -l $(osascript -e 'tell app "QEMU" to id of window 1') /tmp/qemu-virgl.png`
+4. Read the PNG with the Read tool
+
+**Sanity check:** If two screenshots show identical clock times, the capture is stale. The clock updates every second — identical timestamps mean you're reading cached data.
 
 ### When to use this
 
-- Any change to: compositor, drawing library, GPU driver, text editor, init (display pipeline setup)
+- Any change to: drawing library, GPU driver, scene walk, text editor, init (display pipeline setup)
 - Any bug fix where the symptom was visual (wrong rendering, missing content, latency)
 - Before committing display-related changes
+- Serial output alone is NOT sufficient — it only proves messages flow, not that pixels update
+
+## Rendering Pipeline Changes (MANDATORY)
+
+Changes to the rendering pipeline (virgil-render, cpu-render, scene walk, protocol/virgl.rs) must follow this process. These rules exist because a session was lost to shipping unverified rendering changes that broke the display.
+
+### Before implementing
+
+1. **Validate assumptions against source code, not general knowledge.** The full pipeline is: scene graph → virgl command encoding → virtio-gpu wire → QEMU → virglrenderer → ANGLE → Metal. Every layer has source code or documentation. If you're uncertain whether a GPU feature is supported, READ the virglrenderer source or ANGLE docs — do not guess from general OpenGL knowledge.
+2. **If an agreed approach turns out to be infeasible, STOP and discuss.** Do not silently switch to a different approach. Come back to the user with: what we agreed, what you found, why it doesn't work, what the alternatives are.
+
+### During implementation
+
+3. **One subsystem at a time, verified at each step.** Do not change the render target, stencil, viewport, scissor, blur pipeline, and resolve path simultaneously. Change one, verify, then change the next.
+4. **Points and pixels are the only two coordinate units.** Points (1/72 inch) are used everywhere above the render boundary. Pixels are physical framebuffer coordinates used only by render backends. Never conflate them. Never introduce a third unit. Variable names must make the unit clear.
 
 ### Timing instrumentation
 

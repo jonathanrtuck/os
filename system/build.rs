@@ -38,6 +38,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("core", "CORE_ELF"),
     ("cpu-render", "CPU_RENDER_ELF"),
     ("virgil-render", "VIRGIL_RENDER_ELF"),
+    ("metal-render", "METAL_RENDER_ELF"),
     ("text-editor", "TEXT_EDITOR_ELF"),
     ("stress", "STRESS_ELF"),
     ("fuzz", "FUZZ_ELF"),
@@ -61,6 +62,12 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     (
         "virgil-render",
         "services/drivers/virgil-render",
+        true,
+        true,
+    ),
+    (
+        "metal-render",
+        "services/drivers/metal-render",
         true,
         true,
     ),
@@ -166,7 +173,7 @@ fn main() {
             externs.push(("scene", scene_rlib.clone()));
             externs.push(("fonts", fonts_output.rlib.clone()));
         }
-        if name == "cpu-render" || name == "virgil-render" {
+        if name == "cpu-render" || name == "virgil-render" || name == "metal-render" {
             externs.push(("render", render_rlib.clone()));
         }
         if name == "core" {
