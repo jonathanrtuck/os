@@ -35,6 +35,7 @@ include!("neon.rs");
 mod blend;
 mod blit;
 mod blur;
+pub mod box_blur;
 mod coverage;
 mod fill;
 mod gradient;
@@ -46,6 +47,7 @@ pub use blur::{
     blur_surface, blur_surface_scalar, compute_kernel, BlurStrategy, CpuBlur, ReadSurface,
     MAX_CPU_BLUR_RADIUS, MAX_KERNEL_DIAMETER,
 };
+pub use box_blur::{box_blur_pad, box_blur_widths};
 pub use gradient::{fill_radial_gradient_noise, fill_radial_gradient_rows, Xorshift32};
 
 // === Core types =============================================================
