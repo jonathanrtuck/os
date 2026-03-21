@@ -203,15 +203,7 @@ impl<'a> Surface<'a> {
     ///
     /// `radius` is clamped to `min(w, h) / 2`. Zero radius delegates to `fill_rect`.
     /// Anti-aliased edge pixels use gamma-correct sRGB blending.
-    pub fn fill_rounded_rect(
-        &mut self,
-        x: u32,
-        y: u32,
-        w: u32,
-        h: u32,
-        radius: u32,
-        color: Color,
-    ) {
+    pub fn fill_rounded_rect(&mut self, x: u32, y: u32, w: u32, h: u32, radius: u32, color: Color) {
         if w == 0 || h == 0 {
             return;
         }

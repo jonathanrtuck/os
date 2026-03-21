@@ -1,15 +1,32 @@
-//! Animation easing functions for the document-centric OS.
+//! Animation engine for the document-centric OS.
 //!
-//! Evaluates any of 24 easing curves at a normalised time `t ∈ [0, 1]`.
-//! The library is `no_std` with no allocator requirement and no external
-//! dependencies.  All floating-point operations use the `f32` primitives
-//! built into `core`.
+//! A standalone, general-purpose animation library. No dependencies on scene
+//! graph, rendering, or core. Pure `no_std`, no `alloc` required.
+//!
+//! # Core types
+//!
+//! - **`Easing`** — 24 easing curves (CSS standard + polynomial + elastic/bounce).
+//! - **`Spring`** — spring physics simulation with 4 presets (default, snappy,
+//!   gentle, bouncy). Tick-based update, configurable settle threshold.
+//! - **`Timeline`** — fixed-capacity (32 slot) animation manager. Tracks eased
+//!   progress as f32. Use `value()` for f32 animations, `progress()` for
+//!   type-generic interpolation via the `Lerp` trait.
+//! - **`Animated<T>`** — type-generic animation wrapper. Pairs a Timeline slot
+//!   with typed start/end values. Queries `progress()` and applies `T::lerp`.
+//! - **`Lerp`** — linear interpolation trait. Implemented for `f32`, `i32`, `u8`,
+//!   `[u8; 4]` (gamma-correct sRGB), and `Transform2D`.
 //!
 //! # Usage
 //!
 //! ```text
-//! let y = animation::ease(Easing::EaseInOutCubic, 0.5);
-//! // → 0.5  (inflection point of the symmetric cubic)
+//! // f32 animation (opacity, scroll position):
+//! let id = timeline.start(0.0, 255.0, 150, Easing::EaseInOut, now)?;
+//! let opacity = timeline.value(id) as u8;
+//!
+//! // Type-generic animation (color, transform):
+//! let id = timeline.start(0.0, 1.0, 300, Easing::EaseOut, now)?;
+//! let anim = Animated::new([255, 0, 0, 255], [0, 0, 255, 255], id);
+//! let color = anim.value(&timeline); // gamma-correct sRGB blend
 //! ```
 //!
 //! # Accuracy notes
@@ -596,6 +613,19 @@ impl Lerp for u8 {
     fn lerp(a: u8, b: u8, t: f32) -> u8 {
         // Add 0.5 and truncate for nearest-integer rounding in no_std.
         (a as f32 + (b as f32 - a as f32) * t + 0.5) as u8
+    }
+}
+
+/// Gamma-correct sRGB color interpolation as `[R, G, B, A]`.
+///
+/// RGB channels are linearized, interpolated in linear light space, and
+/// re-encoded to sRGB. Alpha is interpolated linearly (not gamma-corrected).
+/// This is perceptually correct — naive sRGB lerp produces wrong midpoints
+/// (mid-gray would be ~128 instead of the correct ~188).
+impl Lerp for [u8; 4] {
+    #[inline]
+    fn lerp(a: [u8; 4], b: [u8; 4], t: f32) -> [u8; 4] {
+        LerpColor::lerp_srgb(a, b, t)
     }
 }
 
@@ -1194,14 +1224,21 @@ struct Animation {
 }
 
 impl Animation {
+    /// Eased progress at the given time: 0.0 before start, 1.0 at/after end.
+    fn progress_at(&self, now_ms: u64) -> f32 {
+        if now_ms <= self.start_time_ms {
+            return 0.0;
+        }
+        let elapsed = (now_ms - self.start_time_ms) as f32;
+        let t = (elapsed / self.duration_ms as f32).min(1.0);
+        ease(self.easing, t)
+    }
+
     fn value_at(&self, now_ms: u64) -> f32 {
         if now_ms <= self.start_time_ms {
             return self.start_value;
         }
-        let elapsed = (now_ms - self.start_time_ms) as f32;
-        let t = (elapsed / self.duration_ms as f32).min(1.0);
-        let eased = ease(self.easing, t);
-        f32::lerp(self.start_value, self.end_value, eased)
+        f32::lerp(self.start_value, self.end_value, self.progress_at(now_ms))
     }
 
     fn is_complete_at(&self, now_ms: u64) -> bool {
@@ -1268,12 +1305,35 @@ impl Timeline {
         }
     }
 
-    /// Get the current value of an animation. Returns 0.0 if the animation
-    /// completed (and was cleaned up) or if the id is invalid.
+    /// Get the current interpolated f32 value of an animation.
+    ///
+    /// Returns 0.0 if the animation completed (and was cleaned up) or if
+    /// the id is invalid. For f32-valued animations (opacity, position),
+    /// this is the most convenient API.
     pub fn value(&self, id: AnimationId) -> f32 {
         match &self.slots[id.0 as usize] {
             Some(anim) => anim.value_at(self.now_ms),
             None => 0.0, // animation completed and was removed
+        }
+    }
+
+    /// Get the eased progress (0.0–1.0) of an animation.
+    ///
+    /// Unlike `value()` which interpolates between start and end f32 values,
+    /// `progress()` returns the raw eased progress. Use with the `Lerp` trait
+    /// for type-generic interpolation:
+    ///
+    /// ```text
+    /// let t = timeline.progress(id);
+    /// let color = <[u8; 4]>::lerp(start_color, end_color, t);
+    /// let xform = Transform2D::lerp(from, to, t);
+    /// ```
+    ///
+    /// Returns 1.0 if the animation completed or the id is invalid.
+    pub fn progress(&self, id: AnimationId) -> f32 {
+        match &self.slots[id.0 as usize] {
+            Some(anim) => anim.progress_at(self.now_ms),
+            None => 1.0, // completed: full progress
         }
     }
 
@@ -1293,6 +1353,59 @@ impl Timeline {
     /// when true, the event loop should tick at 60fps instead of blocking).
     pub fn any_active(&self) -> bool {
         self.slots.iter().any(|s| s.is_some())
+    }
+}
+
+// ── Type-generic animation ──────────────────────────────────────────────────
+
+/// Type-generic animation wrapper.
+///
+/// Pairs a Timeline animation slot (which tracks eased progress as f32) with
+/// typed start/end values. Queries `Timeline::progress()` and applies
+/// `T::lerp` to produce the interpolated result.
+///
+/// This bridges the f32-only Timeline with arbitrary `Lerp` types — colors,
+/// transforms, or any custom type that implements `Lerp`.
+///
+/// # Usage
+///
+/// ```text
+/// // Start a normalized 0→1 animation in the timeline:
+/// let id = timeline.start(0.0, 1.0, 300, Easing::EaseOut, now)?;
+///
+/// // Wrap with typed start/end values:
+/// let anim = Animated::new([255, 0, 0, 255], [0, 0, 255, 255], id);
+///
+/// // Query: applies gamma-correct sRGB interpolation automatically:
+/// let color = anim.value(&timeline);
+/// ```
+pub struct Animated<T: Lerp + Copy> {
+    start: T,
+    end: T,
+    id: AnimationId,
+}
+
+impl<T: Lerp + Copy> Animated<T> {
+    /// Create a new typed animation bound to a timeline slot.
+    ///
+    /// The timeline slot should animate from 0.0 to 1.0 (use
+    /// `timeline.start(0.0, 1.0, ...)`) so that `progress()` maps cleanly
+    /// to the `Lerp` interpolation parameter.
+    pub fn new(start: T, end: T, id: AnimationId) -> Self {
+        Self { start, end, id }
+    }
+
+    /// Get the current interpolated value from the timeline.
+    ///
+    /// Returns the start value if the animation hasn't begun, the end value
+    /// if it completed, and a `Lerp`-interpolated value in between.
+    pub fn value(&self, timeline: &Timeline) -> T {
+        T::lerp(self.start, self.end, timeline.progress(self.id))
+    }
+
+    /// The animation slot id (for cancellation or status checks).
+    pub fn id(&self) -> AnimationId {
+        self.id
     }
 }
 

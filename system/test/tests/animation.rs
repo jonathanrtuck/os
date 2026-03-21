@@ -2,7 +2,7 @@
 
 extern crate animation;
 
-use animation::{ease, Easing, Lerp, LerpColor, Spring, Timeline, Transform2D};
+use animation::{ease, Animated, Easing, Lerp, LerpColor, Spring, Timeline, Transform2D};
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -880,4 +880,175 @@ fn all_easings_handle_exact_midpoint() {
             y
         );
     }
+}
+
+// ── Timeline::progress() ────────────────────────────────────────────────────
+
+#[test]
+fn timeline_progress_returns_eased_t() {
+    let mut tl = Timeline::new();
+    // EaseInQuad: progress at t=0.5 should be 0.25 (t²)
+    let id = tl.start(0.0, 1.0, 1000, Easing::EaseInQuad, 0).unwrap();
+    tl.tick(500); // halfway
+    let p = tl.progress(id);
+    assert!((p - 0.25).abs() < 0.01, "progress={p}, expected ~0.25");
+}
+
+#[test]
+fn timeline_progress_zero_before_start() {
+    let mut tl = Timeline::new();
+    let id = tl.start(10.0, 20.0, 1000, Easing::Linear, 100).unwrap();
+    tl.tick(50); // before animation start
+    assert!((tl.progress(id) - 0.0).abs() < 0.001);
+}
+
+#[test]
+fn timeline_progress_one_after_completion() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
+    tl.tick(200); // well past completion; tick removes the animation
+                  // Completed/removed animations return 1.0 (full progress).
+    assert!((tl.progress(id) - 1.0).abs() < 0.001);
+}
+
+#[test]
+fn timeline_progress_independent_of_start_end_values() {
+    // progress() should return the same eased t regardless of start/end.
+    let mut tl = Timeline::new();
+    let id_a = tl.start(0.0, 100.0, 1000, Easing::Linear, 0).unwrap();
+    let id_b = tl.start(-50.0, 50.0, 1000, Easing::Linear, 0).unwrap();
+    tl.tick(500);
+    let pa = tl.progress(id_a);
+    let pb = tl.progress(id_b);
+    assert!(
+        (pa - pb).abs() < 0.001,
+        "progress should be identical: {pa} vs {pb}"
+    );
+}
+
+// ── Lerp for [u8; 4] (gamma-correct sRGB) ──────────────────────────────────
+
+#[test]
+fn lerp_u8x4_gamma_correct_midpoint() {
+    // Black → white at t=0.5: gamma-correct mid-gray is ~188, not 128.
+    let mid = <[u8; 4]>::lerp([0, 0, 0, 255], [255, 255, 255, 255], 0.5);
+    // RGB channels should be near 188 (perceptually correct mid-gray).
+    for c in 0..3 {
+        assert!(
+            mid[c] > 170 && mid[c] < 200,
+            "channel {c} = {}, expected ~188 (gamma-correct)",
+            mid[c]
+        );
+    }
+    // Alpha is linear, not gamma.
+    assert_eq!(mid[3], 255);
+}
+
+#[test]
+fn lerp_u8x4_boundaries() {
+    let a = [10, 20, 30, 40];
+    let b = [200, 210, 220, 230];
+    assert_eq!(<[u8; 4]>::lerp(a, b, 0.0), a);
+    assert_eq!(<[u8; 4]>::lerp(a, b, 1.0), b);
+}
+
+#[test]
+fn lerp_u8x4_alpha_is_linear() {
+    // Alpha interpolation should be linear (not gamma-corrected).
+    let result = <[u8; 4]>::lerp([0, 0, 0, 0], [0, 0, 0, 200], 0.5);
+    // Linear midpoint of 0 and 200 = 100 (± rounding).
+    assert!(
+        (result[3] as i32 - 100).unsigned_abs() <= 1,
+        "alpha = {}, expected ~100",
+        result[3]
+    );
+}
+
+#[test]
+fn lerp_u8x4_matches_lerp_color() {
+    // Verify that Lerp for [u8; 4] delegates to LerpColor::lerp_srgb.
+    let a = [100, 150, 200, 255];
+    let b = [200, 50, 100, 128];
+    let via_trait = <[u8; 4]>::lerp(a, b, 0.3);
+    let via_static = LerpColor::lerp_srgb(a, b, 0.3);
+    assert_eq!(via_trait, via_static);
+}
+
+// ── Animated<T> ─────────────────────────────────────────────────────────────
+
+#[test]
+fn animated_f32_tracks_timeline() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 1000, Easing::Linear, 0).unwrap();
+    let anim = Animated::new(10.0f32, 20.0f32, id);
+
+    tl.tick(0);
+    assert!((anim.value(&tl) - 10.0).abs() < 0.01);
+
+    tl.tick(500);
+    assert!((anim.value(&tl) - 15.0).abs() < 0.1);
+
+    tl.tick(1000);
+    assert!((anim.value(&tl) - 20.0).abs() < 0.01);
+}
+
+#[test]
+fn animated_color_gamma_correct() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 1000, Easing::Linear, 0).unwrap();
+    let anim = Animated::new([0u8, 0, 0, 255], [255u8, 255, 255, 255], id);
+
+    tl.tick(500);
+    let mid = anim.value(&tl);
+    // Gamma-correct mid-gray: ~188, not 128.
+    for c in 0..3 {
+        assert!(
+            mid[c] > 170 && mid[c] < 200,
+            "Animated color channel {c} = {}, expected ~188",
+            mid[c]
+        );
+    }
+}
+
+#[test]
+fn animated_transform_interpolates_components() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 1000, Easing::Linear, 0).unwrap();
+    let from = Transform2D::identity();
+    let to = Transform2D {
+        a: 2.0,
+        b: 0.0,
+        c: 0.0,
+        d: 2.0,
+        tx: 100.0,
+        ty: 50.0,
+    };
+    let anim = Animated::new(from, to, id);
+
+    tl.tick(500);
+    let mid = anim.value(&tl);
+    assert!((mid.a - 1.5).abs() < 0.01);
+    assert!((mid.tx - 50.0).abs() < 0.5);
+    assert!((mid.ty - 25.0).abs() < 0.5);
+}
+
+#[test]
+fn animated_returns_end_after_completion() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
+    let anim = Animated::new(0.0f32, 42.0f32, id);
+
+    tl.tick(200); // past completion, slot removed
+                  // progress() returns 1.0 for removed slots → Lerp gives end value.
+    assert!((anim.value(&tl) - 42.0).abs() < 0.01);
+}
+
+#[test]
+fn animated_id_accessor() {
+    let mut tl = Timeline::new();
+    let id = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
+    let anim = Animated::new(0.0f32, 1.0f32, id);
+    assert!(tl.is_active(anim.id()));
+    tl.cancel(anim.id());
+    assert!(!tl.is_active(anim.id()));
 }

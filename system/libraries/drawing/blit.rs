@@ -1,11 +1,11 @@
 //! Blit operations: copy and alpha-blend source buffers onto surfaces.
 
+#[cfg(target_arch = "aarch64")]
+use crate::blend::blit_blend_scalar_4px;
 use crate::{
     blend::{blit_blend_scalar_1px, fill_rect_blend_scalar_1px},
     div255, min, Color, Surface, SRGB_TO_LINEAR,
 };
-#[cfg(target_arch = "aarch64")]
-use crate::blend::blit_blend_scalar_4px;
 
 impl<'a> Surface<'a> {
     /// Copy pixels from a source buffer onto this surface at (dst_x, dst_y).
@@ -159,12 +159,7 @@ impl<'a> Surface<'a> {
                             // SAFETY: sp points to 16 readable bytes (4 src
                             // pixels), dp points to 16 writable bytes (4 dst
                             // pixels). Both are within the clipped bounds.
-                            crate::neon_blend_4px(
-                                sp,
-                                dp,
-                                &SRGB_TO_LINEAR,
-                                &crate::LINEAR_TO_SRGB,
-                            );
+                            crate::neon_blend_4px(sp, dp, &SRGB_TO_LINEAR, &crate::LINEAR_TO_SRGB);
                         } else {
                             // All pixels are either 0 or 255 — no semi-transparent.
                             blit_blend_scalar_4px(sp, dp, bpp);

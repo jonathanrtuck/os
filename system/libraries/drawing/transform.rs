@@ -1,6 +1,8 @@
 //! Affine-transformed blits with bilinear interpolation.
 
-use crate::{div255, linear_to_idx, Color, ResamplingMethod, Surface, LINEAR_TO_SRGB, SRGB_TO_LINEAR};
+use crate::{
+    div255, linear_to_idx, Color, ResamplingMethod, Surface, LINEAR_TO_SRGB, SRGB_TO_LINEAR,
+};
 
 /// Sample a source pixel at integer coordinates. Returns (B, G, R, A).
 /// Out-of-bounds pixels return transparent (0, 0, 0, 0).
