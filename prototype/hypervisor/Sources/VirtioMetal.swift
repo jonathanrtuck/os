@@ -214,7 +214,7 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 libraries[handle] = lib
                 if verbose { print("VirtioMetal: compiled library \(handle)") }
             } catch {
-                print("VirtioMetal: shader compilation failed for handle \(handle): \(error)")
+                fatalError("VirtioMetal: shader compilation failed for handle \(handle): \(error)")
             }
 
         case .getFunction:
@@ -225,10 +225,16 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             guard size >= 12 + Int(nameLen) else { return }
             let name = String(bytes: UnsafeRawBufferPointer(start: payload + 12, count: Int(nameLen)),
                               encoding: .utf8) ?? ""
-            if let lib = libraries[libHandle], let fn = lib.makeFunction(name: name) {
-                functions[fnHandle] = fn
-                if verbose { print("VirtioMetal: function '\(name)' → \(fnHandle)") }
+            guard let lib = libraries[libHandle] else {
+                print("VirtioMetal: getFunction — library \(libHandle) not found")
+                return
             }
+            guard let fn = lib.makeFunction(name: name) else {
+                print("VirtioMetal: getFunction — '\(name)' not found in library \(libHandle)")
+                return
+            }
+            functions[fnHandle] = fn
+            if verbose { print("VirtioMetal: function '\(name)' → \(fnHandle)") }
 
         case .createRenderPipeline:
             guard size >= 16 else { return }
@@ -240,7 +246,14 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             let stencilFmt = payload.loadUnaligned(fromByteOffset: 14, as: UInt8.self)
             let sampleCnt = payload.loadUnaligned(fromByteOffset: 15, as: UInt8.self)
 
-            guard let vfn = functions[vertFn], let ffn = functions[fragFn] else { return }
+            guard let vfn = functions[vertFn] else {
+                print("VirtioMetal: createRenderPipeline \(handle) — vertex function \(vertFn) not found")
+                return
+            }
+            guard let ffn = functions[fragFn] else {
+                print("VirtioMetal: createRenderPipeline \(handle) — fragment function \(fragFn) not found")
+                return
+            }
 
             let desc = MTLRenderPipelineDescriptor()
             desc.vertexFunction = vfn
@@ -274,7 +287,10 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
             guard size >= 8 else { return }
             let handle = payload.loadUnaligned(fromByteOffset: 0, as: UInt32.self)
             let fnHandle = payload.loadUnaligned(fromByteOffset: 4, as: UInt32.self)
-            guard let fn = functions[fnHandle] else { return }
+            guard let fn = functions[fnHandle] else {
+                print("VirtioMetal: createComputePipeline \(handle) — function \(fnHandle) not found")
+                return
+            }
             do {
                 computePipelines[handle] = try device.makeComputePipelineState(function: fn)
                 if verbose { print("VirtioMetal: compute pipeline \(handle)") }
