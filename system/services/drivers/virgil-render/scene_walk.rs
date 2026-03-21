@@ -38,7 +38,7 @@ pub const MAX_BLUR_REQUESTS: usize = 8;
 /// A request to blur the framebuffer region behind a node.
 ///
 /// Collected during the scene walk and executed after all normal rendering
-/// using a two-pass separable Gaussian blur (horizontal then vertical).
+/// using a three-pass box blur (converges to Gaussian via CLT).
 /// Coordinates are in physical pixels (post-scale).
 #[derive(Clone, Copy)]
 pub struct BlurRequest {
@@ -52,6 +52,11 @@ pub struct BlurRequest {
     pub h: f32,
     /// Blur radius in scene points (drives kernel selection).
     pub radius: u8,
+    /// Background color to draw ON TOP of the blur result.
+    /// If fully transparent, no post-blur background is drawn.
+    pub bg: scene::Color,
+    /// Corner radius for the post-blur background quad (in physical pixels).
+    pub bg_corner_radius: f32,
 }
 
 /// Total textured VBO size: image quads (MAX_IMAGES x 192 bytes) + glyph quads.
@@ -209,8 +214,11 @@ fn walk_node(
     // Collect backdrop blur request before drawing the node itself.
     // The render loop executes blur passes after all normal rendering,
     // blurring the fully-rendered scene at this region. The node's own
-    // background and content are drawn on top.
-    if node.backdrop_blur_radius > 0 && blur_requests.len() < MAX_BLUR_REQUESTS {
+    // background is drawn ON TOP of the blur result (not baked in).
+    let has_backdrop_blur =
+        node.backdrop_blur_radius > 0 && blur_requests.len() < MAX_BLUR_REQUESTS;
+
+    if has_backdrop_blur {
         let region = ClipRect {
             x: abs_x,
             y: abs_y,
@@ -225,13 +233,15 @@ fn walk_node(
                 w: region.w,
                 h: region.h,
                 radius: node.backdrop_blur_radius,
+                bg: node.background,
+                bg_corner_radius: node.corner_radius as f32 * scale,
             });
         }
     }
 
-    // Draw background if non-transparent.
+    // Draw background — but NOT for backdrop-blur nodes (drawn post-blur).
     let bg = node.background;
-    if bg.a > 0 {
+    if bg.a > 0 && !has_backdrop_blur {
         let quad_clip = ClipRect {
             x: abs_x,
             y: abs_y,

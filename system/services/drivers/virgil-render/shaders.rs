@@ -12,8 +12,8 @@
 //! 3. `TEXTURED_VS`: vertex shader — position + texcoord + color passthrough
 //! 4. `TEXTURED_FS`: fragment shader — texture sample × vertex color
 //! 5. `GLYPH_FS`: R8 glyph atlas with coverage × vertex alpha
-//! 6. `BLUR_H_FS`: 9-tap horizontal Gaussian blur
-//! 7. `BLUR_V_FS`: 9-tap vertical Gaussian blur
+//! 6. `BLUR_H_FS`: loop-based horizontal box blur (any radius)
+//! 7. `BLUR_V_FS`: loop-based vertical box blur (any radius)
 //!
 //! TGSI text format reference: virglrenderer `src/gallium/auxiliary/tgsi/tgsi_text.c`
 //! and the test suite in `tests/test_virgl_cmd.c`.
@@ -140,114 +140,93 @@ DCL TEMP[1]\n\
   3: MOV OUT[0], TEMP[1]\n\
   4: END\n\0";
 
-// ── Horizontal 9-tap Gaussian blur fragment shader ───────────────────────
+// ── Loop-based horizontal box blur fragment shader ──────────────────────
 //
-// Samples 9 texels along the X axis, weighted by a Gaussian kernel (σ≈2).
-// Kernel: [0.0162, 0.0540, 0.1216, 0.1945, 0.2270, 0.1945, 0.1216, 0.0540, 0.0162]
-// Sum = 1.0 (normalised).
+// Accumulates (2*half_width + 1) texel samples along the X axis with
+// uniform weight, producing a box-averaged output. Used as one pass of
+// a 3-pass box blur that converges to Gaussian (CLT).
 //
-// Inputs:
-//   IN[0]  = GENERIC[0]  — UV texcoord (PERSPECTIVE)
-//   SAMP[0]              — source texture to blur
-//   CONST[0].x           — horizontal texel size (1.0 / texture_width)
+// The loop iterates from -half_width to +half_width (inclusive).
+// Each tap's texcoord is clamped to [0, CONST[0].z] to implement
+// CLAMP_TO_EDGE at the captured sub-region boundary.
 //
-// TEMP layout:
-//   TEMP[0] — running accumulator (RGBA)
-//   TEMP[1] — single texel sample (RGBA)
-//   TEMP[2] — mutable UV for off-centre taps (xy used, zw ignored)
+// Constant buffer (binding 0, 8 floats = 2 vec4):
+//   CONST[0] = [h_texel_step, v_texel_step, max_u, max_v]
+//   CONST[1] = [half_width, 1/(2*half+1), 0, 0]
 //
-// Instruction numbering is sequential (TGSI text requires it).
+// Registers:
+//   TEMP[0] = accumulator (RGBA)
+//   TEMP[1] = texel sample
+//   TEMP[2] = mutable UV (x modified per tap)
+//   TEMP[3].x = loop counter (starts at -half_width)
+//   TEMP[3].y = upper bound (half_width + 1, exclusive)
+//   TEMP[4].x = comparison result
 
 pub const BLUR_H_FS: &[u8] = b"FRAG\n\
 DCL IN[0], GENERIC[0], PERSPECTIVE\n\
 DCL OUT[0], COLOR\n\
 DCL SAMP[0]\n\
 DCL CONST[0]\n\
+DCL CONST[1]\n\
 DCL TEMP[0]\n\
 DCL TEMP[1]\n\
 DCL TEMP[2]\n\
-IMM[0] FLT32 { 0.2270, 0.1945, 0.1216, 0.0540 }\n\
-IMM[1] FLT32 { 0.0162, 1.0, 2.0, 3.0 }\n\
-IMM[2] FLT32 { 4.0, 0.0, 0.0, 0.0 }\n\
-  0: MOV TEMP[2], IN[0]\n\
-  1: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
-  2: MUL TEMP[0], TEMP[1], IMM[0].xxxx\n\
-  3: MAD TEMP[2].x, CONST[0].xxxx, IMM[1].yyyy, IN[0].xxxx\n\
-  4: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
-  5: MAD TEMP[0], TEMP[1], IMM[0].yyyy, TEMP[0]\n\
-  6: MAD TEMP[2].x, -CONST[0].xxxx, IMM[1].yyyy, IN[0].xxxx\n\
-  7: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
-  8: MAD TEMP[0], TEMP[1], IMM[0].yyyy, TEMP[0]\n\
-  9: MAD TEMP[2].x, CONST[0].xxxx, IMM[1].zzzz, IN[0].xxxx\n\
- 10: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 11: MAD TEMP[0], TEMP[1], IMM[0].zzzz, TEMP[0]\n\
- 12: MAD TEMP[2].x, -CONST[0].xxxx, IMM[1].zzzz, IN[0].xxxx\n\
- 13: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 14: MAD TEMP[0], TEMP[1], IMM[0].zzzz, TEMP[0]\n\
- 15: MAD TEMP[2].x, CONST[0].xxxx, IMM[1].wwww, IN[0].xxxx\n\
- 16: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 17: MAD TEMP[0], TEMP[1], IMM[0].wwww, TEMP[0]\n\
- 18: MAD TEMP[2].x, -CONST[0].xxxx, IMM[1].wwww, IN[0].xxxx\n\
- 19: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 20: MAD TEMP[0], TEMP[1], IMM[0].wwww, TEMP[0]\n\
- 21: MAD TEMP[2].x, CONST[0].xxxx, IMM[2].xxxx, IN[0].xxxx\n\
- 22: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 23: MAD TEMP[0], TEMP[1], IMM[1].xxxx, TEMP[0]\n\
- 24: MAD TEMP[2].x, -CONST[0].xxxx, IMM[2].xxxx, IN[0].xxxx\n\
- 25: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 26: MAD TEMP[0], TEMP[1], IMM[1].xxxx, TEMP[0]\n\
- 27: MOV OUT[0], TEMP[0]\n\
- 28: END\n\0";
+DCL TEMP[3]\n\
+DCL TEMP[4]\n\
+IMM[0] FLT32 { 0.0, 1.0, 0.0, 0.0 }\n\
+  0: MOV TEMP[0], IMM[0].xxxx\n\
+  1: MOV TEMP[2], IN[0]\n\
+  2: MOV TEMP[3].x, -CONST[1].xxxx\n\
+  3: ADD TEMP[3].y, CONST[1].xxxx, IMM[0].yyyy\n\
+  4: BGNLOOP\n\
+  5: SGE TEMP[4].x, TEMP[3].xxxx, TEMP[3].yyyy\n\
+  6: IF TEMP[4].xxxx\n\
+  7: BRK\n\
+  8: ENDIF\n\
+  9: MAD TEMP[2].x, TEMP[3].xxxx, CONST[0].xxxx, IN[0].xxxx\n\
+ 10: MAX TEMP[2].x, TEMP[2].xxxx, IMM[0].xxxx\n\
+ 11: MIN TEMP[2].x, TEMP[2].xxxx, CONST[0].zzzz\n\
+ 12: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 13: ADD TEMP[0], TEMP[0], TEMP[1]\n\
+ 14: ADD TEMP[3].x, TEMP[3].xxxx, IMM[0].yyyy\n\
+ 15: ENDLOOP\n\
+ 16: MUL OUT[0], TEMP[0], CONST[1].yyyy\n\
+ 17: END\n\0";
 
-// ── Vertical 9-tap Gaussian blur fragment shader ─────────────────────────
+// ── Loop-based vertical box blur fragment shader ────────────────────────
 //
-// Same Gaussian kernel as BLUR_H_FS but samples along the Y axis.
+// Same algorithm as BLUR_H_FS but samples along the Y axis.
+// Texcoord clamping uses CONST[0].w (max V) and 0.0 (min V).
 //
-// Inputs:
-//   IN[0]  = GENERIC[0]  — UV texcoord (PERSPECTIVE)
-//   SAMP[0]              — horizontal-blurred intermediate texture
-//   CONST[0].y           — vertical texel size (1.0 / texture_height)
-//
-// Identical structure to BLUR_H_FS; only the swizzle component changes
-// from .x to .y in the MAD offset computations.
+// Constant buffer layout: same as BLUR_H_FS (binding 0, 8 floats).
 
 pub const BLUR_V_FS: &[u8] = b"FRAG\n\
 DCL IN[0], GENERIC[0], PERSPECTIVE\n\
 DCL OUT[0], COLOR\n\
 DCL SAMP[0]\n\
 DCL CONST[0]\n\
+DCL CONST[1]\n\
 DCL TEMP[0]\n\
 DCL TEMP[1]\n\
 DCL TEMP[2]\n\
-IMM[0] FLT32 { 0.2270, 0.1945, 0.1216, 0.0540 }\n\
-IMM[1] FLT32 { 0.0162, 1.0, 2.0, 3.0 }\n\
-IMM[2] FLT32 { 4.0, 0.0, 0.0, 0.0 }\n\
-  0: MOV TEMP[2], IN[0]\n\
-  1: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
-  2: MUL TEMP[0], TEMP[1], IMM[0].xxxx\n\
-  3: MAD TEMP[2].y, CONST[0].yyyy, IMM[1].yyyy, IN[0].yyyy\n\
-  4: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
-  5: MAD TEMP[0], TEMP[1], IMM[0].yyyy, TEMP[0]\n\
-  6: MAD TEMP[2].y, -CONST[0].yyyy, IMM[1].yyyy, IN[0].yyyy\n\
-  7: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
-  8: MAD TEMP[0], TEMP[1], IMM[0].yyyy, TEMP[0]\n\
-  9: MAD TEMP[2].y, CONST[0].yyyy, IMM[1].zzzz, IN[0].yyyy\n\
- 10: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 11: MAD TEMP[0], TEMP[1], IMM[0].zzzz, TEMP[0]\n\
- 12: MAD TEMP[2].y, -CONST[0].yyyy, IMM[1].zzzz, IN[0].yyyy\n\
- 13: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 14: MAD TEMP[0], TEMP[1], IMM[0].zzzz, TEMP[0]\n\
- 15: MAD TEMP[2].y, CONST[0].yyyy, IMM[1].wwww, IN[0].yyyy\n\
- 16: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 17: MAD TEMP[0], TEMP[1], IMM[0].wwww, TEMP[0]\n\
- 18: MAD TEMP[2].y, -CONST[0].yyyy, IMM[1].wwww, IN[0].yyyy\n\
- 19: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 20: MAD TEMP[0], TEMP[1], IMM[0].wwww, TEMP[0]\n\
- 21: MAD TEMP[2].y, CONST[0].yyyy, IMM[2].xxxx, IN[0].yyyy\n\
- 22: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 23: MAD TEMP[0], TEMP[1], IMM[1].xxxx, TEMP[0]\n\
- 24: MAD TEMP[2].y, -CONST[0].yyyy, IMM[2].xxxx, IN[0].yyyy\n\
- 25: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
- 26: MAD TEMP[0], TEMP[1], IMM[1].xxxx, TEMP[0]\n\
- 27: MOV OUT[0], TEMP[0]\n\
- 28: END\n\0";
+DCL TEMP[3]\n\
+DCL TEMP[4]\n\
+IMM[0] FLT32 { 0.0, 1.0, 0.0, 0.0 }\n\
+  0: MOV TEMP[0], IMM[0].xxxx\n\
+  1: MOV TEMP[2], IN[0]\n\
+  2: MOV TEMP[3].x, -CONST[1].xxxx\n\
+  3: ADD TEMP[3].y, CONST[1].xxxx, IMM[0].yyyy\n\
+  4: BGNLOOP\n\
+  5: SGE TEMP[4].x, TEMP[3].xxxx, TEMP[3].yyyy\n\
+  6: IF TEMP[4].xxxx\n\
+  7: BRK\n\
+  8: ENDIF\n\
+  9: MAD TEMP[2].y, TEMP[3].xxxx, CONST[0].yyyy, IN[0].yyyy\n\
+ 10: MAX TEMP[2].y, TEMP[2].yyyy, IMM[0].xxxx\n\
+ 11: MIN TEMP[2].y, TEMP[2].yyyy, CONST[0].wwww\n\
+ 12: TEX TEMP[1], TEMP[2], SAMP[0], 2D\n\
+ 13: ADD TEMP[0], TEMP[0], TEMP[1]\n\
+ 14: ADD TEMP[3].x, TEMP[3].xxxx, IMM[0].yyyy\n\
+ 15: ENDLOOP\n\
+ 16: MUL OUT[0], TEMP[0], CONST[1].yyyy\n\
+ 17: END\n\0";
