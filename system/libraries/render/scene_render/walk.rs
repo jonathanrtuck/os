@@ -516,9 +516,9 @@ fn fill_shadow_shape(
 /// Render a Gaussian-blurred shadow into `fb`.
 ///
 /// Allocates three temporary buffers (source, temp, dest), rasterizes the
-/// shadow shape into the source, applies a two-pass Gaussian blur, then
-/// composites the result onto `fb`. Falls back to a hard shadow if the
-/// buffer would exceed 4 MiB.
+/// shadow shape into the source, applies three-pass box blur (converges to
+/// Gaussian via CLT), then composites the result onto `fb`. Falls back to
+/// a hard shadow if the buffer would exceed 4 MiB.
 fn render_shadow_blurred(
     fb: &mut Surface,
     sx: u32,
@@ -529,20 +529,18 @@ fn render_shadow_blurred(
     shadow_color: Color,
     blur_radius: u32,
 ) {
-    let pad = blur_radius;
+    let sigma = blur_radius as f32 / 2.0;
+    let pad = drawing::box_blur_pad(sigma);
     let buf_w = sw + 2 * pad;
     let buf_h = sh + 2 * pad;
     let buf_stride = buf_w * 4;
     let buf_size = (buf_stride * buf_h) as usize;
 
-    // Cap allocation to avoid OOM (4 MiB per buffer x 3 = 12 MiB).
     if buf_size > 4 * 1024 * 1024 {
-        // Fallback to hard shadow for very large blur.
         fill_shadow_shape(fb, sx, sy, sw, sh, phys_radius, shadow_color);
         return;
     }
 
-    // Source buffer: fill the shadow shape centered in the padded buffer.
     let mut src_buf = vec![0u8; buf_size];
     {
         let mut src_fb = Surface {
@@ -555,13 +553,8 @@ fn render_shadow_blurred(
         fill_shadow_shape(&mut src_fb, pad, pad, sw, sh, phys_radius, shadow_color);
     }
 
-    // Apply Gaussian blur (two-pass separable).
-    let mut tmp_buf = vec![0u8; buf_size];
+    let mut tmp_buf = vec![0u8; buf_size * 2]; // 2× for ping-pong
     let mut dst_buf = vec![0u8; buf_size];
-
-    // sigma proportional to radius (CSS convention: sigma ~ radius/2).
-    // 8.8 fixed-point: fp = sigma * 256.
-    let sigma_fp = ((blur_radius as u32) * 256 / 2).max(128);
 
     let src_read = drawing::ReadSurface {
         data: &src_buf,
@@ -578,19 +571,10 @@ fn render_shadow_blurred(
         format: PixelFormat::Bgra8888,
     };
 
-    drawing::blur_surface(
-        &src_read,
-        &mut dst_surface,
-        &mut tmp_buf,
-        blur_radius,
-        sigma_fp,
-    );
+    drawing::box_blur_3pass(&src_read, &mut dst_surface, &mut tmp_buf, sigma);
 
-    // Composite the blurred shadow onto the destination.
-    // The shadow buffer's (pad, pad) corresponds to (sx, sy) in the dest.
     let blit_x = sx.saturating_sub(pad);
     let blit_y = sy.saturating_sub(pad);
-
     fb.blit_blend(&dst_buf, buf_w, buf_h, buf_stride, blit_x, blit_y);
 }
 
@@ -598,9 +582,13 @@ fn render_shadow_blurred(
 /// library further clamps to MAX_CPU_BLUR_RADIUS (16 px).
 const MAX_BACKDROP_BLUR_PX: u32 = 32;
 
-/// Apply backdrop blur: extract the framebuffer region behind a node,
-/// blur it, and composite the result back. Must be called before the
-/// node's own background/content is drawn.
+/// Apply backdrop blur: extract a padded framebuffer region behind a node,
+/// blur it with three-pass box blur (converges to Gaussian via CLT), and
+/// write back only the center portion. Must be called before the node's
+/// own background/content is drawn.
+///
+/// The padded capture gives the blur real scene content at the edges,
+/// preventing dark banding from compounded CLAMP_TO_EDGE over 3 passes.
 fn apply_backdrop_blur(
     fb: &mut Surface,
     draw_x: i32,
@@ -610,73 +598,81 @@ fn apply_backdrop_blur(
     blur_radius_pt: u8,
     scale: f32,
 ) {
-    // Scale blur radius from points to physical pixels, clamped.
     let blur_px = ((blur_radius_pt as f32 * scale) as u32).min(MAX_BACKDROP_BLUR_PX);
     if blur_px == 0 {
         return;
     }
 
-    // Clamp extraction region to framebuffer bounds.
-    let x0 = (draw_x.max(0) as u32).min(fb.width);
-    let y0 = (draw_y.max(0) as u32).min(fb.height);
-    let x1 = ((draw_x + nw).max(0) as u32).min(fb.width);
-    let y1 = ((draw_y + nh).max(0) as u32).min(fb.height);
-    let region_w = x1 - x0;
-    let region_h = y1 - y0;
-    if region_w == 0 || region_h == 0 {
+    let sigma = blur_px as f32 / 2.0;
+    let pad = drawing::box_blur_pad(sigma);
+
+    // Node region in FB coordinates, clamped.
+    let nx0 = (draw_x.max(0) as u32).min(fb.width);
+    let ny0 = (draw_y.max(0) as u32).min(fb.height);
+    let nx1 = ((draw_x + nw).max(0) as u32).min(fb.width);
+    let ny1 = ((draw_y + nh).max(0) as u32).min(fb.height);
+    let node_w = nx1 - nx0;
+    let node_h = ny1 - ny0;
+    if node_w == 0 || node_h == 0 {
         return;
     }
 
-    let region_stride = region_w * 4;
-    let buf_size = (region_stride * region_h) as usize;
+    // Padded capture region, clamped to FB bounds.
+    let cx0 = nx0.saturating_sub(pad);
+    let cy0 = ny0.saturating_sub(pad);
+    let cx1 = (nx1 + pad).min(fb.width);
+    let cy1 = (ny1 + pad).min(fb.height);
+    let cap_w = cx1 - cx0;
+    let cap_h = cy1 - cy0;
+
+    let cap_stride = cap_w * 4;
+    let buf_size = (cap_stride * cap_h) as usize;
 
     // Cap allocation to prevent OOM (same 4 MiB limit as shadow blur).
     if buf_size > 4 * 1024 * 1024 {
         return;
     }
 
-    // 1. Extract the region from the framebuffer into a temporary buffer.
+    // 1. Extract padded region from the framebuffer.
     let mut src_buf = vec![0u8; buf_size];
-    for row in 0..region_h {
-        let fb_offset = ((y0 + row) * fb.stride + x0 * 4) as usize;
-        let src_offset = (row * region_stride) as usize;
-        let row_bytes = (region_w * 4) as usize;
+    for row in 0..cap_h {
+        let fb_offset = ((cy0 + row) * fb.stride + cx0 * 4) as usize;
+        let src_offset = (row * cap_stride) as usize;
+        let row_bytes = (cap_w * 4) as usize;
         if fb_offset + row_bytes <= fb.data.len() && src_offset + row_bytes <= src_buf.len() {
             src_buf[src_offset..src_offset + row_bytes]
                 .copy_from_slice(&fb.data[fb_offset..fb_offset + row_bytes]);
         }
     }
 
-    // 2. Apply Gaussian blur (two-pass separable).
-    let mut tmp_buf = vec![0u8; buf_size];
+    // 2. Three-pass box blur (converges to Gaussian, CLT).
+    let mut tmp_buf = vec![0u8; buf_size * 2];
     let mut dst_buf = vec![0u8; buf_size];
-
-    // sigma proportional to radius (CSS convention: sigma ~ radius/2).
-    // 8.8 fixed-point: fp = sigma * 256.
-    let sigma_fp = ((blur_px * 256) / 2).max(128);
 
     let src_read = drawing::ReadSurface {
         data: &src_buf,
-        width: region_w,
-        height: region_h,
-        stride: region_stride,
+        width: cap_w,
+        height: cap_h,
+        stride: cap_stride,
         format: drawing::PixelFormat::Bgra8888,
     };
     let mut dst_surface = Surface {
         data: &mut dst_buf,
-        width: region_w,
-        height: region_h,
-        stride: region_stride,
+        width: cap_w,
+        height: cap_h,
+        stride: cap_stride,
         format: PixelFormat::Bgra8888,
     };
 
-    drawing::blur_surface(&src_read, &mut dst_surface, &mut tmp_buf, blur_px, sigma_fp);
+    drawing::box_blur_3pass(&src_read, &mut dst_surface, &mut tmp_buf, sigma);
 
-    // 3. Write the blurred region back to the framebuffer (overwrite, not blend).
-    for row in 0..region_h {
-        let fb_offset = ((y0 + row) * fb.stride + x0 * 4) as usize;
-        let dst_offset = (row * region_stride) as usize;
-        let row_bytes = (region_w * 4) as usize;
+    // 3. Write back only the center (node) portion — padding is discarded.
+    let pad_left = nx0 - cx0;
+    let pad_top = ny0 - cy0;
+    for row in 0..node_h {
+        let fb_offset = ((ny0 + row) * fb.stride + nx0 * 4) as usize;
+        let dst_offset = ((pad_top + row) * cap_stride + pad_left * 4) as usize;
+        let row_bytes = (node_w * 4) as usize;
         if fb_offset + row_bytes <= fb.data.len() && dst_offset + row_bytes <= dst_buf.len() {
             fb.data[fb_offset..fb_offset + row_bytes]
                 .copy_from_slice(&dst_buf[dst_offset..dst_offset + row_bytes]);
@@ -1113,8 +1109,7 @@ fn apply_coverage_mask(
             if px_offset + 3 < offscreen.len() && mask_offset < mask.len() {
                 let coverage = mask[mask_offset] as u32;
                 // Multiply all BGRA channels by coverage/255.
-                offscreen[px_offset] =
-                    ((offscreen[px_offset] as u32 * coverage) / 255) as u8;
+                offscreen[px_offset] = ((offscreen[px_offset] as u32 * coverage) / 255) as u8;
                 offscreen[px_offset + 1] =
                     ((offscreen[px_offset + 1] as u32 * coverage) / 255) as u8;
                 offscreen[px_offset + 2] =
@@ -1162,7 +1157,12 @@ fn render_clip_path_children(
 
     if clip_data.is_empty() {
         // No valid clip data: render children normally without clipping.
-        let child_clip = ClipRect { x: draw_x, y: draw_y, w: nw, h: nh };
+        let child_clip = ClipRect {
+            x: draw_x,
+            y: draw_y,
+            w: nw,
+            h: nh,
+        };
         let child_ox = draw_x + round_f32(node.content_transform.tx * scale);
         let child_oy = draw_y + round_f32(node.content_transform.ty * scale);
         traverse_children(
@@ -1173,30 +1173,30 @@ fn render_clip_path_children(
 
     // Compute cache key and get or rasterize the clip mask.
     let cache_key = compute_clip_cache_key(node.clip_path, ow, oh);
-    let mask_coverage: Vec<u8> = match clip_cache.get_or_rasterize(
-        clip_data,
-        ow,
-        oh,
-        scene::FillRule::Winding,
-        cache_key,
-    ) {
-        Some(slice) => {
-            // Copy the coverage slice out so we can later mutably borrow
-            // clip_cache again when recursing into children.
-            Vec::from(slice)
-        }
-        None => {
-            // Rasterization failed: render children unclipped.
-            let child_clip = ClipRect { x: draw_x, y: draw_y, w: nw, h: nh };
-            let child_ox = draw_x + round_f32(node.content_transform.tx * scale);
-            let child_oy = draw_y + round_f32(node.content_transform.ty * scale);
-            traverse_children(
-                fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache,
-                clip_cache,
-            );
-            return;
-        }
-    };
+    let mask_coverage: Vec<u8> =
+        match clip_cache.get_or_rasterize(clip_data, ow, oh, scene::FillRule::Winding, cache_key) {
+            Some(slice) => {
+                // Copy the coverage slice out so we can later mutably borrow
+                // clip_cache again when recursing into children.
+                Vec::from(slice)
+            }
+            None => {
+                // Rasterization failed: render children unclipped.
+                let child_clip = ClipRect {
+                    x: draw_x,
+                    y: draw_y,
+                    w: nw,
+                    h: nh,
+                };
+                let child_ox = draw_x + round_f32(node.content_transform.tx * scale);
+                let child_oy = draw_y + round_f32(node.content_transform.ty * scale);
+                traverse_children(
+                    fb, graph, ctx, node, child_ox, child_oy, child_clip, scale, lru, cache,
+                    clip_cache,
+                );
+                return;
+            }
+        };
 
     // 1. Render children into an offscreen BGRA buffer.
     let ostride = ow * 4;
@@ -1209,7 +1209,12 @@ fn render_clip_path_children(
             stride: ostride,
             format: PixelFormat::Bgra8888,
         };
-        let off_clip = ClipRect { x: 0, y: 0, w: nw, h: nh };
+        let off_clip = ClipRect {
+            x: 0,
+            y: 0,
+            w: nw,
+            h: nh,
+        };
         let child_ox = round_f32(node.content_transform.tx * scale);
         let child_oy = round_f32(node.content_transform.ty * scale);
         traverse_children(
@@ -1231,7 +1236,14 @@ fn render_clip_path_children(
     apply_coverage_mask(&mut offscreen_buf, ow, oh, ostride, &mask_coverage, ow);
 
     // 3. Blit masked result onto the main framebuffer.
-    fb.blit_blend(&offscreen_buf, ow, oh, ostride, draw_x as u32, draw_y as u32);
+    fb.blit_blend(
+        &offscreen_buf,
+        ow,
+        oh,
+        ostride,
+        draw_x as u32,
+        draw_y as u32,
+    );
 }
 
 /// Render children into an offscreen buffer with rounded-rect masking.
@@ -1493,7 +1505,19 @@ pub fn render_scene(fb: &mut Surface, graph: &SceneGraph, ctx: &RenderCtx) {
     };
 
     let mut clip_cache = ClipMaskCache::new();
-    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None, None, &mut clip_cache);
+    render_node(
+        fb,
+        graph,
+        ctx,
+        0,
+        0,
+        0,
+        clip,
+        None,
+        None,
+        None,
+        &mut clip_cache,
+    );
 }
 
 /// Render an entire scene graph with a SurfacePool for offscreen opacity.
@@ -1589,7 +1613,19 @@ pub fn render_scene_clipped(
     };
 
     let mut clip_cache = ClipMaskCache::new();
-    render_node(fb, graph, ctx, 0, 0, 0, clip, None, None, None, &mut clip_cache);
+    render_node(
+        fb,
+        graph,
+        ctx,
+        0,
+        0,
+        0,
+        clip,
+        None,
+        None,
+        None,
+        &mut clip_cache,
+    );
 }
 
 /// Render only the region within `dirty`, with SurfacePool for offscreen opacity.
