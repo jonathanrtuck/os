@@ -15,21 +15,54 @@ import AppKit
 import Hypervisor
 import Metal
 
+/// Global flag set by SIGUSR1 signal handler. Checked by VirtioMetal on each frame.
+nonisolated(unsafe) var _signalCaptureFlag: Bool = false
+/// Global reference to the Metal backend for signal-triggered captures.
+nonisolated(unsafe) weak var _metalBackendForCapture: VirtioMetalBackend?
+
 func main() throws {
     let args = CommandLine.arguments
     let noGpu = args.contains("--no-gpu")
 
-    guard args.filter({ !$0.hasPrefix("-") }).count >= 2 else {
-        print("Usage: hypervisor <kernel-elf> [--verbose] [--no-gpu]")
+    // Parse --capture N PATH (capture frame N to PATH, then exit)
+    var captureFrame: Int = -1
+    var capturePath: String = "/tmp/hypervisor-capture.png"
+    if let idx = args.firstIndex(of: "--capture"), idx + 2 < args.count {
+        captureFrame = Int(args[idx + 1]) ?? -1
+        capturePath = args[idx + 2]
+    }
+
+    guard args.filter({ !$0.hasPrefix("-") && !$0.hasPrefix("/") }).count >= 2
+          || args.contains(where: { $0.hasSuffix("kernel") || $0.hasSuffix(".elf") })
+          || args.count >= 2
+    else {
+        print("Usage: hypervisor <kernel-elf> [options]")
         print("")
-        print("  kernel-elf: Path to the OS kernel ELF binary")
-        print("              (system/target/aarch64-unknown-none/release/kernel)")
-        print("  --verbose:  Enable verbose logging")
-        print("  --no-gpu:   Boot without GPU (serial only, no window)")
+        print("  kernel-elf:          Path to the OS kernel ELF binary")
+        print("  --verbose:           Enable verbose logging")
+        print("  --no-gpu:            Boot without GPU (serial only, no window)")
+        print("  --capture N PATH:    Capture frame N as PNG to PATH, then exit")
+        print("  SIGUSR1:             Capture next frame to /tmp/hypervisor-capture.png")
         exit(1)
     }
 
-    let kernelPath = args.first(where: { !$0.hasPrefix("-") && $0 != args[0] })!
+    // Find kernel path: first arg that isn't a flag or the binary itself
+    let kernelPath: String = {
+        for i in 1..<args.count {
+            let a = args[i]
+            if a.hasPrefix("--") {
+                // Skip flag and its arguments
+                if a == "--capture" { continue }
+                continue
+            }
+            // Skip arguments to --capture
+            if i >= 2 && args[i - 1] == "--capture" { continue }
+            if i >= 3 && args[i - 2] == "--capture" { continue }
+            return a
+        }
+        print("Error: no kernel path specified")
+        exit(1)
+    }()
     let verbose = args.contains("--verbose")
 
     print("Hypervisor — Native macOS ARM64 VM")
@@ -91,9 +124,18 @@ func main() throws {
 
         let backend = VirtioMetalBackend(device: window.metalDevice, layer: window.metalLayer)
         backend.verbose = verbose
+        backend.captureAtFrame = captureFrame
+        backend.capturePath = capturePath
+        backend.exitAfterCapture = captureFrame >= 0
         metalBackend = backend
         vm.addVirtioDevice(slot: 3, backend: backend)
         print("  GPU: Metal passthrough (slot 3)")
+
+        // SIGUSR1 triggers ad-hoc screenshot capture.
+        _metalBackendForCapture = backend
+        signal(SIGUSR1) { _ in
+            _signalCaptureFlag = true
+        }
     }
 
     // ── DTB ─────────────────────────────────────────────────────────────

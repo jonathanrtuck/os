@@ -42,6 +42,13 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
     var displayWidth: UInt32 = 1024
     var displayHeight: UInt32 = 768
 
+    // Frame capture state
+    private(set) var frameCount: Int = 0
+    var captureAtFrame: Int = -1       // -1 = disabled
+    var capturePath: String = "/tmp/hypervisor-capture.png"
+    var captureNextFrame: Bool = false  // triggered by SIGUSR1
+    var exitAfterCapture: Bool = false
+
     // Metal state
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
@@ -605,13 +612,52 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
                 destinationOrigin: MTLOrigin(x: Int(dx), y: Int(dy), z: 0))
 
         case .presentAndCommit:
+            // Check SIGUSR1 signal flag (set from signal handler).
+            if _signalCaptureFlag {
+                _signalCaptureFlag = false
+                captureNextFrame = true
+            }
+            let shouldCapture = captureNextFrame
+                || (captureAtFrame >= 0 && frameCount == captureAtFrame)
+
+            if shouldCapture, let drawable = currentDrawable {
+                // Blit drawable to a CPU-readable staging texture before present.
+                let tex = drawable.texture
+                let desc = MTLTextureDescriptor.texture2DDescriptor(
+                    pixelFormat: tex.pixelFormat,
+                    width: tex.width, height: tex.height,
+                    mipmapped: false)
+                desc.storageMode = .shared
+                desc.usage = []
+                if let staging = device.makeTexture(descriptor: desc) {
+                    let cb = commandQueue.makeCommandBuffer()!
+                    let blit = cb.makeBlitCommandEncoder()!
+                    blit.copy(from: tex, sourceSlice: 0, sourceLevel: 0,
+                              sourceOrigin: MTLOrigin(x: 0, y: 0, z: 0),
+                              sourceSize: MTLSize(width: tex.width, height: tex.height, depth: 1),
+                              to: staging, destinationSlice: 0, destinationLevel: 0,
+                              destinationOrigin: MTLOrigin(x: 0, y: 0, z: 0))
+                    blit.endEncoding()
+                    cb.commit()
+                    cb.waitUntilCompleted()
+                    saveTextureAsPNG(staging, path: capturePath)
+                    print("VirtioMetal: captured frame \(frameCount) → \(capturePath)")
+                }
+                captureNextFrame = false
+            }
+
             if let drawable = currentDrawable {
                 currentCommandBuffer?.present(drawable)
             }
             currentCommandBuffer?.commit()
             currentCommandBuffer?.waitUntilCompleted()
+            frameCount += 1
             currentCommandBuffer = nil
             currentDrawable = nil
+
+            if shouldCapture && exitAfterCapture {
+                exit(0)
+            }
         }
     }
 
@@ -700,4 +746,47 @@ final class VirtioMetalBackend: VirtioDeviceBackend {
         case .none:           return .keep
         }
     }
+}
+
+// MARK: - PNG capture
+
+import ImageIO
+import CoreGraphics
+
+/// Save a Metal texture (shared storage) as a PNG file.
+private func saveTextureAsPNG(_ texture: MTLTexture, path: String) {
+    let w = texture.width
+    let h = texture.height
+    let bpr = w * 4
+    var pixels = [UInt8](repeating: 0, count: bpr * h)
+    texture.getBytes(&pixels, bytesPerRow: bpr,
+                     from: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
+                                     size: MTLSize(width: w, height: h, depth: 1)),
+                     mipmapLevel: 0)
+
+    // BGRA → RGBA swap (Metal uses BGRA, CGImage expects RGBA).
+    for i in stride(from: 0, to: pixels.count, by: 4) {
+        let b = pixels[i]
+        pixels[i] = pixels[i + 2]
+        pixels[i + 2] = b
+    }
+
+    guard let colorSpace = CGColorSpace(name: CGColorSpace.sRGB),
+          let ctx = CGContext(data: &pixels, width: w, height: h,
+                             bitsPerComponent: 8, bytesPerRow: bpr,
+                             space: colorSpace,
+                             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+          let image = ctx.makeImage()
+    else {
+        print("VirtioMetal: failed to create CGImage for capture")
+        return
+    }
+
+    let url = URL(fileURLWithPath: path) as CFURL
+    guard let dest = CGImageDestinationCreateWithURL(url, "public.png" as CFString, 1, nil) else {
+        print("VirtioMetal: failed to create PNG destination at \(path)")
+        return
+    }
+    CGImageDestinationAddImage(dest, image, nil)
+    CGImageDestinationFinalize(dest)
 }
