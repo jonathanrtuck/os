@@ -31,9 +31,9 @@ use super::{
 /// Per-process DMA page budget: half of RAM pages.
 /// Generous to support GPU render target + depth/stencil surface.
 /// Derived from RAM geometry so resolution changes never require kernel updates.
-const DEFAULT_DMA_PAGE_LIMIT: u64 = paging::RAM_SIZE / paging::PAGE_SIZE / 2;
+const DEFAULT_DMA_PAGE_LIMIT: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 2;
 /// Per-process heap page budget: quarter of RAM pages.
-const DEFAULT_HEAP_PAGE_LIMIT: u64 = paging::RAM_SIZE / paging::PAGE_SIZE / 4;
+const DEFAULT_HEAP_PAGE_LIMIT: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 4;
 
 // ---------------------------------------------------------------------------
 // PageAttrs — page table attribute builder

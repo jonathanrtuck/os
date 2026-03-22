@@ -1038,6 +1038,17 @@ pub extern "C" fn _start() -> ! {
     let mut vertex_buf: Vec<u8> = Vec::with_capacity(MAX_INLINE_BYTES);
     let mut glyph_vertex_buf: Vec<u8> = Vec::with_capacity(MAX_INLINE_BYTES);
 
+    // Heap-allocate shared path buffer to avoid 4 KiB stack arrays inside
+    // recursive walk_scene (stack overflow at 16 KiB, tight at 64 KiB).
+    let path_buf_layout = alloc::alloc::Layout::from_size_align(
+        core::mem::size_of::<PathPointsBuf>(),
+        core::mem::align_of::<PathPointsBuf>(),
+    )
+    .unwrap();
+    let path_buf_ptr =
+        unsafe { alloc::alloc::alloc_zeroed(path_buf_layout) as *mut PathPointsBuf };
+    let path_buf = unsafe { &mut *path_buf_ptr };
+
     loop {
         // Wait for scene update signal from core, with frame-rate cadence.
         let _ = sys::wait(&[SCENE_HANDLE, INIT_HANDLE], period_ns);
@@ -1111,6 +1122,7 @@ pub extern "C" fn _start() -> ! {
             &mut setup_vq,
             irq_handle,
             &setup_dma,
+            path_buf,
         );
 
         // Flush remaining solid vertices.
@@ -1294,6 +1306,11 @@ fn pack_copy_params(
 
 const MAX_PATH_POINTS: usize = 512;
 
+/// Reusable heap buffer for path flattening. Shared across `walk_scene` and
+/// `draw_path_stencil_cover` to keep the recursive `walk_scene` stack frame small
+/// (~300 bytes per level instead of ~4400).
+type PathPointsBuf = [(f32, f32); MAX_PATH_POINTS];
+
 /// One-time warning for path truncation.
 static mut PATH_TRUNCATION_WARNED: bool = false;
 
@@ -1426,13 +1443,13 @@ fn draw_path_stencil_cover(
     vh: f32,
     scale: f32,
     opacity: f32,
+    path_buf: &mut PathPointsBuf,
 ) {
     let offset = contours.offset as usize;
     let end = offset + contours.length as usize;
     if end > data_buf.len() { return; }
 
-    let mut points = [(0.0f32, 0.0f32); MAX_PATH_POINTS];
-    let n = parse_path_to_points(&data_buf[offset..end], &mut points);
+    let n = parse_path_to_points(&data_buf[offset..end], path_buf);
     if n < 3 { return; }
 
     // Flush any pending solid geometry before changing pipeline.
@@ -1441,15 +1458,15 @@ fn draw_path_stencil_cover(
     // Compute centroid for fan tessellation.
     let mut cx: f32 = 0.0;
     let mut cy: f32 = 0.0;
-    for i in 0..n { cx += points[i].0; cy += points[i].1; }
+    for i in 0..n { cx += path_buf[i].0; cy += path_buf[i].1; }
     cx /= n as f32;
     cy /= n as f32;
 
     // Build fan triangle vertices (position + dummy color with a=1 for stencil).
     let mut fan_verts: Vec<u8> = Vec::with_capacity(n * 3 * VERTEX_BYTES);
     for i in 0..n - 1 {
-        let (ax, ay) = points[i];
-        let (bx, by) = points[i + 1];
+        let (ax, ay) = path_buf[i];
+        let (bx, by) = path_buf[i + 1];
         // NDC conversion: (node_x + point_x) * scale maps to pixels, / vw to NDC.
         let to_ndc_x = |px: f32| -> f32 { ((node_x + px) * scale / vw) * 2.0 - 1.0 };
         let to_ndc_y = |py: f32| -> f32 { 1.0 - ((node_y + py) * scale / vh) * 2.0 };
@@ -1573,6 +1590,8 @@ fn walk_scene(
     setup_vq: &mut virtio::Virtqueue,
     irq_handle: u8,
     setup_dma: &DmaBuf,
+    // Shared heap buffer for path flattening (avoids 4 KiB stack per recursion).
+    path_buf: &mut PathPointsBuf,
 ) {
     if node_id == NULL || node_id as usize >= nodes.len() {
         return;
@@ -1800,7 +1819,7 @@ fn walk_scene(
             if contours.length > 0 {
                 draw_path_stencil_cover(
                     cmdbuf, solid_verts, data_buf, contours, color, fill_rule,
-                    abs_x, abs_y, w, h, vw, vh, scale, opacity,
+                    abs_x, abs_y, w, h, vw, vh, scale, opacity, path_buf,
                 );
             }
         }
@@ -1881,21 +1900,20 @@ fn walk_scene(
             let cp_end = cp_off + cp.length as usize;
 
             if cp_end <= data_buf.len() {
-                let mut points = [(0.0f32, 0.0f32); MAX_PATH_POINTS];
-                let n_pts = parse_path_to_points(&data_buf[cp_off..cp_end], &mut points);
+                let n_pts = parse_path_to_points(&data_buf[cp_off..cp_end], path_buf);
 
                 if n_pts >= 3 {
                     // Build fan triangles for the clip path.
                     let mut fan_verts: Vec<u8> = Vec::with_capacity(n_pts * 3 * VERTEX_BYTES);
                     let mut cx_sum: f32 = 0.0;
                     let mut cy_sum: f32 = 0.0;
-                    for i in 0..n_pts { cx_sum += points[i].0; cy_sum += points[i].1; }
+                    for i in 0..n_pts { cx_sum += path_buf[i].0; cy_sum += path_buf[i].1; }
                     let centroid_x = cx_sum / n_pts as f32;
                     let centroid_y = cy_sum / n_pts as f32;
 
                     for i in 0..n_pts - 1 {
-                        let (ax, ay) = points[i];
-                        let (bx, by) = points[i + 1];
+                        let (ax, ay) = path_buf[i];
+                        let (bx, by) = path_buf[i + 1];
                         for &(px, py) in &[(centroid_x, centroid_y), (bx, by), (ax, ay)] {
                             let ndc_x = ((abs_x + px) * scale / vw) * 2.0 - 1.0;
                             let ndc_y = 1.0 - ((abs_y + py) * scale / vh) * 2.0;
@@ -1974,6 +1992,7 @@ fn walk_scene(
             setup_vq,
             irq_handle,
             setup_dma,
+            path_buf,
         );
         if child as usize >= nodes.len() {
             break;

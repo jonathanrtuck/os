@@ -10,7 +10,12 @@
 
 mod paging {
     pub const PAGE_SIZE: u64 = 4096;
-    pub const RAM_SIZE: u64 = 256 * 1024 * 1024;
+    pub const RAM_SIZE_MAX: u64 = 256 * 1024 * 1024;
+
+    pub fn ram_end() -> u64 {
+        // Stub: not used by buddy allocator tests (validation is #[cfg(not(test))]).
+        0
+    }
 
     pub const fn align_up(addr: usize, align: usize) -> usize {
         (addr + align - 1) & !(align - 1)

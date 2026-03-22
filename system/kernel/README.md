@@ -56,7 +56,7 @@ cd system/test && cargo +nightly miri test -- --test-threads=1
   - Linked-list heap with coalescing for variable-size allocations
 - **Processes** — ELF64 loading, per-process address spaces, full cleanup on exit
   - User code at EL0, kernel at EL1
-  - 16 KiB user stack with guard page
+  - 64 KiB user stack with guard page
   - Per-process handle table (256 slots, read/write rights)
 - **IPC** — shared-memory channels with signal/wait notification
   - Handle-based access control, kernel-mediated creation

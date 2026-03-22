@@ -70,13 +70,30 @@ fn align_up_u64_overflow_wraps_without_panic() {
 // --- Constant relationship checks ---
 
 #[test]
-fn ram_end_equals_start_plus_size() {
-    assert_eq!(RAM_END, RAM_START + RAM_SIZE);
+fn ram_end_max_equals_start_plus_size_max() {
+    assert_eq!(RAM_END_MAX, RAM_START + RAM_SIZE_MAX);
 }
 
 #[test]
-fn ram_region_is_256_mib() {
-    assert_eq!(RAM_SIZE, 256 * 1024 * 1024);
+fn ram_max_region_is_256_mib() {
+    assert_eq!(RAM_SIZE_MAX, 256 * 1024 * 1024);
+}
+
+#[test]
+fn ram_end_defaults_to_max() {
+    assert_eq!(ram_end(), RAM_END_MAX);
+}
+
+#[test]
+fn set_ram_end_updates_runtime_value() {
+    let original = ram_end();
+    let test_end = RAM_START + 128 * 1024 * 1024;
+
+    set_ram_end(test_end);
+    assert_eq!(ram_end(), test_end);
+
+    // Restore original to avoid affecting other tests.
+    set_ram_end(original);
 }
 
 #[test]
@@ -122,9 +139,9 @@ fn user_va_regions_do_not_overlap() {
 }
 
 #[test]
-fn user_stack_size_is_16k() {
-    assert_eq!(USER_STACK_PAGES, 4);
-    assert_eq!(USER_STACK_VA, USER_STACK_TOP - 4 * PAGE_SIZE);
+fn user_stack_size_is_64k() {
+    assert_eq!(USER_STACK_PAGES, 16);
+    assert_eq!(USER_STACK_VA, USER_STACK_TOP - 16 * PAGE_SIZE);
 }
 
 #[test]

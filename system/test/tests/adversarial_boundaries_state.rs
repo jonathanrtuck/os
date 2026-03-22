@@ -108,7 +108,7 @@ enum Error {
 
 // --- Duplicated constants from syscall.rs ---
 
-const MAX_DMA_ORDER: u64 = (RAM_SIZE / PAGE_SIZE).ilog2() as u64;
+const MAX_DMA_ORDER: u64 = (RAM_SIZE_MAX / PAGE_SIZE).ilog2() as u64;
 const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -237,7 +237,7 @@ fn validate_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Res
     if target_handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
-    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE_MAX / PAGE_SIZE / 2;
     if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
@@ -247,7 +247,7 @@ fn validate_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Res
     let end_pa = pa
         .checked_add(page_count * PAGE_SIZE)
         .ok_or(Error::BadAddress)?;
-    if pa < RAM_START || end_pa > RAM_END {
+    if pa < RAM_START || end_pa > RAM_END_MAX {
         return Err(Error::BadAddress);
     }
     Ok(())
@@ -270,7 +270,7 @@ fn validate_device_map(pa: u64, size: u64) -> Result<(), Error> {
         return Err(Error::InvalidArgument);
     }
     let end = pa.checked_add(size).ok_or(Error::InvalidArgument)?;
-    if !(end <= RAM_START || pa >= RAM_END) {
+    if !(end <= RAM_START || pa >= RAM_END_MAX) {
         return Err(Error::InvalidArgument); // Overlaps RAM
     }
     Ok(())
@@ -598,8 +598,8 @@ fn boundary_memory_share_u64_max_page_count() {
 
 #[test]
 fn boundary_memory_share_max_page_count() {
-    // MAX_SHARE_PAGES = RAM_SIZE / PAGE_SIZE / 2 (half of RAM).
-    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    // MAX_SHARE_PAGES = RAM_SIZE_MAX / PAGE_SIZE / 2 (half of RAM).
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE_MAX / PAGE_SIZE / 2;
     assert!(validate_memory_share(0, RAM_START, MAX_SHARE_PAGES).is_ok());
     // One more is invalid.
     assert_eq!(
@@ -614,8 +614,8 @@ fn boundary_memory_share_pa_overflow() {
     // page_count = 2048, pa near end of RAM → checked_add would catch it
     // actually page_count <= 2048 is fine, but let's pick a PA that when added
     // to 2048 * PAGE_SIZE would overflow. This requires a very high PA.
-    // Use a valid page_count but PA that causes end_pa > RAM_END.
-    let pa = RAM_END - PAGE_SIZE;
+    // Use a valid page_count but PA that causes end_pa > RAM_END_MAX.
+    let pa = RAM_END_MAX - PAGE_SIZE;
     assert_eq!(validate_memory_share(0, pa, 2), Err(Error::BadAddress));
 }
 
@@ -780,8 +780,8 @@ fn boundary_adjacent_values_no_panic() {
         USER_VA_END + 1,
         RAM_START,
         RAM_START - 1,
-        RAM_END,
-        RAM_END + 1,
+        RAM_END_MAX,
+        RAM_END_MAX + 1,
         HEAP_BASE,
         HEAP_BASE - 1,
         HEAP_END,
@@ -836,9 +836,9 @@ fn device_map_pa_at_ram_start() {
 
 #[test]
 fn device_map_pa_at_ram_end_minus_one() {
-    // PA at RAM_END - 1 with size 1 → end = RAM_END, pa >= RAM_START → overlaps.
+    // PA at RAM_END_MAX - 1 with size 1 → end = RAM_END_MAX, pa >= RAM_START → overlaps.
     assert_eq!(
-        validate_device_map(RAM_END - 1, 1),
+        validate_device_map(RAM_END_MAX - 1, 1),
         Err(Error::InvalidArgument)
     );
 }
@@ -852,7 +852,7 @@ fn device_map_pa_spanning_ram() {
     );
     // Starts inside RAM, ends after RAM.
     assert_eq!(
-        validate_device_map(RAM_END - PAGE_SIZE, 2 * PAGE_SIZE),
+        validate_device_map(RAM_END_MAX - PAGE_SIZE, 2 * PAGE_SIZE),
         Err(Error::InvalidArgument)
     );
 }
@@ -868,16 +868,16 @@ fn device_map_pa_before_ram() {
 #[test]
 fn device_map_pa_after_ram() {
     // Entirely after RAM → valid device MMIO.
-    assert!(validate_device_map(RAM_END, PAGE_SIZE).is_ok());
-    assert!(validate_device_map(RAM_END + PAGE_SIZE, PAGE_SIZE).is_ok());
+    assert!(validate_device_map(RAM_END_MAX, PAGE_SIZE).is_ok());
+    assert!(validate_device_map(RAM_END_MAX + PAGE_SIZE, PAGE_SIZE).is_ok());
 }
 
 #[test]
 fn device_map_pa_at_ram_boundaries() {
     // end == RAM_START (end = pa + size, doesn't overlap because end <= RAM_START).
     assert!(validate_device_map(RAM_START - PAGE_SIZE, PAGE_SIZE).is_ok());
-    // pa == RAM_END (starts at RAM_END, doesn't overlap because pa >= RAM_END).
-    assert!(validate_device_map(RAM_END, PAGE_SIZE).is_ok());
+    // pa == RAM_END_MAX (starts at RAM_END_MAX, doesn't overlap because pa >= RAM_END_MAX).
+    assert!(validate_device_map(RAM_END_MAX, PAGE_SIZE).is_ok());
 }
 
 #[test]
@@ -914,7 +914,7 @@ fn device_map_u64_max_pa() {
 fn device_map_entire_ram_range() {
     // Map exactly the entire RAM range → overlaps.
     assert_eq!(
-        validate_device_map(RAM_START, RAM_SIZE),
+        validate_device_map(RAM_START, RAM_SIZE_MAX),
         Err(Error::InvalidArgument)
     );
 }

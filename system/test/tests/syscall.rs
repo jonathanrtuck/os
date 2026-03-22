@@ -16,7 +16,7 @@ use paging::*;
 
 // --- Duplicated constants from syscall.rs ---
 
-const MAX_DMA_ORDER: u64 = (RAM_SIZE / PAGE_SIZE).ilog2() as u64;
+const MAX_DMA_ORDER: u64 = (RAM_SIZE_MAX / PAGE_SIZE).ilog2() as u64;
 const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -166,7 +166,7 @@ fn validate_device_map(pa: u64, size: u64) -> Result<(), Error> {
 
     let end = pa.checked_add(size).ok_or(Error::InvalidArgument)?;
 
-    if !(end <= RAM_START || pa >= RAM_END) {
+    if !(end <= RAM_START || pa >= RAM_END_MAX) {
         return Err(Error::InvalidArgument);
     }
 
@@ -175,7 +175,7 @@ fn validate_device_map(pa: u64, size: u64) -> Result<(), Error> {
 
 /// Validates memory_share PA range exactly as sys_memory_share does.
 fn validate_memory_share(pa: u64, page_count: u64) -> Result<(), Error> {
-    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE_MAX / PAGE_SIZE / 2;
     if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
@@ -187,7 +187,7 @@ fn validate_memory_share(pa: u64, page_count: u64) -> Result<(), Error> {
         .checked_add(page_count * PAGE_SIZE)
         .ok_or(Error::BadAddress)?;
 
-    if pa < RAM_START || end_pa > RAM_END {
+    if pa < RAM_START || end_pa > RAM_END_MAX {
         return Err(Error::BadAddress);
     }
 
@@ -484,8 +484,8 @@ fn device_map_below_ram_succeeds() {
 
 #[test]
 fn device_map_above_ram_succeeds() {
-    // MMIO space above RAM_END.
-    assert!(validate_device_map(RAM_END, 0x1000).is_ok());
+    // MMIO space above RAM_END_MAX.
+    assert!(validate_device_map(RAM_END_MAX, 0x1000).is_ok());
 }
 
 #[test]
@@ -528,7 +528,7 @@ fn memory_share_zero_pages_rejected() {
 
 #[test]
 fn memory_share_too_many_pages_rejected() {
-    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE_MAX / PAGE_SIZE / 2;
     assert_eq!(
         validate_memory_share(RAM_START, MAX_SHARE_PAGES + 1),
         Err(Error::InvalidArgument)
@@ -550,20 +550,20 @@ fn memory_share_below_ram_rejected() {
 
 #[test]
 fn memory_share_above_ram_rejected() {
-    assert_eq!(validate_memory_share(RAM_END, 1), Err(Error::BadAddress));
+    assert_eq!(validate_memory_share(RAM_END_MAX, 1), Err(Error::BadAddress));
 }
 
 #[test]
 fn memory_share_valid() {
-    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE_MAX / PAGE_SIZE / 2;
     assert!(validate_memory_share(RAM_START, 1).is_ok());
     assert!(validate_memory_share(RAM_START, MAX_SHARE_PAGES).is_ok());
 }
 
 #[test]
 fn memory_share_end_exceeds_ram() {
-    // Start within RAM, but start + count * PAGE_SIZE > RAM_END.
-    let almost_end = RAM_END - PAGE_SIZE;
+    // Start within RAM, but start + count * PAGE_SIZE > RAM_END_MAX.
+    let almost_end = RAM_END_MAX - PAGE_SIZE;
     assert_eq!(validate_memory_share(almost_end, 2), Err(Error::BadAddress));
 }
 
@@ -804,7 +804,7 @@ fn syscall_numbers_are_unique_and_contiguous() {
 #[test]
 fn max_dma_order_matches_page_allocator() {
     // MAX_DMA_ORDER = log2(RAM pages), derived from RAM geometry.
-    assert_eq!(MAX_DMA_ORDER, (RAM_SIZE / PAGE_SIZE).ilog2() as u64);
+    assert_eq!(MAX_DMA_ORDER, (RAM_SIZE_MAX / PAGE_SIZE).ilog2() as u64);
 }
 
 #[test]
@@ -829,7 +829,7 @@ fn max_write_len_is_4096() {
 #[test]
 fn device_map_rejects_all_ram_addresses() {
     // Every page-aligned address within RAM must be rejected.
-    for offset in (0..RAM_SIZE).step_by(PAGE_SIZE as usize * 1024) {
+    for offset in (0..RAM_SIZE_MAX).step_by(PAGE_SIZE as usize * 1024) {
         let pa = RAM_START + offset;
         assert_eq!(
             validate_device_map(pa, PAGE_SIZE),
@@ -848,8 +848,8 @@ fn device_map_boundary_just_below_ram() {
 
 #[test]
 fn device_map_boundary_just_above_ram() {
-    // PA starting at RAM_END is OK (device space).
-    assert!(validate_device_map(RAM_END, PAGE_SIZE).is_ok());
+    // PA starting at RAM_END_MAX is OK (device space).
+    assert!(validate_device_map(RAM_END_MAX, PAGE_SIZE).is_ok());
 }
 
 // ==========================================================================
@@ -872,6 +872,6 @@ fn memory_share_boundary_exact_ram_start() {
 
 #[test]
 fn memory_share_boundary_exact_ram_end() {
-    // Exactly one page before RAM_END.
-    assert!(validate_memory_share(RAM_END - PAGE_SIZE, 1).is_ok());
+    // Exactly one page before RAM_END_MAX.
+    assert!(validate_memory_share(RAM_END_MAX - PAGE_SIZE, 1).is_ok());
 }

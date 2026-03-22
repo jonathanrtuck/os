@@ -68,6 +68,8 @@ impl Device {
 /// Parsed device table — flat list of discovered devices.
 pub struct DeviceTable {
     devices: Vec<Device>,
+    /// RAM region from the `/memory` node (base, size), if found.
+    memory: Option<(u64, u64)>,
 }
 
 impl DeviceTable {
@@ -86,6 +88,15 @@ impl DeviceTable {
     /// Find the first device matching a compatible string.
     pub fn find_first(&self, compatible: &str) -> Option<&Device> {
         self.devices.iter().find(|d| d.compatible == compatible)
+    }
+
+    /// RAM region (base, size) from the DTB `/memory` node, if present.
+    ///
+    /// The `/memory` node is identified by its `device_type = "memory"`
+    /// property (per the devicetree specification). Returns the first
+    /// `reg` entry (base address and size).
+    pub fn memory_region(&self) -> Option<(u64, u64)> {
+        self.memory
     }
 }
 
@@ -175,12 +186,19 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
     let structs = blob.get(off_dt_struct..totalsize)?;
     let strings = blob.get(off_dt_strings..totalsize)?;
     let mut devices = Vec::new();
+    let mut memory: Option<(u64, u64)> = None;
     let mut offset = 0usize;
     // Per-node property accumulator. Saved/restored via stack for nesting.
     let mut node_compatible: Option<String> = None;
+    let mut node_device_type: Option<String> = None;
     let mut node_regs: Option<Vec<(u64, u64)>> = None;
     let mut node_irq: Option<u32> = None;
-    type DtbStackEntry = (Option<String>, Option<Vec<(u64, u64)>>, Option<u32>);
+    type DtbStackEntry = (
+        Option<String>,
+        Option<String>,
+        Option<Vec<(u64, u64)>>,
+        Option<u32>,
+    );
     let mut stack: Vec<DtbStackEntry> = Vec::new();
 
     loop {
@@ -206,9 +224,27 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
                 offset = align4(offset);
 
                 // Save parent's accumulator before starting this node.
-                stack.push((node_compatible.take(), node_regs.take(), node_irq.take()));
+                stack.push((
+                    node_compatible.take(),
+                    node_device_type.take(),
+                    node_regs.take(),
+                    node_irq.take(),
+                ));
             }
             FDT_END_NODE => {
+                // Check for the /memory node (device_type = "memory" per DT spec).
+                // This node typically has no `compatible` property, only
+                // `device_type` and `reg`.
+                let is_memory_node = node_device_type.as_deref() == Some("memory");
+
+                if is_memory_node {
+                    if let Some(ref regs) = node_regs {
+                        if let Some(&(base, size)) = regs.first() {
+                            memory = Some((base, size));
+                        }
+                    }
+                }
+
                 // Emit device if this node had a compatible string and reg.
                 if let (Some(compat), Some(regs)) = (node_compatible.take(), node_regs.take()) {
                     if !regs.is_empty() {
@@ -220,11 +256,13 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
                     }
                 }
 
+                node_device_type = None;
                 node_irq = None;
 
                 // Restore parent's accumulator.
-                if let Some((c, r, i)) = stack.pop() {
+                if let Some((c, dt, r, i)) = stack.pop() {
                     node_compatible = c;
+                    node_device_type = dt;
                     node_regs = r;
                     node_irq = i;
                 }
@@ -253,6 +291,10 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
                     "compatible" => {
                         // Take first null-terminated string from the value.
                         node_compatible = Some(read_cstr_owned(prop_data, 0));
+                    }
+                    "device_type" => {
+                        // Used to identify /memory nodes (device_type = "memory").
+                        node_device_type = Some(read_cstr_owned(prop_data, 0));
                     }
                     "reg" => {
                         // #address-cells=2, #size-cells=2 → 16 bytes per entry.
@@ -294,5 +336,5 @@ pub fn parse(blob: &[u8]) -> Option<DeviceTable> {
         }
     }
 
-    Some(DeviceTable { devices })
+    Some(DeviceTable { devices, memory })
 }
