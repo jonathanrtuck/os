@@ -28,7 +28,7 @@ A single `cargo build` compiles shared libraries, all userspace programs, init (
 ## Test
 
 ```sh
-cd test && cargo test -- --test-threads=1   # 2,078 host-side unit tests
+cd test && cargo test -- --test-threads=1   # 2,091 host-side unit tests
 cd test && ./smoke.sh                        # QEMU boot verification
 cd test && ./integration.sh                  # Full device pipeline test
 cd test && ./stress.sh 45                    # Headless fuzz + stress

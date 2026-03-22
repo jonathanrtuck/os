@@ -154,12 +154,22 @@ pub mod input {
     pub const MSG_POINTER_ABS: u32 = 11;
     pub const MSG_POINTER_BUTTON: u32 = 12;
 
+    /// Modifier key bitmask flags, packed into `KeyEvent.modifiers`.
+    pub const MOD_SHIFT: u8 = 1 << 0;
+    pub const MOD_CTRL: u8 = 1 << 1;
+    pub const MOD_ALT: u8 = 1 << 2;
+    pub const MOD_SUPER: u8 = 1 << 3;
+    pub const MOD_CAPS_LOCK: u8 = 1 << 4;
+
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct KeyEvent {
         pub keycode: u16,
         pub pressed: u8,
         pub ascii: u8,
+        /// Active modifier keys at the time of this event.
+        pub modifiers: u8,
+        pub _pad: u8,
     }
 
     #[repr(C)]

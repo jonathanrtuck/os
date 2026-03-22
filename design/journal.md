@@ -4,6 +4,59 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Phase 3.2: Text Editor Key Combinations (2026-03-22)
+
+**Status:** Complete.
+
+### Architecture decision: navigation lives in core
+
+The spec originally placed all navigation and editing in the editor process. During implementation, the architecture was revised: **navigation and selection live in core** (the OS service), not the editor. This follows Decision #8 — the OS owns layout and provides content-type interaction primitives (cursor, selection, playhead). Editors are content-type-specific input-to-write translators.
+
+The text editor process was reduced from ~410 to ~195 lines. It now handles only: character insert, backspace, forward delete, Tab (4 spaces), Shift+Tab (dedent). No navigation, no selection, no shift tracking.
+
+### What was implemented
+
+**Protocol changes:**
+- `KeyEvent` gained `modifiers: u8` field with `MOD_SHIFT` (0x01), `MOD_CTRL` (0x02), `MOD_ALT` (0x04), `MOD_SUPER` (0x08), `MOD_CAPS_LOCK` (0x10) flags.
+
+**Input driver (`virtio-input`):**
+- Modifier state tracking (Shift, Ctrl, Alt, Super press/release)
+- Caps Lock: set/clear matching macOS flag state (not toggle-on-press)
+- Shifted ASCII: full US keyboard layout (`!@#$%^&*()` etc.)
+- All key events include modifier bits
+
+**Core (`services/core/main.rs`) — major rewrite of `process_key_event`:**
+- All arrow navigation (Left/Right/Up/Down with sticky `goal_col`)
+- Cmd+Left/Right (visual line start/end), Cmd+Up/Down (document start/end)
+- Opt+Left/Right (word boundary navigation)
+- Home/End, PgUp/PgDn
+- Shift+any navigation (selection extension via `update_selection`)
+- Cmd+A (select all)
+- Selection-aware backspace/delete (core handles directly via `doc_delete_range`)
+- Opt+Backspace/Delete (word delete, core handles directly)
+- Double-click (word select), triple-click (line select)
+- `forward_key_to_editor` includes `channel_signal` to wake editor
+
+**Layout library (`libraries/layout/lib.rs`):**
+- `line_col_to_byte()` — inverse of `byte_to_line_col`
+- `word_boundary_backward()` / `word_boundary_forward()` — scan for whitespace transitions
+- `ParagraphLayout::line_col_to_byte()` method
+
+**Hypervisor (`~/Sites/hypervisor/`):**
+- Added `.capsLock` to `handleFlagsChanged` modifier list in `AppWindow.swift`
+
+### Bug fixes
+
+- `forward_key_to_editor` was missing `sys::channel_signal(EDITOR_HANDLE)` — editor process never woke up for backspace/delete events
+- Hypervisor didn't forward Caps Lock events (missing from `handleFlagsChanged`)
+- Guest Caps Lock handling changed from toggle-on-press to set/clear matching macOS flag state
+
+### Tests
+
+13 new tests in `test/tests/layout.rs`: 6 for `line_col_to_byte` (basic, empty, wrapped, mid-char, beyond-end, multi-paragraph), 7 for word boundaries (backward/forward basic, at-boundary, start/end of string, multiple-spaces, non-alpha). 2,091 total tests pass.
+
+---
+
 ## Analytical Gaussian Shadows + sRGB Pipeline (2026-03-21)
 
 **Status:** Complete.

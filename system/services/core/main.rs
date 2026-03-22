@@ -83,8 +83,20 @@ const EDITOR_HANDLE: u8 = 3;
 const FONT_SIZE: u32 = 18;
 const INPUT_HANDLE: u8 = 1;
 const INPUT2_HANDLE: u8 = 4;
-const KEY_LEFTCTRL: u16 = 29;
+// Keycodes (Linux evdev).
+const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
+const KEY_A: u16 = 30;
+const KEY_LEFTCTRL: u16 = 29;
+const KEY_UP: u16 = 103;
+const KEY_DOWN: u16 = 108;
+const KEY_LEFT: u16 = 105;
+const KEY_RIGHT: u16 = 106;
+const KEY_HOME: u16 = 102;
+const KEY_END: u16 = 107;
+const KEY_PAGEUP: u16 = 104;
+const KEY_PAGEDOWN: u16 = 109;
+const KEY_DELETE: u16 = 111;
 const SHADOW_DEPTH: u32 = 0;
 const TEXT_INSET_BOTTOM: u32 = 8;
 const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
@@ -236,6 +248,20 @@ struct CoreState {
     scroll_spring: animation::Spring,
     scroll_target: f32,
     sel_end: usize,
+    /// Selection anchor: the fixed end of a selection range. When
+    /// `has_selection` is true, the visible range is
+    /// `[min(anchor, cursor_pos), max(anchor, cursor_pos))`.
+    anchor: usize,
+    /// True when a selection is active.
+    has_selection: bool,
+    /// Sticky goal column for Up/Down navigation. Preserved across
+    /// consecutive vertical moves, cleared on any horizontal move.
+    goal_column: Option<usize>,
+    /// Click state for double/triple-click detection.
+    last_click_ms: u64,
+    last_click_x: u32,
+    last_click_y: u32,
+    click_count: u8,
     /// Animation ID for the selection highlight fade-in (0→255).
     selection_fade_id: Option<animation::AnimationId>,
     /// Current selection highlight opacity (animated on selection change).
@@ -282,6 +308,13 @@ impl CoreState {
             scroll_spring: animation::Spring::snappy(0.0),
             scroll_target: 0.0,
             sel_end: 0,
+            anchor: 0,
+            has_selection: false,
+            goal_column: None,
+            last_click_ms: 0,
+            last_click_x: 0,
+            last_click_y: 0,
+            click_count: 0,
             selection_fade_id: None,
             selection_opacity: 255,
             sel_start: 0,
@@ -576,30 +609,144 @@ fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
     buf[6] = b'0' + seconds / 10;
     buf[7] = b'0' + seconds % 10;
 }
+// ── Navigation helpers ─────────────────────────────────────────────
+
+/// Find the previous word boundary (delegates to layout library).
+fn word_boundary_backward(text: &[u8], pos: usize) -> usize {
+    layout_lib::word_boundary_backward(text, pos)
+}
+
+/// Find the next word boundary (delegates to layout library).
+fn word_boundary_forward(text: &[u8], pos: usize) -> usize {
+    layout_lib::word_boundary_forward(text, pos)
+}
+
+/// Convert (visual_line, column) to byte offset (delegates to layout library).
+fn line_col_to_byte(text: &[u8], target_line: usize, target_col: usize, cols: usize) -> usize {
+    /// Unit-width metrics: every character has width 1.0, so max_width = chars_per_line.
+    struct UnitM;
+    impl layout_lib::FontMetrics for UnitM {
+        fn char_width(&self, _ch: char) -> f32 {
+            1.0
+        }
+        fn line_height(&self) -> f32 {
+            1.0
+        }
+    }
+    let max_width = cols as f32;
+    layout_lib::line_col_to_byte(text, target_line, target_col, &UnitM, max_width, &layout_lib::CharBreaker)
+}
+
+/// Find byte offset of start of visual line containing `pos`.
+fn visual_line_start(text: &[u8], pos: usize, cols: usize) -> usize {
+    if cols == 0 || text.is_empty() {
+        return 0;
+    }
+    let (line, _col) = layout::byte_to_line_col(text, pos, cols);
+    line_col_to_byte(text, line, 0, cols)
+}
+
+/// Find byte offset of end of visual line containing `pos`.
+/// Points to the last character on the line (or the newline).
+fn visual_line_end(text: &[u8], pos: usize, cols: usize) -> usize {
+    if cols == 0 || text.is_empty() {
+        return 0;
+    }
+    let (line, _col) = layout::byte_to_line_col(text, pos, cols);
+    // Walk to start of next line and back up, or to end of text.
+    let next_start = line_col_to_byte(text, line + 1, 0, cols);
+    if next_start > 0 && next_start <= text.len() && text[next_start - 1] == b'\n' {
+        // Line ends with newline — point to the newline position.
+        next_start - 1
+    } else {
+        // Wrapped line or last line — point past last char.
+        next_start
+    }
+}
+
+/// Update selection state in CoreState from anchor + cursor_pos.
+/// Returns true if sel_start/sel_end changed.
+fn update_selection_from_anchor() -> bool {
+    let s = state();
+    let (new_start, new_end) = if s.has_selection {
+        let lo = if s.anchor < s.cursor_pos {
+            s.anchor
+        } else {
+            s.cursor_pos
+        };
+        let hi = if s.anchor > s.cursor_pos {
+            s.anchor
+        } else {
+            s.cursor_pos
+        };
+        (lo, hi)
+    } else {
+        (0, 0)
+    };
+    let changed = s.sel_start != new_start || s.sel_end != new_end;
+    s.sel_start = new_start;
+    s.sel_end = new_end;
+    changed
+}
+
+/// Clear selection state.
+fn clear_selection() {
+    let s = state();
+    s.has_selection = false;
+    s.anchor = 0;
+    s.sel_start = 0;
+    s.sel_end = 0;
+}
+
+/// Send MSG_SET_CURSOR to the editor to sync its local cursor.
+fn sync_cursor_to_editor(editor_ch: &ipc::Channel) {
+    let pos = state().cursor_pos;
+    let cm = CursorMove {
+        position: pos as u32,
+    };
+    // SAFETY: CursorMove is a plain data struct; from_payload copies it into payload region.
+    let msg = unsafe { ipc::Message::from_payload(MSG_SET_CURSOR, &cm) };
+    editor_ch.send(&msg);
+}
+
 fn process_key_event(
     key: &KeyEvent,
-    ctrl_pressed: &mut bool,
     has_image: bool,
     editor_ch: &ipc::Channel,
-    msg: &ipc::Message,
+    content_w: u32,
+    content_h: u32,
 ) -> KeyAction {
-    if key.keycode == KEY_LEFTCTRL {
-        *ctrl_pressed = key.pressed == 1;
+    use protocol::input::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
-        return KeyAction {
-            changed: false,
-            text_changed: false,
-            selection_changed: false,
-            context_switched: false,
-            consumed: true,
-        };
+    let no_change = KeyAction {
+        changed: false,
+        text_changed: false,
+        selection_changed: false,
+        context_switched: false,
+        consumed: true,
+    };
+
+    // Ignore modifier-only key events (tracked by input driver).
+    match key.keycode {
+        42 | 54 | 29 | 97 | 56 | 100 | 125 | 126 | 58 => return no_change,
+        _ => {}
     }
-    if key.keycode == KEY_TAB && key.pressed == 1 && *ctrl_pressed {
+
+    // Only handle key presses (not releases).
+    if key.pressed != 1 {
+        return no_change;
+    }
+
+    let mods = key.modifiers;
+    let shift = mods & MOD_SHIFT != 0;
+    let ctrl = mods & MOD_CTRL != 0;
+    let alt = mods & MOD_ALT != 0;
+    let cmd = mods & MOD_SUPER != 0;
+
+    // ── System keys ─────────────────────────────────────────────
+    if key.keycode == KEY_TAB && ctrl {
         if has_image {
             let s = state();
-            // Don't switch immediately — start fade out. The actual switch
-            // happens when the fade-out animation completes (in the animation
-            // tick section of the event loop).
             if !s.pending_context_switch {
                 let now_ms = {
                     let freq = s.counter_freq;
@@ -615,7 +762,6 @@ fn process_key_event(
                     .ok();
                 s.pending_context_switch = true;
             }
-
             return KeyAction {
                 changed: true,
                 text_changed: false,
@@ -624,30 +770,392 @@ fn process_key_event(
                 consumed: true,
             };
         }
-        return KeyAction {
-            changed: false,
-            text_changed: false,
-            selection_changed: false,
-            context_switched: false,
-            consumed: true,
-        };
+        return no_change;
     }
 
-    if !state().image_mode {
-        // TODO: Construct a core→editor message instead of forwarding the
-        // raw input driver message. Fragile if input format changes (review 6.10).
-        editor_ch.send(msg);
-
-        let _ = sys::channel_signal(EDITOR_HANDLE);
+    // In image mode, no editor keys apply.
+    if state().image_mode {
+        return no_change;
     }
 
-    KeyAction {
-        changed: false,
-        text_changed: false,
-        selection_changed: false,
-        context_switched: false,
-        consumed: false,
+    let text = doc_content();
+    let len = text.len();
+    let layout = content_text_layout(content_w);
+    let cols = layout.cols();
+
+    // ── Navigation helper: begin/extend selection ────────────────
+    // If Shift is held, start or extend selection from current cursor.
+    // If Shift is NOT held, clear any active selection (collapse).
+    // Returns whether to proceed with cursor movement.
+    macro_rules! nav_begin {
+        () => {{
+            let s = state();
+            if shift {
+                if !s.has_selection {
+                    s.anchor = s.cursor_pos;
+                    s.has_selection = true;
+                }
+            } else if s.has_selection {
+                // Non-shift navigation clears selection.
+                // For Left: collapse to left edge. For Right: collapse to right edge.
+                // The specific collapse behavior is handled per-key below.
+            }
+        }};
     }
+
+    // After cursor movement, update selection and sync editor.
+    macro_rules! nav_finish {
+        ($clear_goal:expr) => {{
+            if $clear_goal {
+                state().goal_column = None;
+            }
+            if !shift {
+                clear_selection();
+            } else {
+                // Collapse selection if anchor == cursor.
+                let s = state();
+                if s.anchor == s.cursor_pos {
+                    clear_selection();
+                }
+            }
+            update_selection_from_anchor();
+            doc_write_header();
+            sync_cursor_to_editor(editor_ch);
+            let _ = sys::channel_signal(EDITOR_HANDLE);
+            KeyAction {
+                changed: true,
+                text_changed: false,
+                selection_changed: true,
+                context_switched: false,
+                consumed: true,
+            }
+        }};
+    }
+
+    match key.keycode {
+        // ── Cmd+A: select all ───────────────────────────────────
+        KEY_A if cmd => {
+            let s = state();
+            s.anchor = 0;
+            s.cursor_pos = len;
+            s.has_selection = len > 0;
+            s.goal_column = None;
+            update_selection_from_anchor();
+            doc_write_header();
+            sync_cursor_to_editor(editor_ch);
+            let _ = sys::channel_signal(EDITOR_HANDLE);
+            KeyAction {
+                changed: true,
+                text_changed: false,
+                selection_changed: true,
+                context_switched: false,
+                consumed: true,
+            }
+        }
+
+        // ── Left arrow ──────────────────────────────────────────
+        KEY_LEFT => {
+            nav_begin!();
+            let s = state();
+            if cmd {
+                // Cmd+Left: move to start of visual line.
+                s.cursor_pos = visual_line_start(text, s.cursor_pos, cols);
+            } else if alt {
+                // Opt+Left: move to previous word boundary.
+                s.cursor_pos = word_boundary_backward(text, s.cursor_pos);
+            } else if !shift && s.has_selection {
+                // Plain Left with selection: collapse to left edge.
+                let lo = if s.anchor < s.cursor_pos {
+                    s.anchor
+                } else {
+                    s.cursor_pos
+                };
+                s.cursor_pos = lo;
+                clear_selection();
+                doc_write_header();
+                sync_cursor_to_editor(editor_ch);
+                let _ = sys::channel_signal(EDITOR_HANDLE);
+                return KeyAction {
+                    changed: true,
+                    text_changed: false,
+                    selection_changed: true,
+                    context_switched: false,
+                    consumed: true,
+                };
+            } else if s.cursor_pos > 0 {
+                s.cursor_pos -= 1;
+            }
+            nav_finish!(true)
+        }
+
+        // ── Right arrow ─────────────────────────────────────────
+        KEY_RIGHT => {
+            nav_begin!();
+            let s = state();
+            if cmd {
+                // Cmd+Right: move to end of visual line.
+                s.cursor_pos = visual_line_end(text, s.cursor_pos, cols);
+            } else if alt {
+                // Opt+Right: move to next word boundary.
+                s.cursor_pos = word_boundary_forward(text, s.cursor_pos);
+            } else if !shift && s.has_selection {
+                // Plain Right with selection: collapse to right edge.
+                let hi = if s.anchor > s.cursor_pos {
+                    s.anchor
+                } else {
+                    s.cursor_pos
+                };
+                s.cursor_pos = hi;
+                clear_selection();
+                doc_write_header();
+                sync_cursor_to_editor(editor_ch);
+                let _ = sys::channel_signal(EDITOR_HANDLE);
+                return KeyAction {
+                    changed: true,
+                    text_changed: false,
+                    selection_changed: true,
+                    context_switched: false,
+                    consumed: true,
+                };
+            } else if s.cursor_pos < len {
+                s.cursor_pos += 1;
+            }
+            nav_finish!(true)
+        }
+
+        // ── Up arrow ────────────────────────────────────────────
+        KEY_UP => {
+            nav_begin!();
+            if cmd {
+                // Cmd+Up: move to start of document.
+                state().cursor_pos = 0;
+                state().goal_column = None;
+            } else {
+                let s = state();
+                let (line, col) = layout::byte_to_line_col(text, s.cursor_pos, cols);
+                if s.goal_column.is_none() {
+                    s.goal_column = Some(col);
+                }
+                if line > 0 {
+                    let gc = s.goal_column.unwrap_or(col);
+                    s.cursor_pos = line_col_to_byte(text, line - 1, gc, cols);
+                }
+            }
+            nav_finish!(false)
+        }
+
+        // ── Down arrow ──────────────────────────────────────────
+        KEY_DOWN => {
+            nav_begin!();
+            if cmd {
+                // Cmd+Down: move to end of document.
+                state().cursor_pos = len;
+                state().goal_column = None;
+            } else {
+                let s = state();
+                let (line, col) = layout::byte_to_line_col(text, s.cursor_pos, cols);
+                if s.goal_column.is_none() {
+                    s.goal_column = Some(col);
+                }
+                let gc = s.goal_column.unwrap_or(col);
+                let new_pos = line_col_to_byte(text, line + 1, gc, cols);
+                // Only move if we actually reached a different line.
+                if new_pos != s.cursor_pos || new_pos == len {
+                    s.cursor_pos = new_pos;
+                }
+            }
+            nav_finish!(false)
+        }
+
+        // ── Home ────────────────────────────────────────────────
+        KEY_HOME => {
+            nav_begin!();
+            state().cursor_pos = visual_line_start(text, state().cursor_pos, cols);
+            nav_finish!(true)
+        }
+
+        // ── End ─────────────────────────────────────────────────
+        KEY_END => {
+            nav_begin!();
+            state().cursor_pos = visual_line_end(text, state().cursor_pos, cols);
+            nav_finish!(true)
+        }
+
+        // ── Page Up ─────────────────────────────────────────────
+        KEY_PAGEUP => {
+            nav_begin!();
+            let s = state();
+            let (line, col) = layout::byte_to_line_col(text, s.cursor_pos, cols);
+            if s.goal_column.is_none() {
+                s.goal_column = Some(col);
+            }
+            let gc = s.goal_column.unwrap_or(col);
+            let vp = viewport_lines(content_h);
+            let target_line = line.saturating_sub(vp as usize);
+            state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
+            nav_finish!(false)
+        }
+
+        // ── Page Down ───────────────────────────────────────────
+        KEY_PAGEDOWN => {
+            nav_begin!();
+            let s = state();
+            let (line, col) = layout::byte_to_line_col(text, s.cursor_pos, cols);
+            if s.goal_column.is_none() {
+                s.goal_column = Some(col);
+            }
+            let gc = s.goal_column.unwrap_or(col);
+            let vp = viewport_lines(content_h);
+            let target_line = line + vp as usize;
+            state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
+            nav_finish!(false)
+        }
+
+        // ── Backspace ───────────────────────────────────────────
+        KEY_BACKSPACE => {
+            let s = state();
+            if s.has_selection {
+                // Selection-delete: core handles directly.
+                let lo = s.sel_start;
+                let hi = s.sel_end;
+                clear_selection();
+                if doc_delete_range(lo, hi) {
+                    state().cursor_pos = lo;
+                    doc_write_header();
+                    sync_cursor_to_editor(editor_ch);
+                    let _ = sys::channel_signal(EDITOR_HANDLE);
+                    return KeyAction {
+                        changed: true,
+                        text_changed: true,
+                        selection_changed: true,
+                        context_switched: false,
+                        consumed: true,
+                    };
+                }
+                return no_change;
+            }
+            if alt {
+                // Opt+Backspace: word-delete backward.
+                let cursor = state().cursor_pos;
+                let boundary = word_boundary_backward(text, cursor);
+                if boundary < cursor && doc_delete_range(boundary, cursor) {
+                    state().cursor_pos = boundary;
+                    state().goal_column = None;
+                    doc_write_header();
+                    sync_cursor_to_editor(editor_ch);
+                    let _ = sys::channel_signal(EDITOR_HANDLE);
+                    return KeyAction {
+                        changed: true,
+                        text_changed: true,
+                        selection_changed: false,
+                        context_switched: false,
+                        consumed: true,
+                    };
+                }
+                return no_change;
+            }
+            // Single backspace: forward to editor.
+            forward_key_to_editor(key, editor_ch);
+            no_change
+        }
+
+        // ── Delete (forward) ────────────────────────────────────
+        KEY_DELETE => {
+            let s = state();
+            if s.has_selection {
+                // Selection-delete: core handles directly.
+                let lo = s.sel_start;
+                let hi = s.sel_end;
+                clear_selection();
+                if doc_delete_range(lo, hi) {
+                    state().cursor_pos = lo;
+                    doc_write_header();
+                    sync_cursor_to_editor(editor_ch);
+                    let _ = sys::channel_signal(EDITOR_HANDLE);
+                    return KeyAction {
+                        changed: true,
+                        text_changed: true,
+                        selection_changed: true,
+                        context_switched: false,
+                        consumed: true,
+                    };
+                }
+                return no_change;
+            }
+            if alt {
+                // Opt+Delete: word-delete forward.
+                let cursor = state().cursor_pos;
+                let boundary = word_boundary_forward(text, cursor);
+                if boundary > cursor && doc_delete_range(cursor, boundary) {
+                    state().goal_column = None;
+                    doc_write_header();
+                    sync_cursor_to_editor(editor_ch);
+                    let _ = sys::channel_signal(EDITOR_HANDLE);
+                    return KeyAction {
+                        changed: true,
+                        text_changed: true,
+                        selection_changed: false,
+                        context_switched: false,
+                        consumed: true,
+                    };
+                }
+                return no_change;
+            }
+            // Single forward-delete: forward to editor.
+            forward_key_to_editor(key, editor_ch);
+            no_change
+        }
+
+        // ── All other keys: editing ─────────────────────────────
+        _ => {
+            // If selection is active and this is a printable char or tab,
+            // delete the selection first, then forward the key.
+            let s = state();
+            if s.has_selection && (key.ascii != 0 || key.keycode == KEY_TAB) {
+                let lo = s.sel_start;
+                let hi = s.sel_end;
+                clear_selection();
+                if doc_delete_range(lo, hi) {
+                    state().cursor_pos = lo;
+                    doc_write_header();
+                    sync_cursor_to_editor(editor_ch);
+                    // Now forward the key so editor inserts at the new cursor.
+                    forward_key_to_editor(key, editor_ch);
+                    return KeyAction {
+                        changed: true,
+                        text_changed: true,
+                        selection_changed: true,
+                        context_switched: false,
+                        consumed: true,
+                    };
+                }
+            }
+
+            state().goal_column = None;
+
+            // Forward printable characters and tab to editor.
+            if key.ascii != 0 || key.keycode == KEY_TAB {
+                forward_key_to_editor(key, editor_ch);
+            }
+
+            KeyAction {
+                changed: false,
+                text_changed: false,
+                selection_changed: false,
+                context_switched: false,
+                consumed: false,
+            }
+        }
+    }
+}
+
+/// Forward a key event to the editor process.
+/// Forward a key event to the editor process and signal it to wake up.
+fn forward_key_to_editor(key: &KeyEvent, editor_ch: &ipc::Channel) {
+    // SAFETY: KeyEvent is a plain repr(C) struct; from_payload copies it into payload.
+    let msg = unsafe { ipc::Message::from_payload(MSG_KEY_EVENT, key) };
+    editor_ch.send(&msg);
+    let _ = sys::channel_signal(EDITOR_HANDLE);
 }
 fn update_scroll_offset(content_w: u32, content_h: u32) {
     let vp_lines = viewport_lines(content_h);
@@ -926,7 +1434,7 @@ pub extern "C" fn _start() -> ! {
 
     sys::print(b"     entering event loop\n");
 
-    let mut ctrl_pressed = false;
+    // ctrl_pressed removed — modifier state now in KeyEvent.modifiers.
 
     loop {
         let timer_active = state().timer_active;
@@ -1004,7 +1512,7 @@ pub extern "C" fn _start() -> ! {
                 // payload is a valid KeyEvent.
                 let key: KeyEvent = unsafe { msg.payload_as() };
                 let action =
-                    process_key_event(&key, &mut ctrl_pressed, has_image, &editor_ch, &msg);
+                    process_key_event(&key, has_image, &editor_ch, content_w, content_h);
 
                 if action.changed {
                     changed = true;
@@ -1030,7 +1538,7 @@ pub extern "C" fn _start() -> ! {
                         // SAFETY: same invariant as MSG_KEY_EVENT payload_as above.
                         let key: KeyEvent = unsafe { msg.payload_as() };
                         let action =
-                            process_key_event(&key, &mut ctrl_pressed, has_image, &editor_ch, &msg);
+                            process_key_event(&key, has_image, &editor_ch, content_w, content_h);
 
                         if action.changed {
                             changed = true;
@@ -1069,8 +1577,6 @@ pub extern "C" fn _start() -> ! {
                         // SAFETY: msg.msg_type is MSG_POINTER_BUTTON; sender guarantees
                         // payload is a valid PointerButton.
                         let btn: PointerButton = unsafe { msg.payload_as() };
-                        // TODO: Handle right-click, middle-click, and button
-                        // release events (review 6.9). Currently only left-press.
                         if btn.button == 0 && btn.pressed == 1 {
                             let s = state();
                             let click_x = s.mouse_x;
@@ -1082,34 +1588,84 @@ pub extern "C" fn _start() -> ! {
                                 let rel_x = click_x.saturating_sub(text_origin_x);
                                 let rel_y = click_y.saturating_sub(text_origin_y);
                                 let adjusted_y = rel_y + round_f32(s.scroll_offset) as u32;
-                                let layout = content_text_layout(content_w);
+                                let layout_info = content_text_layout(content_w);
                                 let text = doc_content();
-                                let byte_pos = layout.xy_to_byte(text, rel_x, adjusted_y);
+                                let byte_pos =
+                                    layout_info.xy_to_byte(text, rel_x, adjusted_y);
+
+                                // Double/triple-click detection.
+                                // 400ms window, within 4pt of previous click.
+                                let dx = if click_x > s.last_click_x {
+                                    click_x - s.last_click_x
+                                } else {
+                                    s.last_click_x - click_x
+                                };
+                                let dy = if click_y > s.last_click_y {
+                                    click_y - s.last_click_y
+                                } else {
+                                    s.last_click_y - click_y
+                                };
+                                let dt = now_ms.saturating_sub(s.last_click_ms);
+                                let same_spot = dx <= 4 && dy <= 4 && dt <= 400;
+
+                                let click_count = if same_spot {
+                                    // Cycle: 1 → 2 → 3 → 1 → ...
+                                    (s.click_count % 3) + 1
+                                } else {
+                                    1
+                                };
 
                                 {
                                     let s = state();
-                                    s.cursor_pos = byte_pos;
-                                    s.sel_start = 0;
-                                    s.sel_end = 0;
+                                    s.last_click_ms = now_ms;
+                                    s.last_click_x = click_x;
+                                    s.last_click_y = click_y;
+                                    s.click_count = click_count;
                                 }
 
+                                let cols = layout_info.cols();
+
+                                match click_count {
+                                    2 => {
+                                        // Double-click: select word at click position.
+                                        let lo = word_boundary_backward(text, byte_pos);
+                                        let hi = word_boundary_forward(text, byte_pos);
+                                        let s = state();
+                                        s.anchor = lo;
+                                        s.cursor_pos = hi;
+                                        s.has_selection = hi > lo;
+                                        update_selection_from_anchor();
+                                    }
+                                    3 => {
+                                        // Triple-click: select entire visual line.
+                                        let lo = visual_line_start(text, byte_pos, cols);
+                                        let mut hi =
+                                            visual_line_end(text, byte_pos, cols);
+                                        // Include the newline if present.
+                                        if hi < text.len() && text[hi] == b'\n' {
+                                            hi += 1;
+                                        }
+                                        let s = state();
+                                        s.anchor = lo;
+                                        s.cursor_pos = hi;
+                                        s.has_selection = hi > lo;
+                                        update_selection_from_anchor();
+                                    }
+                                    _ => {
+                                        // Single click: position cursor, clear selection.
+                                        let s = state();
+                                        s.cursor_pos = byte_pos;
+                                        clear_selection();
+                                    }
+                                }
+
+                                state().goal_column = None;
                                 doc_write_header();
-
-                                let cm = CursorMove {
-                                    position: byte_pos as u32,
-                                };
-                                // SAFETY: CursorMove is a plain data struct with no padding UB;
-                                // from_payload copies it into the message's 60-byte payload region.
-                                let cm_msg =
-                                    unsafe { ipc::Message::from_payload(MSG_SET_CURSOR, &cm) };
-
-                                editor_ch.send(&cm_msg);
+                                sync_cursor_to_editor(&editor_ch);
 
                                 let _ = sys::channel_signal(EDITOR_HANDLE);
 
                                 changed = true;
-                                // Click moves cursor, clears selection.
-                                // Treat as cursor-move + selection clear.
                                 selection_changed = true;
                                 had_user_input = true;
                             }

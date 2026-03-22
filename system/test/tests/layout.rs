@@ -8,8 +8,9 @@
 //! - `byte_to_line_col` agrees with layout output
 
 use layout::{
-    byte_to_line_col, layout_paragraph, Alignment, CharBreaker, FontMetrics, LayoutLine,
-    LineBreaker, ParagraphLayout, WordBreaker,
+    byte_to_line_col, layout_paragraph, line_col_to_byte, word_boundary_backward,
+    word_boundary_forward, Alignment, CharBreaker, FontMetrics, LayoutLine, LineBreaker,
+    ParagraphLayout, WordBreaker,
 };
 
 // ── Test font metrics ─────────────────────────────────────────────────
@@ -498,4 +499,157 @@ fn custom_breaker_comma() {
 
     assert_eq!(line_text(text, &layout.lines[0]), "one,");
     assert!(layout.lines.len() >= 2);
+}
+
+// ── line_col_to_byte tests ──────────────────────────────────────────
+
+#[test]
+fn line_col_to_byte_single_line() {
+    let text = b"Hello";
+    let m = MonoMetrics::new(1.0, 1.0);
+    // Single line, various columns.
+    assert_eq!(line_col_to_byte(text, 0, 0, &m, 80.0, &CharBreaker), 0);
+    assert_eq!(line_col_to_byte(text, 0, 3, &m, 80.0, &CharBreaker), 3);
+    assert_eq!(line_col_to_byte(text, 0, 5, &m, 80.0, &CharBreaker), 5);
+    // Past end of line, snaps to end.
+    assert_eq!(line_col_to_byte(text, 0, 99, &m, 80.0, &CharBreaker), 5);
+}
+
+#[test]
+fn line_col_to_byte_multiline_newline() {
+    let text = b"abc\ndef\nghi";
+    let m = MonoMetrics::new(1.0, 1.0);
+    // Line 0: "abc" (bytes 0-2, newline at 3)
+    // Line 1: "def" (bytes 4-6, newline at 7)
+    // Line 2: "ghi" (bytes 8-10)
+    assert_eq!(line_col_to_byte(text, 0, 0, &m, 80.0, &CharBreaker), 0);
+    assert_eq!(line_col_to_byte(text, 1, 0, &m, 80.0, &CharBreaker), 4);
+    assert_eq!(line_col_to_byte(text, 2, 0, &m, 80.0, &CharBreaker), 8);
+    assert_eq!(line_col_to_byte(text, 2, 2, &m, 80.0, &CharBreaker), 10);
+    // Past last line.
+    assert_eq!(line_col_to_byte(text, 5, 0, &m, 80.0, &CharBreaker), 11);
+}
+
+#[test]
+fn line_col_to_byte_wrapped() {
+    let text = b"abcdefgh";
+    let m = MonoMetrics::new(1.0, 1.0);
+    // max_width=4.0 → 4 chars per line with CharBreaker.
+    // Line 0: "abcd" (bytes 0-3)
+    // Line 1: "efgh" (bytes 4-7)
+    assert_eq!(line_col_to_byte(text, 0, 0, &m, 4.0, &CharBreaker), 0);
+    assert_eq!(line_col_to_byte(text, 0, 3, &m, 4.0, &CharBreaker), 3);
+    assert_eq!(line_col_to_byte(text, 1, 0, &m, 4.0, &CharBreaker), 4);
+    assert_eq!(line_col_to_byte(text, 1, 2, &m, 4.0, &CharBreaker), 6);
+}
+
+#[test]
+fn line_col_to_byte_roundtrip() {
+    // byte_to_line_col → line_col_to_byte should roundtrip.
+    let text = b"Hello\nWorld\nFoo";
+    let m = MonoMetrics::new(1.0, 1.0);
+    for pos in 0..=text.len() {
+        let (line, col) = byte_to_line_col(text, pos, &m, 80.0, &CharBreaker);
+        let rt = line_col_to_byte(text, line, col, &m, 80.0, &CharBreaker);
+        assert_eq!(
+            rt, pos,
+            "roundtrip failed at pos={pos}: ({line}, {col}) -> {rt}"
+        );
+    }
+}
+
+#[test]
+fn line_col_to_byte_roundtrip_wrapped() {
+    let text = b"abcdefghijklmnop";
+    let m = MonoMetrics::new(1.0, 1.0);
+    for pos in 0..=text.len() {
+        let (line, col) = byte_to_line_col(text, pos, &m, 5.0, &CharBreaker);
+        let rt = line_col_to_byte(text, line, col, &m, 5.0, &CharBreaker);
+        assert_eq!(
+            rt, pos,
+            "roundtrip failed at pos={pos}: ({line}, {col}) -> {rt}"
+        );
+    }
+}
+
+#[test]
+fn line_col_to_byte_empty() {
+    let text = b"";
+    let m = MonoMetrics::new(1.0, 1.0);
+    assert_eq!(line_col_to_byte(text, 0, 0, &m, 80.0, &CharBreaker), 0);
+    assert_eq!(line_col_to_byte(text, 5, 0, &m, 80.0, &CharBreaker), 0);
+}
+
+// ── word_boundary tests ─────────────────────────────────────────────
+
+#[test]
+fn word_boundary_backward_basic() {
+    let text = b"Hello World Foo";
+    // From end (15): skip "Foo" → 12, skip " " → 12. Result: 12.
+    assert_eq!(word_boundary_backward(text, 15), 12);
+    // From 12 (start of "Foo"): skip " " → 11, skip "World" → 6. Result: 6.
+    assert_eq!(word_boundary_backward(text, 12), 6);
+    // From 6 (start of "World"): skip " " → 5, skip "Hello" → 0. Result: 0.
+    assert_eq!(word_boundary_backward(text, 6), 0);
+    // From 0: already at start.
+    assert_eq!(word_boundary_backward(text, 0), 0);
+}
+
+#[test]
+fn word_boundary_backward_multiple_spaces() {
+    let text = b"Hello   World";
+    // From 8 (start of "World"): skip "   " → 5, skip "Hello" → 0.
+    assert_eq!(word_boundary_backward(text, 8), 0);
+    // From 13 (end): skip "World" → 8, skip "   " → skip happens first.
+    // Actually: skip whitespace backward from 13: text[12]='d', not whitespace. Stop.
+    // Skip non-whitespace: text[12]='d'..text[8]='W', text[7]=' '. i=8.
+    assert_eq!(word_boundary_backward(text, 13), 8);
+}
+
+#[test]
+fn word_boundary_forward_basic() {
+    let text = b"Hello World Foo";
+    // From 0: skip "Hello" → 5, skip " " → 6. Result: 6.
+    assert_eq!(word_boundary_forward(text, 0), 6);
+    // From 6: skip "World" → 11, skip " " → 12. Result: 12.
+    assert_eq!(word_boundary_forward(text, 6), 12);
+    // From 12: skip "Foo" → 15, no more whitespace. Result: 15.
+    assert_eq!(word_boundary_forward(text, 12), 15);
+    // From 15 (end): already at end.
+    assert_eq!(word_boundary_forward(text, 15), 15);
+}
+
+#[test]
+fn word_boundary_forward_from_mid_word() {
+    let text = b"Hello World";
+    // From 2 (mid-"Hello"): skip "llo" → 5, skip " " → 6.
+    assert_eq!(word_boundary_forward(text, 2), 6);
+}
+
+#[test]
+fn word_boundary_empty_text() {
+    assert_eq!(word_boundary_backward(b"", 0), 0);
+    assert_eq!(word_boundary_forward(b"", 0), 0);
+}
+
+#[test]
+fn word_boundary_newlines() {
+    let text = b"Hello\nWorld";
+    // Newline is whitespace. From end (11): skip "World" → 6, skip "\n" → 6.
+    // Wait: from 11: text[10]='d', non-ws. Skip non-ws: text[10]='d'..text[6]='W', text[5]='\n'. i=6.
+    // Skip ws: text[5]='\n'. i=5. text[4]='o'. Stop. Result: 5.
+    // Hmm, actually word_boundary_backward skips ws FIRST, then non-ws.
+    // From 11: text[10]='d', not ws → no ws to skip.
+    // Skip non-ws: 'd','l','r','o','W' → stop at text[5]='\n'. i=6.
+    assert_eq!(word_boundary_backward(text, 11), 6);
+
+    // Forward from 0: skip "Hello" → 5, skip "\n" → 6.
+    assert_eq!(word_boundary_forward(text, 0), 6);
+}
+
+#[test]
+fn word_boundary_tabs() {
+    let text = b"Hello\tWorld";
+    assert_eq!(word_boundary_backward(text, 11), 6);
+    assert_eq!(word_boundary_forward(text, 0), 6);
 }

@@ -132,6 +132,27 @@ impl ParagraphLayout {
         let start = self.lines[last].byte_offset as usize;
         (last, byte_offset.saturating_sub(start))
     }
+
+    /// Inverse of `byte_to_line_col` — convert (line, column) to byte offset.
+    ///
+    /// If `target_col` exceeds the line's byte length, snaps to the end
+    /// of the line. If `target_line` exceeds the line count, returns
+    /// the total text length (sum of all line offsets + lengths).
+    pub fn line_col_to_byte(&self, target_line: usize, target_col: usize) -> usize {
+        if self.lines.is_empty() {
+            return 0;
+        }
+        if target_line >= self.lines.len() {
+            // Past last line — return end of text.
+            let last = &self.lines[self.lines.len() - 1];
+            return (last.byte_offset + last.byte_length) as usize;
+        }
+        let line = &self.lines[target_line];
+        let start = line.byte_offset as usize;
+        let len = line.byte_length as usize;
+        let col = if target_col > len { len } else { target_col };
+        start + col
+    }
 }
 
 // ── Layout function ───────────────────────────────────────────────────
@@ -296,4 +317,64 @@ pub fn byte_to_line_col(
 ) -> (usize, usize) {
     let layout = layout_paragraph(text, metrics, max_width, Alignment::Left, breaker);
     layout.byte_to_line_col(byte_offset)
+}
+
+/// Inverse of `byte_to_line_col` — convert (line, column) to byte offset.
+///
+/// Computes the layout and finds the byte offset for the given visual
+/// position. If `target_col` exceeds the line length, snaps to the
+/// end of the line. If `target_line` exceeds the line count, returns
+/// the end of the text.
+pub fn line_col_to_byte(
+    text: &[u8],
+    target_line: usize,
+    target_col: usize,
+    metrics: &dyn FontMetrics,
+    max_width: f32,
+    breaker: &dyn LineBreaker,
+) -> usize {
+    let layout = layout_paragraph(text, metrics, max_width, Alignment::Left, breaker);
+    layout.line_col_to_byte(target_line, target_col)
+}
+
+/// Find the previous word boundary (for Opt+Left / Opt+Backspace).
+///
+/// From `pos`, skips whitespace backward, then skips non-whitespace
+/// backward. Returns the byte offset of the word start.
+pub fn word_boundary_backward(text: &[u8], pos: usize) -> usize {
+    if pos == 0 || text.is_empty() {
+        return 0;
+    }
+    let mut i = pos;
+    while i > 0 && is_whitespace(text[i - 1]) {
+        i -= 1;
+    }
+    while i > 0 && !is_whitespace(text[i - 1]) {
+        i -= 1;
+    }
+    i
+}
+
+/// Find the next word boundary (for Opt+Right / Opt+Delete).
+///
+/// From `pos`, skips non-whitespace forward, then skips whitespace
+/// forward. Returns the byte offset past the word end.
+pub fn word_boundary_forward(text: &[u8], pos: usize) -> usize {
+    let len = text.len();
+    if pos >= len {
+        return len;
+    }
+    let mut i = pos;
+    while i < len && !is_whitespace(text[i]) {
+        i += 1;
+    }
+    while i < len && is_whitespace(text[i]) {
+        i += 1;
+    }
+    i
+}
+
+#[inline]
+fn is_whitespace(b: u8) -> bool {
+    b == b' ' || b == b'\n' || b == b'\t'
 }

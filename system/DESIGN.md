@@ -505,15 +505,15 @@ Minimal and not yet useful. Would need RX queue, proper character device interfa
 
 ### 2.8 Text Editor (`user/text-editor/`) 🟡
 
-**Goal:** First editor process demonstrating the settled edit protocol: editors are read-only consumers, all writes go through the OS service.
+**Goal:** Content-type-specific input-to-write translator. Editors handle character insertion, deletion, and content-specific operations. Navigation and selection live in core (the OS service), which owns layout and provides content-type interaction primitives (cursor, selection, playhead). This is Decision #8 in action.
 
-**Status:** ~410 lines. Receives MSG_KEY_EVENT from core (OS service) via IPC. Has read-only shared memory mapping of the document buffer. Translates keypresses into write requests with cursor positioning. Sends write requests back to core. Never writes to document state directly.
+**Status:** ~195 lines. Receives MSG_KEY_EVENT from core via IPC. Has read-only shared memory mapping of the document buffer. Handles: character insert, backspace, forward delete, Tab (4 spaces), Shift+Tab (dedent). Sends write requests (MSG_WRITE_INSERT, MSG_WRITE_DELETE) back to core. No navigation, no selection, no modifier tracking.
 
 **What's foundational (the pattern):**
 
-- **Editor as read-only consumer.** The editor has a hardware-enforced read-only mapping of the document buffer. It reads content for cursor positioning and context-aware editing. All writes go through IPC. This is Decision #9 in action.
+- **Editor as read-only consumer.** The editor has a hardware-enforced read-only mapping of the document buffer. It reads content for context-aware editing. All writes go through IPC. This is Decision #9 in action.
+- **Thin editor, smart core.** Navigation (arrows, Cmd+Left/Right, word boundaries, Home/End, PgUp/PgDn), selection (Shift+navigation, Cmd+A), selection-aware deletion (Opt+Backspace/Delete), and mouse click handling (double-click word select, triple-click line select) all live in core. The editor only translates content-type-specific keypresses into write operations. This split means adding a new editor for a different content type only requires writing the content-specific translation logic — navigation and selection come for free from core.
 - **IPC write protocol.** MSG_WRITE_INSERT carries position + byte, MSG_WRITE_DELETE carries position, MSG_WRITE_DELETE_RANGE carries a byte range, MSG_CURSOR_MOVE carries cursor position, MSG_SELECTION_UPDATE carries selection state. All typed, all fit in 60-byte ring buffer payload.
-- **Input → intent translation.** The editor's job is deciding what input means in editing context. Cursor movement, selection (shift+arrow), delete, insert — all translated to structured write/cursor operations.
 
 **What's scaffolding (the implementation):**
 
@@ -523,7 +523,7 @@ Minimal and not yet useful. Would need RX queue, proper character device interfa
 **What's missing:**
 
 - **Operation boundary hints.** `beginOperation`/`endOperation` messages for better undo granularity.
-- **Richer edit operations.** Word-level operations, find/replace.
+- **Richer edit operations.** Find/replace.
 
 ---
 

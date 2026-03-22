@@ -4,7 +4,7 @@ Userspace programs. Each is a `#![no_std]` ELF binary embedded into init at buil
 
 | Program        | Purpose                                                                                  |
 | -------------- | ---------------------------------------------------------------------------------------- |
-| `text-editor/` | Editor process: receives input events, sends write requests via IPC (read-only consumer) |
+| `text-editor/` | Editor process: content-type-specific input→write translator (insert, delete, tab/dedent). Navigation and selection live in core. |
 | `echo/`        | Minimal test program (proof of userspace execution)                                      |
 | `fuzz/`        | Adversarial syscall fuzzer: 31 phases of invalid/edge-case syscalls                      |
 | `fuzz-helper/` | Child process spawned by the fuzzer for process lifecycle tests                          |
