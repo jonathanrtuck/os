@@ -38,7 +38,9 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Font library** — TrueType/OpenType rasterizer with grayscale anti-aliasing, stem darkening for heavier strokes, variable font axis support (weight, optical size, MONO), HarfBuzz-level shaping, and glyph cache. Three variable fonts: Source Code Pro (monospace, editor), Nunito Sans (proportional, chrome), Recursive (proportional, variable).
 
-**Scene graph library** — Typed visual node tree in shared memory. Triple-buffered with mailbox semantics for lock-free producer/consumer across processes. Four geometric content types: `None` (containers/solid fills), `Image` (pixel buffers), `Path` (cubic bezier contours), `Glyphs` (shaped glyph runs). Change list for incremental damage tracking. Copy-forward with selective mutation for zero-allocation updates. Per-node 2D affine transforms, corner radius, layer opacity, box shadows. Monospace text layout helpers.
+**Layout library** — Unified text layout engine. Single `layout_paragraph()` function for both monospace and proportional text, parameterized by a `FontMetrics` trait. `CharBreaker` for character-level wrapping (monospace), `WordBreaker` for word-boundary wrapping (proportional). Alignment (left, center, right). Standalone `byte_to_line_col()` for cursor positioning.
+
+**Scene graph library** — Typed visual node tree in shared memory. Triple-buffered with mailbox semantics for lock-free producer/consumer across processes. Four geometric content types: `None` (containers/solid fills), `Image` (pixel buffers), `Path` (cubic bezier contours), `Glyphs` (shaped glyph runs). Change list for incremental damage tracking. Copy-forward with selective mutation for zero-allocation updates. Per-node 2D affine transforms, corner radius, layer opacity, box shadows.
 
 **Text editor** — Cursor movement, text selection (shift+arrow), scrolling, mouse click-to-position, insert and delete. Communicates with core via IPC write requests.
 
@@ -48,7 +50,7 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Assets via 9P** — Fonts, images, and icons loaded at boot from the host filesystem via virtio-9p passthrough.
 
-**Tests** — 2,067 tests (2,046 system + 21 prototype).
+**Tests** — 2,099 tests (2,078 system + 21 prototype).
 
 ## Running the Demo
 
@@ -114,7 +116,8 @@ os/
 │   │   ├── drawing/                 # Surfaces, colors, PNG, compositing, palette
 │   │   ├── fonts/                   # TrueType rasterizer, subpixel rendering, glyph cache
 │   │   ├── render/                  # Render backend (CpuBackend, damage, incremental, frame scheduler)
-│   │   ├── scene/                   # Scene graph nodes, shared memory layout, text layout
+│   │   ├── layout/                  # Unified text layout engine (mono + proportional)
+│   │   ├── scene/                   # Scene graph nodes, shared memory layout
 │   │   ├── ipc/                     # Lock-free SPSC ring buffers
 │   │   ├── protocol/                # IPC message types + payload structs (all protocols)
 │   │   ├── sys/                     # Syscall wrappers + userspace allocator

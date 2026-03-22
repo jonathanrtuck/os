@@ -71,7 +71,9 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-21 (latest):** Three rendering correctness fixes in metal-render. (1) **Analytical Gaussian shadows** — replaced invisible hard-shadow quad with `fragment_shadow` shader that evaluates the exact Gaussian integral per-pixel. Separable `erf()` (Abramowitz & Stegun 7.1.26, |ε|≤1.5e-7) for rectangles (mathematically exact), SDF+erfc approximation for rounded rects. No offscreen textures or compute passes needed. Title bar shadow tuned: offset=2, blur_radius=12, alpha=120. SHADOW_DEPTH eliminated (was 12, now 0 — content starts right below title bar). (2) **sRGB render target** — `PIXEL_FORMAT_BGRA8_SRGB` added to protocol, TEX_MSAA and CAMetalLayer switched to `bgra8Unorm_srgb`. Hardware blender now operates in linear space for physically correct alpha compositing. All fragment shaders linearize color inputs via `srgb_to_linear()`. Backdrop blur pipeline unaffected (compute `read()`/`write()` bypass sRGB conversion). (3) **Rounded-rect alpha-squared bug fix** — shader was outputting premultiplied RGB with non-premultiplied blend mode, causing `alpha²` coverage. Fixed with weighted-average compositing for non-overlapping fill/border regions. Hypervisor updated (`~/Sites/hypervisor/`): sRGB format support + layer pixel format. 2,046 tests pass. Next: v0.3 Phase 3 (Text & Interaction). Spec: `design/v0.3-spec.md`.
+**Session 2026-03-22 (latest):** Unified layout library + hypervisor event script system. (1) **Layout library** (`libraries/layout/`) — single `layout_paragraph()` function for both monospace and proportional text, parameterized by `FontMetrics` trait. `CharBreaker` (character-level wrapping) and `WordBreaker` (word boundaries with whitespace trimming). 32 new tests. Core's `layout_mono_lines()` and `byte_to_line_col()` now delegate to the library via unit-width metrics (identical behavior, new algorithm). Spec updated: Phase 3.1 renamed from "Proportional Text Layout" to "Unified Text Layout." (2) **Soft-wrap reflow fix** — `update_single_line` in incremental.rs only checked if visible line COUNT changed, not whether individual lines' content shifted when the wrap boundary moved. Fix: compare each non-changed line's glyph count against the new layout; fall back to full rebuild if any differ. (3) **Hypervisor event scripts** (`--events FILE`) — line-based format for automated input injection using evdev key names. Actions: `type`, `key`, `click`, `dblclick`, `wait`, `capture`. Events injected through standard virtio-input path. Combined with `--capture`, enables deterministic visual regression testing. (4) **Hypervisor `--resolution WxH`** — fixed pixel resolution for reproducible display tests (e.g., `--resolution 400x300` gives ~37 chars per line for wrap testing). 2,078 tests pass.
+
+**Session 2026-03-21:** Three rendering correctness fixes in metal-render. (1) **Analytical Gaussian shadows** — replaced invisible hard-shadow quad with `fragment_shadow` shader that evaluates the exact Gaussian integral per-pixel. Separable `erf()` (Abramowitz & Stegun 7.1.26, |ε|≤1.5e-7) for rectangles (mathematically exact), SDF+erfc approximation for rounded rects. No offscreen textures or compute passes needed. Title bar shadow tuned: offset=2, blur_radius=12, alpha=120. SHADOW_DEPTH eliminated (was 12, now 0 — content starts right below title bar). (2) **sRGB render target** — `PIXEL_FORMAT_BGRA8_SRGB` added to protocol, TEX_MSAA and CAMetalLayer switched to `bgra8Unorm_srgb`. Hardware blender now operates in linear space for physically correct alpha compositing. All fragment shaders linearize color inputs via `srgb_to_linear()`. Backdrop blur pipeline unaffected (compute `read()`/`write()` bypass sRGB conversion). (3) **Rounded-rect alpha-squared bug fix** — shader was outputting premultiplied RGB with non-premultiplied blend mode, causing `alpha²` coverage. Fixed with weighted-average compositing for non-overlapping fill/border regions. Hypervisor updated (`~/Sites/hypervisor/`): sRGB format support + layer pixel format. 2,046 tests pass. Next: v0.3 Phase 3 (Text & Interaction). Spec: `design/v0.3-spec.md`.
 
 **Session 2026-03-21 (earlier):** Fixed metal-render transform+rounded-corner bug: SDF rounded-rect path was checked before transform path, so rotation/scale/skew were silently ignored on nodes with corner_radius. Fix: `emit_transformed_rounded_rect_quad()` — vertex NDC positions are transformed through the affine while texCoords stay in local pixel space (no shader changes needed). Removed all 21 demo nodes (composition, audit, animation) and test content — clean editor scene. N_POINTER renumbered 14→8, WELL_KNOWN_COUNT 29→9. "Rendering sample compound document" idea noted in journal for future visual test mode. Hypervisor multi-frame capture: `--capture 30,60,90 /tmp/prefix.png` produces numbered PNGs in a single boot cycle (backward compatible with single-frame). 2,046 tests pass.
 
@@ -161,7 +163,7 @@ Content types: `None`, `Path`, `Glyphs`, `Image`. Each render service (`metal-re
 
 **Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, unblocked by prototype-on-host strategy). GUI track: input + event loops done → editor process separation done → **read-only document mapping next** (give editor zero-copy read access) → text layout. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: Files prototype complete → integrate with OS service when document pipeline reaches that point.
 
-**System code:** `system/kernel/` (33 .rs files + 2 .S + link.ld), `system/services/{init,core,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`. `prototype/files/` (21 tests). Boots via native hypervisor (Metal GPU, default) or QEMU `virt` (virgl or software) with 4 SMP cores, EEVDF scheduler, interactive display pipeline with scene graph + render services. 28 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (33 .rs files + 2 .S + link.ld), `system/services/{init,core,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`. `prototype/files/` (21 tests). Boots via native hypervisor (Metal GPU, default) or QEMU `virt` (virgl or software) with 4 SMP cores, EEVDF scheduler, interactive display pipeline with scene graph + render services. 28 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 
@@ -237,7 +239,7 @@ Every `.rs` file follows this order:
 
 ### Three render backends, three testing methods
 
-**metal-render (hypervisor, DEFAULT):** The primary development path. The hypervisor has built-in screenshot capture — no window focus, no macOS utilities, no fragility. Reads directly from the Metal drawable via GPU blit.
+**metal-render (hypervisor, DEFAULT):** The primary development path. The hypervisor has built-in screenshot capture and scripted input injection — no window focus, no macOS utilities, no fragility. Reads directly from the Metal drawable via GPU blit.
 
 ```sh
 # Automated: capture frame 30 as PNG, then exit
@@ -249,10 +251,35 @@ hypervisor target/aarch64-unknown-none/release/kernel --capture 30 /tmp/screensh
 hypervisor target/aarch64-unknown-none/release/kernel --capture 30,60,90 /tmp/test.png
 # Produces /tmp/test-030.png, /tmp/test-060.png, /tmp/test-090.png
 
+# Event script: type text, edit, capture result (deterministic visual test)
+cat > /tmp/test.events << 'SCRIPT'
+type hello world
+key left left left
+key backspace
+wait 5
+capture /tmp/after-edit.png
+SCRIPT
+hypervisor target/aarch64-unknown-none/release/kernel --events /tmp/test.events
+# Then Read /tmp/after-edit.png
+
+# Fixed resolution for wrap testing (e.g., ~37 chars/line at 400px)
+hypervisor target/aarch64-unknown-none/release/kernel --resolution 400x300 --events /tmp/test.events
+
 # Ad-hoc: send SIGUSR1 to running hypervisor
 kill -USR1 $(pgrep hypervisor)
 # Saves to /tmp/hypervisor-capture.png — then Read it
 ```
+
+**Event script format** (evdev key names from `linux/input-event-codes.h`):
+- `type hello` — type each character (handles shift for uppercase)
+- `key backspace` — single key press (also: `left`, `right`, `up`, `down`, `return`, `tab`, `delete`, `home`, `end`, `pageup`, `pagedown`, `escape`, `f1`-`f12`)
+- `key shift+left` — modified key (modifiers: `shift`, `ctrl`, `alt`, `cmd`)
+- `click 100 200` — left click at (x, y) in points
+- `dblclick 100 200` — double click
+- `wait 10` — wait 10 extra frames
+- `capture /tmp/out.png` — screenshot at this point
+
+**When you cannot verify a change with available tools, that is a BLOCKING problem.** Fix the tooling gap before shipping the change. Do not ship unverifiable work.
 
 Launch: `cd system && cargo run -r` (default, no env vars needed).
 
