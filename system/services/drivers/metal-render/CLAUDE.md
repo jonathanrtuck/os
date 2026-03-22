@@ -16,7 +16,9 @@ The scene graph is the interface. All rendering complexity (tree walk, glyph atl
 - **Two virtqueues:** queue 0 (setup: shaders, pipelines, textures), queue 1 (per-frame rendering)
 - **DRAWABLE_HANDLE (0xFFFFFFFF):** special handle that acquires the host CAMetalLayer drawable
 - **4x MSAA:** render to MSAA texture, resolve to drawable on present
-- **MSL shaders:** embedded as source text, compiled at startup via CMD_COMPILE_LIBRARY
+- **sRGB render target:** TEX_MSAA and CAMetalLayer use `bgra8Unorm_srgb`. Hardware blender operates in linear space for gamma-correct compositing. All fragment shaders linearize sRGB color inputs via `srgb_to_linear()`.
+- **Analytical Gaussian shadows:** `fragment_shadow` evaluates the exact Gaussian integral per-pixel — separable erf for rectangles, SDF+erfc for rounded rects. No offscreen textures or compute passes.
+- **MSL shaders:** embedded as source text, compiled at startup via CMD_COMPILE_LIBRARY. Includes solid, textured, glyph, rounded-rect (SDF), shadow (analytical Gaussian), stencil, and separable box-blur (H+V compute) shaders.
 
 ## Dependencies
 

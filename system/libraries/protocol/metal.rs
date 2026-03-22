@@ -75,6 +75,11 @@ pub const PIXEL_FORMAT_RGBA8: u8 = 2;
 pub const PIXEL_FORMAT_R8: u8 = 3;
 pub const PIXEL_FORMAT_STENCIL8: u8 = 4;
 pub const PIXEL_FORMAT_RGBA16F: u8 = 5;
+/// sRGB-encoded BGRA8. Hardware blender operates in linear space:
+/// fragment outputs are converted linear→sRGB on store, and
+/// destination values are converted sRGB→linear before blending.
+/// Compute shader `read()`/`write()` bypass the conversion.
+pub const PIXEL_FORMAT_BGRA8_SRGB: u8 = 6;
 
 // ── Texture usage flags ─────────────────────────────────────────────────
 

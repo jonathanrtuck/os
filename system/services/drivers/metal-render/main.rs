@@ -57,6 +57,7 @@ const FN_BLUR_V: u32 = 16;
 const FN_COPY_SRGB_TO_LINEAR: u32 = 17;
 const FN_COPY_LINEAR_TO_SRGB: u32 = 18;
 const FN_FRAGMENT_ROUNDED_RECT: u32 = 19;
+const FN_FRAGMENT_SHADOW: u32 = 35;
 
 const PIPE_SOLID: u32 = 20;
 const PIPE_TEXTURED: u32 = 21;
@@ -64,6 +65,7 @@ const PIPE_GLYPH: u32 = 22;
 const PIPE_STENCIL_WRITE: u32 = 23;
 const PIPE_SOLID_NO_MSAA: u32 = 24;
 const PIPE_ROUNDED_RECT: u32 = 25;
+const PIPE_SHADOW: u32 = 36;
 const CPIPE_BLUR_H: u32 = 26;
 const CPIPE_BLUR_V: u32 = 27;
 const CPIPE_SRGB_TO_LINEAR: u32 = 28;
@@ -131,8 +133,29 @@ vertex VertexOut vertex_main(VertexIn in [[stage_in]]) {
     return out;
 }
 
+// -- sRGB <-> linear conversion (IEC 61966-2-1) -------------------------
+// With an sRGB render target, all fragment shader outputs must be in linear
+// space. The hardware blender converts linear->sRGB on store and sRGB->linear
+// on read, giving physically correct alpha compositing for free.
+
+float3 srgb_to_linear(float3 s) {
+    return select(
+        pow((s + 0.055) / 1.055, float3(2.4)),
+        s / 12.92,
+        s <= 0.04045
+    );
+}
+
+float3 linear_to_srgb(float3 l) {
+    return select(
+        1.055 * pow(l, float3(1.0/2.4)) - 0.055,
+        12.92 * l,
+        l <= 0.0031308
+    );
+}
+
 fragment float4 fragment_solid(VertexOut in [[stage_in]]) {
-    return in.color;
+    return float4(srgb_to_linear(in.color.rgb), in.color.a);
 }
 
 fragment float4 fragment_textured(
@@ -140,7 +163,11 @@ fragment float4 fragment_textured(
     texture2d<float> tex [[texture(0)]],
     sampler s [[sampler(0)]]
 ) {
-    return tex.sample(s, in.texCoord) * in.color;
+    // Texture data is sRGB; vertex color is sRGB. Linearize both.
+    float4 t = tex.sample(s, in.texCoord);
+    float3 t_lin = srgb_to_linear(t.rgb);
+    float3 c_lin = srgb_to_linear(in.color.rgb);
+    return float4(t_lin * c_lin, t.a * in.color.a);
 }
 
 fragment float4 fragment_glyph(
@@ -149,7 +176,7 @@ fragment float4 fragment_glyph(
     sampler s [[sampler(0)]]
 ) {
     float alpha = tex.sample(s, in.texCoord).r;
-    return float4(in.color.rgb, in.color.a * alpha);
+    return float4(srgb_to_linear(in.color.rgb), in.color.a * alpha);
 }
 
 vertex float4 vertex_stencil(VertexIn in [[stage_in]]) {
@@ -193,49 +220,120 @@ fragment float4 fragment_rounded_rect(
     // Anti-alias the outer edge: 1px transition zone.
     float fill_alpha = 1.0 - smoothstep(-0.5, 0.5, dist);
 
+    // Linearize sRGB colors for correct compositing under sRGB render target.
+    float3 fill_lin = srgb_to_linear(in.color.rgb);
+
+    // Output non-premultiplied color: the hardware blender applies srcAlpha.
     float4 result;
     if (params.border_w > 0.0) {
         // Border: the border region is where dist is between -border_w and 0.
         float inner_dist = dist + params.border_w;
         float border_alpha = 1.0 - smoothstep(-0.5, 0.5, inner_dist);
         float border_mask = fill_alpha - border_alpha; // 1 in border, 0 elsewhere
-        float4 border_color = float4(params.border_r, params.border_g,
-                                      params.border_b, params.border_a);
-        // Composite: border over fill.
-        result = float4(in.color.rgb * in.color.a * border_alpha
-                       + border_color.rgb * border_color.a * border_mask,
-                       in.color.a * border_alpha + border_color.a * border_mask);
+        float3 border_lin = srgb_to_linear(float3(params.border_r, params.border_g,
+                                                    params.border_b));
+        // Composite fill and border coverage (non-overlapping regions).
+        float fill_w = in.color.a * border_alpha;
+        float border_w = params.border_a * border_mask;
+        float total_a = fill_w + border_w;
+        // Weighted average of linear colors (non-premultiplied output).
+        float3 rgb = total_a > 0.001
+            ? (fill_lin * fill_w + border_lin * border_w) / total_a
+            : fill_lin;
         // Apply outer edge AA.
-        result.a = min(result.a, fill_alpha);
+        result = float4(rgb, min(total_a, fill_alpha));
     } else {
         // No border: just fill with AA edge.
-        result = float4(in.color.rgb, in.color.a * fill_alpha);
+        result = float4(fill_lin, in.color.a * fill_alpha);
     }
     return result;
 }
 
-// -- sRGB <-> linear conversion (IEC 61966-2-1) -------------------------
-// Linear-light blur is physically correct: light intensities add linearly.
-// sRGB blur (what macOS uses) biases toward darker results. We chose
-// linear-light for correctness; the cost is two pow() per pixel at the
-// conversion boundaries. Intermediate blur passes stay in linear RGBA16F
-// so no precision is lost between passes.
+// -- Analytical Gaussian box shadow ----------------------------------------
+// Evaluates the exact Gaussian shadow for a rectangle (separable erf integrals)
+// or an approximate Gaussian shadow for a rounded rectangle (SDF + erfc).
+// This is the closed-form solution to 'render shape, then blur with Gaussian
+// kernel' -- no offscreen textures or compute passes needed.
 
-float3 srgb_to_linear(float3 s) {
-    return select(
-        pow((s + 0.055) / 1.055, float3(2.4)),
-        s / 12.92,
-        s <= 0.04045
-    );
+// Abramowitz & Stegun 7.1.26 -- max |error| <= 1.5e-7.
+float erf_approx(float x) {
+    float ax = abs(x);
+    float t = 1.0 / (1.0 + 0.3275911 * ax);
+    float poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741
+                 + t * (-1.453152027 + t * 1.061405429))));
+    float result = 1.0 - poly * exp(-ax * ax);
+    return x >= 0.0 ? result : -result;
 }
 
-float3 linear_to_srgb(float3 l) {
-    return select(
-        1.055 * pow(l, float3(1.0/2.4)) - 0.055,
-        12.92 * l,
-        l <= 0.0031308
-    );
+// Exact 1D Gaussian integral of a segment [lo, hi] evaluated at position p.
+// Returns the fraction of the Gaussian kernel that overlaps [lo, hi].
+float shadow_1d(float p, float lo, float hi, float inv_s2) {
+    return 0.5 * (erf_approx((hi - p) * inv_s2) - erf_approx((lo - p) * inv_s2));
 }
+
+struct ShadowParams {
+    float rect_min_x;   // shadow rect min corner (pixel coords)
+    float rect_min_y;
+    float rect_max_x;   // shadow rect max corner (pixel coords)
+    float rect_max_y;
+    float color_r;
+    float color_g;
+    float color_b;
+    float color_a;
+    float sigma;         // Gaussian standard deviation (pixels)
+    float corner_radius; // rounded corner radius (pixels), 0 = sharp rect
+    float _pad0;
+    float _pad1;
+};
+
+fragment float4 fragment_shadow(
+    VertexOut in [[stage_in]],
+    constant ShadowParams& params [[buffer(0)]]
+) {
+    // texCoord carries absolute pixel-space position of this fragment.
+    float2 p = in.texCoord;
+    float sigma = params.sigma;
+
+    // Linearize shadow color for sRGB render target.
+    float3 color_lin = srgb_to_linear(float3(params.color_r, params.color_g,
+                                               params.color_b));
+
+    // Zero sigma: hard shadow (inside = full alpha, outside = zero).
+    if (sigma <= 0.0) {
+        bool inside = p.x >= params.rect_min_x && p.x <= params.rect_max_x
+                   && p.y >= params.rect_min_y && p.y <= params.rect_max_y;
+        float a = inside ? params.color_a : 0.0;
+        return float4(color_lin, a);
+    }
+
+    float inv_s2 = 1.0 / (sigma * 1.41421356); // 1 / (sigma * sqrt(2))
+    float alpha;
+
+    if (params.corner_radius <= 0.0) {
+        // Exact separable Gaussian integral for axis-aligned rectangles.
+        // The Gaussian-blurred shadow of a rectangle decomposes into the
+        // product of two independent 1D integrals -- one per axis.
+        float ix = shadow_1d(p.x, params.rect_min_x, params.rect_max_x, inv_s2);
+        float iy = shadow_1d(p.y, params.rect_min_y, params.rect_max_y, inv_s2);
+        alpha = ix * iy;
+    } else {
+        // SDF-based Gaussian falloff for rounded rectangles.
+        // erfc(sdf / (sigma * sqrt(2))) / 2 gives an excellent approximation
+        // for convex shapes.
+        float2 center = 0.5 * float2(params.rect_min_x + params.rect_max_x,
+                                       params.rect_min_y + params.rect_max_y);
+        float2 half_ext = 0.5 * float2(params.rect_max_x - params.rect_min_x,
+                                         params.rect_max_y - params.rect_min_y);
+        float r = min(params.corner_radius, min(half_ext.x, half_ext.y));
+        float dist = sd_rounded_rect(p - center, half_ext, r);
+        alpha = 0.5 * (1.0 - erf_approx(dist * inv_s2));
+    }
+
+    return float4(color_lin, params.color_a * alpha);
+}
+
+// srgb_to_linear / linear_to_srgb are defined above (before fragment shaders)
+// so they are available to both fragment and compute shaders.
 
 // -- Color space conversion compute kernels ------------------------------
 // Used at the blur boundary: sRGB drawable <-> linear RGBA16F blur textures.
@@ -751,6 +849,7 @@ pub extern "C" fn _start() -> ! {
         LIB_SHADERS,
         b"fragment_rounded_rect",
     );
+    cmdbuf.get_function(FN_FRAGMENT_SHADOW, LIB_SHADERS, b"fragment_shadow");
     send_setup(&device, &mut setup_vq, irq_handle, &setup_dma, &cmdbuf);
     sys::print(b"     functions loaded\n");
 
@@ -811,6 +910,16 @@ pub extern "C" fn _start() -> ! {
         PIPE_ROUNDED_RECT,
         FN_VERTEX_MAIN,
         FN_FRAGMENT_ROUNDED_RECT,
+        true,
+        0x0F,
+        true,
+        SAMPLE_COUNT,
+    );
+    // Analytical shadow pipeline (Gaussian erf, with blending, MSAA, stencil).
+    cmdbuf.create_render_pipeline(
+        PIPE_SHADOW,
+        FN_VERTEX_MAIN,
+        FN_FRAGMENT_SHADOW,
         true,
         0x0F,
         true,
@@ -877,12 +986,12 @@ pub extern "C" fn _start() -> ! {
 
     // Create textures.
     cmdbuf.clear();
-    // MSAA render target.
+    // MSAA render target (sRGB: hardware blender operates in linear space).
     cmdbuf.create_texture(
         TEX_MSAA,
         width as u16,
         height as u16,
-        metal::PIXEL_FORMAT_BGRA8,
+        metal::PIXEL_FORMAT_BGRA8_SRGB,
         SAMPLE_COUNT,
         metal::USAGE_RENDER_TARGET | metal::USAGE_SHADER_READ,
     );
@@ -1102,16 +1211,18 @@ pub extern "C" fn _start() -> ! {
         let mut blurs: Vec<BlurReq> = Vec::new();
 
         // Begin render pass: MSAA target, resolve to drawable, with stencil.
+        // Clear color in linear space (sRGB render target converts on store).
+        // BG_BASE ≈ rgb(16,16,16) → linear ≈ 0.005.
         cmdbuf.begin_render_pass(
             TEX_MSAA,
             DRAWABLE_HANDLE,
             TEX_STENCIL,
             metal::LOAD_CLEAR,
             metal::STORE_MSAA_RESOLVE,
-            0.13,
-            0.13,
-            0.16,
-            1.0, // dark background
+            0.005,
+            0.005,
+            0.005,
+            1.0,
         );
         cmdbuf.set_render_pipeline(PIPE_SOLID);
 
@@ -1773,19 +1884,55 @@ fn walk_scene(
     }
 
     // Draw shadow if present (behind everything else).
+    // Uses an analytical Gaussian fragment shader: the exact Gaussian integral
+    // for rectangles (separable erf), SDF+erfc approximation for rounded rects.
     let sc = node.shadow_color;
     if sc.a > 0 {
         let sx = abs_x + node.shadow_offset_x as f32 - node.shadow_spread as f32;
         let sy = abs_y + node.shadow_offset_y as f32 - node.shadow_spread as f32;
         let sw = w + node.shadow_spread as f32 * 2.0;
         let sh = h + node.shadow_spread as f32 * 2.0;
-        let sr = sc.r as f32 / 255.0;
-        let sg = sc.g as f32 / 255.0;
-        let sb = sc.b as f32 / 255.0;
-        let sa = (sc.a as f32 / 255.0) * opacity;
-        emit_quad(solid_verts, sx, sy, sw, sh, vw, vh, scale, sr, sg, sb, sa);
-        if solid_verts.len() + 6 * VERTEX_BYTES > MAX_INLINE_BYTES {
+
+        // Gaussian sigma: blur_radius / 2 (W3C convention), in pixel space.
+        let sigma_pt = node.shadow_blur_radius as f32 / 2.0;
+        let sigma_px = sigma_pt * scale;
+
+        if sigma_px > 0.0 {
+            // Blurred shadow: switch to shadow pipeline, draw extended quad.
             flush_solid_vertices(cmdbuf, solid_verts);
+
+            // Shadow rect in pixel coordinates for the fragment shader.
+            let params = pack_shadow_params(
+                sx * scale,
+                sy * scale,
+                (sx + sw) * scale,
+                (sy + sh) * scale,
+                sc.r as f32 / 255.0,
+                sc.g as f32 / 255.0,
+                sc.b as f32 / 255.0,
+                (sc.a as f32 / 255.0) * opacity,
+                sigma_px,
+                node.corner_radius as f32 * scale,
+            );
+
+            // Pad the quad by 3σ to capture 99.7% of the Gaussian energy.
+            let pad_pt = sigma_pt * 3.0;
+
+            cmdbuf.set_render_pipeline(PIPE_SHADOW);
+            cmdbuf.set_fragment_bytes(0, &params);
+            emit_shadow_quad(solid_verts, sx, sy, sw, sh, pad_pt, vw, vh, scale);
+            flush_solid_vertices(cmdbuf, solid_verts);
+            cmdbuf.set_render_pipeline(PIPE_SOLID);
+        } else {
+            // Zero blur radius: hard shadow (flat solid quad).
+            let sr = sc.r as f32 / 255.0;
+            let sg = sc.g as f32 / 255.0;
+            let sb = sc.b as f32 / 255.0;
+            let sa = (sc.a as f32 / 255.0) * opacity;
+            emit_quad(solid_verts, sx, sy, sw, sh, vw, vh, scale, sr, sg, sb, sa);
+            if solid_verts.len() + 6 * VERTEX_BYTES > MAX_INLINE_BYTES {
+                flush_solid_vertices(cmdbuf, solid_verts);
+            }
         }
     }
 
@@ -2530,6 +2677,83 @@ fn pack_rounded_rect_params(
     buf[24..28].copy_from_slice(&border_b.to_le_bytes());
     buf[28..32].copy_from_slice(&border_a.to_le_bytes());
     buf
+}
+
+/// Pack ShadowParams for the fragment_shadow shader.
+/// Layout: { rect_min_x, rect_min_y, rect_max_x, rect_max_y,
+///           color_r, color_g, color_b, color_a,
+///           sigma, corner_radius, _pad0, _pad1 } (12 × f32 = 48 bytes).
+fn pack_shadow_params(
+    rect_min_x: f32,
+    rect_min_y: f32,
+    rect_max_x: f32,
+    rect_max_y: f32,
+    color_r: f32,
+    color_g: f32,
+    color_b: f32,
+    color_a: f32,
+    sigma: f32,
+    corner_radius: f32,
+) -> [u8; 48] {
+    let mut buf = [0u8; 48];
+    buf[0..4].copy_from_slice(&rect_min_x.to_le_bytes());
+    buf[4..8].copy_from_slice(&rect_min_y.to_le_bytes());
+    buf[8..12].copy_from_slice(&rect_max_x.to_le_bytes());
+    buf[12..16].copy_from_slice(&rect_max_y.to_le_bytes());
+    buf[16..20].copy_from_slice(&color_r.to_le_bytes());
+    buf[20..24].copy_from_slice(&color_g.to_le_bytes());
+    buf[24..28].copy_from_slice(&color_b.to_le_bytes());
+    buf[28..32].copy_from_slice(&color_a.to_le_bytes());
+    buf[32..36].copy_from_slice(&sigma.to_le_bytes());
+    buf[36..40].copy_from_slice(&corner_radius.to_le_bytes());
+    buf
+}
+
+/// Emit a shadow quad (6 vertices) covering the shadow rect plus blur padding.
+/// texCoord carries absolute pixel-space coordinates for the fragment shader.
+fn emit_shadow_quad(
+    buf: &mut Vec<u8>,
+    sx: f32,
+    sy: f32,
+    sw: f32,
+    sh: f32,
+    pad: f32,
+    vw: f32,
+    vh: f32,
+    scale: f32,
+) {
+    // Quad extends beyond shadow rect by pad on all sides.
+    let qx = sx - pad;
+    let qy = sy - pad;
+    let qw = sw + 2.0 * pad;
+    let qh = sh + 2.0 * pad;
+
+    // NDC for rasterization.
+    let l = (qx * scale / vw) * 2.0 - 1.0;
+    let r = ((qx + qw) * scale / vw) * 2.0 - 1.0;
+    let t = 1.0 - (qy * scale / vh) * 2.0;
+    let b = 1.0 - ((qy + qh) * scale / vh) * 2.0;
+
+    // Pixel-space coordinates for the fragment shader's Gaussian evaluation.
+    let px_l = qx * scale;
+    let px_r = (qx + qw) * scale;
+    let px_t = qy * scale;
+    let px_b = (qy + qh) * scale;
+
+    // Color fields unused by fragment_shadow (reads from uniform buffer).
+    let verts: [[f32; 8]; 6] = [
+        [l, t, px_l, px_t, 0.0, 0.0, 0.0, 0.0],
+        [r, t, px_r, px_t, 0.0, 0.0, 0.0, 0.0],
+        [l, b, px_l, px_b, 0.0, 0.0, 0.0, 0.0],
+        [r, t, px_r, px_t, 0.0, 0.0, 0.0, 0.0],
+        [r, b, px_r, px_b, 0.0, 0.0, 0.0, 0.0],
+        [l, b, px_l, px_b, 0.0, 0.0, 0.0, 0.0],
+    ];
+    for v in &verts {
+        for f in v {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+    }
 }
 
 /// Flush accumulated solid-color vertices: set_vertex_bytes + draw.

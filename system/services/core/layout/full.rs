@@ -143,11 +143,11 @@ pub fn build_full_scene(
             _pad: [0; 3],
         };
         n.flags = NodeFlags::VISIBLE;
-        // Real blurred shadow below the title bar.
-        n.shadow_color = Color::rgba(0, 0, 0, 60);
+        // Blurred shadow below the title bar (analytical Gaussian in metal-render).
+        n.shadow_color = Color::rgba(0, 0, 0, 120);
         n.shadow_offset_x = 0;
-        n.shadow_offset_y = cfg.shadow_depth as i16;
-        n.shadow_blur_radius = (cfg.shadow_depth as u8).min(8);
+        n.shadow_offset_y = 2;
+        n.shadow_blur_radius = 12;
         n.shadow_spread = 0;
     }
 

@@ -4,6 +4,42 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Analytical Gaussian Shadows + sRGB Pipeline (2026-03-21)
+
+**Status:** Complete.
+
+### Shadows
+
+metal-render had been emitting shadows as a single solid-color quad — invisible on dark backgrounds. Replaced with an analytical Gaussian fragment shader (`fragment_shadow`) that evaluates the exact closed-form integral per-pixel:
+
+- **Rectangles (corner_radius=0):** Separable product of two 1D erf integrals — mathematically exact. `shadow_1d(p, lo, hi, σ) = 0.5 * (erf((hi-p)/σ√2) - erf((lo-p)/σ√2))`, then `alpha = Ix * Iy`.
+- **Rounded rects (corner_radius>0):** SDF distance + `erfc(d/σ√2)/2` — excellent approximation for convex shapes.
+- **erf approximation:** Abramowitz & Stegun 7.1.26, max error ≤ 1.5×10⁻⁷.
+- **No offscreen textures or compute passes.** The quad extends 3σ beyond the shadow rect; the fragment shader computes per-pixel analytically.
+
+Shadow parameters on title bar: offset=2pt, blur_radius=12 (σ=6), alpha=120. SHADOW_DEPTH eliminated (content starts at y=title_bar_h, no gap).
+
+### sRGB Render Target
+
+Switched the MSAA texture and CAMetalLayer to `bgra8Unorm_srgb`. The Metal hardware blender now automatically converts sRGB↔linear at the framebuffer boundary, making all alpha compositing gamma-correct: rounded-rect AA edges, text over background, shadow compositing — everything.
+
+- All fragment shaders linearize their sRGB color inputs via the existing `srgb_to_linear()` MSL function.
+- Backdrop blur pipeline unaffected: compute `read()`/`write()` bypass sRGB conversion, so the manual sRGB↔linear kernels remain correct.
+- Clear color changed from sRGB (0.13) to linear (0.005) to match BG_BASE.
+- New protocol constant: `PIXEL_FORMAT_BGRA8_SRGB = 6`.
+
+### Rounded-rect alpha bug
+
+The `fragment_rounded_rect` shader was outputting premultiplied RGB (`fill.rgb * fill.a`) but the blend mode expected non-premultiplied (`srcAlpha * src + (1-srcAlpha) * dst`). This squared the alpha: the title bar rendered at RGB 27 instead of the correct 40. Fixed by outputting non-premultiplied color via weighted-average compositing for the border/fill regions.
+
+### Rendering audit notes
+
+- **Virgil-render has no shadow rendering** — shadow properties are silently ignored. Not blocking (metal-render is the primary path going forward).
+- **LCD subpixel text rendering** intentionally skipped across all backends (grayscale coverage only).
+- CpuBackend shadow rendering uses discrete 3-pass box blur (correct but different algorithm from analytical Gaussian).
+
+---
+
 ## Rendering Test Document (2026-03-21)
 
 **Status:** Idea — noted for future implementation.
