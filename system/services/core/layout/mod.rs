@@ -74,8 +74,9 @@ pub struct SceneConfig<'a> {
     pub cursor_color: drawing::Color,
     pub sel_color: drawing::Color,
     pub font_size: u16,
-    pub char_width: u32,
-    /// Character advance in 16.16 fixed-point points (for cursor/selection).
+    /// Character advance in 16.16 fixed-point points.
+    /// Single source of truth for character width — same precision as
+    /// scene graph ShapedGlyph advances.
     pub char_width_fx: i32,
     pub line_height: u32,
     pub font_data: &'a [u8],
@@ -275,11 +276,11 @@ pub(crate) fn dc(c: drawing::Color) -> Color {
     Color::rgba(c.r, c.g, c.b, c.a)
 }
 
-/// Compute `chars_per_line` from config.
+/// Compute `chars_per_line` from config using fractional char width.
 pub(crate) fn chars_per_line(cfg: &SceneConfig) -> u32 {
     let doc_width = cfg.fb_width.saturating_sub(2 * cfg.text_inset_x);
-    if cfg.char_width > 0 {
-        (doc_width / cfg.char_width).max(1)
+    if cfg.char_width_fx > 0 {
+        ((doc_width as i64 * 65536) / cfg.char_width_fx as i64).max(1) as u32
     } else {
         80
     }

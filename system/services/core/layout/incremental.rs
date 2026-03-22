@@ -183,7 +183,7 @@ pub fn update_single_line(
 
     // Update cursor position.
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     {
@@ -296,7 +296,7 @@ fn finish_line_update(
 
     // Update cursor position.
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     {
