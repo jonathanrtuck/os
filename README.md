@@ -36,7 +36,7 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Drawing library** — Surfaces, colors, Porter-Duff compositing, gamma-correct sRGB blending. NEON SIMD acceleration for fill, blend, rounded-corner, and blur operations. Anti-aliased lines (Wu's algorithm). Path rendering (MoveTo/LineTo/CurveTo/Close, fill and stroke, cubic beziers). Separable Gaussian blur (two-pass horizontal/vertical, configurable radius/sigma). PNG decoder (DEFLATE, all filter types). Bilinear image resampling. Monochrome palette system.
 
-**Font library** — TrueType/OpenType rasterizer with grayscale anti-aliasing, stem darkening for heavier strokes, variable font axis support (weight, optical size, MONO), HarfBuzz-level shaping, and glyph cache. Three variable fonts: Source Code Pro (monospace, editor), Nunito Sans (proportional, chrome), Recursive (proportional, variable).
+**Font library** — TrueType/OpenType rasterizer with grayscale anti-aliasing, stem darkening for heavier strokes, variable font axis support (weight, optical size), HarfBuzz-level shaping, and glyph cache. Three fonts selected by content type: JetBrains Mono (monospace, editor/code), Inter (sans-serif, chrome/UI), Source Serif 4 (serif, prose/body).
 
 **Layout library** — Unified text layout engine. Single `layout_paragraph()` function for both monospace and proportional text, parameterized by a `FontMetrics` trait. `CharBreaker` for character-level wrapping (monospace), `WordBreaker` for word-boundary wrapping (proportional). Alignment (left, center, right). Standalone `byte_to_line_col()` for cursor positioning.
 

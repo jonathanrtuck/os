@@ -13,8 +13,8 @@ use fallback::ContentType;
 use fonts::Feature;
 use typography::{FontFamily, TypographyConfig};
 
-const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
-const SOURCE_CODE_PRO_VARIABLE: &[u8] = include_bytes!("../../share/source-code-pro-variable.ttf");
+const INTER: &[u8] = include_bytes!("../../share/inter.ttf");
+const JETBRAINS_MONO: &[u8] = include_bytes!("../../share/jetbrains-mono.ttf");
 
 /// Convert a 4-byte OpenType tag to a Feature (enabled, full range).
 fn tag_to_feature(tag: &[u8; 4]) -> Feature {
@@ -67,8 +67,8 @@ fn ctype_prose_uses_proportional_font() {
     let config = TypographyConfig::for_content_type(ContentType::Prose);
     assert_eq!(
         config.font_family,
-        FontFamily::Proportional,
-        "prose content type should select proportional font"
+        FontFamily::Serif,
+        "prose content type should select serif font"
     );
 }
 
@@ -86,11 +86,12 @@ fn ctype_prose_has_onum_feature() {
 #[test]
 fn ctype_prose_has_optical_sizing() {
     let config = TypographyConfig::for_content_type(ContentType::Prose);
-    // Recursive Variable has no opsz axis, so optical_sizing is false.
-    // The MONO axis drives the mono/proportional distinction instead.
+    // Source Serif 4 has an opsz axis (8-60), but optical_sizing is not yet
+    // enabled in TypographyConfig. Auto-opsz is applied at the rasterizer
+    // level via populate_with_axes, not via this config flag.
     assert!(
         !config.optical_sizing,
-        "prose content type should not enable optical sizing (Recursive has no opsz axis)"
+        "prose content type optical_sizing not yet enabled in TypographyConfig"
     );
 }
 
@@ -103,8 +104,8 @@ fn ctype_ui_uses_proportional_font() {
     let config = TypographyConfig::for_content_type(ContentType::Ui);
     assert_eq!(
         config.font_family,
-        FontFamily::Proportional,
-        "UI content type should select proportional font"
+        FontFamily::Sans,
+        "UI content type should select sans-serif font"
     );
 }
 
@@ -141,8 +142,8 @@ fn ctype_code_vs_prose_different_shaped_output() {
     let prose_config = TypographyConfig::for_content_type(ContentType::Prose);
 
     // Get the font data for each content type.
-    let code_font = SOURCE_CODE_PRO_VARIABLE; // monospace for code
-    let prose_font = NUNITO_SANS_VARIABLE; // proportional for prose
+    let code_font = JETBRAINS_MONO; // monospace for code
+    let prose_font = INTER; // proportional for prose
 
     let code_features: Vec<Feature> = code_config
         .features
@@ -190,7 +191,7 @@ fn ctype_code_features_are_parseable_and_applied() {
 
     // Shaping with features should not crash and should produce output.
     let text = "1/2 != 0.5";
-    let glyphs = fonts::shape(SOURCE_CODE_PRO_VARIABLE, text, &code_features);
+    let glyphs = fonts::shape(JETBRAINS_MONO, text, &code_features);
     assert!(
         !glyphs.is_empty(),
         "shaping with code features should produce glyphs"
@@ -209,7 +210,7 @@ fn ctype_unknown_falls_back_to_sane_defaults() {
     let config = TypographyConfig::for_content_type(ContentType::Unknown);
     // Should return non-empty config without panicking.
     assert!(
-        !config.features.is_empty() || config.font_family == FontFamily::Proportional,
+        !config.features.is_empty() || config.font_family == FontFamily::Serif,
         "unknown content type should have sane defaults"
     );
 }
@@ -242,9 +243,11 @@ fn cross_003_auto_opsz_produces_different_rendering_than_fixed() {
         auto_axis_values_for_opsz, rasterize, rasterize_with_axes, RasterBuffer, RasterScratch,
     };
 
-    let gid = fonts::rasterize::glyph_id_for_char(NUNITO_SANS_VARIABLE, 'e').unwrap();
+    let gid = fonts::rasterize::glyph_id_for_char(INTER, 'e').unwrap();
 
     // Render without auto-opsz (default axis values = no variation).
+    // Use 36px so the computed opsz (36*72/96 = 27pt) differs from Inter's
+    // default opsz of 14, producing a visibly different rendering.
     let mut buf_default = vec![0u8; 128 * 6 * 128];
     let mut scratch = Box::new(RasterScratch::zeroed());
     let mut rb = RasterBuffer {
@@ -253,12 +256,12 @@ fn cross_003_auto_opsz_produces_different_rendering_than_fixed() {
         height: 128,
     };
     let m_default =
-        rasterize(NUNITO_SANS_VARIABLE, gid, 10, &mut rb, &mut scratch).expect("should rasterize");
+        rasterize(INTER, gid, 36, &mut rb, &mut scratch).expect("should rasterize");
     let total_default = (m_default.width * m_default.height * 3) as usize;
     let sum_default: u64 = buf_default[..total_default].iter().map(|&b| b as u64).sum();
 
-    // Render with auto-opsz at 10px, 96dpi.
-    let auto_axes = auto_axis_values_for_opsz(NUNITO_SANS_VARIABLE, 10, 96);
+    // Render with auto-opsz at 36px, 96dpi (opsz = 27pt, within Inter's 14-32 range).
+    let auto_axes = auto_axis_values_for_opsz(INTER, 36, 96);
     assert!(
         !auto_axes.is_empty(),
         "auto-opsz should return axes for a font with opsz axis"
@@ -272,9 +275,9 @@ fn cross_003_auto_opsz_produces_different_rendering_than_fixed() {
         height: 128,
     };
     let m_opsz = rasterize_with_axes(
-        NUNITO_SANS_VARIABLE,
+        INTER,
         gid,
-        10,
+        36,
         &mut rb2,
         &mut scratch2,
         &auto_axes,
@@ -307,7 +310,7 @@ fn cross_003_auto_weight_correction_produces_different_rendering_than_fixed() {
         RasterBuffer, RasterScratch,
     };
 
-    let gid = fonts::rasterize::glyph_id_for_char(NUNITO_SANS_VARIABLE, 'H').unwrap();
+    let gid = fonts::rasterize::glyph_id_for_char(INTER, 'H').unwrap();
 
     // Render at base weight (400) — the "uncorrected" rendering.
     let base_axes = [AxisValue {
@@ -322,7 +325,7 @@ fn cross_003_auto_weight_correction_produces_different_rendering_than_fixed() {
         height: 128,
     };
     let m_base = rasterize_with_axes(
-        NUNITO_SANS_VARIABLE,
+        INTER,
         gid,
         24,
         &mut rb,
@@ -355,7 +358,7 @@ fn cross_003_auto_weight_correction_produces_different_rendering_than_fixed() {
         height: 128,
     };
     let m_corrected = rasterize_with_axes(
-        NUNITO_SANS_VARIABLE,
+        INTER,
         gid,
         24,
         &mut rb2,
@@ -389,9 +392,11 @@ fn cross_003_auto_perceptual_combined_differs_from_fixed() {
         AxisValue, RasterBuffer, RasterScratch,
     };
 
-    let gid = fonts::rasterize::glyph_id_for_char(NUNITO_SANS_VARIABLE, 'g').unwrap();
+    let gid = fonts::rasterize::glyph_id_for_char(INTER, 'g').unwrap();
 
     // Render with fixed defaults (no perceptual adjustments).
+    // Use 36px so the computed opsz (36*72/96 = 27pt) differs from Inter's
+    // default opsz of 14, ensuring the perceptual axes produce a different result.
     let mut buf_fixed = vec![0u8; 128 * 6 * 128];
     let mut scratch = Box::new(RasterScratch::zeroed());
     let mut rb = RasterBuffer {
@@ -400,15 +405,15 @@ fn cross_003_auto_perceptual_combined_differs_from_fixed() {
         height: 128,
     };
     let m_fixed =
-        rasterize(NUNITO_SANS_VARIABLE, gid, 14, &mut rb, &mut scratch).expect("should rasterize");
+        rasterize(INTER, gid, 36, &mut rb, &mut scratch).expect("should rasterize");
     let total_fixed = (m_fixed.width * m_fixed.height * 3) as usize;
     let sum_fixed: u64 = buf_fixed[..total_fixed].iter().map(|&b| b as u64).sum();
 
     // Compute combined perceptual axes: opsz + weight correction.
     let mut combined_axes: Vec<AxisValue> = Vec::new();
-    combined_axes.extend_from_slice(&auto_axis_values_for_opsz(NUNITO_SANS_VARIABLE, 14, 96));
+    combined_axes.extend_from_slice(&auto_axis_values_for_opsz(INTER, 36, 96));
     combined_axes.extend_from_slice(&auto_weight_correction_axes(
-        NUNITO_SANS_VARIABLE,
+        INTER,
         255,
         255,
         255, // white fg
@@ -430,9 +435,9 @@ fn cross_003_auto_perceptual_combined_differs_from_fixed() {
         height: 128,
     };
     let m_perceptual = rasterize_with_axes(
-        NUNITO_SANS_VARIABLE,
+        INTER,
         gid,
-        14,
+        36,
         &mut rb2,
         &mut scratch2,
         &combined_axes,

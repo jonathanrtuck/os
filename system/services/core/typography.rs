@@ -1,30 +1,32 @@
 //! Content-type-aware typography defaults.
 //!
 //! Maps content types (code, prose, UI, unknown) to typographic settings:
-//! font family, OpenType feature flags, weight preference, tracking,
-//! optical sizing, and variable font axis overrides.
+//! font family, OpenType feature flags, weight preference, tracking, and
+//! optical sizing.
 //!
 //! The OS natively understands content types (settled decision #5). These
 //! defaults let the rendering pipeline produce intelligent typographic
 //! output without explicit configuration from editors.
 //!
-//! Primary font: **Recursive Variable** — a single font with MONO axis
-//! (0=proportional sans, 1=monospace) and CASL axis (0=linear, 1=casual).
-//! Content type drives axis values, not font selection.
-
-use alloc::vec::Vec;
-
-use fonts::rasterize::AxisValue;
+//! Font families:
+//! - **JetBrains Mono** — monospace (code, editor)
+//! - **Inter** — sans-serif (UI labels, chrome)
+//! - **Source Serif 4** — serif (prose, body text)
+//!
+//! Each font is a separate static file. Content type selects the font
+//! family, not variable font axis values.
 
 use super::fallback::ContentType;
 
 /// Font family preference for a content type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FontFamily {
-    /// Fixed-width font (Recursive MONO=1).
+    /// Fixed-width font (JetBrains Mono).
     Monospace,
-    /// Variable-width font (Recursive MONO=0).
-    Proportional,
+    /// Variable-width sans-serif (Inter).
+    Sans,
+    /// Variable-width serif (Source Serif 4).
+    Serif,
 }
 
 /// Typography configuration for a content type.
@@ -33,7 +35,7 @@ pub enum FontFamily {
 /// perceptual rendering options. Editors can override these defaults.
 #[derive(Debug, Clone)]
 pub struct TypographyConfig {
-    /// Preferred font family (monospace or proportional).
+    /// Preferred font family.
     pub font_family: FontFamily,
 
     /// OpenType feature tags to enable during shaping (e.g., b"calt", b"tnum").
@@ -43,8 +45,6 @@ pub struct TypographyConfig {
     /// Preferred font weight (in CSS-like units: 100–900).
     ///
     /// 400 = Regular, 500 = Medium, 700 = Bold.
-    /// For variable fonts with a `wght` axis, this value is used as the
-    /// base weight before any perceptual corrections (dark mode, etc.).
     pub weight_preference: f32,
 
     /// Letter-spacing adjustment in font units (0.0 = standard tracking).
@@ -52,13 +52,6 @@ pub struct TypographyConfig {
 
     /// Whether automatic optical sizing should be applied.
     pub optical_sizing: bool,
-
-    /// Explicit variable font axis overrides for this content type.
-    ///
-    /// For Recursive: MONO=1 for code, MONO=0 for prose/UI, CASL for
-    /// casual vs linear style. These are passed to the rasterizer and
-    /// merged with any automatic axis values (opsz, wght correction).
-    pub axis_overrides: Vec<AxisValue>,
 }
 
 impl TypographyConfig {
@@ -72,8 +65,7 @@ impl TypographyConfig {
         }
     }
 
-    /// Code typography: monospace (MONO=1), linear (CASL=0), programming
-    /// ligatures, tabular figures.
+    /// Code typography: JetBrains Mono, programming ligatures, tabular figures.
     fn code_defaults() -> Self {
         TypographyConfig {
             font_family: FontFamily::Monospace,
@@ -81,58 +73,28 @@ impl TypographyConfig {
             weight_preference: 400.0,
             tracking: 0.0,
             optical_sizing: false,
-            axis_overrides: alloc::vec![
-                AxisValue {
-                    tag: *b"MONO",
-                    value: 1.0
-                }, // monospace
-                AxisValue {
-                    tag: *b"CASL",
-                    value: 0.0
-                }, // linear (clean)
-            ],
         }
     }
 
-    /// Prose typography: proportional (MONO=0), linear (CASL=0).
+    /// Prose typography: Source Serif 4, oldstyle figures.
     fn prose_defaults() -> Self {
         TypographyConfig {
-            font_family: FontFamily::Proportional,
+            font_family: FontFamily::Serif,
             features: &[b"onum"],
             weight_preference: 400.0,
             tracking: 0.0,
-            optical_sizing: false, // Recursive has no opsz axis
-            axis_overrides: alloc::vec![
-                AxisValue {
-                    tag: *b"MONO",
-                    value: 0.0
-                }, // proportional sans
-                AxisValue {
-                    tag: *b"CASL",
-                    value: 0.0
-                }, // linear
-            ],
+            optical_sizing: false,
         }
     }
 
-    /// UI label typography: proportional, medium weight.
+    /// UI label typography: Inter, medium weight.
     fn ui_defaults() -> Self {
         TypographyConfig {
-            font_family: FontFamily::Proportional,
+            font_family: FontFamily::Sans,
             features: &[],
             weight_preference: 500.0,
             tracking: 0.0,
             optical_sizing: false,
-            axis_overrides: alloc::vec![
-                AxisValue {
-                    tag: *b"MONO",
-                    value: 0.0
-                }, // proportional sans
-                AxisValue {
-                    tag: *b"CASL",
-                    value: 0.0
-                }, // linear
-            ],
         }
     }
 }

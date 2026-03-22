@@ -712,7 +712,7 @@ fn shaped_glyph_byte_exact_round_trip() {
 
 #[test]
 fn proportional_shaped_glyphs_different_advances() {
-    let mono_font = include_bytes!("../../share/source-code-pro.ttf");
+    let mono_font = include_bytes!("../../share/jetbrains-mono.ttf");
 
     // Shape 'W' and 'i' separately to verify mono font gives same advance
     let w_shaped = fonts::shape(mono_font, "W", &[]);
@@ -728,7 +728,7 @@ fn proportional_shaped_glyphs_different_advances() {
     );
 
     // For a proportional font (if available), they'd differ
-    let prop_font = include_bytes!("../../share/nunito-sans.ttf");
+    let prop_font = include_bytes!("../../share/inter.ttf");
     let w_prop = fonts::shape(prop_font, "W", &[]);
     let i_prop = fonts::shape(prop_font, "i", &[]);
 

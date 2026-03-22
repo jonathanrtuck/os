@@ -264,8 +264,8 @@ pub mod core_config {
         pub fb_height: u32,
         pub doc_capacity: u32,
         pub mono_font_len: u32,
-        pub prop_font_len: u32,
-        pub _pad: u32,
+        pub sans_font_len: u32,
+        pub serif_font_len: u32,
     }
 
     // Guard: must fit within the 60-byte IPC payload.
@@ -306,7 +306,8 @@ pub mod compose {
         pub fb_width: u32,
         pub fb_height: u32,
         pub mono_font_len: u32,
-        pub prop_font_len: u32,
+        pub sans_font_len: u32,
+        pub serif_font_len: u32,
         pub scale_factor: f32,
         pub frame_rate: u16,
         pub font_size: u16,

@@ -1647,8 +1647,8 @@ fn blit_blend_mixed_alpha_pixels() {
     assert_eq!(dst.get_pixel(5, 3), Some(Color::rgb(0, 0, 255)));
 }
 
-const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
-const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf");
+const INTER: &[u8] = include_bytes!("../../share/inter.ttf");
+const JETBRAINS_MONO: &[u8] = include_bytes!("../../share/jetbrains-mono.ttf");
 
 // ---------------------------------------------------------------------------
 // Rasterizer — glyph-ID-based rasterization (read-fonts outline extraction)
@@ -1658,7 +1658,7 @@ const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf")
 fn rasterize_valid_glyph_produces_coverage() {
     // VAL-RASTER-001: rasterize(font, glyph_id=valid, 18px) returns Some(metrics)
     // with width > 0, height > 0, coverage sum > 0.
-    let glyph_id = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
+    let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A').unwrap();
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -1668,7 +1668,7 @@ fn rasterize_valid_glyph_produces_coverage() {
     };
 
     let metrics =
-        fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch);
+        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 18, &mut raster, &mut scratch);
     assert!(
         metrics.is_some(),
         "valid glyph should produce Some(metrics)"
@@ -1693,7 +1693,7 @@ fn rasterize_notdef_glyph_produces_valid_coverage() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, 0, 18, &mut raster, &mut scratch);
+    let metrics = fonts::rasterize::rasterize(JETBRAINS_MONO, 0, 18, &mut raster, &mut scratch);
     // .notdef may have an outline (rectangle) or may be empty.
     // Either way, it should not panic and should return Some.
     assert!(metrics.is_some(), ".notdef (glyph_id=0) should return Some");
@@ -1711,7 +1711,7 @@ fn rasterize_invalid_glyph_returns_none() {
     };
 
     let metrics =
-        fonts::rasterize::rasterize(SOURCE_CODE_PRO, u16::MAX, 18, &mut raster, &mut scratch);
+        fonts::rasterize::rasterize(JETBRAINS_MONO, u16::MAX, 18, &mut raster, &mut scratch);
     assert!(
         metrics.is_none(),
         "glyph_id=u16::MAX should return None (no panic)"
@@ -1721,7 +1721,7 @@ fn rasterize_invalid_glyph_returns_none() {
 #[test]
 fn rasterize_a_glyph_reasonable_dimensions() {
     // VAL-RASTER-002: 'A' at 18px produces bounding box ~5-20px wide, ~10-25px tall.
-    let glyph_id = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
+    let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A').unwrap();
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -1730,7 +1730,7 @@ fn rasterize_a_glyph_reasonable_dimensions() {
         height: 128,
     };
 
-    let m = fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch)
+    let m = fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 18, &mut raster, &mut scratch)
         .unwrap();
     assert!(
         m.width >= 5 && m.width <= 20,
@@ -1755,8 +1755,8 @@ fn rasterize_a_glyph_reasonable_dimensions() {
 
 #[test]
 fn rasterize_proportional_font_valid() {
-    // VAL-RASTER-002: Nunito Sans glyph rasterizes correctly via read-fonts.
-    let glyph_id = fonts::rasterize::glyph_id_for_char(NUNITO_SANS, 'W').unwrap();
+    // VAL-RASTER-002: Inter glyph rasterizes correctly via read-fonts.
+    let glyph_id = fonts::rasterize::glyph_id_for_char(INTER, 'W').unwrap();
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -1766,7 +1766,7 @@ fn rasterize_proportional_font_valid() {
     };
 
     let m =
-        fonts::rasterize::rasterize(NUNITO_SANS, glyph_id, 18, &mut raster, &mut scratch).unwrap();
+        fonts::rasterize::rasterize(INTER, glyph_id, 18, &mut raster, &mut scratch).unwrap();
     assert!(
         m.width > 0,
         "proportional font glyph should have non-zero width"
@@ -2301,8 +2301,8 @@ fn grayscale_rasterize_produces_intermediate_coverage() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k').unwrap(),
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'k').unwrap(),
         24 as u16,
         &mut raster,
         &mut scratch,
@@ -2334,8 +2334,8 @@ fn grayscale_diagonal_has_smooth_transitions() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'x').unwrap(),
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'x').unwrap(),
         24 as u16,
         &mut raster,
         &mut scratch,
@@ -2373,8 +2373,8 @@ fn grayscale_curve_has_smooth_edges() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'o').unwrap(),
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'o').unwrap(),
         24 as u16,
         &mut raster,
         &mut scratch,
@@ -2417,12 +2417,12 @@ fn grayscale_all_printable_ascii_still_rasterize() {
             width: 128,
             height: 128,
         };
-        let gid = match fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, ch) {
+        let gid = match fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, ch) {
             Some(id) => id,
             None => continue,
         };
         let metrics =
-            fonts::rasterize::rasterize(SOURCE_CODE_PRO, gid, 24, &mut raster, &mut scratch);
+            fonts::rasterize::rasterize(JETBRAINS_MONO, gid, 24, &mut raster, &mut scratch);
         assert!(
             metrics.is_some(),
             "grayscale: should rasterize '{}' (0x{:02x}) at 24px",
@@ -2438,11 +2438,11 @@ fn grayscale_glyph_cache_populated() {
 
     let mut cache = heap_glyph_cache();
 
-    cache.populate(SOURCE_CODE_PRO, 16);
+    cache.populate(JETBRAINS_MONO, 16);
 
     // Check a few glyphs are cached with valid dimensions.
     // Look up the real font glyph ID for 'A' and 'k' via cmap.
-    let gid_a = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A')
+    let gid_a = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A')
         .expect("font should have glyph for 'A'");
     let (g_a, cov_a) = cache.get(gid_a).unwrap();
     assert!(
@@ -2457,7 +2457,7 @@ fn grayscale_glyph_cache_populated() {
         "'A' coverage should be 1 byte per pixel (grayscale)"
     );
 
-    let gid_k = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k')
+    let gid_k = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'k')
         .expect("font should have glyph for 'k'");
     let (g_k, cov_k) = cache.get(gid_k).unwrap();
     assert!(g_k.width > 0 && g_k.height > 0);
@@ -2487,8 +2487,8 @@ fn grayscale_rasterizer_output_is_1_byte_per_pixel() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'H').unwrap(),
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'H').unwrap(),
         24 as u16,
         &mut raster,
         &mut scratch,
@@ -2513,9 +2513,11 @@ fn grayscale_monospace_cache_has_1_byte_per_pixel() {
     // Cache produces 1-byte-per-pixel grayscale coverage.
 
     let mut cache = heap_glyph_cache();
-    cache.populate(SOURCE_CODE_PRO, 16);
+    cache.populate(JETBRAINS_MONO, 16);
 
-    let (g, cov) = cache.get(b'A' as u16).unwrap();
+    let gid_a = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A')
+        .expect("font should have glyph for 'A'");
+    let (g, cov) = cache.get(gid_a).unwrap();
     assert_eq!(
         cov.len(),
         (g.width * g.height) as usize,
@@ -2534,9 +2536,11 @@ fn grayscale_proportional_cache_has_1_byte_per_pixel() {
     // The proportional cache should produce 1-byte-per-pixel data.
 
     let mut cache = heap_glyph_cache();
-    cache.populate(SOURCE_CODE_PRO, 16);
+    cache.populate(JETBRAINS_MONO, 16);
 
-    let (g, cov) = cache.get(b'A' as u16).unwrap();
+    let gid_a = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A')
+        .expect("font should have glyph for 'A'");
+    let (g, cov) = cache.get(gid_a).unwrap();
     assert_eq!(
         cov.len(),
         (g.width * g.height) as usize,
@@ -2652,8 +2656,8 @@ fn stem_darkening_applied_to_rasterized_glyph() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(),
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'l').unwrap(),
         16 as u16,
         &mut raster,
         &mut scratch,

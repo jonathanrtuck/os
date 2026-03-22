@@ -170,7 +170,7 @@ fn setup_render_pipeline(
     gpu_pa: u64,
     gpu_irq: u32,
     input_devices: &[(u8, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
-    font_buf: Option<(u64, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len)
+    font_buf: Option<(u64, u32, u32, u32, u32, u32)>, // (pa, mono_len, sans_len, serif_len, png_off, png_len)
     rtc_pa: u64,                             // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
 ) -> (u8, u8) {
@@ -212,13 +212,13 @@ fn setup_render_pipeline(
     sys::print(b"     document buffer: 4 KiB shared\n");
 
     // Unpack font buffer info.
-    let (font_pa_val, mono_font_len, prop_font_len, png_offset, png_len) =
-        if let Some((pa, mono, prop, png_off, png_l)) = font_buf {
-            (pa, mono, prop, png_off, png_l)
+    let (font_pa_val, mono_font_len, sans_font_len, serif_font_len, png_offset, png_len) =
+        if let Some((pa, mono, sans, serif, png_off, png_l)) = font_buf {
+            (pa, mono, sans, serif, png_off, png_l)
         } else {
-            (0u64, 0u32, 0u32, 0u32, 0u32)
+            (0u64, 0u32, 0u32, 0u32, 0u32, 0u32)
         };
-    let font_total_len = mono_font_len + prop_font_len + png_len;
+    let font_total_len = mono_font_len + sans_font_len + serif_font_len + png_len;
     let font_pages = if font_total_len > 0 {
         ((font_total_len as u64) + 4095) / 4096
     } else {
@@ -418,7 +418,8 @@ fn setup_render_pipeline(
         fb_width,
         fb_height,
         mono_font_len,
-        prop_font_len,
+        sans_font_len,
+        serif_font_len,
         scale_factor,
         frame_rate: 60,
         font_size: 18,
@@ -478,8 +479,8 @@ fn setup_render_pipeline(
         fb_height: logical_h,
         doc_capacity: DOC_BUF_CAPACITY,
         mono_font_len,
-        prop_font_len,
-        _pad: 0,
+        sans_font_len,
+        serif_font_len,
     };
     // SAFETY: CoreConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_CORE_CONFIG, &core_config) };
@@ -910,15 +911,15 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Phase 1.5: Read font files from host via 9p driver (must complete before compositor).
-    // Loads monospace + proportional fonts and PNG image.
-    // All stored in a single shared buffer: mono | prop | PNG.
-    // Tuple: (font_pa, mono_len, prop_len, png_offset, png_len)
-    let font_buf: Option<(u64, u32, u32, u32, u32)> =
+    // Loads three fonts and PNG image into a single shared buffer:
+    //   [JetBrains Mono | Inter | Source Serif 4 | PNG]
+    // Tuple: (font_pa, mono_len, sans_len, serif_len, png_offset, png_len)
+    let font_buf: Option<(u64, u32, u32, u32, u32, u32)> =
         if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
             sys::print(b"     loading fonts from host filesystem\n");
 
             // Allocate font buffer (4 MiB = order 10 = 1024 pages).
-            // Holds Recursive variable font (~2.3 MiB) and PNG image.
+            // Holds three fonts (JetBrains Mono + Inter + Source Serif 4) and PNG image.
             let font_order: u32 = 10;
             let font_page_count: u64 = 1u64 << font_order;
             let mut font_pa: u64 = 0;
@@ -1036,47 +1037,79 @@ pub extern "C" fn _start() -> ! {
                 }
             };
 
-            // Load Recursive Variable — one font for both mono and proportional.
-            // Content type drives axis values (MONO=1 for code, MONO=0 for prose).
-            sys::print(b"     loading recursive-variable.ttf\n");
+            // Load JetBrains Mono (monospace editor font).
+            sys::print(b"     loading jetbrains-mono.ttf\n");
 
             let mono_len = read_font_file(
                 &p9_ch_obj,
                 p9_ch,
                 p9_font_va as u64,
                 font_capacity,
-                b"recursive-variable.ttf",
+                b"jetbrains-mono.ttf",
             );
 
             if mono_len > 0 {
-                let mut buf = [0u8; 48];
-                let prefix = b"     mono font loaded: ";
-
-                buf[..prefix.len()].copy_from_slice(prefix);
-
-                let mut pos = prefix.len();
-
-                pos += sys::format_u32(mono_len, &mut buf[pos..]);
-
-                let suffix = b" bytes\n";
-
-                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-
-                pos += suffix.len();
-
-                sys::print(&buf[..pos]);
+                sys::print(b"     mono font loaded: ");
+                let mut buf = [0u8; 16];
+                let n = sys::format_u32(mono_len, &mut buf);
+                sys::print(&buf[..n]);
+                sys::print(b" bytes\n");
             } else {
                 sys::print(b"     mono font read failed\n");
             }
 
-            // Recursive Variable serves both mono and proportional via axis values.
-            // No separate prop font needed — compositor uses MONO=0 on same data.
-            let prop_len: u32 = 0;
+            // Load Inter (sans-serif chrome font) right after mono.
+            sys::print(b"     loading inter.ttf\n");
 
-            // Load PNG image (test.png) right after the proportional font.
+            let sans_offset = mono_len;
+            let sans_target_va = p9_font_va as u64 + sans_offset as u64;
+            let sans_capacity = font_capacity - sans_offset;
+            let sans_len = read_font_file(
+                &p9_ch_obj,
+                p9_ch,
+                sans_target_va,
+                sans_capacity,
+                b"inter.ttf",
+            );
+
+            if sans_len > 0 {
+                sys::print(b"     sans font loaded: ");
+                let mut buf = [0u8; 16];
+                let n = sys::format_u32(sans_len, &mut buf);
+                sys::print(&buf[..n]);
+                sys::print(b" bytes\n");
+            } else {
+                sys::print(b"     sans font read failed\n");
+            }
+
+            // Load Source Serif 4 (serif body font) right after sans.
+            sys::print(b"     loading source-serif-4.ttf\n");
+
+            let serif_offset = mono_len + sans_len;
+            let serif_target_va = p9_font_va as u64 + serif_offset as u64;
+            let serif_capacity = font_capacity - serif_offset;
+            let serif_len = read_font_file(
+                &p9_ch_obj,
+                p9_ch,
+                serif_target_va,
+                serif_capacity,
+                b"source-serif-4.ttf",
+            );
+
+            if serif_len > 0 {
+                sys::print(b"     serif font loaded: ");
+                let mut buf = [0u8; 16];
+                let n = sys::format_u32(serif_len, &mut buf);
+                sys::print(&buf[..n]);
+                sys::print(b" bytes\n");
+            } else {
+                sys::print(b"     serif font read failed\n");
+            }
+
+            // Load PNG image (test.png) right after the serif font.
             sys::print(b"     loading test.png\n");
 
-            let png_offset = mono_len + prop_len;
+            let png_offset = mono_len + sans_len + serif_len;
             let png_capacity = font_capacity - png_offset;
             let png_target_va = p9_font_va as u64 + png_offset as u64;
             let png_len =
@@ -1104,7 +1137,7 @@ pub extern "C" fn _start() -> ! {
             }
 
             if mono_len > 0 {
-                Some((font_pa, mono_len, prop_len, png_offset, png_len))
+                Some((font_pa, mono_len, sans_len, serif_len, png_offset, png_len))
             } else {
                 None
             }

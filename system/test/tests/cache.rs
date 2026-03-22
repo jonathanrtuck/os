@@ -351,8 +351,8 @@ fn lru_rasterizer_manual_insert_and_get() {
 
 #[test]
 fn cpu_backend_lru_starts_empty() {
-    // Load the Recursive font embedded in the test binary.
-    let font_data = include_bytes!("../../share/source-code-pro.ttf");
+    // Load the JetBrains Mono font embedded in the test binary.
+    let font_data = include_bytes!("../../share/jetbrains-mono.ttf");
     let backend =
         render::CpuBackend::new(font_data, None, 18, 96, 1.0, 1024, 768).expect("backend init");
     assert_eq!(backend.lru.cache.len(), 0, "LRU cache should start empty");
@@ -361,7 +361,7 @@ fn cpu_backend_lru_starts_empty() {
 #[test]
 fn cpu_backend_ascii_cache_populated() {
     // Verify the fixed ASCII cache has entries after construction.
-    let font_data = include_bytes!("../../share/source-code-pro.ttf");
+    let font_data = include_bytes!("../../share/jetbrains-mono.ttf");
     let backend =
         render::CpuBackend::new(font_data, None, 18, 96, 1.0, 1024, 768).expect("backend init");
 

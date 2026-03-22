@@ -278,11 +278,11 @@ pub extern "C" fn _start() -> ! {
             config.mono_font_len as usize,
         )
     };
-    let prop = if config.prop_font_len > 0 {
+    let prop = if config.sans_font_len > 0 {
         let off = config.mono_font_va as usize + config.mono_font_len as usize;
         // SAFETY: same as above — init mapped font pages before starting us.
         Some(unsafe {
-            core::slice::from_raw_parts(off as *const u8, config.prop_font_len as usize)
+            core::slice::from_raw_parts(off as *const u8, config.sans_font_len as usize)
         })
     } else {
         None

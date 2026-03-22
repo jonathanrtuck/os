@@ -1273,17 +1273,13 @@ pub extern "C" fn _start() -> ! {
                 0
             };
             let line_h = ascent_pt + descent_pt + gap_pt;
-            // For monospace: use axis-adjusted advance of space glyph (MONO=1).
+            // For monospace: use advance of space glyph (static font, no axes).
             let space_gid = fonts::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
-            let mono_axes = [fonts::rasterize::AxisValue {
-                tag: *b"MONO",
-                value: 1.0,
-            }];
             let char_w = fonts::rasterize::glyph_advance_with_axes(
                 font_data,
                 space_gid,
                 size as u16,
-                &mono_axes,
+                &[],
             )
             .unwrap_or_else(|| {
                 let (advance_fu, _) =
@@ -1369,12 +1365,6 @@ pub extern "C" fn _start() -> ! {
 
     format_time_hms(clock_seconds(), &mut time_buf);
 
-    // Axis values for monospace shaping (MONO=1).
-    let mono_shape_axes = [fonts::rasterize::AxisValue {
-        tag: *b"MONO",
-        value: 1.0,
-    }];
-
     let scene_cfg = {
         let s = state();
         scene_state::SceneConfig {
@@ -1397,7 +1387,7 @@ pub extern "C" fn _start() -> ! {
             line_height: s.line_h,
             font_data: font_data(),
             upem: s.font_upem,
-            axes: &mono_shape_axes,
+            axes: &[],
         }
     };
 

@@ -389,12 +389,6 @@ pub extern "C" fn _start() -> ! {
         // the scene_walk applies * scale for NDC.
         let font_size_pt: u32 = font_size_cfg as u32;
 
-        // Axes must match core's shaping axes (MONO=1.0).
-        let mono_axes = [fonts::rasterize::AxisValue {
-            tag: *b"MONO",
-            value: 1.0,
-        }];
-
         // Get font metrics for ascent.
         // scale_fu_ceil(val, size, upem) = (val * size + upem - 1) / upem
         if let Some(metrics) = fonts::rasterize::font_metrics(font_data) {
@@ -410,11 +404,10 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"\n");
         }
 
-        // Shape all printable ASCII through HarfBuzz to get real glyph IDs
-        // (including GSUB substitutions like Recursive's MONO alternates).
-        // Then rasterize each unique glyph ID directly into the atlas.
+        // Shape all printable ASCII to get real glyph IDs.
+        // Static font — no variable axes needed.
         let ascii: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
-        let shaped = fonts::shape_with_variations(font_data, ascii, &[], &mono_axes);
+        let shaped = fonts::shape(font_data, ascii, &[]);
 
         // Heap-allocate rasterization scratch space (~39 KiB).
         let mut scratch: Box<fonts::rasterize::RasterScratch> = box_zeroed();
@@ -438,7 +431,7 @@ pub extern "C" fn _start() -> ! {
                 font_size_pt as u16,
                 &mut rb,
                 &mut scratch,
-                &mono_axes,
+                &[],
             ) {
                 if m.width > 0 && m.height > 0 {
                     let coverage = &raster_buf[..(m.width * m.height) as usize];

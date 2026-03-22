@@ -143,12 +143,6 @@ pub fn build_full_scene(
             _pad: [0; 3],
         };
         n.flags = NodeFlags::VISIBLE;
-        // Blurred shadow below the title bar (analytical Gaussian in metal-render).
-        n.shadow_color = Color::rgba(0, 0, 0, 120);
-        n.shadow_offset_x = 0;
-        n.shadow_offset_y = 2;
-        n.shadow_blur_radius = 12;
-        n.shadow_spread = 0;
     }
 
     let text_y_offset = (cfg.title_bar_h.saturating_sub(cfg.line_height)) / 2;

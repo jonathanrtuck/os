@@ -17,15 +17,18 @@ The text editor process was reduced from ~410 to ~195 lines. It now handles only
 ### What was implemented
 
 **Protocol changes:**
+
 - `KeyEvent` gained `modifiers: u8` field with `MOD_SHIFT` (0x01), `MOD_CTRL` (0x02), `MOD_ALT` (0x04), `MOD_SUPER` (0x08), `MOD_CAPS_LOCK` (0x10) flags.
 
 **Input driver (`virtio-input`):**
+
 - Modifier state tracking (Shift, Ctrl, Alt, Super press/release)
 - Caps Lock: set/clear matching macOS flag state (not toggle-on-press)
 - Shifted ASCII: full US keyboard layout (`!@#$%^&*()` etc.)
 - All key events include modifier bits
 
 **Core (`services/core/main.rs`) — major rewrite of `process_key_event`:**
+
 - All arrow navigation (Left/Right/Up/Down with sticky `goal_col`)
 - Cmd+Left/Right (visual line start/end), Cmd+Up/Down (document start/end)
 - Opt+Left/Right (word boundary navigation)
@@ -38,11 +41,13 @@ The text editor process was reduced from ~410 to ~195 lines. It now handles only
 - `forward_key_to_editor` includes `channel_signal` to wake editor
 
 **Layout library (`libraries/layout/lib.rs`):**
+
 - `line_col_to_byte()` — inverse of `byte_to_line_col`
 - `word_boundary_backward()` / `word_boundary_forward()` — scan for whitespace transitions
 - `ParagraphLayout::line_col_to_byte()` method
 
 **Hypervisor (`~/Sites/hypervisor/`):**
+
 - Added `.capsLock` to `handleFlagsChanged` modifier list in `AppWindow.swift`
 
 ### Bug fixes

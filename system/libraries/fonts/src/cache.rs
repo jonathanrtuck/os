@@ -127,11 +127,12 @@ impl GlyphCache {
     }
     /// Rasterize all printable ASCII glyphs with explicit axis values.
     ///
-    /// `extra_axes` provides explicit variation axis values (e.g., MONO=1
-    /// for monospace, MONO=0 for proportional from a single variable font
-    /// like Recursive). These are merged with any automatic axis values
-    /// (opsz, wght correction). Explicit values take precedence over
-    /// automatic ones when the same axis tag appears in both.
+    /// `extra_axes` provides explicit variation axis values (e.g., wght
+    /// for weight, opsz for optical size). These are merged with any
+    /// automatic axis values (opsz, wght correction). Explicit values
+    /// take precedence over automatic ones when the same axis tag appears
+    /// in both. Font selection is by font family (content type maps to a
+    /// separate font file), not by axis switching.
     pub fn populate_with_axes(
         &mut self,
         font_data: &[u8],

@@ -4041,7 +4041,7 @@ fn rotated_node_aabb_damage() {
 /// Uses real font data to satisfy the constructor, though damage tests
 /// don't exercise text rendering.
 fn test_cpu_backend(fb_w: u16, fb_h: u16) -> Box<render::CpuBackend> {
-    let mono = include_bytes!("../../share/source-code-pro.ttf");
+    let mono = include_bytes!("../../share/jetbrains-mono.ttf");
     render::CpuBackend::new(mono, None, 16, 96, 1.0, fb_w, fb_h)
         .expect("CpuBackend::new should succeed with valid font")
 }

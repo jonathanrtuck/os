@@ -149,7 +149,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **What's scaffolding:**
 
-- Runtime fonts (source-code-pro.ttf, nunito-sans.ttf) are loaded from the host filesystem via the 9p driver. Tests embed these same fonts for parser and rasterizer validation.
+- Runtime fonts (jetbrains-mono.ttf, inter.ttf, source-serif-4.ttf) are loaded from the host filesystem via the 9p driver. Tests embed these same fonts for parser and rasterizer validation.
 
 **What's missing:**
 
@@ -475,7 +475,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Read files from the host macOS filesystem via QEMU's 9p passthrough. Validates the Files interface design through practical use before building the real COW filesystem.
 
-**Status:** ~450 lines. Implements 6 of ~30 9P2000.L operations (Tversion, Tattach, Twalk, Tlopen, Tread, Tclunk). Reads files from a shared host directory (`system/share/`) via virtio transport. Currently used to load the Source Code Pro font at boot (9 KB).
+**Status:** ~450 lines. Implements 6 of ~30 9P2000.L operations (Tversion, Tattach, Twalk, Tlopen, Tread, Tclunk). Reads files from a shared host directory (`system/share/`) via virtio transport. Currently used to load three fonts (JetBrains Mono, Inter, Source Serif 4) and a PNG image at boot.
 
 **What's foundational:**
 

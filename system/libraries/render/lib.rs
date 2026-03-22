@@ -180,9 +180,9 @@ pub struct CpuBackend {
 impl CpuBackend {
     /// Construct a `CpuBackend` with pre-populated glyph caches.
     ///
-    /// `mono_font_data` — raw font file bytes for the monospace face.
+    /// `mono_font_data` — raw font file bytes for the monospace face (JetBrains Mono).
     /// `prop_font_data` — optional raw font file bytes for the proportional
-    ///   face. When `None`, the monospace font is reused with `MONO=0`.
+    ///   face (Inter). When `None`, the monospace font is used as fallback.
     /// `font_size` — font size in points (before scale).
     /// `dpi` — display DPI for optical sizing.
     /// `scale` — fractional display scale factor (1.0, 1.5, 2.0, etc.).
@@ -207,7 +207,7 @@ impl CpuBackend {
         // Physical pixel size: font_size (points) × scale.
         let physical_size = round_f32(font_size as f32 * scale).max(1) as u32;
 
-        // Allocate and populate monospace glyph cache (MONO=1).
+        // Allocate and populate monospace glyph cache (JetBrains Mono).
         // SAFETY: Layout::new::<GlyphCache>() produces a correctly sized and
         // aligned layout for the type. alloc_zeroed returns a valid, zeroed
         // allocation (or null, which we check). All GlyphCache fields are
@@ -222,13 +222,10 @@ impl CpuBackend {
             }
             Box::from_raw(ptr)
         };
-        let mono_axes = vec![fonts::rasterize::AxisValue {
-            tag: *b"MONO",
-            value: 1.0,
-        }];
-        mono_cache.populate_with_axes(mono_font_data, physical_size, dpi, &mono_axes);
+        // No extra axes needed — automatic opsz/wght applied by populate_with_axes.
+        mono_cache.populate_with_axes(mono_font_data, physical_size, dpi, &[]);
 
-        // Allocate and populate proportional glyph cache (MONO=0).
+        // Allocate and populate proportional glyph cache (Inter or fallback to mono).
         // SAFETY: Same rationale as mono_cache above — Layout::new produces
         // correct size/alignment for GlyphCache, alloc_zeroed returns valid
         // zeroed memory (null-checked), all-zeroes is a valid GlyphCache,
@@ -243,14 +240,10 @@ impl CpuBackend {
         };
         let prop_data_slice = prop_font_data.unwrap_or(mono_font_data);
         if fonts::rasterize::font_metrics(prop_data_slice).is_some() {
-            let prop_axes = [fonts::rasterize::AxisValue {
-                tag: *b"MONO",
-                value: 0.0,
-            }];
-            prop_cache.populate_with_axes(prop_data_slice, physical_size, dpi, &prop_axes);
+            prop_cache.populate_with_axes(prop_data_slice, physical_size, dpi, &[]);
         } else {
-            // Fallback: use mono font with MONO=1 axes.
-            prop_cache.populate_with_axes(mono_font_data, physical_size, dpi, &mono_axes);
+            // Fallback: use mono font.
+            prop_cache.populate_with_axes(mono_font_data, physical_size, dpi, &[]);
         }
 
         // Own copy of font data for on-demand LRU rasterization.
@@ -275,7 +268,7 @@ impl CpuBackend {
         let lru = LruRasterizer {
             cache: fonts::cache::LruGlyphCache::new(LRU_CACHE_CAPACITY),
             font_data: font_data_owned,
-            axes: mono_axes,
+            axes: vec![],
             scratch: raster_scratch,
             raster_buf,
         };

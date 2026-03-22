@@ -1054,18 +1054,30 @@ pub extern "C" fn _start() -> ! {
     let glyph_atlas = unsafe { &mut *atlas_ptr };
     let mut font_ascent: u32 = 14;
 
-    if font_va != 0 && font_len > 0 {
+    // Font data slice — kept alive for on-demand glyph rasterization in the render loop.
+    // SAFETY: font_va is mapped read-only by init; valid for the process lifetime.
+    let font_slice: &[u8] = if font_va != 0 && font_len > 0 {
+        unsafe { core::slice::from_raw_parts(font_va as *const u8, font_len as usize) }
+    } else {
+        &[]
+    };
+
+    // Rasterization scratch space — kept alive for on-demand rasterization.
+    let scratch_layout_persistent = alloc::alloc::Layout::from_size_align(
+        core::mem::size_of::<fonts::rasterize::RasterScratch>(),
+        core::mem::align_of::<fonts::rasterize::RasterScratch>(),
+    )
+    .unwrap();
+    let scratch_persistent_ptr = unsafe {
+        alloc::alloc::alloc_zeroed(scratch_layout_persistent) as *mut fonts::rasterize::RasterScratch
+    };
+    let raster_scratch = unsafe { &mut *scratch_persistent_ptr };
+    let font_size_pt: u32 = font_size_cfg as u32;
+
+    if !font_slice.is_empty() {
         sys::print(b"     initializing glyph atlas\n");
 
-        // SAFETY: font_va is mapped read-only by init.
-        let font_data =
-            unsafe { core::slice::from_raw_parts(font_va as *const u8, font_len as usize) };
-
-        let font_size_pt: u32 = font_size_cfg as u32;
-        let mono_axes = [fonts::rasterize::AxisValue {
-            tag: *b"MONO",
-            value: 1.0,
-        }];
+        let font_data = font_slice;
 
         if let Some(metrics) = fonts::rasterize::font_metrics(font_data) {
             let upem = metrics.units_per_em as i32;
@@ -1075,17 +1087,10 @@ pub extern "C" fn _start() -> ! {
         }
 
         let ascii = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
-        let shaped = fonts::shape_with_variations(font_data, ascii, &[], &mono_axes);
-
-        let scratch_layout = alloc::alloc::Layout::from_size_align(
-            core::mem::size_of::<fonts::rasterize::RasterScratch>(),
-            core::mem::align_of::<fonts::rasterize::RasterScratch>(),
-        )
-        .unwrap();
-        let scratch_ptr = unsafe {
-            alloc::alloc::alloc_zeroed(scratch_layout) as *mut fonts::rasterize::RasterScratch
-        };
-        let scratch = unsafe { &mut *scratch_ptr };
+        // Shape the full ASCII string to pre-populate the atlas. Contextual
+        // features (calt) produce ligature glyph IDs for sequences like <=, =>.
+        // Individual characters not covered here are handled by the LRU fallback.
+        let shaped = fonts::shape(font_data, ascii, &[]);
 
         let mut raster_buf = [0u8; 50 * 50];
         let mut packed = 0u32;
@@ -1105,8 +1110,8 @@ pub extern "C" fn _start() -> ! {
                 sg.glyph_id,
                 font_size_pt as u16,
                 &mut rb,
-                scratch,
-                &mono_axes,
+                raster_scratch,
+                &[],
             ) {
                 if glyph_atlas.pack(
                     sg.glyph_id,
@@ -1198,6 +1203,86 @@ pub extern "C" fn _start() -> ! {
         if root == NULL || nodes.is_empty() {
             drop(reader);
             continue;
+        }
+
+        // ── Pre-scan: rasterize any missing glyphs into the atlas ─────
+        // Walk all visible Glyphs nodes and check for atlas misses. If any
+        // new glyphs are rasterized, upload the dirty atlas region to the GPU.
+        if !font_slice.is_empty() {
+            let mut raster_buf = [0u8; 50 * 50];
+            let mut dirty_min_y: u16 = u16::MAX;
+            let mut dirty_max_y: u16 = 0;
+            // Scan all nodes for Glyphs content with missing atlas entries.
+            for node in nodes.iter() {
+                if !node.flags.contains(scene::NodeFlags::VISIBLE) {
+                    continue;
+                }
+                if let scene::Content::Glyphs {
+                    glyphs,
+                    glyph_count,
+                    ..
+                } = node.content
+                {
+                    let shaped = reader.front_shaped_glyphs(glyphs, glyph_count);
+                    for sg in shaped {
+                        if glyph_atlas.lookup(sg.glyph_id).is_some() {
+                            continue;
+                        }
+                        let mut rb = fonts::rasterize::RasterBuffer {
+                            data: &mut raster_buf,
+                            width: 50,
+                            height: 50,
+                        };
+                        if let Some(m) = fonts::rasterize::rasterize_with_axes(
+                            font_slice,
+                            sg.glyph_id,
+                            font_size_pt as u16,
+                            &mut rb,
+                            raster_scratch,
+                            &[],
+                        ) {
+                            let pack_y = glyph_atlas.row_y;
+                            if glyph_atlas.pack(
+                                sg.glyph_id,
+                                m.width as u16,
+                                m.height as u16,
+                                m.bearing_x as i16,
+                                m.bearing_y as i16,
+                                &raster_buf[..m.width as usize * m.height as usize],
+                            ) {
+                                // Track dirty region: the glyph was packed at row pack_y
+                                // (or glyph_atlas.row_y if a new row was started).
+                                if pack_y < dirty_min_y {
+                                    dirty_min_y = pack_y;
+                                }
+                                let end_y = glyph_atlas.row_y + glyph_atlas.row_h;
+                                if end_y > dirty_max_y {
+                                    dirty_max_y = end_y;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // If any new glyphs were packed, upload the dirty region to GPU.
+            if dirty_min_y < dirty_max_y {
+                let start_y = dirty_min_y;
+                let end_y = core::cmp::min(dirty_max_y, ATLAS_HEIGHT as u16);
+                let rows = end_y - start_y;
+                let src_start = start_y as usize * ATLAS_WIDTH as usize;
+                let src_end = src_start + rows as usize * ATLAS_WIDTH as usize;
+                cmdbuf.clear();
+                cmdbuf.upload_texture(
+                    TEX_ATLAS,
+                    0,
+                    start_y,
+                    ATLAS_WIDTH as u16,
+                    rows,
+                    ATLAS_WIDTH,
+                    &glyph_atlas.pixels[src_start..src_end],
+                );
+                send_setup(&device, &mut setup_vq, irq_handle, &setup_dma, &cmdbuf);
+            }
         }
 
         // Build the frame's Metal commands.
