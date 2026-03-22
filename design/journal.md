@@ -1750,6 +1750,18 @@ cd test && cargo test scheduler_state  # Property-based scheduler tests
 
 Active questions we've started exploring but haven't resolved. Each thread links to the decisions it would inform.
 
+### AA transition softness tuning
+
+**Informs:** Phase 4 visual polish
+**Status:** Deferred — not blocking, aesthetic preference
+**Context:** Our analytic rasterizer produces mathematically correct coverage with "hard" AA transitions (fewer partial-coverage pixels at edges). macOS Core Text has slightly softer/wider transitions that give text a warmer feel. Options: post-rasterization Gaussian blur on coverage, wider filter kernel in rasterizer, or leave as-is (sharper is arguably better for a code editor). Decision: leave for now, revisit if the aesthetic feels wrong once more of the UI is built.
+
+### Italic font rendering
+
+**Informs:** v0.5 (Rich inline text / multi-style runs)
+**Status:** Deferred — blocked on style runs
+**Context:** Italic variants are loaded (inter-italic.ttf, jetbrains-mono-italic.ttf). Rasterizer and shaping engine handle any font data. Missing piece: a way to select italic in the scene graph. Requires content-type or style metadata → italic font data mapping, which depends on multi-style text runs (v0.5 scope). No work needed now — infrastructure is ready.
+
 ### Is "compound" intrinsic or contextual?
 
 **Informs:** Decision #14 (Compound Documents), Glossary

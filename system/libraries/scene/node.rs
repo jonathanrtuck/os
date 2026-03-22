@@ -145,7 +145,7 @@ const _: () = assert!(core::mem::size_of::<Node>() == 136);
 // ── Shared memory layout ────────────────────────────────────────────
 
 pub const MAX_NODES: usize = 512;
-pub const DATA_BUFFER_SIZE: usize = 64 * 1024;
+pub const DATA_BUFFER_SIZE: usize = 128 * 1024;
 pub const NODES_OFFSET: usize = core::mem::size_of::<SceneHeader>();
 pub const DATA_OFFSET: usize = NODES_OFFSET + MAX_NODES * core::mem::size_of::<Node>();
 pub const SCENE_SIZE: usize = DATA_OFFSET + DATA_BUFFER_SIZE;

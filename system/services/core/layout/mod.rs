@@ -126,11 +126,15 @@ impl layout_lib::FontMetrics for UnitMetrics {
 /// line-breaking logic — used by both scene building (cursor/selection
 /// positioning) and scroll calculation.
 pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
-    let metrics = UnitMetrics {
-        line_height: 1.0,
-    };
+    let metrics = UnitMetrics { line_height: 1.0 };
     let max_width = chars_per_line as f32;
-    layout_lib::byte_to_line_col(text, byte_offset, &metrics, max_width, &layout_lib::CharBreaker)
+    layout_lib::byte_to_line_col(
+        text,
+        byte_offset,
+        &metrics,
+        max_width,
+        &layout_lib::CharBreaker,
+    )
 }
 
 /// Break text into visual lines using the unified layout library.
@@ -234,15 +238,19 @@ pub fn shape_text(
         return Vec::new();
     }
     let shaped = fonts::shape_with_variations(font_data, &s, &[], axes);
-    let ps = point_size as i32;
-    let u = upem as i32;
+    let ps = point_size as i64;
+    let u = upem as i64;
+    // Convert font units to 16.16 fixed-point points:
+    //   value_16_16 = (value_fu * point_size * 65536) / upem
+    // Using i64 to avoid overflow for large font-unit values.
     shaped
         .iter()
         .map(|g| ShapedGlyph {
             glyph_id: g.glyph_id,
-            x_advance: ((g.x_advance * ps) / u) as i16,
-            x_offset: ((g.x_offset * ps) / u) as i16,
-            y_offset: ((g.y_offset * ps) / u) as i16,
+            _pad: 0,
+            x_advance: ((g.x_advance as i64 * ps * 65536) / u) as i32,
+            x_offset: ((g.x_offset as i64 * ps * 65536) / u) as i32,
+            y_offset: ((g.y_offset as i64 * ps * 65536) / u) as i32,
         })
         .collect()
 }

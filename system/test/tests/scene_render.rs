@@ -3524,7 +3524,8 @@ fn transformed_text_uses_axis_aligned_glyph_rendering() {
     // Build text run data (glyph IDs in 0x20-0x7E range for cache lookup).
     let glyph = scene::ShapedGlyph {
         glyph_id: 0x41, // 'A' — in cache range but zeroed cache has width=0
-        x_advance: 10,
+        _pad: 0,
+        x_advance: 10 * 65536,
         x_offset: 0,
         y_offset: 0,
     };
@@ -3851,7 +3852,8 @@ fn full_feature_composition() {
     // Text content (glyph_id 0x48='H', in ASCII cache range but zeroed cache).
     let glyph = scene::ShapedGlyph {
         glyph_id: 0x48, // 'H'
-        x_advance: 10,
+        _pad: 0,
+        x_advance: 10 * 65536,
         x_offset: 0,
         y_offset: 0,
     };

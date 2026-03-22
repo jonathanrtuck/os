@@ -1069,7 +1069,8 @@ pub extern "C" fn _start() -> ! {
     )
     .unwrap();
     let scratch_persistent_ptr = unsafe {
-        alloc::alloc::alloc_zeroed(scratch_layout_persistent) as *mut fonts::rasterize::RasterScratch
+        alloc::alloc::alloc_zeroed(scratch_layout_persistent)
+            as *mut fonts::rasterize::RasterScratch
     };
     let raster_scratch = unsafe { &mut *scratch_persistent_ptr };
     let font_size_pt: u32 = font_size_cfg as u32;
@@ -2234,12 +2235,15 @@ fn walk_scene(
             // Divide bearing/width/height by scale to position in point space.
             let glyph_scale = scale;
 
+            // 16.16 fixed-point to f32 conversion factor.
+            let fp16 = 65536.0f32;
+
             for sg in shaped {
                 if let Some(entry) = atlas.lookup(sg.glyph_id) {
                     let gx =
-                        pen_x + entry.bearing_x as f32 / glyph_scale + sg.x_offset as f32;
-                    let gy =
-                        baseline_y - entry.bearing_y as f32 / glyph_scale + sg.y_offset as f32;
+                        pen_x + entry.bearing_x as f32 / glyph_scale + sg.x_offset as f32 / fp16;
+                    let gy = baseline_y - entry.bearing_y as f32 / glyph_scale
+                        + sg.y_offset as f32 / fp16;
                     let gw = entry.width as f32 / glyph_scale;
                     let gh = entry.height as f32 / glyph_scale;
 
@@ -2277,7 +2281,7 @@ fn walk_scene(
                         cmdbuf.set_render_pipeline(PIPE_SOLID);
                     }
                 }
-                pen_x += sg.x_advance as f32;
+                pen_x += sg.x_advance as f32 / fp16;
             }
         }
         Content::Path {

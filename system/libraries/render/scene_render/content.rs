@@ -154,7 +154,9 @@ fn render_glyphs(
             }
         }
 
-        cx += scale_coord(sg.x_advance as i32, scale);
+        // x_advance is 16.16 fixed-point points. Convert to f32 points,
+        // then scale to pixels.
+        cx += scale_coord(((sg.x_advance as i64 + 0x8000) >> 16) as i32, scale);
     }
 }
 

@@ -90,7 +90,10 @@ pub struct DataRef {
 }
 
 impl DataRef {
-    pub const EMPTY: Self = Self { offset: 0, length: 0 };
+    pub const EMPTY: Self = Self {
+        offset: 0,
+        length: 0,
+    };
 
     pub const fn is_empty(&self) -> bool {
         self.length == 0
@@ -118,23 +121,32 @@ pub fn fnv1a(data: &[u8]) -> u32 {
 ///
 /// Written by the OS service (via fonts library), stored in the scene
 /// graph data buffer, and read by the compositor for rasterization.
-/// All advance/offset values are in scaled pixel units (not font units).
+///
+/// `x_advance`, `x_offset`, and `y_offset` are in **16.16 fixed-point
+/// points** (top 16 bits = integer points, bottom 16 bits = fractional).
+/// This preserves sub-point precision from the shaping engine through to
+/// the renderer, enabling subpixel glyph positioning for even letter
+/// spacing. Range: ±32767 points. Precision: 1/65536 point.
+///
+/// To convert to floating-point points: `value as f32 / 65536.0`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct ShapedGlyph {
     /// Glyph ID in the font (0 = .notdef).
     pub glyph_id: u16,
-    /// Horizontal advance width in scaled units.
-    pub x_advance: i16,
-    /// Horizontal offset from default position.
-    pub x_offset: i16,
-    /// Vertical offset from default position.
-    pub y_offset: i16,
+    /// Padding for alignment (glyph_id is u16, next field is i32).
+    pub _pad: u16,
+    /// Horizontal advance width in 16.16 fixed-point points.
+    pub x_advance: i32,
+    /// Horizontal offset from default position in 16.16 fixed-point points.
+    pub x_offset: i32,
+    /// Vertical offset from default position in 16.16 fixed-point points.
+    pub y_offset: i32,
 }
 
-// Compile-time size assertion: ShapedGlyph must be exactly 8 bytes
-// (4 × u16/i16 fields, #[repr(C)], no padding needed).
-const _: () = assert!(core::mem::size_of::<ShapedGlyph>() == 8);
+// Compile-time size assertion: ShapedGlyph is 16 bytes
+// (u16 + u16 pad + 3 × i32, #[repr(C)]).
+const _: () = assert!(core::mem::size_of::<ShapedGlyph>() == 16);
 
 // ── Fill rule ───────────────────────────────────────────────────────
 

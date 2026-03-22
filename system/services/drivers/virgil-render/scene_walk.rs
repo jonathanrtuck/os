@@ -475,9 +475,13 @@ fn emit_glyphs(
             core::ptr::read_unaligned(glyphs_data.as_ptr().add(glyph_offset) as *const _)
         };
 
+        // 16.16 fixed-point to f32 points.
+        let fp16 = 65536.0f32;
+
         if let Some(entry) = atlas.lookup(sg.glyph_id) {
-            let gx = pen_x + (entry.bearing_x as f32) * scale + (sg.x_offset as f32) * scale;
-            let gy = baseline_y - (entry.bearing_y as f32) * scale + (sg.y_offset as f32) * scale;
+            let gx = pen_x + (entry.bearing_x as f32) * scale + (sg.x_offset as f32 / fp16) * scale;
+            let gy =
+                baseline_y - (entry.bearing_y as f32) * scale + (sg.y_offset as f32 / fp16) * scale;
             let gw = (entry.width as f32) * scale;
             let gh = (entry.height as f32) * scale;
 
@@ -487,7 +491,7 @@ fn emit_glyphs(
                 || gx >= clip.x + clip.w
                 || gy >= clip.y + clip.h
             {
-                pen_x += (sg.x_advance as f32) * scale;
+                pen_x += (sg.x_advance as f32 / fp16) * scale;
                 continue;
             }
 
@@ -504,6 +508,6 @@ fn emit_glyphs(
             }
         }
 
-        pen_x += (sg.x_advance as f32) * scale;
+        pen_x += (sg.x_advance as f32 / fp16) * scale;
     }
 }

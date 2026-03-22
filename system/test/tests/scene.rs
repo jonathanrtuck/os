@@ -168,7 +168,8 @@ fn make_mono_glyphs(
         .iter()
         .map(|&ch| ShapedGlyph {
             glyph_id: ch as u16,
-            x_advance: advance as i16,
+            _pad: 0,
+            x_advance: advance as i32 * 65536,
             x_offset: 0,
             y_offset: 0,
         })
@@ -644,8 +645,8 @@ fn shaped_glyph_is_repr_c_with_size_assertion() {
     // verifies the runtime size matches expectations.
     let size = core::mem::size_of::<ShapedGlyph>();
     assert_eq!(
-        size, 8,
-        "ShapedGlyph should be 8 bytes: u16 + i16 + i16 + i16"
+        size, 16,
+        "ShapedGlyph should be 16 bytes: u16 + u16 pad + 3 × i32 (16.16 fixed-point)"
     );
 }
 
@@ -653,14 +654,15 @@ fn shaped_glyph_is_repr_c_with_size_assertion() {
 fn shaped_glyph_field_access() {
     let g = ShapedGlyph {
         glyph_id: 42,
-        x_advance: 600,
-        x_offset: -10,
-        y_offset: 5,
+        _pad: 0,
+        x_advance: 600 * 65536,
+        x_offset: -10 * 65536,
+        y_offset: 5 * 65536,
     };
     assert_eq!(g.glyph_id, 42);
-    assert_eq!(g.x_advance, 600);
-    assert_eq!(g.x_offset, -10);
-    assert_eq!(g.y_offset, 5);
+    assert_eq!(g.x_advance, 600 * 65536);
+    assert_eq!(g.x_offset, -10 * 65536);
+    assert_eq!(g.y_offset, 5 * 65536);
 }
 
 // ── Byte-exact equality round-trip ──────────────────────────────────
@@ -673,18 +675,21 @@ fn shaped_glyph_byte_exact_round_trip() {
     let glyphs = [
         ShapedGlyph {
             glyph_id: 0xABCD,
-            x_advance: -32000,
-            x_offset: 32000,
-            y_offset: -1,
+            _pad: 0,
+            x_advance: -32000 * 65536,
+            x_offset: 32000 * 65536,
+            y_offset: -1 * 65536,
         },
         ShapedGlyph {
             glyph_id: 0x0001,
-            x_advance: 1,
-            x_offset: -1,
+            _pad: 0,
+            x_advance: 1 * 65536,
+            x_offset: -1 * 65536,
             y_offset: 0,
         },
         ShapedGlyph {
             glyph_id: 0xFFFE,
+            _pad: 0,
             x_advance: 0,
             x_offset: 0,
             y_offset: 0,
@@ -2459,21 +2464,24 @@ fn glyphs_round_trip_scene_writer_reader() {
     let glyphs = [
         ShapedGlyph {
             glyph_id: 72,
-            x_advance: 600,
+            _pad: 0,
+            x_advance: 600 * 65536,
             x_offset: 0,
             y_offset: 0,
         },
         ShapedGlyph {
             glyph_id: 101,
-            x_advance: 550,
+            _pad: 0,
+            x_advance: 550 * 65536,
             x_offset: 0,
             y_offset: 0,
         },
         ShapedGlyph {
             glyph_id: 108,
-            x_advance: 250,
-            x_offset: -5,
-            y_offset: 3,
+            _pad: 0,
+            x_advance: 250 * 65536,
+            x_offset: -5 * 65536,
+            y_offset: 3 * 65536,
         },
     ];
     let dref = w.push_shaped_glyphs(&glyphs);
@@ -2505,8 +2513,8 @@ fn glyphs_round_trip_scene_writer_reader() {
             let read = r.shaped_glyphs(glyphs, glyph_count);
             assert_eq!(read.len(), 3);
             assert_eq!(read[0].glyph_id, 72);
-            assert_eq!(read[2].x_offset, -5);
-            assert_eq!(read[2].y_offset, 3);
+            assert_eq!(read[2].x_offset, -5 * 65536);
+            assert_eq!(read[2].y_offset, 3 * 65536);
         }
         _ => panic!("expected Glyphs content"),
     }
@@ -2522,13 +2530,15 @@ fn glyphs_triple_buffer_round_trip() {
         let glyphs = [
             ShapedGlyph {
                 glyph_id: 65,
-                x_advance: 10,
+                _pad: 0,
+                x_advance: 10 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             },
             ShapedGlyph {
                 glyph_id: 66,
-                x_advance: 10,
+                _pad: 0,
+                x_advance: 10 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             },
@@ -2576,7 +2586,8 @@ fn glyphs_acquire_copy_preserves_data() {
         w.clear();
         let glyphs = [ShapedGlyph {
             glyph_id: 42,
-            x_advance: 500,
+            _pad: 0,
+            x_advance: 500 * 65536,
             x_offset: 0,
             y_offset: 0,
         }];
@@ -2621,7 +2632,8 @@ fn multiple_glyphs_nodes_coexist() {
         let glyphs: Vec<ShapedGlyph> = (0..(i + 1) * 3)
             .map(|j| ShapedGlyph {
                 glyph_id: i * 100 + j,
-                x_advance: 10,
+                _pad: 0,
+                x_advance: 10 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             })
@@ -2677,8 +2689,8 @@ fn scene_header_size_is_80_bytes() {
 }
 
 #[test]
-fn shaped_glyph_size_is_8_bytes() {
-    assert_eq!(core::mem::size_of::<ShapedGlyph>(), 8);
+fn shaped_glyph_size_is_16_bytes() {
+    assert_eq!(core::mem::size_of::<ShapedGlyph>(), 16);
 }
 
 // ── Mixed content type tests (VAL-SCENE-008) ───────────────────────
@@ -2706,7 +2718,8 @@ fn mixed_background_glyphs_image_triple_buffer() {
         // Glyphs child
         let glyphs = [ShapedGlyph {
             glyph_id: 65,
-            x_advance: 10,
+            _pad: 0,
+            x_advance: 10 * 65536,
             x_offset: 0,
             y_offset: 0,
         }];
@@ -2896,9 +2909,9 @@ fn make_mono_glyphs_produces_correct_content() {
             assert_eq!(read.len(), 5);
             assert_eq!(read[0].glyph_id, b'H' as u16);
             assert_eq!(read[4].glyph_id, b'o' as u16);
-            // Each glyph has x_advance == 8 (monospace)
+            // Each glyph has x_advance == 8 points (in 16.16 fixed-point = 8 * 65536)
             for g in read {
-                assert_eq!(g.x_advance, 8);
+                assert_eq!(g.x_advance, 8 * 65536);
             }
         }
         _ => panic!("expected Glyphs content"),
@@ -2928,7 +2941,8 @@ fn bytes_to_shaped_glyphs_test(text: &[u8], advance: u16) -> Vec<ShapedGlyph> {
     text.iter()
         .map(|&ch| ShapedGlyph {
             glyph_id: ch as u16,
-            x_advance: advance as i16,
+            _pad: 0,
+            x_advance: advance as i32 * 65536,
             x_offset: 0,
             y_offset: 0,
         })
@@ -4355,7 +4369,8 @@ fn triple_buffer_background_glyphs_round_trip() {
         // Glyphs
         let glyphs = [ShapedGlyph {
             glyph_id: 65,
-            x_advance: 10,
+            _pad: 0,
+            x_advance: 10 * 65536,
             x_offset: 0,
             y_offset: 0,
         }];
@@ -4585,7 +4600,8 @@ fn clock_repush_120_times_no_overflow() {
     let title_glyphs: Vec<ShapedGlyph> = (0..4u16)
         .map(|i| ShapedGlyph {
             glyph_id: i,
-            x_advance: 8,
+            _pad: 0,
+            x_advance: 8 * 65536,
             x_offset: 0,
             y_offset: 0,
         })
@@ -4597,7 +4613,8 @@ fn clock_repush_120_times_no_overflow() {
         let line_glyphs: Vec<ShapedGlyph> = (0..80u16)
             .map(|i| ShapedGlyph {
                 glyph_id: i,
-                x_advance: 8,
+                _pad: 0,
+                x_advance: 8 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             })
@@ -4615,7 +4632,8 @@ fn clock_repush_120_times_no_overflow() {
         let clock_glyphs: Vec<ShapedGlyph> = (0..8u16)
             .map(|i| ShapedGlyph {
                 glyph_id: i,
-                x_advance: 8,
+                _pad: 0,
+                x_advance: 8 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             })
@@ -4626,8 +4644,8 @@ fn clock_repush_120_times_no_overflow() {
     let data_after_clocks = w.data_used();
     let clock_data_total = data_after_clocks - data_after_doc;
 
-    // 120 clock pushes × 64 bytes each = 7,680 bytes.
-    // DATA_BUFFER_SIZE is 65,536 bytes. Even with document data, this fits.
+    // 120 clock pushes × 128 bytes each = 15,360 bytes (ShapedGlyph is 16 bytes, ~8 glyphs per clock).
+    // DATA_BUFFER_SIZE is 131,072 bytes. Even with document data, this fits.
     assert!(
         (data_after_clocks as usize) < DATA_BUFFER_SIZE,
         "data_used ({}) should be < DATA_BUFFER_SIZE ({}) after 120 clock re-pushes + document data",
@@ -4637,8 +4655,8 @@ fn clock_repush_120_times_no_overflow() {
 
     // Verify the accumulated clock data size is reasonable.
     assert!(
-        clock_data_total <= 120 * 64 + 120, // 64 bytes per clock + alignment padding
-        "120 clock re-pushes should use ~7,680 bytes, got {}",
+        clock_data_total <= 120 * 128 + 120, // ~128 bytes per clock + alignment padding
+        "120 clock re-pushes should use ~15,360 bytes, got {}",
         clock_data_total
     );
 }
@@ -4728,19 +4746,22 @@ fn incremental_data_push_preserves_old_data() {
     let original_glyphs = [
         ShapedGlyph {
             glyph_id: 72,
-            x_advance: 8,
+            _pad: 0,
+            x_advance: 8 * 65536,
             x_offset: 0,
             y_offset: 0,
         },
         ShapedGlyph {
             glyph_id: 101,
-            x_advance: 8,
+            _pad: 0,
+            x_advance: 8 * 65536,
             x_offset: 0,
             y_offset: 0,
         },
         ShapedGlyph {
             glyph_id: 108,
-            x_advance: 8,
+            _pad: 0,
+            x_advance: 8 * 65536,
             x_offset: 0,
             y_offset: 0,
         },
@@ -4774,13 +4795,15 @@ fn incremental_data_push_preserves_old_data() {
         let new_glyphs = [
             ShapedGlyph {
                 glyph_id: 87,
-                x_advance: 8,
+                _pad: 0,
+                x_advance: 8 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             },
             ShapedGlyph {
                 glyph_id: 111,
-                x_advance: 8,
+                _pad: 0,
+                x_advance: 8 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             },
@@ -4910,19 +4933,22 @@ fn incremental_update_marks_only_changed_nodes_dirty() {
         let new_glyphs = [
             ShapedGlyph {
                 glyph_id: 88,
-                x_advance: 8,
+                _pad: 0,
+                x_advance: 8 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             },
             ShapedGlyph {
                 glyph_id: 89,
-                x_advance: 8,
+                _pad: 0,
+                x_advance: 8 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             },
             ShapedGlyph {
                 glyph_id: 90,
-                x_advance: 8,
+                _pad: 0,
+                x_advance: 8 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             },
@@ -4987,7 +5013,8 @@ fn incremental_data_used_grows_monotonically() {
                 .iter()
                 .map(|&ch| ShapedGlyph {
                     glyph_id: ch as u16,
-                    x_advance: 8,
+                    _pad: 0,
+                    x_advance: 8 * 65536,
                     x_offset: 0,
                     y_offset: 0,
                 })

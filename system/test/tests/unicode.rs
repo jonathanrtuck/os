@@ -11,8 +11,10 @@ use scene::*;
 mod fallback;
 
 use fallback::FallbackChain;
-use fonts::rasterize::{self, RasterBuffer, RasterScratch};
-use fonts::shape;
+use fonts::{
+    rasterize::{self, RasterBuffer, RasterScratch},
+    shape,
+};
 
 const JETBRAINS_MONO: &[u8] = include_bytes!("../../share/jetbrains-mono.ttf");
 const INTER: &[u8] = include_bytes!("../../share/inter.ttf");
@@ -27,7 +29,11 @@ fn make_buf() -> Vec<u8> {
 }
 
 /// Rasterize a glyph and return total coverage sum (RGB channels).
-fn rasterize_glyph(font_data: &[u8], glyph_id: u16, size_px: u16) -> Option<(rasterize::GlyphMetrics, u32)> {
+fn rasterize_glyph(
+    font_data: &[u8],
+    glyph_id: u16,
+    size_px: u16,
+) -> Option<(rasterize::GlyphMetrics, u32)> {
     let mut buf = vec![0u8; 48 * 6 * 48];
     let mut scratch = Box::new(RasterScratch::zeroed());
     let mut rb = RasterBuffer {
@@ -63,11 +69,7 @@ fn unicode_latin_extended_cafe_shapes_four_glyphs() {
             "glyph {} in 'café' has glyph_id 0 (.notdef) — font lacks the codepoint",
             i
         );
-        assert!(
-            g.x_advance > 0,
-            "glyph {} in 'café' has zero x_advance",
-            i
-        );
+        assert!(g.x_advance > 0, "glyph {} in 'café' has zero x_advance", i);
     }
 }
 
@@ -82,18 +84,23 @@ fn unicode_latin_extended_cafe_rasterizes_with_nonzero_coverage() {
         assert!(
             result.is_some(),
             "glyph {} (id={}) in 'café' failed to rasterize",
-            i, g.glyph_id
+            i,
+            g.glyph_id
         );
         let (metrics, coverage_sum) = result.unwrap();
         assert!(
             coverage_sum > 0,
             "glyph {} (id={}) in 'café' has zero coverage — no visible pixels",
-            i, g.glyph_id
+            i,
+            g.glyph_id
         );
         assert!(
             metrics.width > 0 && metrics.height > 0,
             "glyph {} (id={}) in 'café' has zero dimensions: {}x{}",
-            i, g.glyph_id, metrics.width, metrics.height
+            i,
+            g.glyph_id,
+            metrics.width,
+            metrics.height
         );
     }
 }
@@ -135,17 +142,24 @@ fn unicode_latin_extended_rasterize_individual_accented() {
         assert!(gid > 0, "{} has .notdef glyph", name);
 
         let result = rasterize_glyph(INTER, gid, 18);
-        assert!(result.is_some(), "{} (glyph_id={}) failed to rasterize", name, gid);
+        assert!(
+            result.is_some(),
+            "{} (glyph_id={}) failed to rasterize",
+            name,
+            gid
+        );
         let (metrics, coverage_sum) = result.unwrap();
         assert!(
             coverage_sum > 0,
             "{} (glyph_id={}) has zero coverage",
-            name, gid
+            name,
+            gid
         );
         assert!(
             metrics.width > 0 && metrics.height > 0,
             "{} (glyph_id={}) has zero dimensions",
-            name, gid
+            name,
+            gid
         );
     }
 }
@@ -157,7 +171,11 @@ fn unicode_latin_extended_via_fallback_chain() {
     let chain = FallbackChain::new(&[INTER, JETBRAINS_MONO]);
     let result = chain.shape("café", &[]);
 
-    assert_eq!(result.len(), 4, "fallback chain should produce 4 glyphs for 'café'");
+    assert_eq!(
+        result.len(),
+        4,
+        "fallback chain should produce 4 glyphs for 'café'"
+    );
     for (i, fg) in result.iter().enumerate() {
         assert!(
             fg.glyph.glyph_id > 0,
@@ -240,7 +258,8 @@ fn unicode_scene_graph_naive_resume_round_trip() {
             // For this test, we just need the glyph_id and some non-zero advances.
             scene::ShapedGlyph {
                 glyph_id: sg.glyph_id,
-                x_advance: (sg.x_advance / 50).max(1) as i16,
+                _pad: 0,
+                x_advance: (sg.x_advance / 50).max(1) as i32 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             }
@@ -266,7 +285,11 @@ fn unicode_scene_graph_naive_resume_round_trip() {
     let r = SceneReader::new(&buf);
     let node = r.node(id);
     let (read_glyph_ref, read_glyph_count) = match node.content {
-        Content::Glyphs { glyphs, glyph_count, .. } => (glyphs, glyph_count),
+        Content::Glyphs {
+            glyphs,
+            glyph_count,
+            ..
+        } => (glyphs, glyph_count),
         _ => panic!("expected Glyphs content"),
     };
     assert_eq!(read_glyph_count, scene_glyphs.len() as u16);
@@ -303,7 +326,8 @@ fn unicode_scene_graph_write_read_round_trip() {
         .iter()
         .map(|sg| scene::ShapedGlyph {
             glyph_id: sg.glyph_id,
-            x_advance: (sg.x_advance / 50).max(1) as i16,
+            _pad: 0,
+            x_advance: (sg.x_advance / 50).max(1) as i32 * 65536,
             x_offset: 0,
             y_offset: 0,
         })
@@ -330,7 +354,11 @@ fn unicode_scene_graph_write_read_round_trip() {
     assert_eq!(nodes.len(), 1);
 
     match nodes[0].content {
-        Content::Glyphs { glyphs, glyph_count, .. } => {
+        Content::Glyphs {
+            glyphs,
+            glyph_count,
+            ..
+        } => {
             assert_eq!(glyph_count, scene_glyphs.len() as u16);
             let read_glyphs = r.shaped_glyphs(glyphs, glyph_count);
             assert_eq!(read_glyphs.len(), scene_glyphs.len());
@@ -357,9 +385,10 @@ fn unicode_scene_graph_mixed_ascii_and_extended_latin() {
         .iter()
         .map(|sg| scene::ShapedGlyph {
             glyph_id: sg.glyph_id,
-            x_advance: (sg.x_advance / 50).max(1) as i16,
-            x_offset: (sg.x_offset / 50) as i16,
-            y_offset: (sg.y_offset / 50) as i16,
+            _pad: 0,
+            x_advance: (sg.x_advance / 50).max(1) as i32 * 65536,
+            x_offset: (sg.x_offset / 50) as i32 * 65536,
+            y_offset: (sg.y_offset / 50) as i32 * 65536,
         })
         .collect();
 
@@ -547,7 +576,10 @@ fn unicode_supplementary_followed_by_ascii_rasterize() {
 
     // The last glyph should be 'W' with a valid glyph ID.
     let w_glyph = glyphs.last().unwrap();
-    assert!(w_glyph.glyph_id > 0, "'W' after supplementary should have valid glyph ID");
+    assert!(
+        w_glyph.glyph_id > 0,
+        "'W' after supplementary should have valid glyph ID"
+    );
 
     // Rasterize 'W'.
     let result = rasterize_glyph(INTER, w_glyph.glyph_id, 18);
@@ -577,19 +609,33 @@ fn unicode_glyph_cache_latin_extended_and_ascii_coexist() {
     assert_ne!(a_gid, e_gid, "A and é should have different glyph IDs");
 
     let a_cached = LruCachedGlyph {
-        width: 10, height: 14, bearing_x: 1, bearing_y: 12, advance: 8,
+        width: 10,
+        height: 14,
+        bearing_x: 1,
+        bearing_y: 12,
+        advance: 8,
         coverage: vec![100; 40],
     };
     let e_cached = LruCachedGlyph {
-        width: 10, height: 16, bearing_x: 1, bearing_y: 14, advance: 8,
+        width: 10,
+        height: 16,
+        bearing_x: 1,
+        bearing_y: 14,
+        advance: 8,
         coverage: vec![150; 40],
     };
 
     cache.insert(a_gid, 18, a_cached);
     cache.insert(e_gid, 18, e_cached);
 
-    assert!(cache.get(a_gid, 18).is_some(), "ASCII 'A' should be in cache");
-    assert!(cache.get(e_gid, 18).is_some(), "Latin Extended 'é' should be in cache");
+    assert!(
+        cache.get(a_gid, 18).is_some(),
+        "ASCII 'A' should be in cache"
+    );
+    assert!(
+        cache.get(e_gid, 18).is_some(),
+        "Latin Extended 'é' should be in cache"
+    );
     assert_eq!(cache.get(a_gid, 18).unwrap().coverage, vec![100u8; 40]);
     assert_eq!(cache.get(e_gid, 18).unwrap().coverage, vec![150u8; 40]);
 }
@@ -609,7 +655,11 @@ fn unicode_glyph_cache_stress_many_codepoints() {
 
     for g in &glyphs {
         let cached = LruCachedGlyph {
-            width: 10, height: 14, bearing_x: 1, bearing_y: 12, advance: 8,
+            width: 10,
+            height: 14,
+            bearing_x: 1,
+            bearing_y: 12,
+            advance: 8,
             coverage: vec![g.glyph_id as u8; 20],
         };
         cache.insert(g.glyph_id, 18, cached);
@@ -647,11 +697,7 @@ fn jetbrains_mono_angle_brackets_shape_and_rasterize() {
     for ch in ['<', '>', '=', '|', '{', '}'] {
         let s = alloc::format!("{}", ch);
         let shaped = shape(font_data, &s, &[]);
-        assert!(
-            !shaped.is_empty(),
-            "'{}' should produce shaped glyphs",
-            ch
-        );
+        assert!(!shaped.is_empty(), "'{}' should produce shaped glyphs", ch);
         let gid = shaped[0].glyph_id;
         eprintln!("  '{}' -> glyph_id={}", ch, gid);
 
