@@ -100,36 +100,44 @@ pub struct LayoutRun {
     pub font_size: u16,
 }
 
-// ── Monospace text layout helpers ───────────────────────────────────
+// ── Text layout (delegates to layout library) ─────────────────────
 
-/// Convert a byte offset to (visual_line, column) with monospace wrapping.
-/// This is the single source of truth for line-breaking logic — used by
-/// both scene building (cursor/selection positioning) and scroll calculation.
-pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
-    let mut line: usize = 0;
-    let mut col: usize = 0;
-    let mut pos: usize = 0;
-
-    while pos < text.len() && pos < byte_offset {
-        if text[pos] == b'\n' {
-            line += 1;
-            col = 0;
-            pos += 1;
-        } else {
-            col += 1;
-            pos += 1;
-
-            if col >= chars_per_line && pos < text.len() && text[pos] != b'\n' {
-                line += 1;
-                col = 0;
-            }
-        }
-    }
-
-    (line, col)
+/// Monospace font metrics for the layout library.
+///
+/// Every character has the same advance width. The `char_width` is set
+/// to 1.0 so that `max_width = chars_per_line` — the library wraps at
+/// the same character boundaries as the old hand-written code.
+struct UnitMetrics {
+    line_height: f32,
 }
 
-/// Break text into visual lines using monospace line-breaking.
+impl layout_lib::FontMetrics for UnitMetrics {
+    fn char_width(&self, _ch: char) -> f32 {
+        1.0
+    }
+    fn line_height(&self) -> f32 {
+        self.line_height
+    }
+}
+
+/// Convert a byte offset to (visual_line, column) with monospace wrapping.
+///
+/// Delegates to the layout library. The single source of truth for
+/// line-breaking logic — used by both scene building (cursor/selection
+/// positioning) and scroll calculation.
+pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
+    let metrics = UnitMetrics {
+        line_height: 1.0,
+    };
+    let max_width = chars_per_line as f32;
+    layout_lib::byte_to_line_col(text, byte_offset, &metrics, max_width, &layout_lib::CharBreaker)
+}
+
+/// Break text into visual lines using the unified layout library.
+///
+/// Delegates to `layout_lib::layout_paragraph` with `CharBreaker` (character-
+/// level wrapping) and unit-width metrics, then wraps each `LayoutLine`
+/// into a `LayoutRun` with color and font_size for scene graph construction.
 pub fn layout_mono_lines(
     text: &[u8],
     chars_per_line: usize,
@@ -137,73 +145,31 @@ pub fn layout_mono_lines(
     color: Color,
     font_size: u16,
 ) -> Vec<LayoutRun> {
-    let mut runs = Vec::new();
-    let mut line_y: i32 = 0;
-    let mut pos: usize = 0;
+    let metrics = UnitMetrics {
+        line_height: line_height as f32,
+    };
+    let max_width = chars_per_line as f32;
+    let para = layout_lib::layout_paragraph(
+        text,
+        &metrics,
+        max_width,
+        layout_lib::Alignment::Left,
+        &layout_lib::CharBreaker,
+    );
 
-    while pos < text.len() {
-        let remaining = &text[pos..];
-        let line_end = if let Some(nl) = remaining.iter().position(|&b| b == b'\n') {
-            if nl <= chars_per_line {
-                pos + nl
-            } else {
-                pos + chars_per_line
-            }
-        } else if remaining.len() <= chars_per_line {
-            text.len()
-        } else {
-            pos + chars_per_line
-        };
-        let line_len = line_end - pos;
-
-        runs.push(LayoutRun {
+    para.lines
+        .iter()
+        .map(|line| LayoutRun {
             glyphs: DataRef {
-                offset: pos as u32,
-                length: line_len as u32,
+                offset: line.byte_offset,
+                length: line.byte_length,
             },
-            glyph_count: line_len as u16,
-            y: line_y,
+            glyph_count: line.byte_length as u16,
+            y: line.y,
             color,
             font_size,
-        });
-
-        line_y = line_y.saturating_add(line_height);
-        pos = if line_end < text.len() && text[line_end] == b'\n' {
-            line_end + 1
-        } else {
-            line_end
-        };
-    }
-
-    // If text ends with '\n', emit an empty run for the blank trailing line
-    // so the cursor can be positioned there.
-    if !text.is_empty() && text[text.len() - 1] == b'\n' {
-        runs.push(LayoutRun {
-            glyphs: DataRef {
-                offset: text.len() as u32,
-                length: 0,
-            },
-            glyph_count: 0,
-            y: line_y,
-            color,
-            font_size,
-        });
-    }
-
-    if runs.is_empty() {
-        runs.push(LayoutRun {
-            glyphs: DataRef {
-                offset: 0,
-                length: 0,
-            },
-            glyph_count: 0,
-            y: 0,
-            color,
-            font_size,
-        });
-    }
-
-    runs
+        })
+        .collect()
 }
 
 /// Extract source text bytes for a run using its placeholder DataRef.

@@ -27,6 +27,7 @@
 extern crate alloc;
 extern crate animation;
 extern crate fonts;
+extern crate layout as layout_lib;
 extern crate scene;
 
 #[path = "fallback.rs"]

@@ -76,6 +76,33 @@ pub fn update_single_line(
         return false; // Visual line count changed (soft-wrap), fall back.
     }
 
+    // Check if any NON-changed line's content shifted (wrap boundary moved).
+    // When a character is inserted/deleted on a soft-wrapped line, the wrap
+    // point may move — pulling characters from the next line or pushing them
+    // down. The changed line's glyph count is expected to differ, but if any
+    // OTHER visible line's glyph count differs from the scene node's current
+    // value, the wrap boundary moved and we need a full rebuild.
+    {
+        let mut check_node = w.node(N_DOC_TEXT).first_child;
+        for (i, run) in all_runs.iter().enumerate() {
+            let ry = run.y;
+            if ry + cfg.line_height as i32 <= scroll_pt || ry >= scroll_pt + content_h {
+                continue; // Not visible, skip.
+            }
+            if check_node == scene::NULL || check_node == N_CURSOR {
+                break;
+            }
+            if i != changed_line {
+                if let Content::Glyphs { glyph_count, .. } = w.node(check_node).content {
+                    if glyph_count != run.glyph_count {
+                        return false; // Wrap boundary shifted, fall back.
+                    }
+                }
+            }
+            check_node = w.node(check_node).next_sibling;
+        }
+    }
+
     // Find the changed line's run index in the full list.
     if changed_line >= all_runs.len() {
         return false; // Line out of range, fall back.
