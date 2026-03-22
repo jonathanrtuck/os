@@ -135,15 +135,18 @@ pub fn build_full_scene(
     let _content = w.alloc_node().unwrap(); // 5
     let _doc_text = w.alloc_node().unwrap(); // 6
     let _cursor_node = w.alloc_node().unwrap(); // 7
-                                                // Demo nodes 8..13 (scaffolding — see N_DEMO_BALL, N_DEMO_EASE_*).
+
+    // Demo nodes 8..13 (scaffolding — see N_DEMO_BALL, N_DEMO_EASE_*).
     let _demo_ball = w.alloc_node().unwrap(); // 8
     let _demo_ease0 = w.alloc_node().unwrap(); // 9
     let _demo_ease1 = w.alloc_node().unwrap(); // 10
     let _demo_ease2 = w.alloc_node().unwrap(); // 11
     let _demo_ease3 = w.alloc_node().unwrap(); // 12
     let _demo_ease4 = w.alloc_node().unwrap(); // 13
-                                               // Pointer cursor node (top-level, highest z-order).
+
+    // Pointer cursor node (top-level, highest z-order).
     let _pointer = w.alloc_node().unwrap(); // 14
+
     // Audit feature demo nodes.
     let _demo_rounded = w.alloc_node().unwrap(); // 15
     let _demo_border = w.alloc_node().unwrap(); // 16
@@ -932,9 +935,16 @@ pub fn build_document_content(
     let scroll_pt = round_f32(scroll_y);
 
     // Remove old dynamic nodes (line nodes + selection rects).
+    // set_node_count automatically clears dangling first_child pointers
+    // on surviving nodes that referenced the now-dead dynamic nodes.
     w.set_node_count(WELL_KNOWN_COUNT);
 
     // ── Data buffer compaction ──────────────────────────────
+    // Note: reset_data invalidates all DataRef values (clip_path, content).
+    // Surviving nodes with stale DataRefs will produce empty data lookups
+    // (the reader returns &[] for out-of-bounds refs). This is safe but
+    // means clip paths on demo nodes won't render after compaction — they
+    // are re-pushed in build_full_scene on the next full rebuild.
     w.reset_data();
 
     // Re-push title glyph data.
