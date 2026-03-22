@@ -178,14 +178,7 @@ fn relative_luminance(r: u8, g: u8, b: u8) -> f32 {
 ///
 /// A correction factor in the range [0.85, 1.0]. Multiply the font's
 /// base weight by this factor to get the adjusted weight.
-pub fn weight_correction_factor(
-    fg_r: u8,
-    fg_g: u8,
-    fg_b: u8,
-    bg_r: u8,
-    bg_g: u8,
-    bg_b: u8,
-) -> f32 {
+pub fn weight_correction_factor(fg_r: u8, fg_g: u8, fg_b: u8, bg_r: u8, bg_g: u8, bg_b: u8) -> f32 {
     let fg_lum = relative_luminance(fg_r, fg_g, fg_b);
     let bg_lum = relative_luminance(bg_r, bg_g, bg_b);
 

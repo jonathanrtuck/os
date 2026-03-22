@@ -423,17 +423,17 @@ impl TextLayout {
         }
 
         let cursor_line = self.byte_to_visual_line(text, cursor_offset);
-        let cursor_px = cursor_line as f32 * self.line_height as f32;
-        let viewport_px = viewport_lines as f32 * self.line_height as f32;
+        let cursor_pt = cursor_line as f32 * self.line_height as f32;
+        let viewport_pt = viewport_lines as f32 * self.line_height as f32;
 
-        if cursor_px < current_scroll {
-            return cursor_px;
+        if cursor_pt < current_scroll {
+            return cursor_pt;
         }
 
-        let last_visible_top = current_scroll + viewport_px - self.line_height as f32;
+        let last_visible_top = current_scroll + viewport_pt - self.line_height as f32;
 
-        if cursor_px > last_visible_top {
-            return cursor_px - viewport_px + self.line_height as f32;
+        if cursor_pt > last_visible_top {
+            return cursor_pt - viewport_pt + self.line_height as f32;
         }
 
         current_scroll

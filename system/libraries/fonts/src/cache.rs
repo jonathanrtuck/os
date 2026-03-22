@@ -9,13 +9,6 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use crate::rasterize;
 // ---------------------------------------------------------------------------
-// Stem darkening — non-linear coverage boost for thin strokes
-// ---------------------------------------------------------------------------
-
-// Stem darkening constants — canonical definitions in rasterize.rs.
-pub use crate::rasterize::{STEM_DARKENING_BOOST, STEM_DARKENING_LUT};
-
-// ---------------------------------------------------------------------------
 // axis_values_hash
 // ---------------------------------------------------------------------------
 

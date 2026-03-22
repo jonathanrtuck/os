@@ -1073,6 +1073,10 @@ pub extern "C" fn _start() -> ! {
     };
     let raster_scratch = unsafe { &mut *scratch_persistent_ptr };
     let font_size_pt: u32 = font_size_cfg as u32;
+    // Rasterize glyphs at device pixel resolution (2x for Retina) for
+    // crisp rendering. Glyph metrics are stored in pixel space; the
+    // renderer divides by scale_factor when positioning quads.
+    let font_size_px: u32 = font_size_pt * (scale_factor as u32).max(1);
 
     if !font_slice.is_empty() {
         sys::print(b"     initializing glyph atlas\n");
@@ -1082,6 +1086,7 @@ pub extern "C" fn _start() -> ! {
         if let Some(metrics) = fonts::rasterize::font_metrics(font_data) {
             let upem = metrics.units_per_em as i32;
             let asc = metrics.ascent as i32;
+            // font_ascent stays in point space (not pixels).
             let size = font_size_pt as i32;
             font_ascent = ((asc * size + upem - 1) / upem) as u32;
         }
@@ -1092,7 +1097,8 @@ pub extern "C" fn _start() -> ! {
         // Individual characters not covered here are handled by the LRU fallback.
         let shaped = fonts::shape(font_data, ascii, &[]);
 
-        let mut raster_buf = [0u8; 50 * 50];
+        // 2x rasterization produces larger glyphs — increase buffer accordingly.
+        let mut raster_buf = [0u8; 100 * 100];
         let mut packed = 0u32;
         let mut atlas_full_warned = false;
 
@@ -1102,13 +1108,13 @@ pub extern "C" fn _start() -> ! {
             }
             let mut rb = fonts::rasterize::RasterBuffer {
                 data: &mut raster_buf,
-                width: 50,
-                height: 50,
+                width: 100,
+                height: 100,
             };
             if let Some(m) = fonts::rasterize::rasterize_with_axes(
                 font_data,
                 sg.glyph_id,
-                font_size_pt as u16,
+                font_size_px as u16,
                 &mut rb,
                 raster_scratch,
                 &[],
@@ -1209,7 +1215,7 @@ pub extern "C" fn _start() -> ! {
         // Walk all visible Glyphs nodes and check for atlas misses. If any
         // new glyphs are rasterized, upload the dirty atlas region to the GPU.
         if !font_slice.is_empty() {
-            let mut raster_buf = [0u8; 50 * 50];
+            let mut raster_buf = [0u8; 100 * 100];
             let mut dirty_min_y: u16 = u16::MAX;
             let mut dirty_max_y: u16 = 0;
             // Scan all nodes for Glyphs content with missing atlas entries.
@@ -1230,13 +1236,13 @@ pub extern "C" fn _start() -> ! {
                         }
                         let mut rb = fonts::rasterize::RasterBuffer {
                             data: &mut raster_buf,
-                            width: 50,
-                            height: 50,
+                            width: 100,
+                            height: 100,
                         };
                         if let Some(m) = fonts::rasterize::rasterize_with_axes(
                             font_slice,
                             sg.glyph_id,
-                            font_size_pt as u16,
+                            font_size_px as u16,
                             &mut rb,
                             raster_scratch,
                             &[],
@@ -2224,12 +2230,18 @@ fn walk_scene(
             let mut pen_x = abs_x;
             let baseline_y = abs_y + font_ascent as f32;
 
+            // Glyph atlas contains device-pixel-resolution bitmaps.
+            // Divide bearing/width/height by scale to position in point space.
+            let glyph_scale = scale;
+
             for sg in shaped {
                 if let Some(entry) = atlas.lookup(sg.glyph_id) {
-                    let gx = pen_x + entry.bearing_x as f32 + sg.x_offset as f32;
-                    let gy = baseline_y - entry.bearing_y as f32 + sg.y_offset as f32;
-                    let gw = entry.width as f32;
-                    let gh = entry.height as f32;
+                    let gx =
+                        pen_x + entry.bearing_x as f32 / glyph_scale + sg.x_offset as f32;
+                    let gy =
+                        baseline_y - entry.bearing_y as f32 / glyph_scale + sg.y_offset as f32;
+                    let gw = entry.width as f32 / glyph_scale;
+                    let gh = entry.height as f32 / glyph_scale;
 
                     // UV coordinates in atlas.
                     let u0 = entry.u as f32 / atlas_w;

@@ -8,12 +8,11 @@
 use read_fonts::{FontRef, TableProvider};
 
 use super::{
+    embolden::{compute_dilation, embolden_outline},
     metrics::{font_axes, AxisValue, GlyphMetrics, RasterBuffer},
     outline::{extract_outline, GlyphOutline, GlyphPoint, MAX_CONTOURS, MAX_GLYPH_POINTS},
     scale::{scale_fu, scale_fu_ceil, scale_fu_floor},
-    scanline::{
-        flatten_outline_from_scratch, rasterize_segments, RasterScratch, STEM_DARKENING_LUT,
-    },
+    scanline::{flatten_outline_from_scratch, rasterize_segments, RasterScratch},
 };
 
 // ---------------------------------------------------------------------------
@@ -621,6 +620,12 @@ pub fn rasterize_with_axes(
             }
         };
 
+    // Apply outline dilation for stem darkening (macOS Core Text formula).
+    let (dil_x, dil_y) = compute_dilation(size_px, upem, 2);
+    if dil_x != 0 || dil_y != 0 {
+        embolden_outline(&mut scratch.outline, dil_x, dil_y);
+    }
+
     // The rest is identical to rasterize() -- use the outline from scratch.
     let x_min_fu = scratch.outline.x_min;
     let y_min_fu = scratch.outline.y_min;
@@ -671,11 +676,6 @@ pub fn rasterize_with_axes(
 
     // Rasterize at native width (no horizontal oversampling)
     rasterize_segments(scratch, &mut buffer.data[..out_total], bmp_w, bmp_h);
-
-    // Stem darkening (applied per grayscale byte).
-    for i in 0..out_total {
-        buffer.data[i] = STEM_DARKENING_LUT[buffer.data[i] as usize];
-    }
 
     let advance = scale_fu(advance_fu as i32, size_px_u32, upem) as u32;
     // bearing_x = x_min_px: the bitmap starts at the leftmost pixel of the
