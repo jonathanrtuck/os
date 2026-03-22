@@ -68,7 +68,7 @@ enum Error {
 
 // --- Duplicated constants from syscall.rs ---
 
-const MAX_DMA_ORDER: u64 = (RAM_SIZE / PAGE_SIZE).ilog2() as u64;
+const MAX_DMA_ORDER: u64 = (RAM_SIZE_MAX / PAGE_SIZE).ilog2() as u64;
 const MAX_ELF_SIZE: u64 = 2 * 1024 * 1024;
 const MAX_WAIT_HANDLES: u64 = 16;
 const MAX_WRITE_LEN: u64 = 4096;
@@ -189,7 +189,7 @@ fn validate_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Res
     if target_handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
-    const MAX_SHARE_PAGES: u64 = RAM_SIZE / PAGE_SIZE / 2;
+    const MAX_SHARE_PAGES: u64 = RAM_SIZE_MAX / PAGE_SIZE / 2;
     if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
@@ -199,7 +199,7 @@ fn validate_memory_share(target_handle_nr: u64, pa: u64, page_count: u64) -> Res
     let end_pa = pa
         .checked_add(page_count * PAGE_SIZE)
         .ok_or(Error::BadAddress)?;
-    if pa < RAM_START || end_pa > RAM_END {
+    if pa < RAM_START || end_pa > RAM_END_MAX {
         return Err(Error::BadAddress);
     }
     Ok(())
@@ -598,7 +598,7 @@ fn adversarial_memory_share_null_pa() {
 
 #[test]
 fn adversarial_memory_share_kernel_range_pa() {
-    // PA in kernel range is above RAM_END.
+    // PA in kernel range is above RAM_END_MAX.
     assert_eq!(
         validate_memory_share(0, PTR_KERNEL, 1),
         Err(Error::BadAddress)
@@ -636,8 +636,8 @@ fn adversarial_memory_share_zero_pages() {
 
 #[test]
 fn adversarial_memory_share_exceeds_ram_end() {
-    // Start within RAM, but end exceeds RAM_END.
-    let start_pa = RAM_END - PAGE_SIZE;
+    // Start within RAM, but end exceeds RAM_END_MAX.
+    let start_pa = RAM_END_MAX - PAGE_SIZE;
     assert_eq!(
         validate_memory_share(0, start_pa, 2),
         Err(Error::BadAddress)

@@ -116,23 +116,25 @@ impl TextLayout {
         &self,
         text: &[u8],
         cursor_offset: usize,
-        current_scroll: u32,
+        current_scroll: f32,
         viewport_lines: u32,
-    ) -> u32 {
-        if viewport_lines == 0 {
-            return 0;
+    ) -> f32 {
+        if viewport_lines == 0 || self.line_height == 0 {
+            return 0.0;
         }
 
         let cursor_line = self.byte_to_visual_line(text, cursor_offset);
+        let cursor_px = cursor_line as f32 * self.line_height as f32;
+        let viewport_px = viewport_lines as f32 * self.line_height as f32;
 
-        if cursor_line < current_scroll {
-            return cursor_line;
+        if cursor_px < current_scroll {
+            return cursor_px;
         }
 
-        let last_visible = current_scroll + viewport_lines - 1;
+        let last_visible_top = current_scroll + viewport_px - self.line_height as f32;
 
-        if cursor_line > last_visible {
-            return cursor_line - (viewport_lines - 1);
+        if cursor_px > last_visible_top {
+            return cursor_px - viewport_px + self.line_height as f32;
         }
 
         current_scroll
@@ -4642,10 +4644,10 @@ fn total_visual_lines_wrap() {
 #[test]
 fn scroll_for_cursor_no_scroll_needed() {
     let layout = make_layout(200);
-    // 3-line viewport, cursor on line 0, scroll=0 → no change
-    assert_eq!(layout.scroll_for_cursor(b"hello", 0, 0, 3), 0);
+    // 3-line viewport, cursor on line 0, scroll=0px → no change
+    assert_eq!(layout.scroll_for_cursor(b"hello", 0, 0.0, 3), 0.0);
     // cursor on line 2 (viewport 0..2), still visible
-    assert_eq!(layout.scroll_for_cursor(b"a\nb\nc", 4, 0, 3), 0);
+    assert_eq!(layout.scroll_for_cursor(b"a\nb\nc", 4, 0.0, 3), 0.0);
 }
 
 /// scroll_for_cursor scrolls down when cursor goes below viewport.
@@ -4654,9 +4656,9 @@ fn scroll_for_cursor_scroll_down() {
     let layout = make_layout(200);
     // 2-line viewport, cursor on line 2 (past visible range [0,1])
     let text = b"a\nb\nc";
-    // cursor at byte 4 = "c" = line 2. viewport lines = 2. current scroll = 0.
-    // Need scroll = 1 so viewport shows lines [1,2].
-    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 2), 1);
+    // cursor at byte 4 = "c" = line 2. viewport lines = 2. current scroll = 0px.
+    // Need scroll = 20px (line 1 * 20) so viewport shows lines [1,2].
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0.0, 2), 20.0);
 }
 
 /// scroll_for_cursor scrolls up when cursor goes above viewport.
@@ -4664,9 +4666,9 @@ fn scroll_for_cursor_scroll_down() {
 fn scroll_for_cursor_scroll_up() {
     let layout = make_layout(200);
     let text = b"a\nb\nc";
-    // cursor at byte 0 = line 0. scroll = 2, viewport lines = 2 → shows lines [2,3].
-    // Need scroll = 0 to see line 0.
-    assert_eq!(layout.scroll_for_cursor(text, 0, 2, 2), 0);
+    // cursor at byte 0 = line 0. scroll = 40px (line 2*20), viewport lines = 2.
+    // Need scroll = 0px to see line 0.
+    assert_eq!(layout.scroll_for_cursor(text, 0, 40.0, 2), 0.0);
 }
 
 /// scroll_for_cursor handles Home key (cursor at 0, scroll was large).
@@ -4674,8 +4676,8 @@ fn scroll_for_cursor_scroll_up() {
 fn scroll_for_cursor_home_key() {
     let layout = make_layout(200);
     let text = b"line1\nline2\nline3\nline4\nline5";
-    // Cursor at byte 0 = line 0, scroll = 4, viewport = 3
-    assert_eq!(layout.scroll_for_cursor(text, 0, 4, 3), 0);
+    // Cursor at byte 0 = line 0, scroll = 80px (line 4*20), viewport = 3
+    assert_eq!(layout.scroll_for_cursor(text, 0, 80.0, 3), 0.0);
 }
 
 /// scroll_for_cursor handles End key (cursor at end, scroll was 0).
@@ -4683,16 +4685,16 @@ fn scroll_for_cursor_home_key() {
 fn scroll_for_cursor_end_key() {
     let layout = make_layout(200);
     let text = b"l1\nl2\nl3\nl4\nl5";
-    // End of text is on line 4. viewport = 3 lines. scroll = 0.
-    // Need scroll = 2 so viewport shows [2,3,4].
-    assert_eq!(layout.scroll_for_cursor(text, text.len(), 0, 3), 2);
+    // End of text is on line 4. viewport = 3 lines. scroll = 0px.
+    // Need scroll = 40px (line 2*20) so viewport shows [2,3,4].
+    assert_eq!(layout.scroll_for_cursor(text, text.len(), 0.0, 3), 40.0);
 }
 
 /// scroll_for_cursor with viewport_lines=0 always returns 0.
 #[test]
 fn scroll_for_cursor_zero_viewport() {
     let layout = make_layout(200);
-    assert_eq!(layout.scroll_for_cursor(b"a\nb\nc", 4, 5, 0), 0);
+    assert_eq!(layout.scroll_for_cursor(b"a\nb\nc", 4, 100.0, 0), 0.0);
 }
 
 /// scroll_for_cursor: cursor on the last visible line does not scroll.
@@ -4700,8 +4702,8 @@ fn scroll_for_cursor_zero_viewport() {
 fn scroll_for_cursor_cursor_on_last_visible() {
     let layout = make_layout(200);
     let text = b"a\nb\nc\nd\ne";
-    // Viewport=3, scroll=1 → visible lines [1,2,3]. Cursor on line 3 (byte 6='d').
-    assert_eq!(layout.scroll_for_cursor(text, 6, 1, 3), 1);
+    // Viewport=3, scroll=20px (line 1*20) → visible lines [1,2,3]. Cursor on line 3 (byte 6='d').
+    assert_eq!(layout.scroll_for_cursor(text, 6, 20.0, 3), 20.0);
 }
 
 /// scroll_for_cursor: cursor just below viewport triggers minimal scroll.
@@ -4709,9 +4711,9 @@ fn scroll_for_cursor_cursor_on_last_visible() {
 fn scroll_for_cursor_one_past_bottom() {
     let layout = make_layout(200);
     let text = b"a\nb\nc\nd\ne";
-    // Viewport=2, scroll=0 → visible lines [0,1]. Cursor on line 2 (byte 4='c').
-    // Should scroll to 1 so viewport shows [1,2].
-    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 2), 1);
+    // Viewport=2, scroll=0px → visible lines [0,1]. Cursor on line 2 (byte 4='c').
+    // Should scroll to 20px (line 1*20) so viewport shows [1,2].
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0.0, 2), 20.0);
 }
 
 /// scroll_for_cursor: single-line viewport scrolls to the cursor line exactly.
@@ -4719,10 +4721,10 @@ fn scroll_for_cursor_one_past_bottom() {
 fn scroll_for_cursor_single_line_viewport() {
     let layout = make_layout(200);
     let text = b"a\nb\nc";
-    // Viewport=1, cursor on line 2 → scroll=2.
-    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 1), 2);
-    // Viewport=1, cursor on line 0, scroll was 2 → scroll=0.
-    assert_eq!(layout.scroll_for_cursor(text, 0, 2, 1), 0);
+    // Viewport=1, cursor on line 2 → scroll=40px (line 2*20).
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0.0, 1), 40.0);
+    // Viewport=1, cursor on line 0, scroll was 40px → scroll=0px.
+    assert_eq!(layout.scroll_for_cursor(text, 0, 40.0, 1), 0.0);
 }
 
 /// scroll_for_cursor: cursor already visible with large viewport returns unchanged scroll.
@@ -4730,8 +4732,8 @@ fn scroll_for_cursor_single_line_viewport() {
 fn scroll_for_cursor_large_viewport() {
     let layout = make_layout(200);
     let text = b"a\nb\nc";
-    // Viewport=100 lines, everything fits. scroll=0 should remain.
-    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 100), 0);
+    // Viewport=100 lines, everything fits. scroll=0px should remain.
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0.0, 100), 0.0);
 }
 
 /// draw_tt_sel_scroll: selection byte range survives scrolling.
@@ -4788,10 +4790,10 @@ fn scroll_clips_lines_above_and_below() {
 /// just a number that can be stored and restored per content mode.
 #[test]
 fn scroll_offset_preserved_across_context_switch() {
-    // Scroll offset is a u32 (or usize). Switching from editor to image
+    // Scroll offset is an f32 (pixel space). Switching from editor to image
     // and back should restore the same value.
-    let editor_scroll: u32 = 7;
-    let image_scroll: u32 = 0; // images don't scroll (yet)
+    let editor_scroll: f32 = 140.0; // 7 lines * 20px
+    let image_scroll: f32 = 0.0; // images don't scroll (yet)
 
     // Simulate context switch: save editor scroll, load image scroll.
     let saved_editor_scroll = editor_scroll;
@@ -4799,7 +4801,7 @@ fn scroll_offset_preserved_across_context_switch() {
 
     // Switch back: restore editor scroll.
     let restored = saved_editor_scroll;
-    assert_eq!(restored, 7);
+    assert_eq!(restored, 140.0);
 }
 
 // composite_surfaces_rect — partial framebuffer compositing
@@ -5580,11 +5582,11 @@ fn click_to_position_with_scroll_offset() {
     };
     // 3 lines: "aaa\nbbb\nccc"
     let text = b"aaa\nbbb\nccc";
-    // Simulate scroll_offset = 1 (first visible line is "bbb").
+    // Simulate scroll_offset = 24.0px (1 line * 24px line_height).
     // A click at y=0 in the viewport maps to visual line 1 in the document.
-    let scroll_offset: u32 = 1;
+    let scroll_offset: f32 = 24.0;
     let click_y: u32 = 0; // top of viewport
-    let adjusted_y = click_y + scroll_offset * layout.line_height;
+    let adjusted_y = click_y + scroll_offset.round() as u32;
     let result = layout.xy_to_byte(text, 0, adjusted_y);
     // Visual line 1 starts at byte 4 ('b').
     assert_eq!(result, 4);

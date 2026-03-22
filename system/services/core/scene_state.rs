@@ -18,7 +18,7 @@ use super::layout::{
 // Re-export layout types and constants used by main.rs.
 pub use super::layout::{
     byte_to_line_col, count_lines, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT,
-    N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 
 pub struct SceneState {
@@ -39,7 +39,12 @@ impl SceneState {
         TripleWriter::from_existing(self.buf)
     }
 
-    /// Build the full scene tree for the text editor screen layout.
+    /// Build the full scene tree for the editor or image viewer screen layout.
+    ///
+    /// When `image_mode` is false, builds the text editor scene.
+    /// When `image_mode` is true, builds an image viewer scene with a centered
+    /// test image, no cursor/selection/demo nodes, and "Image" in the title bar.
+    ///
     /// Writes to the back buffer and swaps to publish as the new front.
     #[allow(clippy::too_many_arguments)]
     pub fn build_editor_scene(
@@ -51,7 +56,12 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
+        cursor_opacity: u8,
+        mouse_x: u32,
+        mouse_y: u32,
+        pointer_opacity: u8,
+        image_mode: bool,
     ) {
         let mut tw = self.triple();
         {
@@ -66,6 +76,11 @@ impl SceneState {
                 title_label,
                 clock_text,
                 scroll_y,
+                cursor_opacity,
+                mouse_x,
+                mouse_y,
+                pointer_opacity,
+                image_mode,
             );
         }
         tw.publish();
@@ -89,6 +104,7 @@ impl SceneState {
         doc_text: &[u8],
         chars_per_line: u32,
         clock_text: Option<&[u8]>,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -100,6 +116,7 @@ impl SceneState {
                 doc_text,
                 chars_per_line,
                 clock_text,
+                cursor_opacity,
             );
         }
         tw.publish();
@@ -116,12 +133,21 @@ impl SceneState {
         doc_text: &[u8],
         content_h: u32,
         scroll_pt: i32,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
             let mut w = tw.acquire_copy();
             build_selection_update(
-                &mut w, cfg, cursor_pos, sel_start, sel_end, doc_text, content_h, scroll_pt,
+                &mut w,
+                cfg,
+                cursor_pos,
+                sel_start,
+                sel_end,
+                doc_text,
+                content_h,
+                scroll_pt,
+                cursor_opacity,
             );
         }
         tw.publish();
@@ -140,8 +166,9 @@ impl SceneState {
         changed_line: usize,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
         timer_fired: bool,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -156,6 +183,7 @@ impl SceneState {
                 sel_end,
                 scroll_y,
                 if timer_fired { Some(clock_text) } else { None },
+                cursor_opacity,
             );
             if !success {
                 // Compaction: fall back to full rebuild.
@@ -170,6 +198,7 @@ impl SceneState {
                     clock_text,
                     scroll_y,
                     timer_fired,
+                    cursor_opacity,
                 );
             }
         }
@@ -188,8 +217,9 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
         timer_fired: bool,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -203,6 +233,7 @@ impl SceneState {
                 sel_end,
                 scroll_y,
                 if timer_fired { Some(clock_text) } else { None },
+                cursor_opacity,
             );
             if !success {
                 build_document_content(
@@ -216,6 +247,7 @@ impl SceneState {
                     clock_text,
                     scroll_y,
                     timer_fired,
+                    cursor_opacity,
                 );
             }
         }
@@ -234,8 +266,9 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
         timer_fired: bool,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -249,6 +282,7 @@ impl SceneState {
                 sel_end,
                 scroll_y,
                 if timer_fired { Some(clock_text) } else { None },
+                cursor_opacity,
             );
             if !success {
                 build_document_content(
@@ -262,7 +296,38 @@ impl SceneState {
                     clock_text,
                     scroll_y,
                     timer_fired,
+                    cursor_opacity,
                 );
+            }
+        }
+        tw.publish();
+    }
+
+    /// Apply post-build opacity adjustments to the latest published scene.
+    ///
+    /// Copies the latest published buffer, sets root node opacity, walks
+    /// selection nodes (siblings after N_CURSOR) and sets their opacity,
+    /// then publishes. This is a lightweight operation: only a few bytes
+    /// change in the node array.
+    pub fn apply_opacity(&mut self, root_opacity: u8, selection_opacity: u8) {
+        // Skip the extra copy/publish cycle when both are fully opaque.
+        if root_opacity == 255 && selection_opacity == 255 {
+            return;
+        }
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            // Root opacity.
+            w.node_mut(N_ROOT).opacity = root_opacity;
+            w.mark_dirty(N_ROOT);
+            // Selection node opacity: walk siblings after N_CURSOR.
+            if selection_opacity < 255 {
+                let mut sel_id = w.node(N_CURSOR).next_sibling;
+                while sel_id != scene::NULL {
+                    w.node_mut(sel_id).opacity = selection_opacity;
+                    w.mark_dirty(sel_id);
+                    sel_id = w.node(sel_id).next_sibling;
+                }
             }
         }
         tw.publish();
@@ -280,8 +345,9 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: i32,
+        scroll_y: f32,
         mark_clock_changed: bool,
+        cursor_opacity: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -297,7 +363,26 @@ impl SceneState {
                 clock_text,
                 scroll_y,
                 mark_clock_changed,
+                cursor_opacity,
             );
+        }
+        tw.publish();
+    }
+
+    /// Apply pointer cursor position and opacity to the latest published scene.
+    ///
+    /// Updates N_POINTER's x, y, and opacity in-place via an acquire_copy +
+    /// publish cycle. Called every frame when the pointer state changes (move
+    /// or fade tick). Cheap — only one well-known node changes.
+    pub fn apply_pointer(&mut self, mouse_x: u32, mouse_y: u32, opacity: u8) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            let n = w.node_mut(N_POINTER);
+            n.x = mouse_x as i32;
+            n.y = mouse_y as i32;
+            n.opacity = opacity;
+            w.mark_dirty(N_POINTER);
         }
         tw.publish();
     }

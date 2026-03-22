@@ -122,16 +122,16 @@ fn line_bytes_for_run<'a>(text: &'a [u8], run: &TestLayoutRun) -> &'a [u8] {
 
 /// Filter runs to those visible in a scrolled viewport.
 ///
-/// Runs keep their document-relative y positions. The caller sets
-/// `content_transform` on the container node so the renderer handles
-/// the viewport offset.
+/// `scroll_y` is the scroll offset in pixels (f32). Runs keep their
+/// document-relative y positions. The caller sets `content_transform`
+/// on the container node so the renderer handles the viewport offset.
 fn scroll_runs(
     runs: Vec<TestLayoutRun>,
-    scroll_lines: u32,
+    scroll_y: f32,
     line_height: u32,
     viewport_height_pt: i32,
 ) -> Vec<TestLayoutRun> {
-    let scroll_pt = scroll_lines as i32 * line_height as i32;
+    let scroll_pt = scroll_y.round() as i32;
 
     runs.into_iter()
         .filter(|run| {
@@ -555,7 +555,7 @@ fn scroll_runs_no_scroll() {
     let text = b"a\nb\nc";
     let runs = layout_mono_lines(text, 80, 20, WHITE, 8, 16);
     assert_eq!(runs.len(), 3);
-    let visible = scroll_runs(runs, 0, 20, 100);
+    let visible = scroll_runs(runs, 0.0, 20, 100);
     assert_eq!(visible.len(), 3);
     assert_eq!(visible[0].y, 0);
     assert_eq!(visible[1].y, 20);
@@ -574,9 +574,9 @@ fn scroll_runs_filters_above_viewport() {
     }
     let runs = layout_mono_lines(&text, 80, 20, WHITE, 8, 16);
     assert_eq!(runs.len(), 10);
-    let visible = scroll_runs(runs, 5, 20, 60);
-    // Lines 5, 6, 7 visible. Lines 0-4 above, 8-9 below.
-    // y values are document-relative (not viewport-relative).
+    let visible = scroll_runs(runs, 100.0, 20, 60); // 5 lines * 20px = 100px
+                                                    // Lines 5, 6, 7 visible. Lines 0-4 above, 8-9 below.
+                                                    // y values are document-relative (not viewport-relative).
     assert_eq!(visible.len(), 3);
     assert_eq!(visible[0].y, 100); // line 5: 5 * 20 = 100
     assert_eq!(visible[1].y, 120); // line 6: 6 * 20 = 120
@@ -596,8 +596,8 @@ fn scroll_runs_cursor_at_bottom_forces_scroll() {
     }
     let runs = layout_mono_lines(&text, 80, 20, WHITE, 8, 16);
     assert_eq!(runs.len(), 40);
-    let visible = scroll_runs(runs, 6, 20, 600); // 600px = 30 lines
-                                                 // First visible line should be line 6 at document y = 6*20 = 120.
+    let visible = scroll_runs(runs, 120.0, 20, 600); // 6 lines * 20px = 120px, 600px = 30 lines
+                                                     // First visible line should be line 6 at document y = 6*20 = 120.
     assert_eq!(visible[0].y, 120);
     // Last visible line should be line 35 at document y = 35*20 = 700.
     let last = visible.last().unwrap();
@@ -618,7 +618,7 @@ fn scroll_runs_cursor_at_bottom_forces_scroll() {
 #[test]
 fn scroll_runs_empty_text_with_scroll() {
     let runs = layout_mono_lines(b"", 80, 20, WHITE, 8, 16);
-    let visible = scroll_runs(runs, 0, 20, 600);
+    let visible = scroll_runs(runs, 0.0, 20, 600);
     assert_eq!(visible.len(), 1); // empty placeholder run
 }
 
@@ -2145,12 +2145,12 @@ fn affine_transform_partial_eq() {
 #[test]
 fn node_size_assertion_with_transform() {
     // VAL-XFORM-022: Node size compile-time assertion.
-    // After replacing scroll_y (i32) with content_transform (AffineTransform, 24 bytes),
-    // Node grew from 100 to 120 bytes.
+    // After adding clip_path (DataRef, 8 bytes) and _reserved (8 bytes),
+    // Node grew from 120 to 136 bytes.
     let size = core::mem::size_of::<Node>();
     assert_eq!(
-        size, 120,
-        "Node size should be 120 bytes with content_transform, got {}",
+        size, 136,
+        "Node size should be 136 bytes with clip_path + _reserved, got {}",
         size
     );
 }
@@ -2664,11 +2664,11 @@ fn multiple_glyphs_nodes_coexist() {
     }
 }
 
-// ── Node size unchanged (VAL-SCENE-006) ─────────────────────────────
+// ── Node size (VAL-SCENE-006) ────────────────────────────────────────
 
 #[test]
-fn node_size_is_120_bytes() {
-    assert_eq!(core::mem::size_of::<Node>(), 120);
+fn node_size_is_136_bytes() {
+    assert_eq!(core::mem::size_of::<Node>(), 136);
 }
 
 #[test]
@@ -2949,7 +2949,7 @@ fn build_test_editor_scene(
     char_width: u32,
     line_height: u32,
     font_size: u16,
-    scroll_y: i32,
+    scroll_y: f32,
 ) {
     let text_color = Color::rgb(220, 220, 220);
     let cursor_color = Color::rgb(200, 200, 200);
@@ -2983,9 +2983,8 @@ fn build_test_editor_scene(
     );
     let content_y = title_bar_h + shadow_depth;
     let content_h = fb_height.saturating_sub(content_y);
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let visible_runs = scroll_runs(all_runs, scroll_lines, line_height, content_h as i32);
-    let scroll_pt = scroll_lines as i32 * line_height as i32;
+    let visible_runs = scroll_runs(all_runs, scroll_y, line_height, content_h as i32);
+    let scroll_pt = scroll_y.round() as i32;
 
     // Push line glyph data.
     let mut line_glyph_refs: Vec<(DataRef, u16, i32)> = Vec::with_capacity(visible_runs.len());
@@ -3080,7 +3079,7 @@ fn build_test_editor_scene(
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h as u16;
-        n.content_transform = AffineTransform::translate(0.0, -(scroll_pt as f32));
+        n.content_transform = AffineTransform::translate(0.0, -scroll_y);
         n.content = Content::None;
         n.content_hash = fnv1a(doc_text);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -3206,7 +3205,7 @@ fn collect_children(w: &SceneWriter, parent: u16) -> Vec<u16> {
 fn core_cursor_uses_background_container() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
-    build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0.0);
 
     let cursor = w.node(CORE_N_CURSOR);
     assert!(
@@ -3229,7 +3228,7 @@ fn core_selection_rects_use_background_container() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     // Select "ell" in "Hello\nWorld"
-    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 1, 4, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 1, 4, 8, 20, 16, 0.0);
 
     // Selection rects are allocated after well-known + line nodes.
     let total = w.node_count();
@@ -3262,7 +3261,7 @@ fn core_multiline_selection_all_background_containers() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     // Select across two lines: "llo\nWor"
-    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 2, 9, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 2, 9, 8, 20, 16, 0.0);
 
     let mut sel_id = w.node(CORE_N_CURSOR).next_sibling;
     let mut sel_count = 0;
@@ -3294,7 +3293,7 @@ fn core_multiline_selection_all_background_containers() {
 fn core_doc_text_is_pure_container() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
-    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 0, 0, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 0, 0, 8, 20, 16, 0.0);
 
     let doc = w.node(CORE_N_DOC_TEXT);
     assert!(
@@ -3308,7 +3307,7 @@ fn core_doc_text_is_pure_container() {
 fn core_per_line_glyphs_children() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
-    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 0, 0, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 0, 0, 8, 20, 16, 0.0);
 
     // N_DOC_TEXT children: line0, line1, then N_CURSOR
     let children = collect_children(&w, CORE_N_DOC_TEXT);
@@ -3342,7 +3341,7 @@ fn core_child_ordering_glyphs_then_cursor_then_selection() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     // "Hello\nWorld" with selection on first line
-    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 1, 4, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello\nWorld", 0, 1, 4, 8, 20, 16, 0.0);
 
     let children = collect_children(&w, CORE_N_DOC_TEXT);
     // Expected: line0, line1, N_CURSOR, sel_rect(s)
@@ -3380,7 +3379,7 @@ fn core_child_ordering_glyphs_then_cursor_then_selection() {
 fn core_title_uses_glyphs() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
-    build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0.0);
 
     let title = w.node(CORE_N_TITLE_TEXT);
     match title.content {
@@ -3400,7 +3399,7 @@ fn core_title_uses_glyphs() {
 fn core_clock_uses_glyphs() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
-    build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"Hello", 0, 0, 0, 8, 20, 16, 0.0);
 
     let clock = w.node(CORE_N_CLOCK_TEXT);
     match clock.content {
@@ -3432,7 +3431,7 @@ fn core_node_budget_extreme_content() {
     }
     // Select all text
     let text_len = text.len() as u32;
-    build_test_editor_scene(&mut w, 1024, 768, &text, 0, 0, text_len, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, &text, 0, 0, text_len, 8, 20, 16, 0.0);
 
     let total = w.node_count();
     assert!(
@@ -3455,7 +3454,7 @@ fn core_node_budget_extreme_content() {
 fn core_empty_document_has_glyphs_child() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
-    build_test_editor_scene(&mut w, 1024, 768, b"", 0, 0, 0, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"", 0, 0, 0, 8, 20, 16, 0.0);
 
     // N_DOC_TEXT should have at least one child (empty Glyphs).
     let children = collect_children(&w, CORE_N_DOC_TEXT);
@@ -3494,7 +3493,7 @@ fn core_per_line_glyphs_correct_y_positions() {
         8,
         line_h,
         16,
-        0,
+        0.0,
     );
 
     let children = collect_children(&w, CORE_N_DOC_TEXT);
@@ -3511,7 +3510,7 @@ fn core_per_line_glyphs_correct_y_positions() {
 fn core_per_line_glyphs_correct_glyph_data() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
-    build_test_editor_scene(&mut w, 1024, 768, b"AB\nCD", 0, 0, 0, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"AB\nCD", 0, 0, 0, 8, 20, 16, 0.0);
 
     let children = collect_children(&w, CORE_N_DOC_TEXT);
     assert!(children.len() >= 3); // 2 lines + cursor
@@ -3562,7 +3561,7 @@ fn core_scroll_filters_lines_correctly() {
         }
         text.push(b'a' + i);
     }
-    build_test_editor_scene(&mut w, 1024, 768, &text, 0, 0, 0, 8, 20, 16, 5);
+    build_test_editor_scene(&mut w, 1024, 768, &text, 0, 0, 0, 8, 20, 16, 100.0);
 
     let children = collect_children(&w, CORE_N_DOC_TEXT);
     // With scroll=5, only lines 5-9 visible (5 lines + cursor)
@@ -3597,30 +3596,18 @@ fn core_scroll_model_document_relative_positions() {
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
     let line_h: u32 = 20;
-    let scroll_lines: i32 = 3;
-    // 8 lines of text, scroll down 3 lines.
+    let scroll_y: f32 = 60.0; // 3 lines * 20px
+                              // 8 lines of text, scroll down 3 lines.
     let text = b"aaa\nbbb\nccc\nddd\neee\nfff\nggg\nhhh";
-    build_test_editor_scene(
-        &mut w,
-        1024,
-        768,
-        text,
-        0,
-        0,
-        0,
-        8,
-        line_h,
-        16,
-        scroll_lines,
-    );
+    build_test_editor_scene(&mut w, 1024, 768, text, 0, 0, 0, 8, line_h, 16, scroll_y);
 
-    let scroll_pt = scroll_lines as i32 * line_h as i32; // 60
+    let scroll_pt = scroll_y.round() as i32; // 60
 
-    // 1. N_DOC_TEXT.content_transform.ty == -(scroll_lines * line_height)
+    // 1. N_DOC_TEXT.content_transform.ty == -scroll_y
     assert_eq!(
         w.node(CORE_N_DOC_TEXT).content_transform.ty,
-        -(scroll_pt as f32),
-        "N_DOC_TEXT.content_transform.ty must equal -(scroll_lines * line_height)"
+        -scroll_y,
+        "N_DOC_TEXT.content_transform.ty must equal -scroll_y (pixel offset)"
     );
 
     // 2. Line nodes have document-relative y (not viewport-relative).
@@ -3651,7 +3638,7 @@ fn core_scroll_model_no_scroll_positions_unchanged() {
     // so behavior matches the old model.
     let mut buf = make_buf();
     let mut w = SceneWriter::new(&mut buf);
-    build_test_editor_scene(&mut w, 1024, 768, b"aaa\nbbb\nccc", 0, 0, 0, 8, 20, 16, 0);
+    build_test_editor_scene(&mut w, 1024, 768, b"aaa\nbbb\nccc", 0, 0, 0, 8, 20, 16, 0.0);
 
     // content_transform should be identity (no scroll).
     assert_eq!(
@@ -3692,7 +3679,7 @@ fn core_scroll_model_selection_rects_document_relative() {
         8,
         line_h,
         16,
-        0,
+        0.0,
     );
 
     // Selection rects are after cursor.
@@ -4527,7 +4514,7 @@ fn path_cubic_to_encoding() {
 fn node_size_unchanged_with_path() {
     // VAL-CROSS-01: Node size assertion passes after adding Content::Path.
     let size = core::mem::size_of::<Node>();
-    assert_eq!(size, 120, "Node must remain 120 bytes with Path variant");
+    assert_eq!(size, 136, "Node must remain 136 bytes with Path variant");
 }
 
 #[test]

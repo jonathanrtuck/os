@@ -8,7 +8,7 @@
 
 mod content;
 mod coords;
-mod path_raster;
+pub mod path_raster;
 mod walk;
 
 pub use coords::{round_f32, scale_coord, scale_size};

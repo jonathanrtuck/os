@@ -179,14 +179,28 @@ impl<'a> SceneWriter<'a> {
     pub fn node_count(&self) -> u16 {
         self.header().node_count
     }
-    /// Set the node count directly.
+    /// Truncate the node array to `count` nodes.
     ///
-    /// Used to truncate the node array (e.g., removing dynamic selection
-    /// rect nodes by resetting count to the well-known node count).
+    /// Nodes with IDs >= `count` are logically freed. Any surviving node
+    /// (ID < `count`) whose `first_child` points to a now-dead node gets
+    /// its `first_child` cleared to NULL. This prevents the tree walker
+    /// from following dangling pointers into reallocated memory.
+    ///
     /// The caller must ensure `count` does not exceed the previously
     /// allocated high-water mark within the current buffer.
     pub fn set_node_count(&mut self, count: u16) {
+        let old_count = self.header().node_count;
         self.header_mut().node_count = count;
+
+        // Clean up dangling first_child pointers in surviving nodes.
+        if count < old_count {
+            for id in 0..count {
+                let n = self.node_mut(id);
+                if n.first_child >= count {
+                    n.first_child = NULL;
+                }
+            }
+        }
     }
     /// Get a mutable reference to a node by ID.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {

@@ -938,6 +938,7 @@ fn cache_populated_on_first_render() {
 
     let mut buf = vec![0u8; 50 * 50 * 4];
     let mut fb = make_surface(&mut buf, 50, 50);
+    let mut clip_cache = render::ClipMaskCache::new();
 
     scene_render::render_scene_clipped_full(
         &mut fb,
@@ -947,6 +948,7 @@ fn cache_populated_on_first_render() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
     // Node 1 has Content::Image — should be cached.
@@ -980,6 +982,7 @@ fn cache_hit_produces_identical_pixels() {
     // First render (cache miss — populates cache).
     let mut buf1 = vec![0u8; 50 * 50 * 4];
     let mut fb1 = make_surface(&mut buf1, 50, 50);
+    let mut clip_cache = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
         &mut fb1,
         &graph,
@@ -988,6 +991,7 @@ fn cache_hit_produces_identical_pixels() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
     // Second render (cache hit — should produce identical output).
@@ -1001,6 +1005,7 @@ fn cache_hit_produces_identical_pixels() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
     assert_eq!(buf1, buf2, "cache hit should produce identical pixels");
@@ -1025,6 +1030,7 @@ fn cache_miss_on_hash_change() {
     // First render — populates cache with hash 0xDEAD.
     let mut buf = vec![0u8; 50 * 50 * 4];
     let mut fb = make_surface(&mut buf, 50, 50);
+    let mut clip_cache = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
         &mut fb,
         &graph,
@@ -1033,6 +1039,7 @@ fn cache_miss_on_hash_change() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
     assert!(cache.get(1, 0xDEAD).is_some());
 
@@ -1052,6 +1059,7 @@ fn cache_miss_on_hash_change() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
     // Old hash should miss, new hash should hit.
@@ -1085,8 +1093,9 @@ fn none_cache_renders_without_caching() {
     let mut fb = make_surface(&mut buf, 50, 50);
 
     // Pass None for cache — should render normally.
+    let mut clip_cache = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
-        &mut fb, &graph, &ctx, &dirty, &mut pool, &mut lru, None,
+        &mut fb, &graph, &ctx, &dirty, &mut pool, &mut lru, None, &mut clip_cache,
     );
 
     // Verify the image pixel at (5, 5) is red.
@@ -1127,6 +1136,7 @@ fn cache_not_used_for_content_none() {
 
     let mut buf = vec![0u8; 50 * 50 * 4];
     let mut fb = make_surface(&mut buf, 50, 50);
+    let mut clip_cache = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
         &mut fb,
         &graph,
@@ -1135,6 +1145,7 @@ fn cache_not_used_for_content_none() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
     assert_eq!(
@@ -1163,8 +1174,9 @@ fn render_with_and_without_cache_pixel_identical() {
     let mut lru1 = render::LruRasterizer::new_test(16);
     let mut buf_no_cache = vec![0u8; 50 * 50 * 4];
     let mut fb1 = make_surface(&mut buf_no_cache, 50, 50);
+    let mut clip_cache1 = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
-        &mut fb1, &graph, &ctx, &dirty, &mut pool1, &mut lru1, None,
+        &mut fb1, &graph, &ctx, &dirty, &mut pool1, &mut lru1, None, &mut clip_cache1,
     );
 
     // With cache (first render = cache miss, renders to offscreen then blits).
@@ -1173,6 +1185,7 @@ fn render_with_and_without_cache_pixel_identical() {
     let mut cache = NodeCache::new();
     let mut buf_with_cache = vec![0u8; 50 * 50 * 4];
     let mut fb2 = make_surface(&mut buf_with_cache, 50, 50);
+    let mut clip_cache2 = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
         &mut fb2,
         &graph,
@@ -1181,6 +1194,7 @@ fn render_with_and_without_cache_pixel_identical() {
         &mut pool2,
         &mut lru2,
         Some(&mut cache),
+        &mut clip_cache2,
     );
 
     assert_eq!(

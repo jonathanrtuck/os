@@ -24,20 +24,19 @@ This is a long-running exploration project with no deadline. Sessions may be day
 Read these before making any design suggestions:
 
 - `design/philosophy.md` — **Read first.** Two root principles and their consequences. The thinking framework behind every design decision.
-- `design/foundations.md` — Guiding beliefs, glossary, external boundaries, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
+- `design/foundations.md` — The core idea, guiding beliefs, glossary, external boundaries, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `design/decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness table, dependency chains between decisions
 - `design/decision-map.mermaid` — Visual dependency graph of all decisions
 - `design/architecture.md` — The system's architectural narrative: one-way pipeline, what each component understands, where responsibilities live, decision checklist
 - `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
 - `design/journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document.
 - `system/DESIGN.md` — Userspace architecture: libraries, services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `system/kernel/DESIGN.md`.
-- `design/concept.md` — The core idea: OS → Document → Tool, mimetype evolution, layered rendering, compound documents
 
 ## Settled Decisions
 
 1. **Audience & Goals (Tier 0):** Personal design project. Primary artifact is a coherent OS design. Build selectively to validate. Success = coherent design > working prototype > deep learning. Not a daily driver. Target: personal workstation (text, images, audio, video, email, calendar, messaging, videoconferencing, web, coding).
 
-## Initial Leanings (Not Yet Committed)
+## Settled Decisions (Continued)
 
 2. **Data model (SETTLED):** Document-centric. The main axiom. OS → Document → Tool.
 3. **Compatibility (SETTLED):** Rethink everything. No POSIX. Build on established standard interfaces (mimetypes, URIs, HTTP, Unicode, arm64), not implementations. Own native APIs. Development on host OS (macOS). Self-hosting is not a goal.
@@ -72,7 +71,21 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Session 2026-03-18 (latest):** Virgl implementation plan COMPLETE (all 8 tasks) + Phase 5 COMPLETE (cpu-render merge). Both render pipelines are now single-process: `virgil-render` (GPU-accelerated) and `cpu-render` (CPU software). Init auto-detects at boot. 1,816+ total tests pass.
+**Session 2026-03-21 (latest):** Three rendering correctness fixes in metal-render. (1) **Analytical Gaussian shadows** — replaced invisible hard-shadow quad with `fragment_shadow` shader that evaluates the exact Gaussian integral per-pixel. Separable `erf()` (Abramowitz & Stegun 7.1.26, |ε|≤1.5e-7) for rectangles (mathematically exact), SDF+erfc approximation for rounded rects. No offscreen textures or compute passes needed. Title bar shadow tuned: offset=2, blur_radius=12, alpha=120. SHADOW_DEPTH eliminated (was 12, now 0 — content starts right below title bar). (2) **sRGB render target** — `PIXEL_FORMAT_BGRA8_SRGB` added to protocol, TEX_MSAA and CAMetalLayer switched to `bgra8Unorm_srgb`. Hardware blender now operates in linear space for physically correct alpha compositing. All fragment shaders linearize color inputs via `srgb_to_linear()`. Backdrop blur pipeline unaffected (compute `read()`/`write()` bypass sRGB conversion). (3) **Rounded-rect alpha-squared bug fix** — shader was outputting premultiplied RGB with non-premultiplied blend mode, causing `alpha²` coverage. Fixed with weighted-average compositing for non-overlapping fill/border regions. Hypervisor updated (`~/Sites/hypervisor/`): sRGB format support + layer pixel format. 2,046 tests pass. Next: v0.3 Phase 3 (Text & Interaction). Spec: `design/v0.3-spec.md`.
+
+**Session 2026-03-21 (earlier):** Fixed metal-render transform+rounded-corner bug: SDF rounded-rect path was checked before transform path, so rotation/scale/skew were silently ignored on nodes with corner_radius. Fix: `emit_transformed_rounded_rect_quad()` — vertex NDC positions are transformed through the affine while texCoords stay in local pixel space (no shader changes needed). Removed all 21 demo nodes (composition, audit, animation) and test content — clean editor scene. N_POINTER renumbered 14→8, WELL_KNOWN_COUNT 29→9. "Rendering sample compound document" idea noted in journal for future visual test mode. Hypervisor multi-frame capture: `--capture 30,60,90 /tmp/prefix.png` produces numbered PNGs in a single boot cycle (backward compatible with single-frame). 2,046 tests pass.
+
+**Session 2026-03-21 (earlier):** Hypervisor extracted to standalone repo (`~/Sites/hypervisor/`) for other hobby OS developers. Metal render pipeline FEATURE-COMPLETE — all content types (None, Glyphs, Image, Path), 4x MSAA, scissor + stencil clipping, backdrop blur (linear-light 3-pass box blur via compute shaders), shadows, built-in screenshot capture (`--capture N PATH` / SIGUSR1). All 13 audit findings resolved (see `~/Sites/hypervisor/AUDIT.md`). Scene node truncation bug fixed (dangling `first_child` pointers on `set_count`). Stack overflow in metal-render fixed + RAM size now read from DTB. Default development path: `cd system && cargo run -r` launches hypervisor with Metal GPU. QEMU still available via `QEMU=1`. ~44 GB of ANGLE/virglrenderer/QEMU source trees deleted. 2,046 tests pass.
+
+**Session 2026-03-20:** Backdrop blur rewrite COMPLETE. Replaced broken 9-tap Gaussian with mathematically correct three-pass box blur (CLT convergence to Gaussian). 5 commits across 7 tasks: (1) `drawing::box_blur_widths()` — W3C standard formula, integer-only arithmetic via 8.8 fixed-point + `isqrt_fp`, (2) `drawing::box_blur_3pass()` — O(1)-per-pixel running sums, tiled V-pass (TILE_COLS=8) for cache friendliness, rounded division prevents systematic darkening, (3) CpuBackend `apply_backdrop_blur()` — padded capture region (pad = sum of 3 half-widths) eliminates edge banding, writes back center portion only, (4) CpuBackend `render_shadow_blurred()` migrated to same algorithm, (5) virgil-render: `BlurRequest` expanded with bg color/corner_radius, bg skipped during scene walk (drawn post-blur), TGSI shaders replaced with BGNLOOP/ENDLOOP loop-based box blur (any radius), 6-pass ping-pong pipeline with padded capture, post-blur bg quad drawn on top. Constant buffer: single 8-dword upload (CONST[0]+CONST[1] in binding 0). 10 new box blur tests (width computation, 3-pass convergence, symmetry, no-darkening, reference Gaussian comparison ≤ ±3 levels). 2,013+ tests pass. QEMU visual verified: both CPU and virgl renderers show correct frosted glass with no edge artifacts. Plan: `design/plan-v0.3-blur-rewrite.md`. Next: v0.3 Phase 3 (Text & Interaction). Spec: `design/v0.3-spec.md`.
+
+**Session 2026-03-20 (earlier, Phase 2):** v0.3 Phase 2 (Composition) CpuBackend COMPLETE. 7 commits: Node struct growth (120→136 bytes: `clip_path: DataRef`, `backdrop_blur_radius: u8`, `_reserved: [u8; 8]`), clip mask infrastructure (8bpp alpha rasterizer + 16-slot LRU cache in `render/clip_mask.rs`), CpuBackend clip path integration (offscreen render + per-pixel mask multiplication), backdrop blur (extract-blur-composite using existing Gaussian blur), pointer cursor (N_POINTER=14 as Content::Path, arrow shape, 3s auto-hide with 300ms fade), document switching fix (Ctrl+Tab shows centered test image, "Image" title bar), Phase 2 demo scenes (star clip + image, circle clip + text, frosted glass panel). WELL_KNOWN_COUNT bumped to 15. Phase 1 demo animation code removed. 2,013 total tests pass. QEMU visual verified: star clip, circle clip, frosted glass all render correctly. virgil-render also complete: Task 4 (stencil-based clip path — clip fan → stencil write → stencil test for content) and Task 6 (two-pass separable Gaussian blur — 9-tap TGSI shaders, render-to-texture via cmd_blit_region, 1024×1024 intermediate textures). All 9 Phase 2 tasks done. 2,013 tests pass.
+
+**Session 2026-03-20 (earlier, Phase 1):** v0.3 Phase 1 (Motion) COMPLETE. New `libraries/animation/` library (475+ lines): 24 easing functions, spring physics (4 presets), Lerp trait with gamma-correct sRGB color interpolation, Transform2D, 32-slot Timeline. Integrated into core: smooth scroll (spring physics, pixel-space f32 model), animated cursor blink (4-phase state machine with smooth fade), selection fade-in, document switch fade transition, demo scenes (bouncing ball, easing sampler). 11 commits, 2,004 total tests pass.
+
+**Session 2026-03-20 (earlier):** Design folder cleanup (8 files deleted, concept.md merged into foundations.md, research/ subfolder, rendering-capabilities.md moved to system/). README and 4 CLAUDE.md files updated. v0.3 spec written and approved (`design/v0.3-spec.md`). Phase 1 plan written (`design/plan-v0.3-phase1.md`).
+
+**Session 2026-03-18:** Virgl implementation plan COMPLETE (all 8 tasks) + Phase 5 COMPLETE (cpu-render merge). Both render pipelines are now single-process: `virgil-render` (GPU-accelerated) and `cpu-render` (CPU software). Init auto-detects at boot. 1,816+ total tests pass.
 
 **Phase 5: cpu-render merge (2026-03-18):** Merged `compositor/` + `virtio-gpu/` into single `cpu-render/` process. Key insight: cpu-render self-allocates framebuffers via `dma_alloc`, making its init handshake identical to virgil-render's. Eliminated compositor→GPU IPC channel, MSG_PRESENT/MSG_PRESENT_DONE protocol, one process boundary. Old compositor/ and virtio-gpu/ deleted (no parallel implementations). Init's two pipeline functions (`setup_virgl_pipeline()` / `setup_display_pipeline()`) unified into a single `setup_render_pipeline(name, ...)` — the `name` parameter (`b"virgl"` or `b"cpu-render"`) drives diagnostic output only.
 
@@ -100,7 +113,7 @@ Read these before making any design suggestions:
 Core (shaping, layout, scene building) → Scene Graph (shared memory) → Render Service (tree walk, rasterization/GPU, compositing, present) → Display
 ```
 
-Content types: `None`, `Path`, `Glyphs`, `Image`. Each render service (`cpu-render` or `virgil-render`) is a single process that reads the scene graph and produces display output. The render library (`libraries/render/`, ~2,194 lines) provides `CpuBackend` used by cpu-render. See `design/rendering-pipeline.mermaid` and journal entry.
+Content types: `None`, `Path`, `Glyphs`, `Image`. Each render service (`metal-render`, `cpu-render`, or `virgil-render`) is a single process that reads the scene graph and produces display output. The render library (`libraries/render/`) provides `CpuBackend` used by cpu-render. See `design/rendering-pipeline.mermaid` and journal entry.
 
 **Rendering architecture design (2026-03-16, earlier):** Top-down audit of the rendering stack committed to path-centric rendering: the pipeline is a series of data shape transformations (Hardware Events → Key Events → Write Requests → Scene Tree → Pixel Buffer → Display Signal) with four translators (Input Driver, Editor, Core, Render Backend). Key decisions: (1) glyph rasterization in the render backend, (2) tree-structured scene graph with geometric content types (Container, Glyphs, Image, Path), (3) explicit `RenderBackend` trait with `fn render(scene, surface)` — backend owns tree walk, rasterization, compositing, (4) multi-core rasterization internal to backend, (5) Glyphs type serves both text and monochrome icons (eliminates SVG parser), (6) render service is a single process (tree walk + render + present). See `design/rendering-pipeline.mermaid` and full journal entry.
 
@@ -148,7 +161,7 @@ Content types: `None`, `Path`, `Glyphs`, `Image`. Each render service (`cpu-rend
 
 **Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, unblocked by prototype-on-host strategy). GUI track: input + event loops done → editor process separation done → **read-only document mapping next** (give editor zero-copy read access) → text layout. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: Files prototype complete → integrate with OS service when document pipeline reaches that point.
 
-**System code:** `system/kernel/` (33 .rs files + 2 .S + link.ld), `system/services/{init,core,drivers/{cpu-render,virgil-render,virtio-blk,virtio-console,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`. `prototype/files/` (21 tests). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with scene graph + render services. 28 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (33 .rs files + 2 .S + link.ld), `system/services/{init,core,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`. `prototype/files/` (21 tests). Boots via native hypervisor (Metal GPU, default) or QEMU `virt` (virgl or software) with 4 SMP cores, EEVDF scheduler, interactive display pipeline with scene graph + render services. 28 syscalls. Userspace architecture documented in `system/DESIGN.md`.
 
 ## Design Discussion Rules
 
@@ -172,7 +185,7 @@ Content types: `None`, `Path`, `Glyphs`, `Image`. Each render service (`cpu-rend
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~1,816 tests).
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,046 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
@@ -220,66 +233,83 @@ Every `.rs` file follows this order:
 
 ## Visual Testing (MANDATORY)
 
-**Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself.
+**Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself. If you cannot close the verification loop, say so explicitly — do not declare success.
 
-### How to visually test the OS in QEMU
+### Three render backends, three testing methods
 
-The test harness is `system/test-qemu.sh`. For visual verification, use this workflow directly:
+**metal-render (hypervisor, DEFAULT):** The primary development path. The hypervisor has built-in screenshot capture — no window focus, no macOS utilities, no fragility. Reads directly from the Metal drawable via GPU blit.
 
 ```sh
-# 1. Build
+# Automated: capture frame 30 as PNG, then exit
 cd system && cargo build --release
+hypervisor target/aarch64-unknown-none/release/kernel --capture 30 /tmp/screenshot.png
+# Then Read /tmp/screenshot.png
 
-# 2. Launch QEMU (headless, monitor socket for control, serial to file)
-qemu-system-aarch64 \
-    -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 256M \
-    -global virtio-mmio.force-legacy=false \
-    -drive "file=test.img,if=none,format=raw,id=hd0" \
-    -device virtio-blk-device,drive=hd0 \
-    -device virtio-gpu-device -device virtio-keyboard-device \
-    -nographic \
-    -serial file:/tmp/qemu-serial.log \
-    -monitor unix:/tmp/qemu-mon.sock,server,nowait \
-    -device "loader,file=virt.dtb,addr=0x40000000,force-raw=on" \
-    -kernel target/aarch64-unknown-none/release/kernel &
+# Multi-frame: capture frames 30, 60, 90 in a single boot
+hypervisor target/aarch64-unknown-none/release/kernel --capture 30,60,90 /tmp/test.png
+# Produces /tmp/test-030.png, /tmp/test-060.png, /tmp/test-090.png
 
-# 3. Wait for boot (~5s)
-sleep 5
-
-# 4. Send keystrokes via monitor socket
-echo "sendkey h" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
-
-# 5. Capture framebuffer screenshot (PPM format)
-echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2 >/dev/null 2>&1
-
-# 6. Convert PPM → PNG and view it
-python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"
-# Then use the Read tool on /tmp/qemu-screen.png to SEE the display
-
-# 7. Check serial output
-cat /tmp/qemu-serial.log
-
-# 8. Kill QEMU when done
-kill $QPID
+# Ad-hoc: send SIGUSR1 to running hypervisor
+kill -USR1 $(pgrep hypervisor)
+# Saves to /tmp/hypervisor-capture.png — then Read it
 ```
 
-### What "visually verified" means
+Launch: `cd system && cargo run -r` (default, no env vars needed).
 
-- Take a screenshot of the QEMU framebuffer AFTER sending input
-- View the screenshot with the Read tool (it can display PNG images)
-- Confirm the expected pixels are on screen (text appeared, cursor moved, etc.)
-- If debugging latency: take screenshots at multiple time points to measure when content appears
-- Serial output alone is NOT sufficient — it only proves messages flow, not that pixels update
+**cpu-render (QEMU software):** Uses `screendump` via the QEMU monitor socket. This captures the guest framebuffer directly and works reliably.
+
+```sh
+cd system && QEMU=1 ./test-qemu.sh --keys "h e l l o" --boot-wait 8 --wait 3
+# screendump works for cpu-render:
+echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2
+python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"
+# Then Read /tmp/qemu-screen.png
+```
+
+Launch: `cd system && QEMU=1 VIRGL=0 cargo run -r`.
+
+**virgil-render (QEMU virgl): `screendump` DOES NOT WORK.** It produces stale/cached images because the virgl cocoa display renders via the host GPU, not the guest framebuffer. Instead:
+
+1. Launch with `cd system && QEMU=1 cargo run --release` (opens a cocoa window)
+2. Focus the QEMU window
+3. Use macOS screenshot: `screencapture -l $(osascript -e 'tell app "QEMU" to id of window 1') /tmp/qemu-virgl.png`
+4. Read the PNG with the Read tool
+
+**Sanity check:** If two screenshots show identical clock times, the capture is stale. The clock updates every second — identical timestamps mean you're reading cached data.
 
 ### When to use this
 
-- Any change to: compositor, drawing library, GPU driver, text editor, init (display pipeline setup)
+- Any change to: drawing library, render backends, scene walk, text editor, core, init (display pipeline setup)
 - Any bug fix where the symptom was visual (wrong rendering, missing content, latency)
 - Before committing display-related changes
+- Serial output alone is NOT sufficient — it only proves messages flow, not that pixels update
+- **Prefer metal-render** for visual verification — built-in capture is deterministic and doesn't require window focus
+
+## Rendering Pipeline Changes (MANDATORY)
+
+Changes to the rendering pipeline must follow this process. These rules exist because a session was lost to shipping unverified rendering changes that broke the display.
+
+Three render backends exist — changes may affect one or all:
+
+- **metal-render** (default): scene graph → metal command buffer → virtio → hypervisor → Metal API → CAMetalLayer
+- **virgil-render**: scene graph → virgl command encoding → virtio-gpu wire → QEMU → virglrenderer → ANGLE → Metal
+- **cpu-render**: scene graph → CpuBackend (libraries/render/) → virtio-gpu 2D → QEMU → display
+
+Relevant code: `protocol/metal.rs`, `protocol/virgl.rs`, `libraries/render/`, `services/drivers/{metal-render,virgil-render,cpu-render}/`, `services/core/` (scene building).
+
+### Before implementing
+
+1. **Validate assumptions against source code, not general knowledge.** Every layer in the pipeline has source code or documentation. If you're uncertain whether a GPU feature is supported, READ the source — do not guess from general knowledge. For metal-render, check the hypervisor's Swift Metal code (`~/Sites/hypervisor/`). For virgil-render, check virglrenderer source or ANGLE docs.
+2. **If an agreed approach turns out to be infeasible, STOP and discuss.** Do not silently switch to a different approach. Come back to the user with: what we agreed, what you found, why it doesn't work, what the alternatives are.
+
+### During implementation
+
+3. **One subsystem at a time, verified at each step.** Do not change the render target, stencil, viewport, scissor, blur pipeline, and resolve path simultaneously. Change one, verify, then change the next.
+4. **Points and pixels are the only two coordinate units.** Points (1/72 inch) are used everywhere above the render boundary. Pixels are physical framebuffer coordinates used only by render backends. Never conflate them. Never introduce a third unit. Variable names must make the unit clear.
 
 ### Timing instrumentation
 
-The sys library provides `sys::counter()` (reads CNTVCT_EL0) and `sys::counter_freq()` (reads CNTFRQ_EL0, typically 62500000 Hz on QEMU). Use these for sub-millisecond timing of hot paths. Enabled by kernel setting CNTKCTL_EL1.EL0VCTEN=1 in timer::init().
+The sys library provides `sys::counter()` (reads CNTVCT_EL0) and `sys::counter_freq()` (reads CNTFRQ_EL0). Use these for sub-millisecond timing of hot paths. Frequency varies by platform (typically 24 MHz on Apple Silicon via hypervisor, 62.5 MHz on QEMU). Enabled by kernel setting CNTKCTL_EL1.EL0VCTEN=1 in timer::init().
 
 ## Reference Influences
 

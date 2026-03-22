@@ -28,11 +28,32 @@ pub const PXN: u64 = 1 << 53; // Privileged execute-never
 pub const SH_INNER: u64 = 0b11 << 8; // Inner shareable
 pub const UXN: u64 = 1 << 54; // Unprivileged execute-never
 
-// Physical memory layout (QEMU virt, 256 MiB RAM).
-// boot.S has its own `.equ` copies — keep in sync (see boot.S lines 13-14).
+// Physical memory layout (QEMU virt).
+// boot.S has its own `.equ` copies — keep in sync (see boot.S lines 28-29).
 pub const RAM_START: u64 = 0x4000_0000;
-pub const RAM_SIZE: u64 = 256 * 1024 * 1024;
-pub const RAM_END: u64 = RAM_START + RAM_SIZE;
+
+/// Compile-time maximum RAM size. Used for array sizing and upper-bound
+/// calculations that must be const. The actual RAM size is read from the
+/// DTB at boot and may be smaller (or equal). Use `ram_end()` for the
+/// runtime value.
+pub const RAM_SIZE_MAX: u64 = 256 * 1024 * 1024;
+pub const RAM_END_MAX: u64 = RAM_START + RAM_SIZE_MAX;
+
+/// Actual RAM end address, set from the DTB `/memory` node during boot.
+/// Defaults to `RAM_END_MAX` so the system works even if DTB parsing fails.
+static ACTUAL_RAM_END: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(RAM_END_MAX);
+
+/// Set the actual RAM end address (called once during boot from DTB data).
+pub fn set_ram_end(end: u64) {
+    ACTUAL_RAM_END.store(end, core::sync::atomic::Ordering::Release);
+}
+
+/// The actual RAM end address. Reads the value set by `set_ram_end()`,
+/// or returns `RAM_END_MAX` if it was never called (DTB fallback).
+pub fn ram_end() -> u64 {
+    ACTUAL_RAM_END.load(core::sync::atomic::Ordering::Acquire)
+}
 
 // User virtual address layout.
 // All user VA constants in one place for visibility.
@@ -41,7 +62,7 @@ pub const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000; // 4 MiB (matches link.ld
 pub const CHANNEL_SHM_BASE: u64 = 0x0000_0000_4000_0000; // 1 GiB
 pub const CHANNEL_SHM_END: u64 = USER_STACK_VA; // up to stack region
 pub const USER_STACK_TOP: u64 = 0x0000_0000_8000_0000; // 2 GiB
-pub const USER_STACK_PAGES: u64 = 4; // 16 KiB
+pub const USER_STACK_PAGES: u64 = 16; // 64 KiB
 pub const USER_STACK_VA: u64 = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
 
 // Heap region: anonymous memory for userspace allocators.

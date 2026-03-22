@@ -10,14 +10,26 @@ mod incremental;
 
 use alloc::vec::Vec;
 
-use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};
-
 // Re-export all public items from submodules.
 pub use full::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
     build_selection_update,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
+use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};
+
+// ── Float math helpers (no_std) ─────────────────────────────────────
+
+/// Round a float to the nearest integer (round-half-away-from-zero).
+/// Manual implementation for `no_std` (where `f32::round()` isn't available).
+#[inline]
+pub(crate) fn round_f32(x: f32) -> i32 {
+    if x >= 0.0 {
+        (x + 0.5) as i32
+    } else {
+        (x - 0.5) as i32
+    }
+}
 
 // ── Well-known node indices ─────────────────────────────────────────
 
@@ -31,8 +43,15 @@ pub const N_CONTENT: u16 = 5;
 pub const N_DOC_TEXT: u16 = 6;
 pub const N_CURSOR: u16 = 7;
 
-/// Number of well-known nodes (indices 0..7). Dynamic nodes start at 8.
-pub const WELL_KNOWN_COUNT: u16 = 8;
+// ── Pointer cursor node (8) ──────────────────────────────────────────
+//
+// Top-level node rendered above all content. Position updated each
+// frame from MSG_POINTER_ABS. Auto-hides after 3 s of inactivity with
+// a 300 ms EaseOut fade.
+pub const N_POINTER: u16 = 8;
+
+/// Number of well-known nodes (indices 0..8). Dynamic nodes start at 9.
+pub const WELL_KNOWN_COUNT: u16 = 9;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -201,16 +220,16 @@ pub fn line_bytes_for_run<'a>(text: &'a [u8], run: &LayoutRun) -> &'a [u8] {
 
 /// Filter runs to those visible in a scrolled viewport.
 ///
-/// Runs keep their document-relative y positions. The caller sets
-/// `content_transform` on the container node so the renderer handles the
-/// viewport offset.
+/// `scroll_y` is the scroll offset in pixels (f32). Runs keep their
+/// document-relative y positions. The caller sets `content_transform`
+/// on the container node so the renderer handles the viewport offset.
 pub fn scroll_runs(
     runs: Vec<LayoutRun>,
-    scroll_lines: u32,
+    scroll_y: f32,
     line_height: u32,
     viewport_height_pt: i32,
 ) -> Vec<LayoutRun> {
-    let scroll_pt = scroll_lines as i32 * line_height as i32;
+    let scroll_pt = round_f32(scroll_y);
 
     runs.into_iter()
         .filter(|run| {

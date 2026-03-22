@@ -72,6 +72,7 @@ const VIRTIO_DEVICE_CONSOLE: u32 = 3;
 const VIRTIO_DEVICE_GPU: u32 = 16;
 const VIRTIO_DEVICE_INPUT: u32 = 18;
 const VIRTIO_DEVICE_9P: u32 = 9;
+const VIRTIO_DEVICE_METAL: u32 = 22;
 /// Virtio MMIO register offsets for feature probing.
 const MMIO_DEVICE_FEATURES: usize = 0x010;
 const MMIO_DEVICE_FEATURES_SEL: usize = 0x014;
@@ -746,7 +747,8 @@ pub extern "C" fn _start() -> ! {
     // Track channel allocation (0 = kernel, 1+ = ours).
     let mut next_channel: usize = 1;
     // Saved device state for Phase 2 (display pipeline).
-    let mut gpu: Option<(u8, u8, usize, u64, u32, bool)> = None; // (proc, ch, ch_idx, pa, irq, virgl)
+    // Render type: 0 = cpu-render, 1 = virgil-render, 2 = metal-render.
+    let mut gpu: Option<(u8, u8, usize, u64, u32, u8)> = None; // (proc, ch, ch_idx, pa, irq, render_type)
                                                                  // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
     let mut input_devices: [(u8, usize, u64, u32); MAX_INPUT_DEVICES] =
         [(0, 0, 0, 0); MAX_INPUT_DEVICES];
@@ -812,6 +814,7 @@ pub extern "C" fn _start() -> ! {
                     CPU_RENDER_ELF
                 }
             }
+            VIRTIO_DEVICE_METAL => METAL_RENDER_ELF,
             VIRTIO_DEVICE_INPUT => VIRTIO_INPUT_ELF,
             VIRTIO_DEVICE_9P => VIRTIO_9P_ELF,
             _ => {
@@ -859,7 +862,12 @@ pub extern "C" fn _start() -> ! {
         match dev_id {
             VIRTIO_DEVICE_GPU => {
                 // Defer GPU startup — needs framebuffer and cross-process channels.
-                gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq, use_virgl));
+                let rtype: u8 = if use_virgl { 1 } else { 0 };
+                gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq, rtype));
+            }
+            VIRTIO_DEVICE_METAL => {
+                // Defer Metal GPU startup — same pipeline as virtio-gpu.
+                gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq, 2));
             }
             VIRTIO_DEVICE_INPUT => {
                 // Defer input startup — needs cross-process channel to compositor.
@@ -1110,8 +1118,12 @@ pub extern "C" fn _start() -> ! {
     let mut child_names: [&[u8]; 8] = [b""; 8];
     let mut child_count: usize = 0;
 
-    if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq, has_virgl)) = gpu {
-        let render_name: &[u8] = if has_virgl { b"virgl" } else { b"cpu-render" };
+    if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq, render_type)) = gpu {
+        let render_name: &[u8] = match render_type {
+            2 => b"metal",
+            1 => b"virgl",
+            _ => b"cpu-render",
+        };
         let (core_proc, editor_proc) = setup_render_pipeline(
             render_name,
             gpu_proc,

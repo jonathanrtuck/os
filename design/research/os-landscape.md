@@ -1,6 +1,6 @@
 # OS Landscape Research
 
-Research into non-Rust operating systems with ideas relevant to our document-centric OS design. Conducted 2026-03-08. Complements the Rust OS comparison (flosse/rust-os-comparison) and COW filesystem research (research-cow-filesystems.md).
+Research into non-Rust operating systems with ideas relevant to our document-centric OS design. Conducted 2026-03-08. Complements the Rust OS comparison (flosse/rust-os-comparison) and COW filesystem research (cow-filesystems.md).
 
 ---
 

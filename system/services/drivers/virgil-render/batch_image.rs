@@ -23,6 +23,8 @@ pub struct ImageQuad {
     /// Source image dimensions (pixels).
     pub src_width: u16,
     pub src_height: u16,
+    /// True if this image is inside a clip region (requires stencil test).
+    pub clipped: bool,
 }
 
 /// Collected image draw requests from a scene walk.
@@ -43,6 +45,7 @@ impl ImageBatch {
                 data_length: 0,
                 src_width: 0,
                 src_height: 0,
+                clipped: false,
             }; MAX_IMAGES],
             count: 0,
         }

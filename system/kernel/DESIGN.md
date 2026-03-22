@@ -822,7 +822,7 @@ Terminates all threads in the target process. Runs full cleanup. Process handle 
 
 **Goal:** Kernel-level copy-on-write for memory-mapped documents. Editor writes trigger page faults, kernel allocates new pages, filesystem manages on-disk snapshots.
 
-**Blocked on filesystem on-disk design.** Research complete (`design/research-cow-filesystems.md`). Requires settling the last sub-decision of Decision #16.
+**Blocked on filesystem on-disk design.** Research complete (`design/research/cow-filesystems.md`). Requires settling the last sub-decision of Decision #16.
 
 ---
 

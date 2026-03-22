@@ -12,7 +12,7 @@ system/
 ├── user/          # User programs (text-editor, echo, fuzz, fuzz-helper, stress)
 ├── test/          # Host-side unit tests + QEMU integration scripts
 ├── build.rs       # Orchestrates the full build: libraries → user programs → init → kernel
-├── run-qemu.sh    # Launches QEMU with DTB injection
+├── run.sh         # VM launcher (hypervisor default, QEMU=1 for QEMU)
 └── Cargo.toml     # Single workspace root
 ```
 

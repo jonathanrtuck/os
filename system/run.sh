@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
-# Launch QEMU with device tree injection.
+# Launch the kernel in a VM.
 #
-# Used by `cargo run` (via .cargo/config.toml) and can be run directly.
-# Generates a DTB matching the machine config and injects it into guest RAM
-# at 0x40000000 (pre-kernel area). Required because QEMU HVF on macOS
-# doesn't pass the DTB address in x0 for bare-metal ELF kernels.
+# Default: native hypervisor with Metal GPU (requires `hypervisor` on PATH).
+# QEMU=1: use QEMU instead (virgl or software rendering).
 #
-# Usage: ./run-qemu.sh <kernel-binary>
+# Usage: ./run.sh <kernel-binary>
 
 set -euo pipefail
 
-KERNEL="${1:?usage: run-qemu.sh <kernel-binary>}"
+KERNEL="${1:?usage: run.sh <kernel-binary>}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# Default: native hypervisor with Metal GPU passthrough.
+# Set QEMU=1 to use QEMU instead.
+if [ "${QEMU:-0}" != "1" ]; then
+    HYPERVISOR="${HYPERVISOR_BIN:-$(command -v hypervisor 2>/dev/null || true)}"
+    if [ -z "$HYPERVISOR" ] || [ ! -x "$HYPERVISOR" ]; then
+        echo "error: hypervisor not found on PATH" >&2
+        echo "       cd ~/Sites/hypervisor && make install" >&2
+        echo "       or set QEMU=1 to use QEMU instead" >&2
+        exit 1
+    fi
+    exec "$HYPERVISOR" "$KERNEL" --share "${SCRIPT_DIR}/share"
+fi
 DTB_FILE="${SCRIPT_DIR}/virt.dtb"
 DISK_IMG="${SCRIPT_DIR}/test.img"
 

@@ -392,3 +392,7 @@ pub mod fs {
 // ── virgl: Virgl3D protocol constants and command encoding ───────────
 
 pub mod virgl;
+
+// ── metal: Metal-over-virtio command protocol ───────────────────────
+
+pub mod metal;

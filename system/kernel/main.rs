@@ -23,7 +23,7 @@
 //!
 //! # Memory Map
 //!
-//! ## Physical (QEMU virt, 256 MiB RAM at 0x4000_0000)
+//! ## Physical (QEMU virt, RAM at 0x4000_0000, size from DTB)
 //!
 //! ```text
 //! 0x0800_0000  GICv3 (distributor + redistributor, CPU interface via system registers)
@@ -32,7 +32,7 @@
 //! 0x4000_0000  RAM_START ─── kernel image (.text/.rodata/.data/.bss)
 //!              __kernel_end ─ heap (16 MiB, linked-list + slab allocator)
 //!              heap_end ───── page frame pool (buddy allocator, 4 KiB – 8 MiB)
-//! 0x5000_0000  RAM_END
+//!              ram_end ────── from DTB /memory node (fallback: 0x5000_0000 = 256 MiB)
 //! ```
 //!
 //! ## Virtual — TTBR1 (kernel, shared by all threads)
@@ -48,7 +48,7 @@
 //! ```text
 //! 0x0000_0000_0040_0000   User code (ELF segments, demand-paged via VMAs)
 //! 0x0000_0000_4000_0000   Channel shared memory (one 4 KiB page per channel)
-//! 0x0000_0000_7FFF_C000   User stack (4 pages = 16 KiB, guard page below)
+//! 0x0000_0000_7FFF_0000   User stack (16 pages = 64 KiB, guard page below)
 //! 0x0000_0000_8000_0000   USER_STACK_TOP
 //! ```
 //!
@@ -212,7 +212,7 @@ fn find_and_parse_dtb(firmware_pa: u64) -> Option<device_tree::DeviceTable> {
     ];
 
     for (start, end) in regions {
-        let end = end.min(paging::RAM_END);
+        let end = end.min(paging::RAM_END_MAX);
         let mut addr = start;
 
         while addr + 4 <= end {
@@ -349,12 +349,12 @@ fn reclaim_boot_ttbr0() {
 /// Try to parse a DTB at the given physical address. Returns None if the
 /// address is outside RAM or the blob is invalid.
 fn try_parse_dtb_at(pa: u64) -> Option<device_tree::DeviceTable> {
-    if !(paging::RAM_START..paging::RAM_END).contains(&pa) {
+    if !(paging::RAM_START..paging::RAM_END_MAX).contains(&pa) {
         return None;
     }
 
     let va = memory::phys_to_virt(memory::Pa(pa as usize));
-    let max_len = (paging::RAM_END - pa) as usize;
+    let max_len = (paging::RAM_END_MAX - pa) as usize;
     let len = max_len.min(64 * 1024);
     // SAFETY: Address validated within mapped RAM range.
     let blob = unsafe { core::slice::from_raw_parts(va as *const u8, len) };
@@ -607,7 +607,6 @@ pub extern "C" fn kernel_fault_handler(
 pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     serial::puts("🥾 booting…\n");
     memory::init();
-    serial::puts("  💾 memory - 256mib ram, w^x page tables\n");
     heap::init();
     serial::puts("  📦 heap - 16mib (linked-list + slab)\n");
 
@@ -624,12 +623,38 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
         serial::puts("  🌳 dtb - not found\n");
     }
 
+    // Read RAM size from the DTB's /memory node. The reg property contains
+    // (base, size) pairs; we use the first entry. Falls back to the
+    // compile-time RAM_END_MAX if the DTB is missing or has no memory node.
+    let ram_end = if let Some(ref dt) = device_table {
+        if let Some((base, size)) = dt.memory_region() {
+            let dtb_ram_end = base.saturating_add(size);
+            // Sanity: base must match our known RAM start, and end must not
+            // exceed what boot.S identity-mapped (RAM_END_MAX).
+            if base == paging::RAM_START && dtb_ram_end <= paging::RAM_END_MAX {
+                paging::set_ram_end(dtb_ram_end);
+                dtb_ram_end as usize
+            } else {
+                paging::RAM_END_MAX as usize
+            }
+        } else {
+            paging::RAM_END_MAX as usize
+        }
+    } else {
+        paging::RAM_END_MAX as usize
+    };
+
+    let ram_mib = (ram_end - paging::RAM_START as usize) / (1024 * 1024);
+
+    serial::puts("  💾 memory - ");
+    serial::put_u32(ram_mib as u32);
+    serial::puts("mib ram, w^x page tables\n");
+
     // Initialize page frame allocator with memory above kernel heap.
     // SAFETY: __kernel_end is a linker-defined symbol; taking its address
     // yields a valid kernel VA marking the end of the kernel image.
     let kernel_end_pa = memory::virt_to_phys(unsafe { &__kernel_end as *const u8 as usize });
     let heap_end = kernel_end_pa.0 + memory::HEAP_SIZE;
-    let ram_end = paging::RAM_END as usize;
 
     assert!(heap_end < ram_end, "heap extends beyond physical ram");
 

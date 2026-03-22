@@ -25,6 +25,7 @@
 #![no_main]
 
 extern crate alloc;
+extern crate animation;
 extern crate fonts;
 extern crate scene;
 
@@ -52,6 +53,29 @@ use protocol::{
     },
 };
 
+/// Clamp a float to [min, max]. Manual implementation for `no_std`.
+#[inline]
+fn clamp_f32(x: f32, min: f32, max: f32) -> f32 {
+    if x < min {
+        min
+    } else if x > max {
+        max
+    } else {
+        x
+    }
+}
+
+/// Round a float to the nearest integer (round-half-away-from-zero).
+/// Manual implementation for `no_std` (where `f32::round()` isn't available).
+#[inline]
+fn round_f32(x: f32) -> i32 {
+    if x >= 0.0 {
+        (x + 0.5) as i32
+    } else {
+        (x - 0.5) as i32
+    }
+}
+
 const COMPOSITOR_HANDLE: u8 = 2;
 const DOC_HEADER_SIZE: usize = 64;
 const EDITOR_HANDLE: u8 = 3;
@@ -60,20 +84,131 @@ const INPUT_HANDLE: u8 = 1;
 const INPUT2_HANDLE: u8 = 4;
 const KEY_LEFTCTRL: u16 = 29;
 const KEY_TAB: u16 = 15;
-const SHADOW_DEPTH: u32 = 12;
+const SHADOW_DEPTH: u32 = 0;
 const TEXT_INSET_BOTTOM: u32 = 8;
 const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_X: u32 = 12;
 const TITLE_BAR_H: u32 = 36;
 
+// ── Cursor blink state machine ──────────────────────────────────────
+
+/// Phase of the cursor blink cycle: visible hold → fade out → hidden hold → fade in.
+#[derive(Clone, Copy, PartialEq)]
+enum BlinkPhase {
+    /// Cursor fully visible for 500ms.
+    VisibleHold,
+    /// Fading from opacity 255→0 over 150ms.
+    FadeOut,
+    /// Cursor fully hidden for 300ms.
+    HiddenHold,
+    /// Fading from opacity 0→255 over 150ms.
+    FadeIn,
+}
+
+/// Duration of each blink phase in milliseconds.
+const BLINK_VISIBLE_MS: u64 = 500;
+const BLINK_FADE_OUT_MS: u64 = 150;
+const BLINK_HIDDEN_MS: u64 = 300;
+const BLINK_FADE_IN_MS: u64 = 150;
+
+/// Advance the blink state machine. Returns `true` if `cursor_opacity` changed.
+fn advance_blink(state: &mut CoreState, now_ms: u64) -> bool {
+    let elapsed = now_ms.saturating_sub(state.blink_phase_start_ms);
+    let mut changed = false;
+
+    match state.blink_phase {
+        BlinkPhase::VisibleHold => {
+            state.cursor_opacity = 255;
+            if elapsed >= BLINK_VISIBLE_MS {
+                state.cursor_blink_id = state
+                    .timeline
+                    .start(255.0, 0.0, 150, animation::Easing::EaseInOut, now_ms)
+                    .ok();
+                state.blink_phase = BlinkPhase::FadeOut;
+                state.blink_phase_start_ms = now_ms;
+                changed = true;
+            }
+        }
+        BlinkPhase::FadeOut => {
+            if let Some(id) = state.cursor_blink_id {
+                let new_opacity = if state.timeline.is_active(id) {
+                    state.timeline.value(id) as u8
+                } else {
+                    0
+                };
+                if new_opacity != state.cursor_opacity {
+                    state.cursor_opacity = new_opacity;
+                    changed = true;
+                }
+            }
+            if elapsed >= BLINK_FADE_OUT_MS {
+                state.blink_phase = BlinkPhase::HiddenHold;
+                state.blink_phase_start_ms = now_ms;
+                state.cursor_opacity = 0;
+                changed = true;
+            }
+        }
+        BlinkPhase::HiddenHold => {
+            state.cursor_opacity = 0;
+            if elapsed >= BLINK_HIDDEN_MS {
+                state.cursor_blink_id = state
+                    .timeline
+                    .start(0.0, 255.0, 150, animation::Easing::EaseInOut, now_ms)
+                    .ok();
+                state.blink_phase = BlinkPhase::FadeIn;
+                state.blink_phase_start_ms = now_ms;
+                changed = true;
+            }
+        }
+        BlinkPhase::FadeIn => {
+            if let Some(id) = state.cursor_blink_id {
+                let new_opacity = if state.timeline.is_active(id) {
+                    state.timeline.value(id) as u8
+                } else {
+                    255
+                };
+                if new_opacity != state.cursor_opacity {
+                    state.cursor_opacity = new_opacity;
+                    changed = true;
+                }
+            }
+            if elapsed >= BLINK_FADE_IN_MS {
+                state.blink_phase = BlinkPhase::VisibleHold;
+                state.blink_phase_start_ms = now_ms;
+                state.cursor_opacity = 255;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Reset blink to fully visible (called on user input).
+fn reset_blink(state: &mut CoreState, now_ms: u64) {
+    if let Some(id) = state.cursor_blink_id {
+        state.timeline.cancel(id);
+    }
+    state.blink_phase = BlinkPhase::VisibleHold;
+    state.blink_phase_start_ms = now_ms;
+    state.cursor_opacity = 255;
+}
+
 struct CoreState {
+    blink_phase: BlinkPhase,
+    blink_phase_start_ms: u64,
     boot_counter: u64,
     char_w: u32,
     counter_freq: u64,
+    cursor_blink_id: Option<animation::AnimationId>,
+    cursor_opacity: u8,
     cursor_pos: usize,
     doc_buf: *mut u8,
     doc_capacity: usize,
     doc_len: usize,
+    /// Animation ID for the document switch fade-out (255→0).
+    fade_out_id: Option<animation::AnimationId>,
+    /// Animation ID for the document switch fade-in (0→255).
+    fade_in_id: Option<animation::AnimationId>,
     font_data_ptr: *const u8,
     font_data_len: usize,
     font_upem: u16,
@@ -81,11 +216,31 @@ struct CoreState {
     line_h: u32,
     mouse_x: u32,
     mouse_y: u32,
+    /// True while fading out before a document context switch.
+    pending_context_switch: bool,
+    /// Animation ID for the pointer fade-out (255→0, 300ms EaseOut).
+    pointer_fade_id: Option<animation::AnimationId>,
+    /// Timestamp (ms) of the last pointer movement event.
+    pointer_last_event_ms: u64,
+    /// Current pointer cursor opacity (0 = hidden, 255 = fully visible).
+    pointer_opacity: u8,
+    /// True when the pointer cursor is currently shown (recently moved).
+    pointer_visible: bool,
+    /// Root node opacity for document switch fade transitions.
+    root_opacity: u8,
     rtc_mmio_va: usize,
-    saved_editor_scroll: u32,
-    scroll_offset: u32,
+    saved_editor_scroll: f32,
+    scroll_animating: bool,
+    scroll_offset: f32,
+    scroll_spring: animation::Spring,
+    scroll_target: f32,
     sel_end: usize,
+    /// Animation ID for the selection highlight fade-in (0→255).
+    selection_fade_id: Option<animation::AnimationId>,
+    /// Current selection highlight opacity (animated on selection change).
+    selection_opacity: u8,
     sel_start: usize,
+    timeline: animation::Timeline,
     timer_active: bool,
     timer_handle: u8,
 }
@@ -93,13 +248,19 @@ struct CoreState {
 impl CoreState {
     const fn new() -> Self {
         Self {
+            blink_phase: BlinkPhase::VisibleHold,
+            blink_phase_start_ms: 0,
             boot_counter: 0,
             char_w: 8,
             counter_freq: 0,
+            cursor_blink_id: None,
+            cursor_opacity: 255,
             cursor_pos: 0,
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
             doc_len: 0,
+            fade_out_id: None,
+            fade_in_id: None,
             font_data_ptr: core::ptr::null(),
             font_data_len: 0,
             font_upem: 1000,
@@ -107,11 +268,23 @@ impl CoreState {
             line_h: 20,
             mouse_x: 0,
             mouse_y: 0,
+            pending_context_switch: false,
+            pointer_fade_id: None,
+            pointer_last_event_ms: 0,
+            pointer_opacity: 0,
+            pointer_visible: false,
+            root_opacity: 255,
             rtc_mmio_va: 0,
-            saved_editor_scroll: 0,
-            scroll_offset: 0,
+            saved_editor_scroll: 0.0,
+            scroll_animating: false,
+            scroll_offset: 0.0,
+            scroll_spring: animation::Spring::snappy(0.0),
+            scroll_target: 0.0,
             sel_end: 0,
+            selection_fade_id: None,
+            selection_opacity: 255,
             sel_start: 0,
+            timeline: animation::Timeline::new(),
             timer_active: false,
             timer_handle: 0,
         }
@@ -203,28 +376,30 @@ impl TextLayout {
         line as u32
     }
 
-    /// Compute the scroll offset needed to keep the cursor visible.
+    /// Compute the scroll offset (in pixels) needed to keep the cursor visible.
     fn scroll_for_cursor(
         &self,
         text: &[u8],
         cursor_offset: usize,
-        current_scroll: u32,
+        current_scroll: f32,
         viewport_lines: u32,
-    ) -> u32 {
-        if viewport_lines == 0 {
-            return 0;
+    ) -> f32 {
+        if viewport_lines == 0 || self.line_height == 0 {
+            return 0.0;
         }
 
         let cursor_line = self.byte_to_visual_line(text, cursor_offset);
+        let cursor_px = cursor_line as f32 * self.line_height as f32;
+        let viewport_px = viewport_lines as f32 * self.line_height as f32;
 
-        if cursor_line < current_scroll {
-            return cursor_line;
+        if cursor_px < current_scroll {
+            return cursor_px;
         }
 
-        let last_visible = current_scroll + viewport_lines - 1;
+        let last_visible_top = current_scroll + viewport_px - self.line_height as f32;
 
-        if cursor_line > last_visible {
-            return cursor_line - (viewport_lines - 1);
+        if cursor_px > last_visible_top {
+            return cursor_px - viewport_px + self.line_height as f32;
         }
 
         current_scroll
@@ -421,23 +596,30 @@ fn process_key_event(
     if key.keycode == KEY_TAB && key.pressed == 1 && *ctrl_pressed {
         if has_image {
             let s = state();
-            let was_image = s.image_mode;
-
-            if !was_image {
-                s.saved_editor_scroll = s.scroll_offset;
-            }
-
-            s.image_mode = !was_image;
-
-            if was_image {
-                s.scroll_offset = s.saved_editor_scroll;
+            // Don't switch immediately — start fade out. The actual switch
+            // happens when the fade-out animation completes (in the animation
+            // tick section of the event loop).
+            if !s.pending_context_switch {
+                let now_ms = {
+                    let freq = s.counter_freq;
+                    if freq > 0 {
+                        sys::counter() * 1000 / freq
+                    } else {
+                        0
+                    }
+                };
+                s.fade_out_id = s
+                    .timeline
+                    .start(255.0, 0.0, 120, animation::Easing::EaseOut, now_ms)
+                    .ok();
+                s.pending_context_switch = true;
             }
 
             return KeyAction {
                 changed: true,
-                text_changed: true,
+                text_changed: false,
                 selection_changed: false,
-                context_switched: true,
+                context_switched: false,
                 consumed: true,
             };
         }
@@ -480,7 +662,23 @@ fn update_scroll_offset(content_w: u32, content_h: u32) {
     let current = s.scroll_offset;
     let new_scroll = layout.scroll_for_cursor(text, cursor, current, vp_lines);
 
-    state().scroll_offset = new_scroll;
+    // Drive scroll changes through the spring instead of jumping instantly.
+    // Clamp to valid scroll range (allow 50pt overscroll for bounce effect).
+    let total_lines = layout.byte_to_visual_line(text, text.len()) + 1;
+    let max_scroll = if total_lines > vp_lines {
+        (total_lines - vp_lines) as f32 * s.line_h as f32
+    } else {
+        0.0
+    };
+    let clamped = clamp_f32(new_scroll, -50.0, max_scroll + 50.0);
+
+    let diff = s.scroll_target - clamped;
+    let abs_diff = if diff < 0.0 { -diff } else { diff };
+    if abs_diff > 0.5 {
+        s.scroll_target = clamped;
+        s.scroll_spring.set_target(clamped);
+        s.scroll_animating = true;
+    }
 }
 fn viewport_lines(content_h: u32) -> u32 {
     let line_h = state().line_h;
@@ -704,7 +902,12 @@ pub extern "C" fn _start() -> ! {
             s.sel_end as u32,
             b"Text",
             &time_buf,
-            0,
+            0.0,
+            s.cursor_opacity,
+            s.mouse_x,
+            s.mouse_y,
+            s.pointer_opacity,
+            false,
         );
     }
 
@@ -727,20 +930,60 @@ pub extern "C" fn _start() -> ! {
     loop {
         let timer_active = state().timer_active;
         let timer_handle = state().timer_handle;
+        // Compute wait timeout from active animations and blink phase.
+        //
+        // Scroll animation: 16ms (60fps) while active.
+        // Blink fade (FadeOut/FadeIn): 16ms for smooth opacity changes.
+        // Blink holds (VisibleHold/HiddenHold): sleep until next phase transition.
+        let now_ms = {
+            let s = state();
+            let freq = s.counter_freq;
+            if freq > 0 {
+                sys::counter() * 1000 / freq
+            } else {
+                0
+            }
+        };
+        let scroll_timeout_ns: u64 = if state().scroll_animating {
+            16_000_000 // 16ms ~ 60fps
+        } else {
+            u64::MAX
+        };
+        let blink_timeout_ns: u64 = {
+            let s = state();
+            if s.timeline.any_active() {
+                16_000_000 // 16ms for smooth fade animation
+            } else {
+                let elapsed = now_ms.saturating_sub(s.blink_phase_start_ms);
+                let remaining_ms = match s.blink_phase {
+                    BlinkPhase::VisibleHold => BLINK_VISIBLE_MS.saturating_sub(elapsed),
+                    BlinkPhase::FadeOut => BLINK_FADE_OUT_MS.saturating_sub(elapsed),
+                    BlinkPhase::HiddenHold => BLINK_HIDDEN_MS.saturating_sub(elapsed),
+                    BlinkPhase::FadeIn => BLINK_FADE_IN_MS.saturating_sub(elapsed),
+                };
+                if remaining_ms == 0 {
+                    1_000_000 // 1ms — transition imminent
+                } else {
+                    remaining_ms.saturating_mul(1_000_000)
+                }
+            }
+        };
+        let timeout_ns = scroll_timeout_ns.min(blink_timeout_ns);
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
                 &[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE],
-                u64::MAX,
+                timeout_ns,
             ),
-            (true, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], u64::MAX),
-            (false, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, INPUT2_HANDLE], u64::MAX),
-            (false, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX),
+            (true, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], timeout_ns),
+            (false, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, INPUT2_HANDLE], timeout_ns),
+            (false, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], timeout_ns),
         };
         let mut changed = false;
         let mut text_changed = false;
         let mut selection_changed = false;
         let mut context_switched = false;
         let mut timer_fired = false;
+        let mut had_user_input = false;
 
         // Check timer.
         if timer_active {
@@ -774,6 +1017,7 @@ pub extern "C" fn _start() -> ! {
                 if action.context_switched {
                     context_switched = true;
                 }
+                had_user_input = true;
             }
         }
 
@@ -799,6 +1043,7 @@ pub extern "C" fn _start() -> ! {
                         if action.context_switched {
                             context_switched = true;
                         }
+                        had_user_input = true;
                     }
                     MSG_POINTER_ABS => {
                         // SAFETY: msg.msg_type is MSG_POINTER_ABS; sender guarantees
@@ -807,6 +1052,15 @@ pub extern "C" fn _start() -> ! {
                         let s = state();
                         s.mouse_x = scale_pointer_coord(ptr.x, fb_width);
                         s.mouse_y = scale_pointer_coord(ptr.y, fb_height);
+
+                        // Show pointer immediately (cancel any pending fade-out).
+                        if let Some(id) = s.pointer_fade_id {
+                            s.timeline.cancel(id);
+                            s.pointer_fade_id = None;
+                        }
+                        s.pointer_visible = true;
+                        s.pointer_opacity = 255;
+                        s.pointer_last_event_ms = now_ms;
 
                         changed = true;
                     }
@@ -826,9 +1080,7 @@ pub extern "C" fn _start() -> ! {
                                 let text_origin_y = TEXT_INSET_TOP;
                                 let rel_x = click_x.saturating_sub(text_origin_x);
                                 let rel_y = click_y.saturating_sub(text_origin_y);
-                                let scroll = s.scroll_offset;
-                                let line_h = s.line_h;
-                                let adjusted_y = rel_y + scroll * line_h;
+                                let adjusted_y = rel_y + round_f32(s.scroll_offset) as u32;
                                 let layout = content_text_layout(content_w);
                                 let text = doc_content();
                                 let byte_pos = layout.xy_to_byte(text, rel_x, adjusted_y);
@@ -858,6 +1110,7 @@ pub extern "C" fn _start() -> ! {
                                 // Click moves cursor, clears selection.
                                 // Treat as cursor-move + selection clear.
                                 selection_changed = true;
+                                had_user_input = true;
                             }
                         }
                     }
@@ -935,23 +1188,215 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Update scroll offset for cursor/text changes.
+        // Update scroll spring target for cursor/text changes.
+        if (changed || text_changed) && !state().image_mode {
+            update_scroll_offset(content_w, content_h);
+        }
+
+        // ── Cursor blink ─────────────────────────────────────────────
+        //
+        // Reset blink to fully visible on any user input (keystroke or
+        // click). Then advance the blink state machine — may produce a
+        // scene update even when no events arrived (phase transition or
+        // fade frame).
+        let now_ms = {
+            let s = state();
+            let freq = s.counter_freq;
+            if freq > 0 {
+                sys::counter() * 1000 / freq
+            } else {
+                0
+            }
+        };
+        if had_user_input {
+            reset_blink(state(), now_ms);
+        }
+        state().timeline.tick(now_ms);
+        let blink_changed = advance_blink(state(), now_ms);
+        if blink_changed {
+            changed = true;
+        }
+
+        // ── Animation tick ───────────────────────────────────────────
+        //
+        // Advance the scroll spring toward its target. This must happen
+        // after event processing (which may update the target) and before
+        // scene dispatch (which reads scroll_offset).
         let mut scroll_changed = false;
 
-        if (changed || text_changed) && !state().image_mode {
+        if state().scroll_animating {
             let old_scroll = state().scroll_offset;
+            let dt = 1.0 / 60.0; // frame delta (TODO: use actual elapsed from sys::counter)
+            let s = state();
+            s.scroll_spring.tick(dt);
+            s.scroll_offset = s.scroll_spring.value();
 
-            update_scroll_offset(content_w, content_h);
+            if s.scroll_spring.settled() {
+                // Snap to exact target (rounded to integer point) to avoid
+                // persistent sub-pixel jitter.
+                let target = s.scroll_target;
+                let rounded = if target >= 0.0 {
+                    ((target + 0.5) as i32) as f32
+                } else {
+                    ((target - 0.5) as i32) as f32
+                };
+                s.scroll_offset = rounded;
+                s.scroll_animating = false;
+            }
 
-            // If scroll changed, we need a full document content update
-            // (visible lines changed) regardless of whether text changed.
             let new_scroll = state().scroll_offset;
-
-            if old_scroll != new_scroll {
+            let diff = old_scroll - new_scroll;
+            let abs_diff = if diff < 0.0 { -diff } else { diff };
+            if abs_diff > 0.5 {
                 scroll_changed = true;
 
                 if !text_changed {
                     text_changed = true;
+                }
+            }
+            changed = true; // trigger scene update
+        }
+
+        // ── Selection fade animation ────────────────────────────────
+        //
+        // When the selection changes, start a fade-in animation from
+        // opacity 0→255 over 100ms. The animation value is applied to
+        // selection nodes after each scene build.
+        if selection_changed {
+            let s = state();
+            // Cancel any previous selection fade in progress.
+            if let Some(old_id) = s.selection_fade_id {
+                s.timeline.cancel(old_id);
+            }
+            s.selection_fade_id = s
+                .timeline
+                .start(0.0, 255.0, 100, animation::Easing::EaseOut, now_ms)
+                .ok();
+            s.selection_opacity = 0;
+        }
+        // Tick the selection fade (if active).
+        {
+            let s = state();
+            if let Some(id) = s.selection_fade_id {
+                if s.timeline.is_active(id) {
+                    let new_val = s.timeline.value(id) as u8;
+                    if new_val != s.selection_opacity {
+                        s.selection_opacity = new_val;
+                        changed = true;
+                    }
+                } else {
+                    s.selection_opacity = 255;
+                    s.selection_fade_id = None;
+                }
+            }
+        }
+
+        // ── Document switch fade animation ──────────────────────────
+        //
+        // Ctrl+Tab starts a fade-out (255→0). When complete, the actual
+        // context switch happens, followed by a fade-in (0→255). This
+        // prevents the jarring instant switch between editor and image.
+        if state().pending_context_switch {
+            let s = state();
+            if let Some(id) = s.fade_out_id {
+                if s.timeline.is_active(id) {
+                    let new_val = s.timeline.value(id) as u8;
+                    if new_val != s.root_opacity {
+                        s.root_opacity = new_val;
+                        changed = true;
+                    }
+                } else {
+                    // Fade out complete — do the actual switch.
+                    s.root_opacity = 0;
+                    s.fade_out_id = None;
+                    s.pending_context_switch = false;
+
+                    // Perform the context switch (same logic as the
+                    // old immediate Ctrl+Tab path).
+                    let was_image = s.image_mode;
+                    if !was_image {
+                        s.saved_editor_scroll = s.scroll_offset;
+                    }
+                    s.image_mode = !was_image;
+                    if was_image {
+                        s.scroll_offset = s.saved_editor_scroll;
+                        s.scroll_target = s.saved_editor_scroll;
+                        s.scroll_spring.reset_to(s.saved_editor_scroll);
+                        s.scroll_animating = false;
+                    }
+
+                    // Start fade in.
+                    s.fade_in_id = s
+                        .timeline
+                        .start(0.0, 255.0, 120, animation::Easing::EaseIn, now_ms)
+                        .ok();
+
+                    context_switched = true;
+                    text_changed = true;
+                    changed = true;
+                }
+            }
+        }
+        // Tick fade-in (runs independently of pending_context_switch).
+        {
+            let s = state();
+            if let Some(id) = s.fade_in_id {
+                if s.timeline.is_active(id) {
+                    let new_val = s.timeline.value(id) as u8;
+                    if new_val != s.root_opacity {
+                        s.root_opacity = new_val;
+                        changed = true;
+                    }
+                } else {
+                    s.root_opacity = 255;
+                    s.fade_in_id = None;
+                }
+            }
+        }
+
+        // ── Pointer auto-hide ─────────────────────────────────────
+        //
+        // After 3 s of inactivity, start a 300 ms EaseOut fade-out.
+        // When the fade completes, mark the pointer hidden (opacity 0).
+        // On any pointer move, the handler above cancels the fade and
+        // restores full opacity immediately.
+        {
+            const POINTER_HIDE_MS: u64 = 3000;
+            const POINTER_FADE_MS: u32 = 300;
+
+            let s = state();
+
+            // Start fade-out after 3 s of inactivity.
+            if s.pointer_visible && s.pointer_fade_id.is_none() && s.pointer_opacity == 255 {
+                let idle_ms = now_ms.saturating_sub(s.pointer_last_event_ms);
+                if idle_ms >= POINTER_HIDE_MS {
+                    s.pointer_fade_id = s
+                        .timeline
+                        .start(
+                            255.0,
+                            0.0,
+                            POINTER_FADE_MS,
+                            animation::Easing::EaseOut,
+                            now_ms,
+                        )
+                        .ok();
+                }
+            }
+
+            // Tick pointer fade animation.
+            if let Some(id) = s.pointer_fade_id {
+                if s.timeline.is_active(id) {
+                    let new_opacity = s.timeline.value(id) as u8;
+                    if new_opacity != s.pointer_opacity {
+                        s.pointer_opacity = new_opacity;
+                        changed = true;
+                    }
+                } else {
+                    // Fade complete — pointer is now hidden.
+                    s.pointer_opacity = 0;
+                    s.pointer_visible = false;
+                    s.pointer_fade_id = None;
+                    changed = true;
                 }
             }
         }
@@ -989,15 +1434,21 @@ pub extern "C" fn _start() -> ! {
                 }
 
                 let s = state();
+                let title: &[u8] = if s.image_mode { b"Image" } else { b"Text" };
                 scene.build_editor_scene(
                     &scene_cfg,
                     doc_content(),
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
-                    b"Text",
+                    title,
                     &time_buf,
-                    s.scroll_offset as i32,
+                    s.scroll_offset,
+                    s.cursor_opacity,
+                    s.mouse_x,
+                    s.mouse_y,
+                    s.pointer_opacity,
+                    s.image_mode,
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
@@ -1021,8 +1472,9 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count {
                     // Same line count — incremental single-line update.
@@ -1049,8 +1501,9 @@ pub extern "C" fn _start() -> ! {
                         changed_line,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count + 1 {
                     // Single line inserted (Enter key) — incremental insert.
@@ -1063,8 +1516,9 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else if new_line_count + 1 == prev_line_count {
                     // Single line deleted (Backspace at BOL) — incremental delete.
@@ -1077,8 +1531,9 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else {
                     // Multi-line change (paste, delete selection spanning lines) —
@@ -1092,8 +1547,9 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 }
 
@@ -1108,7 +1564,7 @@ pub extern "C" fn _start() -> ! {
                 let s = state();
                 let content_y = TITLE_BAR_H + SHADOW_DEPTH;
                 let sel_content_h = fb_height.saturating_sub(content_y);
-                let scroll_pt = s.scroll_offset as i32 * s.line_h as i32;
+                let scroll_pt = round_f32(s.scroll_offset);
 
                 scene.update_selection(
                     &scene_cfg,
@@ -1118,6 +1574,7 @@ pub extern "C" fn _start() -> ! {
                     doc_content(),
                     sel_content_h,
                     scroll_pt,
+                    s.cursor_opacity,
                 );
             } else if changed {
                 // Cursor moved without text or selection change
@@ -1138,10 +1595,24 @@ pub extern "C" fn _start() -> ! {
                     doc_content(),
                     chars_per_line,
                     if timer_fired { Some(&time_buf) } else { None },
+                    s.cursor_opacity,
                 );
             } else if timer_fired {
                 // Timer only — just update the clock text.
                 scene.update_clock(&scene_cfg, &time_buf);
+            }
+
+            // Apply post-build opacity adjustments (root fade for
+            // document switch, selection fade-in for selection changes).
+            {
+                let s = state();
+                scene.apply_opacity(s.root_opacity, s.selection_opacity);
+            }
+
+            // Apply pointer cursor position and opacity.
+            {
+                let s = state();
+                scene.apply_pointer(s.mouse_x, s.mouse_y, s.pointer_opacity);
             }
 
             // Signal compositor.

@@ -4,6 +4,58 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Analytical Gaussian Shadows + sRGB Pipeline (2026-03-21)
+
+**Status:** Complete.
+
+### Shadows
+
+metal-render had been emitting shadows as a single solid-color quad — invisible on dark backgrounds. Replaced with an analytical Gaussian fragment shader (`fragment_shadow`) that evaluates the exact closed-form integral per-pixel:
+
+- **Rectangles (corner_radius=0):** Separable product of two 1D erf integrals — mathematically exact. `shadow_1d(p, lo, hi, σ) = 0.5 * (erf((hi-p)/σ√2) - erf((lo-p)/σ√2))`, then `alpha = Ix * Iy`.
+- **Rounded rects (corner_radius>0):** SDF distance + `erfc(d/σ√2)/2` — excellent approximation for convex shapes.
+- **erf approximation:** Abramowitz & Stegun 7.1.26, max error ≤ 1.5×10⁻⁷.
+- **No offscreen textures or compute passes.** The quad extends 3σ beyond the shadow rect; the fragment shader computes per-pixel analytically.
+
+Shadow parameters on title bar: offset=2pt, blur_radius=12 (σ=6), alpha=120. SHADOW_DEPTH eliminated (content starts at y=title_bar_h, no gap).
+
+### sRGB Render Target
+
+Switched the MSAA texture and CAMetalLayer to `bgra8Unorm_srgb`. The Metal hardware blender now automatically converts sRGB↔linear at the framebuffer boundary, making all alpha compositing gamma-correct: rounded-rect AA edges, text over background, shadow compositing — everything.
+
+- All fragment shaders linearize their sRGB color inputs via the existing `srgb_to_linear()` MSL function.
+- Backdrop blur pipeline unaffected: compute `read()`/`write()` bypass sRGB conversion, so the manual sRGB↔linear kernels remain correct.
+- Clear color changed from sRGB (0.13) to linear (0.005) to match BG_BASE.
+- New protocol constant: `PIXEL_FORMAT_BGRA8_SRGB = 6`.
+
+### Rounded-rect alpha bug
+
+The `fragment_rounded_rect` shader was outputting premultiplied RGB (`fill.rgb * fill.a`) but the blend mode expected non-premultiplied (`srcAlpha * src + (1-srcAlpha) * dst`). This squared the alpha: the title bar rendered at RGB 27 instead of the correct 40. Fixed by outputting non-premultiplied color via weighted-average compositing for the border/fill regions.
+
+### Rendering audit notes
+
+- **Virgil-render has no shadow rendering** — shadow properties are silently ignored. Not blocking (metal-render is the primary path going forward).
+- **LCD subpixel text rendering** intentionally skipped across all backends (grayscale coverage only).
+- CpuBackend shadow rendering uses discrete 3-pass box blur (correct but different algorithm from analytical Gaussian).
+
+---
+
+## Rendering Test Document (2026-03-21)
+
+**Status:** Idea — noted for future implementation.
+
+A **visual test mode** accessible via key combo that switches to a purpose-built "rendering sample compound document." This document exercises every rendering capability systematically:
+
+- One node per content type (None, Glyphs, Image, Path)
+- One node per composition feature (clip path, backdrop blur, opacity, shadow, border)
+- One node per transform type (translate, rotate, scale, skew, combined + rounded corners)
+- One animated section (spring, easing curves, color lerp)
+- Labeled, grid-laid-out, easy to scan at a glance
+
+Replaces the scattered demo nodes that accumulated during v0.3. Invoked when needed for verification after rendering pipeline changes — doesn't clutter the normal editor scene.
+
+---
+
 ## Points and Pixels: Coordinate System Terminology (2026-03-19)
 
 **Status:** Settled.
@@ -1742,7 +1794,7 @@ Open questions: exact scene graph API, how layout engine and compositor interfac
 ### COW Filesystem
 
 **Informs:** Decision #16 (Technical Foundation — filesystem sub-decision), Decision #12 (Undo), Decision #14 (virtual manifest rewind)
-**Status:** Interface designed (2026-03-11). Placement settled (userspace service). On-disk format deferred — prototype-on-host strategy adopted. See `design/research-cow-filesystems.md`.
+**Status:** Interface designed (2026-03-11). Placement settled (userspace service). On-disk format deferred — prototype-on-host strategy adopted. See `design/research/cow-filesystems.md`.
 **Context:** Studied RedoxFS (Rust, COW but no snapshots), ZFS (birth time + dead lists = gold standard for snapshots), Btrfs (refcounted subvolumes), Bcachefs (key-level versioning). Key findings: (1) birth time in block pointers is non-negotiable for efficient snapshots, (2) ZFS dead lists make deletion tractable, (3) per-document scoping needed (datasets/subvolumes, not whole-FS snapshots), (4) `beginOp`/`endOp` maps naturally to COW transaction boundaries. TFS (Redox's predecessor) attempted per-file revision history but didn't ship it — cautionary data point. Filesystem is a userspace service — kernel owns COW/VM mechanics (page fault handler), filesystem manages on-disk layout (B-trees, block allocation, snapshots). **New constraint (2026-03-09):** metadata DB must live on the COW filesystem so its historical state is preserved in snapshots — required for uniform rewind performance across static and virtual documents. Time-correlated vs per-document snapshots still open — per-document snapshots + a COW'd metadata DB might be sufficient for world-state queries without coordinated global snapshots. Needs further exploration.
 
 **Files interface settled (2026-03-11).** 12 operations: create, clone, delete, size, resize, map_read, map_write, snapshot, restore, map_snapshot, snapshots (list), delete_snapshot, flush. Deliberately absent: paths/directories (files addressed by ID), permissions (OS service is sole consumer), extended attributes (metadata lives in DB), file locking (OS service serializes writes via event loop), links (copy semantics via clone), rename (metadata DB concern), batch operations (OS service sequences), file type info (metadata DB concern). The interface is a dumb file store — it knows nothing about documents, undo ordering, or compound structures. See journal insights for full design rationale.

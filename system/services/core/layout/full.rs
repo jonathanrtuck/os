@@ -10,15 +10,18 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
-    layout_mono_lines, line_bytes_for_run, scroll_runs, shape_text, shape_visible_runs,
-    update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT, N_ROOT,
-    N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    layout_mono_lines, line_bytes_for_run, round_f32, scroll_runs, shape_text, shape_visible_runs,
+    update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT, N_POINTER,
+    N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
-use crate::test_gen::{generate_test_image, generate_test_rounded_rect, generate_test_star};
+use crate::test_gen::generate_test_image;
 
 // ── Full scene builds (called by SceneState methods) ────────────────
 
 /// Build the full editor scene into a fresh (cleared) SceneWriter.
+///
+/// When `image_mode` is true, the content area shows a centered test image
+/// instead of the document text, cursor, selection, and demo nodes.
 #[allow(clippy::too_many_arguments)]
 pub fn build_full_scene(
     w: &mut scene::SceneWriter<'_>,
@@ -29,57 +32,80 @@ pub fn build_full_scene(
     sel_end: u32,
     title_label: &[u8],
     clock_text: &[u8],
-    scroll_y: i32,
+    scroll_y: f32,
+    cursor_opacity: u8,
+    mouse_x: u32,
+    mouse_y: u32,
+    pointer_opacity: u8,
+    image_mode: bool,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
     let cpl = chars_per_line(cfg);
 
-    // Layout document text into visual lines (monospace line-breaking).
-    let all_runs = layout_mono_lines(
-        doc_text,
-        cpl as usize,
-        cfg.line_height as i32,
-        scene_text_color,
-        cfg.font_size,
-    );
-    // Apply scroll: filter to visible viewport.
-    let content_y = cfg.title_bar_h + cfg.shadow_depth;
-    let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, content_h);
-    // Scroll offset in points for cursor/selection positioning.
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
-    // Compute cursor line/col for positioning.
-    let cursor_byte = cursor_pos as usize;
-    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_byte, cpl as usize);
-
-    // Compute selection rectangles.
-    let (sel_lo, sel_hi) = if sel_start <= sel_end {
-        (sel_start as usize, sel_end as usize)
-    } else {
-        (sel_end as usize, sel_start as usize)
-    };
-    let has_selection = sel_lo < sel_hi;
+    // Editor-mode-only layout computation — skipped in image mode.
+    let (visible_runs, scroll_pt, cursor_line, cursor_col, has_selection, sel_lo, sel_hi) =
+        if !image_mode {
+            let all_runs = layout_mono_lines(
+                doc_text,
+                cpl as usize,
+                cfg.line_height as i32,
+                scene_text_color,
+                cfg.font_size,
+            );
+            let content_y = cfg.title_bar_h + cfg.shadow_depth;
+            let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
+            let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, content_h);
+            let scroll_pt = round_f32(scroll_y);
+            let cursor_byte = cursor_pos as usize;
+            let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_byte, cpl as usize);
+            let (sel_lo, sel_hi) = if sel_start <= sel_end {
+                (sel_start as usize, sel_end as usize)
+            } else {
+                (sel_end as usize, sel_start as usize)
+            };
+            let has_selection = sel_lo < sel_hi;
+            (
+                visible_runs,
+                scroll_pt,
+                cursor_line,
+                cursor_col,
+                has_selection,
+                sel_lo,
+                sel_hi,
+            )
+        } else {
+            (alloc::vec![], 0, 0, 0, false, 0, 0)
+        };
 
     w.clear();
 
     // Push shaped glyph arrays for title and clock.
-    let title_glyphs = shape_text(cfg.font_data, title_label, cfg.font_size, cfg.upem, cfg.axes);
-    let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-    let clock_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
-    let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
-
-    // Push visible line glyph data.
-    let line_glyph_refs = shape_visible_runs(
-        w,
-        &visible_runs,
-        doc_text,
+    let title_glyphs = shape_text(
         cfg.font_data,
+        title_label,
         cfg.font_size,
         cfg.upem,
         cfg.axes,
     );
+    let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
+    let clock_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
+    let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
+
+    // Push visible line glyph data (editor mode only).
+    let line_glyph_refs = if !image_mode {
+        shape_visible_runs(
+            w,
+            &visible_runs,
+            doc_text,
+            cfg.font_data,
+            cfg.font_size,
+            cfg.upem,
+            cfg.axes,
+        )
+    } else {
+        alloc::vec![]
+    };
 
     // Allocate well-known nodes in order (sequential IDs).
     let _root = w.alloc_node().unwrap(); // 0
@@ -90,6 +116,9 @@ pub fn build_full_scene(
     let _content = w.alloc_node().unwrap(); // 5
     let _doc_text = w.alloc_node().unwrap(); // 6
     let _cursor_node = w.alloc_node().unwrap(); // 7
+
+    // Pointer cursor node (top-level, highest z-order).
+    let _pointer = w.alloc_node().unwrap(); // 8
 
     {
         let n = w.node_mut(N_ROOT);
@@ -114,11 +143,11 @@ pub fn build_full_scene(
             _pad: [0; 3],
         };
         n.flags = NodeFlags::VISIBLE;
-        // Real blurred shadow below the title bar.
-        n.shadow_color = Color::rgba(0, 0, 0, 60);
+        // Blurred shadow below the title bar (analytical Gaussian in metal-render).
+        n.shadow_color = Color::rgba(0, 0, 0, 120);
         n.shadow_offset_x = 0;
-        n.shadow_offset_y = cfg.shadow_depth as i16;
-        n.shadow_blur_radius = (cfg.shadow_depth as u8).min(8);
+        n.shadow_offset_y = 2;
+        n.shadow_blur_radius = 12;
         n.shadow_spread = 0;
     }
 
@@ -189,6 +218,71 @@ pub fn build_full_scene(
         n.height = content_h_u32 as u16;
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     }
+
+    // ── Image mode: centered test image, no document text ─────────────
+    if image_mode {
+        let test_img = generate_test_image();
+        let img_ref = w.push_data(&test_img);
+
+        let img_display_w: u16 = 128;
+        let img_display_h: u16 = 128;
+        let center_x = ((cfg.fb_width as i32 - img_display_w as i32) / 2).max(0);
+        let center_y = ((content_h_u32 as i32 - img_display_h as i32) / 2).max(0);
+
+        {
+            let n = w.node_mut(N_DOC_TEXT);
+            n.x = center_x;
+            n.y = center_y;
+            n.width = img_display_w;
+            n.height = img_display_h;
+            n.content = Content::Image {
+                data: img_ref,
+                src_width: 32,
+                src_height: 32,
+            };
+            n.content_hash = fnv1a(&test_img);
+            n.flags = NodeFlags::VISIBLE;
+            n.first_child = NULL;
+            n.next_sibling = NULL;
+            n.content_transform = scene::AffineTransform::identity();
+        }
+
+        // Cursor: hidden in image mode.
+        {
+            let n = w.node_mut(N_CURSOR);
+            n.flags = NodeFlags::empty();
+            n.next_sibling = NULL;
+        }
+
+        // Link N_CONTENT → N_POINTER so the pointer renders on top.
+        w.node_mut(N_CONTENT).next_sibling = N_POINTER;
+
+        // Pointer cursor node.
+        {
+            let arrow_cmds = crate::test_gen::generate_arrow_cursor();
+            let arrow_ref = w.push_path_commands(&arrow_cmds);
+            let arrow_hash = scene::fnv1a(&arrow_cmds);
+            let n = w.node_mut(N_POINTER);
+            n.x = mouse_x as i32;
+            n.y = mouse_y as i32;
+            n.width = 10;
+            n.height = 18;
+            n.content = Content::Path {
+                color: Color::rgb(255, 255, 255),
+                fill_rule: FillRule::Winding,
+                contours: arrow_ref,
+            };
+            n.content_hash = arrow_hash;
+            n.opacity = pointer_opacity;
+            n.flags = NodeFlags::VISIBLE;
+            n.next_sibling = NULL;
+        }
+
+        w.set_root(N_ROOT);
+        return;
+    }
+    // ── End image mode ────────────────────────────────────────────────
+
     {
         let n = w.node_mut(N_DOC_TEXT);
 
@@ -196,7 +290,7 @@ pub fn build_full_scene(
         n.y = 8;
         n.width = doc_width as u16;
         n.height = content_h_u32 as u16;
-        n.content_transform = scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
+        n.content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
         // N_DOC_TEXT is now a pure container -- per-line Glyphs
         // child nodes hold the actual text content.
         n.content = Content::None;
@@ -235,6 +329,7 @@ pub fn build_full_scene(
         n.width = 2;
         n.height = cfg.line_height as u16;
         n.background = dc(cfg.cursor_color);
+        n.opacity = cursor_opacity;
         n.content = Content::None;
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
@@ -256,91 +351,31 @@ pub fn build_full_scene(
         );
     }
 
-    // ── Test content: Image + Path ─────────────────────────────
-    // These exercise Content::Image and Content::Path in the GPU
-    // driver. Positioned in the bottom-right of the content area.
+    // N_DOC_TEXT is the only child of N_CONTENT. No sibling chain.
 
-    // Test image: 32x32 BGRA gradient.
-    let test_img = generate_test_image();
-    let img_ref = w.push_data(&test_img);
-    if let Some(img_id) = w.alloc_node() {
-        let n = w.node_mut(img_id);
-        n.x = (cfg.fb_width as i32).saturating_sub(160);
-        n.y = 8;
-        n.width = 64; // Display at 2x for visibility.
-        n.height = 64;
-        n.content = Content::Image {
-            data: img_ref,
-            src_width: 32,
-            src_height: 32,
-        };
-        n.flags = NodeFlags::VISIBLE;
+    // Link pointer cursor as a top-level sibling after N_CONTENT so it
+    // renders above all document content (highest z-order in root).
+    w.node_mut(N_CONTENT).next_sibling = N_POINTER;
 
-        // Link as last child of N_CONTENT (after cursor/selection).
-        // Walk to find last child.
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = img_id;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
-            }
-            w.node_mut(last).next_sibling = img_id;
-        }
-    }
-
-    // Test path 1: 5-pointed star (red).
-    let star_cmds = generate_test_star(60.0);
-    let star_ref = w.push_path_commands(&star_cmds);
-    if let Some(star_id) = w.alloc_node() {
-        let n = w.node_mut(star_id);
-        n.x = (cfg.fb_width as i32).saturating_sub(90);
-        n.y = 8;
-        n.width = 60;
-        n.height = 60;
+    // Pointer cursor node: arrow shape rendered at mouse position.
+    {
+        let arrow_cmds = crate::test_gen::generate_arrow_cursor();
+        let arrow_ref = w.push_path_commands(&arrow_cmds);
+        let arrow_hash = scene::fnv1a(&arrow_cmds);
+        let n = w.node_mut(N_POINTER);
+        n.x = mouse_x as i32;
+        n.y = mouse_y as i32;
+        n.width = 10;
+        n.height = 18;
         n.content = Content::Path {
-            color: Color::rgba(255, 80, 80, 255),
+            color: Color::rgb(255, 255, 255),
             fill_rule: FillRule::Winding,
-            contours: star_ref,
+            contours: arrow_ref,
         };
+        n.content_hash = arrow_hash;
+        n.opacity = pointer_opacity;
         n.flags = NodeFlags::VISIBLE;
-
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = star_id;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
-            }
-            w.node_mut(last).next_sibling = star_id;
-        }
-    }
-
-    // Test path 2: Rounded rectangle (blue, tests CubicTo).
-    let rrect_cmds = generate_test_rounded_rect(80.0, 40.0, 8.0);
-    let rrect_ref = w.push_path_commands(&rrect_cmds);
-    if let Some(rr_id) = w.alloc_node() {
-        let n = w.node_mut(rr_id);
-        n.x = (cfg.fb_width as i32).saturating_sub(160);
-        n.y = 78;
-        n.width = 80;
-        n.height = 40;
-        n.content = Content::Path {
-            color: Color::rgba(80, 140, 255, 255),
-            fill_rule: FillRule::Winding,
-            contours: rrect_ref,
-        };
-        n.flags = NodeFlags::VISIBLE;
-
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = rr_id;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
-            }
-            w.node_mut(last).next_sibling = rr_id;
-        }
+        n.next_sibling = NULL;
     }
 
     w.set_root(N_ROOT);
@@ -377,6 +412,7 @@ pub fn build_cursor_update(
     doc_text: &[u8],
     chars_per_line: u32,
     clock_text: Option<&[u8]>,
+    cursor_opacity: u8,
 ) {
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
@@ -386,6 +422,7 @@ pub fn build_cursor_update(
     let n = w.node_mut(N_CURSOR);
     n.x = cursor_x;
     n.y = cursor_y;
+    n.opacity = cursor_opacity;
 
     w.mark_dirty(N_CURSOR);
 
@@ -406,6 +443,7 @@ pub fn build_selection_update(
     doc_text: &[u8],
     content_h: u32,
     scroll_pt: i32,
+    cursor_opacity: u8,
 ) {
     let doc_width = doc_width(cfg);
     let cpl = chars_per_line(cfg);
@@ -426,8 +464,10 @@ pub fn build_selection_update(
     // Truncate selection rects only, keeping well-known + line nodes.
     w.set_node_count(WELL_KNOWN_COUNT + line_count);
 
-    let (cursor_line, cursor_col) =
-        byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
+    // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
+    w.node_mut(N_DOC_TEXT).next_sibling = NULL;
+
+    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
@@ -435,6 +475,7 @@ pub fn build_selection_update(
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_x;
         n.y = cursor_y;
+        n.opacity = cursor_opacity;
         n.next_sibling = NULL;
     }
     w.mark_dirty(N_CURSOR);
@@ -473,8 +514,9 @@ pub fn build_document_content(
     sel_end: u32,
     title_label: &[u8],
     clock_text: &[u8],
-    scroll_y: i32,
+    scroll_y: f32,
     mark_clock_changed: bool,
+    cursor_opacity: u8,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
@@ -482,17 +524,29 @@ pub fn build_document_content(
 
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y);
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
+    let scroll_pt = round_f32(scroll_y);
 
     // Remove old dynamic nodes (line nodes + selection rects).
+    // set_node_count automatically clears dangling first_child pointers
+    // on surviving nodes that referenced the now-dead dynamic nodes.
     w.set_node_count(WELL_KNOWN_COUNT);
 
     // ── Data buffer compaction ──────────────────────────────
+    // Note: reset_data invalidates all DataRef values (clip_path, content).
+    // Surviving nodes with stale DataRefs will produce empty data lookups
+    // (the reader returns &[] for out-of-bounds refs). This is safe but
+    // means clip paths on demo nodes won't render after compaction — they
+    // are re-pushed in build_full_scene on the next full rebuild.
     w.reset_data();
 
     // Re-push title glyph data.
-    let title_glyphs = shape_text(cfg.font_data, title_label, cfg.font_size, cfg.upem, cfg.axes);
+    let title_glyphs = shape_text(
+        cfg.font_data,
+        title_label,
+        cfg.font_size,
+        cfg.upem,
+        cfg.axes,
+    );
     let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
 
     // Re-push clock glyph data.
@@ -508,7 +562,7 @@ pub fn build_document_content(
         cfg.font_size,
     );
     let viewport_height_pt = content_h as i32;
-    let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, viewport_height_pt);
+    let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, viewport_height_pt);
 
     // Push visible line glyph data.
     let line_glyph_refs = shape_visible_runs(
@@ -551,17 +605,9 @@ pub fn build_document_content(
     }
 
     // Re-create per-line Glyphs children under N_DOC_TEXT.
-    // Reset both first_child AND next_sibling. The initial
-    // build_editor_scene links test content (Image, Path) as
-    // siblings of N_DOC_TEXT under N_CONTENT. acquire_copy()
-    // preserves that stale next_sibling pointer. After
-    // truncation, the same node index gets reused for a line
-    // node — the walker would visit it twice (once as child of
-    // N_DOC_TEXT, once as sibling) with different parent Y
-    // offsets, causing ghost duplicates.
+    // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
-    w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
+    w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
 
@@ -584,8 +630,7 @@ pub fn build_document_content(
     w.mark_dirty(N_DOC_TEXT);
 
     // Update cursor position (document-relative).
-    let (cursor_line, cursor_col) =
-        byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
+    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
@@ -593,6 +638,7 @@ pub fn build_document_content(
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_x;
         n.y = cursor_y;
+        n.opacity = cursor_opacity;
         n.next_sibling = NULL;
     }
     w.mark_dirty(N_CURSOR);

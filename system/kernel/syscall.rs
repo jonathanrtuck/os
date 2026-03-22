@@ -126,7 +126,7 @@ pub mod nr {
 
 /// Maximum DMA allocation order — matches page_allocator::MAX_ORDER.
 /// Derived from RAM geometry so resolution changes never require kernel updates.
-const MAX_DMA_ORDER: u64 = (paging::RAM_SIZE / paging::PAGE_SIZE).ilog2() as u64;
+const MAX_DMA_ORDER: u64 = (paging::RAM_SIZE_MAX / paging::PAGE_SIZE).ilog2() as u64;
 /// Maximum ELF size for process_create (4 MiB).
 /// Increased from 2 MiB to accommodate real HarfBuzz text shaping in core.
 const MAX_ELF_SIZE: u64 = 4 * 1024 * 1024;
@@ -341,7 +341,7 @@ fn sys_device_map(pa: u64, size: u64) -> Result<u64, Error> {
     // Validate: PA must be outside RAM (device MMIO space only).
     let end = pa.checked_add(size).ok_or(Error::InvalidArgument)?;
 
-    if !(end <= paging::RAM_START || pa >= paging::RAM_END) {
+    if !(end <= paging::RAM_START || pa >= paging::ram_end()) {
         return Err(Error::InvalidArgument); // Overlaps RAM — not a device
     }
 
@@ -658,7 +658,7 @@ fn sys_memory_share(
     if target_handle_nr > u8::MAX as u64 {
         return Err(Error::InvalidArgument);
     }
-    const MAX_SHARE_PAGES: u64 = paging::RAM_SIZE / paging::PAGE_SIZE / 2;
+    const MAX_SHARE_PAGES: u64 = paging::RAM_SIZE_MAX / paging::PAGE_SIZE / 2;
     if page_count == 0 || page_count > MAX_SHARE_PAGES {
         return Err(Error::InvalidArgument);
     }
@@ -670,7 +670,7 @@ fn sys_memory_share(
         .checked_add(page_count * paging::PAGE_SIZE)
         .ok_or(Error::BadAddress)?;
 
-    if pa < paging::RAM_START || end_pa > paging::RAM_END {
+    if pa < paging::RAM_START || end_pa > paging::ram_end() {
         return Err(Error::BadAddress);
     }
 
