@@ -2,5 +2,5 @@
 target = "aarch64-unknown-none"
 
 [target.aarch64-unknown-none]
-runner = "./run-qemu.sh"
+runner = "./run.sh"
 rustflags = ["-C", "link-arg=-Tkernel/link.ld"]

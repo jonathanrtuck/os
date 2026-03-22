@@ -81,7 +81,7 @@ Boot initializes each subsystem in dependency order and logs progress. The emoji
 system/
   Cargo.toml                 — build root (builds the entire system)
   build.rs                   — compiles libraries → programs → init → kernel
-  run-qemu.sh                — QEMU launcher (DTB injection, device config)
+  run.sh                     — VM launcher (hypervisor default, QEMU=1 for QEMU)
   test/smoke.sh              — builds, boots QEMU, checks expected output
   rust-toolchain.toml        — pins Rust nightly + aarch64-unknown-none target
   DESIGN.md                  — userspace architecture record

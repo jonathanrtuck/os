@@ -32,4 +32,4 @@ The scene graph is the interface. All rendering complexity (tree walk, glyph atl
 ## Testing
 
 - Protocol encoding: `system/test/` (host-side, via protocol crate tests)
-- Visual: run via hypervisor (`prototype/hypervisor/`) — see hypervisor CLAUDE.md
+- Visual: run via hypervisor (separate repo: `~/Sites/hypervisor/`)

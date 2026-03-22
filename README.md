@@ -72,7 +72,7 @@ cd system
 cargo run -r
 ```
 
-This builds the kernel and launches QEMU with the correct device configuration (see `run-qemu.sh` for details). `Ctrl-A X` to exit QEMU.
+This builds the kernel and launches it in the [native hypervisor](https://github.com/jonathanrtuck/hypervisor) with Metal GPU rendering. Close the window or Cmd+Q to exit. Use `QEMU=1 cargo run -r` for QEMU instead.
 
 ### Interaction
 
