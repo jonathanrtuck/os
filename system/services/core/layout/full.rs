@@ -312,7 +312,7 @@ pub fn build_full_scene(
 
     // Cursor: positioned rectangle child of doc text node.
     // Document-relative: renderer applies content_transform from N_DOC_TEXT.
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     {
@@ -337,7 +337,7 @@ pub fn build_full_scene(
             sel_lo,
             sel_hi,
             cpl as usize,
-            cfg.char_width,
+            cfg.char_width_fx,
             cfg.line_height,
             dc(cfg.sel_color),
             content_h_u32,
@@ -410,7 +410,7 @@ pub fn build_cursor_update(
 ) {
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     let n = w.node_mut(N_CURSOR);
@@ -462,7 +462,7 @@ pub fn build_selection_update(
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
 
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     {
@@ -487,7 +487,7 @@ pub fn build_selection_update(
             sel_lo,
             sel_hi,
             cpl as usize,
-            cfg.char_width,
+            cfg.char_width_fx,
             cfg.line_height,
             dc(cfg.sel_color),
             content_h,
@@ -625,7 +625,7 @@ pub fn build_document_content(
 
     // Update cursor position (document-relative).
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
     let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
 
     {
@@ -651,7 +651,7 @@ pub fn build_document_content(
             sel_lo,
             sel_hi,
             cpl as usize,
-            cfg.char_width,
+            cfg.char_width_fx,
             cfg.line_height,
             dc(cfg.sel_color),
             content_h,

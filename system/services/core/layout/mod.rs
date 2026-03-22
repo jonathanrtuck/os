@@ -75,6 +75,8 @@ pub struct SceneConfig<'a> {
     pub sel_color: drawing::Color,
     pub font_size: u16,
     pub char_width: u32,
+    /// Character advance in 16.16 fixed-point points (for cursor/selection).
+    pub char_width_fx: i32,
     pub line_height: u32,
     pub font_data: &'a [u8],
     pub upem: u16,
@@ -402,7 +404,7 @@ pub(crate) fn allocate_selection_rects(
     sel_lo: usize,
     sel_hi: usize,
     chars_per_line: usize,
-    char_width: u32,
+    char_width_fx: i32,
     line_height: u32,
     sel_color: Color,
     content_h: u32,
@@ -438,9 +440,9 @@ pub(crate) fn allocate_selection_rects(
 
         if let Some(sel_id) = w.alloc_node() {
             let n = w.node_mut(sel_id);
-            n.x = (col_start as u32 * char_width) as i32;
+            n.x = ((col_start as i64 * char_width_fx as i64) >> 16) as i32;
             n.y = sel_y;
-            n.width = ((col_end - col_start) as u32 * char_width) as u16;
+            n.width = (((col_end - col_start) as i64 * char_width_fx as i64) >> 16) as u16;
             n.height = line_height as u16;
             n.background = sel_color;
             n.content = Content::None;

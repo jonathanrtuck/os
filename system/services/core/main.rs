@@ -211,6 +211,9 @@ struct CoreState {
     blink_phase_start_ms: u64,
     boot_counter: u64,
     char_w: u32,
+    /// Character advance in 16.16 fixed-point points (for cursor positioning).
+    /// Matches the precision used by shape_text → scene ShapedGlyph.
+    char_w_fx: i32,
     counter_freq: u64,
     cursor_blink_id: Option<animation::AnimationId>,
     cursor_opacity: u8,
@@ -279,6 +282,7 @@ impl CoreState {
             blink_phase_start_ms: 0,
             boot_counter: 0,
             char_w: 8,
+            char_w_fx: 8 * 65536,
             counter_freq: 0,
             cursor_blink_id: None,
             cursor_opacity: 255,
@@ -634,7 +638,14 @@ fn line_col_to_byte(text: &[u8], target_line: usize, target_col: usize, cols: us
         }
     }
     let max_width = cols as f32;
-    layout_lib::line_col_to_byte(text, target_line, target_col, &UnitM, max_width, &layout_lib::CharBreaker)
+    layout_lib::line_col_to_byte(
+        text,
+        target_line,
+        target_col,
+        &UnitM,
+        max_width,
+        &layout_lib::CharBreaker,
+    )
 }
 
 /// Find byte offset of start of visual line containing `pos`.
@@ -1275,21 +1286,24 @@ pub extern "C" fn _start() -> ! {
             let line_h = ascent_pt + descent_pt + gap_pt;
             // For monospace: use advance of space glyph (static font, no axes).
             let space_gid = fonts::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
-            let char_w = fonts::rasterize::glyph_advance_with_axes(
-                font_data,
-                space_gid,
-                size as u16,
-                &[],
-            )
-            .unwrap_or_else(|| {
-                let (advance_fu, _) =
-                    fonts::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
-                (advance_fu as u32 * size + upem as u32 / 2) / upem as u32
-            });
+            let char_w =
+                fonts::rasterize::glyph_advance_with_axes(font_data, space_gid, size as u16, &[])
+                    .unwrap_or_else(|| {
+                        let (advance_fu, _) =
+                            fonts::rasterize::glyph_h_metrics(font_data, space_gid)
+                                .unwrap_or((0, 0));
+                        (advance_fu as u32 * size + upem as u32 / 2) / upem as u32
+                    });
+            // Compute 16.16 fixed-point advance for cursor positioning.
+            // Same formula as shape_text: (advance_fu * point_size * 65536) / upem.
+            let (advance_fu, _) =
+                fonts::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
+            let char_w_fx = (advance_fu as i64 * size as i64 * 65536 / upem as i64) as i32;
 
             {
                 let s = state();
                 s.char_w = if char_w > 0 { char_w } else { 8 };
+                s.char_w_fx = if char_w_fx > 0 { char_w_fx } else { 8 * 65536 };
                 s.line_h = if line_h > 0 { line_h } else { 20 };
             }
 
@@ -1384,6 +1398,7 @@ pub extern "C" fn _start() -> ! {
             sel_color: drawing::TEXT_SELECTION,
             font_size: FONT_SIZE as u16,
             char_width: s.char_w,
+            char_width_fx: s.char_w_fx,
             line_height: s.line_h,
             font_data: font_data(),
             upem: s.font_upem,
@@ -1501,8 +1516,7 @@ pub extern "C" fn _start() -> ! {
                 // SAFETY: msg.msg_type is MSG_KEY_EVENT; sender (input driver) guarantees
                 // payload is a valid KeyEvent.
                 let key: KeyEvent = unsafe { msg.payload_as() };
-                let action =
-                    process_key_event(&key, has_image, &editor_ch, content_w, content_h);
+                let action = process_key_event(&key, has_image, &editor_ch, content_w, content_h);
 
                 if action.changed {
                     changed = true;
@@ -1580,8 +1594,7 @@ pub extern "C" fn _start() -> ! {
                                 let adjusted_y = rel_y + round_f32(s.scroll_offset) as u32;
                                 let layout_info = content_text_layout(content_w);
                                 let text = doc_content();
-                                let byte_pos =
-                                    layout_info.xy_to_byte(text, rel_x, adjusted_y);
+                                let byte_pos = layout_info.xy_to_byte(text, rel_x, adjusted_y);
 
                                 // Double/triple-click detection.
                                 // 400ms window, within 4pt of previous click.
@@ -1629,8 +1642,7 @@ pub extern "C" fn _start() -> ! {
                                     3 => {
                                         // Triple-click: select entire visual line.
                                         let lo = visual_line_start(text, byte_pos, cols);
-                                        let mut hi =
-                                            visual_line_end(text, byte_pos, cols);
+                                        let mut hi = visual_line_end(text, byte_pos, cols);
                                         // Include the newline if present.
                                         if hi < text.len() && text[hi] == b'\n' {
                                             hi += 1;
