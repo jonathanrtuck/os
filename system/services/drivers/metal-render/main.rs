@@ -530,7 +530,15 @@ impl GlyphAtlas {
         }
     }
 
-    fn pack(&mut self, glyph_id: u16, w: u16, h: u16, bearing_x: i16, bearing_y: i16, data: &[u8]) -> bool {
+    fn pack(
+        &mut self,
+        glyph_id: u16,
+        w: u16,
+        h: u16,
+        bearing_x: i16,
+        bearing_y: i16,
+        data: &[u8],
+    ) -> bool {
         if glyph_id as usize >= MAX_GLYPH_ID {
             return false;
         }
@@ -620,10 +628,14 @@ pub extern "C" fn _start() -> ! {
     });
 
     // Setup two virtqueues.
-    let setup_vq_size =
-        core::cmp::min(device.queue_max_size(VIRTQ_SETUP), virtio::DEFAULT_QUEUE_SIZE);
-    let render_vq_size =
-        core::cmp::min(device.queue_max_size(VIRTQ_RENDER), virtio::DEFAULT_QUEUE_SIZE);
+    let setup_vq_size = core::cmp::min(
+        device.queue_max_size(VIRTQ_SETUP),
+        virtio::DEFAULT_QUEUE_SIZE,
+    );
+    let render_vq_size = core::cmp::min(
+        device.queue_max_size(VIRTQ_RENDER),
+        virtio::DEFAULT_QUEUE_SIZE,
+    );
 
     let mut setup_vq = alloc_virtqueue(&device, VIRTQ_SETUP, setup_vq_size);
     let mut render_vq = alloc_virtqueue(&device, VIRTQ_RENDER, render_vq_size);
@@ -645,9 +657,8 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"\n");
 
     // Send display info back to init.
-    let info_msg = unsafe {
-        ipc::Message::from_payload(MSG_DISPLAY_INFO, &DisplayInfoMsg { width, height })
-    };
+    let info_msg =
+        unsafe { ipc::Message::from_payload(MSG_DISPLAY_INFO, &DisplayInfoMsg { width, height }) };
     ch.send(&info_msg);
     let _ = sys::channel_signal(INIT_HANDLE);
 
@@ -735,7 +746,11 @@ pub extern "C" fn _start() -> ! {
     cmdbuf.get_function(FN_BLUR_V, LIB_SHADERS, b"blur_v");
     cmdbuf.get_function(FN_COPY_SRGB_TO_LINEAR, LIB_SHADERS, b"copy_srgb_to_linear");
     cmdbuf.get_function(FN_COPY_LINEAR_TO_SRGB, LIB_SHADERS, b"copy_linear_to_srgb");
-    cmdbuf.get_function(FN_FRAGMENT_ROUNDED_RECT, LIB_SHADERS, b"fragment_rounded_rect");
+    cmdbuf.get_function(
+        FN_FRAGMENT_ROUNDED_RECT,
+        LIB_SHADERS,
+        b"fragment_rounded_rect",
+    );
     send_setup(&device, &mut setup_vq, irq_handle, &setup_dma, &cmdbuf);
     sys::print(b"     functions loaded\n");
 
@@ -746,9 +761,9 @@ pub extern "C" fn _start() -> ! {
         PIPE_SOLID,
         FN_VERTEX_MAIN,
         FN_FRAGMENT_SOLID,
-        true,  // blend enabled
-        0x0F,  // write all RGBA
-        true,  // stencil format (needed for clip path testing)
+        true, // blend enabled
+        0x0F, // write all RGBA
+        true, // stencil format (needed for clip path testing)
         SAMPLE_COUNT,
     );
     // Textured pipeline (with blending, MSAA, stencil-compatible).
@@ -852,7 +867,11 @@ pub extern "C" fn _start() -> ! {
 
     // Create samplers.
     cmdbuf.clear();
-    cmdbuf.create_sampler(SAMPLER_NEAREST, metal::FILTER_NEAREST, metal::FILTER_NEAREST);
+    cmdbuf.create_sampler(
+        SAMPLER_NEAREST,
+        metal::FILTER_NEAREST,
+        metal::FILTER_NEAREST,
+    );
     cmdbuf.create_sampler(SAMPLER_LINEAR, metal::FILTER_LINEAR, metal::FILTER_LINEAR);
     send_setup(&device, &mut setup_vq, irq_handle, &setup_dma, &cmdbuf);
 
@@ -954,8 +973,9 @@ pub extern "C" fn _start() -> ! {
             core::mem::align_of::<fonts::rasterize::RasterScratch>(),
         )
         .unwrap();
-        let scratch_ptr =
-            unsafe { alloc::alloc::alloc_zeroed(scratch_layout) as *mut fonts::rasterize::RasterScratch };
+        let scratch_ptr = unsafe {
+            alloc::alloc::alloc_zeroed(scratch_layout) as *mut fonts::rasterize::RasterScratch
+        };
         let scratch = unsafe { &mut *scratch_ptr };
 
         let mut raster_buf = [0u8; 50 * 50];
@@ -1045,8 +1065,7 @@ pub extern "C" fn _start() -> ! {
         core::mem::align_of::<PathPointsBuf>(),
     )
     .unwrap();
-    let path_buf_ptr =
-        unsafe { alloc::alloc::alloc_zeroed(path_buf_layout) as *mut PathPointsBuf };
+    let path_buf_ptr = unsafe { alloc::alloc::alloc_zeroed(path_buf_layout) as *mut PathPointsBuf };
     let path_buf = unsafe { &mut *path_buf_ptr };
 
     loop {
@@ -1055,8 +1074,7 @@ pub extern "C" fn _start() -> ! {
         let _ = sys::interrupt_ack(SCENE_HANDLE);
 
         // Read scene graph.
-        let reader =
-            unsafe { scene::TripleReader::new(scene_va as *mut u8, scene_total_size) };
+        let reader = unsafe { scene::TripleReader::new(scene_va as *mut u8, scene_total_size) };
         let gen = reader.front_generation();
         if gen == last_gen {
             drop(reader);
@@ -1090,7 +1108,10 @@ pub extern "C" fn _start() -> ! {
             TEX_STENCIL,
             metal::LOAD_CLEAR,
             metal::STORE_MSAA_RESOLVE,
-            0.13, 0.13, 0.16, 1.0, // dark background
+            0.13,
+            0.13,
+            0.16,
+            1.0, // dark background
         );
         cmdbuf.set_render_pipeline(PIPE_SOLID);
 
@@ -1174,9 +1195,12 @@ pub extern "C" fn _start() -> ! {
 
             // Step 1: Convert padded region from sRGB drawable → linear TEX_BLUR_A.
             let copy_in_params = pack_copy_params(
-                cap_x as i32, cap_y as i32, // src offset (in drawable)
-                0, 0,                        // dst offset (in blur texture)
-                cap_w as i32, cap_h as i32,
+                cap_x as i32,
+                cap_y as i32, // src offset (in drawable)
+                0,
+                0, // dst offset (in blur texture)
+                cap_w as i32,
+                cap_h as i32,
             );
             cmdbuf.begin_compute_pass();
             cmdbuf.set_compute_pipeline(CPIPE_SRGB_TO_LINEAR);
@@ -1214,8 +1238,8 @@ pub extern "C" fn _start() -> ! {
             let off_x = (px - cap_x) as i32; // offset of inner region in blur texture
             let off_y = (py - cap_y) as i32;
             let copy_out_params = pack_copy_params(
-                off_x, off_y,              // src offset (in blur texture)
-                px as i32, py as i32,      // dst offset (in drawable)
+                off_x, off_y, // src offset (in blur texture)
+                px as i32, py as i32, // dst offset (in drawable)
                 pw as i32, ph as i32,
             );
             cmdbuf.begin_compute_pass();
@@ -1229,10 +1253,15 @@ pub extern "C" fn _start() -> ! {
             // Step 4: Semi-transparent background overlay on top of blur.
             if blur.bg.a > 0 {
                 cmdbuf.begin_render_pass(
-                    DRAWABLE_HANDLE, 0, 0,
+                    DRAWABLE_HANDLE,
+                    0,
+                    0,
                     metal::LOAD_LOAD,
                     metal::STORE_STORE,
-                    0.0, 0.0, 0.0, 0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
                 );
                 cmdbuf.set_render_pipeline(PIPE_SOLID_NO_MSAA);
                 let r = blur.bg.r as f32 / 255.0;
@@ -1241,8 +1270,17 @@ pub extern "C" fn _start() -> ! {
                 let a = blur.bg.a as f32 / 255.0;
                 emit_quad(
                     &mut vertex_buf,
-                    blur.x, blur.y, blur.w, blur.h,
-                    vw, vh, scale, r, g, b, a,
+                    blur.x,
+                    blur.y,
+                    blur.w,
+                    blur.h,
+                    vw,
+                    vh,
+                    scale,
+                    r,
+                    g,
+                    b,
+                    a,
                 );
                 flush_solid_vertices(&mut cmdbuf, &mut vertex_buf);
                 cmdbuf.end_render_pass();
@@ -1318,19 +1356,38 @@ fn read_f32_le(data: &[u8], offset: usize) -> f32 {
     if offset + 4 > data.len() {
         return 0.0;
     }
-    f32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    f32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 fn read_u32_le(data: &[u8], offset: usize) -> u32 {
     if offset + 4 > data.len() {
         return u32::MAX;
     }
-    u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 fn flatten_cubic(
-    x0: f32, y0: f32, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x3: f32, y3: f32,
-    points: &mut [(f32, f32)], count: &mut usize, depth: u32,
+    x0: f32,
+    y0: f32,
+    c1x: f32,
+    c1y: f32,
+    c2x: f32,
+    c2y: f32,
+    x3: f32,
+    y3: f32,
+    points: &mut [(f32, f32)],
+    count: &mut usize,
+    depth: u32,
 ) {
     if *count >= points.len() || depth >= 10 {
         if *count < points.len() {
@@ -1362,8 +1419,32 @@ fn flatten_cubic(
     let m123y = (m12y + m23y) * 0.5;
     let mx = (m012x + m123x) * 0.5;
     let my = (m012y + m123y) * 0.5;
-    flatten_cubic(x0, y0, m01x, m01y, m012x, m012y, mx, my, points, count, depth + 1);
-    flatten_cubic(mx, my, m123x, m123y, m23x, m23y, x3, y3, points, count, depth + 1);
+    flatten_cubic(
+        x0,
+        y0,
+        m01x,
+        m01y,
+        m012x,
+        m012y,
+        mx,
+        my,
+        points,
+        count,
+        depth + 1,
+    );
+    flatten_cubic(
+        mx,
+        my,
+        m123x,
+        m123y,
+        m23x,
+        m23y,
+        x3,
+        y3,
+        points,
+        count,
+        depth + 1,
+    );
 }
 
 fn parse_path_to_points(data: &[u8], out: &mut [(f32, f32); MAX_PATH_POINTS]) -> usize {
@@ -1377,22 +1458,35 @@ fn parse_path_to_points(data: &[u8], out: &mut [(f32, f32); MAX_PATH_POINTS]) ->
         let tag = read_u32_le(data, pos);
         match tag {
             scene::PATH_MOVE_TO => {
-                if pos + 12 > data.len() { break; }
+                if pos + 12 > data.len() {
+                    break;
+                }
                 cx = read_f32_le(data, pos + 4);
                 cy = read_f32_le(data, pos + 8);
-                sx = cx; sy = cy;
-                if n < MAX_PATH_POINTS { out[n] = (cx, cy); n += 1; }
+                sx = cx;
+                sy = cy;
+                if n < MAX_PATH_POINTS {
+                    out[n] = (cx, cy);
+                    n += 1;
+                }
                 pos += 12;
             }
             scene::PATH_LINE_TO => {
-                if pos + 12 > data.len() { break; }
+                if pos + 12 > data.len() {
+                    break;
+                }
                 cx = read_f32_le(data, pos + 4);
                 cy = read_f32_le(data, pos + 8);
-                if n < MAX_PATH_POINTS { out[n] = (cx, cy); n += 1; }
+                if n < MAX_PATH_POINTS {
+                    out[n] = (cx, cy);
+                    n += 1;
+                }
                 pos += 12;
             }
             scene::PATH_CUBIC_TO => {
-                if pos + 28 > data.len() { break; }
+                if pos + 28 > data.len() {
+                    break;
+                }
                 let c1x = read_f32_le(data, pos + 4);
                 let c1y = read_f32_le(data, pos + 8);
                 let c2x = read_f32_le(data, pos + 12);
@@ -1400,14 +1494,17 @@ fn parse_path_to_points(data: &[u8], out: &mut [(f32, f32); MAX_PATH_POINTS]) ->
                 let x3 = read_f32_le(data, pos + 20);
                 let y3 = read_f32_le(data, pos + 24);
                 flatten_cubic(cx, cy, c1x, c1y, c2x, c2y, x3, y3, out, &mut n, 0);
-                cx = x3; cy = y3;
+                cx = x3;
+                cy = y3;
                 pos += 28;
             }
             scene::PATH_CLOSE => {
                 if n < MAX_PATH_POINTS && (cx != sx || cy != sy) {
-                    out[n] = (sx, sy); n += 1;
+                    out[n] = (sx, sy);
+                    n += 1;
                 }
-                cx = sx; cy = sy;
+                cx = sx;
+                cy = sy;
                 pos += 4;
             }
             _ => break,
@@ -1447,10 +1544,14 @@ fn draw_path_stencil_cover(
 ) {
     let offset = contours.offset as usize;
     let end = offset + contours.length as usize;
-    if end > data_buf.len() { return; }
+    if end > data_buf.len() {
+        return;
+    }
 
     let n = parse_path_to_points(&data_buf[offset..end], path_buf);
-    if n < 3 { return; }
+    if n < 3 {
+        return;
+    }
 
     // Flush any pending solid geometry before changing pipeline.
     flush_solid_vertices(cmdbuf, solid_verts);
@@ -1458,7 +1559,10 @@ fn draw_path_stencil_cover(
     // Compute centroid for fan tessellation.
     let mut cx: f32 = 0.0;
     let mut cy: f32 = 0.0;
-    for i in 0..n { cx += path_buf[i].0; cy += path_buf[i].1; }
+    for i in 0..n {
+        cx += path_buf[i].0;
+        cy += path_buf[i].1;
+    }
     cx /= n as f32;
     cy /= n as f32;
 
@@ -1523,7 +1627,20 @@ fn draw_path_stencil_cover(
     let g = color.g as f32 / 255.0;
     let b = color.b as f32 / 255.0;
     let a = (color.a as f32 / 255.0) * opacity;
-    emit_quad(solid_verts, node_x, node_y, node_w, node_h, vw, vh, scale, r, g, b, a);
+    emit_quad(
+        solid_verts,
+        node_x,
+        node_y,
+        node_w,
+        node_h,
+        vw,
+        vh,
+        scale,
+        r,
+        g,
+        b,
+        a,
+    );
     flush_solid_vertices(cmdbuf, solid_verts);
 
     // Restore normal state.
@@ -1683,7 +1800,72 @@ fn walk_scene(
         let b = bg.b as f32 / 255.0;
         let a = (bg.a as f32 / 255.0) * opacity;
 
-        if corner_r > 0 || has_border {
+        if has_nontrivial_transform && (corner_r > 0 || has_border) {
+            // Transformed rounded rect: SDF evaluation in local space.
+            // Vertex NDC positions are transformed; texCoords stay in local
+            // pixel space. GPU interpolation is linear, so each fragment gets
+            // the correct local-space coordinate for SDF evaluation.
+            flush_solid_vertices(cmdbuf, solid_verts);
+            let half_w_px = w * scale * 0.5;
+            let half_h_px = h * scale * 0.5;
+            let radius_px = corner_r as f32 * scale;
+            let (bw_px, br, bg_b, bb, ba) = if has_border {
+                let bc = node.border.color;
+                (
+                    node.border.width as f32 * scale,
+                    bc.r as f32 / 255.0,
+                    bc.g as f32 / 255.0,
+                    bc.b as f32 / 255.0,
+                    (bc.a as f32 / 255.0) * opacity,
+                )
+            } else {
+                (0.0, 0.0, 0.0, 0.0, 0.0)
+            };
+            let params =
+                pack_rounded_rect_params(half_w_px, half_h_px, radius_px, bw_px, br, bg_b, bb, ba);
+            cmdbuf.set_render_pipeline(PIPE_ROUNDED_RECT);
+            cmdbuf.set_fragment_bytes(0, &params);
+            let mut rrect_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
+            emit_transformed_rounded_rect_quad(
+                &mut rrect_verts,
+                node_origin_x,
+                node_origin_y,
+                w,
+                h,
+                t,
+                vw,
+                vh,
+                scale,
+                r,
+                g,
+                b,
+                a,
+            );
+            cmdbuf.set_vertex_bytes(0, &rrect_verts);
+            cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
+            cmdbuf.set_render_pipeline(PIPE_SOLID);
+        } else if has_nontrivial_transform {
+            // Transformed solid quad (no corner rounding, no border).
+            flush_solid_vertices(cmdbuf, solid_verts);
+            let mut xf_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
+            emit_transformed_quad(
+                &mut xf_verts,
+                node_origin_x,
+                node_origin_y,
+                w,
+                h,
+                t,
+                vw,
+                vh,
+                scale,
+                r,
+                g,
+                b,
+                a,
+            );
+            cmdbuf.set_vertex_bytes(0, &xf_verts);
+            cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
+        } else if corner_r > 0 || has_border {
             // SDF rounded rect: flush pending solid verts, switch pipeline,
             // set uniform params, draw, then switch back.
             flush_solid_vertices(cmdbuf, solid_verts);
@@ -1702,28 +1884,28 @@ fn walk_scene(
             } else {
                 (0.0, 0.0, 0.0, 0.0, 0.0)
             };
-            let params = pack_rounded_rect_params(
-                half_w_px, half_h_px, radius_px, bw_px, br, bg_b, bb, ba,
-            );
+            let params =
+                pack_rounded_rect_params(half_w_px, half_h_px, radius_px, bw_px, br, bg_b, bb, ba);
             cmdbuf.set_render_pipeline(PIPE_ROUNDED_RECT);
             cmdbuf.set_fragment_bytes(0, &params);
             let mut rrect_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
             emit_rounded_rect_quad(
-                &mut rrect_verts, abs_x, abs_y, w, h, vw, vh, scale, r, g, b, a,
+                &mut rrect_verts,
+                abs_x,
+                abs_y,
+                w,
+                h,
+                vw,
+                vh,
+                scale,
+                r,
+                g,
+                b,
+                a,
             );
             cmdbuf.set_vertex_bytes(0, &rrect_verts);
             cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
             cmdbuf.set_render_pipeline(PIPE_SOLID);
-        } else if has_nontrivial_transform {
-            // Transformed quad: flush pending, emit per-vertex transformed positions.
-            flush_solid_vertices(cmdbuf, solid_verts);
-            let mut xf_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
-            emit_transformed_quad(
-                &mut xf_verts, node_origin_x, node_origin_y, w, h, t,
-                vw, vh, scale, r, g, b, a,
-            );
-            cmdbuf.set_vertex_bytes(0, &xf_verts);
-            cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
         } else {
             emit_quad(solid_verts, abs_x, abs_y, w, h, vw, vh, scale, r, g, b, a);
             // Flush if we're close to the 4KB limit.
@@ -1751,9 +1933,38 @@ fn walk_scene(
         cmdbuf.set_render_pipeline(PIPE_ROUNDED_RECT);
         cmdbuf.set_fragment_bytes(0, &params);
         let mut rrect_verts: Vec<u8> = Vec::with_capacity(6 * VERTEX_BYTES);
-        emit_rounded_rect_quad(
-            &mut rrect_verts, abs_x, abs_y, w, h, vw, vh, scale, 0.0, 0.0, 0.0, 0.0,
-        );
+        if has_nontrivial_transform {
+            emit_transformed_rounded_rect_quad(
+                &mut rrect_verts,
+                node_origin_x,
+                node_origin_y,
+                w,
+                h,
+                t,
+                vw,
+                vh,
+                scale,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            );
+        } else {
+            emit_rounded_rect_quad(
+                &mut rrect_verts,
+                abs_x,
+                abs_y,
+                w,
+                h,
+                vw,
+                vh,
+                scale,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+            );
+        }
         cmdbuf.set_vertex_bytes(0, &rrect_verts);
         cmdbuf.draw_primitives(metal::PRIM_TRIANGLE, 0, 6);
         cmdbuf.set_render_pipeline(PIPE_SOLID);
@@ -1795,8 +2006,22 @@ fn walk_scene(
                     let v1 = (entry.v + entry.height) as f32 / atlas_h;
 
                     emit_textured_quad(
-                        glyph_verts, gx, gy, gw, gh, vw, vh, scale, u0, v0, u1, v1,
-                        r, g, b, a,
+                        glyph_verts,
+                        gx,
+                        gy,
+                        gw,
+                        gh,
+                        vw,
+                        vh,
+                        scale,
+                        u0,
+                        v0,
+                        u1,
+                        v1,
+                        r,
+                        g,
+                        b,
+                        a,
                     );
 
                     if glyph_verts.len() + 6 * VERTEX_BYTES > MAX_INLINE_BYTES {
@@ -1818,8 +2043,21 @@ fn walk_scene(
         } => {
             if contours.length > 0 {
                 draw_path_stencil_cover(
-                    cmdbuf, solid_verts, data_buf, contours, color, fill_rule,
-                    abs_x, abs_y, w, h, vw, vh, scale, opacity, path_buf,
+                    cmdbuf,
+                    solid_verts,
+                    data_buf,
+                    contours,
+                    color,
+                    fill_rule,
+                    abs_x,
+                    abs_y,
+                    w,
+                    h,
+                    vw,
+                    vh,
+                    scale,
+                    opacity,
+                    path_buf,
                 );
             }
         }
@@ -1861,8 +2099,22 @@ fn walk_scene(
                 cmdbuf.set_fragment_texture(TEX_IMAGE, 0);
                 cmdbuf.set_fragment_sampler(SAMPLER_LINEAR, 0);
                 emit_textured_quad(
-                    solid_verts, abs_x, abs_y, w, h, vw, vh, scale,
-                    0.0, 0.0, u1, v1, 1.0, 1.0, 1.0, 1.0,
+                    solid_verts,
+                    abs_x,
+                    abs_y,
+                    w,
+                    h,
+                    vw,
+                    vh,
+                    scale,
+                    0.0,
+                    0.0,
+                    u1,
+                    v1,
+                    1.0,
+                    1.0,
+                    1.0,
+                    1.0,
                 );
                 flush_solid_vertices(cmdbuf, solid_verts);
                 cmdbuf.set_render_pipeline(PIPE_SOLID);
@@ -1879,7 +2131,12 @@ fn walk_scene(
 
     // If this node clips children, set up clipping.
     let child_clip = if node.flags.contains(NodeFlags::CLIPS_CHILDREN) {
-        let node_rect = ClipRect { x: abs_x, y: abs_y, w, h };
+        let node_rect = ClipRect {
+            x: abs_x,
+            y: abs_y,
+            w,
+            h,
+        };
         let clipped = clip.intersect(&node_rect);
 
         // Flush pending vertices before changing clip state.
@@ -1907,7 +2164,10 @@ fn walk_scene(
                     let mut fan_verts: Vec<u8> = Vec::with_capacity(n_pts * 3 * VERTEX_BYTES);
                     let mut cx_sum: f32 = 0.0;
                     let mut cy_sum: f32 = 0.0;
-                    for i in 0..n_pts { cx_sum += path_buf[i].0; cy_sum += path_buf[i].1; }
+                    for i in 0..n_pts {
+                        cx_sum += path_buf[i].0;
+                        cy_sum += path_buf[i].1;
+                    }
                     let centroid_x = cx_sum / n_pts as f32;
                     let centroid_y = cy_sum / n_pts as f32;
 
@@ -1953,8 +2213,7 @@ fn walk_scene(
                         let g = bg.g as f32 / 255.0;
                         let b = bg.b as f32 / 255.0;
                         let a = (bg.a as f32 / 255.0) * opacity;
-                        emit_quad(solid_verts, abs_x, abs_y, w, h,
-                                  vw, vh, scale, r, g, b, a);
+                        emit_quad(solid_verts, abs_x, abs_y, w, h, vw, vh, scale, r, g, b, a);
                         flush_solid_vertices(cmdbuf, solid_verts);
                     }
                 }
@@ -2118,12 +2377,7 @@ fn emit_transformed_quad(
     a: f32,
 ) {
     // Transform 4 corners of the local rect through the affine, then offset to parent space.
-    let corners = [
-        (0.0f32, 0.0f32),
-        (w, 0.0),
-        (0.0, h),
-        (w, h),
-    ];
+    let corners = [(0.0f32, 0.0f32), (w, 0.0), (0.0, h), (w, h)];
     let mut tc = [(0.0f32, 0.0f32); 4];
     for (i, &(lx, ly)) in corners.iter().enumerate() {
         let (tx, ty) = t.transform_point(lx, ly);
@@ -2186,6 +2440,66 @@ fn emit_rounded_rect_quad(
         [r_ndc, t, half_w_px, -half_h_px, r, g, b, a],
         [r_ndc, b_ndc, half_w_px, half_h_px, r, g, b, a],
         [l, b_ndc, -half_w_px, half_h_px, r, g, b, a],
+    ];
+    for v in &verts {
+        for f in v {
+            buf.extend_from_slice(&f.to_le_bytes());
+        }
+    }
+}
+
+/// Push a rounded-rect quad with an affine transform applied to vertex positions.
+///
+/// Like `emit_transformed_quad`, the 4 corners are transformed through the
+/// affine to produce NDC positions. But unlike a solid quad, texCoords carry
+/// LOCAL pixel coordinates (center-relative), identical to `emit_rounded_rect_quad`.
+///
+/// Because the affine is linear and GPU barycentric interpolation is linear,
+/// each fragment receives the correct local-space coordinate. The SDF shader
+/// evaluates in that local space — no shader changes needed.
+fn emit_transformed_rounded_rect_quad(
+    buf: &mut Vec<u8>,
+    ox: f32,
+    oy: f32,
+    w: f32,
+    h: f32,
+    t: &scene::AffineTransform,
+    vw: f32,
+    vh: f32,
+    scale: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+    a: f32,
+) {
+    // Transform 4 corners of the local rect, offset to parent space.
+    let corners = [
+        (0.0f32, 0.0f32), // top-left
+        (w, 0.0),         // top-right
+        (0.0, h),         // bottom-left
+        (w, h),           // bottom-right
+    ];
+    let mut ndc = [(0.0f32, 0.0f32); 4];
+    for (i, &(lx, ly)) in corners.iter().enumerate() {
+        let (tx, ty) = t.transform_point(lx, ly);
+        let px = ox + tx;
+        let py = oy + ty;
+        ndc[i] = ((px * scale / vw) * 2.0 - 1.0, 1.0 - (py * scale / vh) * 2.0);
+    }
+
+    // Local pixel coords: center of rect = (0,0), same as axis-aligned version.
+    let half_w_px = w * scale * 0.5;
+    let half_h_px = h * scale * 0.5;
+
+    // Two triangles: (0,1,2) and (1,3,2).
+    // NDC positions are transformed; texCoords are in local (pre-transform) space.
+    let verts: [[f32; 8]; 6] = [
+        [ndc[0].0, ndc[0].1, -half_w_px, -half_h_px, r, g, b, a],
+        [ndc[1].0, ndc[1].1, half_w_px, -half_h_px, r, g, b, a],
+        [ndc[2].0, ndc[2].1, -half_w_px, half_h_px, r, g, b, a],
+        [ndc[1].0, ndc[1].1, half_w_px, -half_h_px, r, g, b, a],
+        [ndc[3].0, ndc[3].1, half_w_px, half_h_px, r, g, b, a],
+        [ndc[2].0, ndc[2].1, -half_w_px, half_h_px, r, g, b, a],
     ];
     for v in &verts {
         for f in v {

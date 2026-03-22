@@ -12,7 +12,7 @@ use scene::{fnv1a, Color, Content, NodeFlags, NULL};
 use super::{
     allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width, layout_mono_lines,
     line_bytes_for_run, round_f32, shape_text, update_clock_inline, SceneConfig, N_CURSOR,
-    N_DEMO_BALL, N_DOC_TEXT, WELL_KNOWN_COUNT,
+    N_DOC_TEXT, WELL_KNOWN_COUNT,
 };
 
 // ── Incremental scene update ─────────────────────────────────────────
@@ -147,15 +147,10 @@ pub fn update_single_line(
         w.mark_dirty(cur);
     }
 
-    // Update N_DOC_TEXT: content_transform, content_hash, and repoint
-    // next_sibling to N_DEMO_BALL. The initial build_full_scene links
-    // test content (Image, Path, demo nodes) as siblings of N_DOC_TEXT
-    // under N_CONTENT. Those dynamic nodes (IDs >= WELL_KNOWN_COUNT)
-    // are gone after the first compaction, but the pointer survives
-    // acquire_copy. Setting next_sibling → N_DEMO_BALL skips the dead
-    // test content and keeps the demo nodes in the sibling chain.
+    // Update N_DOC_TEXT: content_transform, content_hash.
+    // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
     w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
-    w.node_mut(N_DOC_TEXT).next_sibling = N_DEMO_BALL;
+    w.node_mut(N_DOC_TEXT).next_sibling = NULL;
     w.node_mut(N_DOC_TEXT).content_hash = scene::fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
 
@@ -266,12 +261,9 @@ fn finish_line_update(
 
     // Update N_DOC_TEXT content_transform and content hash.
     // Repoint next_sibling → N_DEMO_BALL so demo nodes stay in the
-    // N_CONTENT sibling chain. The initial build_full_scene links test
-    // content (Image, Path, demo nodes) as siblings; those dynamic nodes
-    // are gone after the first compaction but the stale pointer survives
-    // acquire_copy. N_DEMO_BALL is a well-known node (always present).
+    // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
     w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
-    w.node_mut(N_DOC_TEXT).next_sibling = N_DEMO_BALL;
+    w.node_mut(N_DOC_TEXT).next_sibling = NULL;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
 

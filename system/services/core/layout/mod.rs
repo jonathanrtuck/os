@@ -43,42 +43,15 @@ pub const N_CONTENT: u16 = 5;
 pub const N_DOC_TEXT: u16 = 6;
 pub const N_CURSOR: u16 = 7;
 
-// ── Demo / scaffolding nodes (8..13) ─────────────────────────────────
-//
-// Bouncing-ball demo: one small square that animates vertically using
-// a spring. The spring alternates between two Y targets each time it
-// settles, producing a perpetual bounce.
-pub const N_DEMO_BALL: u16 = 8;
-
-// Easing-curve sampler: five bars that each run a different easing
-// function left → right over 2 s, then reset and repeat.
-pub const N_DEMO_EASE_0: u16 = 9;
-pub const N_DEMO_EASE_1: u16 = 10;
-pub const N_DEMO_EASE_2: u16 = 11;
-pub const N_DEMO_EASE_3: u16 = 12;
-pub const N_DEMO_EASE_4: u16 = 13;
-
-// ── Pointer cursor node (14) ──────────────────────────────────────────
+// ── Pointer cursor node (8) ──────────────────────────────────────────
 //
 // Top-level node rendered above all content. Position updated each
 // frame from MSG_POINTER_ABS. Auto-hides after 3 s of inactivity with
 // a 300 ms EaseOut fade.
-pub const N_POINTER: u16 = 14;
+pub const N_POINTER: u16 = 8;
 
-// ── Audit feature demo nodes (15..22) ─────────────────────────────────
-//
-// Static demo nodes showcasing corner_radius, borders, and transforms.
-pub const N_DEMO_ROUNDED: u16 = 15; // Rounded rect (corner_radius only)
-pub const N_DEMO_BORDER: u16 = 16; // Border + corner_radius
-pub const N_DEMO_SCALE: u16 = 17; // Scale transform
-pub const N_DEMO_ROTATE: u16 = 18; // Rotation transform
-pub const N_DEMO_SKEW: u16 = 19; // Skew transform
-pub const N_DEMO_COMBINED: u16 = 20; // Combined: scale + rotate
-pub const N_DEMO_TRANSLATE: u16 = 21; // Translation transform
-pub const N_DEMO_BORDER_ONLY: u16 = 22; // Border-only (no fill)
-
-/// Number of well-known nodes (indices 0..22). Dynamic nodes start at 23.
-pub const WELL_KNOWN_COUNT: u16 = 23;
+/// Number of well-known nodes (indices 0..8). Dynamic nodes start at 9.
+pub const WELL_KNOWN_COUNT: u16 = 9;
 
 // ── Configuration ───────────────────────────────────────────────────
 

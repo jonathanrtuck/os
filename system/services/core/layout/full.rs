@@ -11,29 +11,10 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
     layout_mono_lines, line_bytes_for_run, round_f32, scroll_runs, shape_text, shape_visible_runs,
-    update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DEMO_BALL,
-    N_DEMO_BORDER, N_DEMO_BORDER_ONLY, N_DEMO_COMBINED, N_DEMO_EASE_0, N_DEMO_EASE_1,
-    N_DEMO_EASE_2, N_DEMO_EASE_3, N_DEMO_EASE_4, N_DEMO_ROTATE, N_DEMO_ROUNDED, N_DEMO_SCALE,
-    N_DEMO_SKEW, N_DEMO_TRANSLATE, N_DOC_TEXT, N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR,
-    N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT, N_POINTER,
+    N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
-use crate::test_gen::{
-    generate_circle_clip, generate_test_image, generate_test_rounded_rect, generate_test_star,
-};
-
-// ── Demo panel positioning ────────────────────────────────────────────
-//
-// The Phase 2 composition demos are positioned in the right margin,
-// relative to N_CONTENT's top-left corner.
-
-/// Width of the demo panel in points.
-const DEMO_W: u32 = 160;
-
-/// Compute the left X of the demo panel given the framebuffer width.
-#[inline]
-pub(crate) fn demo_left_x(fb_width: u32) -> i32 {
-    (fb_width as i32).saturating_sub(DEMO_W as i32 + 10)
-}
+use crate::test_gen::generate_test_image;
 
 // ── Full scene builds (called by SceneState methods) ────────────────
 
@@ -136,26 +117,8 @@ pub fn build_full_scene(
     let _doc_text = w.alloc_node().unwrap(); // 6
     let _cursor_node = w.alloc_node().unwrap(); // 7
 
-    // Demo nodes 8..13 (scaffolding — see N_DEMO_BALL, N_DEMO_EASE_*).
-    let _demo_ball = w.alloc_node().unwrap(); // 8
-    let _demo_ease0 = w.alloc_node().unwrap(); // 9
-    let _demo_ease1 = w.alloc_node().unwrap(); // 10
-    let _demo_ease2 = w.alloc_node().unwrap(); // 11
-    let _demo_ease3 = w.alloc_node().unwrap(); // 12
-    let _demo_ease4 = w.alloc_node().unwrap(); // 13
-
     // Pointer cursor node (top-level, highest z-order).
-    let _pointer = w.alloc_node().unwrap(); // 14
-
-    // Audit feature demo nodes.
-    let _demo_rounded = w.alloc_node().unwrap(); // 15
-    let _demo_border = w.alloc_node().unwrap(); // 16
-    let _demo_scale = w.alloc_node().unwrap(); // 17
-    let _demo_rotate = w.alloc_node().unwrap(); // 18
-    let _demo_skew = w.alloc_node().unwrap(); // 19
-    let _demo_combined = w.alloc_node().unwrap(); // 20
-    let _demo_translate = w.alloc_node().unwrap(); // 21
-    let _demo_border_only = w.alloc_node().unwrap(); // 22
+    let _pointer = w.alloc_node().unwrap(); // 8
 
     {
         let n = w.node_mut(N_ROOT);
@@ -291,20 +254,6 @@ pub fn build_full_scene(
             n.next_sibling = NULL;
         }
 
-        // Demo nodes: hidden in image mode (well-known indices must exist).
-        for &nid in &[
-            N_DEMO_BALL,
-            N_DEMO_EASE_0,
-            N_DEMO_EASE_1,
-            N_DEMO_EASE_2,
-            N_DEMO_EASE_3,
-            N_DEMO_EASE_4,
-        ] {
-            let n = w.node_mut(nid);
-            n.flags = NodeFlags::empty();
-            n.next_sibling = NULL;
-        }
-
         // Link N_CONTENT → N_POINTER so the pointer renders on top.
         w.node_mut(N_CONTENT).next_sibling = N_POINTER;
 
@@ -402,360 +351,7 @@ pub fn build_full_scene(
         );
     }
 
-    // ── Test content: Image + Path ─────────────────────────────
-    // These exercise Content::Image and Content::Path in the GPU
-    // driver. Positioned in the bottom-right of the content area.
-
-    // Test image: 32x32 BGRA gradient.
-    let test_img = generate_test_image();
-    let img_ref = w.push_data(&test_img);
-    if let Some(img_id) = w.alloc_node() {
-        let n = w.node_mut(img_id);
-        n.x = (cfg.fb_width as i32).saturating_sub(160);
-        n.y = 8;
-        n.width = 64; // Display at 2x for visibility.
-        n.height = 64;
-        n.content = Content::Image {
-            data: img_ref,
-            src_width: 32,
-            src_height: 32,
-        };
-        n.flags = NodeFlags::VISIBLE;
-
-        // Link as last child of N_CONTENT (after cursor/selection).
-        // Walk to find last child.
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = img_id;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
-            }
-            w.node_mut(last).next_sibling = img_id;
-        }
-    }
-
-    // Test path 1: 5-pointed star (red).
-    let star_cmds = generate_test_star(60.0);
-    let star_ref = w.push_path_commands(&star_cmds);
-    if let Some(star_id) = w.alloc_node() {
-        let n = w.node_mut(star_id);
-        n.x = (cfg.fb_width as i32).saturating_sub(90);
-        n.y = 8;
-        n.width = 60;
-        n.height = 60;
-        n.content = Content::Path {
-            color: Color::rgba(255, 80, 80, 255),
-            fill_rule: FillRule::Winding,
-            contours: star_ref,
-        };
-        n.flags = NodeFlags::VISIBLE;
-
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = star_id;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
-            }
-            w.node_mut(last).next_sibling = star_id;
-        }
-    }
-
-    // Test path 2: Rounded rectangle (blue, tests CubicTo).
-    let rrect_cmds = generate_test_rounded_rect(80.0, 40.0, 8.0);
-    let rrect_ref = w.push_path_commands(&rrect_cmds);
-    if let Some(rr_id) = w.alloc_node() {
-        let n = w.node_mut(rr_id);
-        n.x = (cfg.fb_width as i32).saturating_sub(160);
-        n.y = 78;
-        n.width = 80;
-        n.height = 40;
-        n.content = Content::Path {
-            color: Color::rgba(80, 140, 255, 255),
-            fill_rule: FillRule::Winding,
-            contours: rrect_ref,
-        };
-        n.flags = NodeFlags::VISIBLE;
-
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = rr_id;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
-            }
-            w.node_mut(last).next_sibling = rr_id;
-        }
-    }
-
-    // ── Demo nodes: Phase 2 composition demos ─────────────────────────
-    //
-    // Three static composition demos using well-known node indices 8-13.
-    // Demo 1 (N_DEMO_BALL = 8): star-shaped clip containing an image.
-    // Demo 2 (N_DEMO_EASE_0 = 9): circular clip containing text.
-    // Demo 3 (N_DEMO_EASE_1 = 10): frosted glass panel (backdrop blur).
-    // Nodes 11-13: hidden (unused in Phase 2).
-    let demo_x = demo_left_x(cfg.fb_width);
-
-    // Demo 1: Star-shaped clip containing an image.
-    {
-        let star_clip_cmds = generate_test_star(60.0);
-        let star_clip_ref = w.push_path_commands(&star_clip_cmds);
-        let test_img = generate_test_image();
-        let img_ref = w.push_data(&test_img);
-
-        let n = w.node_mut(N_DEMO_BALL);
-        n.x = demo_x;
-        n.y = 130;
-        n.width = 60;
-        n.height = 60;
-        n.clip_path = star_clip_ref;
-        n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
-        n.next_sibling = N_DEMO_EASE_0;
-
-        // Child: test image filling the clip container.
-        if let Some(img_id) = w.alloc_node() {
-            let n = w.node_mut(img_id);
-            n.width = 60;
-            n.height = 60;
-            n.content = Content::Image {
-                data: img_ref,
-                src_width: 32,
-                src_height: 32,
-            };
-            n.flags = NodeFlags::VISIBLE;
-            n.next_sibling = NULL;
-            w.node_mut(N_DEMO_BALL).first_child = img_id;
-        }
-    }
-
-    // Demo 2: Circular clip containing text.
-    {
-        let circle_cmds = generate_circle_clip(30.0);
-        let circle_ref = w.push_path_commands(&circle_cmds);
-
-        let n = w.node_mut(N_DEMO_EASE_0);
-        n.x = demo_x;
-        n.y = 200;
-        n.width = 60;
-        n.height = 60;
-        n.clip_path = circle_ref;
-        n.background = Color::rgba(40, 40, 50, 255);
-        n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
-        n.next_sibling = N_DEMO_EASE_1;
-
-        // Child: text glyphs inside the circle.
-        let demo_text = b"Hello";
-        let shaped = shape_text(cfg.font_data, demo_text, cfg.font_size, cfg.upem, cfg.axes);
-        let glyph_ref = w.push_shaped_glyphs(&shaped);
-        if let Some(txt_id) = w.alloc_node() {
-            let n = w.node_mut(txt_id);
-            n.x = 4;
-            n.y = 22;
-            n.width = 56;
-            n.height = 20;
-            n.content = Content::Glyphs {
-                color: Color::rgb(255, 255, 255),
-                glyphs: glyph_ref,
-                glyph_count: shaped.len() as u16,
-                font_size: cfg.font_size,
-                axis_hash: 0,
-            };
-            n.content_hash = scene::fnv1a(demo_text);
-            n.flags = NodeFlags::VISIBLE;
-            n.next_sibling = NULL;
-            w.node_mut(N_DEMO_EASE_0).first_child = txt_id;
-        }
-    }
-
-    // Colorful background rectangles behind the frosted glass panel.
-    // These render BEFORE the glass (earlier in sibling chain) so the
-    // backdrop blur has visible colorful content to blur.
-    // Reorder chain: EASE_0 → EASE_2 → EASE_3 → EASE_4 → EASE_1 (glass on top).
-    w.node_mut(N_DEMO_EASE_0).next_sibling = N_DEMO_EASE_2;
-
-    {
-        let n = w.node_mut(N_DEMO_EASE_2);
-        n.x = demo_x - 5;
-        n.y = 265;
-        n.width = 70;
-        n.height = 70;
-        n.background = Color::rgba(220, 50, 50, 255); // Red
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_EASE_3;
-    }
-    {
-        let n = w.node_mut(N_DEMO_EASE_3);
-        n.x = demo_x + 40;
-        n.y = 275;
-        n.width = 60;
-        n.height = 60;
-        n.background = Color::rgba(50, 180, 80, 255); // Green
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_EASE_4;
-    }
-    {
-        let n = w.node_mut(N_DEMO_EASE_4);
-        n.x = demo_x + 80;
-        n.y = 260;
-        n.width = 50;
-        n.height = 70;
-        n.background = Color::rgba(60, 100, 240, 255); // Blue
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_EASE_1;
-    }
-
-    // Demo 3: Frosted glass panel (backdrop blur), renders on top of colors.
-    {
-        let n = w.node_mut(N_DEMO_EASE_1);
-        n.x = demo_x;
-        n.y = 270;
-        n.width = 120;
-        n.height = 60;
-        n.background = Color::rgba(255, 255, 255, 180);
-        n.backdrop_blur_radius = 8;
-        n.corner_radius = 8;
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_ROUNDED;
-    }
-
-    // ── Audit feature demos ─────────────────────────────────────────
-    //
-    // Showcase: corner_radius, borders, transforms (all types).
-    // Positioned in a column below the Phase 2 demos.
-
-    // Demo 4: Rounded rectangle (corner_radius, no border).
-    {
-        let n = w.node_mut(N_DEMO_ROUNDED);
-        n.x = demo_x;
-        n.y = 350;
-        n.width = 60;
-        n.height = 40;
-        n.background = Color::rgba(90, 130, 230, 255);
-        n.corner_radius = 12;
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_BORDER;
-    }
-
-    // Demo 5: Rounded rect with border.
-    {
-        let n = w.node_mut(N_DEMO_BORDER);
-        n.x = demo_x + 70;
-        n.y = 350;
-        n.width = 60;
-        n.height = 40;
-        n.background = Color::rgba(240, 240, 245, 255);
-        n.corner_radius = 8;
-        n.border = Border {
-            color: Color::rgba(60, 60, 80, 255),
-            width: 2,
-            _pad: [0; 3],
-        };
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_BORDER_ONLY;
-    }
-
-    // Demo 6: Border-only (no fill, transparent background).
-    {
-        let n = w.node_mut(N_DEMO_BORDER_ONLY);
-        n.x = demo_x;
-        n.y = 400;
-        n.width = 50;
-        n.height = 50;
-        n.corner_radius = 25; // Fully circular
-        n.border = Border {
-            color: Color::rgba(220, 60, 90, 255),
-            width: 3,
-            _pad: [0; 3],
-        };
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_TRANSLATE;
-    }
-
-    // Demo 7: Translation transform.
-    {
-        let n = w.node_mut(N_DEMO_TRANSLATE);
-        n.x = demo_x + 70;
-        n.y = 400;
-        n.width = 40;
-        n.height = 40;
-        n.background = Color::rgba(60, 180, 120, 255);
-        n.transform = scene::AffineTransform::translate(10.0, 5.0);
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_SCALE;
-    }
-
-    // Demo 8: Scale transform (1.5x horizontal, 0.8x vertical).
-    {
-        let n = w.node_mut(N_DEMO_SCALE);
-        n.x = demo_x;
-        n.y = 460;
-        n.width = 40;
-        n.height = 40;
-        n.background = Color::rgba(200, 140, 50, 255);
-        n.corner_radius = 6;
-        n.transform = scene::AffineTransform::scale(1.5, 0.8);
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_ROTATE;
-    }
-
-    // Demo 9: Rotation transform (15 degrees).
-    {
-        let n = w.node_mut(N_DEMO_ROTATE);
-        n.x = demo_x + 80;
-        n.y = 460;
-        n.width = 40;
-        n.height = 40;
-        n.background = Color::rgba(180, 60, 200, 255);
-        n.corner_radius = 4;
-        n.transform = scene::AffineTransform::rotate(0.26); // ~15 degrees
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_SKEW;
-    }
-
-    // Demo 10: Skew transform (horizontal shear).
-    {
-        let n = w.node_mut(N_DEMO_SKEW);
-        n.x = demo_x;
-        n.y = 520;
-        n.width = 50;
-        n.height = 30;
-        n.background = Color::rgba(240, 180, 60, 255);
-        n.transform = scene::AffineTransform::skew_x(0.3); // ~17 degrees
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = N_DEMO_COMBINED;
-    }
-
-    // Demo 11: Combined transform (scale + rotate).
-    {
-        let rot = scene::AffineTransform::rotate(-0.35); // ~-20 degrees
-        let scl = scene::AffineTransform::scale(1.2, 1.2);
-        let n = w.node_mut(N_DEMO_COMBINED);
-        n.x = demo_x + 80;
-        n.y = 520;
-        n.width = 40;
-        n.height = 40;
-        n.background = Color::rgba(100, 200, 220, 255);
-        n.corner_radius = 10;
-        n.transform = scl.compose(rot);
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = NULL;
-    }
-
-    // Link demo siblings: last dynamic node → N_DEMO_BALL.
-    // Walk N_CONTENT children to find the last one.
-    {
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = N_DEMO_BALL;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
-            }
-            w.node_mut(last).next_sibling = N_DEMO_BALL;
-        }
-    }
+    // N_DOC_TEXT is the only child of N_CONTENT. No sibling chain.
 
     // Link pointer cursor as a top-level sibling after N_CONTENT so it
     // renders above all document content (highest z-order in root).
@@ -868,12 +464,8 @@ pub fn build_selection_update(
     // Truncate selection rects only, keeping well-known + line nodes.
     w.set_node_count(WELL_KNOWN_COUNT + line_count);
 
-    // Repoint N_DOC_TEXT.next_sibling to N_DEMO_BALL so demo nodes stay
-    // in the N_CONTENT child chain after truncation. The initial
-    // build_full_scene links dynamic test content (img, star, rrect) as
-    // siblings after N_DOC_TEXT; those IDs are now above node_count and
-    // the traversal would stop there without this fixup.
-    w.node_mut(N_DOC_TEXT).next_sibling = N_DEMO_BALL;
+    // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
+    w.node_mut(N_DOC_TEXT).next_sibling = NULL;
 
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
     let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
@@ -1013,14 +605,8 @@ pub fn build_document_content(
     }
 
     // Re-create per-line Glyphs children under N_DOC_TEXT.
-    // Reset next_sibling to N_DEMO_BALL so the demo nodes remain
-    // in the N_CONTENT child chain after compaction. The initial
-    // build_full_scene links test content (Image, Path) as
-    // siblings of N_DOC_TEXT under N_CONTENT, but those dynamic
-    // nodes (IDs >= WELL_KNOWN_COUNT) are gone after truncation.
-    // Pointing next_sibling → N_DEMO_BALL skips the now-dead test
-    // content nodes and re-attaches the well-known demo nodes.
-    w.node_mut(N_DOC_TEXT).next_sibling = N_DEMO_BALL;
+    // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
+    w.node_mut(N_DOC_TEXT).next_sibling = NULL;
     w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);

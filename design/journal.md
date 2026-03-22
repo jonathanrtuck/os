@@ -4,6 +4,22 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Rendering Test Document (2026-03-21)
+
+**Status:** Idea — noted for future implementation.
+
+A **visual test mode** accessible via key combo that switches to a purpose-built "rendering sample compound document." This document exercises every rendering capability systematically:
+
+- One node per content type (None, Glyphs, Image, Path)
+- One node per composition feature (clip path, backdrop blur, opacity, shadow, border)
+- One node per transform type (translate, rotate, scale, skew, combined + rounded corners)
+- One animated section (spring, easing curves, color lerp)
+- Labeled, grid-laid-out, easy to scan at a glance
+
+Replaces the scattered demo nodes that accumulated during v0.3. Invoked when needed for verification after rendering pipeline changes — doesn't clutter the normal editor scene.
+
+---
+
 ## Points and Pixels: Coordinate System Terminology (2026-03-19)
 
 **Status:** Settled.

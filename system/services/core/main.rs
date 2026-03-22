@@ -1372,7 +1372,13 @@ pub extern "C" fn _start() -> ! {
                 if idle_ms >= POINTER_HIDE_MS {
                     s.pointer_fade_id = s
                         .timeline
-                        .start(255.0, 0.0, POINTER_FADE_MS, animation::Easing::EaseOut, now_ms)
+                        .start(
+                            255.0,
+                            0.0,
+                            POINTER_FADE_MS,
+                            animation::Easing::EaseOut,
+                            now_ms,
+                        )
                         .ok();
                 }
             }
