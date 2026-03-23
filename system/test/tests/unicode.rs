@@ -41,7 +41,7 @@ fn rasterize_glyph(
         width: 48,
         height: 48,
     };
-    let metrics = rasterize::rasterize(font_data, glyph_id, size_px, &mut rb, &mut scratch)?;
+    let metrics = rasterize::rasterize(font_data, glyph_id, size_px, &mut rb, &mut scratch, 1)?;
     let total = (metrics.width * metrics.height * 3) as usize;
     let coverage_sum: u32 = buf[..total].iter().map(|&b| b as u32).sum();
     Some((metrics, coverage_sum))
@@ -706,7 +706,7 @@ fn jetbrains_mono_angle_brackets_shape_and_rasterize() {
             width: 50,
             height: 50,
         };
-        let result = rasterize::rasterize_with_axes(font_data, gid, 18, &mut rb, &mut scratch, &[]);
+        let result = rasterize::rasterize_with_axes(font_data, gid, 18, &mut rb, &mut scratch, &[], 1);
         let dims = result.as_ref().map(|m| (m.width, m.height));
         eprintln!("  '{}' rasterize: {:?}", ch, dims);
         assert!(

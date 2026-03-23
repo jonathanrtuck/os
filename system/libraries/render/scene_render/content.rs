@@ -9,7 +9,7 @@ use fonts::cache::GlyphCache;
 use scene::{Content, Node, ShapedGlyph};
 
 use super::{
-    coords::scale_coord,
+    coords::round_f32,
     path_raster::{render_path, scene_to_draw_color},
     RenderCtx, SceneGraph,
 };
@@ -94,8 +94,8 @@ fn render_glyphs(
     glyph_count: u16,
     draw_x: i32,
     draw_y: i32,
-    _font_size: u16,
-    _axis_hash: u32,
+    font_size: u16,
+    axis_hash: u32,
     font_size_px: u16,
     mut lru: Option<&mut LruRasterizer>,
 ) {
@@ -115,18 +115,23 @@ fn render_glyphs(
     };
     let glyph_color = scene_to_draw_color(color);
 
-    let mut cx = draw_x;
+    // Accumulate pen position in f32 pixel space to preserve fractional
+    // advances. Snap to integer pixels only for actual drawing. This
+    // matches the GPU backends and prevents inter-glyph drift.
+    let mut pen_x = draw_x as f32;
 
     // Use the node's font_size from Content::Glyphs if non-zero,
     // otherwise fall back to the backend's physical font size.
-    let lru_font_size = if _font_size > 0 {
-        _font_size
+    let lru_font_size = if font_size > 0 {
+        font_size
     } else {
         font_size_px
     };
-    let lru_axis_hash = _axis_hash;
+    let lru_axis_hash = axis_hash;
 
     for sg in shaped_glyphs {
+        let cx = round_f32(pen_x);
+
         // Fast path: fixed ASCII cache.
         if let Some((glyph, coverage)) = cache.get(sg.glyph_id) {
             let px = cx + glyph.bearing_x;
@@ -155,8 +160,8 @@ fn render_glyphs(
         }
 
         // x_advance is 16.16 fixed-point points. Convert to f32 points,
-        // then scale to pixels.
-        cx += scale_coord(((sg.x_advance as i64 + 0x8000) >> 16) as i32, scale);
+        // then scale to pixels. Accumulate in float to avoid drift.
+        pen_x += sg.x_advance as f32 / 65536.0 * scale;
     }
 }
 

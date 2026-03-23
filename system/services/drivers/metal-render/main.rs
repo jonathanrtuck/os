@@ -791,7 +791,7 @@ pub extern "C" fn _start() -> ! {
         if ch.try_recv(&mut msg) && msg.msg_type == MSG_COMPOSITOR_CONFIG {
             let config: CompositorConfig = unsafe { msg.payload_as() };
             scene_va = config.scene_va;
-            font_va = config.mono_font_va;
+            font_va = config.font_buf_va;
             font_len = config.mono_font_len;
             scale_factor = config.scale_factor;
             font_size_cfg = config.font_size;
@@ -1074,10 +1074,14 @@ pub extern "C" fn _start() -> ! {
     };
     let raster_scratch = unsafe { &mut *scratch_persistent_ptr };
     let font_size_pt: u32 = font_size_cfg as u32;
-    // Rasterize glyphs at device pixel resolution (2x for Retina) for
-    // crisp rendering. Glyph metrics are stored in pixel space; the
+    // Rasterize glyphs at device pixel resolution (e.g. 2x for Retina)
+    // for crisp rendering. Glyph metrics are stored in pixel space; the
     // renderer divides by scale_factor when positioning quads.
-    let font_size_px: u32 = font_size_pt * (scale_factor as u32).max(1);
+    let font_size_px: u32 = {
+        let px = font_size_pt as f32 * scale_factor;
+        if px >= 0.0 { (px + 0.5) as u32 } else { 1 }
+    };
+    let scale_factor_int: u16 = (scale_factor as u16).max(1);
 
     if !font_slice.is_empty() {
         sys::print(b"     initializing glyph atlas\n");
@@ -1119,6 +1123,7 @@ pub extern "C" fn _start() -> ! {
                 &mut rb,
                 raster_scratch,
                 &[],
+                scale_factor_int,
             ) {
                 if glyph_atlas.pack(
                     sg.glyph_id,
@@ -1247,6 +1252,7 @@ pub extern "C" fn _start() -> ! {
                             &mut rb,
                             raster_scratch,
                             &[],
+                            scale_factor_int,
                         ) {
                             let pack_y = glyph_atlas.row_y;
                             if glyph_atlas.pack(

@@ -267,19 +267,19 @@ pub extern "C" fn _start() -> ! {
     }
 
     // ── Phase F: Init render backend ─────────────────────────────────
-    if config.mono_font_va == 0 || config.mono_font_len == 0 {
+    if config.font_buf_va == 0 || config.mono_font_len == 0 {
         sys::print(b"cpu-render: no font data\n");
         sys::exit();
     }
     // SAFETY: init mapped these pages before starting us.
     let mono = unsafe {
         core::slice::from_raw_parts(
-            config.mono_font_va as *const u8,
+            config.font_buf_va as *const u8,
             config.mono_font_len as usize,
         )
     };
     let prop = if config.sans_font_len > 0 {
-        let off = config.mono_font_va as usize + config.mono_font_len as usize;
+        let off = config.font_buf_va as usize + config.mono_font_len as usize;
         // SAFETY: same as above — init mapped font pages before starting us.
         Some(unsafe {
             core::slice::from_raw_parts(off as *const u8, config.sans_font_len as usize)

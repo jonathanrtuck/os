@@ -139,13 +139,14 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** TrueType font parsing, rasterization, and caching. Separated from the drawing library for modularity — fonts depend on drawing (for coverage maps), but drawing doesn't depend on fonts.
 
-**Status:** ~2750 lines (lib.rs + rasterize.rs + cache.rs). Zero-copy TTF parser, scanline rasterizer with LCD subpixel rendering, glyph cache.
+**Status:** ~3,500 lines across lib.rs, cache.rs, and rasterize/ (8 modules). read-fonts for outline extraction, HarfRust for OpenType shaping, analytic area coverage rasterizer, outline dilation (stem darkening), variable font support (gvar), glyph cache.
 
 **What's foundational:**
 
-- `TrueTypeFont` — zero-copy parser for TTF files. Parses 7 required tables (head, maxp, cmap format 4, hhea, hmtx, loca, glyf). Extracts glyph outlines (quadratic bezier contours), maps codepoints via cmap, reads horizontal metrics.
-- Scanline rasterizer — flattens quadratic beziers via De Casteljau subdivision, sweeps with non-zero winding rule. LCD subpixel rendering (per-channel RGB coverage, 6× horizontal oversampling), stem darkening for heavier strokes, GPOS kerning, proper hhea baseline metrics.
-- Glyph cache — fixed-size LRU cache (codepoint + size → pre-rasterized bitmap) avoids re-rasterization for repeated text.
+- read-fonts + HarfRust — OpenType shaping (ligatures, kerning, contextual alternates). Glyph outline extraction from TTF/OTF (simple + composite glyphs, variable fonts via gvar).
+- Analytic area coverage rasterizer — bezier flattening + exact signed-area trapezoid coverage per pixel. Grayscale anti-aliasing (1 byte/pixel). No LCD subpixel rendering (unnecessary at Retina density).
+- Outline dilation (stem darkening) — macOS Core Text formula with scale-factor-aware conversion. Symmetric miter-join modification applied to glyph outlines before rasterization.
+- Glyph cache — fixed ASCII cache (95 glyphs, O(1) lookup) + LRU cache for non-ASCII/ligature glyphs. Keyed by (glyph_id, font_size, axis_hash).
 
 **What's scaffolding:**
 
@@ -716,7 +717,7 @@ Ring buffer messages are fixed at 64 bytes (4-byte type + 60-byte payload). All 
 
 Ordered by what unblocks the most, building the happy path first:
 
-1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the font library (`libraries/fonts/`). Zero-copy parser, scanline rasterizer with LCD subpixel rendering (6× horizontal oversampling), stem darkening, glyph cache. Running on bare metal: core for shaping + metrics, render backend for rasterization + caching.
+1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the font library (`libraries/fonts/`). read-fonts + HarfRust for shaping, analytic area coverage rasterizer, outline dilation (stem darkening), variable font support, glyph cache. Running on bare metal: core for shaping + metrics, render backend for rasterization + caching.
 2. ~~**Syscall error types**~~ — **Done.** `SyscallError` enum (13 variants) + `SyscallResult<T>` on all 25 syscalls + `print()` convenience. All 6 userspace binaries migrated. Eliminated raw `i64` returns and ad-hoc `< 0` checks.
 3. ~~**Userspace memory allocation**~~ (§3.1) — **Done.** `memory_alloc`/`memory_free` (#25/#26) + `GlobalAlloc` in `sys` library. `Vec`/`String`/`Box` available to all userspace programs.
 4. ~~**Structured IPC**~~ (§3.5) — **Done.** Ring buffer library implemented (`libraries/ipc/`). Kernel allocates two pages per channel. All services migrated to ring buffer messages.

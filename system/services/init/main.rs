@@ -414,7 +414,7 @@ fn setup_render_pipeline(
     // -----------------------------------------------------------------------
     let render_config = CompositorConfig {
         scene_va: render_scene_va as u64,
-        mono_font_va: render_font_va,
+        font_buf_va: render_font_va,
         fb_width,
         fb_height,
         mono_font_len,
@@ -474,7 +474,7 @@ fn setup_render_pipeline(
     let core_config = CoreConfig {
         doc_va: core_doc_va as u64,
         scene_va: core_scene_va as u64,
-        mono_font_va: core_font_va,
+        font_buf_va: core_font_va,
         fb_width: logical_w,
         fb_height: logical_h,
         doc_capacity: DOC_BUF_CAPACITY,

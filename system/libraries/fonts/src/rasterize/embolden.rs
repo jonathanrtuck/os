@@ -592,8 +592,16 @@ mod tests {
         let (x, y) = compute_dilation(12, 1000, 2);
         let x_fu = x as f32 / FX_ONE as f32;
         let y_fu = y as f32 / FX_ONE as f32;
-        assert!((x_fu - 16.25).abs() < 1.0, "x_fu expected ~16.25, got {}", x_fu);
-        assert!((y_fu - 15.73).abs() < 1.0, "y_fu expected ~15.73, got {}", y_fu);
+        assert!(
+            (x_fu - 16.25).abs() < 1.0,
+            "x_fu expected ~16.25, got {}",
+            x_fu
+        );
+        assert!(
+            (y_fu - 15.73).abs() < 1.0,
+            "y_fu expected ~15.73, got {}",
+            y_fu
+        );
     }
 
     #[test]
@@ -603,8 +611,16 @@ mod tests {
         let (x, y) = compute_dilation(36, 1000, 2);
         let x_fu = x as f32 / FX_ONE as f32;
         let y_fu = y as f32 / FX_ONE as f32;
-        assert!((x_fu - 5.417).abs() < 1.0, "x_fu expected ~5.417, got {}", x_fu);
-        assert!((y_fu - 5.417).abs() < 1.0, "y_fu expected ~5.417, got {}", y_fu);
+        assert!(
+            (x_fu - 5.417).abs() < 1.0,
+            "x_fu expected ~5.417, got {}",
+            x_fu
+        );
+        assert!(
+            (y_fu - 5.417).abs() < 1.0,
+            "y_fu expected ~5.417, got {}",
+            y_fu
+        );
     }
 
     #[test]

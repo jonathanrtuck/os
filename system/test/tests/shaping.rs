@@ -432,6 +432,7 @@ fn rasterize_at_weight(font_data: &[u8], glyph_id: u16, size_px: u16, weight: f3
         &mut rb,
         &mut scratch,
         &axes,
+        1,
     )
     .expect("rasterization should succeed");
 
@@ -593,8 +594,8 @@ fn varfont_cache_axis_values_separate_entries() {
         value: 700.0,
     }];
 
-    let hash_400 = fonts::cache::axis_values_hash(axes_400);
-    let hash_700 = fonts::cache::axis_values_hash(axes_700);
+    let hash_400 = fonts::rasterize::axis_values_hash(axes_400);
+    let hash_700 = fonts::rasterize::axis_values_hash(axes_700);
 
     cache.insert_with_axes(65, 18, hash_400, glyph_400.clone());
     cache.insert_with_axes(65, 18, hash_700, glyph_700.clone());
@@ -638,7 +639,7 @@ fn varfont_cache_no_axes_vs_with_axes() {
         tag: *b"wght",
         value: 700.0,
     }];
-    let hash_700 = fonts::cache::axis_values_hash(axes_700);
+    let hash_700 = fonts::rasterize::axis_values_hash(axes_700);
     cache.insert_with_axes(65, 18, hash_700, glyph_heavy.clone());
 
     let r_default = cache.get_with_axes(65, 18, 0);
@@ -775,6 +776,7 @@ fn rasterize_with_auto_opsz(font_data: &[u8], glyph_id: u16, size_px: u16) -> Ve
         &mut rb,
         &mut scratch,
         &auto_axes,
+        1,
     );
 
     match metrics {
@@ -873,7 +875,7 @@ fn opsz_no_op_for_non_opsz_font() {
         height: 48,
     };
     let metrics_without =
-        fonts::rasterize::rasterize(JETBRAINS_MONO, gid, 18, &mut rb, &mut scratch)
+        fonts::rasterize::rasterize(JETBRAINS_MONO, gid, 18, &mut rb, &mut scratch, 1)
             .expect("rasterization without opsz should succeed");
 
     let total_without = (metrics_without.width * metrics_without.height * 3) as usize;
@@ -906,6 +908,7 @@ fn opsz_no_op_for_non_opsz_font() {
         &mut rb2,
         &mut scratch2,
         &auto_axes,
+        1,
     )
     .expect("rasterization with auto-opsz should succeed for non-opsz font");
 
@@ -1094,15 +1097,9 @@ fn weight_correction_reduces_coverage_white_on_black() {
         width: 128,
         height: 128,
     };
-    let metrics_base = rasterize_with_axes(
-        INTER,
-        gid,
-        24,
-        &mut rb_base,
-        &mut scratch_base,
-        &axes_base,
-    )
-    .expect("rasterization at base weight should succeed");
+    let metrics_base =
+        rasterize_with_axes(INTER, gid, 24, &mut rb_base, &mut scratch_base, &axes_base, 1)
+            .expect("rasterization at base weight should succeed");
     let total_base = (metrics_base.width * metrics_base.height * 3) as usize;
     let sum_base: u64 = buf_base[..total_base].iter().map(|&b| b as u64).sum();
 
@@ -1152,6 +1149,7 @@ fn weight_correction_reduces_coverage_white_on_black() {
         &mut rb_corrected,
         &mut scratch_corrected,
         &axes_corrected,
+        1,
     )
     .expect("rasterization at corrected weight should succeed");
     let total_corrected = (metrics_corrected.width * metrics_corrected.height * 3) as usize;
@@ -1234,7 +1232,7 @@ fn weight_correction_no_op_rendering_identical_with_empty_axes() {
         width: 48,
         height: 48,
     };
-    let metrics_without = rasterize(JETBRAINS_MONO, gid, 18, &mut rb, &mut scratch)
+    let metrics_without = rasterize(JETBRAINS_MONO, gid, 18, &mut rb, &mut scratch, 1)
         .expect("rasterization without axes should succeed");
     let total_without = (metrics_without.width * metrics_without.height * 3) as usize;
     let coverage_without: Vec<u8> = buf_without[..total_without].to_vec();
@@ -1247,15 +1245,8 @@ fn weight_correction_no_op_rendering_identical_with_empty_axes() {
         width: 48,
         height: 48,
     };
-    let metrics_with = rasterize_with_axes(
-        JETBRAINS_MONO,
-        gid,
-        18,
-        &mut rb2,
-        &mut scratch2,
-        &[],
-    )
-    .expect("rasterization with empty axes should succeed");
+    let metrics_with = rasterize_with_axes(JETBRAINS_MONO, gid, 18, &mut rb2, &mut scratch2, &[], 1)
+        .expect("rasterization with empty axes should succeed");
     let total_with = (metrics_with.width * metrics_with.height * 3) as usize;
 
     assert_eq!(
@@ -1276,13 +1267,8 @@ fn weight_correction_dark_on_light_no_change() {
     use fonts::rasterize::{auto_weight_correction_axes, font_axes};
 
     let axes_result = auto_weight_correction_axes(
-        INTER,
-        0,
-        0,
-        0,     // black fg
-        255,
-        255,
-        255, // white bg
+        INTER, 0, 0, 0, // black fg
+        255, 255, 255, // white bg
     );
     // For dark-on-light, correction factor >= 1.0, so weight stays at default.
     // The function may return empty (no adjustment needed) or the default weight.
@@ -1347,8 +1333,7 @@ fn shape_whitespace_produces_glyphs_with_advances() {
 fn font_units_to_points_conversion_correct() {
     // Verify the conversion formula: value_pt = value_fu * point_size / upem
     // For JetBrains Mono: units_per_em is typically 1000.
-    let fm = fonts::rasterize::font_metrics(JETBRAINS_MONO)
-        .expect("should parse font metrics");
+    let fm = fonts::rasterize::font_metrics(JETBRAINS_MONO).expect("should parse font metrics");
     let upem = fm.units_per_em;
     assert!(upem > 0, "units_per_em should be > 0");
 

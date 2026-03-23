@@ -252,7 +252,8 @@ pub enum Content {
         glyphs: DataRef,
         /// Number of glyphs in this run.
         glyph_count: u16,
-        /// Font size in pixels (selects the glyph cache).
+        /// Font size in points (e.g., 18). Render backends scale to device
+        /// pixels by multiplying by scale_factor. Used as glyph cache key.
         font_size: u16,
         /// Hash of variable font axis values used for rasterization
         /// (0 = default). Used as glyph cache key.

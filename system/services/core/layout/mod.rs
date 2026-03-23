@@ -21,14 +21,10 @@ use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};
 // ── Float math helpers (no_std) ─────────────────────────────────────
 
 /// Round a float to the nearest integer (round-half-away-from-zero).
-/// Manual implementation for `no_std` (where `f32::round()` isn't available).
+/// Delegates to the canonical implementation in `drawing`.
 #[inline]
 pub(crate) fn round_f32(x: f32) -> i32 {
-    if x >= 0.0 {
-        (x + 0.5) as i32
-    } else {
-        (x - 0.5) as i32
-    }
+    drawing::round_f32(x)
 }
 
 // ── Well-known node indices ─────────────────────────────────────────
@@ -64,7 +60,6 @@ pub struct SceneConfig<'a> {
     pub title_bar_h: u32,
     pub shadow_depth: u32,
     pub text_inset_x: u32,
-    pub text_inset_top: u32,
     pub chrome_bg: drawing::Color,
     pub chrome_border: drawing::Color,
     pub chrome_title_color: drawing::Color,

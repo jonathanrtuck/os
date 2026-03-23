@@ -4,15 +4,10 @@
 //! No dependencies beyond `core`.
 
 /// Round a float to the nearest integer (round-half-away-from-zero).
-/// Manual implementation for `no_std` (where `f32::round()` isn't available
-/// without `core_maths`).
+/// Re-exported from `drawing` where the canonical implementation lives.
 #[inline]
 pub fn round_f32(x: f32) -> i32 {
-    if x >= 0.0 {
-        (x + 0.5) as i32
-    } else {
-        (x - 0.5) as i32
-    }
+    drawing::round_f32(x)
 }
 
 /// Scale a point coordinate to physical pixels using fractional scale.

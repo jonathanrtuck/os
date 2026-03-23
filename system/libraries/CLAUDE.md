@@ -8,7 +8,7 @@ Shared `#![no_std]` libraries used by userspace services and programs.
 | `protocol/` | IPC message types and payload structs — single source of truth for all 9 protocol boundaries           | Foundational |
 | `virtio/`   | Virtio MMIO device initialization + virtqueue management                                               | Foundational |
 | `drawing/`  | Surfaces, colors, PNG decoder, Porter-Duff compositing, sRGB blending, palette                         | Foundational |
-| `fonts/`    | TrueType rasterizer, LCD subpixel rendering, stem darkening, glyph cache                               | Foundational |
+| `fonts/`    | TrueType rasterizer, analytic coverage, outline dilation (stem darkening), glyph cache                 | Foundational |
 | `ipc/`      | Lock-free SPSC ring buffer for 64-byte IPC messages over shared memory                                 | Foundational |
 | `layout/`   | Unified text layout engine: one function for mono + proportional via `FontMetrics` trait               | Foundational |
 | `render/`   | Render backend (CpuBackend, scene tree walk, incremental rendering, damage, frame scheduler)           | Foundational |

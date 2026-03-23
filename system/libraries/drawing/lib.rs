@@ -257,6 +257,20 @@ pub(crate) fn abs(x: i32) -> i32 {
     }
 }
 
+/// Round a float to the nearest integer (round-half-away-from-zero).
+///
+/// Manual implementation for `no_std` where `f32::round()` is not available
+/// without the `core_maths` feature. Used throughout the rendering pipeline
+/// for scaling point coordinates to physical pixels.
+#[inline]
+pub fn round_f32(x: f32) -> i32 {
+    if x >= 0.0 {
+        (x + 0.5) as i32
+    } else {
+        (x - 0.5) as i32
+    }
+}
+
 /// Integer square root of a 64-bit value in 8.8 fixed-point.
 ///
 /// Given `x` in 16.16 fixed-point (i.e., the value `n * 256 * n * 256` where

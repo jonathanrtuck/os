@@ -74,6 +74,9 @@ pub struct LruRasterizer {
     scratch: Box<fonts::rasterize::RasterScratch>,
     /// Pixel buffer for on-demand glyph rasterization (GLYPH_MAX_W * GLYPH_MAX_H).
     raster_buf: Vec<u8>,
+    /// Display scale factor (1 for standard, 2 for Retina). Used to
+    /// compute stem darkening dilation during on-demand rasterization.
+    scale_factor: u16,
 }
 
 impl LruRasterizer {
@@ -96,6 +99,7 @@ impl LruRasterizer {
             axes: Vec::new(),
             scratch,
             raster_buf: vec![0u8; GLYPH_MAX_W * GLYPH_MAX_H],
+            scale_factor: 1,
         }
     }
 
@@ -126,6 +130,7 @@ impl LruRasterizer {
             &mut raster,
             &mut self.scratch,
             &self.axes,
+            self.scale_factor,
         );
 
         let m = match metrics {
@@ -223,7 +228,8 @@ impl CpuBackend {
             Box::from_raw(ptr)
         };
         // No extra axes needed — automatic opsz/wght applied by populate_with_axes.
-        mono_cache.populate_with_axes(mono_font_data, physical_size, dpi, &[]);
+        let sf = scale.max(1.0) as u16;
+        mono_cache.populate_with_axes(mono_font_data, physical_size, dpi, &[], sf);
 
         // Allocate and populate proportional glyph cache (Inter or fallback to mono).
         // SAFETY: Same rationale as mono_cache above — Layout::new produces
@@ -240,10 +246,10 @@ impl CpuBackend {
         };
         let prop_data_slice = prop_font_data.unwrap_or(mono_font_data);
         if fonts::rasterize::font_metrics(prop_data_slice).is_some() {
-            prop_cache.populate_with_axes(prop_data_slice, physical_size, dpi, &[]);
+            prop_cache.populate_with_axes(prop_data_slice, physical_size, dpi, &[], sf);
         } else {
             // Fallback: use mono font.
-            prop_cache.populate_with_axes(mono_font_data, physical_size, dpi, &[]);
+            prop_cache.populate_with_axes(mono_font_data, physical_size, dpi, &[], sf);
         }
 
         // Own copy of font data for on-demand LRU rasterization.
@@ -269,6 +275,7 @@ impl CpuBackend {
             cache: fonts::cache::LruGlyphCache::new(LRU_CACHE_CAPACITY),
             font_data: font_data_owned,
             axes: vec![],
+            scale_factor: sf,
             scratch: raster_scratch,
             raster_buf,
         };

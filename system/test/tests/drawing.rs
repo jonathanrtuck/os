@@ -1668,7 +1668,7 @@ fn rasterize_valid_glyph_produces_coverage() {
     };
 
     let metrics =
-        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 18, &mut raster, &mut scratch);
+        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 18, &mut raster, &mut scratch, 1);
     assert!(
         metrics.is_some(),
         "valid glyph should produce Some(metrics)"
@@ -1693,7 +1693,7 @@ fn rasterize_notdef_glyph_produces_valid_coverage() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(JETBRAINS_MONO, 0, 18, &mut raster, &mut scratch);
+    let metrics = fonts::rasterize::rasterize(JETBRAINS_MONO, 0, 18, &mut raster, &mut scratch, 1);
     // .notdef may have an outline (rectangle) or may be empty.
     // Either way, it should not panic and should return Some.
     assert!(metrics.is_some(), ".notdef (glyph_id=0) should return Some");
@@ -1711,7 +1711,7 @@ fn rasterize_invalid_glyph_returns_none() {
     };
 
     let metrics =
-        fonts::rasterize::rasterize(JETBRAINS_MONO, u16::MAX, 18, &mut raster, &mut scratch);
+        fonts::rasterize::rasterize(JETBRAINS_MONO, u16::MAX, 18, &mut raster, &mut scratch, 1);
     assert!(
         metrics.is_none(),
         "glyph_id=u16::MAX should return None (no panic)"
@@ -1730,7 +1730,7 @@ fn rasterize_a_glyph_reasonable_dimensions() {
         height: 128,
     };
 
-    let m = fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 18, &mut raster, &mut scratch)
+    let m = fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 18, &mut raster, &mut scratch, 1)
         .unwrap();
     assert!(
         m.width >= 5 && m.width <= 20,
@@ -1765,8 +1765,7 @@ fn rasterize_proportional_font_valid() {
         height: 128,
     };
 
-    let m =
-        fonts::rasterize::rasterize(INTER, glyph_id, 18, &mut raster, &mut scratch).unwrap();
+    let m = fonts::rasterize::rasterize(INTER, glyph_id, 18, &mut raster, &mut scratch, 1).unwrap();
     assert!(
         m.width > 0,
         "proportional font glyph should have non-zero width"
@@ -2273,19 +2272,8 @@ fn gamma_draw_coverage_uses_gamma_correction() {
 }
 
 // ---------------------------------------------------------------------------
-// Vertical oversampling tests (grayscale anti-aliasing)
+// Analytic coverage tests (grayscale anti-aliasing)
 // ---------------------------------------------------------------------------
-
-use fonts::rasterize::OVERSAMPLE_Y;
-
-#[test]
-fn oversample_y_is_at_least_4() {
-    assert!(
-        OVERSAMPLE_Y >= 4,
-        "OVERSAMPLE_Y should be >= 4, got {}",
-        OVERSAMPLE_Y,
-    );
-}
 
 #[test]
 fn grayscale_rasterize_produces_intermediate_coverage() {
@@ -2306,6 +2294,7 @@ fn grayscale_rasterize_produces_intermediate_coverage() {
         24 as u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
@@ -2339,6 +2328,7 @@ fn grayscale_diagonal_has_smooth_transitions() {
         24 as u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     let w = metrics.width;
@@ -2378,6 +2368,7 @@ fn grayscale_curve_has_smooth_edges() {
         24 as u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     let w = metrics.width;
@@ -2394,8 +2385,8 @@ fn grayscale_curve_has_smooth_edges() {
     }
     let distinct_levels = levels.iter().filter(|&&v| v).count();
 
-    // With OVERSAMPLE_Y=8 vertical oversampling, we expect
-    // more than 4 distinct levels at minimum.
+    // The analytic area coverage rasterizer produces many distinct
+    // coverage levels — we expect at least 4 for curved glyphs.
     assert!(
         distinct_levels >= 4,
         "'o' should have at least 4 distinct non-zero coverage levels, got {}",
@@ -2422,7 +2413,7 @@ fn grayscale_all_printable_ascii_still_rasterize() {
             None => continue,
         };
         let metrics =
-            fonts::rasterize::rasterize(JETBRAINS_MONO, gid, 24, &mut raster, &mut scratch);
+            fonts::rasterize::rasterize(JETBRAINS_MONO, gid, 24, &mut raster, &mut scratch, 1);
         assert!(
             metrics.is_some(),
             "grayscale: should rasterize '{}' (0x{:02x}) at 24px",
@@ -2492,6 +2483,7 @@ fn grayscale_rasterizer_output_is_1_byte_per_pixel() {
         24 as u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
@@ -2601,6 +2593,7 @@ fn stem_darkening_rasterized_glyph_has_coverage() {
         16_u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     let w = metrics.width;
@@ -2612,8 +2605,14 @@ fn stem_darkening_rasterized_glyph_has_coverage() {
     // and pixels with partial coverage (anti-aliased edges).
     let has_full = coverage.iter().any(|&c| c >= 240);
     let has_partial = coverage.iter().any(|&c| c > 0 && c < 200);
-    assert!(has_full, "'l' at 16px should have near-full coverage pixels");
-    assert!(has_partial, "'l' at 16px should have partial coverage pixels (AA edges)");
+    assert!(
+        has_full,
+        "'l' at 16px should have near-full coverage pixels"
+    );
+    assert!(
+        has_partial,
+        "'l' at 16px should have partial coverage pixels (AA edges)"
+    );
 }
 
 #[test]
@@ -2630,9 +2629,9 @@ fn stem_darkening_dilation_increases_glyph_width() {
 
     let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'I').unwrap();
 
-    let metrics = fonts::rasterize::rasterize(
-        JETBRAINS_MONO, glyph_id, 14_u16, &mut raster, &mut scratch,
-    ).unwrap();
+    let metrics =
+        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 14_u16, &mut raster, &mut scratch, 1)
+            .unwrap();
 
     // The glyph should have non-zero dimensions.
     assert!(metrics.width > 0, "glyph should have width");

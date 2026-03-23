@@ -337,7 +337,7 @@ pub extern "C" fn _start() -> ! {
             // SAFETY: msg payload is a valid CompositorConfig from init.
             let config: CompositorConfig = unsafe { msg.payload_as() };
             scene_va = config.scene_va;
-            font_va = config.mono_font_va;
+            font_va = config.font_buf_va;
             font_len = config.mono_font_len;
             scale_factor = config.scale_factor;
             font_size_cfg = config.font_size;
@@ -425,6 +425,7 @@ pub extern "C" fn _start() -> ! {
                 width: 50,
                 height: 50,
             };
+            // virgil-render rasterizes at point size (1x); scale_factor=1.
             if let Some(m) = fonts::rasterize::rasterize_with_axes(
                 font_data,
                 sg.glyph_id,
@@ -432,6 +433,7 @@ pub extern "C" fn _start() -> ! {
                 &mut rb,
                 &mut scratch,
                 &[],
+                1,
             ) {
                 if m.width > 0 && m.height > 0 {
                     let coverage = &raster_buf[..(m.width * m.height) as usize];

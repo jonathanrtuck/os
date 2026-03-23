@@ -1,8 +1,8 @@
 //! Glyph rasterizer — converts glyph outlines to coverage maps using read-fonts.
 //!
 //! Uses read-fonts for glyph outline extraction and metrics, then runs the
-//! scanline rasterizer algorithm (bezier flattening, active edge sweep, coverage
-//! map generation with grayscale anti-aliasing via vertical oversampling).
+//! analytic area coverage rasterizer (bezier flattening + exact signed-area
+//! trapezoid coverage per pixel).
 //!
 //! Output is 1 byte per pixel (grayscale coverage). No subpixel (LCD) rendering.
 //!
@@ -18,9 +18,11 @@ mod scanline;
 
 // Re-export the public API so `fonts::rasterize::*` paths remain unchanged.
 
-// From metrics
+// From embolden
+pub use embolden::{compute_dilation, embolden_outline};
 // From gvar
-pub use gvar::{glyph_advance_with_axes, rasterize_with_axes};
+pub use gvar::rasterize_with_axes;
+// From metrics
 pub use metrics::{
     axis_values_hash, font_axes, font_metrics, glyph_h_metrics, glyph_id_for_char, AxisValue,
     FontAxis, FontMetrics, GlyphMetrics, RasterBuffer,
@@ -32,10 +34,7 @@ pub use optical::{
 };
 // From outline
 pub use outline::{GlyphOutline, GlyphPoint};
-// From embolden
-pub use embolden::{compute_dilation, embolden_outline};
-
 // Re-export crate-visible items used by other modules in the crate.
-pub(crate) use scale::{scale_fu, scale_fu_ceil, scale_fu_floor};
+pub(crate) use scale::{scale_fu, scale_fu_ceil};
 // From scanline
-pub use scanline::{rasterize, RasterScratch, OVERSAMPLE_Y};
+pub use scanline::{rasterize, RasterScratch};

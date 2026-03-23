@@ -1,14 +1,14 @@
-//! Scanline rasterizer — bezier flattening, active edge sweep, coverage map.
+//! Glyph rasterizer — bezier flattening + analytic area coverage.
 //!
 //! Converts a `GlyphOutline` (font-unit contours) into a grayscale coverage
 //! bitmap. The pipeline: scale to fixed-point pixel coords, flatten quadratic
-//! bezier curves into line segments, sweep scanlines with vertical oversampling,
-//! apply non-zero winding rule, accumulate coverage per pixel.
+//! bezier curves into line segments, compute exact signed-area trapezoid
+//! coverage per pixel (continuous, not quantized).
 //!
 //! All math is integer/fixed-point. No floating point.
 
 use super::{
-    outline::{GlyphOutline, GlyphPoint, MAX_GLYPH_POINTS},
+    outline::GlyphOutline,
     scale::{scale_fu, scale_fu_ceil, scale_fu_floor, FP_ONE, FP_SHIFT},
 };
 
@@ -19,29 +19,9 @@ use super::{
 /// Maximum line segments after bezier flattening.
 const MAX_SEGMENTS: usize = 2048;
 
-/// Vertical oversampling factor (legacy constant, kept for API compatibility).
-/// The analytic rasterizer does not use oversampling.
-pub const OVERSAMPLE_Y: i32 = 8;
-
 /// Maximum glyph dimensions for buffer sizing.
 /// Sized for 2x Retina rasterization (glyphs up to ~36pt * 2 = 72px).
 pub(crate) const GLYPH_MAX_W: usize = 100;
-
-/// Tunable boost constant for stem darkening.
-pub const STEM_DARKENING_BOOST: u32 = 90;
-
-/// Pre-computed lookup table for stem darkening.
-pub const STEM_DARKENING_LUT: [u8; 256] = {
-    let mut lut = [0u8; 256];
-    let boost = STEM_DARKENING_BOOST;
-    let mut i = 1u32;
-    while i < 256 {
-        let darkened = i + boost * (255 - i) / 255;
-        lut[i as usize] = if darkened > 255 { 255 } else { darkened as u8 };
-        i += 1;
-    }
-    lut
-};
 
 /// A line segment in pixel-space fixed-point coordinates.
 #[derive(Clone, Copy, Default)]
@@ -262,7 +242,7 @@ fn process_edge(
     x1: i32,
     y1: i32,
     dir: i32,
-    row_y_top: i32,
+    _row_y_top: i32,
     width: i32,
 ) {
     // Signed height of this edge segment within the pixel row.
@@ -500,8 +480,8 @@ use super::{
 
 /// Rasterize a glyph by its ID from font data into a coverage buffer.
 ///
-/// Uses read-fonts for glyph outline extraction and the scanline rasterizer
-/// for coverage map generation with subpixel rendering.
+/// Uses read-fonts for glyph outline extraction and analytic area coverage
+/// for grayscale anti-aliasing.
 ///
 /// Returns `None` if the glyph ID is invalid, has no outline (e.g. space
 /// returns `Some` with zero-size bitmap), or exceeds the buffer dimensions.
@@ -511,10 +491,11 @@ pub fn rasterize(
     size_px: u16,
     buffer: &mut RasterBuffer,
     scratch: &mut RasterScratch,
+    scale_factor: u16,
 ) -> Option<GlyphMetrics> {
     let size_px = size_px as u32;
 
-    let (advance_fu, lsb_fu, upem) =
+    let (advance_fu, _lsb_fu, upem) =
         match extract_outline(font_data, glyph_id, &mut scratch.outline) {
             Some(v) => v,
             None => {
@@ -564,8 +545,7 @@ pub fn rasterize(
         };
 
     // Apply outline dilation for stem darkening (macOS Core Text formula).
-    // Scale factor 2 = Retina display (glyph rasterized at logical px, displayed at 2x).
-    let (dil_x, dil_y) = compute_dilation(size_px as u16, upem, 2);
+    let (dil_x, dil_y) = compute_dilation(size_px as u16, upem, scale_factor);
     if dil_x != 0 || dil_y != 0 {
         embolden_outline(&mut scratch.outline, dil_x, dil_y);
     }
@@ -582,7 +562,6 @@ pub fn rasterize(
     let y_min_px = scale_fu_floor(y_min_fu as i32, size_px, upem);
     let x_max_px = scale_fu_ceil(x_max_fu as i32, size_px, upem) + 1;
     let y_max_px = scale_fu_ceil(y_max_fu as i32, size_px, upem) + 1;
-    let _ = y_min_px;
     if x_max_px < x_min_px || y_max_px < y_min_px {
         return None;
     }
@@ -604,7 +583,7 @@ pub fn rasterize(
         return None;
     }
 
-    // Grayscale anti-aliasing: rasterize at 1x width with vertical oversampling.
+    // Analytic area coverage: exact signed-area trapezoid computation.
     // Output is 1 byte per pixel (grayscale coverage).
     let out_total = (bmp_w * bmp_h) as usize;
 

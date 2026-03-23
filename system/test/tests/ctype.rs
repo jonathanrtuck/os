@@ -256,7 +256,7 @@ fn cross_003_auto_opsz_produces_different_rendering_than_fixed() {
         height: 128,
     };
     let m_default =
-        rasterize(INTER, gid, 36, &mut rb, &mut scratch).expect("should rasterize");
+        rasterize(INTER, gid, 36, &mut rb, &mut scratch, 1).expect("should rasterize");
     let total_default = (m_default.width * m_default.height * 3) as usize;
     let sum_default: u64 = buf_default[..total_default].iter().map(|&b| b as u64).sum();
 
@@ -281,6 +281,7 @@ fn cross_003_auto_opsz_produces_different_rendering_than_fixed() {
         &mut rb2,
         &mut scratch2,
         &auto_axes,
+        1,
     )
     .expect("should rasterize with auto-opsz");
     let total_opsz = (m_opsz.width * m_opsz.height * 3) as usize;
@@ -331,6 +332,7 @@ fn cross_003_auto_weight_correction_produces_different_rendering_than_fixed() {
         &mut rb,
         &mut scratch,
         &base_axes,
+        1,
     )
     .expect("should rasterize at base weight");
     let total_base = (m_base.width * m_base.height * 3) as usize;
@@ -364,6 +366,7 @@ fn cross_003_auto_weight_correction_produces_different_rendering_than_fixed() {
         &mut rb2,
         &mut scratch2,
         &corrected_axes,
+        1,
     )
     .expect("should rasterize with corrected weight");
     let total_corrected = (m_corrected.width * m_corrected.height * 3) as usize;
@@ -405,7 +408,7 @@ fn cross_003_auto_perceptual_combined_differs_from_fixed() {
         height: 128,
     };
     let m_fixed =
-        rasterize(INTER, gid, 36, &mut rb, &mut scratch).expect("should rasterize");
+        rasterize(INTER, gid, 36, &mut rb, &mut scratch, 1).expect("should rasterize");
     let total_fixed = (m_fixed.width * m_fixed.height * 3) as usize;
     let sum_fixed: u64 = buf_fixed[..total_fixed].iter().map(|&b| b as u64).sum();
 
@@ -441,6 +444,7 @@ fn cross_003_auto_perceptual_combined_differs_from_fixed() {
         &mut rb2,
         &mut scratch2,
         &combined_axes,
+        1,
     )
     .expect("should rasterize with perceptual axes");
     let total_perceptual = (m_perceptual.width * m_perceptual.height * 3) as usize;

@@ -259,7 +259,7 @@ pub mod core_config {
     pub struct CoreConfig {
         pub doc_va: u64,
         pub scene_va: u64,
-        pub mono_font_va: u64,
+        pub font_buf_va: u64,
         pub fb_width: u32,
         pub fb_height: u32,
         pub doc_capacity: u32,
@@ -302,7 +302,7 @@ pub mod compose {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CompositorConfig {
         pub scene_va: u64,
-        pub mono_font_va: u64,
+        pub font_buf_va: u64,
         pub fb_width: u32,
         pub fb_height: u32,
         pub mono_font_len: u32,

@@ -67,14 +67,10 @@ fn clamp_f32(x: f32, min: f32, max: f32) -> f32 {
 }
 
 /// Round a float to the nearest integer (round-half-away-from-zero).
-/// Manual implementation for `no_std` (where `f32::round()` isn't available).
+/// Delegates to the canonical implementation in `drawing`.
 #[inline]
 fn round_f32(x: f32) -> i32 {
-    if x >= 0.0 {
-        (x + 0.5) as i32
-    } else {
-        (x - 0.5) as i32
-    }
+    drawing::round_f32(x)
 }
 
 const COMPOSITOR_HANDLE: u8 = 2;
@@ -1265,19 +1261,19 @@ pub extern "C" fn _start() -> ! {
 
     // Parse font to get metrics (char_width, line_height).
     // Core only needs metrics for layout, not the full glyph cache.
-    if config.mono_font_va != 0 && config.mono_font_len > 0 {
-        // SAFETY: mono_font_va..+mono_font_len is within the font shared memory region mapped
+    if config.font_buf_va != 0 && config.mono_font_len > 0 {
+        // SAFETY: font_buf_va..+mono_font_len is within the font shared memory region mapped
         // by init; alignment is 1 (u8 slice). Guarded by the non-null/non-zero checks above.
         let font_data = unsafe {
             core::slice::from_raw_parts(
-                config.mono_font_va as *const u8,
+                config.font_buf_va as *const u8,
                 config.mono_font_len as usize,
             )
         };
         // Store font data pointer and length for shaping calls.
         {
             let s = state();
-            s.font_data_ptr = config.mono_font_va as *const u8;
+            s.font_data_ptr = config.font_buf_va as *const u8;
             s.font_data_len = config.mono_font_len as usize;
         }
         if let Some(fm) = fonts::rasterize::font_metrics(font_data) {
@@ -1388,7 +1384,6 @@ pub extern "C" fn _start() -> ! {
             title_bar_h: TITLE_BAR_H,
             shadow_depth: SHADOW_DEPTH,
             text_inset_x: TEXT_INSET_X,
-            text_inset_top: TEXT_INSET_TOP,
             chrome_bg: drawing::CHROME_BG,
             chrome_border: drawing::CHROME_BORDER,
             chrome_title_color: drawing::CHROME_TITLE,

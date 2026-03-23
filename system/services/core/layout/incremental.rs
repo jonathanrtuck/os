@@ -287,7 +287,6 @@ fn finish_line_update(
     let scroll_pt = round_f32(scroll_y);
 
     // Update N_DOC_TEXT content_transform and content hash.
-    // Repoint next_sibling → N_DEMO_BALL so demo nodes stay in the
     // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
     w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;

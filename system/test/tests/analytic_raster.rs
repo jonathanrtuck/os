@@ -24,7 +24,7 @@ fn rasterize_letter_l_produces_coverage() {
 
     let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'l').unwrap();
     let metrics =
-        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 16, &mut raster, &mut scratch)
+        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 16, &mut raster, &mut scratch, 1)
             .unwrap();
     drop(raster); // Release mutable borrow on buf.
 
@@ -58,7 +58,7 @@ fn rasterize_letter_o_has_hole() {
 
     let glyph_id = fonts::rasterize::glyph_id_for_char(INTER, 'O').unwrap();
     let metrics =
-        fonts::rasterize::rasterize(INTER, glyph_id, 24, &mut raster, &mut scratch).unwrap();
+        fonts::rasterize::rasterize(INTER, glyph_id, 24, &mut raster, &mut scratch, 1).unwrap();
     drop(raster); // Release mutable borrow on buf.
 
     let w = metrics.width as usize;
@@ -93,7 +93,7 @@ fn rasterize_space_returns_zero_dimensions() {
 
     let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, ' ').unwrap();
     let metrics =
-        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 16, &mut raster, &mut scratch)
+        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 16, &mut raster, &mut scratch, 1)
             .unwrap();
 
     assert_eq!(metrics.width, 0);
@@ -117,7 +117,7 @@ fn rasterize_at_multiple_sizes() {
             height: 128,
         };
         let metrics =
-            fonts::rasterize::rasterize(INTER, glyph_id, size, &mut raster, &mut scratch).unwrap();
+            fonts::rasterize::rasterize(INTER, glyph_id, size, &mut raster, &mut scratch, 1).unwrap();
         let area = metrics.width * metrics.height;
         assert!(
             area > prev_area,
@@ -142,7 +142,7 @@ fn rasterize_coverage_values_bounded() {
                 width: 128,
                 height: 128,
             };
-            fonts::rasterize::rasterize(INTER, glyph_id, 16, &mut raster, &mut scratch).unwrap()
+            fonts::rasterize::rasterize(INTER, glyph_id, 16, &mut raster, &mut scratch, 1).unwrap()
         };
         let total = (metrics.width * metrics.height) as usize;
         for &c in &buf[..total] {
@@ -174,6 +174,7 @@ fn rasterize_variable_font_with_axes() {
         &mut raster,
         &mut scratch,
         &axes,
+        1,
     )
     .unwrap();
 
