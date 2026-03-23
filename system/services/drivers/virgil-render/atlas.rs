@@ -14,8 +14,12 @@ pub const ATLAS_HEIGHT: u32 = 512;
 /// Atlas size in bytes (R8_UNORM = 1 byte per pixel).
 pub const ATLAS_BYTES: usize = (ATLAS_WIDTH * ATLAS_HEIGHT) as usize;
 
-/// Maximum glyph ID supported by the atlas lookup table.
-const MAX_GLYPH_ID: usize = 2048;
+/// Maximum glyph ID per font in the atlas lookup table.
+const GLYPH_STRIDE: usize = 2048;
+/// Number of font slots (0 = mono, 1 = sans).
+const MAX_FONTS: usize = 2;
+/// Total atlas entry capacity (GLYPH_STRIDE * MAX_FONTS).
+const MAX_GLYPH_ENTRIES: usize = GLYPH_STRIDE * MAX_FONTS;
 
 /// Atlas entry for a single rasterized glyph.
 #[derive(Clone, Copy)]
@@ -40,8 +44,9 @@ pub struct AtlasEntry {
 /// memory pointed to by `dma_va` — this struct does NOT hold the pixel
 /// buffer.
 pub struct GlyphAtlas {
-    /// Lookup table: glyph_id → AtlasEntry. `width == 0` means empty.
-    entries: [AtlasEntry; MAX_GLYPH_ID],
+    /// Lookup table: (glyph_id, font_id) → AtlasEntry. `width == 0` means empty.
+    /// Font 0 uses entries[0..GLYPH_STRIDE), font 1 uses entries[GLYPH_STRIDE..2*GLYPH_STRIDE).
+    entries: [AtlasEntry; MAX_GLYPH_ENTRIES],
     /// DMA backing memory VA (atlas pixel data is written here directly).
     dma_va: usize,
     /// Current row Y position.
@@ -59,11 +64,16 @@ impl GlyphAtlas {
         self.dma_va = va;
     }
 
-    /// Look up a glyph in the atlas by font glyph ID.
+    /// Flat index for a (glyph_id, font_id) pair.
+    fn effective_id(glyph_id: u16, font_id: u16) -> usize {
+        font_id as usize * GLYPH_STRIDE + glyph_id as usize
+    }
+
+    /// Look up a glyph in the atlas by font glyph ID and font_id.
     /// Returns None if the glyph is not cached.
-    pub fn lookup(&self, glyph_id: u16) -> Option<&AtlasEntry> {
-        let id = glyph_id as usize;
-        if id >= MAX_GLYPH_ID {
+    pub fn lookup(&self, glyph_id: u16, font_id: u16) -> Option<&AtlasEntry> {
+        let id = Self::effective_id(glyph_id, font_id);
+        if id >= MAX_GLYPH_ENTRIES {
             return None;
         }
         let entry = &self.entries[id];
@@ -79,14 +89,15 @@ impl GlyphAtlas {
     pub fn pack_glyph(
         &mut self,
         glyph_id: u16,
+        font_id: u16,
         width: u32,
         height: u32,
         bearing_x: i32,
         bearing_y: i32,
         coverage: &[u8],
     ) -> Option<AtlasEntry> {
-        let id = glyph_id as usize;
-        if id >= MAX_GLYPH_ID || width == 0 || height == 0 {
+        let id = Self::effective_id(glyph_id, font_id);
+        if id >= MAX_GLYPH_ENTRIES || width == 0 || height == 0 {
             return None;
         }
         // Already cached?
@@ -152,14 +163,15 @@ impl GlyphAtlas {
         Some(entry)
     }
 
-    /// Populate the atlas from a fonts::cache::GlyphCache.
+    /// Populate the atlas from a fonts::cache::GlyphCache for a given font_id.
     /// Iterates over all cached glyph IDs and packs their coverage data.
-    pub fn populate_from_cache(&mut self, cache: &fonts::cache::GlyphCache) {
-        for glyph_id in 0..MAX_GLYPH_ID as u16 {
+    pub fn populate_from_cache(&mut self, cache: &fonts::cache::GlyphCache, font_id: u16) {
+        for glyph_id in 0..GLYPH_STRIDE as u16 {
             if let Some((glyph, coverage)) = cache.get(glyph_id) {
                 if glyph.width > 0 && glyph.height > 0 {
                     self.pack_glyph(
                         glyph_id,
+                        font_id,
                         glyph.width,
                         glyph.height,
                         glyph.bearing_x,

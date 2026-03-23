@@ -11,8 +11,8 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
     layout_mono_lines, line_bytes_for_run, round_f32, scroll_runs, shape_text, shape_visible_runs,
-    update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT, N_POINTER,
-    N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    update_clock_inline, SceneConfig, FONT_SANS, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT,
+    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 use crate::test_gen::generate_test_image;
 
@@ -80,16 +80,12 @@ pub fn build_full_scene(
 
     w.clear();
 
-    // Push shaped glyph arrays for title and clock.
-    let title_glyphs = shape_text(
-        cfg.font_data,
-        title_label,
-        cfg.font_size,
-        cfg.upem,
-        cfg.axes,
-    );
+    // Push shaped glyph arrays for title and clock using the sans font (Inter).
+    let sans = cfg.sans_font_data;
+    let sans_upem = cfg.sans_upem;
+    let title_glyphs = shape_text(sans, title_label, cfg.font_size, sans_upem, cfg.axes);
     let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-    let clock_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
+    let clock_glyphs = shape_text(sans, clock_text, cfg.font_size, sans_upem, cfg.axes);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
     // Push visible line glyph data (editor mode only).
@@ -160,7 +156,7 @@ pub fn build_full_scene(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(title_label);
         n.flags = NodeFlags::VISIBLE;
@@ -180,7 +176,7 @@ pub fn build_full_scene(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(clock_text);
         n.flags = NodeFlags::VISIBLE;
@@ -380,7 +376,13 @@ pub fn build_full_scene(
 pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clock_text: &[u8]) {
     let clock_node = w.node(N_CLOCK_TEXT);
     if let Content::Glyphs { color, .. } = clock_node.content {
-        let new_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
+        let new_glyphs = shape_text(
+            cfg.sans_font_data,
+            clock_text,
+            cfg.font_size,
+            cfg.sans_upem,
+            cfg.axes,
+        );
         let new_ref = w.push_shaped_glyphs(&new_glyphs);
         let new_count = new_glyphs.len() as u16;
 
@@ -390,7 +392,7 @@ pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clo
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(clock_text);
         w.mark_dirty(N_CLOCK_TEXT);
@@ -421,7 +423,14 @@ pub fn build_cursor_update(
     w.mark_dirty(N_CURSOR);
 
     if let Some(ct) = clock_text {
-        update_clock_inline(w, ct, cfg.font_data, cfg.font_size, cfg.upem, cfg.axes);
+        update_clock_inline(
+            w,
+            ct,
+            cfg.sans_font_data,
+            cfg.font_size,
+            cfg.sans_upem,
+            cfg.axes,
+        );
     }
 }
 
@@ -533,18 +542,28 @@ pub fn build_document_content(
     // are re-pushed in build_full_scene on the next full rebuild.
     w.reset_data();
 
-    // Re-push title glyph data.
-    let title_glyphs = shape_text(
-        cfg.font_data,
-        title_label,
-        cfg.font_size,
-        cfg.upem,
-        cfg.axes,
-    );
+    // Re-push pointer cursor path data (invalidated by reset_data).
+    {
+        let arrow_cmds = crate::test_gen::generate_arrow_cursor();
+        let arrow_ref = w.push_path_commands(&arrow_cmds);
+        let arrow_hash = fnv1a(&arrow_cmds);
+        let n = w.node_mut(N_POINTER);
+        n.content = Content::Path {
+            color: Color::rgb(255, 255, 255),
+            fill_rule: FillRule::Winding,
+            contours: arrow_ref,
+        };
+        n.content_hash = arrow_hash;
+    }
+
+    // Re-push title glyph data (shaped with sans font).
+    let sans = cfg.sans_font_data;
+    let sans_upem = cfg.sans_upem;
+    let title_glyphs = shape_text(sans, title_label, cfg.font_size, sans_upem, cfg.axes);
     let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
 
-    // Re-push clock glyph data.
-    let clock_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
+    // Re-push clock glyph data (shaped with sans font).
+    let clock_glyphs = shape_text(sans, clock_text, cfg.font_size, sans_upem, cfg.axes);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
     // Re-layout visible document text lines.
@@ -577,7 +596,7 @@ pub fn build_document_content(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(title_label);
     }
@@ -590,7 +609,7 @@ pub fn build_document_content(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(clock_text);
     }

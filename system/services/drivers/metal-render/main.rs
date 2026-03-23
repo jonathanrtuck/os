@@ -595,8 +595,12 @@ fn print_hex_u32(val: u32) {
 
 // ── Glyph atlas ─────────────────────────────────────────────────────────
 
-/// Maximum glyph ID supported by the atlas lookup table.
-const MAX_GLYPH_ID: usize = 2048;
+/// Maximum glyph ID per font in the atlas lookup table.
+const GLYPH_STRIDE: usize = 2048;
+/// Number of font slots in the atlas (0 = mono, 1 = sans).
+const MAX_FONTS: usize = 2;
+/// Total atlas entry capacity (GLYPH_STRIDE * MAX_FONTS).
+const MAX_GLYPH_ENTRIES: usize = GLYPH_STRIDE * MAX_FONTS;
 
 /// Atlas entry for a single rasterized glyph.
 #[derive(Clone, Copy)]
@@ -610,8 +614,11 @@ struct AtlasEntry {
 }
 
 /// Glyph texture atlas with row-based packing.
+/// Supports multiple fonts via `font_id` offset into the entries array:
+/// font 0 (mono) uses entries[0..GLYPH_STRIDE), font 1 (sans) uses
+/// entries[GLYPH_STRIDE..2*GLYPH_STRIDE), etc.
 struct GlyphAtlas {
-    entries: [AtlasEntry; MAX_GLYPH_ID],
+    entries: [AtlasEntry; MAX_GLYPH_ENTRIES],
     pixels: [u8; (ATLAS_WIDTH * ATLAS_HEIGHT) as usize],
     row_y: u16,
     row_x: u16,
@@ -619,9 +626,14 @@ struct GlyphAtlas {
 }
 
 impl GlyphAtlas {
-    fn lookup(&self, glyph_id: u16) -> Option<&AtlasEntry> {
-        let id = glyph_id as usize;
-        if id < MAX_GLYPH_ID && self.entries[id].width > 0 {
+    /// Flat index for a (glyph_id, font_id) pair.
+    fn effective_id(glyph_id: u16, font_id: u16) -> usize {
+        font_id as usize * GLYPH_STRIDE + glyph_id as usize
+    }
+
+    fn lookup(&self, glyph_id: u16, font_id: u16) -> Option<&AtlasEntry> {
+        let id = Self::effective_id(glyph_id, font_id);
+        if id < MAX_GLYPH_ENTRIES && self.entries[id].width > 0 {
             Some(&self.entries[id])
         } else {
             None
@@ -631,13 +643,15 @@ impl GlyphAtlas {
     fn pack(
         &mut self,
         glyph_id: u16,
+        font_id: u16,
         w: u16,
         h: u16,
         bearing_x: i16,
         bearing_y: i16,
         data: &[u8],
     ) -> bool {
-        if glyph_id as usize >= MAX_GLYPH_ID {
+        let id = Self::effective_id(glyph_id, font_id);
+        if id >= MAX_GLYPH_ENTRIES {
             return false;
         }
         // Check if we need a new row.
@@ -664,7 +678,7 @@ impl GlyphAtlas {
             }
         }
 
-        self.entries[glyph_id as usize] = AtlasEntry {
+        self.entries[id] = AtlasEntry {
             u,
             v,
             width: w,
@@ -781,7 +795,8 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"     waiting for render config\n");
     let mut scene_va: u64 = 0;
     let mut font_va: u64 = 0;
-    let mut font_len: u32 = 0;
+    let mut mono_font_len: u32 = 0;
+    let mut sans_font_len: u32 = 0;
     let mut scale_factor: f32 = 1.0;
     let mut font_size_cfg: u16 = 18;
     let mut frame_rate_cfg: u32 = 60;
@@ -792,7 +807,8 @@ pub extern "C" fn _start() -> ! {
             let config: CompositorConfig = unsafe { msg.payload_as() };
             scene_va = config.scene_va;
             font_va = config.font_buf_va;
-            font_len = config.mono_font_len;
+            mono_font_len = config.mono_font_len;
+            sans_font_len = config.sans_font_len;
             scale_factor = config.scale_factor;
             font_size_cfg = config.font_size;
             frame_rate_cfg = if config.frame_rate > 0 {
@@ -807,8 +823,10 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"     render config: scene_va=");
     print_hex_u32((scene_va >> 32) as u32);
     print_hex_u32(scene_va as u32);
-    sys::print(b" font_len=");
-    print_u32(font_len);
+    sys::print(b" mono_font_len=");
+    print_u32(mono_font_len);
+    sys::print(b" sans_font_len=");
+    print_u32(sans_font_len);
     sys::print(b"\n");
 
     if scene_va == 0 {
@@ -1054,13 +1072,22 @@ pub extern "C" fn _start() -> ! {
     let glyph_atlas = unsafe { &mut *atlas_ptr };
     let mut font_ascent: u32 = 14;
 
-    // Font data slice — kept alive for on-demand glyph rasterization in the render loop.
+    // Font data slices — kept alive for on-demand glyph rasterization in the render loop.
     // SAFETY: font_va is mapped read-only by init; valid for the process lifetime.
-    let font_slice: &[u8] = if font_va != 0 && font_len > 0 {
-        unsafe { core::slice::from_raw_parts(font_va as *const u8, font_len as usize) }
+    let font_slice: &[u8] = if font_va != 0 && mono_font_len > 0 {
+        unsafe { core::slice::from_raw_parts(font_va as *const u8, mono_font_len as usize) }
     } else {
         &[]
     };
+    let sans_font_slice: &[u8] = if font_va != 0 && sans_font_len > 0 {
+        let off = font_va as usize + mono_font_len as usize;
+        // SAFETY: same as above — init mapped the full font buffer region.
+        unsafe { core::slice::from_raw_parts(off as *const u8, sans_font_len as usize) }
+    } else {
+        &[]
+    };
+    // Array of font slices indexed by font_id (0 = mono, 1 = sans).
+    let font_slices: [&[u8]; MAX_FONTS] = [font_slice, sans_font_slice];
 
     // Rasterization scratch space — kept alive for on-demand rasterization.
     let scratch_layout_persistent = alloc::alloc::Layout::from_size_align(
@@ -1079,7 +1106,11 @@ pub extern "C" fn _start() -> ! {
     // renderer divides by scale_factor when positioning quads.
     let font_size_px: u32 = {
         let px = font_size_pt as f32 * scale_factor;
-        if px >= 0.0 { (px + 0.5) as u32 } else { 1 }
+        if px >= 0.0 {
+            (px + 0.5) as u32
+        } else {
+            1
+        }
     };
     let scale_factor_int: u16 = (scale_factor as u16).max(1);
 
@@ -1108,7 +1139,7 @@ pub extern "C" fn _start() -> ! {
         let mut atlas_full_warned = false;
 
         for sg in &shaped {
-            if glyph_atlas.lookup(sg.glyph_id).is_some() {
+            if glyph_atlas.lookup(sg.glyph_id, 0).is_some() {
                 continue;
             }
             let mut rb = fonts::rasterize::RasterBuffer {
@@ -1127,6 +1158,7 @@ pub extern "C" fn _start() -> ! {
             ) {
                 if glyph_atlas.pack(
                     sg.glyph_id,
+                    0,
                     m.width as u16,
                     m.height as u16,
                     m.bearing_x as i16,
@@ -1139,6 +1171,48 @@ pub extern "C" fn _start() -> ! {
                     atlas_full_warned = true;
                 }
             }
+        }
+
+        // Pre-populate sans font (Inter) ASCII glyphs (font_id = 1).
+        if !sans_font_slice.is_empty() {
+            let sans_shaped = fonts::shape(sans_font_slice, ascii, &[]);
+            for sg in &sans_shaped {
+                if glyph_atlas.lookup(sg.glyph_id, 1).is_some() {
+                    continue;
+                }
+                let mut rb = fonts::rasterize::RasterBuffer {
+                    data: &mut raster_buf,
+                    width: 100,
+                    height: 100,
+                };
+                if let Some(m) = fonts::rasterize::rasterize_with_axes(
+                    sans_font_slice,
+                    sg.glyph_id,
+                    font_size_px as u16,
+                    &mut rb,
+                    raster_scratch,
+                    &[],
+                    scale_factor_int,
+                ) {
+                    if glyph_atlas.pack(
+                        sg.glyph_id,
+                        1,
+                        m.width as u16,
+                        m.height as u16,
+                        m.bearing_x as i16,
+                        m.bearing_y as i16,
+                        &raster_buf[..m.width as usize * m.height as usize],
+                    ) {
+                        packed += 1;
+                    } else if !atlas_full_warned {
+                        sys::print(
+                            b"WARNING: glyph atlas full - remaining glyphs will not render\n",
+                        );
+                        atlas_full_warned = true;
+                    }
+                }
+            }
+            sys::print(b"     sans font pre-populated\n");
         }
 
         sys::print(b"     atlas: packed ");
@@ -1232,12 +1306,19 @@ pub extern "C" fn _start() -> ! {
                 if let scene::Content::Glyphs {
                     glyphs,
                     glyph_count,
+                    axis_hash,
                     ..
                 } = node.content
                 {
+                    // Map axis_hash to font_id (0 = mono, 1 = sans).
+                    let font_id = (axis_hash as u16).min((MAX_FONTS - 1) as u16);
+                    let raster_font = font_slices[font_id as usize];
+                    if raster_font.is_empty() {
+                        continue;
+                    }
                     let shaped = reader.front_shaped_glyphs(glyphs, glyph_count);
                     for sg in shaped {
-                        if glyph_atlas.lookup(sg.glyph_id).is_some() {
+                        if glyph_atlas.lookup(sg.glyph_id, font_id).is_some() {
                             continue;
                         }
                         let mut rb = fonts::rasterize::RasterBuffer {
@@ -1246,7 +1327,7 @@ pub extern "C" fn _start() -> ! {
                             height: 100,
                         };
                         if let Some(m) = fonts::rasterize::rasterize_with_axes(
-                            font_slice,
+                            raster_font,
                             sg.glyph_id,
                             font_size_px as u16,
                             &mut rb,
@@ -1257,6 +1338,7 @@ pub extern "C" fn _start() -> ! {
                             let pack_y = glyph_atlas.row_y;
                             if glyph_atlas.pack(
                                 sg.glyph_id,
+                                font_id,
                                 m.width as u16,
                                 m.height as u16,
                                 m.bearing_x as i16,
@@ -2221,6 +2303,7 @@ fn walk_scene(
             color,
             glyphs,
             glyph_count,
+            axis_hash,
             ..
         } => {
             let shaped = reader.front_shaped_glyphs(glyphs, glyph_count);
@@ -2244,8 +2327,11 @@ fn walk_scene(
             // 16.16 fixed-point to f32 conversion factor.
             let fp16 = 65536.0f32;
 
+            // Map axis_hash to font_id for atlas lookup.
+            let font_id = (axis_hash as u16).min((MAX_FONTS - 1) as u16);
+
             for sg in shaped {
-                if let Some(entry) = atlas.lookup(sg.glyph_id) {
+                if let Some(entry) = atlas.lookup(sg.glyph_id, font_id) {
                     let gx =
                         pen_x + entry.bearing_x as f32 / glyph_scale + sg.x_offset as f32 / fp16;
                     let gy = baseline_y - entry.bearing_y as f32 / glyph_scale

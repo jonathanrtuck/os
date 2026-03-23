@@ -49,6 +49,11 @@ pub const N_POINTER: u16 = 8;
 /// Number of well-known nodes (indices 0..8). Dynamic nodes start at 9.
 pub const WELL_KNOWN_COUNT: u16 = 9;
 
+/// Font axis_hash value indicating the sans font (Inter).
+/// Render backends use this to select the correct font for rasterization.
+/// 0 = mono (JetBrains Mono, default), 1 = sans (Inter).
+pub const FONT_SANS: u32 = 1;
+
 // ── Configuration ───────────────────────────────────────────────────
 
 /// Shared configuration for scene building functions. Avoids passing
@@ -77,6 +82,10 @@ pub struct SceneConfig<'a> {
     pub font_data: &'a [u8],
     pub upem: u16,
     pub axes: &'a [fonts::rasterize::AxisValue],
+    /// Sans font data (Inter) for chrome text (title, clock).
+    /// Falls back to font_data (mono) when empty.
+    pub sans_font_data: &'a [u8],
+    pub sans_upem: u16,
 }
 
 // ── Layout types ────────────────────────────────────────────────────
@@ -379,7 +388,7 @@ pub(crate) fn update_clock_inline(
             glyphs: new_ref,
             glyph_count: new_count,
             font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = scene::fnv1a(clock_text);
         w.mark_dirty(N_CLOCK_TEXT);

@@ -223,6 +223,9 @@ struct CoreState {
     font_data_ptr: *const u8,
     font_data_len: usize,
     font_upem: u16,
+    sans_font_data_ptr: *const u8,
+    sans_font_data_len: usize,
+    sans_font_upem: u16,
     image_mode: bool,
     line_h: u32,
     mouse_x: u32,
@@ -289,6 +292,9 @@ impl CoreState {
             font_data_ptr: core::ptr::null(),
             font_data_len: 0,
             font_upem: 1000,
+            sans_font_data_ptr: core::ptr::null(),
+            sans_font_data_len: 0,
+            sans_font_upem: 1000,
             image_mode: false,
             line_h: 20,
             mouse_x: 0,
@@ -341,7 +347,7 @@ struct KeyAction {
     consumed: bool,
 }
 
-/// Access the font data slice from shared memory.
+/// Access the mono font data slice from shared memory.
 fn font_data() -> &'static [u8] {
     let s = state();
     if s.font_data_ptr.is_null() || s.font_data_len == 0 {
@@ -351,6 +357,19 @@ fn font_data() -> &'static [u8] {
         unsafe { core::slice::from_raw_parts(s.font_data_ptr, s.font_data_len) }
     }
 }
+
+/// Access the sans font data slice (Inter) from shared memory.
+fn sans_font_data() -> &'static [u8] {
+    let s = state();
+    if s.sans_font_data_ptr.is_null() || s.sans_font_data_len == 0 {
+        // Fallback to mono when sans font not available.
+        font_data()
+    } else {
+        // SAFETY: sans_font_data_ptr points to sans_font_data_len bytes of shared memory.
+        unsafe { core::slice::from_raw_parts(s.sans_font_data_ptr, s.sans_font_data_len) }
+    }
+}
+
 fn clock_seconds() -> u64 {
     let s = state();
     let rtc_va = s.rtc_mmio_va;
@@ -1189,23 +1208,21 @@ fn update_scroll_offset(content_w: u32, content_h: u32) {
     let current = s.scroll_offset;
     let new_scroll = layout.scroll_for_cursor(text, cursor, current, vp_lines);
 
-    // Drive scroll changes through the spring instead of jumping instantly.
-    // Clamp to valid scroll range (allow 50pt overscroll for bounce effect).
+    // Jump instantly to the target scroll position. Cursor-driven scroll
+    // must be immediate so the eye can track the new line without chasing
+    // a moving target. Spring animation reserved for future trackpad/wheel
+    // inertial scrolling.
     let total_lines = layout.byte_to_visual_line(text, text.len()) + 1;
     let max_scroll = if total_lines > vp_lines {
         (total_lines - vp_lines) as f32 * s.line_h as f32
     } else {
         0.0
     };
-    let clamped = clamp_f32(new_scroll, -50.0, max_scroll + 50.0);
+    let clamped = clamp_f32(new_scroll, 0.0, max_scroll);
 
-    let diff = s.scroll_target - clamped;
-    let abs_diff = if diff < 0.0 { -diff } else { diff };
-    if abs_diff > 0.5 {
-        s.scroll_target = clamped;
-        s.scroll_spring.set_target(clamped);
-        s.scroll_animating = true;
-    }
+    s.scroll_offset = clamped;
+    s.scroll_target = clamped;
+    s.scroll_spring.reset_to(clamped);
 }
 fn viewport_lines(content_h: u32) -> u32 {
     let line_h = state().line_h;
@@ -1310,6 +1327,26 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
+    // Parse sans font (Inter) for chrome text (title bar, clock).
+    // The sans font sits immediately after the mono font in the shared font buffer.
+    if config.font_buf_va != 0 && config.sans_font_len > 0 {
+        let sans_offset = config.font_buf_va as usize + config.mono_font_len as usize;
+        // SAFETY: font_buf_va..+(mono_font_len+sans_font_len) is within the font shared memory
+        // region mapped by init. Guarded by the non-zero checks above.
+        let sans_data = unsafe {
+            core::slice::from_raw_parts(sans_offset as *const u8, config.sans_font_len as usize)
+        };
+        if let Some(fm) = fonts::rasterize::font_metrics(sans_data) {
+            let s = state();
+            s.sans_font_data_ptr = sans_offset as *const u8;
+            s.sans_font_data_len = config.sans_font_len as usize;
+            s.sans_font_upem = fm.units_per_em;
+            sys::print(b"     sans font (Inter) loaded\n");
+        } else {
+            sys::print(b"     warning: sans font parse failed\n");
+        }
+    }
+
     // Check for image data (used for Ctrl+Tab image viewer mode detection).
     let mut has_image = false;
 
@@ -1398,6 +1435,8 @@ pub extern "C" fn _start() -> ! {
             font_data: font_data(),
             upem: s.font_upem,
             axes: &[],
+            sans_font_data: sans_font_data(),
+            sans_upem: s.sans_font_upem,
         }
     };
 
@@ -1742,10 +1781,21 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Update scroll spring target for cursor/text changes.
+        // Update scroll offset for cursor/text changes.
+        // Track whether the scroll position actually changed — the scene
+        // dispatch needs to know so it does a full rebuild (visible lines
+        // differ) instead of an incremental single-line update.
+        let scroll_before = state().scroll_offset;
         if (changed || text_changed) && !state().image_mode {
             update_scroll_offset(content_w, content_h);
         }
+        let scroll_after = state().scroll_offset;
+        let scroll_diff = scroll_before - scroll_after;
+        let scroll_moved = if scroll_diff < 0.0 {
+            -scroll_diff > 0.5
+        } else {
+            scroll_diff > 0.5
+        };
 
         // ── Cursor blink ─────────────────────────────────────────────
         //
@@ -1776,7 +1826,10 @@ pub extern "C" fn _start() -> ! {
         // Advance the scroll spring toward its target. This must happen
         // after event processing (which may update the target) and before
         // scene dispatch (which reads scroll_offset).
-        let mut scroll_changed = false;
+        let mut scroll_changed = scroll_moved;
+        if scroll_moved && !text_changed {
+            text_changed = true;
+        }
 
         if state().scroll_animating {
             let old_scroll = state().scroll_offset;

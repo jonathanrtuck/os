@@ -327,6 +327,7 @@ pub extern "C" fn _start() -> ! {
     let mut scene_va: u64 = 0;
     let mut font_va: u64 = 0;
     let mut font_len: u32 = 0;
+    let mut sans_font_len: u32 = 0;
     let mut scale_factor: f32 = 1.0;
     let mut font_size_cfg: u16 = 18;
     let mut frame_rate_cfg: u32 = 60;
@@ -339,6 +340,7 @@ pub extern "C" fn _start() -> ! {
             scene_va = config.scene_va;
             font_va = config.font_buf_va;
             font_len = config.mono_font_len;
+            sans_font_len = config.sans_font_len;
             scale_factor = config.scale_factor;
             font_size_cfg = config.font_size;
             frame_rate_cfg = if config.frame_rate > 0 {
@@ -417,7 +419,7 @@ pub extern "C" fn _start() -> ! {
 
         let mut packed = 0u32;
         for sg in &shaped {
-            if glyph_atlas.lookup(sg.glyph_id).is_some() {
+            if glyph_atlas.lookup(sg.glyph_id, 0).is_some() {
                 continue; // Already packed.
             }
             let mut rb = fonts::rasterize::RasterBuffer {
@@ -439,6 +441,7 @@ pub extern "C" fn _start() -> ! {
                     let coverage = &raster_buf[..(m.width * m.height) as usize];
                     glyph_atlas.pack_glyph(
                         sg.glyph_id,
+                        0,
                         m.width,
                         m.height,
                         m.bearing_x,
@@ -448,6 +451,50 @@ pub extern "C" fn _start() -> ! {
                     packed += 1;
                 }
             }
+        }
+
+        // Pre-populate sans font (Inter) ASCII glyphs (font_id = 1).
+        if sans_font_len > 0 {
+            let sans_off = font_va as usize + font_len as usize;
+            // SAFETY: same as above — init mapped the full font buffer region.
+            let sans_data = unsafe {
+                core::slice::from_raw_parts(sans_off as *const u8, sans_font_len as usize)
+            };
+            let sans_shaped = fonts::shape(sans_data, ascii, &[]);
+            for sg in &sans_shaped {
+                if glyph_atlas.lookup(sg.glyph_id, 1).is_some() {
+                    continue;
+                }
+                let mut rb = fonts::rasterize::RasterBuffer {
+                    data: &mut raster_buf,
+                    width: 50,
+                    height: 50,
+                };
+                if let Some(m) = fonts::rasterize::rasterize_with_axes(
+                    sans_data,
+                    sg.glyph_id,
+                    font_size_pt as u16,
+                    &mut rb,
+                    &mut scratch,
+                    &[],
+                    1,
+                ) {
+                    if m.width > 0 && m.height > 0 {
+                        let coverage = &raster_buf[..(m.width * m.height) as usize];
+                        glyph_atlas.pack_glyph(
+                            sg.glyph_id,
+                            1,
+                            m.width,
+                            m.height,
+                            m.bearing_x,
+                            m.bearing_y,
+                            coverage,
+                        );
+                        packed += 1;
+                    }
+                }
+            }
+            sys::print(b"     sans font pre-populated\n");
         }
 
         sys::print(b"     atlas packed ");

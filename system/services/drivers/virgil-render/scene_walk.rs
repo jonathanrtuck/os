@@ -291,13 +291,16 @@ fn walk_node(
             color,
             glyphs: glyph_ref,
             glyph_count,
+            axis_hash,
             ..
         } => {
+            let font_id = (axis_hash as u16).min(1);
             emit_glyphs(
                 text_batch,
                 glyphs_data,
                 glyph_ref,
                 glyph_count,
+                font_id,
                 atlas,
                 abs_x,
                 abs_y,
@@ -434,6 +437,7 @@ fn emit_glyphs(
     glyphs_data: &[u8],
     glyph_ref: scene::DataRef,
     glyph_count: u16,
+    font_id: u16,
     atlas: &GlyphAtlas,
     node_x: f32,
     node_y: f32,
@@ -478,7 +482,7 @@ fn emit_glyphs(
         // 16.16 fixed-point to f32 points.
         let fp16 = 65536.0f32;
 
-        if let Some(entry) = atlas.lookup(sg.glyph_id) {
+        if let Some(entry) = atlas.lookup(sg.glyph_id, font_id) {
             let gx = pen_x + (entry.bearing_x as f32) * scale + (sg.x_offset as f32 / fp16) * scale;
             let gy =
                 baseline_y - (entry.bearing_y as f32) * scale + (sg.y_offset as f32 / fp16) * scale;

@@ -31,7 +31,6 @@ pub(super) fn render_content(
     nh: i32,
     lru: Option<&mut LruRasterizer>,
 ) {
-    let cache = ctx.mono_cache;
     let scale = ctx.scale;
     match node.content {
         Content::None => {}
@@ -51,6 +50,13 @@ pub(super) fn render_content(
             font_size,
             axis_hash,
         } => {
+            // Select the glyph cache based on font identity. axis_hash != 0
+            // means a proportional font (Inter) — use prop_cache. 0 = mono.
+            let cache = if axis_hash != 0 {
+                ctx.prop_cache
+            } else {
+                ctx.mono_cache
+            };
             render_glyphs(
                 fb,
                 graph,
