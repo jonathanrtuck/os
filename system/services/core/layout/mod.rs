@@ -55,8 +55,23 @@ pub const N_POINTER: u16 = 8;
 // text. Content::Path with stroke_width > 0 for outline Tabler icons.
 pub const N_TITLE_ICON: u16 = 9;
 
-/// Number of well-known nodes (indices 0..9). Dynamic nodes start at 10.
-pub const WELL_KNOWN_COUNT: u16 = 10;
+// ── Document strip (10..12) ─────────────────────────────────────────
+//
+// Horizontal strip of document spaces. N_STRIP is a child of N_CONTENT
+// with width = N × viewport. content_transform.tx slides the viewport.
+// Each document occupies one viewport-width "space" in the strip.
+pub const N_STRIP: u16 = 10;
+
+// White page surface for the text document (space 0). A4 proportions,
+// centered horizontally. N_DOC_TEXT is a child of this node.
+pub const N_PAGE: u16 = 11;
+
+// Image content in space 1. Centered in the second viewport-width
+// region of the strip. The image IS its own surface (no page bg).
+pub const N_DOC_IMAGE: u16 = 12;
+
+/// Number of well-known nodes (indices 0..12). Dynamic nodes start at 13.
+pub const WELL_KNOWN_COUNT: u16 = 13;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -68,6 +83,7 @@ pub struct SceneConfig<'a> {
     pub fb_height: u32,
     pub title_bar_h: u32,
     pub shadow_depth: u32,
+    /// Text inset within the page surface (padding from page edge).
     pub text_inset_x: u32,
     pub chrome_bg: drawing::Color,
     pub chrome_border: drawing::Color,
@@ -77,6 +93,12 @@ pub struct SceneConfig<'a> {
     pub text_color: drawing::Color,
     pub cursor_color: drawing::Color,
     pub sel_color: drawing::Color,
+    /// Page surface background color (white paper).
+    pub page_bg: drawing::Color,
+    /// Page width in points (A4 proportions, derived from viewport).
+    pub page_width: u32,
+    /// Page height in points.
+    pub page_height: u32,
     pub font_size: u16,
     /// Character advance in 16.16 fixed-point points.
     /// Single source of truth for character width — same precision as
@@ -297,19 +319,19 @@ pub(crate) fn dc(c: drawing::Color) -> Color {
     Color::rgba(c.r, c.g, c.b, c.a)
 }
 
-/// Compute `chars_per_line` from config using fractional char width.
+/// Compute `chars_per_line` from config using page width and text inset.
 pub(crate) fn chars_per_line(cfg: &SceneConfig) -> u32 {
-    let doc_width = cfg.fb_width.saturating_sub(2 * cfg.text_inset_x);
+    let dw = doc_width(cfg);
     if cfg.char_width_fx > 0 {
-        ((doc_width as i64 * 65536) / cfg.char_width_fx as i64).max(1) as u32
+        ((dw as i64 * 65536) / cfg.char_width_fx as i64).max(1) as u32
     } else {
         80
     }
 }
 
-/// Compute the document-area width from config.
+/// Compute the text-area width within the page surface.
 pub(crate) fn doc_width(cfg: &SceneConfig) -> u32 {
-    cfg.fb_width.saturating_sub(2 * cfg.text_inset_x)
+    cfg.page_width.saturating_sub(2 * cfg.text_inset_x)
 }
 
 /// Allocate per-line Glyphs child nodes under N_DOC_TEXT, linking them

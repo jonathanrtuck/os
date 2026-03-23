@@ -17,8 +17,9 @@ use super::layout::{
 };
 // Re-export layout types and constants used by main.rs.
 pub use super::layout::{
-    byte_to_line_col, count_lines, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT,
-    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    byte_to_line_col, count_lines, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE,
+    N_DOC_TEXT, N_PAGE, N_POINTER, N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON,
+    N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 
 pub struct SceneState {
@@ -39,13 +40,11 @@ impl SceneState {
         TripleWriter::from_existing(self.buf)
     }
 
-    /// Build the full scene tree for the editor or image viewer screen layout.
+    /// Build the full scene tree with both document spaces in the strip.
     ///
-    /// When `image_mode` is false, builds the text editor scene.
-    /// When `image_mode` is true, builds an image viewer scene with a centered
-    /// test image, no cursor/selection/demo nodes, and "Image" in the title bar.
-    ///
-    /// Writes to the back buffer and swaps to publish as the new front.
+    /// Both documents are always present. `slide_offset` determines which
+    /// is visible (0.0 = text, fb_width = image). `active_space` determines
+    /// which title bar content to show.
     #[allow(clippy::too_many_arguments)]
     pub fn build_editor_scene(
         &mut self,
@@ -61,7 +60,8 @@ impl SceneState {
         mouse_x: u32,
         mouse_y: u32,
         pointer_opacity: u8,
-        image_mode: bool,
+        slide_offset: f32,
+        active_space: u8,
     ) {
         let mut tw = self.triple();
         {
@@ -80,8 +80,22 @@ impl SceneState {
                 mouse_x,
                 mouse_y,
                 pointer_opacity,
-                image_mode,
+                slide_offset,
+                active_space,
             );
+        }
+        tw.publish();
+    }
+
+    /// Update the strip slide offset (for document switch animation).
+    /// Lightweight: only changes N_STRIP's content_transform.
+    pub fn apply_slide(&mut self, slide_offset: f32) {
+        let mut tw = self.triple();
+        {
+            let mut w = tw.acquire_copy();
+            w.node_mut(N_STRIP).content_transform =
+                scene::AffineTransform::translate(-slide_offset, 0.0);
+            w.mark_dirty(N_STRIP);
         }
         tw.publish();
     }

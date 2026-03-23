@@ -220,22 +220,25 @@ struct CoreState {
     doc_buf: *mut u8,
     doc_capacity: usize,
     doc_len: usize,
-    /// Animation ID for the document switch fade-out (255→0).
-    fade_out_id: Option<animation::AnimationId>,
-    /// Animation ID for the document switch fade-in (0→255).
-    fade_in_id: Option<animation::AnimationId>,
     font_data_ptr: *const u8,
     font_data_len: usize,
     font_upem: u16,
     sans_font_data_ptr: *const u8,
     sans_font_data_len: usize,
     sans_font_upem: u16,
-    image_mode: bool,
+    /// Which document space receives input (0=text, 1=image).
+    active_space: u8,
+    /// True when the slide spring is animating between spaces.
+    slide_animating: bool,
+    /// Current slide offset (0.0 = space 0, fb_width = space 1).
+    slide_offset: f32,
+    /// Spring physics for slide animation.
+    slide_spring: animation::Spring,
+    /// Target slide offset.
+    slide_target: f32,
     line_h: u32,
     mouse_x: u32,
     mouse_y: u32,
-    /// True while fading out before a document context switch.
-    pending_context_switch: bool,
     /// Animation ID for the pointer fade-out (255→0, 300ms EaseOut).
     pointer_fade_id: Option<animation::AnimationId>,
     /// Timestamp (ms) of the last pointer movement event.
@@ -244,10 +247,7 @@ struct CoreState {
     pointer_opacity: u8,
     /// True when the pointer cursor is currently shown (recently moved).
     pointer_visible: bool,
-    /// Root node opacity for document switch fade transitions.
-    root_opacity: u8,
     rtc_mmio_va: usize,
-    saved_editor_scroll: f32,
     scroll_animating: bool,
     scroll_offset: f32,
     scroll_spring: animation::Spring,
@@ -291,26 +291,25 @@ impl CoreState {
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
             doc_len: 0,
-            fade_out_id: None,
-            fade_in_id: None,
             font_data_ptr: core::ptr::null(),
             font_data_len: 0,
             font_upem: 1000,
             sans_font_data_ptr: core::ptr::null(),
             sans_font_data_len: 0,
             sans_font_upem: 1000,
-            image_mode: false,
+            active_space: 0,
+            slide_animating: false,
+            slide_offset: 0.0,
+            slide_spring: animation::Spring::snappy(0.0),
+            slide_target: 0.0,
             line_h: 20,
             mouse_x: 0,
             mouse_y: 0,
-            pending_context_switch: false,
             pointer_fade_id: None,
             pointer_last_event_ms: 0,
             pointer_opacity: 0,
             pointer_visible: false,
-            root_opacity: 255,
             rtc_mmio_va: 0,
-            saved_editor_scroll: 0.0,
             scroll_animating: false,
             scroll_offset: 0.0,
             scroll_spring: animation::Spring::snappy(0.0),
@@ -518,12 +517,12 @@ impl TextLayout {
     }
 }
 
-fn content_text_layout(content_w: u32) -> TextLayout {
+fn content_text_layout(page_w: u32, page_pad: u32) -> TextLayout {
     let s = state();
     TextLayout {
         char_width_fx: s.char_w_fx,
         line_height: s.line_h,
-        max_width: content_w.saturating_sub(2 * TEXT_INSET_X),
+        max_width: page_w.saturating_sub(2 * page_pad),
     }
 }
 fn create_clock_timer() -> bool {
@@ -754,8 +753,10 @@ fn process_key_event(
     key: &KeyEvent,
     has_image: bool,
     editor_ch: &ipc::Channel,
-    content_w: u32,
-    content_h: u32,
+    fb_width: u32,
+    page_w: u32,
+    page_h: u32,
+    page_pad: u32,
 ) -> KeyAction {
     use protocol::input::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
 
@@ -788,40 +789,32 @@ fn process_key_event(
     if key.keycode == KEY_TAB && ctrl {
         if has_image {
             let s = state();
-            if !s.pending_context_switch {
-                let now_ms = {
-                    let freq = s.counter_freq;
-                    if freq > 0 {
-                        sys::counter() * 1000 / freq
-                    } else {
-                        0
-                    }
-                };
-                s.fade_out_id = s
-                    .timeline
-                    .start(255.0, 0.0, 120, animation::Easing::EaseOut, now_ms)
-                    .ok();
-                s.pending_context_switch = true;
-            }
+            // Toggle active space.
+            let new_space = if s.active_space == 0 { 1u8 } else { 0u8 };
+            s.active_space = new_space;
+            let target = new_space as f32 * fb_width as f32;
+            s.slide_target = target;
+            s.slide_spring.set_target(target);
+            s.slide_animating = true;
             return KeyAction {
                 changed: true,
                 text_changed: false,
                 selection_changed: false,
-                context_switched: false,
+                context_switched: true,
                 consumed: true,
             };
         }
         return no_change;
     }
 
-    // In image mode, no editor keys apply.
-    if state().image_mode {
+    // In image space, no editor keys apply.
+    if state().active_space != 0 {
         return no_change;
     }
 
     let text = doc_content();
     let len = text.len();
-    let layout = content_text_layout(content_w);
+    let layout = content_text_layout(page_w, page_pad);
     let cols = layout.cols();
 
     // ── Navigation helper: begin/extend selection ────────────────
@@ -1031,7 +1024,7 @@ fn process_key_event(
                 s.goal_column = Some(col);
             }
             let gc = s.goal_column.unwrap_or(col);
-            let vp = viewport_lines(content_h);
+            let vp = viewport_lines(page_h, page_pad);
             let target_line = line.saturating_sub(vp as usize);
             state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
             nav_finish!(false)
@@ -1046,7 +1039,7 @@ fn process_key_event(
                 s.goal_column = Some(col);
             }
             let gc = s.goal_column.unwrap_or(col);
-            let vp = viewport_lines(content_h);
+            let vp = viewport_lines(page_h, page_pad);
             let target_line = line + vp as usize;
             state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
             nav_finish!(false)
@@ -1198,14 +1191,14 @@ fn forward_key_to_editor(key: &KeyEvent, editor_ch: &ipc::Channel) {
     editor_ch.send(&msg);
     let _ = sys::channel_signal(EDITOR_HANDLE);
 }
-fn update_scroll_offset(content_w: u32, content_h: u32) {
-    let vp_lines = viewport_lines(content_h);
+fn update_scroll_offset(page_w: u32, page_h: u32, page_pad: u32) {
+    let vp_lines = viewport_lines(page_h, page_pad);
 
     if vp_lines == 0 {
         return;
     }
 
-    let layout = content_text_layout(content_w);
+    let layout = content_text_layout(page_w, page_pad);
     let text = doc_content();
     let s = state();
     let cursor = s.cursor_pos;
@@ -1228,14 +1221,14 @@ fn update_scroll_offset(content_w: u32, content_h: u32) {
     s.scroll_target = clamped;
     s.scroll_spring.reset_to(clamped);
 }
-fn viewport_lines(content_h: u32) -> u32 {
+fn viewport_lines(page_h: u32, page_pad: u32) -> u32 {
     let line_h = state().line_h;
 
     if line_h == 0 {
         return 0;
     }
 
-    let usable = content_h.saturating_sub(TEXT_INSET_TOP + TEXT_INSET_BOTTOM);
+    let usable = page_h.saturating_sub(2 * page_pad);
 
     usable / line_h
 }
@@ -1417,6 +1410,15 @@ pub extern "C" fn _start() -> ! {
 
     format_time_hms(clock_seconds(), &mut time_buf);
 
+    // Compute page dimensions (A4 proportions, centered in content area).
+    let content_y = TITLE_BAR_H + SHADOW_DEPTH;
+    let content_h = fb_height.saturating_sub(content_y);
+    let page_margin_v: u32 = 16;
+    let page_height = content_h.saturating_sub(2 * page_margin_v);
+    // A4 ratio: width = height × 210/297.
+    let page_width = (page_height as u64 * 210 / 297) as u32;
+    let page_padding: u32 = 24;
+
     let scene_cfg = {
         let s = state();
         scene_state::SceneConfig {
@@ -1424,7 +1426,7 @@ pub extern "C" fn _start() -> ! {
             fb_height,
             title_bar_h: TITLE_BAR_H,
             shadow_depth: SHADOW_DEPTH,
-            text_inset_x: TEXT_INSET_X,
+            text_inset_x: page_padding,
             chrome_bg: drawing::CHROME_BG,
             chrome_border: drawing::CHROME_BORDER,
             chrome_title_color: drawing::CHROME_TITLE,
@@ -1433,6 +1435,9 @@ pub extern "C" fn _start() -> ! {
             text_color: drawing::TEXT_PRIMARY,
             cursor_color: drawing::TEXT_CURSOR,
             sel_color: drawing::TEXT_SELECTION,
+            page_bg: drawing::PAGE_BG,
+            page_width,
+            page_height,
             font_size: FONT_SIZE as u16,
             char_width_fx: s.char_w_fx,
             line_height: s.line_h,
@@ -1459,7 +1464,8 @@ pub extern "C" fn _start() -> ! {
             s.mouse_x,
             s.mouse_y,
             s.pointer_opacity,
-            false,
+            0.0,
+            0,
         );
     }
 
@@ -1496,11 +1502,12 @@ pub extern "C" fn _start() -> ! {
                 0
             }
         };
-        let scroll_timeout_ns: u64 = if state().scroll_animating {
-            16_000_000 // 16ms ~ 60fps
-        } else {
-            u64::MAX
-        };
+        let scroll_timeout_ns: u64 =
+            if state().scroll_animating || state().slide_animating {
+                16_000_000 // 16ms ~ 60fps
+            } else {
+                u64::MAX
+            };
         let blink_timeout_ns: u64 = {
             let s = state();
             if s.timeline.any_active() {
@@ -1554,7 +1561,7 @@ pub extern "C" fn _start() -> ! {
                 // SAFETY: msg.msg_type is MSG_KEY_EVENT; sender (input driver) guarantees
                 // payload is a valid KeyEvent.
                 let key: KeyEvent = unsafe { msg.payload_as() };
-                let action = process_key_event(&key, has_image, &editor_ch, content_w, content_h);
+                let action = process_key_event(&key, has_image, &editor_ch, fb_width, page_width, page_height, page_padding);
 
                 if action.changed {
                     changed = true;
@@ -1580,7 +1587,7 @@ pub extern "C" fn _start() -> ! {
                         // SAFETY: same invariant as MSG_KEY_EVENT payload_as above.
                         let key: KeyEvent = unsafe { msg.payload_as() };
                         let action =
-                            process_key_event(&key, has_image, &editor_ch, content_w, content_h);
+                            process_key_event(&key, has_image, &editor_ch, fb_width, page_width, page_height, page_padding);
 
                         if action.changed {
                             changed = true;
@@ -1624,13 +1631,18 @@ pub extern "C" fn _start() -> ! {
                             let click_x = s.mouse_x;
                             let click_y = s.mouse_y;
 
-                            if click_y >= TITLE_BAR_H && !s.image_mode {
-                                let text_origin_x = TEXT_INSET_X;
-                                let text_origin_y = TEXT_INSET_TOP;
+                            if click_y >= TITLE_BAR_H && s.active_space == 0 {
+                                // Text origin = page position + padding.
+                                let page_x = (fb_width - page_width) / 2;
+                                let page_y_abs = content_y
+                                    + (content_h.saturating_sub(page_height)) / 2;
+                                let text_origin_x = page_x + page_padding;
+                                let text_origin_y = page_y_abs + page_padding;
                                 let rel_x = click_x.saturating_sub(text_origin_x);
                                 let rel_y = click_y.saturating_sub(text_origin_y);
                                 let adjusted_y = rel_y + round_f32(s.scroll_offset) as u32;
-                                let layout_info = content_text_layout(content_w);
+                                let layout_info =
+                                    content_text_layout(page_width, page_padding);
                                 let text = doc_content();
                                 let byte_pos = layout_info.xy_to_byte(text, rel_x, adjusted_y);
 
@@ -1790,8 +1802,8 @@ pub extern "C" fn _start() -> ! {
         // dispatch needs to know so it does a full rebuild (visible lines
         // differ) instead of an incremental single-line update.
         let scroll_before = state().scroll_offset;
-        if (changed || text_changed) && !state().image_mode {
-            update_scroll_offset(content_w, content_h);
+        if (changed || text_changed) && state().active_space == 0 {
+            update_scroll_offset(page_width, page_height, page_padding);
         }
         let scroll_after = state().scroll_offset;
         let scroll_diff = scroll_before - scroll_after;
@@ -1831,6 +1843,7 @@ pub extern "C" fn _start() -> ! {
         // after event processing (which may update the target) and before
         // scene dispatch (which reads scroll_offset).
         let mut scroll_changed = scroll_moved;
+        let mut slide_changed = false;
         if scroll_moved && !text_changed {
             text_changed = true;
         }
@@ -1902,85 +1915,25 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // ── Document switch fade animation ──────────────────────────
+        // ── Document switch slide animation ─────────────────────────
         //
-        // Ctrl+Tab starts a fade-out (255→0). When complete, the actual
-        // context switch happens, followed by a fade-in (0→255). This
-        // prevents the jarring instant switch between editor and image.
-        if state().pending_context_switch {
+        // Ctrl+Tab sets slide_target to the next space. The spring
+        // animates slide_offset toward the target. We update N_STRIP's
+        // content_transform each frame via apply_slide.
+        if state().slide_animating {
             let s = state();
-            // Determine if the fade-out is complete. Either the animation
-            // has finished (is_active returns false — including stale IDs
-            // from slot reuse), or fade_out_id is None (timeline was full
-            // when starting — perform the switch immediately).
-            let fade_out_done = match s.fade_out_id {
-                Some(id) => !s.timeline.is_active(id),
-                None => true, // timeline was full; skip fade, switch now
-            };
-
-            if !fade_out_done {
-                // Fade-out still in progress — update root opacity.
-                let id = s.fade_out_id.unwrap();
-                let new_val = s.timeline.value(id) as u8;
-                if new_val != s.root_opacity {
-                    s.root_opacity = new_val;
-                    changed = true;
-                }
-            } else {
-                // Fade out complete — do the actual switch.
-                s.root_opacity = 0;
-                s.fade_out_id = None;
-                s.pending_context_switch = false;
-
-                // Perform the context switch (same logic as the
-                // old immediate Ctrl+Tab path).
-                let was_image = s.image_mode;
-                if !was_image {
-                    s.saved_editor_scroll = s.scroll_offset;
-                    // Stop any in-flight scroll animation so it doesn't
-                    // trigger text_changed in image mode (which would
-                    // corrupt the image scene with text-mode content).
-                    s.scroll_animating = false;
-                }
-                s.image_mode = !was_image;
-                if was_image {
-                    s.scroll_offset = s.saved_editor_scroll;
-                    s.scroll_target = s.saved_editor_scroll;
-                    s.scroll_spring.reset_to(s.saved_editor_scroll);
-                    s.scroll_animating = false;
-                }
-
-                // Start fade in.
-                s.fade_in_id = s
-                    .timeline
-                    .start(0.0, 255.0, 120, animation::Easing::EaseIn, now_ms)
-                    .ok();
-
-                context_switched = true;
-                text_changed = true;
+            let dt = 1.0 / 60.0; // ~60fps frame rate
+            s.slide_spring.tick(dt);
+            let new_offset = s.slide_spring.value();
+            if new_offset != s.slide_offset {
+                s.slide_offset = new_offset;
+                slide_changed = true;
                 changed = true;
             }
-        }
-        // Tick fade-in (runs independently of pending_context_switch).
-        {
-            let s = state();
-            if let Some(id) = s.fade_in_id {
-                if s.timeline.is_active(id) {
-                    let new_val = s.timeline.value(id) as u8;
-                    if new_val != s.root_opacity {
-                        s.root_opacity = new_val;
-                        changed = true;
-                    }
-                } else {
-                    s.root_opacity = 255;
-                    s.fade_in_id = None;
-                }
-            } else if !s.pending_context_switch && s.root_opacity < 255 {
-                // Defense-in-depth: if no fade animation is active but
-                // root opacity is stuck below 255, force it back. This
-                // prevents a permanently black screen if a fade-in
-                // animation failed to start (e.g., timeline at capacity).
-                s.root_opacity = 255;
+            if s.slide_spring.settled() {
+                s.slide_offset = s.slide_target;
+                s.slide_animating = false;
+                slide_changed = true;
                 changed = true;
             }
         }
@@ -2065,7 +2018,11 @@ pub extern "C" fn _start() -> ! {
                 }
 
                 let s = state();
-                let title: &[u8] = if s.image_mode { b"Image" } else { b"Text" };
+                let title: &[u8] = if s.active_space != 0 {
+                    b"Image"
+                } else {
+                    b"Text"
+                };
                 scene.build_editor_scene(
                     &scene_cfg,
                     doc_content(),
@@ -2079,7 +2036,8 @@ pub extern "C" fn _start() -> ! {
                     s.mouse_x,
                     s.mouse_y,
                     s.pointer_opacity,
-                    s.image_mode,
+                    s.slide_offset,
+                    s.active_space,
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
@@ -2112,18 +2070,17 @@ pub extern "C" fn _start() -> ! {
                     // Only reshapes the changed line, pushes new glyph data
                     // at the bump pointer, and updates cursor/selection.
                     let s = state();
-                    let changed_line = scene_state::byte_to_line_col(
-                        doc,
-                        s.cursor_pos,
-                        if s.char_w_fx > 0 {
-                            ((scene_cfg.fb_width.saturating_sub(2 * TEXT_INSET_X) as i64 * 65536)
-                                / s.char_w_fx as i64)
-                                .max(1) as usize
-                        } else {
-                            80
-                        },
-                    )
-                    .0;
+                    let cpl = if s.char_w_fx > 0 {
+                        ((scene_cfg.page_width.saturating_sub(2 * scene_cfg.text_inset_x)
+                            as i64
+                            * 65536)
+                            / s.char_w_fx as i64)
+                            .max(1) as usize
+                    } else {
+                        80
+                    };
+                    let changed_line =
+                        scene_state::byte_to_line_col(doc, s.cursor_pos, cpl).0;
                     scene.update_document_incremental(
                         &scene_cfg,
                         doc,
@@ -2194,8 +2151,8 @@ pub extern "C" fn _start() -> ! {
                 // Clock text is updated only by update_document_content
                 // (timer-driven) to prevent data buffer leak.
                 let s = state();
-                let content_y = TITLE_BAR_H + SHADOW_DEPTH;
-                let sel_content_h = fb_height.saturating_sub(content_y);
+                let sel_text_h =
+                    scene_cfg.page_height.saturating_sub(2 * scene_cfg.text_inset_x);
                 let scroll_pt = round_f32(s.scroll_offset);
 
                 scene.update_selection(
@@ -2204,7 +2161,7 @@ pub extern "C" fn _start() -> ! {
                     s.sel_start as u32,
                     s.sel_end as u32,
                     doc_content(),
-                    sel_content_h,
+                    sel_text_h,
                     scroll_pt,
                     s.cursor_opacity,
                 );
@@ -2214,9 +2171,11 @@ pub extern "C" fn _start() -> ! {
                 // that doesn't trigger scroll change).
                 // When timer_fired, also updates clock in-place.
                 let s = state();
-                let doc_width = fb_width.saturating_sub(2 * TEXT_INSET_X);
+                let dw = scene_cfg
+                    .page_width
+                    .saturating_sub(2 * scene_cfg.text_inset_x);
                 let chars_per_line = if s.char_w_fx > 0 {
-                    ((doc_width as i64 * 65536) / s.char_w_fx as i64).max(1) as u32
+                    ((dw as i64 * 65536) / s.char_w_fx as i64).max(1) as u32
                 } else {
                     80
                 };
@@ -2234,11 +2193,15 @@ pub extern "C" fn _start() -> ! {
                 scene.update_clock(&scene_cfg, &time_buf);
             }
 
-            // Apply post-build opacity adjustments (root fade for
-            // document switch, selection fade-in for selection changes).
+            // Apply post-build opacity (selection fade-in).
             {
                 let s = state();
-                scene.apply_opacity(s.root_opacity, s.selection_opacity);
+                scene.apply_opacity(255, s.selection_opacity);
+            }
+
+            // Apply slide offset if it changed this frame.
+            if slide_changed {
+                scene.apply_slide(state().slide_offset);
             }
 
             // Apply pointer cursor position and opacity.
