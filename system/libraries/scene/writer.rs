@@ -10,6 +10,38 @@ use crate::{
 
 const NODE_SIZE: usize = core::mem::size_of::<Node>();
 
+// ── Sibling chain iterator ──────────────────────────────────────────
+
+/// Iterator over the sibling chain starting from a given node.
+/// Yields `NodeId`s until `NULL` is reached or `stop_before` is encountered.
+/// Use via `SceneWriter::children_until()` or `SceneWriter::siblings()`.
+pub struct ChildIter<'a> {
+    buf: &'a [u8],
+    current: NodeId,
+    stop_before: NodeId,
+}
+
+impl<'a> Iterator for ChildIter<'a> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<NodeId> {
+        if self.current == NULL || self.current == self.stop_before {
+            return None;
+        }
+        let id = self.current;
+        // Read next_sibling from the node at `id`.
+        // SAFETY: the buffer and node layout are the same as SceneWriter::node().
+        let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
+        if offset + NODE_SIZE > self.buf.len() {
+            self.current = NULL;
+            return None; // Bounds safety
+        }
+        let node = unsafe { &*(self.buf.as_ptr().add(offset) as *const Node) };
+        self.current = node.next_sibling;
+        Some(id)
+    }
+}
+
 /// Builds and mutates a scene graph in a flat byte buffer conforming
 /// to the shared memory layout (Header + Node array + Data buffer).
 ///
@@ -360,5 +392,22 @@ impl<'a> SceneWriter<'a> {
         self.buf[start..end].copy_from_slice(bytes);
 
         true
+    }
+
+    /// Iterate over the sibling chain starting from `start`, stopping before
+    /// `stop_before` (or `NULL`). Does not include `stop_before` itself.
+    ///
+    /// Example: `for node_id in w.children_until(first_child, N_CURSOR) { ... }`
+    pub fn children_until(&self, start: NodeId, stop_before: NodeId) -> ChildIter<'_> {
+        ChildIter {
+            buf: self.buf,
+            current: start,
+            stop_before,
+        }
+    }
+
+    /// Iterate all siblings from `start` until `NULL`.
+    pub fn siblings(&self, start: NodeId) -> ChildIter<'_> {
+        self.children_until(start, NULL)
     }
 }

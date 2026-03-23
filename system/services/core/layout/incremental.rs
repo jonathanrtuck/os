@@ -11,9 +11,78 @@ use scene::{fnv1a, Color, Content, NodeFlags, NULL};
 
 use super::{
     allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width, layout_mono_lines,
-    line_bytes_for_run, round_f32, shape_text, update_clock_inline, SceneConfig, N_CURSOR,
-    N_DOC_TEXT, WELL_KNOWN_COUNT,
+    line_bytes_for_run, round_f32, shape_text, update_clock_inline, LayoutRun, SceneConfig,
+    N_CURSOR, N_DOC_TEXT, WELL_KNOWN_COUNT,
 };
+
+// ── Soft-wrap stability check ───────────────────────────────────────
+
+/// Check whether the soft-wrap layout is stable for an incremental update.
+///
+/// Compares the current visible line count and per-line glyph counts against
+/// the scene graph's sibling chain. Returns `false` if:
+/// - The number of visible lines changed (wrap added/removed a line)
+/// - Any non-changed line's glyph count differs (wrap boundary shifted)
+///
+/// When this returns `false`, the caller should fall back to compaction
+/// via `build_document_content`.
+fn is_soft_wrap_stable(
+    w: &scene::SceneWriter<'_>,
+    all_runs: &[LayoutRun],
+    changed_line: usize,
+    scroll_pt: i32,
+    content_h: i32,
+    line_height: u32,
+) -> bool {
+    // Count visible runs.
+    let visible_run_count = all_runs
+        .iter()
+        .filter(|r| r.y + line_height as i32 > scroll_pt && r.y < scroll_pt + content_h)
+        .count();
+
+    // Count line nodes in sibling chain (using the iterator).
+    let first = w.node(N_DOC_TEXT).first_child;
+    let chain_line_count = w.children_until(first, N_CURSOR).count();
+
+    if visible_run_count != chain_line_count {
+        return false;
+    }
+
+    // Check each non-changed visible line's glyph count.
+    let mut check_node = w.node(N_DOC_TEXT).first_child;
+    for (i, run) in all_runs.iter().enumerate() {
+        let ry = run.y;
+        if ry + line_height as i32 <= scroll_pt || ry >= scroll_pt + content_h {
+            continue; // Not visible, skip.
+        }
+        if check_node == scene::NULL || check_node == N_CURSOR {
+            break;
+        }
+        if i != changed_line {
+            if let Content::Glyphs { glyph_count, .. } = w.node(check_node).content {
+                if glyph_count != run.glyph_count {
+                    return false; // Wrap boundary shifted, fall back.
+                }
+            }
+        }
+        check_node = w.node(check_node).next_sibling;
+    }
+
+    true
+}
+
+// ── Shared helper: find max node index in sibling chain ─────────────
+
+/// Walk the sibling chain under N_DOC_TEXT (stopping at N_CURSOR) and
+/// return the highest node index. Bump-allocated nodes may have indices
+/// above WELL_KNOWN_COUNT + line_count (from prior insert_line calls).
+fn max_line_node_idx(w: &scene::SceneWriter<'_>) -> u16 {
+    let first = w.node(N_DOC_TEXT).first_child;
+    w.children_until(first, N_CURSOR)
+        .filter(|&child| child >= WELL_KNOWN_COUNT)
+        .max()
+        .unwrap_or(WELL_KNOWN_COUNT.saturating_sub(1))
+}
 
 // ── Incremental scene update ─────────────────────────────────────────
 
@@ -57,50 +126,16 @@ pub fn update_single_line(
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
     let scroll_pt = round_f32(scroll_y);
 
-    // Count visible runs and compare against the sibling chain length.
-    // If they differ, a soft-wrap change occurred — fall back to compaction
-    // to avoid stale line nodes rendering old glyphs.
-    let visible_run_count = all_runs
-        .iter()
-        .filter(|r| r.y + cfg.line_height as i32 > scroll_pt && r.y < scroll_pt + content_h)
-        .count();
-    let mut chain_line_count: usize = 0;
-    {
-        let mut c = w.node(N_DOC_TEXT).first_child;
-        while c != scene::NULL && c != N_CURSOR {
-            chain_line_count += 1;
-            c = w.node(c).next_sibling;
-        }
-    }
-    if visible_run_count != chain_line_count {
-        return false; // Visual line count changed (soft-wrap), fall back.
-    }
-
-    // Check if any NON-changed line's content shifted (wrap boundary moved).
-    // When a character is inserted/deleted on a soft-wrapped line, the wrap
-    // point may move — pulling characters from the next line or pushing them
-    // down. The changed line's glyph count is expected to differ, but if any
-    // OTHER visible line's glyph count differs from the scene node's current
-    // value, the wrap boundary moved and we need a full rebuild.
-    {
-        let mut check_node = w.node(N_DOC_TEXT).first_child;
-        for (i, run) in all_runs.iter().enumerate() {
-            let ry = run.y;
-            if ry + cfg.line_height as i32 <= scroll_pt || ry >= scroll_pt + content_h {
-                continue; // Not visible, skip.
-            }
-            if check_node == scene::NULL || check_node == N_CURSOR {
-                break;
-            }
-            if i != changed_line {
-                if let Content::Glyphs { glyph_count, .. } = w.node(check_node).content {
-                    if glyph_count != run.glyph_count {
-                        return false; // Wrap boundary shifted, fall back.
-                    }
-                }
-            }
-            check_node = w.node(check_node).next_sibling;
-        }
+    // Check soft-wrap stability: line count match + per-line glyph counts.
+    if !is_soft_wrap_stable(
+        w,
+        &all_runs,
+        changed_line,
+        scroll_pt,
+        content_h,
+        cfg.line_height,
+    ) {
+        return false;
     }
 
     // Find the changed line's run index in the full list.
@@ -134,16 +169,11 @@ pub fn update_single_line(
         // Walk sibling chain from N_DOC_TEXT.first_child to find the node
         // at visible_index. Stop at N_CURSOR (it's in the chain after line
         // nodes) or NULL.
-        let mut cur = w.node(N_DOC_TEXT).first_child;
-        let mut idx: usize = 0;
-        while cur != scene::NULL && cur != N_CURSOR && idx < visible_index {
-            cur = w.node(cur).next_sibling;
-            idx += 1;
-        }
-
-        if cur == scene::NULL || cur == N_CURSOR {
-            return false; // Node not found, fall back to compaction.
-        }
+        let first = w.node(N_DOC_TEXT).first_child;
+        let cur = match w.children_until(first, N_CURSOR).nth(visible_index) {
+            Some(id) => id,
+            None => return false, // Node not found, fall back to compaction.
+        };
 
         // Shape the changed line's text.
         let line_text = line_bytes_for_run(doc_text, changed_run);
@@ -195,18 +225,7 @@ pub fn update_single_line(
     w.mark_dirty(N_CURSOR);
 
     // Truncate selection rects and rebuild from current selection state.
-    // Walk the chain to find the highest node index — bump-allocated nodes
-    // may have indices above WELL_KNOWN_COUNT + line_count (from prior
-    // insert_line calls that created gaps). Must use max_node_idx to avoid
-    // truncating live nodes at higher indices.
-    let mut max_node_idx: u16 = WELL_KNOWN_COUNT.saturating_sub(1);
-    let mut child = w.node(N_DOC_TEXT).first_child;
-    while child != scene::NULL && child != N_CURSOR {
-        if child >= WELL_KNOWN_COUNT && child > max_node_idx {
-            max_node_idx = child;
-        }
-        child = w.node(child).next_sibling;
-    }
+    let max_node_idx = max_line_node_idx(w);
     w.set_node_count(max_node_idx + 1);
     w.node_mut(N_CURSOR).next_sibling = scene::NULL;
 
@@ -246,6 +265,9 @@ pub fn update_single_line(
 /// Walks the sibling chain, sets y = `start_y + index * line_height`.
 /// Marks each repositioned node dirty (property-only — content_hash unchanged).
 /// Stops at N_CURSOR or NULL.
+///
+/// Note: this function mutates nodes during iteration, so it uses a manual
+/// loop rather than `ChildIter` (which borrows the buffer immutably).
 fn update_line_positions(
     w: &mut scene::SceneWriter<'_>,
     start_node: u16,
@@ -306,17 +328,8 @@ fn finish_line_update(
     }
     w.mark_dirty(N_CURSOR);
 
-    // Truncate selection rects. Walk the chain to find the highest node
-    // index — newly allocated nodes may have indices above the old
-    // WELL_KNOWN_COUNT + line_count boundary.
-    let mut max_node_idx: u16 = WELL_KNOWN_COUNT.saturating_sub(1);
-    let mut child = w.node(N_DOC_TEXT).first_child;
-    while child != scene::NULL && child != N_CURSOR {
-        if child >= WELL_KNOWN_COUNT && child > max_node_idx {
-            max_node_idx = child;
-        }
-        child = w.node(child).next_sibling;
-    }
+    // Truncate selection rects using the max node index in the chain.
+    let max_node_idx = max_line_node_idx(w);
     // node_count must be at least max_node_idx + 1 to include all live nodes.
     w.set_node_count(max_node_idx + 1);
     w.node_mut(N_CURSOR).next_sibling = scene::NULL;
@@ -388,14 +401,8 @@ pub fn insert_line(
         .count();
 
     // Count current line nodes in the sibling chain.
-    let mut chain_len: usize = 0;
-    {
-        let mut c = w.node(N_DOC_TEXT).first_child;
-        while c != scene::NULL && c != N_CURSOR {
-            chain_len += 1;
-            c = w.node(c).next_sibling;
-        }
-    }
+    let first = w.node(N_DOC_TEXT).first_child;
+    let chain_len = w.children_until(first, N_CURSOR).count();
 
     // After insert, visible count should be chain_len + 1.
     // If not, something unexpected happened (soft wrap change). Fall back.
@@ -446,15 +453,9 @@ pub fn insert_line(
         .iter()
         .position(|&full_idx| full_idx == modified_full_idx);
 
-    // Walk the sibling chain to find nodes.
-    let mut chain_nodes: Vec<u16> = Vec::new();
-    {
-        let mut c = w.node(N_DOC_TEXT).first_child;
-        while c != scene::NULL && c != N_CURSOR {
-            chain_nodes.push(c);
-            c = w.node(c).next_sibling;
-        }
-    }
+    // Collect sibling chain node IDs.
+    let first = w.node(N_DOC_TEXT).first_child;
+    let chain_nodes: Vec<u16> = w.children_until(first, N_CURSOR).collect();
 
     // Reshape the modified line if it's visible.
     if let Some(mod_vis_idx) = modified_vis_idx {
@@ -605,15 +606,9 @@ pub fn delete_line(
         .filter(|r| r.y + cfg.line_height as i32 > scroll_pt && r.y < scroll_pt + content_h)
         .count();
 
-    // Count current line nodes in the sibling chain.
-    let mut chain_nodes: Vec<u16> = Vec::new();
-    {
-        let mut c = w.node(N_DOC_TEXT).first_child;
-        while c != scene::NULL && c != N_CURSOR {
-            chain_nodes.push(c);
-            c = w.node(c).next_sibling;
-        }
-    }
+    // Collect current line nodes in the sibling chain.
+    let first = w.node(N_DOC_TEXT).first_child;
+    let chain_nodes: Vec<u16> = w.children_until(first, N_CURSOR).collect();
     let chain_len = chain_nodes.len();
 
     // After delete, visible count should be chain_len - 1.

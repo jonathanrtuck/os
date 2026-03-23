@@ -442,12 +442,8 @@ pub fn build_selection_update(
     // Count per-line Glyphs children under N_DOC_TEXT (stop at
     // N_CURSOR). These must be preserved — only selection rects
     // (allocated after cursor) are truncated.
-    let mut line_count: u16 = 0;
-    let mut child = w.node(N_DOC_TEXT).first_child;
-    while child != NULL && child != N_CURSOR {
-        line_count += 1;
-        child = w.node(child).next_sibling;
-    }
+    let first = w.node(N_DOC_TEXT).first_child;
+    let line_count = w.children_until(first, N_CURSOR).count() as u16;
 
     // Truncate selection rects only, keeping well-known + line nodes.
     w.set_node_count(WELL_KNOWN_COUNT + line_count);
