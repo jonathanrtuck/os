@@ -1310,7 +1310,7 @@ pub extern "C" fn _start() -> ! {
                     ..
                 } = node.content
                 {
-                    // Map axis_hash to font_id (0 = mono, 1 = sans).
+                    // Map axis_hash to font_id (scene::FONT_MONO=0, scene::FONT_SANS=1).
                     let font_id = (axis_hash as u16).min((MAX_FONTS - 1) as u16);
                     let raster_font = font_slices[font_id as usize];
                     if raster_font.is_empty() {
@@ -2327,7 +2327,7 @@ fn walk_scene(
             // 16.16 fixed-point to f32 conversion factor.
             let fp16 = 65536.0f32;
 
-            // Map axis_hash to font_id for atlas lookup.
+            // Map axis_hash to font_id for atlas lookup (scene::FONT_MONO=0, scene::FONT_SANS=1).
             let font_id = (axis_hash as u16).min((MAX_FONTS - 1) as u16);
 
             for sg in shaped {

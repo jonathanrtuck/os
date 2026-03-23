@@ -1,0 +1,64 @@
+%% Userspace Component Graph
+%% Two views: runtime communication (data flow) and compile-time dependencies
+
+%% ═══════════════════════════════════════════════════════════════════
+%% VIEW 1: RUNTIME COMMUNICATION (should be pipeline/tree — no cycles)
+%% ═══════════════════════════════════════════════════════════════════
+
+graph LR
+    subgraph Hardware
+        KB[Keyboard]
+        TABLET[Tablet]
+        GPU_HW[GPU / Display]
+        BLK_HW[Block Device]
+        FS_HW[Host FS]
+    end
+
+    subgraph Drivers
+        INPUT[virtio-input]
+        P9[virtio-9p]
+        BLK[virtio-blk]
+    end
+
+    subgraph "OS Layer"
+        INIT[init]
+        CORE[core]
+        EDITOR[text-editor]
+    end
+
+    subgraph "Render Layer (one active)"
+        METAL[metal-render]
+        CPU[cpu-render]
+        VIRGL[virgil-render]
+    end
+
+    %% Hardware → Drivers
+    KB --> INPUT
+    TABLET --> INPUT
+    FS_HW --> P9
+    BLK_HW --> BLK
+
+    %% Boot: init orchestrates
+    INIT -.->|spawns + config| INPUT
+    INIT -.->|spawns + config| P9
+    INIT -.->|spawns + config| BLK
+    INIT -.->|spawns + config| CORE
+    INIT -.->|spawns + config| EDITOR
+    INIT -.->|spawns + config| METAL
+    INIT -.->|spawns + config| CPU
+    INIT -.->|spawns + config| VIRGL
+    INIT -->|fonts via shared mem| CORE
+    INIT -->|fonts via shared mem| METAL
+    INIT -->|fonts via shared mem| CPU
+    INIT -->|fonts via shared mem| VIRGL
+
+    %% Runtime data flow (the pipeline)
+    INPUT -->|KEY_EVENT, POINTER_ABS, POINTER_BUTTON| CORE
+    CORE -->|KEY_EVENT| EDITOR
+    EDITOR -->|WRITE_INSERT, WRITE_DELETE| CORE
+    CORE -->|scene graph: shared mem| METAL
+    CORE -->|scene graph: shared mem| CPU
+    CORE -->|scene graph: shared mem| VIRGL
+    METAL --> GPU_HW
+    CPU --> GPU_HW
+    VIRGL --> GPU_HW

@@ -5,7 +5,7 @@ use crate::{
         Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES,
         NODES_OFFSET, NULL, SCENE_SIZE,
     },
-    primitives::{DataRef, ShapedGlyph},
+    primitives::{Content, DataRef, ShapedGlyph},
 };
 
 const NODE_SIZE: usize = core::mem::size_of::<Node>();
@@ -309,7 +309,27 @@ impl<'a> SceneWriter<'a> {
         (self.header().data_used as usize) + bytes <= DATA_BUFFER_SIZE
     }
     /// Reset the data buffer usage counter (bump allocator rewind).
+    ///
+    /// Also clears `Content` on surviving nodes whose content references
+    /// the data buffer (`Content::Glyphs`, `Content::Path`). Setting them
+    /// to `Content::None` forces callers to explicitly re-push all content
+    /// after a reset. Missed re-pushes render as empty (visible error)
+    /// instead of stale data (silent error). `clip_path` DataRefs are
+    /// similarly cleared.
     pub fn reset_data(&mut self) {
+        let count = self.header().node_count;
+        for id in 0..count {
+            let n = self.node_mut(id);
+            match n.content {
+                Content::Glyphs { .. } | Content::Path { .. } => {
+                    n.content = Content::None;
+                }
+                _ => {}
+            }
+            if !n.clip_path.is_empty() {
+                n.clip_path = DataRef::EMPTY;
+            }
+        }
         self.header_mut().data_used = 0;
     }
     pub fn root(&self) -> NodeId {

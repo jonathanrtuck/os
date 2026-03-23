@@ -206,6 +206,18 @@ pub fn path_close(buf: &mut Vec<u8>) {
     buf.extend_from_slice(&PATH_CLOSE.to_le_bytes());
 }
 
+// ── Font identity constants ─────────────────────────────────────────
+
+/// Font identity constants for `Content::Glyphs`.
+///
+/// Used by core to specify which font was used for shaping, and by
+/// render backends to select the correct glyph cache/atlas. Stored in
+/// the `axis_hash` field of `Content::Glyphs` (the field name is
+/// historical — the wire format is unchanged).
+pub const FONT_MONO: u32 = 0;
+pub const FONT_SANS: u32 = 1;
+pub const FONT_SERIF: u32 = 2;
+
 // ── Content variant ─────────────────────────────────────────────────
 
 /// What a node draws (beyond its container decoration).

@@ -234,14 +234,7 @@ pub fn update_single_line(
 
     // Update clock if requested.
     if let Some(ct) = clock_text {
-        update_clock_inline(
-            w,
-            ct,
-            cfg.sans_font_data,
-            cfg.font_size,
-            cfg.sans_upem,
-            cfg.axes,
-        );
+        update_clock_inline(w, ct, cfg);
     }
 
     true
@@ -351,14 +344,7 @@ fn finish_line_update(
 
     // Update clock if requested.
     if let Some(ct) = clock_text {
-        update_clock_inline(
-            w,
-            ct,
-            cfg.sans_font_data,
-            cfg.font_size,
-            cfg.sans_upem,
-            cfg.axes,
-        );
+        update_clock_inline(w, ct, cfg);
     }
 }
 

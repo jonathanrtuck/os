@@ -294,6 +294,7 @@ fn walk_node(
             axis_hash,
             ..
         } => {
+            // Map axis_hash to font_id (scene::FONT_MONO=0, scene::FONT_SANS=1).
             let font_id = (axis_hash as u16).min(1);
             emit_glyphs(
                 text_batch,

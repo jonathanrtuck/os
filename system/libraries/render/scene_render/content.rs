@@ -50,9 +50,9 @@ pub(super) fn render_content(
             font_size,
             axis_hash,
         } => {
-            // Select the glyph cache based on font identity. axis_hash != 0
-            // means a proportional font (Inter) — use prop_cache. 0 = mono.
-            let cache = if axis_hash != 0 {
+            // Select glyph cache by font identity (scene::FONT_MONO = 0,
+            // scene::FONT_SANS = 1). Non-mono fonts use the prop_cache.
+            let cache = if axis_hash != scene::FONT_MONO {
                 ctx.prop_cache
             } else {
                 ctx.mono_cache

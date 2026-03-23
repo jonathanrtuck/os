@@ -16,6 +16,9 @@ pub use full::{
     build_selection_update,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
+// Re-export font identity constants from the scene library (single source
+// of truth) so submodules can use `super::FONT_SANS`.
+pub(crate) use scene::FONT_SANS;
 use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};
 
 // ── Float math helpers (no_std) ─────────────────────────────────────
@@ -48,11 +51,6 @@ pub const N_POINTER: u16 = 8;
 
 /// Number of well-known nodes (indices 0..8). Dynamic nodes start at 9.
 pub const WELL_KNOWN_COUNT: u16 = 9;
-
-/// Font axis_hash value indicating the sans font (Inter).
-/// Render backends use this to select the correct font for rasterization.
-/// 0 = mono (JetBrains Mono, default), 1 = sans (Inter).
-pub const FONT_SANS: u32 = 1;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -262,6 +260,19 @@ pub fn shape_text(
         .collect()
 }
 
+/// Shape text using the chrome font (Inter/sans). Returns shaped glyphs
+/// ready for `push_shaped_glyphs()`. All chrome text (title bar, clock)
+/// uses this — single source of truth for font selection.
+pub(crate) fn shape_chrome_text(cfg: &SceneConfig, text: &[u8]) -> Vec<ShapedGlyph> {
+    shape_text(
+        cfg.sans_font_data,
+        text,
+        cfg.font_size,
+        cfg.sans_upem,
+        cfg.axes,
+    )
+}
+
 /// Count lines in a text buffer (newlines + 1).
 pub fn count_lines(text: &[u8]) -> usize {
     let mut count: usize = 1;
@@ -371,14 +382,11 @@ pub(crate) fn shape_visible_runs(
 pub(crate) fn update_clock_inline(
     w: &mut scene::SceneWriter<'_>,
     clock_text: &[u8],
-    font_data: &[u8],
-    font_size: u16,
-    upem: u16,
-    axes: &[fonts::rasterize::AxisValue],
+    cfg: &SceneConfig,
 ) {
     let clock_node = w.node(N_CLOCK_TEXT);
     if let Content::Glyphs { color, .. } = clock_node.content {
-        let new_glyphs = shape_text(font_data, clock_text, font_size, upem, axes);
+        let new_glyphs = shape_chrome_text(cfg, clock_text);
         let new_ref = w.push_shaped_glyphs(&new_glyphs);
         let new_count = new_glyphs.len() as u16;
 
@@ -387,7 +395,7 @@ pub(crate) fn update_clock_inline(
             color,
             glyphs: new_ref,
             glyph_count: new_count,
-            font_size,
+            font_size: cfg.font_size,
             axis_hash: FONT_SANS,
         };
         n.content_hash = scene::fnv1a(clock_text);
