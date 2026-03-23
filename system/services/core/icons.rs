@@ -26,8 +26,7 @@ pub const PHOTO: &[&str] = &[
     "M14 14l1 -1c.928 -.893 2.072 -.893 3 0l3 3",
 ];
 
-use alloc::vec::Vec;
-use alloc::vec;
+use alloc::{vec, vec::Vec};
 
 /// Pre-rasterize a stroked Tabler icon into BGRA pixels.
 ///
@@ -35,12 +34,7 @@ use alloc::vec;
 /// given color. `stroke_w` is in viewbox units (Tabler's 24×24 space);
 /// the native default is 2.0 — use smaller values for thinner strokes.
 /// Returns BGRA pixel data (4 bytes/pixel, `size_px * size_px * 4` bytes).
-pub fn rasterize_icon(
-    paths: &[&str],
-    size_px: u32,
-    color: scene::Color,
-    stroke_w: f32,
-) -> Vec<u8> {
+pub fn rasterize_icon(paths: &[&str], size_px: u32, color: scene::Color, stroke_w: f32) -> Vec<u8> {
     // Work in Tabler's 24×24 viewbox space for SVG parsing and stroke
     // expansion. The rasterizer scales from viewbox → pixel coordinates.
     let scale = size_px as f32 / 24.0;

@@ -171,7 +171,7 @@ fn setup_render_pipeline(
     gpu_irq: u32,
     input_devices: &[(u8, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
     font_buf: Option<(u64, u32, u32, u32, u32, u32)>, // (pa, mono_len, sans_len, serif_len, png_off, png_len)
-    rtc_pa: u64,                             // PL031 RTC physical address (0 = not found)
+    rtc_pa: u64,                                      // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
 ) -> (u8, u8) {
     sys::print(b"     setting up ");
@@ -469,12 +469,29 @@ fn setup_render_pipeline(
     } else {
         0u64
     };
+    // Allocate shared pointer state register (input driver → core).
+    // One page, shared with all input devices (write) and core (read-only).
+    let mut input_state_pa: u64 = 0;
+    let input_state_va = sys::dma_alloc(0, &mut input_state_pa).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (input state) failed\n");
+        sys::exit();
+    });
+    // SAFETY: input_state_va is a valid DMA page; zero before sharing.
+    unsafe { core::ptr::write_bytes(input_state_va as *mut u8, 0, 4096) };
+
+    let core_input_state_va =
+        sys::memory_share(core_proc, input_state_pa, 1, true).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (core input state) failed\n");
+            sys::exit();
+        });
+
     // Send core config.
     let core_ch = init_channel(core_channel_idx);
     let core_config = CoreConfig {
         doc_va: core_doc_va as u64,
         scene_va: core_scene_va as u64,
         font_buf_va: core_font_va,
+        input_state_va: core_input_state_va as u64,
         fb_width: logical_w,
         fb_height: logical_h,
         doc_capacity: DOC_BUF_CAPACITY,
@@ -555,6 +572,21 @@ fn setup_render_pipeline(
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
 
         input_ch.send(&msg);
+
+        // Share pointer state register with input driver (read-write).
+        let driver_input_state_va = sys::memory_share(input_proc_handle, input_state_pa, 1, false)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (input state to driver) failed\n");
+                sys::exit();
+            });
+        let state_config = protocol::input::PointerStateConfig {
+            state_va: driver_input_state_va as u64,
+        };
+        // SAFETY: PointerStateConfig fits within 60-byte payload.
+        let state_msg = unsafe {
+            ipc::Message::from_payload(protocol::input::MSG_POINTER_STATE_CONFIG, &state_config)
+        };
+        input_ch.send(&state_msg);
 
         sys::print(b"     input device 0 channel created\n");
     }
@@ -648,6 +680,19 @@ fn setup_render_pipeline(
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
 
         input_ch.send(&msg);
+
+        // Share pointer state register with additional input driver.
+        let drv_state_va = sys::memory_share(input_proc_handle, input_state_pa, 1, false)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (input state to driver) failed\n");
+                sys::exit();
+            });
+        let sc = protocol::input::PointerStateConfig {
+            state_va: drv_state_va as u64,
+        };
+        let sm =
+            unsafe { ipc::Message::from_payload(protocol::input::MSG_POINTER_STATE_CONFIG, &sc) };
+        input_ch.send(&sm);
     }
 
     // -----------------------------------------------------------------------
@@ -750,7 +795,7 @@ pub extern "C" fn _start() -> ! {
     // Saved device state for Phase 2 (display pipeline).
     // Render type: 0 = cpu-render, 1 = virgil-render, 2 = metal-render.
     let mut gpu: Option<(u8, u8, usize, u64, u32, u8)> = None; // (proc, ch, ch_idx, pa, irq, render_type)
-                                                                 // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
+                                                               // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
     let mut input_devices: [(u8, usize, u64, u32); MAX_INPUT_DEVICES] =
         [(0, 0, 0, 0); MAX_INPUT_DEVICES];
     let mut input_count: usize = 0;

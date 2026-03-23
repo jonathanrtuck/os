@@ -54,7 +54,7 @@ use protocol::{
         MSG_WRITE_INSERT,
     },
     input::{
-        KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
+        KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON,
     },
 };
 
@@ -247,6 +247,10 @@ struct CoreState {
     pointer_opacity: u8,
     /// True when the pointer cursor is currently shown (recently moved).
     pointer_visible: bool,
+    /// VA of the shared PointerState register (input driver writes, core reads).
+    input_state_va: usize,
+    /// Last-seen packed pointer_xy value (for change detection).
+    last_pointer_xy: u64,
     rtc_mmio_va: usize,
     scroll_animating: bool,
     scroll_offset: f32,
@@ -309,6 +313,8 @@ impl CoreState {
             pointer_last_event_ms: 0,
             pointer_opacity: 0,
             pointer_visible: false,
+            input_state_va: 0,
+            last_pointer_xy: 0,
             rtc_mmio_va: 0,
             scroll_animating: false,
             scroll_offset: 0.0,
@@ -1270,6 +1276,7 @@ pub extern "C" fn _start() -> ! {
         s.doc_buf = config.doc_va as *mut u8;
         s.doc_capacity = config.doc_capacity as usize;
         s.doc_len = 0;
+        s.input_state_va = config.input_state_va as usize;
     }
     doc_write_header();
 
@@ -1502,12 +1509,11 @@ pub extern "C" fn _start() -> ! {
                 0
             }
         };
-        let scroll_timeout_ns: u64 =
-            if state().scroll_animating || state().slide_animating {
-                16_000_000 // 16ms ~ 60fps
-            } else {
-                u64::MAX
-            };
+        let scroll_timeout_ns: u64 = if state().scroll_animating || state().slide_animating {
+            16_000_000 // 16ms ~ 60fps
+        } else {
+            u64::MAX
+        };
         let blink_timeout_ns: u64 = {
             let s = state();
             if s.timeline.any_active() {
@@ -1561,7 +1567,15 @@ pub extern "C" fn _start() -> ! {
                 // SAFETY: msg.msg_type is MSG_KEY_EVENT; sender (input driver) guarantees
                 // payload is a valid KeyEvent.
                 let key: KeyEvent = unsafe { msg.payload_as() };
-                let action = process_key_event(&key, has_image, &editor_ch, fb_width, page_width, page_height, page_padding);
+                let action = process_key_event(
+                    &key,
+                    has_image,
+                    &editor_ch,
+                    fb_width,
+                    page_width,
+                    page_height,
+                    page_padding,
+                );
 
                 if action.changed {
                     changed = true;
@@ -1586,8 +1600,15 @@ pub extern "C" fn _start() -> ! {
                     MSG_KEY_EVENT => {
                         // SAFETY: same invariant as MSG_KEY_EVENT payload_as above.
                         let key: KeyEvent = unsafe { msg.payload_as() };
-                        let action =
-                            process_key_event(&key, has_image, &editor_ch, fb_width, page_width, page_height, page_padding);
+                        let action = process_key_event(
+                            &key,
+                            has_image,
+                            &editor_ch,
+                            fb_width,
+                            page_width,
+                            page_height,
+                            page_padding,
+                        );
 
                         if action.changed {
                             changed = true;
@@ -1603,25 +1624,6 @@ pub extern "C" fn _start() -> ! {
                         }
                         had_user_input = true;
                     }
-                    MSG_POINTER_ABS => {
-                        // SAFETY: msg.msg_type is MSG_POINTER_ABS; sender guarantees
-                        // payload is a valid PointerAbs.
-                        let ptr: PointerAbs = unsafe { msg.payload_as() };
-                        let s = state();
-                        s.mouse_x = scale_pointer_coord(ptr.x, fb_width);
-                        s.mouse_y = scale_pointer_coord(ptr.y, fb_height);
-
-                        // Show pointer immediately (cancel any pending fade-out).
-                        if let Some(id) = s.pointer_fade_id {
-                            s.timeline.cancel(id);
-                            s.pointer_fade_id = None;
-                        }
-                        s.pointer_visible = true;
-                        s.pointer_opacity = 255;
-                        s.pointer_last_event_ms = now_ms;
-
-                        changed = true;
-                    }
                     MSG_POINTER_BUTTON => {
                         // SAFETY: msg.msg_type is MSG_POINTER_BUTTON; sender guarantees
                         // payload is a valid PointerButton.
@@ -1634,15 +1636,14 @@ pub extern "C" fn _start() -> ! {
                             if click_y >= TITLE_BAR_H && s.active_space == 0 {
                                 // Text origin = page position + padding.
                                 let page_x = (fb_width - page_width) / 2;
-                                let page_y_abs = content_y
-                                    + (content_h.saturating_sub(page_height)) / 2;
+                                let page_y_abs =
+                                    content_y + (content_h.saturating_sub(page_height)) / 2;
                                 let text_origin_x = page_x + page_padding;
                                 let text_origin_y = page_y_abs + page_padding;
                                 let rel_x = click_x.saturating_sub(text_origin_x);
                                 let rel_y = click_y.saturating_sub(text_origin_y);
                                 let adjusted_y = rel_y + round_f32(s.scroll_offset) as u32;
-                                let layout_info =
-                                    content_text_layout(page_width, page_padding);
+                                let layout_info = content_text_layout(page_width, page_padding);
                                 let text = doc_content();
                                 let byte_pos = layout_info.xy_to_byte(text, rel_x, adjusted_y);
 
@@ -1725,6 +1726,45 @@ pub extern "C" fn _start() -> ! {
                     }
                     _ => {}
                 }
+            }
+        }
+
+        // ── Read pointer state register ─────────────────────────────
+        //
+        // The input driver writes pointer position to a shared memory
+        // register (atomic u64). We read it once after draining all event
+        // rings. This replaces MSG_POINTER_ABS — no ring overflow possible.
+        // ── Read pointer state register ─────────────────────────────
+        //
+        // The input driver writes pointer position to a shared memory
+        // register (atomic u64). We read it once after draining all event
+        // rings. This replaces MSG_POINTER_ABS — no ring overflow possible.
+        {
+            let s = state();
+            // SAFETY: input_state_va points to a PointerState page mapped
+            // by init. Atomic load-acquire for cross-core visibility.
+            let packed = unsafe {
+                let atom =
+                    &*(s.input_state_va as *const core::sync::atomic::AtomicU64);
+                atom.load(core::sync::atomic::Ordering::Acquire)
+            };
+            if packed != s.last_pointer_xy && packed != 0 {
+                s.last_pointer_xy = packed;
+                let x = protocol::input::PointerState::unpack_x(packed);
+                let y = protocol::input::PointerState::unpack_y(packed);
+                s.mouse_x = scale_pointer_coord(x, fb_width);
+                s.mouse_y = scale_pointer_coord(y, fb_height);
+
+                // Show pointer immediately (cancel any pending fade-out).
+                if let Some(id) = s.pointer_fade_id {
+                    s.timeline.cancel(id);
+                    s.pointer_fade_id = None;
+                }
+                s.pointer_visible = true;
+                s.pointer_opacity = 255;
+                s.pointer_last_event_ms = now_ms;
+
+                changed = true;
             }
         }
 
@@ -2071,7 +2111,9 @@ pub extern "C" fn _start() -> ! {
                     // at the bump pointer, and updates cursor/selection.
                     let s = state();
                     let cpl = if s.char_w_fx > 0 {
-                        ((scene_cfg.page_width.saturating_sub(2 * scene_cfg.text_inset_x)
+                        ((scene_cfg
+                            .page_width
+                            .saturating_sub(2 * scene_cfg.text_inset_x)
                             as i64
                             * 65536)
                             / s.char_w_fx as i64)
@@ -2079,8 +2121,7 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         80
                     };
-                    let changed_line =
-                        scene_state::byte_to_line_col(doc, s.cursor_pos, cpl).0;
+                    let changed_line = scene_state::byte_to_line_col(doc, s.cursor_pos, cpl).0;
                     scene.update_document_incremental(
                         &scene_cfg,
                         doc,
@@ -2151,8 +2192,9 @@ pub extern "C" fn _start() -> ! {
                 // Clock text is updated only by update_document_content
                 // (timer-driven) to prevent data buffer leak.
                 let s = state();
-                let sel_text_h =
-                    scene_cfg.page_height.saturating_sub(2 * scene_cfg.text_inset_x);
+                let sel_text_h = scene_cfg
+                    .page_height
+                    .saturating_sub(2 * scene_cfg.text_inset_x);
                 let scroll_pt = round_f32(s.scroll_offset);
 
                 scene.update_selection(

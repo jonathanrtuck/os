@@ -10,7 +10,7 @@
 //!   → MSG_POINTER_BUTTON
 //! - EV_ABS (type 3): absolute pointer coordinates from virtio-tablet
 //!   ABS_X (code 0x00) and ABS_Y (code 0x01) in [0, 32767]
-//!   → MSG_POINTER_ABS
+//!   → shared PointerState register (atomic u64, no IPC ring)
 //!
 //! # virtio-input protocol
 //!
@@ -38,8 +38,8 @@
 use protocol::{
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
     input::{
-        KeyEvent, PointerAbs, PointerButton, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT,
-        MOD_SUPER, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
+        KeyEvent, PointerButton, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MOD_SUPER,
+        MSG_KEY_EVENT, MSG_POINTER_BUTTON,
     },
 };
 
@@ -247,11 +247,22 @@ pub extern "C" fn _start() -> ! {
     // SAFETY: same as above — channel SHM region mapped by kernel at page-aligned boundaries.
     let comp_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 0) };
 
+    // Receive pointer state register VA from init (optional — 0 if not present).
+    let pointer_state_va: usize = if init_ch.try_recv(&mut msg)
+        && msg.msg_type == protocol::input::MSG_POINTER_STATE_CONFIG
+    {
+        // SAFETY: msg_type is MSG_POINTER_STATE_CONFIG; payload is PointerStateConfig.
+        let cfg: protocol::input::PointerStateConfig = unsafe { msg.payload_as() };
+        cfg.state_va as usize
+    } else {
+        0
+    };
+
     sys::print(b"  \xE2\x8C\xA8\xEF\xB8\x8F  virtio-input ready\n");
 
     // Track absolute pointer state. EV_ABS events for X and Y arrive as
-    // separate events before an EV_SYN. We accumulate them and send a
-    // single MSG_POINTER_ABS when either axis updates.
+    // separate events before an EV_SYN. We accumulate them and write to
+    // the shared state register (atomic u64, init-allocated).
     let mut pointer_x: u32 = 0;
     let mut pointer_y: u32 = 0;
 
@@ -379,20 +390,17 @@ pub extern "C" fn _start() -> ! {
             repost_count += 1;
         }
 
-        // Send accumulated pointer position after processing all events
-        // in this IRQ batch (avoids sending redundant intermediate positions).
+        // Write accumulated pointer position to shared state register.
+        // Atomic u64 store — no ring, no overflow, always latest.
         if pointer_moved {
-            let ptr_abs = PointerAbs {
-                x: pointer_x,
-                y: pointer_y,
-            };
-            // SAFETY: PointerAbs fits within 60-byte IPC payload.
-            let msg = unsafe { ipc::Message::from_payload(MSG_POINTER_ABS, &ptr_abs) };
-
-            if !comp_ch.send(&msg) {
-                sys::print(b"virtio-input: ring full, event dropped\n");
+            let packed = protocol::input::PointerState::pack(pointer_x, pointer_y);
+            // SAFETY: pointer_state_va points to a shared PointerState page
+            // mapped by init. Atomic store-release for cross-core visibility.
+            unsafe {
+                let atom = &*(pointer_state_va as *const core::sync::atomic::AtomicU64);
+                atom.store(packed, core::sync::atomic::Ordering::Release);
             }
-
+            // Signal core to wake and read the new state.
             let _ = sys::channel_signal(1);
         }
 

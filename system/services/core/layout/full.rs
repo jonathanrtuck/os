@@ -29,12 +29,7 @@ pub const CURSOR_HOTSPOT_OFFSET: i32 = {
 };
 
 /// Push cursor image data and set up N_POINTER as Content::Image.
-fn setup_cursor(
-    w: &mut scene::SceneWriter<'_>,
-    mouse_x: u32,
-    mouse_y: u32,
-    pointer_opacity: u8,
-) {
+fn setup_cursor(w: &mut scene::SceneWriter<'_>, mouse_x: u32, mouse_y: u32, pointer_opacity: u8) {
     let cursor_px = CURSOR_SIZE_PT * 2; // 2× for Retina
     let cursor_pixels = icons::rasterize_cursor(cursor_px);
     let cursor_ref = w.push_data(&cursor_pixels);
@@ -346,8 +341,7 @@ pub fn build_full_scene(
     let img_display_w: u16 = 128;
     let img_display_h: u16 = 128;
     // Position in strip: viewport_width + centered within second space.
-    let img_x =
-        cfg.fb_width as i32 + ((cfg.fb_width as i32 - img_display_w as i32) / 2).max(0);
+    let img_x = cfg.fb_width as i32 + ((cfg.fb_width as i32 - img_display_w as i32) / 2).max(0);
     let img_y = ((content_h_u32 as i32 - img_display_h as i32) / 2).max(0);
     {
         let n = w.node_mut(N_DOC_IMAGE);
@@ -546,8 +540,12 @@ pub fn build_document_content(
     {
         let icon_size_pt = cfg.line_height * 3 / 4;
         let icon_size_px = icon_size_pt * 2;
-        let icon_pixels =
-            icons::rasterize_icon(icons::FILE_TEXT, icon_size_px, dc(cfg.chrome_title_color), 1.5);
+        let icon_pixels = icons::rasterize_icon(
+            icons::FILE_TEXT,
+            icon_size_px,
+            dc(cfg.chrome_title_color),
+            1.5,
+        );
         let icon_data_ref = w.push_data(&icon_pixels);
         let icon_hash = fnv1a(&icon_pixels);
         let n = w.node_mut(N_TITLE_ICON);

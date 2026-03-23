@@ -17,7 +17,7 @@ The IPC channel between virtio-input and core overflows under sustained input. T
 Input data has two fundamentally different semantics:
 
 - **Events** (discrete, every one matters): key press, key release, mouse button click. Order and count are significant. A ring buffer is the correct abstraction.
-- **State** (continuous, latest wins): pointer position, tablet pressure, modifier bitfield. Intermediate values between frames are waste. Only the latest matters. A ring buffer is the *wrong* abstraction — it forces the consumer to drain N messages when it only needs the last one, and overflows when N exceeds capacity.
+- **State** (continuous, latest wins): pointer position, tablet pressure, modifier bitfield. Intermediate values between frames are waste. Only the latest matters. A ring buffer is the _wrong_ abstraction — it forces the consumer to drain N messages when it only needs the last one, and overflows when N exceeds capacity.
 
 Every major OS converges on this distinction: macOS coalesces mouse moves in WindowServer. Windows explicitly coalesces WM_MOUSEMOVE between GetMessage() calls. Linux/libinput merges motion events at frame boundaries. Plan 9's /dev/mouse is a current-state file, not an event stream.
 
@@ -38,12 +38,12 @@ Making "event ring + state register" a first-class IPC primitive was considered.
 
 ### Prior art in this system
 
-| Shared memory region | Writer | Reader | Pattern |
-|---|---|---|---|
-| Scene graph | core | render service | State (triple-buffered) |
-| Font data | init (loader) | core | Read-only |
-| IPC channel ring | virtio-input | core | Events |
-| **Input state register** (new) | **virtio-input** | **core** | **State (single slot)** |
+| Shared memory region           | Writer           | Reader         | Pattern                 |
+| ------------------------------ | ---------------- | -------------- | ----------------------- |
+| Scene graph                    | core             | render service | State (triple-buffered) |
+| Font data                      | init (loader)    | core           | Read-only               |
+| IPC channel ring               | virtio-input     | core           | Events                  |
+| **Input state register** (new) | **virtio-input** | **core**       | **State (single slot)** |
 
 ### Implementation plan
 

@@ -153,6 +153,8 @@ pub mod input {
     pub const MSG_KEY_EVENT: u32 = 10;
     pub const MSG_POINTER_ABS: u32 = 11;
     pub const MSG_POINTER_BUTTON: u32 = 12;
+    /// Config message: VA of the shared PointerState register.
+    pub const MSG_POINTER_STATE_CONFIG: u32 = 13;
 
     /// Modifier key bitmask flags, packed into `KeyEvent.modifiers`.
     pub const MOD_SHIFT: u8 = 1 << 0;
@@ -186,9 +188,45 @@ pub mod input {
         pub pressed: u8,
         pub _pad: [u8; 2],
     }
+
+    /// Config message payload: VA of the shared pointer state register.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct PointerStateConfig {
+        pub state_va: u64,
+    }
+
+    /// Shared pointer state register. Lives in init-allocated shared memory.
+    ///
+    /// The input driver atomically writes `pointer_xy` (packed `(x << 32) | y`)
+    /// using a store-release. Core atomically reads it with a load-acquire.
+    /// Single atomic u64 — no torn reads, no generation counter needed.
+    ///
+    /// Coordinates are absolute [0, 32767] from the virtio tablet device.
+    #[repr(C)]
+    pub struct PointerState {
+        /// Packed pointer position: `(x << 32) | y`.
+        /// Accessed via AtomicU64 semantics (store-release / load-acquire).
+        pub pointer_xy: u64,
+    }
+
+    impl PointerState {
+        pub const fn pack(x: u32, y: u32) -> u64 {
+            ((x as u64) << 32) | (y as u64)
+        }
+        pub const fn unpack_x(packed: u64) -> u32 {
+            (packed >> 32) as u32
+        }
+        pub const fn unpack_y(packed: u64) -> u32 {
+            packed as u32
+        }
+    }
+
     const _: () = assert!(core::mem::size_of::<KeyEvent>() <= 60);
     const _: () = assert!(core::mem::size_of::<PointerAbs>() <= 60);
     const _: () = assert!(core::mem::size_of::<PointerButton>() <= 60);
+    const _: () = assert!(core::mem::size_of::<PointerStateConfig>() <= 60);
+    const _: () = assert!(core::mem::size_of::<PointerState>() == 8);
 }
 
 // ── edit: core <-> text editor ──────────────────────────────────────
@@ -260,6 +298,9 @@ pub mod core_config {
         pub doc_va: u64,
         pub scene_va: u64,
         pub font_buf_va: u64,
+        /// VA of the shared PointerState register (input driver → core).
+        /// 0 if no input device is present.
+        pub input_state_va: u64,
         pub fb_width: u32,
         pub fb_height: u32,
         pub doc_capacity: u32,
@@ -268,7 +309,7 @@ pub mod core_config {
         pub serif_font_len: u32,
     }
 
-    // Guard: must fit within the 60-byte IPC payload.
+    // Guard: must fit within the 60-byte IPC payload (56 bytes used).
     const _: () = assert!(core::mem::size_of::<CoreConfig>() <= 60);
 }
 
