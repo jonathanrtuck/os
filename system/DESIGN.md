@@ -52,7 +52,12 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Process model:** Kernel spawns only init. Init embeds all other ELF binaries and spawns everything else. Microkernel pattern (Fuchsia component_manager, seL4 root task). This pattern is foundational; init's implementation is scaffolding.
 
-**IPC:** Kernel creates channels (two shared memory pages per channel + signal). Each page is a SPSC ring buffer of 64-byte messages (one direction). The `ipc` library provides lock-free ring buffer mechanics; the `protocol` library defines message types and payload structs for all 9 protocol boundaries. Configuration uses the same mechanism (first message on the ring). The mechanism (channels, shared memory, wait, ring buffers) is foundational.
+**IPC:** Two mechanisms, matched to data semantics:
+
+- **Event rings** (discrete events where order and count matter): Kernel creates channels (two shared memory pages per channel + signal). Each page is a SPSC ring buffer of 64-byte messages (one direction). The `ipc` library provides lock-free ring buffer mechanics; the `protocol` library defines message types and payload structs for all 9 protocol boundaries. Used for key presses, button clicks, config messages.
+- **State registers** (continuous state where only the latest value matters): Init-allocated shared memory pages with atomic reads/writes. The producer overwrites the latest value (store-release); the consumer reads it once per frame (load-acquire). Zero queue, zero overflow. Used for pointer position (input driver → core). Same init-orchestrated shared memory pattern as the scene graph (core → render).
+
+Notification for both: `channel_signal` syscall wakes the consumer from `sys::wait()`. The signal means "something changed" — the consumer checks both event rings and state registers.
 
 **Memory model for userspace:** Stack (16 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` in `sys` library (linked-list first-fit with coalescing, grows via `memory_alloc`). Programs opt in with `extern crate alloc;` to get `Vec`/`String`/`Box`.
 
@@ -165,7 +170,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Single source of truth for all IPC message types and payload structs. Every component that sends or receives IPC messages imports from here.
 
-**Status:** ~364 lines. Defines all 25 message type constants and all shared payload structs across 9 protocol modules, plus `CHANNEL_SHM_BASE` and `channel_shm_va()`.
+**Status:** ~400 lines. Defines message type constants and all shared payload structs across 9 protocol modules, plus shared memory layout types (`PointerState` for the input state register), `CHANNEL_SHM_BASE` and `channel_shm_va()`.
 
 **What's foundational:**
 

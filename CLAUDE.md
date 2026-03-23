@@ -73,12 +73,15 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Current state (2026-03-22):** v0.3 Phase 4 (Visual Polish) IN PROGRESS. 2,104 tests pass.
+**Current state (2026-03-23):** v0.3 Phase 4 (Visual Polish) IN PROGRESS. 2,134 tests pass.
 
 **Phase 4 progress so far:**
 
 - **Blank slate + three-font stack:** Pure black/white palette. JetBrains Mono (mono), Inter (sans), Source Serif 4 (serif) loaded via 9p. On-demand glyph atlas in metal-render (fixes ligature drops).
 - **Font rendering quality sprint (5 changes to match macOS Core Text):** (1) Outline dilation via symmetric miter-join (macOS formula, Pathfinder coefficients × 1.3 boost). (2) Analytic area coverage rasterizer (exact signed-area trapezoids, not quantized). (3) Device-pixel rasterization (atlas at `font_size_pt × scale_factor`). (4) Subpixel glyph positioning (ShapedGlyph widened 8→16 bytes, 16.16 fixed-point advances). (5) Single `char_w_fx` source of truth (eliminates cursor drift from truncation).
+- **Icon pipeline (2026-03-23):** SVG path parser, stroke expansion engine, arc-to-cubic conversion, build-time SVG→path compilation. Tabler file-text/photo icons in title bar. Pointer cursor redesigned to Tabler proportions.
+- **Page surface + document strip (2026-03-23):** White A4-proportioned page centered on dark desk. Dark text/cursor. Horizontal strip of N document spaces with spring-based slide transition (Ctrl+Tab). Both documents always in scene — no teardown/rebuild on switch.
+- **Shared pointer state register (2026-03-23):** Replaced MSG_POINTER_ABS IPC ring messages with atomic u64 in init-allocated shared memory. Eliminates input ring overflow for pointer events. State vs event distinction at the IPC level (see journal).
 - **Deferred:** AA transition softness tuning, italic rendering (in journal).
 - **Next:** Continue visual polish (spacing, colors, effects), or declare v0.3 complete.
 
@@ -130,7 +133,7 @@ Content types: `None`, `Path`, `Glyphs`, `Image`. Three render services: `metal-
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,046 tests).
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,134 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
