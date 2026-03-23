@@ -354,6 +354,10 @@ pub mod compose {
         pub font_size: u16,
         pub screen_dpi: u16,
         pub _pad: u16,
+        /// Pointer state register VA (atomic u64, read-only). Metal-render
+        /// reads cursor position directly from here for cursor plane commands,
+        /// independent of the scene graph.
+        pub pointer_state_va: u64,
     }
 
     // Guard: must fit within the 60-byte IPC payload.

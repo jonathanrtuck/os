@@ -92,7 +92,7 @@ const CURSOR_OFFSET: f32 = 1.0;
 /// `-(size_pt / CURSOR_VIEWBOX)` points to align the hotspot with the mouse.
 pub fn rasterize_cursor(size_px: u32) -> Vec<u8> {
     let scale = size_px as f32 / CURSOR_VIEWBOX;
-    let outline_w = 1.2_f32; // viewbox units
+    let outline_w = 1.8_f32; // viewbox units
 
     let w = size_px;
     let h = size_px;

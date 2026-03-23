@@ -43,6 +43,11 @@ const INIT_HANDLE: u8 = 0;
 /// IPC handle for the core→metal-render scene update channel.
 const SCENE_HANDLE: u8 = 1;
 
+/// Scene graph node index for the pointer cursor. Matches core's N_POINTER.
+/// When the cursor plane is active, this node is skipped during walk_scene
+/// and composited by the host's cursor plane instead.
+const CURSOR_PLANE_NODE: NodeId = 8;
+
 // ── Metal object handles (guest-assigned, must be nonzero) ──────────────
 
 const LIB_SHADERS: u32 = 1;
@@ -802,6 +807,7 @@ pub extern "C" fn _start() -> ! {
     let mut mono_font_len: u32 = 0;
     let mut sans_font_len: u32 = 0;
     let mut scale_factor: f32 = 1.0;
+    let mut pointer_state_va: u64 = 0;
     let mut font_size_cfg: u16 = 18;
     let mut frame_rate_cfg: u32 = 60;
 
@@ -814,6 +820,7 @@ pub extern "C" fn _start() -> ! {
             mono_font_len = config.mono_font_len;
             sans_font_len = config.sans_font_len;
             scale_factor = config.scale_factor;
+            pointer_state_va = config.pointer_state_va;
             font_size_cfg = config.font_size;
             frame_rate_cfg = if config.frame_rate > 0 {
                 config.frame_rate as u32
@@ -1287,18 +1294,64 @@ pub extern "C" fn _start() -> ! {
     let path_buf_ptr = unsafe { alloc::alloc::alloc_zeroed(path_buf_layout) as *mut PathPointsBuf };
     let path_buf = unsafe { &mut *path_buf_ptr };
 
+    // Cursor plane state.
+    let mut cursor_image_hash: u32 = 0;
+    let mut cursor_visible: bool = false;
+    let mut last_pointer_xy: u64 = 0;
+    let mut cursor_x: f32 = 0.0;
+    let mut cursor_y: f32 = 0.0;
+
     loop {
         // Wait for scene update signal from core, with frame-rate cadence.
         let _ = sys::wait(&[SCENE_HANDLE, INIT_HANDLE], period_ns);
         let _ = sys::interrupt_ack(SCENE_HANDLE);
 
+        // Read cursor position from the pointer state register (independent
+        // of the scene graph). This lets us send cursor plane updates even
+        // when the scene hasn't changed — no full render needed for mouse moves.
+        let cursor_moved = if pointer_state_va != 0 {
+            // SAFETY: pointer_state_va is a shared page mapped by init (read-only).
+            let packed = unsafe {
+                let atom =
+                    &*(pointer_state_va as *const core::sync::atomic::AtomicU64);
+                atom.load(core::sync::atomic::Ordering::Acquire)
+            };
+            if packed != last_pointer_xy && packed != 0 {
+                last_pointer_xy = packed;
+                let raw_x = protocol::input::PointerState::unpack_x(packed);
+                let raw_y = protocol::input::PointerState::unpack_y(packed);
+                cursor_x = scale_pointer_coord(raw_x, width) as f32 * scale_factor;
+                cursor_y = scale_pointer_coord(raw_y, height) as f32 * scale_factor;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         // Read scene graph.
         let reader = unsafe { scene::TripleReader::new(scene_va as *mut u8, scene_total_size) };
         let gen = reader.front_generation();
-        if gen == last_gen {
+        let scene_changed = gen != last_gen;
+
+        if !scene_changed && !cursor_moved {
             drop(reader);
-            continue; // No new frame.
+            continue; // Nothing changed.
         }
+
+        if !scene_changed && cursor_moved {
+            // Cursor-only frame: send position update, no scene walk.
+            // The hypervisor blits the retained frame and composites cursor.
+            drop(reader);
+            cmdbuf.clear();
+            cmdbuf.set_cursor_position(cursor_x, cursor_y);
+            cmdbuf.set_cursor_visible(cursor_visible);
+            cmdbuf.present_and_commit();
+            send_render(&device, &mut render_vq, irq_handle, &render_dma, &cmdbuf);
+            continue;
+        }
+
         last_gen = gen;
 
         let nodes = reader.front_nodes();
@@ -1596,6 +1649,45 @@ pub extern "C" fn _start() -> ! {
                 );
                 flush_solid_vertices(&mut cmdbuf, &mut vertex_buf);
                 cmdbuf.end_render_pass();
+            }
+        }
+
+        // ── Cursor plane ────────────────────────────────────────────────
+        // Read cursor image and visibility from the scene graph (these change
+        // infrequently). Position comes from the pointer state register (read
+        // at the top of the loop, independent of scene generation).
+        if (CURSOR_PLANE_NODE as usize) < nodes.len() {
+            let cnode = &nodes[CURSOR_PLANE_NODE as usize];
+            cursor_visible = cnode.flags.contains(NodeFlags::VISIBLE) && cnode.opacity > 0;
+            cmdbuf.set_cursor_visible(cursor_visible);
+
+            if cursor_visible {
+                // Re-upload cursor image only when it changes.
+                if cnode.content_hash != cursor_image_hash {
+                    if let Content::Image {
+                        data,
+                        src_width,
+                        src_height,
+                    } = cnode.content
+                    {
+                        let byte_count = src_width as usize * src_height as usize * 4;
+                        let start = data.offset as usize;
+                        let end = start + byte_count;
+                        if data.length > 0 && end <= data_buf.len() {
+                            cmdbuf.set_cursor_image(
+                                src_width,
+                                src_height,
+                                0, // hotspot_x — baked into position by core
+                                0, // hotspot_y
+                                &data_buf[start..end],
+                            );
+                            cursor_image_hash = cnode.content_hash;
+                        }
+                    }
+                }
+
+                // Position from pointer state register (already scaled).
+                cmdbuf.set_cursor_position(cursor_x, cursor_y);
             }
         }
 
@@ -2000,6 +2092,20 @@ fn draw_path_stencil_cover(
     cmdbuf.set_depth_stencil_state(DSS_NONE);
 }
 
+// ── Pointer coordinate scaling ──────────────────────────────────────────
+
+/// Scale a raw pointer coordinate [0, 32767] to framebuffer pixels.
+/// Same function as core's scale_pointer_coord — must produce identical results.
+fn scale_pointer_coord(coord: u32, max_pixels: u32) -> u32 {
+    let result = (coord as u64 * max_pixels as u64) / 32768;
+    let r = result as u32;
+    if r >= max_pixels && max_pixels > 0 {
+        max_pixels - 1
+    } else {
+        r
+    }
+}
+
 // ── Scene graph tree walk ───────────────────────────────────────────────
 
 /// Clip rectangle in points (pre-scale).
@@ -2118,6 +2224,12 @@ fn walk_scene(
     if node_id == NULL || node_id as usize >= nodes.len() {
         return;
     }
+
+    // Skip cursor node — composited by the host's cursor plane.
+    if node_id == CURSOR_PLANE_NODE {
+        return;
+    }
+
     let node = &nodes[node_id as usize];
 
     if !node.flags.contains(NodeFlags::VISIBLE) {

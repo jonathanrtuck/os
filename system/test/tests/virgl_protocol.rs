@@ -580,6 +580,7 @@ fn compositor_config_includes_font_fields() {
         font_size: 18,
         screen_dpi: 96,
         _pad: 0,
+        pointer_state_va: 0,
     };
     assert_eq!(config.frame_rate, 60);
     assert_eq!(config.font_size, 18);

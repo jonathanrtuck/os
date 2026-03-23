@@ -60,6 +60,12 @@ pub const CMD_END_BLIT_PASS: u16 = 0x0301;
 pub const CMD_COPY_TEXTURE_REGION: u16 = 0x0310;
 pub const CMD_PRESENT_AND_COMMIT: u16 = 0x0F00;
 
+// ── Cursor plane commands ──────────────────────────────────────────────
+
+pub const CMD_SET_CURSOR_IMAGE: u16 = 0x0F10;
+pub const CMD_SET_CURSOR_POSITION: u16 = 0x0F11;
+pub const CMD_SET_CURSOR_VISIBLE: u16 = 0x0F12;
+
 // ── Special handles ─────────────────────────────────────────────────────
 
 /// When used as a texture handle in `begin_render_pass`, the host acquires
@@ -524,5 +530,39 @@ impl CommandBuffer {
     /// Present and commit the frame.
     pub fn present_and_commit(&mut self) {
         self.push_header(CMD_PRESENT_AND_COMMIT, 0);
+    }
+
+    // ── Cursor plane ────────────────────────────────────────────────
+
+    /// Upload cursor image (BGRA, premultiplied alpha) with hotspot offset.
+    pub fn set_cursor_image(
+        &mut self,
+        width: u16,
+        height: u16,
+        hotspot_x: i16,
+        hotspot_y: i16,
+        bgra_pixels: &[u8],
+    ) {
+        let payload_size = 8 + bgra_pixels.len() as u32;
+        self.push_header(CMD_SET_CURSOR_IMAGE, payload_size);
+        self.push_u16(width);
+        self.push_u16(height);
+        // Hotspot as i16, written as two bytes in little-endian.
+        self.data.extend_from_slice(&hotspot_x.to_le_bytes());
+        self.data.extend_from_slice(&hotspot_y.to_le_bytes());
+        self.data.extend_from_slice(bgra_pixels);
+    }
+
+    /// Update cursor position in framebuffer pixels (the click point).
+    pub fn set_cursor_position(&mut self, x: f32, y: f32) {
+        self.push_header(CMD_SET_CURSOR_POSITION, 8);
+        self.data.extend_from_slice(&x.to_le_bytes());
+        self.data.extend_from_slice(&y.to_le_bytes());
+    }
+
+    /// Show or hide the cursor plane.
+    pub fn set_cursor_visible(&mut self, visible: bool) {
+        self.push_header(CMD_SET_CURSOR_VISIBLE, 1);
+        self.push_u8(if visible { 1 } else { 0 });
     }
 }

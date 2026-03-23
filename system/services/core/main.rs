@@ -53,9 +53,7 @@ use protocol::{
         MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE,
         MSG_WRITE_INSERT,
     },
-    input::{
-        KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON,
-    },
+    input::{KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON},
 };
 
 /// Clamp a float to [min, max]. Manual implementation for `no_std`.
@@ -304,7 +302,7 @@ impl CoreState {
             active_space: 0,
             slide_animating: false,
             slide_offset: 0.0,
-            slide_spring: animation::Spring::snappy(0.0),
+            slide_spring: animation::Spring::new(0.0, 600.0, 49.0, 1.0),
             slide_target: 0.0,
             line_h: 20,
             mouse_x: 0,
@@ -1744,8 +1742,7 @@ pub extern "C" fn _start() -> ! {
             // SAFETY: input_state_va points to a PointerState page mapped
             // by init. Atomic load-acquire for cross-core visibility.
             let packed = unsafe {
-                let atom =
-                    &*(s.input_state_va as *const core::sync::atomic::AtomicU64);
+                let atom = &*(s.input_state_va as *const core::sync::atomic::AtomicU64);
                 atom.load(core::sync::atomic::Ordering::Acquire)
             };
             if packed != s.last_pointer_xy && packed != 0 {

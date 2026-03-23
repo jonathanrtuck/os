@@ -103,6 +103,8 @@ Core (shaping, layout, scene building) → Scene Graph (shared memory) → Rende
 
 Content types: `None`, `Path`, `Glyphs`, `Image`. Three render services: `metal-render` (default), `cpu-render`, `virgil-render`.
 
+**IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. See `system/DESIGN.md` §0 for full details.
+
 **Open design questions (from earlier sessions):**
 
 - Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved)
