@@ -4134,6 +4134,7 @@ fn build_path_scene(
     w.node_mut(root).content = scene::Content::Path {
         color,
         fill_rule,
+        stroke_width: 0,
         contours: dref,
     };
     w.set_root(root);
@@ -4764,6 +4765,7 @@ fn all_content_types_render_in_one_scene() {
     w.node_mut(path_node).content = scene::Content::Path {
         color: scene::Color::rgba(0, 255, 0, 255),
         fill_rule: scene::FillRule::Winding,
+        stroke_width: 0,
         contours: path_ref,
     };
     w.add_child(root, path_node);

@@ -178,7 +178,11 @@ fn main() {
             externs.push(("scene", scene_rlib.clone()));
             externs.push(("fonts", fonts_output.rlib.clone()));
         }
-        if name == "cpu-render" || name == "virgil-render" || name == "metal-render" {
+        if name == "cpu-render"
+            || name == "virgil-render"
+            || name == "metal-render"
+            || name == "core"
+        {
             externs.push(("render", render_rlib.clone()));
         }
         if name == "core" {

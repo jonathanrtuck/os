@@ -13,7 +13,7 @@ use alloc::vec::Vec;
 // Re-export all public items from submodules.
 pub use full::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_selection_update,
+    build_selection_update, CURSOR_HOTSPOT_OFFSET,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
 // Re-export font identity constants from the scene library (single source
@@ -49,8 +49,14 @@ pub const N_CURSOR: u16 = 7;
 // a 300 ms EaseOut fade.
 pub const N_POINTER: u16 = 8;
 
-/// Number of well-known nodes (indices 0..8). Dynamic nodes start at 9.
-pub const WELL_KNOWN_COUNT: u16 = 9;
+// ── Title bar icon (9) ──────────────────────────────────────────────
+//
+// Document type icon in the title bar, baseline-aligned with the title
+// text. Content::Path with stroke_width > 0 for outline Tabler icons.
+pub const N_TITLE_ICON: u16 = 9;
+
+/// Number of well-known nodes (indices 0..9). Dynamic nodes start at 10.
+pub const WELL_KNOWN_COUNT: u16 = 10;
 
 // ── Configuration ───────────────────────────────────────────────────
 

@@ -12,9 +12,47 @@ use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
     layout_mono_lines, round_f32, scroll_runs, shape_chrome_text, shape_visible_runs,
     update_clock_inline, SceneConfig, FONT_SANS, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT,
-    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
-use crate::test_gen::generate_test_image;
+use crate::{icons, test_gen::generate_test_image};
+
+// ── Pointer cursor constants ─────────────────────────────────────────
+
+/// Pointer cursor display size in points.
+const CURSOR_SIZE_PT: u32 = 18;
+/// Hotspot offset in points (arrow tip is inset by this amount from node origin).
+pub const CURSOR_HOTSPOT_OFFSET: i32 = {
+    // offset_viewbox * display_pt / viewbox_size, rounded
+    // = 1.0 * 18 / 14 ≈ 1.3 → 1
+    (CURSOR_SIZE_PT as f32 * icons::CURSOR_VIEWBOX.recip()) as i32
+};
+
+/// Push cursor image data and set up N_POINTER as Content::Image.
+fn setup_cursor(
+    w: &mut scene::SceneWriter<'_>,
+    mouse_x: u32,
+    mouse_y: u32,
+    pointer_opacity: u8,
+) {
+    let cursor_px = CURSOR_SIZE_PT * 2; // 2× for Retina
+    let cursor_pixels = icons::rasterize_cursor(cursor_px);
+    let cursor_ref = w.push_data(&cursor_pixels);
+    let cursor_hash = fnv1a(&cursor_pixels);
+    let n = w.node_mut(N_POINTER);
+    n.x = mouse_x as i32 - CURSOR_HOTSPOT_OFFSET;
+    n.y = mouse_y as i32 - CURSOR_HOTSPOT_OFFSET;
+    n.width = CURSOR_SIZE_PT as u16;
+    n.height = CURSOR_SIZE_PT as u16;
+    n.content = Content::Image {
+        data: cursor_ref,
+        src_width: cursor_px as u16,
+        src_height: cursor_px as u16,
+    };
+    n.content_hash = cursor_hash;
+    n.opacity = pointer_opacity;
+    n.flags = NodeFlags::VISIBLE;
+    n.next_sibling = NULL;
+}
 
 // ── Full scene builds (called by SceneState methods) ────────────────
 
@@ -114,6 +152,9 @@ pub fn build_full_scene(
     // Pointer cursor node (top-level, highest z-order).
     let _pointer = w.alloc_node().unwrap(); // 8
 
+    // Title bar icon (document type indicator).
+    let _title_icon = w.alloc_node().unwrap(); // 9
+
     {
         let n = w.node_mut(N_ROOT);
 
@@ -126,7 +167,7 @@ pub fn build_full_scene(
     {
         let n = w.node_mut(N_TITLE_BAR);
 
-        n.first_child = N_TITLE_TEXT;
+        n.first_child = N_TITLE_ICON;
         n.next_sibling = N_SHADOW;
         n.width = cfg.fb_width as u16;
         n.height = cfg.title_bar_h as u16;
@@ -141,11 +182,55 @@ pub fn build_full_scene(
 
     let text_y_offset = (cfg.title_bar_h.saturating_sub(cfg.line_height)) / 2;
 
+    // Title bar icon: Tabler outline icon, pre-rasterized into BGRA pixels
+    // by the CPU scanline rasterizer. Displayed as Content::Image — this
+    // bypasses the metal-render stencil pipeline and produces correct results
+    // on all three render backends.
+    //
+    // Display size: ~60% of line height. Tabler icons have ~4pt of viewbox
+    // padding on each side (in a 24×24 viewbox), so the visible strokes
+    // occupy roughly the central 16×16 area. The display size accounts for
+    // this padding so the visible icon aligns well with the title text.
+    let icon_size_pt = cfg.line_height * 3 / 4;
+    // Rasterize at 2× for Retina quality.
+    let icon_size_px = icon_size_pt * 2;
+    let icon_paths = if image_mode {
+        icons::PHOTO
+    } else {
+        icons::FILE_TEXT
+    };
+    // Stroke width 1.5 (viewbox units) — thinner than Tabler's default
+    // of 2.0 for a lighter, more refined look at small sizes.
+    let icon_pixels =
+        icons::rasterize_icon(icon_paths, icon_size_px, dc(cfg.chrome_title_color), 1.5);
+    let icon_data_ref = w.push_data(&icon_pixels);
+    let icon_hash = fnv1a(&icon_pixels);
+
+    let icon_x: i32 = 10;
+    let icon_y = (cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2;
+    let title_text_x = icon_x + icon_size_pt as i32 + 6;
+
+    {
+        let n = w.node_mut(N_TITLE_ICON);
+        n.next_sibling = N_TITLE_TEXT;
+        n.x = icon_x;
+        n.y = icon_y as i32;
+        n.width = icon_size_pt as u16;
+        n.height = icon_size_pt as u16;
+        n.content = Content::Image {
+            data: icon_data_ref,
+            src_width: icon_size_px as u16,
+            src_height: icon_size_px as u16,
+        };
+        n.content_hash = icon_hash;
+        n.flags = NodeFlags::VISIBLE;
+    }
+
     {
         let n = w.node_mut(N_TITLE_TEXT);
 
         n.next_sibling = N_CLOCK_TEXT;
-        n.x = 12;
+        n.x = title_text_x;
         n.y = text_y_offset as i32;
         n.width = (cfg.fb_width / 2) as u16;
         n.height = cfg.line_height as u16;
@@ -244,27 +329,7 @@ pub fn build_full_scene(
 
         // Link N_CONTENT → N_POINTER so the pointer renders on top.
         w.node_mut(N_CONTENT).next_sibling = N_POINTER;
-
-        // Pointer cursor node.
-        {
-            let arrow_cmds = crate::test_gen::generate_arrow_cursor();
-            let arrow_ref = w.push_path_commands(&arrow_cmds);
-            let arrow_hash = scene::fnv1a(&arrow_cmds);
-            let n = w.node_mut(N_POINTER);
-            n.x = mouse_x as i32;
-            n.y = mouse_y as i32;
-            n.width = 10;
-            n.height = 18;
-            n.content = Content::Path {
-                color: Color::rgb(255, 255, 255),
-                fill_rule: FillRule::Winding,
-                contours: arrow_ref,
-            };
-            n.content_hash = arrow_hash;
-            n.opacity = pointer_opacity;
-            n.flags = NodeFlags::VISIBLE;
-            n.next_sibling = NULL;
-        }
+        setup_cursor(w, mouse_x, mouse_y, pointer_opacity);
 
         w.set_root(N_ROOT);
         return;
@@ -344,27 +409,7 @@ pub fn build_full_scene(
     // Link pointer cursor as a top-level sibling after N_CONTENT so it
     // renders above all document content (highest z-order in root).
     w.node_mut(N_CONTENT).next_sibling = N_POINTER;
-
-    // Pointer cursor node: arrow shape rendered at mouse position.
-    {
-        let arrow_cmds = crate::test_gen::generate_arrow_cursor();
-        let arrow_ref = w.push_path_commands(&arrow_cmds);
-        let arrow_hash = scene::fnv1a(&arrow_cmds);
-        let n = w.node_mut(N_POINTER);
-        n.x = mouse_x as i32;
-        n.y = mouse_y as i32;
-        n.width = 10;
-        n.height = 18;
-        n.content = Content::Path {
-            color: Color::rgb(255, 255, 255),
-            fill_rule: FillRule::Winding,
-            contours: arrow_ref,
-        };
-        n.content_hash = arrow_hash;
-        n.opacity = pointer_opacity;
-        n.flags = NodeFlags::VISIBLE;
-        n.next_sibling = NULL;
-    }
+    setup_cursor(w, mouse_x, mouse_y, pointer_opacity);
 
     w.set_root(N_ROOT);
 }
@@ -523,18 +568,36 @@ pub fn build_document_content(
     // are re-pushed in build_full_scene on the next full rebuild.
     w.reset_data();
 
-    // Re-push pointer cursor path data (invalidated by reset_data).
+    // Re-push pointer cursor image data (invalidated by reset_data).
     {
-        let arrow_cmds = crate::test_gen::generate_arrow_cursor();
-        let arrow_ref = w.push_path_commands(&arrow_cmds);
-        let arrow_hash = fnv1a(&arrow_cmds);
+        let cursor_px = CURSOR_SIZE_PT * 2;
+        let cursor_pixels = icons::rasterize_cursor(cursor_px);
+        let cursor_ref = w.push_data(&cursor_pixels);
+        let cursor_hash = fnv1a(&cursor_pixels);
         let n = w.node_mut(N_POINTER);
-        n.content = Content::Path {
-            color: Color::rgb(255, 255, 255),
-            fill_rule: FillRule::Winding,
-            contours: arrow_ref,
+        n.content = Content::Image {
+            data: cursor_ref,
+            src_width: cursor_px as u16,
+            src_height: cursor_px as u16,
         };
-        n.content_hash = arrow_hash;
+        n.content_hash = cursor_hash;
+    }
+
+    // Re-push title icon pixel data (invalidated by reset_data).
+    {
+        let icon_size_pt = cfg.line_height * 3 / 4;
+        let icon_size_px = icon_size_pt * 2;
+        let icon_pixels =
+            icons::rasterize_icon(icons::FILE_TEXT, icon_size_px, dc(cfg.chrome_title_color), 1.5);
+        let icon_data_ref = w.push_data(&icon_pixels);
+        let icon_hash = fnv1a(&icon_pixels);
+        let n = w.node_mut(N_TITLE_ICON);
+        n.content = Content::Image {
+            data: icon_data_ref,
+            src_width: icon_size_px as u16,
+            src_height: icon_size_px as u16,
+        };
+        n.content_hash = icon_hash;
     }
 
     // Re-push title glyph data (shaped with chrome font).

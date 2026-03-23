@@ -79,6 +79,9 @@ const DSS_STENCIL_TEST: u32 = 32;
 const DSS_CLIP_TEST: u32 = 33;
 /// Even-odd fill: INVERT stencil on each triangle overlap, then test for odd count.
 const DSS_STENCIL_INVERT: u32 = 34;
+/// Two-sided non-zero winding fill: front-face triangles INCR_WRAP, back-face DECR_WRAP.
+/// The stencil accumulates signed winding number; non-zero = inside.
+const DSS_STENCIL_WINDING: u32 = 35;
 
 const SAMPLER_NEAREST: u32 = 41;
 const SAMPLER_LINEAR: u32 = 42;
@@ -90,7 +93,8 @@ const TEX_BLUR_A: u32 = 53;
 const TEX_BLUR_B: u32 = 54;
 const TEX_IMAGE: u32 = 55;
 
-/// Maximum image texture dimension. Images larger than this are skipped.
+/// Maximum image texture dimension. All per-frame images are packed into
+/// sub-rectangles of this single atlas texture via `ImageAtlas`.
 const IMG_TEX_DIM: u32 = 1024;
 
 /// Glyph atlas dimensions.
@@ -990,6 +994,16 @@ pub extern "C" fn _start() -> ! {
         metal::STENCIL_INVERT,
         metal::STENCIL_KEEP,
     );
+    // Two-sided non-zero winding fill: front INCR_WRAP, back DECR_WRAP.
+    // Correct for any polygon (convex or concave) — the standard GPU path fill algorithm.
+    cmdbuf.create_depth_stencil_state_two_sided(
+        DSS_STENCIL_WINDING,
+        metal::CMP_ALWAYS,
+        metal::STENCIL_INCR_WRAP,
+        metal::STENCIL_KEEP,
+        metal::STENCIL_DECR_WRAP,
+        metal::STENCIL_KEEP,
+    );
     send_setup(&device, &mut setup_vq, irq_handle, &setup_dma, &cmdbuf);
 
     // Create samplers.
@@ -1031,7 +1045,12 @@ pub extern "C" fn _start() -> ! {
         1,
         metal::USAGE_SHADER_READ,
     );
-    // Image texture (BGRA8, max 1024x1024, re-uploaded per image).
+    // Image atlas texture (BGRA8, 1024×1024). All Content::Image nodes in a
+    // frame are packed into non-overlapping sub-rectangles via ImageAtlas.
+    // Each image uploads to its own region and draws with matching UVs, so
+    // no image overwrites another even though draws are deferred.
+    // Non-sRGB format: the fragment_textured shader manually linearizes via
+    // srgb_to_linear(). Using BGRA8_SRGB here would cause double gamma decode.
     cmdbuf.create_texture(
         TEX_IMAGE,
         IMG_TEX_DIM as u16,
@@ -1413,6 +1432,7 @@ pub extern "C" fn _start() -> ! {
             w: vw / scale,
             h: vh / scale,
         };
+        let mut image_atlas = ImageAtlas::new();
         walk_scene(
             nodes,
             data_buf,
@@ -1435,6 +1455,7 @@ pub extern "C" fn _start() -> ! {
             irq_handle,
             &setup_dma,
             path_buf,
+            &mut image_atlas,
         );
 
         // Flush remaining solid vertices.
@@ -1635,6 +1656,9 @@ fn pack_copy_params(
 
 const MAX_PATH_POINTS: usize = 512;
 
+/// Maximum number of contour boundaries tracked in a single path.
+const MAX_CONTOURS: usize = 32;
+
 /// Reusable heap buffer for path flattening. Shared across `walk_scene` and
 /// `draw_path_stencil_cover` to keep the recursive `walk_scene` stack frame small
 /// (~300 bytes per level instead of ~4400).
@@ -1738,19 +1762,37 @@ fn flatten_cubic(
     );
 }
 
-fn parse_path_to_points(data: &[u8], out: &mut [(f32, f32); MAX_PATH_POINTS]) -> usize {
+/// Parsed path result: flat point array plus contour boundary indices.
+struct ParsedPath {
+    /// Total number of points.
+    n: usize,
+    /// Start index of each contour in the points array.
+    /// `contour_starts[0..num_contours]` are valid.
+    contour_starts: [usize; MAX_CONTOURS],
+    /// Number of contours.
+    num_contours: usize,
+}
+
+fn parse_path_to_points(data: &[u8], out: &mut [(f32, f32); MAX_PATH_POINTS]) -> ParsedPath {
     let mut n: usize = 0;
     let mut cx: f32 = 0.0;
     let mut cy: f32 = 0.0;
     let mut sx: f32 = 0.0;
     let mut sy: f32 = 0.0;
     let mut pos: usize = 0;
+    let mut contour_starts = [0usize; MAX_CONTOURS];
+    let mut num_contours: usize = 0;
     while pos + 4 <= data.len() {
         let tag = read_u32_le(data, pos);
         match tag {
             scene::PATH_MOVE_TO => {
                 if pos + 12 > data.len() {
                     break;
+                }
+                // Record the start of a new contour.
+                if num_contours < MAX_CONTOURS {
+                    contour_starts[num_contours] = n;
+                    num_contours += 1;
                 }
                 cx = read_f32_le(data, pos + 4);
                 cy = read_f32_le(data, pos + 8);
@@ -1812,7 +1854,16 @@ fn parse_path_to_points(data: &[u8], out: &mut [(f32, f32); MAX_PATH_POINTS]) ->
             }
         }
     }
-    n
+    // If no MoveTo was encountered, treat the whole thing as one contour.
+    if num_contours == 0 && n > 0 {
+        contour_starts[0] = 0;
+        num_contours = 1;
+    }
+    ParsedPath {
+        n,
+        contour_starts,
+        num_contours,
+    }
 }
 
 /// Draw a Content::Path using stencil-then-cover within the current render pass.
@@ -1839,57 +1890,68 @@ fn draw_path_stencil_cover(
         return;
     }
 
-    let n = parse_path_to_points(&data_buf[offset..end], path_buf);
-    if n < 3 {
+    let parsed = parse_path_to_points(&data_buf[offset..end], path_buf);
+    if parsed.n < 3 {
         return;
     }
 
     // Flush any pending solid geometry before changing pipeline.
     flush_solid_vertices(cmdbuf, solid_verts);
 
-    // Compute centroid for fan tessellation.
-    let mut cx: f32 = 0.0;
-    let mut cy: f32 = 0.0;
-    for i in 0..n {
-        cx += path_buf[i].0;
-        cy += path_buf[i].1;
-    }
-    cx /= n as f32;
-    cy /= n as f32;
-
-    // Build fan triangle vertices (position + dummy color with a=1 for stencil).
+    // Build fan triangle vertices from a single arbitrary point (origin = 0,0).
+    // With two-sided stencil (front INCR_WRAP, back DECR_WRAP), any fan origin
+    // produces correct stencil winding for any polygon — convex, concave, or
+    // multi-contour. This is the standard GPU path fill algorithm.
+    let n = parsed.n;
     let mut fan_verts: Vec<u8> = Vec::with_capacity(n * 3 * VERTEX_BYTES);
-    for i in 0..n - 1 {
-        let (ax, ay) = path_buf[i];
-        let (bx, by) = path_buf[i + 1];
-        // NDC conversion: (node_x + point_x) * scale maps to pixels, / vw to NDC.
-        let to_ndc_x = |px: f32| -> f32 { ((node_x + px) * scale / vw) * 2.0 - 1.0 };
-        let to_ndc_y = |py: f32| -> f32 { 1.0 - ((node_y + py) * scale / vh) * 2.0 };
-        // CCW triangle: centroid, p[i+1], p[i] (reversed winding for Metal).
-        for &(px, py) in &[(cx, cy), (bx, by), (ax, ay)] {
-            let ndc_x = to_ndc_x(px);
-            let ndc_y = to_ndc_y(py);
-            // position(f32x2) + texcoord(f32x2) + color(f32x4) = 32 bytes
-            fan_verts.extend_from_slice(&ndc_x.to_le_bytes());
-            fan_verts.extend_from_slice(&ndc_y.to_le_bytes());
-            fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // u
-            fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // v
-            fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // r (unused)
-            fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // g
-            fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // b
-            fan_verts.extend_from_slice(&1.0f32.to_le_bytes()); // a=1 (non-zero for stencil)
+    let to_ndc_x = |px: f32| -> f32 { ((node_x + px) * scale / vw) * 2.0 - 1.0 };
+    let to_ndc_y = |py: f32| -> f32 { 1.0 - ((node_y + py) * scale / vh) * 2.0 };
+
+    // Use (0, 0) as the fan origin — outside the path, which is fine.
+    // Fan each contour separately to avoid spurious triangles spanning
+    // contour boundaries (MoveTo discontinuities).
+    let fan_ox = 0.0f32;
+    let fan_oy = 0.0f32;
+
+    for ci in 0..parsed.num_contours {
+        let start = parsed.contour_starts[ci];
+        let end_idx = if ci + 1 < parsed.num_contours {
+            parsed.contour_starts[ci + 1]
+        } else {
+            parsed.n
+        };
+        if end_idx - start < 2 {
+            continue;
+        }
+        for i in start..end_idx - 1 {
+            let (ax, ay) = path_buf[i];
+            let (bx, by) = path_buf[i + 1];
+            for &(px, py) in &[(fan_ox, fan_oy), (ax, ay), (bx, by)] {
+                let ndc_x = to_ndc_x(px);
+                let ndc_y = to_ndc_y(py);
+                fan_verts.extend_from_slice(&ndc_x.to_le_bytes());
+                fan_verts.extend_from_slice(&ndc_y.to_le_bytes());
+                fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // u
+                fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // v
+                fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // r
+                fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // g
+                fan_verts.extend_from_slice(&0.0f32.to_le_bytes()); // b
+                fan_verts.extend_from_slice(&1.0f32.to_le_bytes()); // a=1
+            }
         }
     }
 
     // Pass 1: Stencil write (fan triangles, no color).
-    // Winding rule: REPLACE sets stencil to ref (nonzero everywhere inside).
+    // Winding rule: two-sided INCR_WRAP/DECR_WRAP — correct for any polygon.
+    //   Front-facing triangles increment, back-facing decrement.
+    //   Stencil != 0 means inside (non-zero winding number).
     // Even-odd rule: INVERT flips stencil bit on each triangle overlap,
     //   so odd overlap count = 1 (inside), even = 0 (outside/hole).
     cmdbuf.set_render_pipeline(PIPE_STENCIL_WRITE);
     match fill_rule {
         scene::FillRule::Winding => {
-            cmdbuf.set_depth_stencil_state(DSS_STENCIL_WRITE);
-            cmdbuf.set_stencil_ref(1);
+            cmdbuf.set_depth_stencil_state(DSS_STENCIL_WINDING);
+            cmdbuf.set_stencil_ref(0);
         }
         scene::FillRule::EvenOdd => {
             cmdbuf.set_depth_stencil_state(DSS_STENCIL_INVERT);
@@ -1976,6 +2038,55 @@ impl ClipRect {
     }
 }
 
+/// Per-frame image atlas packer. Each Content::Image uploads to the next
+/// available sub-rectangle within the shared 1024×1024 TEX_IMAGE texture.
+/// Draws use matching UV coordinates, so no image overwrites another even
+/// though uploads are synchronous and draws are deferred.
+///
+/// Simple row-based packing: images fill left-to-right in the current row.
+/// When an image doesn't fit horizontally, advance to a new row (height =
+/// tallest image in the previous row). Reset at frame start.
+struct ImageAtlas {
+    cursor_x: u32,
+    cursor_y: u32,
+    row_height: u32,
+}
+
+impl ImageAtlas {
+    fn new() -> Self {
+        Self {
+            cursor_x: 0,
+            cursor_y: 0,
+            row_height: 0,
+        }
+    }
+
+    /// Reserve a sub-rectangle for an image. Returns (x, y) atlas offset
+    /// in pixels, or None if the image doesn't fit.
+    fn allocate(&mut self, w: u32, h: u32) -> Option<(u32, u32)> {
+        if w > IMG_TEX_DIM || h > IMG_TEX_DIM {
+            return None;
+        }
+        // Doesn't fit in current row — start a new one.
+        if self.cursor_x + w > IMG_TEX_DIM {
+            self.cursor_y += self.row_height;
+            self.cursor_x = 0;
+            self.row_height = 0;
+        }
+        // Doesn't fit vertically — atlas is full.
+        if self.cursor_y + h > IMG_TEX_DIM {
+            return None;
+        }
+        let x = self.cursor_x;
+        let y = self.cursor_y;
+        self.cursor_x += w;
+        if h > self.row_height {
+            self.row_height = h;
+        }
+        Some((x, y))
+    }
+}
+
 fn walk_scene(
     nodes: &[Node],
     data_buf: &[u8],
@@ -2000,6 +2111,9 @@ fn walk_scene(
     setup_dma: &DmaBuf,
     // Shared heap buffer for path flattening (avoids 4 KiB stack per recursion).
     path_buf: &mut PathPointsBuf,
+    // Per-frame image atlas — packs Content::Image nodes into non-overlapping
+    // sub-rectangles of TEX_IMAGE so uploads don't overwrite each other.
+    image_atlas: &mut ImageAtlas,
 ) {
     if node_id == NULL || node_id as usize >= nodes.len() {
         return;
@@ -2379,26 +2493,61 @@ fn walk_scene(
         Content::Path {
             color,
             fill_rule,
+            stroke_width,
             contours,
         } => {
             if contours.length > 0 {
-                draw_path_stencil_cover(
-                    cmdbuf,
-                    solid_verts,
-                    data_buf,
-                    contours,
-                    color,
-                    fill_rule,
-                    abs_x,
-                    abs_y,
-                    w,
-                    h,
-                    vw,
-                    vh,
-                    scale,
-                    opacity,
-                    path_buf,
-                );
+                if stroke_width > 0 {
+                    // Expand stroked path to filled geometry before rendering.
+                    let offset = contours.offset as usize;
+                    let end = offset + contours.length as usize;
+                    if end <= data_buf.len() {
+                        let src = &data_buf[offset..end];
+                        let sw_pt = stroke_width as f32 / 256.0;
+                        let expanded = scene::stroke::expand_stroke(src, sw_pt);
+                        if !expanded.is_empty() {
+                            let exp_ref = scene::DataRef {
+                                offset: 0,
+                                length: expanded.len() as u32,
+                            };
+                            draw_path_stencil_cover(
+                                cmdbuf,
+                                solid_verts,
+                                &expanded,
+                                exp_ref,
+                                color,
+                                scene::FillRule::Winding,
+                                abs_x,
+                                abs_y,
+                                w,
+                                h,
+                                vw,
+                                vh,
+                                scale,
+                                opacity,
+                                path_buf,
+                            );
+                        }
+                    }
+                } else {
+                    draw_path_stencil_cover(
+                        cmdbuf,
+                        solid_verts,
+                        data_buf,
+                        contours,
+                        color,
+                        fill_rule,
+                        abs_x,
+                        abs_y,
+                        w,
+                        h,
+                        vw,
+                        vh,
+                        scale,
+                        opacity,
+                        path_buf,
+                    );
+                }
             }
         }
         Content::Image {
@@ -2412,52 +2561,58 @@ fn walk_scene(
             if data.length > 0
                 && src_width > 0
                 && src_height > 0
-                && (src_width as u32) <= IMG_TEX_DIM
-                && (src_height as u32) <= IMG_TEX_DIM
                 && src_end <= data_buf.len()
             {
-                // Draw inline to respect active stencil clip state.
-                flush_solid_vertices(cmdbuf, solid_verts);
+                // Pack this image into the per-frame atlas. Each image
+                // gets a unique sub-rectangle so deferred draw commands
+                // sample the correct pixels from the shared TEX_IMAGE.
+                if let Some((atlas_x, atlas_y)) =
+                    image_atlas.allocate(src_width as u32, src_height as u32)
+                {
+                    flush_solid_vertices(cmdbuf, solid_verts);
 
-                // Upload image pixels via setup queue (synchronous).
-                let mut setup_cmdbuf = metal::CommandBuffer::new();
-                setup_cmdbuf.upload_texture(
-                    TEX_IMAGE,
-                    0,
-                    0,
-                    src_width,
-                    src_height,
-                    src_width as u32 * 4,
-                    &data_buf[src_start..src_end],
-                );
-                send_setup(device, setup_vq, irq_handle, setup_dma, &setup_cmdbuf);
+                    // Upload to the image's sub-rectangle in the atlas.
+                    let mut setup_cmdbuf = metal::CommandBuffer::new();
+                    setup_cmdbuf.upload_texture(
+                        TEX_IMAGE,
+                        atlas_x as u16,
+                        atlas_y as u16,
+                        src_width,
+                        src_height,
+                        src_width as u32 * 4,
+                        &data_buf[src_start..src_end],
+                    );
+                    send_setup(device, setup_vq, irq_handle, setup_dma, &setup_cmdbuf);
 
-                // Draw textured quad.
-                let u1 = src_width as f32 / IMG_TEX_DIM as f32;
-                let v1 = src_height as f32 / IMG_TEX_DIM as f32;
-                cmdbuf.set_render_pipeline(PIPE_TEXTURED);
-                cmdbuf.set_fragment_texture(TEX_IMAGE, 0);
-                cmdbuf.set_fragment_sampler(SAMPLER_LINEAR, 0);
-                emit_textured_quad(
-                    solid_verts,
-                    abs_x,
-                    abs_y,
-                    w,
-                    h,
-                    vw,
-                    vh,
-                    scale,
-                    0.0,
-                    0.0,
-                    u1,
-                    v1,
-                    1.0,
-                    1.0,
-                    1.0,
-                    1.0,
-                );
-                flush_solid_vertices(cmdbuf, solid_verts);
-                cmdbuf.set_render_pipeline(PIPE_SOLID);
+                    // UV coordinates into this image's atlas sub-rectangle.
+                    let u0 = atlas_x as f32 / IMG_TEX_DIM as f32;
+                    let v0 = atlas_y as f32 / IMG_TEX_DIM as f32;
+                    let u1 = (atlas_x + src_width as u32) as f32 / IMG_TEX_DIM as f32;
+                    let v1 = (atlas_y + src_height as u32) as f32 / IMG_TEX_DIM as f32;
+                    cmdbuf.set_render_pipeline(PIPE_TEXTURED);
+                    cmdbuf.set_fragment_texture(TEX_IMAGE, 0);
+                    cmdbuf.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                    emit_textured_quad(
+                        solid_verts,
+                        abs_x,
+                        abs_y,
+                        w,
+                        h,
+                        vw,
+                        vh,
+                        scale,
+                        u0,
+                        v0,
+                        u1,
+                        v1,
+                        1.0,
+                        1.0,
+                        1.0,
+                        1.0,
+                    );
+                    flush_solid_vertices(cmdbuf, solid_verts);
+                    cmdbuf.set_render_pipeline(PIPE_SOLID);
+                }
             }
         }
         _ => {}
@@ -2497,7 +2652,8 @@ fn walk_scene(
             let cp_end = cp_off + cp.length as usize;
 
             if cp_end <= data_buf.len() {
-                let n_pts = parse_path_to_points(&data_buf[cp_off..cp_end], path_buf);
+                let cp_parsed = parse_path_to_points(&data_buf[cp_off..cp_end], path_buf);
+                let n_pts = cp_parsed.n;
 
                 if n_pts >= 3 {
                     // Build fan triangles for the clip path.
@@ -2592,6 +2748,7 @@ fn walk_scene(
             irq_handle,
             setup_dma,
             path_buf,
+            image_atlas,
         );
         if child as usize >= nodes.len() {
             break;

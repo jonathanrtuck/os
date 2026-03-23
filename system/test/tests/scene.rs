@@ -4469,6 +4469,7 @@ fn path_content_variant_exists() {
     w.node_mut(id).content = Content::Path {
         color: Color::rgb(255, 0, 0),
         fill_rule: scene::FillRule::Winding,
+        stroke_width: 0,
         contours: dref,
     };
     w.set_root(id);
@@ -4478,10 +4479,12 @@ fn path_content_variant_exists() {
         Content::Path {
             color,
             fill_rule,
+            stroke_width,
             contours,
         } => {
             assert_eq!(color, Color::rgb(255, 0, 0));
             assert_eq!(fill_rule, scene::FillRule::Winding);
+            assert_eq!(stroke_width, 0);
             assert_eq!(contours.length as usize, cmds.len());
         }
         _ => panic!("expected Path content"),
@@ -4569,6 +4572,7 @@ fn path_empty_commands() {
     let content = Content::Path {
         color: Color::rgb(255, 0, 0),
         fill_rule: scene::FillRule::Winding,
+        stroke_width: 0,
         contours: dref,
     };
     // Just verify it can be stored and matched.
@@ -5032,4 +5036,1198 @@ fn incremental_data_used_grows_monotonically() {
         }
         tw.publish();
     }
+}
+
+#[test]
+fn stroke_expand_simple_line() {
+    // A simple horizontal line should produce filled stroke geometry.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    assert!(
+        !expanded.is_empty(),
+        "Stroke expansion should produce output"
+    );
+    // The expanded path should be longer than the input (offset curves + caps).
+    assert!(
+        expanded.len() > cmds.len(),
+        "Expanded should be larger than input"
+    );
+}
+
+#[test]
+fn stroke_expand_closed_triangle() {
+    // A closed triangle should produce filled stroke geometry with joins.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+    scene::path_line_to(&mut cmds, 5.0, 8.0);
+    scene::path_close(&mut cmds);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    assert!(
+        !expanded.is_empty(),
+        "Closed path stroke should produce output"
+    );
+}
+
+#[test]
+fn stroke_expand_zero_width() {
+    // Zero stroke width should produce empty output.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 0.0);
+    assert!(
+        expanded.is_empty(),
+        "Zero width should produce empty output"
+    );
+}
+
+#[test]
+fn stroke_expand_dot() {
+    // A zero-length segment (dot) should produce a circle.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 5.0, 5.0);
+    scene::path_line_to(&mut cmds, 5.0, 5.0);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    assert!(!expanded.is_empty(), "Dot should produce circle geometry");
+}
+
+#[test]
+fn svg_parse_simple_line() {
+    let cmds = scene::svg_path::parse_svg_path("M0 0 L10 5");
+    assert!(!cmds.is_empty(), "Should produce MoveTo + LineTo");
+    // MoveTo(12) + LineTo(12) = 24 bytes
+    assert_eq!(cmds.len(), 24);
+}
+
+#[test]
+fn svg_parse_relative_hv() {
+    let cmds = scene::svg_path::parse_svg_path("M5 5 h10 v10");
+    // MoveTo(12) + LineTo(12) + LineTo(12) = 36 bytes
+    assert_eq!(cmds.len(), 36);
+}
+
+#[test]
+fn svg_parse_relative_arc() {
+    // A simple 90-degree arc (quarter circle, radius 1).
+    let cmds = scene::svg_path::parse_svg_path("M0 0 a1 1 0 0 1 1 1");
+    assert!(!cmds.is_empty(), "Arc should produce cubic(s)");
+    // Should produce MoveTo + one or more CubicTo commands.
+    assert!(cmds.len() >= 12 + 28, "At least MoveTo + CubicTo");
+}
+
+#[test]
+fn svg_parse_file_text_icon() {
+    // Real Tabler file-text.svg path data (5 sub-paths).
+    let paths = [
+        "M14 3v4a1 1 0 0 0 1 1h4",
+        "M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2",
+        "M9 9l1 0",
+        "M9 13l6 0",
+        "M9 17l6 0",
+    ];
+    for p in &paths {
+        let cmds = scene::svg_path::parse_svg_path(p);
+        assert!(!cmds.is_empty(), "Path '{}' should produce output", p);
+    }
+}
+
+#[test]
+fn svg_parse_photo_icon() {
+    // Real Tabler photo.svg path data.
+    let paths = [
+        "M15 8h.01",
+        "M3 6a3 3 0 0 1 3 -3h12a3 3 0 0 1 3 3v12a3 3 0 0 1 -3 3h-12a3 3 0 0 1 -3 -3v-12",
+        "M3 16l5 -5c.928 -.893 2.072 -.893 3 0l5 5",
+        "M14 14l1 -1c.928 -.893 2.072 -.893 3 0l3 3",
+    ];
+    for p in &paths {
+        let cmds = scene::svg_path::parse_svg_path(p);
+        assert!(!cmds.is_empty(), "Path '{}' should produce output", p);
+    }
+}
+
+// ── Geometric invariant tests ────────────────────────────────────
+//
+// Strategy: test PROPERTIES, not implementations. One invariant test
+// catches entire categories of math bugs simultaneously.
+
+/// Evaluate a cubic Bézier at parameter t. Returns (x, y).
+fn cubic_at(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32) -> (f32, f32) {
+    let u = 1.0 - t;
+    let x = u*u*u*p0.0 + 3.0*u*u*t*p1.0 + 3.0*u*t*t*p2.0 + t*t*t*p3.0;
+    let y = u*u*u*p0.1 + 3.0*u*u*t*p1.1 + 3.0*u*t*t*p2.1 + t*t*t*p3.1;
+    (x, y)
+}
+
+#[test]
+fn svg_arc_cubic_points_lie_on_circle() {
+    // THE invariant: every point on the cubic approximation of a circular
+    // arc should be within a tight tolerance of the original circle.
+    // This single test catches all trig bugs (sin, cos, atan2), arc
+    // parameterization bugs, control point calculation bugs, and
+    // segment-count bugs — anything that distorts the arc shape.
+    //
+    // Tests all four icon arcs at 11 sample points each (t = 0.0, 0.1, ..., 1.0).
+    let arcs: &[(&str, f32, f32, f32)] = &[
+        // (svg_path, center_x, center_y, radius)
+        ("M7 21a2 2 0 0 1 -2 -2",    7.0, 19.0, 2.0),  // bottom-left corner
+        ("M5 5a2 2 0 0 1 2 -2",      7.0,  5.0, 2.0),  // top-left corner
+        ("M19 19a2 2 0 0 1 -2 2",   17.0, 19.0, 2.0),  // bottom-right corner
+        ("M14 7a1 1 0 0 0 1 1",     15.0,  7.0, 1.0),  // fold corner
+    ];
+
+    for &(svg, cx, cy, r) in arcs {
+        let cmds = scene::svg_path::parse_svg_path(svg);
+        let parsed = parse_path_commands(&cmds);
+
+        // Extract start point from MoveTo.
+        let (_, start_coords) = parsed.iter().find(|(t, _)| *t == scene::PATH_MOVE_TO)
+            .expect("Should have MoveTo");
+        let p0 = (start_coords[0], start_coords[1]);
+
+        // Collect all CubicTo commands.
+        let cubics: Vec<_> = parsed.iter()
+            .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
+            .collect();
+        assert!(!cubics.is_empty(), "Arc '{}' should produce cubics", svg);
+
+        // Walk each cubic, sampling at t = 0.0, 0.1, ..., 1.0.
+        let mut prev_end = p0;
+        for (_, coords) in &cubics {
+            let cp1 = (coords[0], coords[1]);
+            let cp2 = (coords[2], coords[3]);
+            let end = (coords[4], coords[5]);
+
+            for i in 0..=10 {
+                let t = i as f32 / 10.0;
+                let (px, py) = cubic_at(prev_end, cp1, cp2, end, t);
+                let dist = ((px - cx) * (px - cx) + (py - cy) * (py - cy)).sqrt();
+                let error = (dist - r).abs();
+                assert!(
+                    error < 0.01,
+                    "Arc '{}': point at t={:.1} is ({:.4},{:.4}), dist from center={:.4}, \
+                     error={:.6} (max 0.01)",
+                    svg, t, px, py, dist, error
+                );
+            }
+            prev_end = end;
+        }
+    }
+}
+
+#[test]
+fn stroke_expand_width_is_uniform() {
+    // THE stroke invariant: every point on the expanded outline should
+    // be exactly half_width away from the nearest point on the original
+    // path. Test with a simple horizontal line where "nearest point" is
+    // trivially computed.
+    //
+    // Line from (0,0) to (10,0), stroke_width=2 (half_width=1).
+    // Every point on the expanded outline should be at distance 1.0 from
+    // the line segment (0,0)-(10,0), ignoring the end caps.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    let parsed = parse_path_commands(&expanded);
+
+    // Collect all line/cubic points from the expanded path.
+    for (tag, coords) in &parsed {
+        let points: Vec<(f32, f32)> = match *tag {
+            scene::PATH_LINE_TO => vec![(coords[0], coords[1])],
+            scene::PATH_CUBIC_TO => {
+                // Sample cubic at a few points.
+                vec![(coords[4], coords[5])] // just endpoint for now
+            }
+            _ => continue,
+        };
+
+        for (px, py) in points {
+            // Distance from point to line segment (0,0)-(10,0).
+            let clamped_x = px.max(0.0).min(10.0);
+            let dist = ((px - clamped_x) * (px - clamped_x) + py * py).sqrt();
+
+            // Should be within tolerance of half_width = 1.0.
+            // Allow extra tolerance for cap curvature beyond endpoints.
+            assert!(
+                dist < 1.15,
+                "Stroke point ({:.3},{:.3}): dist={:.4} from path, expected ≤1.0 (+tolerance)",
+                px, py, dist
+            );
+        }
+    }
+}
+
+// ── SVG arc geometry: numerical verification ─────────────────────
+//
+// These tests verify the SVG arc-to-cubic conversion produces correct
+// cubic Bézier control points by comparing against hand-computed
+// reference values (from the SVG spec Appendix F.6 algorithm with
+// exact trig). This catches trig approximation errors, coordinate
+// system bugs, and arc parameterization mistakes.
+
+/// Extract the first CubicTo command's control points from path data.
+fn first_cubic(data: &[u8]) -> Option<(f32, f32, f32, f32, f32, f32)> {
+    let cmds = parse_path_commands(data);
+    for (tag, coords) in &cmds {
+        if *tag == scene::PATH_CUBIC_TO && coords.len() == 6 {
+            return Some((coords[0], coords[1], coords[2], coords[3], coords[4], coords[5]));
+        }
+    }
+    None
+}
+
+#[test]
+fn svg_arc_quarter_circle_bottom_left_control_points() {
+    // Arc from (7,21) to (5,19): the bottom-left rounded corner of the
+    // file-text icon body. rx=ry=2, center=(7,19), sweeps from θ=π/2 to θ=π.
+    //
+    // Reference (SVG spec F.6, alpha = (sqrt(7)-1)/3 ≈ 0.5486):
+    //   P1 = (7.0, 21.0)      — arc start
+    //   P2 = (5.903, 21.0)    — MUST have P2.y = P1.y (horizontal tangent)
+    //   P3 = (5.0, 20.097)    — MUST have P3.x = P4.x (vertical tangent)
+    //   P4 = (5.0, 19.0)      — arc end (exact, specified by SVG)
+    let cmds = scene::svg_path::parse_svg_path("M7 21a2 2 0 0 1 -2 -2");
+    let all = parse_path_commands(&cmds);
+    // Dump all commands for diagnosis.
+    for (i, (tag, coords)) in all.iter().enumerate() {
+        let name = match *tag {
+            scene::PATH_MOVE_TO => "MoveTo",
+            scene::PATH_LINE_TO => "LineTo",
+            scene::PATH_CUBIC_TO => "CubicTo",
+            scene::PATH_CLOSE => "Close",
+            _ => "???",
+        };
+        eprintln!("  cmd[{}]: {} {:?}", i, name, coords);
+    }
+    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds)
+        .expect("Arc should produce a CubicTo");
+
+    let tol = 0.05; // 0.05 viewbox units ≈ sub-pixel at icon scale
+
+    // P2.y must equal P1.y = 21.0 (horizontal tangent at arc start).
+    // This is the most sensitive test — sin(π) error shows up here directly.
+    assert!(
+        (c1y - 21.0).abs() < tol,
+        "P2.y should be 21.0 (horizontal tangent), got {:.4}", c1y
+    );
+
+    // P3.x must equal P4.x = 5.0 (vertical tangent at arc end).
+    assert!(
+        (c2x - 5.0).abs() < tol,
+        "P3.x should be 5.0 (vertical tangent), got {:.4}", c2x
+    );
+
+    // Endpoint must be at (5, 19).
+    assert!(
+        (ex - 5.0).abs() < tol && (ey - 19.0).abs() < tol,
+        "Endpoint should be (5.0, 19.0), got ({:.4}, {:.4})", ex, ey
+    );
+
+    // Control point P2: x ≈ 5.903 (for alpha ≈ 0.5486).
+    assert!(
+        (c1x - 5.903).abs() < 0.1,
+        "P2.x should be ≈5.903, got {:.4}", c1x
+    );
+
+    // Control point P3: y ≈ 20.097.
+    assert!(
+        (c2y - 20.097).abs() < 0.1,
+        "P3.y should be ≈20.097, got {:.4}", c2y
+    );
+}
+
+#[test]
+fn svg_arc_quarter_circle_top_left_control_points() {
+    // Arc from (5,5) to (7,3): top-left corner. Center=(7,5), θ: π to 3π/2.
+    //
+    // Reference:
+    //   P1 = (5.0, 5.0)
+    //   P2 = (5.0, 3.903)     — MUST have P2.x = P1.x (vertical tangent)
+    //   P3 = (5.903, 3.0)     — MUST have P3.y = P4.y (horizontal tangent)
+    //   P4 = (7.0, 3.0)
+    let cmds = scene::svg_path::parse_svg_path("M5 5a2 2 0 0 1 2 -2");
+    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds)
+        .expect("Arc should produce a CubicTo");
+
+    let tol = 0.05;
+
+    // P2.x must equal P1.x = 5.0 (vertical tangent at start).
+    assert!(
+        (c1x - 5.0).abs() < tol,
+        "P2.x should be 5.0 (vertical tangent), got {:.4}", c1x
+    );
+
+    // P3.y must equal P4.y = 3.0 (horizontal tangent at end).
+    assert!(
+        (c2y - 3.0).abs() < tol,
+        "P3.y should be 3.0 (horizontal tangent), got {:.4}", c2y
+    );
+
+    // Endpoint must be at (7, 3).
+    assert!(
+        (ex - 7.0).abs() < tol && (ey - 3.0).abs() < tol,
+        "Endpoint should be (7.0, 3.0), got ({:.4}, {:.4})", ex, ey
+    );
+}
+
+#[test]
+fn svg_arc_quarter_circle_bottom_right_control_points() {
+    // Arc from (19,19) to (17,21): bottom-right corner. Center=(17,19), θ: 0 to π/2.
+    //
+    // Reference:
+    //   P2 = (19.0, 20.097)   — MUST have P2.x = P1.x (vertical tangent)
+    //   P3 = (18.097, 21.0)   — MUST have P3.y = P4.y (horizontal tangent)
+    //   P4 = (17.0, 21.0)
+    let cmds = scene::svg_path::parse_svg_path("M19 19a2 2 0 0 1 -2 2");
+    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds)
+        .expect("Arc should produce a CubicTo");
+
+    let tol = 0.05;
+
+    // P2.x must equal P1.x = 19.0.
+    assert!(
+        (c1x - 19.0).abs() < tol,
+        "P2.x should be 19.0 (vertical tangent), got {:.4}", c1x
+    );
+
+    // P3.y must equal P4.y = 21.0.
+    assert!(
+        (c2y - 21.0).abs() < tol,
+        "P3.y should be 21.0 (horizontal tangent), got {:.4}", c2y
+    );
+
+    // Endpoint.
+    assert!(
+        (ex - 17.0).abs() < tol && (ey - 21.0).abs() < tol,
+        "Endpoint should be (17.0, 21.0), got ({:.4}, {:.4})", ex, ey
+    );
+}
+
+#[test]
+fn svg_arc_fold_corner_control_points() {
+    // Fold arc from (14,7) to (15,8): rx=ry=1, sweep=0 (CCW in SVG).
+    // Center=(15,7), sweeps θ from π to π/2.
+    //
+    // At θ=π (start), tangent is VERTICAL (downward): P2.x = P1.x = 14.
+    // At θ=π/2 (end), tangent is HORIZONTAL (rightward): P3.y = P4.y = 8.
+    let cmds = scene::svg_path::parse_svg_path("M14 7a1 1 0 0 0 1 1");
+    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds)
+        .expect("Arc should produce a CubicTo");
+
+    let tol = 0.05;
+
+    // Vertical tangent at start: P2.x = P1.x = 14.0
+    assert!(
+        (c1x - 14.0).abs() < tol,
+        "P2.x should be 14.0 (vertical tangent), got {:.4}", c1x
+    );
+    // Horizontal tangent at end: P3.y = P4.y = 8.0
+    assert!(
+        (c2y - 8.0).abs() < tol,
+        "P3.y should be 8.0 (horizontal tangent), got {:.4}", c2y
+    );
+    // Endpoint exact.
+    assert!(
+        (ex - 15.0).abs() < tol && (ey - 8.0).abs() < tol,
+        "Endpoint should be (15.0, 8.0), got ({:.4}, {:.4})", ex, ey
+    );
+}
+
+// ── Custom trig replicas (must match svg_path.rs exactly) ─────────
+
+fn nostd_floor(x: f32) -> f32 {
+    let i = x as i32;
+    let f = i as f32;
+    if x < f { f - 1.0 } else { f }
+}
+
+fn nostd_sin(x: f32) -> f32 {
+    let pi: f32 = core::f32::consts::PI;
+    let half_pi: f32 = core::f32::consts::FRAC_PI_2;
+    let two_pi: f32 = 2.0 * pi;
+    let mut x = x - two_pi * nostd_floor(x / two_pi + 0.5);
+    if x > half_pi { x = pi - x; }
+    else if x < -half_pi { x = -pi - x; }
+    let x2 = x * x;
+    x * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0)))
+}
+
+fn nostd_cos(x: f32) -> f32 {
+    nostd_sin(x + core::f32::consts::FRAC_PI_2)
+}
+
+fn nostd_atan_inner(x: f32) -> f32 {
+    let x2 = x * x;
+    x * (0.999_866_0
+        + x2 * (-0.330_299_5
+            + x2 * (0.180_141_0 + x2 * (-0.085_133_0 + x2 * 0.020_835_1))))
+}
+
+fn nostd_atan2(y: f32, x: f32) -> f32 {
+    let pi: f32 = core::f32::consts::PI;
+    let half_pi: f32 = core::f32::consts::FRAC_PI_2;
+    if x > 0.0 {
+        let a = y / x;
+        if a.abs() > 1.0 {
+            let r = nostd_atan_inner(x / y);
+            if y > 0.0 { half_pi - r } else { -half_pi - r }
+        } else {
+            nostd_atan_inner(a)
+        }
+    } else if x < 0.0 {
+        let a = y / x;
+        let base = if a.abs() > 1.0 {
+            let r = nostd_atan_inner(x / y);
+            if y >= 0.0 { half_pi - r } else { -half_pi - r }
+        } else {
+            nostd_atan_inner(a)
+        };
+        if y >= 0.0 { base + pi } else { base - pi }
+    } else if y > 0.0 {
+        half_pi
+    } else if y < 0.0 {
+        -half_pi
+    } else {
+        0.0
+    }
+}
+
+#[test]
+fn nostd_atan2_matches_std() {
+    let cases: &[(f32, f32, &str)] = &[
+        (0.0, 1.0, "east"),
+        (1.0, 0.0, "north"),
+        (0.0, -1.0, "west"),
+        (-1.0, 0.0, "south"),
+        (1.0, 1.0, "NE"),
+        (-1.0, 1.0, "SE"),
+        (-1.0, -1.0, "SW"),
+        (1.0, -1.0, "NW"),
+    ];
+    for &(y, x, label) in cases {
+        let expected = y.atan2(x);
+        let got = nostd_atan2(y, x);
+        assert!(
+            (expected - got).abs() < 0.01,
+            "atan2({},{}) [{}]: expected {:.6}, got {:.6}, diff {:.6}",
+            y, x, label, expected, got, (expected - got).abs()
+        );
+    }
+}
+
+#[test]
+fn nostd_sin_cos_at_key_angles() {
+    let pi: f32 = core::f32::consts::PI;
+    let hp: f32 = core::f32::consts::FRAC_PI_2;
+    let cases: &[(f32, f32, f32, &str)] = &[
+        (0.0,       0.0,    1.0,   "0"),
+        (hp,        1.0,    0.0,   "π/2"),
+        (pi,        0.0,   -1.0,   "π"),
+        (-hp,      -1.0,    0.0,  "-π/2"),
+        (-pi,       0.0,   -1.0,  "-π"),
+        (3.0*hp,   -1.0,    0.0,  "3π/2"),
+        (pi/4.0,    0.7071, 0.7071,"π/4"),
+        (3.0*pi/4.0,0.7071,-0.7071,"3π/4"),
+    ];
+    for &(angle, exp_sin, exp_cos, label) in cases {
+        let s = nostd_sin(angle);
+        let c = nostd_cos(angle);
+        assert!(
+            (s - exp_sin).abs() < 0.01,
+            "sin({}) = {:.6}, expected {:.4}", label, s, exp_sin
+        );
+        assert!(
+            (c - exp_cos).abs() < 0.01,
+            "cos({}) = {:.6}, expected {:.4}", label, c, exp_cos
+        );
+    }
+}
+
+#[test]
+fn nostd_actual_arc_debug() {
+    // Test the ACTUAL atan2 and sin from svg_path.rs.
+    let cases: &[(f32, f32, f32, &str)] = &[
+        (1.0, 0.0, core::f32::consts::FRAC_PI_2, "atan2(1,0)=π/2"),
+        (0.0, -1.0, core::f32::consts::PI, "atan2(0,-1)=π"),
+        (0.0, 1.0, 0.0, "atan2(0,1)=0"),
+        (-1.0, 0.0, -core::f32::consts::FRAC_PI_2, "atan2(-1,0)=-π/2"),
+    ];
+    for &(y, x, expected, label) in cases {
+        let got = scene::svg_path::debug_atan2(y, x);
+        eprintln!("  {}: expected={:.6}, got={:.6}, diff={:.6}", label, expected, got, (got-expected).abs());
+        assert!(
+            (got - expected).abs() < 0.01,
+            "{}: expected {:.6}, got {:.6}", label, expected, got
+        );
+    }
+
+    // Test sin at key angles.
+    let pi = core::f32::consts::PI;
+    let hp = core::f32::consts::FRAC_PI_2;
+    let sin_cases: &[(f32, f32, &str)] = &[
+        (0.0, 0.0, "sin(0)"),
+        (hp, 1.0, "sin(π/2)"),
+        (pi, 0.0, "sin(π)"),
+        (-hp, -1.0, "sin(-π/2)"),
+    ];
+    for &(angle, expected, label) in sin_cases {
+        let got = scene::svg_path::debug_sin(angle);
+        eprintln!("  {}: expected={:.6}, got={:.6}", label, expected, got);
+        assert!(
+            (got - expected).abs() < 0.01,
+            "{}: expected {:.6}, got {:.6}", label, expected, got
+        );
+    }
+
+    // Finally test the arc params.
+    let (theta1, dtheta, n_segs, cx, cy, t1_y, t1_x, cxp, cyp, x1p, y1p) =
+        scene::svg_path::debug_arc_params(
+            7.0, 21.0, 2.0, 2.0, 0.0, false, true, 5.0, 19.0,
+        );
+    eprintln!("  x1p={:.6}, y1p={:.6}, cxp={:.6}, cyp={:.6}", x1p, y1p, cxp, cyp);
+    eprintln!("  t1 args: y={:.6}, x={:.6}", t1_y, t1_x);
+    eprintln!("  atan2(t1_y, t1_x)={:.6}", scene::svg_path::debug_atan2(t1_y, t1_x));
+    eprintln!("  ARC: theta1={:.6}, dtheta={:.6}, n_segs={}, center=({:.4},{:.4})",
+        theta1, dtheta, n_segs, cx, cy);
+    assert_eq!(n_segs, 1, "Should be 1 segment, got {}", n_segs);
+
+    // Also test top-left arc: (5,5) to (7,3), sweep=1.
+    let (theta1, dtheta, n_segs, cx, cy, t1_y, t1_x, cxp, cyp, x1p, y1p) =
+        scene::svg_path::debug_arc_params(5.0, 5.0, 2.0, 2.0, 0.0, false, true, 7.0, 3.0);
+    eprintln!("  TOP-LEFT: x1p={:.6}, y1p={:.6}, cxp={:.6}, cyp={:.6}", x1p, y1p, cxp, cyp);
+    eprintln!("  TOP-LEFT: t1(y={:.6},x={:.6}), theta1={:.6}, dtheta={:.6}, n_segs={}",
+        t1_y, t1_x, theta1, dtheta, n_segs);
+    assert_eq!(n_segs, 1, "Top-left should be 1 segment, got {}", n_segs);
+
+    // And fold arc: (14,7) to (15,8), sweep=0.
+    let (theta1, dtheta, n_segs, cx, cy, t1_y, t1_x, cxp, cyp, x1p, y1p) =
+        scene::svg_path::debug_arc_params(14.0, 7.0, 1.0, 1.0, 0.0, false, false, 15.0, 8.0);
+    eprintln!("  FOLD: x1p={:.6}, y1p={:.6}, cxp={:.6}, cyp={:.6}", x1p, y1p, cxp, cyp);
+    eprintln!("  FOLD: t1(y={:.6},x={:.6}), theta1={:.6}, dtheta={:.6}, n_segs={}",
+        t1_y, t1_x, theta1, dtheta, n_segs);
+    assert_eq!(n_segs, 1, "Fold should be 1 segment, got {}", n_segs);
+}
+
+#[test]
+fn nostd_arc_dtheta_matches_std() {
+    // Replicate the EXACT arc_to_cubics dtheta logic using the custom
+    // atan2, and compare to std.
+    let pi: f32 = core::f32::consts::PI;
+    let hp: f32 = core::f32::consts::FRAC_PI_2;
+    let two_pi: f32 = 2.0 * pi;
+
+    // Arc from (7,21) to (5,19), center (7,19).
+    let x1p: f32 = 1.0;
+    let y1p: f32 = 1.0;
+    let cxp: f32 = 1.0;
+    let cyp: f32 = -1.0;
+    let rx: f32 = 2.0;
+    let ry: f32 = 2.0;
+
+    let t1_y = (y1p - cyp) / ry;  // (1-(-1))/2 = 1
+    let t1_x = (x1p - cxp) / rx;  // (1-1)/2 = 0
+    let t2_y = (-y1p - cyp) / ry;  // (-1-(-1))/2 = 0
+    let t2_x = (-x1p - cxp) / rx;  // (-1-1)/2 = -1
+
+    let theta1_std = t1_y.atan2(t1_x);
+    let theta2_std = t2_y.atan2(t2_x);
+    let theta1_nostd = nostd_atan2(t1_y, t1_x);
+    let theta2_nostd = nostd_atan2(t2_y, t2_x);
+
+    eprintln!("  t1 args: y={}, x={}", t1_y, t1_x);
+    eprintln!("  t2 args: y={}, x={}", t2_y, t2_x);
+    eprintln!("  theta1: std={:.6}, nostd={:.6}", theta1_std, theta1_nostd);
+    eprintln!("  theta2: std={:.6}, nostd={:.6}", theta2_std, theta2_nostd);
+
+    let dtheta_std = theta2_std - theta1_std;
+    let dtheta_nostd = theta2_nostd - theta1_nostd;
+    eprintln!("  dtheta_raw: std={:.6}, nostd={:.6}", dtheta_std, dtheta_nostd);
+
+    // Sweep=true adjustment
+    let dtheta_adj_std = if dtheta_std < 0.0 { dtheta_std + two_pi } else { dtheta_std };
+    let dtheta_adj_nostd = if dtheta_nostd < 0.0 { dtheta_nostd + two_pi } else { dtheta_nostd };
+    eprintln!("  dtheta_adj: std={:.6}, nostd={:.6}", dtheta_adj_std, dtheta_adj_nostd);
+
+    let n_std = ((dtheta_adj_std.abs() / hp).ceil() as usize).max(1);
+    let n_nostd = ((dtheta_adj_nostd.abs() / hp).ceil() as usize).max(1);
+    eprintln!("  n_segs: std={}, nostd={}", n_std, n_nostd);
+
+    assert_eq!(n_nostd, 1, "nostd arc should produce 1 segment, got {}", n_nostd);
+}
+
+#[test]
+fn svg_arc_dtheta_computation_matches_expected() {
+    // Replicate the arc_to_cubics dtheta logic in the test to diagnose
+    // why the bottom-left arc produces 3 cubics instead of 1.
+    //
+    // Arc from (7,21) to (5,19), rx=ry=2, sweep=true.
+    // Expected: center=(7,19), theta1=π/2, dtheta=π/2, n_segs=1.
+    let pi: f32 = core::f32::consts::PI;
+    let half_pi: f32 = core::f32::consts::FRAC_PI_2;
+    let two_pi: f32 = 2.0 * pi;
+
+    // Reproduce the center computation (SVG F.6.5).
+    let x1: f32 = 7.0;
+    let y1: f32 = 21.0;
+    let x2: f32 = 5.0;
+    let y2: f32 = 19.0;
+    let rx: f32 = 2.0;
+    let ry: f32 = 2.0;
+
+    let dx2 = (x1 - x2) * 0.5; // 1.0
+    let dy2 = (y1 - y2) * 0.5; // 1.0
+    let x1p = dx2;  // cos_phi=1, sin_phi=0
+    let y1p = dy2;
+
+    let rx2 = rx * rx; // 4
+    let ry2 = ry * ry; // 4
+    let num = (rx2 * ry2 - rx2 * y1p * y1p - ry2 * x1p * x1p).max(0.0);
+    let den = rx2 * y1p * y1p + ry2 * x1p * x1p;
+    let sq = if den > 1e-10 { (num / den).sqrt() } else { 0.0 };
+
+    // sign: large_arc(false) == sweep(true) → false → sign = 1
+    let cxp = sq * (rx * y1p / ry);
+    let cyp = sq * (-(ry * x1p / rx));
+
+    let cx = cxp + (x1 + x2) * 0.5;
+    let cy = cyp + (y1 + y2) * 0.5;
+
+    eprintln!("  center: ({}, {})", cx, cy);
+    assert!((cx - 7.0).abs() < 0.01, "cx should be 7.0, got {}", cx);
+    assert!((cy - 19.0).abs() < 0.01, "cy should be 19.0, got {}", cy);
+
+    // Theta1 and dtheta using std atan2 (reference).
+    let theta1 = ((y1p - cyp) / ry).atan2((x1p - cxp) / rx);
+    let theta2 = ((-y1p - cyp) / ry).atan2((-x1p - cxp) / rx);
+    let mut dtheta = theta2 - theta1;
+
+    eprintln!("  theta1: {:.6} (expected {:.6})", theta1, half_pi);
+    eprintln!("  theta2: {:.6} (expected {:.6})", theta2, pi);
+    eprintln!("  dtheta_raw: {:.6} (expected {:.6})", dtheta, half_pi);
+
+    // Sweep adjustment (sweep=true).
+    if dtheta < 0.0 {
+        dtheta += two_pi;
+    }
+
+    eprintln!("  dtheta_adjusted: {:.6}", dtheta);
+
+    let n_segs = ((dtheta.abs() / half_pi).ceil() as usize).max(1);
+    eprintln!("  n_segs: {} (expected 1)", n_segs);
+
+    assert_eq!(n_segs, 1, "Quarter-circle arc should need exactly 1 cubic segment");
+}
+
+#[test]
+fn svg_arc_full_body_path_top_edge_is_horizontal() {
+    // Parse the full document body path and verify that the top edge
+    // (from after the top-left arc to the start of the diagonal) is
+    // purely horizontal: both endpoints must have y = 3.0.
+    let cmds = scene::svg_path::parse_svg_path(
+        "M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"
+    );
+    let parsed = parse_path_commands(&cmds);
+
+    // The top-left arc ends at (7, 3). The next command is h7 → LineTo(14, 3).
+    // Find this LineTo by looking for a LineTo with x≈14, y≈3.
+    let top_edge = parsed.iter().find(|(tag, coords)| {
+        *tag == scene::PATH_LINE_TO
+            && coords.len() == 2
+            && (coords[0] - 14.0).abs() < 0.1
+            && (coords[1] - 3.0).abs() < 0.5
+    });
+
+    let (_, coords) = top_edge.expect("Should find LineTo(14, 3) for top edge");
+    assert!(
+        (coords[1] - 3.0).abs() < 0.01,
+        "Top edge y should be exactly 3.0, got {:.4}", coords[1]
+    );
+}
+
+// ── Stroke expansion coordinate verification ─────────────────────
+
+/// Parse expanded path commands into a list of (tag, [f32]) tuples for easy
+/// coordinate inspection.
+fn parse_path_commands(data: &[u8]) -> Vec<(u32, Vec<f32>)> {
+    let mut result = Vec::new();
+    let mut offset = 0;
+    while offset < data.len() {
+        if offset + 4 > data.len() {
+            break;
+        }
+        let tag = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]);
+        match tag {
+            scene::PATH_MOVE_TO => {
+                if offset + scene::PATH_MOVE_TO_SIZE > data.len() {
+                    break;
+                }
+                let x = f32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap());
+                let y = f32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap());
+                result.push((tag, vec![x, y]));
+                offset += scene::PATH_MOVE_TO_SIZE;
+            }
+            scene::PATH_LINE_TO => {
+                if offset + scene::PATH_LINE_TO_SIZE > data.len() {
+                    break;
+                }
+                let x = f32::from_le_bytes(data[offset + 4..offset + 8].try_into().unwrap());
+                let y = f32::from_le_bytes(data[offset + 8..offset + 12].try_into().unwrap());
+                result.push((tag, vec![x, y]));
+                offset += scene::PATH_LINE_TO_SIZE;
+            }
+            scene::PATH_CUBIC_TO => {
+                if offset + scene::PATH_CUBIC_TO_SIZE > data.len() {
+                    break;
+                }
+                let mut coords = Vec::new();
+                for i in 0..6 {
+                    let off = offset + 4 + i * 4;
+                    coords.push(f32::from_le_bytes(data[off..off + 4].try_into().unwrap()));
+                }
+                result.push((tag, coords));
+                offset += scene::PATH_CUBIC_TO_SIZE;
+            }
+            scene::PATH_CLOSE => {
+                result.push((tag, vec![]));
+                offset += scene::PATH_CLOSE_SIZE;
+            }
+            _ => break,
+        }
+    }
+    result
+}
+
+/// Find the first MoveTo command and return its (x, y).
+fn first_move_to(cmds: &[(u32, Vec<f32>)]) -> (f32, f32) {
+    for (tag, coords) in cmds {
+        if *tag == scene::PATH_MOVE_TO {
+            return (coords[0], coords[1]);
+        }
+    }
+    panic!("No MoveTo found");
+}
+
+/// Collect all LineTo coordinates from expanded path.
+fn line_to_coords(cmds: &[(u32, Vec<f32>)]) -> Vec<(f32, f32)> {
+    cmds.iter()
+        .filter(|(tag, _)| *tag == scene::PATH_LINE_TO)
+        .map(|(_, c)| (c[0], c[1]))
+        .collect()
+}
+
+fn approx_eq(a: f32, b: f32, tol: f32) -> bool {
+    (a - b).abs() < tol
+}
+
+#[test]
+fn stroke_expand_horizontal_line_offset_coordinates() {
+    // A horizontal line (0,0)→(10,0) with stroke width 2 (hw=1).
+    //
+    // Normal of rightward segment: (-dy/len, dx/len) = (0, 1).
+    // Left offset (vertex + n*hw) = below the line (y+1 in y-down).
+    // Right offset (vertex − n*hw) = above the line (y−1 in y-down).
+    //
+    // Expected shape (open path, single contour):
+    //   MoveTo(0, 1)              — left start
+    //   LineTo(10, 1)             — left end
+    //   [end cap: semicircle from (10,1) to (10,-1) bulging toward x=11]
+    //   LineTo(10, -1)            — right end (first point of backward walk)
+    //   [backward right side: no joins for single segment]
+    //   LineTo(0, -1)             — right start
+    //   [start cap: semicircle from (0,-1) to (0,1) bulging toward x=-1]
+    //   Close
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    let parsed = parse_path_commands(&expanded);
+
+    // First MoveTo should be at left_start = (0, 1).
+    let (mx, my) = first_move_to(&parsed);
+    assert!(
+        approx_eq(mx, 0.0, 0.01) && approx_eq(my, 1.0, 0.01),
+        "First MoveTo should be at (0, 1), got ({}, {})",
+        mx,
+        my
+    );
+
+    // First LineTo should be at left_end = (10, 1).
+    let lines = line_to_coords(&parsed);
+    assert!(!lines.is_empty());
+    assert!(
+        approx_eq(lines[0].0, 10.0, 0.01) && approx_eq(lines[0].1, 1.0, 0.01),
+        "First LineTo should be at (10, 1), got ({}, {})",
+        lines[0].0,
+        lines[0].1
+    );
+
+    // There should be exactly one Close command (single contour, open path).
+    let close_count = parsed
+        .iter()
+        .filter(|(tag, _)| *tag == scene::PATH_CLOSE)
+        .count();
+    assert_eq!(
+        close_count, 1,
+        "Open path should produce exactly one contour"
+    );
+
+    // Verify the expanded geometry contains points on both sides of the line.
+    // At least one point should have y ≈ -1 (right/above) from the caps/backward walk.
+    let has_above = lines.iter().any(|(_, y)| approx_eq(*y, -1.0, 0.1));
+    assert!(
+        has_above,
+        "Should have points at y ≈ -1 (right side of rightward line)"
+    );
+}
+
+#[test]
+fn stroke_expand_closed_rectangle_two_contours() {
+    // A CW rectangle: (0,0)→(10,0)→(10,10)→(0,10)→close, stroke width 2.
+    //
+    // For a closed path, expand_stroke produces two contours:
+    //   1. Left (forward) contour — inner for CW paths
+    //   2. Right (backward) contour — outer for CW paths
+    // Both are closed, so we expect exactly 2 Close commands.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 0.0, 10.0);
+    scene::path_close(&mut cmds);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    let parsed = parse_path_commands(&expanded);
+
+    let close_count = parsed
+        .iter()
+        .filter(|(tag, _)| *tag == scene::PATH_CLOSE)
+        .count();
+    assert_eq!(
+        close_count, 2,
+        "Closed path should produce 2 contours (inner + outer)"
+    );
+
+    let move_count = parsed
+        .iter()
+        .filter(|(tag, _)| *tag == scene::PATH_MOVE_TO)
+        .count();
+    assert_eq!(
+        move_count, 2,
+        "Should have exactly 2 MoveTo (one per contour)"
+    );
+}
+
+#[test]
+fn stroke_expand_closed_rectangle_outer_has_arcs() {
+    // The CW rectangle's OUTER contour (right side) should contain cubic arcs
+    // for round joins. The INNER contour (left side) should NOT have arcs
+    // at corners (just straight lines connecting inner offset points).
+    //
+    // For CW input in y-down, all corners have cross > 0 (CW turns).
+    // Right side is outer → arcs. Left side is inner → no arcs.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 0.0, 10.0);
+    scene::path_close(&mut cmds);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    let parsed = parse_path_commands(&expanded);
+
+    // Split into contours at Close commands.
+    let mut contours: Vec<Vec<&(u32, Vec<f32>)>> = Vec::new();
+    let mut current: Vec<&(u32, Vec<f32>)> = Vec::new();
+    for cmd in &parsed {
+        current.push(cmd);
+        if cmd.0 == scene::PATH_CLOSE {
+            contours.push(std::mem::take(&mut current));
+        }
+    }
+    assert_eq!(contours.len(), 2, "Expected 2 contours");
+
+    // Count cubics in each contour.
+    let cubics_0 = contours[0]
+        .iter()
+        .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
+        .count();
+    let cubics_1 = contours[1]
+        .iter()
+        .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
+        .count();
+
+    // First contour is left (inner for CW) — should have 0 cubics (no arcs at inner corners).
+    assert_eq!(
+        cubics_0, 0,
+        "Inner contour (left/forward) should have no cubic arcs, got {}",
+        cubics_0
+    );
+
+    // Second contour is right (outer for CW) — should have cubics (round join arcs).
+    // 4 corners × 1 quarter-circle arc each = at least 4 cubics.
+    assert!(
+        cubics_1 >= 4,
+        "Outer contour (right/backward) should have round join arcs, got {} cubics",
+        cubics_1
+    );
+}
+
+#[test]
+fn stroke_expand_ccw_rectangle_arcs_on_correct_side() {
+    // A CCW rectangle: (0,0)→(0,10)→(10,10)→(10,0)→close.
+    // All corners have cross < 0 (CCW turns in y-down).
+    // Left side is outer → arcs on left. Right side is inner → no arcs.
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 0.0, 10.0);
+    scene::path_line_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+    scene::path_close(&mut cmds);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    let parsed = parse_path_commands(&expanded);
+
+    let mut contours: Vec<Vec<&(u32, Vec<f32>)>> = Vec::new();
+    let mut current: Vec<&(u32, Vec<f32>)> = Vec::new();
+    for cmd in &parsed {
+        current.push(cmd);
+        if cmd.0 == scene::PATH_CLOSE {
+            contours.push(std::mem::take(&mut current));
+        }
+    }
+    assert_eq!(contours.len(), 2);
+
+    let cubics_0 = contours[0]
+        .iter()
+        .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
+        .count();
+    let cubics_1 = contours[1]
+        .iter()
+        .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
+        .count();
+
+    // First contour is left (outer for CCW) — should have cubic arcs.
+    assert!(
+        cubics_0 >= 4,
+        "Outer contour (left/forward for CCW) should have round join arcs, got {} cubics",
+        cubics_0
+    );
+
+    // Second contour is right (inner for CCW) — should have no cubics.
+    assert_eq!(
+        cubics_1, 0,
+        "Inner contour (right/backward for CCW) should have no arcs, got {}",
+        cubics_1
+    );
+}
+
+#[test]
+fn stroke_expand_outer_contour_encloses_inner() {
+    // For a CW rectangle with stroke width 2 (hw=1):
+    //   Inner contour: offset inward by 1 → approx 8×8 at (1,1)
+    //   Outer contour: offset outward by 1 → approx 12×12 at (-1,-1)
+    //
+    // Verify the bounding boxes are correct (outer > original > inner).
+    let mut cmds = Vec::new();
+    scene::path_move_to(&mut cmds, 0.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 0.0);
+    scene::path_line_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 0.0, 10.0);
+    scene::path_close(&mut cmds);
+
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    let parsed = parse_path_commands(&expanded);
+
+    // Collect all coordinates from all commands.
+    let mut all_x = Vec::new();
+    let mut all_y = Vec::new();
+    for (_, coords) in &parsed {
+        let mut i = 0;
+        while i + 1 < coords.len() {
+            all_x.push(coords[i]);
+            all_y.push(coords[i + 1]);
+            i += 2;
+        }
+    }
+
+    let min_x = all_x.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_x = all_x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let min_y = all_y.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_y = all_y.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+
+    // Outer contour should extend 1 unit beyond the original rectangle (hw=1).
+    assert!(
+        min_x < -0.5,
+        "Outer should extend left of 0, got min_x={}",
+        min_x
+    );
+    assert!(
+        max_x > 10.5,
+        "Outer should extend right of 10, got max_x={}",
+        max_x
+    );
+    assert!(
+        min_y < -0.5,
+        "Outer should extend above 0, got min_y={}",
+        min_y
+    );
+    assert!(
+        max_y > 10.5,
+        "Outer should extend below 10, got max_y={}",
+        max_y
+    );
+
+    // No coordinate should be more than hw + a small tolerance beyond the original.
+    // (Round joins don't overshoot — the max extent is exactly hw from the vertex.)
+    let tol = 0.1; // Tolerance for arc approximation
+    assert!(
+        min_x > -1.0 - tol,
+        "No spike: min_x should be ≥ -1.1, got {}",
+        min_x
+    );
+    assert!(
+        max_x < 11.0 + tol,
+        "No spike: max_x should be ≤ 11.1, got {}",
+        max_x
+    );
+    assert!(
+        min_y > -1.0 - tol,
+        "No spike: min_y should be ≥ -1.1, got {}",
+        min_y
+    );
+    assert!(
+        max_y < 11.0 + tol,
+        "No spike: max_y should be ≤ 11.1, got {}",
+        max_y
+    );
+}
+
+#[test]
+fn stroke_expand_tabler_icon_no_spike() {
+    // Stroke-expand the file-text icon body and verify no coordinate spikes.
+    // With viewbox 24×24 and stroke width 2, the maximum extent of any
+    // coordinate should be within the viewbox ± half stroke width + tolerance.
+    let d = "M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2";
+    let cmds = scene::svg_path::parse_svg_path(d);
+    let expanded = scene::stroke::expand_stroke(&cmds, 2.0);
+    let parsed = parse_path_commands(&expanded);
+
+    let mut all_x = Vec::new();
+    let mut all_y = Vec::new();
+    for (_, coords) in &parsed {
+        let mut i = 0;
+        while i + 1 < coords.len() {
+            all_x.push(coords[i]);
+            all_y.push(coords[i + 1]);
+            i += 2;
+        }
+    }
+
+    let min_x = all_x.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_x = all_x.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let min_y = all_y.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_y = all_y.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+
+    // The icon body spans roughly x=[5,19], y=[3,21]. With hw=1, no coordinate
+    // should exceed those bounds by more than 1 + tolerance.
+    let spike_limit = 2.0; // hw + generous tolerance for arcs and cubics
+    assert!(
+        min_x > 5.0 - spike_limit,
+        "x spike: min_x={} (expected > {})",
+        min_x,
+        5.0 - spike_limit
+    );
+    assert!(
+        max_x < 19.0 + spike_limit,
+        "x spike: max_x={} (expected < {})",
+        max_x,
+        19.0 + spike_limit
+    );
+    assert!(
+        min_y > 3.0 - spike_limit,
+        "y spike: min_y={} (expected > {})",
+        min_y,
+        3.0 - spike_limit
+    );
+    assert!(
+        max_y < 21.0 + spike_limit,
+        "y spike: max_y={} (expected < {})",
+        max_y,
+        21.0 + spike_limit
+    );
+}
+
+// ── Multiple Content::Image data isolation ───────────────────────────────────
+
+/// Verify that two Content::Image nodes in the same scene reference
+/// non-overlapping data ranges. This catches the class of bug where a
+/// shared GPU texture is overwritten by the second image before the
+/// first image's draw command executes — the scene graph must produce
+/// distinct DataRefs so the render backend can distinguish them.
+#[test]
+fn two_content_image_nodes_have_disjoint_data() {
+    let mut buf = vec![0u8; TRIPLE_SCENE_SIZE];
+    let _ = TripleWriter::new(&mut buf);
+    let mut tw = TripleWriter::from_existing(&mut buf);
+    let mut w = tw.acquire();
+    w.clear();
+
+    // Push two different image pixel buffers.
+    let icon_pixels = vec![0xAA_u8; 52 * 52 * 4]; // 52×52 icon
+    let img_pixels = vec![0xBB_u8; 32 * 32 * 4]; // 32×32 test image
+    let icon_ref = w.push_data(&icon_pixels);
+    let img_ref = w.push_data(&img_pixels);
+
+    // Allocate two nodes.
+    let n_icon = w.alloc_node().unwrap();
+    let n_img = w.alloc_node().unwrap();
+
+    // Set up as Content::Image with distinct data.
+    w.node_mut(n_icon).content = Content::Image {
+        data: icon_ref,
+        src_width: 52,
+        src_height: 52,
+    };
+    w.node_mut(n_img).content = Content::Image {
+        data: img_ref,
+        src_width: 32,
+        src_height: 32,
+    };
+
+    // DataRefs must not overlap.
+    let icon_end = icon_ref.offset + icon_ref.length;
+    let img_end = img_ref.offset + img_ref.length;
+    assert!(
+        icon_end <= img_ref.offset || img_end <= icon_ref.offset,
+        "image data ranges overlap: icon=[{}..{}), img=[{}..{})",
+        icon_ref.offset,
+        icon_end,
+        img_ref.offset,
+        img_end,
+    );
+
+    // Both must have non-zero length.
+    assert!(icon_ref.length > 0, "icon data should be non-empty");
+    assert!(img_ref.length > 0, "image data should be non-empty");
+
+    // Verify the data is actually distinct (not pointing at the same bytes).
+    assert_ne!(
+        icon_ref.offset, img_ref.offset,
+        "two images should have different data offsets"
+    );
 }

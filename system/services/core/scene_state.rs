@@ -18,7 +18,7 @@ use super::layout::{
 // Re-export layout types and constants used by main.rs.
 pub use super::layout::{
     byte_to_line_col, count_lines, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT,
-    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    N_POINTER, N_ROOT, N_SHADOW, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT, WELL_KNOWN_COUNT,
 };
 
 pub struct SceneState {
@@ -375,12 +375,13 @@ impl SceneState {
     /// publish cycle. Called every frame when the pointer state changes (move
     /// or fade tick). Cheap — only one well-known node changes.
     pub fn apply_pointer(&mut self, mouse_x: u32, mouse_y: u32, opacity: u8) {
+        use super::layout::CURSOR_HOTSPOT_OFFSET;
         let mut tw = self.triple();
         {
             let mut w = tw.acquire_copy();
             let n = w.node_mut(N_POINTER);
-            n.x = mouse_x as i32;
-            n.y = mouse_y as i32;
+            n.x = mouse_x as i32 - CURSOR_HOTSPOT_OFFSET;
+            n.y = mouse_y as i32 - CURSOR_HOTSPOT_OFFSET;
             n.opacity = opacity;
             w.mark_dirty(N_POINTER);
         }

@@ -114,7 +114,11 @@ pub const CMP_NOT_EQUAL: u8 = 3;
 pub const STENCIL_KEEP: u8 = 0;
 pub const STENCIL_ZERO: u8 = 1;
 pub const STENCIL_REPLACE: u8 = 2;
+pub const STENCIL_INCR_CLAMP: u8 = 3;
+pub const STENCIL_DECR_CLAMP: u8 = 4;
 pub const STENCIL_INVERT: u8 = 5;
+pub const STENCIL_INCR_WRAP: u8 = 6;
+pub const STENCIL_DECR_WRAP: u8 = 7;
 
 // ── Filter modes ────────────────────────────────────────────────────────
 
@@ -223,6 +227,7 @@ impl CommandBuffer {
     }
 
     /// Create a depth/stencil state.
+    /// Create a depth/stencil state. Front and back face use the same ops.
     pub fn create_depth_stencil_state(
         &mut self,
         handle: u32,
@@ -237,6 +242,30 @@ impl CommandBuffer {
         self.push_u8(compare_fn);
         self.push_u8(pass_op);
         self.push_u8(fail_op);
+    }
+
+    /// Create a depth/stencil state with separate front/back stencil ops.
+    /// Used for non-zero winding fill: front = INCR_WRAP, back = DECR_WRAP.
+    pub fn create_depth_stencil_state_two_sided(
+        &mut self,
+        handle: u32,
+        compare_fn: u8,
+        front_pass_op: u8,
+        front_fail_op: u8,
+        back_pass_op: u8,
+        back_fail_op: u8,
+    ) {
+        self.push_header(CMD_CREATE_DEPTH_STENCIL_STATE, 12);
+        self.push_u32(handle);
+        self.push_u8(1); // stencil_enabled = true
+        self.push_u8(compare_fn);
+        self.push_u8(front_pass_op);
+        self.push_u8(front_fail_op);
+        // Back-face ops (bytes 8..11). Hypervisor reads these if size >= 12.
+        self.push_u8(compare_fn);
+        self.push_u8(back_pass_op);
+        self.push_u8(back_fail_op);
+        self.push_u8(0); // padding
     }
 
     /// Create a texture sampler.

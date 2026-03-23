@@ -1208,8 +1208,17 @@ impl Lerp for Transform2D {
 // ── Animation and Timeline ───────────────────────────────────────────────────
 
 /// Unique identifier for a running animation in a Timeline.
+///
+/// Contains a slot index and a generation counter. The generation prevents
+/// ABA aliasing: if animation A completes, its slot is freed by `tick()`,
+/// and a new animation B reuses the same slot, callers holding A's
+/// `AnimationId` will see `is_active` return false because the generation
+/// no longer matches.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AnimationId(u8);
+pub struct AnimationId {
+    slot: u8,
+    gen: u8,
+}
 
 /// A single property animation from start_value to end_value over duration_ms.
 /// Uses f32 values. For type-generic interpolation, use the Lerp trait at the
@@ -1258,6 +1267,10 @@ const MAX_ANIMATIONS: usize = 32;
 /// + transition (1) + per-node property animations (up to 28 concurrent).
 pub struct Timeline {
     slots: [Option<Animation>; MAX_ANIMATIONS],
+    /// Per-slot generation counter. Incremented each time a slot is reused
+    /// by `start()`. Prevents ABA aliasing where a stale `AnimationId`
+    /// accidentally references a new animation in the same slot.
+    generations: [u8; MAX_ANIMATIONS],
     now_ms: u64,
 }
 
@@ -1265,6 +1278,7 @@ impl Timeline {
     pub const fn new() -> Self {
         Self {
             slots: [None; MAX_ANIMATIONS],
+            generations: [0; MAX_ANIMATIONS],
             now_ms: 0,
         }
     }
@@ -1287,7 +1301,11 @@ impl Timeline {
                     duration_ms,
                     easing,
                 });
-                return Ok(AnimationId(i as u8));
+                self.generations[i] = self.generations[i].wrapping_add(1);
+                return Ok(AnimationId {
+                    slot: i as u8,
+                    gen: self.generations[i],
+                });
             }
         }
         Err(()) // at capacity
@@ -1307,13 +1325,18 @@ impl Timeline {
 
     /// Get the current interpolated f32 value of an animation.
     ///
-    /// Returns 0.0 if the animation completed (and was cleaned up) or if
-    /// the id is invalid. For f32-valued animations (opacity, position),
-    /// this is the most convenient API.
+    /// Returns 0.0 if the animation completed (and was cleaned up), if
+    /// the id is invalid, or if the slot was reused by a different
+    /// animation (generation mismatch).
     pub fn value(&self, id: AnimationId) -> f32 {
-        match &self.slots[id.0 as usize] {
-            Some(anim) => anim.value_at(self.now_ms),
-            None => 0.0, // animation completed and was removed
+        let i = id.slot as usize;
+        if i < MAX_ANIMATIONS && self.generations[i] == id.gen {
+            match &self.slots[i] {
+                Some(anim) => anim.value_at(self.now_ms),
+                None => 0.0,
+            }
+        } else {
+            0.0
         }
     }
 
@@ -1329,24 +1352,38 @@ impl Timeline {
     /// let xform = Transform2D::lerp(from, to, t);
     /// ```
     ///
-    /// Returns 1.0 if the animation completed or the id is invalid.
+    /// Returns 1.0 if the animation completed, the id is invalid, or the
+    /// slot was reused by a different animation (generation mismatch).
     pub fn progress(&self, id: AnimationId) -> f32 {
-        match &self.slots[id.0 as usize] {
-            Some(anim) => anim.progress_at(self.now_ms),
-            None => 1.0, // completed: full progress
+        let i = id.slot as usize;
+        if i < MAX_ANIMATIONS && self.generations[i] == id.gen {
+            match &self.slots[i] {
+                Some(anim) => anim.progress_at(self.now_ms),
+                None => 1.0,
+            }
+        } else {
+            1.0
         }
     }
 
     /// Cancel an animation, freeing its slot immediately.
+    ///
+    /// Only cancels if the generation matches (the slot hasn't been reused
+    /// by a different animation since this ID was issued).
     pub fn cancel(&mut self, id: AnimationId) {
-        if (id.0 as usize) < MAX_ANIMATIONS {
-            self.slots[id.0 as usize] = None;
+        let i = id.slot as usize;
+        if i < MAX_ANIMATIONS && self.generations[i] == id.gen {
+            self.slots[i] = None;
         }
     }
 
     /// Check if an animation is still running (not completed or cancelled).
+    ///
+    /// Returns false if the slot was reused by a different animation
+    /// (generation mismatch), preventing ABA aliasing.
     pub fn is_active(&self, id: AnimationId) -> bool {
-        (id.0 as usize) < MAX_ANIMATIONS && self.slots[id.0 as usize].is_some()
+        let i = id.slot as usize;
+        i < MAX_ANIMATIONS && self.generations[i] == id.gen && self.slots[i].is_some()
     }
 
     /// Returns true if any animation is active (useful for frame scheduling —

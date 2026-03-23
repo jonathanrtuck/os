@@ -27,17 +27,21 @@ pub fn generate_test_image() -> Vec<u8> {
     pixels
 }
 
-/// Generate path commands for a standard arrow pointer cursor.
-/// 10 × 16 pt. Tip at (0, 0), body extends down-right.
+/// Generate path commands for the pointer cursor.
+/// 12 × 12 pt. Tip (hotspot) at (0, 0), body extends down-right.
+/// Proportions inspired by Tabler's pointer icon — wider, more balanced
+/// angle than a classic arrow, with a diagonal shaft and notch.
 pub fn generate_arrow_cursor() -> Vec<u8> {
     let mut cmds = Vec::new();
     scene::path_move_to(&mut cmds, 0.0, 0.0);
-    scene::path_line_to(&mut cmds, 0.0, 14.0);
-    scene::path_line_to(&mut cmds, 4.0, 11.0);
-    scene::path_line_to(&mut cmds, 7.0, 17.0);
-    scene::path_line_to(&mut cmds, 9.0, 16.0);
-    scene::path_line_to(&mut cmds, 6.0, 10.0);
-    scene::path_line_to(&mut cmds, 10.0, 10.0);
+    scene::path_line_to(&mut cmds, 3.0, 10.5);
+    scene::path_line_to(&mut cmds, 4.7, 10.6);
+    scene::path_line_to(&mut cmds, 6.3, 8.2);
+    scene::path_line_to(&mut cmds, 10.0, 12.0);
+    scene::path_line_to(&mut cmds, 12.0, 10.0);
+    scene::path_line_to(&mut cmds, 8.2, 6.3);
+    scene::path_line_to(&mut cmds, 10.6, 4.7);
+    scene::path_line_to(&mut cmds, 10.5, 3.0);
     scene::path_close(&mut cmds);
     cmds
 }

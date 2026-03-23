@@ -10,7 +10,7 @@ use scene::{Content, Node, ShapedGlyph};
 
 use super::{
     coords::round_f32,
-    path_raster::{render_path, scene_to_draw_color},
+    path_raster::{render_path, render_path_data, scene_to_draw_color},
     RenderCtx, SceneGraph,
 };
 use crate::LruRasterizer;
@@ -37,11 +37,38 @@ pub(super) fn render_content(
         Content::Path {
             color,
             fill_rule,
+            stroke_width,
             contours,
         } => {
-            render_path(
-                fb, graph, scale, contours, color, fill_rule, draw_x, draw_y, nw, nh,
-            );
+            if stroke_width > 0 {
+                // Expand stroked path to filled geometry, then rasterize.
+                let data =
+                    if (contours.offset as usize + contours.length as usize) <= graph.data.len() {
+                        &graph.data[contours.offset as usize..][..contours.length as usize]
+                    } else {
+                        return;
+                    };
+                // Decode 8.8 fixed-point stroke width to f32 points.
+                let sw_pt = stroke_width as f32 / 256.0;
+                let expanded = scene::stroke::expand_stroke(data, sw_pt);
+                if !expanded.is_empty() {
+                    render_path_data(
+                        fb,
+                        &expanded,
+                        scale,
+                        color,
+                        scene::FillRule::Winding,
+                        draw_x,
+                        draw_y,
+                        nw,
+                        nh,
+                    );
+                }
+            } else {
+                render_path(
+                    fb, graph, scale, contours, color, fill_rule, draw_x, draw_y, nw, nh,
+                );
+            }
         }
         Content::Glyphs {
             color,

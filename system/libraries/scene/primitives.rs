@@ -241,14 +241,19 @@ pub enum Content {
         src_width: u16,
         src_height: u16,
     },
-    /// Filled cubic Bezier contours. The render backend rasterizes them
-    /// with scanline coverage (same engine as glyph outlines). Vector
-    /// content scales cleanly at any display density.
+    /// Cubic Bezier contours, filled or stroked. The render backend
+    /// rasterizes them with scanline coverage (same engine as glyph
+    /// outlines). Vector content scales cleanly at any display density.
     Path {
-        /// Fill color.
+        /// Fill or stroke color.
         color: Color,
-        /// Winding or even-odd fill rule.
+        /// Winding or even-odd fill rule (applies to fill; ignored for stroke).
         fill_rule: FillRule,
+        /// Stroke width in 8.8 fixed-point points (0 = filled, not stroked).
+        /// Example: 2.0 pt = `0x0200`, 1.5 pt = `0x0180`.
+        /// When non-zero, the render backend expands strokes to filled
+        /// geometry before rasterization (round joins and caps).
+        stroke_width: u16,
         /// Reference to serialized path commands in the data buffer
         /// (MoveTo, LineTo, CubicTo, Close). 4-byte aligned.
         contours: DataRef,

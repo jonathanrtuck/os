@@ -35,6 +35,8 @@ mod diff;
 mod node;
 mod primitives;
 mod reader;
+pub mod stroke;
+pub mod svg_path;
 mod transform;
 mod triple;
 mod writer;

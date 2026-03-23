@@ -336,6 +336,7 @@ fn walk_node(
         Content::Path {
             color,
             fill_rule,
+            stroke_width: _,
             contours,
         } => {
             if contours.length > 0 {

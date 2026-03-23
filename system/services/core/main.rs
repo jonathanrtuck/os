@@ -26,12 +26,16 @@
 
 extern crate alloc;
 extern crate animation;
+extern crate drawing;
 extern crate fonts;
 extern crate layout as layout_lib;
+extern crate render;
 extern crate scene;
 
 #[path = "fallback.rs"]
 mod fallback;
+#[path = "icons.rs"]
+mod icons;
 #[path = "layout/mod.rs"]
 mod layout;
 #[path = "scene_state.rs"]
@@ -1905,43 +1909,56 @@ pub extern "C" fn _start() -> ! {
         // prevents the jarring instant switch between editor and image.
         if state().pending_context_switch {
             let s = state();
-            if let Some(id) = s.fade_out_id {
-                if s.timeline.is_active(id) {
-                    let new_val = s.timeline.value(id) as u8;
-                    if new_val != s.root_opacity {
-                        s.root_opacity = new_val;
-                        changed = true;
-                    }
-                } else {
-                    // Fade out complete — do the actual switch.
-                    s.root_opacity = 0;
-                    s.fade_out_id = None;
-                    s.pending_context_switch = false;
+            // Determine if the fade-out is complete. Either the animation
+            // has finished (is_active returns false — including stale IDs
+            // from slot reuse), or fade_out_id is None (timeline was full
+            // when starting — perform the switch immediately).
+            let fade_out_done = match s.fade_out_id {
+                Some(id) => !s.timeline.is_active(id),
+                None => true, // timeline was full; skip fade, switch now
+            };
 
-                    // Perform the context switch (same logic as the
-                    // old immediate Ctrl+Tab path).
-                    let was_image = s.image_mode;
-                    if !was_image {
-                        s.saved_editor_scroll = s.scroll_offset;
-                    }
-                    s.image_mode = !was_image;
-                    if was_image {
-                        s.scroll_offset = s.saved_editor_scroll;
-                        s.scroll_target = s.saved_editor_scroll;
-                        s.scroll_spring.reset_to(s.saved_editor_scroll);
-                        s.scroll_animating = false;
-                    }
-
-                    // Start fade in.
-                    s.fade_in_id = s
-                        .timeline
-                        .start(0.0, 255.0, 120, animation::Easing::EaseIn, now_ms)
-                        .ok();
-
-                    context_switched = true;
-                    text_changed = true;
+            if !fade_out_done {
+                // Fade-out still in progress — update root opacity.
+                let id = s.fade_out_id.unwrap();
+                let new_val = s.timeline.value(id) as u8;
+                if new_val != s.root_opacity {
+                    s.root_opacity = new_val;
                     changed = true;
                 }
+            } else {
+                // Fade out complete — do the actual switch.
+                s.root_opacity = 0;
+                s.fade_out_id = None;
+                s.pending_context_switch = false;
+
+                // Perform the context switch (same logic as the
+                // old immediate Ctrl+Tab path).
+                let was_image = s.image_mode;
+                if !was_image {
+                    s.saved_editor_scroll = s.scroll_offset;
+                    // Stop any in-flight scroll animation so it doesn't
+                    // trigger text_changed in image mode (which would
+                    // corrupt the image scene with text-mode content).
+                    s.scroll_animating = false;
+                }
+                s.image_mode = !was_image;
+                if was_image {
+                    s.scroll_offset = s.saved_editor_scroll;
+                    s.scroll_target = s.saved_editor_scroll;
+                    s.scroll_spring.reset_to(s.saved_editor_scroll);
+                    s.scroll_animating = false;
+                }
+
+                // Start fade in.
+                s.fade_in_id = s
+                    .timeline
+                    .start(0.0, 255.0, 120, animation::Easing::EaseIn, now_ms)
+                    .ok();
+
+                context_switched = true;
+                text_changed = true;
+                changed = true;
             }
         }
         // Tick fade-in (runs independently of pending_context_switch).
@@ -1958,6 +1975,13 @@ pub extern "C" fn _start() -> ! {
                     s.root_opacity = 255;
                     s.fade_in_id = None;
                 }
+            } else if !s.pending_context_switch && s.root_opacity < 255 {
+                // Defense-in-depth: if no fade animation is active but
+                // root opacity is stuck below 255, force it back. This
+                // prevents a permanently black screen if a fade-in
+                // animation failed to start (e.g., timeline at capacity).
+                s.root_opacity = 255;
+                changed = true;
             }
         }
 

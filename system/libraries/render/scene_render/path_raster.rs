@@ -519,6 +519,26 @@ pub(super) fn render_path(
         return;
     };
 
+    render_path_data(fb, data, scale, color, fill_rule, draw_x, draw_y, nw, nh);
+}
+
+/// Render path commands from a raw byte slice (used for both original and
+/// stroke-expanded paths). Public for use by core's icon pre-rasterization.
+pub fn render_path_data(
+    fb: &mut Surface,
+    data: &[u8],
+    scale: f32,
+    color: scene::Color,
+    fill_rule: scene::FillRule,
+    draw_x: i32,
+    draw_y: i32,
+    nw: i32,
+    nh: i32,
+) {
+    if data.is_empty() || nw <= 0 || nh <= 0 {
+        return;
+    }
+
     let s = scale;
 
     // Parse path commands and build segment list in physical pixel fixed-point.

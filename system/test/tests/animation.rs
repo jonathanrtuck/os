@@ -1052,3 +1052,65 @@ fn animated_id_accessor() {
     tl.cancel(anim.id());
     assert!(!tl.is_active(anim.id()));
 }
+
+// ── AnimationId generation counter (ABA aliasing prevention) ─────────────────
+
+#[test]
+fn stale_id_after_slot_reuse_returns_inactive() {
+    // Simulates the bug: animation A completes, tick() frees the slot,
+    // animation B reuses the slot. A's AnimationId must NOT alias B.
+    let mut tl = Timeline::new();
+
+    // Start animation A in slot 0 (100ms duration).
+    let id_a = tl.start(255.0, 0.0, 100, Easing::EaseOut, 0).unwrap();
+    assert!(tl.is_active(id_a));
+
+    // Advance past completion — tick removes A from slot 0.
+    tl.tick(100);
+    assert!(!tl.is_active(id_a));
+
+    // Start animation B — reuses the now-free slot 0.
+    let id_b = tl.start(0.0, 255.0, 100, Easing::EaseIn, 100).unwrap();
+    assert!(tl.is_active(id_b));
+
+    // Critical: A's ID must still be inactive despite slot 0 being occupied.
+    assert!(!tl.is_active(id_a), "stale ID should not alias new animation");
+    assert_eq!(tl.value(id_a), 0.0, "stale ID should return 0.0");
+    assert_eq!(tl.progress(id_a), 1.0, "stale ID should return progress 1.0");
+
+    // B's ID is valid and returns the correct value.
+    tl.tick(150);
+    let v = tl.value(id_b);
+    assert!(v > 0.0, "new animation should have progressed: {}", v);
+}
+
+#[test]
+fn cancel_with_stale_id_does_not_cancel_new_animation() {
+    let mut tl = Timeline::new();
+
+    let id_old = tl.start(0.0, 1.0, 100, Easing::Linear, 0).unwrap();
+    tl.tick(100); // completes, slot freed
+
+    let id_new = tl.start(0.0, 1.0, 100, Easing::Linear, 100).unwrap();
+    assert!(tl.is_active(id_new));
+
+    // Cancelling the stale ID must NOT cancel the new animation.
+    tl.cancel(id_old);
+    assert!(
+        tl.is_active(id_new),
+        "cancel with stale ID must not affect new animation"
+    );
+}
+
+#[test]
+fn generation_wraps_around_safely() {
+    let mut tl = Timeline::new();
+
+    // Reuse the same slot 256 times — generation wraps from 255 → 0.
+    for cycle in 0..260u64 {
+        let id = tl.start(0.0, 1.0, 10, Easing::Linear, cycle * 10).unwrap();
+        assert!(tl.is_active(id), "cycle {} should be active", cycle);
+        tl.tick(cycle * 10 + 10); // complete it
+        assert!(!tl.is_active(id), "cycle {} should be complete", cycle);
+    }
+}

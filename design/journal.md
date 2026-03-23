@@ -4,6 +4,20 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Icon Implementation (2026-03-23)
+
+**Status:** Complete. Pipeline working, icons rendering cleanly.
+
+### What was built
+
+Full icon rendering pipeline: SVG path parser (`scene/svg_path.rs`), stroke expansion engine (`scene/stroke.rs`), arc-to-cubic conversion, `stroke_width` field on `Content::Path`, two-sided Metal stencil, CPU pre-rasterization in core, `Content::Image` display in title bar. Tabler file-text icon renders at correct size in the title bar. Pointer cursor redesigned to Tabler proportions.
+
+### Spike artifacts (resolved)
+
+Stroke-expanded geometry had spike artifacts at corners. The spikes persisted even with round join arcs disabled (bevel-only), indicating the issue was in the structural offset contour logic, not the arc math. Fixed by the user between sessions.
+
+---
+
 ## Decision #18: Iconography (2026-03-22)
 
 **Status:** Settled. Recorded in `decisions.md` as Decision #18.
