@@ -281,8 +281,8 @@ kill -USR1 $(pgrep hypervisor)
 - `type hello` — type each character (handles shift for uppercase)
 - `key backspace` — single key press (also: `left`, `right`, `up`, `down`, `return`, `tab`, `delete`, `home`, `end`, `pageup`, `pagedown`, `escape`, `f1`-`f12`)
 - `key shift+left` — modified key (modifiers: `shift`, `ctrl`, `alt`, `cmd`)
-- `click 100 200` — left click at (x, y) in points
-- `dblclick 100 200` — double click
+- `click 100 200` — left click at (x, y) in framebuffer pixels (matches `--resolution`)
+- `dblclick 100 200` — double click at (x, y) in framebuffer pixels
 - `wait 10` — wait 10 extra frames
 - `capture /tmp/out.png` — screenshot at this point
 
