@@ -29,6 +29,7 @@ Which decisions are stable enough to write code against? This guides when to cod
 | #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                                                                                                     |
 | #16 Tech Foundation    | Partial   | **Partially safe**   | Most sub-decisions settled (incl. driver model, filesystem placement). Files interface designed + macOS prototype validated (`prototype/files/`, 21 tests). Remaining: COW on-disk design. |
 | #17 Interaction Model  | Exploring | **Not safe**         | Shell placement leaning (blue-layer, pluggable). Compound editing model unresolved. Nothing settled yet.                                                                                   |
+| #18 Iconography        | Settled   | **Safe**             | Vector path icons, runtime stroke rendering, build-time SVG conversion. Mimetype → icon mapping with fallback.                                                                            |
 
 **Readiness key:**
 
@@ -562,6 +563,68 @@ _Tier 5. Depends on: Rendering technology, data model, file organization._
 
 ---
 
+## 18. Iconography
+
+_Tier 3. Depends on: File understanding (#5), rendering technology (#11), complexity philosophy (#4)._ **SETTLED.**
+
+**Decision:** Icons are vector content rendered through the existing `Content::Path` pipeline — the same primitive used for pointer cursors, shapes, and all other vector graphics. The OS provides a curated collection of icons and maps them to mimetypes. Icons are outline-style (stroke-based) with fill available as a rendering mode, not a separate data set.
+
+### Format and rendering
+
+**Icons are `Content::Path` data with runtime stroke rendering.** The path pipeline gains stroke support: given path commands and a stroke width, the render backend expands strokes to filled geometry during rasterization. This is a general-purpose investment — any vector content can use strokes (line charts, diagrams, drawing tools, etc.), not just icons. The same path data can be rendered as outline (stroked) or filled depending on context, without storing two versions.
+
+**Build-time SVG conversion.** A host-side tool converts source SVGs into the OS's native path command format (MoveTo, LineTo, CubicTo, Close) at compile time. This requires adding arc-to-cubic conversion (SVG arc → cubic Bézier approximation) and expanding shorthand commands (h/v → lineto, s → cubic, q → cubic via degree elevation). The converter runs during `build.rs`.
+
+**Path commands stored as compiled-in `const` arrays** in a new `libraries/icons/` library. Icons are small (~200 bytes of path commands each); a curated set of ~50 icons is under 10 KB total. No runtime I/O, no failure modes, no boot-time loading. This matches the pattern of the pointer cursor (hand-built path data in core) and generalizes it.
+
+### Source set
+
+**Tabler Icons** (MIT license). 5,021 outline + 1,053 filled SVGs. Consistent 24×24 viewbox, stroke-width 2, rounded joins. The OS ships a curated subset — enough to cover all known mimetypes plus common UI symbols. The full set remains available for future expansion.
+
+### Mimetype → icon mapping
+
+The `libraries/icons/` library provides a lookup function: mimetype string → icon path data, with a three-level fallback chain:
+
+1. **Specific:** `image/png` → `file-type-png` icon
+2. **Category:** `image/*` → `photo` icon
+3. **Universal:** `*/*` → `file` icon
+
+This is simple, explicit, and requires no external database, registry, or filesystem traversal. The mapping table is a `const` match expression — the compiler verifies exhaustiveness.
+
+### Baseline alignment
+
+Icons placed next to text (e.g., document type icon in the title bar) are positioned using font metrics already available in core: ascent, descent, line height. The icon is sized to match the font's cap height or ascent, and its y-position is computed relative to the text baseline. This is ~5 lines of arithmetic in the scene graph builder — no architectural change, no new renderer code. Optionally, cap height can be extracted from the OS/2 font table for more precise optical alignment.
+
+### Scope boundaries
+
+**Operational cursors (mouse pointer, text insertion caret) are not icons.** They remain hand-built geometric primitives purpose-designed for pixel-precise interaction at small sizes. Tabler's cursor-themed icons (`pointer`, `cursor-text`) are for symbolic/UI use (status indicators, mode labels), not as replacements for operational cursors.
+
+**Color is per-path.** Each `Content::Path` node already has a `color: Color` field. Monochrome icons use a single path node. Hierarchical depth (primary/secondary layers at different opacities) or multi-color icons use multiple path nodes. No special color system needed — the scene graph already supports this.
+
+### Why not icon fonts?
+
+Evaluated and rejected for this OS. Font glyphs would reuse the glyph cache pipeline, but:
+
+- **Stroke-to-fill required at build time.** Tabler icons are stroke-based (`stroke="currentColor" stroke-width="2"`). Font glyphs must be filled outlines. Converting strokes to filled outlines (offset curves via Tiller-Hanson or similar) is complex and produces larger data than storing strokes directly.
+- **Philosophical mismatch.** In a document-centric OS where content types are first-class, icons are content — vector graphics — not text glyphs. Rendering icons through `Content::Path` is consistent with the architecture; rendering them through `Content::Glyphs` is an optimization that obscures their nature.
+- **Multi-color requires font color tables.** COLR/CPAL adds significant complexity to the font library for a feature that's free with multiple `Content::Path` nodes.
+- **All-or-nothing loading.** A font file contains every icon; scene graph nodes contain only the icons actually used.
+- **Baseline alignment is trivial without fonts.** The positioning math (~5 lines) is cheaper than building a SVG→font compiler.
+
+### Why not individual SVG files loaded at runtime?
+
+Also evaluated and rejected:
+
+- **SVG is complex.** Full SVG parsing in a `#![no_std]` bare-metal environment is significant scope. The OS doesn't need SVG as a general format — it needs path commands.
+- **Runtime I/O adds failure modes.** Fonts must be loaded from 9p because they're large (200+ KB). Icons are small enough to compile in.
+- **No benefit.** The icon set is curated by the OS, not user-swappable. There's no theming requirement. Compiling in is simpler, faster, and more reliable.
+
+### Why not a custom binary icon format?
+
+Rejected as over-engineering. The existing path command format (MoveTo/LineTo/CubicTo/Close as 4-byte-aligned binary commands) already IS a compact binary icon format. A separate format would be marginally more optimized but requires dedicated tooling, a separate renderer, and ongoing maintenance — all for icons that total under 10 KB.
+
+---
+
 ## Decision Dependencies (Key Chains)
 
 Reading the diagram top-to-bottom, the critical decision chains are:
@@ -577,5 +640,8 @@ Reading the diagram top-to-bottom, the critical decision chains are:
 
 4. **Data model + File organization → Interaction model**
    What the user sees depends on whether the system is document-centric and how files are organized.
+
+5. **File understanding + Rendering technology + Complexity → Iconography**
+   Mimetype as fundamental metadata creates the mapping; the path rendering pipeline provides the mechanism; complexity philosophy drives the "same primitive everywhere" choice.
 
 The single most influential decision is **#2 (Data Model)**. If you're confident in document-centric, almost everything else is constrained in useful ways. If you're not, that uncertainty propagates everywhere.

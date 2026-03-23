@@ -50,6 +50,7 @@ Read these before making any design suggestions:
 11. **Undo (SETTLED):** COW snapshots at operation boundaries for sequential undo. Global undo regardless of which editor. Selective undo requires content-type rebase handlers (same investment as collaboration). Cross-session history via filesystem snapshot retention.
 12. **Collaboration (SETTLED):** Designed for, build later. Same content-type rebase handlers needed for selective undo unlock collaboration. Architecture supports it; implementation deferred.
 13. **Compound documents (SETTLED):** Uniform manifest model — every document is a manifest referencing content files. Three composable relationship axes: spatial (flow, canvas, grid, freeform), temporal (simultaneous, sequential, timed), logical (flat, sequential, hierarchical, graph). Simple/compound is internal property, not user-facing. Layout engine mediates cross-type interactions. Translators handle import/export. Content-type registration via editor metadata.
+14. **Iconography (SETTLED):** Icons are `Content::Path` vector data — same primitive as pointer cursors and shapes. Outline style (stroke-based) with runtime stroke rendering. Build-time SVG→path converter. Source: Tabler Icons (MIT). Compiled into `libraries/icons/` as `const` arrays. Mimetype → icon lookup with three-level fallback (specific → category → universal). Baseline-aligned with text via font metrics. Operational cursors remain hand-built.
 
 ## Key Architectural Principles (Settled)
 
@@ -66,6 +67,7 @@ Read these before making any design suggestions:
 2. Editor model → Rendering technology → Compound documents → Layout
 3. Compatibility stance → Technical foundation
 4. Data model + File organization → Interaction model
+5. File understanding + Rendering technology + Complexity → Iconography
 
 **Most influential decision:** #2 (Data Model). If document-centric is confirmed, most other decisions are constrained in useful ways.
 

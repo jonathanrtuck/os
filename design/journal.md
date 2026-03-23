@@ -4,6 +4,53 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Decision #18: Iconography (2026-03-22)
+
+**Status:** Settled. Recorded in `decisions.md` as Decision #18.
+
+### The question
+
+How should the OS store, render, and map icons? Three sub-questions: (1) what format for icon data, (2) how to render them, (3) how to associate icons with mimetypes.
+
+### What we explored
+
+**Three format options evaluated:**
+
+- **A: Icon font** (what macOS SF Symbols and Windows Segoe Fluent do). Pack icons as glyphs in an OpenType font, render through the existing glyph cache. Rejected: stroke-to-fill conversion needed (Tabler icons are stroke-based), philosophical mismatch (icons are content, not text), multi-color requires COLR/CPAL table complexity.
+- **B: Native `Content::Path` data** (what the pointer cursor already uses). Convert SVGs to the OS's binary path commands at build time. Render through the existing path rasterizer. **Chosen.**
+- **C: Custom binary icon format.** Rejected as over-engineering — the existing path command format already _is_ a compact binary format.
+
+**Runtime vs build-time stroke rendering:** Runtime chosen. Adding stroke support to the path pipeline is a general-purpose investment (line charts, diagrams, drawing tools), not icon-specific. The same path data can render as outline or filled depending on context.
+
+**Icon font vs path baseline alignment:** The concern was that font glyphs get automatic baseline alignment "for free." Analysis showed that aligning `Content::Path` icons with adjacent text requires ~5 lines of positioning math using font metrics already available in core (ascent, line height). Not a meaningful cost difference.
+
+**Cursors:** Operational cursors (mouse pointer, text caret) remain hand-built geometric primitives. Tabler's cursor icons are for symbolic/UI representation, not operational use. Different requirements: operational cursors need pixel-precise hotspots at small sizes; symbolic icons need visual consistency in UI chrome.
+
+### Source set
+
+**Tabler Icons** (MIT license, 5,021 outline + 1,053 filled). SVG analysis across all 5,021 outline icons:
+
+- 83% use SVG arcs (`a` command) — requires arc-to-cubic conversion
+- Commands used: M (20K), a (19K), l (13K), h/v (22K), c (5K), s (487), q/t (74)
+- Average ~580 bytes per SVG; estimated ~200 bytes as compiled path commands
+- Outline style chosen over filled (lighter, more icons available, fill available as rendering mode)
+
+### Implementation plan
+
+1. Add arc, h/v, s, q command support to path pipeline (scene library)
+2. Add runtime stroke rendering to path pipeline (render backends)
+3. Build host-side SVG→path converter tool (`system/tools/svg2path/` or in `build.rs`)
+4. Create `libraries/icons/` with compiled-in icon data and mimetype lookup
+5. Integrate into core: document type icon in title bar, baseline-aligned with text
+
+### Deferred
+
+- Full icon set curation (starting with ~20 for known mimetypes)
+- Cap height extraction from OS/2 font table (ascent works well enough)
+- Hierarchical/multi-color icon rendering (architecture supports it; monochrome first)
+
+---
+
 ## Phase 3.2: Text Editor Key Combinations (2026-03-22)
 
 **Status:** Complete.
