@@ -4,6 +4,58 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## IPC: State Registers vs Event Rings (2026-03-23)
+
+**Status:** Design decided. Implementation pending.
+
+### The problem
+
+The IPC channel between virtio-input and core overflows under sustained input. The ring holds 62 messages. When core is busy (scene rebuild, text shaping), pointer movement events pile up and are silently dropped: `virtio-input: ring full, event dropped`.
+
+### The insight
+
+Input data has two fundamentally different semantics:
+
+- **Events** (discrete, every one matters): key press, key release, mouse button click. Order and count are significant. A ring buffer is the correct abstraction.
+- **State** (continuous, latest wins): pointer position, tablet pressure, modifier bitfield. Intermediate values between frames are waste. Only the latest matters. A ring buffer is the *wrong* abstraction — it forces the consumer to drain N messages when it only needs the last one, and overflows when N exceeds capacity.
+
+Every major OS converges on this distinction: macOS coalesces mouse moves in WindowServer. Windows explicitly coalesces WM_MOUSEMOVE between GetMessage() calls. Linux/libinput merges motion events at frame boundaries. Plan 9's /dev/mouse is a current-state file, not an event stream.
+
+### The decision
+
+**Separate the two concerns at the IPC level:**
+
+1. **Event ring** (existing): SPSC ring buffer for discrete events. Keep as-is. Consider adding a dropped-event signal (like Linux SYN_DROPPED) so the consumer can resync modifier state.
+2. **Shared state register** (new): init-allocated shared memory for continuous state. The driver atomically overwrites the latest value. Core reads it once per frame. Zero queue, zero overflow, always current.
+
+**Ownership:** Init allocates the shared memory region and maps it into both processes. Same pattern as the scene graph (core → render) and font data (init → core). No changes to the IPC library or kernel.
+
+**Notification:** The existing `channel_signal` on the IPC channel. The signal means "something changed" — core wakes and checks both the event ring and the state register. Still event-driven, not polling.
+
+### Why not extend the IPC channel?
+
+Making "event ring + state register" a first-class IPC primitive was considered. It's more general but changes a foundational interface. The init-as-orchestrator pattern already handles shared state between processes (scene graph, fonts). Promoting to a first-class IPC feature is a future option if the pattern recurs — for now, init-allocated is simpler and equally correct.
+
+### Prior art in this system
+
+| Shared memory region | Writer | Reader | Pattern |
+|---|---|---|---|
+| Scene graph | core | render service | State (triple-buffered) |
+| Font data | init (loader) | core | Read-only |
+| IPC channel ring | virtio-input | core | Events |
+| **Input state register** (new) | **virtio-input** | **core** | **State (single slot)** |
+
+### Implementation plan
+
+1. Define `InputState` struct in protocol (pointer x/y, button bitfield, generation counter)
+2. Init allocates a shared page, maps into virtio-input and core
+3. Init sends the address to both via config messages
+4. virtio-input writes `InputState` on pointer events (atomic store + channel_signal)
+5. Core reads `InputState` once per frame (atomic load), drains event ring for keys/buttons
+6. Remove MSG_POINTER_ABS from the event ring
+
+---
+
 ## Icon Implementation (2026-03-23)
 
 **Status:** Complete. Pipeline working, icons rendering cleanly.
