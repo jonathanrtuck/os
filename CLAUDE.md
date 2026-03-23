@@ -109,6 +109,13 @@ Content types: `None`, `Path`, `Glyphs`, `Image`. Three render services: `metal-
 - Decision #14: Mimetype of whole document, manifest format, FS organization of manifests + content files
 - Decision #16: COW on-disk design (deferred via prototype-on-host), snapshot scope (punted)
 
+**Future milestones (from v0.3 spec, now deleted):**
+
+- v0.4: Undo/redo (needs COW filesystem), system clipboard
+- v0.5: Rich inline text / multi-style runs
+- v0.6: Video / animated media
+- Later: BiDi / complex scripts, multi-display
+
 **System code:** `system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `prototype/files/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
 
 ## Design Discussion Rules
