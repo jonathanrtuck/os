@@ -1,6 +1,6 @@
 # system
 
-Bare-metal aarch64 system for QEMU's `virt` machine and the [native macOS hypervisor](https://github.com/jonathanrtuck/hypervisor). Microkernel architecture: the kernel provides memory, scheduling, and IPC; everything else runs in userspace. Part of a [document-centric OS](../design/foundations.md).
+Bare-metal aarch64 system for QEMU’s `virt` machine and the [native macOS hypervisor](https://github.com/jonathanrtuck/hypervisor). Microkernel architecture: the kernel provides memory, scheduling, and IPC; everything else runs in userspace. Part of a [document-centric OS](../design/foundations.md).
 
 Boots with 4 SMP cores, spawns a single init process which reads a device manifest, spawns virtio drivers, loads fonts and images via 9P filesystem, and orchestrates a full display pipeline — core builds a scene graph, a render service presents it to the screen with Metal GPU rendering.
 
