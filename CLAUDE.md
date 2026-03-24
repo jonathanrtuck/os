@@ -108,6 +108,8 @@ Content types: `None`, `Path`, `Glyphs`, `Image`. Three render services: `metal-
 
 **IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. See `system/DESIGN.md` §0 for full details.
 
+**Crash reporting:** Kernel panic → diagnostic output via UART → `pvpanic_signal()` (MMIO write to 0x0902_0000) → hypervisor captures vCPU registers + serial log → crash report at `/tmp/hypervisor-crash-<ts>.log` → `exit(1)`. Fallback: `system_off()` (PSCI SYSTEM_OFF). pvpanic device discovered from DTB at boot, address stored in `PVPANIC_ADDR` AtomicUsize.
+
 **Open design questions (from earlier sessions):**
 
 - Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved)
