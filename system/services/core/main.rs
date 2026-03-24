@@ -46,8 +46,6 @@ mod input_handling;
 mod layout;
 #[path = "scene_state.rs"]
 mod scene_state;
-#[path = "test_gen.rs"]
-mod test_gen;
 #[path = "typography.rs"]
 mod typography;
 
@@ -129,6 +127,13 @@ pub(crate) struct CoreState {
     pub(crate) sans_font_data_ptr: *const u8,
     pub(crate) sans_font_data_len: usize,
     pub(crate) sans_font_upem: u16,
+    /// Content Region base VA and size (for PNG decode output).
+    pub(crate) content_va: usize,
+    pub(crate) content_size: usize,
+    /// Decoded image in the Content Region (set after PNG decode).
+    pub(crate) image_content_id: u32,
+    pub(crate) image_width: u16,
+    pub(crate) image_height: u16,
     /// Which document space receives input (0=text, 1=image).
     pub(crate) active_space: u8,
     /// True when the slide spring is animating between spaces.
@@ -204,6 +209,11 @@ impl CoreState {
             sans_font_data_ptr: core::ptr::null(),
             sans_font_data_len: 0,
             sans_font_upem: 1000,
+            content_va: 0,
+            content_size: 0,
+            image_content_id: 0,
+            image_width: 0,
+            image_height: 0,
             active_space: 0,
             slide_animating: false,
             slide_offset: 0,
@@ -527,78 +537,84 @@ pub extern "C" fn _start() -> ! {
     }
     documents::doc_write_header();
 
-    // Parse font to get metrics (char_width, line_height).
-    // Core only needs metrics for layout, not the full glyph cache.
-    if config.font_buf_va != 0 && config.mono_font_len > 0 {
-        // SAFETY: font_buf_va..+mono_font_len is within the font shared memory region mapped
-        // by init; alignment is 1 (u8 slice). Guarded by the non-null/non-zero checks above.
-        let font_data = unsafe {
-            core::slice::from_raw_parts(
-                config.font_buf_va as *const u8,
-                config.mono_font_len as usize,
-            )
-        };
-        // Store font data pointer and length for shaping calls.
+    // Parse fonts from Content Region via registry lookup.
+    // Core needs metrics for layout and font data pointers for shaping.
+    if config.content_va != 0 && config.content_size > 0 {
+        // SAFETY: content_va..+content_size is mapped read-write by init. Header is repr(C).
+        let header =
+            unsafe { &*(config.content_va as *const protocol::content::ContentRegionHeader) };
+
+        // Store Content Region info for PNG decode later.
         {
             let s = state();
-            s.font_data_ptr = config.font_buf_va as *const u8;
-            s.font_data_len = config.mono_font_len as usize;
+            s.content_va = config.content_va as usize;
+            s.content_size = config.content_size as usize;
         }
-        if let Some(fm) = fonts::rasterize::font_metrics(font_data) {
-            let upem = fm.units_per_em;
-            state().font_upem = upem;
-            let asc = fm.ascent as i32;
-            let desc = fm.descent as i32;
-            let gap = fm.line_gap as i32;
-            let size = FONT_SIZE;
-            let ascent_pt = ((asc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
-            let descent_pt = ((-desc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
-            let gap_pt = if gap > 0 {
-                (gap * size as i32 / upem as i32) as u32
-            } else {
-                0
-            };
-            let line_h = ascent_pt + descent_pt + gap_pt;
-            // For monospace: use advance of space glyph in 16.16 fixed-point.
-            // Same formula as shape_text: (advance_fu * point_size * 65536) / upem.
-            let space_gid = fonts::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
-            let (advance_fu, _) =
-                fonts::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
-            let char_w_fx = (advance_fu as i64 * size as i64 * 65536 / upem as i64) as i32;
 
+        // Mono font.
+        if let Some(entry) =
+            protocol::content::find_entry(header, protocol::content::CONTENT_ID_FONT_MONO)
+        {
+            let font_ptr = (config.content_va as usize + entry.offset as usize) as *const u8;
+            // SAFETY: entry bounds validated by init; content_va region is mapped.
+            let font_data = unsafe { core::slice::from_raw_parts(font_ptr, entry.length as usize) };
             {
                 let s = state();
-                s.char_w_fx = if char_w_fx > 0 { char_w_fx } else { 8 * 65536 };
-                s.line_h = if line_h > 0 { line_h } else { 20 };
+                s.font_data_ptr = font_ptr;
+                s.font_data_len = entry.length as usize;
             }
+            if let Some(fm) = fonts::rasterize::font_metrics(font_data) {
+                let upem = fm.units_per_em;
+                state().font_upem = upem;
+                let asc = fm.ascent as i32;
+                let desc = fm.descent as i32;
+                let gap = fm.line_gap as i32;
+                let size = FONT_SIZE;
+                let ascent_pt = ((asc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
+                let descent_pt = ((-desc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
+                let gap_pt = if gap > 0 {
+                    (gap * size as i32 / upem as i32) as u32
+                } else {
+                    0
+                };
+                let line_h = ascent_pt + descent_pt + gap_pt;
+                let space_gid = fonts::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
+                let (advance_fu, _) =
+                    fonts::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
+                let char_w_fx = (advance_fu as i64 * size as i64 * 65536 / upem as i64) as i32;
 
-            sys::print(b"     font metrics loaded\n");
-        } else {
-            sys::print(b"     warning: font parse failed, using defaults\n");
+                {
+                    let s = state();
+                    s.char_w_fx = if char_w_fx > 0 { char_w_fx } else { 8 * 65536 };
+                    s.line_h = if line_h > 0 { line_h } else { 20 };
+                }
+
+                sys::print(b"     font metrics loaded\n");
+            } else {
+                sys::print(b"     warning: font parse failed, using defaults\n");
+            }
+        }
+
+        // Sans font (Inter) for chrome text.
+        if let Some(entry) =
+            protocol::content::find_entry(header, protocol::content::CONTENT_ID_FONT_SANS)
+        {
+            let sans_ptr = (config.content_va as usize + entry.offset as usize) as *const u8;
+            // SAFETY: entry bounds validated by init; content_va region is mapped.
+            let sans_data = unsafe { core::slice::from_raw_parts(sans_ptr, entry.length as usize) };
+            if let Some(fm) = fonts::rasterize::font_metrics(sans_data) {
+                let s = state();
+                s.sans_font_data_ptr = sans_ptr;
+                s.sans_font_data_len = entry.length as usize;
+                s.sans_font_upem = fm.units_per_em;
+                sys::print(b"     sans font (Inter) loaded\n");
+            } else {
+                sys::print(b"     warning: sans font parse failed\n");
+            }
         }
     }
 
-    // Parse sans font (Inter) for chrome text (title bar, clock).
-    // The sans font sits immediately after the mono font in the shared font buffer.
-    if config.font_buf_va != 0 && config.sans_font_len > 0 {
-        let sans_offset = config.font_buf_va as usize + config.mono_font_len as usize;
-        // SAFETY: font_buf_va..+(mono_font_len+sans_font_len) is within the font shared memory
-        // region mapped by init. Guarded by the non-zero checks above.
-        let sans_data = unsafe {
-            core::slice::from_raw_parts(sans_offset as *const u8, config.sans_font_len as usize)
-        };
-        if let Some(fm) = fonts::rasterize::font_metrics(sans_data) {
-            let s = state();
-            s.sans_font_data_ptr = sans_offset as *const u8;
-            s.sans_font_data_len = config.sans_font_len as usize;
-            s.sans_font_upem = fm.units_per_em;
-            sys::print(b"     sans font (Inter) loaded\n");
-        } else {
-            sys::print(b"     warning: sans font parse failed\n");
-        }
-    }
-
-    // Check for image data (used for Ctrl+Tab image viewer mode detection).
+    // Check for image data and decode PNG into Content Region.
     let mut has_image = false;
 
     if let Some(compose::Message::ImageConfig(img_config)) = init_ch
@@ -607,6 +623,55 @@ pub extern "C" fn _start() -> ! {
         .flatten()
     {
         if img_config.image_va != 0 && img_config.image_len > 0 {
+            // SAFETY: image_va..+image_len is within the File Store mapped by init.
+            let png_data = unsafe {
+                core::slice::from_raw_parts(
+                    img_config.image_va as *const u8,
+                    img_config.image_len as usize,
+                )
+            };
+            if let Ok(hdr) = drawing::png::png_header(png_data) {
+                let pixel_bytes = hdr.width as usize * hdr.height as usize * 4;
+                let s = state();
+                if s.content_va != 0 && s.content_size > 0 {
+                    // SAFETY: content_va is mapped read-write; header is repr(C).
+                    let header = unsafe {
+                        &mut *(s.content_va as *mut protocol::content::ContentRegionHeader)
+                    };
+                    let alloc_offset = header.next_alloc as usize;
+                    if alloc_offset + pixel_bytes <= s.content_size {
+                        // SAFETY: output slice is within the Content Region allocation.
+                        let output = unsafe {
+                            core::slice::from_raw_parts_mut(
+                                (s.content_va + alloc_offset) as *mut u8,
+                                pixel_bytes,
+                            )
+                        };
+                        if drawing::png::png_decode(png_data, output).is_ok() {
+                            let entry_idx = header.entry_count as usize;
+                            if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
+                                let content_id = protocol::content::CONTENT_ID_DYNAMIC_START;
+                                header.entries[entry_idx] = protocol::content::ContentEntry {
+                                    content_id,
+                                    offset: alloc_offset as u32,
+                                    length: pixel_bytes as u32,
+                                    class: protocol::content::ContentClass::Pixels as u8,
+                                    _pad: [0; 3],
+                                    width: hdr.width as u16,
+                                    height: hdr.height as u16,
+                                    generation: 0,
+                                };
+                                header.entry_count += 1;
+                                header.next_alloc = (alloc_offset + pixel_bytes) as u32;
+                                s.image_content_id = content_id;
+                                s.image_width = hdr.width as u16;
+                                s.image_height = hdr.height as u16;
+                                sys::print(b"     PNG decoded into Content Region\n");
+                            }
+                        }
+                    }
+                }
+            }
             has_image = true;
         }
     }

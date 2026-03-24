@@ -15,7 +15,7 @@ use super::{
     N_POINTER, N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT,
     WELL_KNOWN_COUNT,
 };
-use crate::{icons, test_gen::generate_test_image};
+use crate::icons;
 
 // ── Pointer cursor constants ─────────────────────────────────────────
 
@@ -120,10 +120,6 @@ pub fn build_full_scene(
         cfg.upem,
         cfg.axes,
     );
-
-    // Test image for space 1.
-    let test_img = generate_test_image();
-    let img_ref = w.push_data(&test_img);
 
     // ── Allocate well-known nodes (sequential IDs 0..12) ─────────────
 
@@ -337,7 +333,7 @@ pub fn build_full_scene(
         );
     }
 
-    // ── Space 1: image document ──────────────────────────────────────
+    // ── Space 1: image document (Content Region) ──────────────────────
 
     let img_display_w: u32 = 128;
     let img_display_h: u32 = 128;
@@ -345,17 +341,23 @@ pub fn build_full_scene(
     let img_x = cfg.fb_width as i32 + ((cfg.fb_width as i32 - img_display_w as i32) / 2).max(0);
     let img_y = ((content_h_u32 as i32 - img_display_h as i32) / 2).max(0);
     {
+        let s = crate::state();
         let n = w.node_mut(N_DOC_IMAGE);
         n.x = scene::pt(img_x);
         n.y = scene::pt(img_y);
         n.width = scene::upt(img_display_w);
         n.height = scene::upt(img_display_h);
-        n.content = Content::InlineImage {
-            data: img_ref,
-            src_width: 32,
-            src_height: 32,
-        };
-        n.content_hash = fnv1a(&test_img);
+        if s.image_content_id != 0 {
+            n.content = Content::Image {
+                content_id: s.image_content_id,
+                src_width: s.image_width,
+                src_height: s.image_height,
+            };
+            n.content_hash = s.image_content_id;
+        } else {
+            n.content = Content::None;
+            n.content_hash = 0;
+        }
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
     }
@@ -558,25 +560,9 @@ pub fn build_document_content(
         n.content_hash = icon_hash;
     }
 
-    // Re-push test image data for space 1 (invalidated by reset_data).
-    {
-        let test_img = generate_test_image();
-        let img_ref = w.push_data(&test_img);
-        let n = w.node_mut(N_DOC_IMAGE);
-        if let Content::InlineImage {
-            src_width,
-            src_height,
-            ..
-        } = n.content
-        {
-            n.content = Content::InlineImage {
-                data: img_ref,
-                src_width,
-                src_height,
-            };
-        }
-        n.content_hash = fnv1a(&test_img);
-    }
+    // Content::Image nodes reference the Content Region (not the scene data buffer),
+    // so no re-push is needed for space 1 after reset_data. The content_id reference
+    // is stable across data buffer compaction.
 
     // Re-push title glyph data (shaped with chrome font).
     let title_glyphs = shape_chrome_text(cfg, title_label);

@@ -569,12 +569,10 @@ fn compositor_config_includes_font_fields() {
     use protocol::compose::CompositorConfig;
     let config = CompositorConfig {
         scene_va: 0,
-        font_buf_va: 0,
+        content_va: 0,
         fb_width: 1024,
         fb_height: 768,
-        mono_font_len: 100,
-        sans_font_len: 0,
-        serif_font_len: 0,
+        content_size: 0,
         scale_factor: 1.0,
         frame_rate: 60,
         font_size: 18,

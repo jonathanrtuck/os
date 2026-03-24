@@ -159,6 +159,7 @@ fn full_screen_clip_renders_all_children() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -193,6 +194,7 @@ fn clip_to_top_left_only_renders_red_child() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -229,6 +231,7 @@ fn clip_to_bottom_right_only_renders_white_child() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -265,6 +268,7 @@ fn clip_spanning_top_row_renders_red_and_green() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -304,6 +308,7 @@ fn composited_partial_clips_match_full_render() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // Full render (reference)
@@ -374,6 +379,7 @@ fn clip_skips_entire_subtree_not_just_direct_child() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -427,6 +433,7 @@ fn zero_size_child_is_skipped() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -477,6 +484,7 @@ fn partial_render_clears_vacated_region() {
     let graph1 = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -498,6 +506,7 @@ fn partial_render_clears_vacated_region() {
     let graph2 = scene_render::SceneGraph {
         nodes: &nodes2,
         data: &data,
+        content_region: &[],
     };
 
     // Re-render the OLD position's dirty rect — this simulates what the
@@ -549,6 +558,7 @@ fn scaled_clip_skips_correctly() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &scene_data,
+        content_region: &[],
     };
 
     {
@@ -621,6 +631,7 @@ fn fractional_scale_1_0_matches_integer_scale_1() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // Integer scale (old path: u32 = 1)
@@ -658,6 +669,7 @@ fn fractional_scale_2_0_matches_integer_scale_2() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 200u32;
@@ -718,6 +730,7 @@ fn fractional_scale_1_5_correct_physical_dimensions() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 300u32;
@@ -815,6 +828,7 @@ fn fractional_scale_no_gap_between_adjacent_nodes() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 30u32;
@@ -895,6 +909,7 @@ fn fractional_scale_border_pixel_snapped() {
         let graph = scene_render::SceneGraph {
             nodes: &nodes,
             data: &data,
+            content_region: &[],
         };
 
         let stride = phys_w * 4;
@@ -989,6 +1004,7 @@ fn fractional_scale_zero_no_panic() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -1017,6 +1033,7 @@ fn fractional_scale_negative_treated_as_safe() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -1044,6 +1061,7 @@ fn fractional_scale_extreme_clamped() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // Surface needs to be big enough: 10*8 = 80
@@ -1208,6 +1226,7 @@ fn scroll_offset_fractional_scale() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // Physical framebuffer: 150x150
@@ -1318,6 +1337,7 @@ fn corner_radius_renders_rounded_background() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 60 * 4];
@@ -1369,6 +1389,7 @@ fn corner_radius_zero_falls_back_to_rect() {
     let graph_sharp = scene_render::SceneGraph {
         nodes: &nodes_sharp,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf_sharp = vec![0u8; 60 * 40 * 4];
@@ -1415,6 +1436,7 @@ fn corner_radius_clips_children_to_rounded_boundary() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -1475,6 +1497,7 @@ fn corner_radius_zero_clips_children_uses_rect_clip() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -1528,6 +1551,7 @@ fn rounded_border_follows_corner_contour() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 80 * 60 * 4];
@@ -1576,6 +1600,7 @@ fn corner_radius_at_fractional_scale() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // Physical: 120×90
@@ -1627,6 +1652,7 @@ fn fractional_scale_rounded_corner_symmetry() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // Physical: 90×90
@@ -1680,6 +1706,7 @@ fn rounded_rect_semi_transparent_blends() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // Framebuffer starts white
@@ -1764,6 +1791,7 @@ fn group_opacity_differs_from_individual_opacity() {
     let graph_group = scene_render::SceneGraph {
         nodes: &nodes_group,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf_group = vec![0u8; 80 * 60 * 4];
@@ -1802,6 +1830,7 @@ fn group_opacity_differs_from_individual_opacity() {
     let graph_ind = scene_render::SceneGraph {
         nodes: &nodes_ind,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf_ind = vec![0u8; 80 * 60 * 4];
@@ -1843,6 +1872,7 @@ fn opacity_255_bypasses_offscreen() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes_full,
         data: &data,
+        content_region: &[],
     };
 
     // Use a SurfacePool and verify no allocation occurs.
@@ -1889,6 +1919,7 @@ fn opacity_zero_produces_no_output() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // Fill with white before rendering.
@@ -1936,6 +1967,7 @@ fn srgb_correct_group_opacity() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 60u32;
@@ -1995,6 +2027,7 @@ fn nested_group_opacity() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 60u32;
@@ -2066,6 +2099,7 @@ fn offscreen_opacity_respects_clip() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 100u32;
@@ -2133,6 +2167,7 @@ fn offscreen_opacity_respects_scroll() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 60u32;
@@ -2169,6 +2204,7 @@ fn opacity_255_scenes_render_identically() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // All nodes in the four-corner scene have opacity=255 (default).
@@ -2292,6 +2328,7 @@ fn shadow_renders_behind_source_with_offset() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 120u32;
@@ -2368,6 +2405,7 @@ fn shadow_spread_expands_footprint() {
         let graph = scene_render::SceneGraph {
             nodes: &nodes,
             data: &data,
+            content_region: &[],
         };
 
         let w = 100u32;
@@ -2441,6 +2479,7 @@ fn shadow_zero_blur_is_hard_shadow() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 100u32;
@@ -2508,6 +2547,7 @@ fn shadow_color_applied_correctly() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 100u32;
@@ -2577,6 +2617,7 @@ fn default_shadow_fields_no_shadow() {
     let graph_no = scene_render::SceneGraph {
         nodes: &nodes_noshadow,
         data: &data,
+        content_region: &[],
     };
 
     let w = 80u32;
@@ -2605,6 +2646,7 @@ fn default_shadow_fields_no_shadow() {
     let graph_ex = scene_render::SceneGraph {
         nodes: &nodes_explicit,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf_ex = vec![0u8; (stride * h) as usize];
@@ -2658,6 +2700,7 @@ fn shadow_falloff_is_smooth_gradient() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 120u32;
@@ -2738,6 +2781,7 @@ fn fractional_scale_preserves_blur_radius() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     // Physical framebuffer at 1.5x = 150×150.
@@ -2811,6 +2855,7 @@ fn layer_opacity_applies_to_shadow() {
         let graph = scene_render::SceneGraph {
             nodes: &nodes,
             data: &data,
+            content_region: &[],
         };
 
         let w = 100u32;
@@ -2924,6 +2969,7 @@ fn identity_transform_pixel_identical() {
     let graph1 = scene_render::SceneGraph {
         nodes: &nodes_no_xform,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb1, &graph1, &ctx);
 
@@ -2932,6 +2978,7 @@ fn identity_transform_pixel_identical() {
     let graph2 = scene_render::SceneGraph {
         nodes: &nodes_identity,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb2, &graph2, &ctx);
 
@@ -2969,6 +3016,7 @@ fn translate_shifts_content() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3018,6 +3066,7 @@ fn scale_doubles_area() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3061,6 +3110,7 @@ fn non_uniform_scale() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3138,6 +3188,7 @@ fn child_transform_composes_with_parent() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx_scaled);
 
@@ -3195,6 +3246,7 @@ fn transform_does_not_affect_siblings() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3245,6 +3297,7 @@ fn rotation_90_aabb_clip() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3317,6 +3370,7 @@ fn clip_rect_intersected_with_transformed_aabb() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3364,6 +3418,7 @@ fn scale_zero_no_output_no_panic() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     // Should not panic.
     scene_render::render_scene(&mut fb, &graph, &ctx);
@@ -3465,6 +3520,7 @@ fn bilinear_resampling_for_rotated_content() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3567,6 +3623,7 @@ fn transformed_text_uses_axis_aligned_glyph_rendering() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     // Should not panic — glyph rendering in a transformed context must work.
     scene_render::render_scene(&mut fb, &graph, &ctx);
@@ -3626,6 +3683,7 @@ fn transform_plus_opacity_no_double_application() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3709,6 +3767,7 @@ fn dpi_scale_composes_with_affine_as_single_matrix() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb_a, &graph, &ctx_a);
 
@@ -3772,6 +3831,7 @@ fn group_opacity_on_rotated_content() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -3896,6 +3956,7 @@ fn full_feature_composition() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     // Should not panic — all features compose correctly.
     scene_render::render_scene(&mut fb, &graph, &ctx);
@@ -3980,6 +4041,7 @@ fn content_image_downscaled_checkerboard_bilinear() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &img_data,
+        content_region: &[],
     };
     scene_render::render_scene(&mut fb, &graph, &ctx);
 
@@ -4081,6 +4143,7 @@ fn full_repaint_no_stale_pixel_artifacts() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     backend.render(&graph, &mut fb);
 
@@ -4091,6 +4154,7 @@ fn full_repaint_no_stale_pixel_artifacts() {
     let graph2 = scene_render::SceneGraph {
         nodes: &nodes2,
         data: &data,
+        content_region: &[],
     };
     backend.render(&graph2, &mut fb);
 
@@ -4169,6 +4233,7 @@ fn path_triangle_fill_winding() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -4238,6 +4303,7 @@ fn path_fill_rule_winding_vs_evenodd() {
     let graph_w = scene_render::SceneGraph {
         nodes: &nodes_w,
         data: &data_w,
+        content_region: &[],
     };
     let mut buf_w = vec![0u8; 100 * 100 * 4];
     {
@@ -4256,6 +4322,7 @@ fn path_fill_rule_winding_vs_evenodd() {
     let graph_e = scene_render::SceneGraph {
         nodes: &nodes_e,
         data: &data_e,
+        content_region: &[],
     };
     let mut buf_e = vec![0u8; 100 * 100 * 4];
     {
@@ -4332,6 +4399,7 @@ fn path_cubic_bezier_smooth_curve() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -4392,6 +4460,7 @@ fn path_empty_no_crash() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -4433,6 +4502,7 @@ fn path_unclosed_implicitly_closed() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -4491,10 +4561,12 @@ fn path_degenerate_cubic_collinear() {
     let graph_c = scene_render::SceneGraph {
         nodes: &nodes_c,
         data: &data_c,
+        content_region: &[],
     };
     let graph_l = scene_render::SceneGraph {
         nodes: &nodes_l,
         data: &data_l,
+        content_region: &[],
     };
 
     let mut buf_c = vec![0u8; 100 * 100 * 4];
@@ -4552,6 +4624,7 @@ fn path_multiple_contours_both_fill() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let w = 100u32;
@@ -4612,6 +4685,7 @@ fn path_edges_antialiased() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 100 * 100 * 4];
@@ -4670,6 +4744,7 @@ fn path_scale_factor_applied() {
     let graph1 = scene_render::SceneGraph {
         nodes: &nodes1,
         data: &data1,
+        content_region: &[],
     };
     let mut buf1 = vec![0u8; 50 * 50 * 4];
     {
@@ -4694,6 +4769,7 @@ fn path_scale_factor_applied() {
     let graph2 = scene_render::SceneGraph {
         nodes: &nodes2,
         data: &data2,
+        content_region: &[],
     };
     let mut buf2 = vec![0u8; 100 * 100 * 4];
     {
@@ -4814,6 +4890,7 @@ fn all_content_types_render_in_one_scene() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
 
     let mut buf = vec![0u8; 200 * 200 * 4];

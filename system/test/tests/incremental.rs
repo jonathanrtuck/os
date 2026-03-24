@@ -1015,6 +1015,7 @@ fn cache_populated_on_first_render() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
@@ -1058,6 +1059,7 @@ fn cache_hit_produces_identical_pixels() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
@@ -1106,6 +1108,7 @@ fn cache_miss_on_hash_change() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
@@ -1130,6 +1133,7 @@ fn cache_miss_on_hash_change() {
     let graph2 = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let mut buf2 = vec![0u8; 50 * 50 * 4];
     let mut fb2 = make_surface(&mut buf2, 50, 50);
@@ -1168,6 +1172,7 @@ fn none_cache_renders_without_caching() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
@@ -1220,6 +1225,7 @@ fn cache_not_used_for_content_none() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &[],
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
@@ -1255,6 +1261,7 @@ fn render_with_and_without_cache_pixel_identical() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 

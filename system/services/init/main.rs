@@ -170,8 +170,9 @@ fn setup_render_pipeline(
     gpu_pa: u64,
     gpu_irq: u32,
     input_devices: &[(sys::ProcessHandle, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
-    font_buf: Option<(u64, u32, u32, u32, u32, u32)>, // (pa, mono_len, sans_len, serif_len, png_off, png_len)
-    rtc_pa: u64,                                      // PL031 RTC physical address (0 = not found)
+    content_region: Option<(u64, u32)>, // (content_pa, content_size) — Content Region
+    file_store: Option<(u64, u32, u32)>, // (file_store_pa, png_offset, png_len) — File Store
+    rtc_pa: u64,                        // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
 ) -> (sys::ProcessHandle, sys::ProcessHandle) {
     sys::print(b"     setting up ");
@@ -226,16 +227,24 @@ fn setup_render_pipeline(
 
     sys::print(b"     pointer state register: 4 KiB shared\n");
 
-    // Unpack font buffer info.
-    let (font_pa_val, mono_font_len, sans_font_len, serif_font_len, png_offset, png_len) =
-        if let Some((pa, mono, sans, serif, png_off, png_l)) = font_buf {
-            (pa, mono, sans, serif, png_off, png_l)
-        } else {
-            (0u64, 0u32, 0u32, 0u32, 0u32, 0u32)
-        };
-    let font_total_len = mono_font_len + sans_font_len + serif_font_len + png_len;
-    let font_pages = if font_total_len > 0 {
-        ((font_total_len as u64) + 4095) / 4096
+    // Unpack Content Region and File Store info.
+    let (content_pa_val, content_size_val) = if let Some((pa, size)) = content_region {
+        (pa, size)
+    } else {
+        (0u64, 0u32)
+    };
+    let content_pages = if content_size_val > 0 {
+        (content_size_val as u64 + 4095) / 4096
+    } else {
+        0
+    };
+    let (file_store_pa_val, png_offset, png_len) = if let Some((pa, off, len)) = file_store {
+        (pa, off, len)
+    } else {
+        (0u64, 0u32, 0u32)
+    };
+    let file_store_pages = if png_len > 0 {
+        ((png_offset as u64 + png_len as u64) + 4095) / 4096
     } else {
         0
     };
@@ -266,10 +275,10 @@ fn setup_render_pipeline(
             sys::exit();
         });
 
-    // Share font data with render service (for glyph atlas/rasterization).
-    let render_font_va = if font_pages > 0 {
-        sys::memory_share(gpu_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (render font) failed\n");
+    // Share Content Region with render service (read-only, for fonts + decoded images).
+    let render_content_va = if content_pages > 0 {
+        sys::memory_share(gpu_proc, content_pa_val, content_pages, true).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (render content) failed\n");
             sys::exit();
         }) as u64
     } else {
@@ -450,12 +459,10 @@ fn setup_render_pipeline(
     // -----------------------------------------------------------------------
     let render_config = CompositorConfig {
         scene_va: render_scene_va as u64,
-        font_buf_va: render_font_va,
+        content_va: render_content_va,
         fb_width,
         fb_height,
-        mono_font_len,
-        sans_font_len,
-        serif_font_len,
+        content_size: content_size_val,
         scale_factor,
         frame_rate,
         font_size: 18,
@@ -497,12 +504,23 @@ fn setup_render_pipeline(
             sys::print(b"init: memory_share (core scene) failed\n");
             sys::exit();
         });
-    // Share font data with core (read-only).
-    let core_font_va = if font_pages > 0 {
-        sys::memory_share(core_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (core font) failed\n");
+    // Share Content Region with core (read-write — core writes decoded images).
+    let core_content_va = if content_pages > 0 {
+        sys::memory_share(core_proc, content_pa_val, content_pages, false).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (core content) failed\n");
             sys::exit();
         }) as u64
+    } else {
+        0u64
+    };
+    // Share File Store with core (read-only — raw PNG bytes for decoding).
+    let core_file_store_va = if file_store_pages > 0 {
+        sys::memory_share(core_proc, file_store_pa_val, file_store_pages, true).unwrap_or_else(
+            |_| {
+                sys::print(b"init: memory_share (core file store) failed\n");
+                sys::exit();
+            },
+        ) as u64
     } else {
         0u64
     };
@@ -518,20 +536,18 @@ fn setup_render_pipeline(
     let core_config = CoreConfig {
         doc_va: core_doc_va as u64,
         scene_va: core_scene_va as u64,
-        font_buf_va: core_font_va,
+        content_va: core_content_va,
         input_state_va: core_input_state_va as u64,
         fb_width: logical_w,
         fb_height: logical_h,
         doc_capacity: DOC_BUF_CAPACITY,
-        mono_font_len,
-        sans_font_len,
-        serif_font_len,
+        content_size: content_size_val,
     };
     // SAFETY: CoreConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_CORE_CONFIG, &core_config) };
     core_ch.send(&msg);
 
-    // Send frame rate as a separate message (CoreConfig is full at 56 bytes).
+    // Send frame rate as a separate message.
     let fr_msg = unsafe {
         ipc::Message::from_payload(
             MSG_FRAME_RATE,
@@ -542,9 +558,9 @@ fn setup_render_pipeline(
     };
     core_ch.send(&fr_msg);
 
-    // Send image config to core (for has_image detection).
+    // Send image config to core (PNG location in the File Store).
     if png_len > 0 {
-        let image_va = core_font_va + png_offset as u64;
+        let image_va = core_file_store_va + png_offset as u64;
         let img_config = ImageConfig {
             image_va,
             image_len: png_len,
@@ -997,239 +1013,335 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Phase 1.5: Read font files from host via 9p driver (must complete before compositor).
-    // Loads three fonts and PNG image into a single shared buffer:
-    //   [JetBrains Mono | Inter | Source Serif 4 | PNG]
-    // Tuple: (font_pa, mono_len, sans_len, serif_len, png_offset, png_len)
-    let font_buf: Option<(u64, u32, u32, u32, u32, u32)> =
-        if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
-            sys::print(b"     loading fonts from host filesystem\n");
+    // Two memory regions:
+    //   Content Region (4 MiB): header + registry + font data (shared with core + render)
+    //   File Store (256 KiB): raw PNG bytes (shared with core only, NOT render)
+    let content_region_info: Option<(u64, u32)>; // (content_pa, content_size)
+    let file_store_info: Option<(u64, u32, u32)>; // (file_store_pa, png_offset, png_len)
 
-            // Allocate font buffer (4 MiB = order 10 = 1024 pages).
-            // Holds three fonts (JetBrains Mono + Inter + Source Serif 4) and PNG image.
-            let font_order: u32 = 10;
-            let font_page_count: u64 = 1u64 << font_order;
-            let mut font_pa: u64 = 0;
-            let _font_va = sys::dma_alloc(font_order, &mut font_pa).unwrap_or_else(|_| {
-                sys::print(b"init: dma_alloc (font buffer) failed\n");
+    if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
+        sys::print(b"     loading fonts from host filesystem\n");
+
+        // Allocate Content Region (4 MiB = order 10 = 1024 pages).
+        // Holds: header + registry + font TTF data + space for decoded images.
+        let content_order: u32 = 10;
+        let content_page_count: u64 = 1u64 << content_order;
+        let mut content_pa: u64 = 0;
+        let content_va = sys::dma_alloc(content_order, &mut content_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (content region) failed\n");
+            sys::exit();
+        });
+        let content_capacity: u32 = (content_page_count as u32) * 4096; // 4 MiB
+
+        // SAFETY: content_va..+content_capacity is the DMA region just allocated; zeroing is within bounds.
+        unsafe { core::ptr::write_bytes(content_va as *mut u8, 0, content_capacity as usize) };
+
+        // Allocate File Store (256 KiB = order 6 = 64 pages).
+        // Holds raw PNG bytes (core reads for decoding).
+        let fs_order: u32 = 6;
+        let fs_page_count: u64 = 1u64 << fs_order;
+        let mut fs_pa: u64 = 0;
+        let fs_va = sys::dma_alloc(fs_order, &mut fs_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (file store) failed\n");
+            sys::exit();
+        });
+        let fs_capacity: u32 = (fs_page_count as u32) * 4096; // 256 KiB
+
+        // SAFETY: fs_va..+fs_capacity is the DMA region just allocated; zeroing is within bounds.
+        unsafe { core::ptr::write_bytes(fs_va as *mut u8, 0, fs_capacity as usize) };
+
+        // Share Content Region with 9p driver (read-write, for writing font data).
+        let p9_content_va = sys::memory_share(p9_proc, content_pa, content_page_count, false)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (9p content) failed\n");
                 sys::exit();
             });
-            let font_capacity: u32 = (font_page_count as u32) * 4096; // 4 MiB
 
-            // SAFETY: font_zeroed_va..+font_capacity is the DMA region just allocated above; zeroing is within bounds.
-            let font_zeroed_va = _font_va;
-            unsafe { core::ptr::write_bytes(font_zeroed_va as *mut u8, 0, font_capacity as usize) };
+        // Share File Store with 9p driver (read-write, for writing PNG data).
+        let p9_fs_va =
+            sys::memory_share(p9_proc, fs_pa, fs_page_count, false).unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (9p file store) failed\n");
+                sys::exit();
+            });
 
-            // Share font buffer with 9p driver (read-write).
-            let p9_font_va = sys::memory_share(p9_proc, font_pa, font_page_count, false)
-                .unwrap_or_else(|_| {
-                    sys::print(b"init: memory_share (9p font) failed\n");
-                    sys::exit();
-                });
-            // Send device config via IPC.
-            let p9_ch_obj = init_channel(p9_ch_idx);
-            let dev_config = DeviceConfig {
-                mmio_pa: p9_pa,
-                irq: p9_irq,
-                _pad: 0,
-            };
-            // SAFETY: same as DeviceConfig from_payload above.
-            let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
+        // Send device config via IPC.
+        let p9_ch_obj = init_channel(p9_ch_idx);
+        let dev_config = DeviceConfig {
+            mmio_pa: p9_pa,
+            irq: p9_irq,
+            _pad: 0,
+        };
+        // SAFETY: same as DeviceConfig from_payload above.
+        let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
 
-            p9_ch_obj.send(&cfg_msg);
+        p9_ch_obj.send(&cfg_msg);
 
-            // Start 9p driver.
-            sys::print(b"     starting 9p driver\n");
+        // Start 9p driver.
+        sys::print(b"     starting 9p driver\n");
 
-            start_process(p9_proc, b"9p");
+        start_process(p9_proc, b"9p");
 
-            // Helper: send a file read request and wait for the response.
-            // Returns the number of bytes read, or 0 on failure.
-            let read_font_file = |ch_obj: &ipc::Channel,
-                                  ch_handle: sys::ChannelHandle,
-                                  target_va: u64,
-                                  capacity: u32,
-                                  filename: &[u8]|
-             -> u32 {
-                let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
+        // Helper: send a file read request and wait for the response.
+        // Returns the number of bytes read, or 0 on failure.
+        let read_file = |ch_obj: &ipc::Channel,
+                         ch_handle: sys::ChannelHandle,
+                         target_va: u64,
+                         capacity: u32,
+                         filename: &[u8]|
+         -> u32 {
+            let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
 
-                // SAFETY: payload is 60 bytes; writes at offsets 0..8 (u64), 8..12 (u32), 12..16 (u32),
-                // 16..60 (filename) stay within bounds. Unaligned writes used because payload is [u8].
-                // copy_nonoverlapping: src (filename) and dst (payload+16) do not overlap; len asserted <= 44.
-                unsafe {
-                    let p = req_msg.payload.as_mut_ptr();
+            // SAFETY: payload is 60 bytes; writes at offsets 0..8 (u64), 8..12 (u32), 12..16 (u32),
+            // 16..60 (filename) stay within bounds. Unaligned writes used because payload is [u8].
+            // copy_nonoverlapping: src (filename) and dst (payload+16) do not overlap; len asserted <= 44.
+            unsafe {
+                let p = req_msg.payload.as_mut_ptr();
 
-                    core::ptr::write_unaligned(p as *mut u64, target_va);
-                    core::ptr::write_unaligned(p.add(8) as *mut u32, capacity);
-                    core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
+                core::ptr::write_unaligned(p as *mut u64, target_va);
+                core::ptr::write_unaligned(p.add(8) as *mut u32, capacity);
+                core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
 
-                    // Zero-fill filename area first.
-                    core::ptr::write_bytes(p.add(16), 0, 44);
-                    assert!(filename.len() <= 44, "filename too long for IPC payload");
-                    core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
-                }
+                // Zero-fill filename area first.
+                core::ptr::write_bytes(p.add(16), 0, 44);
+                assert!(filename.len() <= 44, "filename too long for IPC payload");
+                core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
+            }
 
-                ch_obj.send(&req_msg);
+            ch_obj.send(&req_msg);
 
-                let _ = sys::channel_signal(ch_handle);
-                let mut resp_msg = ipc::Message::new(0);
-                let mut got_response = false;
+            let _ = sys::channel_signal(ch_handle);
+            let mut resp_msg = ipc::Message::new(0);
+            let mut got_response = false;
 
-                {
-                    let mut retries = 0u32;
+            {
+                let mut retries = 0u32;
 
-                    loop {
-                        match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
-                            Ok(_) => {
-                                if ch_obj.try_recv(&mut resp_msg)
-                                    && resp_msg.msg_type == MSG_FS_READ_RESPONSE
-                                {
-                                    got_response = true;
-                                    break;
-                                }
+                loop {
+                    match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
+                        Ok(_) => {
+                            if ch_obj.try_recv(&mut resp_msg)
+                                && resp_msg.msg_type == MSG_FS_READ_RESPONSE
+                            {
+                                got_response = true;
+                                break;
                             }
-                            Err(sys::SyscallError::WouldBlock) => {
-                                retries += 1;
-                                sys::print(b"init: timeout waiting for font read (retry)\n");
-                                if retries >= 3 {
-                                    sys::print(
-                                        b"init: font read timed out, using bitmap fallback\n",
-                                    );
-                                    break;
-                                }
-                            }
-                            _ => break,
                         }
+                        Err(sys::SyscallError::WouldBlock) => {
+                            retries += 1;
+                            sys::print(b"init: timeout waiting for font read (retry)\n");
+                            if retries >= 3 {
+                                sys::print(b"init: font read timed out, using bitmap fallback\n");
+                                break;
+                            }
+                        }
+                        _ => break,
                     }
                 }
+            }
 
-                if !got_response {
-                    return 0;
-                }
+            if !got_response {
+                return 0;
+            }
 
-                // SAFETY: payload is 60 bytes; reads at offsets 0..4 (len) and 4..8 (status) are in bounds.
-                // Unaligned reads used because payload is [u8]. msg_type verified as MSG_FS_READ_RESPONSE.
-                let (len, status) = unsafe {
-                    let p = resp_msg.payload.as_ptr();
-                    let len = core::ptr::read_unaligned(p as *const u32);
-                    let status = core::ptr::read_unaligned(p.add(4) as *const u32);
+            // SAFETY: payload is 60 bytes; reads at offsets 0..4 (len) and 4..8 (status) are in bounds.
+            // Unaligned reads used because payload is [u8]. msg_type verified as MSG_FS_READ_RESPONSE.
+            let (len, status) = unsafe {
+                let p = resp_msg.payload.as_ptr();
+                let len = core::ptr::read_unaligned(p as *const u32);
+                let status = core::ptr::read_unaligned(p.add(4) as *const u32);
 
-                    (len, status)
-                };
-
-                if status == 0 && len > 0 {
-                    len
-                } else {
-                    0
-                }
+                (len, status)
             };
 
-            // Load JetBrains Mono (monospace editor font).
-            sys::print(b"     loading jetbrains-mono.ttf\n");
-
-            let mono_len = read_font_file(
-                &p9_ch_obj,
-                p9_ch,
-                p9_font_va as u64,
-                font_capacity,
-                b"jetbrains-mono.ttf",
-            );
-
-            if mono_len > 0 {
-                sys::print(b"     mono font loaded: ");
-                let mut buf = [0u8; 16];
-                let n = sys::format_u32(mono_len, &mut buf);
-                sys::print(&buf[..n]);
-                sys::print(b" bytes\n");
+            if status == 0 && len > 0 {
+                len
             } else {
-                sys::print(b"     mono font read failed\n");
+                0
             }
-
-            // Load Inter (sans-serif chrome font) right after mono.
-            sys::print(b"     loading inter.ttf\n");
-
-            let sans_offset = mono_len;
-            let sans_target_va = p9_font_va as u64 + sans_offset as u64;
-            let sans_capacity = font_capacity - sans_offset;
-            let sans_len = read_font_file(
-                &p9_ch_obj,
-                p9_ch,
-                sans_target_va,
-                sans_capacity,
-                b"inter.ttf",
-            );
-
-            if sans_len > 0 {
-                sys::print(b"     sans font loaded: ");
-                let mut buf = [0u8; 16];
-                let n = sys::format_u32(sans_len, &mut buf);
-                sys::print(&buf[..n]);
-                sys::print(b" bytes\n");
-            } else {
-                sys::print(b"     sans font read failed\n");
-            }
-
-            // Load Source Serif 4 (serif body font) right after sans.
-            sys::print(b"     loading source-serif-4.ttf\n");
-
-            let serif_offset = mono_len + sans_len;
-            let serif_target_va = p9_font_va as u64 + serif_offset as u64;
-            let serif_capacity = font_capacity - serif_offset;
-            let serif_len = read_font_file(
-                &p9_ch_obj,
-                p9_ch,
-                serif_target_va,
-                serif_capacity,
-                b"source-serif-4.ttf",
-            );
-
-            if serif_len > 0 {
-                sys::print(b"     serif font loaded: ");
-                let mut buf = [0u8; 16];
-                let n = sys::format_u32(serif_len, &mut buf);
-                sys::print(&buf[..n]);
-                sys::print(b" bytes\n");
-            } else {
-                sys::print(b"     serif font read failed\n");
-            }
-
-            // Load PNG image (test.png) right after the serif font.
-            sys::print(b"     loading test.png\n");
-
-            let png_offset = mono_len + sans_len + serif_len;
-            let png_capacity = font_capacity - png_offset;
-            let png_target_va = p9_font_va as u64 + png_offset as u64;
-            let png_len =
-                read_font_file(&p9_ch_obj, p9_ch, png_target_va, png_capacity, b"test.png");
-
-            if png_len > 0 {
-                let mut buf = [0u8; 40];
-                let prefix = b"     png loaded: ";
-
-                buf[..prefix.len()].copy_from_slice(prefix);
-
-                let mut pos = prefix.len();
-
-                pos += sys::format_u32(png_len, &mut buf[pos..]);
-
-                let suffix = b" bytes\n";
-
-                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-
-                pos += suffix.len();
-
-                sys::print(&buf[..pos]);
-            } else {
-                sys::print(b"     png read failed\n");
-            }
-
-            if mono_len > 0 {
-                Some((font_pa, mono_len, sans_len, serif_len, png_offset, png_len))
-            } else {
-                None
-            }
-        } else {
-            None
         };
+
+        // Data area starts after the Content Region header.
+        let data_start = protocol::content::CONTENT_HEADER_SIZE as u32;
+        let mut data_cursor = data_start;
+        let mut entry_count: u32 = 0;
+
+        // Load fonts into Content Region data area (after CONTENT_HEADER_SIZE).
+        // The 9p driver writes directly into the Content Region at the specified VA.
+        // Font target VA = 9p's mapping of Content Region + data_cursor offset.
+
+        // Load JetBrains Mono (monospace editor font).
+        sys::print(b"     loading jetbrains-mono.ttf\n");
+
+        let mono_target_va = p9_content_va as u64 + data_cursor as u64;
+        let mono_capacity = content_capacity - data_cursor;
+        let mono_len = read_file(
+            &p9_ch_obj,
+            p9_ch,
+            mono_target_va,
+            mono_capacity,
+            b"jetbrains-mono.ttf",
+        );
+
+        if mono_len > 0 {
+            sys::print(b"     mono font loaded: ");
+            let mut buf = [0u8; 16];
+            let n = sys::format_u32(mono_len, &mut buf);
+            sys::print(&buf[..n]);
+            sys::print(b" bytes\n");
+
+            // Write registry entry for mono font at init's VA of the Content Region.
+            // SAFETY: content_va is a valid DMA allocation; header fits within CONTENT_HEADER_SIZE.
+            let header =
+                unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
+            header.entries[entry_count as usize] = protocol::content::ContentEntry {
+                content_id: protocol::content::CONTENT_ID_FONT_MONO,
+                offset: data_cursor,
+                length: mono_len,
+                class: protocol::content::ContentClass::Font as u8,
+                _pad: [0; 3],
+                width: 0,
+                height: 0,
+                generation: 0,
+            };
+            entry_count += 1;
+            data_cursor += mono_len;
+        } else {
+            sys::print(b"     mono font read failed\n");
+        }
+
+        // Load Inter (sans-serif chrome font).
+        sys::print(b"     loading inter.ttf\n");
+
+        let sans_target_va = p9_content_va as u64 + data_cursor as u64;
+        let sans_capacity = content_capacity - data_cursor;
+        let sans_len = read_file(
+            &p9_ch_obj,
+            p9_ch,
+            sans_target_va,
+            sans_capacity,
+            b"inter.ttf",
+        );
+
+        if sans_len > 0 {
+            sys::print(b"     sans font loaded: ");
+            let mut buf = [0u8; 16];
+            let n = sys::format_u32(sans_len, &mut buf);
+            sys::print(&buf[..n]);
+            sys::print(b" bytes\n");
+
+            // SAFETY: content_va is a valid DMA allocation; header is within bounds.
+            let header =
+                unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
+            header.entries[entry_count as usize] = protocol::content::ContentEntry {
+                content_id: protocol::content::CONTENT_ID_FONT_SANS,
+                offset: data_cursor,
+                length: sans_len,
+                class: protocol::content::ContentClass::Font as u8,
+                _pad: [0; 3],
+                width: 0,
+                height: 0,
+                generation: 0,
+            };
+            entry_count += 1;
+            data_cursor += sans_len;
+        } else {
+            sys::print(b"     sans font read failed\n");
+        }
+
+        // Load Source Serif 4 (serif body font).
+        sys::print(b"     loading source-serif-4.ttf\n");
+
+        let serif_target_va = p9_content_va as u64 + data_cursor as u64;
+        let serif_capacity = content_capacity - data_cursor;
+        let serif_len = read_file(
+            &p9_ch_obj,
+            p9_ch,
+            serif_target_va,
+            serif_capacity,
+            b"source-serif-4.ttf",
+        );
+
+        if serif_len > 0 {
+            sys::print(b"     serif font loaded: ");
+            let mut buf = [0u8; 16];
+            let n = sys::format_u32(serif_len, &mut buf);
+            sys::print(&buf[..n]);
+            sys::print(b" bytes\n");
+
+            // SAFETY: content_va is a valid DMA allocation; header is within bounds.
+            let header =
+                unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
+            header.entries[entry_count as usize] = protocol::content::ContentEntry {
+                content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+                offset: data_cursor,
+                length: serif_len,
+                class: protocol::content::ContentClass::Font as u8,
+                _pad: [0; 3],
+                width: 0,
+                height: 0,
+                generation: 0,
+            };
+            entry_count += 1;
+            data_cursor += serif_len;
+        } else {
+            sys::print(b"     serif font read failed\n");
+        }
+
+        // Write Content Region header.
+        // SAFETY: content_va is a valid DMA allocation; header struct fits within CONTENT_HEADER_SIZE.
+        let header = unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
+        header.magic = protocol::content::CONTENT_REGION_MAGIC;
+        header.version = protocol::content::CONTENT_REGION_VERSION;
+        header.entry_count = entry_count;
+        header.max_entries = protocol::content::MAX_CONTENT_ENTRIES as u32;
+        header.data_offset = data_start;
+        header.next_alloc = data_cursor;
+
+        sys::print(b"     content region header written\n");
+
+        // Load PNG into File Store (separate from Content Region).
+        sys::print(b"     loading test.png\n");
+
+        let png_offset_in_fs: u32 = 0;
+        let png_target_va = p9_fs_va as u64;
+        let png_len = read_file(&p9_ch_obj, p9_ch, png_target_va, fs_capacity, b"test.png");
+
+        if png_len > 0 {
+            let mut buf = [0u8; 40];
+            let prefix = b"     png loaded: ";
+
+            buf[..prefix.len()].copy_from_slice(prefix);
+
+            let mut pos = prefix.len();
+
+            pos += sys::format_u32(png_len, &mut buf[pos..]);
+
+            let suffix = b" bytes\n";
+
+            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
+            pos += suffix.len();
+
+            sys::print(&buf[..pos]);
+        } else {
+            sys::print(b"     png read failed\n");
+        }
+
+        if mono_len > 0 {
+            content_region_info = Some((content_pa, content_capacity));
+        } else {
+            content_region_info = None;
+        }
+
+        if png_len > 0 {
+            file_store_info = Some((fs_pa, png_offset_in_fs, png_len));
+        } else {
+            file_store_info = None;
+        }
+    } else {
+        content_region_info = None;
+        file_store_info = None;
+    };
 
     // Phase 2: Display pipeline — select based on virgl probe result.
     // Collect all child process handles for monitoring.
@@ -1251,7 +1363,8 @@ pub extern "C" fn _start() -> ! {
             gpu_pa,
             gpu_irq,
             &input_devices[..input_count],
-            font_buf,
+            content_region_info,
+            file_store_info,
             rtc_pa,
             &mut next_channel,
         );

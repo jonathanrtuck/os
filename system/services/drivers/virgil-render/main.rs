@@ -331,9 +331,8 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"     waiting for render config\n");
 
     let mut scene_va: u64 = 0;
-    let mut font_va: u64 = 0;
-    let mut font_len: u32 = 0;
-    let mut sans_font_len: u32 = 0;
+    let mut content_va: u64 = 0;
+    let mut content_size: u32 = 0;
     let mut scale_factor: f32 = 1.0;
     let mut font_size_cfg: u16 = 18;
     let mut frame_rate_cfg: u32 = 60;
@@ -345,9 +344,8 @@ pub extern "C" fn _start() -> ! {
                 protocol::compose::decode(msg.msg_type, &msg.payload)
             {
                 scene_va = config.scene_va;
-                font_va = config.font_buf_va;
-                font_len = config.mono_font_len;
-                sans_font_len = config.sans_font_len;
+                content_va = config.content_va;
+                content_size = config.content_size;
                 scale_factor = config.scale_factor;
                 font_size_cfg = config.font_size;
                 frame_rate_cfg = if config.frame_rate > 0 {
@@ -359,8 +357,8 @@ pub extern "C" fn _start() -> ! {
                 sys::print(b"     render config: scene_va=");
                 print_hex_u32((scene_va >> 32) as u32);
                 print_hex_u32(scene_va as u32);
-                sys::print(b" font_len=");
-                print_u32(font_len);
+                sys::print(b" content_size=");
+                print_u32(content_size);
                 sys::print(b" scale=");
                 print_u32((scale_factor * 100.0) as u32);
                 sys::print(b"%\n");
@@ -387,12 +385,69 @@ pub extern "C" fn _start() -> ! {
     glyph_atlas.set_dma_va(atlas_va);
     let mut font_ascent: u32 = 14;
 
-    if font_va != 0 && font_len > 0 {
-        sys::print(b"     initializing glyph atlas via HarfBuzz shaping\n");
+    // Parse Content Region header to find font data.
+    // SAFETY: content_va..+content_size is mapped read-only by init before starting us.
+    let content_region_slice: &[u8] = if content_va != 0 && content_size > 0 {
+        unsafe { core::slice::from_raw_parts(content_va as *const u8, content_size as usize) }
+    } else {
+        &[]
+    };
+    let content_header: Option<&protocol::content::ContentRegionHeader> = if content_region_slice
+        .len()
+        >= core::mem::size_of::<protocol::content::ContentRegionHeader>()
+    {
+        // SAFETY: content_va is page-aligned; ContentRegionHeader is repr(C).
+        Some(unsafe { &*(content_va as *const protocol::content::ContentRegionHeader) })
+    } else {
+        None
+    };
+    let font_data: &[u8] = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_MONO)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size as usize {
+                unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va as usize + start) as *const u8,
+                        entry.length as usize,
+                    )
+                }
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
+    let sans_font_data: &[u8] = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_SANS)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size as usize {
+                unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va as usize + start) as *const u8,
+                        entry.length as usize,
+                    )
+                }
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
 
-        // SAFETY: font_va is mapped read-only into our address space by init.
-        let font_data =
-            unsafe { core::slice::from_raw_parts(font_va as *const u8, font_len as usize) };
+    if !font_data.is_empty() {
+        sys::print(b"     initializing glyph atlas via HarfBuzz shaping\n");
 
         // Font size from config (points). The scene graph x_advance/x_offset
         // are in points at this size. Rasterize at the point size —
@@ -462,12 +517,8 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Pre-populate sans font (Inter) ASCII glyphs (font_id = 1).
-        if sans_font_len > 0 {
-            let sans_off = font_va as usize + font_len as usize;
-            // SAFETY: same as above — init mapped the full font buffer region.
-            let sans_data = unsafe {
-                core::slice::from_raw_parts(sans_off as *const u8, sans_font_len as usize)
-            };
+        if !sans_font_data.is_empty() {
+            let sans_data = sans_font_data;
             let sans_shaped = fonts::shape(sans_data, ascii, &[]);
             for sg in &sans_shaped {
                 if glyph_atlas.lookup(sg.glyph_id, 1).is_some() {

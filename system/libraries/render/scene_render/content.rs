@@ -109,8 +109,14 @@ pub(super) fn render_content(
                 fb, graph, data, src_width, src_height, draw_x, draw_y, nw, nh,
             );
         }
-        Content::Image { .. } => {
-            // Content Region image: resolved when render services wire up Content Region.
+        Content::Image {
+            content_id,
+            src_width,
+            src_height,
+        } => {
+            render_content_region_image(
+                fb, graph, content_id, src_width, src_height, draw_x, draw_y, nw, nh,
+            );
         }
     }
 }
@@ -223,6 +229,82 @@ fn render_image(
     // use bilinear resampling for smooth scaling instead of nearest-
     // neighbor. This produces blended gray for downscaled checker-
     // boards instead of aliased black/white.
+    let phys_nw = nw.max(0) as u32;
+    let phys_nh = nh.max(0) as u32;
+    if phys_nw > 0 && phys_nh > 0 && (src_width as u32 != phys_nw || src_height as u32 != phys_nh) {
+        let inv_a = src_width as f32 / phys_nw as f32;
+        let inv_d = src_height as f32 / phys_nh as f32;
+        let inv_tx = (inv_a - 1.0) * 0.5;
+        let inv_ty = (inv_d - 1.0) * 0.5;
+
+        fb.blit_transformed_bilinear(
+            pixels,
+            src_width as u32,
+            src_height as u32,
+            src_stride,
+            draw_x,
+            draw_y,
+            phys_nw,
+            phys_nh,
+            inv_a,
+            0.0,
+            0.0,
+            inv_d,
+            inv_tx,
+            inv_ty,
+            255,
+        );
+    } else {
+        fb.blit_blend(
+            pixels,
+            src_width as u32,
+            src_height as u32,
+            src_stride,
+            draw_x as u32,
+            draw_y as u32,
+        );
+    }
+}
+
+/// Render an image from the Content Region (decoded BGRA pixels).
+///
+/// Looks up the content_id in the Content Region registry to find
+/// the pixel data offset and length, then renders identically to
+/// `render_image` but sourcing data from `graph.content_region`.
+fn render_content_region_image(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    content_id: u32,
+    src_width: u16,
+    src_height: u16,
+    draw_x: i32,
+    draw_y: i32,
+    nw: i32,
+    nh: i32,
+) {
+    if graph.content_region.is_empty() || content_id == 0 {
+        return;
+    }
+    if graph.content_region.len() < core::mem::size_of::<protocol::content::ContentRegionHeader>() {
+        return;
+    }
+    // SAFETY: content_region starts at the Content Region base, which is aligned
+    // by page allocation. ContentRegionHeader is repr(C) and fits within the region.
+    let header = unsafe {
+        &*(graph.content_region.as_ptr() as *const protocol::content::ContentRegionHeader)
+    };
+    let entry = match protocol::content::find_entry(header, content_id) {
+        Some(e) => e,
+        None => return,
+    };
+    let start = entry.offset as usize;
+    let end = start + entry.length as usize;
+    if end > graph.content_region.len() {
+        return;
+    }
+    let pixels = &graph.content_region[start..end];
+    let src_stride = src_width as u32 * 4;
+
     let phys_nw = nw.max(0) as u32;
     let phys_nh = nh.max(0) as u32;
     if phys_nw > 0 && phys_nh > 0 && (src_width as u32 != phys_nw || src_height as u32 != phys_nh) {

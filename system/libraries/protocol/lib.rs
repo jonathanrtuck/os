@@ -402,24 +402,25 @@ pub mod core_config {
     ///
     /// `fb_width` / `fb_height` are dimensions in points (physical / scale).
     /// The core lays out in point coordinates; the render service scales to pixels.
+    /// `content_va` is the Content Region base (read-write). Core reads font
+    /// data via the registry and writes decoded image pixels.
+    /// `content_size` is the total Content Region size in bytes.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CoreConfig {
         pub doc_va: u64,
         pub scene_va: u64,
-        pub font_buf_va: u64,
+        pub content_va: u64,
         /// VA of the shared PointerState register (input driver → core).
         /// 0 if no input device is present.
         pub input_state_va: u64,
         pub fb_width: u32,
         pub fb_height: u32,
         pub doc_capacity: u32,
-        pub mono_font_len: u32,
-        pub sans_font_len: u32,
-        pub serif_font_len: u32,
+        pub content_size: u32,
     }
 
-    // Guard: must fit within the 60-byte IPC payload (56 bytes used).
+    // Guard: must fit within the 60-byte IPC payload (48 bytes used).
     const _: () = assert!(core::mem::size_of::<CoreConfig>() <= 60);
 
     /// Display refresh rate, sent as a separate message after CoreConfig.
@@ -479,6 +480,10 @@ pub mod compose {
     /// `font_size` is the font size in points (e.g. 18).
     /// `screen_dpi` is the display DPI (e.g. 96).
     /// `frame_rate` is the target frames per second (e.g. 60).
+    /// `content_va` is the base VA of the Content Region shared memory
+    /// (header + data area). Render services find fonts and decoded
+    /// image pixels via the registry in the Content Region header.
+    /// `content_size` is the total Content Region size in bytes.
     ///
     /// Framebuffer VAs are not included — both render services self-allocate
     /// framebuffers via `dma_alloc`.
@@ -486,12 +491,10 @@ pub mod compose {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CompositorConfig {
         pub scene_va: u64,
-        pub font_buf_va: u64,
+        pub content_va: u64,
         pub fb_width: u32,
         pub fb_height: u32,
-        pub mono_font_len: u32,
-        pub sans_font_len: u32,
-        pub serif_font_len: u32,
+        pub content_size: u32,
         pub scale_factor: f32,
         pub frame_rate: u16,
         pub font_size: u16,

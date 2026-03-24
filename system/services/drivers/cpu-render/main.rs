@@ -291,23 +291,69 @@ pub extern "C" fn _start() -> ! {
     }
 
     // ── Phase F: Init render backend ─────────────────────────────────
-    if config.font_buf_va == 0 || config.mono_font_len == 0 {
-        sys::print(b"cpu-render: no font data\n");
+    // Parse Content Region header to find font data.
+    let content_va = config.content_va as usize;
+    let content_size = config.content_size as usize;
+    // SAFETY: content_va..+content_size is mapped read-only by init before starting us.
+    let content_slice: &[u8] = if content_va != 0 && content_size > 0 {
+        unsafe { core::slice::from_raw_parts(content_va as *const u8, content_size) }
+    } else {
+        &[]
+    };
+    let content_header: Option<&protocol::content::ContentRegionHeader> =
+        if content_slice.len() >= core::mem::size_of::<protocol::content::ContentRegionHeader>() {
+            // SAFETY: content_va is page-aligned by DMA allocation; ContentRegionHeader is repr(C).
+            Some(unsafe { &*(content_va as *const protocol::content::ContentRegionHeader) })
+        } else {
+            None
+        };
+    let mono: &[u8] = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_MONO)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size {
+                // SAFETY: entry bounds validated within content_size; content_va is init-mapped.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va + start) as *const u8,
+                        entry.length as usize,
+                    )
+                }
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
+    if mono.is_empty() {
+        sys::print(b"cpu-render: no font data in content region\n");
         sys::exit();
     }
-    // SAFETY: init mapped these pages before starting us.
-    let mono = unsafe {
-        core::slice::from_raw_parts(
-            config.font_buf_va as *const u8,
-            config.mono_font_len as usize,
-        )
-    };
-    let prop = if config.sans_font_len > 0 {
-        let off = config.font_buf_va as usize + config.mono_font_len as usize;
-        // SAFETY: same as above — init mapped font pages before starting us.
-        Some(unsafe {
-            core::slice::from_raw_parts(off as *const u8, config.sans_font_len as usize)
-        })
+    let prop: Option<&[u8]> = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_SANS)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size {
+                // SAFETY: entry bounds validated within content_size; content_va is init-mapped.
+                Some(unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va + start) as *const u8,
+                        entry.length as usize,
+                    )
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -399,6 +445,7 @@ pub extern "C" fn _start() -> ! {
         let graph = render::scene_render::SceneGraph {
             nodes,
             data: tr.front_data_buf(),
+            content_region: content_slice,
         };
         backend.render(&graph, &mut make_fb(0));
         // Update incremental state from first frame.
@@ -514,6 +561,7 @@ pub extern "C" fn _start() -> ! {
         let graph = render::scene_render::SceneGraph {
             nodes,
             data: tr.front_data_buf(),
+            content_region: content_slice,
         };
 
         // Determine incremental vs full repaint.

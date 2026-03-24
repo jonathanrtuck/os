@@ -822,9 +822,8 @@ pub extern "C" fn _start() -> ! {
     // ── Phase C: Receive render config ───────────────────────────────────
     sys::print(b"     waiting for render config\n");
     let mut scene_va: u64 = 0;
-    let mut font_va: u64 = 0;
-    let mut mono_font_len: u32 = 0;
-    let mut sans_font_len: u32 = 0;
+    let mut content_va: u64 = 0;
+    let mut content_size: u32 = 0;
     let mut scale_factor: f32 = 1.0;
     let mut pointer_state_va: u64 = 0;
     let mut font_size_cfg: u16 = 18;
@@ -837,9 +836,8 @@ pub extern "C" fn _start() -> ! {
                 protocol::compose::decode(msg.msg_type, &msg.payload)
             {
                 scene_va = config.scene_va;
-                font_va = config.font_buf_va;
-                mono_font_len = config.mono_font_len;
-                sans_font_len = config.sans_font_len;
+                content_va = config.content_va;
+                content_size = config.content_size;
                 scale_factor = config.scale_factor;
                 pointer_state_va = config.pointer_state_va;
                 font_size_cfg = config.font_size;
@@ -856,10 +854,8 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"     render config: scene_va=");
     print_hex_u32((scene_va >> 32) as u32);
     print_hex_u32(scene_va as u32);
-    sys::print(b" mono_font_len=");
-    print_u32(mono_font_len);
-    sys::print(b" sans_font_len=");
-    print_u32(sans_font_len);
+    sys::print(b" content_size=");
+    print_u32(content_size);
     sys::print(b"\n");
 
     if scene_va == 0 {
@@ -1120,17 +1116,63 @@ pub extern "C" fn _start() -> ! {
     let glyph_atlas = unsafe { &mut *atlas_ptr };
     let mut font_ascent: u32 = 14;
 
-    // Font data slices — kept alive for on-demand glyph rasterization in the render loop.
-    // SAFETY: font_va is mapped read-only by init; valid for the process lifetime.
-    let font_slice: &[u8] = if font_va != 0 && mono_font_len > 0 {
-        unsafe { core::slice::from_raw_parts(font_va as *const u8, mono_font_len as usize) }
+    // Parse Content Region header to find font data.
+    // SAFETY: content_va..+content_size is mapped read-only by init before starting us.
+    let content_slice: &[u8] = if content_va != 0 && content_size > 0 {
+        unsafe { core::slice::from_raw_parts(content_va as *const u8, content_size as usize) }
     } else {
         &[]
     };
-    let sans_font_slice: &[u8] = if font_va != 0 && sans_font_len > 0 {
-        let off = font_va as usize + mono_font_len as usize;
-        // SAFETY: same as above — init mapped the full font buffer region.
-        unsafe { core::slice::from_raw_parts(off as *const u8, sans_font_len as usize) }
+    let content_header: Option<&protocol::content::ContentRegionHeader> =
+        if content_slice.len() >= core::mem::size_of::<protocol::content::ContentRegionHeader>() {
+            // SAFETY: content_va is page-aligned; ContentRegionHeader is repr(C).
+            Some(unsafe { &*(content_va as *const protocol::content::ContentRegionHeader) })
+        } else {
+            None
+        };
+    let font_slice: &[u8] = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_MONO)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size as usize {
+                // SAFETY: entry bounds validated within content_size; content_va is init-mapped.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va as usize + start) as *const u8,
+                        entry.length as usize,
+                    )
+                }
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
+    let sans_font_slice: &[u8] = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_SANS)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size as usize {
+                // SAFETY: entry bounds validated within content_size; content_va is init-mapped.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va as usize + start) as *const u8,
+                        entry.length as usize,
+                    )
+                }
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
     } else {
         &[]
     };
@@ -1530,6 +1572,7 @@ pub extern "C" fn _start() -> ! {
             &setup_dma,
             path_buf,
             &mut image_atlas,
+            content_slice,
         );
 
         // Flush remaining solid vertices.
@@ -2244,6 +2287,8 @@ fn walk_scene(
     // Per-frame image atlas — packs Content::InlineImage nodes into non-overlapping
     // sub-rectangles of TEX_IMAGE so uploads don't overwrite each other.
     image_atlas: &mut ImageAtlas,
+    // Content Region shared memory for resolving Content::Image content_ids.
+    content_region: &[u8],
 ) {
     if node_id == NULL || node_id as usize >= nodes.len() {
         return;
@@ -2747,8 +2792,73 @@ fn walk_scene(
                 }
             }
         }
-        Content::Image { .. } => {
-            // Content Region image: resolved when render services wire up Content Region.
+        Content::Image {
+            content_id,
+            src_width,
+            src_height,
+        } => {
+            // Resolve content_id from the Content Region registry.
+            if !content_region.is_empty()
+                && content_region.len()
+                    >= core::mem::size_of::<protocol::content::ContentRegionHeader>()
+            {
+                // SAFETY: content_region is page-aligned shared memory; header is repr(C).
+                let header = unsafe {
+                    &*(content_region.as_ptr() as *const protocol::content::ContentRegionHeader)
+                };
+                if let Some(entry) = protocol::content::find_entry(header, content_id) {
+                    let start = entry.offset as usize;
+                    let end = start + entry.length as usize;
+                    if end <= content_region.len() && src_width > 0 && src_height > 0 {
+                        let pixel_data = &content_region[start..end];
+                        if let Some((atlas_x, atlas_y)) =
+                            image_atlas.allocate(src_width as u32, src_height as u32)
+                        {
+                            flush_solid_vertices(cmdbuf, solid_verts);
+
+                            let mut setup_cmdbuf = metal::CommandBuffer::new();
+                            setup_cmdbuf.upload_texture(
+                                TEX_IMAGE,
+                                atlas_x as u16,
+                                atlas_y as u16,
+                                src_width,
+                                src_height,
+                                src_width as u32 * 4,
+                                pixel_data,
+                            );
+                            send_setup(device, setup_vq, irq_handle, setup_dma, &setup_cmdbuf);
+
+                            let u0 = atlas_x as f32 / IMG_TEX_DIM as f32;
+                            let v0 = atlas_y as f32 / IMG_TEX_DIM as f32;
+                            let u1 = (atlas_x + src_width as u32) as f32 / IMG_TEX_DIM as f32;
+                            let v1 = (atlas_y + src_height as u32) as f32 / IMG_TEX_DIM as f32;
+                            cmdbuf.set_render_pipeline(PIPE_TEXTURED);
+                            cmdbuf.set_fragment_texture(TEX_IMAGE, 0);
+                            cmdbuf.set_fragment_sampler(SAMPLER_LINEAR, 0);
+                            emit_textured_quad(
+                                solid_verts,
+                                abs_x,
+                                abs_y,
+                                w,
+                                h,
+                                vw,
+                                vh,
+                                scale,
+                                u0,
+                                v0,
+                                u1,
+                                v1,
+                                1.0,
+                                1.0,
+                                1.0,
+                                1.0,
+                            );
+                            flush_solid_vertices(cmdbuf, solid_verts);
+                            cmdbuf.set_render_pipeline(PIPE_SOLID);
+                        }
+                    }
+                }
+            }
         }
         _ => {}
     }
@@ -2884,6 +2994,7 @@ fn walk_scene(
             setup_dma,
             path_buf,
             image_atlas,
+            content_region,
         );
         if child as usize >= nodes.len() {
             break;

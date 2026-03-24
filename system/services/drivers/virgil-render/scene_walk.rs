@@ -334,7 +334,9 @@ fn walk_node(
             }
         }
         Content::Image { .. } => {
-            // Content Region image: resolved when render services wire up Content Region.
+            // Content Region image: not yet implemented for virgil-render.
+            // Images are resolved via the Content Region registry in metal-render
+            // and cpu-render. Virgil path deferred.
         }
         Content::Path {
             color,
