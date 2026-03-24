@@ -1,14 +1,8 @@
 //! PNG decoder tests.
-//!
-//! The PNG decoder is a standalone format decoder. The code lives here in
-//! the test crate since no service currently consumes it. When a service
-//! needs PNG decoding, the code can be moved to that service's local modules.
 
-// ---------------------------------------------------------------------------
-// PNG decoder (self-contained, no external dependencies)
-// ---------------------------------------------------------------------------
-
-include!("png_decoder.rs");
+#[path = "../../libraries/drawing/png.rs"]
+mod png;
+use png::{png_decode, png_header, PngError};
 
 // ---------------------------------------------------------------------------
 // Test data

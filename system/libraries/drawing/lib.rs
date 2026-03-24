@@ -40,6 +40,7 @@ mod coverage;
 mod fill;
 mod gradient;
 mod line;
+pub mod png;
 mod transform;
 
 // --- Re-exports from submodules ---------------------------------------------
