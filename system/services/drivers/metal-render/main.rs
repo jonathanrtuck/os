@@ -867,8 +867,9 @@ pub extern "C" fn _start() -> ! {
 
     // ── Phase D: Metal pipeline setup ────────────────────────────────────
     // Allocate DMA buffers for command submission.
-    // Setup buffer: 512 KiB (order 7) — enough for shader source + atlas upload.
-    let setup_dma = DmaBuf::alloc(7);
+    // Setup buffer: 2 MiB (order 9) — enough for shader source + atlas upload + image textures.
+    // Increased from 512 KiB to handle Content Region images (e.g., 800×537 BGRA = 1.6 MiB).
+    let setup_dma = DmaBuf::alloc(9);
     // Render buffer: 64 KiB (order 4) — per-frame command buffer.
     let render_dma = DmaBuf::alloc(4);
 

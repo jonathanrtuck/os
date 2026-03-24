@@ -1015,7 +1015,7 @@ pub extern "C" fn _start() -> ! {
     // Phase 1.5: Read font files from host via 9p driver (must complete before compositor).
     // Two memory regions:
     //   Content Region (4 MiB): header + registry + font data (shared with core + render)
-    //   File Store (256 KiB): raw PNG bytes (shared with core only, NOT render)
+    //   File Store (1 MiB): raw file bytes (shared with core only, NOT render)
     let content_region_info: Option<(u64, u32)>; // (content_pa, content_size)
     let file_store_info: Option<(u64, u32, u32)>; // (file_store_pa, png_offset, png_len)
 
@@ -1036,16 +1036,16 @@ pub extern "C" fn _start() -> ! {
         // SAFETY: content_va..+content_capacity is the DMA region just allocated; zeroing is within bounds.
         unsafe { core::ptr::write_bytes(content_va as *mut u8, 0, content_capacity as usize) };
 
-        // Allocate File Store (256 KiB = order 6 = 64 pages).
+        // Allocate File Store (1 MiB = order 8 = 256 pages).
         // Holds raw PNG bytes (core reads for decoding).
-        let fs_order: u32 = 6;
+        let fs_order: u32 = 8;
         let fs_page_count: u64 = 1u64 << fs_order;
         let mut fs_pa: u64 = 0;
         let fs_va = sys::dma_alloc(fs_order, &mut fs_pa).unwrap_or_else(|_| {
             sys::print(b"init: dma_alloc (file store) failed\n");
             sys::exit();
         });
-        let fs_capacity: u32 = (fs_page_count as u32) * 4096; // 256 KiB
+        let fs_capacity: u32 = (fs_page_count as u32) * 4096; // 1 MiB
 
         // SAFETY: fs_va..+fs_capacity is the DMA region just allocated; zeroing is within bounds.
         unsafe { core::ptr::write_bytes(fs_va as *mut u8, 0, fs_capacity as usize) };
