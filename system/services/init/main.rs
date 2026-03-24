@@ -211,6 +211,21 @@ fn setup_render_pipeline(
 
     sys::print(b"     document buffer: 4 KiB shared\n");
 
+    // Pointer state register (1 page). Shared with input drivers (write),
+    // core (read-only), and render service (read-only for cursor plane).
+    // Allocated here so it can be shared with the render service in Phase 3
+    // (memory_share requires the target process to be unstarted).
+    let mut input_state_pa: u64 = 0;
+    let input_state_va = sys::dma_alloc(0, &mut input_state_pa).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (input state) failed\n");
+        sys::exit();
+    });
+
+    // SAFETY: input_state_va is a valid 1-page DMA region; zeroing 4096 bytes is within bounds.
+    unsafe { core::ptr::write_bytes(input_state_va as *mut u8, 0, 4096) };
+
+    sys::print(b"     pointer state register: 4 KiB shared\n");
+
     // Unpack font buffer info.
     let (font_pa_val, mono_font_len, sans_font_len, serif_font_len, png_offset, png_len) =
         if let Some((pa, mono, sans, serif, png_off, png_l)) = font_buf {
@@ -260,6 +275,14 @@ fn setup_render_pipeline(
     } else {
         0u64
     };
+
+    // Share pointer state register with render service (read-only).
+    // Enables cursor plane position updates without full scene walks.
+    let render_input_state_va = sys::memory_share(gpu_proc, input_state_pa, 1, true)
+        .unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (render input state) failed\n");
+            sys::exit();
+        });
 
     // Send scene update channel endpoint B to render service (handle 1).
     sys::handle_send(gpu_proc, cv_b).unwrap_or_else(|_| {
@@ -412,14 +435,6 @@ fn setup_render_pipeline(
     // -----------------------------------------------------------------------
     // Phase 6: Send render config (CompositorConfig) to render service.
     // -----------------------------------------------------------------------
-    // Pointer state register is allocated later (after core spawns) and shared
-    // with core + input drivers. Metal-render gets VA=0 for now, meaning it
-    // reads cursor position from the scene graph instead of the register.
-    // TODO: share pointer state with metal-render for cursor-only frames
-    // (requires investigating memory_share failure to a running process).
-    let mut input_state_pa: u64 = 0;
-    let input_state_va: usize = 0; // Allocated later.
-
     let render_config = CompositorConfig {
         scene_va: render_scene_va as u64,
         font_buf_va: render_font_va,
@@ -433,7 +448,7 @@ fn setup_render_pipeline(
         font_size: 18,
         screen_dpi: 96,
         _pad: 0,
-        pointer_state_va: 0,
+        pointer_state_va: render_input_state_va as u64,
     };
     // SAFETY: CompositorConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &render_config) };
@@ -478,17 +493,7 @@ fn setup_render_pipeline(
     } else {
         0u64
     };
-    // Allocate shared pointer state register (input driver → core).
-    // One page, shared with all input devices (write) and core (read-only).
-    input_state_pa = 0;
-    let input_state_va = sys::dma_alloc(0, &mut input_state_pa).unwrap_or_else(|_| {
-        sys::print(b"init: dma_alloc (input state) failed\n");
-        sys::exit();
-    });
-    let _ = input_state_va; // Used for zeroing below.
-    // SAFETY: input_state_va is a valid DMA page; zero before sharing.
-    unsafe { core::ptr::write_bytes(input_state_va as *mut u8, 0, 4096) };
-
+    // Share pointer state register with core (read-only).
     let core_input_state_va =
         sys::memory_share(core_proc, input_state_pa, 1, true).unwrap_or_else(|_| {
             sys::print(b"init: memory_share (core input state) failed\n");

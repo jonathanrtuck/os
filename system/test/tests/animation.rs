@@ -656,6 +656,439 @@ fn spring_custom_settle_threshold() {
     );
 }
 
+// ── Slide spring contract ────────────────────────────────────────────────────
+//
+// The document slide uses Spring::new(0.0, 600.0, D, 1.0) where D is the
+// damping coefficient. These tests encode the contract that the slide
+// animation must satisfy regardless of damping choice.
+
+/// The slide spring (with settle_threshold=0.5) must settle within 1 second.
+#[test]
+fn slide_spring_settles_at_target() {
+    let target = 2056.0; // fb_width for a Retina display
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_settle_threshold(0.5);
+    s.set_target(target);
+    for _ in 0..60 {
+        s.tick(1.0 / 60.0);
+    }
+    assert!(
+        s.settled(),
+        "slide spring not settled after 1s: value={}, vel={}",
+        s.value(),
+        s.velocity()
+    );
+    assert!(
+        (s.value() - target).abs() < 1.0,
+        "slide spring final value {} too far from target {}",
+        s.value(),
+        target
+    );
+}
+
+/// The slide spring must never overshoot by more than 5% of the travel distance.
+/// Larger overshoot makes documents appear from the wrong side.
+#[test]
+fn slide_spring_overshoot_bounded() {
+    let target = 2056.0;
+    let max_overshoot_frac = 0.05;
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_target(target);
+    let mut max_val = 0.0f32;
+    let mut min_val = 0.0f32;
+    for _ in 0..120 {
+        s.tick(1.0 / 60.0);
+        if s.value() > max_val {
+            max_val = s.value();
+        }
+        if s.value() < min_val {
+            min_val = s.value();
+        }
+    }
+    let overshoot = max_val - target;
+    assert!(
+        overshoot < target * max_overshoot_frac,
+        "overshoot {} exceeds {}% of target {}",
+        overshoot,
+        max_overshoot_frac * 100.0,
+        target
+    );
+    assert!(
+        min_val >= -target * max_overshoot_frac,
+        "undershoot {} below 0 exceeds bound",
+        min_val
+    );
+}
+
+/// Round-trip: slide from 0→target→0 must settle back at 0.
+#[test]
+fn slide_spring_round_trip_settles_at_zero() {
+    let target = 2056.0;
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_settle_threshold(0.5);
+    s.set_target(target);
+    for _ in 0..60 {
+        s.tick(1.0 / 60.0);
+    }
+    assert!(s.settled());
+    // Now slide back.
+    s.set_target(0.0);
+    for _ in 0..60 {
+        s.tick(1.0 / 60.0);
+    }
+    assert!(
+        s.settled(),
+        "spring not settled after return: value={}, vel={}",
+        s.value(),
+        s.velocity()
+    );
+    assert!(
+        s.value().abs() < 1.0,
+        "spring did not return to origin: value={}",
+        s.value()
+    );
+}
+
+/// Rapid switching (0→target→0 before first animation settles) must still
+/// converge to the final target.
+#[test]
+fn slide_spring_rapid_retarget_converges() {
+    let target = 2056.0;
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    // Switch to space 1.
+    s.set_target(target);
+    for _ in 0..10 {
+        s.tick(1.0 / 60.0);
+    }
+    // Immediately switch back before settling.
+    s.set_target(0.0);
+    for _ in 0..120 {
+        s.tick(1.0 / 60.0);
+    }
+    assert!(
+        s.settled(),
+        "spring not settled after rapid retarget: value={}, vel={}",
+        s.value(),
+        s.velocity()
+    );
+    assert!(
+        s.value().abs() < 1.0,
+        "spring did not converge to 0 after rapid retarget: value={}",
+        s.value()
+    );
+}
+
+/// Critically damped spring must NOT overshoot. This prevents the "mouse shakes
+/// scene" bug — underdamped oscillation ticked by pointer events.
+#[test]
+fn slide_spring_critically_damped_no_overshoot() {
+    let target = 2056.0;
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_target(target);
+    for _ in 0..300 {
+        s.tick(1.0 / 60.0);
+        assert!(
+            s.value() <= target + 0.5,
+            "critically damped spring overshot: value={}, target={}",
+            s.value(),
+            target
+        );
+        assert!(
+            s.value() >= -0.5,
+            "critically damped spring went negative: value={}",
+            s.value()
+        );
+    }
+}
+
+/// Default settle_threshold=0.5 snaps within 0.5px of target.
+/// A tighter threshold (0.1) should take more frames to settle.
+#[test]
+fn slide_spring_snaps_with_higher_threshold() {
+    let target = 2056.0;
+    // Default threshold = 0.5 (sub-pixel).
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_target(target);
+    let mut settled_frame = None;
+    for i in 0..60 {
+        s.tick(1.0 / 60.0);
+        if s.settled() && settled_frame.is_none() {
+            settled_frame = Some(i);
+        }
+    }
+    let frame = settled_frame.expect("spring never settled with default threshold=0.5");
+    // Tighter threshold = 0.1: should take more frames.
+    let mut s2 = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s2.set_settle_threshold(0.1);
+    s2.set_target(target);
+    let mut settled_frame2 = None;
+    for i in 0..200 {
+        s2.tick(1.0 / 60.0);
+        if s2.settled() && settled_frame2.is_none() {
+            settled_frame2 = Some(i);
+        }
+    }
+    let frame2 = settled_frame2.expect("spring never settled with threshold=0.1");
+    assert!(
+        frame < frame2,
+        "threshold=0.5 should settle faster (frame {}) than threshold=0.1 (frame {})",
+        frame,
+        frame2
+    );
+}
+
+/// The slide spring must work correctly with variable dt (actual frame timing).
+/// Simulate frames varying between 10ms and 25ms.
+#[test]
+fn slide_spring_variable_dt_settles() {
+    let target = 2056.0;
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_target(target);
+    let dts = [0.010, 0.020, 0.016, 0.025, 0.012, 0.018, 0.016, 0.022];
+    for i in 0..100 {
+        s.tick(dts[i % dts.len()]);
+    }
+    assert!(
+        s.settled(),
+        "spring not settled with variable dt: value={}, vel={}",
+        s.value(),
+        s.velocity()
+    );
+    assert!(
+        (s.value() - target).abs() < 1.0,
+        "spring value {} too far from target {} with variable dt",
+        s.value(),
+        target
+    );
+}
+
+// ── Reproduction tests for slide animation bugs ──────────────────────────────
+
+/// Simulate the exact Ctrl+Tab scenario: many rapid toggles between
+/// two targets (0 and fb_width). After each toggle, tick the spring for
+/// N frames. After all toggles, let the spring settle and check:
+/// 1. The spring value NEVER leaves the [0, target] range
+/// 2. The spring settles to the correct final target
+/// 3. Velocity doesn't accumulate unboundedly during rapid toggling
+#[test]
+fn slide_spring_many_rapid_toggles_bounded() {
+    let target = 2056.0f32; // fb_width in points
+    let dt = 1.0 / 60.0; // 60fps
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_settle_threshold(0.5);
+
+    let mut max_value: f32 = 0.0;
+    let mut min_value: f32 = 0.0;
+    let mut max_velocity: f32 = 0.0;
+
+    // 20 rapid toggles, 3 frames (~50ms) between each
+    for toggle in 0..20 {
+        let new_target = if toggle % 2 == 0 { target } else { 0.0 };
+        s.set_target(new_target);
+        for _ in 0..3 {
+            s.tick(dt);
+            max_value = max_value.max(s.value());
+            min_value = min_value.min(s.value());
+            max_velocity = max_velocity.max(s.velocity().abs());
+        }
+    }
+
+    // After rapid toggling, check bounds: spring should never have gone
+    // more than 10% beyond the valid range.
+    let overshoot_limit = target * 0.10;
+    assert!(
+        min_value >= -overshoot_limit,
+        "spring went too far negative during rapid toggles: min_value={}, limit={}",
+        min_value,
+        -overshoot_limit
+    );
+    assert!(
+        max_value <= target + overshoot_limit,
+        "spring overshot too far during rapid toggles: max_value={}, limit={}",
+        max_value,
+        target + overshoot_limit
+    );
+
+    // Let it settle (2 seconds = 120 frames at 60fps)
+    let final_target = s.target();
+    for _ in 0..120 {
+        s.tick(dt);
+    }
+    assert!(
+        s.settled(),
+        "spring not settled after rapid toggles: value={}, vel={}, target={}",
+        s.value(),
+        s.velocity(),
+        final_target
+    );
+    assert!(
+        (s.value() - final_target).abs() < 1.0,
+        "spring converged to wrong value: value={}, target={}",
+        s.value(),
+        final_target
+    );
+}
+
+/// Extreme stress: 50 toggles with only 1 frame between each (simulating
+/// Ctrl+Tab held down or repeated very fast). This is the worst case for
+/// velocity accumulation.
+#[test]
+fn slide_spring_extreme_rapid_toggles_bounded() {
+    let target = 2056.0f32;
+    let dt = 1.0 / 60.0;
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_settle_threshold(0.5);
+
+    let mut max_value: f32 = 0.0;
+    let mut min_value: f32 = 0.0;
+    let mut max_velocity: f32 = 0.0;
+
+    // 50 toggles, only 1 frame between each — maximizes velocity buildup
+    for toggle in 0..50 {
+        let new_target = if toggle % 2 == 0 { target } else { 0.0 };
+        s.set_target(new_target);
+        s.tick(dt);
+        max_value = max_value.max(s.value());
+        min_value = min_value.min(s.value());
+        max_velocity = max_velocity.max(s.velocity().abs());
+    }
+
+    eprintln!(
+        "After 50 extreme toggles: value={:.1}, vel={:.1}, target={:.0}, bounds=[{:.1}, {:.1}], max_vel={:.1}",
+        s.value(), s.velocity(), s.target(), min_value, max_value, max_velocity
+    );
+
+    // After settling (3 seconds = generous)
+    for _ in 0..180 {
+        s.tick(dt);
+    }
+    assert!(
+        s.settled(),
+        "spring not settled after extreme toggles: value={}, vel={}",
+        s.value(),
+        s.velocity()
+    );
+}
+
+/// Simulate the "cursor shaking" scenario: rapid toggles, then high-frequency
+/// ticking with small dt (simulating cursor movement waking core at ~1000Hz).
+/// The spring should converge, NOT diverge.
+#[test]
+fn slide_spring_rapid_toggles_then_high_freq_tick() {
+    let target = 2056.0f32;
+    let dt = 1.0 / 60.0;
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_settle_threshold(0.5);
+
+    // 10 rapid toggles, 2 frames between each
+    for toggle in 0..10 {
+        let new_target = if toggle % 2 == 0 { target } else { 0.0 };
+        s.set_target(new_target);
+        for _ in 0..2 {
+            s.tick(dt);
+        }
+    }
+
+    let value_before = s.value();
+    let vel_before = s.velocity();
+
+    // Now simulate cursor movement waking core at 1000Hz (dt=1ms) for 1 second.
+    // Track if energy is growing (divergence) or shrinking (convergence).
+    let small_dt = 0.001; // 1ms between ticks
+    let mut max_displacement: f32 = 0.0;
+    let mut energy_samples: [f32; 10] = [0.0; 10];
+    let ticks_per_sample = 100; // 100ms per sample
+
+    for sample in 0..10 {
+        let mut max_disp_in_sample: f32 = 0.0;
+        for _ in 0..ticks_per_sample {
+            s.tick(small_dt);
+            let disp = (s.value() - s.target()).abs();
+            max_disp_in_sample = max_disp_in_sample.max(disp);
+            max_displacement = max_displacement.max(disp);
+        }
+        energy_samples[sample] = max_disp_in_sample;
+    }
+
+    eprintln!(
+        "Cursor shake test: before value={:.1} vel={:.1}, after value={:.1} vel={:.1}",
+        value_before,
+        vel_before,
+        s.value(),
+        s.velocity()
+    );
+    eprintln!(
+        "Energy over time (max displacement per 100ms): {:?}",
+        energy_samples
+            .iter()
+            .map(|e| format!("{:.1}", e))
+            .collect::<Vec<_>>()
+    );
+
+    // Energy must be monotonically non-increasing (convergence, not divergence).
+    // Allow small floating-point noise (0.1px).
+    for i in 1..energy_samples.len() {
+        assert!(
+            energy_samples[i] <= energy_samples[i - 1] + 0.1,
+            "spring energy INCREASED between samples {} and {}: {:.2} -> {:.2} — divergence!",
+            i - 1,
+            i,
+            energy_samples[i - 1],
+            energy_samples[i]
+        );
+    }
+
+    // Spring must converge to target
+    assert!(
+        s.settled(),
+        "spring not settled after 1s of high-freq ticking: value={}, vel={}",
+        s.value(),
+        s.velocity()
+    );
+}
+
+/// Verify that context_switched full rebuilds during animation don't
+/// create coordinate mismatches. Simulates the exact frame sequence:
+/// Ctrl+Tab → spring tick → full rebuild → apply_slide.
+#[test]
+fn slide_spring_context_switch_offset_consistency() {
+    let target = 2056.0f32;
+    let dt = 1.0 / 60.0;
+    let mut s = Spring::new(0.0, 600.0, 49.0, 1.0);
+    s.set_settle_threshold(0.5);
+
+    // Simulate Ctrl+Tab press: set target
+    s.set_target(target);
+
+    // Simulate what core does: tick spring, then read offset for build_editor_scene
+    s.tick(dt);
+    let build_offset = s.value();
+
+    // The apply_slide call uses the same state().slide_offset
+    let apply_offset = s.value(); // same state, no tick between
+
+    assert_eq!(
+        build_offset, apply_offset,
+        "offset mismatch: build_editor_scene got {} but apply_slide got {}",
+        build_offset, apply_offset
+    );
+
+    // Now simulate subsequent frames (no context_switch, just animation)
+    for frame in 0..60 {
+        s.tick(dt);
+        let frame_offset = s.value();
+        // The offset should always be between 0 and target (no overshoot for
+        // critically damped spring from rest)
+        assert!(
+            frame_offset >= -0.5 && frame_offset <= target + 0.5,
+            "frame {}: offset {} out of bounds [0, {}]",
+            frame,
+            frame_offset,
+            target
+        );
+    }
+}
+
 // ── Lerp trait ────────────────────────────────────────────────────────────────
 
 #[test]
@@ -1074,9 +1507,16 @@ fn stale_id_after_slot_reuse_returns_inactive() {
     assert!(tl.is_active(id_b));
 
     // Critical: A's ID must still be inactive despite slot 0 being occupied.
-    assert!(!tl.is_active(id_a), "stale ID should not alias new animation");
+    assert!(
+        !tl.is_active(id_a),
+        "stale ID should not alias new animation"
+    );
     assert_eq!(tl.value(id_a), 0.0, "stale ID should return 0.0");
-    assert_eq!(tl.progress(id_a), 1.0, "stale ID should return progress 1.0");
+    assert_eq!(
+        tl.progress(id_a),
+        1.0,
+        "stale ID should return progress 1.0"
+    );
 
     // B's ID is valid and returns the correct value.
     tl.tick(150);

@@ -1320,8 +1320,8 @@ pub extern "C" fn _start() -> ! {
                 last_pointer_xy = packed;
                 let raw_x = protocol::input::PointerState::unpack_x(packed);
                 let raw_y = protocol::input::PointerState::unpack_y(packed);
-                cursor_x = scale_pointer_coord(raw_x, width) as f32 * scale_factor;
-                cursor_y = scale_pointer_coord(raw_y, height) as f32 * scale_factor;
+                cursor_x = scale_pointer_coord(raw_x, width) as f32;
+                cursor_y = scale_pointer_coord(raw_y, height) as f32;
                 true
             } else {
                 false
@@ -1661,31 +1661,34 @@ pub extern "C" fn _start() -> ! {
             cursor_visible = cnode.flags.contains(NodeFlags::VISIBLE) && cnode.opacity > 0;
             cmdbuf.set_cursor_visible(cursor_visible);
 
-            if cursor_visible {
-                // Re-upload cursor image only when it changes.
-                if cnode.content_hash != cursor_image_hash {
-                    if let Content::Image {
-                        data,
-                        src_width,
-                        src_height,
-                    } = cnode.content
-                    {
-                        let byte_count = src_width as usize * src_height as usize * 4;
-                        let start = data.offset as usize;
-                        let end = start + byte_count;
-                        if data.length > 0 && end <= data_buf.len() {
-                            cmdbuf.set_cursor_image(
-                                src_width,
-                                src_height,
-                                0, // hotspot_x — baked into position by core
-                                0, // hotspot_y
-                                &data_buf[start..end],
-                            );
-                            cursor_image_hash = cnode.content_hash;
-                        }
+            // Always upload cursor image when hash changes — even if not
+            // yet visible. This pre-populates the cursor texture on the first
+            // frame so the render command buffer doesn't suddenly grow by ~5KB
+            // when cursor becomes visible (avoids captured-frame corruption).
+            if cnode.content_hash != cursor_image_hash {
+                if let Content::Image {
+                    data,
+                    src_width,
+                    src_height,
+                } = cnode.content
+                {
+                    let byte_count = src_width as usize * src_height as usize * 4;
+                    let start = data.offset as usize;
+                    let end = start + byte_count;
+                    if data.length > 0 && end <= data_buf.len() {
+                        cmdbuf.set_cursor_image(
+                            src_width,
+                            src_height,
+                            0, // hotspot_x — baked into position by core
+                            0, // hotspot_y
+                            &data_buf[start..end],
+                        );
+                        cursor_image_hash = cnode.content_hash;
                     }
                 }
+            }
 
+            if cursor_visible {
                 // Position from pointer state register (already scaled).
                 cmdbuf.set_cursor_position(cursor_x, cursor_y);
             }

@@ -73,7 +73,7 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Current state (2026-03-23):** v0.3 Phase 4 (Visual Polish) IN PROGRESS. 2,134 tests pass.
+**Current state (2026-03-23):** v0.3 Phase 4 (Visual Polish) IN PROGRESS. 2,145 tests pass.
 
 **Phase 4 progress so far:**
 
@@ -82,8 +82,11 @@ Read these before making any design suggestions:
 - **Icon pipeline (2026-03-23):** SVG path parser, stroke expansion engine, arc-to-cubic conversion, build-time SVG→path compilation. Tabler file-text/photo icons in title bar. Pointer cursor redesigned to Tabler proportions.
 - **Page surface + document strip (2026-03-23):** White A4-proportioned page centered on dark desk. Dark text/cursor. Horizontal strip of N document spaces with spring-based slide transition (Ctrl+Tab). Both documents always in scene — no teardown/rebuild on switch.
 - **Shared pointer state register (2026-03-23):** Replaced MSG_POINTER_ABS IPC ring messages with atomic u64 in init-allocated shared memory. Eliminates input ring overflow for pointer events. State vs event distinction at the IPC level (see journal).
+- **Cursor-only frames (2026-03-23):** Pointer state register shared with metal-render (init allocates in Phase 1, before render service start). Core skips scene publish for position-only moves. Metal-render detects `!scene_changed && cursor_moved` → sends lightweight cursor-plane-only command (no scene walk). Hardware cursor plane pattern: fully decoupled from content rendering.
+- **Spring substep fix (2026-03-23):** Semi-implicit Euler diverged at dt > 33ms (stiffness=600). Root cause: switch from hardcoded 1/60 dt to actual frame_dt (capped at 50ms). Fix: 4ms fixed substeps inside `Spring::tick()`. Default settle threshold raised to 0.5 (f32 precision limit at large values).
+- **Headless visual testing (2026-03-23):** Hypervisor background mode (`--events` uses `.accessory` activation policy — no focus stealing, no Dock icon). `move x y` event script command. `system/test/imgdiff.py` for numerical screenshot verification (page edges, colored regions, pixel diffs).
 - **Deferred:** AA transition softness tuning, italic rendering (in journal).
-- **Next:** Continue visual polish (spacing, colors, effects), or declare v0.3 complete.
+- **Next:** Coordinate model decision (fixed-point units — see journal). Animation tick architecture cleanup (see journal). Then declare v0.3 complete or continue polish.
 
 **Completed phases (see git log for details):**
 
@@ -142,7 +145,7 @@ Content types: `None`, `Path`, `Glyphs`, `Image`. Three render services: `metal-
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,134 tests).
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,145 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
@@ -230,10 +233,34 @@ kill -USR1 $(pgrep hypervisor)
 - `type hello` — type each character (handles shift for uppercase)
 - `key backspace` — single key press (also: `left`, `right`, `up`, `down`, `return`, `tab`, `delete`, `home`, `end`, `pageup`, `pagedown`, `escape`, `f1`-`f12`)
 - `key shift+left` — modified key (modifiers: `shift`, `ctrl`, `alt`, `cmd`)
+- `move 100 200` — move pointer to (x, y) without clicking
 - `click 100 200` — left click at (x, y) in framebuffer pixels (matches `--resolution`)
 - `dblclick 100 200` — double click at (x, y) in framebuffer pixels
 - `wait 10` — wait 10 extra frames
 - `capture /tmp/out.png` — screenshot at this point
+
+**Background mode:** When using `--events`, the hypervisor runs without stealing focus (`.accessory` activation policy). No Dock icon, no window activation. Metal rendering still works — safe to run during other work.
+
+### Numerical image verification (MANDATORY)
+
+**Never eyeball screenshots to judge correctness.** Downscaled images in the conversation are unreliable — you WILL hallucinate pixel differences. Always use `system/test/imgdiff.py` for hard numbers.
+
+```sh
+# Measure a single screenshot: page position, colored region
+python3 system/test/imgdiff.py /tmp/screenshot.png
+
+# Compare two screenshots: positions + pixel diff count
+python3 system/test/imgdiff.py /tmp/before.png /tmp/after.png
+```
+
+Output includes:
+
+- **Page edges** — left/right x of the white page (first/last bright pixel in the middle row)
+- **Page center** — midpoint of left/right edges
+- **Colored region** — bounding box of the test image (non-black, non-white)
+- **Pixel diff** — count of differing pixels between two images
+
+Use this to verify: "page left=1164 in both images" is proof of no shift. "colored region: not found" is proof the image is offscreen. Never claim a visual result without a number backing it.
 
 **When you cannot verify a change with available tools, that is a BLOCKING problem.** Fix the tooling gap before shipping the change. Do not ship unverifiable work.
 

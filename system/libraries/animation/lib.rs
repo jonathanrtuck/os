@@ -501,7 +501,7 @@ impl Spring {
             stiffness,
             damping,
             mass,
-            settle_threshold: 0.01,
+            settle_threshold: 0.5,
         }
     }
 
@@ -528,19 +528,32 @@ impl Spring {
     /// Advance the simulation by `dt` seconds.
     ///
     /// Non-positive `dt` is a no-op (guards against zero-division and
-    /// time-reversal).
+    /// time-reversal). Large timesteps are subdivided into fixed substeps
+    /// to maintain numerical stability — semi-implicit Euler diverges for
+    /// damped springs when dt exceeds ~1/(2*sqrt(stiffness/mass)).
     pub fn tick(&mut self, dt: f32) {
         if dt <= 0.0 {
             return;
         }
-        let displacement = self.value - self.target;
-        let force = -self.stiffness * displacement - self.damping * self.velocity;
-        let acceleration = force / self.mass;
-        // Semi-implicit Euler: update velocity first, then position.
-        // This ordering is energy-conserving and unconditionally stable for
-        // spring systems, unlike standard (explicit) Euler.
-        self.velocity += acceleration * dt;
-        self.value += self.velocity * dt;
+        // Fixed substep: 4ms (250 Hz physics). Stable for stiffness up to
+        // ~15,000 (dt < 2/sqrt(k/m) → k < (2/dt)^2 = 250,000). Well beyond
+        // any UI spring. Large dt (e.g. 50ms after wake) gets 12-13 substeps.
+        const MAX_SUBSTEP: f32 = 0.004;
+        let mut remaining = dt;
+        while remaining > 0.0 {
+            let step = if remaining > MAX_SUBSTEP {
+                MAX_SUBSTEP
+            } else {
+                remaining
+            };
+            let displacement = self.value - self.target;
+            let force = -self.stiffness * displacement - self.damping * self.velocity;
+            let acceleration = force / self.mass;
+            // Semi-implicit Euler: update velocity first, then position.
+            self.velocity += acceleration * step;
+            self.value += self.velocity * step;
+            remaining -= step;
+        }
     }
 
     /// Current animated value.
@@ -579,7 +592,7 @@ impl Spring {
     }
 
     /// Override the settle threshold (default: `0.01`).
-    pub fn set_settle_threshold(&mut self, threshold: f32) {
+    pub const fn set_settle_threshold(&mut self, threshold: f32) {
         self.settle_threshold = threshold;
     }
 }

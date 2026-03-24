@@ -4,6 +4,130 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Coordinate Model: Fixed-Point Units (2026-03-23)
+
+**Status:** Open design question. Needs decision before v0.4.
+
+### The problem
+
+The system uses mixed coordinate types: `i32` for node positions, 16.16 fixed-point for glyph advances, `f32` for animation state and `AffineTransform`. The f32 parts caused two bugs in one session:
+
+1. **Spring instability:** Semi-implicit Euler diverged at dt > 33ms because f32 arithmetic amplified the overshoot. Fixed with substep integration, but the root cause was doing physics in float.
+2. **Settle precision:** At value ≈ 2056, f32 can't represent positions closer than ±0.00024. The spring got stuck 0.001 away from its target with non-zero velocity, never settling. Fixed by raising the settle threshold to 0.5.
+
+Neither bug would exist with integer arithmetic.
+
+### What production systems do
+
+Every major GUI system converges on the same pattern:
+
+| Layer                 | What they use                                         | Why                                |
+| --------------------- | ----------------------------------------------------- | ---------------------------------- |
+| Document layout       | Integers (TeX scaled points, LibreOffice twips)       | Determinism, no drift              |
+| Protocol/wire format  | Fixed-point (Wayland 24.8) or integers (X11, Android) | No NaN/Inf, compact, deterministic |
+| Font metrics          | Fixed-point (FreeType 26.6)                           | Matches TrueType spec              |
+| 2D rasterizer         | Fixed-point (Cairo 24.8, Direct3D 16.8)               | Exact scanline intersections       |
+| Compositor transforms | Float (macOS CGFloat, DWM)                            | Rotation/scale produce irrationals |
+| GPU vertex shader     | f32 (hardware mandated)                               | No choice                          |
+
+The pattern: **integers or fixed-point for everything except transforms and the GPU boundary.**
+
+### Options for the internal coordinate unit
+
+This system uses **points** (1/72 inch) as the native unit. The question is what subdivision to use internally.
+
+| Unit                         | Precision   | i32 range                       | Division               | DPI-independent     |
+| ---------------------------- | ----------- | ------------------------------- | ---------------------- | ------------------- |
+| **Millipoints** (1/1000 pt)  | 0.001 pt    | ±29,826 pt (35 A4 pages)        | Needs actual `/1000`   | Yes                 |
+| **1/1024 pt** (power-of-two) | ~0.001 pt   | ±2,097,151 pt (~2,489 A4 pages) | Bit shift `>> 10`      | Yes                 |
+| **Twips** (1/20 pt)          | 0.05 pt     | ±107M pt (unlimited)            | `/20` or `*3277 >> 16` | Yes                 |
+| **26.6 fixed** (1/64 px)     | 0.016 px    | ±33M px                         | Bit shift `>> 6`       | No (pixel-relative) |
+| **16.16 fixed** (1/65536 px) | 0.000015 px | ±32K px                         | Bit shift `>> 16`      | No (pixel-relative) |
+
+**1/1024 pt is the most attractive option.** Same precision as millipoints (~0.001 pt = sub-pixel at any density), but: divide/multiply by bit shift, i32 range covers 2,489 A4 pages vertically (enough for any scrollable document without a paging scheme), and DPI-independent (the unit is physical, not tied to a display).
+
+### Where floats remain
+
+Floats are justified at exactly two boundaries:
+
+1. **GPU vertex shaders** — hardware mandates f32. The conversion from fixed-point to f32 happens at the render boundary (inside metal-render/virgil-render/cpu-render). One conversion per node, not per-pixel.
+2. **Spring/easing physics** — the math (sin, exp, cubic bezier) is natural in float. But the output is a coordinate, so the spring should compute in float internally and convert to fixed-point at its API boundary. This isolates float imprecision from the rest of the system.
+
+Everything else — scene graph nodes, transforms, layout, scroll offsets, hit testing — would use the fixed-point unit.
+
+### What changes
+
+If we adopt 1/1024 pt:
+
+- `AffineTransform` fields: `f32` → `i32` (in 1/1024 pt)
+- Scene node `x`, `y`: already `i32`, just reinterpret as 1/1024 pt (currently they're integer points)
+- `slide_offset`, `scroll_offset`: `f32` → `i32`
+- `Spring::value()` return type: `f32` → convert to `i32` at call site
+- Scene graph wire format: `AffineTransform` becomes 6×i32 instead of 6×f32 — same size
+- Render services: convert i32 coordinates to f32 at the render boundary (already done implicitly for node.x/y)
+- Protocol boundary: fixed-point throughout, no float in shared memory
+
+The scene graph becomes fully integer — deterministic, no NaN, no precision surprises.
+
+### Open questions
+
+- Should `width`/`height` also be 1/1024 pt? Currently they're `u16` (integer points). u16 in 1/1024 pt caps at 63 pt — too small. Would need `u32`.
+- Does the scroll spring (which scrolls through potentially thousands of points of document) need the 2M pt range, or do we need a viewport-relative scheme?
+- Is 1/1024 actually the right denominator, or should we match FreeType's 26.6 (1/64) for simpler font metric integration? 1/64 gives 33M pt range but only 0.016 pt precision (still sub-pixel).
+
+---
+
+## Animation Tick Architecture (2026-03-23)
+
+**Status:** Open concern. Not blocking, but fragile.
+
+### The problem
+
+The core event loop mixes animation ticking with event processing in a single `sys::wait` loop. The sleep duration is `min(scroll_timeout, blink_timeout)` — the shortest of several unrelated timing concerns. This means:
+
+- Animation frame rate depends on which other animations or timers are active
+- During cursor blink's VisibleHold phase (530ms), the loop sleeps for up to 530ms. Springs only tick at ~2 Hz during this period.
+- The 50ms `frame_dt` cap was a band-aid. The real issue is that `frame_dt` varies from 1ms to 50ms depending on event arrival.
+- The spring substep fix (4ms substeps) makes the physics correct at any dt, but animations still visually stutter if the loop sleeps too long between ticks.
+
+### What should happen
+
+While any animation is active (spring, scroll, fade), the loop should wake at a consistent rate (~60 Hz / 16ms). The current code partially does this:
+
+```rust
+let scroll_timeout_ns: u64 = if state().scroll_animating || state().slide_animating {
+    16_000_000 // 16ms ~ 60fps
+} else {
+    u64::MAX
+};
+```
+
+But this only covers scroll and slide. Cursor blink fades, pointer fades, and selection fades also need smooth ticking but are governed by the separate `blink_timeout_ns` calculation. And `blink_timeout_ns` during VisibleHold is 530ms, not 16ms.
+
+### A cleaner model
+
+One animation timeout that governs the whole loop:
+
+```rust
+if any_animation_active() {
+    timeout = 16ms
+} else if any_timer_hold_active() {
+    timeout = time_until_next_hold_expiry
+} else {
+    timeout = infinity (pure event-driven)
+}
+```
+
+Where `any_animation_active()` checks: scroll spring, slide spring, any timeline animation (fades), cursor blink during FadeIn/FadeOut phases.
+
+This collapses the multiple timeout calculations into a single question: "is anything moving?" If yes, tick at 60fps. If no, sleep until the next event or timer.
+
+### Risk if not fixed
+
+The substep fix makes the physics correct, but visual smoothness still depends on consistent wakeups. A future animation (e.g., page transitions, zoom) could stutter if it happens to coincide with a long blink hold. The architecture should guarantee smooth ticking for all active animations, not just scroll/slide.
+
+---
+
 ## IPC: State Registers vs Event Rings (2026-03-23)
 
 **Status:** Design decided. Implementation pending.

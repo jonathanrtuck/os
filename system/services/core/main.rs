@@ -302,7 +302,11 @@ impl CoreState {
             active_space: 0,
             slide_animating: false,
             slide_offset: 0.0,
-            slide_spring: animation::Spring::new(0.0, 600.0, 49.0, 1.0),
+            slide_spring: {
+                let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
+                s.set_settle_threshold(0.5);
+                s
+            },
             slide_target: 0.0,
             line_h: 20,
             mouse_x: 0,
@@ -1490,6 +1494,12 @@ pub extern "C" fn _start() -> ! {
 
     // ctrl_pressed removed — modifier state now in KeyEvent.modifiers.
 
+    let mut prev_ms: u64 = {
+        let s = state();
+        let freq = s.counter_freq;
+        if freq > 0 { sys::counter() * 1000 / freq } else { 0 }
+    };
+
     loop {
         let timer_active = state().timer_active;
         let timer_handle = state().timer_handle;
@@ -1547,6 +1557,7 @@ pub extern "C" fn _start() -> ! {
         let mut context_switched = false;
         let mut timer_fired = false;
         let mut had_user_input = false;
+        let mut pointer_position_changed = false;
 
         // Check timer.
         if timer_active {
@@ -1752,16 +1763,22 @@ pub extern "C" fn _start() -> ! {
                 s.mouse_x = scale_pointer_coord(x, fb_width);
                 s.mouse_y = scale_pointer_coord(y, fb_height);
 
-                // Show pointer immediately (cancel any pending fade-out).
+                // Cancel any pending fade-out and restore full opacity.
                 if let Some(id) = s.pointer_fade_id {
                     s.timeline.cancel(id);
                     s.pointer_fade_id = None;
                 }
                 s.pointer_visible = true;
-                s.pointer_opacity = 255;
+                // Only trigger scene publish when opacity actually changes
+                // (pointer was fading/hidden). Position-only changes are
+                // handled by the render service reading the shared register.
+                if s.pointer_opacity != 255 {
+                    s.pointer_opacity = 255;
+                    changed = true;
+                }
                 s.pointer_last_event_ms = now_ms;
 
-                changed = true;
+                pointer_position_changed = true;
             }
         }
 
@@ -1865,6 +1882,15 @@ pub extern "C" fn _start() -> ! {
                 0
             }
         };
+        // Actual frame delta for spring physics. Zero when multiple events
+        // arrive in the same millisecond (spring tick is a no-op at dt=0).
+        // Capped at 50ms to prevent spiral-of-death from long stalls.
+        let frame_dt = {
+            let elapsed = now_ms.saturating_sub(prev_ms);
+            (elapsed.min(50) as f32) / 1000.0
+        };
+        prev_ms = now_ms;
+
         if had_user_input {
             reset_blink(state(), now_ms);
         }
@@ -1887,9 +1913,8 @@ pub extern "C" fn _start() -> ! {
 
         if state().scroll_animating {
             let old_scroll = state().scroll_offset;
-            let dt = 1.0 / 60.0; // frame delta (TODO: use actual elapsed from sys::counter)
             let s = state();
-            s.scroll_spring.tick(dt);
+            s.scroll_spring.tick(frame_dt);
             s.scroll_offset = s.scroll_spring.value();
 
             if s.scroll_spring.settled() {
@@ -1959,8 +1984,7 @@ pub extern "C" fn _start() -> ! {
         // content_transform each frame via apply_slide.
         if state().slide_animating {
             let s = state();
-            let dt = 1.0 / 60.0; // ~60fps frame rate
-            s.slide_spring.tick(dt);
+            s.slide_spring.tick(frame_dt);
             let new_offset = s.slide_spring.value();
             if new_offset != s.slide_offset {
                 s.slide_offset = new_offset;
@@ -2243,15 +2267,23 @@ pub extern "C" fn _start() -> ! {
                 scene.apply_slide(state().slide_offset);
             }
 
-            // Apply pointer cursor position and opacity.
-            {
+            // Apply pointer cursor opacity to the scene graph. Position
+            // is read directly from the shared register by the render
+            // service, so we only need to publish when something else in
+            // the scene already changed (opacity, visibility, image).
+            if needs_scene_update {
                 let s = state();
                 scene.apply_pointer(s.mouse_x, s.mouse_y, s.pointer_opacity);
             }
 
-            // Signal compositor.
-            compositor_ch.send(&scene_msg);
+        }
 
+        // Signal compositor for scene changes AND pointer-only moves.
+        // For pointer-only moves (no scene publish), the render service
+        // wakes up, sees no generation change, reads the pointer state
+        // register, and sends a cursor-only frame (no full scene walk).
+        if needs_scene_update || pointer_position_changed {
+            compositor_ch.send(&scene_msg);
             let _ = sys::channel_signal(COMPOSITOR_HANDLE);
         }
     }
