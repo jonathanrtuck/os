@@ -233,8 +233,10 @@ pub enum Content {
     /// Solid rectangle fills (cursor, selection) use this with
     /// `node.background` set to the desired color.
     None,
-    /// A pixel buffer reference.
-    Image {
+    /// A pixel buffer stored in the scene graph's inline data buffer.
+    /// Used for small, per-frame content (icons, cursor) that is
+    /// regenerated each frame or on content change.
+    InlineImage {
         /// Reference to pixel data in the data buffer.
         data: DataRef,
         /// Source image dimensions.

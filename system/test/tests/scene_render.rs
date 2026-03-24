@@ -3928,7 +3928,7 @@ fn full_feature_composition() {
 
 // ── Bilinear resampling + damage tracking tests ─────────────────────
 
-/// VAL-XFORM-014: Content::Image with src dimensions != node dimensions
+/// VAL-XFORM-014: Content::InlineImage with src dimensions != node dimensions
 /// uses bilinear resampling. A checkerboard image downscaled should
 /// produce blended gray pixels, not aliased black/white.
 #[test]
@@ -3966,7 +3966,7 @@ fn content_image_downscaled_checkerboard_bilinear() {
     nodes[1].width = scene::upt(20);
     nodes[1].height = scene::upt(20);
     nodes[1].flags = NodeFlags::VISIBLE;
-    nodes[1].content = scene::Content::Image {
+    nodes[1].content = scene::Content::InlineImage {
         data: scene::DataRef {
             offset: 0,
             length: img_data.len() as u32,
@@ -4802,7 +4802,7 @@ fn all_content_types_render_in_one_scene() {
     w.node_mut(img_node).width = scene::upt(4);
     w.node_mut(img_node).height = scene::upt(4);
     w.node_mut(img_node).flags = NodeFlags::VISIBLE;
-    w.node_mut(img_node).content = scene::Content::Image {
+    w.node_mut(img_node).content = scene::Content::InlineImage {
         data: img_ref,
         src_width: 4,
         src_height: 4,

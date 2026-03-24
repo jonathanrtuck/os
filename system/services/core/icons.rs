@@ -2,7 +2,7 @@
 //!
 //! Each icon is stored as SVG `d` attribute strings. At boot, icons are
 //! pre-rasterized into BGRA pixel buffers using the CPU scanline path
-//! rasterizer, then displayed as `Content::Image` nodes. This bypasses
+//! rasterizer, then displayed as `Content::InlineImage` nodes. This bypasses
 //! the metal-render stencil pipeline (which struggles with the complex
 //! concave geometry from stroke expansion) and produces pixel-perfect
 //! results on all three render backends.

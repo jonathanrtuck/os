@@ -100,7 +100,7 @@ pub(super) fn render_content(
                 lru,
             );
         }
-        Content::Image {
+        Content::InlineImage {
             data,
             src_width,
             src_height,

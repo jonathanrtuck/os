@@ -963,7 +963,7 @@ fn make_surface(buf: &mut [u8], w: u32, h: u32) -> Surface {
 }
 
 /// Build a scene with an image node for cache testing.
-/// Returns (nodes, data_buf) where node 1 has Content::Image.
+/// Returns (nodes, data_buf) where node 1 has Content::InlineImage.
 fn build_image_scene() -> (Vec<Node>, Vec<u8>) {
     // 10x10 solid red BGRA image.
     let mut img_data = vec![0u8; 10 * 10 * 4];
@@ -989,7 +989,7 @@ fn build_image_scene() -> (Vec<Node>, Vec<u8>) {
     nodes[1].width = scene::upt(10);
     nodes[1].height = scene::upt(10);
     nodes[1].flags = NodeFlags::VISIBLE;
-    nodes[1].content = Content::Image {
+    nodes[1].content = Content::InlineImage {
         data: scene::DataRef {
             offset: 0,
             length: (10 * 10 * 4) as u32,
@@ -1033,7 +1033,7 @@ fn cache_populated_on_first_render() {
         &mut clip_cache,
     );
 
-    // Node 1 has Content::Image — should be cached.
+    // Node 1 has Content::InlineImage — should be cached.
     assert!(
         cache.get(1, 0xDEAD).is_some(),
         "image node should be cached after render"

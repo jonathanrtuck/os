@@ -337,7 +337,7 @@ fn writer_image_node_round_trip() {
     let id = w.alloc_node().unwrap();
     {
         let n = w.node_mut(id);
-        n.content = Content::Image {
+        n.content = Content::InlineImage {
             data: dref,
             src_width: 4,
             src_height: 4,
@@ -346,7 +346,7 @@ fn writer_image_node_round_trip() {
     let r = SceneReader::new(&buf);
     let node = r.node(id);
     match node.content {
-        Content::Image {
+        Content::InlineImage {
             data,
             src_width,
             src_height,
@@ -2730,7 +2730,7 @@ fn mixed_background_glyphs_image_triple_buffer() {
         let pixels = vec![0u8; 16]; // 1x1 BGRA pixel (4 bytes)
         let iref = w.push_data(&pixels);
         let img_id = w.alloc_node().unwrap();
-        w.node_mut(img_id).content = Content::Image {
+        w.node_mut(img_id).content = Content::InlineImage {
             data: iref,
             src_width: 2,
             src_height: 2,
@@ -2749,7 +2749,7 @@ fn mixed_background_glyphs_image_triple_buffer() {
         _ => panic!("expected Glyphs"),
     }
     match tr.front_nodes()[3].content {
-        Content::Image {
+        Content::InlineImage {
             src_width,
             src_height,
             ..
@@ -2849,7 +2849,7 @@ fn content_enum_has_three_variants() {
     // FillRect removed — solid fills use Content::None + node.background.
     // Path will be added in a later feature.
     let none = Content::None;
-    let img = Content::Image {
+    let img = Content::InlineImage {
         data: DataRef {
             offset: 0,
             length: 0,
@@ -2868,7 +2868,7 @@ fn content_enum_has_three_variants() {
         axis_hash: 0,
     };
     assert!(matches!(none, Content::None));
-    assert!(matches!(img, Content::Image { .. }));
+    assert!(matches!(img, Content::InlineImage { .. }));
     assert!(matches!(glyphs, Content::Glyphs { .. }));
 }
 
@@ -6269,9 +6269,9 @@ fn stroke_expand_tabler_icon_no_spike() {
     );
 }
 
-// ── Multiple Content::Image data isolation ───────────────────────────────────
+// ── Multiple Content::InlineImage data isolation ───────────────────────────────────
 
-/// Verify that two Content::Image nodes in the same scene reference
+/// Verify that two Content::InlineImage nodes in the same scene reference
 /// non-overlapping data ranges. This catches the class of bug where a
 /// shared GPU texture is overwritten by the second image before the
 /// first image's draw command executes — the scene graph must produce
@@ -6294,13 +6294,13 @@ fn two_content_image_nodes_have_disjoint_data() {
     let n_icon = w.alloc_node().unwrap();
     let n_img = w.alloc_node().unwrap();
 
-    // Set up as Content::Image with distinct data.
-    w.node_mut(n_icon).content = Content::Image {
+    // Set up as Content::InlineImage with distinct data.
+    w.node_mut(n_icon).content = Content::InlineImage {
         data: icon_ref,
         src_width: 52,
         src_height: 52,
     };
-    w.node_mut(n_img).content = Content::Image {
+    w.node_mut(n_img).content = Content::InlineImage {
         data: img_ref,
         src_width: 32,
         src_height: 32,

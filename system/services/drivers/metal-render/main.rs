@@ -1074,7 +1074,7 @@ pub extern "C" fn _start() -> ! {
         1,
         metal::USAGE_SHADER_READ,
     );
-    // Image atlas texture (BGRA8, 1024×1024). All Content::Image nodes in a
+    // Image atlas texture (BGRA8, 1024×1024). All Content::InlineImage nodes in a
     // frame are packed into non-overlapping sub-rectangles via ImageAtlas.
     // Each image uploads to its own region and draws with matching UVs, so
     // no image overwrites another even though draws are deferred.
@@ -1687,7 +1687,7 @@ pub extern "C" fn _start() -> ! {
             // frame so the render command buffer doesn't suddenly grow by ~5KB
             // when cursor becomes visible (avoids captured-frame corruption).
             if cnode.content_hash != cursor_image_hash {
-                if let Content::Image {
+                if let Content::InlineImage {
                     data,
                     src_width,
                     src_height,
@@ -2168,7 +2168,7 @@ impl ClipRect {
     }
 }
 
-/// Per-frame image atlas packer. Each Content::Image uploads to the next
+/// Per-frame image atlas packer. Each Content::InlineImage uploads to the next
 /// available sub-rectangle within the shared 1024×1024 TEX_IMAGE texture.
 /// Draws use matching UV coordinates, so no image overwrites another even
 /// though uploads are synchronous and draws are deferred.
@@ -2241,7 +2241,7 @@ fn walk_scene(
     setup_dma: &DmaBuf,
     // Shared heap buffer for path flattening (avoids 4 KiB stack per recursion).
     path_buf: &mut PathPointsBuf,
-    // Per-frame image atlas — packs Content::Image nodes into non-overlapping
+    // Per-frame image atlas — packs Content::InlineImage nodes into non-overlapping
     // sub-rectangles of TEX_IMAGE so uploads don't overwrite each other.
     image_atlas: &mut ImageAtlas,
 ) {
@@ -2686,7 +2686,7 @@ fn walk_scene(
                 }
             }
         }
-        Content::Image {
+        Content::InlineImage {
             data,
             src_width,
             src_height,

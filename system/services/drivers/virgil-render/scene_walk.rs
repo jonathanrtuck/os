@@ -314,7 +314,7 @@ fn walk_node(
                 inside_clip,
             );
         }
-        Content::Image {
+        Content::InlineImage {
             data,
             src_width,
             src_height,

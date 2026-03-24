@@ -28,7 +28,7 @@ pub const CURSOR_HOTSPOT_OFFSET: i32 = {
     (CURSOR_SIZE_PT as f32 * icons::CURSOR_VIEWBOX.recip()) as i32
 };
 
-/// Push cursor image data and set up N_POINTER as Content::Image.
+/// Push cursor image data and set up N_POINTER as Content::InlineImage.
 fn setup_cursor(w: &mut scene::SceneWriter<'_>, mouse_x: u32, mouse_y: u32, pointer_opacity: u8) {
     let cursor_px = CURSOR_SIZE_PT * 2; // 2× for Retina
     let cursor_pixels = icons::rasterize_cursor(cursor_px);
@@ -39,7 +39,7 @@ fn setup_cursor(w: &mut scene::SceneWriter<'_>, mouse_x: u32, mouse_y: u32, poin
     n.y = scene::pt(mouse_y as i32 - CURSOR_HOTSPOT_OFFSET);
     n.width = scene::upt(CURSOR_SIZE_PT);
     n.height = scene::upt(CURSOR_SIZE_PT);
-    n.content = Content::Image {
+    n.content = Content::InlineImage {
         data: cursor_ref,
         src_width: cursor_px as u16,
         src_height: cursor_px as u16,
@@ -182,7 +182,7 @@ pub fn build_full_scene(
         n.y = scene::pt(icon_y as i32);
         n.width = scene::upt(icon_size_pt);
         n.height = scene::upt(icon_size_pt);
-        n.content = Content::Image {
+        n.content = Content::InlineImage {
             data: icon_data_ref,
             src_width: icon_size_px as u16,
             src_height: icon_size_px as u16,
@@ -350,7 +350,7 @@ pub fn build_full_scene(
         n.y = scene::pt(img_y);
         n.width = scene::upt(img_display_w);
         n.height = scene::upt(img_display_h);
-        n.content = Content::Image {
+        n.content = Content::InlineImage {
             data: img_ref,
             src_width: 32,
             src_height: 32,
@@ -529,7 +529,7 @@ pub fn build_document_content(
         let cursor_ref = w.push_data(&cursor_pixels);
         let cursor_hash = fnv1a(&cursor_pixels);
         let n = w.node_mut(N_POINTER);
-        n.content = Content::Image {
+        n.content = Content::InlineImage {
             data: cursor_ref,
             src_width: cursor_px as u16,
             src_height: cursor_px as u16,
@@ -550,7 +550,7 @@ pub fn build_document_content(
         let icon_data_ref = w.push_data(&icon_pixels);
         let icon_hash = fnv1a(&icon_pixels);
         let n = w.node_mut(N_TITLE_ICON);
-        n.content = Content::Image {
+        n.content = Content::InlineImage {
             data: icon_data_ref,
             src_width: icon_size_px as u16,
             src_height: icon_size_px as u16,
@@ -563,13 +563,13 @@ pub fn build_document_content(
         let test_img = generate_test_image();
         let img_ref = w.push_data(&test_img);
         let n = w.node_mut(N_DOC_IMAGE);
-        if let Content::Image {
+        if let Content::InlineImage {
             src_width,
             src_height,
             ..
         } = n.content
         {
-            n.content = Content::Image {
+            n.content = Content::InlineImage {
                 data: img_ref,
                 src_width,
                 src_height,
