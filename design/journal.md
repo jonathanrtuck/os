@@ -59,52 +59,15 @@ Neither bug would exist with integer arithmetic. Every major GUI system converge
 
 ## Animation Tick Architecture (2026-03-23)
 
-**Status:** Open concern. Not blocking, but fragile.
+**Status:** SETTLED and IMPLEMENTED (2026-03-23).
 
-### The problem
+### The solution
 
-The core event loop mixes animation ticking with event processing in a single `sys::wait` loop. The sleep duration is `min(scroll_timeout, blink_timeout)` — the shortest of several unrelated timing concerns. This means:
+Unified animation timeout: single `any_animation_active()` check (scroll spring || slide spring || timeline.any_active()). If anything is animating, wake at the actual display refresh rate (from hypervisor via render service → init → core). Otherwise sleep until the next blink phase transition.
 
-- Animation frame rate depends on which other animations or timers are active
-- During cursor blink's VisibleHold phase (530ms), the loop sleeps for up to 530ms. Springs only tick at ~2 Hz during this period.
-- The 50ms `frame_dt` cap was a band-aid. The real issue is that `frame_dt` varies from 1ms to 50ms depending on event arrival.
-- The spring substep fix (4ms substeps) makes the physics correct at any dt, but animations still visually stutter if the loop sleeps too long between ticks.
+Refresh rate plumbing: hypervisor exposes `NSScreen.maximumFramesPerSecond` at virtio config offset 0x08. Metal-render reads it and reports in `DisplayInfoMsg`. Init distributes to core via `MSG_FRAME_RATE` message (separate from `CoreConfig` which is full at 56 bytes due to u64 alignment).
 
-### What should happen
-
-While any animation is active (spring, scroll, fade), the loop should wake at a consistent rate (~60 Hz / 16ms). The current code partially does this:
-
-```rust
-let scroll_timeout_ns: u64 = if state().scroll_animating || state().slide_animating {
-    16_000_000 // 16ms ~ 60fps
-} else {
-    u64::MAX
-};
-```
-
-But this only covers scroll and slide. Cursor blink fades, pointer fades, and selection fades also need smooth ticking but are governed by the separate `blink_timeout_ns` calculation. And `blink_timeout_ns` during VisibleHold is 530ms, not 16ms.
-
-### A cleaner model
-
-One animation timeout that governs the whole loop:
-
-```rust
-if any_animation_active() {
-    timeout = 16ms
-} else if any_timer_hold_active() {
-    timeout = time_until_next_hold_expiry
-} else {
-    timeout = infinity (pure event-driven)
-}
-```
-
-Where `any_animation_active()` checks: scroll spring, slide spring, any timeline animation (fades), cursor blink during FadeIn/FadeOut phases.
-
-This collapses the multiple timeout calculations into a single question: "is anything moving?" If yes, tick at 60fps. If no, sleep until the next event or timer.
-
-### Risk if not fixed
-
-The substep fix makes the physics correct, but visual smoothness still depends on consistent wakeups. A future animation (e.g., page transitions, zoom) could stutter if it happens to coincide with a long blink hold. The architecture should guarantee smooth ticking for all active animations, not just scroll/slide.
+On ProMotion displays, animations now tick at 120 Hz instead of hardcoded 60 Hz. QEMU path defaults to 60 Hz (no refresh rate exposed).
 
 ---
 
