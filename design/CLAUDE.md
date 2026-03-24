@@ -15,7 +15,9 @@ Design documents for the document-centric OS. This is the primary artifact of th
 
 - `architecture.mermaid` — System architecture (process layers, IPC, memory mapping)
 - `decision-map.mermaid` — Visual dependency graph of all decisions
+- `dependency-graph.mermaid` — Component dependency graph
 - `rendering-pipeline.mermaid` — Rendering pipeline data shapes and translators
+- `userspace-graph.mermaid` — Userspace component relationships
 
 ## Conventions
 
