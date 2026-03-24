@@ -335,8 +335,42 @@ pub fn build_full_scene(
 
     // ── Space 1: image document (Content Region) ──────────────────────
 
-    let img_display_w: u32 = 128;
-    let img_display_h: u32 = 128;
+    // Image display size: actual decoded dimensions, scaled to fit the content area
+    // with padding while preserving aspect ratio.
+    let (img_display_w, img_display_h) = {
+        let s = crate::state();
+        if s.image_width > 0 && s.image_height > 0 {
+            let max_w = cfg.fb_width.saturating_sub(48); // padding
+            let max_h = content_h_u32.saturating_sub(48);
+            let src_w = s.image_width as u32;
+            let src_h = s.image_height as u32;
+            // Scale to fit: min(max_w/src_w, max_h/src_h), capped at 1.0 (don't upscale).
+            // Use integer arithmetic: scale_num/scale_den.
+            let scale_w_num = max_w;
+            let scale_w_den = src_w;
+            let scale_h_num = max_h;
+            let scale_h_den = src_h;
+            // Compare scale_w and scale_h: scale_w < scale_h iff w_num*h_den < h_num*w_den.
+            let (s_num, s_den) = if (scale_w_num as u64) * (scale_h_den as u64)
+                < (scale_h_num as u64) * (scale_w_den as u64)
+            {
+                (scale_w_num, scale_w_den)
+            } else {
+                (scale_h_num, scale_h_den)
+            };
+            // Don't upscale beyond native size.
+            if s_num >= s_den {
+                (src_w, src_h)
+            } else {
+                (
+                    (src_w * s_num / s_den).max(1),
+                    (src_h * s_num / s_den).max(1),
+                )
+            }
+        } else {
+            (128, 128) // fallback if no image decoded
+        }
+    };
     // Position in strip: viewport_width + centered within second space.
     let img_x = cfg.fb_width as i32 + ((cfg.fb_width as i32 - img_display_w as i32) / 2).max(0);
     let img_y = ((content_h_u32 as i32 - img_display_h as i32) / 2).max(0);
