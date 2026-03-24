@@ -9,7 +9,7 @@ Design documents for the document-centric OS. This is the primary artifact of th
 - `decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness, dependency chains
 - `architecture.md` — The system's architectural narrative: pipeline, responsibilities, decision checklist
 - `journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document
-- `research/` — COW filesystems, OS landscape, font rendering research
+- `research/` — COW filesystems, OS landscape, font rendering, kernel hardening gap analysis
 
 ## Diagrams
 

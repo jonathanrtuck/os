@@ -58,16 +58,16 @@ cd system/test && ./smoke.sh
      device 2: id=18     (virtio-input tablet)
      device 3: id=22     (virtio-metal GPU)
      device 4: id=200    (pl031 rtc)
-       ...
+       …
   📂 virtio-9p - starting
      mono font loaded: 303144 bytes
      sans font loaded: 879708 bytes
      serif font loaded: 1196808 bytes
      png loaded: 884951 bytes
-       ...
+       …
   🔱 metal-render - starting
      display 4112x2658@120Hz
-       ...
+       …
   🧠 core - starting
      entering event loop
   📝 text-editor starting
@@ -95,7 +95,7 @@ system/
     link.ld                  — kernel linker script (upper VA, split TTBR)
     DESIGN.md                — kernel architecture decisions
     README.md                — kernel features, scope, limitations
-    ...                      — scheduler, memory, processes, IPC, devices (see kernel/README.md)
+    …                        — scheduler, memory, processes, IPC, devices (see kernel/README.md)
 
   services/                  — trusted userspace (EL0)
     init/main.rs             — root task (embeds ELFs, spawns drivers, wires IPC)

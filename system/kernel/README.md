@@ -79,7 +79,7 @@ Comprehensive bug audit of all 33 `.rs` files, 2 `.S` files, and `link.ld`. Ever
 **Cross-file analyses produced:**
 
 - [`LOCK-ORDERING.md`](LOCK-ORDERING.md) — maps all 13 `IrqMutex` instances, verifies no circular dependencies
-- [`CROSS-MODULE-LIFETIMES.md`](CROSS-MODULE-LIFETIMES.md) — verifies 5 cross-module ownership invariants
+- [`SAFETY-MAP.md`](SAFETY-MAP.md) — cross-cutting safety invariants (TPIDR chain, handle lifecycle, process exit, ASID, allocator routing)
 
 ## source files
 

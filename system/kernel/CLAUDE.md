@@ -24,8 +24,7 @@ cd system/test && cargo test -- --test-threads=1      # ~2,152 host-side tests
 
 - `DESIGN.md` — Rationale for every subsystem (~1517 lines)
 - `LOCK-ORDERING.md` — All lock sites and acquisition order constraints
-- `CROSS-MODULE-LIFETIMES.md` — Cross-file ownership invariants
-- `AUDIT-MISSION.md` — Bug audit methodology and results
+- `SAFETY-MAP.md` — Cross-cutting safety invariants (synthesizes lock ordering, TPIDR chain, handle lifecycle, process exit, ASID lifecycle)
 
 ## Conventions
 

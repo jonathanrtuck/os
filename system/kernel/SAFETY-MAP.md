@@ -10,7 +10,7 @@ scheduling context ref_count, and emergency stack sizing.
 **Companion documents:**
 
 - `LOCK-ORDERING.md` — full lock acquisition site table
-- `TPIDR-CHAIN.md` — full TPIDR_EL1 write/read trace
+- §2 below — TPIDR_EL1 invariant chain (consolidated from former TPIDR-CHAIN.md)
 - `DESIGN.md` — architectural rationale for each subsystem
 
 ---
@@ -128,7 +128,7 @@ No `nomem` option — prevents LLVM from reordering past the lock release.
 
 **Validation:** 3000-key stress test with 4 SMP cores, no crashes.
 
-**Full details:** `TPIDR-CHAIN.md`
+**Full details:** previously in TPIDR-CHAIN.md (consolidated into this document).
 
 ---
 
