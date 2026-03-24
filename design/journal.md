@@ -6,20 +6,45 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ## Coordinate Model: Fixed-Point Units (2026-03-23)
 
-**Status:** Open design question. Needs decision before v0.4.
+**Status:** SETTLED (2026-03-23). Unit: 1/1024 pt. Absolute scroll. AffineTransform stays f32.
 
-### The problem
+### The decision
 
-The system uses mixed coordinate types: `i32` for node positions, 16.16 fixed-point for glyph advances, `f32` for animation state and `AffineTransform`. The f32 parts caused two bugs in one session:
+**Internal coordinate unit: 1/1024 pt (10-bit fractional point).** All scene graph positions, dimensions, and offsets use `i32` (signed) or `u32` (unsigned) in this unit. Precision: 0.001 pt (sub-pixel at any density). Range: ±2,097,151 pt (±2,489 A4 pages). Conversion: bit shift `>> 10`.
 
-1. **Spring instability:** Semi-implicit Euler diverged at dt > 33ms because f32 arithmetic amplified the overshoot. Fixed with substep integration, but the root cause was doing physics in float.
-2. **Settle precision:** At value ≈ 2056, f32 can't represent positions closer than ±0.00024. The spring got stuck 0.001 away from its target with non-zero velocity, never settling. Fixed by raising the settle threshold to 0.5.
+### What motivated it
 
-Neither bug would exist with integer arithmetic.
+Two f32 bugs in one session:
 
-### What production systems do
+1. **Spring instability:** Semi-implicit Euler diverged at dt > 33ms because f32 arithmetic amplified the overshoot.
+2. **Settle precision:** At value ≈ 2056, f32 can't represent positions closer than ±0.00024. The spring got stuck 0.001 away from its target.
 
-Every major GUI system converges on the same pattern:
+Neither bug would exist with integer arithmetic. Every major GUI system converges on the same pattern: integers or fixed-point for positions/layout, float only at the compositor transform and GPU boundaries.
+
+### Resolved questions
+
+**Width/height type:** `u16` → `u32` (1/1024 pt). The `_reserved` field shrinks from `[u8; 8]` to `[u8; 4]` — Node stays at exactly 136 bytes.
+
+**1/1024 vs 1/64 (FreeType 26.6):** 1/1024. The "match FreeType" argument doesn't apply — this system has its own rasterizer with 16.16 glyph advances. The extra precision (16× over 1/64) costs nothing (same i32 storage). 1/64's extra range (39K vs 2.5K pages) is wasted on a personal workstation.
+
+**Scroll range:** Absolute offset, no viewport-relative scheme. i32 at 1/1024 pt covers 2,489 A4 pages. A 1,000-page document uses 40% of the range. If a future content type needs infinite scroll, the content type's layout handler implements virtual scrolling internally (leaf-node complexity behind a simple interface).
+
+**AffineTransform:** Stays f32. Transform coefficients (a, b, c, d) are dimensionless multipliers — not "in points." Quantizing rotation coefficients to 1/1024 produces visible error on large elements (cos(30°) error × 1000 pt ≈ 0.19 pt). Transforms compose via matrix multiplication (different from position accumulation) and go straight to the GPU (which mandates f32). Every major compositor keeps transforms in float.
+
+### Integer/float boundary
+
+| Component                   | Type            | Unit               | Rationale                                   |
+| --------------------------- | --------------- | ------------------ | ------------------------------------------- |
+| Node.x, Node.y              | `i32`           | 1/1024 pt          | Positions accumulate, need exact comparison |
+| Node.width, height          | `u32`           | 1/1024 pt          | Dimensions need same unit as positions      |
+| scroll_offset, slide_offset | `i32`           | 1/1024 pt          | The actual bug sites                        |
+| Spring internals            | `f32`           | unitless           | Math is natural in float (sin, exp)         |
+| Spring::value() output      | → `i32`         | 1/1024 pt          | Convert at API boundary                     |
+| AffineTransform             | `f32`           | dimensionless + pt | Render boundary, GPU-bound                  |
+| Render services             | convert i32→f32 | pixels             | Already happens for node.x/y                |
+| Glyph advances (internal)   | 16.16 fixed     | 1/65536 pt         | Truncate to 1/1024 at layout boundary       |
+
+### Prior art
 
 | Layer                 | What they use                                         | Why                                |
 | --------------------- | ----------------------------------------------------- | ---------------------------------- |
@@ -29,51 +54,6 @@ Every major GUI system converges on the same pattern:
 | 2D rasterizer         | Fixed-point (Cairo 24.8, Direct3D 16.8)               | Exact scanline intersections       |
 | Compositor transforms | Float (macOS CGFloat, DWM)                            | Rotation/scale produce irrationals |
 | GPU vertex shader     | f32 (hardware mandated)                               | No choice                          |
-
-The pattern: **integers or fixed-point for everything except transforms and the GPU boundary.**
-
-### Options for the internal coordinate unit
-
-This system uses **points** (1/72 inch) as the native unit. The question is what subdivision to use internally.
-
-| Unit                         | Precision   | i32 range                       | Division               | DPI-independent     |
-| ---------------------------- | ----------- | ------------------------------- | ---------------------- | ------------------- |
-| **Millipoints** (1/1000 pt)  | 0.001 pt    | ±29,826 pt (35 A4 pages)        | Needs actual `/1000`   | Yes                 |
-| **1/1024 pt** (power-of-two) | ~0.001 pt   | ±2,097,151 pt (~2,489 A4 pages) | Bit shift `>> 10`      | Yes                 |
-| **Twips** (1/20 pt)          | 0.05 pt     | ±107M pt (unlimited)            | `/20` or `*3277 >> 16` | Yes                 |
-| **26.6 fixed** (1/64 px)     | 0.016 px    | ±33M px                         | Bit shift `>> 6`       | No (pixel-relative) |
-| **16.16 fixed** (1/65536 px) | 0.000015 px | ±32K px                         | Bit shift `>> 16`      | No (pixel-relative) |
-
-**1/1024 pt is the most attractive option.** Same precision as millipoints (~0.001 pt = sub-pixel at any density), but: divide/multiply by bit shift, i32 range covers 2,489 A4 pages vertically (enough for any scrollable document without a paging scheme), and DPI-independent (the unit is physical, not tied to a display).
-
-### Where floats remain
-
-Floats are justified at exactly two boundaries:
-
-1. **GPU vertex shaders** — hardware mandates f32. The conversion from fixed-point to f32 happens at the render boundary (inside metal-render/virgil-render/cpu-render). One conversion per node, not per-pixel.
-2. **Spring/easing physics** — the math (sin, exp, cubic bezier) is natural in float. But the output is a coordinate, so the spring should compute in float internally and convert to fixed-point at its API boundary. This isolates float imprecision from the rest of the system.
-
-Everything else — scene graph nodes, transforms, layout, scroll offsets, hit testing — would use the fixed-point unit.
-
-### What changes
-
-If we adopt 1/1024 pt:
-
-- `AffineTransform` fields: `f32` → `i32` (in 1/1024 pt)
-- Scene node `x`, `y`: already `i32`, just reinterpret as 1/1024 pt (currently they're integer points)
-- `slide_offset`, `scroll_offset`: `f32` → `i32`
-- `Spring::value()` return type: `f32` → convert to `i32` at call site
-- Scene graph wire format: `AffineTransform` becomes 6×i32 instead of 6×f32 — same size
-- Render services: convert i32 coordinates to f32 at the render boundary (already done implicitly for node.x/y)
-- Protocol boundary: fixed-point throughout, no float in shared memory
-
-The scene graph becomes fully integer — deterministic, no NaN, no precision surprises.
-
-### Open questions
-
-- Should `width`/`height` also be 1/1024 pt? Currently they're `u16` (integer points). u16 in 1/1024 pt caps at 63 pt — too small. Would need `u32`.
-- Does the scroll spring (which scrolls through potentially thousands of points of document) need the 2M pt range, or do we need a viewport-relative scheme?
-- Is 1/1024 actually the right denominator, or should we match FreeType's 26.6 (1/64) for simpler font metric integration? 1/64 gives 33M pt range but only 0.016 pt precision (still sub-pixel).
 
 ---
 
