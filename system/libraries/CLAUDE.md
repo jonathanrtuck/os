@@ -2,19 +2,19 @@
 
 Shared `#![no_std]` libraries used by userspace services and programs.
 
-| Library     | Purpose                                                                                                | Status       |
-| ----------- | ------------------------------------------------------------------------------------------------------ | ------------ |
-| `sys/`        | Syscall wrappers + userspace GlobalAlloc (heap via `memory_alloc` syscall)                             | Foundational |
-| `protocol/`   | IPC message types and payload structs — single source of truth for all 9 protocol boundaries           | Foundational |
-| `virtio/`     | Virtio MMIO device initialization + virtqueue management                                               | Foundational |
-| `drawing/`    | Surfaces, colors, PNG decoder, Porter-Duff compositing, sRGB blending, palette                         | Foundational |
-| `fonts/`      | TrueType rasterizer, analytic coverage, outline dilation (stem darkening), glyph cache                 | Foundational |
-| `animation/`  | Animation library: easing functions, spring physics, timeline sequencing                                | Foundational |
-| `ipc/`        | Lock-free SPSC ring buffer for 64-byte IPC messages over shared memory                                 | Foundational |
-| `layout/`     | Unified text layout engine: one function for mono + proportional via `FontMetrics` trait               | Foundational |
-| `render/`     | Render backend (CpuBackend, scene tree walk, incremental rendering, damage, frame scheduler)           | Foundational |
-| `scene/`      | Scene graph types, triple-buffered shared memory layout, writer/reader APIs for core ↔ render services | Foundational |
-| `link.ld`     | Linker script for all userspace ELF binaries (code at 4 MiB, stack at 2 GiB)                           | Foundational |
+| Library      | Purpose                                                                                                | Status       |
+| ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
+| `sys/`       | Syscall wrappers + userspace GlobalAlloc (heap via `memory_alloc` syscall)                             | Foundational |
+| `protocol/`  | IPC message types and payload structs — single source of truth for all 9 protocol boundaries           | Foundational |
+| `virtio/`    | Virtio MMIO device initialization + virtqueue management                                               | Foundational |
+| `drawing/`   | Surfaces, colors, PNG decoder, Porter-Duff compositing, sRGB blending, palette                         | Foundational |
+| `fonts/`     | TrueType rasterizer, analytic coverage, outline dilation (stem darkening), glyph cache                 | Foundational |
+| `animation/` | Animation library: easing functions, spring physics, timeline sequencing                               | Foundational |
+| `ipc/`       | Lock-free SPSC ring buffer for 64-byte IPC messages over shared memory                                 | Foundational |
+| `layout/`    | Unified text layout engine: one function for mono + proportional via `FontMetrics` trait               | Foundational |
+| `render/`    | Render backend (CpuBackend, scene tree walk, incremental rendering, damage, frame scheduler)           | Foundational |
+| `scene/`     | Scene graph types, triple-buffered shared memory layout, writer/reader APIs for core ↔ render services | Foundational |
+| `link.ld`    | Linker script for all userspace ELF binaries (code at 4 MiB, stack at 2 GiB)                           | Foundational |
 
 ## Conventions
 
