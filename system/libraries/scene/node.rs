@@ -11,6 +11,57 @@ use crate::{
 pub type NodeId = u16;
 pub const NULL: NodeId = u16::MAX;
 
+// ── Millipoint coordinate unit ─────────────────────────────────────
+
+/// 1/1024 of a point. The internal coordinate unit for all spatial
+/// values in the scene graph, layout engine, and core service.
+///
+/// Precision: ~0.001 pt (sub-pixel at any density).
+/// i32 range: +/-2,097,151 pt (~2,489 A4 pages).
+/// Convert to/from whole points: `pt << 10` / `mpt >> 10`.
+pub type Mpt = i32;
+
+/// Unsigned millipoint for dimensions (width, height).
+pub type Umpt = u32;
+
+/// Millipoints per point.
+pub const MPT_PER_PT: i32 = 1024;
+
+/// Convert signed whole points to millipoints.
+pub const fn pt(points: i32) -> Mpt {
+    points * MPT_PER_PT
+}
+
+/// Convert unsigned whole points to unsigned millipoints.
+pub const fn upt(points: u32) -> Umpt {
+    points * MPT_PER_PT as u32
+}
+
+/// Convert millipoints to f32 points (for AffineTransform / render boundary).
+pub fn mpt_to_f32(mpt: Mpt) -> f32 {
+    mpt as f32 / MPT_PER_PT as f32
+}
+
+/// Convert unsigned millipoints to f32 points.
+pub fn umpt_to_f32(mpt: Umpt) -> f32 {
+    mpt as f32 / MPT_PER_PT as f32
+}
+
+/// Convert f32 points to millipoints (for spring output boundary).
+pub fn f32_to_mpt(points: f32) -> Mpt {
+    (points * MPT_PER_PT as f32) as Mpt
+}
+
+/// Round millipoints to the nearest whole-point-aligned value
+/// (nearest multiple of MPT_PER_PT). Used for settle snap.
+pub fn mpt_round_pt(mpt: Mpt) -> Mpt {
+    if mpt >= 0 {
+        (mpt + MPT_PER_PT / 2) / MPT_PER_PT * MPT_PER_PT
+    } else {
+        (mpt - MPT_PER_PT / 2) / MPT_PER_PT * MPT_PER_PT
+    }
+}
+
 // ── Node flags ──────────────────────────────────────────────────────
 
 bitflags! {

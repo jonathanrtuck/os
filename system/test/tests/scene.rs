@@ -6231,3 +6231,68 @@ fn two_content_image_nodes_have_disjoint_data() {
         "two images should have different data offsets"
     );
 }
+
+// ── Millipoint coordinate unit tests ────────────────────────────────
+
+#[test]
+fn mpt_pt_roundtrip() {
+    assert_eq!(pt(10), 10240);
+    assert_eq!(pt(10) >> 10, 10);
+    assert_eq!(pt(-5), -5120);
+}
+
+#[test]
+fn mpt_upt_conversion() {
+    assert_eq!(upt(100), 102400);
+    assert_eq!(umpt_to_f32(upt(100)), 100.0);
+}
+
+#[test]
+fn mpt_f32_roundtrip() {
+    assert_eq!(f32_to_mpt(10.0), pt(10));
+    assert!((mpt_to_f32(pt(10)) - 10.0).abs() < 0.001);
+}
+
+#[test]
+fn mpt_round_pt_snaps_to_whole_point() {
+    assert_eq!(mpt_round_pt(pt(10)), pt(10)); // exact
+    assert_eq!(mpt_round_pt(pt(10) + 100), pt(10)); // rounds down
+    assert_eq!(mpt_round_pt(pt(10) + 600), pt(11)); // rounds up
+    assert_eq!(mpt_round_pt(pt(-3) - 100), pt(-3)); // negative rounds toward zero
+    assert_eq!(mpt_round_pt(pt(-3) - 600), pt(-4)); // negative rounds away
+}
+
+#[test]
+fn mpt_f32_to_mpt_precision() {
+    // Spring value 2056.003 in points
+    let spring_val = 2056.003_f32;
+    let mpt = f32_to_mpt(spring_val);
+    // Should be within 1 Mpt of the true value
+    let diff = (mpt as f32 - spring_val * 1024.0).abs();
+    assert!(diff < 1.0, "conversion error {} exceeds 1 Mpt", diff);
+}
+
+#[test]
+fn mpt_render_boundary_equivalence() {
+    // Key regression property: Mpt -> f32 -> pixel produces
+    // the same pixel as old whole-point -> f32 -> pixel.
+    let scale = 2.0_f32;
+    for pt_val in [0, 1, 10, 100, 595] {
+        let old_px = (pt_val as f32 * scale) as i32;
+        let new_px = (mpt_to_f32(pt(pt_val)) * scale) as i32;
+        assert_eq!(old_px, new_px, "mismatch at {} pt", pt_val);
+    }
+}
+
+#[test]
+fn mpt_spring_settle_roundtrip() {
+    // Verify that setting a target, settling, and converting back
+    // produces an exact whole-point-aligned Mpt value.
+    let target_pt = 200.0_f32;
+    let target_mpt = f32_to_mpt(target_pt);
+    let settled_mpt = mpt_round_pt(target_mpt);
+    // Must be exact multiple of MPT_PER_PT
+    assert_eq!(settled_mpt % MPT_PER_PT, 0);
+    // Must round-trip to the same point value
+    assert_eq!(settled_mpt >> 10, 200);
+}
