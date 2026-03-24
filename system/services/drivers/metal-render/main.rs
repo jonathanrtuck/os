@@ -768,18 +768,30 @@ pub extern "C" fn _start() -> ! {
     // Read display dimensions from virtio config space.
     let disp_w = device.config_read32(0x00);
     let disp_h = device.config_read32(0x04);
+    let disp_refresh = device.config_read32(0x08);
     let width = if disp_w > 0 { disp_w } else { 1024 };
     let height = if disp_h > 0 { disp_h } else { 768 };
+    let refresh_rate = disp_refresh;
 
     sys::print(b"     display ");
     print_u32(width);
     sys::print(b"x");
     print_u32(height);
-    sys::print(b"\n");
+    sys::print(b"@");
+    print_u32(refresh_rate);
+    sys::print(b"Hz\n");
 
     // Send display info back to init.
-    let info_msg =
-        unsafe { ipc::Message::from_payload(MSG_DISPLAY_INFO, &DisplayInfoMsg { width, height, refresh_rate: 0 }) };
+    let info_msg = unsafe {
+        ipc::Message::from_payload(
+            MSG_DISPLAY_INFO,
+            &DisplayInfoMsg {
+                width,
+                height,
+                refresh_rate,
+            },
+        )
+    };
     ch.send(&info_msg);
     let _ = sys::channel_signal(INIT_HANDLE);
 
