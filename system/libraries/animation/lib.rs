@@ -1230,7 +1230,7 @@ impl Lerp for Transform2D {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnimationId {
     slot: u8,
-    gen: u8,
+    generation: u8,
 }
 
 /// A single property animation from start_value to end_value over duration_ms.
@@ -1317,7 +1317,7 @@ impl Timeline {
                 self.generations[i] = self.generations[i].wrapping_add(1);
                 return Ok(AnimationId {
                     slot: i as u8,
-                    gen: self.generations[i],
+                    generation: self.generations[i],
                 });
             }
         }
@@ -1343,7 +1343,7 @@ impl Timeline {
     /// animation (generation mismatch).
     pub fn value(&self, id: AnimationId) -> f32 {
         let i = id.slot as usize;
-        if i < MAX_ANIMATIONS && self.generations[i] == id.gen {
+        if i < MAX_ANIMATIONS && self.generations[i] == id.generation {
             match &self.slots[i] {
                 Some(anim) => anim.value_at(self.now_ms),
                 None => 0.0,
@@ -1369,7 +1369,7 @@ impl Timeline {
     /// slot was reused by a different animation (generation mismatch).
     pub fn progress(&self, id: AnimationId) -> f32 {
         let i = id.slot as usize;
-        if i < MAX_ANIMATIONS && self.generations[i] == id.gen {
+        if i < MAX_ANIMATIONS && self.generations[i] == id.generation {
             match &self.slots[i] {
                 Some(anim) => anim.progress_at(self.now_ms),
                 None => 1.0,
@@ -1385,7 +1385,7 @@ impl Timeline {
     /// by a different animation since this ID was issued).
     pub fn cancel(&mut self, id: AnimationId) {
         let i = id.slot as usize;
-        if i < MAX_ANIMATIONS && self.generations[i] == id.gen {
+        if i < MAX_ANIMATIONS && self.generations[i] == id.generation {
             self.slots[i] = None;
         }
     }
@@ -1396,7 +1396,7 @@ impl Timeline {
     /// (generation mismatch), preventing ABA aliasing.
     pub fn is_active(&self, id: AnimationId) -> bool {
         let i = id.slot as usize;
-        i < MAX_ANIMATIONS && self.generations[i] == id.gen && self.slots[i].is_some()
+        i < MAX_ANIMATIONS && self.generations[i] == id.generation && self.slots[i].is_some()
     }
 
     /// Returns true if any animation is active (useful for frame scheduling —

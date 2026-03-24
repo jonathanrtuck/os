@@ -7,7 +7,7 @@
 //! messages with init (MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY).
 
 use protocol::{
-    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    gpu::{DisplayInfoMsg, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
     virgl::{VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_RESP_OK_DISPLAY_INFO},
 };
 
@@ -18,7 +18,10 @@ use crate::{
 
 // ── Phase A: Device initialization ───────────────────────────────────────
 
-pub(crate) fn init_device(mmio_pa: u64, irq: u32) -> (virtio::Device, virtio::Virtqueue, u8) {
+pub(crate) fn init_device(
+    mmio_pa: u64,
+    irq: u32,
+) -> (virtio::Device, virtio::Virtqueue, sys::InterruptHandle) {
     // Map the MMIO region.
     let page_offset = mmio_pa & 0xFFF;
     let page_pa = mmio_pa & !0xFFF;
@@ -50,7 +53,7 @@ pub(crate) fn init_device(mmio_pa: u64, irq: u32) -> (virtio::Device, virtio::Vi
     }
 
     // Register IRQ (handle slot 2: after init=0, present=1).
-    let irq_handle = sys::interrupt_register(irq).unwrap_or_else(|_| {
+    let irq_handle: sys::InterruptHandle = sys::interrupt_register(irq).unwrap_or_else(|_| {
         sys::print(b"virgil-render: interrupt_register failed\n");
         sys::exit();
     });
@@ -88,7 +91,7 @@ pub(crate) fn init_device(mmio_pa: u64, irq: u32) -> (virtio::Device, virtio::Vi
 pub(crate) fn get_display_info(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
 ) -> (u32, u32) {
     let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page, writing CtrlHeader at start.
@@ -130,7 +133,7 @@ pub(crate) fn get_display_info(
 pub(crate) fn init_handshake(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     ch: &ipc::Channel,
 ) -> (u32, u32) {
     // Query display dimensions.
@@ -157,7 +160,7 @@ pub(crate) fn init_handshake(
         // SAFETY: DisplayInfoMsg is repr(C) and fits in payload.
         unsafe { ipc::Message::from_payload(MSG_DISPLAY_INFO, &DisplayInfoMsg { width, height, refresh_rate: 0 }) };
     ch.send(&info_msg);
-    let _ = sys::channel_signal(INIT_HANDLE);
+    let _ = sys::channel_signal(sys::ChannelHandle(INIT_HANDLE));
 
     // Wait for GPU config from init.
     sys::print(b"     waiting for gpu config\n");
@@ -168,15 +171,21 @@ pub(crate) fn init_handshake(
             break;
         }
     }
-    // SAFETY: msg payload contains a valid GpuConfig written by init.
-    let config: GpuConfig = unsafe { msg.payload_as() };
+    let config = if let Some(protocol::gpu::Message::GpuConfig(c)) =
+        protocol::gpu::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"virgil-render: bad gpu config\n");
+        sys::exit();
+    };
     let cfg_width = config.fb_width;
     let cfg_height = config.fb_height;
     // Signal init that we're ready.
     sys::print(b"     handshake complete, sending GPU_READY\n");
     let ready_msg = ipc::Message::new(MSG_GPU_READY);
     ch.send(&ready_msg);
-    let _ = sys::channel_signal(INIT_HANDLE);
+    let _ = sys::channel_signal(sys::ChannelHandle(INIT_HANDLE));
 
     (cfg_width, cfg_height)
 }

@@ -23,9 +23,9 @@ extern crate scene;
 use alloc::vec::Vec;
 
 use protocol::{
-    compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG},
-    device::{DeviceConfig, MSG_DEVICE_CONFIG},
-    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    compose::MSG_COMPOSITOR_CONFIG,
+    device::MSG_DEVICE_CONFIG,
+    gpu::{DisplayInfoMsg, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
     metal::{self, DRAWABLE_HANDLE},
 };
 use render::frame_scheduler::frame_period_ns;
@@ -521,13 +521,13 @@ impl DmaBuf {
 fn submit_setup(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     dma: &DmaBuf,
     len: usize,
 ) {
     vq.push_chain(&[(dma.pa, len as u32, false)]);
     device.notify(VIRTQ_SETUP);
-    let _ = sys::wait(&[irq_handle], u64::MAX);
+    let _ = sys::wait(&[irq_handle.0], u64::MAX);
     device.ack_interrupt();
     vq.pop_used();
     let _ = sys::interrupt_ack(irq_handle);
@@ -536,13 +536,13 @@ fn submit_setup(
 fn submit_render(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     dma: &DmaBuf,
     len: usize,
 ) {
     vq.push_chain(&[(dma.pa, len as u32, false)]);
     device.notify(VIRTQ_RENDER);
-    let _ = sys::wait(&[irq_handle], u64::MAX);
+    let _ = sys::wait(&[irq_handle.0], u64::MAX);
     device.ack_interrupt();
     vq.pop_used();
     let _ = sys::interrupt_ack(irq_handle);
@@ -552,7 +552,7 @@ fn submit_render(
 fn send_setup(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     dma: &DmaBuf,
     cmdbuf: &metal::CommandBuffer,
 ) {
@@ -566,7 +566,7 @@ fn send_setup(
 fn send_render(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     dma: &DmaBuf,
     cmdbuf: &metal::CommandBuffer,
 ) {
@@ -718,8 +718,14 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"metal-render: no device config message\n");
         sys::exit();
     }
-    // SAFETY: msg payload contains a valid DeviceConfig from init.
-    let dev_config: DeviceConfig = unsafe { msg.payload_as() };
+    let dev_config = if let Some(protocol::device::Message::DeviceConfig(c)) =
+        protocol::device::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"metal-render: bad device config\n");
+        sys::exit();
+    };
 
     // Map MMIO region.
     let page_offset = dev_config.mmio_pa & 0xFFF;
@@ -743,10 +749,11 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Register IRQ.
-    let irq_handle = sys::interrupt_register(dev_config.irq).unwrap_or_else(|_| {
-        sys::print(b"metal-render: interrupt_register failed\n");
-        sys::exit();
-    });
+    let irq_handle: sys::InterruptHandle =
+        sys::interrupt_register(dev_config.irq).unwrap_or_else(|_| {
+            sys::print(b"metal-render: interrupt_register failed\n");
+            sys::exit();
+        });
 
     // Setup two virtqueues.
     let setup_vq_size = core::cmp::min(
@@ -793,7 +800,7 @@ pub extern "C" fn _start() -> ! {
         )
     };
     ch.send(&info_msg);
-    let _ = sys::channel_signal(INIT_HANDLE);
+    let _ = sys::channel_signal(sys::ChannelHandle(INIT_HANDLE));
 
     // Wait for GPU config from init.
     sys::print(b"     waiting for gpu config\n");
@@ -803,14 +810,14 @@ pub extern "C" fn _start() -> ! {
             break;
         }
     }
-    let config: GpuConfig = unsafe { msg.payload_as() };
-    let _ = config; // We use display dimensions from config space.
+    // We use display dimensions from config space; decode to consume the message type safely.
+    let _ = protocol::gpu::decode(msg.msg_type, &msg.payload);
 
     // Signal init that we're ready.
     sys::print(b"     handshake complete, sending GPU_READY\n");
     let ready_msg = ipc::Message::new(MSG_GPU_READY);
     ch.send(&ready_msg);
-    let _ = sys::channel_signal(INIT_HANDLE);
+    let _ = sys::channel_signal(sys::ChannelHandle(INIT_HANDLE));
 
     // ── Phase C: Receive render config ───────────────────────────────────
     sys::print(b"     waiting for render config\n");
@@ -826,20 +833,23 @@ pub extern "C" fn _start() -> ! {
     loop {
         let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
         if ch.try_recv(&mut msg) && msg.msg_type == MSG_COMPOSITOR_CONFIG {
-            let config: CompositorConfig = unsafe { msg.payload_as() };
-            scene_va = config.scene_va;
-            font_va = config.font_buf_va;
-            mono_font_len = config.mono_font_len;
-            sans_font_len = config.sans_font_len;
-            scale_factor = config.scale_factor;
-            pointer_state_va = config.pointer_state_va;
-            font_size_cfg = config.font_size;
-            frame_rate_cfg = if config.frame_rate > 0 {
-                config.frame_rate as u32
-            } else {
-                60
-            };
-            break;
+            if let Some(protocol::compose::Message::CompositorConfig(config)) =
+                protocol::compose::decode(msg.msg_type, &msg.payload)
+            {
+                scene_va = config.scene_va;
+                font_va = config.font_buf_va;
+                mono_font_len = config.mono_font_len;
+                sans_font_len = config.sans_font_len;
+                scale_factor = config.scale_factor;
+                pointer_state_va = config.pointer_state_va;
+                font_size_cfg = config.font_size;
+                frame_rate_cfg = if config.frame_rate > 0 {
+                    config.frame_rate as u32
+                } else {
+                    60
+                };
+                break;
+            }
         }
     }
 
@@ -1316,7 +1326,7 @@ pub extern "C" fn _start() -> ! {
     loop {
         // Wait for scene update signal from core, with frame-rate cadence.
         let _ = sys::wait(&[SCENE_HANDLE, INIT_HANDLE], period_ns);
-        let _ = sys::interrupt_ack(SCENE_HANDLE);
+        let _ = sys::interrupt_ack(sys::InterruptHandle(SCENE_HANDLE));
 
         // Read cursor position from the pointer state register (independent
         // of the scene graph). This lets us send cursor plane updates even
@@ -1343,8 +1353,8 @@ pub extern "C" fn _start() -> ! {
 
         // Read scene graph.
         let reader = unsafe { scene::TripleReader::new(scene_va as *mut u8, scene_total_size) };
-        let gen = reader.front_generation();
-        let scene_changed = gen != last_gen;
+        let generation = reader.front_generation();
+        let scene_changed = generation != last_gen;
 
         if !scene_changed && !cursor_moved {
             drop(reader);
@@ -1363,7 +1373,7 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
-        last_gen = gen;
+        last_gen = generation;
 
         let nodes = reader.front_nodes();
         let data_buf = reader.front_data_buf();
@@ -2227,7 +2237,7 @@ fn walk_scene(
     // Setup queue for inline image upload.
     device: &virtio::Device,
     setup_vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     setup_dma: &DmaBuf,
     // Shared heap buffer for path flattening (avoids 4 KiB stack per recursion).
     path_buf: &mut PathPointsBuf,

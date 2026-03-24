@@ -26,7 +26,7 @@ use crate::{
 pub(crate) fn gpu_command(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     cmd_pa: u64,
     cmd_len: u32,
     resp_pa: u64,
@@ -35,7 +35,7 @@ pub(crate) fn gpu_command(
 ) -> u32 {
     vq.push_chain(&[(cmd_pa, cmd_len, false), (resp_pa, resp_len, true)]);
     device.notify(VIRTQ_CONTROL);
-    let _ = sys::wait(&[irq_handle], u64::MAX);
+    let _ = sys::wait(&[irq_handle.0], u64::MAX);
     device.ack_interrupt();
     vq.pop_used();
     let _ = sys::interrupt_ack(irq_handle);
@@ -48,7 +48,7 @@ pub(crate) fn gpu_command(
 pub(crate) fn gpu_cmd_ok(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     cmd: &DmaBuf,
     cmd_len: u32,
 ) -> bool {
@@ -90,7 +90,11 @@ pub(crate) fn print_hex_u32(val: u32) {
 
 // ── Phase C: Virgl 3D initialization ─────────────────────────────────────
 
-pub(crate) fn ctx_create(device: &virtio::Device, vq: &mut virtio::Virtqueue, irq_handle: u8) {
+pub(crate) fn ctx_create(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: sys::InterruptHandle,
+) {
     let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page, writing CtxCreate at start.
     unsafe {
@@ -121,7 +125,7 @@ pub(crate) fn ctx_create(device: &virtio::Device, vq: &mut virtio::Virtqueue, ir
 pub(crate) fn resource_create_3d(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     width: u32,
     height: u32,
 ) {
@@ -164,7 +168,7 @@ pub(crate) fn resource_create_3d(
 pub(crate) fn attach_backing(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     width: u32,
     height: u32,
 ) {
@@ -261,7 +265,7 @@ pub(crate) fn attach_backing(
 pub(crate) fn ctx_attach_resource(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
 ) {
     let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
@@ -292,7 +296,7 @@ pub(crate) fn ctx_attach_resource(
 pub(crate) fn set_scanout(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     width: u32,
     height: u32,
 ) {
@@ -332,7 +336,7 @@ pub(crate) fn set_scanout(
 pub(crate) fn resource_create_vbo(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     size_bytes: u32,
 ) {
     let mut cmd = DmaBuf::alloc(0);
@@ -376,7 +380,7 @@ pub(crate) fn resource_create_vbo(
 pub(crate) fn attach_backing_vbo(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     size_bytes: u32,
 ) -> (usize, u64, u32) {
     let mut cmd = DmaBuf::alloc(0);
@@ -430,7 +434,7 @@ pub(crate) fn attach_backing_vbo(
 pub(crate) fn transfer_vbo_to_host(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     data_bytes: u32,
 ) {
     let mut cmd = DmaBuf::alloc(0);
@@ -467,7 +471,11 @@ pub(crate) fn transfer_vbo_to_host(
 }
 
 /// Attach VBO resource to the virgl context.
-pub(crate) fn ctx_attach_vbo(device: &virtio::Device, vq: &mut virtio::Virtqueue, irq_handle: u8) {
+pub(crate) fn ctx_attach_vbo(
+    device: &virtio::Device,
+    vq: &mut virtio::Virtqueue,
+    irq_handle: sys::InterruptHandle,
+) {
     let mut cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va points to zeroed DMA page.
     unsafe {
@@ -498,7 +506,7 @@ pub(crate) fn ctx_attach_vbo(device: &virtio::Device, vq: &mut virtio::Virtqueue
 pub(crate) fn resource_create_3d_generic(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     resource_id: u32,
     target: u32,
     format: u32,
@@ -545,7 +553,7 @@ pub(crate) fn resource_create_3d_generic(
 pub(crate) fn attach_and_ctx_resource(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     resource_id: u32,
     size_bytes: u32,
 ) -> (usize, u64, u32) {
@@ -621,7 +629,7 @@ pub(crate) fn attach_and_ctx_resource(
 pub(crate) fn transfer_texture_to_host(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     resource_id: u32,
     width: u32,
     height: u32,
@@ -664,7 +672,7 @@ pub(crate) fn transfer_texture_to_host(
 pub(crate) fn transfer_buffer_to_host(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     resource_id: u32,
     data_bytes: u32,
 ) {
@@ -705,7 +713,7 @@ pub(crate) fn transfer_buffer_to_host(
 pub(crate) fn flush_resource(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     width: u32,
     height: u32,
 ) {

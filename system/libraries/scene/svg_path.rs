@@ -103,8 +103,7 @@ fn cos_poly(x: f32) -> f32 {
 fn atan_inner(x: f32) -> f32 {
     let x2 = x * x;
     x * (0.999_866_0
-        + x2 * (-0.330_299_5
-            + x2 * (0.180_141_0 + x2 * (-0.085_133_0 + x2 * 0.020_835_1))))
+        + x2 * (-0.330_299_5 + x2 * (0.180_141_0 + x2 * (-0.085_133_0 + x2 * 0.020_835_1))))
 }
 
 fn atan2(y: f32, x: f32) -> f32 {
@@ -525,12 +524,48 @@ pub fn parse_svg_path(d: &str) -> Vec<u8> {
                 let c2y;
                 let x;
                 let y;
-                if let Some((v, ni)) = parse_number(s, i) { c1x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { c1y = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { c2x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { c2y = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { y = v; i = ni; } else { last_cmd = cmd; continue; }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    c1x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    c1y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    c2x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    c2y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
                 last_c2x = c2x;
                 last_c2y = c2y;
                 cx = x;
@@ -544,12 +579,48 @@ pub fn parse_svg_path(d: &str) -> Vec<u8> {
                 let dc2y;
                 let dx;
                 let dy;
-                if let Some((v, ni)) = parse_number(s, i) { dc1x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dc1y = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dc2x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dc2y = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dx = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dy = v; i = ni; } else { last_cmd = cmd; continue; }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dc1x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dc1y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dc2x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dc2y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dx = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dy = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
                 let c1x = cx + dc1x;
                 let c1y = cy + dc1y;
                 let c2x = cx + dc2x;
@@ -568,10 +639,34 @@ pub fn parse_svg_path(d: &str) -> Vec<u8> {
                 let c2y;
                 let x;
                 let y;
-                if let Some((v, ni)) = parse_number(s, i) { c2x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { c2y = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { y = v; i = ni; } else { last_cmd = cmd; continue; }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    c2x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    c2y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
                 last_c2x = c2x;
                 last_c2y = c2y;
                 cx = x;
@@ -585,10 +680,34 @@ pub fn parse_svg_path(d: &str) -> Vec<u8> {
                 let dc2y;
                 let dx;
                 let dy;
-                if let Some((v, ni)) = parse_number(s, i) { dc2x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dc2y = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dx = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dy = v; i = ni; } else { last_cmd = cmd; continue; }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dc2x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dc2y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dx = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dy = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
                 let c2x = cx + dc2x;
                 let c2y = cy + dc2y;
                 last_c2x = c2x;
@@ -603,10 +722,34 @@ pub fn parse_svg_path(d: &str) -> Vec<u8> {
                 let qy;
                 let x;
                 let y;
-                if let Some((v, ni)) = parse_number(s, i) { qx = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { qy = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { y = v; i = ni; } else { last_cmd = cmd; continue; }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    qx = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    qy = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
                 let c1x = cx + 2.0 / 3.0 * (qx - cx);
                 let c1y = cy + 2.0 / 3.0 * (qy - cy);
                 let c2x = x + 2.0 / 3.0 * (qx - x);
@@ -622,10 +765,34 @@ pub fn parse_svg_path(d: &str) -> Vec<u8> {
                 let dqy;
                 let dx;
                 let dy;
-                if let Some((v, ni)) = parse_number(s, i) { dqx = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dqy = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dx = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dy = v; i = ni; } else { last_cmd = cmd; continue; }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dqx = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dqy = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dx = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dy = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
                 let qx = cx + dqx;
                 let qy = cy + dqy;
                 let x = cx + dx;
@@ -648,13 +815,55 @@ pub fn parse_svg_path(d: &str) -> Vec<u8> {
                 let sw;
                 let x;
                 let y;
-                if let Some((v, ni)) = parse_number(s, i) { arx = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { ary = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { rot = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_flag(s, i) { la = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_flag(s, i) { sw = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { x = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { y = v; i = ni; } else { last_cmd = cmd; continue; }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    arx = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    ary = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    rot = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_flag(s, i) {
+                    la = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_flag(s, i) {
+                    sw = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    x = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    y = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
                 arc_to_cubics(&mut out, cx, cy, arx, ary, rot, la, sw, x, y);
                 cx = x;
                 cy = y;
@@ -667,13 +876,55 @@ pub fn parse_svg_path(d: &str) -> Vec<u8> {
                 let sw;
                 let dx;
                 let dy;
-                if let Some((v, ni)) = parse_number(s, i) { arx = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { ary = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { rot = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_flag(s, i) { la = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_flag(s, i) { sw = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dx = v; i = ni; } else { last_cmd = cmd; continue; }
-                if let Some((v, ni)) = parse_number(s, i) { dy = v; i = ni; } else { last_cmd = cmd; continue; }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    arx = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    ary = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    rot = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_flag(s, i) {
+                    la = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_flag(s, i) {
+                    sw = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dx = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
+                if let Some((v, ni)) = parse_number(s, i) {
+                    dy = v;
+                    i = ni;
+                } else {
+                    last_cmd = cmd;
+                    continue;
+                }
                 let x = cx + dx;
                 let y = cy + dy;
                 arc_to_cubics(&mut out, cx, cy, arx, ary, rot, la, sw, x, y);
@@ -719,9 +970,15 @@ pub fn debug_sin(x: f32) -> f32 {
 /// Debug helper: expose internal arc computation for testing.
 /// Returns (theta1, dtheta, n_segs, cx, cy, t1_y, t1_x, cxp, cyp, x1p, y1p).
 pub fn debug_arc_params(
-    x1: f32, y1: f32, rx_in: f32, ry_in: f32,
-    x_rot_deg: f32, large_arc: bool, sweep: bool,
-    x2: f32, y2: f32,
+    x1: f32,
+    y1: f32,
+    rx_in: f32,
+    ry_in: f32,
+    x_rot_deg: f32,
+    large_arc: bool,
+    sweep: bool,
+    x2: f32,
+    y2: f32,
 ) -> (f32, f32, usize, f32, f32, f32, f32, f32, f32, f32, f32) {
     let mut rx = rx_in.abs();
     let mut ry = ry_in.abs();
@@ -735,7 +992,11 @@ pub fn debug_arc_params(
     let x1p2 = x1p * x1p;
     let y1p2 = y1p * y1p;
     let lambda = x1p2 / (rx * rx) + y1p2 / (ry * ry);
-    if lambda > 1.0 { let sq = sqrt(lambda); rx *= sq; ry *= sq; }
+    if lambda > 1.0 {
+        let sq = sqrt(lambda);
+        rx *= sq;
+        ry *= sq;
+    }
     let rx2 = rx * rx;
     let ry2 = ry * ry;
     let num = (rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2).max(0.0);
@@ -748,10 +1009,15 @@ pub fn debug_arc_params(
     let cy = sin_phi * cxp + cos_phi * cyp + (y1 + y2) * 0.5;
     let theta1 = atan2((y1p - cyp) / ry, (x1p - cxp) / rx);
     let mut dtheta = atan2((-y1p - cyp) / ry, (-x1p - cxp) / rx) - theta1;
-    if sweep && dtheta < 0.0 { dtheta += TWO_PI; }
-    else if !sweep && dtheta > 0.0 { dtheta -= TWO_PI; }
+    if sweep && dtheta < 0.0 {
+        dtheta += TWO_PI;
+    } else if !sweep && dtheta > 0.0 {
+        dtheta -= TWO_PI;
+    }
     let n_segs = (((dtheta.abs() / HALF_PI) - 1e-4).ceil_no_std().max(1.0) as usize).max(1);
     let t1_y = (y1p - cyp) / ry;
     let t1_x = (x1p - cxp) / rx;
-    (theta1, dtheta, n_segs, cx, cy, t1_y, t1_x, cxp, cyp, x1p, y1p)
+    (
+        theta1, dtheta, n_segs, cx, cy, t1_y, t1_x, cxp, cyp, x1p, y1p,
+    )
 }

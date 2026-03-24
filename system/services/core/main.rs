@@ -32,10 +32,16 @@ extern crate layout as layout_lib;
 extern crate render;
 extern crate scene;
 
+#[path = "blink.rs"]
+mod blink;
+#[path = "documents.rs"]
+mod documents;
 #[path = "fallback.rs"]
 mod fallback;
 #[path = "icons.rs"]
 mod icons;
+#[path = "input.rs"]
+mod input_handling;
 #[path = "layout/mod.rs"]
 mod layout;
 #[path = "scene_state.rs"]
@@ -46,14 +52,16 @@ mod test_gen;
 mod typography;
 
 use protocol::{
-    compose::{ImageConfig, RtcConfig, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG},
-    core_config::{CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE, MSG_SCENE_UPDATED},
-    edit::{
-        CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE,
-        MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE,
-        MSG_WRITE_INSERT,
+    compose::{self, ImageConfig, RtcConfig, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG},
+    core_config::{
+        self, CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE, MSG_SCENE_UPDATED,
     },
-    input::{KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON},
+    edit::{
+        self, CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
+        MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE,
+        MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
+    },
+    input::{self, KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON},
 };
 
 /// Clamp a float to [min, max]. Manual implementation for `no_std`.
@@ -75,12 +83,12 @@ fn round_f32(x: f32) -> i32 {
     drawing::round_f32(x)
 }
 
-const COMPOSITOR_HANDLE: u8 = 2;
-const DOC_HEADER_SIZE: usize = 64;
-const EDITOR_HANDLE: u8 = 3;
+const COMPOSITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(2);
+pub(crate) const DOC_HEADER_SIZE: usize = 64;
+const EDITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(3);
 const FONT_SIZE: u32 = 18;
-const INPUT_HANDLE: u8 = 1;
-const INPUT2_HANDLE: u8 = 4;
+const INPUT_HANDLE: sys::ChannelHandle = sys::ChannelHandle(1);
+const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
 // Keycodes (Linux evdev).
 const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
@@ -101,188 +109,85 @@ const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_X: u32 = 12;
 const TITLE_BAR_H: u32 = 36;
 
-// ── Cursor blink state machine ──────────────────────────────────────
-
-/// Phase of the cursor blink cycle: visible hold → fade out → hidden hold → fade in.
-#[derive(Clone, Copy, PartialEq)]
-enum BlinkPhase {
-    /// Cursor fully visible for 500ms.
-    VisibleHold,
-    /// Fading from opacity 255→0 over 150ms.
-    FadeOut,
-    /// Cursor fully hidden for 300ms.
-    HiddenHold,
-    /// Fading from opacity 0→255 over 150ms.
-    FadeIn,
-}
-
-/// Duration of each blink phase in milliseconds.
-const BLINK_VISIBLE_MS: u64 = 500;
-const BLINK_FADE_OUT_MS: u64 = 150;
-const BLINK_HIDDEN_MS: u64 = 300;
-const BLINK_FADE_IN_MS: u64 = 150;
-
-/// Advance the blink state machine. Returns `true` if `cursor_opacity` changed.
-fn advance_blink(state: &mut CoreState, now_ms: u64) -> bool {
-    let elapsed = now_ms.saturating_sub(state.blink_phase_start_ms);
-    let mut changed = false;
-
-    match state.blink_phase {
-        BlinkPhase::VisibleHold => {
-            state.cursor_opacity = 255;
-            if elapsed >= BLINK_VISIBLE_MS {
-                state.cursor_blink_id = state
-                    .timeline
-                    .start(255.0, 0.0, 150, animation::Easing::EaseInOut, now_ms)
-                    .ok();
-                state.blink_phase = BlinkPhase::FadeOut;
-                state.blink_phase_start_ms = now_ms;
-                changed = true;
-            }
-        }
-        BlinkPhase::FadeOut => {
-            if let Some(id) = state.cursor_blink_id {
-                let new_opacity = if state.timeline.is_active(id) {
-                    state.timeline.value(id) as u8
-                } else {
-                    0
-                };
-                if new_opacity != state.cursor_opacity {
-                    state.cursor_opacity = new_opacity;
-                    changed = true;
-                }
-            }
-            if elapsed >= BLINK_FADE_OUT_MS {
-                state.blink_phase = BlinkPhase::HiddenHold;
-                state.blink_phase_start_ms = now_ms;
-                state.cursor_opacity = 0;
-                changed = true;
-            }
-        }
-        BlinkPhase::HiddenHold => {
-            state.cursor_opacity = 0;
-            if elapsed >= BLINK_HIDDEN_MS {
-                state.cursor_blink_id = state
-                    .timeline
-                    .start(0.0, 255.0, 150, animation::Easing::EaseInOut, now_ms)
-                    .ok();
-                state.blink_phase = BlinkPhase::FadeIn;
-                state.blink_phase_start_ms = now_ms;
-                changed = true;
-            }
-        }
-        BlinkPhase::FadeIn => {
-            if let Some(id) = state.cursor_blink_id {
-                let new_opacity = if state.timeline.is_active(id) {
-                    state.timeline.value(id) as u8
-                } else {
-                    255
-                };
-                if new_opacity != state.cursor_opacity {
-                    state.cursor_opacity = new_opacity;
-                    changed = true;
-                }
-            }
-            if elapsed >= BLINK_FADE_IN_MS {
-                state.blink_phase = BlinkPhase::VisibleHold;
-                state.blink_phase_start_ms = now_ms;
-                state.cursor_opacity = 255;
-                changed = true;
-            }
-        }
-    }
-    changed
-}
-
-/// Reset blink to fully visible (called on user input).
-fn reset_blink(state: &mut CoreState, now_ms: u64) {
-    if let Some(id) = state.cursor_blink_id {
-        state.timeline.cancel(id);
-    }
-    state.blink_phase = BlinkPhase::VisibleHold;
-    state.blink_phase_start_ms = now_ms;
-    state.cursor_opacity = 255;
-}
-
-struct CoreState {
-    blink_phase: BlinkPhase,
-    blink_phase_start_ms: u64,
-    boot_counter: u64,
+pub(crate) struct CoreState {
+    pub(crate) blink_phase: blink::BlinkPhase,
+    pub(crate) blink_phase_start_ms: u64,
+    pub(crate) boot_counter: u64,
     /// Character advance in 16.16 fixed-point points.
     /// Single source of truth — same precision as scene ShapedGlyph advances.
-    char_w_fx: i32,
-    counter_freq: u64,
-    cursor_blink_id: Option<animation::AnimationId>,
-    cursor_opacity: u8,
-    cursor_pos: usize,
-    doc_buf: *mut u8,
-    doc_capacity: usize,
-    doc_len: usize,
-    font_data_ptr: *const u8,
-    font_data_len: usize,
-    font_upem: u16,
-    sans_font_data_ptr: *const u8,
-    sans_font_data_len: usize,
-    sans_font_upem: u16,
+    pub(crate) char_w_fx: i32,
+    pub(crate) counter_freq: u64,
+    pub(crate) cursor_blink_id: Option<animation::AnimationId>,
+    pub(crate) cursor_opacity: u8,
+    pub(crate) cursor_pos: usize,
+    pub(crate) doc_buf: *mut u8,
+    pub(crate) doc_capacity: usize,
+    pub(crate) doc_len: usize,
+    pub(crate) font_data_ptr: *const u8,
+    pub(crate) font_data_len: usize,
+    pub(crate) font_upem: u16,
+    pub(crate) sans_font_data_ptr: *const u8,
+    pub(crate) sans_font_data_len: usize,
+    pub(crate) sans_font_upem: u16,
     /// Which document space receives input (0=text, 1=image).
-    active_space: u8,
+    pub(crate) active_space: u8,
     /// True when the slide spring is animating between spaces.
-    slide_animating: bool,
+    pub(crate) slide_animating: bool,
     /// Current slide offset in millipoints (0 = space 0, fb_width*MPT = space 1).
-    slide_offset: scene::Mpt,
+    pub(crate) slide_offset: scene::Mpt,
     /// Spring physics for slide animation.
-    slide_spring: animation::Spring,
+    pub(crate) slide_spring: animation::Spring,
     /// Target slide offset in millipoints.
-    slide_target: scene::Mpt,
-    line_h: u32,
-    mouse_x: u32,
-    mouse_y: u32,
+    pub(crate) slide_target: scene::Mpt,
+    pub(crate) line_h: u32,
+    pub(crate) mouse_x: u32,
+    pub(crate) mouse_y: u32,
     /// Animation ID for the pointer fade-out (255→0, 300ms EaseOut).
-    pointer_fade_id: Option<animation::AnimationId>,
+    pub(crate) pointer_fade_id: Option<animation::AnimationId>,
     /// Timestamp (ms) of the last pointer movement event.
-    pointer_last_event_ms: u64,
+    pub(crate) pointer_last_event_ms: u64,
     /// Current pointer cursor opacity (0 = hidden, 255 = fully visible).
-    pointer_opacity: u8,
+    pub(crate) pointer_opacity: u8,
     /// True when the pointer cursor is currently shown (recently moved).
-    pointer_visible: bool,
+    pub(crate) pointer_visible: bool,
     /// VA of the shared PointerState register (input driver writes, core reads).
-    input_state_va: usize,
+    pub(crate) input_state_va: usize,
     /// Last-seen packed pointer_xy value (for change detection).
-    last_pointer_xy: u64,
-    rtc_mmio_va: usize,
-    scroll_animating: bool,
-    scroll_offset: scene::Mpt,
-    scroll_spring: animation::Spring,
-    scroll_target: scene::Mpt,
-    sel_end: usize,
+    pub(crate) last_pointer_xy: u64,
+    pub(crate) rtc_mmio_va: usize,
+    pub(crate) scroll_animating: bool,
+    pub(crate) scroll_offset: scene::Mpt,
+    pub(crate) scroll_spring: animation::Spring,
+    pub(crate) scroll_target: scene::Mpt,
+    pub(crate) sel_end: usize,
     /// Selection anchor: the fixed end of a selection range. When
     /// `has_selection` is true, the visible range is
     /// `[min(anchor, cursor_pos), max(anchor, cursor_pos))`.
-    anchor: usize,
+    pub(crate) anchor: usize,
     /// True when a selection is active.
-    has_selection: bool,
+    pub(crate) has_selection: bool,
     /// Sticky goal column for Up/Down navigation. Preserved across
     /// consecutive vertical moves, cleared on any horizontal move.
-    goal_column: Option<usize>,
+    pub(crate) goal_column: Option<usize>,
     /// Click state for double/triple-click detection.
-    last_click_ms: u64,
-    last_click_x: u32,
-    last_click_y: u32,
-    click_count: u8,
+    pub(crate) last_click_ms: u64,
+    pub(crate) last_click_x: u32,
+    pub(crate) last_click_y: u32,
+    pub(crate) click_count: u8,
     /// Animation ID for the selection highlight fade-in (0→255).
-    selection_fade_id: Option<animation::AnimationId>,
+    pub(crate) selection_fade_id: Option<animation::AnimationId>,
     /// Current selection highlight opacity (animated on selection change).
-    selection_opacity: u8,
-    sel_start: usize,
-    timeline: animation::Timeline,
-    timer_active: bool,
-    timer_handle: u8,
+    pub(crate) selection_opacity: u8,
+    pub(crate) sel_start: usize,
+    pub(crate) timeline: animation::Timeline,
+    pub(crate) timer_active: bool,
+    pub(crate) timer_handle: sys::TimerHandle,
 }
 
 impl CoreState {
     const fn new() -> Self {
         Self {
-            blink_phase: BlinkPhase::VisibleHold,
+            blink_phase: blink::BlinkPhase::VisibleHold,
             blink_phase_start_ms: 0,
             boot_counter: 0,
             char_w_fx: 8 * 65536,
@@ -335,7 +240,7 @@ impl CoreState {
             sel_start: 0,
             timeline: animation::Timeline::new(),
             timer_active: false,
-            timer_handle: 0,
+            timer_handle: sys::TimerHandle(0),
         }
     }
 }
@@ -345,17 +250,9 @@ struct SyncState(core::cell::UnsafeCell<CoreState>);
 unsafe impl Sync for SyncState {}
 static STATE: SyncState = SyncState(core::cell::UnsafeCell::new(CoreState::new()));
 
-fn state() -> &'static mut CoreState {
+pub(crate) fn state() -> &'static mut CoreState {
     // SAFETY: Single-threaded userspace process. No concurrent access.
     unsafe { &mut *STATE.0.get() }
-}
-
-struct KeyAction {
-    changed: bool,
-    text_changed: bool,
-    selection_changed: bool,
-    context_switched: bool,
-    consumed: bool,
 }
 
 /// Access the mono font data slice from shared memory.
@@ -566,680 +463,6 @@ fn create_clock_timer() -> bool {
         }
     }
 }
-fn doc_content() -> &'static [u8] {
-    let s = state();
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    // doc_len is always <= doc_capacity - DOC_HEADER_SIZE (maintained by
-    // doc_insert/doc_delete/doc_delete_range). doc_buf is set once during
-    // init and never null after that point.
-    unsafe {
-        debug_assert!(!s.doc_buf.is_null());
-        debug_assert!(s.doc_len <= s.doc_capacity);
-        core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), s.doc_len)
-    }
-}
-fn doc_delete(pos: usize) -> bool {
-    let s = state();
-    if s.doc_len == 0 || pos >= s.doc_len {
-        return false;
-    }
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    unsafe {
-        let base = s.doc_buf.add(DOC_HEADER_SIZE);
-        if pos + 1 < s.doc_len {
-            core::ptr::copy(base.add(pos + 1), base.add(pos), s.doc_len - pos - 1);
-        }
-    }
-    s.doc_len -= 1;
-    doc_write_header();
-    true
-}
-fn doc_delete_range(start: usize, end: usize) -> bool {
-    let s = state();
-    if start >= end || start >= s.doc_len || end > s.doc_len {
-        return false;
-    }
-    let del_count = end - start;
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    unsafe {
-        let base = s.doc_buf.add(DOC_HEADER_SIZE);
-        if end < s.doc_len {
-            core::ptr::copy(base.add(end), base.add(start), s.doc_len - end);
-        }
-    }
-    s.doc_len -= del_count;
-    doc_write_header();
-    true
-}
-fn doc_insert(pos: usize, byte: u8) -> bool {
-    let s = state();
-    if s.doc_len >= s.doc_capacity || pos > s.doc_len {
-        return false;
-    }
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    unsafe {
-        let base = s.doc_buf.add(DOC_HEADER_SIZE);
-        if pos < s.doc_len {
-            core::ptr::copy(base.add(pos), base.add(pos + 1), s.doc_len - pos);
-        }
-        *base.add(pos) = byte;
-    }
-    s.doc_len += 1;
-    doc_write_header();
-    true
-}
-fn doc_write_header() {
-    let s = state();
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    unsafe {
-        core::ptr::write_volatile(s.doc_buf as *mut u64, s.doc_len as u64);
-        core::ptr::write_volatile(s.doc_buf.add(8) as *mut u64, s.cursor_pos as u64);
-    }
-}
-fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
-    let hours = ((total_seconds / 3600) % 24) as u8;
-    let minutes = ((total_seconds / 60) % 60) as u8;
-    let seconds = (total_seconds % 60) as u8;
-
-    buf[0] = b'0' + hours / 10;
-    buf[1] = b'0' + hours % 10;
-    buf[2] = b':';
-    buf[3] = b'0' + minutes / 10;
-    buf[4] = b'0' + minutes % 10;
-    buf[5] = b':';
-    buf[6] = b'0' + seconds / 10;
-    buf[7] = b'0' + seconds % 10;
-}
-// ── Navigation helpers ─────────────────────────────────────────────
-
-/// Find the previous word boundary (delegates to layout library).
-fn word_boundary_backward(text: &[u8], pos: usize) -> usize {
-    layout_lib::word_boundary_backward(text, pos)
-}
-
-/// Find the next word boundary (delegates to layout library).
-fn word_boundary_forward(text: &[u8], pos: usize) -> usize {
-    layout_lib::word_boundary_forward(text, pos)
-}
-
-/// Convert (visual_line, column) to byte offset (delegates to layout library).
-fn line_col_to_byte(text: &[u8], target_line: usize, target_col: usize, cols: usize) -> usize {
-    /// Unit-width metrics: every character has width 1.0, so max_width = chars_per_line.
-    struct UnitM;
-    impl layout_lib::FontMetrics for UnitM {
-        fn char_width(&self, _ch: char) -> f32 {
-            1.0
-        }
-        fn line_height(&self) -> f32 {
-            1.0
-        }
-    }
-    let max_width = cols as f32;
-    layout_lib::line_col_to_byte(
-        text,
-        target_line,
-        target_col,
-        &UnitM,
-        max_width,
-        &layout_lib::CharBreaker,
-    )
-}
-
-/// Find byte offset of start of visual line containing `pos`.
-fn visual_line_start(text: &[u8], pos: usize, cols: usize) -> usize {
-    if cols == 0 || text.is_empty() {
-        return 0;
-    }
-    let (line, _col) = layout::byte_to_line_col(text, pos, cols);
-    line_col_to_byte(text, line, 0, cols)
-}
-
-/// Find byte offset of end of visual line containing `pos`.
-/// Points to the last character on the line (or the newline).
-fn visual_line_end(text: &[u8], pos: usize, cols: usize) -> usize {
-    if cols == 0 || text.is_empty() {
-        return 0;
-    }
-    let (line, _col) = layout::byte_to_line_col(text, pos, cols);
-    // Walk to start of next line and back up, or to end of text.
-    let next_start = line_col_to_byte(text, line + 1, 0, cols);
-    if next_start > 0 && next_start <= text.len() && text[next_start - 1] == b'\n' {
-        // Line ends with newline — point to the newline position.
-        next_start - 1
-    } else {
-        // Wrapped line or last line — point past last char.
-        next_start
-    }
-}
-
-/// Update selection state in CoreState from anchor + cursor_pos.
-/// Returns true if sel_start/sel_end changed.
-fn update_selection_from_anchor() -> bool {
-    let s = state();
-    let (new_start, new_end) = if s.has_selection {
-        let lo = if s.anchor < s.cursor_pos {
-            s.anchor
-        } else {
-            s.cursor_pos
-        };
-        let hi = if s.anchor > s.cursor_pos {
-            s.anchor
-        } else {
-            s.cursor_pos
-        };
-        (lo, hi)
-    } else {
-        (0, 0)
-    };
-    let changed = s.sel_start != new_start || s.sel_end != new_end;
-    s.sel_start = new_start;
-    s.sel_end = new_end;
-    changed
-}
-
-/// Clear selection state.
-fn clear_selection() {
-    let s = state();
-    s.has_selection = false;
-    s.anchor = 0;
-    s.sel_start = 0;
-    s.sel_end = 0;
-}
-
-/// Send MSG_SET_CURSOR to the editor to sync its local cursor.
-fn sync_cursor_to_editor(editor_ch: &ipc::Channel) {
-    let pos = state().cursor_pos;
-    let cm = CursorMove {
-        position: pos as u32,
-    };
-    // SAFETY: CursorMove is a plain data struct; from_payload copies it into payload region.
-    let msg = unsafe { ipc::Message::from_payload(MSG_SET_CURSOR, &cm) };
-    editor_ch.send(&msg);
-}
-
-fn process_key_event(
-    key: &KeyEvent,
-    has_image: bool,
-    editor_ch: &ipc::Channel,
-    fb_width: u32,
-    page_w: u32,
-    page_h: u32,
-    page_pad: u32,
-) -> KeyAction {
-    use protocol::input::{MOD_ALT, MOD_CTRL, MOD_SHIFT, MOD_SUPER};
-
-    let no_change = KeyAction {
-        changed: false,
-        text_changed: false,
-        selection_changed: false,
-        context_switched: false,
-        consumed: true,
-    };
-
-    // Ignore modifier-only key events (tracked by input driver).
-    match key.keycode {
-        42 | 54 | 29 | 97 | 56 | 100 | 125 | 126 | 58 => return no_change,
-        _ => {}
-    }
-
-    // Only handle key presses (not releases).
-    if key.pressed != 1 {
-        return no_change;
-    }
-
-    let mods = key.modifiers;
-    let shift = mods & MOD_SHIFT != 0;
-    let ctrl = mods & MOD_CTRL != 0;
-    let alt = mods & MOD_ALT != 0;
-    let cmd = mods & MOD_SUPER != 0;
-
-    // ── System keys ─────────────────────────────────────────────
-    if key.keycode == KEY_TAB && ctrl {
-        if has_image {
-            let s = state();
-            // Toggle active space.
-            let new_space = if s.active_space == 0 { 1u8 } else { 0u8 };
-            s.active_space = new_space;
-            let target_pt = new_space as f32 * fb_width as f32;
-            s.slide_target = scene::f32_to_mpt(target_pt);
-            s.slide_spring.set_target(target_pt);
-            s.slide_animating = true;
-            return KeyAction {
-                changed: true,
-                text_changed: false,
-                selection_changed: false,
-                context_switched: true,
-                consumed: true,
-            };
-        }
-        return no_change;
-    }
-
-    // In image space, no editor keys apply.
-    if state().active_space != 0 {
-        return no_change;
-    }
-
-    let text = doc_content();
-    let len = text.len();
-    let layout = content_text_layout(page_w, page_pad);
-    let cols = layout.cols();
-
-    // ── Navigation helper: begin/extend selection ────────────────
-    // If Shift is held, start or extend selection from current cursor.
-    // If Shift is NOT held, clear any active selection (collapse).
-    // Returns whether to proceed with cursor movement.
-    macro_rules! nav_begin {
-        () => {{
-            let s = state();
-            if shift {
-                if !s.has_selection {
-                    s.anchor = s.cursor_pos;
-                    s.has_selection = true;
-                }
-            } else if s.has_selection {
-                // Non-shift navigation clears selection.
-                // For Left: collapse to left edge. For Right: collapse to right edge.
-                // The specific collapse behavior is handled per-key below.
-            }
-        }};
-    }
-
-    // After cursor movement, update selection and sync editor.
-    macro_rules! nav_finish {
-        ($clear_goal:expr) => {{
-            if $clear_goal {
-                state().goal_column = None;
-            }
-            if !shift {
-                clear_selection();
-            } else {
-                // Collapse selection if anchor == cursor.
-                let s = state();
-                if s.anchor == s.cursor_pos {
-                    clear_selection();
-                }
-            }
-            update_selection_from_anchor();
-            doc_write_header();
-            sync_cursor_to_editor(editor_ch);
-            let _ = sys::channel_signal(EDITOR_HANDLE);
-            KeyAction {
-                changed: true,
-                text_changed: false,
-                selection_changed: true,
-                context_switched: false,
-                consumed: true,
-            }
-        }};
-    }
-
-    match key.keycode {
-        // ── Cmd+A: select all ───────────────────────────────────
-        KEY_A if cmd => {
-            let s = state();
-            s.anchor = 0;
-            s.cursor_pos = len;
-            s.has_selection = len > 0;
-            s.goal_column = None;
-            update_selection_from_anchor();
-            doc_write_header();
-            sync_cursor_to_editor(editor_ch);
-            let _ = sys::channel_signal(EDITOR_HANDLE);
-            KeyAction {
-                changed: true,
-                text_changed: false,
-                selection_changed: true,
-                context_switched: false,
-                consumed: true,
-            }
-        }
-
-        // ── Left arrow ──────────────────────────────────────────
-        KEY_LEFT => {
-            nav_begin!();
-            let s = state();
-            if cmd {
-                // Cmd+Left: move to start of visual line.
-                s.cursor_pos = visual_line_start(text, s.cursor_pos, cols);
-            } else if alt {
-                // Opt+Left: move to previous word boundary.
-                s.cursor_pos = word_boundary_backward(text, s.cursor_pos);
-            } else if !shift && s.has_selection {
-                // Plain Left with selection: collapse to left edge.
-                let lo = if s.anchor < s.cursor_pos {
-                    s.anchor
-                } else {
-                    s.cursor_pos
-                };
-                s.cursor_pos = lo;
-                clear_selection();
-                doc_write_header();
-                sync_cursor_to_editor(editor_ch);
-                let _ = sys::channel_signal(EDITOR_HANDLE);
-                return KeyAction {
-                    changed: true,
-                    text_changed: false,
-                    selection_changed: true,
-                    context_switched: false,
-                    consumed: true,
-                };
-            } else if s.cursor_pos > 0 {
-                s.cursor_pos -= 1;
-            }
-            nav_finish!(true)
-        }
-
-        // ── Right arrow ─────────────────────────────────────────
-        KEY_RIGHT => {
-            nav_begin!();
-            let s = state();
-            if cmd {
-                // Cmd+Right: move to end of visual line.
-                s.cursor_pos = visual_line_end(text, s.cursor_pos, cols);
-            } else if alt {
-                // Opt+Right: move to next word boundary.
-                s.cursor_pos = word_boundary_forward(text, s.cursor_pos);
-            } else if !shift && s.has_selection {
-                // Plain Right with selection: collapse to right edge.
-                let hi = if s.anchor > s.cursor_pos {
-                    s.anchor
-                } else {
-                    s.cursor_pos
-                };
-                s.cursor_pos = hi;
-                clear_selection();
-                doc_write_header();
-                sync_cursor_to_editor(editor_ch);
-                let _ = sys::channel_signal(EDITOR_HANDLE);
-                return KeyAction {
-                    changed: true,
-                    text_changed: false,
-                    selection_changed: true,
-                    context_switched: false,
-                    consumed: true,
-                };
-            } else if s.cursor_pos < len {
-                s.cursor_pos += 1;
-            }
-            nav_finish!(true)
-        }
-
-        // ── Up arrow ────────────────────────────────────────────
-        KEY_UP => {
-            nav_begin!();
-            if cmd {
-                // Cmd+Up: move to start of document.
-                state().cursor_pos = 0;
-                state().goal_column = None;
-            } else {
-                let s = state();
-                let (line, col) = layout::byte_to_line_col(text, s.cursor_pos, cols);
-                if s.goal_column.is_none() {
-                    s.goal_column = Some(col);
-                }
-                if line > 0 {
-                    let gc = s.goal_column.unwrap_or(col);
-                    s.cursor_pos = line_col_to_byte(text, line - 1, gc, cols);
-                }
-            }
-            nav_finish!(false)
-        }
-
-        // ── Down arrow ──────────────────────────────────────────
-        KEY_DOWN => {
-            nav_begin!();
-            if cmd {
-                // Cmd+Down: move to end of document.
-                state().cursor_pos = len;
-                state().goal_column = None;
-            } else {
-                let s = state();
-                let (line, col) = layout::byte_to_line_col(text, s.cursor_pos, cols);
-                if s.goal_column.is_none() {
-                    s.goal_column = Some(col);
-                }
-                let gc = s.goal_column.unwrap_or(col);
-                let new_pos = line_col_to_byte(text, line + 1, gc, cols);
-                // Only move if we actually reached a different line.
-                if new_pos != s.cursor_pos || new_pos == len {
-                    s.cursor_pos = new_pos;
-                }
-            }
-            nav_finish!(false)
-        }
-
-        // ── Home ────────────────────────────────────────────────
-        KEY_HOME => {
-            nav_begin!();
-            state().cursor_pos = visual_line_start(text, state().cursor_pos, cols);
-            nav_finish!(true)
-        }
-
-        // ── End ─────────────────────────────────────────────────
-        KEY_END => {
-            nav_begin!();
-            state().cursor_pos = visual_line_end(text, state().cursor_pos, cols);
-            nav_finish!(true)
-        }
-
-        // ── Page Up ─────────────────────────────────────────────
-        KEY_PAGEUP => {
-            nav_begin!();
-            let s = state();
-            let (line, col) = layout::byte_to_line_col(text, s.cursor_pos, cols);
-            if s.goal_column.is_none() {
-                s.goal_column = Some(col);
-            }
-            let gc = s.goal_column.unwrap_or(col);
-            let vp = viewport_lines(page_h, page_pad);
-            let target_line = line.saturating_sub(vp as usize);
-            state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
-            nav_finish!(false)
-        }
-
-        // ── Page Down ───────────────────────────────────────────
-        KEY_PAGEDOWN => {
-            nav_begin!();
-            let s = state();
-            let (line, col) = layout::byte_to_line_col(text, s.cursor_pos, cols);
-            if s.goal_column.is_none() {
-                s.goal_column = Some(col);
-            }
-            let gc = s.goal_column.unwrap_or(col);
-            let vp = viewport_lines(page_h, page_pad);
-            let target_line = line + vp as usize;
-            state().cursor_pos = line_col_to_byte(text, target_line, gc, cols);
-            nav_finish!(false)
-        }
-
-        // ── Backspace ───────────────────────────────────────────
-        KEY_BACKSPACE => {
-            let s = state();
-            if s.has_selection {
-                // Selection-delete: core handles directly.
-                let lo = s.sel_start;
-                let hi = s.sel_end;
-                clear_selection();
-                if doc_delete_range(lo, hi) {
-                    state().cursor_pos = lo;
-                    doc_write_header();
-                    sync_cursor_to_editor(editor_ch);
-                    let _ = sys::channel_signal(EDITOR_HANDLE);
-                    return KeyAction {
-                        changed: true,
-                        text_changed: true,
-                        selection_changed: true,
-                        context_switched: false,
-                        consumed: true,
-                    };
-                }
-                return no_change;
-            }
-            if alt {
-                // Opt+Backspace: word-delete backward.
-                let cursor = state().cursor_pos;
-                let boundary = word_boundary_backward(text, cursor);
-                if boundary < cursor && doc_delete_range(boundary, cursor) {
-                    state().cursor_pos = boundary;
-                    state().goal_column = None;
-                    doc_write_header();
-                    sync_cursor_to_editor(editor_ch);
-                    let _ = sys::channel_signal(EDITOR_HANDLE);
-                    return KeyAction {
-                        changed: true,
-                        text_changed: true,
-                        selection_changed: false,
-                        context_switched: false,
-                        consumed: true,
-                    };
-                }
-                return no_change;
-            }
-            // Single backspace: forward to editor.
-            forward_key_to_editor(key, editor_ch);
-            no_change
-        }
-
-        // ── Delete (forward) ────────────────────────────────────
-        KEY_DELETE => {
-            let s = state();
-            if s.has_selection {
-                // Selection-delete: core handles directly.
-                let lo = s.sel_start;
-                let hi = s.sel_end;
-                clear_selection();
-                if doc_delete_range(lo, hi) {
-                    state().cursor_pos = lo;
-                    doc_write_header();
-                    sync_cursor_to_editor(editor_ch);
-                    let _ = sys::channel_signal(EDITOR_HANDLE);
-                    return KeyAction {
-                        changed: true,
-                        text_changed: true,
-                        selection_changed: true,
-                        context_switched: false,
-                        consumed: true,
-                    };
-                }
-                return no_change;
-            }
-            if alt {
-                // Opt+Delete: word-delete forward.
-                let cursor = state().cursor_pos;
-                let boundary = word_boundary_forward(text, cursor);
-                if boundary > cursor && doc_delete_range(cursor, boundary) {
-                    state().goal_column = None;
-                    doc_write_header();
-                    sync_cursor_to_editor(editor_ch);
-                    let _ = sys::channel_signal(EDITOR_HANDLE);
-                    return KeyAction {
-                        changed: true,
-                        text_changed: true,
-                        selection_changed: false,
-                        context_switched: false,
-                        consumed: true,
-                    };
-                }
-                return no_change;
-            }
-            // Single forward-delete: forward to editor.
-            forward_key_to_editor(key, editor_ch);
-            no_change
-        }
-
-        // ── All other keys: editing ─────────────────────────────
-        _ => {
-            // If selection is active and this is a printable char or tab,
-            // delete the selection first, then forward the key.
-            let s = state();
-            if s.has_selection && (key.ascii != 0 || key.keycode == KEY_TAB) {
-                let lo = s.sel_start;
-                let hi = s.sel_end;
-                clear_selection();
-                if doc_delete_range(lo, hi) {
-                    state().cursor_pos = lo;
-                    doc_write_header();
-                    sync_cursor_to_editor(editor_ch);
-                    // Now forward the key so editor inserts at the new cursor.
-                    forward_key_to_editor(key, editor_ch);
-                    return KeyAction {
-                        changed: true,
-                        text_changed: true,
-                        selection_changed: true,
-                        context_switched: false,
-                        consumed: true,
-                    };
-                }
-            }
-
-            state().goal_column = None;
-
-            // Forward printable characters and tab to editor.
-            if key.ascii != 0 || key.keycode == KEY_TAB {
-                forward_key_to_editor(key, editor_ch);
-            }
-
-            KeyAction {
-                changed: false,
-                text_changed: false,
-                selection_changed: false,
-                context_switched: false,
-                consumed: false,
-            }
-        }
-    }
-}
-
-/// Forward a key event to the editor process.
-/// Forward a key event to the editor process and signal it to wake up.
-fn forward_key_to_editor(key: &KeyEvent, editor_ch: &ipc::Channel) {
-    // SAFETY: KeyEvent is a plain repr(C) struct; from_payload copies it into payload.
-    let msg = unsafe { ipc::Message::from_payload(MSG_KEY_EVENT, key) };
-    editor_ch.send(&msg);
-    let _ = sys::channel_signal(EDITOR_HANDLE);
-}
-fn update_scroll_offset(page_w: u32, page_h: u32, page_pad: u32) {
-    let vp_lines = viewport_lines(page_h, page_pad);
-
-    if vp_lines == 0 {
-        return;
-    }
-
-    let layout = content_text_layout(page_w, page_pad);
-    let text = doc_content();
-    let s = state();
-    let cursor = s.cursor_pos;
-    let current = scene::mpt_to_f32(s.scroll_offset);
-    let new_scroll = layout.scroll_for_cursor(text, cursor, current, vp_lines);
-
-    // Jump instantly to the target scroll position. Cursor-driven scroll
-    // must be immediate so the eye can track the new line without chasing
-    // a moving target. Spring animation reserved for future trackpad/wheel
-    // inertial scrolling.
-    let total_lines = layout.byte_to_visual_line(text, text.len()) + 1;
-    let max_scroll = if total_lines > vp_lines {
-        (total_lines - vp_lines) as f32 * s.line_h as f32
-    } else {
-        0.0
-    };
-    let clamped = clamp_f32(new_scroll, 0.0, max_scroll);
-
-    s.scroll_offset = scene::f32_to_mpt(clamped);
-    s.scroll_target = scene::f32_to_mpt(clamped);
-    s.scroll_spring.reset_to(clamped);
-}
-fn viewport_lines(page_h: u32, page_pad: u32) -> u32 {
-    let line_h = state().line_h;
-
-    if line_h == 0 {
-        return 0;
-    }
-
-    let usable = page_h.saturating_sub(2 * page_pad);
-
-    usable / line_h
-}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -1263,16 +486,23 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    // SAFETY: msg.msg_type is MSG_CORE_CONFIG; sender (init) guarantees payload is a valid CoreConfig.
-    let config: CoreConfig = unsafe { msg.payload_as() };
+    let Some(core_config::Message::CoreConfig(config)) =
+        core_config::decode(msg.msg_type, &msg.payload)
+    else {
+        sys::print(b"core: bad config payload\n");
+        sys::exit();
+    };
     let fb_width = config.fb_width;
     let fb_height = config.fb_height;
 
     // Read frame rate from separate message (CoreConfig is full at 56 bytes).
     // Init sends FrameRateMsg immediately after CoreConfig on the same channel.
     let _ = sys::wait(&[0], 100_000_000); // 100ms timeout on init channel
-    let frame_rate: u64 = if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_FRAME_RATE {
-        let fr: FrameRateMsg = unsafe { msg.payload_as() };
+    let frame_rate: u64 = if let Some(core_config::Message::FrameRate(fr)) = init_ch
+        .try_recv(&mut msg)
+        .then(|| core_config::decode(msg.msg_type, &msg.payload))
+        .flatten()
+    {
         if fr.frame_rate > 0 {
             fr.frame_rate as u64
         } else {
@@ -1295,7 +525,7 @@ pub extern "C" fn _start() -> ! {
         s.doc_len = 0;
         s.input_state_va = config.input_state_va as usize;
     }
-    doc_write_header();
+    documents::doc_write_header();
 
     // Parse font to get metrics (char_width, line_height).
     // Core only needs metrics for layout, not the full glyph cache.
@@ -1371,20 +601,22 @@ pub extern "C" fn _start() -> ! {
     // Check for image data (used for Ctrl+Tab image viewer mode detection).
     let mut has_image = false;
 
-    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_IMAGE_CONFIG {
-        // SAFETY: msg.msg_type is MSG_IMAGE_CONFIG; sender (init) guarantees payload is a valid ImageConfig.
-        let img_config: ImageConfig = unsafe { msg.payload_as() };
-
+    if let Some(compose::Message::ImageConfig(img_config)) = init_ch
+        .try_recv(&mut msg)
+        .then(|| compose::decode(msg.msg_type, &msg.payload))
+        .flatten()
+    {
         if img_config.image_va != 0 && img_config.image_len > 0 {
             has_image = true;
         }
     }
 
     // Check for RTC config.
-    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_RTC_CONFIG {
-        // SAFETY: msg.msg_type is MSG_RTC_CONFIG; sender (init) guarantees payload is a valid RtcConfig.
-        let rtc_config: RtcConfig = unsafe { msg.payload_as() };
-
+    if let Some(compose::Message::RtcConfig(rtc_config)) = init_ch
+        .try_recv(&mut msg)
+        .then(|| compose::decode(msg.msg_type, &msg.payload))
+        .flatten()
+    {
         if rtc_config.mmio_pa != 0 {
             match sys::device_map(rtc_config.mmio_pa, 4096) {
                 Ok(va) => {
@@ -1407,7 +639,7 @@ pub extern "C" fn _start() -> ! {
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(2), ipc::PAGE_SIZE, 0) };
     let editor_ch =
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(3), ipc::PAGE_SIZE, 0) };
-    let has_input2 = match sys::wait(&[INPUT2_HANDLE], 0) {
+    let has_input2 = match sys::wait(&[INPUT2_HANDLE.0], 0) {
         Ok(_) => true,
         Err(sys::SyscallError::WouldBlock) => true,
         _ => false,
@@ -1432,7 +664,7 @@ pub extern "C" fn _start() -> ! {
     // Build initial scene.
     let mut time_buf = [0u8; 8];
 
-    format_time_hms(clock_seconds(), &mut time_buf);
+    documents::format_time_hms(clock_seconds(), &mut time_buf);
 
     // Compute page dimensions (A4 proportions, centered in content area).
     let content_y = TITLE_BAR_H + SHADOW_DEPTH;
@@ -1477,7 +709,7 @@ pub extern "C" fn _start() -> ! {
         let s = state();
         scene.build_editor_scene(
             &scene_cfg,
-            doc_content(),
+            documents::doc_content(),
             s.cursor_pos as u32,
             s.sel_start as u32,
             s.sel_end as u32,
@@ -1503,7 +735,7 @@ pub extern "C" fn _start() -> ! {
     create_clock_timer();
 
     // Track line count for incremental scene updates.
-    let mut prev_line_count = scene_state::count_lines(doc_content());
+    let mut prev_line_count = scene_state::count_lines(documents::doc_content());
 
     sys::print(b"     entering event loop\n");
 
@@ -1549,10 +781,10 @@ pub extern "C" fn _start() -> ! {
             let s = state();
             let elapsed = now_ms.saturating_sub(s.blink_phase_start_ms);
             let remaining_ms = match s.blink_phase {
-                BlinkPhase::VisibleHold => BLINK_VISIBLE_MS.saturating_sub(elapsed),
-                BlinkPhase::FadeOut => BLINK_FADE_OUT_MS.saturating_sub(elapsed),
-                BlinkPhase::HiddenHold => BLINK_HIDDEN_MS.saturating_sub(elapsed),
-                BlinkPhase::FadeIn => BLINK_FADE_IN_MS.saturating_sub(elapsed),
+                blink::BlinkPhase::VisibleHold => blink::BLINK_VISIBLE_MS.saturating_sub(elapsed),
+                blink::BlinkPhase::FadeOut => blink::BLINK_FADE_OUT_MS.saturating_sub(elapsed),
+                blink::BlinkPhase::HiddenHold => blink::BLINK_HIDDEN_MS.saturating_sub(elapsed),
+                blink::BlinkPhase::FadeIn => blink::BLINK_FADE_IN_MS.saturating_sub(elapsed),
             };
             if remaining_ms == 0 {
                 1_000_000 // 1ms — transition imminent
@@ -1562,12 +794,23 @@ pub extern "C" fn _start() -> ! {
         };
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
-                &[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE],
+                &[
+                    INPUT_HANDLE.0,
+                    EDITOR_HANDLE.0,
+                    timer_handle.0,
+                    INPUT2_HANDLE.0,
+                ],
                 timeout_ns,
             ),
-            (true, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], timeout_ns),
-            (false, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, INPUT2_HANDLE], timeout_ns),
-            (false, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], timeout_ns),
+            (true, false) => sys::wait(
+                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, timer_handle.0],
+                timeout_ns,
+            ),
+            (false, true) => sys::wait(
+                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, INPUT2_HANDLE.0],
+                timeout_ns,
+            ),
+            (false, false) => sys::wait(&[INPUT_HANDLE.0, EDITOR_HANDLE.0], timeout_ns),
         };
         let mut changed = false;
         let mut text_changed = false;
@@ -1579,10 +822,10 @@ pub extern "C" fn _start() -> ! {
 
         // Check timer.
         if timer_active {
-            if let Ok(_) = sys::wait(&[timer_handle], 0) {
+            if let Ok(_) = sys::wait(&[timer_handle.0], 0) {
                 timer_fired = true;
 
-                let _ = sys::handle_close(timer_handle);
+                let _ = sys::handle_close(timer_handle.0);
 
                 create_clock_timer();
             }
@@ -1590,11 +833,8 @@ pub extern "C" fn _start() -> ! {
 
         // Process input events.
         while input_ch.try_recv(&mut msg) {
-            if msg.msg_type == MSG_KEY_EVENT {
-                // SAFETY: msg.msg_type is MSG_KEY_EVENT; sender (input driver) guarantees
-                // payload is a valid KeyEvent.
-                let key: KeyEvent = unsafe { msg.payload_as() };
-                let action = process_key_event(
+            if let Some(input::Message::KeyEvent(key)) = input::decode(msg.msg_type, &msg.payload) {
+                let action = input_handling::process_key_event(
                     &key,
                     has_image,
                     &editor_ch,
@@ -1625,9 +865,12 @@ pub extern "C" fn _start() -> ! {
             while ch2.try_recv(&mut msg) {
                 match msg.msg_type {
                     MSG_KEY_EVENT => {
-                        // SAFETY: same invariant as MSG_KEY_EVENT payload_as above.
-                        let key: KeyEvent = unsafe { msg.payload_as() };
-                        let action = process_key_event(
+                        let Some(input::Message::KeyEvent(key)) =
+                            input::decode(msg.msg_type, &msg.payload)
+                        else {
+                            continue;
+                        };
+                        let action = input_handling::process_key_event(
                             &key,
                             has_image,
                             &editor_ch,
@@ -1652,9 +895,11 @@ pub extern "C" fn _start() -> ! {
                         had_user_input = true;
                     }
                     MSG_POINTER_BUTTON => {
-                        // SAFETY: msg.msg_type is MSG_POINTER_BUTTON; sender guarantees
-                        // payload is a valid PointerButton.
-                        let btn: PointerButton = unsafe { msg.payload_as() };
+                        let Some(input::Message::PointerButton(btn)) =
+                            input::decode(msg.msg_type, &msg.payload)
+                        else {
+                            continue;
+                        };
                         if btn.button == 0 && btn.pressed == 1 {
                             let s = state();
                             let click_x = s.mouse_x;
@@ -1672,7 +917,7 @@ pub extern "C" fn _start() -> ! {
                                 let adjusted_y =
                                     rel_y + (s.scroll_offset / scene::MPT_PER_PT) as u32;
                                 let layout_info = content_text_layout(page_width, page_padding);
-                                let text = doc_content();
+                                let text = documents::doc_content();
                                 let byte_pos = layout_info.xy_to_byte(text, rel_x, adjusted_y);
 
                                 // Double/triple-click detection.
@@ -1710,18 +955,22 @@ pub extern "C" fn _start() -> ! {
                                 match click_count {
                                     2 => {
                                         // Double-click: select word at click position.
-                                        let lo = word_boundary_backward(text, byte_pos);
-                                        let hi = word_boundary_forward(text, byte_pos);
+                                        let lo =
+                                            input_handling::word_boundary_backward(text, byte_pos);
+                                        let hi =
+                                            input_handling::word_boundary_forward(text, byte_pos);
                                         let s = state();
                                         s.anchor = lo;
                                         s.cursor_pos = hi;
                                         s.has_selection = hi > lo;
-                                        update_selection_from_anchor();
+                                        input_handling::update_selection_from_anchor();
                                     }
                                     3 => {
                                         // Triple-click: select entire visual line.
-                                        let lo = visual_line_start(text, byte_pos, cols);
-                                        let mut hi = visual_line_end(text, byte_pos, cols);
+                                        let lo =
+                                            input_handling::visual_line_start(text, byte_pos, cols);
+                                        let mut hi =
+                                            input_handling::visual_line_end(text, byte_pos, cols);
                                         // Include the newline if present.
                                         if hi < text.len() && text[hi] == b'\n' {
                                             hi += 1;
@@ -1730,19 +979,19 @@ pub extern "C" fn _start() -> ! {
                                         s.anchor = lo;
                                         s.cursor_pos = hi;
                                         s.has_selection = hi > lo;
-                                        update_selection_from_anchor();
+                                        input_handling::update_selection_from_anchor();
                                     }
                                     _ => {
                                         // Single click: position cursor, clear selection.
                                         let s = state();
                                         s.cursor_pos = byte_pos;
-                                        clear_selection();
+                                        input_handling::clear_selection();
                                     }
                                 }
 
                                 state().goal_column = None;
-                                doc_write_header();
-                                sync_cursor_to_editor(&editor_ch);
+                                documents::doc_write_header();
+                                input_handling::sync_cursor_to_editor(&editor_ch);
 
                                 let _ = sys::channel_signal(EDITOR_HANDLE);
 
@@ -1805,12 +1054,14 @@ pub extern "C" fn _start() -> ! {
         while editor_ch.try_recv(&mut msg) {
             match msg.msg_type {
                 MSG_WRITE_INSERT => {
-                    // SAFETY: msg.msg_type is MSG_WRITE_INSERT; sender (editor) guarantees
-                    // payload is a valid WriteInsert.
-                    let insert: WriteInsert = unsafe { msg.payload_as() };
+                    let Some(edit::Message::WriteInsert(insert)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let pos = insert.position as usize;
 
-                    if doc_insert(pos, insert.byte) {
+                    if documents::doc_insert(pos, insert.byte) {
                         state().cursor_pos = pos + 1;
 
                         changed = true;
@@ -1818,11 +1069,14 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 MSG_WRITE_DELETE => {
-                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
-                    let del: WriteDelete = unsafe { msg.payload_as() };
+                    let Some(edit::Message::WriteDelete(del)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let pos = del.position as usize;
 
-                    if doc_delete(pos) {
+                    if documents::doc_delete(pos) {
                         state().cursor_pos = pos;
 
                         changed = true;
@@ -1830,22 +1084,28 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 MSG_CURSOR_MOVE => {
-                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
-                    let cm: CursorMove = unsafe { msg.payload_as() };
+                    let Some(edit::Message::CursorMove(cm)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let pos = cm.position as usize;
 
                     if pos <= state().doc_len {
                         state().cursor_pos = pos;
 
-                        doc_write_header();
+                        documents::doc_write_header();
 
                         changed = true;
                         // Cursor-only move: no text change.
                     }
                 }
                 MSG_SELECTION_UPDATE => {
-                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
-                    let su: SelectionUpdate = unsafe { msg.payload_as() };
+                    let Some(edit::Message::SelectionUpdate(su)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let s = state();
                     s.sel_start = su.sel_start as usize;
                     s.sel_end = su.sel_end as usize;
@@ -1854,12 +1114,15 @@ pub extern "C" fn _start() -> ! {
                     selection_changed = true;
                 }
                 MSG_WRITE_DELETE_RANGE => {
-                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
-                    let dr: WriteDeleteRange = unsafe { msg.payload_as() };
+                    let Some(edit::Message::WriteDeleteRange(dr)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let start = dr.start as usize;
                     let end = dr.end as usize;
 
-                    if doc_delete_range(start, end) {
+                    if documents::doc_delete_range(start, end) {
                         state().cursor_pos = start;
 
                         changed = true;
@@ -1876,7 +1139,7 @@ pub extern "C" fn _start() -> ! {
         // differ) instead of an incremental single-line update.
         let scroll_before = state().scroll_offset;
         if (changed || text_changed) && state().active_space == 0 {
-            update_scroll_offset(page_width, page_height, page_padding);
+            input_handling::update_scroll_offset(page_width, page_height, page_padding);
         }
         let scroll_after = state().scroll_offset;
         let scroll_diff = if scroll_before > scroll_after {
@@ -1911,10 +1174,10 @@ pub extern "C" fn _start() -> ! {
         prev_ms = now_ms;
 
         if had_user_input {
-            reset_blink(state(), now_ms);
+            blink::reset_blink(state(), now_ms);
         }
         state().timeline.tick(now_ms);
-        let blink_changed = advance_blink(state(), now_ms);
+        let blink_changed = blink::advance_blink(state(), now_ms);
         if blink_changed {
             changed = true;
         }
@@ -2084,14 +1347,14 @@ pub extern "C" fn _start() -> ! {
         if needs_scene_update {
             // Prepare clock text if timer fired (needed by any path).
             if timer_fired {
-                format_time_hms(clock_seconds(), &mut time_buf);
+                documents::format_time_hms(clock_seconds(), &mut time_buf);
             }
 
             // Only context_switched requires a full rebuild. Timer+input
             // coincidence is handled incrementally by each targeted method.
             if context_switched {
                 if !timer_fired {
-                    format_time_hms(clock_seconds(), &mut time_buf);
+                    documents::format_time_hms(clock_seconds(), &mut time_buf);
                 }
 
                 let s = state();
@@ -2102,7 +1365,7 @@ pub extern "C" fn _start() -> ! {
                 };
                 scene.build_editor_scene(
                     &scene_cfg,
-                    doc_content(),
+                    documents::doc_content(),
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
@@ -2119,10 +1382,10 @@ pub extern "C" fn _start() -> ! {
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
                 if !timer_fired {
-                    format_time_hms(clock_seconds(), &mut time_buf);
+                    documents::format_time_hms(clock_seconds(), &mut time_buf);
                 }
 
-                let doc = doc_content();
+                let doc = documents::doc_content();
                 let new_line_count = scene_state::count_lines(doc);
 
                 if scroll_changed {
@@ -2239,7 +1502,7 @@ pub extern "C" fn _start() -> ! {
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
-                    doc_content(),
+                    documents::doc_content(),
                     sel_text_h,
                     scroll_pt,
                     s.cursor_opacity,
@@ -2262,7 +1525,7 @@ pub extern "C" fn _start() -> ! {
                 scene.update_cursor(
                     &scene_cfg,
                     s.cursor_pos as u32,
-                    doc_content(),
+                    documents::doc_content(),
                     chars_per_line,
                     if timer_fired { Some(&time_buf) } else { None },
                     s.cursor_opacity,

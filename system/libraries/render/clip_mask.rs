@@ -63,7 +63,7 @@ impl ClipMaskCache {
         cache_key: u64,
     ) -> Option<&[u8]> {
         self.generation = self.generation.wrapping_add(1);
-        let gen = self.generation;
+        let current_gen = self.generation;
 
         // Look for a matching slot by index (avoids holding a borrow across
         // the mutable store below).
@@ -72,7 +72,7 @@ impl ClipMaskCache {
         if let Some(idx) = hit_idx {
             // Cache hit: refresh last_used and return the coverage slice.
             if let Some(ref mut m) = self.masks[idx] {
-                m.last_used = gen;
+                m.last_used = current_gen;
             }
             return self.masks[idx].as_ref().map(|m| m.data.as_slice());
         }
@@ -90,7 +90,7 @@ impl ClipMaskCache {
             data: coverage,
             width,
             height,
-            last_used: gen,
+            last_used: current_gen,
         });
 
         self.masks[target_idx].as_ref().map(|m| m.data.as_slice())

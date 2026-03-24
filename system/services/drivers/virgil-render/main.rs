@@ -23,8 +23,8 @@ extern crate scene;
 use alloc::{boxed::Box, vec::Vec};
 
 use protocol::{
-    compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG},
-    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    compose::MSG_COMPOSITOR_CONFIG,
+    device::MSG_DEVICE_CONFIG,
     virgl::{
         self, PIPE_BUFFER, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
         PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_R8_UNORM,
@@ -152,8 +152,14 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"virgil-render: no device config message\n");
         sys::exit();
     }
-    // SAFETY: msg payload contains a valid DeviceConfig from init.
-    let dev_config: DeviceConfig = unsafe { msg.payload_as() };
+    let dev_config = if let Some(protocol::device::Message::DeviceConfig(c)) =
+        protocol::device::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"virgil-render: bad device config\n");
+        sys::exit();
+    };
     let (device, mut vq, irq_handle) = device::init_device(dev_config.mmio_pa, dev_config.irq);
 
     // ── Phase B: Display query + init handshake ──────────────────────────
@@ -335,29 +341,31 @@ pub extern "C" fn _start() -> ! {
     loop {
         let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
         if ch.try_recv(&mut msg) && msg.msg_type == MSG_COMPOSITOR_CONFIG {
-            // SAFETY: msg payload is a valid CompositorConfig from init.
-            let config: CompositorConfig = unsafe { msg.payload_as() };
-            scene_va = config.scene_va;
-            font_va = config.font_buf_va;
-            font_len = config.mono_font_len;
-            sans_font_len = config.sans_font_len;
-            scale_factor = config.scale_factor;
-            font_size_cfg = config.font_size;
-            frame_rate_cfg = if config.frame_rate > 0 {
-                config.frame_rate as u32
-            } else {
-                60
-            };
+            if let Some(protocol::compose::Message::CompositorConfig(config)) =
+                protocol::compose::decode(msg.msg_type, &msg.payload)
+            {
+                scene_va = config.scene_va;
+                font_va = config.font_buf_va;
+                font_len = config.mono_font_len;
+                sans_font_len = config.sans_font_len;
+                scale_factor = config.scale_factor;
+                font_size_cfg = config.font_size;
+                frame_rate_cfg = if config.frame_rate > 0 {
+                    config.frame_rate as u32
+                } else {
+                    60
+                };
 
-            sys::print(b"     render config: scene_va=");
-            print_hex_u32((scene_va >> 32) as u32);
-            print_hex_u32(scene_va as u32);
-            sys::print(b" font_len=");
-            print_u32(font_len);
-            sys::print(b" scale=");
-            print_u32((scale_factor * 100.0) as u32);
-            sys::print(b"%\n");
-            break;
+                sys::print(b"     render config: scene_va=");
+                print_hex_u32((scene_va >> 32) as u32);
+                print_hex_u32(scene_va as u32);
+                sys::print(b" font_len=");
+                print_u32(font_len);
+                sys::print(b" scale=");
+                print_u32((scale_factor * 100.0) as u32);
+                sys::print(b"%\n");
+                break;
+            }
         }
     }
 
@@ -555,7 +563,7 @@ pub extern "C" fn _start() -> ! {
     let mut sched = frame_scheduler::FrameScheduler::new(frame_rate_cfg);
     let cfreq = sys::counter_freq();
 
-    let mut timer_h: u8 = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
+    let mut timer_h: sys::TimerHandle = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
         sys::print(b"virgil-render: frame timer create failed\n");
         sys::exit();
     });
@@ -567,7 +575,7 @@ pub extern "C" fn _start() -> ! {
         unsafe { ipc::Channel::from_base(resources::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
 
     loop {
-        let _ = sys::wait(&[SCENE_HANDLE, timer_h], u64::MAX);
+        let _ = sys::wait(&[SCENE_HANDLE, timer_h.0], u64::MAX);
         let mut go = false;
 
         // Check for scene updates.
@@ -578,8 +586,8 @@ pub extern "C" fn _start() -> ! {
             sched.on_scene_update();
         }
         // Check for timer tick.
-        if sys::wait(&[timer_h], 0).is_ok() {
-            let _ = sys::handle_close(timer_h);
+        if sys::wait(&[timer_h.0], 0).is_ok() {
+            let _ = sys::handle_close(timer_h.0);
             timer_h = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
                 sys::print(b"virgil-render: timer recreate failed\n");
                 sys::exit();
@@ -594,12 +602,12 @@ pub extern "C" fn _start() -> ! {
         let reader = unsafe { scene::TripleReader::new(scene_ptr, scene_len) };
         let nodes = reader.front_nodes();
         let node_count = nodes.len() as u16;
-        let gen = reader.front_generation();
+        let generation = reader.front_generation();
         let dirty_bits = *reader.dirty_bits();
 
         // Skip-frame: nothing changed since last render.
         if all_bits_zero(&dirty_bits) {
-            reader.finish_read(gen);
+            reader.finish_read(generation);
             sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
             continue;
         }
@@ -617,7 +625,7 @@ pub extern "C" fn _start() -> ! {
         let (scissor_x, scissor_y, scissor_w, scissor_h) = if let Some(ref d) = damage {
             if d.count == 0 && !d.full_screen {
                 // All dirty nodes off-screen — skip frame entirely.
-                reader.finish_read(gen);
+                reader.finish_read(generation);
                 incr_state.update_from_frame(nodes, node_count);
                 sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
                 continue;
@@ -1498,7 +1506,7 @@ pub extern "C" fn _start() -> ! {
 
         // Update incremental state before releasing the reader.
         incr_state.update_from_frame(nodes, node_count);
-        reader.finish_read(gen);
+        reader.finish_read(generation);
         sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
         frame_count = frame_count.wrapping_add(1);
     }

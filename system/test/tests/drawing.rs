@@ -2693,6 +2693,19 @@ fn dirty_rect_union_all_empty() {
 }
 
 #[test]
+fn dirty_rect_union_saturates_on_large_extent() {
+    // Two rects whose union would exceed u16::MAX width if unclamped.
+    let a = protocol::DirtyRect::new(0, 0, 60000, 60000);
+    let b = protocol::DirtyRect::new(10000, 10000, 60000, 60000);
+    let u = a.union(b);
+    assert_eq!(u.x, 0);
+    assert_eq!(u.y, 0);
+    // 10000 + 60000 = 70000 > 65535 → clamped to u16::MAX
+    assert_eq!(u.w, u16::MAX);
+    assert_eq!(u.h, u16::MAX);
+}
+
+#[test]
 fn dirty_rect_size_is_8_bytes() {
     assert_eq!(core::mem::size_of::<protocol::DirtyRect>(), 8);
 }

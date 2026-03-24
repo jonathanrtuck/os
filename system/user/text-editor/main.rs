@@ -35,11 +35,10 @@
 
 use protocol::{
     edit::{
-        CursorMove, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE, MSG_SET_CURSOR,
-        MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
+        CursorMove, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE, MSG_WRITE_DELETE,
+        MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
     },
-    editor::{EditorConfig, MSG_EDITOR_CONFIG},
-    input::{KeyEvent, MOD_SHIFT, MSG_KEY_EVENT},
+    input::MOD_SHIFT,
 };
 
 const DOC_HEADER_SIZE: usize = 64;
@@ -81,12 +80,15 @@ pub extern "C" fn _start() -> ! {
     let init_ch = unsafe { ipc::Channel::from_base(channel_shm_va(0), ipc::PAGE_SIZE, 1) };
     let mut msg = ipc::Message::new(0);
 
-    if !init_ch.try_recv(&mut msg) || msg.msg_type != MSG_EDITOR_CONFIG {
+    let config = if init_ch.try_recv(&mut msg) {
+        protocol::editor::decode(msg.msg_type, &msg.payload)
+    } else {
+        None
+    };
+    let Some(protocol::editor::Message::EditorConfig(config)) = config else {
         sys::print(b"text-editor: no config message\n");
         sys::exit();
-    }
-
-    let config: EditorConfig = unsafe { msg.payload_as() };
+    };
     let doc_buf = config.doc_va as *const u8;
     let doc_capacity = config.doc_capacity as usize;
 
@@ -114,16 +116,17 @@ pub extern "C" fn _start() -> ! {
 
         while os_ch.try_recv(&mut msg) {
             // Cursor sync from core (navigation, click, selection-delete).
-            if msg.msg_type == MSG_SET_CURSOR {
-                let cm: CursorMove = unsafe { msg.payload_as() };
+            if let Some(protocol::edit::Message::SetCursor(cm)) =
+                protocol::edit::decode(msg.msg_type, &msg.payload)
+            {
                 cursor = cm.position as usize;
                 continue;
             }
-            if msg.msg_type != MSG_KEY_EVENT {
-                continue;
-            }
 
-            let key: KeyEvent = unsafe { msg.payload_as() };
+            let key = match protocol::input::decode(msg.msg_type, &msg.payload) {
+                Some(protocol::input::Message::KeyEvent(k)) => k,
+                _ => continue,
+            };
 
             if key.pressed != 1 {
                 continue;
@@ -140,10 +143,9 @@ pub extern "C" fn _start() -> ! {
                         let del = WriteDelete {
                             position: cursor as u32,
                         };
-                        let del_msg =
-                            unsafe { ipc::Message::from_payload(MSG_WRITE_DELETE, &del) };
+                        let del_msg = unsafe { ipc::Message::from_payload(MSG_WRITE_DELETE, &del) };
                         os_ch.send(&del_msg);
-                        let _ = sys::channel_signal(OS_HANDLE);
+                        let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
                     }
                 }
 
@@ -153,10 +155,9 @@ pub extern "C" fn _start() -> ! {
                         let del = WriteDelete {
                             position: cursor as u32,
                         };
-                        let del_msg =
-                            unsafe { ipc::Message::from_payload(MSG_WRITE_DELETE, &del) };
+                        let del_msg = unsafe { ipc::Message::from_payload(MSG_WRITE_DELETE, &del) };
                         os_ch.send(&del_msg);
-                        let _ = sys::channel_signal(OS_HANDLE);
+                        let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
                     }
                 }
 
@@ -167,10 +168,7 @@ pub extern "C" fn _start() -> ! {
                         let text = doc_content(doc_buf, len);
                         let ls = line_start(text, cursor);
                         let mut spaces = 0usize;
-                        while spaces < 4
-                            && ls + spaces < len
-                            && text[ls + spaces] == b' '
-                        {
+                        while spaces < 4 && ls + spaces < len && text[ls + spaces] == b' ' {
                             spaces += 1;
                         }
                         if spaces > 0 {
@@ -199,7 +197,7 @@ pub extern "C" fn _start() -> ! {
                             let cm_msg =
                                 unsafe { ipc::Message::from_payload(MSG_CURSOR_MOVE, &cm) };
                             os_ch.send(&cm_msg);
-                            let _ = sys::channel_signal(OS_HANDLE);
+                            let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
                         }
                     } else {
                         // Tab: insert 4 spaces.
@@ -215,7 +213,7 @@ pub extern "C" fn _start() -> ! {
                                 os_ch.send(&ins_msg);
                                 cursor += 1;
                             }
-                            let _ = sys::channel_signal(OS_HANDLE);
+                            let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
                         }
                     }
                 }
@@ -231,7 +229,7 @@ pub extern "C" fn _start() -> ! {
                             unsafe { ipc::Message::from_payload(MSG_WRITE_INSERT, &insert) };
                         os_ch.send(&ins_msg);
                         cursor += 1;
-                        let _ = sys::channel_signal(OS_HANDLE);
+                        let _ = sys::channel_signal(sys::ChannelHandle(OS_HANDLE));
                     }
                 }
             }

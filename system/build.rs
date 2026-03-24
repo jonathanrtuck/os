@@ -65,12 +65,7 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
         true,
         true,
     ),
-    (
-        "metal-render",
-        "services/drivers/metal-render",
-        true,
-        true,
-    ),
+    ("metal-render", "services/drivers/metal-render", true, true),
     ("text-editor", "user/text-editor", false, false),
     ("stress", "user/stress", false, false),
     ("fuzz-helper", "user/fuzz-helper", false, false),

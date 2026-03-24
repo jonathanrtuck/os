@@ -43,7 +43,7 @@ pub extern "C" fn _start() -> ! {
         core::ptr::copy_nonoverlapping(reply.as_ptr(), SHM.add(128), reply.len());
     }
 
-    let _ = sys::channel_signal(0);
+    let _ = sys::channel_signal(sys::ChannelHandle(0));
 
     sys::exit();
 }

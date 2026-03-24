@@ -43,7 +43,7 @@ extern "C" fn worker_entry(args: u64) -> ! {
 
     for _ in 0..iters {
         // Signal peer, then wait for peer to signal back.
-        let _ = sys::channel_signal(signal_h);
+        let _ = sys::channel_signal(sys::ChannelHandle(signal_h));
         let _ = sys::wait(&[wait_h], u64::MAX);
     }
 
@@ -56,8 +56,8 @@ extern "C" fn timer_worker(_args: u64) -> ! {
         // Create a short timer, wait on it (poll mode), then close it.
         if let Ok(h) = sys::timer_create(1_000) {
             // Poll (timeout=0) — don't actually block, just exercise the path.
-            let _ = sys::wait(&[h], 0);
-            let _ = sys::handle_close(h);
+            let _ = sys::wait(&[h.0], 0);
+            let _ = sys::handle_close(h.0);
         }
     }
 
@@ -104,8 +104,8 @@ pub extern "C" fn _start() -> ! {
         };
 
         // Pack arguments: wait_handle | (signal_handle << 8) | (iters << 16)
-        let args_a: u64 = ep_a as u64 | ((ep_b as u64) << 8) | (ITERATIONS << 16);
-        let args_b: u64 = ep_b as u64 | ((ep_a as u64) << 8) | (ITERATIONS << 16);
+        let args_a: u64 = ep_a.0 as u64 | ((ep_b.0 as u64) << 8) | (ITERATIONS << 16);
+        let args_b: u64 = ep_b.0 as u64 | ((ep_a.0 as u64) << 8) | (ITERATIONS << 16);
 
         let stack_a = alloc_thread_stack();
         let stack_b = alloc_thread_stack();
@@ -129,7 +129,7 @@ pub extern "C" fn _start() -> ! {
         // Thread entry reads args from [SP], so set SP = stack_top - 8.
         match sys::thread_create(worker_trampoline as u64, stack_a - 16) {
             Ok(h) => {
-                thread_handles[thread_count] = h;
+                thread_handles[thread_count] = h.0;
                 thread_count += 1;
             }
             Err(_) => {
@@ -140,7 +140,7 @@ pub extern "C" fn _start() -> ! {
 
         match sys::thread_create(worker_trampoline as u64, stack_b - 16) {
             Ok(h) => {
-                thread_handles[thread_count] = h;
+                thread_handles[thread_count] = h.0;
                 thread_count += 1;
             }
             Err(_) => {
@@ -155,9 +155,9 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"     pair ");
         print_u64(pair as u64);
         sys::print(b": handles ");
-        print_u64(ep_a as u64);
+        print_u64(ep_a.0 as u64);
         sys::print(b"/");
-        print_u64(ep_b as u64);
+        print_u64(ep_b.0 as u64);
         sys::print(b" started\n");
     }
 
@@ -169,7 +169,7 @@ pub extern "C" fn _start() -> ! {
 
     match sys::thread_create(timer_trampoline as u64, timer_stack - 16) {
         Ok(h) => {
-            thread_handles[thread_count] = h;
+            thread_handles[thread_count] = h.0;
             thread_count += 1;
         }
         Err(_) => {

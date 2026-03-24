@@ -61,7 +61,7 @@ use protocol::{
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
     editor::{EditorConfig, MSG_EDITOR_CONFIG},
     fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
-    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    gpu::{GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
 };
 
 /// Bytes per pixel (BGRA8888).
@@ -104,7 +104,7 @@ fn init_channel(channel_index: usize) -> ipc::Channel {
 fn print_u32(n: u32) {
     sys::print_u32(n);
 }
-fn start_process(handle: u8, name: &[u8]) {
+fn start_process(handle: sys::ProcessHandle, name: &[u8]) {
     if sys::process_start(handle).is_err() {
         sys::print(b"init: process_start failed for ");
         sys::print(name);
@@ -164,16 +164,16 @@ fn probe_virgl(gpu_pa: u64) -> bool {
 /// Returns (core_proc_handle, editor_proc_handle) for monitoring.
 fn setup_render_pipeline(
     name: &[u8], // e.g. b"virgl" or b"cpu-render"
-    gpu_proc: u8,
-    gpu_ch_handle: u8,
+    gpu_proc: sys::ProcessHandle,
+    gpu_ch_handle: sys::ChannelHandle,
     gpu_channel_idx: usize,
     gpu_pa: u64,
     gpu_irq: u32,
-    input_devices: &[(u8, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
+    input_devices: &[(sys::ProcessHandle, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
     font_buf: Option<(u64, u32, u32, u32, u32, u32)>, // (pa, mono_len, sans_len, serif_len, png_off, png_len)
     rtc_pa: u64,                                      // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
-) -> (u8, u8) {
+) -> (sys::ProcessHandle, sys::ProcessHandle) {
     sys::print(b"     setting up ");
     sys::print(name);
     sys::print(b" pipeline\n");
@@ -285,7 +285,7 @@ fn setup_render_pipeline(
         });
 
     // Send scene update channel endpoint B to render service (handle 1).
-    sys::handle_send(gpu_proc, cv_b).unwrap_or_else(|_| {
+    sys::handle_send(gpu_proc, cv_b.0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-render B) failed\n");
         sys::exit();
     });
@@ -321,7 +321,7 @@ fn setup_render_pipeline(
         let mut retries = 0u32;
 
         loop {
-            match sys::wait(&[gpu_ch_handle], BOOT_TIMEOUT_NS) {
+            match sys::wait(&[gpu_ch_handle.0], BOOT_TIMEOUT_NS) {
                 Ok(_) => {
                     if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_DISPLAY_INFO {
                         display_ok = true;
@@ -348,8 +348,16 @@ fn setup_render_pipeline(
         }
     }
 
-    // SAFETY: DisplayInfoMsg fits within 60-byte payload; msg_type was verified as MSG_DISPLAY_INFO above.
-    let display_info: DisplayInfoMsg = unsafe { resp_msg.payload_as() };
+    let display_info = if let Some(protocol::gpu::Message::DisplayInfo(d)) =
+        protocol::gpu::decode(resp_msg.msg_type, &resp_msg.payload)
+    {
+        d
+    } else {
+        sys::print(b"init: bad display info payload\n");
+        loop {
+            sys::yield_now();
+        }
+    };
     let fb_width = display_info.width;
     let fb_height = display_info.height;
     let frame_rate: u16 = if display_info.refresh_rate > 0 {
@@ -410,7 +418,7 @@ fn setup_render_pipeline(
         let mut retries = 0u32;
 
         loop {
-            match sys::wait(&[gpu_ch_handle], BOOT_TIMEOUT_NS) {
+            match sys::wait(&[gpu_ch_handle.0], BOOT_TIMEOUT_NS) {
                 Ok(_) => {
                     if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_GPU_READY {
                         gpu_ready = true;
@@ -525,7 +533,12 @@ fn setup_render_pipeline(
 
     // Send frame rate as a separate message (CoreConfig is full at 56 bytes).
     let fr_msg = unsafe {
-        ipc::Message::from_payload(MSG_FRAME_RATE, &FrameRateMsg { frame_rate: frame_rate as u32 })
+        ipc::Message::from_payload(
+            MSG_FRAME_RATE,
+            &FrameRateMsg {
+                frame_rate: frame_rate as u32,
+            },
+        )
     };
     core_ch.send(&fr_msg);
 
@@ -577,12 +590,12 @@ fn setup_render_pipeline(
 
         *next_channel += 1;
 
-        sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
+        sys::handle_send(input_proc_handle, ic_a.0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core A) failed\n");
             sys::exit();
         });
         // Send to core (handle 1 in core).
-        sys::handle_send(core_proc, ic_b).unwrap_or_else(|_| {
+        sys::handle_send(core_proc, ic_b.0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core B) failed\n");
             sys::exit();
         });
@@ -618,7 +631,7 @@ fn setup_render_pipeline(
 
     // Core → render service scene update channel.
     // Endpoint A → core (handle 2 = COMPOSITOR_HANDLE in core).
-    sys::handle_send(core_proc, cv_a).unwrap_or_else(|_| {
+    sys::handle_send(core_proc, cv_a.0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-render A) failed\n");
         sys::exit();
     });
@@ -663,12 +676,12 @@ fn setup_render_pipeline(
     *next_channel += 1;
 
     // Endpoint A → core (handle 3 = EDITOR_HANDLE in core).
-    sys::handle_send(core_proc, ce_a).unwrap_or_else(|_| {
+    sys::handle_send(core_proc, ce_a.0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-editor A) failed\n");
         sys::exit();
     });
     // Endpoint B → editor (handle 1 in editor's table).
-    sys::handle_send(editor_proc, ce_b).unwrap_or_else(|_| {
+    sys::handle_send(editor_proc, ce_b.0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-editor B) failed\n");
         sys::exit();
     });
@@ -686,11 +699,11 @@ fn setup_render_pipeline(
 
         *next_channel += 1;
 
-        sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
+        sys::handle_send(input_proc_handle, ic_a.0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core A) failed\n");
             sys::exit();
         });
-        sys::handle_send(core_proc, ic_b).unwrap_or_else(|_| {
+        sys::handle_send(core_proc, ic_b.0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core B) failed\n");
             sys::exit();
         });
@@ -756,7 +769,10 @@ fn setup_render_pipeline(
 /// Returns (process_handle, init_channel_handle, channel_index) on success.
 /// The child receives endpoint B at CHANNEL_SHM_BASE in its address space.
 /// Init retains endpoint A at channel_shm_va(channel_index).
-fn spawn_with_channel(elf: &[u8], next_channel: &mut usize) -> Option<(u8, u8, usize)> {
+fn spawn_with_channel(
+    elf: &[u8],
+    next_channel: &mut usize,
+) -> Option<(sys::ProcessHandle, sys::ChannelHandle, usize)> {
     let proc_handle = match sys::process_create(elf.as_ptr(), elf.len()) {
         Ok(h) => h,
         Err(_) => {
@@ -772,7 +788,7 @@ fn spawn_with_channel(elf: &[u8], next_channel: &mut usize) -> Option<(u8, u8, u
         }
     };
 
-    if let Err(_) = sys::handle_send(proc_handle, ch_b) {
+    if let Err(_) = sys::handle_send(proc_handle, ch_b.0) {
         sys::print(b"       spawn: handle_send FAILED\n");
 
         return None;
@@ -819,12 +835,12 @@ pub extern "C" fn _start() -> ! {
     let mut next_channel: usize = 1;
     // Saved device state for Phase 2 (display pipeline).
     // Render type: 0 = cpu-render, 1 = virgil-render, 2 = metal-render.
-    let mut gpu: Option<(u8, u8, usize, u64, u32, u8)> = None; // (proc, ch, ch_idx, pa, irq, render_type)
-                                                               // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
-    let mut input_devices: [(u8, usize, u64, u32); MAX_INPUT_DEVICES] =
-        [(0, 0, 0, 0); MAX_INPUT_DEVICES];
+    let mut gpu: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32, u8)> = None; // (proc, ch, ch_idx, pa, irq, render_type)
+                                                                                               // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
+    let mut input_devices: [(sys::ProcessHandle, usize, u64, u32); MAX_INPUT_DEVICES] =
+        [(sys::ProcessHandle(0), 0, 0, 0); MAX_INPUT_DEVICES];
     let mut input_count: usize = 0;
-    let mut p9: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
+    let mut p9: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
     let mut rtc_pa: u64 = 0; // PL031 RTC physical address (0 = not found)
                              // Phase 1: Spawn a driver for each device in the manifest.
     let actual = if device_count > 8 { 8 } else { device_count };
@@ -1029,7 +1045,7 @@ pub extern "C" fn _start() -> ! {
             // Helper: send a file read request and wait for the response.
             // Returns the number of bytes read, or 0 on failure.
             let read_font_file = |ch_obj: &ipc::Channel,
-                                  ch_handle: u8,
+                                  ch_handle: sys::ChannelHandle,
                                   target_va: u64,
                                   capacity: u32,
                                   filename: &[u8]|
@@ -1062,7 +1078,7 @@ pub extern "C" fn _start() -> ! {
                     let mut retries = 0u32;
 
                     loop {
-                        match sys::wait(&[ch_handle], FONT_READ_TIMEOUT_NS) {
+                        match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
                             Ok(_) => {
                                 if ch_obj.try_recv(&mut resp_msg)
                                     && resp_msg.msg_type == MSG_FS_READ_RESPONSE
@@ -1241,24 +1257,24 @@ pub extern "C" fn _start() -> ! {
         );
 
         // Register render service.
-        child_handles[child_count] = gpu_proc;
+        child_handles[child_count] = gpu_proc.0;
         child_names[child_count] = render_name;
         child_count += 1;
 
         // Register core.
-        child_handles[child_count] = core_proc;
+        child_handles[child_count] = core_proc.0;
         child_names[child_count] = b"core";
         child_count += 1;
 
         // Register editor.
-        child_handles[child_count] = editor_proc;
+        child_handles[child_count] = editor_proc.0;
         child_names[child_count] = b"editor";
         child_count += 1;
 
         // Register input drivers.
         for i in 0..input_count {
             if child_count < child_handles.len() {
-                child_handles[child_count] = input_devices[i].0;
+                child_handles[child_count] = input_devices[i].0 .0;
                 child_names[child_count] = b"input";
                 child_count += 1;
             }
@@ -1267,7 +1283,7 @@ pub extern "C" fn _start() -> ! {
         // Register 9p driver (if spawned).
         if let Some((p9_proc, _, _, _, _)) = p9 {
             if child_count < child_handles.len() {
-                child_handles[child_count] = p9_proc;
+                child_handles[child_count] = p9_proc.0;
                 child_names[child_count] = b"9p";
                 child_count += 1;
             }
@@ -1284,7 +1300,7 @@ pub extern "C" fn _start() -> ! {
         match sys::process_create(FUZZ_ELF.as_ptr(), FUZZ_ELF.len()) {
             Ok(proc_h) => {
                 start_process(proc_h, b"fuzz");
-                let _ = sys::wait(&[proc_h], u64::MAX);
+                let _ = sys::wait(&[proc_h.0], u64::MAX);
             }
             Err(_) => {
                 sys::print(b"     fuzz test spawn failed\n");
@@ -1294,7 +1310,7 @@ pub extern "C" fn _start() -> ! {
         match sys::process_create(STRESS_ELF.as_ptr(), STRESS_ELF.len()) {
             Ok(proc_h) => {
                 start_process(proc_h, b"stress");
-                let _ = sys::wait(&[proc_h], u64::MAX);
+                let _ = sys::wait(&[proc_h.0], u64::MAX);
             }
             Err(_) => {
                 sys::print(b"     stress test spawn failed\n");

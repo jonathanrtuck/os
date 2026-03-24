@@ -10,7 +10,7 @@
 #![no_main]
 
 use protocol::{
-    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    device::MSG_DEVICE_CONFIG,
     fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
 };
 
@@ -47,7 +47,7 @@ struct MsgWriter {
 struct P9Client {
     device: virtio::Device,
     vq: virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     t_va: usize,
     t_pa: u64,
     r_va: usize,
@@ -288,7 +288,7 @@ impl P9Client {
             .push_chain(&[(self.t_pa, t_size, false), (self.r_pa, MSIZE, true)]);
         self.device.notify(VIRTQ_REQUEST);
 
-        let _ = sys::wait(&[self.irq_handle], u64::MAX);
+        let _ = sys::wait(&[self.irq_handle.0], u64::MAX);
 
         self.device.ack_interrupt();
         self.vq.pop_used();
@@ -384,7 +384,14 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    let config: DeviceConfig = unsafe { msg.payload_as() };
+    let config = if let Some(protocol::device::Message::DeviceConfig(c)) =
+        protocol::device::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"virtio-9p: bad device config\n");
+        sys::exit();
+    };
     let mmio_pa = config.mmio_pa;
     let irq = config.irq;
     // Map MMIO region.
@@ -401,7 +408,7 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    let irq_handle = sys::interrupt_register(irq).unwrap_or_else(|_| {
+    let irq_handle: sys::InterruptHandle = sys::interrupt_register(irq).unwrap_or_else(|_| {
         sys::print(b"virtio-9p: interrupt_register failed\n");
         sys::exit();
     });
@@ -525,7 +532,7 @@ pub extern "C" fn _start() -> ! {
 
                 ch.send(&resp_msg);
 
-                let _ = sys::channel_signal(0);
+                let _ = sys::channel_signal(sys::ChannelHandle(0));
 
                 continue;
             }
@@ -544,7 +551,7 @@ pub extern "C" fn _start() -> ! {
 
                 ch.send(&resp_msg);
 
-                let _ = sys::channel_signal(0);
+                let _ = sys::channel_signal(sys::ChannelHandle(0));
 
                 continue;
             }
@@ -584,7 +591,7 @@ pub extern "C" fn _start() -> ! {
 
             ch.send(&resp_msg);
 
-            let _ = sys::channel_signal(0);
+            let _ = sys::channel_signal(sys::ChannelHandle(0));
         }
     }
 }

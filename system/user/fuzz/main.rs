@@ -156,7 +156,7 @@ fn phase_2_bad_handles() {
 
     // Signal invalid handles.
     for h in [0u8, 1, 127, 128, 255] {
-        let _ = sys::channel_signal(h);
+        let _ = sys::channel_signal(sys::ChannelHandle(h));
     }
 
     // Handle > u8::MAX via raw syscall.
@@ -173,18 +173,18 @@ fn phase_2_bad_handles() {
     let (a, b) = sys::channel_create().unwrap_or_else(|_| {
         phase_fail(b"phase 2", b"channel_create failed");
     });
-    sys::handle_close(a).unwrap_or_else(|_| {
+    sys::handle_close(a.0).unwrap_or_else(|_| {
         phase_fail(b"phase 2", b"first close(a) failed");
     });
-    sys::handle_close(b).unwrap_or_else(|_| {
+    sys::handle_close(b.0).unwrap_or_else(|_| {
         phase_fail(b"phase 2", b"first close(b) failed");
     });
     // Second close should return error, not crash.
-    let r = sys::handle_close(a);
+    let r = sys::handle_close(a.0);
     if r.is_ok() {
         phase_fail(b"phase 2", b"double-close(a) should fail");
     }
-    let r = sys::handle_close(b);
+    let r = sys::handle_close(b.0);
     if r.is_ok() {
         phase_fail(b"phase 2", b"double-close(b) should fail");
     }
@@ -193,27 +193,27 @@ fn phase_2_bad_handles() {
     let (a, b) = sys::channel_create().unwrap_or_else(|_| {
         phase_fail(b"phase 2", b"channel_create 2 failed");
     });
-    let _ = sys::handle_close(b);
+    let _ = sys::handle_close(b.0);
     // Signal with peer closed — should not crash.
     let _ = sys::channel_signal(a);
-    let _ = sys::handle_close(a);
+    let _ = sys::handle_close(a.0);
 
     // interrupt_ack on non-interrupt handle.
     let (a, b) = sys::channel_create().unwrap_or_else(|_| {
         phase_fail(b"phase 2", b"channel_create 3 failed");
     });
-    let _ = sys::interrupt_ack(a); // Channel handle, not interrupt — should fail.
-    let _ = sys::handle_close(a);
-    let _ = sys::handle_close(b);
+    let _ = sys::interrupt_ack(sys::InterruptHandle(a.0)); // Channel handle, not interrupt — should fail.
+    let _ = sys::handle_close(a.0);
+    let _ = sys::handle_close(b.0);
 
     // process_start on non-process handle.
     let (a, b) = sys::channel_create().unwrap_or_else(|_| {
         phase_fail(b"phase 2", b"channel_create 4 failed");
     });
-    let _ = sys::process_start(a); // Channel handle, not process.
-    let _ = sys::process_kill(a); // Channel handle, not process.
-    let _ = sys::handle_close(a);
-    let _ = sys::handle_close(b);
+    let _ = sys::process_start(sys::ProcessHandle(a.0)); // Channel handle, not process.
+    let _ = sys::process_kill(sys::ProcessHandle(a.0)); // Channel handle, not process.
+    let _ = sys::handle_close(a.0);
+    let _ = sys::handle_close(b.0);
 
     phase_ok(b"phase 2: bad handle arguments");
 }
@@ -398,8 +398,8 @@ fn phase_4_handle_exhaustion() {
         match sys::channel_create() {
             Ok((a, b)) => {
                 if (count as usize) < 128 {
-                    handles_a[count as usize] = a;
-                    handles_b[count as usize] = b;
+                    handles_a[count as usize] = a.0;
+                    handles_b[count as usize] = b.0;
                 }
                 count += 1;
             }
@@ -431,8 +431,8 @@ fn phase_4_handle_exhaustion() {
     // Verify recovery — should be able to create again.
     match sys::channel_create() {
         Ok((a, b)) => {
-            let _ = sys::handle_close(a);
-            let _ = sys::handle_close(b);
+            let _ = sys::handle_close(a.0);
+            let _ = sys::handle_close(b.0);
         }
         Err(_) => phase_fail(b"phase 4", b"couldn't create after recovery"),
     }
@@ -498,7 +498,7 @@ fn phase_6_timer_exhaustion() {
         match sys::timer_create(1_000_000_000) {
             Ok(h) => {
                 if count < 128 {
-                    timer_handles[count] = h;
+                    timer_handles[count] = h.0;
                 }
                 count += 1;
             }
@@ -522,7 +522,7 @@ fn phase_6_timer_exhaustion() {
     // Verify recovery.
     match sys::timer_create(1_000_000) {
         Ok(h) => {
-            let _ = sys::handle_close(h);
+            let _ = sys::handle_close(h.0);
         }
         Err(_) => phase_fail(b"phase 6", b"couldn't create timer after recovery"),
     }
@@ -546,22 +546,22 @@ fn phase_7_process_lifecycle() {
     let (a, b) = sys::channel_create().unwrap_or_else(|_| {
         phase_fail(b"phase 7", b"channel_create failed");
     });
-    let _ = sys::process_start(a); // Should fail — channel, not process.
-    let _ = sys::handle_close(a);
-    let _ = sys::handle_close(b);
+    let _ = sys::process_start(sys::ProcessHandle(a.0)); // Should fail — channel, not process.
+    let _ = sys::handle_close(a.0);
+    let _ = sys::handle_close(b.0);
 
     // process_kill with non-process handle.
     let (a, b) = sys::channel_create().unwrap_or_else(|_| {
         phase_fail(b"phase 7", b"channel_create 2 failed");
     });
-    let _ = sys::process_kill(a); // Should fail.
-    let _ = sys::handle_close(a);
-    let _ = sys::handle_close(b);
+    let _ = sys::process_kill(sys::ProcessHandle(a.0)); // Should fail.
+    let _ = sys::handle_close(a.0);
+    let _ = sys::handle_close(b.0);
 
     // process_kill(self) — should be rejected.
     // We can't easily get our own process handle, but process_kill validates
     // that target != caller. Just exercise invalid handle paths.
-    let _ = sys::process_kill(255); // Invalid handle.
+    let _ = sys::process_kill(sys::ProcessHandle(255)); // Invalid handle.
 
     // Rapid create+kill cycles.
     for _ in 0..5 {
@@ -569,7 +569,7 @@ fn phase_7_process_lifecycle() {
         let r = sys::process_create(garbage_elf.as_ptr(), garbage_elf.len());
         if let Ok(h) = r {
             let _ = sys::process_kill(h);
-            let _ = sys::handle_close(h);
+            let _ = sys::handle_close(h.0);
         }
     }
 
@@ -617,8 +617,8 @@ fn phase_8_thread_lifecycle() {
 
         match sys::thread_create(thread_trampoline as u64, stack - 16) {
             Ok(h) => {
-                let _ = sys::wait(&[h], u64::MAX);
-                let _ = sys::handle_close(h);
+                let _ = sys::wait(&[h.0], u64::MAX);
+                let _ = sys::handle_close(h.0);
             }
             Err(_) => break,
         }
@@ -632,12 +632,12 @@ fn phase_8_thread_lifecycle() {
 
         if let Ok(h) = sys::thread_create(thread_trampoline as u64, stack - 16) {
             // Poll immediately — thread might or might not have exited.
-            let _ = sys::wait(&[h], 0);
+            let _ = sys::wait(&[h.0], 0);
             // Wait with short timeout.
-            let _ = sys::wait(&[h], 1_000_000);
+            let _ = sys::wait(&[h.0], 1_000_000);
             // Wait forever (thread should exit quickly).
-            let _ = sys::wait(&[h], u64::MAX);
-            let _ = sys::handle_close(h);
+            let _ = sys::wait(&[h.0], u64::MAX);
+            let _ = sys::handle_close(h.0);
         }
     }
 
@@ -662,7 +662,7 @@ fn phase_9_scheduling_context() {
             // Second bind — should fail (already bound).
             let r2 = sys::scheduling_context_bind(h);
             let _ = r2; // AlreadyBound expected.
-            let _ = sys::handle_close(h);
+            let _ = sys::handle_close(h.0);
         }
         Err(_) => {
             // May fail if table full — not a test failure.
@@ -678,7 +678,7 @@ fn phase_9_scheduling_context() {
             // Double return — should fail.
             let r = sys::scheduling_context_return();
             let _ = r;
-            let _ = sys::handle_close(h);
+            let _ = sys::handle_close(h.0);
         }
         Err(_) => {
             sys::print(b"       (skipped sc_borrow - table issue)\n");
@@ -707,14 +707,14 @@ extern "C" fn chaos_worker(seed: u64) -> ! {
             1 => {
                 if let Ok((a, b)) = sys::channel_create() {
                     let _ = sys::channel_signal(a);
-                    let _ = sys::handle_close(a);
-                    let _ = sys::handle_close(b);
+                    let _ = sys::handle_close(a.0);
+                    let _ = sys::handle_close(b.0);
                 }
             }
             2 => {
                 if let Ok(h) = sys::timer_create(1) {
-                    let _ = sys::wait(&[h], 0);
-                    let _ = sys::handle_close(h);
+                    let _ = sys::wait(&[h.0], 0);
+                    let _ = sys::handle_close(h.0);
                 }
             }
             3 => {
@@ -733,18 +733,18 @@ extern "C" fn chaos_worker(seed: u64) -> ! {
             }
             6 => {
                 if let Ok(h) = sys::timer_create(1_000) {
-                    let _ = sys::wait(&[h], 0);
-                    let _ = sys::handle_close(h);
+                    let _ = sys::wait(&[h.0], 0);
+                    let _ = sys::handle_close(h.0);
                 }
             }
             7 => {
                 if let Ok((a, b)) = sys::channel_create() {
                     let _ = sys::channel_signal(a);
                     let _ = sys::channel_signal(b);
-                    let _ = sys::wait(&[a], 0);
-                    let _ = sys::wait(&[b], 0);
-                    let _ = sys::handle_close(a);
-                    let _ = sys::handle_close(b);
+                    let _ = sys::wait(&[a.0], 0);
+                    let _ = sys::wait(&[b.0], 0);
+                    let _ = sys::handle_close(a.0);
+                    let _ = sys::handle_close(b.0);
                 }
             }
             _ => {
@@ -784,7 +784,7 @@ fn phase_10_concurrent_chaos() {
 
         match sys::thread_create(chaos_trampoline as u64, stack - 16) {
             Ok(h) => {
-                thread_handles[spawned] = h;
+                thread_handles[spawned] = h.0;
                 spawned += 1;
             }
             Err(_) => break,
@@ -815,7 +815,7 @@ fn phase_11_wait_edge_cases() {
     });
 
     // Wait with poll (timeout=0) on channel — should return WouldBlock.
-    let r = sys::wait(&[a], 0);
+    let r = sys::wait(&[a.0], 0);
     match r {
         Err(sys::SyscallError::WouldBlock) => {}
         _ => {} // Any result is fine as long as no crash.
@@ -823,17 +823,17 @@ fn phase_11_wait_edge_cases() {
 
     // Signal then poll — should succeed.
     let _ = sys::channel_signal(b);
-    let r = sys::wait(&[a], 0);
+    let r = sys::wait(&[a.0], 0);
     match r {
         Ok(0) => {} // Expected.
         _ => {}     // Timer race etc — fine.
     }
 
     // Wait with very short timeout.
-    let _ = sys::wait(&[a], 1);
+    let _ = sys::wait(&[a.0], 1);
 
     // Wait on 16 handles (max).
-    let handles_to_wait = [a; 16];
+    let handles_to_wait = [a.0; 16];
     let r = sys::wait(&handles_to_wait, 0);
     let _ = r;
 
@@ -843,18 +843,18 @@ fn phase_11_wait_edge_cases() {
     let ret = unsafe { raw_syscall3(12, big_buf.as_ptr() as u64, 17, 0) } as i64;
     let _ = ret;
 
-    let _ = sys::handle_close(a);
-    let _ = sys::handle_close(b);
+    let _ = sys::handle_close(a.0);
+    let _ = sys::handle_close(b.0);
 
     // Wait with timeout on a timer that fires.
     if let Ok(t) = sys::timer_create(1_000) {
         // Timer fires in 1us — wait up to 1s.
-        let r = sys::wait(&[t], 1_000_000_000);
+        let r = sys::wait(&[t.0], 1_000_000_000);
         match r {
             Ok(0) => {} // Timer fired.
             _ => {}     // Timeout or error — still fine.
         }
-        let _ = sys::handle_close(t);
+        let _ = sys::handle_close(t.0);
     }
 
     phase_ok(b"phase 11: wait edge cases");
@@ -884,7 +884,7 @@ fn phase_12_dma_edge_cases() {
 // -----------------------------------------------------------------------
 
 struct ChildProcess {
-    proc_h: u8,
+    proc_h: sys::ProcessHandle,
     cmd_va: usize,
 }
 
@@ -900,7 +900,7 @@ fn spawn_helper(cmd: u8) -> Option<ChildProcess> {
         Ok(va) => va,
         Err(_) => {
             let _ = sys::process_kill(proc_h);
-            let _ = sys::handle_close(proc_h);
+            let _ = sys::handle_close(proc_h.0);
             return None;
         }
     };
@@ -909,7 +909,7 @@ fn spawn_helper(cmd: u8) -> Option<ChildProcess> {
     if sys::memory_share(proc_h, cmd_pa, 1, false).is_err() {
         let _ = sys::dma_free(cmd_va as u64, 0);
         let _ = sys::process_kill(proc_h);
-        let _ = sys::handle_close(proc_h);
+        let _ = sys::handle_close(proc_h.0);
         return None;
     }
 
@@ -920,8 +920,8 @@ fn spawn_helper(cmd: u8) -> Option<ChildProcess> {
 
 /// Wait for child to exit and free resources.
 fn reap_helper(child: ChildProcess) {
-    let _ = sys::wait(&[child.proc_h], u64::MAX);
-    let _ = sys::handle_close(child.proc_h);
+    let _ = sys::wait(&[child.proc_h.0], u64::MAX);
+    let _ = sys::handle_close(child.proc_h.0);
     let _ = sys::dma_free(child.cmd_va as u64, 0);
 }
 
@@ -1076,26 +1076,26 @@ fn phase_18_sibling_close_while_blocked() {
 
         // Blocker thread: waits on ch_a.
         let args_ptr1 = (stack1 - 8) as *mut u64;
-        unsafe { core::ptr::write_volatile(args_ptr1, ch_a as u64) };
+        unsafe { core::ptr::write_volatile(args_ptr1, ch_a.0 as u64) };
         let t1 = sys::thread_create(blocker_trampoline as u64, stack1 - 16);
 
         // Closer thread: closes ch_a.
         let args_ptr2 = (stack2 - 8) as *mut u64;
-        unsafe { core::ptr::write_volatile(args_ptr2, ch_a as u64) };
+        unsafe { core::ptr::write_volatile(args_ptr2, ch_a.0 as u64) };
         let t2 = sys::thread_create(closer_trampoline as u64, stack2 - 16);
 
         // Wait for both threads.
         if let Ok(h) = t1 {
-            let _ = sys::wait(&[h], 100_000_000); // 100ms timeout.
-            let _ = sys::handle_close(h);
+            let _ = sys::wait(&[h.0], 100_000_000); // 100ms timeout.
+            let _ = sys::handle_close(h.0);
         }
         if let Ok(h) = t2 {
-            let _ = sys::wait(&[h], 100_000_000);
-            let _ = sys::handle_close(h);
+            let _ = sys::wait(&[h.0], 100_000_000);
+            let _ = sys::handle_close(h.0);
         }
         // ch_a may or may not be closed by closer thread. Try closing.
-        let _ = sys::handle_close(ch_a);
-        let _ = sys::handle_close(ch_b);
+        let _ = sys::handle_close(ch_a.0);
+        let _ = sys::handle_close(ch_b.0);
     }
 
     phase_ok(b"phase 18: sibling close while blocked");
@@ -1121,10 +1121,10 @@ fn phase_20_double_kill() {
     // Kill after exit.
     match spawn_helper(0x03) {
         Some(child) => {
-            let _ = sys::wait(&[child.proc_h], u64::MAX);
+            let _ = sys::wait(&[child.proc_h.0], u64::MAX);
             let _ = sys::process_kill(child.proc_h);
             let _ = sys::process_kill(child.proc_h);
-            let _ = sys::handle_close(child.proc_h);
+            let _ = sys::handle_close(child.proc_h.0);
             let _ = sys::dma_free(child.cmd_va as u64, 0);
         }
         None => sys::print(b"       (skipped - spawn failed)\n"),
@@ -1203,7 +1203,7 @@ fn spawn_with_trampoline(trampoline: u64, arg: u64) -> Option<u8> {
     }
     let args_ptr = (stack - 8) as *mut u64;
     unsafe { core::ptr::write_volatile(args_ptr, arg) };
-    sys::thread_create(trampoline, stack - 16).ok()
+    sys::thread_create(trampoline, stack - 16).ok().map(|h| h.0)
 }
 
 fn phase_21_futex_race() {
@@ -1262,15 +1262,15 @@ fn phase_23_timer_fire_during_setup() {
     // Tests the race between timer fire callback and wait registration.
     for _ in 0..100 {
         if let Ok(h) = sys::timer_create(0) {
-            let _ = sys::wait(&[h], 1_000_000);
-            let _ = sys::handle_close(h);
+            let _ = sys::wait(&[h.0], 1_000_000);
+            let _ = sys::handle_close(h.0);
         }
     }
     // Also: create timer with 1ns.
     for _ in 0..100 {
         if let Ok(h) = sys::timer_create(1) {
-            let _ = sys::wait(&[h], 1_000_000);
-            let _ = sys::handle_close(h);
+            let _ = sys::wait(&[h.0], 1_000_000);
+            let _ = sys::handle_close(h.0);
         }
     }
 
@@ -1308,8 +1308,8 @@ fn phase_24_multi_waiter_same_handle() {
         }
     };
 
-    let t1 = spawn_with_trampoline(channel_waiter_trampoline as u64, ch_a as u64);
-    let t2 = spawn_with_trampoline(channel_waiter_trampoline as u64, ch_a as u64);
+    let t1 = spawn_with_trampoline(channel_waiter_trampoline as u64, ch_a.0 as u64);
+    let t2 = spawn_with_trampoline(channel_waiter_trampoline as u64, ch_a.0 as u64);
 
     // Signal the channel — should wake at least one waiter.
     sys::yield_now();
@@ -1324,8 +1324,8 @@ fn phase_24_multi_waiter_same_handle() {
         let _ = sys::wait(&[h], 100_000_000);
         let _ = sys::handle_close(h);
     }
-    let _ = sys::handle_close(ch_a);
-    let _ = sys::handle_close(ch_b);
+    let _ = sys::handle_close(ch_a.0);
+    let _ = sys::handle_close(ch_b.0);
 
     phase_ok(b"phase 24: multi-waiter same handle");
 }
@@ -1356,7 +1356,7 @@ fn phase_25_create_under_pressure() {
         Ok(h) => {
             // Somehow succeeded — clean up.
             let _ = sys::process_kill(h);
-            let _ = sys::handle_close(h);
+            let _ = sys::handle_close(h.0);
         }
         Err(_) => {} // Expected — out of memory.
     }
@@ -1537,10 +1537,10 @@ fn phase_28_signal_closed_channel() {
     for _ in 0..10 {
         match sys::channel_create() {
             Ok((a, b)) => {
-                let _ = sys::handle_close(b);
+                let _ = sys::handle_close(b.0);
                 // Signal the orphaned peer — should not crash.
                 let _ = sys::channel_signal(a);
-                let _ = sys::handle_close(a);
+                let _ = sys::handle_close(a.0);
             }
             Err(_) => break,
         }
@@ -1616,19 +1616,19 @@ fn phase_30_close_while_waiting() {
     // The kernel must wake the blocked sibling — otherwise it hangs forever.
     match sys::timer_create(u64::MAX) {
         Ok(timer_h) => {
-            WAIT_HANDLE.store(timer_h as u64, core::sync::atomic::Ordering::Release);
+            WAIT_HANDLE.store(timer_h.0 as u64, core::sync::atomic::Ordering::Release);
             let t = spawn_with_trampoline(wait_on_shared_trampoline as u64, 0);
             if let Some(th) = t {
                 for _ in 0..200 {
                     sys::yield_now();
                 }
                 // Close the timer handle — kernel must wake the blocked sibling.
-                let _ = sys::handle_close(timer_h);
+                let _ = sys::handle_close(timer_h.0);
                 // Sibling should wake and exit promptly.
                 let _ = sys::wait(&[th], u64::MAX);
                 let _ = sys::handle_close(th);
             } else {
-                let _ = sys::handle_close(timer_h);
+                let _ = sys::handle_close(timer_h.0);
             }
         }
         Err(_) => sys::print(b"       (skipped - timer create failed)\n"),
@@ -1646,8 +1646,8 @@ extern "C" fn channel_churn_entry(_: u64) -> ! {
             Ok((a, b)) => {
                 let _ = sys::channel_signal(a);
                 let _ = sys::channel_signal(b);
-                let _ = sys::handle_close(a);
-                let _ = sys::handle_close(b);
+                let _ = sys::handle_close(a.0);
+                let _ = sys::handle_close(b.0);
             }
             Err(_) => break,
         }
@@ -1704,12 +1704,12 @@ fn phase_32_interrupt_lifecycle() {
             }
 
             // Close the handle (kernel should disable the IRQ in GIC).
-            let _ = sys::handle_close(h);
+            let _ = sys::handle_close(h.0);
 
             // After close, re-register should succeed.
             match sys::interrupt_register(unused_spi) {
                 Ok(h2) => {
-                    let _ = sys::handle_close(h2);
+                    let _ = sys::handle_close(h2.0);
                 }
                 Err(_) => {
                     phase_fail(b"phase 32", b"re-register after close should succeed");
@@ -1725,24 +1725,24 @@ fn phase_32_interrupt_lifecycle() {
     for i in 0..4u32 {
         match sys::interrupt_register(133 + i) {
             Ok(h) => {
-                int_handles[int_count] = h;
+                int_handles[int_count] = h.0;
                 int_count += 1;
             }
             Err(_) => break,
         }
     }
     for i in 0..int_count {
-        let _ = sys::interrupt_ack(int_handles[i]);
+        let _ = sys::interrupt_ack(sys::InterruptHandle(int_handles[i]));
         let _ = sys::handle_close(int_handles[i]);
     }
 
     // Wait on interrupt handle with poll (timeout=0) — should return not-ready.
     match sys::interrupt_register(140) {
         Ok(h) => {
-            let r = sys::wait(&[h], 0);
+            let r = sys::wait(&[h.0], 0);
             // Poll should time out (no IRQ fired).
             let _ = r;
-            let _ = sys::handle_close(h);
+            let _ = sys::handle_close(h.0);
         }
         Err(_) => {}
     }
@@ -1767,18 +1767,18 @@ fn phase_33_handle_send_success() {
     let proc_h = match sys::process_create(HELPER_ELF.as_ptr(), HELPER_ELF.len()) {
         Ok(h) => h,
         Err(_) => {
-            let _ = sys::handle_close(ch_a);
-            let _ = sys::handle_close(ch_b);
+            let _ = sys::handle_close(ch_a.0);
+            let _ = sys::handle_close(ch_b.0);
             sys::print(b"       (skipped - process_create failed)\n");
             return phase_ok(b"phase 33: handle_send (skipped)");
         }
     };
 
     // Send endpoint B to the child. The child will get it at some handle slot.
-    if sys::handle_send(proc_h, ch_b).is_err() {
-        let _ = sys::handle_close(ch_a);
+    if sys::handle_send(proc_h, ch_b.0).is_err() {
+        let _ = sys::handle_close(ch_a.0);
         let _ = sys::process_kill(proc_h);
-        let _ = sys::handle_close(proc_h);
+        let _ = sys::handle_close(proc_h.0);
         phase_fail(b"phase 33", b"handle_send should succeed");
     }
     // ch_b is now moved to child — caller no longer owns it.
@@ -1788,9 +1788,9 @@ fn phase_33_handle_send_success() {
     let cmd_va = match sys::dma_alloc(0, &mut cmd_pa) {
         Ok(va) => va,
         Err(_) => {
-            let _ = sys::handle_close(ch_a);
+            let _ = sys::handle_close(ch_a.0);
             let _ = sys::process_kill(proc_h);
-            let _ = sys::handle_close(proc_h);
+            let _ = sys::handle_close(proc_h.0);
             sys::print(b"       (skipped - dma_alloc failed)\n");
             return phase_ok(b"phase 33: handle_send (skipped)");
         }
@@ -1799,10 +1799,10 @@ fn phase_33_handle_send_success() {
     unsafe { core::ptr::write_volatile(cmd_va as *mut u8, 0x06) };
 
     if sys::memory_share(proc_h, cmd_pa, 1, false).is_err() {
-        let _ = sys::handle_close(ch_a);
+        let _ = sys::handle_close(ch_a.0);
         let _ = sys::dma_free(cmd_va as u64, 0);
         let _ = sys::process_kill(proc_h);
-        let _ = sys::handle_close(proc_h);
+        let _ = sys::handle_close(proc_h.0);
         sys::print(b"       (skipped - memory_share failed)\n");
         return phase_ok(b"phase 33: handle_send (skipped)");
     }
@@ -1810,12 +1810,12 @@ fn phase_33_handle_send_success() {
     let _ = sys::process_start(proc_h);
 
     // Wait for the child to signal the channel (proves handle_send worked).
-    let _ = sys::wait(&[ch_a], 500_000_000); // 500ms timeout
+    let _ = sys::wait(&[ch_a.0], 500_000_000); // 500ms timeout
 
     // Clean up.
-    let _ = sys::wait(&[proc_h], 500_000_000);
-    let _ = sys::handle_close(proc_h);
-    let _ = sys::handle_close(ch_a);
+    let _ = sys::wait(&[proc_h.0], 500_000_000);
+    let _ = sys::handle_close(proc_h.0);
+    let _ = sys::handle_close(ch_a.0);
     let _ = sys::dma_free(cmd_va as u64, 0);
 
     phase_ok(b"phase 33: handle_send success path");
@@ -1877,7 +1877,7 @@ extern "C" fn sc_thread_entry(seed: u64) -> ! {
                 // Create + bind + close.
                 if let Ok(h) = sys::scheduling_context_create(500_000, 1_000_000) {
                     let _ = sys::scheduling_context_bind(h);
-                    let _ = sys::handle_close(h);
+                    let _ = sys::handle_close(h.0);
                 }
             }
             1 => {
@@ -1885,7 +1885,7 @@ extern "C" fn sc_thread_entry(seed: u64) -> ! {
                 if let Ok(h) = sys::scheduling_context_create(1_000_000, 10_000_000) {
                     let _ = sys::scheduling_context_borrow(h);
                     let _ = sys::scheduling_context_return();
-                    let _ = sys::handle_close(h);
+                    let _ = sys::handle_close(h.0);
                 }
             }
             2 => {
@@ -1894,7 +1894,7 @@ extern "C" fn sc_thread_entry(seed: u64) -> ! {
                     let _ = sys::scheduling_context_borrow(h);
                     let _ = sys::scheduling_context_borrow(h); // Should fail.
                     let _ = sys::scheduling_context_return();
-                    let _ = sys::handle_close(h);
+                    let _ = sys::handle_close(h.0);
                 }
             }
             _ => {

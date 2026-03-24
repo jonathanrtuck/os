@@ -26,6 +26,20 @@
 
 #![no_std]
 
+/// IPC payload size in bytes. Must match `ipc::PAYLOAD_SIZE`.
+const PAYLOAD_SIZE: usize = 60;
+
+/// Decode a `#[repr(C)]` payload from raw bytes.
+///
+/// # Safety
+///
+/// `T` must be `#[repr(C)]` and `size_of::<T>() <= PAYLOAD_SIZE`. Both are
+/// enforced by const assertions on every payload struct in this crate.
+#[inline]
+unsafe fn decode_payload<T: Copy>(payload: &[u8; PAYLOAD_SIZE]) -> T {
+    unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const T) }
+}
+
 /// Base virtual address where channel shared memory pages are mapped.
 /// The kernel's channel is at page 0. Channels created by init start
 /// at subsequent 2-page pairs. Must match `kernel/paging.rs`.
@@ -85,8 +99,8 @@ impl DirtyRect {
         DirtyRect {
             x: x0,
             y: y0,
-            w: (x1 - x0 as u32) as u16,
-            h: (y1 - y0 as u32) as u16,
+            w: (x1 - x0 as u32).min(u16::MAX as u32) as u16,
+            h: (y1 - y0 as u32).min(u16::MAX as u32) as u16,
         }
     }
 
@@ -112,6 +126,22 @@ pub mod device {
         pub _pad: u32,
     }
     const _: () = assert!(core::mem::size_of::<DeviceConfig>() <= 60);
+
+    /// Typed message for the device protocol boundary.
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        DeviceConfig(DeviceConfig),
+    }
+
+    /// Decode a device protocol message. Returns `None` for unknown msg_type.
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_DEVICE_CONFIG => Some(Message::DeviceConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── gpu: init <-> GPU driver ────────────────────────────────────────
@@ -147,6 +177,26 @@ pub mod gpu {
         pub refresh_rate: u32,
     }
     const _: () = assert!(core::mem::size_of::<DisplayInfoMsg>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        GpuConfig(GpuConfig),
+        DisplayInfo(DisplayInfoMsg),
+        GpuReady,
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_GPU_CONFIG => Some(Message::GpuConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_DISPLAY_INFO => Some(Message::DisplayInfo(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_GPU_READY => Some(Message::GpuReady),
+            _ => None,
+        }
+    }
 }
 
 // ── input: input driver -> core ─────────────────────────────────────
@@ -229,6 +279,30 @@ pub mod input {
     const _: () = assert!(core::mem::size_of::<PointerButton>() <= 60);
     const _: () = assert!(core::mem::size_of::<PointerStateConfig>() <= 60);
     const _: () = assert!(core::mem::size_of::<PointerState>() == 8);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        KeyEvent(KeyEvent),
+        PointerAbs(PointerAbs),
+        PointerButton(PointerButton),
+        PointerStateConfig(PointerStateConfig),
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_KEY_EVENT => Some(Message::KeyEvent(unsafe { crate::decode_payload(payload) })),
+            MSG_POINTER_ABS => Some(Message::PointerAbs(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_POINTER_BUTTON => Some(Message::PointerButton(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_POINTER_STATE_CONFIG => Some(Message::PointerStateConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── edit: core <-> text editor ──────────────────────────────────────
@@ -278,6 +352,40 @@ pub mod edit {
     const _: () = assert!(core::mem::size_of::<WriteDeleteRange>() <= 60);
     const _: () = assert!(core::mem::size_of::<CursorMove>() <= 60);
     const _: () = assert!(core::mem::size_of::<SelectionUpdate>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        WriteInsert(WriteInsert),
+        WriteDelete(WriteDelete),
+        WriteDeleteRange(WriteDeleteRange),
+        CursorMove(CursorMove),
+        SelectionUpdate(SelectionUpdate),
+        SetCursor(CursorMove),
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_WRITE_INSERT => Some(Message::WriteInsert(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_WRITE_DELETE => Some(Message::WriteDelete(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_WRITE_DELETE_RANGE => Some(Message::WriteDeleteRange(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_CURSOR_MOVE => Some(Message::CursorMove(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_SELECTION_UPDATE => Some(Message::SelectionUpdate(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_SET_CURSOR => Some(Message::SetCursor(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── core: init -> core (OS service) ─────────────────────────────────
@@ -326,6 +434,26 @@ pub mod core_config {
         pub frame_rate: u32,
     }
     const _: () = assert!(core::mem::size_of::<FrameRateMsg>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        CoreConfig(CoreConfig),
+        FrameRate(FrameRateMsg),
+        SceneUpdated,
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_CORE_CONFIG => Some(Message::CoreConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_FRAME_RATE => Some(Message::FrameRate(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_SCENE_UPDATED => Some(Message::SceneUpdated),
+            _ => None,
+        }
+    }
 }
 
 // ── compose: init -> render service ─────────────────────────────────
@@ -393,6 +521,28 @@ pub mod compose {
         pub mmio_pa: u64,
     }
     const _: () = assert!(core::mem::size_of::<RtcConfig>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        CompositorConfig(CompositorConfig),
+        ImageConfig(ImageConfig),
+        RtcConfig(RtcConfig),
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_COMPOSITOR_CONFIG => Some(Message::CompositorConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_IMAGE_CONFIG => Some(Message::ImageConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_RTC_CONFIG => Some(Message::RtcConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── editor: init -> text editor ─────────────────────────────────────
@@ -408,6 +558,20 @@ pub mod editor {
         pub _pad: u32,
     }
     const _: () = assert!(core::mem::size_of::<EditorConfig>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        EditorConfig(EditorConfig),
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_EDITOR_CONFIG => Some(Message::EditorConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── present: render service internal (legacy, unused) ──────────────

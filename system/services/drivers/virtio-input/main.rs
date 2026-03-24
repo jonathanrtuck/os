@@ -36,7 +36,7 @@
 #![no_main]
 
 use protocol::{
-    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    device::MSG_DEVICE_CONFIG,
     input::{
         KeyEvent, PointerButton, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MOD_SUPER,
         MSG_KEY_EVENT, MSG_POINTER_BUTTON,
@@ -172,8 +172,14 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    // SAFETY: msg.msg_type is MSG_DEVICE_CONFIG; sender (init) guarantees payload is valid DeviceConfig.
-    let config: DeviceConfig = unsafe { msg.payload_as() };
+    let config = if let Some(protocol::device::Message::DeviceConfig(c)) =
+        protocol::device::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"virtio-input: bad device config\n");
+        sys::exit();
+    };
     // Map MMIO region (sub-page offset for virtio-mmio slots).
     let page_offset = config.mmio_pa & 0xFFF;
     let page_pa = config.mmio_pa & !0xFFF;
@@ -189,10 +195,11 @@ pub extern "C" fn _start() -> ! {
     }
 
     // IRQ handle goes into slot 2 (after init channel=0, compositor channel=1).
-    let irq_handle = sys::interrupt_register(config.irq).unwrap_or_else(|_| {
-        sys::print(b"virtio-input: interrupt_register failed\n");
-        sys::exit();
-    });
+    let irq_handle: sys::InterruptHandle =
+        sys::interrupt_register(config.irq).unwrap_or_else(|_| {
+            sys::print(b"virtio-input: interrupt_register failed\n");
+            sys::exit();
+        });
     // Setup event virtqueue.
     let queue_size = core::cmp::min(
         device.queue_max_size(VIRTQ_EVENT),
@@ -251,9 +258,13 @@ pub extern "C" fn _start() -> ! {
     let pointer_state_va: usize = if init_ch.try_recv(&mut msg)
         && msg.msg_type == protocol::input::MSG_POINTER_STATE_CONFIG
     {
-        // SAFETY: msg_type is MSG_POINTER_STATE_CONFIG; payload is PointerStateConfig.
-        let cfg: protocol::input::PointerStateConfig = unsafe { msg.payload_as() };
-        cfg.state_va as usize
+        if let Some(protocol::input::Message::PointerStateConfig(cfg)) =
+            protocol::input::decode(msg.msg_type, &msg.payload)
+        {
+            cfg.state_va as usize
+        } else {
+            0
+        }
     } else {
         0
     };
@@ -273,7 +284,7 @@ pub extern "C" fn _start() -> ! {
     // Event loop: wait for IRQ → read events → forward to compositor
     // -----------------------------------------------------------------------
     loop {
-        let _ = sys::wait(&[irq_handle], u64::MAX);
+        let _ = sys::wait(&[irq_handle.0], u64::MAX);
 
         device.ack_interrupt();
 
@@ -312,7 +323,7 @@ pub extern "C" fn _start() -> ! {
                         sys::print(b"virtio-input: ring full, event dropped\n");
                     }
 
-                    let _ = sys::channel_signal(1);
+                    let _ = sys::channel_signal(sys::ChannelHandle(1));
                 } else {
                     // Update modifier state.
                     let mod_bit = modifier_bit(event.code);
@@ -362,7 +373,7 @@ pub extern "C" fn _start() -> ! {
                         sys::print(b"virtio-input: ring full, event dropped\n");
                     }
 
-                    let _ = sys::channel_signal(1);
+                    let _ = sys::channel_signal(sys::ChannelHandle(1));
                 }
             } else if event.event_type == EV_ABS {
                 // Absolute pointer axis event from virtio-tablet.
@@ -401,7 +412,7 @@ pub extern "C" fn _start() -> ! {
                 atom.store(packed, core::sync::atomic::Ordering::Release);
             }
             // Signal core to wake and read the new state.
-            let _ = sys::channel_signal(1);
+            let _ = sys::channel_signal(sys::ChannelHandle(1));
         }
 
         // Batch-notify after reposting all consumed buffers.

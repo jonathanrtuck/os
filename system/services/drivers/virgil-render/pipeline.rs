@@ -32,7 +32,7 @@ use crate::{
 pub(crate) fn submit_3d(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     cmdbuf: &virgl::CommandBuffer,
 ) -> bool {
     let data = cmdbuf.as_dwords();
@@ -99,7 +99,7 @@ pub(crate) fn submit_3d(
 pub(crate) fn setup_pipeline(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     width: u32,
     height: u32,
 ) -> bool {
@@ -257,7 +257,7 @@ pub(crate) fn setup_pipeline(
 pub(crate) fn clear_screen(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     width: u32,
     height: u32,
 ) {
