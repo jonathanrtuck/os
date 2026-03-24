@@ -183,9 +183,7 @@ pub fn free_frames(pa: Pa, order: usize) {
     // Uses runtime ram_end() (from DTB) instead of the compile-time upper bound.
     // Gated on not(test) because host tests use heap addresses, not real RAM.
     #[cfg(not(test))]
-    if pa.0 & 0xFFF != 0
-        || pa.0 < paging::RAM_START as usize
-        || pa.0 >= paging::ram_end() as usize
+    if pa.0 & 0xFFF != 0 || pa.0 < paging::RAM_START as usize || pa.0 >= paging::ram_end() as usize
     {
         serial::panic_puts("free_frames: bad PA 0x");
         serial::panic_put_hex(pa.0 as u64);

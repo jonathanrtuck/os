@@ -28,6 +28,8 @@
 //! ```text
 //! 0x0800_0000  GICv3 (distributor + redistributor, CPU interface via system registers)
 //! 0x0900_0000  PL011 UART
+//! 0x0901_0000  PL031 RTC
+//! 0x0902_0000  pvpanic (paravirtual panic notification)
 //! 0x0A00_0000  Virtio MMIO (32 slots, 0x200 stride)
 //! 0x4000_0000  RAM_START ─── kernel image (.text/.rodata/.data/.bss)
 //!              __kernel_end ─ heap (16 MiB, linked-list + slab allocator)
@@ -65,7 +67,10 @@
 
 extern crate alloc;
 
-use core::panic::PanicInfo;
+use core::{
+    panic::PanicInfo,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use context::Context;
 
@@ -109,6 +114,8 @@ mod waitable;
 /// Not a virtio device — uses a distinct ID range (200+) so init can
 /// differentiate it from virtio devices (IDs 1–26).
 const DEVICE_ID_PL031_RTC: u32 = 200;
+/// SGI 0 is used as the inter-processor interrupt (IPI) for cross-core wakeup.
+const SGI_IPI: u32 = 0;
 /// Virtio MMIO constants for device probe.
 const VIRTIO_MAGIC: u32 = 0x7472_6976;
 const VIRTIO_MMIO_BASE_PA: u64 = 0x0A00_0000;
@@ -119,6 +126,12 @@ const VIRTIO_IRQ_BASE: u32 = 48; // SPI 16 = GIC IRQ 48
 /// Init ELF — the only process the kernel spawns directly.
 /// Init is the proto-OS-service that spawns all other processes.
 static INIT_ELF: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/init.elf"));
+/// pvpanic MMIO address (kernel VA). Zero if not available.
+///
+/// Set once during boot from the DTB "qemu,pvpanic-mmio" node. Read from the
+/// panic handler to signal the hypervisor. Using AtomicUsize for safe cross-core
+/// access without locks (the panic handler cannot acquire locks).
+static PVPANIC_ADDR: AtomicUsize = AtomicUsize::new(0);
 
 extern "C" {
     static __kernel_end: u8;
@@ -319,6 +332,25 @@ fn probe_virtio_devices(
 
     count
 }
+/// Signal panic to the hypervisor via the pvpanic device.
+///
+/// Writes PVPANIC_PANICKED (0x01) to the pvpanic MMIO register if the device
+/// was discovered during boot. The hypervisor captures vCPU state and writes a
+/// crash report, then terminates the VM. If pvpanic is not available, this is
+/// a no-op and the caller should fall through to PSCI SYSTEM_OFF.
+fn pvpanic_signal() {
+    let addr = PVPANIC_ADDR.load(Ordering::Relaxed);
+
+    if addr != 0 {
+        // SAFETY: addr is a kernel VA pointing to the pvpanic MMIO register,
+        // validated during boot from the DTB. The address is within the UART
+        // L2 block (0x0900_0000-0x091F_FFFF), which is mapped at boot.
+        // A single byte write to offset 0 signals panic to the hypervisor.
+        unsafe {
+            core::ptr::write_volatile(addr as *mut u8, 0x01);
+        }
+    }
+}
 /// Free the boot identity-map pages (TTBR0) now that all cores have
 /// transitioned to upper VA via TTBR1.
 fn reclaim_boot_ttbr0() {
@@ -344,6 +376,24 @@ fn reclaim_boot_ttbr0() {
 
     for &va in &pages {
         page_allocator::free_frame(memory::virt_to_phys(va));
+    }
+}
+/// Request VM shutdown via PSCI SYSTEM_OFF.
+///
+/// Issues an HVC call to the hypervisor. If handled, the VM terminates and
+/// this function does not return. If the hypervisor doesn't handle it (e.g.,
+/// bare metal), the HVC returns and the caller should fall through to a
+/// spin loop.
+fn system_off() {
+    // SAFETY: HVC #0 with PSCI_SYSTEM_OFF (0x84000008) in x0. This is a
+    // hypervisor call — no memory access, but may have side effects (VM
+    // termination), so nomem is NOT used per project convention.
+    unsafe {
+        core::arch::asm!(
+            "hvc #0",
+            in("x0") 0x8400_0008u64,
+            options(nostack),
+        );
     }
 }
 /// Try to parse a DTB at the given physical address. Returns None if the
@@ -464,9 +514,6 @@ fn write_device_manifest(
         }
     }
 }
-
-/// SGI 0 is used as the inter-processor interrupt (IPI) for cross-core wakeup.
-const SGI_IPI: u32 = 0;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn irq_handler(ctx: *mut Context) -> *const Context {
@@ -629,10 +676,12 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     let ram_end = if let Some(ref dt) = device_table {
         if let Some((base, size)) = dt.memory_region() {
             let dtb_ram_end = base.saturating_add(size);
+
             // Sanity: base must match our known RAM start, and end must not
             // exceed what boot.S identity-mapped (RAM_END_MAX).
             if base == paging::RAM_START && dtb_ram_end <= paging::RAM_END_MAX {
                 paging::set_ram_end(dtb_ram_end);
+
                 dtb_ram_end as usize
             } else {
                 paging::RAM_END_MAX as usize
@@ -662,6 +711,21 @@ pub extern "C" fn kernel_main(dtb_pa: u64) -> ! {
     serial::puts("  🧩 frames - ");
     serial::put_u32(page_allocator::free_count() as u32);
     serial::puts(" free (buddy allocator, 4k–8m)\n");
+
+    // pvpanic: paravirtual panic notification (QEMU pvpanic-mmio spec).
+    // Discovered as early as possible so it's available for any subsequent panic.
+    // The address is in the UART L2 block (0x0900_0000), already mapped at boot.
+    if let Some(ref dt) = device_table {
+        if let Some(dev) = dt.find_first("qemu,pvpanic-mmio") {
+            let pa = dev.base_address();
+
+            if pa != 0 {
+                PVPANIC_ADDR.store(pa as usize + memory::KERNEL_VA_OFFSET, Ordering::Relaxed);
+
+                serial::puts("  🚨 pvpanic - registered\n");
+            }
+        }
+    }
 
     // Wire DTB into device initialization.
     let gic_from_dtb = if let Some(ref dt) = device_table {
@@ -873,6 +937,7 @@ pub extern "C" fn user_fault_handler(ctx: *mut Context) -> *const Context {
     serial::panic_puts(" FAR=0x");
     serial::panic_put_hex(far);
     serial::panic_puts("\n");
+
     let result = scheduler::exit_current_from_syscall(ctx);
 
     validate_context_before_eret(result);
@@ -897,6 +962,13 @@ fn panic(info: &PanicInfo) -> ! {
     }
 
     metrics::panic_dump();
+
+    // Signal the hypervisor to capture state and write a crash report.
+    // pvpanic is the primary mechanism — the hypervisor exits immediately.
+    // SYSTEM_OFF is the fallback for hypervisors without pvpanic support.
+    // Spin loop is the ultimate fallback if neither mechanism terminates the VM.
+    pvpanic_signal();
+    system_off();
 
     loop {
         core::hint::spin_loop();
