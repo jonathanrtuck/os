@@ -47,7 +47,7 @@ mod typography;
 
 use protocol::{
     compose::{ImageConfig, RtcConfig, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG},
-    core_config::{CoreConfig, MSG_CORE_CONFIG, MSG_SCENE_UPDATED},
+    core_config::{CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE, MSG_SCENE_UPDATED},
     edit::{
         CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE,
         MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE,
@@ -1268,6 +1268,21 @@ pub extern "C" fn _start() -> ! {
     let fb_width = config.fb_width;
     let fb_height = config.fb_height;
 
+    // Read frame rate from separate message (CoreConfig is full at 56 bytes).
+    // Init sends FrameRateMsg immediately after CoreConfig on the same channel.
+    let _ = sys::wait(&[0], 100_000_000); // 100ms timeout on init channel
+    let frame_rate: u64 = if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_FRAME_RATE {
+        let fr: FrameRateMsg = unsafe { msg.payload_as() };
+        if fr.frame_rate > 0 {
+            fr.frame_rate as u64
+        } else {
+            60
+        }
+    } else {
+        60
+    };
+    let frame_interval_ns: u64 = 1_000_000_000 / frame_rate;
+
     if config.doc_va == 0 || config.scene_va == 0 {
         sys::print(b"core: bad config\n");
         sys::exit();
@@ -1521,31 +1536,30 @@ pub extern "C" fn _start() -> ! {
                 0
             }
         };
-        let scroll_timeout_ns: u64 = if state().scroll_animating || state().slide_animating {
-            16_000_000 // 16ms ~ 60fps
+        // ── Animation timeout ─────────────────────────────────────
+        // Single question: is anything visually animating?
+        // If yes, wake at display refresh rate for smooth frames.
+        // If no, sleep until the next timer event or IPC wake.
+        let any_animating =
+            state().scroll_animating || state().slide_animating || state().timeline.any_active();
+
+        let timeout_ns: u64 = if any_animating {
+            frame_interval_ns
         } else {
-            u64::MAX
-        };
-        let blink_timeout_ns: u64 = {
             let s = state();
-            if s.timeline.any_active() {
-                16_000_000 // 16ms for smooth fade animation
+            let elapsed = now_ms.saturating_sub(s.blink_phase_start_ms);
+            let remaining_ms = match s.blink_phase {
+                BlinkPhase::VisibleHold => BLINK_VISIBLE_MS.saturating_sub(elapsed),
+                BlinkPhase::FadeOut => BLINK_FADE_OUT_MS.saturating_sub(elapsed),
+                BlinkPhase::HiddenHold => BLINK_HIDDEN_MS.saturating_sub(elapsed),
+                BlinkPhase::FadeIn => BLINK_FADE_IN_MS.saturating_sub(elapsed),
+            };
+            if remaining_ms == 0 {
+                1_000_000 // 1ms — transition imminent
             } else {
-                let elapsed = now_ms.saturating_sub(s.blink_phase_start_ms);
-                let remaining_ms = match s.blink_phase {
-                    BlinkPhase::VisibleHold => BLINK_VISIBLE_MS.saturating_sub(elapsed),
-                    BlinkPhase::FadeOut => BLINK_FADE_OUT_MS.saturating_sub(elapsed),
-                    BlinkPhase::HiddenHold => BLINK_HIDDEN_MS.saturating_sub(elapsed),
-                    BlinkPhase::FadeIn => BLINK_FADE_IN_MS.saturating_sub(elapsed),
-                };
-                if remaining_ms == 0 {
-                    1_000_000 // 1ms — transition imminent
-                } else {
-                    remaining_ms.saturating_mul(1_000_000)
-                }
+                remaining_ms.saturating_mul(1_000_000)
             }
         };
-        let timeout_ns = scroll_timeout_ns.min(blink_timeout_ns);
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
                 &[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE],
