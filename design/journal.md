@@ -4,6 +4,122 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Content Pipeline Architecture (2026-03-24)
+
+**Status:** IMPLEMENTED (2026-03-24). Content Region + File Store + PNG decode + registry-based font lookup.
+
+### The question
+
+How should image content (and eventually video, audio, compound parts) flow from file bytes to pixels on screen? Triggered by a concrete question: switching the test gradient image to the real test.png loaded via 9p.
+
+### The wrong answer we almost built
+
+The initial proposal (Option B) was: core references encoded PNG bytes in the scene graph, the render service decodes and caches. This seemed efficient (render service owns textures, no pixel copy through the scene graph) and followed the font precedent (render services parse TTF bytes directly).
+
+**This violates the architecture.** The decision checklist (`architecture.md:191`) is unambiguous:
+
+- "Does it require understanding what content _is_? → OS service."
+- "Does it turn positioned visual elements into pixels? → Compositor."
+- "If you find yourself adding content-type awareness to the compositor, the responsibility is in the wrong place."
+
+PNG decoding is content-type understanding, not visual rendering. The decoded BGRA pixels are a visual primitive; the PNG file is a content artifact. The compositor must never see encoded files.
+
+**The font precedent was misleading.** Glyph rasterization in the compositor IS visual primitive rendering (device-dependent: hinting, density, AA). Image decoding is NOT (device-independent: same pixels regardless of display). The architecture document explicitly places glyph rasterization in the compositor (line 74, 87). There is no anomaly to resolve.
+
+### The three data transformations
+
+The content pipeline has exactly three stages. Each is a data transformation with a clear interface:
+
+```text
+File bytes  ──[decode]──→  Decoded content  ──[layout]──→  Scene graph  ──[render]──→  Pixels
+              (leaf node)                     (OS service)                (compositor)
+```
+
+| Stage  | Responsibility                                                                   | Knows about     |
+| ------ | -------------------------------------------------------------------------------- | --------------- |
+| Decode | Format internals (PNG chunks, JPEG DCT, MP4 atoms)                               | One format      |
+| Layout | Content semantics (text wraps, images have dimensions, parts have relationships) | Content types   |
+| Render | Visual primitives (rectangles, pixel blits, glyph outlines, Bézier paths)        | Geometry, color |
+
+Decoders are leaf nodes — complex inside, simple interface. Called by core (in-process library for simple formats, out-of-process service for complex ones like video). The interface is stable; implementations are swappable.
+
+### Three memory regions
+
+| Region             | Writer              | Reader            | Contents                                                                                 | Lifetime                   |
+| ------------------ | ------------------- | ----------------- | ---------------------------------------------------------------------------------------- | -------------------------- |
+| **File Store**     | Filesystem (9p/blk) | Core only         | Raw encoded file bytes (PNG, TTF, MP4)                                                   | Tied to file on disk       |
+| **Content Region** | Core (via decoders) | Core + Compositor | Decoded pixels, font TTF data, frame rings                                               | Tied to open documents     |
+| **Scene Graph**    | Core                | Compositor        | Visual primitives + small inline data (glyph arrays, path commands, small pixel buffers) | Per-frame, triple-buffered |
+
+**The compositor never sees the File Store.** It only reads decoded/rendering data from the Content Region and visual primitives from the Scene Graph.
+
+Today these are conflated: the "font buffer" carries raw fonts AND raw PNG bytes AND is shared with everyone. The font buffer needs to become the Content Region (decoded rendering data, shared with compositor) with raw file bytes staying in core-private memory (File Store).
+
+Note: font TTF data belongs in the Content Region, not the File Store, because it's rendering data — the compositor reads it for glyph rasterization. The fact that it happens to be the same bytes as the file on disk is incidental.
+
+### Content Region design
+
+The Content Region is a persistent shared memory region with a registry:
+
+- **Allocated by init** at boot (generous fixed size, e.g., 32–64 MB)
+- **Managed by core** — core decides what's loaded, allocated, evicted
+- **Read-only for compositor** — compositor reads at offsets the registry specifies
+
+Registry: fixed header with entry table. Each entry: offset, length, content class (font/pixels/frame-ring), generation counter (for cache invalidation in the compositor).
+
+**Write-once semantics for concurrency.** Entries are immutable once written. Content updates (image re-decoded after edit) create new entries with new content_ids. The scene graph generation is the synchronization mechanism — the compositor reads the old entry until it picks up the new scene graph generation referencing the new entry. Old entries are freed via generation-based GC: with triple buffering, at most 3 generations are in flight; core frees entries no longer referenced by any active generation.
+
+**The Content Region is a decode cache.** File Store is the source of truth. Content Region holds the hot working set. Eviction policy (e.g., LRU for offscreen documents) is core's concern. Re-decode from File Store when scrolled back. Needs a real allocator (free-list with coalescing, not just bump).
+
+### Scene graph content types
+
+```text
+None            — pure container (rectangles, selection highlights)
+InlineImage     — small pixel buffer in inline data buffer (icons, cursors)
+Image           — decoded pixels in Content Region (photos, illustrations)
+Stream          — time-varying frame ring in Content Region (video, animation)
+Path            — cubic Bézier vector geometry
+Glyphs          — shaped glyph IDs (compositor rasterizes from font data in Content Region)
+```
+
+`InlineImage` is for small, per-frame, potentially regenerated content. `Image` is for large, persistent, decoded content. The distinction is explicit in the type. (Long-term, InlineImage may merge into Image if all persistent pixel data moves to the Content Region.)
+
+### How each content class flows through
+
+**Text:** UTF-8 bytes → (no decode needed) → core shapes + lays out → Glyphs nodes in scene graph → compositor rasterizes from font data in Content Region.
+
+**Image:** PNG bytes in File Store → core calls png_decode() library → BGRA pixels in Content Region → core reads header for dimensions, lays out → Image node in scene graph (content_id, w, h) → compositor blits from Content Region. Compositor never sees PNG.
+
+**Video (future, v0.6):** MP4 in File Store → decode service (separate process) demuxes/decompresses → frame ring in Content Region → core sets playhead (start time, play/pause/seek state) → Stream node in scene graph → compositor samples current frame by wall-clock time. Core does not run at video framerate; it sets the playhead once and the compositor computes which frame to show at render time (same pattern as cursor blink — time-dependent rendering is a compositor concern).
+
+### Format discrimination
+
+The scene graph `Image` node carries a `content_id` referencing a Content Region entry. It does not carry a mimetype or format hint. The compositor doesn't need to know the source format — it sees decoded BGRA pixels. All format discrimination happens before the scene graph, in core's decoder dispatch (keyed on the document's mimetype, which is OS-managed metadata per Decision #5).
+
+### Dimensions from file headers
+
+Core needs image dimensions for layout without full decoding. Every image format puts dimensions in a fixed-position header (PNG: bytes 16-23; JPEG: SOF marker scan; WebP: bytes 12-29; GIF: bytes 6-9; BMP: bytes 18-25). A header-only parse function per format (~30 lines each) is sufficient. JPEG is the only one requiring a marker scan; all others are at fixed offsets.
+
+### What this means for the current code
+
+1. Rename/redesign "font buffer" → Content Region (with registry, allocator, generation tracking)
+2. Split file loading: raw bytes stay in core-private memory (File Store), decoded content goes to Content Region
+3. Move PNG decoder from `test/tests/png_decoder.rs` to a library callable by core
+4. Core decodes PNG into Content Region, writes Image node with content_id
+5. Delete `generate_test_image()` in core
+6. `CompositorConfig` carries Content Region base VA (replaces `font_buf_va`)
+7. Render services resolve content_ids via Content Region registry
+
+### Deferred
+
+- Content Region allocator implementation (free-list with coalescing)
+- Generation-based GC for stale entries
+- Stream content type and frame ring layout (v0.6)
+- Whether InlineImage can be eliminated entirely (all persistent pixels in Content Region)
+- Content Region growth/resize strategy (if fixed size proves insufficient)
+
+---
+
 ## Coordinate Model: Fixed-Point Units (2026-03-23)
 
 **Status:** SETTLED (2026-03-23). Unit: 1/1024 pt. Absolute scroll. AffineTransform stays f32.

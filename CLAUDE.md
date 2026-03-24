@@ -73,7 +73,9 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Current state (2026-03-23):** v0.3 Phase 4 (Visual Polish) IN PROGRESS. 2,145 tests pass.
+**Current state (2026-03-24):** v0.3 Phase 4 (Visual Polish) IN PROGRESS. 2,153 tests pass.
+
+**Content Pipeline Architecture (2026-03-24):** IMPLEMENTED. Three memory regions: File Store (1 MiB, core-private raw bytes), Content Region (4 MiB, shared decoded content with registry), Scene Graph (per-frame visual primitives). Init allocates both, loads fonts into Content Region + PNG into File Store. Core decodes PNG via `drawing::png`, writes decoded BGRA pixels into Content Region, creates `Content::Image` node with content_id. Render services find fonts and images via `protocol::content` registry lookup. Compositor never sees encoded files. See `design/journal.md` "Content Pipeline Architecture" entry for design rationale.
 
 **Phase 4 progress so far:**
 
@@ -85,8 +87,10 @@ Read these before making any design suggestions:
 - **Cursor-only frames (2026-03-23):** Pointer state register shared with metal-render (init allocates in Phase 1, before render service start). Core skips scene publish for position-only moves. Metal-render detects `!scene_changed && cursor_moved` → sends lightweight cursor-plane-only command (no scene walk). Hardware cursor plane pattern: fully decoupled from content rendering.
 - **Spring substep fix (2026-03-23):** Semi-implicit Euler diverged at dt > 33ms (stiffness=600). Root cause: switch from hardcoded 1/60 dt to actual frame_dt (capped at 50ms). Fix: 4ms fixed substeps inside `Spring::tick()`. Default settle threshold raised to 0.5 (f32 precision limit at large values).
 - **Headless visual testing (2026-03-23):** Hypervisor background mode (`--events` uses `.accessory` activation policy — no focus stealing, no Dock icon). `move x y` event script command. `system/test/imgdiff.py` for numerical screenshot verification (page edges, colored regions, pixel diffs).
+- **Millipoint coordinates (2026-03-23):** 1/1024 pt fixed-point coordinate unit (Mpt/Umpt). Unified animation tick at actual display refresh rate (120 Hz ProMotion). See journal.
+- **Content pipeline (2026-03-24):** PNG decoder in `libraries/drawing/png.rs`. Content Region types in `protocol/content.rs`. `ContentRegionHeader` with 64-entry registry. `Content::InlineImage` (per-frame scene data) vs `Content::Image` (Content Region persistent data via content_id). All 3 render services use registry-based font lookup. File Store (core-only) holds raw file bytes; Content Region (shared) holds fonts + decoded pixels. `test_gen.rs` deleted.
 - **Deferred:** AA transition softness tuning, italic rendering (in journal).
-- **Next:** Coordinate model decision (fixed-point units — see journal). Animation tick architecture cleanup (see journal). Then declare v0.3 complete or continue polish.
+- **Next:** Declare v0.3 complete or continue polish.
 
 **Completed phases (see git log for details):**
 
@@ -104,9 +108,9 @@ Read these before making any design suggestions:
 Core (shaping, layout, scene building) → Scene Graph (shared memory) → Render Service → Display
 ```
 
-Content types: `None`, `Path`, `Glyphs`, `Image`. Three render services: `metal-render` (default), `cpu-render`, `virgil-render`.
+Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Three render services: `metal-render` (default), `cpu-render`, `virgil-render`.
 
-**IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. See `system/DESIGN.md` §0 for full details.
+**IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. **Content Region** (4 MiB shared memory with registry) for persistent decoded content (font TTF data, decoded image pixels) — init allocates, core writes, render services read. See `system/DESIGN.md` §0 for full details.
 
 **Crash reporting:** Kernel panic → diagnostic output via UART → `pvpanic_signal()` (MMIO write to 0x0902_0000) → hypervisor captures vCPU registers + serial log → crash report at `/tmp/hypervisor-crash-<ts>.log` → `exit(1)`. Fallback: `system_off()` (PSCI SYSTEM_OFF). pvpanic device discovered from DTB at boot, address stored in `PVPANIC_ADDR` AtomicUsize.
 
@@ -147,7 +151,7 @@ Content types: `None`, `Path`, `Glyphs`, `Image`. Three render services: `metal-
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,145 tests).
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,153 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds

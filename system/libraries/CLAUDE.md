@@ -5,7 +5,7 @@ Shared `#![no_std]` libraries used by userspace services and programs.
 | Library      | Purpose                                                                                                | Status       |
 | ------------ | ------------------------------------------------------------------------------------------------------ | ------------ |
 | `sys/`       | Syscall wrappers + userspace GlobalAlloc (heap via `memory_alloc` syscall)                             | Foundational |
-| `protocol/`  | IPC message types and payload structs — single source of truth for all 9 protocol boundaries           | Foundational |
+| `protocol/`  | IPC message types, payload structs (9 boundaries), Content Region shared memory layout (`content.rs`)  | Foundational |
 | `virtio/`    | Virtio MMIO device initialization + virtqueue management                                               | Foundational |
 | `drawing/`   | Surfaces, colors, PNG decoder, Porter-Duff compositing, sRGB blending, palette                         | Foundational |
 | `fonts/`     | TrueType rasterizer, analytic coverage, outline dilation (stem darkening), glyph cache                 | Foundational |
