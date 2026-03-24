@@ -18,7 +18,7 @@ This project explores inverting that: **OS → Document → Tool.** Documents ha
 
 ## status
 
-The project has a working interactive demo running on a bare-metal aarch64 microkernel. The display pipeline renders text with anti-aliasing, stem darkening, and variable font axes, composites z-ordered surfaces with rounded corners, Gaussian-blurred box shadows, and layer opacity over a radial gradient background, decodes PNG images, renders cubic bezier paths, and supports a text editor with selection, scrolling, and mouse click-to-position plus an image viewer — switchable at runtime with context-aware glyph icons. A hardware RTC clock ticks in the title bar. Three render services are available: native Metal GPU rendering (`metal-render`) via the [hypervisor](https://github.com/jonathanrtuck/hypervisor), GPU-accelerated Virgil3D rendering (`virgil-render`) via QEMU, and CPU software rendering (`cpu-render`) — auto-selected at boot. The rendering pipeline uses a configurable-cadence frame scheduler (60/30/120fps) with event coalescing and idle optimization, triple-buffered incremental scene graph updates with change-list-driven damage tracking, 2D affine transforms, fractional DPI scaling, and bilinear image resampling — only dirty screen regions are re-rendered and transferred to the GPU.
+The project has a working interactive demo running on a bare-metal aarch64 microkernel. The display pipeline renders text with macOS-grade anti-aliasing (analytic coverage, outline dilation, subpixel glyph positioning), composites z-ordered surfaces with rounded corners, analytical Gaussian shadows, backdrop blur, and layer opacity over a radial gradient background, decodes PNG images, renders cubic bezier paths and Tabler vector icons, and supports a text editor with selection, smooth scrolling, and mouse click-to-position plus an image viewer — switchable at runtime with context-aware glyph icons via a spring-animated document strip (Ctrl+Tab). A hardware RTC clock ticks in the title bar. Three render services are available: native Metal GPU rendering (`metal-render`) via the [hypervisor](https://github.com/jonathanrtuck/hypervisor), GPU-accelerated Virgil3D rendering (`virgil-render`) via QEMU, and CPU software rendering (`cpu-render`) — auto-selected at boot. The rendering pipeline uses a display-refresh-rate frame scheduler (120 Hz on ProMotion, 60 Hz default) with event coalescing and idle optimization, triple-buffered incremental scene graph updates with change-list-driven damage tracking, millipoint coordinates (1/1024 pt), 2D affine transforms, fractional DPI scaling, and bilinear image resampling — only dirty screen regions are re-rendered and transferred to the GPU.
 
 For the full design landscape, see the [decision register](design/decisions.md) and the [exploration journal](design/journal.md).
 
@@ -40,6 +40,8 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Layout library** — Unified text layout engine. Single `layout_paragraph()` function for both monospace and proportional text, parameterized by a `FontMetrics` trait. `CharBreaker` for character-level wrapping (monospace), `WordBreaker` for word-boundary wrapping (proportional). Alignment (left, center, right). Standalone `byte_to_line_col()` for cursor positioning.
 
+**Animation library** — Easing functions (standard CSS curves), spring physics (semi-implicit Euler with 4ms fixed substeps), and timeline sequencing. Used for smooth scroll, cursor blink, and document slide transitions (Ctrl+Tab).
+
 **Scene graph library** — Typed visual node tree in shared memory. Triple-buffered with mailbox semantics for lock-free producer/consumer across processes. Four geometric content types: `None` (containers/solid fills), `Image` (pixel buffers), `Path` (cubic bezier contours), `Glyphs` (shaped glyph runs). Change list for incremental damage tracking. Copy-forward with selective mutation for zero-allocation updates. Per-node 2D affine transforms, corner radius, layer opacity, box shadows.
 
 **Text editor** — Cursor movement, text selection (shift+arrow), scrolling, mouse click-to-position, insert and delete. Communicates with core via IPC write requests.
@@ -50,7 +52,7 @@ For the full design landscape, see the [decision register](design/decisions.md) 
 
 **Assets via 9P** — Fonts, images, and icons loaded at boot from the host filesystem via virtio-9p passthrough.
 
-**Tests** — ~2,152 host-side tests.
+**Tests** — ~2,153 host-side tests.
 
 ## running the demo
 
@@ -132,7 +134,7 @@ os/
 │   │   ├── stress/                  # IPC stress test program
 │   │   ├── fuzz/                    # Fuzzing harness
 │   │   └── fuzz-helper/             # Fuzzing helper
-│   ├── test/                        # Host-side unit + integration tests (~2,152 tests)
+│   ├── test/                        # Host-side unit + integration tests (~2,153 tests)
 │   └── share/                       # Runtime assets (fonts, images, icons)
 ├── prototype/
 │   └── files/                       # Files interface prototype (macOS-backed)
@@ -150,6 +152,13 @@ If you’re curious about the design, read in this order:
 3. **[Decisions](design/decisions.md)** — All 17 design decisions: settled positions with reasoning, open questions with tradeoffs, considered-and-rejected alternatives
 4. **[Architecture](design/architecture.md)** — The system’s architectural narrative: pipeline, responsibilities, decision checklist
 5. **[Journal](design/journal.md)** — Where the design exploration is right now: open threads, discussion backlog, insights
+
+If you're curious about the implementation, start here:
+
+1. **[System Design](system/DESIGN.md)** — Userspace architecture: libraries, services, drivers, what's foundational vs scaffolding
+2. **[Kernel Design](system/kernel/DESIGN.md)** — Rationale for every kernel subsystem (boot, memory, scheduling, IPC, devices)
+3. **[Kernel README](system/kernel/README.md)** — Feature list, build/test commands, source file guide
+4. **[Rendering Capabilities](system/rendering-capabilities.md)** — What the rendering pipeline can and cannot do, compared to real systems
 
 ## influences
 

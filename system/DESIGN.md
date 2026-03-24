@@ -24,30 +24,39 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **How it fits together:**
 
 ```text
-┌────────────────────────────────────────────────────────┐
-│  User Programs     (text-editor, echo)                 │  🟡/🔴
-├────────────────────────────────────────────────────────┤
-│  Platform Services                                     │
-│  ┌────────┐ ┌──────┐ ┌────────────┐ ┌──────────────┐   │
-│  │  Init  │ │ Core │ │ Compositor │ │   Drivers    │   │  🟡/🟢
-│  │ (root  │ │ (OS  │ │  (event    │ │ (virtio-blk/ │   │
-│  │  task) │ │  svc,│ │   loop,    │ │  gpu/input/  │   │
-│  │        │ │ sole │ │   pixel    │ │  9p/console) │   │
-│  │        │ │writer│ │   pump)    │ │              │   │
-│  └────────┘ └──┬───┘ └─────┬──────┘ └──────┬───────┘   │
-│       input→core│  core→comp│(scene)  comp→gpu│        │
-│        editor↔core  (shared mem)       (IPC)           │
-├────────────────────────────────────────────────────────┤
-│  Libraries                                             │
-│  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐    │  🟢 foundational
-│  │ sys │ │ virtio │ │ drawing │ │ fonts │ │ scene │    │
-│  └─────┘ └────────┘ └─────────┘ └───────┘ └───────┘    │
-│  ┌─────┐ ┌──────────┐ ┌────────┐ ┌─────┐               │
-│  │ ipc │ │ protocol │ │ render │ │ l.d │               │
-│  └─────┘ └──────────┘ └────────┘ └─────┘               │
-├────────────────────────────────────────────────────────┤
-│  Kernel (28 syscalls, see kernel/DESIGN.md)            │  🟢 production
-└────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│  User Programs     (text-editor, echo)                    │  🟡/🔴
+├───────────────────────────────────────────────────────────┤
+│  Platform Services                                        │
+│  ┌────────┐ ┌─────────┐ ┌──────────────────────────────┐  │
+│  │  Init  │ │  Core   │ │      Render Services         │  │  🟡/🟢
+│  │ (root  │ │ (OS svc)│ │ ┌─────────────┐ ┌──────────┐ │  │
+│  │  task) │ │         │ │ │metal-render │ │cpu-render│ │  │
+│  │        │ │   sole  │ │ │  (Metal GPU)│ │ (CpuBack │ │  │
+│  │        │ │  writer │ │ └─────────────┘ │  +gpu 2D)│ │  │
+│  └────────┘ └───┬─────┘ │ ┌─────────────┐ └──────────┘ │  │
+│      input→core │       │ │virgil-render│              │  │
+│   editor↔core   │       │ │ (Gallium3D) │              │  │
+│                 │       │ └─────────────┘              │  │
+│          core→render    └──────────────────────────────┘  │
+│          (scene graph,                                    │
+│           shared mem)          ┌──────────────────┐       │
+│                                │     Drivers      │       │
+│                                │ (virtio-blk/     │       │
+│                                │  input/9p/       │       │
+│                                │  console)        │       │
+│                                └──────────────────┘       │
+├───────────────────────────────────────────────────────────┤
+│  Libraries                                                │
+│  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐       │  🟢 foundational
+│  │ sys │ │ virtio │ │ drawing │ │ fonts │ │ scene │       │
+│  └─────┘ └────────┘ └─────────┘ └───────┘ └───────┘       │
+│  ┌─────┐ ┌──────────┐ ┌────────┐ ┌───────────┐ ┌────────┐ │
+│  │ ipc │ │ protocol │ │ render │ │ animation │ │ layout │ │
+│  └─────┘ └──────────┘ └────────┘ └───────────┘ └────────┘ │
+├───────────────────────────────────────────────────────────┤
+│  Kernel (28 syscalls, see kernel/DESIGN.md)               │  🟢 production
+└───────────────────────────────────────────────────────────┘
 ```
 
 **Process model:** Kernel spawns only init. Init embeds all other ELF binaries and spawns everything else. Microkernel pattern (Fuchsia component_manager, seL4 root task). This pattern is foundational; init's implementation is scaffolding.

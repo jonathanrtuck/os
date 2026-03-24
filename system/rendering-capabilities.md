@@ -1,6 +1,6 @@
 # Rendering Pipeline — Capabilities and Limitations
 
-An honest audit of what this OS's rendering pipeline can and cannot do, compared against real systems. Updated 2026-03-20.
+An honest audit of what this OS's rendering pipeline can and cannot do, compared against real systems. Updated 2026-03-24.
 
 ---
 
@@ -12,14 +12,15 @@ Event-driven 2D document rendering with pluggable render services:
 Core (layout + scene build) → Scene Graph (shared memory) → Render Service → Display
 ```
 
-The scene graph is the interface. Render services are thick GPU drivers that read the scene graph, perform the full tree walk, and produce pixels. Two render services:
+The scene graph is the interface. Render services are thick drivers that read the scene graph, perform the full tree walk, and produce pixels. Three render services:
 
-- **`cpu-render`**: software rasterization via `CpuBackend` + virtio-gpu 2D presentation. Used for headless testing and non-virgl QEMU.
-- **`virgil-render`**: GPU-accelerated rendering via Gallium3D command streams (virtio-gpu 3D / Virgl). Glyph atlas, image textures, stencil-then-cover path rendering. Same scene graph interface, hardware-accelerated compositing and blending.
+- **`metal-render`** (default): Native Metal GPU rendering via serialized Metal commands over a custom virtio device. Used with the [hypervisor](https://github.com/jonathanrtuck/hypervisor) on Apple Silicon. 4x MSAA, sRGB render targets, analytical Gaussian shadows, on-demand glyph atlas, hardware cursor plane. Auto-detects native display resolution (e.g., 4112×2658@120Hz on ProMotion).
+- **`virgil-render`**: GPU-accelerated rendering via Gallium3D command streams (virtio-gpu 3D / Virgl). Glyph atlas, image textures, stencil-then-cover path rendering. Used with virgl-capable QEMU.
+- **`cpu-render`**: Software rasterization via `CpuBackend` + virtio-gpu 2D presentation. Used for headless testing and non-virgl QEMU.
 
-Both live as sibling directories under `services/drivers/`. Init probes GPU capabilities at boot and selects the appropriate render service.
+All three live as sibling directories under `services/drivers/`. Init probes GPU capabilities at boot and selects the appropriate render service.
 
-The pipeline uses a **configurable-cadence frame scheduler** (60/30/120fps) with event coalescing, frame budgeting, and idle optimization. Updates are driven by state changes (keystroke, clock tick, pointer move), coalesced within frame boundaries.
+The pipeline uses a **configurable-cadence frame scheduler** with actual display refresh rate (120 Hz on ProMotion, 60 Hz on QEMU), event coalescing, frame budgeting, and idle optimization. Updates are driven by state changes (keystroke, clock tick, pointer move), coalesced within frame boundaries.
 
 ---
 
@@ -27,22 +28,48 @@ The pipeline uses a **configurable-cadence frame scheduler** (60/30/120fps) with
 
 ### Text rendering
 
-The strongest part of the pipeline. Comparable to macOS Core Text for Latin text at common sizes.
+Comparable to macOS Core Text for Latin text at common sizes. The result of a dedicated quality sprint matching the macOS reference pixel-for-pixel.
 
-- **TrueType rasterizer** with LCD subpixel rendering (6× horizontal, 4× vertical oversampling)
-- **Stem darkening** for heavier strokes at small sizes
-- **Variable font axes** (weight, optical size, MONO) with content-type-aware defaults
-- **HarfBuzz-level shaping** via read-fonts (glyph lookup, horizontal metrics, kerning)
+- **Analytic area coverage rasterizer** — exact signed-area trapezoids (not quantized), matching macOS precision
+- **Outline dilation** for stem darkening — symmetric miter-join (macOS formula, Pathfinder coefficients × 1.3 boost)
+- **Device-pixel rasterization** — atlas rendered at `font_size_pt × scale_factor` for crisp output at native resolution
+- **Subpixel glyph positioning** — 16.16 fixed-point advances (ShapedGlyph is 16 bytes), eliminates cursor drift from float truncation
+- **Variable font axes** (weight, optical size) with three-font stack: JetBrains Mono (mono), Inter (sans), Source Serif 4 (serif)
+- **HarfBuzz-level shaping** via HarfRust (pure Rust port, no_std) — glyph lookup, metrics, kerning
 - **Glyph cache** (LRU, keyed on glyph ID + size + axis hash) — cache hits are memory copies
 - **Gamma-correct blending** of glyph coverage maps (sRGB↔linear LUTs)
+- **On-demand glyph atlas** in metal-render — fixes ligature drops from fixed-size atlases
+
+### Text layout
+
+Unified layout engine in `libraries/layout/`:
+
+- **Single `layout_paragraph()` function** for both monospace and proportional text, parameterized by a `FontMetrics` trait
+- **`CharBreaker`** for character-level wrapping (monospace)
+- **`WordBreaker`** for word-boundary wrapping (proportional)
+- **Alignment** (left, center, right)
+- **Standalone `byte_to_line_col()`** for cursor positioning
 
 ### Compositing
 
 - **Porter-Duff source-over** with gamma-correct sRGB blending (integer math, lookup tables)
+- **NEON SIMD acceleration** for fill, blend, rounded-corner, and blur operations
 - **Per-pixel alpha** on all surfaces
-- **Z-ordered back-to-front compositing** with insertion-sort by z-order (up to 16 surfaces)
+- **Z-ordered back-to-front compositing** with insertion-sort by z-order
+- **Backdrop blur** — 3-pass box blur approximating Gaussian, used for frosted-glass chrome overlays
 
 Most desktop compositors skip gamma-correct blending. This pipeline gets it right.
+
+### Animation
+
+Full animation library (`libraries/animation/`):
+
+- **Easing functions** — standard CSS-style easing curves (ease-in, ease-out, ease-in-out, etc.)
+- **Spring physics** — semi-implicit Euler with 4ms fixed substeps for stability. Used for smooth scroll and document slide transitions
+- **Timeline sequencing** — composable animation timelines with start/end/duration
+- **Cursor blink** — phase-based blink with smooth transitions
+- **Smooth scroll** — spring-based scroll with momentum and settle detection
+- **Document strip** — horizontal strip of N document spaces with spring-based Ctrl+Tab slide transition (both documents always in scene — no teardown/rebuild on switch)
 
 ### Damage tracking
 
@@ -55,111 +82,59 @@ Most desktop compositors skip gamma-correct blending. This pipeline gets it righ
 
 Clock and cursor updates are near-zero-cost (no heap allocations, no layout). Document edits are O(visible_lines).
 
+### Cursor plane
+
+Hardware cursor decoupled from the content rendering pipeline:
+
+- **Shared pointer state register** — atomic u64 in init-allocated shared memory replaces MSG_POINTER_ABS ring messages. Eliminates input ring overflow for pointer events
+- **Cursor-only frames** — metal-render detects `!scene_changed && cursor_moved` and sends a lightweight cursor-plane-only command (no scene walk)
+- **State vs event distinction** at the IPC level: pointer position is continuous state (latest wins), button clicks are discrete events (every one matters)
+
+### Coordinate system
+
+- **Millipoint coordinates** — i32 at 1/1024 pt (Mpt/Umpt type aliases). Sub-pixel precision at any density. Range: ±2,097,151 pt (±2,489 A4 pages)
+- **Fractional DPI scaling** — f32 scale factors (1.0, 1.25, 1.5, 2.0, etc.) with pixel-snapped borders
+- **AffineTransform stays f32** — dimensionless multipliers, GPU-bound
+
 ### Other 2D primitives
 
 - **Gradients**: radial and vertical linear, dithered with Bayer 4×4 ordered dithering (band-free, deterministic)
 - **Path rendering**: Content::Path with MoveTo/LineTo/CurveTo/Close, fill and stroke, cubic beziers
+- **SVG→path pipeline**: build-time SVG path parser with stroke expansion engine, arc-to-cubic conversion. Tabler Icons (MIT) compiled into const path data
 - **Path rasterization**: cubic bezier flattening (De Casteljau), scanline fill, non-zero winding, antialiased
 - **Anti-aliased lines** (Wu's algorithm), filled/outlined rectangles, horizontal/vertical lines
 - **Rounded corners**: SDF-based fill with anti-aliased edges, NEON SIMD, corner-radius-aware child clipping
-- **Gaussian blur**: separable two-pass (horizontal/vertical), NEON SIMD, configurable radius/sigma, GPU-ready trait interface
-- **Box shadows**: blur + offset + spread, declarative on Node, damage-tracking-aware
+- **Box shadows**: analytical Gaussian in metal-render (exact erf integral per-pixel, no offscreen textures); separable blur in cpu-render/virgil-render. Configurable radius, offset, spread. Declarative on Node, damage-tracking-aware
 - **Layer opacity**: per-subtree opacity via offscreen compositing (group opacity), pool-based buffer management
+- **Clip masks**: per-subtree clip regions for non-rectangular clipping
 - **2D affine transforms**: 3×3 matrix per node, transform composition through tree, transform-aware clipping
 - **Bilinear image resampling**: for scaled/rotated content, ResamplingMethod enum for future Lanczos
 - **PNG decoding** (DEFLATE, all filter types) from byte slices
-- **Fractional DPI scaling** (f32 scale factors: 1.0, 1.25, 1.5, 2.0, etc.) with pixel-snapped borders and fractional font sizing
+- **Page surface**: white A4-proportioned page centered on dark desk background
 
 ---
 
 ## What it cannot do
 
-These are architectural constraints. Each would require structural additions to the pipeline.
+These are genuine architectural gaps. Each would require structural additions.
 
 ### No 3D rendering
 
-No 3D scene graph, no depth buffer, no projection matrix, no GPU compute. The `virgil-render` backend uses GPU hardware for 2D rendering (textured quads, glyph atlas, stencil-then-cover paths) but the pipeline is fundamentally 2D — no 3D geometry or scene representation.
+No 3D scene graph, no depth buffer, no projection matrix, no GPU compute. The GPU backends use hardware for 2D rendering (textured quads, glyph atlas, stencil-then-cover paths) but the pipeline is fundamentally 2D.
 
-**What it would take:** A 3D scene representation, vertex/mesh pipeline, camera/projection, lighting. Essentially a second rendering pipeline alongside the existing one.
-
-**Who has this:** Every modern desktop OS (via OpenGL/Vulkan/Metal/DirectX). Game engines (Unity, Unreal, Godot).
-
-**Implication for the OS:** 3D games, CAD software, WebGL-style content, and GPU-accelerated video decode are not possible. This is consistent with the project's document-centric focus — documents are 2D.
-
-### No smooth animation _(partially addressed)_
-
-The frame scheduler now provides configurable-cadence rendering (60/30/120fps) with event coalescing and frame budgeting. However, there is no animation timeline, no easing functions, no property interpolation between states.
-
-When state changes, the scene graph is updated and rendered at the next frame boundary. There is no concept of "animate property X from value A to value B over 300ms." State transitions are instantaneous within a single frame.
-
-**What remains:** An animation timeline with easing curves, property interpolation, and spring physics. The frame scheduler provides the cadence; what's missing is the interpolation layer on top.
-
-**Who has this:** macOS Core Animation (implicit animation on every CALayer property), Android Choreographer, CSS transitions/animations, every game engine.
-
-**Implication for the OS:** UI transitions (window open/close, panel slide, fade) are still step functions. No momentum scrolling, no spring physics, no kinetic gestures. But the frame scheduler ensures consistent frame pacing when animations are eventually added.
-
-### No continuous motion _(infrastructure partially ready)_
-
-The scene graph now supports sub-pixel scroll via `content_transform: AffineTransform` (f32 translation), replacing the old `scroll_y: i32`. The infrastructure for smooth scrolling exists, but the current implementation still uses integer point offsets. No momentum, no inertia, no velocity tracking.
-
-**What it would take:** Fractional scroll offsets in core (the scene graph already supports them), momentum/decay physics for scroll flinging, frame-rate-independent integration.
-
-**Who has this:** macOS (NSScrollView momentum), iOS (UIKit spring animations), every web browser (smooth-scroll), Wayland compositors.
-
-**Implication for the OS:** Scrolling is functional but not fluid. The content_transform field means smooth scroll is a core-service change, not a pipeline change.
-
-### ~~No 2D transforms~~ ✅ Implemented
-
-2D affine transforms are now supported: 3×3 matrix per node, transform composition through the tree, transform-aware clipping. Supports rotation, scaling, skew, and translation. Bilinear image resampling for transformed content.
-
-**Remaining gaps:** No rotated text rendering (text is always axis-aligned). No perspective transforms (3D). Coordinate system still uses `i16` (±32,767 points).
-
-### ~~No layer opacity~~ ✅ Implemented
-
-Per-subtree opacity is now supported via offscreen compositing (group opacity). A subtree is rendered to a temporary buffer, then composited onto the parent at the specified opacity. Pool-based buffer management avoids per-frame allocation.
-
-Fade effects, disabled UI dimming, and translucent overlays work correctly with composed opacity.
-
-### ~~No rounded corners~~ ✅ Implemented
-
-`corner_radius` on Node is now fully functional. SDF-based rounded-rect fill with anti-aliased edges, NEON SIMD acceleration, and corner-radius-aware child clipping. Buttons, cards, dialogs, and avatar thumbnails render with smooth corners.
-
-### ~~No blur or real shadows~~ ✅ Implemented
-
-Separable Gaussian blur (two-pass horizontal/vertical) with NEON SIMD acceleration, configurable radius and sigma, and a GPU-ready trait interface. Box shadows with blur + offset + spread, declarative on Node, integrated with damage tracking.
-
-**Remaining gaps:** No frosted-glass / backdrop blur (blurring content behind a surface). No drop shadows on arbitrary shapes (shadows are rectangular). Large blur radii are CPU-expensive without GPU compute.
-
-### Non-rectangular clipping _(partially implemented)_
-
-Corner-radius-aware clipping is now supported — child content is clipped to the parent's rounded rectangle. This covers the most common UI case (content inside rounded cards/panels).
-
-**Remaining gaps:** No arbitrary path clipping (clip to circle, polygon, bezier outline). No clip masks or stencil buffer. Clipping is still fundamentally rectangular, with rounded-corner SDF as a special case.
-
-**Who has this (full path clipping):** Every 2D renderer (Skia, Direct2D, Cairo, Core Graphics).
+**Implication:** 3D games, CAD, WebGL-style content not possible. Consistent with the document-centric focus — documents are 2D.
 
 ### No rich inline text
 
-One font/style per Glyphs node. To have a bold word in a paragraph, you need separate Glyphs nodes manually positioned. No inline style changes within a run.
-
-Additionally:
+One font/style per Glyphs node. No inline style switching within a text run. Additionally:
 
 - No bidirectional text (RTL, Arabic, Hebrew)
-- No complex script shaping beyond what read-fonts provides (no full Unicode text stack)
+- No complex script shaping beyond what HarfRust provides (no full Unicode text stack)
 - No text decoration (underline, strikethrough) as a text primitive
-- Monospace layout only (no proportional word-wrap / line-break algorithm)
 
-**What it would take:** Run-level font/style switching with shaping across run boundaries, the Unicode BiDi algorithm (UAX #9), a proportional line-breaking algorithm (UAX #14 or Knuth-Plass), text decoration geometry.
+**What it would take:** Run-level font/style switching with shaping across run boundaries, the Unicode BiDi algorithm (UAX #9), text decoration geometry.
 
-**Who has this:** macOS Core Text, Pango + HarfBuzz + FriBidi, DirectWrite, web browsers.
-
-**Implication for the OS:** Document rendering is limited to monospace plaintext. Rich text documents (.docx, .rtf, markdown) cannot be rendered faithfully. Non-Latin scripts are unsupported for layout (even if glyphs exist in the font).
-
-### ~~No image resampling~~ ✅ Partially implemented
-
-Bilinear resampling is now supported for scaled and rotated content (non-1:1 display). A `ResamplingMethod` enum exists for future Lanczos support.
-
-**Remaining gaps:** No Lanczos or bicubic filtering for higher-quality downscaling. No mipmap generation. Bilinear is adequate for moderate scale changes but visibly soft for large downscales.
+**Implication:** Document rendering handles single-style text (monospace code, proportional prose) but not rich text within a paragraph. Non-Latin scripts untested.
 
 ### No video or animated media
 
@@ -167,52 +142,53 @@ No codec integration, no frame decode pipeline, no audio subsystem, no A/V synch
 
 **What it would take:** Codec library (AV1/H.264/VP9 decoder), frame buffer ring, audio output driver, A/V sync clock, timeline playback control.
 
-**Who has this:** Every modern OS has a media framework (AVFoundation, GStreamer, MediaFoundation).
-
-### ~~No fractional DPI scaling~~ ✅ Implemented
-
-Scale factor is now `f32`, supporting any fractional value (1.0, 1.25, 1.5, 2.0, etc.). Pixel-snapped borders prevent sub-pixel artifacts. Fractional font sizing with glyph cache keyed on physical pixel size.
-
 ### No multi-display
 
-Single framebuffer, single resolution, configured at init. No display hotplug, no per-display scale/refresh.
+Single framebuffer, single resolution. No display hotplug, no per-display scale/refresh.
 
 **What it would take:** Display enumeration, per-display scanout, independent resolution/scale/refresh per output.
 
-**Who has this:** Every desktop OS, Wayland (wl_output), X11 (XRandR).
+### No arbitrary path clipping
+
+Clip masks handle rectangular and rounded-rect regions. No clip-to-arbitrary-bezier-path. Adequate for UI panels and cards; insufficient for complex vector artwork masking.
+
+### Remaining text gaps
+
+- No rotated text rendering (text is always axis-aligned)
+- No Lanczos or bicubic image filtering (bilinear only)
+- No italic rendering (deferred — see journal)
 
 ---
 
 ## Performance envelope
 
-| Metric                 | Current state                                              | Bottleneck                                                       | Practical ceiling                                                                            |
-| ---------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Resolution             | 1024×768 (hardcoded)                                       | CPU compositing bandwidth; virtio-gpu copy cost                  | ~4K at low refresh with NEON SIMD. CPU-bound without GPU compositing                         |
-| Compositing throughput | Scalar per-pixel blend_over                                | 1280×800 @ 60fps full recomposite = ~245 MB/s                    | NEON could do ~4× (4 pixels/cycle). Still CPU-bound for full-screen recomposite at high res  |
-| Text rendering         | Cache hit = memcpy. Miss = bezier flatten + scanline sweep | Cache misses are expensive. LRU eviction under font-size variety | Adequate for document editing. Would struggle with many font sizes or rapid font switching   |
-| Scene graph            | 512 nodes max, 64 KB data buffer, triple-buffered          | Fixed. Selection rects and glyph runs consume capacity           | Sufficient for single-document text editing. Complex compound documents would hit limits     |
-| Frame cadence          | Configurable (60/30/120fps) with event coalescing          | Frame budget enforcement. Heavy layout can miss deadline         | 60fps = 16ms budget. Event coalescing prevents redundant frames. Idle optimization saves CPU |
-| Damage tracking        | 512-bit dirty bitmap + dirty rects                         | Full repaint on data buffer exhaustion                           | Effective for all editor interactions. Bitmap covers all 512 node slots without overflow     |
+| Metric                 | Current state                                              | Bottleneck                                                        | Practical ceiling                                                                          |
+| ---------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Resolution             | Native display (e.g., 4112×2658 on Retina, configurable)   | GPU command throughput (metal-render); CPU bandwidth (cpu-render) | Retina resolutions at 120fps via metal-render. cpu-render limited to ~1080p at 60fps       |
+| Compositing throughput | NEON SIMD per-pixel blend (cpu-render); GPU (metal/virgil) | Full-screen recomposite at high res is CPU-bound in cpu-render    | metal-render bypasses this entirely via GPU compositing                                    |
+| Text rendering         | Cache hit = memcpy. Miss = outline + scanline + coverage   | Cache misses are expensive. LRU eviction under font-size variety  | Adequate for document editing. Would struggle with many font sizes or rapid font switching |
+| Scene graph            | 512 nodes max, 64 KB data buffer, triple-buffered          | Fixed. Selection rects and glyph runs consume capacity            | Sufficient for single-document editing. Complex compound documents would hit limits        |
+| Frame cadence          | Actual display refresh (120/60 Hz) with event coalescing   | Frame budget enforcement. Heavy layout can miss deadline          | 8.3ms budget at 120Hz. Event coalescing prevents redundant frames. Idle optimization       |
+| Damage tracking        | 512-bit dirty bitmap + dirty rects                         | Full repaint on data buffer exhaustion                            | Effective for all editor interactions. Bitmap covers all 512 node slots without overflow   |
 
 ---
 
 ## Comparison to real systems
 
-| System                                    | Model                                                               | Similarity                                                                          | Key difference                                                                   |
-| ----------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| **macOS Quartz / Core Animation**         | GPU-composited layer tree, hardware blur/shadow, implicit animation | Same scene-graph→compositor split                                                   | macOS has GPU compositing, per-layer transforms, implicit animation, blur        |
-| **Fuchsia Scenic**                        | Scene graph in shared memory, GPU-composited                        | Closest architectural prior art                                                     | Scenic has GPU rendering, 3D node types, view embedding                          |
-| **Wayland compositors**                   | Client renders to buffer, compositor composites via EGL/Vulkan      | Different: your compositor is the sole renderer, not a compositor of client buffers | Wayland clients own their rendering; your editors don't render at all            |
-| **Plan 9 rio**                            | CPU-rasterized, rectangular windows, no compositing                 | Similar simplicity                                                                  | Your pipeline has alpha blending, subpixel text, scene graph, damage tracking    |
-| **Game engines (2D)**                     | Frame-driven render loop, GPU batched draws, animation system       | Frame scheduler now provides similar cadence                                        | Game engines have GPU batching, animation timelines, and continuous rendering    |
-| **Terminal emulators (kitty, alacritty)** | Fixed-width glyph grid, GPU-accelerated text, damage tracking       | Closest functional analog today                                                     | The render pipeline is a very good terminal renderer with chrome and glyph icons |
+| System                            | Model                                                               | Similarity                                                           | Key difference                                                              |
+| --------------------------------- | ------------------------------------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| **macOS Quartz / Core Animation** | GPU-composited layer tree, hardware blur/shadow, implicit animation | Same scene-graph→compositor split. Font quality comparable for Latin | macOS has implicit property animation, per-layer transforms, view embedding |
+| **Fuchsia Scenic**                | Scene graph in shared memory, GPU-composited                        | Closest architectural prior art                                      | Scenic has 3D node types, view embedding, Vulkan backend                    |
+| **Wayland compositors**           | Client renders to buffer, compositor composites via EGL/Vulkan      | Different: this pipeline renders everything — editors don't render   | Wayland clients own their rendering; here editors have no pixel access      |
+| **Plan 9 rio**                    | CPU-rasterized, rectangular windows, no compositing                 | Similar simplicity                                                   | This pipeline adds alpha, subpixel text, scene graph, damage, animation     |
+| **Game engines (2D)**             | Frame-driven render loop, GPU batched draws, animation system       | Animation library + frame scheduler provide similar cadence          | Game engines have GPU batching, sprite systems, continuous rendering        |
 
 ---
 
 ## Summary
 
-This is a **high-quality 2D document renderer for static and semi-static content**. Text rendering is genuinely excellent. The architecture (one-way pipeline, scene graph interface, damage tracking) is clean and well-separated.
+This is a **high-quality 2D document renderer with animation, GPU acceleration, and macOS-grade text**. The architecture (one-way pipeline, scene graph interface, three pluggable render backends, damage tracking) is clean and well-separated.
 
-The gap between this and a modern desktop compositor is approximately: animation timeline + multi-display + proportional text layout + backdrop blur + arbitrary path clipping + smooth scroll/momentum. The pipeline has closed several major gaps (GPU rendering, rounded corners, blur/shadows, transforms, fractional scaling, layer opacity, image resampling, frame scheduling, incremental damage tracking). The remaining items are leaf-node complexity behind the existing scene graph interface. The architecture does not prevent any of these additions — it accommodates them.
+The gap between this and a modern desktop compositor is approximately: rich inline text (multi-style runs, BiDi) + multi-display + video/media + arbitrary path clipping. These are leaf-node complexity behind the existing scene graph interface. The architecture does not prevent any of these additions — it accommodates them.
 
 The design is coherent for its stated purpose: a document-centric OS where documents are first-class and tools attach to content. The rendering pipeline renders documents. It does not try to be a general-purpose graphics engine, and it should not.

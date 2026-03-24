@@ -6,7 +6,8 @@ Platform services that run as userspace processes. Each is a `#![no_std]` ELF bi
 | ------------------------- | -------------------------------------------------------------------------------- | ----------- |
 | `init/`                   | Root task: reads device manifest, spawns drivers, orchestrates display pipeline  | Scaffolding |
 | `core/`                   | OS service: sole writer, scene graph builder, navigation/selection, input router | Scaffolding |
-| `drivers/cpu-render/`     | CPU render service: CpuBackend + virtio-gpu 2D present (no-virgl fallback)       | Scaffolding |
+| `drivers/metal-render/`   | Metal render service: native Metal GPU via hypervisor (default, 4x MSAA)         | Scaffolding |
+| `drivers/cpu-render/`     | CPU render service: CpuBackend + virtio-gpu 2D present (QEMU fallback)           | Scaffolding |
 | `drivers/virgil-render/`  | GPU render service: Gallium3D via virglrenderer (virgl-capable QEMU)             | Scaffolding |
 | `drivers/virtio-blk/`     | Block device driver (reads sector 0 as proof of life)                            | Scaffolding |
 | `drivers/virtio-console/` | Console driver (placeholder)                                                     | Scaffolding |

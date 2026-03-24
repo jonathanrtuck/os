@@ -1,26 +1,28 @@
 # Font Rendering: Research & Design
 
-## Current State (Updated 2026-03-14)
+## Current State (Updated 2026-03-23)
 
-All phases of the font rendering pipeline improvement plan are **complete**. The system has a full shaped text pipeline with perceptual rendering capabilities no production OS currently offers.
+All phases of the font rendering pipeline are **complete**, including a quality sprint that achieves macOS Core Text-level rendering for Latin text.
 
-**Fonts:** Variable Source Code Pro (monospace, wght axis) and Variable Nunito Sans (proportional, opsz/wght/wdth/YTLC axes), loaded from host via 9p. Static versions retained as fallback.
+**Fonts:** Three-font stack selected by content type, loaded from host via 9p: JetBrains Mono (monospace — editor/code), Inter (sans-serif — chrome/UI), Source Serif 4 (serif — prose/body). All variable fonts with weight axes.
 
-**Shaping library** (`libraries/shaping/`, ~300 lines): Wraps HarfRust (pure Rust port of HarfBuzz, no_std+alloc). API: `shape(font_data, text, features) → Vec<ShapedGlyph>` and `shape_with_variations()` for variable fonts. Supports OpenType feature control (+liga, +calt, +tnum, +onum, etc.). Includes `fallback` module for content-type-aware font fallback chains and `typography` module for content-type-aware defaults.
+**Font library** (`libraries/fonts/`): Rasterizer (`src/rasterize/`) with modular pipeline: outline extraction (read-fonts), gvar delta interpolation, scanline sweep, analytic area coverage (exact signed-area trapezoids), outline dilation via symmetric miter-join for stem darkening (macOS formula, Pathfinder coefficients × 1.3 boost), optical sizing. Device-pixel rasterization: atlas rendered at `font_size_pt × scale_factor` for crisp output at native display resolution. Glyph cache (`src/cache.rs`): LRU keyed by (glyph_id, font_size, axis_hash), bounded memory. On-demand atlas upload in metal-render (fixes ligature drops from fixed-size atlases).
 
-**Rasterizer** (`libraries/shaping/src/rasterize.rs`, ~700 lines): Scanline sweep algorithm preserved from original, now sourcing glyph outlines from read-fonts instead of the custom TrueType parser. Supports variable font axis interpolation via gvar deltas. 4× vertical and 6× horizontal oversampling with subpixel coverage. Includes automatic optical sizing (`auto_axis_values_for_opsz`) and dark mode weight correction (`auto_weight_correction_axes`, `weight_correction_factor`).
+**Shaping:** Wraps HarfRust (pure Rust port of HarfBuzz, no_std+alloc). `ShapedGlyph` is 16 bytes with 16.16 fixed-point advances for subpixel glyph positioning. Eliminates cursor drift from float truncation. Single `char_w_fx` source of truth across layout and rendering.
 
-**Glyph cache** (`libraries/drawing/lib.rs`): LRU cache keyed by (glyph_id: u16, font_size: u16, axis_hash: u32). Supports arbitrary glyph IDs (Unicode), variable font axis differentiation, and font identifier separation for fallback chains. Bounded memory with configurable max capacity.
+**Scene graph** (`libraries/scene/lib.rs`): TextRun carries `ShapedGlyph` arrays via DataRef in shared memory. Core writes shaped glyph data; render services read and rasterize. Cross-process safe with compile-time size assertion.
 
-**Scene graph** (`libraries/scene/lib.rs`): TextRun carries `ShapedGlyph` arrays (#[repr(C)], 24 bytes each) via DataRef in shared memory. Core service writes shaped glyph data, compositor reads and rasterizes. Cross-process safe with compile-time size assertion.
+**Text layout** (`libraries/layout/`): Unified `layout_paragraph()` for both monospace and proportional text, parameterized by `FontMetrics` trait. `CharBreaker` (character-level wrapping) and `WordBreaker` (word-boundary wrapping). Standalone `byte_to_line_col()` for cursor positioning.
 
-**Text layout:** Core service shapes text using the shaping library, produces positioned ShapedGlyph arrays in scene graph nodes. Layout is monospace (line breaking by character width). Scroll adjustment applied before scene graph write.
+**Compositing:** `draw_coverage` blends coverage maps with sRGB→linear→sRGB gamma-correct blending (LUT-based). Stem darkening applied via outline dilation in the rasterizer (not post-rasterization).
 
-**Compositing:** `draw_coverage` blends subpixel coverage maps onto framebuffer with sRGB→linear→sRGB gamma-correct blending (LUT-based). Stem darkening applied post-rasterization.
+**Font quality sprint (5 changes to match macOS Core Text):**
 
-**Typography defaults** (`libraries/shaping/src/typography.rs`): Content-type-aware `TypographyConfig` struct maps content types to font family, OpenType features, weight preference, tracking, and optical sizing. Code → monospace + calt + tnum; Prose → proportional + onum + optical sizing; UI → proportional + medium weight; Unknown → prose defaults.
-
-**Perceptual rendering:** Automatic optical sizing adjusts the opsz axis based on rendered pixel size and display DPI. Dark mode weight correction continuously reduces font weight proportional to fg/bg luminance contrast for light-on-dark text. Both are automatic — no explicit caller intervention needed.
+1. Outline dilation via symmetric miter-join (macOS formula, Pathfinder coefficients × 1.3 boost)
+2. Analytic area coverage rasterizer (exact signed-area trapezoids, not quantized)
+3. Device-pixel rasterization (atlas at `font_size_pt × scale_factor`)
+4. Subpixel glyph positioning (ShapedGlyph widened 8→16 bytes, 16.16 fixed-point advances)
+5. Single `char_w_fx` source of truth (eliminates cursor drift from truncation)
 
 ### What Remains (Future Work)
 
