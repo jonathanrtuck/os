@@ -57,7 +57,7 @@ use protocol::compose::{
     MSG_RTC_CONFIG,
 };
 use protocol::{
-    core_config::{CoreConfig, MSG_CORE_CONFIG},
+    core_config::{CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE},
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
     editor::{EditorConfig, MSG_EDITOR_CONFIG},
     fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
@@ -352,6 +352,11 @@ fn setup_render_pipeline(
     let display_info: DisplayInfoMsg = unsafe { resp_msg.payload_as() };
     let fb_width = display_info.width;
     let fb_height = display_info.height;
+    let frame_rate: u16 = if display_info.refresh_rate > 0 {
+        display_info.refresh_rate as u16
+    } else {
+        60
+    };
 
     // Compute scale factor.
     let scale_factor: f32 = if fb_width >= 2048 { 2.0 } else { 1.0 };
@@ -444,7 +449,7 @@ fn setup_render_pipeline(
         sans_font_len,
         serif_font_len,
         scale_factor,
-        frame_rate: 60,
+        frame_rate,
         font_size: 18,
         screen_dpi: 96,
         _pad: 0,
@@ -516,8 +521,13 @@ fn setup_render_pipeline(
     };
     // SAFETY: CoreConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_CORE_CONFIG, &core_config) };
-
     core_ch.send(&msg);
+
+    // Send frame rate as a separate message (CoreConfig is full at 56 bytes).
+    let fr_msg = unsafe {
+        ipc::Message::from_payload(MSG_FRAME_RATE, &FrameRateMsg { frame_rate: frame_rate as u32 })
+    };
+    core_ch.send(&fr_msg);
 
     // Send image config to core (for has_image detection).
     if png_len > 0 {

@@ -143,6 +143,8 @@ pub mod gpu {
     pub struct DisplayInfoMsg {
         pub width: u32,
         pub height: u32,
+        /// Display refresh rate in Hz. 0 = unknown (default to 60).
+        pub refresh_rate: u32,
     }
     const _: () = assert!(core::mem::size_of::<DisplayInfoMsg>() <= 60);
 }
@@ -311,6 +313,19 @@ pub mod core_config {
 
     // Guard: must fit within the 60-byte IPC payload (56 bytes used).
     const _: () = assert!(core::mem::size_of::<CoreConfig>() <= 60);
+
+    /// Display refresh rate, sent as a separate message after CoreConfig.
+    /// Separate because CoreConfig is at 56 bytes and u64 fields force
+    /// 8-byte struct alignment — adding even 2 bytes would pad to 64.
+    pub const MSG_FRAME_RATE: u32 = 52;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct FrameRateMsg {
+        /// Display refresh rate in Hz. 0 = use default (60 Hz).
+        pub frame_rate: u32,
+    }
+    const _: () = assert!(core::mem::size_of::<FrameRateMsg>() <= 60);
 }
 
 // ── compose: init -> render service ─────────────────────────────────

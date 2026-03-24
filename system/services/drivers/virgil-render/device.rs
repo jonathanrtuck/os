@@ -155,7 +155,7 @@ pub(crate) fn init_handshake(
     // Send display info back to init.
     let info_msg =
         // SAFETY: DisplayInfoMsg is repr(C) and fits in payload.
-        unsafe { ipc::Message::from_payload(MSG_DISPLAY_INFO, &DisplayInfoMsg { width, height }) };
+        unsafe { ipc::Message::from_payload(MSG_DISPLAY_INFO, &DisplayInfoMsg { width, height, refresh_rate: 0 }) };
     ch.send(&info_msg);
     let _ = sys::channel_signal(INIT_HANDLE);
 
