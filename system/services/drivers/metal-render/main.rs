@@ -2747,6 +2747,9 @@ fn walk_scene(
                 }
             }
         }
+        Content::Image { .. } => {
+            // Content Region image: resolved when render services wire up Content Region.
+        }
         _ => {}
     }
 

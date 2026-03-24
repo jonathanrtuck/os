@@ -333,6 +333,9 @@ fn walk_node(
                 });
             }
         }
+        Content::Image { .. } => {
+            // Content Region image: resolved when render services wire up Content Region.
+        }
         Content::Path {
             color,
             fill_rule,

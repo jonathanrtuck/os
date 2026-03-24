@@ -109,6 +109,9 @@ pub(super) fn render_content(
                 fb, graph, data, src_width, src_height, draw_x, draw_y, nw, nh,
             );
         }
+        Content::Image { .. } => {
+            // Content Region image: resolved when render services wire up Content Region.
+        }
     }
 }
 

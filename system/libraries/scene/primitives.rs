@@ -243,6 +243,18 @@ pub enum Content {
         src_width: u16,
         src_height: u16,
     },
+    /// Decoded pixel data stored in the Content Region (persistent shared
+    /// memory). The compositor resolves `content_id` via the Content Region
+    /// registry to find the pixel data offset and length.
+    Image {
+        /// Content Region entry ID. The compositor looks this up in the
+        /// ContentRegionHeader to find the pixel data.
+        content_id: u32,
+        /// Source image width in pixels.
+        src_width: u16,
+        /// Source image height in pixels.
+        src_height: u16,
+    },
     /// Cubic Bezier contours, filled or stroked. The render backend
     /// rasterizes them with scanline coverage (same engine as glyph
     /// outlines). Vector content scales cleanly at any display density.
@@ -279,3 +291,8 @@ pub enum Content {
         axis_hash: u32,
     },
 }
+
+// Compile-time size assertion: Content must remain exactly 24 bytes.
+// Largest payload: Glyphs = Color(4) + DataRef(8) + u16 + u16 + u32 = 20 bytes.
+// Image payload: u32 + u16 + u16 = 8 bytes (well within budget).
+const _: () = assert!(core::mem::size_of::<Content>() == 24);
