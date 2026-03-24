@@ -631,3 +631,8 @@ pub mod virgl;
 // ── metal: Metal-over-virtio command protocol ───────────────────────
 
 pub mod metal;
+
+// ── content: Content Region shared memory layout ────────────────────
+
+/// Content Region shared memory layout (font data, decoded images).
+pub mod content;
