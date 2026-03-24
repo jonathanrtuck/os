@@ -228,12 +228,12 @@ struct CoreState {
     active_space: u8,
     /// True when the slide spring is animating between spaces.
     slide_animating: bool,
-    /// Current slide offset (0.0 = space 0, fb_width = space 1).
-    slide_offset: f32,
+    /// Current slide offset in millipoints (0 = space 0, fb_width*MPT = space 1).
+    slide_offset: scene::Mpt,
     /// Spring physics for slide animation.
     slide_spring: animation::Spring,
-    /// Target slide offset.
-    slide_target: f32,
+    /// Target slide offset in millipoints.
+    slide_target: scene::Mpt,
     line_h: u32,
     mouse_x: u32,
     mouse_y: u32,
@@ -251,9 +251,9 @@ struct CoreState {
     last_pointer_xy: u64,
     rtc_mmio_va: usize,
     scroll_animating: bool,
-    scroll_offset: f32,
+    scroll_offset: scene::Mpt,
     scroll_spring: animation::Spring,
-    scroll_target: f32,
+    scroll_target: scene::Mpt,
     sel_end: usize,
     /// Selection anchor: the fixed end of a selection range. When
     /// `has_selection` is true, the visible range is
@@ -301,13 +301,13 @@ impl CoreState {
             sans_font_upem: 1000,
             active_space: 0,
             slide_animating: false,
-            slide_offset: 0.0,
+            slide_offset: 0,
             slide_spring: {
                 let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
                 s.set_settle_threshold(0.5);
                 s
             },
-            slide_target: 0.0,
+            slide_target: 0,
             line_h: 20,
             mouse_x: 0,
             mouse_y: 0,
@@ -319,9 +319,9 @@ impl CoreState {
             last_pointer_xy: 0,
             rtc_mmio_va: 0,
             scroll_animating: false,
-            scroll_offset: 0.0,
+            scroll_offset: 0,
             scroll_spring: animation::Spring::snappy(0.0),
-            scroll_target: 0.0,
+            scroll_target: 0,
             sel_end: 0,
             anchor: 0,
             has_selection: false,
@@ -800,9 +800,9 @@ fn process_key_event(
             // Toggle active space.
             let new_space = if s.active_space == 0 { 1u8 } else { 0u8 };
             s.active_space = new_space;
-            let target = new_space as f32 * fb_width as f32;
-            s.slide_target = target;
-            s.slide_spring.set_target(target);
+            let target_pt = new_space as f32 * fb_width as f32;
+            s.slide_target = scene::f32_to_mpt(target_pt);
+            s.slide_spring.set_target(target_pt);
             s.slide_animating = true;
             return KeyAction {
                 changed: true,
@@ -1210,7 +1210,7 @@ fn update_scroll_offset(page_w: u32, page_h: u32, page_pad: u32) {
     let text = doc_content();
     let s = state();
     let cursor = s.cursor_pos;
-    let current = s.scroll_offset;
+    let current = scene::mpt_to_f32(s.scroll_offset);
     let new_scroll = layout.scroll_for_cursor(text, cursor, current, vp_lines);
 
     // Jump instantly to the target scroll position. Cursor-driven scroll
@@ -1225,8 +1225,8 @@ fn update_scroll_offset(page_w: u32, page_h: u32, page_pad: u32) {
     };
     let clamped = clamp_f32(new_scroll, 0.0, max_scroll);
 
-    s.scroll_offset = clamped;
-    s.scroll_target = clamped;
+    s.scroll_offset = scene::f32_to_mpt(clamped);
+    s.scroll_target = scene::f32_to_mpt(clamped);
     s.scroll_spring.reset_to(clamped);
 }
 fn viewport_lines(page_h: u32, page_pad: u32) -> u32 {
@@ -1655,7 +1655,8 @@ pub extern "C" fn _start() -> ! {
                                 let text_origin_y = page_y_abs + page_padding;
                                 let rel_x = click_x.saturating_sub(text_origin_x);
                                 let rel_y = click_y.saturating_sub(text_origin_y);
-                                let adjusted_y = rel_y + round_f32(s.scroll_offset) as u32;
+                                let adjusted_y =
+                                    rel_y + (s.scroll_offset / scene::MPT_PER_PT) as u32;
                                 let layout_info = content_text_layout(page_width, page_padding);
                                 let text = doc_content();
                                 let byte_pos = layout_info.xy_to_byte(text, rel_x, adjusted_y);
@@ -1864,12 +1865,12 @@ pub extern "C" fn _start() -> ! {
             update_scroll_offset(page_width, page_height, page_padding);
         }
         let scroll_after = state().scroll_offset;
-        let scroll_diff = scroll_before - scroll_after;
-        let scroll_moved = if scroll_diff < 0.0 {
-            -scroll_diff > 0.5
+        let scroll_diff = if scroll_before > scroll_after {
+            scroll_before - scroll_after
         } else {
-            scroll_diff > 0.5
+            scroll_after - scroll_before
         };
+        let scroll_moved = scroll_diff > scene::MPT_PER_PT / 2;
 
         // ── Cursor blink ─────────────────────────────────────────────
         //
@@ -1919,25 +1920,22 @@ pub extern "C" fn _start() -> ! {
             let old_scroll = state().scroll_offset;
             let s = state();
             s.scroll_spring.tick(frame_dt);
-            s.scroll_offset = s.scroll_spring.value();
+            s.scroll_offset = scene::f32_to_mpt(s.scroll_spring.value());
 
             if s.scroll_spring.settled() {
-                // Snap to exact target (rounded to integer point) to avoid
-                // persistent sub-pixel jitter.
-                let target = s.scroll_target;
-                let rounded = if target >= 0.0 {
-                    ((target + 0.5) as i32) as f32
-                } else {
-                    ((target - 0.5) as i32) as f32
-                };
-                s.scroll_offset = rounded;
+                // Snap to exact target (nearest whole-point-aligned Mpt)
+                // to avoid persistent sub-pixel jitter.
+                s.scroll_offset = scene::mpt_round_pt(s.scroll_target);
                 s.scroll_animating = false;
             }
 
             let new_scroll = state().scroll_offset;
-            let diff = old_scroll - new_scroll;
-            let abs_diff = if diff < 0.0 { -diff } else { diff };
-            if abs_diff > 0.5 {
+            let diff = if old_scroll > new_scroll {
+                old_scroll - new_scroll
+            } else {
+                new_scroll - old_scroll
+            };
+            if diff > scene::MPT_PER_PT / 2 {
                 scroll_changed = true;
 
                 if !text_changed {
@@ -1989,14 +1987,14 @@ pub extern "C" fn _start() -> ! {
         if state().slide_animating {
             let s = state();
             s.slide_spring.tick(frame_dt);
-            let new_offset = s.slide_spring.value();
+            let new_offset = scene::f32_to_mpt(s.slide_spring.value());
             if new_offset != s.slide_offset {
                 s.slide_offset = new_offset;
                 slide_changed = true;
                 changed = true;
             }
             if s.slide_spring.settled() {
-                s.slide_offset = s.slide_target;
+                s.slide_offset = s.slide_target; // both Mpt, exact match
                 s.slide_animating = false;
                 slide_changed = true;
                 changed = true;
@@ -2096,12 +2094,12 @@ pub extern "C" fn _start() -> ! {
                     s.sel_end as u32,
                     title,
                     &time_buf,
-                    scene::f32_to_mpt(s.scroll_offset),
+                    s.scroll_offset,
                     s.cursor_opacity,
                     s.mouse_x,
                     s.mouse_y,
                     s.pointer_opacity,
-                    scene::f32_to_mpt(s.slide_offset),
+                    s.slide_offset,
                     s.active_space,
                 );
             } else if text_changed {
@@ -2126,7 +2124,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        scene::f32_to_mpt(s.scroll_offset),
+                        s.scroll_offset,
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2156,7 +2154,7 @@ pub extern "C" fn _start() -> ! {
                         changed_line,
                         b"Text",
                         &time_buf,
-                        scene::f32_to_mpt(s.scroll_offset),
+                        s.scroll_offset,
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2171,7 +2169,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        scene::f32_to_mpt(s.scroll_offset),
+                        s.scroll_offset,
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2186,7 +2184,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        scene::f32_to_mpt(s.scroll_offset),
+                        s.scroll_offset,
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2202,7 +2200,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        scene::f32_to_mpt(s.scroll_offset),
+                        s.scroll_offset,
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2220,7 +2218,7 @@ pub extern "C" fn _start() -> ! {
                 let sel_text_h = scene_cfg
                     .page_height
                     .saturating_sub(2 * scene_cfg.text_inset_x);
-                let scroll_pt = round_f32(s.scroll_offset);
+                let scroll_pt = s.scroll_offset / scene::MPT_PER_PT;
 
                 scene.update_selection(
                     &scene_cfg,
@@ -2268,7 +2266,7 @@ pub extern "C" fn _start() -> ! {
 
             // Apply slide offset if it changed this frame.
             if slide_changed {
-                scene.apply_slide(scene::f32_to_mpt(state().slide_offset));
+                scene.apply_slide(state().slide_offset);
             }
 
             // Apply pointer cursor opacity to the scene graph. Position
