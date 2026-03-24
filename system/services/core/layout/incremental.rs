@@ -11,8 +11,8 @@ use scene::{fnv1a, Color, Content, NodeFlags, NULL};
 
 use super::{
     allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width, layout_mono_lines,
-    line_bytes_for_run, round_f32, shape_text, update_clock_inline, LayoutRun, SceneConfig,
-    N_CURSOR, N_DOC_TEXT, WELL_KNOWN_COUNT,
+    line_bytes_for_run, shape_text, update_clock_inline, LayoutRun, SceneConfig, N_CURSOR,
+    N_DOC_TEXT, WELL_KNOWN_COUNT,
 };
 
 // ── Soft-wrap stability check ───────────────────────────────────────
@@ -105,7 +105,7 @@ pub fn update_single_line(
     cursor_pos: u32,
     sel_start: u32,
     sel_end: u32,
-    scroll_y: f32,
+    scroll_y: scene::Mpt,
     clock_text: Option<&[u8]>,
     cursor_opacity: u8,
 ) -> bool {
@@ -124,7 +124,7 @@ pub fn update_single_line(
     // Determine which visible lines are in the viewport.
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let scroll_pt = round_f32(scroll_y);
+    let scroll_pt = scroll_y >> 10;
 
     // Check soft-wrap stability: line count match + per-line glyph counts.
     if !is_soft_wrap_stable(
@@ -206,15 +206,16 @@ pub fn update_single_line(
 
     // Update N_DOC_TEXT: content_transform, content_hash.
     // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
-    w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
+    w.node_mut(N_DOC_TEXT).content_transform =
+        scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
     w.node_mut(N_DOC_TEXT).content_hash = scene::fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
 
     // Update cursor position.
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
 
     {
         let n = w.node_mut(N_CURSOR);
@@ -275,7 +276,8 @@ fn update_line_positions(
     line_height: i32,
 ) {
     let mut cur = start_node;
-    let mut y = start_y;
+    let mut y = scene::pt(start_y);
+    let lh_mpt = scene::pt(line_height);
 
     while cur != scene::NULL && cur != N_CURSOR {
         let old_y = w.node(cur).y;
@@ -284,7 +286,7 @@ fn update_line_positions(
             w.mark_dirty(cur);
         }
         cur = w.node(cur).next_sibling;
-        y = y.saturating_add(line_height);
+        y = y.saturating_add(lh_mpt);
     }
 }
 
@@ -298,7 +300,7 @@ fn finish_line_update(
     cursor_pos: u32,
     sel_start: u32,
     sel_end: u32,
-    scroll_y: f32,
+    scroll_y: scene::Mpt,
     clock_text: Option<&[u8]>,
     cursor_opacity: u8,
 ) {
@@ -306,19 +308,20 @@ fn finish_line_update(
 
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y);
-    let scroll_pt = round_f32(scroll_y);
+    let scroll_pt = scroll_y >> 10;
 
     // Update N_DOC_TEXT content_transform and content hash.
     // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
-    w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
+    w.node_mut(N_DOC_TEXT).content_transform =
+        scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
     w.mark_dirty(N_DOC_TEXT);
 
     // Update cursor position.
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
 
     {
         let n = w.node_mut(N_CURSOR);
@@ -373,7 +376,7 @@ pub fn insert_line(
     cursor_pos: u32,
     sel_start: u32,
     sel_end: u32,
-    scroll_y: f32,
+    scroll_y: scene::Mpt,
     clock_text: Option<&[u8]>,
     cursor_opacity: u8,
 ) -> bool {
@@ -393,7 +396,7 @@ pub fn insert_line(
     // Determine visible runs.
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let scroll_pt = round_f32(scroll_y);
+    let scroll_pt = scroll_y >> 10;
 
     let visible_run_count = all_runs
         .iter()
@@ -515,9 +518,9 @@ pub fn insert_line(
 
     {
         let n = w.node_mut(new_node);
-        n.y = new_run.y;
-        n.width = doc_width as u16;
-        n.height = cfg.line_height as u16;
+        n.y = scene::pt(new_run.y);
+        n.width = scene::upt(doc_width);
+        n.height = scene::upt(cfg.line_height);
         n.content = Content::Glyphs {
             color: scene_text_color,
             glyphs: new_glyph_ref,
@@ -580,7 +583,7 @@ pub fn delete_line(
     cursor_pos: u32,
     sel_start: u32,
     sel_end: u32,
-    scroll_y: f32,
+    scroll_y: scene::Mpt,
     clock_text: Option<&[u8]>,
     cursor_opacity: u8,
 ) -> bool {
@@ -599,7 +602,7 @@ pub fn delete_line(
     // Determine visible runs.
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let scroll_pt = round_f32(scroll_y);
+    let scroll_pt = scroll_y >> 10;
 
     let visible_run_count = all_runs
         .iter()

@@ -1447,7 +1447,7 @@ fn multiple_copy_forward_frames() {
         {
             let mut w = tw.acquire();
             w.clear();
-            for i in 0..8u16 {
+            for i in 0..8u32 {
                 let n = w.alloc_node().unwrap();
                 w.node_mut(n).width = (i + 1) * 10;
             }
@@ -1457,13 +1457,13 @@ fn multiple_copy_forward_frames() {
     }
 
     // Frames 2-5: copy-forward with different mutations.
-    for frame in 0..4u16 {
+    for frame in 0..4u32 {
         {
             let mut tw = scene::TripleWriter::from_existing(&mut buf);
             {
                 let mut w = tw.acquire_copy();
                 // Mutate a different node each frame.
-                let target = (frame + 1) as NodeId; // nodes 1, 2, 3, 4
+                let target = (frame as u16 + 1) as NodeId; // nodes 1, 2, 3, 4
                 w.node_mut(target).height = (frame + 1) * 100;
                 w.mark_dirty(target);
             }
@@ -1473,7 +1473,7 @@ fn multiple_copy_forward_frames() {
         // Verify change list has exactly one entry.
         let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
         let bits = tr.dirty_bits();
-        let target_id = (frame + 1) as NodeId;
+        let target_id = (frame as u16 + 1) as NodeId;
         let word = target_id as usize / 64;
         let bit = target_id as usize % 64;
         assert_ne!(
@@ -1495,7 +1495,7 @@ fn multiple_copy_forward_frames() {
         for i in 0..8usize {
             assert_eq!(
                 tr.front_nodes()[i].width,
-                ((i as u16) + 1) * 10,
+                ((i as u32) + 1) * 10,
                 "Frame {}: node {} width changed unexpectedly",
                 frame + 2,
                 i
@@ -1632,37 +1632,40 @@ fn abs_bounds_accounts_for_content_transform() {
 
     // Root at (0, 0)
     let root = w.alloc_node().unwrap();
-    w.node_mut(root).width = 800;
-    w.node_mut(root).height = 600;
+    w.node_mut(root).width = scene::upt(800);
+    w.node_mut(root).height = scene::upt(600);
     w.set_root(root);
 
     // Scrollable container at (0, 50) with scroll offset 10 (ty = -10)
     let container = w.alloc_node().unwrap();
-    w.node_mut(container).y = 50;
-    w.node_mut(container).width = 800;
-    w.node_mut(container).height = 500;
+    w.node_mut(container).y = scene::pt(50);
+    w.node_mut(container).width = scene::upt(800);
+    w.node_mut(container).height = scene::upt(500);
     w.node_mut(container).content_transform = AffineTransform::translate(0.0, -10.0);
     w.add_child(root, container);
 
     // Child inside the scrolled container at (20, 30)
     let child = w.alloc_node().unwrap();
-    w.node_mut(child).x = 20;
-    w.node_mut(child).y = 30;
-    w.node_mut(child).width = 100;
-    w.node_mut(child).height = 40;
+    w.node_mut(child).x = scene::pt(20);
+    w.node_mut(child).y = scene::pt(30);
+    w.node_mut(child).width = scene::upt(100);
+    w.node_mut(child).height = scene::upt(40);
     w.add_child(container, child);
 
     let nodes = w.nodes();
     let parent_map = build_parent_map(nodes, 3);
     let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
 
-    // Expected: child.x(20) + container.x(0) + root.x(0) = 20
-    assert_eq!(ax, 20, "abs_bounds x should sum parent x values");
-    // Expected: child.y(30) + container.y(50) + container.content_transform.ty(-10) + root.y(0) = 70
-    // NOT 80 (which would be the result without content_transform)
-    assert_eq!(ay, 70, "abs_bounds y must apply parent content_transform");
-    assert_eq!(aw, 100);
-    assert_eq!(ah, 40);
+    // Expected in millipoints: child.x(20pt) + container.x(0) + root.x(0) = 20pt
+    assert_eq!(ax, scene::pt(20), "abs_bounds x should sum parent x values");
+    // Expected: child.y(30pt) + container.y(50pt) + mpt(-10.0) + root.y(0) = 70pt
+    assert_eq!(
+        ay,
+        scene::pt(70),
+        "abs_bounds y must apply parent content_transform"
+    );
+    assert_eq!(aw, scene::upt(100));
+    assert_eq!(ah, scene::upt(40));
 }
 
 /// abs_bounds with deeply nested scroll containers: content_transform accumulates.
@@ -1672,47 +1675,44 @@ fn abs_bounds_nested_scroll_containers() {
     let mut w = SceneWriter::new(&mut buf);
 
     let root = w.alloc_node().unwrap();
-    w.node_mut(root).width = 800;
-    w.node_mut(root).height = 600;
+    w.node_mut(root).width = scene::upt(800);
+    w.node_mut(root).height = scene::upt(600);
     w.set_root(root);
 
     // Outer container scrolled by 5 (ty = -5)
     let outer = w.alloc_node().unwrap();
-    w.node_mut(outer).y = 100;
-    w.node_mut(outer).width = 800;
-    w.node_mut(outer).height = 400;
+    w.node_mut(outer).y = scene::pt(100);
+    w.node_mut(outer).width = scene::upt(800);
+    w.node_mut(outer).height = scene::upt(400);
     w.node_mut(outer).content_transform = AffineTransform::translate(0.0, -5.0);
     w.add_child(root, outer);
 
     // Inner container scrolled by 15 (ty = -15)
     let inner = w.alloc_node().unwrap();
-    w.node_mut(inner).y = 20;
-    w.node_mut(inner).width = 800;
-    w.node_mut(inner).height = 300;
+    w.node_mut(inner).y = scene::pt(20);
+    w.node_mut(inner).width = scene::upt(800);
+    w.node_mut(inner).height = scene::upt(300);
     w.node_mut(inner).content_transform = AffineTransform::translate(0.0, -15.0);
     w.add_child(outer, inner);
 
     // Leaf at y=10 inside inner
     let leaf = w.alloc_node().unwrap();
-    w.node_mut(leaf).x = 5;
-    w.node_mut(leaf).y = 10;
-    w.node_mut(leaf).width = 50;
-    w.node_mut(leaf).height = 20;
+    w.node_mut(leaf).x = scene::pt(5);
+    w.node_mut(leaf).y = scene::pt(10);
+    w.node_mut(leaf).width = scene::upt(50);
+    w.node_mut(leaf).height = scene::upt(20);
     w.add_child(inner, leaf);
 
     let nodes = w.nodes();
     let parent_map = build_parent_map(nodes, 4);
     let (ax, ay, _aw, _ah) = abs_bounds(nodes, &parent_map, leaf as usize);
 
-    // x: leaf(5) + inner(0) + outer(0) + root(0) = 5
-    assert_eq!(ax, 5);
-    // y: content_transform.ty on a node offsets its CHILDREN. So:
-    //   leaf.y(10) + inner.content_transform.ty(-15) = -5 (relative to inner)
-    //   inner.y(20) + outer.content_transform.ty(-5) = 15 (relative to outer)
-    //   outer.y(100) -> 100 (relative to root, no scroll)
-    //   Total: -5 + 15 + 100 = 110
+    // x: leaf(5pt) = 5pt in millipoints
+    assert_eq!(ax, scene::pt(5));
+    // y in millipoints: leaf.y(10pt) + mpt(-15) + inner.y(20pt) + mpt(-5) + outer.y(100pt) = 110pt
     assert_eq!(
-        ay, 110,
+        ay,
+        scene::pt(110),
         "abs_bounds must apply each ancestor's content_transform"
     );
 }
@@ -2209,15 +2209,15 @@ fn abs_bounds_rotated_node_uses_aabb() {
     let mut w = SceneWriter::new(&mut buf);
 
     let root = w.alloc_node().unwrap();
-    w.node_mut(root).width = 200;
-    w.node_mut(root).height = 200;
+    w.node_mut(root).width = scene::upt(200);
+    w.node_mut(root).height = scene::upt(200);
     w.set_root(root);
 
     let child = w.alloc_node().unwrap();
-    w.node_mut(child).x = 50;
-    w.node_mut(child).y = 50;
-    w.node_mut(child).width = 40;
-    w.node_mut(child).height = 40;
+    w.node_mut(child).x = scene::pt(50);
+    w.node_mut(child).y = scene::pt(50);
+    w.node_mut(child).width = scene::upt(40);
+    w.node_mut(child).height = scene::upt(40);
     w.node_mut(child).flags = NodeFlags::VISIBLE;
     // 45° rotation
     w.node_mut(child).transform = AffineTransform::rotate(45.0 * core::f32::consts::PI / 180.0);
@@ -2225,19 +2225,17 @@ fn abs_bounds_rotated_node_uses_aabb() {
 
     let nodes = w.nodes();
     let parent_map = build_parent_map(nodes, 2);
-    let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
+    let (_ax, _ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
 
-    // 40×40 rotated 45°: AABB should be ~56.57×56.57
-    // The center of the 40×40 rect at (50,50) is at (70,70).
-    // After rotation, the AABB expands.
-    // The AABB width and height should be approximately sqrt(2)*40 ≈ 56.57.
+    // 40×40 rotated 45°: AABB should be ~56.57×56.57 points = ~57926 millipoints
+    // Allow range in millipoints: 55*1024..60*1024
     assert!(
-        aw >= 55 && aw <= 60,
-        "VAL-XFORM-016: rotated 40×40 node AABB width should be ~57, got {aw}"
+        aw >= scene::upt(55) && aw <= scene::upt(60),
+        "VAL-XFORM-016: rotated 40×40 node AABB width should be ~57pt, got {aw} mpt"
     );
     assert!(
-        ah >= 55 && ah <= 60,
-        "VAL-XFORM-016: rotated 40×40 node AABB height should be ~57, got {ah}"
+        ah >= scene::upt(55) && ah <= scene::upt(60),
+        "VAL-XFORM-016: rotated 40×40 node AABB height should be ~57pt, got {ah} mpt"
     );
 }
 
@@ -2249,15 +2247,15 @@ fn abs_bounds_scaled_node_uses_scaled_size() {
     let mut w = SceneWriter::new(&mut buf);
 
     let root = w.alloc_node().unwrap();
-    w.node_mut(root).width = 200;
-    w.node_mut(root).height = 200;
+    w.node_mut(root).width = scene::upt(200);
+    w.node_mut(root).height = scene::upt(200);
     w.set_root(root);
 
     let child = w.alloc_node().unwrap();
-    w.node_mut(child).x = 10;
-    w.node_mut(child).y = 10;
-    w.node_mut(child).width = 20;
-    w.node_mut(child).height = 20;
+    w.node_mut(child).x = scene::pt(10);
+    w.node_mut(child).y = scene::pt(10);
+    w.node_mut(child).width = scene::upt(20);
+    w.node_mut(child).height = scene::upt(20);
     w.node_mut(child).flags = NodeFlags::VISIBLE;
     // 3x scale
     w.node_mut(child).transform = AffineTransform::scale(3.0, 3.0);
@@ -2265,16 +2263,18 @@ fn abs_bounds_scaled_node_uses_scaled_size() {
 
     let nodes = w.nodes();
     let parent_map = build_parent_map(nodes, 2);
-    let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
+    let (_ax, _ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
 
-    // 20×20 node scaled 3x: AABB should be 60×60
+    // 20×20 node scaled 3x: AABB should be 60×60 points = 60*1024 millipoints
     assert_eq!(
-        aw, 60,
-        "scaled 20×20 at 3x should have AABB width 60, got {aw}"
+        aw,
+        scene::upt(60),
+        "scaled 20×20 at 3x should have AABB width 60pt, got {aw} mpt"
     );
     assert_eq!(
-        ah, 60,
-        "scaled 20×20 at 3x should have AABB height 60, got {ah}"
+        ah,
+        scene::upt(60),
+        "scaled 20×20 at 3x should have AABB height 60pt, got {ah} mpt"
     );
 }
 
@@ -2287,15 +2287,15 @@ fn abs_bounds_compound_transform_aabb() {
     let mut w = SceneWriter::new(&mut buf);
 
     let root = w.alloc_node().unwrap();
-    w.node_mut(root).width = 200;
-    w.node_mut(root).height = 200;
+    w.node_mut(root).width = scene::upt(200);
+    w.node_mut(root).height = scene::upt(200);
     w.set_root(root);
 
     let child = w.alloc_node().unwrap();
-    w.node_mut(child).x = 0;
-    w.node_mut(child).y = 0;
-    w.node_mut(child).width = 10;
-    w.node_mut(child).height = 10;
+    w.node_mut(child).x = scene::pt(0);
+    w.node_mut(child).y = scene::pt(0);
+    w.node_mut(child).width = scene::upt(10);
+    w.node_mut(child).height = scene::upt(10);
     w.node_mut(child).flags = NodeFlags::VISIBLE;
     // Compound: translate(50,50) × rotate(45°) × scale(2,2)
     let xform = AffineTransform::translate(50.0, 50.0)
@@ -2310,33 +2310,25 @@ fn abs_bounds_compound_transform_aabb() {
     let parent_map = build_parent_map(nodes, 2);
     let (ax, ay, aw, ah) = abs_bounds(nodes, &parent_map, child as usize);
 
-    // 10×10 scaled 2x then rotated 45°: effective size 20×20 rotated = ~28.28×28.28
-    // Then translated to (50,50).
-    //
-    // The four corners of (0,0,10,10) after the full transform:
-    //   (0,0) → scale → (0,0) → rotate → (0,0) → translate → (50,50)
-    //   (10,0) → scale → (20,0) → rotate → (~14.1, 14.1) → translate → (~64.1, 64.1)
-    //   (10,10) → scale → (20,20) → rotate → (0, ~28.3) → translate → (50, ~78.3)
-    //   (0,10) → scale → (0,20) → rotate → (~-14.1, 14.1) → translate → (~35.9, 64.1)
-    //
-    // AABB: x ≈ 35.9, y = 50, w ≈ 28.3, h ≈ 28.3
+    // 10×10 scaled 2x then rotated 45°: AABB ~28.3×28.3 points.
+    // In millipoints: ~28.3*1024 ≈ 28979
     assert!(
-        aw >= 27 && aw <= 30,
-        "VAL-XFORM-017: compound transform AABB width should be ~28, got {aw}"
+        aw >= scene::upt(27) && aw <= scene::upt(30),
+        "VAL-XFORM-017: compound transform AABB width should be ~28pt, got {aw} mpt"
     );
     assert!(
-        ah >= 27 && ah <= 30,
-        "VAL-XFORM-017: compound transform AABB height should be ~28, got {ah}"
+        ah >= scene::upt(27) && ah <= scene::upt(30),
+        "VAL-XFORM-017: compound transform AABB height should be ~28pt, got {ah} mpt"
     );
-    // The AABB x origin should be near 35.9 (from bottom-left corner transform)
+    // The AABB x origin should be near 35.9pt in millipoints
     assert!(
-        ax >= 34 && ax <= 38,
-        "VAL-XFORM-017: compound transform AABB x should be ~36, got {ax}"
+        ax >= scene::pt(34) && ax <= scene::pt(38),
+        "VAL-XFORM-017: compound transform AABB x should be ~36pt, got {ax} mpt"
     );
-    // The AABB y origin should be near 50 (from top-left corner transform)
+    // The AABB y origin should be near 50pt in millipoints
     assert!(
-        ay >= 49 && ay <= 52,
-        "VAL-XFORM-017: compound transform AABB y should be ~50, got {ay}"
+        ay >= scene::pt(49) && ay <= scene::pt(52),
+        "VAL-XFORM-017: compound transform AABB y should be ~50pt, got {ay} mpt"
     );
 }
 
@@ -3018,8 +3010,8 @@ fn build_test_editor_scene(
     {
         let n = w.node_mut(CORE_N_ROOT);
         n.first_child = CORE_N_TITLE_BAR;
-        n.width = fb_width as u16;
-        n.height = fb_height as u16;
+        n.width = fb_width as u32;
+        n.height = fb_height as u32;
         n.background = Color::rgb(30, 30, 30);
         n.flags = NodeFlags::VISIBLE;
     }
@@ -3028,8 +3020,8 @@ fn build_test_editor_scene(
         let n = w.node_mut(CORE_N_TITLE_BAR);
         n.first_child = CORE_N_TITLE_TEXT;
         n.next_sibling = CORE_N_SHADOW;
-        n.width = fb_width as u16;
-        n.height = title_bar_h as u16;
+        n.width = fb_width as u32;
+        n.height = title_bar_h as u32;
         n.background = Color::rgba(20, 20, 20, 200);
         n.flags = NodeFlags::VISIBLE;
     }
@@ -3039,8 +3031,8 @@ fn build_test_editor_scene(
         n.next_sibling = CORE_N_CLOCK_TEXT;
         n.x = 12;
         n.y = 8;
-        n.width = (fb_width / 2) as u16;
-        n.height = line_height as u16;
+        n.width = (fb_width / 2) as u32;
+        n.height = line_height as u32;
         n.content = Content::Glyphs {
             color: Color::rgb(180, 180, 180),
             glyphs: title_glyph_ref,
@@ -3057,7 +3049,7 @@ fn build_test_editor_scene(
         n.x = (fb_width - 12 - 80) as i32;
         n.y = 8;
         n.width = 80;
-        n.height = line_height as u16;
+        n.height = line_height as u32;
         n.content = Content::Glyphs {
             color: Color::rgb(120, 120, 120),
             glyphs: clock_glyph_ref,
@@ -3073,7 +3065,7 @@ fn build_test_editor_scene(
         let n = w.node_mut(CORE_N_SHADOW);
         n.next_sibling = CORE_N_CONTENT;
         n.y = title_bar_h as i32;
-        n.width = fb_width as u16;
+        n.width = fb_width as u32;
         n.flags = NodeFlags::VISIBLE;
     }
     // N_CONTENT
@@ -3082,8 +3074,8 @@ fn build_test_editor_scene(
         n.first_child = CORE_N_DOC_TEXT;
         n.next_sibling = NULL;
         n.y = content_y as i32;
-        n.width = fb_width as u16;
-        n.height = content_h as u16;
+        n.width = fb_width as u32;
+        n.height = content_h as u32;
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     }
     // N_DOC_TEXT -- Content::None (pure container with content_transform)
@@ -3091,8 +3083,8 @@ fn build_test_editor_scene(
         let n = w.node_mut(CORE_N_DOC_TEXT);
         n.x = text_inset_x as i32;
         n.y = 8;
-        n.width = doc_width as u16;
-        n.height = content_h as u16;
+        n.width = doc_width as u32;
+        n.height = content_h as u32;
         n.content_transform = AffineTransform::translate(0.0, -scroll_y);
         n.content = Content::None;
         n.content_hash = fnv1a(doc_text);
@@ -3106,8 +3098,8 @@ fn build_test_editor_scene(
         if let Some(line_id) = w.alloc_node() {
             let n = w.node_mut(line_id);
             n.y = y;
-            n.width = doc_width as u16;
-            n.height = line_height as u16;
+            n.width = doc_width as u32;
+            n.height = line_height as u32;
             n.content = Content::Glyphs {
                 color: text_color,
                 glyphs: glyph_ref,
@@ -3143,7 +3135,7 @@ fn build_test_editor_scene(
         n.x = cursor_x;
         n.y = cursor_y_px;
         n.width = 2;
-        n.height = line_height as u16;
+        n.height = line_height as u32;
         n.background = cursor_color;
         n.content = Content::None;
         n.flags = NodeFlags::VISIBLE;
@@ -3182,8 +3174,8 @@ fn build_test_editor_scene(
                 let n = w.node_mut(sel_id);
                 n.x = (col_start as u32 * char_width) as i32;
                 n.y = sel_y as i32;
-                n.width = ((col_end - col_start) as u32 * char_width) as u16;
-                n.height = line_height as u16;
+                n.width = (col_end - col_start) as u32 * char_width;
+                n.height = line_height as u32;
                 n.background = sel_color;
                 n.content = Content::None;
                 n.flags = NodeFlags::VISIBLE;
@@ -3929,7 +3921,7 @@ fn triple_writer_acquire_after_multiple_publishes() {
             let mut w = tw.acquire();
             w.clear();
             let n = w.alloc_node().unwrap();
-            w.node_mut(n).width = (i + 1) as u16;
+            w.node_mut(n).width = i + 1;
             w.set_root(n);
         }
         tw.publish();
@@ -4037,7 +4029,7 @@ fn triple_buffer_no_torn_reads() {
             let mut w = tw.acquire();
             w.clear();
             let n = w.alloc_node().unwrap();
-            let marker = (frame_id & 0xFFFF) as u16;
+            let marker = frame_id & 0xFFFF;
             w.node_mut(n).width = marker;
             w.node_mut(n).height = marker;
             w.node_mut(n).background =
@@ -4051,7 +4043,7 @@ fn triple_buffer_no_torn_reads() {
         let node = &nodes[0];
         let w = node.width;
         let h = node.height;
-        let bg_marker = (node.background.r as u16) | ((node.background.g as u16) << 8);
+        let bg_marker = (node.background.r as u32) | ((node.background.g as u32) << 8);
         if w != h || w != bg_marker {
             inconsistencies += 1;
         }
@@ -4154,7 +4146,7 @@ fn triple_reader_finish_read_releases_buffer() {
                 let mut w = tw.acquire();
                 w.clear();
                 let n = w.alloc_node().unwrap();
-                w.node_mut(n).width = (i + 200) as u16;
+                w.node_mut(n).width = i + 200;
                 w.set_root(n);
             }
             tw.publish();
@@ -4247,7 +4239,7 @@ fn triple_buffer_consistency_many_cycles() {
             let mut w = tw.acquire();
             w.clear();
             let n = w.alloc_node().unwrap();
-            let marker = (frame_id & 0xFFFF) as u16;
+            let marker = frame_id & 0xFFFF;
             w.node_mut(n).width = marker;
             w.node_mut(n).height = marker;
             w.node_mut(n).background =
@@ -4261,7 +4253,7 @@ fn triple_buffer_consistency_many_cycles() {
         let node = &nodes[0];
         let w = node.width;
         let h = node.height;
-        let bg_marker = (node.background.r as u16) | ((node.background.g as u16) << 8);
+        let bg_marker = (node.background.r as u32) | ((node.background.g as u32) << 8);
         if w != h || w != bg_marker {
             inconsistencies += 1;
         }
@@ -4286,7 +4278,7 @@ fn triple_buffer_reader_writer_alternating() {
                 let mut w = tw.acquire();
                 w.clear();
                 let n = w.alloc_node().unwrap();
-                w.node_mut(n).width = frame as u16;
+                w.node_mut(n).width = frame;
                 w.set_root(n);
             }
             tw.publish();
@@ -4295,7 +4287,7 @@ fn triple_buffer_reader_writer_alternating() {
         // Read and finish.
         {
             let tr = unsafe { scene::TripleReader::new(buf.as_mut_ptr(), buf.len()) };
-            assert_eq!(tr.front_nodes()[0].width, frame as u16);
+            assert_eq!(tr.front_nodes()[0].width, frame);
             let gen = tr.front_generation();
             tr.finish_read(gen);
         }
@@ -4315,7 +4307,7 @@ fn triple_buffer_writer_publishes_multiple_reader_sees_latest() {
                 let mut w = tw.acquire();
                 w.clear();
                 let n = w.alloc_node().unwrap();
-                w.node_mut(n).width = (i * 100) as u16;
+                w.node_mut(n).width = i * 100;
                 w.set_root(n);
             }
             tw.publish();
@@ -5161,8 +5153,8 @@ fn svg_parse_photo_icon() {
 /// Evaluate a cubic Bézier at parameter t. Returns (x, y).
 fn cubic_at(p0: (f32, f32), p1: (f32, f32), p2: (f32, f32), p3: (f32, f32), t: f32) -> (f32, f32) {
     let u = 1.0 - t;
-    let x = u*u*u*p0.0 + 3.0*u*u*t*p1.0 + 3.0*u*t*t*p2.0 + t*t*t*p3.0;
-    let y = u*u*u*p0.1 + 3.0*u*u*t*p1.1 + 3.0*u*t*t*p2.1 + t*t*t*p3.1;
+    let x = u * u * u * p0.0 + 3.0 * u * u * t * p1.0 + 3.0 * u * t * t * p2.0 + t * t * t * p3.0;
+    let y = u * u * u * p0.1 + 3.0 * u * u * t * p1.1 + 3.0 * u * t * t * p2.1 + t * t * t * p3.1;
     (x, y)
 }
 
@@ -5177,10 +5169,10 @@ fn svg_arc_cubic_points_lie_on_circle() {
     // Tests all four icon arcs at 11 sample points each (t = 0.0, 0.1, ..., 1.0).
     let arcs: &[(&str, f32, f32, f32)] = &[
         // (svg_path, center_x, center_y, radius)
-        ("M7 21a2 2 0 0 1 -2 -2",    7.0, 19.0, 2.0),  // bottom-left corner
-        ("M5 5a2 2 0 0 1 2 -2",      7.0,  5.0, 2.0),  // top-left corner
-        ("M19 19a2 2 0 0 1 -2 2",   17.0, 19.0, 2.0),  // bottom-right corner
-        ("M14 7a1 1 0 0 0 1 1",     15.0,  7.0, 1.0),  // fold corner
+        ("M7 21a2 2 0 0 1 -2 -2", 7.0, 19.0, 2.0), // bottom-left corner
+        ("M5 5a2 2 0 0 1 2 -2", 7.0, 5.0, 2.0),    // top-left corner
+        ("M19 19a2 2 0 0 1 -2 2", 17.0, 19.0, 2.0), // bottom-right corner
+        ("M14 7a1 1 0 0 0 1 1", 15.0, 7.0, 1.0),   // fold corner
     ];
 
     for &(svg, cx, cy, r) in arcs {
@@ -5188,12 +5180,15 @@ fn svg_arc_cubic_points_lie_on_circle() {
         let parsed = parse_path_commands(&cmds);
 
         // Extract start point from MoveTo.
-        let (_, start_coords) = parsed.iter().find(|(t, _)| *t == scene::PATH_MOVE_TO)
+        let (_, start_coords) = parsed
+            .iter()
+            .find(|(t, _)| *t == scene::PATH_MOVE_TO)
             .expect("Should have MoveTo");
         let p0 = (start_coords[0], start_coords[1]);
 
         // Collect all CubicTo commands.
-        let cubics: Vec<_> = parsed.iter()
+        let cubics: Vec<_> = parsed
+            .iter()
             .filter(|(t, _)| *t == scene::PATH_CUBIC_TO)
             .collect();
         assert!(!cubics.is_empty(), "Arc '{}' should produce cubics", svg);
@@ -5214,7 +5209,12 @@ fn svg_arc_cubic_points_lie_on_circle() {
                     error < 0.01,
                     "Arc '{}': point at t={:.1} is ({:.4},{:.4}), dist from center={:.4}, \
                      error={:.6} (max 0.01)",
-                    svg, t, px, py, dist, error
+                    svg,
+                    t,
+                    px,
+                    py,
+                    dist,
+                    error
                 );
             }
             prev_end = end;
@@ -5260,7 +5260,9 @@ fn stroke_expand_width_is_uniform() {
             assert!(
                 dist < 1.15,
                 "Stroke point ({:.3},{:.3}): dist={:.4} from path, expected ≤1.0 (+tolerance)",
-                px, py, dist
+                px,
+                py,
+                dist
             );
         }
     }
@@ -5279,7 +5281,9 @@ fn first_cubic(data: &[u8]) -> Option<(f32, f32, f32, f32, f32, f32)> {
     let cmds = parse_path_commands(data);
     for (tag, coords) in &cmds {
         if *tag == scene::PATH_CUBIC_TO && coords.len() == 6 {
-            return Some((coords[0], coords[1], coords[2], coords[3], coords[4], coords[5]));
+            return Some((
+                coords[0], coords[1], coords[2], coords[3], coords[4], coords[5],
+            ));
         }
     }
     None
@@ -5308,8 +5312,7 @@ fn svg_arc_quarter_circle_bottom_left_control_points() {
         };
         eprintln!("  cmd[{}]: {} {:?}", i, name, coords);
     }
-    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds)
-        .expect("Arc should produce a CubicTo");
+    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds).expect("Arc should produce a CubicTo");
 
     let tol = 0.05; // 0.05 viewbox units ≈ sub-pixel at icon scale
 
@@ -5317,31 +5320,37 @@ fn svg_arc_quarter_circle_bottom_left_control_points() {
     // This is the most sensitive test — sin(π) error shows up here directly.
     assert!(
         (c1y - 21.0).abs() < tol,
-        "P2.y should be 21.0 (horizontal tangent), got {:.4}", c1y
+        "P2.y should be 21.0 (horizontal tangent), got {:.4}",
+        c1y
     );
 
     // P3.x must equal P4.x = 5.0 (vertical tangent at arc end).
     assert!(
         (c2x - 5.0).abs() < tol,
-        "P3.x should be 5.0 (vertical tangent), got {:.4}", c2x
+        "P3.x should be 5.0 (vertical tangent), got {:.4}",
+        c2x
     );
 
     // Endpoint must be at (5, 19).
     assert!(
         (ex - 5.0).abs() < tol && (ey - 19.0).abs() < tol,
-        "Endpoint should be (5.0, 19.0), got ({:.4}, {:.4})", ex, ey
+        "Endpoint should be (5.0, 19.0), got ({:.4}, {:.4})",
+        ex,
+        ey
     );
 
     // Control point P2: x ≈ 5.903 (for alpha ≈ 0.5486).
     assert!(
         (c1x - 5.903).abs() < 0.1,
-        "P2.x should be ≈5.903, got {:.4}", c1x
+        "P2.x should be ≈5.903, got {:.4}",
+        c1x
     );
 
     // Control point P3: y ≈ 20.097.
     assert!(
         (c2y - 20.097).abs() < 0.1,
-        "P3.y should be ≈20.097, got {:.4}", c2y
+        "P3.y should be ≈20.097, got {:.4}",
+        c2y
     );
 }
 
@@ -5355,27 +5364,30 @@ fn svg_arc_quarter_circle_top_left_control_points() {
     //   P3 = (5.903, 3.0)     — MUST have P3.y = P4.y (horizontal tangent)
     //   P4 = (7.0, 3.0)
     let cmds = scene::svg_path::parse_svg_path("M5 5a2 2 0 0 1 2 -2");
-    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds)
-        .expect("Arc should produce a CubicTo");
+    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds).expect("Arc should produce a CubicTo");
 
     let tol = 0.05;
 
     // P2.x must equal P1.x = 5.0 (vertical tangent at start).
     assert!(
         (c1x - 5.0).abs() < tol,
-        "P2.x should be 5.0 (vertical tangent), got {:.4}", c1x
+        "P2.x should be 5.0 (vertical tangent), got {:.4}",
+        c1x
     );
 
     // P3.y must equal P4.y = 3.0 (horizontal tangent at end).
     assert!(
         (c2y - 3.0).abs() < tol,
-        "P3.y should be 3.0 (horizontal tangent), got {:.4}", c2y
+        "P3.y should be 3.0 (horizontal tangent), got {:.4}",
+        c2y
     );
 
     // Endpoint must be at (7, 3).
     assert!(
         (ex - 7.0).abs() < tol && (ey - 3.0).abs() < tol,
-        "Endpoint should be (7.0, 3.0), got ({:.4}, {:.4})", ex, ey
+        "Endpoint should be (7.0, 3.0), got ({:.4}, {:.4})",
+        ex,
+        ey
     );
 }
 
@@ -5388,27 +5400,30 @@ fn svg_arc_quarter_circle_bottom_right_control_points() {
     //   P3 = (18.097, 21.0)   — MUST have P3.y = P4.y (horizontal tangent)
     //   P4 = (17.0, 21.0)
     let cmds = scene::svg_path::parse_svg_path("M19 19a2 2 0 0 1 -2 2");
-    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds)
-        .expect("Arc should produce a CubicTo");
+    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds).expect("Arc should produce a CubicTo");
 
     let tol = 0.05;
 
     // P2.x must equal P1.x = 19.0.
     assert!(
         (c1x - 19.0).abs() < tol,
-        "P2.x should be 19.0 (vertical tangent), got {:.4}", c1x
+        "P2.x should be 19.0 (vertical tangent), got {:.4}",
+        c1x
     );
 
     // P3.y must equal P4.y = 21.0.
     assert!(
         (c2y - 21.0).abs() < tol,
-        "P3.y should be 21.0 (horizontal tangent), got {:.4}", c2y
+        "P3.y should be 21.0 (horizontal tangent), got {:.4}",
+        c2y
     );
 
     // Endpoint.
     assert!(
         (ex - 17.0).abs() < tol && (ey - 21.0).abs() < tol,
-        "Endpoint should be (17.0, 21.0), got ({:.4}, {:.4})", ex, ey
+        "Endpoint should be (17.0, 21.0), got ({:.4}, {:.4})",
+        ex,
+        ey
     );
 }
 
@@ -5420,25 +5435,28 @@ fn svg_arc_fold_corner_control_points() {
     // At θ=π (start), tangent is VERTICAL (downward): P2.x = P1.x = 14.
     // At θ=π/2 (end), tangent is HORIZONTAL (rightward): P3.y = P4.y = 8.
     let cmds = scene::svg_path::parse_svg_path("M14 7a1 1 0 0 0 1 1");
-    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds)
-        .expect("Arc should produce a CubicTo");
+    let (c1x, c1y, c2x, c2y, ex, ey) = first_cubic(&cmds).expect("Arc should produce a CubicTo");
 
     let tol = 0.05;
 
     // Vertical tangent at start: P2.x = P1.x = 14.0
     assert!(
         (c1x - 14.0).abs() < tol,
-        "P2.x should be 14.0 (vertical tangent), got {:.4}", c1x
+        "P2.x should be 14.0 (vertical tangent), got {:.4}",
+        c1x
     );
     // Horizontal tangent at end: P3.y = P4.y = 8.0
     assert!(
         (c2y - 8.0).abs() < tol,
-        "P3.y should be 8.0 (horizontal tangent), got {:.4}", c2y
+        "P3.y should be 8.0 (horizontal tangent), got {:.4}",
+        c2y
     );
     // Endpoint exact.
     assert!(
         (ex - 15.0).abs() < tol && (ey - 8.0).abs() < tol,
-        "Endpoint should be (15.0, 8.0), got ({:.4}, {:.4})", ex, ey
+        "Endpoint should be (15.0, 8.0), got ({:.4}, {:.4})",
+        ex,
+        ey
     );
 }
 
@@ -5447,7 +5465,11 @@ fn svg_arc_fold_corner_control_points() {
 fn nostd_floor(x: f32) -> f32 {
     let i = x as i32;
     let f = i as f32;
-    if x < f { f - 1.0 } else { f }
+    if x < f {
+        f - 1.0
+    } else {
+        f
+    }
 }
 
 fn nostd_sin(x: f32) -> f32 {
@@ -5455,8 +5477,11 @@ fn nostd_sin(x: f32) -> f32 {
     let half_pi: f32 = core::f32::consts::FRAC_PI_2;
     let two_pi: f32 = 2.0 * pi;
     let mut x = x - two_pi * nostd_floor(x / two_pi + 0.5);
-    if x > half_pi { x = pi - x; }
-    else if x < -half_pi { x = -pi - x; }
+    if x > half_pi {
+        x = pi - x;
+    } else if x < -half_pi {
+        x = -pi - x;
+    }
     let x2 = x * x;
     x * (1.0 - x2 / 6.0 * (1.0 - x2 / 20.0 * (1.0 - x2 / 42.0)))
 }
@@ -5468,8 +5493,7 @@ fn nostd_cos(x: f32) -> f32 {
 fn nostd_atan_inner(x: f32) -> f32 {
     let x2 = x * x;
     x * (0.999_866_0
-        + x2 * (-0.330_299_5
-            + x2 * (0.180_141_0 + x2 * (-0.085_133_0 + x2 * 0.020_835_1))))
+        + x2 * (-0.330_299_5 + x2 * (0.180_141_0 + x2 * (-0.085_133_0 + x2 * 0.020_835_1))))
 }
 
 fn nostd_atan2(y: f32, x: f32) -> f32 {
@@ -5479,7 +5503,11 @@ fn nostd_atan2(y: f32, x: f32) -> f32 {
         let a = y / x;
         if a.abs() > 1.0 {
             let r = nostd_atan_inner(x / y);
-            if y > 0.0 { half_pi - r } else { -half_pi - r }
+            if y > 0.0 {
+                half_pi - r
+            } else {
+                -half_pi - r
+            }
         } else {
             nostd_atan_inner(a)
         }
@@ -5487,11 +5515,19 @@ fn nostd_atan2(y: f32, x: f32) -> f32 {
         let a = y / x;
         let base = if a.abs() > 1.0 {
             let r = nostd_atan_inner(x / y);
-            if y >= 0.0 { half_pi - r } else { -half_pi - r }
+            if y >= 0.0 {
+                half_pi - r
+            } else {
+                -half_pi - r
+            }
         } else {
             nostd_atan_inner(a)
         };
-        if y >= 0.0 { base + pi } else { base - pi }
+        if y >= 0.0 {
+            base + pi
+        } else {
+            base - pi
+        }
     } else if y > 0.0 {
         half_pi
     } else if y < 0.0 {
@@ -5519,7 +5555,12 @@ fn nostd_atan2_matches_std() {
         assert!(
             (expected - got).abs() < 0.01,
             "atan2({},{}) [{}]: expected {:.6}, got {:.6}, diff {:.6}",
-            y, x, label, expected, got, (expected - got).abs()
+            y,
+            x,
+            label,
+            expected,
+            got,
+            (expected - got).abs()
         );
     }
 }
@@ -5529,25 +5570,31 @@ fn nostd_sin_cos_at_key_angles() {
     let pi: f32 = core::f32::consts::PI;
     let hp: f32 = core::f32::consts::FRAC_PI_2;
     let cases: &[(f32, f32, f32, &str)] = &[
-        (0.0,       0.0,    1.0,   "0"),
-        (hp,        1.0,    0.0,   "π/2"),
-        (pi,        0.0,   -1.0,   "π"),
-        (-hp,      -1.0,    0.0,  "-π/2"),
-        (-pi,       0.0,   -1.0,  "-π"),
-        (3.0*hp,   -1.0,    0.0,  "3π/2"),
-        (pi/4.0,    0.7071, 0.7071,"π/4"),
-        (3.0*pi/4.0,0.7071,-0.7071,"3π/4"),
+        (0.0, 0.0, 1.0, "0"),
+        (hp, 1.0, 0.0, "π/2"),
+        (pi, 0.0, -1.0, "π"),
+        (-hp, -1.0, 0.0, "-π/2"),
+        (-pi, 0.0, -1.0, "-π"),
+        (3.0 * hp, -1.0, 0.0, "3π/2"),
+        (pi / 4.0, 0.7071, 0.7071, "π/4"),
+        (3.0 * pi / 4.0, 0.7071, -0.7071, "3π/4"),
     ];
     for &(angle, exp_sin, exp_cos, label) in cases {
         let s = nostd_sin(angle);
         let c = nostd_cos(angle);
         assert!(
             (s - exp_sin).abs() < 0.01,
-            "sin({}) = {:.6}, expected {:.4}", label, s, exp_sin
+            "sin({}) = {:.6}, expected {:.4}",
+            label,
+            s,
+            exp_sin
         );
         assert!(
             (c - exp_cos).abs() < 0.01,
-            "cos({}) = {:.6}, expected {:.4}", label, c, exp_cos
+            "cos({}) = {:.6}, expected {:.4}",
+            label,
+            c,
+            exp_cos
         );
     }
 }
@@ -5563,10 +5610,19 @@ fn nostd_actual_arc_debug() {
     ];
     for &(y, x, expected, label) in cases {
         let got = scene::svg_path::debug_atan2(y, x);
-        eprintln!("  {}: expected={:.6}, got={:.6}, diff={:.6}", label, expected, got, (got-expected).abs());
+        eprintln!(
+            "  {}: expected={:.6}, got={:.6}, diff={:.6}",
+            label,
+            expected,
+            got,
+            (got - expected).abs()
+        );
         assert!(
             (got - expected).abs() < 0.01,
-            "{}: expected {:.6}, got {:.6}", label, expected, got
+            "{}: expected {:.6}, got {:.6}",
+            label,
+            expected,
+            got
         );
     }
 
@@ -5584,36 +5640,55 @@ fn nostd_actual_arc_debug() {
         eprintln!("  {}: expected={:.6}, got={:.6}", label, expected, got);
         assert!(
             (got - expected).abs() < 0.01,
-            "{}: expected {:.6}, got {:.6}", label, expected, got
+            "{}: expected {:.6}, got {:.6}",
+            label,
+            expected,
+            got
         );
     }
 
     // Finally test the arc params.
     let (theta1, dtheta, n_segs, cx, cy, t1_y, t1_x, cxp, cyp, x1p, y1p) =
-        scene::svg_path::debug_arc_params(
-            7.0, 21.0, 2.0, 2.0, 0.0, false, true, 5.0, 19.0,
-        );
-    eprintln!("  x1p={:.6}, y1p={:.6}, cxp={:.6}, cyp={:.6}", x1p, y1p, cxp, cyp);
+        scene::svg_path::debug_arc_params(7.0, 21.0, 2.0, 2.0, 0.0, false, true, 5.0, 19.0);
+    eprintln!(
+        "  x1p={:.6}, y1p={:.6}, cxp={:.6}, cyp={:.6}",
+        x1p, y1p, cxp, cyp
+    );
     eprintln!("  t1 args: y={:.6}, x={:.6}", t1_y, t1_x);
-    eprintln!("  atan2(t1_y, t1_x)={:.6}", scene::svg_path::debug_atan2(t1_y, t1_x));
-    eprintln!("  ARC: theta1={:.6}, dtheta={:.6}, n_segs={}, center=({:.4},{:.4})",
-        theta1, dtheta, n_segs, cx, cy);
+    eprintln!(
+        "  atan2(t1_y, t1_x)={:.6}",
+        scene::svg_path::debug_atan2(t1_y, t1_x)
+    );
+    eprintln!(
+        "  ARC: theta1={:.6}, dtheta={:.6}, n_segs={}, center=({:.4},{:.4})",
+        theta1, dtheta, n_segs, cx, cy
+    );
     assert_eq!(n_segs, 1, "Should be 1 segment, got {}", n_segs);
 
     // Also test top-left arc: (5,5) to (7,3), sweep=1.
     let (theta1, dtheta, n_segs, cx, cy, t1_y, t1_x, cxp, cyp, x1p, y1p) =
         scene::svg_path::debug_arc_params(5.0, 5.0, 2.0, 2.0, 0.0, false, true, 7.0, 3.0);
-    eprintln!("  TOP-LEFT: x1p={:.6}, y1p={:.6}, cxp={:.6}, cyp={:.6}", x1p, y1p, cxp, cyp);
-    eprintln!("  TOP-LEFT: t1(y={:.6},x={:.6}), theta1={:.6}, dtheta={:.6}, n_segs={}",
-        t1_y, t1_x, theta1, dtheta, n_segs);
+    eprintln!(
+        "  TOP-LEFT: x1p={:.6}, y1p={:.6}, cxp={:.6}, cyp={:.6}",
+        x1p, y1p, cxp, cyp
+    );
+    eprintln!(
+        "  TOP-LEFT: t1(y={:.6},x={:.6}), theta1={:.6}, dtheta={:.6}, n_segs={}",
+        t1_y, t1_x, theta1, dtheta, n_segs
+    );
     assert_eq!(n_segs, 1, "Top-left should be 1 segment, got {}", n_segs);
 
     // And fold arc: (14,7) to (15,8), sweep=0.
     let (theta1, dtheta, n_segs, cx, cy, t1_y, t1_x, cxp, cyp, x1p, y1p) =
         scene::svg_path::debug_arc_params(14.0, 7.0, 1.0, 1.0, 0.0, false, false, 15.0, 8.0);
-    eprintln!("  FOLD: x1p={:.6}, y1p={:.6}, cxp={:.6}, cyp={:.6}", x1p, y1p, cxp, cyp);
-    eprintln!("  FOLD: t1(y={:.6},x={:.6}), theta1={:.6}, dtheta={:.6}, n_segs={}",
-        t1_y, t1_x, theta1, dtheta, n_segs);
+    eprintln!(
+        "  FOLD: x1p={:.6}, y1p={:.6}, cxp={:.6}, cyp={:.6}",
+        x1p, y1p, cxp, cyp
+    );
+    eprintln!(
+        "  FOLD: t1(y={:.6},x={:.6}), theta1={:.6}, dtheta={:.6}, n_segs={}",
+        t1_y, t1_x, theta1, dtheta, n_segs
+    );
     assert_eq!(n_segs, 1, "Fold should be 1 segment, got {}", n_segs);
 }
 
@@ -5633,10 +5708,10 @@ fn nostd_arc_dtheta_matches_std() {
     let rx: f32 = 2.0;
     let ry: f32 = 2.0;
 
-    let t1_y = (y1p - cyp) / ry;  // (1-(-1))/2 = 1
-    let t1_x = (x1p - cxp) / rx;  // (1-1)/2 = 0
-    let t2_y = (-y1p - cyp) / ry;  // (-1-(-1))/2 = 0
-    let t2_x = (-x1p - cxp) / rx;  // (-1-1)/2 = -1
+    let t1_y = (y1p - cyp) / ry; // (1-(-1))/2 = 1
+    let t1_x = (x1p - cxp) / rx; // (1-1)/2 = 0
+    let t2_y = (-y1p - cyp) / ry; // (-1-(-1))/2 = 0
+    let t2_x = (-x1p - cxp) / rx; // (-1-1)/2 = -1
 
     let theta1_std = t1_y.atan2(t1_x);
     let theta2_std = t2_y.atan2(t2_x);
@@ -5650,18 +5725,36 @@ fn nostd_arc_dtheta_matches_std() {
 
     let dtheta_std = theta2_std - theta1_std;
     let dtheta_nostd = theta2_nostd - theta1_nostd;
-    eprintln!("  dtheta_raw: std={:.6}, nostd={:.6}", dtheta_std, dtheta_nostd);
+    eprintln!(
+        "  dtheta_raw: std={:.6}, nostd={:.6}",
+        dtheta_std, dtheta_nostd
+    );
 
     // Sweep=true adjustment
-    let dtheta_adj_std = if dtheta_std < 0.0 { dtheta_std + two_pi } else { dtheta_std };
-    let dtheta_adj_nostd = if dtheta_nostd < 0.0 { dtheta_nostd + two_pi } else { dtheta_nostd };
-    eprintln!("  dtheta_adj: std={:.6}, nostd={:.6}", dtheta_adj_std, dtheta_adj_nostd);
+    let dtheta_adj_std = if dtheta_std < 0.0 {
+        dtheta_std + two_pi
+    } else {
+        dtheta_std
+    };
+    let dtheta_adj_nostd = if dtheta_nostd < 0.0 {
+        dtheta_nostd + two_pi
+    } else {
+        dtheta_nostd
+    };
+    eprintln!(
+        "  dtheta_adj: std={:.6}, nostd={:.6}",
+        dtheta_adj_std, dtheta_adj_nostd
+    );
 
     let n_std = ((dtheta_adj_std.abs() / hp).ceil() as usize).max(1);
     let n_nostd = ((dtheta_adj_nostd.abs() / hp).ceil() as usize).max(1);
     eprintln!("  n_segs: std={}, nostd={}", n_std, n_nostd);
 
-    assert_eq!(n_nostd, 1, "nostd arc should produce 1 segment, got {}", n_nostd);
+    assert_eq!(
+        n_nostd, 1,
+        "nostd arc should produce 1 segment, got {}",
+        n_nostd
+    );
 }
 
 #[test]
@@ -5685,7 +5778,7 @@ fn svg_arc_dtheta_computation_matches_expected() {
 
     let dx2 = (x1 - x2) * 0.5; // 1.0
     let dy2 = (y1 - y2) * 0.5; // 1.0
-    let x1p = dx2;  // cos_phi=1, sin_phi=0
+    let x1p = dx2; // cos_phi=1, sin_phi=0
     let y1p = dy2;
 
     let rx2 = rx * rx; // 4
@@ -5724,7 +5817,10 @@ fn svg_arc_dtheta_computation_matches_expected() {
     let n_segs = ((dtheta.abs() / half_pi).ceil() as usize).max(1);
     eprintln!("  n_segs: {} (expected 1)", n_segs);
 
-    assert_eq!(n_segs, 1, "Quarter-circle arc should need exactly 1 cubic segment");
+    assert_eq!(
+        n_segs, 1,
+        "Quarter-circle arc should need exactly 1 cubic segment"
+    );
 }
 
 #[test]
@@ -5733,7 +5829,7 @@ fn svg_arc_full_body_path_top_edge_is_horizontal() {
     // (from after the top-left arc to the start of the diagonal) is
     // purely horizontal: both endpoints must have y = 3.0.
     let cmds = scene::svg_path::parse_svg_path(
-        "M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z"
+        "M17 21h-10a2 2 0 0 1 -2 -2v-14a2 2 0 0 1 2 -2h7l5 5v11a2 2 0 0 1 -2 2z",
     );
     let parsed = parse_path_commands(&cmds);
 
@@ -5749,7 +5845,8 @@ fn svg_arc_full_body_path_top_edge_is_horizontal() {
     let (_, coords) = top_edge.expect("Should find LineTo(14, 3) for top edge");
     assert!(
         (coords[1] - 3.0).abs() < 0.01,
-        "Top edge y should be exactly 3.0, got {:.4}", coords[1]
+        "Top edge y should be exactly 3.0, got {:.4}",
+        coords[1]
     );
 }
 

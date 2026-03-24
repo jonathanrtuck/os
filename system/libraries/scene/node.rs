@@ -85,11 +85,11 @@ pub struct Node {
     // ── tree ──
     pub first_child: NodeId,
     pub next_sibling: NodeId,
-    // ── geometry (relative to parent content area) ──
+    // ── geometry (relative to parent content area, in millipoints) ──
     pub x: i32,
     pub y: i32,
-    pub width: u16,
-    pub height: u16,
+    pub width: Umpt,
+    pub height: Umpt,
     // ── content transform ──
     /// 2D affine transform applied to children's coordinate space.
     /// Used for scrolling (pure translation) and zoom (scale).
@@ -132,7 +132,7 @@ pub struct Node {
     /// no path clip (rectangular clip via `CLIPS_CHILDREN` flag still applies).
     pub clip_path: DataRef,
     /// Reserved for future fields. Must be zero.
-    pub _reserved: [u8; 8],
+    pub _reserved: [u8; 4],
     // ── content ──
     pub content: Content,
 }
@@ -165,7 +165,7 @@ impl Node {
         transform: AffineTransform::identity(),
         content_hash: 0,
         clip_path: DataRef::EMPTY,
-        _reserved: [0; 8],
+        _reserved: [0; 4],
         content: Content::None,
     };
 
@@ -190,7 +190,7 @@ impl Node {
 // Compile-time size assertion: Node must be exactly 136 bytes.
 // This prevents silent shared-memory layout drift between core and compositor.
 // If you add a field, update this assertion and verify both sides agree.
-// Layout: 96 bytes pre-content + clip_path (8) + _reserved (8) + content (24) = 136.
+// Layout: 96 bytes pre-content + clip_path (8) + _reserved (4) + content (24) = 132 +4 = 136.
 const _: () = assert!(core::mem::size_of::<Node>() == 136);
 
 // ── Shared memory layout ────────────────────────────────────────────

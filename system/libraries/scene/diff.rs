@@ -41,8 +41,8 @@ pub fn abs_bounds(
     id: usize,
 ) -> (i32, i32, u32, u32) {
     let node = &nodes[id];
-    let mut ax = node.x as i32;
-    let mut ay = node.y as i32;
+    let mut ax = node.x;
+    let mut ay = node.y;
     let mut cur = parent_map[id];
     while cur != NULL && (cur as usize) < nodes.len() {
         let p = &nodes[cur as usize];
@@ -51,14 +51,14 @@ pub fn abs_bounds(
         // Non-translation content_transforms (e.g. zoom/scale) are approximated
         // with translation only — under-damages for zoomed content. Full AABB
         // computation (transform_aabb) needed when zoom is implemented.
-        ax += p.x as i32 + p.content_transform.tx as i32;
-        ay += p.y as i32 + p.content_transform.ty as i32;
+        ax += p.x + crate::node::f32_to_mpt(p.content_transform.tx);
+        ay += p.y + crate::node::f32_to_mpt(p.content_transform.ty);
         cur = parent_map[cur as usize];
     }
 
-    // Start with the node's point-based size.
-    let mut bw = node.width as u32;
-    let mut bh = node.height as u32;
+    // Start with the node's millipoint-based size.
+    let mut bw = node.width;
+    let mut bh = node.height;
     let mut bx = ax;
     let mut by = ay;
 
@@ -66,16 +66,19 @@ pub fn abs_bounds(
     // transformed bounds. The transform shifts the node's visual footprint
     // — damage tracking must cover the full transformed area.
     if !node.transform.is_identity() {
-        let (aabb_x, aabb_y, aabb_w, aabb_h) =
-            node.transform
-                .transform_aabb(0.0, 0.0, node.width as f32, node.height as f32);
+        let (aabb_x, aabb_y, aabb_w, aabb_h) = node.transform.transform_aabb(
+            0.0,
+            0.0,
+            crate::node::umpt_to_f32(node.width),
+            crate::node::umpt_to_f32(node.height),
+        );
 
-        // The AABB origin is relative to the node's position.
-        // Round conservatively: floor for origin, ceil for size.
-        let aabb_xi = floor_f32(aabb_x) as i32;
-        let aabb_yi = floor_f32(aabb_y) as i32;
-        let aabb_wi = ceil_f32(aabb_w) as u32;
-        let aabb_hi = ceil_f32(aabb_h) as u32;
+        // The AABB origin is relative to the node's position (in points).
+        // Convert to millipoints for consistency with ax/ay/bw/bh.
+        let aabb_xi = crate::node::f32_to_mpt(aabb_x);
+        let aabb_yi = crate::node::f32_to_mpt(aabb_y);
+        let aabb_wi = (aabb_w * crate::node::MPT_PER_PT as f32) as u32;
+        let aabb_hi = (aabb_h * crate::node::MPT_PER_PT as f32) as u32;
 
         bx = ax + aabb_xi;
         by = ay + aabb_yi;

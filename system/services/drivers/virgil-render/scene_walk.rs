@@ -206,10 +206,10 @@ fn walk_node(
         return;
     }
 
-    let abs_x = parent_x + (node.x as f32) * scale;
-    let abs_y = parent_y + (node.y as f32) * scale;
-    let w = (node.width as f32) * scale;
-    let h = (node.height as f32) * scale;
+    let abs_x = parent_x + scene::mpt_to_f32(node.x) * scale;
+    let abs_y = parent_y + scene::mpt_to_f32(node.y) * scale;
+    let w = scene::umpt_to_f32(node.width) * scale;
+    let h = scene::umpt_to_f32(node.height) * scale;
 
     // Collect backdrop blur request before drawing the node itself.
     // The render loop executes blur passes after all normal rendering,

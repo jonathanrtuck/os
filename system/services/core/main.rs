@@ -1468,12 +1468,12 @@ pub extern "C" fn _start() -> ! {
             s.sel_end as u32,
             b"Text",
             &time_buf,
-            0.0,
+            0,
             s.cursor_opacity,
             s.mouse_x,
             s.mouse_y,
             s.pointer_opacity,
-            0.0,
+            0,
             0,
         );
     }
@@ -1497,7 +1497,11 @@ pub extern "C" fn _start() -> ! {
     let mut prev_ms: u64 = {
         let s = state();
         let freq = s.counter_freq;
-        if freq > 0 { sys::counter() * 1000 / freq } else { 0 }
+        if freq > 0 {
+            sys::counter() * 1000 / freq
+        } else {
+            0
+        }
     };
 
     loop {
@@ -2092,12 +2096,12 @@ pub extern "C" fn _start() -> ! {
                     s.sel_end as u32,
                     title,
                     &time_buf,
-                    s.scroll_offset,
+                    scene::f32_to_mpt(s.scroll_offset),
                     s.cursor_opacity,
                     s.mouse_x,
                     s.mouse_y,
                     s.pointer_opacity,
-                    s.slide_offset,
+                    scene::f32_to_mpt(s.slide_offset),
                     s.active_space,
                 );
             } else if text_changed {
@@ -2122,7 +2126,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        scene::f32_to_mpt(s.scroll_offset),
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2152,7 +2156,7 @@ pub extern "C" fn _start() -> ! {
                         changed_line,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        scene::f32_to_mpt(s.scroll_offset),
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2167,7 +2171,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        scene::f32_to_mpt(s.scroll_offset),
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2182,7 +2186,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        scene::f32_to_mpt(s.scroll_offset),
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2198,7 +2202,7 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset,
+                        scene::f32_to_mpt(s.scroll_offset),
                         timer_fired,
                         s.cursor_opacity,
                     );
@@ -2264,7 +2268,7 @@ pub extern "C" fn _start() -> ! {
 
             // Apply slide offset if it changed this frame.
             if slide_changed {
-                scene.apply_slide(state().slide_offset);
+                scene.apply_slide(scene::f32_to_mpt(state().slide_offset));
             }
 
             // Apply pointer cursor opacity to the scene graph. Position
@@ -2275,7 +2279,6 @@ pub extern "C" fn _start() -> ! {
                 let s = state();
                 scene.apply_pointer(s.mouse_x, s.mouse_y, s.pointer_opacity);
             }
-
         }
 
         // Signal compositor for scene changes AND pointer-only moves.

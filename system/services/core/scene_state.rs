@@ -55,12 +55,12 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: f32,
+        scroll_y: scene::Mpt,
         cursor_opacity: u8,
         mouse_x: u32,
         mouse_y: u32,
         pointer_opacity: u8,
-        slide_offset: f32,
+        slide_offset: scene::Mpt,
         active_space: u8,
     ) {
         let mut tw = self.triple();
@@ -89,12 +89,12 @@ impl SceneState {
 
     /// Update the strip slide offset (for document switch animation).
     /// Lightweight: only changes N_STRIP's content_transform.
-    pub fn apply_slide(&mut self, slide_offset: f32) {
+    pub fn apply_slide(&mut self, slide_offset: scene::Mpt) {
         let mut tw = self.triple();
         {
             let mut w = tw.acquire_copy();
             w.node_mut(N_STRIP).content_transform =
-                scene::AffineTransform::translate(-slide_offset, 0.0);
+                scene::AffineTransform::translate(-scene::mpt_to_f32(slide_offset), 0.0);
             w.mark_dirty(N_STRIP);
         }
         tw.publish();
@@ -180,7 +180,7 @@ impl SceneState {
         changed_line: usize,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: f32,
+        scroll_y: scene::Mpt,
         timer_fired: bool,
         cursor_opacity: u8,
     ) {
@@ -231,7 +231,7 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: f32,
+        scroll_y: scene::Mpt,
         timer_fired: bool,
         cursor_opacity: u8,
     ) {
@@ -280,7 +280,7 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: f32,
+        scroll_y: scene::Mpt,
         timer_fired: bool,
         cursor_opacity: u8,
     ) {
@@ -359,7 +359,7 @@ impl SceneState {
         sel_end: u32,
         title_label: &[u8],
         clock_text: &[u8],
-        scroll_y: f32,
+        scroll_y: scene::Mpt,
         mark_clock_changed: bool,
         cursor_opacity: u8,
     ) {
@@ -394,8 +394,8 @@ impl SceneState {
         {
             let mut w = tw.acquire_copy();
             let n = w.node_mut(N_POINTER);
-            n.x = mouse_x as i32 - CURSOR_HOTSPOT_OFFSET;
-            n.y = mouse_y as i32 - CURSOR_HOTSPOT_OFFSET;
+            n.x = scene::pt(mouse_x as i32 - CURSOR_HOTSPOT_OFFSET);
+            n.y = scene::pt(mouse_y as i32 - CURSOR_HOTSPOT_OFFSET);
             n.opacity = opacity;
             w.mark_dirty(N_POINTER);
         }

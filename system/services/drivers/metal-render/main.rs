@@ -1312,8 +1312,7 @@ pub extern "C" fn _start() -> ! {
         let cursor_moved = if pointer_state_va != 0 {
             // SAFETY: pointer_state_va is a shared page mapped by init (read-only).
             let packed = unsafe {
-                let atom =
-                    &*(pointer_state_va as *const core::sync::atomic::AtomicU64);
+                let atom = &*(pointer_state_va as *const core::sync::atomic::AtomicU64);
                 atom.load(core::sync::atomic::Ordering::Acquire)
             };
             if packed != last_pointer_xy && packed != 0 {
@@ -2248,10 +2247,10 @@ fn walk_scene(
     // node.transform applies around the node's own origin (node.x, node.y in parent space).
     // For identity/pure-translation transforms, this collapses to a simple offset.
     let t = &node.transform;
-    let node_origin_x = parent_x + node.x as f32;
-    let node_origin_y = parent_y + node.y as f32;
-    let w = node.width as f32;
-    let h = node.height as f32;
+    let node_origin_x = parent_x + scene::mpt_to_f32(node.x);
+    let node_origin_y = parent_y + scene::mpt_to_f32(node.y);
+    let w = scene::umpt_to_f32(node.width);
+    let h = scene::umpt_to_f32(node.height);
     // abs_x/abs_y: for identity transforms, same as before. For non-trivial transforms,
     // we use the AABB of the transformed rect for clip/scissor purposes, but vertex
     // positions are computed per-corner through the transform.
@@ -2673,11 +2672,7 @@ fn walk_scene(
             let pixel_bytes = src_width as u32 * src_height as u32 * 4;
             let src_start = data.offset as usize;
             let src_end = src_start + pixel_bytes as usize;
-            if data.length > 0
-                && src_width > 0
-                && src_height > 0
-                && src_end <= data_buf.len()
-            {
+            if data.length > 0 && src_width > 0 && src_height > 0 && src_end <= data_buf.len() {
                 // Pack this image into the per-frame atlas. Each image
                 // gets a unique sub-rectangle so deferred draw commands
                 // sample the correct pixels from the shared TEX_IMAGE.

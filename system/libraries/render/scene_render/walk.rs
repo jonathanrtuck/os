@@ -142,10 +142,10 @@ fn render_node_transformed(
         // Pure translation: shift the node's position by the transform's tx, ty.
         let tx_px = round_f32(world_xform.tx * s);
         let ty_px = round_f32(world_xform.ty * s);
-        let nx = abs_x + scale_coord(node.x as i32, s) + tx_px;
-        let ny = abs_y + scale_coord(node.y as i32, s) + ty_px;
-        let nw = scale_size(node.x as i32, node.width as i32, s);
-        let nh = scale_size(node.y as i32, node.height as i32, s);
+        let nx = abs_x + scale_coord(node.x, s) + tx_px;
+        let ny = abs_y + scale_coord(node.y, s) + ty_px;
+        let nw = scale_size(node.x, node.width as i32, s);
+        let nh = scale_size(node.y, node.height as i32, s);
         let node_rect = ClipRect {
             x: nx,
             y: ny,
@@ -251,10 +251,10 @@ fn render_node_transformed(
         //
         // For paths: transform coordinates before rasterization (matrix x vertex).
 
-        let base_nx = abs_x + scale_coord(node.x as i32, s);
-        let base_ny = abs_y + scale_coord(node.y as i32, s);
-        let nw = scale_size(node.x as i32, node.width as i32, s);
-        let nh = scale_size(node.y as i32, node.height as i32, s);
+        let base_nx = abs_x + scale_coord(node.x, s);
+        let base_ny = abs_y + scale_coord(node.y, s);
+        let nw = scale_size(node.x, node.width as i32, s);
+        let nh = scale_size(node.y, node.height as i32, s);
         if nw <= 0 || nh <= 0 {
             return;
         }
@@ -707,8 +707,8 @@ fn render_node_content_translated(
     clip_cache: &mut ClipMaskCache,
 ) {
     let s = ctx.scale;
-    let nw = scale_size(node.x as i32, node.width as i32, s);
-    let nh = scale_size(node.y as i32, node.height as i32, s);
+    let nw = scale_size(node.x, node.width as i32, s);
+    let nh = scale_size(node.y, node.height as i32, s);
     let node_rect = ClipRect {
         x: draw_x,
         y: draw_y,
@@ -1377,10 +1377,10 @@ fn traverse_children(
         }
         let child_node = &graph.nodes[child as usize];
 
-        let cx = child_origin_x + scale_coord(child_node.x as i32, scale);
-        let cy = child_origin_y + scale_coord(child_node.y as i32, scale);
-        let cw = scale_size(child_node.x as i32, child_node.width as i32, scale);
-        let ch = scale_size(child_node.y as i32, child_node.height as i32, scale);
+        let cx = child_origin_x + scale_coord(child_node.x, scale);
+        let cy = child_origin_y + scale_coord(child_node.y, scale);
+        let cw = scale_size(child_node.x, child_node.width as i32, scale);
+        let ch = scale_size(child_node.y, child_node.height as i32, scale);
         let child_rect = ClipRect {
             x: cx,
             y: cy,

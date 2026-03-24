@@ -101,45 +101,45 @@ fn build_four_corner_scene() -> (Vec<Node>, Vec<u8>) {
     let mut nodes = vec![Node::EMPTY; 5];
 
     // Node 0: root — full surface, clips children
-    nodes[0].x = 0;
-    nodes[0].y = 0;
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].x = scene::pt(0);
+    nodes[0].y = scene::pt(0);
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
     // Node 1: child_a — top-left red square
-    nodes[1].x = 0;
-    nodes[1].y = 0;
-    nodes[1].width = 30;
-    nodes[1].height = 30;
+    nodes[1].x = scene::pt(0);
+    nodes[1].y = scene::pt(0);
+    nodes[1].width = scene::upt(30);
+    nodes[1].height = scene::upt(30);
     nodes[1].background = red;
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].next_sibling = 2;
 
     // Node 2: child_b — top-right green square
-    nodes[2].x = 70;
-    nodes[2].y = 0;
-    nodes[2].width = 30;
-    nodes[2].height = 30;
+    nodes[2].x = scene::pt(70);
+    nodes[2].y = scene::pt(0);
+    nodes[2].width = scene::upt(30);
+    nodes[2].height = scene::upt(30);
     nodes[2].background = green;
     nodes[2].flags = NodeFlags::VISIBLE;
     nodes[2].next_sibling = 3;
 
     // Node 3: child_c — bottom-left blue square
-    nodes[3].x = 0;
-    nodes[3].y = 70;
-    nodes[3].width = 30;
-    nodes[3].height = 30;
+    nodes[3].x = scene::pt(0);
+    nodes[3].y = scene::pt(70);
+    nodes[3].width = scene::upt(30);
+    nodes[3].height = scene::upt(30);
     nodes[3].background = blue;
     nodes[3].flags = NodeFlags::VISIBLE;
     nodes[3].next_sibling = 4;
 
     // Node 4: child_d — bottom-right white square
-    nodes[4].x = 70;
-    nodes[4].y = 70;
-    nodes[4].width = 30;
-    nodes[4].height = 30;
+    nodes[4].x = scene::pt(70);
+    nodes[4].y = scene::pt(70);
+    nodes[4].width = scene::upt(30);
+    nodes[4].height = scene::upt(30);
     nodes[4].background = white;
     nodes[4].flags = NodeFlags::VISIBLE;
 
@@ -349,24 +349,24 @@ fn clip_skips_entire_subtree_not_just_direct_child() {
     let mut nodes = vec![Node::EMPTY; 3];
 
     // Node 0: root
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
     // Node 1: container at right half
-    nodes[1].x = 50;
-    nodes[1].y = 0;
-    nodes[1].width = 50;
-    nodes[1].height = 100;
+    nodes[1].x = scene::pt(50);
+    nodes[1].y = scene::pt(0);
+    nodes[1].width = scene::upt(50);
+    nodes[1].height = scene::upt(100);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].first_child = 2;
 
     // Node 2: grandchild with yellow background, fills parent
-    nodes[2].x = 0;
-    nodes[2].y = 0;
-    nodes[2].width = 50;
-    nodes[2].height = 100;
+    nodes[2].x = scene::pt(0);
+    nodes[2].y = scene::pt(0);
+    nodes[2].width = scene::upt(50);
+    nodes[2].height = scene::upt(100);
     nodes[2].background = scene::Color::rgba(255, 255, 0, 255);
     nodes[2].flags = NodeFlags::VISIBLE;
 
@@ -410,16 +410,16 @@ fn zero_size_child_is_skipped() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
     // Zero-size child at origin
-    nodes[1].x = 0;
-    nodes[1].y = 0;
-    nodes[1].width = 0;
-    nodes[1].height = 0;
+    nodes[1].x = scene::pt(0);
+    nodes[1].y = scene::pt(0);
+    nodes[1].width = scene::upt(0);
+    nodes[1].height = scene::upt(0);
     nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
 
@@ -460,16 +460,16 @@ fn partial_render_clears_vacated_region() {
 
     // Frame 1: root with bg, child at (10,10).
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].background = bg;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 10;
-    nodes[1].y = 10;
-    nodes[1].width = 20;
-    nodes[1].height = 20;
+    nodes[1].x = scene::pt(10);
+    nodes[1].y = scene::pt(10);
+    nodes[1].width = scene::upt(20);
+    nodes[1].height = scene::upt(20);
     nodes[1].background = red;
     nodes[1].flags = NodeFlags::VISIBLE;
 
@@ -492,8 +492,8 @@ fn partial_render_clears_vacated_region() {
 
     // Frame 2: child moves to (60, 60).
     let mut nodes2 = nodes.clone();
-    nodes2[1].x = 60;
-    nodes2[1].y = 60;
+    nodes2[1].x = scene::pt(60);
+    nodes2[1].y = scene::pt(60);
 
     let graph2 = scene_render::SceneGraph {
         nodes: &nodes2,
@@ -701,16 +701,16 @@ fn fractional_scale_1_5_correct_physical_dimensions() {
     let mut nodes = vec![Node::EMPTY; 2];
 
     // Root: 200×150 point → 300×225 physical
-    nodes[0].width = 200;
-    nodes[0].height = 150;
+    nodes[0].width = scene::upt(200);
+    nodes[0].height = scene::upt(150);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
     // Child: point (10,20) 100×50 → physical (15,30) 150×75
-    nodes[1].x = 10;
-    nodes[1].y = 20;
-    nodes[1].width = 100;
-    nodes[1].height = 50;
+    nodes[1].x = scene::pt(10);
+    nodes[1].y = scene::pt(20);
+    nodes[1].width = scene::upt(100);
+    nodes[1].height = scene::upt(50);
     nodes[1].background = green;
     nodes[1].flags = NodeFlags::VISIBLE;
 
@@ -785,8 +785,8 @@ fn fractional_scale_no_gap_between_adjacent_nodes() {
     let mut nodes = vec![Node::EMPTY; 3];
 
     // Root: point width 20 → physical 30
-    nodes[0].width = 20;
-    nodes[0].height = 10;
+    nodes[0].width = scene::upt(20);
+    nodes[0].height = scene::upt(10);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
@@ -795,19 +795,19 @@ fn fractional_scale_no_gap_between_adjacent_nodes() {
     // At 1.5: x_phys=floor(3*1.5)=4, w_phys=floor(1*1.5)=1 (or round?)
     // Key: node B at x=4, w=1 → x_phys=floor(4*1.5)=6, w_phys=1
     // There should be no gap at physical pixel 5.
-    nodes[1].x = 3;
-    nodes[1].y = 0;
-    nodes[1].width = 1;
-    nodes[1].height = 10;
+    nodes[1].x = scene::pt(3);
+    nodes[1].y = scene::pt(0);
+    nodes[1].width = scene::upt(1);
+    nodes[1].height = scene::upt(10);
     nodes[1].background = red;
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].next_sibling = 2;
 
     // Node B: point x=4, w=1
-    nodes[2].x = 4;
-    nodes[2].y = 0;
-    nodes[2].width = 1;
-    nodes[2].height = 10;
+    nodes[2].x = scene::pt(4);
+    nodes[2].y = scene::pt(0);
+    nodes[2].width = scene::upt(1);
+    nodes[2].height = scene::upt(10);
     nodes[2].background = blue;
     nodes[2].flags = NodeFlags::VISIBLE;
 
@@ -881,8 +881,8 @@ fn fractional_scale_border_pixel_snapped() {
         let phys_h = (40.0 * scale) as u32;
 
         let mut nodes = vec![Node::EMPTY; 1];
-        nodes[0].width = 60;
-        nodes[0].height = 40;
+        nodes[0].width = scene::upt(60);
+        nodes[0].height = scene::upt(40);
         nodes[0].background = scene::Color::rgba(0, 0, 0, 255);
         nodes[0].border = scene::Border {
             width: point_bw as u8,
@@ -980,8 +980,8 @@ fn fractional_scale_zero_no_panic() {
     let ctx = test_ctx_f32(&mono, &prop, 0.0);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[0].flags = NodeFlags::VISIBLE;
 
@@ -1008,8 +1008,8 @@ fn fractional_scale_negative_treated_as_safe() {
     let ctx = test_ctx_f32(&mono, &prop, -1.5);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[0].flags = NodeFlags::VISIBLE;
 
@@ -1035,8 +1035,8 @@ fn fractional_scale_extreme_clamped() {
     let ctx = test_ctx_f32(&mono, &prop, 8.0);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 10;
-    nodes[0].height = 10;
+    nodes[0].width = scene::upt(10);
+    nodes[0].height = scene::upt(10);
     nodes[0].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[0].flags = NodeFlags::VISIBLE;
 
@@ -1063,14 +1063,14 @@ fn fractional_scale_extreme_clamped() {
 /// haven't changed from the baseline.
 #[test]
 fn scene_graph_node_struct_unchanged() {
-    // Node coordinates: x/y are i32, width/height are u16.
+    // Node coordinates: x/y are i32 (Mpt), width/height are u32 (Umpt).
     let n = Node::EMPTY;
     // Verify the types by assigning known values.
     let mut node = n;
-    node.x = -100i32; // x is i32
-    node.y = 32000i32; // y is i32
-    node.width = 65535u16; // width is u16
-    node.height = 1u16; // height is u16
+    node.x = -100i32; // x is Mpt (i32)
+    node.y = 32000i32; // y is Mpt (i32)
+    node.width = 65535u32; // width is Umpt (u32)
+    node.height = 1u32; // height is Umpt (u32)
 
     assert_eq!(node.x, -100);
     assert_eq!(node.y, 32000);
@@ -1185,22 +1185,22 @@ fn scroll_offset_fractional_scale() {
     let mut nodes = vec![Node::EMPTY; 3];
 
     // Root: 150x150 physical (100x100 point at 1.5x)
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
     // Container: full size, content_transform ty = -10 (scroll down 10)
-    nodes[1].width = 100;
-    nodes[1].height = 100;
+    nodes[1].width = scene::upt(100);
+    nodes[1].height = scene::upt(100);
     nodes[1].content_transform = scene::AffineTransform::translate(0.0, -10.0);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].first_child = 2;
 
     // Child: 20x20 at y=20 (point), background = RED
-    nodes[2].y = 20; // Logical y = 20
-    nodes[2].width = 20;
-    nodes[2].height = 20;
+    nodes[2].y = scene::pt(20); // Logical y = 20
+    nodes[2].width = scene::upt(20);
+    nodes[2].height = scene::upt(20);
     nodes[2].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[2].flags = NodeFlags::VISIBLE;
 
@@ -1308,8 +1308,8 @@ fn corner_radius_renders_rounded_background() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 100;
-    nodes[0].height = 60;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(60);
     nodes[0].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[0].corner_radius = 8;
     nodes[0].flags = NodeFlags::VISIBLE;
@@ -1359,8 +1359,8 @@ fn corner_radius_zero_falls_back_to_rect() {
 
     // Scene with corner_radius = 0
     let mut nodes_sharp = vec![Node::EMPTY; 1];
-    nodes_sharp[0].width = 60;
-    nodes_sharp[0].height = 40;
+    nodes_sharp[0].width = scene::upt(60);
+    nodes_sharp[0].height = scene::upt(40);
     nodes_sharp[0].background = green;
     nodes_sharp[0].corner_radius = 0;
     nodes_sharp[0].flags = NodeFlags::VISIBLE;
@@ -1398,16 +1398,16 @@ fn corner_radius_clips_children_to_rounded_boundary() {
     let mut nodes = vec![Node::EMPTY; 2];
 
     // Parent: 100×100, corner_radius=20, clips children
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].corner_radius = 20;
     nodes[0].background = scene::Color::rgba(100, 100, 100, 255);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
     // Child: fills entire parent, bright green
-    nodes[1].width = 100;
-    nodes[1].height = 100;
+    nodes[1].width = scene::upt(100);
+    nodes[1].height = scene::upt(100);
     nodes[1].background = scene::Color::rgba(0, 255, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
 
@@ -1458,16 +1458,16 @@ fn corner_radius_zero_clips_children_uses_rect_clip() {
     let mut nodes = vec![Node::EMPTY; 2];
 
     // Parent: 60×40, corner_radius=0, clips children
-    nodes[0].width = 60;
-    nodes[0].height = 40;
+    nodes[0].width = scene::upt(60);
+    nodes[0].height = scene::upt(40);
     nodes[0].corner_radius = 0;
     nodes[0].background = scene::Color::rgba(100, 100, 100, 255);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
     // Child: extends beyond parent (80×60)
-    nodes[1].width = 80;
-    nodes[1].height = 60;
+    nodes[1].width = scene::upt(80);
+    nodes[1].height = scene::upt(60);
     nodes[1].background = scene::Color::rgba(0, 255, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
 
@@ -1513,8 +1513,8 @@ fn rounded_border_follows_corner_contour() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 80;
-    nodes[0].height = 60;
+    nodes[0].width = scene::upt(80);
+    nodes[0].height = scene::upt(60);
     nodes[0].background = scene::Color::rgba(50, 50, 50, 255);
     nodes[0].corner_radius = 12;
     nodes[0].border = scene::Border {
@@ -1566,8 +1566,8 @@ fn corner_radius_at_fractional_scale() {
     let ctx = test_ctx_f32(&mono, &prop, 1.5);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 80;
-    nodes[0].height = 60;
+    nodes[0].width = scene::upt(80);
+    nodes[0].height = scene::upt(60);
     nodes[0].background = scene::Color::rgba(0, 0, 255, 255);
     nodes[0].corner_radius = 8;
     nodes[0].flags = NodeFlags::VISIBLE;
@@ -1617,8 +1617,8 @@ fn fractional_scale_rounded_corner_symmetry() {
     let ctx = test_ctx_f32(&mono, &prop, 1.5);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 60;
-    nodes[0].height = 60;
+    nodes[0].width = scene::upt(60);
+    nodes[0].height = scene::upt(60);
     nodes[0].background = scene::Color::rgba(200, 0, 0, 255);
     nodes[0].corner_radius = 10;
     nodes[0].flags = NodeFlags::VISIBLE;
@@ -1670,8 +1670,8 @@ fn rounded_rect_semi_transparent_blends() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 60;
-    nodes[0].height = 40;
+    nodes[0].width = scene::upt(60);
+    nodes[0].height = scene::upt(40);
     nodes[0].background = scene::Color::rgba(255, 0, 0, 128);
     nodes[0].corner_radius = 8;
     nodes[0].flags = NodeFlags::VISIBLE;
@@ -1739,24 +1739,24 @@ fn group_opacity_differs_from_individual_opacity() {
     // composited at 128. The overlap region should show the frontmost child
     // at 128 opacity.
     let mut nodes_group = vec![Node::EMPTY; 3];
-    nodes_group[0].width = 80;
-    nodes_group[0].height = 60;
+    nodes_group[0].width = scene::upt(80);
+    nodes_group[0].height = scene::upt(60);
     nodes_group[0].opacity = 128;
     nodes_group[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes_group[0].first_child = 1;
 
-    nodes_group[1].x = 0;
-    nodes_group[1].y = 0;
-    nodes_group[1].width = 50;
-    nodes_group[1].height = 60;
+    nodes_group[1].x = scene::pt(0);
+    nodes_group[1].y = scene::pt(0);
+    nodes_group[1].width = scene::upt(50);
+    nodes_group[1].height = scene::upt(60);
     nodes_group[1].background = scene::Color::rgba(255, 0, 0, 255);
     nodes_group[1].flags = NodeFlags::VISIBLE;
     nodes_group[1].next_sibling = 2;
 
-    nodes_group[2].x = 30;
-    nodes_group[2].y = 0;
-    nodes_group[2].width = 50;
-    nodes_group[2].height = 60;
+    nodes_group[2].x = scene::pt(30);
+    nodes_group[2].y = scene::pt(0);
+    nodes_group[2].width = scene::upt(50);
+    nodes_group[2].height = scene::upt(60);
     nodes_group[2].background = scene::Color::rgba(0, 0, 255, 255);
     nodes_group[2].flags = NodeFlags::VISIBLE;
 
@@ -1776,25 +1776,25 @@ fn group_opacity_differs_from_individual_opacity() {
     // Per-child opacity: each child independently composited at 128.
     // The overlap region gets both children composited separately.
     let mut nodes_ind = vec![Node::EMPTY; 3];
-    nodes_ind[0].width = 80;
-    nodes_ind[0].height = 60;
+    nodes_ind[0].width = scene::upt(80);
+    nodes_ind[0].height = scene::upt(60);
     nodes_ind[0].opacity = 255;
     nodes_ind[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes_ind[0].first_child = 1;
 
-    nodes_ind[1].x = 0;
-    nodes_ind[1].y = 0;
-    nodes_ind[1].width = 50;
-    nodes_ind[1].height = 60;
+    nodes_ind[1].x = scene::pt(0);
+    nodes_ind[1].y = scene::pt(0);
+    nodes_ind[1].width = scene::upt(50);
+    nodes_ind[1].height = scene::upt(60);
     nodes_ind[1].background = scene::Color::rgba(255, 0, 0, 255);
     nodes_ind[1].opacity = 128;
     nodes_ind[1].flags = NodeFlags::VISIBLE;
     nodes_ind[1].next_sibling = 2;
 
-    nodes_ind[2].x = 30;
-    nodes_ind[2].y = 0;
-    nodes_ind[2].width = 50;
-    nodes_ind[2].height = 60;
+    nodes_ind[2].x = scene::pt(30);
+    nodes_ind[2].y = scene::pt(0);
+    nodes_ind[2].width = scene::upt(50);
+    nodes_ind[2].height = scene::upt(60);
     nodes_ind[2].background = scene::Color::rgba(0, 0, 255, 255);
     nodes_ind[2].opacity = 128;
     nodes_ind[2].flags = NodeFlags::VISIBLE;
@@ -1833,8 +1833,8 @@ fn opacity_255_bypasses_offscreen() {
 
     // Scene with opacity=255 on a red square.
     let mut nodes_full = vec![Node::EMPTY; 1];
-    nodes_full[0].width = 60;
-    nodes_full[0].height = 40;
+    nodes_full[0].width = scene::upt(60);
+    nodes_full[0].height = scene::upt(40);
     nodes_full[0].background = scene::Color::rgba(255, 0, 0, 255);
     nodes_full[0].opacity = 255;
     nodes_full[0].flags = NodeFlags::VISIBLE;
@@ -1879,8 +1879,8 @@ fn opacity_zero_produces_no_output() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 60;
-    nodes[0].height = 40;
+    nodes[0].width = scene::upt(60);
+    nodes[0].height = scene::upt(40);
     nodes[0].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[0].opacity = 0;
     nodes[0].flags = NodeFlags::VISIBLE;
@@ -1926,8 +1926,8 @@ fn srgb_correct_group_opacity() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 1];
-    nodes[0].width = 60;
-    nodes[0].height = 40;
+    nodes[0].width = scene::upt(60);
+    nodes[0].height = scene::upt(40);
     nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
     nodes[0].opacity = 128;
     nodes[0].flags = NodeFlags::VISIBLE;
@@ -1979,14 +1979,14 @@ fn nested_group_opacity() {
     // Parent: opacity=128, child: opacity=128, child bg = white.
     // Effective opacity ~= 128/255 * 128/255 ≈ 25%.
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 60;
-    nodes[0].height = 40;
+    nodes[0].width = scene::upt(60);
+    nodes[0].height = scene::upt(40);
     nodes[0].opacity = 128;
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].width = 60;
-    nodes[1].height = 40;
+    nodes[1].width = scene::upt(60);
+    nodes[1].height = scene::upt(40);
     nodes[1].background = scene::Color::rgba(255, 255, 255, 255);
     nodes[1].opacity = 128;
     nodes[1].flags = NodeFlags::VISIBLE;
@@ -2042,23 +2042,23 @@ fn offscreen_opacity_respects_clip() {
     let mut nodes = vec![Node::EMPTY; 3];
 
     // Root: 100×100, fully opaque.
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
     // Semi-transparent parent with clipping.
-    nodes[1].x = 10;
-    nodes[1].y = 10;
-    nodes[1].width = 40;
-    nodes[1].height = 40;
+    nodes[1].x = scene::pt(10);
+    nodes[1].y = scene::pt(10);
+    nodes[1].width = scene::upt(40);
+    nodes[1].height = scene::upt(40);
     nodes[1].opacity = 128;
     nodes[1].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[1].first_child = 2;
 
     // Child: fills more than parent.
-    nodes[2].width = 80;
-    nodes[2].height = 80;
+    nodes[2].width = scene::upt(80);
+    nodes[2].height = scene::upt(80);
     nodes[2].background = scene::Color::rgba(0, 255, 0, 255);
     nodes[2].flags = NodeFlags::VISIBLE;
 
@@ -2109,13 +2109,13 @@ fn offscreen_opacity_respects_scroll() {
     // Child: 60x40 at y=0.
     let mut nodes = vec![Node::EMPTY; 3];
 
-    nodes[0].width = 60;
-    nodes[0].height = 60;
+    nodes[0].width = scene::upt(60);
+    nodes[0].height = scene::upt(60);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].width = 60;
-    nodes[1].height = 40;
+    nodes[1].width = scene::upt(60);
+    nodes[1].height = scene::upt(40);
     nodes[1].opacity = 128;
     nodes[1].content_transform = scene::AffineTransform::translate(0.0, -10.0);
     nodes[1].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -2123,9 +2123,9 @@ fn offscreen_opacity_respects_scroll() {
 
     // Child at y=0, height 40. With content_transform ty=-10, the first
     // 10 pixels of the child should be scrolled off the top.
-    nodes[2].y = 0;
-    nodes[2].width = 60;
-    nodes[2].height = 40;
+    nodes[2].y = scene::pt(0);
+    nodes[2].width = scene::upt(60);
+    nodes[2].height = scene::upt(40);
     nodes[2].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[2].flags = NodeFlags::VISIBLE;
 
@@ -2240,8 +2240,8 @@ fn triple_buffer_publish_preserves_opacity() {
         let n = sw.alloc_node().unwrap();
         let node = sw.node_mut(n);
         node.opacity = 128;
-        node.width = 100;
-        node.height = 100;
+        node.width = scene::upt(100);
+        node.height = scene::upt(100);
         node.flags = NodeFlags::VISIBLE;
         sw.commit();
     }
@@ -2269,17 +2269,17 @@ fn shadow_renders_behind_source_with_offset() {
 
     let mut nodes = vec![Node::EMPTY; 2];
     // Root: 120×120 white background, clips children.
-    nodes[0].width = 120;
-    nodes[0].height = 120;
+    nodes[0].width = scene::upt(120);
+    nodes[0].height = scene::upt(120);
     nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
     nodes[0].first_child = 1;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
 
     // Child: 40×40 red box at (20, 20) with black shadow offset (5, 5), blur=0.
-    nodes[1].x = 20;
-    nodes[1].y = 20;
-    nodes[1].width = 40;
-    nodes[1].height = 40;
+    nodes[1].x = scene::pt(20);
+    nodes[1].y = scene::pt(20);
+    nodes[1].width = scene::upt(40);
+    nodes[1].height = scene::upt(40);
     nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 200);
@@ -2346,16 +2346,16 @@ fn shadow_spread_expands_footprint() {
     // Render with spread=0.
     let render_with_spread = |spread: i8| -> Vec<u8> {
         let mut nodes = vec![Node::EMPTY; 2];
-        nodes[0].width = 100;
-        nodes[0].height = 100;
+        nodes[0].width = scene::upt(100);
+        nodes[0].height = scene::upt(100);
         nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
         nodes[0].first_child = 1;
         nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
 
-        nodes[1].x = 30;
-        nodes[1].y = 30;
-        nodes[1].width = 40;
-        nodes[1].height = 40;
+        nodes[1].x = scene::pt(30);
+        nodes[1].y = scene::pt(30);
+        nodes[1].width = scene::upt(40);
+        nodes[1].height = scene::upt(40);
         nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
         nodes[1].flags = NodeFlags::VISIBLE;
         nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 200);
@@ -2419,16 +2419,16 @@ fn shadow_zero_blur_is_hard_shadow() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
     nodes[0].first_child = 1;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
 
-    nodes[1].x = 30;
-    nodes[1].y = 30;
-    nodes[1].width = 40;
-    nodes[1].height = 40;
+    nodes[1].x = scene::pt(30);
+    nodes[1].y = scene::pt(30);
+    nodes[1].width = scene::upt(40);
+    nodes[1].height = scene::upt(40);
     nodes[1].background = scene::Color::rgba(128, 128, 128, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 255);
@@ -2485,17 +2485,17 @@ fn shadow_color_applied_correctly() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].background = scene::Color::rgba(255, 255, 255, 255);
     nodes[0].first_child = 1;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
 
     // Small node with red shadow at offset (10,10).
-    nodes[1].x = 20;
-    nodes[1].y = 20;
-    nodes[1].width = 30;
-    nodes[1].height = 30;
+    nodes[1].x = scene::pt(20);
+    nodes[1].y = scene::pt(20);
+    nodes[1].width = scene::upt(30);
+    nodes[1].height = scene::upt(30);
     nodes[1].background = scene::Color::rgba(0, 0, 255, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].shadow_color = scene::Color::rgba(255, 0, 0, 128);
@@ -2634,18 +2634,18 @@ fn shadow_falloff_is_smooth_gradient() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 120;
-    nodes[0].height = 120;
+    nodes[0].width = scene::upt(120);
+    nodes[0].height = scene::upt(120);
     // Transparent background so shadow alpha is directly visible.
     nodes[0].background = scene::Color::TRANSPARENT;
     nodes[0].first_child = 1;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
 
     // Node with blurred shadow, no offset so shadow is centered.
-    nodes[1].x = 30;
-    nodes[1].y = 30;
-    nodes[1].width = 60;
-    nodes[1].height = 60;
+    nodes[1].x = scene::pt(30);
+    nodes[1].y = scene::pt(30);
+    nodes[1].width = scene::upt(60);
+    nodes[1].height = scene::upt(60);
     nodes[1].background = scene::Color::TRANSPARENT;
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 255);
@@ -2719,16 +2719,16 @@ fn fractional_scale_preserves_blur_radius() {
     ctx.scale = 1.5;
 
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].background = scene::Color::TRANSPARENT;
     nodes[0].first_child = 1;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
 
-    nodes[1].x = 20;
-    nodes[1].y = 20;
-    nodes[1].width = 40;
-    nodes[1].height = 40;
+    nodes[1].x = scene::pt(20);
+    nodes[1].y = scene::pt(20);
+    nodes[1].width = scene::upt(40);
+    nodes[1].height = scene::upt(40);
     nodes[1].background = scene::Color::TRANSPARENT;
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 255);
@@ -2788,16 +2788,16 @@ fn layer_opacity_applies_to_shadow() {
     // Render shadow at full opacity (255).
     let render_with_opacity = |opacity: u8| -> Vec<u8> {
         let mut nodes = vec![Node::EMPTY; 2];
-        nodes[0].width = 100;
-        nodes[0].height = 100;
+        nodes[0].width = scene::upt(100);
+        nodes[0].height = scene::upt(100);
         nodes[0].background = scene::Color::TRANSPARENT;
         nodes[0].first_child = 1;
         nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
 
-        nodes[1].x = 20;
-        nodes[1].y = 20;
-        nodes[1].width = 40;
-        nodes[1].height = 40;
+        nodes[1].x = scene::pt(20);
+        nodes[1].y = scene::pt(20);
+        nodes[1].width = scene::upt(40);
+        nodes[1].height = scene::upt(40);
         nodes[1].background = scene::Color::TRANSPARENT;
         nodes[1].opacity = opacity;
         nodes[1].flags = NodeFlags::VISIBLE;
@@ -2860,15 +2860,15 @@ fn shadow_overflow_in_damage_rects() {
     // bounds. The abs_bounds function (used for damage tracking) must
     // account for shadow overflow.
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 200;
-    nodes[0].height = 200;
+    nodes[0].width = scene::upt(200);
+    nodes[0].height = scene::upt(200);
     nodes[0].first_child = 1;
     nodes[0].flags = NodeFlags::VISIBLE;
 
-    nodes[1].x = 50;
-    nodes[1].y = 50;
-    nodes[1].width = 40;
-    nodes[1].height = 40;
+    nodes[1].x = scene::pt(50);
+    nodes[1].y = scene::pt(50);
+    nodes[1].width = scene::upt(40);
+    nodes[1].height = scene::upt(40);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].shadow_color = scene::Color::rgba(0, 0, 0, 200);
     nodes[1].shadow_offset_x = 5;
@@ -2902,14 +2902,14 @@ fn identity_transform_pixel_identical() {
 
     // Scene: root (100×100) with a red child (20×20 at 10,10).
     let mut nodes_no_xform = vec![Node::EMPTY; 2];
-    nodes_no_xform[0].width = 100;
-    nodes_no_xform[0].height = 100;
+    nodes_no_xform[0].width = scene::upt(100);
+    nodes_no_xform[0].height = scene::upt(100);
     nodes_no_xform[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes_no_xform[0].first_child = 1;
-    nodes_no_xform[1].x = 10;
-    nodes_no_xform[1].y = 10;
-    nodes_no_xform[1].width = 20;
-    nodes_no_xform[1].height = 20;
+    nodes_no_xform[1].x = scene::pt(10);
+    nodes_no_xform[1].y = scene::pt(10);
+    nodes_no_xform[1].width = scene::upt(20);
+    nodes_no_xform[1].height = scene::upt(20);
     nodes_no_xform[1].background = scene::Color::rgba(255, 0, 0, 255);
     nodes_no_xform[1].flags = NodeFlags::VISIBLE;
 
@@ -2950,15 +2950,15 @@ fn translate_shifts_content() {
 
     // Child at (10,10) with translate(10,5) → should appear at (20,15).
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 10;
-    nodes[1].y = 10;
-    nodes[1].width = 20;
-    nodes[1].height = 20;
+    nodes[1].x = scene::pt(10);
+    nodes[1].y = scene::pt(10);
+    nodes[1].width = scene::upt(20);
+    nodes[1].height = scene::upt(20);
     nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].transform = scene::AffineTransform::translate(10.0, 5.0);
@@ -2999,15 +2999,15 @@ fn scale_doubles_area() {
 
     // Child at (0,0) 10×10 with scale(2,2) → AABB is 20×20.
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 10;
-    nodes[1].y = 10;
-    nodes[1].width = 10;
-    nodes[1].height = 10;
+    nodes[1].x = scene::pt(10);
+    nodes[1].y = scene::pt(10);
+    nodes[1].width = scene::upt(10);
+    nodes[1].height = scene::upt(10);
     nodes[1].background = scene::Color::rgba(0, 255, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].transform = scene::AffineTransform::scale(2.0, 2.0);
@@ -3042,15 +3042,15 @@ fn non_uniform_scale() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 5;
-    nodes[1].y = 5;
-    nodes[1].width = 10;
-    nodes[1].height = 10;
+    nodes[1].x = scene::pt(5);
+    nodes[1].y = scene::pt(5);
+    nodes[1].width = scene::upt(10);
+    nodes[1].height = scene::upt(10);
     nodes[1].background = scene::Color::rgba(0, 0, 255, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].transform = scene::AffineTransform::scale(3.0, 1.0);
@@ -3100,23 +3100,23 @@ fn child_transform_composes_with_parent() {
     // Root: 200×200. Parent at (0,0) with translate(20,10).
     // Child at (0,0) with translate(5,3). World position = (25, 13).
     let mut nodes = vec![Node::EMPTY; 3];
-    nodes[0].width = 200;
-    nodes[0].height = 200;
+    nodes[0].width = scene::upt(200);
+    nodes[0].height = scene::upt(200);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 0;
-    nodes[1].y = 0;
-    nodes[1].width = 200;
-    nodes[1].height = 200;
+    nodes[1].x = scene::pt(0);
+    nodes[1].y = scene::pt(0);
+    nodes[1].width = scene::upt(200);
+    nodes[1].height = scene::upt(200);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].first_child = 2;
     nodes[1].transform = scene::AffineTransform::translate(20.0, 10.0);
 
-    nodes[2].x = 0;
-    nodes[2].y = 0;
-    nodes[2].width = 10;
-    nodes[2].height = 10;
+    nodes[2].x = scene::pt(0);
+    nodes[2].y = scene::pt(0);
+    nodes[2].width = scene::upt(10);
+    nodes[2].height = scene::upt(10);
     nodes[2].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[2].flags = NodeFlags::VISIBLE;
     nodes[2].transform = scene::AffineTransform::translate(5.0, 3.0);
@@ -3167,24 +3167,24 @@ fn transform_does_not_affect_siblings() {
     // Child A at (5,5) 10×10 with translate(30,0) → rendered at ~(35,5)
     // Child B at (5,50) 10×10 with NO transform → rendered at (5,50)
     let mut nodes = vec![Node::EMPTY; 3];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 5;
-    nodes[1].y = 5;
-    nodes[1].width = 10;
-    nodes[1].height = 10;
+    nodes[1].x = scene::pt(5);
+    nodes[1].y = scene::pt(5);
+    nodes[1].width = scene::upt(10);
+    nodes[1].height = scene::upt(10);
     nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].next_sibling = 2;
     nodes[1].transform = scene::AffineTransform::translate(30.0, 0.0);
 
-    nodes[2].x = 5;
-    nodes[2].y = 50;
-    nodes[2].width = 10;
-    nodes[2].height = 10;
+    nodes[2].x = scene::pt(5);
+    nodes[2].y = scene::pt(50);
+    nodes[2].width = scene::upt(10);
+    nodes[2].height = scene::upt(10);
     nodes[2].background = scene::Color::rgba(0, 255, 0, 255);
     nodes[2].flags = NodeFlags::VISIBLE;
     // No transform on sibling.
@@ -3226,15 +3226,15 @@ fn rotation_90_aabb_clip() {
     // Node at (30,30) 40x20 rotated 90°.
     // AABB should be ~20x40 (width and height swap).
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 30;
-    nodes[1].y = 30;
-    nodes[1].width = 40;
-    nodes[1].height = 20;
+    nodes[1].x = scene::pt(30);
+    nodes[1].y = scene::pt(30);
+    nodes[1].width = scene::upt(40);
+    nodes[1].height = scene::upt(20);
     nodes[1].background = scene::Color::rgba(255, 128, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].transform = scene::AffineTransform::rotate(core::f32::consts::FRAC_PI_2);
@@ -3287,15 +3287,15 @@ fn clip_rect_intersected_with_transformed_aabb() {
     // Without clipping, content would extend past parent bounds.
     // With clipping, no content should appear outside parent (0,0,50,50).
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 50;
-    nodes[0].height = 50;
+    nodes[0].width = scene::upt(50);
+    nodes[0].height = scene::upt(50);
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 25;
-    nodes[1].y = 25;
-    nodes[1].width = 40;
-    nodes[1].height = 40;
+    nodes[1].x = scene::pt(25);
+    nodes[1].y = scene::pt(25);
+    nodes[1].width = scene::upt(40);
+    nodes[1].height = scene::upt(40);
     nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].transform = scene::AffineTransform::rotate(core::f32::consts::FRAC_PI_4);
@@ -3345,15 +3345,15 @@ fn scale_zero_no_output_no_panic() {
     let ctx = test_ctx(&mono, &prop);
 
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 50;
-    nodes[0].height = 50;
+    nodes[0].width = scene::upt(50);
+    nodes[0].height = scene::upt(50);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 5;
-    nodes[1].y = 5;
-    nodes[1].width = 20;
-    nodes[1].height = 20;
+    nodes[1].x = scene::pt(5);
+    nodes[1].y = scene::pt(5);
+    nodes[1].width = scene::upt(20);
+    nodes[1].height = scene::upt(20);
     nodes[1].background = scene::Color::rgba(255, 0, 0, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].transform = scene::AffineTransform::scale(0.0, 0.0);
@@ -3394,8 +3394,8 @@ fn triple_buffer_publish_preserves_shadow_fields() {
         sw.clear();
         let n = sw.alloc_node().unwrap();
         let node = sw.node_mut(n);
-        node.width = 100;
-        node.height = 100;
+        node.width = scene::upt(100);
+        node.height = scene::upt(100);
         node.flags = NodeFlags::VISIBLE;
         node.shadow_color = scene::Color::rgba(255, 0, 0, 128);
         node.shadow_offset_x = 10;
@@ -3445,15 +3445,15 @@ fn bilinear_resampling_for_rotated_content() {
 
     // Node: 40x40 white rect rotated 15°.
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 30;
-    nodes[1].y = 30;
-    nodes[1].width = 40;
-    nodes[1].height = 40;
+    nodes[1].x = scene::pt(30);
+    nodes[1].y = scene::pt(30);
+    nodes[1].width = scene::upt(40);
+    nodes[1].height = scene::upt(40);
     nodes[1].background = scene::Color::rgba(255, 255, 255, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     // 15° in radians
@@ -3507,16 +3507,16 @@ fn transformed_text_uses_axis_aligned_glyph_rendering() {
     // The text node also has a background, so we can verify the transform
     // path works even when the glyph cache is empty.
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 200;
-    nodes[0].height = 200;
+    nodes[0].width = scene::upt(200);
+    nodes[0].height = scene::upt(200);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
     // Text node at (50, 50) 100×30, rotated 30°.
-    nodes[1].x = 50;
-    nodes[1].y = 50;
-    nodes[1].width = 100;
-    nodes[1].height = 30;
+    nodes[1].x = scene::pt(50);
+    nodes[1].y = scene::pt(50);
+    nodes[1].width = scene::upt(100);
+    nodes[1].height = scene::upt(30);
     nodes[1].background = scene::Color::rgba(100, 150, 200, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].transform = scene::AffineTransform::rotate(30.0 * core::f32::consts::PI / 180.0);
@@ -3606,15 +3606,15 @@ fn transform_plus_opacity_no_double_application() {
 
     // Scene: white rect rotated 30° with opacity=128.
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 30;
-    nodes[1].y = 30;
-    nodes[1].width = 30;
-    nodes[1].height = 30;
+    nodes[1].x = scene::pt(30);
+    nodes[1].y = scene::pt(30);
+    nodes[1].width = scene::upt(30);
+    nodes[1].height = scene::upt(30);
     nodes[1].background = scene::Color::rgba(255, 255, 255, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].opacity = 128;
@@ -3679,15 +3679,15 @@ fn dpi_scale_composes_with_affine_as_single_matrix() {
     };
 
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 20;
-    nodes[1].y = 20;
-    nodes[1].width = 20;
-    nodes[1].height = 20;
+    nodes[1].x = scene::pt(20);
+    nodes[1].y = scene::pt(20);
+    nodes[1].width = scene::upt(20);
+    nodes[1].height = scene::upt(20);
     nodes[1].background = scene::Color::rgba(200, 100, 50, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].transform = scene::AffineTransform::rotate(core::f32::consts::FRAC_PI_4);
@@ -3743,25 +3743,25 @@ fn group_opacity_on_rotated_content() {
 
     // Parent with opacity=128, child rotated 30°.
     let mut nodes = vec![Node::EMPTY; 3];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
     // Parent node with opacity=128.
-    nodes[1].x = 10;
-    nodes[1].y = 10;
-    nodes[1].width = 80;
-    nodes[1].height = 80;
+    nodes[1].x = scene::pt(10);
+    nodes[1].y = scene::pt(10);
+    nodes[1].width = scene::upt(80);
+    nodes[1].height = scene::upt(80);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].opacity = 128;
     nodes[1].first_child = 2;
 
     // Rotated child.
-    nodes[2].x = 20;
-    nodes[2].y = 20;
-    nodes[2].width = 30;
-    nodes[2].height = 30;
+    nodes[2].x = scene::pt(20);
+    nodes[2].y = scene::pt(20);
+    nodes[2].width = scene::upt(30);
+    nodes[2].height = scene::upt(30);
     nodes[2].background = scene::Color::rgba(255, 255, 255, 255);
     nodes[2].flags = NodeFlags::VISIBLE;
     nodes[2].transform = scene::AffineTransform::rotate(30.0 * core::f32::consts::PI / 180.0);
@@ -3827,16 +3827,16 @@ fn full_feature_composition() {
 
     // Scene: root → child with ALL features enabled.
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 200;
-    nodes[0].height = 200;
+    nodes[0].width = scene::upt(200);
+    nodes[0].height = scene::upt(200);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
     // Node with corner_radius, opacity, rotation, shadow, and text.
-    nodes[1].x = 40;
-    nodes[1].y = 40;
-    nodes[1].width = 60;
-    nodes[1].height = 40;
+    nodes[1].x = scene::pt(40);
+    nodes[1].y = scene::pt(40);
+    nodes[1].width = scene::upt(60);
+    nodes[1].height = scene::upt(40);
     nodes[1].background = scene::Color::rgba(100, 150, 200, 255);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].corner_radius = 6;
@@ -3956,15 +3956,15 @@ fn content_image_downscaled_checkerboard_bilinear() {
 
     // Node: 20×20 display area for a 40×40 image → 0.5x downscale.
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 10;
-    nodes[1].y = 10;
-    nodes[1].width = 20;
-    nodes[1].height = 20;
+    nodes[1].x = scene::pt(10);
+    nodes[1].y = scene::pt(10);
+    nodes[1].width = scene::upt(20);
+    nodes[1].height = scene::upt(20);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].content = scene::Content::Image {
         data: scene::DataRef {
@@ -4011,15 +4011,15 @@ fn content_image_downscaled_checkerboard_bilinear() {
 #[test]
 fn rotated_node_aabb_damage() {
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 200;
-    nodes[0].height = 200;
+    nodes[0].width = scene::upt(200);
+    nodes[0].height = scene::upt(200);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 50;
-    nodes[1].y = 50;
-    nodes[1].width = 40;
-    nodes[1].height = 40;
+    nodes[1].x = scene::pt(50);
+    nodes[1].y = scene::pt(50);
+    nodes[1].width = scene::upt(40);
+    nodes[1].height = scene::upt(40);
     nodes[1].flags = NodeFlags::VISIBLE;
     nodes[1].transform = scene::AffineTransform::rotate(45.0 * core::f32::consts::PI / 180.0);
 
@@ -4060,16 +4060,16 @@ fn full_repaint_no_stale_pixel_artifacts() {
     let bg = scene::Color::rgba(30, 30, 30, 255);
 
     let mut nodes = vec![Node::EMPTY; 2];
-    nodes[0].width = 100;
-    nodes[0].height = 100;
+    nodes[0].width = scene::upt(100);
+    nodes[0].height = scene::upt(100);
     nodes[0].background = bg;
     nodes[0].flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     nodes[0].first_child = 1;
 
-    nodes[1].x = 10;
-    nodes[1].y = 10;
-    nodes[1].width = 20;
-    nodes[1].height = 20;
+    nodes[1].x = scene::pt(10);
+    nodes[1].y = scene::pt(10);
+    nodes[1].width = scene::upt(20);
+    nodes[1].height = scene::upt(20);
     nodes[1].background = red;
     nodes[1].flags = NodeFlags::VISIBLE;
 
@@ -4086,8 +4086,8 @@ fn full_repaint_no_stale_pixel_artifacts() {
 
     // Frame 2: move child to (60, 60), full repaint again.
     let mut nodes2 = nodes.clone();
-    nodes2[1].x = 60;
-    nodes2[1].y = 60;
+    nodes2[1].x = scene::pt(60);
+    nodes2[1].y = scene::pt(60);
     let graph2 = scene_render::SceneGraph {
         nodes: &nodes2,
         data: &data,
@@ -4119,8 +4119,8 @@ fn build_path_scene(
     cmds: &[u8],
     color: scene::Color,
     fill_rule: scene::FillRule,
-    node_w: u16,
-    node_h: u16,
+    node_w: u32,
+    node_h: u32,
 ) -> (Vec<Node>, Vec<u8>) {
     let mut scene_buf = vec![0u8; scene::SCENE_SIZE];
     let mut w = scene::SceneWriter::new(&mut scene_buf);
@@ -4128,8 +4128,8 @@ fn build_path_scene(
     let dref = w.push_path_commands(cmds);
 
     let root = w.alloc_node().unwrap();
-    w.node_mut(root).width = node_w;
-    w.node_mut(root).height = node_h;
+    w.node_mut(root).width = scene::upt(node_w);
+    w.node_mut(root).height = scene::upt(node_h);
     w.node_mut(root).flags = NodeFlags::VISIBLE;
     w.node_mut(root).content = scene::Content::Path {
         color,
@@ -4745,8 +4745,8 @@ fn all_content_types_render_in_one_scene() {
 
     // Root container (Content::None with background).
     let root = w.alloc_node().unwrap();
-    w.node_mut(root).width = 200;
-    w.node_mut(root).height = 200;
+    w.node_mut(root).width = scene::upt(200);
+    w.node_mut(root).height = scene::upt(200);
     w.node_mut(root).background = scene::Color::rgba(30, 30, 30, 255);
     w.node_mut(root).flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     w.set_root(root);
@@ -4759,8 +4759,8 @@ fn all_content_types_render_in_one_scene() {
     scene::path_close(&mut cmds);
     let path_ref = w.push_path_commands(&cmds);
     let path_node = w.alloc_node().unwrap();
-    w.node_mut(path_node).width = 100;
-    w.node_mut(path_node).height = 100;
+    w.node_mut(path_node).width = scene::upt(100);
+    w.node_mut(path_node).height = scene::upt(100);
     w.node_mut(path_node).flags = NodeFlags::VISIBLE;
     w.node_mut(path_node).content = scene::Content::Path {
         color: scene::Color::rgba(0, 255, 0, 255),
@@ -4772,9 +4772,9 @@ fn all_content_types_render_in_one_scene() {
 
     // Glyphs node (empty glyphs — just testing no-crash dispatch).
     let glyphs_node = w.alloc_node().unwrap();
-    w.node_mut(glyphs_node).x = 100;
-    w.node_mut(glyphs_node).width = 100;
-    w.node_mut(glyphs_node).height = 100;
+    w.node_mut(glyphs_node).x = scene::pt(100);
+    w.node_mut(glyphs_node).width = scene::upt(100);
+    w.node_mut(glyphs_node).height = scene::upt(100);
     w.node_mut(glyphs_node).flags = NodeFlags::VISIBLE;
     w.node_mut(glyphs_node).content = scene::Content::Glyphs {
         color: scene::Color::rgba(255, 255, 255, 255),
@@ -4798,9 +4798,9 @@ fn all_content_types_render_in_one_scene() {
     }
     let img_ref = w.push_data(&pixels);
     let img_node = w.alloc_node().unwrap();
-    w.node_mut(img_node).y = 100;
-    w.node_mut(img_node).width = 4;
-    w.node_mut(img_node).height = 4;
+    w.node_mut(img_node).y = scene::pt(100);
+    w.node_mut(img_node).width = scene::upt(4);
+    w.node_mut(img_node).height = scene::upt(4);
     w.node_mut(img_node).flags = NodeFlags::VISIBLE;
     w.node_mut(img_node).content = scene::Content::Image {
         data: img_ref,

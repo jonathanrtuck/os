@@ -10,10 +10,10 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
-    layout_mono_lines, round_f32, scroll_runs, shape_chrome_text, shape_visible_runs,
-    update_clock_inline, SceneConfig, FONT_SANS, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE,
-    N_DOC_TEXT, N_PAGE, N_POINTER, N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON,
-    N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    layout_mono_lines, scroll_runs, shape_chrome_text, shape_visible_runs, update_clock_inline,
+    SceneConfig, FONT_SANS, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE,
+    N_POINTER, N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT,
+    WELL_KNOWN_COUNT,
 };
 use crate::{icons, test_gen::generate_test_image};
 
@@ -35,10 +35,10 @@ fn setup_cursor(w: &mut scene::SceneWriter<'_>, mouse_x: u32, mouse_y: u32, poin
     let cursor_ref = w.push_data(&cursor_pixels);
     let cursor_hash = fnv1a(&cursor_pixels);
     let n = w.node_mut(N_POINTER);
-    n.x = mouse_x as i32 - CURSOR_HOTSPOT_OFFSET;
-    n.y = mouse_y as i32 - CURSOR_HOTSPOT_OFFSET;
-    n.width = CURSOR_SIZE_PT as u16;
-    n.height = CURSOR_SIZE_PT as u16;
+    n.x = scene::pt(mouse_x as i32 - CURSOR_HOTSPOT_OFFSET);
+    n.y = scene::pt(mouse_y as i32 - CURSOR_HOTSPOT_OFFSET);
+    n.width = scene::upt(CURSOR_SIZE_PT);
+    n.height = scene::upt(CURSOR_SIZE_PT);
     n.content = Content::Image {
         data: cursor_ref,
         src_width: cursor_px as u16,
@@ -67,12 +67,12 @@ pub fn build_full_scene(
     sel_end: u32,
     title_label: &[u8],
     clock_text: &[u8],
-    scroll_y: f32,
+    scroll_y: scene::Mpt,
     cursor_opacity: u8,
     mouse_x: u32,
     mouse_y: u32,
     pointer_opacity: u8,
-    slide_offset: f32,
+    slide_offset: scene::Mpt,
     active_space: u8,
 ) {
     let scene_text_color = dc(cfg.text_color);
@@ -90,7 +90,7 @@ pub fn build_full_scene(
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
     let content_h_u32 = cfg.fb_height.saturating_sub(content_y);
     let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, content_h_u32 as i32);
-    let scroll_pt = round_f32(scroll_y);
+    let scroll_pt = scroll_y >> 10;
     let cursor_byte = cursor_pos as usize;
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_byte, cpl as usize);
     let (sel_lo, sel_hi) = if sel_start <= sel_end {
@@ -136,8 +136,8 @@ pub fn build_full_scene(
     {
         let n = w.node_mut(N_ROOT);
         n.first_child = N_TITLE_BAR;
-        n.width = cfg.fb_width as u16;
-        n.height = cfg.fb_height as u16;
+        n.width = scene::upt(cfg.fb_width);
+        n.height = scene::upt(cfg.fb_height);
         n.background = dc(cfg.bg_color);
         n.flags = NodeFlags::VISIBLE;
     }
@@ -145,8 +145,8 @@ pub fn build_full_scene(
         let n = w.node_mut(N_TITLE_BAR);
         n.first_child = N_TITLE_ICON;
         n.next_sibling = N_SHADOW;
-        n.width = cfg.fb_width as u16;
-        n.height = cfg.title_bar_h as u16;
+        n.width = scene::upt(cfg.fb_width);
+        n.height = scene::upt(cfg.title_bar_h);
         n.background = dc(cfg.chrome_bg);
         n.border = Border {
             color: dc(cfg.chrome_border),
@@ -178,10 +178,10 @@ pub fn build_full_scene(
     {
         let n = w.node_mut(N_TITLE_ICON);
         n.next_sibling = N_TITLE_TEXT;
-        n.x = icon_x;
-        n.y = icon_y as i32;
-        n.width = icon_size_pt as u16;
-        n.height = icon_size_pt as u16;
+        n.x = scene::pt(icon_x);
+        n.y = scene::pt(icon_y as i32);
+        n.width = scene::upt(icon_size_pt);
+        n.height = scene::upt(icon_size_pt);
         n.content = Content::Image {
             data: icon_data_ref,
             src_width: icon_size_px as u16,
@@ -193,10 +193,10 @@ pub fn build_full_scene(
     {
         let n = w.node_mut(N_TITLE_TEXT);
         n.next_sibling = N_CLOCK_TEXT;
-        n.x = title_text_x;
-        n.y = text_y_offset as i32;
-        n.width = (cfg.fb_width / 2) as u16;
-        n.height = cfg.line_height as u16;
+        n.x = scene::pt(title_text_x);
+        n.y = scene::pt(text_y_offset as i32);
+        n.width = scene::upt(cfg.fb_width / 2);
+        n.height = scene::upt(cfg.line_height);
         n.content = Content::Glyphs {
             color: dc(cfg.chrome_title_color),
             glyphs: title_glyph_ref,
@@ -211,10 +211,10 @@ pub fn build_full_scene(
     let clock_x = (cfg.fb_width - 12 - 80) as i32;
     {
         let n = w.node_mut(N_CLOCK_TEXT);
-        n.x = clock_x;
-        n.y = text_y_offset as i32;
-        n.width = 80;
-        n.height = cfg.line_height as u16;
+        n.x = scene::pt(clock_x);
+        n.y = scene::pt(text_y_offset as i32);
+        n.width = scene::upt(80);
+        n.height = scene::upt(cfg.line_height);
         n.content = Content::Glyphs {
             color: dc(cfg.chrome_clock_color),
             glyphs: clock_glyph_ref,
@@ -228,8 +228,8 @@ pub fn build_full_scene(
     {
         let n = w.node_mut(N_SHADOW);
         n.next_sibling = N_CONTENT;
-        n.y = cfg.title_bar_h as i32;
-        n.width = cfg.fb_width as u16;
+        n.y = scene::pt(cfg.title_bar_h as i32);
+        n.width = scene::upt(cfg.fb_width);
         n.height = 0;
         n.background = Color::TRANSPARENT;
         n.flags = NodeFlags::VISIBLE;
@@ -241,9 +241,9 @@ pub fn build_full_scene(
         let n = w.node_mut(N_CONTENT);
         n.first_child = N_STRIP;
         n.next_sibling = NULL;
-        n.y = content_y as i32;
-        n.width = cfg.fb_width as u16;
-        n.height = content_h_u32 as u16;
+        n.y = scene::pt(content_y as i32);
+        n.width = scene::upt(cfg.fb_width);
+        n.height = scene::upt(content_h_u32);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     }
     {
@@ -251,9 +251,10 @@ pub fn build_full_scene(
         // content_transform.tx slides between spaces.
         let n = w.node_mut(N_STRIP);
         n.first_child = N_PAGE;
-        n.width = (cfg.fb_width * 2) as u16; // 2 spaces
-        n.height = content_h_u32 as u16;
-        n.content_transform = scene::AffineTransform::translate(-slide_offset, 0.0);
+        n.width = scene::upt(cfg.fb_width * 2); // 2 spaces
+        n.height = scene::upt(content_h_u32);
+        n.content_transform =
+            scene::AffineTransform::translate(-scene::mpt_to_f32(slide_offset), 0.0);
         n.flags = NodeFlags::VISIBLE;
     }
 
@@ -268,20 +269,20 @@ pub fn build_full_scene(
         let n = w.node_mut(N_PAGE);
         n.first_child = N_DOC_TEXT;
         n.next_sibling = N_DOC_IMAGE;
-        n.x = page_x;
-        n.y = page_y;
-        n.width = cfg.page_width as u16;
-        n.height = cfg.page_height as u16;
+        n.x = scene::pt(page_x);
+        n.y = scene::pt(page_y);
+        n.width = scene::upt(cfg.page_width);
+        n.height = scene::upt(cfg.page_height);
         n.background = dc(cfg.page_bg);
         n.flags = NodeFlags::VISIBLE;
     }
     {
         let n = w.node_mut(N_DOC_TEXT);
-        n.x = page_padding as i32;
-        n.y = page_padding as i32;
-        n.width = doc_width as u16;
-        n.height = text_area_h as u16;
-        n.content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
+        n.x = scene::pt(page_padding as i32);
+        n.y = scene::pt(page_padding as i32);
+        n.width = scene::upt(doc_width);
+        n.height = scene::upt(text_area_h);
+        n.content_transform = scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
         n.content = Content::None;
         n.content_hash = fnv1a(doc_text);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
@@ -305,14 +306,14 @@ pub fn build_full_scene(
     }
 
     // Cursor.
-    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
     {
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_x;
         n.y = cursor_y;
-        n.width = 2;
-        n.height = cfg.line_height as u16;
+        n.width = scene::upt(2);
+        n.height = scene::upt(cfg.line_height);
         n.background = dc(cfg.cursor_color);
         n.opacity = cursor_opacity;
         n.content = Content::None;
@@ -338,17 +339,17 @@ pub fn build_full_scene(
 
     // ── Space 1: image document ──────────────────────────────────────
 
-    let img_display_w: u16 = 128;
-    let img_display_h: u16 = 128;
+    let img_display_w: u32 = 128;
+    let img_display_h: u32 = 128;
     // Position in strip: viewport_width + centered within second space.
     let img_x = cfg.fb_width as i32 + ((cfg.fb_width as i32 - img_display_w as i32) / 2).max(0);
     let img_y = ((content_h_u32 as i32 - img_display_h as i32) / 2).max(0);
     {
         let n = w.node_mut(N_DOC_IMAGE);
-        n.x = img_x;
-        n.y = img_y;
-        n.width = img_display_w;
-        n.height = img_display_h;
+        n.x = scene::pt(img_x);
+        n.y = scene::pt(img_y);
+        n.width = scene::upt(img_display_w);
+        n.height = scene::upt(img_display_h);
         n.content = Content::Image {
             data: img_ref,
             src_width: 32,
@@ -402,8 +403,8 @@ pub fn build_cursor_update(
 ) {
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
-    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
 
     let n = w.node_mut(N_CURSOR);
     n.x = cursor_x;
@@ -450,8 +451,8 @@ pub fn build_selection_update(
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
 
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
 
     {
         let n = w.node_mut(N_CURSOR);
@@ -496,7 +497,7 @@ pub fn build_document_content(
     sel_end: u32,
     title_label: &[u8],
     clock_text: &[u8],
-    scroll_y: f32,
+    scroll_y: scene::Mpt,
     mark_clock_changed: bool,
     cursor_opacity: u8,
 ) {
@@ -506,7 +507,7 @@ pub fn build_document_content(
 
     let page_padding = cfg.text_inset_x;
     let text_area_h = cfg.page_height.saturating_sub(2 * page_padding);
-    let scroll_pt = round_f32(scroll_y);
+    let scroll_pt = scroll_y >> 10;
 
     // Remove old dynamic nodes (line nodes + selection rects).
     // set_node_count automatically clears dangling first_child pointers
@@ -638,7 +639,8 @@ pub fn build_document_content(
     // Re-create per-line Glyphs children under N_DOC_TEXT.
     // N_DOC_TEXT is the sole child of N_PAGE — no siblings.
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
-    w.node_mut(N_DOC_TEXT).content_transform = scene::AffineTransform::translate(0.0, -scroll_y);
+    w.node_mut(N_DOC_TEXT).content_transform =
+        scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
 
@@ -662,8 +664,8 @@ pub fn build_document_content(
 
     // Update cursor position (document-relative).
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 16) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
 
     {
         let n = w.node_mut(N_CURSOR);

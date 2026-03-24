@@ -228,11 +228,11 @@ pub fn line_bytes_for_run<'a>(text: &'a [u8], run: &LayoutRun) -> &'a [u8] {
 /// on the container node so the renderer handles the viewport offset.
 pub fn scroll_runs(
     runs: Vec<LayoutRun>,
-    scroll_y: f32,
+    scroll_y: scene::Mpt,
     line_height: u32,
     viewport_height_pt: i32,
 ) -> Vec<LayoutRun> {
-    let scroll_pt = round_f32(scroll_y);
+    let scroll_pt = scroll_y >> 10;
 
     runs.into_iter()
         .filter(|run| {
@@ -354,9 +354,9 @@ pub(crate) fn allocate_line_nodes(
     for &(glyph_ref, glyph_count, y) in line_glyph_refs {
         if let Some(line_id) = w.alloc_node() {
             let n = w.node_mut(line_id);
-            n.y = y;
-            n.width = doc_width as u16;
-            n.height = line_height as u16;
+            n.y = scene::pt(y);
+            n.width = scene::upt(doc_width);
+            n.height = scene::upt(line_height);
             n.content = Content::Glyphs {
                 color: scene_text_color,
                 glyphs: glyph_ref,
@@ -481,10 +481,10 @@ pub(crate) fn allocate_selection_rects(
 
         if let Some(sel_id) = w.alloc_node() {
             let n = w.node_mut(sel_id);
-            n.x = ((col_start as i64 * char_width_fx as i64) >> 16) as i32;
-            n.y = sel_y;
-            n.width = (((col_end - col_start) as i64 * char_width_fx as i64) >> 16) as u16;
-            n.height = line_height as u16;
+            n.x = ((col_start as i64 * char_width_fx as i64) >> 6) as scene::Mpt;
+            n.y = scene::pt(sel_y);
+            n.width = (((col_end - col_start) as u64 * char_width_fx as u64) >> 6) as scene::Umpt;
+            n.height = scene::upt(line_height);
             n.background = sel_color;
             n.content = Content::None;
             n.flags = NodeFlags::VISIBLE;
