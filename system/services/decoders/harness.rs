@@ -3,21 +3,17 @@
 //! Handles all IPC plumbing, config reading, bounds checking, and response
 //! building. Format-specific decoders supply two functions:
 //!
-//! - `header(data) → Option<(width, height)>` — parse dimensions without decoding
-//! - `decode(data, output) → bool` — decode into caller-provided BGRA buffer
+//! - `header(data) → Option<(width, height, bits_per_pixel)>` — parse dimensions
+//! - `decode(data, output) → bool` — decode into caller-provided buffer
 //!
-//! Usage in a decoder service's `main.rs`:
-//!
-//! ```ignore
-//! #[path = "../../decoders/harness.rs"]
-//! mod harness;
-//! mod png;
-//!
-//! #[unsafe(no_mangle)]
-//! pub extern "C" fn _start() -> ! {
-//!     harness::run(png::header, png::decode, b"png-decode");
-//! }
-//! ```
+//! The harness heap-allocates a decode buffer (BGRA + decompression scratch),
+//! calls the decoder, then copies only the BGRA pixels into the Content Region.
+//! This keeps scratch memory private to the decoder service — the Content Region
+//! holds only final pixel data.
+
+extern crate alloc;
+
+use alloc::vec;
 
 use protocol::decode::{
     DecodeResponse, DecodeStatus, DECODE_FLAG_HEADER_ONLY, MSG_DECODE_RESPONSE,
@@ -28,11 +24,11 @@ const CORE_HANDLE: u8 = 1;
 
 /// Run the decoder service event loop. Never returns.
 ///
-/// `header_fn`: parse encoded data, return `Some((width, height))` or `None`.
-/// `decode_fn`: decode encoded data into `output` (BGRA pixels), return success.
+/// `header_fn`: parse encoded data, return `Some((width, height, bits_per_pixel))` or `None`.
+/// `decode_fn`: decode encoded data into `output` (BGRA + scratch), return success.
 /// `name`: service name for diagnostic output (e.g., `b"png-decode"`).
 pub fn run(
-    header_fn: fn(&[u8]) -> Option<(u32, u32)>,
+    header_fn: fn(&[u8]) -> Option<(u32, u32, u8)>,
     decode_fn: fn(&[u8], &mut [u8]) -> bool,
     name: &[u8],
 ) -> ! {
@@ -108,7 +104,7 @@ fn handle_request(
     file_store_size: usize,
     content_va: usize,
     content_size: usize,
-    header_fn: fn(&[u8]) -> Option<(u32, u32)>,
+    header_fn: fn(&[u8]) -> Option<(u32, u32, u8)>,
     decode_fn: fn(&[u8], &mut [u8]) -> bool,
 ) -> DecodeResponse {
     let file_end = req.file_offset as usize + req.file_length as usize;
@@ -125,55 +121,73 @@ fn handle_request(
         )
     };
 
-    // Parse header for dimensions.
-    let (width, height) = match header_fn(data) {
-        Some(dims) => dims,
+    // Parse header for dimensions and format.
+    let (width, height, bpp) = match header_fn(data) {
+        Some(info) => info,
         None => return error_response(req.request_id, DecodeStatus::InvalidData),
     };
 
-    // Header-only query: report dimensions, don't decode.
+    // Header-only query: report dimensions and format, don't decode.
     if req.flags & DECODE_FLAG_HEADER_ONLY != 0 {
         return DecodeResponse {
             request_id: req.request_id,
             status: DecodeStatus::HeaderOk as u8,
-            _pad: [0; 3],
+            bits_per_pixel: bpp,
+            _pad: [0; 2],
             width,
             height,
             bytes_written: 0,
         };
     }
 
-    // Full decode: check output buffer.
+    // Full decode.
     let pixel_bytes = width as usize * height as usize * 4;
     if pixel_bytes > req.max_output as usize {
         return error_response(req.request_id, DecodeStatus::BufferTooSmall);
     }
-
     let content_end = req.content_offset as usize + pixel_bytes;
     if content_end > content_size {
         return error_response(req.request_id, DecodeStatus::BufferTooSmall);
     }
 
-    // SAFETY: content_va..+content_size is a valid read-write mapping
-    // provided by init. content_offset..content_end is within bounds.
+    // Compute decompression scratch size from format info.
+    // Raw scanline = ceil(width * bpp / 8) bytes + 1 filter byte per row.
+    // Add margin for Adam7 interlace overhead (extra filter bytes per pass).
+    let bpp_val = (bpp as usize).max(1);
+    let raw_row = (width as usize * bpp_val + 7) / 8;
+    let scratch = height as usize * (raw_row + 1) + height as usize * 8;
+    let decode_buf_size = pixel_bytes + scratch;
+
+    // Heap-allocate the full decode buffer (BGRA output + scratch).
+    // The decoder writes decompressed data into the scratch area and
+    // final BGRA pixels into the first pixel_bytes. After decode, we
+    // copy only the BGRA pixels to the Content Region.
+    let mut decode_buf = vec![0u8; decode_buf_size];
+
+    if !decode_fn(data, &mut decode_buf) {
+        return error_response(req.request_id, DecodeStatus::InvalidData);
+    }
+
+    // Copy BGRA pixels from heap buffer to Content Region.
+    // SAFETY: content_va..+content_size is a valid read-write mapping.
+    // content_offset..content_end is within bounds (checked above).
     let output = unsafe {
         core::slice::from_raw_parts_mut(
             (content_va + req.content_offset as usize) as *mut u8,
             pixel_bytes,
         )
     };
+    output.copy_from_slice(&decode_buf[..pixel_bytes]);
+    // decode_buf is freed here (Vec drop).
 
-    if decode_fn(data, output) {
-        DecodeResponse {
-            request_id: req.request_id,
-            status: DecodeStatus::Ok as u8,
-            _pad: [0; 3],
-            width,
-            height,
-            bytes_written: pixel_bytes as u32,
-        }
-    } else {
-        error_response(req.request_id, DecodeStatus::InvalidData)
+    DecodeResponse {
+        request_id: req.request_id,
+        status: DecodeStatus::Ok as u8,
+        bits_per_pixel: bpp,
+        _pad: [0; 2],
+        width,
+        height,
+        bytes_written: pixel_bytes as u32,
     }
 }
 
@@ -181,7 +195,8 @@ fn error_response(request_id: u32, status: DecodeStatus) -> DecodeResponse {
     DecodeResponse {
         request_id,
         status: status as u8,
-        _pad: [0; 3],
+        bits_per_pixel: 0,
+        _pad: [0; 2],
         width: 0,
         height: 0,
         bytes_written: 0,

@@ -12,8 +12,11 @@ mod harness;
 mod png;
 
 /// Adapter: png_header → harness header signature.
-fn header(data: &[u8]) -> Option<(u32, u32)> {
-    png::png_header(data).ok().map(|h| (h.width, h.height))
+fn header(data: &[u8]) -> Option<(u32, u32, u8)> {
+    png::png_header(data).ok().map(|h| {
+        let bpp = png::bits_per_pixel(h.color_type, h.bit_depth) as u8;
+        (h.width, h.height, bpp)
+    })
 }
 
 /// Adapter: png_decode → harness decode signature.

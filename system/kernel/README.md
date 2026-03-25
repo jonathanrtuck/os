@@ -18,7 +18,7 @@ cd system && cargo build
 cd system/test && cargo test -- --test-threads=1
 ```
 
-~2,153 tests covering memory management, scheduling, IPC, processes, ELF loading, interrupt handling, syscalls, OOM fault injection, adversarial stress/fuzz scenarios, drawing, fonts, animation, layout, scene graph, and compositing.
+~2,236 tests covering memory management, scheduling, IPC, processes, ELF loading, interrupt handling, syscalls, OOM fault injection, adversarial stress/fuzz scenarios, drawing, fonts, animation, layout, scene graph, PNG decoding, and compositing.
 
 ### stress testing
 

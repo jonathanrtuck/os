@@ -650,28 +650,27 @@ pub extern "C" fn _start() -> ! {
             };
 
             // Helper: send a decode request and block for the response.
-            let send_and_recv =
-                |ch: &ipc::Channel,
-                 req: &protocol::decode::DecodeRequest,
-                 msg: &mut ipc::Message|
-                 -> Option<protocol::decode::DecodeResponse> {
-                    // SAFETY: DecodeRequest is repr(C) and fits in 60-byte payload.
-                    let req_msg = unsafe {
-                        ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, req)
-                    };
-                    ch.send(&req_msg);
-                    let _ = sys::channel_signal(DECODER_HANDLE);
-                    if !ch.recv_blocking(DECODER_HANDLE.0, msg) {
-                        return None;
-                    }
-                    if let Some(protocol::decode::Message::Response(r)) =
-                        protocol::decode::decode(msg.msg_type, &msg.payload)
-                    {
-                        Some(r)
-                    } else {
-                        None
-                    }
+            let send_and_recv = |ch: &ipc::Channel,
+                                 req: &protocol::decode::DecodeRequest,
+                                 msg: &mut ipc::Message|
+             -> Option<protocol::decode::DecodeResponse> {
+                // SAFETY: DecodeRequest is repr(C) and fits in 60-byte payload.
+                let req_msg = unsafe {
+                    ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, req)
                 };
+                ch.send(&req_msg);
+                let _ = sys::channel_signal(DECODER_HANDLE);
+                if !ch.recv_blocking(DECODER_HANDLE.0, msg) {
+                    return None;
+                }
+                if let Some(protocol::decode::Message::Response(r)) =
+                    protocol::decode::decode(msg.msg_type, &msg.payload)
+                {
+                    Some(r)
+                } else {
+                    None
+                }
+            };
 
             // Step 1: Header-only query to get image dimensions.
             let hdr_req = protocol::decode::DecodeRequest {
@@ -687,7 +686,8 @@ pub extern "C" fn _start() -> ! {
                     && hdr_resp.width > 0
                     && hdr_resp.height > 0
                 {
-                    // Step 2: Allocate Content Region space.
+                    // Step 2: Allocate Content Region space (BGRA pixels only).
+                    // Decompression scratch is heap-allocated by the decoder service.
                     let pixel_bytes = hdr_resp.width as u32 * hdr_resp.height as u32 * 4;
                     let s = state();
                     if let Some(alloc_offset) = s.content_alloc.allocate(pixel_bytes) {
@@ -700,9 +700,7 @@ pub extern "C" fn _start() -> ! {
                             request_id: 2,
                             flags: 0,
                         };
-                        if let Some(dec_resp) =
-                            send_and_recv(&decoder_ch, &dec_req, &mut msg)
-                        {
+                        if let Some(dec_resp) = send_and_recv(&decoder_ch, &dec_req, &mut msg) {
                             if dec_resp.status == protocol::decode::DecodeStatus::Ok as u8 {
                                 // Step 4: Write Content Region registry entry.
                                 // SAFETY: content_va is mapped read-write.
@@ -712,20 +710,17 @@ pub extern "C" fn _start() -> ! {
                                 };
                                 let entry_idx = header.entry_count as usize;
                                 if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
-                                    let content_id =
-                                        protocol::content::CONTENT_ID_DYNAMIC_START;
-                                    header.entries[entry_idx] =
-                                        protocol::content::ContentEntry {
-                                            content_id,
-                                            offset: alloc_offset,
-                                            length: dec_resp.bytes_written,
-                                            class: protocol::content::ContentClass::Pixels
-                                                as u8,
-                                            _pad: [0; 3],
-                                            width: dec_resp.width as u16,
-                                            height: dec_resp.height as u16,
-                                            generation: s.scene_generation,
-                                        };
+                                    let content_id = protocol::content::CONTENT_ID_DYNAMIC_START;
+                                    header.entries[entry_idx] = protocol::content::ContentEntry {
+                                        content_id,
+                                        offset: alloc_offset,
+                                        length: dec_resp.bytes_written,
+                                        class: protocol::content::ContentClass::Pixels as u8,
+                                        _pad: [0; 3],
+                                        width: dec_resp.width as u16,
+                                        height: dec_resp.height as u16,
+                                        generation: s.scene_generation,
+                                    };
                                     header.entry_count += 1;
                                     s.image_content_id = content_id;
                                     s.image_width = dec_resp.width as u16;
@@ -733,7 +728,7 @@ pub extern "C" fn _start() -> ! {
                                     sys::print(b"     PNG decoded into Content Region\n");
                                 }
                             } else {
-                                // Decode failed — return space.
+                                // Decode failed — return allocation.
                                 s.content_alloc.free(alloc_offset, pixel_bytes);
                                 sys::print(b"     PNG decode failed\n");
                             }
@@ -1720,9 +1715,8 @@ pub extern "C" fn _start() -> ! {
             if s.content_alloc.pending_count() > 0 && s.content_va != 0 {
                 let reader_gen = scene.reader_done_gen();
                 // SAFETY: content_va is mapped read-write; header is repr(C).
-                let header = unsafe {
-                    &mut *(s.content_va as *mut protocol::content::ContentRegionHeader)
-                };
+                let header =
+                    unsafe { &mut *(s.content_va as *mut protocol::content::ContentRegionHeader) };
                 s.content_alloc.sweep(reader_gen, header);
             }
         }

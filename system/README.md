@@ -24,7 +24,7 @@ A single `cargo build -r` compiles the full system: shared libraries, all usersp
 ## testing
 
 ```shell
-# Host-side unit tests (~2,153 tests):
+# Host-side unit tests (~2,236 tests):
 cd system/test && cargo test -- --test-threads=1
 
 # QEMU smoke test (builds, boots, checks expected output):

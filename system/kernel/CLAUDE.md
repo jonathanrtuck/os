@@ -7,7 +7,7 @@ Bare-metal aarch64 microkernel. 33 .rs files + 2 .S + link.ld, 28 syscalls, ~500
 ```sh
 cd system && cargo build                              # Cross-compile for aarch64-unknown-none
 cd system && cargo clippy                             # Must be zero warnings
-cd system/test && cargo test -- --test-threads=1      # ~2,152 host-side tests
+cd system/test && cargo test -- --test-threads=1      # ~2,236 host-side tests
 ```
 
 ## Architecture

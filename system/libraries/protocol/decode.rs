@@ -93,7 +93,11 @@ pub struct DecodeResponse {
     pub request_id: u32,
     /// Result status.
     pub status: u8,
-    pub _pad: [u8; 3],
+    /// Bits per raw pixel in the source format (valid for HeaderOk).
+    /// Used by core to compute decompression scratch space.
+    /// E.g., 8-bit RGB = 24, 16-bit RGBA = 64, 4-bit indexed = 4.
+    pub bits_per_pixel: u8,
+    pub _pad: [u8; 2],
     /// Decoded image width in pixels (valid for Ok and HeaderOk).
     pub width: u32,
     /// Decoded image height in pixels (valid for Ok and HeaderOk).
@@ -119,9 +123,7 @@ pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Mess
     match msg_type {
         MSG_DECODER_CONFIG => Some(Message::Config(unsafe { crate::decode_payload(payload) })),
         MSG_DECODE_REQUEST => Some(Message::Request(unsafe { crate::decode_payload(payload) })),
-        MSG_DECODE_RESPONSE => {
-            Some(Message::Response(unsafe { crate::decode_payload(payload) }))
-        }
+        MSG_DECODE_RESPONSE => Some(Message::Response(unsafe { crate::decode_payload(payload) })),
         _ => None,
     }
 }
