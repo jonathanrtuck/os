@@ -1,7 +1,7 @@
 //! Scene graph node type, header, and memory layout constants.
 
 use crate::{
-    primitives::{bitflags, Border, Color, Content},
+    primitives::{bitflags, Border, Color, Content, DataRef},
     transform::AffineTransform,
 };
 
@@ -10,6 +10,57 @@ use crate::{
 /// Index into the node array. `NULL` means no node.
 pub type NodeId = u16;
 pub const NULL: NodeId = u16::MAX;
+
+// ── Millipoint coordinate unit ─────────────────────────────────────
+
+/// 1/1024 of a point. The internal coordinate unit for all spatial
+/// values in the scene graph, layout engine, and core service.
+///
+/// Precision: ~0.001 pt (sub-pixel at any density).
+/// i32 range: +/-2,097,151 pt (~2,489 A4 pages).
+/// Convert to/from whole points: `pt << 10` / `mpt >> 10`.
+pub type Mpt = i32;
+
+/// Unsigned millipoint for dimensions (width, height).
+pub type Umpt = u32;
+
+/// Millipoints per point.
+pub const MPT_PER_PT: i32 = 1024;
+
+/// Convert signed whole points to millipoints.
+pub const fn pt(points: i32) -> Mpt {
+    points * MPT_PER_PT
+}
+
+/// Convert unsigned whole points to unsigned millipoints.
+pub const fn upt(points: u32) -> Umpt {
+    points * MPT_PER_PT as u32
+}
+
+/// Convert millipoints to f32 points (for AffineTransform / render boundary).
+pub fn mpt_to_f32(mpt: Mpt) -> f32 {
+    mpt as f32 / MPT_PER_PT as f32
+}
+
+/// Convert unsigned millipoints to f32 points.
+pub fn umpt_to_f32(mpt: Umpt) -> f32 {
+    mpt as f32 / MPT_PER_PT as f32
+}
+
+/// Convert f32 points to millipoints (for spring output boundary).
+pub fn f32_to_mpt(points: f32) -> Mpt {
+    (points * MPT_PER_PT as f32) as Mpt
+}
+
+/// Round millipoints to the nearest whole-point-aligned value
+/// (nearest multiple of MPT_PER_PT). Used for settle snap.
+pub fn mpt_round_pt(mpt: Mpt) -> Mpt {
+    if mpt >= 0 {
+        (mpt + MPT_PER_PT / 2) / MPT_PER_PT * MPT_PER_PT
+    } else {
+        (mpt - MPT_PER_PT / 2) / MPT_PER_PT * MPT_PER_PT
+    }
+}
 
 // ── Node flags ──────────────────────────────────────────────────────
 
@@ -34,11 +85,11 @@ pub struct Node {
     // ── tree ──
     pub first_child: NodeId,
     pub next_sibling: NodeId,
-    // ── geometry (relative to parent content area) ──
+    // ── geometry (relative to parent content area, in millipoints) ──
     pub x: i32,
     pub y: i32,
-    pub width: u16,
-    pub height: u16,
+    pub width: Umpt,
+    pub height: Umpt,
     // ── content transform ──
     /// 2D affine transform applied to children's coordinate space.
     /// Used for scrolling (pure translation) and zoom (scale).
@@ -51,7 +102,7 @@ pub struct Node {
     pub opacity: u8,
     // ── flags ──
     pub flags: NodeFlags,
-    pub _pad: u8,
+    pub backdrop_blur_radius: u8,
     // ── shadow ──
     /// Shadow color (TRANSPARENT = no shadow).
     pub shadow_color: Color,
@@ -75,6 +126,13 @@ pub struct Node {
     /// uses this for scene diffing — a changed hash means the data buffer
     /// content changed even if the DataRef is identical.
     pub content_hash: u32,
+    // ── clip path ──
+    /// Reference to serialized path commands in the data buffer that define
+    /// a clip region for this node and its children. `DataRef::EMPTY` means
+    /// no path clip (rectangular clip via `CLIPS_CHILDREN` flag still applies).
+    pub clip_path: DataRef,
+    /// Reserved for future fields. Must be zero.
+    pub _reserved: [u8; 4],
     // ── content ──
     pub content: Content,
 }
@@ -97,7 +155,7 @@ impl Node {
         corner_radius: 0,
         opacity: 255,
         flags: NodeFlags::VISIBLE,
-        _pad: 0,
+        backdrop_blur_radius: 0,
         shadow_color: Color::TRANSPARENT,
         shadow_offset_x: 0,
         shadow_offset_y: 0,
@@ -106,6 +164,8 @@ impl Node {
         _shadow_pad: [0; 2],
         transform: AffineTransform::identity(),
         content_hash: 0,
+        clip_path: DataRef::EMPTY,
+        _reserved: [0; 4],
         content: Content::None,
     };
 
@@ -127,15 +187,16 @@ impl Node {
     }
 }
 
-// Compile-time size assertion: Node must be exactly 120 bytes.
+// Compile-time size assertion: Node must be exactly 136 bytes.
 // This prevents silent shared-memory layout drift between core and compositor.
 // If you add a field, update this assertion and verify both sides agree.
-const _: () = assert!(core::mem::size_of::<Node>() == 120);
+// Layout: 96 bytes pre-content + clip_path (8) + _reserved (4) + content (24) = 132 +4 = 136.
+const _: () = assert!(core::mem::size_of::<Node>() == 136);
 
 // ── Shared memory layout ────────────────────────────────────────────
 
 pub const MAX_NODES: usize = 512;
-pub const DATA_BUFFER_SIZE: usize = 64 * 1024;
+pub const DATA_BUFFER_SIZE: usize = 128 * 1024;
 pub const NODES_OFFSET: usize = core::mem::size_of::<SceneHeader>();
 pub const DATA_OFFSET: usize = NODES_OFFSET + MAX_NODES * core::mem::size_of::<Node>();
 pub const SCENE_SIZE: usize = DATA_OFFSET + DATA_BUFFER_SIZE;

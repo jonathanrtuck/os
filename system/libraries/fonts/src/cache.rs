@@ -9,22 +9,8 @@ use alloc::{collections::BTreeMap, vec, vec::Vec};
 
 use crate::rasterize;
 // ---------------------------------------------------------------------------
-// Stem darkening — non-linear coverage boost for thin strokes
-// ---------------------------------------------------------------------------
-
-// Stem darkening constants — canonical definitions in rasterize.rs.
-pub use crate::rasterize::{STEM_DARKENING_BOOST, STEM_DARKENING_LUT};
-
-// ---------------------------------------------------------------------------
 // axis_values_hash
 // ---------------------------------------------------------------------------
-
-/// Compute a deterministic hash of axis values for use as a glyph cache key component.
-///
-/// The hash is computed from the axis tags and values. An empty slice produces hash 0.
-pub fn axis_values_hash(axis_values: &[rasterize::AxisValue]) -> u32 {
-    rasterize::axis_values_hash(axis_values)
-}
 
 // ---------------------------------------------------------------------------
 // Fixed ASCII glyph cache
@@ -123,21 +109,28 @@ impl GlyphCache {
     /// the font's opsz range). For fonts without an opsz axis, this
     /// behaves identically to `populate()`.
     pub fn populate_with_dpi(&mut self, font_data: &[u8], size_px: u32, dpi: u16) {
-        self.populate_with_axes(font_data, size_px, dpi, &[]);
+        self.populate_with_axes(font_data, size_px, dpi, &[], 1);
     }
     /// Rasterize all printable ASCII glyphs with explicit axis values.
     ///
-    /// `extra_axes` provides explicit variation axis values (e.g., MONO=1
-    /// for monospace, MONO=0 for proportional from a single variable font
-    /// like Recursive). These are merged with any automatic axis values
-    /// (opsz, wght correction). Explicit values take precedence over
-    /// automatic ones when the same axis tag appears in both.
+    /// `extra_axes` provides explicit variation axis values (e.g., wght
+    /// for weight, opsz for optical size). These are merged with any
+    /// automatic axis values (opsz, wght correction). Explicit values
+    /// take precedence over automatic ones when the same axis tag appears
+    /// in both. Font selection is by font family (content type maps to a
+    /// separate font file), not by axis switching.
+    /// `scale_factor` is the display scale (1 for standard, 2 for Retina).
+    /// Used to compute stem darkening dilation strength — the rasterizer
+    /// needs both `size_px` (device resolution) and `scale_factor` (display
+    /// density) because dilation is specified in device pixels but converted
+    /// back to glyph units via `size_px * scale_factor`.
     pub fn populate_with_axes(
         &mut self,
         font_data: &[u8],
         size_px: u32,
         dpi: u16,
         extra_axes: &[rasterize::AxisValue],
+        scale_factor: u16,
     ) {
         let metrics = match rasterize::font_metrics(font_data) {
             Some(m) => m,
@@ -210,6 +203,7 @@ impl GlyphCache {
                 &mut raster,
                 &mut scratch,
                 &axes,
+                scale_factor,
             ) {
                 self.glyphs[i] = CachedGlyph {
                     width: m.width,

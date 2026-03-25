@@ -324,8 +324,8 @@ pub fn compute_scroll_blit(
     }
 
     // Scale point bounds to physical pixels.
-    let cx = crate::round_f32(bounds.0 as f32 * scale).max(0) as u32;
-    let cy = crate::round_f32(bounds.1 as f32 * scale).max(0) as u32;
+    let cx = crate::round_f32(bounds.0 as f32 / 1024.0 * scale).max(0) as u32;
+    let cy = crate::round_f32(bounds.1 as f32 / 1024.0 * scale).max(0) as u32;
     let cw = crate::scale_size(bounds.0, bounds.2 as i32, scale).max(0) as u32;
     let raw_ch = crate::scale_size(bounds.1, bounds.3 as i32, scale).max(0) as u32;
 
@@ -525,13 +525,18 @@ fn union_bounds(
 /// clipping to framebuffer bounds. Coordinates can be negative (off-screen).
 fn add_rect_clamped(
     tracker: &mut DamageTracker,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
+    mpt_x: i32,
+    mpt_y: i32,
+    mpt_w: u32,
+    mpt_h: u32,
     fb_width: u16,
     fb_height: u16,
 ) {
+    // Convert millipoints to whole points (>> 10 = / 1024).
+    let x = mpt_x >> 10;
+    let y = mpt_y >> 10;
+    let w = mpt_w >> 10;
+    let h = mpt_h >> 10;
     // Clip to framebuffer: clamp origin to 0, adjust size.
     let x0 = x.max(0);
     let y0 = y.max(0);

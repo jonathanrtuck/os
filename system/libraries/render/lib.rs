@@ -14,6 +14,7 @@
 extern crate alloc;
 
 pub mod cache;
+pub mod clip_mask;
 pub mod damage;
 pub mod frame_scheduler;
 pub mod incremental;
@@ -22,6 +23,7 @@ pub mod surface_pool;
 
 use alloc::{boxed::Box, vec, vec::Vec};
 
+pub use clip_mask::ClipMaskCache;
 use drawing::Surface;
 // Re-export helper functions at the crate root for external use.
 pub use scene_render::{round_f32, scale_coord, scale_size};
@@ -72,6 +74,9 @@ pub struct LruRasterizer {
     scratch: Box<fonts::rasterize::RasterScratch>,
     /// Pixel buffer for on-demand glyph rasterization (GLYPH_MAX_W * GLYPH_MAX_H).
     raster_buf: Vec<u8>,
+    /// Display scale factor (1 for standard, 2 for Retina). Used to
+    /// compute stem darkening dilation during on-demand rasterization.
+    scale_factor: u16,
 }
 
 impl LruRasterizer {
@@ -94,6 +99,7 @@ impl LruRasterizer {
             axes: Vec::new(),
             scratch,
             raster_buf: vec![0u8; GLYPH_MAX_W * GLYPH_MAX_H],
+            scale_factor: 1,
         }
     }
 
@@ -124,6 +130,7 @@ impl LruRasterizer {
             &mut raster,
             &mut self.scratch,
             &self.axes,
+            self.scale_factor,
         );
 
         let m = match metrics {
@@ -167,6 +174,10 @@ pub struct CpuBackend {
     /// rendered bitmaps keyed by (node_id, content_hash). On cache
     /// hit, the cached bitmap is blitted instead of re-rasterizing.
     pub node_cache: cache::NodeCache,
+    /// LRU cache of rasterized clip masks. Keyed by (path DataRef +
+    /// node dimensions). Masks are rasterized once and reused across
+    /// frames as long as the path data and dimensions are unchanged.
+    pub clip_cache: ClipMaskCache,
     /// Physical font size in pixels (after scale).
     font_size_px: u32,
 }
@@ -174,9 +185,9 @@ pub struct CpuBackend {
 impl CpuBackend {
     /// Construct a `CpuBackend` with pre-populated glyph caches.
     ///
-    /// `mono_font_data` — raw font file bytes for the monospace face.
+    /// `mono_font_data` — raw font file bytes for the monospace face (JetBrains Mono).
     /// `prop_font_data` — optional raw font file bytes for the proportional
-    ///   face. When `None`, the monospace font is reused with `MONO=0`.
+    ///   face (Inter). When `None`, the monospace font is used as fallback.
     /// `font_size` — font size in points (before scale).
     /// `dpi` — display DPI for optical sizing.
     /// `scale` — fractional display scale factor (1.0, 1.5, 2.0, etc.).
@@ -201,7 +212,7 @@ impl CpuBackend {
         // Physical pixel size: font_size (points) × scale.
         let physical_size = round_f32(font_size as f32 * scale).max(1) as u32;
 
-        // Allocate and populate monospace glyph cache (MONO=1).
+        // Allocate and populate monospace glyph cache (JetBrains Mono).
         // SAFETY: Layout::new::<GlyphCache>() produces a correctly sized and
         // aligned layout for the type. alloc_zeroed returns a valid, zeroed
         // allocation (or null, which we check). All GlyphCache fields are
@@ -216,13 +227,11 @@ impl CpuBackend {
             }
             Box::from_raw(ptr)
         };
-        let mono_axes = vec![fonts::rasterize::AxisValue {
-            tag: *b"MONO",
-            value: 1.0,
-        }];
-        mono_cache.populate_with_axes(mono_font_data, physical_size, dpi, &mono_axes);
+        // No extra axes needed — automatic opsz/wght applied by populate_with_axes.
+        let sf = scale.max(1.0) as u16;
+        mono_cache.populate_with_axes(mono_font_data, physical_size, dpi, &[], sf);
 
-        // Allocate and populate proportional glyph cache (MONO=0).
+        // Allocate and populate proportional glyph cache (Inter or fallback to mono).
         // SAFETY: Same rationale as mono_cache above — Layout::new produces
         // correct size/alignment for GlyphCache, alloc_zeroed returns valid
         // zeroed memory (null-checked), all-zeroes is a valid GlyphCache,
@@ -237,14 +246,10 @@ impl CpuBackend {
         };
         let prop_data_slice = prop_font_data.unwrap_or(mono_font_data);
         if fonts::rasterize::font_metrics(prop_data_slice).is_some() {
-            let prop_axes = [fonts::rasterize::AxisValue {
-                tag: *b"MONO",
-                value: 0.0,
-            }];
-            prop_cache.populate_with_axes(prop_data_slice, physical_size, dpi, &prop_axes);
+            prop_cache.populate_with_axes(prop_data_slice, physical_size, dpi, &[], sf);
         } else {
-            // Fallback: use mono font with MONO=1 axes.
-            prop_cache.populate_with_axes(mono_font_data, physical_size, dpi, &mono_axes);
+            // Fallback: use mono font.
+            prop_cache.populate_with_axes(mono_font_data, physical_size, dpi, &[], sf);
         }
 
         // Own copy of font data for on-demand LRU rasterization.
@@ -269,7 +274,8 @@ impl CpuBackend {
         let lru = LruRasterizer {
             cache: fonts::cache::LruGlyphCache::new(LRU_CACHE_CAPACITY),
             font_data: font_data_owned,
-            axes: mono_axes,
+            axes: vec![],
+            scale_factor: sf,
             scratch: raster_scratch,
             raster_buf,
         };
@@ -279,11 +285,12 @@ impl CpuBackend {
         // SAFETY: Layout::new::<CpuBackend>() produces correct size and
         // alignment. alloc_zeroed returns valid zeroed memory (null-checked).
         // ptr::write is used for Drop-bearing fields (Box, Vec, LruRasterizer,
-        // SurfacePool, NodeCache) — these types whose drop glue must not run
-        // on the zeroed memory, so ptr::write overwrites them without dropping
-        // the destination. Primitive fields (scale, font_size_px) are safe to
-        // assign directly (no Drop). Box::from_raw takes ownership of the
-        // fully-initialized CpuBackend with matching layout.
+        // SurfacePool, NodeCache, ClipMaskCache) — these types whose drop glue
+        // must not run on the zeroed memory, so ptr::write overwrites them
+        // without dropping the destination. Primitive fields (scale,
+        // font_size_px) are safe to assign directly (no Drop). Box::from_raw
+        // takes ownership of the fully-initialized CpuBackend with matching
+        // layout.
         unsafe {
             let layout = alloc::alloc::Layout::new::<CpuBackend>();
             let ptr = alloc::alloc::alloc_zeroed(layout) as *mut CpuBackend;
@@ -299,6 +306,7 @@ impl CpuBackend {
             );
             core::ptr::write(&mut (*ptr).lru, lru);
             core::ptr::write(&mut (*ptr).node_cache, cache::NodeCache::new());
+            core::ptr::write(&mut (*ptr).clip_cache, ClipMaskCache::new());
             (*ptr).font_size_px = physical_size;
             Some(Box::from_raw(ptr))
         }
@@ -337,6 +345,7 @@ impl CpuBackend {
             &mut self.pool,
             &mut self.lru,
             Some(&mut self.node_cache),
+            &mut self.clip_cache,
         );
     }
 
@@ -361,6 +370,13 @@ impl RenderBackend for CpuBackend {
             scale: self.scale,
             font_size_px: self.font_size_px as u16,
         };
-        scene_render::render_scene_full(target, scene, &ctx, &mut self.pool, &mut self.lru);
+        scene_render::render_scene_full(
+            target,
+            scene,
+            &ctx,
+            &mut self.pool,
+            &mut self.lru,
+            &mut self.clip_cache,
+        );
     }
 }

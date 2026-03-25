@@ -6,7 +6,7 @@
 #![no_std]
 #![no_main]
 
-use protocol::device::{DeviceConfig, MSG_DEVICE_CONFIG};
+use protocol::device::MSG_DEVICE_CONFIG;
 
 const SECTOR_SIZE: usize = 512;
 const VIRTIO_BLK_T_IN: u32 = 0; // Read
@@ -67,7 +67,7 @@ fn read_and_print_sector(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
     sector: u64,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
 ) {
     // Allocate a DMA page. Layout:
     //   [0..16)    BlkReqHeader  (device-readable)
@@ -110,7 +110,7 @@ fn read_and_print_sector(
     device.notify(VIRTQ_REQUEST);
 
     // Wait for completion interrupt (blocks instead of spinning).
-    let _ = sys::wait(&[irq_handle], u64::MAX);
+    let _ = sys::wait(&[irq_handle.0], u64::MAX);
 
     device.ack_interrupt();
     vq.pop_used();
@@ -152,7 +152,14 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    let config: DeviceConfig = unsafe { msg.payload_as() };
+    let config = if let Some(protocol::device::Message::DeviceConfig(c)) =
+        protocol::device::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"virtio-blk: bad device config\n");
+        sys::exit();
+    };
     let mmio_pa = config.mmio_pa;
     let irq = config.irq;
     // Map the 4K page containing the MMIO region. Virtio-mmio slots have
@@ -172,7 +179,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Register for device interrupt before driver_ok.
-    let irq_handle = sys::interrupt_register(irq).unwrap_or_else(|_| {
+    let irq_handle: sys::InterruptHandle = sys::interrupt_register(irq).unwrap_or_else(|_| {
         sys::print(b"virtio-blk: interrupt_register failed\n");
         sys::exit();
     });
@@ -231,7 +238,7 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Signal the kernel channel to indicate we're done.
-    let _ = sys::channel_signal(0);
+    let _ = sys::channel_signal(sys::ChannelHandle(0));
 
     sys::exit();
 }

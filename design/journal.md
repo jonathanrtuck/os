@@ -4,6 +4,629 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Image Decoding as a Service Interface (2026-03-24)
+
+**Status:** IMPLEMENTED (2026-03-25) — PNG decoder factored into sandboxed service
+
+### The question
+
+The PNG decoder (`libraries/drawing/png.rs`) is an in-process library call from core. To support JPEG, BMP, WebP, GIF, and future formats: do we hand-write every decoder, use no_std libraries, or design an extension point?
+
+### Why hand-writing every decoder doesn't scale
+
+PNG (subset: 8-bit RGB/RGBA only) is ~700 lines. A baseline JPEG decoder is ~800. These are the easy formats. WebP lossy needs a VP8 decoder (~5,000+ lines). AVIF needs AV1 (tens of thousands). TIFF is tag soup with dozens of compression modes. Hand-writing works for 2-3 formats; it collapses after that.
+
+### Why no_std libraries are a poor fit
+
+The Rust `image-rs` and `zune-image` ecosystems exist but assume `alloc` — they allocate and return owned buffers. Our decode contract is "write BGRA pixels into this caller-provided shared memory region." Adapting library crates to that model means either forking their buffer management (losing the library benefit) or building an allocator shim (fragile coupling). The `no_alloc` constraint is the real blocker.
+
+### The answer: decoders are sandboxed services
+
+ALL image decoders become out-of-process services, including PNG and JPEG. This is an evolution from the Content Pipeline entry (below) which proposed "in-process library for simple formats, out-of-process service for complex ones like video." The new position: **no in-process special cases.** Reasons:
+
+1. **Uniform interface.** One IPC protocol for all decode operations. No conditional "is this format simple enough for in-process?" dispatch.
+2. **Security.** Image parsers are historically the #1 attack surface in document-handling systems (CVE databases are full of PNG/JPEG/TIFF parser exploits). Moving them out of core means a malformed file crashes a decoder service, not the OS service. Core shows a placeholder.
+3. **Scalability.** Hand-write PNG and JPEG as built-in decoder services (we own the core experience). Define the IPC protocol so third parties can contribute decoders for additional formats. The interface is the design; implementations are leaf nodes.
+4. **Allocator freedom.** Each decoder service has its own heap (via `sys` library's GlobalAlloc). This means decoder implementations CAN use `alloc` — `Vec`, `String`, dynamic buffers — without contaminating core's memory model. Library crates that require `alloc` become viable inside a decoder service.
+
+### IPC protocol sketch
+
+**Decode request** (core → decoder, event ring):
+
+- File Store offset + length (where the raw encoded bytes live)
+- Content Region output offset + max length (where to write decoded BGRA pixels)
+- Request ID (for matching response)
+
+**Decode response** (decoder → core, event ring):
+
+- Request ID
+- Status (success / unsupported format / corrupt data / buffer too small)
+- Width, height (decoded image dimensions)
+- Actual byte length written to Content Region
+
+**Header-only query** (for layout without full decode):
+
+- Same request, flag for "header only — report dimensions, don't decode"
+- Response carries width + height, zero bytes written
+
+### Memory region access changes
+
+Current: File Store is core-private (core-write, no other readers).
+New: File Store becomes core-write, decoder-read. Decoder services get **read-only** mappings of the File Store. This is the same trust model as Content Region (core-write, render-read). Render services still never see File Store.
+
+```text
+File Store ────→ Decoder service (read-only) ────→ Content Region
+  (raw bytes)    (sandboxed, per-format)            (decoded BGRA)
+                       ↑                                  ↓
+                  IPC request                       IPC response
+                  from core                          to core
+                       ↑                                  ↓
+                     Core ─────────────────────────→ Scene Graph
+                     (layout, content semantics)     (content_id ref)
+```
+
+### Performance: not a concern
+
+The IPC boundary carries only control messages (~64 bytes). The bulk data (raw file bytes, decoded pixels) lives in shared memory regions that the decoder reads/writes directly. Zero copies across the IPC boundary. The IPC round-trip adds ~5-10 microseconds of scheduling overhead; a JPEG decode of a 1080p image takes 5-50 milliseconds of compute. The overhead is <0.1%.
+
+This is the same pattern that makes the scene graph IPC viable: shared memory for data, event rings for coordination.
+
+### Migration path
+
+1. ~~**Define the decode protocol**~~ **Done (2026-03-25).** `protocol/decode.rs` — `DecodeRequest`, `DecodeResponse`, `DecoderConfig`, `DecodeStatus`, header-only flag. Format-agnostic: same types for all decoders.
+2. ~~**Factor PNG decoder into a service.**~~ **Done (2026-03-25).** `services/decoders/png/main.rs` — sandboxed process that calls `drawing::png`. Gets File Store (RO) + Content Region (RW) from init. Core sends requests via IPC, decoder writes pixels directly to shared memory. Zero copies across IPC boundary.
+3. ~~**Update core**~~ **Done (2026-03-25).** Core sends header-only query (get dimensions), allocates Content Region space, sends full decode request, writes registry entry from response. Loop-wait pattern handles spurious wakeups. `drawing::png` dependency still linked (used by host tests via drawing library).
+4. **Build JPEG decoder** as a second decode service (`services/decoders/jpeg/`), validating the protocol works for a second format.
+5. ~~**Update init**~~ **Done (2026-03-25).** Init spawns `png-decode`, shares File Store (RO) + Content Region (RW), creates core↔decoder channel (handle 4 in core, handle 1 in decoder). Decoder starts before core (core sends request at boot).
+
+### Implementation notes (2026-03-25)
+
+- **Channel handle layout in core:** 0=init, 1=input, 2=compositor, 3=editor, 4=decoder, 5=tablet. Decoder inserted before variable-count input devices.
+- **ImageConfig changed:** `file_store_offset`/`file_store_length` (u32) replaced `image_va`/`image_len` (u64). Core no longer needs File Store VA.
+- **Spurious wakeup handling:** `sys::wait` can return from stale signals. Core uses a loop-wait pattern: `loop { wait; if try_recv → break }`. Same pattern used in all long-lived services.
+- **Service location:** `services/decoders/` (not `services/drivers/`) — decoders are content services, not hardware abstractions. JPEG, WebP, etc. will be siblings of `png/`.
+
+### Deferred
+
+- Decoder service discovery / registration (how does core know which decoder handles which mimetype? Static table in init? Dynamic registration?)
+- Multiplexed vs per-format services (one service per mimetype, or one service that loads format plugins?)
+- Streaming decode for progressive JPEG / interlaced PNG (partial results before full file is decoded)
+- Decode priority (visible images first, offscreen deferred)
+- Whether the `drawing::png` library module should be deleted or kept for host-side tests
+
+### Relationship to existing design
+
+- **Content Pipeline Architecture (below):** This entry evolves the "in-process library for simple formats" to "all decoders are services." The three memory regions, scene graph content types, and Content Region design are unchanged.
+- **Decision #5 (file understanding):** Mimetype is the dispatch key. Core looks up mimetype → decoder service mapping. No format sniffing in the decoder protocol.
+- **Decision #13 (compound documents):** Translators that convert external formats to native compound docs are a superset of image decoders. The decoder protocol could be the foundation for the translator service interface.
+- **Architecture principle:** "Does it require understanding what content IS? → OS service." Decoders understand content formats. They are services, not library utilities baked into core.
+
+---
+
+## Float16 Rendering Pipeline + Ordered Dithering (2026-03-24)
+
+**Status: IMPLEMENTED**
+
+### The problem
+
+Document drop shadows over a #202020 desk background showed visible banding — discrete concentric bands instead of a smooth gradient. The analytical Gaussian shader (`erf` integrals) produces float-precision alpha, but the 8-bit render target quantizes to 256 levels.
+
+### Why per-shader dithering is wrong
+
+The naive fix is to add dither in each shader that produces gradients (shadow, rounded-rect, etc.). This fails because:
+
+1. **Dither must be at the quantization boundary.** The quantization happens after compositing + sRGB encoding, not in individual shader outputs. Dithering alpha pre-compositing requires compensating for two nonlinear transforms (blending + sRGB gamma), making the amplitude background-dependent.
+2. **It doesn't compose.** Every new visual effect that produces smooth gradients needs its own dither hack with its own amplitude correction.
+
+### The fix: float16 intermediate
+
+Following production renderer practice (Filament, Unreal), the entire rendering pipeline now operates in RGBA16Float:
+
+1. **TEX_MSAA** changed from `bgra8Unorm_srgb` to `rgba16Float` (4x MSAA).
+2. **TEX_RESOLVE** (new): MSAA resolves to this float16 non-MSAA texture.
+3. **`fragment_dither`** (new): single fullscreen pass reads TEX_RESOLVE, applies 4x4 Bayer ordered dither in sRGB space (+/-0.5 LSB — the standard amplitude), outputs to the 8-bit sRGB drawable.
+
+All MSAA render pipelines now specify `PIXEL_FORMAT_RGBA16F` via a new `pixel_format` field in the `create_render_pipeline` protocol command (previously hardcoded to `bgra8Unorm_srgb` in the hypervisor). The dither pipeline and blur overlay use `PIXEL_FORMAT_BGRA8_SRGB` for the drawable.
+
+### Why this is correct
+
+- **Dither at the quantization boundary.** The Bayer threshold is added in sRGB space, exactly where 8-bit quantization occurs. Standard +/-0.5/255 amplitude works without any background-dependent correction.
+- **Composes universally.** Every visual effect (shadows, rounded rects, transparency, future gradients) gets correct dithering from the single pass.
+- **Higher blending precision.** Alpha compositing accumulates in float16 instead of 8-bit, eliminating per-layer rounding error.
+- **4x4 Bayer matrix** via bit-interleave: `((x0^y0)<<3 | y0<<2 | (x1^y1)<<1 | y1)`. Optimal threshold matrix — minimizes max spatial frequency of quantization error.
+
+### Protocol change
+
+`create_render_pipeline` payload: 16 bytes -> 17 bytes. New `pixel_format: u8` field at offset 16. Mandatory — hypervisor rejects undersized payloads with a diagnostic message. No backward-compatibility fallback (kill the old way).
+
+Verified numerically: longest band 34px -> 12px, average band 7.4px -> 1.9px.
+
+---
+
+## Scene Tree Z-Order: Content Under Title Bar (2026-03-24)
+
+**Status: IMPLEMENTED**
+
+### The problem
+
+Document drop shadows extend beyond the document bounds (blur + spread). The content viewport (`N_CONTENT`) had `CLIPS_CHILDREN` and started below the title bar (`y = title_bar_h`). Shadows extending upward were hard-clipped at the content boundary, creating a visible cutoff.
+
+### The fix
+
+Restructured the scene tree sibling chain from:
+
+```text
+N_ROOT → N_TITLE_BAR → N_SHADOW → N_CONTENT → N_POINTER
+         (low z)                    (high z)
+```
+
+to:
+
+```
+N_ROOT → N_CONTENT → N_TITLE_BAR → N_POINTER
+         (low z)     (high z)
+```
+
+Changes:
+
+- `N_CONTENT`: y=0, height=fb_height (full screen, was clipped below title bar)
+- `N_STRIP`: y=content_y (offset to position documents below title bar)
+- `N_TITLE_BAR`: paints AFTER content (higher z-order), overlays shadows
+- `N_SHADOW`: unused (was a zero-height placeholder for a chrome shadow gradient)
+
+The title bar is transparent (`CHROME_BG = TRANSPARENT`), so shadows show through it while title text/icon/clock render on top. The `CLIPS_CHILDREN` on `N_CONTENT` still prevents horizontal document leakage during slide transitions.
+
+---
+
+## Scheduling budget starvation — 120 Hz animation ran at ~20 Hz (2026-03-24)
+
+**Status: FIXED**
+
+### Symptom
+
+Slide animation (Ctrl+Tab) appeared to run at ~5-10 FPS instead of 120 FPS. Core's main loop requests `sys::wait(handles, 8_333_333)` (8.3ms for 120 Hz). Actual wait times alternated between **~8.9ms** (correct) and **~41ms** (5× late), giving ~20 Hz effective update rate.
+
+### Root cause
+
+All user threads shared a single default scheduling context: **10ms budget per 50ms period** (20% of one core). The core service consumed ~8.3ms per frame — nearly the entire 10ms shared budget. After one animation frame, the budget was exhausted. The kernel's `reprogram_next_deadline` programmed CNTV_TVAL for the scheduler's replenishment deadline (~41ms remaining in the 50ms period) instead of the sys::wait timeout (8.3ms). The core thread waited ~41ms for replenishment before running again.
+
+Kernel instrumentation confirmed: TVAL values on "slow" frames were ~1,000,000 ticks (41ms at 24 MHz) — matching the scheduler replenishment period, not the wait timeout.
+
+### Fix
+
+`kernel/scheduler.rs`: Changed `DEFAULT_BUDGET_NS` from 10ms to 50ms (= period). With budget=period, the budget is effectively unlimited. EEVDF still provides fairness via virtual time. Per-service budgets can be implemented later via the existing `scheduling_context_create`/`scheduling_context_bind` syscalls.
+
+After fix: consistent **8-9ms per frame** across all 64 frames of the animation. No alternating pattern.
+
+### Also fixed: hypervisor IMASK re-arm detection
+
+`~/Sites/hypervisor/Sources/VCPU.swift`: Changed vtimer re-arm detection from ISTATUS-based to CNTV_CVAL-based. The old check (`ISTATUS==0`) missed re-arms where the new timer fired before the hypervisor checked — a fast timer sets ISTATUS=1, making the hypervisor think the guest hadn't re-armed. The new check compares CNTV_CVAL against the value captured at mask time; any change means the guest wrote a new deadline.
+
+### Also fixed: core animation improvements
+
+`services/core/main.rs`:
+
+1. **First-frame dt clamp** (`slide_first_frame` flag): Spring ticks with nominal frame interval on the animation-start frame instead of accumulated idle time (up to 50ms). Prevents ~35% first-frame jump.
+2. **Slide-only dispatch path**: Slide animation no longer sets `changed=true`, avoiding unnecessary `update_cursor` dispatch on every animation frame. Uses `slide_changed` in `needs_scene_update` for its own dedicated publish path (1 scene buffer copy instead of 3).
+
+### Future: per-service scheduling budgets
+
+Current fix (budget=period) is effectively unlimited — fine with 4 cores and ~5 threads. When contention becomes real, the architecture naturally supports **static allocation with dynamic binding**:
+
+- Init creates named scheduling contexts at boot (e.g., "idle" 1ms/500ms, "animation" 8.5ms/8.3ms, "render" 8.5ms/8.3ms).
+- Services use `scheduling_context_borrow`/`return` (syscalls already exist) to switch between contexts based on current workload. Core borrows "animation" on Ctrl+Tab, returns on settle.
+- Budgets are static (init decides at spawn). Binding is dynamic (services switch at runtime). No negotiation protocol needed.
+
+**Open questions for that future:** shared vs separate budgets for core+render during animation; borrow reference counting when multiple animations overlap; defensive timeout if a borrow is never returned; whether the complexity is ever justified given EEVDF fairness without budgets.
+
+---
+
+## Content Pipeline Architecture (2026-03-24)
+
+**Status:** IMPLEMENTED (2026-03-24). Content Region + File Store + PNG decode + registry-based font lookup.
+
+### The question
+
+How should image content (and eventually video, audio, compound parts) flow from file bytes to pixels on screen? Triggered by a concrete question: switching the test gradient image to the real test.png loaded via 9p.
+
+### The wrong answer we almost built
+
+The initial proposal (Option B) was: core references encoded PNG bytes in the scene graph, the render service decodes and caches. This seemed efficient (render service owns textures, no pixel copy through the scene graph) and followed the font precedent (render services parse TTF bytes directly).
+
+**This violates the architecture.** The decision checklist (`architecture.md:191`) is unambiguous:
+
+- "Does it require understanding what content _is_? → OS service."
+- "Does it turn positioned visual elements into pixels? → Compositor."
+- "If you find yourself adding content-type awareness to the compositor, the responsibility is in the wrong place."
+
+PNG decoding is content-type understanding, not visual rendering. The decoded BGRA pixels are a visual primitive; the PNG file is a content artifact. The compositor must never see encoded files.
+
+**The font precedent was misleading.** Glyph rasterization in the compositor IS visual primitive rendering (device-dependent: hinting, density, AA). Image decoding is NOT (device-independent: same pixels regardless of display). The architecture document explicitly places glyph rasterization in the compositor (line 74, 87). There is no anomaly to resolve.
+
+### The three data transformations
+
+The content pipeline has exactly three stages. Each is a data transformation with a clear interface:
+
+```text
+File bytes  ──[decode]──→  Decoded content  ──[layout]──→  Scene graph  ──[render]──→  Pixels
+              (leaf node)                     (OS service)                (compositor)
+```
+
+| Stage  | Responsibility                                                                   | Knows about     |
+| ------ | -------------------------------------------------------------------------------- | --------------- |
+| Decode | Format internals (PNG chunks, JPEG DCT, MP4 atoms)                               | One format      |
+| Layout | Content semantics (text wraps, images have dimensions, parts have relationships) | Content types   |
+| Render | Visual primitives (rectangles, pixel blits, glyph outlines, Bézier paths)        | Geometry, color |
+
+Decoders are leaf nodes — complex inside, simple interface. The interface is stable; implementations are swappable. **Updated 2026-03-24:** All decoders are now out-of-process services, including simple formats like PNG — see "Image Decoding as a Service Interface" above.
+
+### Three memory regions
+
+| Region             | Writer              | Reader            | Contents                                                                                 | Lifetime                   |
+| ------------------ | ------------------- | ----------------- | ---------------------------------------------------------------------------------------- | -------------------------- |
+| **File Store**     | Filesystem (9p/blk) | Core only         | Raw encoded file bytes (PNG, TTF, MP4)                                                   | Tied to file on disk       |
+| **Content Region** | Core (via decoders) | Core + Compositor | Decoded pixels, font TTF data, frame rings                                               | Tied to open documents     |
+| **Scene Graph**    | Core                | Compositor        | Visual primitives + small inline data (glyph arrays, path commands, small pixel buffers) | Per-frame, triple-buffered |
+
+**The compositor never sees the File Store.** It only reads decoded/rendering data from the Content Region and visual primitives from the Scene Graph.
+
+Today these are conflated: the "font buffer" carries raw fonts AND raw PNG bytes AND is shared with everyone. The font buffer needs to become the Content Region (decoded rendering data, shared with compositor) with raw file bytes staying in core-private memory (File Store).
+
+Note: font TTF data belongs in the Content Region, not the File Store, because it's rendering data — the compositor reads it for glyph rasterization. The fact that it happens to be the same bytes as the file on disk is incidental.
+
+### Content Region design
+
+The Content Region is a persistent shared memory region with a registry:
+
+- **Allocated by init** at boot (generous fixed size, e.g., 32–64 MB)
+- **Managed by core** — core decides what's loaded, allocated, evicted
+- **Read-only for compositor** — compositor reads at offsets the registry specifies
+
+Registry: fixed header with entry table. Each entry: offset, length, content class (font/pixels/frame-ring), generation counter (for cache invalidation in the compositor).
+
+**Write-once semantics for concurrency.** Entries are immutable once written. Content updates (image re-decoded after edit) create new entries with new content_ids. The scene graph generation is the synchronization mechanism — the compositor reads the old entry until it picks up the new scene graph generation referencing the new entry. Old entries are freed via generation-based GC: with triple buffering, at most 3 generations are in flight; core frees entries no longer referenced by any active generation.
+
+**The Content Region is a decode cache.** File Store is the source of truth. Content Region holds the hot working set. Eviction policy (e.g., LRU for offscreen documents) is core's concern. Re-decode from File Store when scrolled back. Needs a real allocator (free-list with coalescing, not just bump).
+
+### Scene graph content types
+
+```text
+None            — pure container (rectangles, selection highlights)
+InlineImage     — small pixel buffer in inline data buffer (icons, cursors)
+Image           — decoded pixels in Content Region (photos, illustrations)
+Stream          — time-varying frame ring in Content Region (video, animation)
+Path            — cubic Bézier vector geometry
+Glyphs          — shaped glyph IDs (compositor rasterizes from font data in Content Region)
+```
+
+`InlineImage` is for small, per-frame, potentially regenerated content. `Image` is for large, persistent, decoded content. The distinction is explicit in the type. (Long-term, InlineImage may merge into Image if all persistent pixel data moves to the Content Region.)
+
+### How each content class flows through
+
+**Text:** UTF-8 bytes → (no decode needed) → core shapes + lays out → Glyphs nodes in scene graph → compositor rasterizes from font data in Content Region.
+
+**Image:** PNG bytes in File Store → core calls png_decode() library → BGRA pixels in Content Region → core reads header for dimensions, lays out → Image node in scene graph (content_id, w, h) → compositor blits from Content Region. Compositor never sees PNG.
+
+**Video (future, v0.6):** MP4 in File Store → decode service (separate process) demuxes/decompresses → frame ring in Content Region → core sets playhead (start time, play/pause/seek state) → Stream node in scene graph → compositor samples current frame by wall-clock time. Core does not run at video framerate; it sets the playhead once and the compositor computes which frame to show at render time (same pattern as cursor blink — time-dependent rendering is a compositor concern).
+
+### Format discrimination
+
+The scene graph `Image` node carries a `content_id` referencing a Content Region entry. It does not carry a mimetype or format hint. The compositor doesn't need to know the source format — it sees decoded BGRA pixels. All format discrimination happens before the scene graph, in core's decoder dispatch (keyed on the document's mimetype, which is OS-managed metadata per Decision #5).
+
+### Dimensions from file headers
+
+Core needs image dimensions for layout without full decoding. Every image format puts dimensions in a fixed-position header (PNG: bytes 16-23; JPEG: SOF marker scan; WebP: bytes 12-29; GIF: bytes 6-9; BMP: bytes 18-25). A header-only parse function per format (~30 lines each) is sufficient. JPEG is the only one requiring a marker scan; all others are at fixed offsets.
+
+### What this means for the current code
+
+1. Rename/redesign "font buffer" → Content Region (with registry, allocator, generation tracking)
+2. Split file loading: raw bytes stay in core-private memory (File Store), decoded content goes to Content Region
+3. Move PNG decoder from `test/tests/png_decoder.rs` to a library callable by core
+4. Core decodes PNG into Content Region, writes Image node with content_id
+5. Delete `generate_test_image()` in core
+6. `CompositorConfig` carries Content Region base VA (replaces `font_buf_va`)
+7. Render services resolve content_ids via Content Region registry
+
+### Deferred
+
+- ~~Content Region allocator implementation (free-list with coalescing)~~ **Done (2026-03-25).** `ContentAllocator` in `protocol/content.rs`. Free-list with first-fit, sorted-by-offset, automatic coalescing. 16-byte alignment. Init bump-allocates fonts; core initializes free-list from remaining space. `remove_entry()` companion for registry removal. 27 tests.
+- ~~Generation-based GC for stale entries~~ **Done (2026-03-25).** Deferred reclamation via `defer_free()` + `sweep()` on `ContentAllocator`. Core retires content_id at death_gen; sweep frees when `reader_done_gen >= death_gen`. Leverages triple-buffer generation counter (already existed). `TripleWriter::reader_done_gen()` exposed. `SceneState` generation accessors. Entry creation stamped with current scene generation. Sweep runs in event loop after scene publish (only when pending > 0). 9 additional tests. Same pattern as RCU — grace period is the triple-buffer generation gap.
+- Stream content type and frame ring layout (v0.6)
+- Whether InlineImage can be eliminated entirely (all persistent pixels in Content Region)
+- Content Region growth/resize strategy (if fixed size proves insufficient)
+
+---
+
+## Coordinate Model: Fixed-Point Units (2026-03-23)
+
+**Status:** SETTLED (2026-03-23). Unit: 1/1024 pt. Absolute scroll. AffineTransform stays f32.
+
+### The decision
+
+**Internal coordinate unit: 1/1024 pt (10-bit fractional point).** All scene graph positions, dimensions, and offsets use `i32` (signed) or `u32` (unsigned) in this unit. Precision: 0.001 pt (sub-pixel at any density). Range: ±2,097,151 pt (±2,489 A4 pages). Conversion: bit shift `>> 10`.
+
+### What motivated it
+
+Two f32 bugs in one session:
+
+1. **Spring instability:** Semi-implicit Euler diverged at dt > 33ms because f32 arithmetic amplified the overshoot.
+2. **Settle precision:** At value ≈ 2056, f32 can't represent positions closer than ±0.00024. The spring got stuck 0.001 away from its target.
+
+Neither bug would exist with integer arithmetic. Every major GUI system converges on the same pattern: integers or fixed-point for positions/layout, float only at the compositor transform and GPU boundaries.
+
+### Resolved questions
+
+**Width/height type:** `u16` → `u32` (1/1024 pt). The `_reserved` field shrinks from `[u8; 8]` to `[u8; 4]` — Node stays at exactly 136 bytes.
+
+**1/1024 vs 1/64 (FreeType 26.6):** 1/1024. The "match FreeType" argument doesn't apply — this system has its own rasterizer with 16.16 glyph advances. The extra precision (16× over 1/64) costs nothing (same i32 storage). 1/64's extra range (39K vs 2.5K pages) is wasted on a personal workstation.
+
+**Scroll range:** Absolute offset, no viewport-relative scheme. i32 at 1/1024 pt covers 2,489 A4 pages. A 1,000-page document uses 40% of the range. If a future content type needs infinite scroll, the content type's layout handler implements virtual scrolling internally (leaf-node complexity behind a simple interface).
+
+**AffineTransform:** Stays f32. Transform coefficients (a, b, c, d) are dimensionless multipliers — not "in points." Quantizing rotation coefficients to 1/1024 produces visible error on large elements (cos(30°) error × 1000 pt ≈ 0.19 pt). Transforms compose via matrix multiplication (different from position accumulation) and go straight to the GPU (which mandates f32). Every major compositor keeps transforms in float.
+
+### Integer/float boundary
+
+| Component                   | Type            | Unit               | Rationale                                   |
+| --------------------------- | --------------- | ------------------ | ------------------------------------------- |
+| Node.x, Node.y              | `i32`           | 1/1024 pt          | Positions accumulate, need exact comparison |
+| Node.width, height          | `u32`           | 1/1024 pt          | Dimensions need same unit as positions      |
+| scroll_offset, slide_offset | `i32`           | 1/1024 pt          | The actual bug sites                        |
+| Spring internals            | `f32`           | unitless           | Math is natural in float (sin, exp)         |
+| Spring::value() output      | → `i32`         | 1/1024 pt          | Convert at API boundary                     |
+| AffineTransform             | `f32`           | dimensionless + pt | Render boundary, GPU-bound                  |
+| Render services             | convert i32→f32 | pixels             | Already happens for node.x/y                |
+| Glyph advances (internal)   | 16.16 fixed     | 1/65536 pt         | Truncate to 1/1024 at layout boundary       |
+
+### Prior art
+
+| Layer                 | What they use                                         | Why                                |
+| --------------------- | ----------------------------------------------------- | ---------------------------------- |
+| Document layout       | Integers (TeX scaled points, LibreOffice twips)       | Determinism, no drift              |
+| Protocol/wire format  | Fixed-point (Wayland 24.8) or integers (X11, Android) | No NaN/Inf, compact, deterministic |
+| Font metrics          | Fixed-point (FreeType 26.6)                           | Matches TrueType spec              |
+| 2D rasterizer         | Fixed-point (Cairo 24.8, Direct3D 16.8)               | Exact scanline intersections       |
+| Compositor transforms | Float (macOS CGFloat, DWM)                            | Rotation/scale produce irrationals |
+| GPU vertex shader     | f32 (hardware mandated)                               | No choice                          |
+
+---
+
+## Animation Tick Architecture (2026-03-23)
+
+**Status:** SETTLED and IMPLEMENTED (2026-03-23).
+
+### The solution
+
+Unified animation timeout: single `any_animation_active()` check (scroll spring || slide spring || timeline.any_active()). If anything is animating, wake at the actual display refresh rate (from hypervisor via render service → init → core). Otherwise sleep until the next blink phase transition.
+
+Refresh rate plumbing: hypervisor exposes `NSScreen.maximumFramesPerSecond` at virtio config offset 0x08. Metal-render reads it and reports in `DisplayInfoMsg`. Init distributes to core via `MSG_FRAME_RATE` message (separate from `CoreConfig` which is full at 56 bytes due to u64 alignment).
+
+On ProMotion displays, animations now tick at 120 Hz instead of hardcoded 60 Hz. QEMU path defaults to 60 Hz (no refresh rate exposed).
+
+---
+
+## IPC: State Registers vs Event Rings (2026-03-23)
+
+**Status:** Design decided. Implementation pending.
+
+### The problem
+
+The IPC channel between virtio-input and core overflows under sustained input. The ring holds 62 messages. When core is busy (scene rebuild, text shaping), pointer movement events pile up and are silently dropped: `virtio-input: ring full, event dropped`.
+
+### The insight
+
+Input data has two fundamentally different semantics:
+
+- **Events** (discrete, every one matters): key press, key release, mouse button click. Order and count are significant. A ring buffer is the correct abstraction.
+- **State** (continuous, latest wins): pointer position, tablet pressure, modifier bitfield. Intermediate values between frames are waste. Only the latest matters. A ring buffer is the _wrong_ abstraction — it forces the consumer to drain N messages when it only needs the last one, and overflows when N exceeds capacity.
+
+Every major OS converges on this distinction: macOS coalesces mouse moves in WindowServer. Windows explicitly coalesces WM_MOUSEMOVE between GetMessage() calls. Linux/libinput merges motion events at frame boundaries. Plan 9's /dev/mouse is a current-state file, not an event stream.
+
+### The decision
+
+**Separate the two concerns at the IPC level:**
+
+1. **Event ring** (existing): SPSC ring buffer for discrete events. Keep as-is. Consider adding a dropped-event signal (like Linux SYN_DROPPED) so the consumer can resync modifier state.
+2. **Shared state register** (new): init-allocated shared memory for continuous state. The driver atomically overwrites the latest value. Core reads it once per frame. Zero queue, zero overflow, always current.
+
+**Ownership:** Init allocates the shared memory region and maps it into both processes. Same pattern as the scene graph (core → render) and font data (init → core). No changes to the IPC library or kernel.
+
+**Notification:** The existing `channel_signal` on the IPC channel. The signal means "something changed" — core wakes and checks both the event ring and the state register. Still event-driven, not polling.
+
+### Why not extend the IPC channel?
+
+Making "event ring + state register" a first-class IPC primitive was considered. It's more general but changes a foundational interface. The init-as-orchestrator pattern already handles shared state between processes (scene graph, fonts). Promoting to a first-class IPC feature is a future option if the pattern recurs — for now, init-allocated is simpler and equally correct.
+
+### Prior art in this system
+
+| Shared memory region           | Writer           | Reader         | Pattern                 |
+| ------------------------------ | ---------------- | -------------- | ----------------------- |
+| Scene graph                    | core             | render service | State (triple-buffered) |
+| Font data                      | init (loader)    | core           | Read-only               |
+| IPC channel ring               | virtio-input     | core           | Events                  |
+| **Input state register** (new) | **virtio-input** | **core**       | **State (single slot)** |
+
+### Implementation plan
+
+1. Define `InputState` struct in protocol (pointer x/y, button bitfield, generation counter)
+2. Init allocates a shared page, maps into virtio-input and core
+3. Init sends the address to both via config messages
+4. virtio-input writes `InputState` on pointer events (atomic store + channel_signal)
+5. Core reads `InputState` once per frame (atomic load), drains event ring for keys/buttons
+6. Remove MSG_POINTER_ABS from the event ring
+
+---
+
+## Icon Implementation (2026-03-23)
+
+**Status:** Complete. Pipeline working, icons rendering cleanly.
+
+### What was built
+
+Full icon rendering pipeline: SVG path parser (`scene/svg_path.rs`), stroke expansion engine (`scene/stroke.rs`), arc-to-cubic conversion, `stroke_width` field on `Content::Path`, two-sided Metal stencil, CPU pre-rasterization in core, `Content::Image` display in title bar. Tabler file-text icon renders at correct size in the title bar. Pointer cursor redesigned to Tabler proportions.
+
+### Spike artifacts (resolved)
+
+Stroke-expanded geometry had spike artifacts at corners. The spikes persisted even with round join arcs disabled (bevel-only), indicating the issue was in the structural offset contour logic, not the arc math. Fixed by the user between sessions.
+
+---
+
+## Decision #18: Iconography (2026-03-22)
+
+**Status:** Settled. Recorded in `decisions.md` as Decision #18.
+
+### The question
+
+How should the OS store, render, and map icons? Three sub-questions: (1) what format for icon data, (2) how to render them, (3) how to associate icons with mimetypes.
+
+### What we explored
+
+**Three format options evaluated:**
+
+- **A: Icon font** (what macOS SF Symbols and Windows Segoe Fluent do). Pack icons as glyphs in an OpenType font, render through the existing glyph cache. Rejected: stroke-to-fill conversion needed (Tabler icons are stroke-based), philosophical mismatch (icons are content, not text), multi-color requires COLR/CPAL table complexity.
+- **B: Native `Content::Path` data** (what the pointer cursor already uses). Convert SVGs to the OS's binary path commands at build time. Render through the existing path rasterizer. **Chosen.**
+- **C: Custom binary icon format.** Rejected as over-engineering — the existing path command format already _is_ a compact binary format.
+
+**Runtime vs build-time stroke rendering:** Runtime chosen. Adding stroke support to the path pipeline is a general-purpose investment (line charts, diagrams, drawing tools), not icon-specific. The same path data can render as outline or filled depending on context.
+
+**Icon font vs path baseline alignment:** The concern was that font glyphs get automatic baseline alignment "for free." Analysis showed that aligning `Content::Path` icons with adjacent text requires ~5 lines of positioning math using font metrics already available in core (ascent, line height). Not a meaningful cost difference.
+
+**Cursors:** Operational cursors (mouse pointer, text caret) remain hand-built geometric primitives. Tabler's cursor icons are for symbolic/UI representation, not operational use. Different requirements: operational cursors need pixel-precise hotspots at small sizes; symbolic icons need visual consistency in UI chrome.
+
+### Source set
+
+**Tabler Icons** (MIT license, 5,021 outline + 1,053 filled). SVG analysis across all 5,021 outline icons:
+
+- 83% use SVG arcs (`a` command) — requires arc-to-cubic conversion
+- Commands used: M (20K), a (19K), l (13K), h/v (22K), c (5K), s (487), q/t (74)
+- Average ~580 bytes per SVG; estimated ~200 bytes as compiled path commands
+- Outline style chosen over filled (lighter, more icons available, fill available as rendering mode)
+
+### Implementation plan
+
+1. Add arc, h/v, s, q command support to path pipeline (scene library)
+2. Add runtime stroke rendering to path pipeline (render backends)
+3. Build host-side SVG→path converter tool (`system/tools/svg2path/` or in `build.rs`)
+4. Create `libraries/icons/` with compiled-in icon data and mimetype lookup
+5. Integrate into core: document type icon in title bar, baseline-aligned with text
+
+### Deferred
+
+- Full icon set curation (starting with ~20 for known mimetypes)
+- Cap height extraction from OS/2 font table (ascent works well enough)
+- Hierarchical/multi-color icon rendering (architecture supports it; monochrome first)
+
+---
+
+## Phase 3.2: Text Editor Key Combinations (2026-03-22)
+
+**Status:** Complete.
+
+### Architecture decision: navigation lives in core
+
+The spec originally placed all navigation and editing in the editor process. During implementation, the architecture was revised: **navigation and selection live in core** (the OS service), not the editor. This follows Decision #8 — the OS owns layout and provides content-type interaction primitives (cursor, selection, playhead). Editors are content-type-specific input-to-write translators.
+
+The text editor process was reduced from ~410 to ~195 lines. It now handles only: character insert, backspace, forward delete, Tab (4 spaces), Shift+Tab (dedent). No navigation, no selection, no shift tracking.
+
+### What was implemented
+
+**Protocol changes:**
+
+- `KeyEvent` gained `modifiers: u8` field with `MOD_SHIFT` (0x01), `MOD_CTRL` (0x02), `MOD_ALT` (0x04), `MOD_SUPER` (0x08), `MOD_CAPS_LOCK` (0x10) flags.
+
+**Input driver (`virtio-input`):**
+
+- Modifier state tracking (Shift, Ctrl, Alt, Super press/release)
+- Caps Lock: set/clear matching macOS flag state (not toggle-on-press)
+- Shifted ASCII: full US keyboard layout (`!@#$%^&*()` etc.)
+- All key events include modifier bits
+
+**Core (`services/core/main.rs`) — major rewrite of `process_key_event`:**
+
+- All arrow navigation (Left/Right/Up/Down with sticky `goal_col`)
+- Cmd+Left/Right (visual line start/end), Cmd+Up/Down (document start/end)
+- Opt+Left/Right (word boundary navigation)
+- Home/End, PgUp/PgDn
+- Shift+any navigation (selection extension via `update_selection`)
+- Cmd+A (select all)
+- Selection-aware backspace/delete (core handles directly via `doc_delete_range`)
+- Opt+Backspace/Delete (word delete, core handles directly)
+- Double-click (word select), triple-click (line select)
+- `forward_key_to_editor` includes `channel_signal` to wake editor
+
+**Layout library (`libraries/layout/lib.rs`):**
+
+- `line_col_to_byte()` — inverse of `byte_to_line_col`
+- `word_boundary_backward()` / `word_boundary_forward()` — scan for whitespace transitions
+- `ParagraphLayout::line_col_to_byte()` method
+
+**Hypervisor (`~/Sites/hypervisor/`):**
+
+- Added `.capsLock` to `handleFlagsChanged` modifier list in `AppWindow.swift`
+
+### Bug fixes
+
+- `forward_key_to_editor` was missing `sys::channel_signal(EDITOR_HANDLE)` — editor process never woke up for backspace/delete events
+- Hypervisor didn't forward Caps Lock events (missing from `handleFlagsChanged`)
+- Guest Caps Lock handling changed from toggle-on-press to set/clear matching macOS flag state
+
+### Tests
+
+13 new tests in `test/tests/layout.rs`: 6 for `line_col_to_byte` (basic, empty, wrapped, mid-char, beyond-end, multi-paragraph), 7 for word boundaries (backward/forward basic, at-boundary, start/end of string, multiple-spaces, non-alpha). 2,091 total tests pass.
+
+---
+
+## Analytical Gaussian Shadows + sRGB Pipeline (2026-03-21)
+
+**Status:** Complete.
+
+### Shadows
+
+metal-render had been emitting shadows as a single solid-color quad — invisible on dark backgrounds. Replaced with an analytical Gaussian fragment shader (`fragment_shadow`) that evaluates the exact closed-form integral per-pixel:
+
+- **Rectangles (corner_radius=0):** Separable product of two 1D erf integrals — mathematically exact. `shadow_1d(p, lo, hi, σ) = 0.5 * (erf((hi-p)/σ√2) - erf((lo-p)/σ√2))`, then `alpha = Ix * Iy`.
+- **Rounded rects (corner_radius>0):** SDF distance + `erfc(d/σ√2)/2` — excellent approximation for convex shapes.
+- **erf approximation:** Abramowitz & Stegun 7.1.26, max error ≤ 1.5×10⁻⁷.
+- **No offscreen textures or compute passes.** The quad extends 3σ beyond the shadow rect; the fragment shader computes per-pixel analytically.
+
+Shadow parameters on title bar: offset=2pt, blur_radius=12 (σ=6), alpha=120. SHADOW_DEPTH eliminated (content starts at y=title_bar_h, no gap).
+
+### sRGB Render Target
+
+Switched the MSAA texture and CAMetalLayer to `bgra8Unorm_srgb`. The Metal hardware blender now automatically converts sRGB↔linear at the framebuffer boundary, making all alpha compositing gamma-correct: rounded-rect AA edges, text over background, shadow compositing — everything.
+
+- All fragment shaders linearize their sRGB color inputs via the existing `srgb_to_linear()` MSL function.
+- Backdrop blur pipeline unaffected: compute `read()`/`write()` bypass sRGB conversion, so the manual sRGB↔linear kernels remain correct.
+- Clear color changed from sRGB (0.13) to linear (0.005) to match BG_BASE.
+- New protocol constant: `PIXEL_FORMAT_BGRA8_SRGB = 6`.
+
+### Rounded-rect alpha bug
+
+The `fragment_rounded_rect` shader was outputting premultiplied RGB (`fill.rgb * fill.a`) but the blend mode expected non-premultiplied (`srcAlpha * src + (1-srcAlpha) * dst`). This squared the alpha: the title bar rendered at RGB 27 instead of the correct 40. Fixed by outputting non-premultiplied color via weighted-average compositing for the border/fill regions.
+
+### Rendering audit notes
+
+- **Virgil-render has no shadow rendering** — shadow properties are silently ignored. Not blocking (metal-render is the primary path going forward).
+- **LCD subpixel text rendering** intentionally skipped across all backends (grayscale coverage only).
+- CpuBackend shadow rendering uses discrete 3-pass box blur (correct but different algorithm from analytical Gaussian).
+
+---
+
+## Rendering Test Document (2026-03-21)
+
+**Status:** Idea — noted for future implementation.
+
+A **visual test mode** accessible via key combo that switches to a purpose-built "rendering sample compound document." This document exercises every rendering capability systematically:
+
+- One node per content type (None, Glyphs, Image, Path)
+- One node per composition feature (clip path, backdrop blur, opacity, shadow, border)
+- One node per transform type (translate, rotate, scale, skew, combined + rounded corners)
+- One animated section (spring, easing curves, color lerp)
+- Labeled, grid-laid-out, easy to scan at a glance
+
+Replaces the scattered demo nodes that accumulated during v0.3. Invoked when needed for verification after rendering pipeline changes — doesn't clutter the normal editor scene.
+
+---
+
 ## Points and Pixels: Coordinate System Terminology (2026-03-19)
 
 **Status:** Settled.
@@ -1640,6 +2263,18 @@ cd test && cargo test scheduler_state  # Property-based scheduler tests
 
 Active questions we've started exploring but haven't resolved. Each thread links to the decisions it would inform.
 
+### AA transition softness tuning
+
+**Informs:** Phase 4 visual polish
+**Status:** Deferred — not blocking, aesthetic preference
+**Context:** Our analytic rasterizer produces mathematically correct coverage with "hard" AA transitions (fewer partial-coverage pixels at edges). macOS Core Text has slightly softer/wider transitions that give text a warmer feel. Options: post-rasterization Gaussian blur on coverage, wider filter kernel in rasterizer, or leave as-is (sharper is arguably better for a code editor). Decision: leave for now, revisit if the aesthetic feels wrong once more of the UI is built.
+
+### Italic font rendering
+
+**Informs:** v0.5 (Rich inline text / multi-style runs)
+**Status:** Deferred — blocked on style runs
+**Context:** Italic variants are loaded (inter-italic.ttf, jetbrains-mono-italic.ttf). Rasterizer and shaping engine handle any font data. Missing piece: a way to select italic in the scene graph. Requires content-type or style metadata → italic font data mapping, which depends on multi-style text runs (v0.5 scope). No work needed now — infrastructure is ready.
+
 ### Is "compound" intrinsic or contextual?
 
 **Informs:** Decision #14 (Compound Documents), Glossary
@@ -1742,7 +2377,7 @@ Open questions: exact scene graph API, how layout engine and compositor interfac
 ### COW Filesystem
 
 **Informs:** Decision #16 (Technical Foundation — filesystem sub-decision), Decision #12 (Undo), Decision #14 (virtual manifest rewind)
-**Status:** Interface designed (2026-03-11). Placement settled (userspace service). On-disk format deferred — prototype-on-host strategy adopted. See `design/research-cow-filesystems.md`.
+**Status:** Interface designed (2026-03-11). Placement settled (userspace service). On-disk format deferred — prototype-on-host strategy adopted. See `design/research/cow-filesystems.md`.
 **Context:** Studied RedoxFS (Rust, COW but no snapshots), ZFS (birth time + dead lists = gold standard for snapshots), Btrfs (refcounted subvolumes), Bcachefs (key-level versioning). Key findings: (1) birth time in block pointers is non-negotiable for efficient snapshots, (2) ZFS dead lists make deletion tractable, (3) per-document scoping needed (datasets/subvolumes, not whole-FS snapshots), (4) `beginOp`/`endOp` maps naturally to COW transaction boundaries. TFS (Redox's predecessor) attempted per-file revision history but didn't ship it — cautionary data point. Filesystem is a userspace service — kernel owns COW/VM mechanics (page fault handler), filesystem manages on-disk layout (B-trees, block allocation, snapshots). **New constraint (2026-03-09):** metadata DB must live on the COW filesystem so its historical state is preserved in snapshots — required for uniform rewind performance across static and virtual documents. Time-correlated vs per-document snapshots still open — per-document snapshots + a COW'd metadata DB might be sufficient for world-state queries without coordinated global snapshots. Needs further exploration.
 
 **Files interface settled (2026-03-11).** 12 operations: create, clone, delete, size, resize, map_read, map_write, snapshot, restore, map_snapshot, snapshots (list), delete_snapshot, flush. Deliberately absent: paths/directories (files addressed by ID), permissions (OS service is sole consumer), extended attributes (metadata lives in DB), file locking (OS service serializes writes via event loop), links (copy semantics via clone), rename (metadata DB concern), batch operations (OS service sequences), file type info (metadata DB concern). The interface is a dumb file store — it knows nothing about documents, undo ordering, or compound structures. See journal insights for full design rationale.

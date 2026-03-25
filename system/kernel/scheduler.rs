@@ -31,8 +31,13 @@ use super::{
 };
 
 /// Initialize the scheduler with core 0's boot thread.
-/// Default scheduling context: 10ms budget per 50ms period (20% of one core).
-const DEFAULT_BUDGET_NS: u64 = 10_000_000;
+/// Default scheduling context: 50ms budget per 50ms period (100% of one core).
+/// Effectively unlimited until per-service budgets are implemented. The
+/// previous 10ms/50ms (20%) budget caused animation stutter: at 120 Hz,
+/// the core service exhausted the shared budget in ~1 frame (8.3ms), then
+/// waited ~41ms for replenishment. EEVDF still provides fairness via
+/// virtual time even at 100% budget.
+const DEFAULT_BUDGET_NS: u64 = 50_000_000;
 const DEFAULT_PERIOD_NS: u64 = 50_000_000;
 
 static STATE: IrqMutex<State> = IrqMutex::new(State {

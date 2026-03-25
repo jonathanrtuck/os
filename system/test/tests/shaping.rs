@@ -5,9 +5,8 @@
 
 use fonts::{shape, Feature, ShapedGlyph};
 
-const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
-const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
-const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf");
+const INTER: &[u8] = include_bytes!("../../share/inter.ttf");
+const JETBRAINS_MONO: &[u8] = include_bytes!("../../share/jetbrains-mono.ttf");
 
 // ---------------------------------------------------------------------------
 // VAL-SHAPE-001: Basic Latin text shaping
@@ -17,12 +16,11 @@ const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf")
 fn shape_hello_world_glyph_count() {
     // "Hello World" is 11 characters (including space). For basic Latin text
     // with no ligatures, each character should produce one glyph.
-    let glyphs = shape(NUNITO_SANS, "Hello World", &[]);
+    let glyphs = shape(INTER, "Hello World", &[]);
     assert!(
         !glyphs.is_empty(),
         "shaping should produce glyphs for non-empty text"
     );
-    // Nunito Sans static may or may not have ligatures for this text.
     // At minimum we expect at least 10 glyphs for 11 characters.
     assert!(
         glyphs.len() >= 10,
@@ -33,7 +31,7 @@ fn shape_hello_world_glyph_count() {
 
 #[test]
 fn shape_hello_world_nonzero_advances() {
-    let glyphs = shape(NUNITO_SANS, "Hello World", &[]);
+    let glyphs = shape(INTER, "Hello World", &[]);
     for (i, g) in glyphs.iter().enumerate() {
         // Space glyph (cluster mapping to space character) may have 0 y_advance
         // but should have non-zero x_advance for horizontal text.
@@ -49,7 +47,7 @@ fn shape_hello_world_nonzero_advances() {
 
 #[test]
 fn shape_empty_string_produces_no_glyphs() {
-    let glyphs = shape(NUNITO_SANS, "", &[]);
+    let glyphs = shape(INTER, "", &[]);
     assert!(
         glyphs.is_empty(),
         "empty string should produce 0 glyphs, got {}",
@@ -60,32 +58,33 @@ fn shape_empty_string_produces_no_glyphs() {
 // ---------------------------------------------------------------------------
 // VAL-SHAPE-002: Ligature production
 // ---------------------------------------------------------------------------
-// Font: Variable Nunito Sans (nunito-sans-variable.ttf) — a variable OpenType
-// font with GSUB ligature tables, including standard "fi" and "fl" ligatures.
+// Font: Inter (inter.ttf) — a variable OpenType font. Inter is a UI font
+// that does not have traditional fi/fl ligatures.
 
 #[test]
-fn shape_ligature_fi_fewer_glyphs() {
-    // "fi" (2 chars) should produce fewer than 2 glyphs when the font's GSUB
-    // ligature tables are active (default shaping enables standard ligatures).
+fn shape_ligature_fi_no_ligature_in_inter() {
+    // Inter does not have traditional fi/fl ligatures (it's a UI font).
+    // "fi" (2 chars) should produce exactly 2 glyphs regardless of liga setting.
     let liga_on = vec!["+liga".parse::<Feature>().unwrap()];
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "fi", &liga_on);
-    assert!(
-        glyphs.len() < 2,
-        "Variable Nunito Sans: 'fi' with +liga should produce fewer than 2 glyphs \
-         (ligature substitution), got {} glyphs",
+    let glyphs = shape(INTER, "fi", &liga_on);
+    assert_eq!(
+        glyphs.len(),
+        2,
+        "Inter: 'fi' with +liga should produce 2 glyphs (no fi ligature), got {}",
         glyphs.len()
     );
 }
 
 #[test]
-fn shape_ligature_fl_fewer_glyphs() {
-    // "fl" (2 chars) should also produce fewer than 2 glyphs via GSUB ligature.
+fn shape_ligature_fl_no_ligature_in_inter() {
+    // Inter does not have traditional fl ligatures.
+    // "fl" (2 chars) should produce exactly 2 glyphs.
     let liga_on = vec!["+liga".parse::<Feature>().unwrap()];
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "fl", &liga_on);
-    assert!(
-        glyphs.len() < 2,
-        "Variable Nunito Sans: 'fl' with +liga should produce fewer than 2 glyphs \
-         (ligature substitution), got {} glyphs",
+    let glyphs = shape(INTER, "fl", &liga_on);
+    assert_eq!(
+        glyphs.len(),
+        2,
+        "Inter: 'fl' with +liga should produce 2 glyphs (no fl ligature), got {}",
         glyphs.len()
     );
 }
@@ -93,12 +92,13 @@ fn shape_ligature_fl_fewer_glyphs() {
 #[test]
 fn shape_ligature_disabled_no_merge() {
     // With ligatures explicitly disabled, "fi" should produce exactly 2 glyphs.
+    // Inter has no fi ligature, so this matches the enabled case.
     let liga_off = vec!["-liga".parse::<Feature>().unwrap()];
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "fi", &liga_off);
+    let glyphs = shape(INTER, "fi", &liga_off);
     assert_eq!(
         glyphs.len(),
         2,
-        "Variable Nunito Sans: 'fi' with -liga should produce 2 glyphs (no ligature), got {}",
+        "Inter: 'fi' with -liga should produce 2 glyphs, got {}",
         glyphs.len()
     );
 }
@@ -109,16 +109,16 @@ fn shape_ligature_disabled_no_merge() {
 
 #[test]
 fn shape_kerning_av_tighter_than_sum() {
-    // "AV" is a classic kerning pair. With Nunito Sans, the total advance
+    // "AV" is a classic kerning pair. With Inter, the total advance
     // when shaped together should be less than the sum of individual advances
     // (kerning pulls them closer together).
-    let av_glyphs = shape(NUNITO_SANS, "AV", &[]);
+    let av_glyphs = shape(INTER, "AV", &[]);
     assert_eq!(av_glyphs.len(), 2, "AV should produce 2 glyphs");
 
     let total_advance: i32 = av_glyphs.iter().map(|g| g.x_advance).sum();
 
-    let a_glyphs = shape(NUNITO_SANS, "A", &[]);
-    let v_glyphs = shape(NUNITO_SANS, "V", &[]);
+    let a_glyphs = shape(INTER, "A", &[]);
+    let v_glyphs = shape(INTER, "V", &[]);
     let sum_individual = a_glyphs[0].x_advance + v_glyphs[0].x_advance;
 
     assert!(
@@ -135,25 +135,23 @@ fn shape_kerning_av_tighter_than_sum() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn shape_feature_liga_on_off_differs() {
-    // When ligatures are enabled vs disabled, text containing ligature-eligible
-    // sequences should produce different glyph output.
+fn shape_feature_liga_on_off_same_for_inter() {
+    // Inter has no traditional fi/fl/ffi ligatures, so enabling vs disabling
+    // the liga feature should produce identical glyph output.
     let liga_on = vec!["+liga".parse::<Feature>().unwrap()];
     let liga_off = vec!["-liga".parse::<Feature>().unwrap()];
 
     let text = "difficult office";
-    let glyphs_on = shape(NUNITO_SANS, text, &liga_on);
-    let glyphs_off = shape(NUNITO_SANS, text, &liga_off);
+    let glyphs_on = shape(INTER, text, &liga_on);
+    let glyphs_off = shape(INTER, text, &liga_off);
 
-    // With ligatures disabled, every character maps to one glyph.
-    // With ligatures enabled, fi/ffi ligatures may reduce glyph count.
-    // At minimum, the glyph ID arrays should differ.
     let ids_on: Vec<u16> = glyphs_on.iter().map(|g| g.glyph_id).collect();
     let ids_off: Vec<u16> = glyphs_off.iter().map(|g| g.glyph_id).collect();
 
-    assert_ne!(
+    assert_eq!(
         ids_on, ids_off,
-        "liga on vs off should produce different glyph IDs for '{}'",
+        "Inter has no traditional ligatures — liga on vs off should produce \
+         identical glyph IDs for '{}'",
         text
     );
 }
@@ -165,8 +163,8 @@ fn shape_feature_liga_on_off_differs() {
 #[test]
 fn shape_proportional_w_vs_i() {
     // Proportional font should give different advance widths for 'W' and 'i'.
-    let w_glyphs = shape(NUNITO_SANS, "W", &[]);
-    let i_glyphs = shape(NUNITO_SANS, "i", &[]);
+    let w_glyphs = shape(INTER, "W", &[]);
+    let i_glyphs = shape(INTER, "i", &[]);
     assert_eq!(w_glyphs.len(), 1);
     assert_eq!(i_glyphs.len(), 1);
     assert_ne!(
@@ -181,8 +179,8 @@ fn shape_proportional_w_vs_i() {
 
 #[test]
 fn shape_monospace_uniform_width() {
-    // Source Code Pro is monospace — all Latin glyphs should have the same advance.
-    let glyphs = shape(SOURCE_CODE_PRO, "iiiWWW", &[]);
+    // JetBrains Mono is monospace — all Latin glyphs should have the same advance.
+    let glyphs = shape(JETBRAINS_MONO, "iiiWWW", &[]);
     assert_eq!(glyphs.len(), 6, "expected 6 glyphs for 'iiiWWW'");
     let first_advance = glyphs[0].x_advance;
     for (idx, g) in glyphs.iter().enumerate() {
@@ -199,8 +197,8 @@ fn shape_monospace_uniform_width() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn shape_source_code_pro_basic() {
-    let glyphs = shape(SOURCE_CODE_PRO, "Hello", &[]);
+fn shape_jetbrains_mono_basic() {
+    let glyphs = shape(JETBRAINS_MONO, "Hello", &[]);
     assert_eq!(glyphs.len(), 5, "expected 5 glyphs for 'Hello'");
     for g in &glyphs {
         assert!(
@@ -248,29 +246,23 @@ fn shape_empty_font_data() {
 }
 
 // ---------------------------------------------------------------------------
-// Variable font files and constants
-// ---------------------------------------------------------------------------
-
-const SOURCE_CODE_PRO_VARIABLE: &[u8] = include_bytes!("../../share/source-code-pro-variable.ttf");
-
-// ---------------------------------------------------------------------------
-// VAL-VARFONT-001: Variable Nunito Sans axis detection
+// VAL-VARFONT-001: Variable Inter axis detection
 // ---------------------------------------------------------------------------
 
 #[test]
-fn varfont_nunito_sans_has_four_axes() {
-    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+fn varfont_inter_has_two_axes() {
+    let axes = fonts::rasterize::font_axes(INTER);
     assert_eq!(
         axes.len(),
-        4,
-        "variable Nunito Sans should have 4 axes, got {}",
+        2,
+        "variable Inter should have 2 axes, got {}",
         axes.len()
     );
 }
 
 #[test]
-fn varfont_nunito_sans_opsz_axis() {
-    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+fn varfont_inter_opsz_axis() {
+    let axes = fonts::rasterize::font_axes(INTER);
     let opsz = axes.iter().find(|a| &a.tag == b"opsz");
     assert!(opsz.is_some(), "should have opsz axis");
     let opsz = opsz.unwrap();
@@ -290,8 +282,8 @@ fn varfont_nunito_sans_opsz_axis() {
 }
 
 #[test]
-fn varfont_nunito_sans_wght_axis() {
-    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+fn varfont_inter_wght_axis() {
+    let axes = fonts::rasterize::font_axes(INTER);
     let wght = axes.iter().find(|a| &a.tag == b"wght");
     assert!(wght.is_some(), "should have wght axis");
     let wght = wght.unwrap();
@@ -301,63 +293,43 @@ fn varfont_nunito_sans_wght_axis() {
         wght.min_value,
         wght.max_value
     );
-    // Typical weight range: 100–900 or similar.
-    assert!(
-        wght.min_value >= 100.0 && wght.max_value <= 1000.0,
-        "wght range [{}, {}] seems unreasonable",
-        wght.min_value,
+    // Inter weight range: 100–900.
+    assert_eq!(
+        wght.min_value, 100.0,
+        "Inter wght min should be 100, got {}",
+        wght.min_value
+    );
+    assert_eq!(
+        wght.max_value, 900.0,
+        "Inter wght max should be 900, got {}",
         wght.max_value
     );
 }
 
 #[test]
-fn varfont_nunito_sans_wdth_axis() {
-    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
-    let wdth = axes.iter().find(|a| &a.tag == b"wdth");
-    assert!(wdth.is_some(), "should have wdth axis");
-    let wdth = wdth.unwrap();
-    assert!(
-        wdth.min_value < wdth.max_value,
-        "wdth min ({}) must be < max ({})",
-        wdth.min_value,
-        wdth.max_value
-    );
-}
-
-#[test]
-fn varfont_nunito_sans_ytlc_axis() {
-    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
-    let ytlc = axes.iter().find(|a| &a.tag == b"YTLC");
-    assert!(ytlc.is_some(), "should have YTLC axis");
-    let ytlc = ytlc.unwrap();
-    assert!(
-        ytlc.min_value < ytlc.max_value,
-        "YTLC min ({}) must be < max ({})",
-        ytlc.min_value,
-        ytlc.max_value
-    );
-}
-
-#[test]
-fn varfont_nunito_sans_axis_tags_exact() {
-    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+fn varfont_inter_axis_tags_exact() {
+    let axes = fonts::rasterize::font_axes(INTER);
     let tags: Vec<[u8; 4]> = axes.iter().map(|a| a.tag).collect();
     assert!(tags.contains(b"opsz"), "missing opsz axis in {:?}", tags);
     assert!(tags.contains(b"wght"), "missing wght axis in {:?}", tags);
-    assert!(tags.contains(b"wdth"), "missing wdth axis in {:?}", tags);
-    assert!(tags.contains(b"YTLC"), "missing YTLC axis in {:?}", tags);
+    assert_eq!(
+        tags.len(),
+        2,
+        "Inter should have exactly 2 axes (opsz, wght), got {:?}",
+        tags
+    );
 }
 
 // ---------------------------------------------------------------------------
-// VAL-VARFONT-004: Variable Source Code Pro axis detection
+// VAL-VARFONT-004: Variable JetBrains Mono axis detection
 // ---------------------------------------------------------------------------
 
 #[test]
-fn varfont_source_code_pro_has_wght_axis() {
-    let axes = fonts::rasterize::font_axes(SOURCE_CODE_PRO_VARIABLE);
+fn varfont_jetbrains_mono_has_wght_axis() {
+    let axes = fonts::rasterize::font_axes(JETBRAINS_MONO);
     assert!(
         !axes.is_empty(),
-        "variable Source Code Pro should have at least one axis"
+        "variable JetBrains Mono should have at least one axis"
     );
     let wght = axes.iter().find(|a| &a.tag == b"wght");
     assert!(wght.is_some(), "should have wght axis");
@@ -378,35 +350,25 @@ fn varfont_source_code_pro_has_wght_axis() {
 }
 
 #[test]
-fn varfont_source_code_pro_wght_range_valid() {
-    let axes = fonts::rasterize::font_axes(SOURCE_CODE_PRO_VARIABLE);
+fn varfont_jetbrains_mono_wght_range_valid() {
+    let axes = fonts::rasterize::font_axes(JETBRAINS_MONO);
     let wght = axes.iter().find(|a| &a.tag == b"wght").unwrap();
-    // Source Code Pro variable has weights from ~200 to ~900.
-    assert!(
-        wght.min_value >= 100.0,
-        "wght min {} too low",
+    // JetBrains Mono variable has weights from 100 to 800.
+    assert_eq!(
+        wght.min_value, 100.0,
+        "JetBrains Mono wght min should be 100, got {}",
         wght.min_value
     );
-    assert!(
-        wght.max_value <= 1000.0,
-        "wght max {} too high",
+    assert_eq!(
+        wght.max_value, 800.0,
+        "JetBrains Mono wght max should be 800, got {}",
         wght.max_value
     );
 }
 
 // ---------------------------------------------------------------------------
-// Non-variable fonts return no axes
+// Non-variable / invalid fonts return no axes
 // ---------------------------------------------------------------------------
-
-#[test]
-fn varfont_static_font_returns_no_axes() {
-    let axes = fonts::rasterize::font_axes(SOURCE_CODE_PRO);
-    assert!(
-        axes.is_empty(),
-        "static Source Code Pro should have 0 axes, got {}",
-        axes.len()
-    );
-}
 
 #[test]
 fn varfont_empty_data_returns_no_axes() {
@@ -419,11 +381,11 @@ fn varfont_empty_data_returns_no_axes() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn varfont_nunito_sans_variable_shapes_text() {
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "Hello", &[]);
+fn varfont_inter_shapes_text() {
+    let glyphs = shape(INTER, "Hello", &[]);
     assert!(
         glyphs.len() >= 5,
-        "variable Nunito Sans should shape 'Hello' to >= 5 glyphs, got {}",
+        "variable Inter should shape 'Hello' to >= 5 glyphs, got {}",
         glyphs.len()
     );
     for g in &glyphs {
@@ -432,11 +394,11 @@ fn varfont_nunito_sans_variable_shapes_text() {
 }
 
 #[test]
-fn varfont_source_code_pro_variable_shapes_text() {
-    let glyphs = shape(SOURCE_CODE_PRO_VARIABLE, "Hello", &[]);
+fn varfont_jetbrains_mono_shapes_text() {
+    let glyphs = shape(JETBRAINS_MONO, "Hello", &[]);
     assert!(
         glyphs.len() >= 5,
-        "variable Source Code Pro should shape 'Hello' to >= 5 glyphs, got {}",
+        "variable JetBrains Mono should shape 'Hello' to >= 5 glyphs, got {}",
         glyphs.len()
     );
     for g in &glyphs {
@@ -470,6 +432,7 @@ fn rasterize_at_weight(font_data: &[u8], glyph_id: u16, size_px: u16, weight: f3
         &mut rb,
         &mut scratch,
         &axes,
+        1,
     )
     .expect("rasterization should succeed");
 
@@ -485,9 +448,9 @@ fn glyph_for_char(font_data: &[u8], ch: char) -> u16 {
 #[test]
 fn varfont_wght_400_vs_700_different_coverage() {
     // VAL-VARFONT-002: wght=400 vs wght=700 produces measurably different coverage.
-    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
-    let cov_400 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 400.0);
-    let cov_700 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 700.0);
+    let gid = glyph_for_char(INTER, 'H');
+    let cov_400 = rasterize_at_weight(INTER, gid, 24, 400.0);
+    let cov_700 = rasterize_at_weight(INTER, gid, 24, 700.0);
 
     assert_ne!(
         cov_400, cov_700,
@@ -499,9 +462,9 @@ fn varfont_wght_400_vs_700_different_coverage() {
 #[test]
 fn varfont_wght_700_heavier_than_400() {
     // VAL-CROSS-002: Coverage sum at wght=700 > coverage sum at wght=400.
-    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
-    let cov_400 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 400.0);
-    let cov_700 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 700.0);
+    let gid = glyph_for_char(INTER, 'H');
+    let cov_400 = rasterize_at_weight(INTER, gid, 24, 400.0);
+    let cov_700 = rasterize_at_weight(INTER, gid, 24, 700.0);
 
     assert!(
         cov_700 > cov_400,
@@ -518,10 +481,10 @@ fn varfont_wght_700_heavier_than_400() {
 #[test]
 fn varfont_wght_550_differs_from_400_and_700() {
     // VAL-VARFONT-003: wght=550 differs from both 400 and 700 by >5% of pixels.
-    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
-    let cov_400 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 400.0);
-    let cov_550 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 550.0);
-    let cov_700 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 24, 700.0);
+    let gid = glyph_for_char(INTER, 'H');
+    let cov_400 = rasterize_at_weight(INTER, gid, 24, 400.0);
+    let cov_550 = rasterize_at_weight(INTER, gid, 24, 550.0);
+    let cov_700 = rasterize_at_weight(INTER, gid, 24, 700.0);
 
     // Difference from 400.
     let diff_400 = if cov_550 > cov_400 {
@@ -562,16 +525,16 @@ fn varfont_wght_550_differs_from_400_and_700() {
 #[test]
 fn varfont_out_of_range_wght_clamped_no_panic() {
     // Out-of-range axis value (wght=2000) is clamped to font's max without panic.
-    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'A');
+    let gid = glyph_for_char(INTER, 'A');
     // Should not panic — just clamp to max.
-    let cov = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, 2000.0);
+    let cov = rasterize_at_weight(INTER, gid, 18, 2000.0);
     assert!(
         cov > 0,
         "clamped out-of-range weight should still produce coverage"
     );
 
     // Also test underflow (wght=0, below min).
-    let cov_low = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, 0.0);
+    let cov_low = rasterize_at_weight(INTER, gid, 18, 0.0);
     assert!(
         cov_low > 0,
         "clamped underflow weight should still produce coverage"
@@ -581,11 +544,11 @@ fn varfont_out_of_range_wght_clamped_no_panic() {
 #[test]
 fn varfont_wght_2000_equals_max() {
     // Out-of-range wght=2000 should produce same result as max weight.
-    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
-    let axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    let gid = glyph_for_char(INTER, 'H');
+    let axes = fonts::rasterize::font_axes(INTER);
     let wght = axes.iter().find(|a| &a.tag == b"wght").unwrap();
-    let cov_2000 = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, 2000.0);
-    let cov_max = rasterize_at_weight(NUNITO_SANS_VARIABLE, gid, 18, wght.max_value);
+    let cov_2000 = rasterize_at_weight(INTER, gid, 18, 2000.0);
+    let cov_max = rasterize_at_weight(INTER, gid, 18, wght.max_value);
     assert_eq!(
         cov_2000, cov_max,
         "wght=2000 should produce same result as wght={} (font max)",
@@ -631,8 +594,8 @@ fn varfont_cache_axis_values_separate_entries() {
         value: 700.0,
     }];
 
-    let hash_400 = fonts::cache::axis_values_hash(axes_400);
-    let hash_700 = fonts::cache::axis_values_hash(axes_700);
+    let hash_400 = fonts::rasterize::axis_values_hash(axes_400);
+    let hash_700 = fonts::rasterize::axis_values_hash(axes_700);
 
     cache.insert_with_axes(65, 18, hash_400, glyph_400.clone());
     cache.insert_with_axes(65, 18, hash_700, glyph_700.clone());
@@ -676,7 +639,7 @@ fn varfont_cache_no_axes_vs_with_axes() {
         tag: *b"wght",
         value: 700.0,
     }];
-    let hash_700 = fonts::cache::axis_values_hash(axes_700);
+    let hash_700 = fonts::rasterize::axis_values_hash(axes_700);
     cache.insert_with_axes(65, 18, hash_700, glyph_heavy.clone());
 
     let r_default = cache.get_with_axes(65, 18, 0);
@@ -698,7 +661,7 @@ fn varfont_shape_with_variations_produces_output() {
         tag: *b"wght",
         value: 700.0,
     }];
-    let glyphs = fonts::shape_with_variations(NUNITO_SANS_VARIABLE, "Hello", &[], &axes);
+    let glyphs = fonts::shape_with_variations(INTER, "Hello", &[], &axes);
     assert!(
         glyphs.len() >= 5,
         "shape_with_variations should produce glyphs"
@@ -711,8 +674,8 @@ fn varfont_shape_with_variations_produces_output() {
 #[test]
 fn varfont_shape_with_no_variations_same_as_default() {
     // Shaping with empty axis values should match regular shape().
-    let glyphs_default = shape(NUNITO_SANS_VARIABLE, "Hello", &[]);
-    let glyphs_empty = fonts::shape_with_variations(NUNITO_SANS_VARIABLE, "Hello", &[], &[]);
+    let glyphs_default = shape(INTER, "Hello", &[]);
+    let glyphs_empty = fonts::shape_with_variations(INTER, "Hello", &[], &[]);
 
     assert_eq!(
         glyphs_default.len(),
@@ -813,6 +776,7 @@ fn rasterize_with_auto_opsz(font_data: &[u8], glyph_id: u16, size_px: u16) -> Ve
         &mut rb,
         &mut scratch,
         &auto_axes,
+        1,
     );
 
     match metrics {
@@ -826,12 +790,12 @@ fn rasterize_with_auto_opsz(font_data: &[u8], glyph_id: u16, size_px: u16) -> Ve
 
 #[test]
 fn opsz_auto_10px_vs_48px_different_coverage() {
-    // VAL-OPSZ-002: When rendering 10px text vs 48px text with variable Nunito Sans,
+    // VAL-OPSZ-002: When rendering 10px text vs 48px text with variable Inter,
     // the opsz axis is automatically set to match the rendered size, producing
     // different glyph outlines (smaller text gets sturdier letterforms).
-    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'a');
-    let coverage_10 = rasterize_with_auto_opsz(NUNITO_SANS_VARIABLE, gid, 10);
-    let coverage_48 = rasterize_with_auto_opsz(NUNITO_SANS_VARIABLE, gid, 48);
+    let gid = glyph_for_char(INTER, 'a');
+    let coverage_10 = rasterize_with_auto_opsz(INTER, gid, 10);
+    let coverage_48 = rasterize_with_auto_opsz(INTER, gid, 48);
 
     // Both should produce some output.
     assert!(
@@ -868,7 +832,7 @@ fn opsz_auto_returns_opsz_axis_value() {
     // The auto function should return an AxisValue with tag "opsz".
     use fonts::rasterize::auto_axis_values_for_opsz;
 
-    let axes = auto_axis_values_for_opsz(NUNITO_SANS_VARIABLE, 18, 96);
+    let axes = auto_axis_values_for_opsz(INTER, 18, 96);
     assert!(
         !axes.is_empty(),
         "auto_axis_values_for_opsz should return axis values for a font with opsz"
@@ -876,9 +840,9 @@ fn opsz_auto_returns_opsz_axis_value() {
     let opsz_av = axes.iter().find(|av| &av.tag == b"opsz");
     assert!(opsz_av.is_some(), "returned axes should include opsz");
     let opsz_val = opsz_av.unwrap().value;
-    // At 18px, 96dpi: opsz = 18 * 72 / 96 = 13.5. Nunito Sans opsz range is
-    // 6–12, so it should be clamped to the max (12.0).
-    let font_axes = fonts::rasterize::font_axes(NUNITO_SANS_VARIABLE);
+    // At 18px, 96dpi: opsz = 18 * 72 / 96 = 13.5. Inter opsz range is
+    // 14–32, so it should be clamped to the min (14.0).
+    let font_axes = fonts::rasterize::font_axes(INTER);
     let opsz_axis = font_axes.iter().find(|a| &a.tag == b"opsz").unwrap();
     assert!(
         opsz_val >= opsz_axis.min_value && opsz_val <= opsz_axis.max_value,
@@ -896,11 +860,11 @@ fn opsz_auto_returns_opsz_axis_value() {
 #[test]
 fn opsz_no_op_for_non_opsz_font() {
     // VAL-OPSZ-003: When auto optical sizing is applied to a font without an
-    // opsz axis (e.g., Source Code Pro variable), rendering is unchanged
+    // opsz axis (e.g., JetBrains Mono variable), rendering is unchanged
     // compared to rendering without auto-opsz. No error or crash.
     use fonts::rasterize::{auto_axis_values_for_opsz, RasterBuffer, RasterScratch};
 
-    let gid = glyph_for_char(SOURCE_CODE_PRO_VARIABLE, 'H');
+    let gid = glyph_for_char(JETBRAINS_MONO, 'H');
 
     // Render without auto-opsz (no axes).
     let mut buf_without = vec![0u8; 48 * 6 * 48];
@@ -911,15 +875,15 @@ fn opsz_no_op_for_non_opsz_font() {
         height: 48,
     };
     let metrics_without =
-        fonts::rasterize::rasterize(SOURCE_CODE_PRO_VARIABLE, gid, 18, &mut rb, &mut scratch)
+        fonts::rasterize::rasterize(JETBRAINS_MONO, gid, 18, &mut rb, &mut scratch, 1)
             .expect("rasterization without opsz should succeed");
 
     let total_without = (metrics_without.width * metrics_without.height * 3) as usize;
     let coverage_without: Vec<u8> = buf_without[..total_without].to_vec();
 
     // Render with auto-opsz (should be a no-op since SCP has no opsz axis).
-    let auto_axes = auto_axis_values_for_opsz(SOURCE_CODE_PRO_VARIABLE, 18, 96);
-    // Should return empty — no opsz axis in Source Code Pro.
+    let auto_axes = auto_axis_values_for_opsz(JETBRAINS_MONO, 18, 96);
+    // Should return empty — no opsz axis in JetBrains Mono.
     assert!(
         auto_axes.is_empty(),
         "auto_axis_values_for_opsz should return empty for a font without opsz axis, got {:?}",
@@ -938,12 +902,13 @@ fn opsz_no_op_for_non_opsz_font() {
         height: 48,
     };
     let metrics_with = fonts::rasterize::rasterize_with_axes(
-        SOURCE_CODE_PRO_VARIABLE,
+        JETBRAINS_MONO,
         gid,
         18,
         &mut rb2,
         &mut scratch2,
         &auto_axes,
+        1,
     )
     .expect("rasterization with auto-opsz should succeed for non-opsz font");
 
@@ -961,14 +926,14 @@ fn opsz_no_op_for_non_opsz_font() {
 }
 
 #[test]
-fn opsz_auto_empty_for_static_font() {
-    // Static (non-variable) fonts should also return empty axes.
+fn opsz_auto_empty_for_font_without_opsz() {
+    // Fonts without an opsz axis should return empty axes.
     use fonts::rasterize::auto_axis_values_for_opsz;
 
-    let axes = auto_axis_values_for_opsz(SOURCE_CODE_PRO, 18, 96);
+    let axes = auto_axis_values_for_opsz(JETBRAINS_MONO, 18, 96);
     assert!(
         axes.is_empty(),
-        "static font should return empty auto-opsz axes"
+        "font without opsz axis should return empty auto-opsz axes"
     );
 }
 
@@ -1107,14 +1072,14 @@ fn weight_correction_reduces_coverage_white_on_black() {
     // (lower total coverage sum) than rendering without correction.
     //
     // We use wght=400 (Regular) as the base weight because the font's default
-    // may be at the axis minimum (200 for Nunito Sans), where a reduction would
+    // may be at the axis minimum (100 for Inter), where a reduction would
     // clamp to the minimum and show no difference.
     use fonts::rasterize::{
         font_axes, rasterize_with_axes, weight_correction_factor, AxisValue, RasterBuffer,
         RasterScratch,
     };
 
-    let gid = glyph_for_char(NUNITO_SANS_VARIABLE, 'H');
+    let gid = glyph_for_char(INTER, 'H');
 
     // Use Regular weight (400) as base weight — high enough that correction
     // can reduce it without clamping to the axis minimum.
@@ -1132,15 +1097,9 @@ fn weight_correction_reduces_coverage_white_on_black() {
         width: 128,
         height: 128,
     };
-    let metrics_base = rasterize_with_axes(
-        NUNITO_SANS_VARIABLE,
-        gid,
-        24,
-        &mut rb_base,
-        &mut scratch_base,
-        &axes_base,
-    )
-    .expect("rasterization at base weight should succeed");
+    let metrics_base =
+        rasterize_with_axes(INTER, gid, 24, &mut rb_base, &mut scratch_base, &axes_base, 1)
+            .expect("rasterization at base weight should succeed");
     let total_base = (metrics_base.width * metrics_base.height * 3) as usize;
     let sum_base: u64 = buf_base[..total_base].iter().map(|&b| b as u64).sum();
 
@@ -1154,7 +1113,7 @@ fn weight_correction_reduces_coverage_white_on_black() {
     let corrected_weight = base_weight * factor;
 
     // Verify corrected weight is within the font's wght axis range.
-    let axes = font_axes(NUNITO_SANS_VARIABLE);
+    let axes = font_axes(INTER);
     let wght_axis = axes.iter().find(|a| &a.tag == b"wght").unwrap();
     let clamped_weight = if corrected_weight < wght_axis.min_value {
         wght_axis.min_value
@@ -1184,12 +1143,13 @@ fn weight_correction_reduces_coverage_white_on_black() {
         height: 128,
     };
     let metrics_corrected = rasterize_with_axes(
-        NUNITO_SANS_VARIABLE,
+        INTER,
         gid,
         24,
         &mut rb_corrected,
         &mut scratch_corrected,
         &axes_corrected,
+        1,
     )
     .expect("rasterization at corrected weight should succeed");
     let total_corrected = (metrics_corrected.width * metrics_corrected.height * 3) as usize;
@@ -1212,13 +1172,13 @@ fn weight_correction_reduces_coverage_white_on_black() {
 // ===========================================================================
 
 #[test]
-fn weight_correction_no_op_for_non_variable_font() {
-    // VAL-WEIGHT-004: Weight correction on a non-variable font produces
+fn weight_correction_no_op_for_invalid_font_data() {
+    // VAL-WEIGHT-004: Weight correction on invalid font data produces
     // no change and no error.
     use fonts::rasterize::auto_weight_correction_axes;
 
     let axes = auto_weight_correction_axes(
-        SOURCE_CODE_PRO,
+        &[0, 1, 2, 3],
         255,
         255,
         255, // white fg
@@ -1228,7 +1188,7 @@ fn weight_correction_no_op_for_non_variable_font() {
     );
     assert!(
         axes.is_empty(),
-        "non-variable font should return empty weight correction axes, got {} axes",
+        "invalid font data should return empty weight correction axes, got {} axes",
         axes.len()
     );
 }
@@ -1236,7 +1196,7 @@ fn weight_correction_no_op_for_non_variable_font() {
 #[test]
 fn weight_correction_no_op_for_font_without_wght() {
     // A font that is variable but lacks a wght axis should also be unaffected.
-    // Source Code Pro variable has only wght, so we can't easily test this
+    // Both Inter and JetBrains Mono have wght, so we can't easily test this
     // without a custom font. Instead, verify that the function handles
     // empty font data gracefully.
     use fonts::rasterize::auto_weight_correction_axes;
@@ -1257,16 +1217,14 @@ fn weight_correction_no_op_for_font_without_wght() {
 }
 
 #[test]
-fn weight_correction_no_op_rendering_identical_for_static_font() {
-    // VAL-WEIGHT-004: Applying weight correction to a static font
-    // (or a font without wght axis) produces identical rendering.
-    use fonts::rasterize::{
-        auto_weight_correction_axes, rasterize, rasterize_with_axes, RasterBuffer, RasterScratch,
-    };
+fn weight_correction_no_op_rendering_identical_with_empty_axes() {
+    // VAL-WEIGHT-004: Rendering with empty correction axes produces
+    // identical output to rendering without any axes.
+    use fonts::rasterize::{rasterize, rasterize_with_axes, RasterBuffer, RasterScratch};
 
-    let gid = glyph_for_char(SOURCE_CODE_PRO, 'A');
+    let gid = glyph_for_char(JETBRAINS_MONO, 'A');
 
-    // Render without weight correction.
+    // Render without any axes.
     let mut buf_without = vec![0u8; 48 * 6 * 48];
     let mut scratch = Box::new(RasterScratch::zeroed());
     let mut rb = RasterBuffer {
@@ -1274,20 +1232,12 @@ fn weight_correction_no_op_rendering_identical_for_static_font() {
         width: 48,
         height: 48,
     };
-    let metrics_without = rasterize(SOURCE_CODE_PRO, gid, 18, &mut rb, &mut scratch)
-        .expect("rasterization without weight correction should succeed");
+    let metrics_without = rasterize(JETBRAINS_MONO, gid, 18, &mut rb, &mut scratch, 1)
+        .expect("rasterization without axes should succeed");
     let total_without = (metrics_without.width * metrics_without.height * 3) as usize;
     let coverage_without: Vec<u8> = buf_without[..total_without].to_vec();
 
-    // Attempt weight correction — should return empty for static font.
-    let corrected_axes =
-        auto_weight_correction_axes(SOURCE_CODE_PRO, 255, 255, 255, 0, 0, 0);
-    assert!(
-        corrected_axes.is_empty(),
-        "static font should produce empty correction axes"
-    );
-
-    // Render with (empty) correction axes.
+    // Render with empty axes (should be identical).
     let mut buf_with = vec![0u8; 48 * 6 * 48];
     let mut scratch2 = Box::new(RasterScratch::zeroed());
     let mut rb2 = RasterBuffer {
@@ -1295,15 +1245,8 @@ fn weight_correction_no_op_rendering_identical_for_static_font() {
         width: 48,
         height: 48,
     };
-    let metrics_with = rasterize_with_axes(
-        SOURCE_CODE_PRO,
-        gid,
-        18,
-        &mut rb2,
-        &mut scratch2,
-        &corrected_axes,
-    )
-    .expect("rasterization with empty correction axes should succeed");
+    let metrics_with = rasterize_with_axes(JETBRAINS_MONO, gid, 18, &mut rb2, &mut scratch2, &[], 1)
+        .expect("rasterization with empty axes should succeed");
     let total_with = (metrics_with.width * metrics_with.height * 3) as usize;
 
     assert_eq!(
@@ -1313,7 +1256,7 @@ fn weight_correction_no_op_rendering_identical_for_static_font() {
     assert_eq!(
         &coverage_without[..],
         &buf_with[..total_with],
-        "coverage should be byte-identical for static font with and without weight correction"
+        "coverage should be byte-identical with and without empty axes"
     );
 }
 
@@ -1324,18 +1267,13 @@ fn weight_correction_dark_on_light_no_change() {
     use fonts::rasterize::{auto_weight_correction_axes, font_axes};
 
     let axes_result = auto_weight_correction_axes(
-        NUNITO_SANS_VARIABLE,
-        0,
-        0,
-        0,     // black fg
-        255,
-        255,
-        255, // white bg
+        INTER, 0, 0, 0, // black fg
+        255, 255, 255, // white bg
     );
     // For dark-on-light, correction factor >= 1.0, so weight stays at default.
     // The function may return empty (no adjustment needed) or the default weight.
     if !axes_result.is_empty() {
-        let font_ax = font_axes(NUNITO_SANS_VARIABLE);
+        let font_ax = font_axes(INTER);
         let wght = font_ax.iter().find(|a| &a.tag == b"wght").unwrap();
         let returned_wght = axes_result.iter().find(|a| &a.tag == b"wght").unwrap();
         assert!(
@@ -1354,9 +1292,9 @@ fn weight_correction_dark_on_light_no_change() {
 
 #[test]
 fn shape_a_glyph_id_not_ascii() {
-    // VAL-SHAPE-02: Shape "A" in Source Code Pro, verify glyph ID ≠ 65
+    // VAL-SHAPE-02: Shape "A" in JetBrains Mono, verify glyph ID ≠ 65
     // (real cmap lookup, not ASCII byte cast).
-    let glyphs = shape(SOURCE_CODE_PRO, "A", &[]);
+    let glyphs = shape(JETBRAINS_MONO, "A", &[]);
     assert_eq!(glyphs.len(), 1, "expected 1 glyph for 'A'");
     assert_ne!(
         glyphs[0].glyph_id, 65,
@@ -1375,7 +1313,7 @@ fn shape_a_glyph_id_not_ascii() {
 #[test]
 fn shape_whitespace_produces_glyphs_with_advances() {
     // VAL-SHAPE-03: Shaping whitespace produces glyph(s) with non-zero advance.
-    let glyphs = shape(SOURCE_CODE_PRO, " ", &[]);
+    let glyphs = shape(JETBRAINS_MONO, " ", &[]);
     assert!(
         !glyphs.is_empty(),
         "shaping a single space should produce at least one glyph"
@@ -1394,14 +1332,13 @@ fn shape_whitespace_produces_glyphs_with_advances() {
 #[test]
 fn font_units_to_points_conversion_correct() {
     // Verify the conversion formula: value_pt = value_fu * point_size / upem
-    // For Source Code Pro: units_per_em is typically 1000.
-    let fm = fonts::rasterize::font_metrics(SOURCE_CODE_PRO)
-        .expect("should parse font metrics");
+    // For JetBrains Mono: units_per_em is typically 1000.
+    let fm = fonts::rasterize::font_metrics(JETBRAINS_MONO).expect("should parse font metrics");
     let upem = fm.units_per_em;
     assert!(upem > 0, "units_per_em should be > 0");
 
     // Shape "A" to get font-unit advance
-    let glyphs = shape(SOURCE_CODE_PRO, "A", &[]);
+    let glyphs = shape(JETBRAINS_MONO, "A", &[]);
     assert_eq!(glyphs.len(), 1);
     let advance_fu = glyphs[0].x_advance;
     assert!(advance_fu > 0, "advance in font units should be > 0");

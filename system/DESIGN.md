@@ -24,35 +24,50 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 **How it fits together:**
 
 ```text
-┌────────────────────────────────────────────────────────┐
-│  User Programs     (text-editor, echo)                 │  🟡/🔴
-├────────────────────────────────────────────────────────┤
-│  Platform Services                                     │
-│  ┌────────┐ ┌──────┐ ┌────────────┐ ┌──────────────┐   │
-│  │  Init  │ │ Core │ │ Compositor │ │   Drivers    │   │  🟡/🟢
-│  │ (root  │ │ (OS  │ │  (event    │ │ (virtio-blk/ │   │
-│  │  task) │ │  svc,│ │   loop,    │ │  gpu/input/  │   │
-│  │        │ │ sole │ │   pixel    │ │  9p/console) │   │
-│  │        │ │writer│ │   pump)    │ │              │   │
-│  └────────┘ └──┬───┘ └─────┬──────┘ └──────┬───────┘   │
-│       input→core│  core→comp│(scene)  comp→gpu│        │
-│        editor↔core  (shared mem)       (IPC)           │
-├────────────────────────────────────────────────────────┤
-│  Libraries                                             │
-│  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐    │  🟢 foundational
-│  │ sys │ │ virtio │ │ drawing │ │ fonts │ │ scene │    │
-│  └─────┘ └────────┘ └─────────┘ └───────┘ └───────┘    │
-│  ┌─────┐ ┌──────────┐ ┌────────┐ ┌─────┐               │
-│  │ ipc │ │ protocol │ │ render │ │ l.d │               │
-│  └─────┘ └──────────┘ └────────┘ └─────┘               │
-├────────────────────────────────────────────────────────┤
-│  Kernel (28 syscalls, see kernel/DESIGN.md)            │  🟢 production
-└────────────────────────────────────────────────────────┘
+┌───────────────────────────────────────────────────────────┐
+│  User Programs     (text-editor, echo)                    │  🟡/🔴
+├───────────────────────────────────────────────────────────┤
+│  Platform Services                                        │
+│  ┌────────┐ ┌─────────┐ ┌──────────────────────────────┐  │
+│  │  Init  │ │  Core   │ │      Render Services         │  │  🟡/🟢
+│  │ (root  │ │ (OS svc)│ │ ┌─────────────┐ ┌──────────┐ │  │
+│  │  task) │ │         │ │ │metal-render │ │cpu-render│ │  │
+│  │        │ │   sole  │ │ │  (Metal GPU)│ │ (CpuBack │ │  │
+│  │        │ │  writer │ │ └─────────────┘ │  +gpu 2D)│ │  │
+│  └────────┘ └───┬─────┘ │ ┌─────────────┐ └──────────┘ │  │
+│      input→core │       │ │virgil-render│              │  │
+│   editor↔core   │       │ │ (Gallium3D) │              │  │
+│                 │       │ └─────────────┘              │  │
+│          core→render    └──────────────────────────────┘  │
+│          (scene graph,                                    │
+│           shared mem)          ┌──────────────────┐       │
+│                                │     Drivers      │       │
+│                                │ (virtio-blk/     │       │
+│                                │  input/9p/       │       │
+│                                │  console)        │       │
+│                                └──────────────────┘       │
+├───────────────────────────────────────────────────────────┤
+│  Libraries                                                │
+│  ┌─────┐ ┌────────┐ ┌─────────┐ ┌───────┐ ┌───────┐       │  🟢 foundational
+│  │ sys │ │ virtio │ │ drawing │ │ fonts │ │ scene │       │
+│  └─────┘ └────────┘ └─────────┘ └───────┘ └───────┘       │
+│  ┌─────┐ ┌──────────┐ ┌────────┐ ┌───────────┐ ┌────────┐ │
+│  │ ipc │ │ protocol │ │ render │ │ animation │ │ layout │ │
+│  └─────┘ └──────────┘ └────────┘ └───────────┘ └────────┘ │
+├───────────────────────────────────────────────────────────┤
+│  Kernel (28 syscalls, see kernel/DESIGN.md)               │  🟢 production
+└───────────────────────────────────────────────────────────┘
 ```
 
 **Process model:** Kernel spawns only init. Init embeds all other ELF binaries and spawns everything else. Microkernel pattern (Fuchsia component_manager, seL4 root task). This pattern is foundational; init's implementation is scaffolding.
 
-**IPC:** Kernel creates channels (two shared memory pages per channel + signal). Each page is a SPSC ring buffer of 64-byte messages (one direction). The `ipc` library provides lock-free ring buffer mechanics; the `protocol` library defines message types and payload structs for all 9 protocol boundaries. Configuration uses the same mechanism (first message on the ring). The mechanism (channels, shared memory, wait, ring buffers) is foundational.
+**IPC:** Two mechanisms, matched to data semantics:
+
+- **Event rings** (discrete events where order and count matter): Kernel creates channels (two shared memory pages per channel + signal). Each page is a SPSC ring buffer of 64-byte messages (one direction). The `ipc` library provides lock-free ring buffer mechanics; the `protocol` library defines message types and payload structs for all 9 protocol boundaries. Used for key presses, button clicks, config messages.
+- **State registers** (continuous state where only the latest value matters): Init-allocated shared memory pages with atomic reads/writes. The producer overwrites the latest value (store-release); the consumer reads it once per frame (load-acquire). Zero queue, zero overflow. Used for pointer position (input driver → core). Same init-orchestrated shared memory pattern as the scene graph (core → render).
+- **Content Region** (persistent decoded content): Init-allocated 4 MiB shared memory region with a `ContentRegionHeader` registry (64 entries). Contains font TTF data and decoded image pixels. Init writes font entries at boot; decoder services write decoded pixels via IPC-directed shared memory writes; core manages the registry and free-list allocator (`ContentAllocator` with first-fit, coalescing, generation-based deferred GC). Render services read-only. Compositor never sees raw encoded files (File Store is a separate 1 MiB region shared with decoder services). Write-once entry semantics for lock-free concurrent reads.
+
+Notification for both: `channel_signal` syscall wakes the consumer from `sys::wait()`. The signal means "something changed" — the consumer checks both event rings and state registers.
 
 **Memory model for userspace:** Stack (16 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` in `sys` library (linked-list first-fit with coalescing, grows via `memory_alloc`). Programs opt in with `extern crate alloc;` to get `Vec`/`String`/`Box`.
 
@@ -107,7 +122,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Pure drawing primitives for pixel buffers. No allocations, no syscalls, no hardware — fully testable on the host.
 
-**Status:** ~1100 lines (lib.rs + gamma_tables.rs + palette.rs). Surface abstraction, color with alpha, blending, blitting, PNG decoder, gamma-correct sRGB blending, monochrome palette.
+**Status:** ~1100 lines (lib.rs + gamma_tables.rs + palette.rs). Surface abstraction, color with alpha, blending, blitting, gamma-correct sRGB blending, monochrome palette. PNG decoder moved to `services/decoders/png/` (sandboxed service).
 
 **What's foundational:**
 
@@ -116,7 +131,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - Porter-Duff source-over blending with gamma-correct sRGB (blend in linear space via lookup tables).
 - `blit_blend` — the core compositing operation (per-pixel alpha, clips to bounds).
 - `draw_coverage` — composites a coverage map onto a surface with color modulation. The bridge between rasterizer output and the compositing pipeline.
-- PNG decoder (DEFLATE, all filter types) — decodes PNG images from byte slices.
+- ~~PNG decoder~~ — moved to `services/decoders/png/` as a sandboxed decoder service (2026-03-25).
 - `Palette` — monochrome palette system for consistent UI theming.
 - All operations clip silently (no panics). Safe to call with any coordinates.
 
@@ -139,17 +154,18 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** TrueType font parsing, rasterization, and caching. Separated from the drawing library for modularity — fonts depend on drawing (for coverage maps), but drawing doesn't depend on fonts.
 
-**Status:** ~2750 lines (lib.rs + rasterize.rs + cache.rs). Zero-copy TTF parser, scanline rasterizer with LCD subpixel rendering, glyph cache.
+**Status:** ~3,500 lines across lib.rs, cache.rs, and rasterize/ (8 modules). read-fonts for outline extraction, HarfRust for OpenType shaping, analytic area coverage rasterizer, outline dilation (stem darkening), variable font support (gvar), glyph cache.
 
 **What's foundational:**
 
-- `TrueTypeFont` — zero-copy parser for TTF files. Parses 7 required tables (head, maxp, cmap format 4, hhea, hmtx, loca, glyf). Extracts glyph outlines (quadratic bezier contours), maps codepoints via cmap, reads horizontal metrics.
-- Scanline rasterizer — flattens quadratic beziers via De Casteljau subdivision, sweeps with non-zero winding rule. LCD subpixel rendering (per-channel RGB coverage, 6× horizontal oversampling), stem darkening for heavier strokes, GPOS kerning, proper hhea baseline metrics.
-- Glyph cache — fixed-size LRU cache (codepoint + size → pre-rasterized bitmap) avoids re-rasterization for repeated text.
+- read-fonts + HarfRust — OpenType shaping (ligatures, kerning, contextual alternates). Glyph outline extraction from TTF/OTF (simple + composite glyphs, variable fonts via gvar).
+- Analytic area coverage rasterizer — bezier flattening + exact signed-area trapezoid coverage per pixel. Grayscale anti-aliasing (1 byte/pixel). No LCD subpixel rendering (unnecessary at Retina density).
+- Outline dilation (stem darkening) — macOS Core Text formula with scale-factor-aware conversion. Symmetric miter-join modification applied to glyph outlines before rasterization.
+- Glyph cache — fixed ASCII cache (95 glyphs, O(1) lookup) + LRU cache for non-ASCII/ligature glyphs. Keyed by (glyph_id, font_size, axis_hash).
 
 **What's scaffolding:**
 
-- Runtime fonts (source-code-pro.ttf, nunito-sans.ttf) are loaded from the host filesystem via the 9p driver. Tests embed these same fonts for parser and rasterizer validation.
+- Runtime fonts (jetbrains-mono.ttf, inter.ttf, source-serif-4.ttf) are loaded from the host filesystem via the 9p driver. Tests embed these same fonts for parser and rasterizer validation.
 
 **What's missing:**
 
@@ -164,7 +180,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Single source of truth for all IPC message types and payload structs. Every component that sends or receives IPC messages imports from here.
 
-**Status:** ~364 lines. Defines all 25 message type constants and all shared payload structs across 9 protocol modules, plus `CHANNEL_SHM_BASE` and `channel_shm_va()`.
+**Status:** ~400 lines. Defines message type constants and all shared payload structs across 9 protocol modules, plus shared memory layout types (`PointerState` for the input state register), `CHANNEL_SHM_BASE` and `channel_shm_va()`.
 
 **What's foundational:**
 
@@ -290,8 +306,8 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 ```
 
 - **Header (64 B):** generation counter (u32), node count (u16), root NodeId (u16), data bytes used (u32), reserved.
-- **Node array:** fixed-size entries indexed by `NodeId` (u16). Each node has geometry (x, y, width, height), visual decoration (background, border, corner radius, opacity), flags (visible, clips children), and an optional `Content` variant.
-- **Data buffer (64 KiB):** variable-length data (shaped glyph arrays, pixel buffers) referenced by offset+length (`DataRef`).
+- **Node array:** fixed-size entries indexed by `NodeId` (u16). Each node is 136 bytes (17 × 8, aarch64 cache-line friendly). Geometry (x, y, width, height), visual decoration (background, border, corner radius, opacity, shadow), flags (visible, clips children), `clip_path` (DataRef), `content_transform` (AffineTransform), and a `Content` variant (None/Image/Path/Glyphs). **Growth policy:** add fields in 8-byte increments. `_reserved` fields provide headroom for future additions without a size bump.
+- **Data buffer (128 KiB):** variable-length data (shaped glyph arrays, pixel buffers, path commands) referenced by offset+length (`DataRef`).
 
 **APIs:**
 
@@ -305,7 +321,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 - `TripleWriter::acquire_copy()` — copies the latest published buffer to the acquired buffer (copy-forward pattern). Enables incremental updates: the OS service copies the previous frame, modifies only changed nodes, and publishes. The dirty bitmap is zeroed in the copy so only newly-dirtied nodes are flagged.
 - `SceneWriter::mark_dirty(node_id)` — sets one bit in the dirty bitmap. O(1), idempotent. Complemented by `clear_dirty()`, `set_all_dirty()`, `is_dirty()`, `dirty_count()`.
 - **SceneState targeted update methods:** `update_clock` (updates clock text, 0 allocations), `update_cursor` (updates cursor position/blink, 0 allocations), `update_document_content` (rebuilds text runs and selection after edits), `update_selection` (updates selection overlay). Each method uses `acquire_copy()` → modify specific nodes → `mark_dirty()` → `publish()`.
-- **Data buffer compaction:** When the data buffer is full, the scene triggers a full rebuild to compact data references. See `design/incremental-scene-pipeline.md` for the complete incremental pipeline design.
+- **Data buffer compaction:** When the data buffer is full, the scene triggers a full rebuild to compact data references. The incremental pipeline design is implemented in the scene library and core service.
 
 **No restrictions imposed.** Pure `no_std` library with no syscalls, no allocations. Callers provide the buffer. ~1584 lines, host-side tests in `system/test/`. The scene library is purely geometric — no content-aware code (no monospace assumptions, no line breaking, no character encoding knowledge). Content-aware layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) live in core where they belong.
 
@@ -475,7 +491,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 **Goal:** Read files from the host macOS filesystem via QEMU's 9p passthrough. Validates the Files interface design through practical use before building the real COW filesystem.
 
-**Status:** ~450 lines. Implements 6 of ~30 9P2000.L operations (Tversion, Tattach, Twalk, Tlopen, Tread, Tclunk). Reads files from a shared host directory (`system/share/`) via virtio transport. Currently used to load the Source Code Pro font at boot (9 KB).
+**Status:** ~450 lines. Implements 6 of ~30 9P2000.L operations (Tversion, Tattach, Twalk, Tlopen, Tread, Tclunk). Reads files from a shared host directory (`system/share/`) via virtio transport. Currently used to load three fonts (JetBrains Mono, Inter, Source Serif 4) and a PNG image at boot.
 
 **What's foundational:**
 
@@ -505,15 +521,15 @@ Minimal and not yet useful. Would need RX queue, proper character device interfa
 
 ### 2.8 Text Editor (`user/text-editor/`) 🟡
 
-**Goal:** First editor process demonstrating the settled edit protocol: editors are read-only consumers, all writes go through the OS service.
+**Goal:** Content-type-specific input-to-write translator. Editors handle character insertion, deletion, and content-specific operations. Navigation and selection live in core (the OS service), which owns layout and provides content-type interaction primitives (cursor, selection, playhead). This is Decision #8 in action.
 
-**Status:** ~410 lines. Receives MSG_KEY_EVENT from core (OS service) via IPC. Has read-only shared memory mapping of the document buffer. Translates keypresses into write requests with cursor positioning. Sends write requests back to core. Never writes to document state directly.
+**Status:** ~195 lines. Receives MSG_KEY_EVENT from core via IPC. Has read-only shared memory mapping of the document buffer. Handles: character insert, backspace, forward delete, Tab (4 spaces), Shift+Tab (dedent). Sends write requests (MSG_WRITE_INSERT, MSG_WRITE_DELETE) back to core. No navigation, no selection, no modifier tracking.
 
 **What's foundational (the pattern):**
 
-- **Editor as read-only consumer.** The editor has a hardware-enforced read-only mapping of the document buffer. It reads content for cursor positioning and context-aware editing. All writes go through IPC. This is Decision #9 in action.
+- **Editor as read-only consumer.** The editor has a hardware-enforced read-only mapping of the document buffer. It reads content for context-aware editing. All writes go through IPC. This is Decision #9 in action.
+- **Thin editor, smart core.** Navigation (arrows, Cmd+Left/Right, word boundaries, Home/End, PgUp/PgDn), selection (Shift+navigation, Cmd+A), selection-aware deletion (Opt+Backspace/Delete), and mouse click handling (double-click word select, triple-click line select) all live in core. The editor only translates content-type-specific keypresses into write operations. This split means adding a new editor for a different content type only requires writing the content-specific translation logic — navigation and selection come for free from core.
 - **IPC write protocol.** MSG_WRITE_INSERT carries position + byte, MSG_WRITE_DELETE carries position, MSG_WRITE_DELETE_RANGE carries a byte range, MSG_CURSOR_MOVE carries cursor position, MSG_SELECTION_UPDATE carries selection state. All typed, all fit in 60-byte ring buffer payload.
-- **Input → intent translation.** The editor's job is deciding what input means in editing context. Cursor movement, selection (shift+arrow), delete, insert — all translated to structured write/cursor operations.
 
 **What's scaffolding (the implementation):**
 
@@ -523,7 +539,7 @@ Minimal and not yet useful. Would need RX queue, proper character device interfa
 **What's missing:**
 
 - **Operation boundary hints.** `beginOperation`/`endOperation` messages for better undo granularity.
-- **Richer edit operations.** Word-level operations, find/replace.
+- **Richer edit operations.** Find/replace.
 
 ---
 
@@ -716,7 +732,7 @@ Ring buffer messages are fixed at 64 bytes (4-byte type + 60-byte payload). All 
 
 Ordered by what unblocks the most, building the happy path first:
 
-1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the font library (`libraries/fonts/`). Zero-copy parser, scanline rasterizer with LCD subpixel rendering (6× horizontal oversampling), stem darkening, glyph cache. Running on bare metal: core for shaping + metrics, render backend for rasterization + caching.
+1. ~~**Font rasterization**~~ — **Done.** TrueType rasterizer in the font library (`libraries/fonts/`). read-fonts + HarfRust for shaping, analytic area coverage rasterizer, outline dilation (stem darkening), variable font support, glyph cache. Running on bare metal: core for shaping + metrics, render backend for rasterization + caching.
 2. ~~**Syscall error types**~~ — **Done.** `SyscallError` enum (13 variants) + `SyscallResult<T>` on all 25 syscalls + `print()` convenience. All 6 userspace binaries migrated. Eliminated raw `i64` returns and ad-hoc `< 0` checks.
 3. ~~**Userspace memory allocation**~~ (§3.1) — **Done.** `memory_alloc`/`memory_free` (#25/#26) + `GlobalAlloc` in `sys` library. `Vec`/`String`/`Box` available to all userspace programs.
 4. ~~**Structured IPC**~~ (§3.5) — **Done.** Ring buffer library implemented (`libraries/ipc/`). Kernel allocates two pages per channel. All services migrated to ring buffer messages.

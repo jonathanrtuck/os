@@ -202,8 +202,8 @@ pub(crate) fn extract_outline(
                             outline.num_points = pt_idx as u16;
                         }
                         _ => {
-                            // Nested composites: skip for simplicity
-                            continue;
+                            // Nested composites not supported — fall back to .notdef
+                            return None;
                         }
                     }
                 }

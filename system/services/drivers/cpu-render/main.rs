@@ -34,14 +34,13 @@ extern crate scene;
 #[path = "gpu.rs"]
 mod gpu;
 
-use render::frame_scheduler;
-
 use protocol::{
-    compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG},
-    device::{DeviceConfig, MSG_DEVICE_CONFIG},
-    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    compose::MSG_COMPOSITOR_CONFIG,
+    device::MSG_DEVICE_CONFIG,
+    gpu::{DisplayInfoMsg, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
 };
 use render::{
+    frame_scheduler,
     incremental::{all_bits_zero, IncrementalState},
     RenderBackend,
 };
@@ -89,8 +88,14 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"cpu-render: no device config message\n");
         sys::exit();
     }
-    // SAFETY: msg payload contains a valid DeviceConfig from init.
-    let dev_config: DeviceConfig = unsafe { msg.payload_as() };
+    let dev_config = if let Some(protocol::device::Message::DeviceConfig(c)) =
+        protocol::device::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"cpu-render: bad device config\n");
+        sys::exit();
+    };
     let (device, mut vq, irq_handle) = gpu::init_device(dev_config.mmio_pa, dev_config.irq);
     sys::print(b"     gpu device initialized\n");
 
@@ -116,10 +121,17 @@ pub extern "C" fn _start() -> ! {
     // Send display info back to init.
     let info_msg = unsafe {
         // SAFETY: DisplayInfoMsg is repr(C) and fits in payload.
-        ipc::Message::from_payload(MSG_DISPLAY_INFO, &DisplayInfoMsg { width, height })
+        ipc::Message::from_payload(
+            MSG_DISPLAY_INFO,
+            &DisplayInfoMsg {
+                width,
+                height,
+                refresh_rate: 0,
+            },
+        )
     };
     ch.send(&info_msg);
-    let _ = sys::channel_signal(INIT_HANDLE);
+    let _ = sys::channel_signal(sys::ChannelHandle(INIT_HANDLE));
 
     // Wait for GPU config from init.
     sys::print(b"     waiting for gpu config\n");
@@ -129,8 +141,14 @@ pub extern "C" fn _start() -> ! {
             break;
         }
     }
-    // SAFETY: msg payload contains a valid GpuConfig from init.
-    let gpu_config: GpuConfig = unsafe { msg.payload_as() };
+    let gpu_config = if let Some(protocol::gpu::Message::GpuConfig(c)) =
+        protocol::gpu::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"cpu-render: bad gpu config\n");
+        sys::exit();
+    };
     let fb_width = gpu_config.fb_width;
     let fb_height = gpu_config.fb_height;
     let stride = fb_width * gpu::FB_BPP;
@@ -247,7 +265,7 @@ pub extern "C" fn _start() -> ! {
     // Signal init that device setup is complete.
     let ready_msg = ipc::Message::new(MSG_GPU_READY);
     ch.send(&ready_msg);
-    let _ = sys::channel_signal(INIT_HANDLE);
+    let _ = sys::channel_signal(sys::ChannelHandle(INIT_HANDLE));
 
     // ── Phase E: Receive render config ───────────────────────────────
     sys::print(b"     waiting for render config\n");
@@ -257,8 +275,14 @@ pub extern "C" fn _start() -> ! {
             break;
         }
     }
-    // SAFETY: msg payload contains a valid CompositorConfig from init.
-    let config: CompositorConfig = unsafe { msg.payload_as() };
+    let config = if let Some(protocol::compose::Message::CompositorConfig(c)) =
+        protocol::compose::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"cpu-render: bad compositor config\n");
+        sys::exit();
+    };
     let scene_va = config.scene_va as usize;
     let scale = clamp_scale(config.scale_factor);
     if scene_va == 0 {
@@ -267,23 +291,69 @@ pub extern "C" fn _start() -> ! {
     }
 
     // ── Phase F: Init render backend ─────────────────────────────────
-    if config.mono_font_va == 0 || config.mono_font_len == 0 {
-        sys::print(b"cpu-render: no font data\n");
+    // Parse Content Region header to find font data.
+    let content_va = config.content_va as usize;
+    let content_size = config.content_size as usize;
+    // SAFETY: content_va..+content_size is mapped read-only by init before starting us.
+    let content_slice: &[u8] = if content_va != 0 && content_size > 0 {
+        unsafe { core::slice::from_raw_parts(content_va as *const u8, content_size) }
+    } else {
+        &[]
+    };
+    let content_header: Option<&protocol::content::ContentRegionHeader> =
+        if content_slice.len() >= core::mem::size_of::<protocol::content::ContentRegionHeader>() {
+            // SAFETY: content_va is page-aligned by DMA allocation; ContentRegionHeader is repr(C).
+            Some(unsafe { &*(content_va as *const protocol::content::ContentRegionHeader) })
+        } else {
+            None
+        };
+    let mono: &[u8] = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_MONO)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size {
+                // SAFETY: entry bounds validated within content_size; content_va is init-mapped.
+                unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va + start) as *const u8,
+                        entry.length as usize,
+                    )
+                }
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
+    if mono.is_empty() {
+        sys::print(b"cpu-render: no font data in content region\n");
         sys::exit();
     }
-    // SAFETY: init mapped these pages before starting us.
-    let mono = unsafe {
-        core::slice::from_raw_parts(
-            config.mono_font_va as *const u8,
-            config.mono_font_len as usize,
-        )
-    };
-    let prop = if config.prop_font_len > 0 {
-        let off = config.mono_font_va as usize + config.mono_font_len as usize;
-        // SAFETY: same as above — init mapped font pages before starting us.
-        Some(unsafe {
-            core::slice::from_raw_parts(off as *const u8, config.prop_font_len as usize)
-        })
+    let prop: Option<&[u8]> = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_SANS)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size {
+                // SAFETY: entry bounds validated within content_size; content_va is init-mapped.
+                Some(unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va + start) as *const u8,
+                        entry.length as usize,
+                    )
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -371,15 +441,16 @@ pub extern "C" fn _start() -> ! {
     {
         // SAFETY: scene_ptr is mapped into our address space by init; scene_len matches allocation.
         let tr = unsafe { scene::TripleReader::new(scene_ptr, scene_len) };
-        let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
+        let (generation, nodes) = (tr.front_generation(), tr.front_nodes());
         let graph = render::scene_render::SceneGraph {
             nodes,
             data: tr.front_data_buf(),
+            content_region: content_slice,
         };
         backend.render(&graph, &mut make_fb(0));
         // Update incremental state from first frame.
         incr_state.update_from_frame(nodes, nodes.len() as u16);
-        tr.finish_read(gen);
+        tr.finish_read(generation);
     }
     // Present first frame: full-screen transfer + flush.
     gpu::transfer_to_host_reuse(
@@ -410,7 +481,7 @@ pub extern "C" fn _start() -> ! {
     // ── Phase I: Render loop ─────────────────────────────────────────
     let mut sched = frame_scheduler::FrameScheduler::new(frame_rate);
     let cfreq = sys::counter_freq();
-    let mut timer_h: u8 = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
+    let mut timer_h: sys::TimerHandle = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
         sys::print(b"cpu-render: frame timer create failed\n");
         sys::exit();
     });
@@ -418,7 +489,7 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"  \xF0\x9F\x96\xA5\xEF\xB8\x8F  cpu-render: render loop starting\n");
 
     loop {
-        let _ = sys::wait(&[CORE_HANDLE, timer_h], u64::MAX);
+        let _ = sys::wait(&[CORE_HANDLE, timer_h.0], u64::MAX);
         let mut go = false;
 
         if sys::wait(&[CORE_HANDLE], 0).is_ok() {
@@ -426,8 +497,8 @@ pub extern "C" fn _start() -> ! {
             go = sched.should_render_immediately(sys::counter_to_ns(sys::counter(), cfreq));
             sched.on_scene_update();
         }
-        if sys::wait(&[timer_h], 0).is_ok() {
-            let _ = sys::handle_close(timer_h);
+        if sys::wait(&[timer_h.0], 0).is_ok() {
+            let _ = sys::handle_close(timer_h.0);
             timer_h = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
                 sys::print(b"cpu-render: timer recreate failed\n");
                 sys::exit();
@@ -443,12 +514,12 @@ pub extern "C" fn _start() -> ! {
         // SAFETY: same as above — scene_ptr mapped by init, scene_len matches allocation.
         let tr = unsafe { scene::TripleReader::new(scene_ptr, scene_len) };
         let dirty_bits = *tr.dirty_bits();
-        let (gen, nodes) = (tr.front_generation(), tr.front_nodes());
+        let (generation, nodes) = (tr.front_generation(), tr.front_nodes());
         let node_count = nodes.len() as u16;
 
         // ── Skip-frame: nothing changed ──────────────────────────
         if all_bits_zero(&dirty_bits) {
-            tr.finish_read(gen);
+            tr.finish_read(generation);
             sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
             continue;
         }
@@ -490,6 +561,7 @@ pub extern "C" fn _start() -> ! {
         let graph = render::scene_render::SceneGraph {
             nodes,
             data: tr.front_data_buf(),
+            content_region: content_slice,
         };
 
         // Determine incremental vs full repaint.
@@ -558,7 +630,7 @@ pub extern "C" fn _start() -> ! {
 
         // ── Update incremental state before releasing the reader ──
         incr_state.update_from_frame(nodes, node_count);
-        tr.finish_read(gen);
+        tr.finish_read(generation);
 
         // ── Present: transfer dirty rects + flush ────────────────
         let base_offset = (render_buf as u64) * buf_stride;

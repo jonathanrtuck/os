@@ -63,6 +63,21 @@ struct FreeBlock {
 struct UserHeap {
     head: UnsafeCell<*mut FreeBlock>,
     lock: AtomicBool,
+    // Instrumentation counters (protected by the same spinlock as head).
+    total_allocated: UnsafeCell<usize>,
+    total_freed: UnsafeCell<usize>,
+    pages_requested: UnsafeCell<usize>,
+}
+
+/// Heap usage statistics.
+#[derive(Clone, Copy, Debug)]
+pub struct HeapStats {
+    /// Cumulative bytes handed out by alloc().
+    pub total_allocated: usize,
+    /// Cumulative bytes returned by dealloc().
+    pub total_freed: usize,
+    /// Pages requested from the kernel via memory_alloc().
+    pub pages_requested: usize,
 }
 
 /// Convenience alias for syscall results.
@@ -93,10 +108,51 @@ pub enum SyscallError {
     SyscallBlocked = -15,
 }
 
+// ---------------------------------------------------------------------------
+// Typed handle wrappers — zero-cost compile-time safety for kernel handles.
+//
+// Each handle type wraps a raw u8 index into the kernel handle table. The
+// `.0` field is public for constructing `wait()` slices (which accept mixed
+// handle types). Type-specific syscalls accept/return the appropriate type.
+// ---------------------------------------------------------------------------
+
+/// Handle to a kernel channel endpoint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ChannelHandle(pub u8);
+
+/// Handle to a registered hardware interrupt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct InterruptHandle(pub u8);
+
+/// Handle to a child process.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ProcessHandle(pub u8);
+
+/// Handle to a scheduling context.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct SchedHandle(pub u8);
+
+/// Handle to a thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct ThreadHandle(pub u8);
+
+/// Handle to a one-shot timer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct TimerHandle(pub u8);
+
 #[global_allocator]
 static HEAP: UserHeap = UserHeap {
     head: UnsafeCell::new(core::ptr::null_mut()),
     lock: AtomicBool::new(false),
+    total_allocated: UnsafeCell::new(0),
+    total_freed: UnsafeCell::new(0),
+    pages_requested: UnsafeCell::new(0),
 };
 
 impl UserHeap {
@@ -125,6 +181,7 @@ impl UserHeap {
         (*block).size = pages * PAGE_SIZE;
         (*block).next = *head;
         *head = block;
+        *self.pages_requested.get() += pages;
 
         true
     }
@@ -194,6 +251,7 @@ unsafe impl GlobalAlloc for UserHeap {
                 *prev = back;
             }
 
+            *self.total_allocated.get() += size;
             self.release();
 
             return alloc_start as *mut u8;
@@ -245,6 +303,7 @@ unsafe impl GlobalAlloc for UserHeap {
                     *prev = back;
                 }
 
+                *self.total_allocated.get() += size;
                 self.release();
 
                 return alloc_start as *mut u8;
@@ -260,6 +319,7 @@ unsafe impl GlobalAlloc for UserHeap {
         self.acquire();
 
         let size = align_up(layout.size().max(MIN_BLOCK), MIN_BLOCK);
+        *self.total_freed.get() += size;
         let addr = ptr as usize;
         let head = &mut *self.head.get();
 
@@ -427,20 +487,38 @@ unsafe fn syscall4(nr: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> u64 {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Return heap usage statistics.
+///
+/// Acquires the heap spinlock to read consistent counters. Safe to call
+/// from any thread, but not from within an allocator callback.
+pub fn heap_stats() -> HeapStats {
+    HEAP.acquire();
+    // SAFETY: Counters are protected by the same spinlock as the free list.
+    let stats = unsafe {
+        HeapStats {
+            total_allocated: *HEAP.total_allocated.get(),
+            total_freed: *HEAP.total_freed.get(),
+            pages_requested: *HEAP.pages_requested.get(),
+        }
+    };
+    HEAP.release();
+    stats
+}
+
 /// Create a channel with two endpoints.
 ///
 /// Returns `(handle_a, handle_b)` — both handles refer to endpoints of the
 /// same shared-memory channel. The shared page is automatically mapped into
 /// the calling process.
-pub fn channel_create() -> SyscallResult<(u8, u8)> {
+pub fn channel_create() -> SyscallResult<(ChannelHandle, ChannelHandle)> {
     let raw = unsafe { syscall0(nr::CHANNEL_CREATE) as i64 };
     let val = result(raw)?;
 
-    Ok((val as u8, (val >> 8) as u8))
+    Ok((ChannelHandle(val as u8), ChannelHandle((val >> 8) as u8)))
 }
 /// Signal the peer on a channel (write direction).
-pub fn channel_signal(handle: u8) -> SyscallResult<()> {
-    let raw = unsafe { syscall1(nr::CHANNEL_SIGNAL, handle as u64) as i64 };
+pub fn channel_signal(handle: ChannelHandle) -> SyscallResult<()> {
+    let raw = unsafe { syscall1(nr::CHANNEL_SIGNAL, handle.0 as u64) as i64 };
 
     result(raw)?;
 
@@ -557,9 +635,14 @@ pub fn handle_close(handle: u8) -> SyscallResult<()> {
 /// target process identified by `target_handle` (which must be a Process
 /// handle). The target must not have been started yet. For channel handles,
 /// the shared page is also mapped into the target's address space.
-pub fn handle_send(target_handle: u8, source_handle: u8) -> SyscallResult<()> {
-    let raw =
-        unsafe { syscall2(nr::HANDLE_SEND, target_handle as u64, source_handle as u64) as i64 };
+pub fn handle_send(target_handle: ProcessHandle, source_handle: u8) -> SyscallResult<()> {
+    let raw = unsafe {
+        syscall2(
+            nr::HANDLE_SEND,
+            target_handle.0 as u64,
+            source_handle as u64,
+        ) as i64
+    };
 
     result(raw)?;
 
@@ -569,8 +652,8 @@ pub fn handle_send(target_handle: u8, source_handle: u8) -> SyscallResult<()> {
 ///
 /// Clears the pending flag and re-enables the IRQ in the GIC. Must be called
 /// after processing each interrupt.
-pub fn interrupt_ack(handle: u8) -> SyscallResult<()> {
-    let raw = unsafe { syscall1(nr::INTERRUPT_ACK, handle as u64) as i64 };
+pub fn interrupt_ack(handle: InterruptHandle) -> SyscallResult<()> {
+    let raw = unsafe { syscall1(nr::INTERRUPT_ACK, handle.0 as u64) as i64 };
 
     result(raw)?;
 
@@ -580,10 +663,10 @@ pub fn interrupt_ack(handle: u8) -> SyscallResult<()> {
 ///
 /// The handle becomes ready when the IRQ fires. Use `wait` to block until
 /// the interrupt occurs, then call `interrupt_ack` after processing.
-pub fn interrupt_register(irq: u32) -> SyscallResult<u8> {
+pub fn interrupt_register(irq: u32) -> SyscallResult<InterruptHandle> {
     let raw = unsafe { syscall1(nr::INTERRUPT_REGISTER, irq as u64) as i64 };
 
-    result(raw).map(|v| v as u8)
+    result(raw).map(|v| InterruptHandle(v as u8))
 }
 /// Allocate anonymous heap memory (demand-paged, zero-filled on first touch).
 ///
@@ -616,7 +699,7 @@ pub fn memory_free(va: usize, page_count: u64) -> SyscallResult<()> {
 /// When `read_only` is true, pages are mapped without write permission
 /// (hardware-enforced via page table attributes).
 pub fn memory_share(
-    target_handle: u8,
+    target_handle: ProcessHandle,
     pa: u64,
     page_count: u64,
     read_only: bool,
@@ -625,7 +708,7 @@ pub fn memory_share(
     let raw = unsafe {
         syscall4(
             nr::MEMORY_SHARE,
-            target_handle as u64,
+            target_handle.0 as u64,
             pa,
             page_count,
             flags,
@@ -685,17 +768,17 @@ pub fn print_u32(mut n: u32) {
 /// The child process starts suspended — call `process_start` with the returned
 /// handle to make its thread runnable. The handle becomes ready when the child's
 /// last thread exits.
-pub fn process_create(elf_ptr: *const u8, elf_len: usize) -> SyscallResult<u8> {
+pub fn process_create(elf_ptr: *const u8, elf_len: usize) -> SyscallResult<ProcessHandle> {
     let raw = unsafe { syscall2(nr::PROCESS_CREATE, elf_ptr as u64, elf_len as u64) as i64 };
 
-    result(raw).map(|v| v as u8)
+    result(raw).map(|v| ProcessHandle(v as u8))
 }
 /// Kill a process, terminating all its threads.
 ///
 /// The handle must be a Process handle with write rights. All threads in the
 /// target process are terminated and full cleanup runs.
-pub fn process_kill(handle: u8) -> SyscallResult<()> {
-    let raw = unsafe { syscall1(nr::PROCESS_KILL, handle as u64) as i64 };
+pub fn process_kill(handle: ProcessHandle) -> SyscallResult<()> {
+    let raw = unsafe { syscall1(nr::PROCESS_KILL, handle.0 as u64) as i64 };
 
     result(raw)?;
 
@@ -706,16 +789,16 @@ pub fn process_kill(handle: u8) -> SyscallResult<()> {
 /// Bit N set in `mask` allows syscall number N. Bit N clear blocks it
 /// (returns `SyscallBlocked`). EXIT (nr 0) is always allowed regardless
 /// of the mask. Must be called before `process_start`.
-pub fn process_set_syscall_filter(handle: u8, mask: u32) -> SyscallResult<()> {
-    let r = unsafe { syscall2(nr::PROCESS_SET_SYSCALL_FILTER, handle as u64, mask as u64) };
+pub fn process_set_syscall_filter(handle: ProcessHandle, mask: u32) -> SyscallResult<()> {
+    let r = unsafe { syscall2(nr::PROCESS_SET_SYSCALL_FILTER, handle.0 as u64, mask as u64) };
 
     result(r as i64).map(|_| ())
 }
 /// Start a suspended child process.
 ///
 /// Makes all suspended threads in the process identified by `handle` runnable.
-pub fn process_start(handle: u8) -> SyscallResult<()> {
-    let raw = unsafe { syscall1(nr::PROCESS_START, handle as u64) as i64 };
+pub fn process_start(handle: ProcessHandle) -> SyscallResult<()> {
+    let raw = unsafe { syscall1(nr::PROCESS_START, handle.0 as u64) as i64 };
 
     result(raw)?;
 
@@ -724,8 +807,8 @@ pub fn process_start(handle: u8) -> SyscallResult<()> {
 /// Bind a scheduling context to the calling thread.
 ///
 /// The thread must not already have a context bound.
-pub fn scheduling_context_bind(handle: u8) -> SyscallResult<()> {
-    let raw = unsafe { syscall1(nr::SCHEDULING_CONTEXT_BIND, handle as u64) as i64 };
+pub fn scheduling_context_bind(handle: SchedHandle) -> SyscallResult<()> {
+    let raw = unsafe { syscall1(nr::SCHEDULING_CONTEXT_BIND, handle.0 as u64) as i64 };
 
     result(raw)?;
 
@@ -734,8 +817,8 @@ pub fn scheduling_context_bind(handle: u8) -> SyscallResult<()> {
 /// Borrow another scheduling context (context donation).
 ///
 /// Saves the current context and switches to the one identified by `handle`.
-pub fn scheduling_context_borrow(handle: u8) -> SyscallResult<()> {
-    let raw = unsafe { syscall1(nr::SCHEDULING_CONTEXT_BORROW, handle as u64) as i64 };
+pub fn scheduling_context_borrow(handle: SchedHandle) -> SyscallResult<()> {
+    let raw = unsafe { syscall1(nr::SCHEDULING_CONTEXT_BORROW, handle.0 as u64) as i64 };
 
     result(raw)?;
 
@@ -744,10 +827,10 @@ pub fn scheduling_context_borrow(handle: u8) -> SyscallResult<()> {
 /// Create a scheduling context with the given budget and period (both in ns).
 ///
 /// Returns the handle index.
-pub fn scheduling_context_create(budget: u64, period: u64) -> SyscallResult<u8> {
+pub fn scheduling_context_create(budget: u64, period: u64) -> SyscallResult<SchedHandle> {
     let raw = unsafe { syscall2(nr::SCHEDULING_CONTEXT_CREATE, budget, period) as i64 };
 
-    result(raw).map(|v| v as u8)
+    result(raw).map(|v| SchedHandle(v as u8))
 }
 /// Return a borrowed scheduling context, restoring the saved one.
 pub fn scheduling_context_return() -> SyscallResult<()> {
@@ -761,18 +844,18 @@ pub fn scheduling_context_return() -> SyscallResult<()> {
 ///
 /// The thread starts at `entry_va` with user stack pointer `stack_top`.
 /// Returns a waitable handle (becomes ready on thread exit).
-pub fn thread_create(entry_va: u64, stack_top: u64) -> SyscallResult<u8> {
+pub fn thread_create(entry_va: u64, stack_top: u64) -> SyscallResult<ThreadHandle> {
     let raw = unsafe { syscall2(nr::THREAD_CREATE, entry_va, stack_top) as i64 };
 
-    result(raw).map(|v| v as u8)
+    result(raw).map(|v| ThreadHandle(v as u8))
 }
 /// Create a one-shot timer that fires after `timeout_ns` nanoseconds.
 ///
 /// Returns a waitable handle. Wait on it via `wait` to block until the deadline.
-pub fn timer_create(timeout_ns: u64) -> SyscallResult<u8> {
+pub fn timer_create(timeout_ns: u64) -> SyscallResult<TimerHandle> {
     let raw = unsafe { syscall1(nr::TIMER_CREATE, timeout_ns) as i64 };
 
-    result(raw).map(|v| v as u8)
+    result(raw).map(|v| TimerHandle(v as u8))
 }
 /// Wait for an event on one or more handles.
 ///

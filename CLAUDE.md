@@ -24,20 +24,19 @@ This is a long-running exploration project with no deadline. Sessions may be day
 Read these before making any design suggestions:
 
 - `design/philosophy.md` — **Read first.** Two root principles and their consequences. The thinking framework behind every design decision.
-- `design/foundations.md` — Guiding beliefs, glossary, external boundaries, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
+- `design/foundations.md` — The core idea, guiding beliefs, glossary, external boundaries, content model (3-layer type system), viewer-first design, editor augmentation model, edit protocol, undo/history architecture
 - `design/decisions.md` — 17 tiered decisions with tradeoffs, implementation readiness table, dependency chains between decisions
 - `design/decision-map.mermaid` — Visual dependency graph of all decisions
 - `design/architecture.md` — The system's architectural narrative: one-way pipeline, what each component understands, where responsibilities live, decision checklist
 - `design/architecture.mermaid` — System architecture diagram (process layers, IPC, memory mapping)
 - `design/journal.md` — Open threads, discussion backlog, insights log, research spikes. The "pick up where you left off" document.
 - `system/DESIGN.md` — Userspace architecture: libraries, services, drivers. Component status (foundational vs scaffolding), constraints, gaps, dependency map. Companion to `system/kernel/DESIGN.md`.
-- `design/concept.md` — The core idea: OS → Document → Tool, mimetype evolution, layered rendering, compound documents
 
 ## Settled Decisions
 
 1. **Audience & Goals (Tier 0):** Personal design project. Primary artifact is a coherent OS design. Build selectively to validate. Success = coherent design > working prototype > deep learning. Not a daily driver. Target: personal workstation (text, images, audio, video, email, calendar, messaging, videoconferencing, web, coding).
 
-## Initial Leanings (Not Yet Committed)
+## Settled Decisions (Continued)
 
 2. **Data model (SETTLED):** Document-centric. The main axiom. OS → Document → Tool.
 3. **Compatibility (SETTLED):** Rethink everything. No POSIX. Build on established standard interfaces (mimetypes, URIs, HTTP, Unicode, arm64), not implementations. Own native APIs. Development on host OS (macOS). Self-hosting is not a goal.
@@ -51,6 +50,7 @@ Read these before making any design suggestions:
 11. **Undo (SETTLED):** COW snapshots at operation boundaries for sequential undo. Global undo regardless of which editor. Selective undo requires content-type rebase handlers (same investment as collaboration). Cross-session history via filesystem snapshot retention.
 12. **Collaboration (SETTLED):** Designed for, build later. Same content-type rebase handlers needed for selective undo unlock collaboration. Architecture supports it; implementation deferred.
 13. **Compound documents (SETTLED):** Uniform manifest model — every document is a manifest referencing content files. Three composable relationship axes: spatial (flow, canvas, grid, freeform), temporal (simultaneous, sequential, timed), logical (flat, sequential, hierarchical, graph). Simple/compound is internal property, not user-facing. Layout engine mediates cross-type interactions. Translators handle import/export. Content-type registration via editor metadata.
+14. **Iconography (SETTLED):** Icons are `Content::Path` vector data — same primitive as pointer cursors and shapes. Outline style (stroke-based) with runtime stroke rendering. Build-time SVG→path converter. Source: Tabler Icons (MIT). Compiled into `libraries/icons/` as `const` arrays. Mimetype → icon lookup with three-level fallback (specific → category → universal). Baseline-aligned with text via font metrics. Operational cursors remain hand-built.
 
 ## Key Architectural Principles (Settled)
 
@@ -67,88 +67,71 @@ Read these before making any design suggestions:
 2. Editor model → Rendering technology → Compound documents → Layout
 3. Compatibility stance → Technical foundation
 4. Data model + File organization → Interaction model
+5. File understanding + Rendering technology + Complexity → Iconography
 
 **Most influential decision:** #2 (Data Model). If document-centric is confirmed, most other decisions are constrained in useful ways.
 
 ## Where We Left Off
 
-**Session 2026-03-18 (latest):** Virgl implementation plan COMPLETE (all 8 tasks) + Phase 5 COMPLETE (cpu-render merge). Both render pipelines are now single-process: `virgil-render` (GPU-accelerated) and `cpu-render` (CPU software). Init auto-detects at boot. 1,816+ total tests pass.
+**Current state (2026-03-25):** v0.3 COMPLETE. 2,236 tests pass.
 
-**Phase 5: cpu-render merge (2026-03-18):** Merged `compositor/` + `virtio-gpu/` into single `cpu-render/` process. Key insight: cpu-render self-allocates framebuffers via `dma_alloc`, making its init handshake identical to virgil-render's. Eliminated compositor→GPU IPC channel, MSG_PRESENT/MSG_PRESENT_DONE protocol, one process boundary. Old compositor/ and virtio-gpu/ deleted (no parallel implementations). Init's two pipeline functions (`setup_virgl_pipeline()` / `setup_display_pipeline()`) unified into a single `setup_render_pipeline(name, ...)` — the `name` parameter (`b"virgl"` or `b"cpu-render"`) drives diagnostic output only.
+**Content Pipeline Architecture (2026-03-25):** IMPLEMENTED. Three memory regions: File Store (1 MiB, shared with decoder services), Content Region (4 MiB, shared decoded content with registry + free-list allocator + generation-based GC), Scene Graph (per-frame visual primitives). Init allocates both, loads fonts into Content Region + PNG into File Store. Core sends decode requests to sandboxed decoder services via generic IPC protocol (`protocol/decode.rs`). Decoder services read File Store (RO), write decoded BGRA pixels into Content Region (RW). Core manages Content Region registry and allocator. Render services find fonts and images via `protocol::content` registry lookup. Compositor never sees encoded files. Generic decoder harness (`services/decoders/harness.rs`) handles all IPC plumbing; format-specific code is just header + decode functions. See `design/journal.md` "Image Decoding as a Service Interface" entry.
 
-**Task 8: Init integration (2026-03-18):** Added `probe_virgl()` to init — maps GPU MMIO region, reads virtio feature bits, checks `VIRTIO_GPU_F_VIRGL` (bit 0). Selects `VIRGIL_RENDER_ELF` or `CPU_RENDER_ELF` accordingly, then calls `setup_render_pipeline()` for either backend. No new IPC messages needed — simpler than planned.
+**Phase 4 (Visual Polish, 2026-03-23–25):**
 
-**Virgl Tasks 1-7 (2026-03-17/18):** Virgil3D GPU driver (`virgil-render`) built from scratch. All four content types render via GPU: backgrounds (color quads), text (glyph atlas), images (BGRA textures), paths (stencil-then-cover). See `project_virgl_progress.md` memory for details.
+- **Blank slate + three-font stack:** Dark desk (#202020) / white page palette. JetBrains Mono (mono), Inter (sans), Source Serif 4 (serif) loaded via 9p. On-demand glyph atlas in metal-render (fixes ligature drops).
+- **Font rendering quality sprint (5 changes to match macOS Core Text):** (1) Outline dilation via symmetric miter-join (macOS formula, Pathfinder coefficients × 1.3 boost). (2) Analytic area coverage rasterizer (exact signed-area trapezoids, not quantized). (3) Device-pixel rasterization (atlas at `font_size_pt × scale_factor`). (4) Subpixel glyph positioning (ShapedGlyph widened 8→16 bytes, 16.16 fixed-point advances). (5) Single `char_w_fx` source of truth (eliminates cursor drift from truncation).
+- **Icon pipeline (2026-03-23):** SVG path parser, stroke expansion engine, arc-to-cubic conversion, build-time SVG→path compilation. Tabler file-text/photo icons in title bar. Pointer cursor redesigned to Tabler proportions.
+- **Page surface + document strip (2026-03-23):** White A4-proportioned page centered on dark desk. Dark text/cursor. Horizontal strip of N document spaces with spring-based slide transition (Ctrl+Tab). Both documents always in scene — no teardown/rebuild on switch.
+- **Shared pointer state register (2026-03-23):** Replaced MSG_POINTER_ABS IPC ring messages with atomic u64 in init-allocated shared memory. Eliminates input ring overflow for pointer events. State vs event distinction at the IPC level (see journal).
+- **Cursor-only frames (2026-03-23):** Pointer state register shared with metal-render (init allocates in Phase 1, before render service start). Core skips scene publish for position-only moves. Metal-render detects `!scene_changed && cursor_moved` → sends lightweight cursor-plane-only command (no scene walk). Hardware cursor plane pattern: fully decoupled from content rendering.
+- **Spring substep fix (2026-03-23):** Semi-implicit Euler diverged at dt > 33ms (stiffness=600). Root cause: switch from hardcoded 1/60 dt to actual frame_dt (capped at 50ms). Fix: 4ms fixed substeps inside `Spring::tick()`. Default settle threshold raised to 0.5 (f32 precision limit at large values).
+- **Headless visual testing (2026-03-23):** Hypervisor background mode (`--events` uses `.accessory` activation policy — no focus stealing, no Dock icon). `move x y` event script command. `system/test/imgdiff.py` for numerical screenshot verification (page edges, colored regions, pixel diffs).
+- **Millipoint coordinates (2026-03-23):** 1/1024 pt fixed-point coordinate unit (Mpt/Umpt). Unified animation tick at actual display refresh rate (120 Hz ProMotion). See journal.
+- **Content pipeline (2026-03-24):** PNG decoder in `libraries/drawing/png.rs`. Content Region types in `protocol/content.rs`. `ContentRegionHeader` with 64-entry registry. `Content::InlineImage` (per-frame scene data) vs `Content::Image` (Content Region persistent data via content_id). All 3 render services use registry-based font lookup. File Store (core-only) holds raw file bytes; Content Region (shared) holds fonts + decoded pixels. `test_gen.rs` deleted.
+- **Dark desk + document shadows (2026-03-24):** Desktop background #202020 (was pure black). Drop shadows on page and image documents (blur=64pt, spread=36pt, black). Scene tree restructured: `N_CONTENT → N_TITLE_BAR → N_POINTER` z-order so shadows extend into title bar region. `N_CONTENT` full-height, `N_STRIP` offset below title bar.
+- **Float16 rendering pipeline (2026-03-24):** All rendering now in RGBA16Float. MSAA resolves to float16 `TEX_RESOLVE`, then single `fragment_dither` pass blits to 8-bit sRGB drawable with 4×4 Bayer ordered dither at the quantization boundary. Protocol `create_render_pipeline` extended with mandatory `pixel_format` field (hypervisor updated). Eliminates shadow banding and provides correct dithering for all future visual effects. See journal.
+- **Content Region allocator + GC (2026-03-25):** `ContentAllocator` in `protocol/content.rs` — free-list with first-fit, coalescing, 16-byte alignment. Generation-based deferred reclamation (`defer_free` + `sweep`) leveraging triple-buffer generation counter. `remove_entry()` for registry cleanup. 36 tests.
+- **Decoder service restructuring (2026-03-25):** PNG decoder factored from in-process library call to sandboxed IPC service. Generic decode protocol (`protocol/decode.rs`): `DecodeRequest`/`DecodeResponse`, header-only flag, format-agnostic. Generic decoder harness (`services/decoders/harness.rs`): config, IPC loop, bounds checks, responses. PNG-specific code: just `header()` + `decode()` functions in `services/decoders/png/png.rs`. `drawing/png.rs` deleted. Core sends IPC requests; decoder writes pixels to shared memory. `ipc::Channel::recv_blocking()` helper for spurious-wakeup-safe synchronous RPC.
+- **PNG decoder hardening (2026-03-25):** CRC32 validation on every chunk (compile-time 256-entry lookup table, IEEE 802.3 polynomial). `CrcMismatch` error variant. Chunk-walking `BitReader` replaces fixed 64-entry IDAT offset arrays — unlimited IDAT chunks with O(1) memory. 162/162 PngSuite conformance (all color types, bit depths, filters, interlacing, palettes, transparency). ASID test isolation bug fixed (real `std::sync::Mutex` stub + `SERIAL` lock + per-test `reset()`). Bad `tbwn0g16` reference regenerated (was bKGD-composited + wrong PIL endianness). 68 PNG tests, 7 ASID tests, 2,236 total.
+- **Deferred to future milestones:** AA transition softness tuning, italic rendering (in journal). JPEG decoder blocked on mimetype-based decoder routing (requires filesystem/metadata layer).
 
-**Triple buffering + flow control (2026-03-17, earlier):** Replaced double-buffered scene graph with triple buffering (mailbox semantics). `TripleWriter`/`TripleReader` replace `DoubleWriter`/`DoubleReader` — `acquire()` always succeeds (writer never blocks), `publish()` atomically makes buffer latest, reader always gets most recent (intermediate frames silently skipped). `copy_front_to_back()` eliminated entirely. Core scene dispatch simplified: all update paths use acquire/publish, no retry logic. `MSG_PRESENT_DONE` (ID 21) added for GPU→compositor completion signaling — compositor tracks in-flight framebuffers, waits for GPU before reuse. Compositor always renders to non-displayed buffer (fixes tearing on partial updates). GPU driver dirty rect coalescing now unions all rects instead of keeping only the last. Damage tracking `update_bounds_for_skip()` keeps `prev_bounds` consistent across skipped frames. Init allocates `TRIPLE_SCENE_SIZE` shared memory. 23 new tests, 1,791 total pass. QEMU visual verified + 68s stress test on 4 SMP cores.
+**Completed phases (see git log for details):**
 
-**Session 2026-03-16:** Tickless idle + IPI wakeup mission COMPLETE — GICv3 migration, cross-core IPI wakeup, tickless idle scheduling. 70 new tests, 1,768 total pass.
+- Phase 3 (Text & Interaction, 2026-03-22): Unified layout library (`FontMetrics` trait, CharBreaker/WordBreaker). All navigation/selection in core (not editor). Full macOS key combos. Editor slimmed to ~195 lines. Hypervisor event scripts + fixed resolution for visual regression testing.
+- Phase 2 (Composition, 2026-03-20): Clip masks, backdrop blur (3-pass box blur), pointer cursor. All three render backends.
+- Phase 1 (Motion, 2026-03-20): Animation library (easing, springs, timeline). Smooth scroll, cursor blink, transitions.
+- Rendering architecture redesign (2026-03-16): `RenderBackend` trait, geometric content types, compositor minimized to 174 lines.
+- Virgl driver + cpu-render merge (2026-03-17-18): Three single-process render backends. Init auto-detects GPU.
+- GICv3 + tickless idle (2026-03-16): Full GICv2→GICv3 migration, IPI wakeup, tickless scheduling.
+- Rendering correctness (2026-03-21): Analytical shadows, sRGB render targets, alpha compositing fix. Hypervisor extracted to `~/Sites/hypervisor/`.
 
-**GICv3 migration + tickless idle (2026-03-16):** Full interrupt controller migration from GICv2 to GICv3. `InterruptController` trait with `GicV3` implementation using system register CPU interface (ICC\_\*) and MMIO distributor/redistributor. GICv2 code deleted entirely — no parallel implementations. boot.S updated for ICC_SRE_EL2 during EL2→EL1 transition. All QEMU scripts updated to `gic-version=3`. IPI-driven cross-core wakeup: `try_wake` sends SGI 0 via ICC_SGI1R_EL1 to idle cores blocked in WFI. Per-core idle tracking (`is_idle` in `PerCoreState`). Tickless idle: `reprogram_next_deadline` replaces fixed 250Hz tick — deadline computed from timer objects, quantum expiry, and context replenishment. `TICKS_PER_SEC` removed. Lock-free deadline cache (AtomicU64) avoids STATE→TIMERS lock ordering. Fuzz test updated (syscall 27 now valid). 70 new tests (33 GICv3 + 7 idle tracking + 13 IPI + 17 tickless), 1,768 total pass.
-
-**Session 2026-03-16:** Rendering architecture redesign COMPLETE — all three phases shipped.
-
-**Rendering architecture Phases 1–3 (2026-03-16):** The full rendering pipeline redesign is done. Three phases delivered in sequence:
-
-- **Phase 1: Extract Render Backend.** Created `libraries/render/` with `RenderBackend` trait and `CpuBackend` implementation. Moved ~3,100 lines of rendering code from compositor into the standalone library: scene_render.rs (tree walk, content rendering, transforms), compositing.rs, surface_pool.rs, damage.rs, cursor.rs. CpuBackend encapsulates all rendering state (glyph caches, damage tracker, surface pool, PREV_BOUNDS).
-- **Phase 2: Geometric Content Types.** Replaced semantic scene graph content types (`Text`, `Path`) with geometric primitives (`Glyphs`). `Image` unchanged. `FillRect` was initially added but subsequently removed — solid fills now use `Content::None` with `node.background` color. Core emits one `Glyphs` node per visible text line, background-colored containers for cursor and selection highlights. SVG parser and all path rendering code eliminated — icons use the glyph cache. Render backend updated for new content types. QEMU visual output pixel-identical before and after.
-- **Phase 3: Architecture Cleanup.** Compositor minimized to 174 lines — content-agnostic pixel pump with zero font knowledge, zero content dispatch, no SVG. Layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) confirmed in core (not scene library). Font handling boundary clean: core owns shaping + metrics, render backend owns rasterization + glyph caching. Scene library is purely geometric (no content-aware code).
-
-**Post-cleanup architecture (updated 2026-03-18):**
+**Architecture (settled 2026-03-18):**
 
 ```text
-Core (shaping, layout, scene building) → Scene Graph (shared memory) → Render Service (tree walk, rasterization/GPU, compositing, present) → Display
+Core (shaping, layout, scene building) → Scene Graph (shared memory) → Render Service → Display
 ```
 
-Content types: `None`, `Path`, `Glyphs`, `Image`. Each render service (`cpu-render` or `virgil-render`) is a single process that reads the scene graph and produces display output. The render library (`libraries/render/`, ~2,194 lines) provides `CpuBackend` used by cpu-render. See `design/rendering-pipeline.mermaid` and journal entry.
+Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Three render services: `metal-render` (default), `cpu-render`, `virgil-render`.
 
-**Rendering architecture design (2026-03-16, earlier):** Top-down audit of the rendering stack committed to path-centric rendering: the pipeline is a series of data shape transformations (Hardware Events → Key Events → Write Requests → Scene Tree → Pixel Buffer → Display Signal) with four translators (Input Driver, Editor, Core, Render Backend). Key decisions: (1) glyph rasterization in the render backend, (2) tree-structured scene graph with geometric content types (Container, Glyphs, Image, Path), (3) explicit `RenderBackend` trait with `fn render(scene, surface)` — backend owns tree walk, rasterization, compositing, (4) multi-core rasterization internal to backend, (5) Glyphs type serves both text and monochrome icons (eliminates SVG parser), (6) render service is a single process (tree walk + render + present). See `design/rendering-pipeline.mermaid` and full journal entry.
+**IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. **Content Region** (4 MiB shared memory with registry) for persistent decoded content (font TTF data, decoded image pixels) — init allocates, core writes, render services read. See `system/DESIGN.md` §0 for full details.
 
-**Session 2026-03-14:** Scene scroll fix + kernel TPIDR race fix (EC=0x21 crash resolved).
+**Crash reporting:** Kernel panic → diagnostic output via UART → `pvpanic_signal()` (MMIO write to 0x0902_0000) → hypervisor captures vCPU registers + serial log → crash report at `/tmp/hypervisor-crash-<ts>.log` → `exit(1)`. Fallback: `system_off()` (PSCI SYSTEM_OFF). pvpanic device discovered from DTB at boot, address stored in `PVPANIC_ADDR` AtomicUsize.
 
-**Scene scroll fix (2026-03-14):** Text runs were positioned at absolute y coords without scroll adjustment — content overflowed viewport, cursor misaligned. Extracted layout helpers (`layout_mono_lines`, `byte_to_line_col`, `scroll_runs`) from core into scene library. Core pre-applies scroll via `scroll_runs`, positions cursor/selection viewport-relative. 11 new tests, 943 total pass.
+**Open design questions (from earlier sessions):**
 
-**Kernel TPIDR race fix (2026-03-14, Fix 17):** Root cause of intermittent EC=0x21 crash under SMP. `schedule_inner` returned the new thread's context, but `TPIDR_EL1` was updated by exception.S _after_ the scheduler lock dropped (re-enabling IRQs). A timer IRQ in that window caused `save_context` to overwrite the old thread's Context with kernel-mode state. Fix: set `TPIDR_EL1` inside `schedule_inner` while the lock is held. Added `validate_context_before_eret` for defense-in-depth. 3000-key stress test passes, 943 tests pass.
+- Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved)
+- Decision #14: Mimetype of whole document, manifest format, FS organization of manifests + content files
+- Decision #16: COW on-disk design (deferred via prototype-on-host), snapshot scope (punted)
 
-**Session 2026-03-13:** Compositor split + scene graph design. Protocol crate refactor.
+**Future milestones:**
 
-**Protocol crate (2026-03-13):** Created `libraries/protocol/` as single source of truth for all IPC message types and payload structs. 8 modules by protocol boundary. Zero duplicated constants or structs remain. Libraries now have proper Cargo.toml files; test crate uses normal Cargo dependencies instead of `#[path]` source includes.
+- v0.4: Undo/redo (needs COW filesystem), system clipboard
+- v0.5: Rich inline text / multi-style runs
+- v0.6: Video / animated media, JPEG decoder (requires mimetype routing from filesystem layer)
+- Later: BiDi / complex scripts, multi-display
 
-**Compositor split design (2026-03-13, in progress):** The compositor (2260 lines) splits into OS service (document semantics) and compositor (pixels). Interface between them: a **scene graph in shared memory** — the OS service compiles document structure into a tree of typed visual nodes, the compositor renders them. Key insight: the screen is the root compound document. Layout and compositing are the same pipeline: document → scene graph → pixels. Prior art surveyed: Fuchsia Scenic, Core Animation, Wayland, game engines (Unity/Godot/Bevy). **Next:** scene graph node type design.
-
-**Session 2026-03-11:** Filesystem design session. Major edit protocol revision + Files interface designed. Kernel bug audit mission running in parallel.
-
-**Filesystem design (2026-03-11):** Comprehensive filesystem discussion settling several open questions. Key decisions: (1) **Editors are read-only consumers** — all writes go through the OS service via IPC. "Never make the wrong path the happy path": undo is automatic and non-circumventable, no editor cooperation required. (2) **Compound documents use copy semantics** — embedding creates an independent copy, COW shares physical blocks, provenance metadata enables "update to latest." (3) **Files interface designed** — 12 operations, files by opaque ID, no paths/permissions/locking/links. A dumb file store; all semantics live above. (4) **Prototype-on-host strategy** — implement Files against macOS during prototyping, build real COW FS later. (5) **Compound atomicity solved** — OS service as sole writer sequences multi-file writes, no FS transactions needed. (6) **Snapshot scope punted** — per-document vs global vs time-correlated still open, doesn't block interface.
-
-**Earlier in session 2026-03-11:** Input driver + event loop implementation. Keyboard input end-to-end. Wait timeout fix. **Kernel crash under rapid typing — FIXED.** Root causes: aliasing UB in syscall dispatch, `nomem` on DAIF/system register asm, deferred thread drop use-after-free, idle thread park bug. 11 fixes total (see `design/journal.md`). Headless stress test + property-based scheduler tests added. 20 scheduler tests pass. Opt-level 3 verified crash-free (50M iterations, 137s headless stress test). Follow-up audit fixed break-before-make in guard page setup and added AddressSpace Drop for leak prevention.
-
-**Session 2026-03-10:** Structured IPC design, TrueType font rasterizer, alpha blending, overlapping surface compositing, userspace architecture audit.
-
-1. **Input driver + event loops implemented (2026-03-11).** virtio-input keyboard driver reading evdev events, forwarding to compositor via cross-process IPC channel. Compositor runs event loop: wait for input → update text buffer → re-render → signal GPU. GPU driver runs present loop: wait for compositor → transfer+flush. Init creates cross-process channels (input→compositor, compositor→GPU), starts all processes, idles. Interactive text demo: typed characters appear on screen. QEMU `-device virtio-keyboard-device` added. **Known:** QMP `input-send-event` doesn't route to virtio-keyboard (QEMU limitation) — must type into display window. **Known:** kernel `wait` syscall doesn't implement finite timeouts (only poll or infinite block).
-
-2. **Structured IPC designed.** Four sub-decisions settled: (a) one mechanism — ring buffers for everything, config = first message (Singularity pattern), no separate config path; (b) separate pages per direction — each channel has two 4 KiB pages, each a SPSC ring buffer; (c) fixed 64-byte messages — one AArch64 cache line, 4-byte type + 60-byte payload, 62 slots per ring; (d) split architecture — shared `ipc` library for ring mechanics, per-protocol payload definitions. Ring buffer layout designed in `system/DESIGN.md` §1.5. Kernel change: `channel::create()` allocates 2 pages. Pressure point documented: messages >60 bytes use shared-memory reference pattern. Prior art: io_uring, LMAX Disruptor, Singularity contracts. Implementation next.
-
-3. **TrueType font rasterizer built and running on bare metal.** Zero-copy TTF parser (7 tables). Scanline rasterizer with 4× vertical and 6× horizontal (subpixel) oversampling. GPOS kerning. Fonts: Source Code Pro (mono) and Nunito Sans (proportional), loaded from host via 9p. 21 new tests (83 total).
-
-4. **Alpha blending + compositor rewrite.** Porter-Duff source-over compositing. Three panels with per-pixel alpha, composited back-to-front. TrueType text demo.
-
-5. **Userspace architecture audit and `system/DESIGN.md` created.** Systematic classification of every component. Five constraints documented, dependency map and roadmap.
-
-**Previous session highlights (still relevant):** Display pipeline complete end-to-end. Init is proto-OS-service. Kernel Phase 7 (memory sharing) done. 27 syscalls. Alignment bug fixed (DFSC check + ISS diagnostics).
-
-**Still open from previous sessions:** Trust/complexity orthogonality (solid), blue-wraps-all-sides (solid), shell is blue-layer (leaning), one-document-at-a-time (leaning), compound document editing (unresolved tension — connected to compositor tree model).
-
-**Decision #14 sub-decisions open:** Mimetype of the whole document, manifest format, filesystem organization of manifests + content files. **Settled this session:** referenced vs owned (copy semantics), COW atomicity (sole-writer solves it).
-
-**Decision #16 sub-decisions open:** Filesystem COW on-disk design (deferred via prototype-on-host). Files interface designed (12 operations). Snapshot scope (per-document vs global vs time-correlated) punted. New constraint: metadata DB must be on COW filesystem for uniform rewind.
-
-**Editor process separation implemented (2026-03-11, commit 827bcc8).** Text editor process (`system/user/text-editor/`) demonstrates the settled architecture: editor receives input events from compositor, translates to write requests (MSG_WRITE_INSERT, MSG_WRITE_DELETE), sends back via IPC. Compositor is sole writer to document buffer. Four processes in the display pipeline: GPU driver → input driver → text editor → compositor. Init creates compositor↔editor bidirectional channel (handle 3 in compositor, handle 1 in editor). Build and smoke tests pass.
-
-**Files macOS prototype completed (2026-03-11).** `prototype/files/` — trait definition (12 operations: create, clone, delete, size, resize, map_read, map_write, snapshot, restore, map_snapshot, snapshots, delete_snapshot, flush), HostFiles implementation backed by regular macOS files, 21 tests all passing. Validates the interface design before building the real COW filesystem.
-
-**Two tracks forward:** GUI (more interesting, closer to the project's soul) and filesystem (important infrastructure, unblocked by prototype-on-host strategy). GUI track: input + event loops done → editor process separation done → **read-only document mapping next** (give editor zero-copy read access) → text layout. Longer-term: Decisions #15 (layout engine API), #17 (interaction model), #10 (view state). FS track: Files prototype complete → integrate with OS service when document pipeline reaches that point.
-
-**System code:** `system/kernel/` (33 .rs files + 2 .S + link.ld), `system/services/{init,core,drivers/{cpu-render,virgil-render,virtio-blk,virtio-console,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`. `prototype/files/` (21 tests). Boots on QEMU `virt` with 4 SMP cores, EEVDF scheduler, interactive display pipeline with scene graph + render services. 28 syscalls. Userspace architecture documented in `system/DESIGN.md`.
+**System code:** `system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `prototype/files/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
 
 ## Design Discussion Rules
 
@@ -172,7 +155,7 @@ Content types: `None`, `Path`, `Glyphs`, `Image`. Each render service (`cpu-rend
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~1,816 tests).
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,236 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
@@ -220,66 +203,133 @@ Every `.rs` file follows this order:
 
 ## Visual Testing (MANDATORY)
 
-**Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself.
+**Every change that affects the display pipeline MUST be visually verified before declaring it done.** The user is not a tester. Do not ask them to check if something works. Do not declare a fix without seeing the result yourself. If you cannot close the verification loop, say so explicitly — do not declare success.
 
-### How to visually test the OS in QEMU
+### Three render backends, three testing methods
 
-The test harness is `system/test-qemu.sh`. For visual verification, use this workflow directly:
+**metal-render (hypervisor, DEFAULT):** The primary development path. The hypervisor has built-in screenshot capture and scripted input injection — no window focus, no macOS utilities, no fragility. Reads directly from the Metal drawable via GPU blit.
 
 ```sh
-# 1. Build
+# Automated: capture frame 30 as PNG, then exit
 cd system && cargo build --release
+hypervisor target/aarch64-unknown-none/release/kernel --capture 30 /tmp/screenshot.png
+# Then Read /tmp/screenshot.png
 
-# 2. Launch QEMU (headless, monitor socket for control, serial to file)
-qemu-system-aarch64 \
-    -machine virt,gic-version=3 -cpu cortex-a53 -smp 4 -m 256M \
-    -global virtio-mmio.force-legacy=false \
-    -drive "file=test.img,if=none,format=raw,id=hd0" \
-    -device virtio-blk-device,drive=hd0 \
-    -device virtio-gpu-device -device virtio-keyboard-device \
-    -nographic \
-    -serial file:/tmp/qemu-serial.log \
-    -monitor unix:/tmp/qemu-mon.sock,server,nowait \
-    -device "loader,file=virt.dtb,addr=0x40000000,force-raw=on" \
-    -kernel target/aarch64-unknown-none/release/kernel &
+# Multi-frame: capture frames 30, 60, 90 in a single boot
+hypervisor target/aarch64-unknown-none/release/kernel --capture 30,60,90 /tmp/test.png
+# Produces /tmp/test-030.png, /tmp/test-060.png, /tmp/test-090.png
 
-# 3. Wait for boot (~5s)
-sleep 5
+# Event script: type text, edit, capture result (deterministic visual test)
+cat > /tmp/test.events << 'SCRIPT'
+type hello world
+key left left left
+key backspace
+wait 5
+capture /tmp/after-edit.png
+SCRIPT
+hypervisor target/aarch64-unknown-none/release/kernel --events /tmp/test.events
+# Then Read /tmp/after-edit.png
 
-# 4. Send keystrokes via monitor socket
-echo "sendkey h" | nc -U /tmp/qemu-mon.sock -w 1 >/dev/null 2>&1
+# Fixed resolution for wrap testing (e.g., ~37 chars/line at 400px)
+hypervisor target/aarch64-unknown-none/release/kernel --resolution 400x300 --events /tmp/test.events
 
-# 5. Capture framebuffer screenshot (PPM format)
-echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2 >/dev/null 2>&1
-
-# 6. Convert PPM → PNG and view it
-python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"
-# Then use the Read tool on /tmp/qemu-screen.png to SEE the display
-
-# 7. Check serial output
-cat /tmp/qemu-serial.log
-
-# 8. Kill QEMU when done
-kill $QPID
+# Ad-hoc: send SIGUSR1 to running hypervisor
+kill -USR1 $(pgrep hypervisor)
+# Saves to /tmp/hypervisor-capture.png — then Read it
 ```
 
-### What "visually verified" means
+**Event script format** (evdev key names from `linux/input-event-codes.h`):
 
-- Take a screenshot of the QEMU framebuffer AFTER sending input
-- View the screenshot with the Read tool (it can display PNG images)
-- Confirm the expected pixels are on screen (text appeared, cursor moved, etc.)
-- If debugging latency: take screenshots at multiple time points to measure when content appears
-- Serial output alone is NOT sufficient — it only proves messages flow, not that pixels update
+- `type hello` — type each character (handles shift for uppercase)
+- `key backspace` — single key press (also: `left`, `right`, `up`, `down`, `return`, `tab`, `delete`, `home`, `end`, `pageup`, `pagedown`, `escape`, `f1`-`f12`)
+- `key shift+left` — modified key (modifiers: `shift`, `ctrl`, `alt`, `cmd`)
+- `move 100 200` — move pointer to (x, y) without clicking
+- `click 100 200` — left click at (x, y) in framebuffer pixels (matches `--resolution`)
+- `dblclick 100 200` — double click at (x, y) in framebuffer pixels
+- `wait 10` — wait 10 extra frames
+- `capture /tmp/out.png` — screenshot at this point
+
+**Background mode:** When using `--events`, the hypervisor runs without stealing focus (`.accessory` activation policy). No Dock icon, no window activation. Metal rendering still works — safe to run during other work.
+
+### Numerical image verification (MANDATORY)
+
+**Never eyeball screenshots to judge correctness.** Downscaled images in the conversation are unreliable — you WILL hallucinate pixel differences. Always use `system/test/imgdiff.py` for hard numbers.
+
+```sh
+# Measure a single screenshot: page position, colored region
+python3 system/test/imgdiff.py /tmp/screenshot.png
+
+# Compare two screenshots: positions + pixel diff count
+python3 system/test/imgdiff.py /tmp/before.png /tmp/after.png
+```
+
+Output includes:
+
+- **Page edges** — left/right x of the white page (first/last bright pixel in the middle row)
+- **Page center** — midpoint of left/right edges
+- **Colored region** — bounding box of the test image (non-black, non-white)
+- **Pixel diff** — count of differing pixels between two images
+
+Use this to verify: "page left=1164 in both images" is proof of no shift. "colored region: not found" is proof the image is offscreen. Never claim a visual result without a number backing it.
+
+**When you cannot verify a change with available tools, that is a BLOCKING problem.** Fix the tooling gap before shipping the change. Do not ship unverifiable work.
+
+Launch: `cd system && cargo run -r` (default, no env vars needed).
+
+**cpu-render (QEMU software):** Uses `screendump` via the QEMU monitor socket. This captures the guest framebuffer directly and works reliably.
+
+```sh
+cd system && QEMU=1 ./test-qemu.sh --keys "h e l l o" --boot-wait 8 --wait 3
+# screendump works for cpu-render:
+echo "screendump /tmp/qemu-screen.ppm" | nc -U /tmp/qemu-mon.sock -w 2
+python3 -c "from PIL import Image; Image.open('/tmp/qemu-screen.ppm').save('/tmp/qemu-screen.png')"
+# Then Read /tmp/qemu-screen.png
+```
+
+Launch: `cd system && QEMU=1 VIRGL=0 cargo run -r`.
+
+**virgil-render (QEMU virgl): `screendump` DOES NOT WORK.** It produces stale/cached images because the virgl cocoa display renders via the host GPU, not the guest framebuffer. Instead:
+
+1. Launch with `cd system && QEMU=1 cargo run --release` (opens a cocoa window)
+2. Focus the QEMU window
+3. Use macOS screenshot: `screencapture -l $(osascript -e 'tell app "QEMU" to id of window 1') /tmp/qemu-virgl.png`
+4. Read the PNG with the Read tool
+
+**Sanity check:** If two screenshots show identical clock times, the capture is stale. The clock updates every second — identical timestamps mean you're reading cached data.
 
 ### When to use this
 
-- Any change to: compositor, drawing library, GPU driver, text editor, init (display pipeline setup)
+- Any change to: drawing library, render backends, scene walk, text editor, core, init (display pipeline setup)
 - Any bug fix where the symptom was visual (wrong rendering, missing content, latency)
 - Before committing display-related changes
+- Serial output alone is NOT sufficient — it only proves messages flow, not that pixels update
+- **Prefer metal-render** for visual verification — built-in capture is deterministic and doesn't require window focus
+
+## Rendering Pipeline Changes (MANDATORY)
+
+Changes to the rendering pipeline must follow this process. These rules exist because a session was lost to shipping unverified rendering changes that broke the display.
+
+Three render backends exist — changes may affect one or all:
+
+- **metal-render** (default): scene graph → metal command buffer → virtio → hypervisor → Metal API → CAMetalLayer
+- **virgil-render**: scene graph → virgl command encoding → virtio-gpu wire → QEMU → virglrenderer → ANGLE → Metal
+- **cpu-render**: scene graph → CpuBackend (libraries/render/) → virtio-gpu 2D → QEMU → display
+
+Relevant code: `protocol/metal.rs`, `protocol/virgl.rs`, `libraries/render/`, `services/drivers/{metal-render,virgil-render,cpu-render}/`, `services/core/` (scene building).
+
+### Before implementing
+
+1. **Validate assumptions against source code, not general knowledge.** Every layer in the pipeline has source code or documentation. If you're uncertain whether a GPU feature is supported, READ the source — do not guess from general knowledge. For metal-render, check the hypervisor's Swift Metal code (`~/Sites/hypervisor/`). For virgil-render, check virglrenderer source or ANGLE docs.
+2. **If an agreed approach turns out to be infeasible, STOP and discuss.** Do not silently switch to a different approach. Come back to the user with: what we agreed, what you found, why it doesn't work, what the alternatives are.
+
+### During implementation
+
+3. **One subsystem at a time, verified at each step.** Do not change the render target, stencil, viewport, scissor, blur pipeline, and resolve path simultaneously. Change one, verify, then change the next.
+4. **Points and pixels are the only two coordinate units.** Points (1/72 inch) are used everywhere above the render boundary. Pixels are physical framebuffer coordinates used only by render backends. Never conflate them. Never introduce a third unit. Variable names must make the unit clear.
 
 ### Timing instrumentation
 
-The sys library provides `sys::counter()` (reads CNTVCT_EL0) and `sys::counter_freq()` (reads CNTFRQ_EL0, typically 62500000 Hz on QEMU). Use these for sub-millisecond timing of hot paths. Enabled by kernel setting CNTKCTL_EL1.EL0VCTEN=1 in timer::init().
+The sys library provides `sys::counter()` (reads CNTVCT_EL0) and `sys::counter_freq()` (reads CNTFRQ_EL0). Use these for sub-millisecond timing of hot paths. Frequency varies by platform (typically 24 MHz on Apple Silicon via hypervisor, 62.5 MHz on QEMU). Enabled by kernel setting CNTKCTL_EL1.EL0VCTEN=1 in timer::init().
 
 ## Reference Influences
 

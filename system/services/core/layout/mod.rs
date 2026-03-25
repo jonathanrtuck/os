@@ -10,14 +10,25 @@ mod incremental;
 
 use alloc::vec::Vec;
 
-use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};
-
 // Re-export all public items from submodules.
 pub use full::{
     build_clock_update, build_cursor_update, build_document_content, build_full_scene,
-    build_selection_update,
+    build_selection_update, CURSOR_HOTSPOT_OFFSET,
 };
 pub use incremental::{delete_line, insert_line, update_single_line};
+// Re-export font identity constants from the scene library (single source
+// of truth) so submodules can use `super::FONT_SANS`.
+pub(crate) use scene::FONT_SANS;
+use scene::{Color, Content, DataRef, NodeFlags, ShapedGlyph, NULL};
+
+// ── Float math helpers (no_std) ─────────────────────────────────────
+
+/// Round a float to the nearest integer (round-half-away-from-zero).
+/// Delegates to the canonical implementation in `drawing`.
+#[inline]
+pub(crate) fn round_f32(x: f32) -> i32 {
+    drawing::round_f32(x)
+}
 
 // ── Well-known node indices ─────────────────────────────────────────
 
@@ -31,8 +42,36 @@ pub const N_CONTENT: u16 = 5;
 pub const N_DOC_TEXT: u16 = 6;
 pub const N_CURSOR: u16 = 7;
 
-/// Number of well-known nodes (indices 0..7). Dynamic nodes start at 8.
-pub const WELL_KNOWN_COUNT: u16 = 8;
+// ── Pointer cursor node (8) ──────────────────────────────────────────
+//
+// Top-level node rendered above all content. Position updated each
+// frame from MSG_POINTER_ABS. Auto-hides after 3 s of inactivity with
+// a 300 ms EaseOut fade.
+pub const N_POINTER: u16 = 8;
+
+// ── Title bar icon (9) ──────────────────────────────────────────────
+//
+// Document type icon in the title bar, baseline-aligned with the title
+// text. Content::Path with stroke_width > 0 for outline Tabler icons.
+pub const N_TITLE_ICON: u16 = 9;
+
+// ── Document strip (10..12) ─────────────────────────────────────────
+//
+// Horizontal strip of document spaces. N_STRIP is a child of N_CONTENT
+// with width = N × viewport. content_transform.tx slides the viewport.
+// Each document occupies one viewport-width "space" in the strip.
+pub const N_STRIP: u16 = 10;
+
+// White page surface for the text document (space 0). A4 proportions,
+// centered horizontally. N_DOC_TEXT is a child of this node.
+pub const N_PAGE: u16 = 11;
+
+// Image content in space 1. Centered in the second viewport-width
+// region of the strip. The image IS its own surface (no page bg).
+pub const N_DOC_IMAGE: u16 = 12;
+
+/// Number of well-known nodes (indices 0..12). Dynamic nodes start at 13.
+pub const WELL_KNOWN_COUNT: u16 = 13;
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -44,8 +83,8 @@ pub struct SceneConfig<'a> {
     pub fb_height: u32,
     pub title_bar_h: u32,
     pub shadow_depth: u32,
+    /// Text inset within the page surface (padding from page edge).
     pub text_inset_x: u32,
-    pub text_inset_top: u32,
     pub chrome_bg: drawing::Color,
     pub chrome_border: drawing::Color,
     pub chrome_title_color: drawing::Color,
@@ -54,12 +93,25 @@ pub struct SceneConfig<'a> {
     pub text_color: drawing::Color,
     pub cursor_color: drawing::Color,
     pub sel_color: drawing::Color,
+    /// Page surface background color (white paper).
+    pub page_bg: drawing::Color,
+    /// Page width in points (A4 proportions, derived from viewport).
+    pub page_width: u32,
+    /// Page height in points.
+    pub page_height: u32,
     pub font_size: u16,
-    pub char_width: u32,
+    /// Character advance in 16.16 fixed-point points.
+    /// Single source of truth for character width — same precision as
+    /// scene graph ShapedGlyph advances.
+    pub char_width_fx: i32,
     pub line_height: u32,
     pub font_data: &'a [u8],
     pub upem: u16,
     pub axes: &'a [fonts::rasterize::AxisValue],
+    /// Sans font data (Inter) for chrome text (title, clock).
+    /// Falls back to font_data (mono) when empty.
+    pub sans_font_data: &'a [u8],
+    pub sans_upem: u16,
 }
 
 // ── Layout types ────────────────────────────────────────────────────
@@ -81,36 +133,48 @@ pub struct LayoutRun {
     pub font_size: u16,
 }
 
-// ── Monospace text layout helpers ───────────────────────────────────
+// ── Text layout (delegates to layout library) ─────────────────────
 
-/// Convert a byte offset to (visual_line, column) with monospace wrapping.
-/// This is the single source of truth for line-breaking logic — used by
-/// both scene building (cursor/selection positioning) and scroll calculation.
-pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
-    let mut line: usize = 0;
-    let mut col: usize = 0;
-    let mut pos: usize = 0;
-
-    while pos < text.len() && pos < byte_offset {
-        if text[pos] == b'\n' {
-            line += 1;
-            col = 0;
-            pos += 1;
-        } else {
-            col += 1;
-            pos += 1;
-
-            if col >= chars_per_line && pos < text.len() && text[pos] != b'\n' {
-                line += 1;
-                col = 0;
-            }
-        }
-    }
-
-    (line, col)
+/// Monospace font metrics for the layout library.
+///
+/// Every character has the same advance width. The `char_width` is set
+/// to 1.0 so that `max_width = chars_per_line` — the library wraps at
+/// the same character boundaries as the old hand-written code.
+struct UnitMetrics {
+    line_height: f32,
 }
 
-/// Break text into visual lines using monospace line-breaking.
+impl layout_lib::FontMetrics for UnitMetrics {
+    fn char_width(&self, _ch: char) -> f32 {
+        1.0
+    }
+    fn line_height(&self) -> f32 {
+        self.line_height
+    }
+}
+
+/// Convert a byte offset to (visual_line, column) with monospace wrapping.
+///
+/// Delegates to the layout library. The single source of truth for
+/// line-breaking logic — used by both scene building (cursor/selection
+/// positioning) and scroll calculation.
+pub fn byte_to_line_col(text: &[u8], byte_offset: usize, chars_per_line: usize) -> (usize, usize) {
+    let metrics = UnitMetrics { line_height: 1.0 };
+    let max_width = chars_per_line as f32;
+    layout_lib::byte_to_line_col(
+        text,
+        byte_offset,
+        &metrics,
+        max_width,
+        &layout_lib::CharBreaker,
+    )
+}
+
+/// Break text into visual lines using the unified layout library.
+///
+/// Delegates to `layout_lib::layout_paragraph` with `CharBreaker` (character-
+/// level wrapping) and unit-width metrics, then wraps each `LayoutLine`
+/// into a `LayoutRun` with color and font_size for scene graph construction.
 pub fn layout_mono_lines(
     text: &[u8],
     chars_per_line: usize,
@@ -118,73 +182,31 @@ pub fn layout_mono_lines(
     color: Color,
     font_size: u16,
 ) -> Vec<LayoutRun> {
-    let mut runs = Vec::new();
-    let mut line_y: i32 = 0;
-    let mut pos: usize = 0;
+    let metrics = UnitMetrics {
+        line_height: line_height as f32,
+    };
+    let max_width = chars_per_line as f32;
+    let para = layout_lib::layout_paragraph(
+        text,
+        &metrics,
+        max_width,
+        layout_lib::Alignment::Left,
+        &layout_lib::CharBreaker,
+    );
 
-    while pos < text.len() {
-        let remaining = &text[pos..];
-        let line_end = if let Some(nl) = remaining.iter().position(|&b| b == b'\n') {
-            if nl <= chars_per_line {
-                pos + nl
-            } else {
-                pos + chars_per_line
-            }
-        } else if remaining.len() <= chars_per_line {
-            text.len()
-        } else {
-            pos + chars_per_line
-        };
-        let line_len = line_end - pos;
-
-        runs.push(LayoutRun {
+    para.lines
+        .iter()
+        .map(|line| LayoutRun {
             glyphs: DataRef {
-                offset: pos as u32,
-                length: line_len as u32,
+                offset: line.byte_offset,
+                length: line.byte_length,
             },
-            glyph_count: line_len as u16,
-            y: line_y,
+            glyph_count: line.byte_length as u16,
+            y: line.y,
             color,
             font_size,
-        });
-
-        line_y = line_y.saturating_add(line_height);
-        pos = if line_end < text.len() && text[line_end] == b'\n' {
-            line_end + 1
-        } else {
-            line_end
-        };
-    }
-
-    // If text ends with '\n', emit an empty run for the blank trailing line
-    // so the cursor can be positioned there.
-    if !text.is_empty() && text[text.len() - 1] == b'\n' {
-        runs.push(LayoutRun {
-            glyphs: DataRef {
-                offset: text.len() as u32,
-                length: 0,
-            },
-            glyph_count: 0,
-            y: line_y,
-            color,
-            font_size,
-        });
-    }
-
-    if runs.is_empty() {
-        runs.push(LayoutRun {
-            glyphs: DataRef {
-                offset: 0,
-                length: 0,
-            },
-            glyph_count: 0,
-            y: 0,
-            color,
-            font_size,
-        });
-    }
-
-    runs
+        })
+        .collect()
 }
 
 /// Extract source text bytes for a run using its placeholder DataRef.
@@ -201,16 +223,16 @@ pub fn line_bytes_for_run<'a>(text: &'a [u8], run: &LayoutRun) -> &'a [u8] {
 
 /// Filter runs to those visible in a scrolled viewport.
 ///
-/// Runs keep their document-relative y positions. The caller sets
-/// `content_transform` on the container node so the renderer handles the
-/// viewport offset.
+/// `scroll_y` is the scroll offset in pixels (f32). Runs keep their
+/// document-relative y positions. The caller sets `content_transform`
+/// on the container node so the renderer handles the viewport offset.
 pub fn scroll_runs(
     runs: Vec<LayoutRun>,
-    scroll_lines: u32,
+    scroll_y: scene::Mpt,
     line_height: u32,
     viewport_height_pt: i32,
 ) -> Vec<LayoutRun> {
-    let scroll_pt = scroll_lines as i32 * line_height as i32;
+    let scroll_pt = scroll_y >> 10;
 
     runs.into_iter()
         .filter(|run| {
@@ -249,17 +271,34 @@ pub fn shape_text(
         return Vec::new();
     }
     let shaped = fonts::shape_with_variations(font_data, &s, &[], axes);
-    let ps = point_size as i32;
-    let u = upem as i32;
+    let ps = point_size as i64;
+    let u = upem as i64;
+    // Convert font units to 16.16 fixed-point points:
+    //   value_16_16 = (value_fu * point_size * 65536) / upem
+    // Using i64 to avoid overflow for large font-unit values.
     shaped
         .iter()
         .map(|g| ShapedGlyph {
             glyph_id: g.glyph_id,
-            x_advance: ((g.x_advance * ps) / u) as i16,
-            x_offset: ((g.x_offset * ps) / u) as i16,
-            y_offset: ((g.y_offset * ps) / u) as i16,
+            _pad: 0,
+            x_advance: ((g.x_advance as i64 * ps * 65536) / u) as i32,
+            x_offset: ((g.x_offset as i64 * ps * 65536) / u) as i32,
+            y_offset: ((g.y_offset as i64 * ps * 65536) / u) as i32,
         })
         .collect()
+}
+
+/// Shape text using the chrome font (Inter/sans). Returns shaped glyphs
+/// ready for `push_shaped_glyphs()`. All chrome text (title bar, clock)
+/// uses this — single source of truth for font selection.
+pub(crate) fn shape_chrome_text(cfg: &SceneConfig, text: &[u8]) -> Vec<ShapedGlyph> {
+    shape_text(
+        cfg.sans_font_data,
+        text,
+        cfg.font_size,
+        cfg.sans_upem,
+        cfg.axes,
+    )
 }
 
 /// Count lines in a text buffer (newlines + 1).
@@ -280,19 +319,19 @@ pub(crate) fn dc(c: drawing::Color) -> Color {
     Color::rgba(c.r, c.g, c.b, c.a)
 }
 
-/// Compute `chars_per_line` from config.
+/// Compute `chars_per_line` from config using page width and text inset.
 pub(crate) fn chars_per_line(cfg: &SceneConfig) -> u32 {
-    let doc_width = cfg.fb_width.saturating_sub(2 * cfg.text_inset_x);
-    if cfg.char_width > 0 {
-        (doc_width / cfg.char_width).max(1)
+    let dw = doc_width(cfg);
+    if cfg.char_width_fx > 0 {
+        ((dw as i64 * 65536) / cfg.char_width_fx as i64).max(1) as u32
     } else {
         80
     }
 }
 
-/// Compute the document-area width from config.
+/// Compute the text-area width within the page surface.
 pub(crate) fn doc_width(cfg: &SceneConfig) -> u32 {
-    cfg.fb_width.saturating_sub(2 * cfg.text_inset_x)
+    cfg.page_width.saturating_sub(2 * cfg.text_inset_x)
 }
 
 /// Allocate per-line Glyphs child nodes under N_DOC_TEXT, linking them
@@ -315,9 +354,9 @@ pub(crate) fn allocate_line_nodes(
     for &(glyph_ref, glyph_count, y) in line_glyph_refs {
         if let Some(line_id) = w.alloc_node() {
             let n = w.node_mut(line_id);
-            n.y = y;
-            n.width = doc_width as u16;
-            n.height = line_height as u16;
+            n.y = scene::pt(y);
+            n.width = scene::upt(doc_width);
+            n.height = scene::upt(line_height);
             n.content = Content::Glyphs {
                 color: scene_text_color,
                 glyphs: glyph_ref,
@@ -371,14 +410,11 @@ pub(crate) fn shape_visible_runs(
 pub(crate) fn update_clock_inline(
     w: &mut scene::SceneWriter<'_>,
     clock_text: &[u8],
-    font_data: &[u8],
-    font_size: u16,
-    upem: u16,
-    axes: &[fonts::rasterize::AxisValue],
+    cfg: &SceneConfig,
 ) {
     let clock_node = w.node(N_CLOCK_TEXT);
     if let Content::Glyphs { color, .. } = clock_node.content {
-        let new_glyphs = shape_text(font_data, clock_text, font_size, upem, axes);
+        let new_glyphs = shape_chrome_text(cfg, clock_text);
         let new_ref = w.push_shaped_glyphs(&new_glyphs);
         let new_count = new_glyphs.len() as u16;
 
@@ -387,8 +423,8 @@ pub(crate) fn update_clock_inline(
             color,
             glyphs: new_ref,
             glyph_count: new_count,
-            font_size,
-            axis_hash: 0,
+            font_size: cfg.font_size,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = scene::fnv1a(clock_text);
         w.mark_dirty(N_CLOCK_TEXT);
@@ -409,7 +445,7 @@ pub(crate) fn allocate_selection_rects(
     sel_lo: usize,
     sel_hi: usize,
     chars_per_line: usize,
-    char_width: u32,
+    char_width_fx: i32,
     line_height: u32,
     sel_color: Color,
     content_h: u32,
@@ -445,10 +481,10 @@ pub(crate) fn allocate_selection_rects(
 
         if let Some(sel_id) = w.alloc_node() {
             let n = w.node_mut(sel_id);
-            n.x = (col_start as u32 * char_width) as i32;
-            n.y = sel_y;
-            n.width = ((col_end - col_start) as u32 * char_width) as u16;
-            n.height = line_height as u16;
+            n.x = ((col_start as i64 * char_width_fx as i64) >> 6) as scene::Mpt;
+            n.y = scene::pt(sel_y);
+            n.width = (((col_end - col_start) as u64 * char_width_fx as u64) >> 6) as scene::Umpt;
+            n.height = scene::upt(line_height);
             n.background = sel_color;
             n.content = Content::None;
             n.flags = NodeFlags::VISIBLE;

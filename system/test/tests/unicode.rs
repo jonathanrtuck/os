@@ -11,14 +11,14 @@ use scene::*;
 mod fallback;
 
 use fallback::FallbackChain;
-use fonts::rasterize::{self, RasterBuffer, RasterScratch};
-use fonts::shape;
+use fonts::{
+    rasterize::{self, RasterBuffer, RasterScratch},
+    shape,
+};
 
-const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
-const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
-const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf");
-const SOURCE_CODE_PRO_VARIABLE: &[u8] =
-    include_bytes!("../../share/source-code-pro-variable.ttf");
+const JETBRAINS_MONO: &[u8] = include_bytes!("../../share/jetbrains-mono.ttf");
+const INTER: &[u8] = include_bytes!("../../share/inter.ttf");
+const SOURCE_SERIF_4: &[u8] = include_bytes!("../../share/source-serif-4.ttf");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -29,7 +29,11 @@ fn make_buf() -> Vec<u8> {
 }
 
 /// Rasterize a glyph and return total coverage sum (RGB channels).
-fn rasterize_glyph(font_data: &[u8], glyph_id: u16, size_px: u16) -> Option<(rasterize::GlyphMetrics, u32)> {
+fn rasterize_glyph(
+    font_data: &[u8],
+    glyph_id: u16,
+    size_px: u16,
+) -> Option<(rasterize::GlyphMetrics, u32)> {
     let mut buf = vec![0u8; 48 * 6 * 48];
     let mut scratch = Box::new(RasterScratch::zeroed());
     let mut rb = RasterBuffer {
@@ -37,7 +41,7 @@ fn rasterize_glyph(font_data: &[u8], glyph_id: u16, size_px: u16) -> Option<(ras
         width: 48,
         height: 48,
     };
-    let metrics = rasterize::rasterize(font_data, glyph_id, size_px, &mut rb, &mut scratch)?;
+    let metrics = rasterize::rasterize(font_data, glyph_id, size_px, &mut rb, &mut scratch, 1)?;
     let total = (metrics.width * metrics.height * 3) as usize;
     let coverage_sum: u32 = buf[..total].iter().map(|&b| b as u32).sum();
     Some((metrics, coverage_sum))
@@ -52,7 +56,7 @@ fn rasterize_glyph(font_data: &[u8], glyph_id: u16, size_px: u16) -> Option<(ras
 fn unicode_latin_extended_cafe_shapes_four_glyphs() {
     // "café" has 4 characters: c, a, f, é (U+00E9).
     // Shaping should produce 4 glyphs with non-zero glyph IDs.
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "café", &[]);
+    let glyphs = shape(INTER, "café", &[]);
     assert_eq!(
         glyphs.len(),
         4,
@@ -65,37 +69,38 @@ fn unicode_latin_extended_cafe_shapes_four_glyphs() {
             "glyph {} in 'café' has glyph_id 0 (.notdef) — font lacks the codepoint",
             i
         );
-        assert!(
-            g.x_advance > 0,
-            "glyph {} in 'café' has zero x_advance",
-            i
-        );
+        assert!(g.x_advance > 0, "glyph {} in 'café' has zero x_advance", i);
     }
 }
 
 #[test]
 fn unicode_latin_extended_cafe_rasterizes_with_nonzero_coverage() {
     // Each glyph in "café" must produce a valid coverage map with non-zero pixels.
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "café", &[]);
+    let glyphs = shape(INTER, "café", &[]);
     assert_eq!(glyphs.len(), 4);
 
     for (i, g) in glyphs.iter().enumerate() {
-        let result = rasterize_glyph(NUNITO_SANS_VARIABLE, g.glyph_id, 18);
+        let result = rasterize_glyph(INTER, g.glyph_id, 18);
         assert!(
             result.is_some(),
             "glyph {} (id={}) in 'café' failed to rasterize",
-            i, g.glyph_id
+            i,
+            g.glyph_id
         );
         let (metrics, coverage_sum) = result.unwrap();
         assert!(
             coverage_sum > 0,
             "glyph {} (id={}) in 'café' has zero coverage — no visible pixels",
-            i, g.glyph_id
+            i,
+            g.glyph_id
         );
         assert!(
             metrics.width > 0 && metrics.height > 0,
             "glyph {} (id={}) in 'café' has zero dimensions: {}x{}",
-            i, g.glyph_id, metrics.width, metrics.height
+            i,
+            g.glyph_id,
+            metrics.width,
+            metrics.height
         );
     }
 }
@@ -103,7 +108,7 @@ fn unicode_latin_extended_cafe_rasterizes_with_nonzero_coverage() {
 #[test]
 fn unicode_latin_e_acute_shapes_correctly() {
     // U+00E9 (é) should shape to a single valid glyph.
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "é", &[]);
+    let glyphs = shape(INTER, "é", &[]);
     assert_eq!(glyphs.len(), 1, "é should produce 1 glyph");
     assert!(glyphs[0].glyph_id > 0, "é should have valid glyph ID");
     assert!(glyphs[0].x_advance > 0, "é should have positive advance");
@@ -112,7 +117,7 @@ fn unicode_latin_e_acute_shapes_correctly() {
 #[test]
 fn unicode_latin_n_tilde_shapes_correctly() {
     // U+00F1 (ñ) should shape to a single valid glyph.
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "ñ", &[]);
+    let glyphs = shape(INTER, "ñ", &[]);
     assert_eq!(glyphs.len(), 1, "ñ should produce 1 glyph");
     assert!(glyphs[0].glyph_id > 0, "ñ should have valid glyph ID");
 }
@@ -120,7 +125,7 @@ fn unicode_latin_n_tilde_shapes_correctly() {
 #[test]
 fn unicode_latin_u_diaeresis_shapes_correctly() {
     // U+00FC (ü) should shape to a single valid glyph.
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "ü", &[]);
+    let glyphs = shape(INTER, "ü", &[]);
     assert_eq!(glyphs.len(), 1, "ü should produce 1 glyph");
     assert!(glyphs[0].glyph_id > 0, "ü should have valid glyph ID");
 }
@@ -131,23 +136,30 @@ fn unicode_latin_extended_rasterize_individual_accented() {
     for (ch, name) in [('é', "e-acute"), ('ñ', "n-tilde"), ('ü', "u-diaeresis")] {
         let mut buf = [0u8; 4];
         let text = ch.encode_utf8(&mut buf);
-        let glyphs = shape(NUNITO_SANS_VARIABLE, text, &[]);
+        let glyphs = shape(INTER, text, &[]);
         assert!(!glyphs.is_empty(), "{} produced no glyphs", name);
         let gid = glyphs[0].glyph_id;
         assert!(gid > 0, "{} has .notdef glyph", name);
 
-        let result = rasterize_glyph(NUNITO_SANS_VARIABLE, gid, 18);
-        assert!(result.is_some(), "{} (glyph_id={}) failed to rasterize", name, gid);
+        let result = rasterize_glyph(INTER, gid, 18);
+        assert!(
+            result.is_some(),
+            "{} (glyph_id={}) failed to rasterize",
+            name,
+            gid
+        );
         let (metrics, coverage_sum) = result.unwrap();
         assert!(
             coverage_sum > 0,
             "{} (glyph_id={}) has zero coverage",
-            name, gid
+            name,
+            gid
         );
         assert!(
             metrics.width > 0 && metrics.height > 0,
             "{} (glyph_id={}) has zero dimensions",
-            name, gid
+            name,
+            gid
         );
     }
 }
@@ -156,10 +168,14 @@ fn unicode_latin_extended_rasterize_individual_accented() {
 fn unicode_latin_extended_via_fallback_chain() {
     // Latin Extended characters should be resolved by the primary font
     // in a fallback chain — no fallback needed for these common codepoints.
-    let chain = FallbackChain::new(&[NUNITO_SANS_VARIABLE, SOURCE_CODE_PRO_VARIABLE]);
+    let chain = FallbackChain::new(&[INTER, JETBRAINS_MONO]);
     let result = chain.shape("café", &[]);
 
-    assert_eq!(result.len(), 4, "fallback chain should produce 4 glyphs for 'café'");
+    assert_eq!(
+        result.len(),
+        4,
+        "fallback chain should produce 4 glyphs for 'café'"
+    );
     for (i, fg) in result.iter().enumerate() {
         assert!(
             fg.glyph.glyph_id > 0,
@@ -182,7 +198,7 @@ fn unicode_glyph_cache_handles_non_ascii_ids() {
     let mut cache = LruGlyphCache::new(64);
 
     // Shape 'é' to get a real non-ASCII glyph ID.
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "é", &[]);
+    let glyphs = shape(INTER, "é", &[]);
     let gid = glyphs[0].glyph_id;
     assert!(gid > 0, "é must produce a valid glyph ID");
 
@@ -217,7 +233,7 @@ fn unicode_scene_graph_naive_resume_round_trip() {
     // Shape 'naïve résumé' and write shaped glyphs to scene graph,
     // then read back and verify all glyph IDs are preserved exactly.
     let text = "naïve résumé";
-    let shaped = shape(NUNITO_SANS_VARIABLE, text, &[]);
+    let shaped = shape(INTER, text, &[]);
 
     assert!(
         shaped.len() >= 12,
@@ -242,7 +258,8 @@ fn unicode_scene_graph_naive_resume_round_trip() {
             // For this test, we just need the glyph_id and some non-zero advances.
             scene::ShapedGlyph {
                 glyph_id: sg.glyph_id,
-                x_advance: (sg.x_advance / 50).max(1) as i16,
+                _pad: 0,
+                x_advance: (sg.x_advance / 50).max(1) as i32 * 65536,
                 x_offset: 0,
                 y_offset: 0,
             }
@@ -268,7 +285,11 @@ fn unicode_scene_graph_naive_resume_round_trip() {
     let r = SceneReader::new(&buf);
     let node = r.node(id);
     let (read_glyph_ref, read_glyph_count) = match node.content {
-        Content::Glyphs { glyphs, glyph_count, .. } => (glyphs, glyph_count),
+        Content::Glyphs {
+            glyphs,
+            glyph_count,
+            ..
+        } => (glyphs, glyph_count),
         _ => panic!("expected Glyphs content"),
     };
     assert_eq!(read_glyph_count, scene_glyphs.len() as u16);
@@ -299,13 +320,14 @@ fn unicode_scene_graph_naive_resume_round_trip() {
 fn unicode_scene_graph_write_read_round_trip() {
     // Verify Unicode text survives a scene graph write/read cycle.
     let text = "naïve résumé";
-    let shaped = shape(NUNITO_SANS_VARIABLE, text, &[]);
+    let shaped = shape(INTER, text, &[]);
 
     let scene_glyphs: Vec<scene::ShapedGlyph> = shaped
         .iter()
         .map(|sg| scene::ShapedGlyph {
             glyph_id: sg.glyph_id,
-            x_advance: (sg.x_advance / 50).max(1) as i16,
+            _pad: 0,
+            x_advance: (sg.x_advance / 50).max(1) as i32 * 65536,
             x_offset: 0,
             y_offset: 0,
         })
@@ -332,7 +354,11 @@ fn unicode_scene_graph_write_read_round_trip() {
     assert_eq!(nodes.len(), 1);
 
     match nodes[0].content {
-        Content::Glyphs { glyphs, glyph_count, .. } => {
+        Content::Glyphs {
+            glyphs,
+            glyph_count,
+            ..
+        } => {
             assert_eq!(glyph_count, scene_glyphs.len() as u16);
             let read_glyphs = r.shaped_glyphs(glyphs, glyph_count);
             assert_eq!(read_glyphs.len(), scene_glyphs.len());
@@ -353,15 +379,16 @@ fn unicode_scene_graph_mixed_ascii_and_extended_latin() {
     // Write a mix of ASCII and Latin Extended glyphs to scene graph,
     // read back, verify all preserved.
     let text = "Hello café naïve";
-    let shaped = shape(NUNITO_SANS_VARIABLE, text, &[]);
+    let shaped = shape(INTER, text, &[]);
 
     let scene_glyphs: Vec<scene::ShapedGlyph> = shaped
         .iter()
         .map(|sg| scene::ShapedGlyph {
             glyph_id: sg.glyph_id,
-            x_advance: (sg.x_advance / 50).max(1) as i16,
-            x_offset: (sg.x_offset / 50) as i16,
-            y_offset: (sg.y_offset / 50) as i16,
+            _pad: 0,
+            x_advance: (sg.x_advance / 50).max(1) as i32 * 65536,
+            x_offset: (sg.x_offset / 50) as i32 * 65536,
+            y_offset: (sg.y_offset / 50) as i32 * 65536,
         })
         .collect();
 
@@ -391,7 +418,7 @@ fn unicode_scene_graph_mixed_ascii_and_extended_latin() {
 fn unicode_supplementary_plane_no_panic() {
     // U+1F600 (😀 Grinning Face) is a supplementary plane codepoint.
     // It likely won't be in either font, but the pipeline must NOT panic.
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "\u{1F600}", &[]);
+    let glyphs = shape(INTER, "\u{1F600}", &[]);
 
     // Should produce at least 1 glyph (possibly .notdef).
     // The key assertion is: no panic occurred.
@@ -406,7 +433,7 @@ fn unicode_supplementary_plane_followed_by_ascii() {
     // A supplementary plane codepoint followed by ASCII text:
     // the pipeline must not crash, and the ASCII text must shape correctly.
     let text = "\u{1F600}Hello";
-    let glyphs = shape(NUNITO_SANS_VARIABLE, text, &[]);
+    let glyphs = shape(INTER, text, &[]);
 
     // We need at least 6 glyphs: 1 for emoji (possibly .notdef) + 5 for "Hello".
     assert!(
@@ -434,7 +461,7 @@ fn unicode_supplementary_plane_followed_by_ascii() {
 #[test]
 fn unicode_supplementary_plane_via_fallback_chain() {
     // Supplementary plane codepoint followed by ASCII through fallback chain.
-    let chain = FallbackChain::new(&[NUNITO_SANS_VARIABLE, SOURCE_CODE_PRO_VARIABLE]);
+    let chain = FallbackChain::new(&[INTER, JETBRAINS_MONO]);
     let text = "\u{1F600}Hello";
     let result = chain.shape(text, &[]);
 
@@ -459,7 +486,7 @@ fn unicode_supplementary_plane_via_fallback_chain() {
 #[test]
 fn unicode_supplementary_plane_u10000_no_crash() {
     // U+10000 (LINEAR B SYLLABLE B008 A) — first supplementary plane codepoint.
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "\u{10000}", &[]);
+    let glyphs = shape(INTER, "\u{10000}", &[]);
     // Must not panic. May produce .notdef.
     assert!(
         !glyphs.is_empty(),
@@ -471,7 +498,7 @@ fn unicode_supplementary_plane_u10000_no_crash() {
 fn unicode_supplementary_mixed_string_no_crash() {
     // Mix of BMP and supplementary plane codepoints.
     let text = "A\u{10000}B\u{1F600}C";
-    let glyphs = shape(NUNITO_SANS_VARIABLE, text, &[]);
+    let glyphs = shape(INTER, text, &[]);
 
     // At least 5 glyphs: A, U+10000, B, U+1F600, C.
     assert!(
@@ -495,7 +522,7 @@ fn unicode_supplementary_mixed_string_no_crash() {
 #[test]
 fn unicode_supplementary_u10fffd_produces_notdef_or_valid() {
     // U+10FFFD — near the end of Unicode, unlikely to be in any font.
-    let glyphs = shape(NUNITO_SANS_VARIABLE, "\u{10FFFD}", &[]);
+    let glyphs = shape(INTER, "\u{10FFFD}", &[]);
     assert!(
         !glyphs.is_empty(),
         "U+10FFFD should produce at least 1 glyph (even .notdef)"
@@ -513,7 +540,7 @@ fn unicode_supplementary_glyph_id_truncation_safety() {
     // For standard fonts, glyph IDs are well within u16 range (< 65536).
     // .notdef is glyph_id 0. This test ensures no unexpected behavior.
     let text = "\u{1F600}";
-    let glyphs = shape(NUNITO_SANS_VARIABLE, text, &[]);
+    let glyphs = shape(INTER, text, &[]);
     if !glyphs.is_empty() {
         // glyph_id should be 0 (.notdef) since the font likely doesn't have emoji.
         // The key assertion: glyph_id fits in u16 without overflow issues.
@@ -529,7 +556,7 @@ fn unicode_supplementary_glyph_id_truncation_safety() {
 #[test]
 fn unicode_supplementary_rasterize_notdef_no_crash() {
     // Rasterizing .notdef (glyph_id 0) must not crash.
-    let result = rasterize_glyph(NUNITO_SANS_VARIABLE, 0, 18);
+    let result = rasterize_glyph(INTER, 0, 18);
     // .notdef may or may not have an outline. Either way, no panic.
     // If it has an outline, coverage should be valid.
     if let Some((metrics, _coverage_sum)) = result {
@@ -544,15 +571,18 @@ fn unicode_supplementary_followed_by_ascii_rasterize() {
     // Shape a supplementary codepoint + ASCII, then rasterize the ASCII glyphs.
     // Verify the ASCII glyphs rasterize correctly after the supplementary one.
     let text = "\u{1F600}W";
-    let glyphs = shape(NUNITO_SANS_VARIABLE, text, &[]);
+    let glyphs = shape(INTER, text, &[]);
     assert!(glyphs.len() >= 2);
 
     // The last glyph should be 'W' with a valid glyph ID.
     let w_glyph = glyphs.last().unwrap();
-    assert!(w_glyph.glyph_id > 0, "'W' after supplementary should have valid glyph ID");
+    assert!(
+        w_glyph.glyph_id > 0,
+        "'W' after supplementary should have valid glyph ID"
+    );
 
     // Rasterize 'W'.
-    let result = rasterize_glyph(NUNITO_SANS_VARIABLE, w_glyph.glyph_id, 18);
+    let result = rasterize_glyph(INTER, w_glyph.glyph_id, 18);
     assert!(result.is_some(), "'W' glyph should rasterize successfully");
     let (metrics, coverage_sum) = result.unwrap();
     assert!(coverage_sum > 0, "'W' should have non-zero coverage");
@@ -571,27 +601,41 @@ fn unicode_glyph_cache_latin_extended_and_ascii_coexist() {
     let mut cache = LruGlyphCache::new(128);
 
     // Shape ASCII 'A' and Latin Extended 'é'.
-    let a_glyphs = shape(NUNITO_SANS_VARIABLE, "A", &[]);
-    let e_glyphs = shape(NUNITO_SANS_VARIABLE, "é", &[]);
+    let a_glyphs = shape(INTER, "A", &[]);
+    let e_glyphs = shape(INTER, "é", &[]);
     let a_gid = a_glyphs[0].glyph_id;
     let e_gid = e_glyphs[0].glyph_id;
 
     assert_ne!(a_gid, e_gid, "A and é should have different glyph IDs");
 
     let a_cached = LruCachedGlyph {
-        width: 10, height: 14, bearing_x: 1, bearing_y: 12, advance: 8,
+        width: 10,
+        height: 14,
+        bearing_x: 1,
+        bearing_y: 12,
+        advance: 8,
         coverage: vec![100; 40],
     };
     let e_cached = LruCachedGlyph {
-        width: 10, height: 16, bearing_x: 1, bearing_y: 14, advance: 8,
+        width: 10,
+        height: 16,
+        bearing_x: 1,
+        bearing_y: 14,
+        advance: 8,
         coverage: vec![150; 40],
     };
 
     cache.insert(a_gid, 18, a_cached);
     cache.insert(e_gid, 18, e_cached);
 
-    assert!(cache.get(a_gid, 18).is_some(), "ASCII 'A' should be in cache");
-    assert!(cache.get(e_gid, 18).is_some(), "Latin Extended 'é' should be in cache");
+    assert!(
+        cache.get(a_gid, 18).is_some(),
+        "ASCII 'A' should be in cache"
+    );
+    assert!(
+        cache.get(e_gid, 18).is_some(),
+        "Latin Extended 'é' should be in cache"
+    );
     assert_eq!(cache.get(a_gid, 18).unwrap().coverage, vec![100u8; 40]);
     assert_eq!(cache.get(e_gid, 18).unwrap().coverage, vec![150u8; 40]);
 }
@@ -607,11 +651,15 @@ fn unicode_glyph_cache_stress_many_codepoints() {
 
     // Shape a string with various Unicode characters.
     let text = "ABCDéñüàèìòùâêîôû";
-    let glyphs = shape(NUNITO_SANS_VARIABLE, text, &[]);
+    let glyphs = shape(INTER, text, &[]);
 
     for g in &glyphs {
         let cached = LruCachedGlyph {
-            width: 10, height: 14, bearing_x: 1, bearing_y: 12, advance: 8,
+            width: 10,
+            height: 14,
+            bearing_x: 1,
+            bearing_y: 12,
+            advance: 8,
             coverage: vec![g.glyph_id as u8; 20],
         };
         cache.insert(g.glyph_id, 18, cached);
@@ -632,4 +680,49 @@ fn unicode_glyph_cache_stress_many_codepoints() {
         );
     }
     assert!(cache.len() <= max_cap);
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic: JetBrains Mono angle bracket glyph IDs
+// ---------------------------------------------------------------------------
+
+#[test]
+fn jetbrains_mono_angle_brackets_shape_and_rasterize() {
+    let font_data = include_bytes!("../../share/jetbrains-mono.ttf");
+
+    // Shape each problem character individually and verify rasterization.
+    let mut scratch = RasterScratch::zeroed();
+    let mut buf = [0u8; 50 * 50];
+
+    for ch in ['<', '>', '=', '|', '{', '}'] {
+        let s = alloc::format!("{}", ch);
+        let shaped = shape(font_data, &s, &[]);
+        assert!(!shaped.is_empty(), "'{}' should produce shaped glyphs", ch);
+        let gid = shaped[0].glyph_id;
+        eprintln!("  '{}' -> glyph_id={}", ch, gid);
+
+        let mut rb = RasterBuffer {
+            data: &mut buf,
+            width: 50,
+            height: 50,
+        };
+        let result = rasterize::rasterize_with_axes(font_data, gid, 18, &mut rb, &mut scratch, &[], 1);
+        let dims = result.as_ref().map(|m| (m.width, m.height));
+        eprintln!("  '{}' rasterize: {:?}", ch, dims);
+        assert!(
+            result.is_some(),
+            "'{}' (gid={}) should rasterize successfully",
+            ch,
+            gid
+        );
+        let m = result.unwrap();
+        assert!(
+            m.width > 0 && m.height > 0,
+            "'{}' (gid={}) should have non-zero dimensions, got {}x{}",
+            ch,
+            gid,
+            m.width,
+            m.height
+        );
+    }
 }

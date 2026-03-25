@@ -8,7 +8,7 @@
 
 mod content;
 mod coords;
-mod path_raster;
+pub mod path_raster;
 mod walk;
 
 pub use coords::{round_f32, scale_coord, scale_size};
@@ -37,4 +37,8 @@ pub struct RenderCtx<'a> {
 pub struct SceneGraph<'a> {
     pub nodes: &'a [Node],
     pub data: &'a [u8],
+    /// Content Region shared memory (header + data area). Empty if no
+    /// Content Region is available. Used to resolve Content::Image
+    /// content_ids to decoded pixel data.
+    pub content_region: &'a [u8],
 }

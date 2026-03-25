@@ -15,15 +15,16 @@
 #![no_main]
 
 extern crate alloc;
+extern crate drawing;
 extern crate fonts;
 extern crate render;
 extern crate scene;
 
-use alloc::boxed::Box;
+use alloc::{boxed::Box, vec::Vec};
 
 use protocol::{
-    compose::{CompositorConfig, MSG_COMPOSITOR_CONFIG},
-    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    compose::MSG_COMPOSITOR_CONFIG,
+    device::MSG_DEVICE_CONFIG,
     virgl::{
         self, PIPE_BUFFER, PIPE_PRIM_TRIANGLES, PIPE_SHADER_FRAGMENT, PIPE_SHADER_VERTEX,
         PIPE_TEXTURE_2D, VIRGL_FORMAT_B8G8R8A8_UNORM, VIRGL_FORMAT_R8_UNORM,
@@ -95,6 +96,21 @@ pub(crate) const HANDLE_DSA_STENCIL_WRITE: u32 = 15;
 pub(crate) const HANDLE_DSA_STENCIL_TEST: u32 = 16;
 pub(crate) const HANDLE_BLEND_NO_COLOR: u32 = 17;
 pub(crate) const HANDLE_STENCIL_SURFACE: u32 = 18;
+/// Backdrop blur pipeline handles.
+pub(crate) const HANDLE_FS_BLUR_H: u32 = 19;
+pub(crate) const HANDLE_FS_BLUR_V: u32 = 20;
+/// Surface handle for the blur capture texture (used as render target).
+pub(crate) const HANDLE_BLUR_CAPTURE_SURFACE: u32 = 21;
+/// Sampler view for the blur capture texture (input to H-blur pass).
+pub(crate) const HANDLE_BLUR_CAPTURE_VIEW: u32 = 22;
+/// Surface handle for the blur intermediate texture (H-blur output).
+pub(crate) const HANDLE_BLUR_INTERMEDIATE_SURFACE: u32 = 23;
+/// Sampler view for the blur intermediate texture (input to V-blur pass).
+pub(crate) const HANDLE_BLUR_INTERMEDIATE_VIEW: u32 = 24;
+/// DSA for clip-path stencil test: pass if != 0, KEEP stencil value on pass.
+/// Unlike HANDLE_DSA_STENCIL_TEST (which zeros stencil on pass for path cover),
+/// this preserves the stencil so multiple clipped draws can all test against it.
+pub(crate) const HANDLE_DSA_CLIP_TEST: u32 = 25;
 
 /// Resource ID for the vertex buffer (PIPE_BUFFER).
 pub(crate) const VB_RESOURCE_ID: u32 = 2;
@@ -106,6 +122,21 @@ pub(crate) const TEXT_VB_RESOURCE_ID: u32 = 4;
 pub(crate) const IMG_RESOURCE_ID: u32 = 5;
 /// Resource ID for the depth/stencil surface (Z32_FLOAT_S8X24_UINT).
 pub(crate) const STENCIL_RESOURCE_ID: u32 = 6;
+/// Resource ID for the blur capture texture (copy of framebuffer region).
+/// Sized to the framebuffer so any region fits. B8G8R8A8_UNORM.
+pub(crate) const BLUR_CAPTURE_RESOURCE_ID: u32 = 7;
+/// Resource ID for the blur intermediate texture (horizontal blur output).
+/// Same dimensions as BLUR_CAPTURE_RESOURCE_ID. B8G8R8A8_UNORM.
+pub(crate) const BLUR_INTERMEDIATE_RESOURCE_ID: u32 = 8;
+
+/// Maximum image texture dimension (width and height).
+/// The GPU texture is always this size; texcoords are scaled to
+/// [0..src/IMG_TEX_DIM] so only the populated sub-region is sampled.
+pub(crate) const IMG_TEX_DIM: u32 = 64;
+
+/// Maximum framebuffer dimension used for blur texture sizing.
+/// Actual display may be smaller; this is the worst-case allocation.
+pub(crate) const BLUR_MAX_DIM: u32 = 1024;
 
 // ── Entry point ──────────────────────────────────────────────────────────
 
@@ -121,8 +152,14 @@ pub extern "C" fn _start() -> ! {
         sys::print(b"virgil-render: no device config message\n");
         sys::exit();
     }
-    // SAFETY: msg payload contains a valid DeviceConfig from init.
-    let dev_config: DeviceConfig = unsafe { msg.payload_as() };
+    let dev_config = if let Some(protocol::device::Message::DeviceConfig(c)) =
+        protocol::device::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"virgil-render: bad device config\n");
+        sys::exit();
+    };
     let (device, mut vq, irq_handle) = device::init_device(dev_config.mmio_pa, dev_config.irq);
 
     // ── Phase B: Display query + init handshake ──────────────────────────
@@ -214,7 +251,7 @@ pub extern "C" fn _start() -> ! {
 
     // Image texture will be created lazily on first image frame.
     // Pre-allocate a DMA buffer for the max image size we support (64x64 BGRA).
-    let max_img_bytes: u32 = 64 * 64 * 4; // 16 KiB for a 64x64 BGRA image.
+    let max_img_bytes: u32 = IMG_TEX_DIM * IMG_TEX_DIM * 4;
     resources::resource_create_3d_generic(
         &device,
         &mut vq,
@@ -223,8 +260,8 @@ pub extern "C" fn _start() -> ! {
         PIPE_TEXTURE_2D,
         VIRGL_FORMAT_B8G8R8A8_UNORM,
         virgl::PIPE_BIND_SAMPLER_VIEW,
-        64, // Max supported width — matches DMA backing size.
-        64, // Max supported height.
+        IMG_TEX_DIM, // Max supported width — matches DMA backing size.
+        IMG_TEX_DIM, // Max supported height.
     );
     let (img_dma_va, _img_dma_pa, _img_dma_order) = resources::attach_and_ctx_resource(
         &device,
@@ -234,6 +271,55 @@ pub extern "C" fn _start() -> ! {
         max_img_bytes,
     );
     sys::print(b"     image texture created (64x64)\n");
+
+    // ── Blur textures (two full-framebuffer BGRA textures for two-pass blur) ──
+    //
+    // BLUR_CAPTURE: holds a copy of the framebuffer region behind a blurred node.
+    //   Bound as a render target for the blit pass, then as a sampler for H-blur.
+    // BLUR_INTERMEDIATE: holds the horizontal-blur output.
+    //   Bound as a render target for H-blur, then as a sampler for V-blur.
+    //
+    // Both need PIPE_BIND_RENDER_TARGET | PIPE_BIND_SAMPLER_VIEW so the same
+    // resource can be used both as a framebuffer attachment and a sampler input.
+    let blur_bind = virgl::PIPE_BIND_RENDER_TARGET | virgl::PIPE_BIND_SAMPLER_VIEW;
+    let blur_bytes = BLUR_MAX_DIM * BLUR_MAX_DIM * 4;
+    resources::resource_create_3d_generic(
+        &device,
+        &mut vq,
+        irq_handle,
+        BLUR_CAPTURE_RESOURCE_ID,
+        PIPE_TEXTURE_2D,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+        blur_bind,
+        BLUR_MAX_DIM,
+        BLUR_MAX_DIM,
+    );
+    let (_blur_cap_va, _blur_cap_pa, _blur_cap_order) = resources::attach_and_ctx_resource(
+        &device,
+        &mut vq,
+        irq_handle,
+        BLUR_CAPTURE_RESOURCE_ID,
+        blur_bytes,
+    );
+    resources::resource_create_3d_generic(
+        &device,
+        &mut vq,
+        irq_handle,
+        BLUR_INTERMEDIATE_RESOURCE_ID,
+        PIPE_TEXTURE_2D,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+        blur_bind,
+        BLUR_MAX_DIM,
+        BLUR_MAX_DIM,
+    );
+    let (_blur_int_va, _blur_int_pa, _blur_int_order) = resources::attach_and_ctx_resource(
+        &device,
+        &mut vq,
+        irq_handle,
+        BLUR_INTERMEDIATE_RESOURCE_ID,
+        blur_bytes,
+    );
+    sys::print(b"     blur textures created (1024x1024 each)\n");
 
     // ── Phase D: GPU pipeline setup ──────────────────────────────────────
     let stencil_available = pipeline::setup_pipeline(&device, &mut vq, irq_handle, width, height);
@@ -245,8 +331,8 @@ pub extern "C" fn _start() -> ! {
     sys::print(b"     waiting for render config\n");
 
     let mut scene_va: u64 = 0;
-    let mut font_va: u64 = 0;
-    let mut font_len: u32 = 0;
+    let mut content_va: u64 = 0;
+    let mut content_size: u32 = 0;
     let mut scale_factor: f32 = 1.0;
     let mut font_size_cfg: u16 = 18;
     let mut frame_rate_cfg: u32 = 60;
@@ -254,28 +340,30 @@ pub extern "C" fn _start() -> ! {
     loop {
         let _ = sys::wait(&[INIT_HANDLE], u64::MAX);
         if ch.try_recv(&mut msg) && msg.msg_type == MSG_COMPOSITOR_CONFIG {
-            // SAFETY: msg payload is a valid CompositorConfig from init.
-            let config: CompositorConfig = unsafe { msg.payload_as() };
-            scene_va = config.scene_va;
-            font_va = config.mono_font_va;
-            font_len = config.mono_font_len;
-            scale_factor = config.scale_factor;
-            font_size_cfg = config.font_size;
-            frame_rate_cfg = if config.frame_rate > 0 {
-                config.frame_rate as u32
-            } else {
-                60
-            };
+            if let Some(protocol::compose::Message::CompositorConfig(config)) =
+                protocol::compose::decode(msg.msg_type, &msg.payload)
+            {
+                scene_va = config.scene_va;
+                content_va = config.content_va;
+                content_size = config.content_size;
+                scale_factor = config.scale_factor;
+                font_size_cfg = config.font_size;
+                frame_rate_cfg = if config.frame_rate > 0 {
+                    config.frame_rate as u32
+                } else {
+                    60
+                };
 
-            sys::print(b"     render config: scene_va=");
-            print_hex_u32((scene_va >> 32) as u32);
-            print_hex_u32(scene_va as u32);
-            sys::print(b" font_len=");
-            print_u32(font_len);
-            sys::print(b" scale=");
-            print_u32((scale_factor * 100.0) as u32);
-            sys::print(b"%\n");
-            break;
+                sys::print(b"     render config: scene_va=");
+                print_hex_u32((scene_va >> 32) as u32);
+                print_hex_u32(scene_va as u32);
+                sys::print(b" content_size=");
+                print_u32(content_size);
+                sys::print(b" scale=");
+                print_u32((scale_factor * 100.0) as u32);
+                sys::print(b"%\n");
+                break;
+            }
         }
     }
 
@@ -297,23 +385,74 @@ pub extern "C" fn _start() -> ! {
     glyph_atlas.set_dma_va(atlas_va);
     let mut font_ascent: u32 = 14;
 
-    if font_va != 0 && font_len > 0 {
-        sys::print(b"     initializing glyph atlas via HarfBuzz shaping\n");
+    // Parse Content Region header to find font data.
+    // SAFETY: content_va..+content_size is mapped read-only by init before starting us.
+    let content_region_slice: &[u8] = if content_va != 0 && content_size > 0 {
+        unsafe { core::slice::from_raw_parts(content_va as *const u8, content_size as usize) }
+    } else {
+        &[]
+    };
+    let content_header: Option<&protocol::content::ContentRegionHeader> = if content_region_slice
+        .len()
+        >= core::mem::size_of::<protocol::content::ContentRegionHeader>()
+    {
+        // SAFETY: content_va is page-aligned; ContentRegionHeader is repr(C).
+        Some(unsafe { &*(content_va as *const protocol::content::ContentRegionHeader) })
+    } else {
+        None
+    };
+    let font_data: &[u8] = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_MONO)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size as usize {
+                unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va as usize + start) as *const u8,
+                        entry.length as usize,
+                    )
+                }
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
+    let sans_font_data: &[u8] = if let Some(h) = content_header {
+        if let Some(entry) =
+            protocol::content::find_entry(h, protocol::content::CONTENT_ID_FONT_SANS)
+        {
+            let start = entry.offset as usize;
+            let end = start + entry.length as usize;
+            if end <= content_size as usize {
+                unsafe {
+                    core::slice::from_raw_parts(
+                        (content_va as usize + start) as *const u8,
+                        entry.length as usize,
+                    )
+                }
+            } else {
+                &[]
+            }
+        } else {
+            &[]
+        }
+    } else {
+        &[]
+    };
 
-        // SAFETY: font_va is mapped read-only into our address space by init.
-        let font_data =
-            unsafe { core::slice::from_raw_parts(font_va as *const u8, font_len as usize) };
+    if !font_data.is_empty() {
+        sys::print(b"     initializing glyph atlas via HarfBuzz shaping\n");
 
         // Font size from config (points). The scene graph x_advance/x_offset
         // are in points at this size. Rasterize at the point size —
         // the scene_walk applies * scale for NDC.
         let font_size_pt: u32 = font_size_cfg as u32;
-
-        // Axes must match core's shaping axes (MONO=1.0).
-        let mono_axes = [fonts::rasterize::AxisValue {
-            tag: *b"MONO",
-            value: 1.0,
-        }];
 
         // Get font metrics for ascent.
         // scale_fu_ceil(val, size, upem) = (val * size + upem - 1) / upem
@@ -330,11 +469,10 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"\n");
         }
 
-        // Shape all printable ASCII through HarfBuzz to get real glyph IDs
-        // (including GSUB substitutions like Recursive's MONO alternates).
-        // Then rasterize each unique glyph ID directly into the atlas.
+        // Shape all printable ASCII to get real glyph IDs.
+        // Static font — no variable axes needed.
         let ascii: &str = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~";
-        let shaped = fonts::shape_with_variations(font_data, ascii, &[], &mono_axes);
+        let shaped = fonts::shape(font_data, ascii, &[]);
 
         // Heap-allocate rasterization scratch space (~39 KiB).
         let mut scratch: Box<fonts::rasterize::RasterScratch> = box_zeroed();
@@ -344,7 +482,7 @@ pub extern "C" fn _start() -> ! {
 
         let mut packed = 0u32;
         for sg in &shaped {
-            if glyph_atlas.lookup(sg.glyph_id).is_some() {
+            if glyph_atlas.lookup(sg.glyph_id, 0).is_some() {
                 continue; // Already packed.
             }
             let mut rb = fonts::rasterize::RasterBuffer {
@@ -352,18 +490,21 @@ pub extern "C" fn _start() -> ! {
                 width: 50,
                 height: 50,
             };
+            // virgil-render rasterizes at point size (1x); scale_factor=1.
             if let Some(m) = fonts::rasterize::rasterize_with_axes(
                 font_data,
                 sg.glyph_id,
                 font_size_pt as u16,
                 &mut rb,
                 &mut scratch,
-                &mono_axes,
+                &[],
+                1,
             ) {
                 if m.width > 0 && m.height > 0 {
                     let coverage = &raster_buf[..(m.width * m.height) as usize];
                     glyph_atlas.pack_glyph(
                         sg.glyph_id,
+                        0,
                         m.width,
                         m.height,
                         m.bearing_x,
@@ -373,6 +514,46 @@ pub extern "C" fn _start() -> ! {
                     packed += 1;
                 }
             }
+        }
+
+        // Pre-populate sans font (Inter) ASCII glyphs (font_id = 1).
+        if !sans_font_data.is_empty() {
+            let sans_data = sans_font_data;
+            let sans_shaped = fonts::shape(sans_data, ascii, &[]);
+            for sg in &sans_shaped {
+                if glyph_atlas.lookup(sg.glyph_id, 1).is_some() {
+                    continue;
+                }
+                let mut rb = fonts::rasterize::RasterBuffer {
+                    data: &mut raster_buf,
+                    width: 50,
+                    height: 50,
+                };
+                if let Some(m) = fonts::rasterize::rasterize_with_axes(
+                    sans_data,
+                    sg.glyph_id,
+                    font_size_pt as u16,
+                    &mut rb,
+                    &mut scratch,
+                    &[],
+                    1,
+                ) {
+                    if m.width > 0 && m.height > 0 {
+                        let coverage = &raster_buf[..(m.width * m.height) as usize];
+                        glyph_atlas.pack_glyph(
+                            sg.glyph_id,
+                            1,
+                            m.width,
+                            m.height,
+                            m.bearing_x,
+                            m.bearing_y,
+                            coverage,
+                        );
+                        packed += 1;
+                    }
+                }
+            }
+            sys::print(b"     sans font pre-populated\n");
         }
 
         sys::print(b"     atlas packed ");
@@ -412,6 +593,9 @@ pub extern "C" fn _start() -> ! {
     let mut image_batch: Box<scene_walk::ImageBatch> = box_zeroed();
     let mut path_batch: Box<scene_walk::PathBatch> = box_zeroed();
     let mut cmdbuf: Box<virgl::CommandBuffer> = box_zeroed();
+    // Blur requests collected per-frame during scene walk.
+    let mut blur_requests: Vec<scene_walk::BlurRequest> =
+        Vec::with_capacity(scene_walk::MAX_BLUR_REQUESTS);
 
     // Heap-allocated via alloc_zeroed because IncrementalState is ~22 KiB
     // (prev_bounds 8K + prev_content_transform 12K + prev_content_hash 2K),
@@ -430,7 +614,7 @@ pub extern "C" fn _start() -> ! {
     let mut sched = frame_scheduler::FrameScheduler::new(frame_rate_cfg);
     let cfreq = sys::counter_freq();
 
-    let mut timer_h: u8 = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
+    let mut timer_h: sys::TimerHandle = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
         sys::print(b"virgil-render: frame timer create failed\n");
         sys::exit();
     });
@@ -442,7 +626,7 @@ pub extern "C" fn _start() -> ! {
         unsafe { ipc::Channel::from_base(resources::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
 
     loop {
-        let _ = sys::wait(&[SCENE_HANDLE, timer_h], u64::MAX);
+        let _ = sys::wait(&[SCENE_HANDLE, timer_h.0], u64::MAX);
         let mut go = false;
 
         // Check for scene updates.
@@ -453,8 +637,8 @@ pub extern "C" fn _start() -> ! {
             sched.on_scene_update();
         }
         // Check for timer tick.
-        if sys::wait(&[timer_h], 0).is_ok() {
-            let _ = sys::handle_close(timer_h);
+        if sys::wait(&[timer_h.0], 0).is_ok() {
+            let _ = sys::handle_close(timer_h.0);
             timer_h = sys::timer_create(sched.period_ns()).unwrap_or_else(|_| {
                 sys::print(b"virgil-render: timer recreate failed\n");
                 sys::exit();
@@ -469,12 +653,12 @@ pub extern "C" fn _start() -> ! {
         let reader = unsafe { scene::TripleReader::new(scene_ptr, scene_len) };
         let nodes = reader.front_nodes();
         let node_count = nodes.len() as u16;
-        let gen = reader.front_generation();
+        let generation = reader.front_generation();
         let dirty_bits = *reader.dirty_bits();
 
         // Skip-frame: nothing changed since last render.
         if all_bits_zero(&dirty_bits) {
-            reader.finish_read(gen);
+            reader.finish_read(generation);
             sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
             continue;
         }
@@ -492,7 +676,7 @@ pub extern "C" fn _start() -> ! {
         let (scissor_x, scissor_y, scissor_w, scissor_h) = if let Some(ref d) = damage {
             if d.count == 0 && !d.full_screen {
                 // All dirty nodes off-screen — skip frame entirely.
-                reader.finish_read(gen);
+                reader.finish_read(generation);
                 incr_state.update_from_frame(nodes, node_count);
                 sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
                 continue;
@@ -521,6 +705,7 @@ pub extern "C" fn _start() -> ! {
             data_buf,
             &glyph_atlas,
             font_ascent,
+            &mut blur_requests,
         );
 
         if frame_count < 3 {
@@ -544,10 +729,15 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"WARN: vertices dropped\n");
         }
 
-        // ── Color VBO: pack backgrounds + path fan + path cover at offsets ─
+        // ── Color VBO: pack backgrounds + clipped bgs + path fan + path cover + clip fan ─
+        // Layout: [bg quads][clipped bg quads][path fan][path cover][clip fan]
         let color_data = batch.as_vertex_data();
         let color_dwords = color_data.len();
         let color_bytes = color_dwords * 4;
+
+        let clip_bg_data = batch.as_clip_vertex_data();
+        let clip_bg_dwords = clip_bg_data.len();
+        let clip_bg_bytes = clip_bg_dwords * 4;
 
         let has_paths = path_batch.fan_vertex_count > 0 && stencil_available;
         let fan_data = path_batch.as_fan_data();
@@ -557,9 +747,16 @@ pub extern "C" fn _start() -> ! {
         let cover_dwords = cover_data.len();
         let cover_bytes = cover_dwords * 4;
 
-        let fan_vbo_offset = color_bytes;
+        let has_clip = path_batch.clip_fan_vertex_count > 0 && stencil_available;
+        let clip_fan_data = path_batch.as_clip_fan_data();
+        let clip_fan_dwords = clip_fan_data.len();
+        let clip_fan_bytes = clip_fan_dwords * 4;
+
+        let clip_bg_vbo_offset = color_bytes;
+        let fan_vbo_offset = clip_bg_vbo_offset + clip_bg_bytes;
         let cover_vbo_offset = fan_vbo_offset + fan_bytes;
-        let total_color_bytes = cover_vbo_offset + cover_bytes;
+        let clip_fan_vbo_offset = cover_vbo_offset + cover_bytes;
+        let total_color_bytes = clip_fan_vbo_offset + clip_fan_bytes;
 
         // Upload all color vertex data in one transfer.
         if total_color_bytes > 0 {
@@ -570,6 +767,16 @@ pub extern "C" fn _start() -> ! {
                         color_data.as_ptr(),
                         vbo_va as *mut u32,
                         color_dwords,
+                    );
+                }
+            }
+            if clip_bg_bytes > 0 {
+                // SAFETY: vbo_va is valid DMA of TOTAL_COLOR_VBO_BYTES.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        clip_bg_data.as_ptr(),
+                        (vbo_va + clip_bg_vbo_offset) as *mut u32,
+                        clip_bg_dwords,
                     );
                 }
             }
@@ -591,6 +798,17 @@ pub extern "C" fn _start() -> ! {
                     );
                 }
             }
+            if has_clip && clip_fan_bytes > 0 {
+                // SAFETY: vbo_va is valid DMA of TOTAL_COLOR_VBO_BYTES; clip_fan_vbo_offset
+                // is bounded by the layout computation above.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        clip_fan_data.as_ptr(),
+                        (vbo_va + clip_fan_vbo_offset) as *mut u32,
+                        clip_fan_dwords,
+                    );
+                }
+            }
             resources::transfer_vbo_to_host(&device, &mut vq, irq_handle, total_color_bytes as u32);
         }
 
@@ -608,7 +826,7 @@ pub extern "C" fn _start() -> ! {
         cmdbuf.cmd_set_viewport(width as f32, height as f32);
         cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
         cmdbuf.cmd_clear(0.13, 0.13, 0.16, 1.0);
-        if has_paths {
+        if has_paths || has_clip {
             cmdbuf.cmd_clear_stencil();
         }
 
@@ -624,6 +842,9 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Stencil-then-cover paths (VBO offsets for fan + cover).
+        // Content::Path uses the stencil buffer and then zeroes it via the
+        // stencil test DSA (zero-on-pass). Clip stencil is written AFTER this
+        // pass so it is not consumed by the path cover draw.
         if has_paths {
             // Pass A: stencil write (fan triangles, no color).
             cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND_NO_COLOR);
@@ -646,11 +867,11 @@ pub extern "C" fn _start() -> ! {
             );
             cmdbuf.cmd_draw_vbo(0, path_batch.cover_vertex_count, PIPE_PRIM_TRIANGLES, false);
 
-            // Restore normal DSA.
+            // Restore normal DSA after path rendering.
             cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
         }
 
-        // ── Pass 3: Upload + draw images (TEXTURED_FS) ──────────────────
+        // ── Pass 3: Draw non-clipped images ──────────────────────────────
         // Each image shares a single GPU texture resource, so we must
         // upload, transfer, and draw each image individually.  Vertices
         // are written sequentially into the text VBO (image 0 at offset
@@ -662,11 +883,15 @@ pub extern "C" fn _start() -> ! {
             let vh = height as f32;
             let white = 1.0f32.to_bits();
 
+            // First pass: draw non-clipped images only.
             for idx in 0..image_batch.count {
                 let img = match image_batch.get(idx) {
                     Some(i) => i,
                     None => break,
                 };
+                if img.clipped {
+                    continue; // Deferred to clipped pass.
+                }
                 let img_pixels = img.src_width as u32 * img.src_height as u32 * 4;
                 let src_offset = img.data_offset as usize;
                 let src_end = src_offset + img_pixels as usize;
@@ -701,17 +926,22 @@ pub extern "C" fn _start() -> ! {
                 let x1 = (img.x + img.w) / vw * 2.0 - 1.0;
                 let y1 = 1.0 - (img.y + img.h) / vh * 2.0;
 
+                // Texcoords scaled to the populated sub-region of the
+                // IMG_TEX_DIM × IMG_TEX_DIM texture (source image may be smaller).
+                let u_max = img.src_width as f32 / IMG_TEX_DIM as f32;
+                let v_max = img.src_height as f32 / IMG_TEX_DIM as f32;
+
                 // 6 vertices x 8 floats = 48 dwords.
                 let dwords = scene_walk::DWORDS_PER_IMAGE_QUAD;
                 let mut img_verts = [0u32; 48];
                 // pos(x,y) + texcoord(u,v) + color(r,g,b,a)
                 let verts: [(f32, f32, f32, f32); 6] = [
-                    (x0, y0, 0.0, 0.0), // top-left
-                    (x0, y1, 0.0, 1.0), // bottom-left
-                    (x1, y0, 1.0, 0.0), // top-right
-                    (x1, y0, 1.0, 0.0), // top-right
-                    (x0, y1, 0.0, 1.0), // bottom-left
-                    (x1, y1, 1.0, 1.0), // bottom-right
+                    (x0, y0, 0.0, 0.0),     // top-left
+                    (x0, y1, 0.0, v_max),   // bottom-left
+                    (x1, y0, u_max, 0.0),   // top-right
+                    (x1, y0, u_max, 0.0),   // top-right
+                    (x0, y1, 0.0, v_max),   // bottom-left
+                    (x1, y1, u_max, v_max), // bottom-right
                 ];
                 for (i, &(px, py, u, v)) in verts.iter().enumerate() {
                     let base = i * 8;
@@ -781,30 +1011,48 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // ── Pass 4: Upload glyph vertices to text VBO and draw.
+        // ── Pass 4: Upload + draw non-clipped glyph vertices ────────────
         //
-        // Layout: [image vertices (MAX_IMAGES * 192 bytes)] [glyph vertices]
-        // Glyph draw uses VBO offset after all image data.
+        // Layout: [image vertices (MAX_IMAGES * 192 bytes)] [glyph vertices] [clipped glyphs]
+        // Non-clipped glyph draw uses VBO offset after all image data.
         let text_data = text_batch.as_vertex_data();
         let text_dwords = text_data.len();
         let text_bytes = text_dwords * 4;
 
+        let clip_text_data = text_batch.as_clip_vertex_data();
+        let clip_text_dwords = clip_text_data.len();
+        let clip_text_bytes = clip_text_dwords * 4;
+
         // Reserve space for MAX_IMAGES image quads so glyph offset is stable.
         let img_vbo_bytes: usize = scene_walk::MAX_IMAGES * scene_walk::DWORDS_PER_IMAGE_QUAD * 4;
-        let glyph_vbo_offset = img_vbo_bytes; // glyphs start after all image slots
+        let glyph_vbo_offset = img_vbo_bytes; // non-clipped glyphs start after all image slots
+        let clip_glyph_vbo_offset = glyph_vbo_offset + text_bytes; // clipped glyphs follow
 
-        if text_bytes > 0 {
-            // Copy glyph data after image region in DMA buffer.
-            // SAFETY: text_vbo_va is valid DMA of TOTAL_TEXTURED_VBO_BYTES.
-            unsafe {
-                core::ptr::copy_nonoverlapping(
-                    text_data.as_ptr(),
-                    (text_vbo_va + img_vbo_bytes) as *mut u32,
-                    text_dwords,
-                );
+        if text_bytes > 0 || clip_text_bytes > 0 {
+            // Copy non-clipped glyph data after image region in DMA buffer.
+            if text_bytes > 0 {
+                // SAFETY: text_vbo_va is valid DMA of TOTAL_TEXTURED_VBO_BYTES.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        text_data.as_ptr(),
+                        (text_vbo_va + img_vbo_bytes) as *mut u32,
+                        text_dwords,
+                    );
+                }
+            }
+            // Copy clipped glyph data after non-clipped glyphs.
+            if clip_text_bytes > 0 {
+                // SAFETY: text_vbo_va is valid DMA of TOTAL_TEXTURED_VBO_BYTES.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        clip_text_data.as_ptr(),
+                        (text_vbo_va + clip_glyph_vbo_offset) as *mut u32,
+                        clip_text_dwords,
+                    );
+                }
             }
 
-            let total_upload = img_vbo_bytes + text_bytes;
+            let total_upload = clip_glyph_vbo_offset + clip_text_bytes;
             resources::transfer_buffer_to_host(
                 &device,
                 &mut vq,
@@ -813,6 +1061,7 @@ pub extern "C" fn _start() -> ! {
                 total_upload as u32,
             );
 
+            // Draw non-clipped glyphs.
             if text_batch.vertex_count > 0 {
                 cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
                 cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
@@ -828,16 +1077,487 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
+        // ── Pass 5: Clip path stencil write + clipped content ───────────
+        //
+        // Write the clip fan geometry to the stencil buffer, then draw
+        // all clipped content (backgrounds, images, glyphs) with stencil
+        // test enabled, then clear the stencil buffer.
+        if has_clip {
+            // Step A: Write clip fan to stencil buffer (no color output).
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND_NO_COLOR);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_STENCIL_WRITE);
+            cmdbuf.cmd_set_vertex_buffers(
+                scene_walk::VERTEX_STRIDE,
+                clip_fan_vbo_offset as u32,
+                VB_RESOURCE_ID,
+            );
+            cmdbuf.cmd_set_stencil_ref(0, 0);
+            cmdbuf.cmd_draw_vbo(
+                0,
+                path_batch.clip_fan_vertex_count,
+                PIPE_PRIM_TRIANGLES,
+                false,
+            );
+
+            // Step B: Enable stencil test for clipped content.
+            // Use HANDLE_DSA_CLIP_TEST (not HANDLE_DSA_STENCIL_TEST) because
+            // clip test KEEPs the stencil value on pass, allowing multiple
+            // clipped draws to all test against the same stencil mask.
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_CLIP_TEST);
+
+            // Step C: Draw clipped backgrounds.
+            if batch.clip_vertex_count > 0 {
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE);
+                cmdbuf.cmd_bind_shader(HANDLE_VS, PIPE_SHADER_VERTEX);
+                cmdbuf.cmd_bind_shader(HANDLE_FS, PIPE_SHADER_FRAGMENT);
+                cmdbuf.cmd_set_vertex_buffers(
+                    scene_walk::VERTEX_STRIDE,
+                    clip_bg_vbo_offset as u32,
+                    VB_RESOURCE_ID,
+                );
+                cmdbuf.cmd_draw_vbo(0, batch.clip_vertex_count, PIPE_PRIM_TRIANGLES, false);
+            }
+
+            // Step D: Draw clipped images (with stencil test still active).
+            // Must submit current cmdbuf first since images need per-image
+            // texture upload cycles.
+            if !cmdbuf.overflowed() {
+                submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+            }
+            cmdbuf.clear();
+            let zsurf_clip = if stencil_available {
+                HANDLE_STENCIL_SURFACE
+            } else {
+                0
+            };
+            cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf_clip);
+            cmdbuf.cmd_set_viewport(width as f32, height as f32);
+            cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
+
+            {
+                let vw = width as f32;
+                let vh = height as f32;
+                let white = 1.0f32.to_bits();
+
+                for idx in 0..image_batch.count {
+                    let img = match image_batch.get(idx) {
+                        Some(i) => i,
+                        None => break,
+                    };
+                    if !img.clipped {
+                        continue; // Already drawn in non-clipped pass.
+                    }
+                    let img_pixels = img.src_width as u32 * img.src_height as u32 * 4;
+                    let src_offset = img.data_offset as usize;
+                    let src_end = src_offset + img_pixels as usize;
+
+                    if src_end > data_buf.len() || img_pixels > max_img_bytes {
+                        continue;
+                    }
+
+                    // SAFETY: img_dma_va is valid DMA of max_img_bytes.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            data_buf[src_offset..src_end].as_ptr(),
+                            img_dma_va as *mut u8,
+                            img_pixels as usize,
+                        );
+                    }
+                    resources::transfer_texture_to_host(
+                        &device,
+                        &mut vq,
+                        irq_handle,
+                        IMG_RESOURCE_ID,
+                        img.src_width as u32,
+                        img.src_height as u32,
+                        img.src_width as u32 * 4,
+                    );
+
+                    let x0 = img.x / vw * 2.0 - 1.0;
+                    let y0 = 1.0 - img.y / vh * 2.0;
+                    let x1 = (img.x + img.w) / vw * 2.0 - 1.0;
+                    let y1 = 1.0 - (img.y + img.h) / vh * 2.0;
+
+                    // Texcoords scaled to populated sub-region of IMG_TEX_DIM texture.
+                    let u_max = img.src_width as f32 / IMG_TEX_DIM as f32;
+                    let v_max = img.src_height as f32 / IMG_TEX_DIM as f32;
+
+                    let dwords = scene_walk::DWORDS_PER_IMAGE_QUAD;
+                    let mut img_verts = [0u32; 48];
+                    let verts: [(f32, f32, f32, f32); 6] = [
+                        (x0, y0, 0.0, 0.0),
+                        (x0, y1, 0.0, v_max),
+                        (x1, y0, u_max, 0.0),
+                        (x1, y0, u_max, 0.0),
+                        (x0, y1, 0.0, v_max),
+                        (x1, y1, u_max, v_max),
+                    ];
+                    for (i, &(px, py, u, v)) in verts.iter().enumerate() {
+                        let base = i * 8;
+                        img_verts[base] = px.to_bits();
+                        img_verts[base + 1] = py.to_bits();
+                        img_verts[base + 2] = u.to_bits();
+                        img_verts[base + 3] = v.to_bits();
+                        img_verts[base + 4] = white;
+                        img_verts[base + 5] = white;
+                        img_verts[base + 6] = white;
+                        img_verts[base + 7] = white;
+                    }
+
+                    let vbo_dword_offset = images_drawn * dwords;
+                    // SAFETY: text_vbo_va is valid DMA, bounded by MAX_IMAGES.
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            img_verts.as_ptr(),
+                            (text_vbo_va as *mut u32).add(vbo_dword_offset),
+                            dwords,
+                        );
+                    }
+
+                    let vbo_byte_offset = (vbo_dword_offset * 4) as u32;
+                    let vbo_byte_len = (dwords * 4) as u32;
+                    resources::transfer_buffer_to_host(
+                        &device,
+                        &mut vq,
+                        irq_handle,
+                        TEXT_VB_RESOURCE_ID,
+                        vbo_byte_offset + vbo_byte_len,
+                    );
+
+                    // Re-bind clip test DSA (lost after cmdbuf.clear above).
+                    cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+                    cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+                    cmdbuf.cmd_bind_shader(HANDLE_FS_IMAGE, PIPE_SHADER_FRAGMENT);
+                    cmdbuf.cmd_set_vertex_buffers(
+                        scene_walk::TEXTURED_VERTEX_STRIDE,
+                        vbo_byte_offset,
+                        TEXT_VB_RESOURCE_ID,
+                    );
+                    cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+                    cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER_VIEW_IMG);
+                    cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_CLIP_TEST);
+                    cmdbuf.cmd_draw_vbo(0, 6, PIPE_PRIM_TRIANGLES, false);
+
+                    if !cmdbuf.overflowed() {
+                        submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+                    }
+                    cmdbuf.clear();
+                    cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf_clip);
+                    cmdbuf.cmd_set_viewport(width as f32, height as f32);
+                    cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
+
+                    images_drawn += 1;
+                }
+            }
+
+            // Step E: Draw clipped glyphs (stencil test still active).
+            if text_batch.clip_vertex_count > 0 {
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA_CLIP_TEST);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+                cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+                cmdbuf.cmd_bind_shader(HANDLE_FS_GLYPH, PIPE_SHADER_FRAGMENT);
+                cmdbuf.cmd_set_vertex_buffers(
+                    scene_walk::TEXTURED_VERTEX_STRIDE,
+                    clip_glyph_vbo_offset as u32,
+                    TEXT_VB_RESOURCE_ID,
+                );
+                cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+                cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER_VIEW);
+                cmdbuf.cmd_draw_vbo(0, text_batch.clip_vertex_count, PIPE_PRIM_TRIANGLES, false);
+            }
+
+            // Step F: Restore normal DSA and clear stencil.
+            cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
+            cmdbuf.cmd_clear_stencil();
+        }
+
+        // Submit all normal rendering before blur passes.
+        // Blur operates on the fully-rendered framebuffer.
         if cmdbuf.overflowed() {
             sys::print(b"virgil-render: command buffer overflow!\n");
         } else {
             submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
-            resources::flush_resource(&device, &mut vq, irq_handle, width, height);
         }
+
+        // ── Pass 5: Two-pass GPU backdrop blur ───────────────────────────
+        //
+        // Three-pass box blur (3 iterations × H+V = 6 draw calls) with
+        // padded capture for edge-artifact-free blurring. The node's
+        // background is drawn ON TOP of the blur result (not baked in).
+        for blur in &blur_requests {
+            if blur.w < 1.0 || blur.h < 1.0 {
+                continue;
+            }
+
+            let bx = blur.x as u32;
+            let by = blur.y as u32;
+            let bw = blur.w as u32;
+            let bh = blur.h as u32;
+
+            // Compute box blur widths from shared algorithm.
+            let sigma = blur.radius as f32 / 2.0;
+            let halves = drawing::box_blur_widths(sigma);
+            let pad = halves[0] + halves[1] + halves[2];
+
+            // Padded capture region, clamped to FB bounds.
+            let cap_x = if bx >= pad { bx - pad } else { 0 };
+            let cap_y = if by >= pad { by - pad } else { 0 };
+            let cap_x1 = (bx + bw + pad).min(width);
+            let cap_y1 = (by + bh + pad).min(height);
+            let cap_w = cap_x1 - cap_x;
+            let cap_h = cap_y1 - cap_y;
+            if cap_w == 0 || cap_h == 0 {
+                continue;
+            }
+
+            let vw_f = width as f32;
+            let vh_f = height as f32;
+            let padded_u = cap_w as f32 / BLUR_MAX_DIM as f32;
+            let padded_v = cap_h as f32 / BLUR_MAX_DIM as f32;
+            let texel_step = 1.0 / BLUR_MAX_DIM as f32;
+
+            // Blit padded FB region → BLUR_CAPTURE.
+            cmdbuf.clear();
+            cmdbuf.cmd_blit_region(
+                BLUR_CAPTURE_RESOURCE_ID,
+                0,
+                0,
+                RT_RESOURCE_ID,
+                cap_x,
+                cap_y,
+                cap_w,
+                cap_h,
+            );
+            if !cmdbuf.overflowed() {
+                submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+            }
+
+            let white = 1.0f32.to_bits();
+            let mut blur_verts = [0u32; 48];
+            let blur_vbo_offset = 0usize;
+
+            // Fullscreen quad for intermediate passes.
+            let fs_verts: [(f32, f32, f32, f32); 6] = [
+                (-1.0, 1.0, 0.0, 0.0),
+                (-1.0, -1.0, 0.0, padded_v),
+                (1.0, 1.0, padded_u, 0.0),
+                (1.0, 1.0, padded_u, 0.0),
+                (-1.0, -1.0, 0.0, padded_v),
+                (1.0, -1.0, padded_u, padded_v),
+            ];
+
+            // Three iterations of H+V box blur.
+            for pass_idx in 0..3u32 {
+                let half = halves[pass_idx as usize];
+                let diameter = 2 * half + 1;
+                let inv_diam = 1.0 / diameter as f32;
+                let cb_data_8: [u32; 8] = [
+                    texel_step.to_bits(),
+                    texel_step.to_bits(),
+                    padded_u.to_bits(),
+                    padded_v.to_bits(),
+                    (half as f32).to_bits(),
+                    inv_diam.to_bits(),
+                    0,
+                    0,
+                ];
+
+                // H-blur: BLUR_CAPTURE → BLUR_INTERMEDIATE.
+                for (i, &(px, py, u, v)) in fs_verts.iter().enumerate() {
+                    let base = i * 8;
+                    blur_verts[base] = px.to_bits();
+                    blur_verts[base + 1] = py.to_bits();
+                    blur_verts[base + 2] = u.to_bits();
+                    blur_verts[base + 3] = v.to_bits();
+                    blur_verts[base + 4] = white;
+                    blur_verts[base + 5] = white;
+                    blur_verts[base + 6] = white;
+                    blur_verts[base + 7] = white;
+                }
+                // SAFETY: text_vbo_va is valid DMA of TOTAL_TEXTURED_VBO_BYTES.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        blur_verts.as_ptr(),
+                        (text_vbo_va + blur_vbo_offset) as *mut u32,
+                        48,
+                    );
+                }
+                resources::transfer_buffer_to_host(
+                    &device,
+                    &mut vq,
+                    irq_handle,
+                    TEXT_VB_RESOURCE_ID,
+                    (blur_vbo_offset + 48 * 4) as u32,
+                );
+                cmdbuf.clear();
+                cmdbuf.cmd_set_framebuffer_state(HANDLE_BLUR_INTERMEDIATE_SURFACE, 0);
+                cmdbuf.cmd_set_viewport(cap_w as f32, cap_h as f32);
+                cmdbuf.cmd_set_scissor(0, 0, cap_w as u16, cap_h as u16);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+                cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+                cmdbuf.cmd_bind_shader(HANDLE_FS_BLUR_H, PIPE_SHADER_FRAGMENT);
+                cmdbuf.cmd_set_vertex_buffers(
+                    scene_walk::TEXTURED_VERTEX_STRIDE,
+                    blur_vbo_offset as u32,
+                    TEXT_VB_RESOURCE_ID,
+                );
+                cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+                cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_BLUR_CAPTURE_VIEW);
+                cmdbuf.cmd_set_constant_buffer(PIPE_SHADER_FRAGMENT, 0, &cb_data_8);
+                cmdbuf.cmd_draw_vbo(0, 6, PIPE_PRIM_TRIANGLES, false);
+                if !cmdbuf.overflowed() {
+                    submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+                }
+
+                // V-blur: BLUR_INTERMEDIATE → destination.
+                let is_final = pass_idx == 2;
+                if is_final {
+                    // Final: map output to node bounds, texcoords to center
+                    // of padded texture (discard padding).
+                    let pad_left = bx - cap_x;
+                    let pad_top = by - cap_y;
+                    let u0 = pad_left as f32 / BLUR_MAX_DIM as f32;
+                    let v0 = pad_top as f32 / BLUR_MAX_DIM as f32;
+                    let u1 = (pad_left + bw) as f32 / BLUR_MAX_DIM as f32;
+                    let v1 = (pad_top + bh) as f32 / BLUR_MAX_DIM as f32;
+                    let x0 = blur.x / vw_f * 2.0 - 1.0;
+                    let y0 = 1.0 - blur.y / vh_f * 2.0;
+                    let x1 = (blur.x + blur.w) / vw_f * 2.0 - 1.0;
+                    let y1 = 1.0 - (blur.y + blur.h) / vh_f * 2.0;
+                    let v_verts: [(f32, f32, f32, f32); 6] = [
+                        (x0, y0, u0, v0),
+                        (x0, y1, u0, v1),
+                        (x1, y0, u1, v0),
+                        (x1, y0, u1, v0),
+                        (x0, y1, u0, v1),
+                        (x1, y1, u1, v1),
+                    ];
+                    for (i, &(px, py, u, v)) in v_verts.iter().enumerate() {
+                        let base = i * 8;
+                        blur_verts[base] = px.to_bits();
+                        blur_verts[base + 1] = py.to_bits();
+                        blur_verts[base + 2] = u.to_bits();
+                        blur_verts[base + 3] = v.to_bits();
+                        blur_verts[base + 4] = white;
+                        blur_verts[base + 5] = white;
+                        blur_verts[base + 6] = white;
+                        blur_verts[base + 7] = white;
+                    }
+                }
+                // SAFETY: same DMA slot, same bounds.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(
+                        blur_verts.as_ptr(),
+                        (text_vbo_va + blur_vbo_offset) as *mut u32,
+                        48,
+                    );
+                }
+                resources::transfer_buffer_to_host(
+                    &device,
+                    &mut vq,
+                    irq_handle,
+                    TEXT_VB_RESOURCE_ID,
+                    (blur_vbo_offset + 48 * 4) as u32,
+                );
+                if is_final {
+                    let zsurf = if stencil_available {
+                        HANDLE_STENCIL_SURFACE
+                    } else {
+                        0
+                    };
+                    cmdbuf.clear();
+                    cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf);
+                    cmdbuf.cmd_set_viewport(width as f32, height as f32);
+                    cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
+                } else {
+                    cmdbuf.clear();
+                    cmdbuf.cmd_set_framebuffer_state(HANDLE_BLUR_CAPTURE_SURFACE, 0);
+                    cmdbuf.cmd_set_viewport(cap_w as f32, cap_h as f32);
+                    cmdbuf.cmd_set_scissor(0, 0, cap_w as u16, cap_h as u16);
+                }
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE_TEXTURED);
+                cmdbuf.cmd_bind_shader(HANDLE_VS_TEXTURED, PIPE_SHADER_VERTEX);
+                cmdbuf.cmd_bind_shader(HANDLE_FS_BLUR_V, PIPE_SHADER_FRAGMENT);
+                cmdbuf.cmd_set_vertex_buffers(
+                    scene_walk::TEXTURED_VERTEX_STRIDE,
+                    blur_vbo_offset as u32,
+                    TEXT_VB_RESOURCE_ID,
+                );
+                cmdbuf.cmd_bind_sampler_states(PIPE_SHADER_FRAGMENT, HANDLE_SAMPLER);
+                cmdbuf.cmd_set_sampler_views(PIPE_SHADER_FRAGMENT, HANDLE_BLUR_INTERMEDIATE_VIEW);
+                cmdbuf.cmd_set_constant_buffer(PIPE_SHADER_FRAGMENT, 0, &cb_data_8);
+                cmdbuf.cmd_draw_vbo(0, 6, PIPE_PRIM_TRIANGLES, false);
+                if !cmdbuf.overflowed() {
+                    submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+                }
+            }
+
+            // Post-blur: draw bg quad on top of blur result.
+            if blur.bg.a > 0 {
+                let r = blur.bg.r as f32 / 255.0;
+                let g = blur.bg.g as f32 / 255.0;
+                let b = blur.bg.b as f32 / 255.0;
+                let a = blur.bg.a as f32 / 255.0;
+                let x0 = blur.x / vw_f * 2.0 - 1.0;
+                let y0 = 1.0 - blur.y / vh_f * 2.0;
+                let x1 = (blur.x + blur.w) / vw_f * 2.0 - 1.0;
+                let y1 = 1.0 - (blur.y + blur.h) / vh_f * 2.0;
+                let mut bg_verts = [0u32; 36]; // 6 verts × 6 floats
+                let bg_pos: [(f32, f32); 6] =
+                    [(x0, y0), (x0, y1), (x1, y0), (x1, y0), (x0, y1), (x1, y1)];
+                for (i, &(px, py)) in bg_pos.iter().enumerate() {
+                    let base = i * 6;
+                    bg_verts[base] = px.to_bits();
+                    bg_verts[base + 1] = py.to_bits();
+                    bg_verts[base + 2] = r.to_bits();
+                    bg_verts[base + 3] = g.to_bits();
+                    bg_verts[base + 4] = b.to_bits();
+                    bg_verts[base + 5] = a.to_bits();
+                }
+                // SAFETY: vbo_va is valid DMA of TOTAL_COLOR_VBO_BYTES.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(bg_verts.as_ptr(), vbo_va as *mut u32, 36);
+                }
+                resources::transfer_buffer_to_host(
+                    &device,
+                    &mut vq,
+                    irq_handle,
+                    VB_RESOURCE_ID,
+                    (36 * 4) as u32,
+                );
+                let zsurf = if stencil_available {
+                    HANDLE_STENCIL_SURFACE
+                } else {
+                    0
+                };
+                cmdbuf.clear();
+                cmdbuf.cmd_set_framebuffer_state(HANDLE_SURFACE, zsurf);
+                cmdbuf.cmd_set_viewport(width as f32, height as f32);
+                cmdbuf.cmd_set_scissor(scissor_x, scissor_y, scissor_w, scissor_h);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_BLEND, HANDLE_BLEND);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_DSA, HANDLE_DSA);
+                cmdbuf.cmd_bind_object(VIRGL_OBJECT_VERTEX_ELEMENTS, HANDLE_VE);
+                cmdbuf.cmd_bind_shader(HANDLE_VS, PIPE_SHADER_VERTEX);
+                cmdbuf.cmd_bind_shader(HANDLE_FS, PIPE_SHADER_FRAGMENT);
+                cmdbuf.cmd_set_vertex_buffers(scene_walk::VERTEX_STRIDE, 0, VB_RESOURCE_ID);
+                cmdbuf.cmd_draw_vbo(0, 6, PIPE_PRIM_TRIANGLES, false);
+                if !cmdbuf.overflowed() {
+                    submit_3d(&device, &mut vq, irq_handle, &cmdbuf);
+                }
+            }
+        }
+
+        resources::flush_resource(&device, &mut vq, irq_handle, width, height);
 
         // Update incremental state before releasing the reader.
         incr_state.update_from_frame(nodes, node_count);
-        reader.finish_read(gen);
+        reader.finish_read(generation);
         sched.on_render_complete_at(sys::counter_to_ns(sys::counter(), cfreq));
         frame_count = frame_count.wrapping_add(1);
     }

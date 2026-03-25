@@ -15,3 +15,5 @@ drawing = { path = "../libraries/drawing" }
 scene = { path = "../libraries/scene" }
 fonts = { path = "../libraries/fonts" }
 render = { path = "../libraries/render" }
+animation = { path = "../libraries/animation" }
+layout = { path = "../libraries/layout" }

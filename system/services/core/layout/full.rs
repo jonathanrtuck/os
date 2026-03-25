@@ -10,15 +10,59 @@ use scene::{fnv1a, Border, Color, Content, FillRule, NodeFlags, NULL};
 
 use super::{
     allocate_line_nodes, allocate_selection_rects, byte_to_line_col, chars_per_line, dc, doc_width,
-    layout_mono_lines, line_bytes_for_run, scroll_runs, shape_text, shape_visible_runs,
-    update_clock_inline, SceneConfig, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_TEXT, N_ROOT,
-    N_SHADOW, N_TITLE_BAR, N_TITLE_TEXT, WELL_KNOWN_COUNT,
+    layout_mono_lines, scroll_runs, shape_chrome_text, shape_visible_runs, update_clock_inline,
+    SceneConfig, FONT_SANS, N_CLOCK_TEXT, N_CONTENT, N_CURSOR, N_DOC_IMAGE, N_DOC_TEXT, N_PAGE,
+    N_POINTER, N_ROOT, N_SHADOW, N_STRIP, N_TITLE_BAR, N_TITLE_ICON, N_TITLE_TEXT,
+    WELL_KNOWN_COUNT,
 };
-use crate::test_gen::{generate_test_image, generate_test_rounded_rect, generate_test_star};
+use crate::icons;
+
+const DOCUMENT_SHADOW_BLUR_RADIUS: u8 = 64;
+const DOCUMENT_SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 255);
+const DOCUMENT_SHADOW_OFFSET_X: i16 = 0;
+const DOCUMENT_SHADOW_OFFSET_Y: i16 = 0;
+const DOCUMENT_SHADOW_SPREAD: i8 = 36;
+
+// ── Pointer cursor constants ─────────────────────────────────────────
+
+/// Pointer cursor display size in points.
+const CURSOR_SIZE_PT: u32 = 18;
+/// Hotspot offset in points (arrow tip is inset by this amount from node origin).
+pub const CURSOR_HOTSPOT_OFFSET: i32 = {
+    // offset_viewbox * display_pt / viewbox_size, rounded
+    // = 1.0 * 18 / 14 ≈ 1.3 → 1
+    (CURSOR_SIZE_PT as f32 * icons::CURSOR_VIEWBOX.recip()) as i32
+};
+
+/// Push cursor image data and set up N_POINTER as Content::InlineImage.
+fn setup_cursor(w: &mut scene::SceneWriter<'_>, mouse_x: u32, mouse_y: u32, pointer_opacity: u8) {
+    let cursor_px = CURSOR_SIZE_PT * 2; // 2× for Retina
+    let cursor_pixels = icons::rasterize_cursor(cursor_px);
+    let cursor_ref = w.push_data(&cursor_pixels);
+    let cursor_hash = fnv1a(&cursor_pixels);
+    let n = w.node_mut(N_POINTER);
+    n.x = scene::pt(mouse_x as i32 - CURSOR_HOTSPOT_OFFSET);
+    n.y = scene::pt(mouse_y as i32 - CURSOR_HOTSPOT_OFFSET);
+    n.width = scene::upt(CURSOR_SIZE_PT);
+    n.height = scene::upt(CURSOR_SIZE_PT);
+    n.content = Content::InlineImage {
+        data: cursor_ref,
+        src_width: cursor_px as u16,
+        src_height: cursor_px as u16,
+    };
+    n.content_hash = cursor_hash;
+    n.opacity = pointer_opacity;
+    n.flags = NodeFlags::VISIBLE;
+    n.next_sibling = NULL;
+}
 
 // ── Full scene builds (called by SceneState methods) ────────────────
 
-/// Build the full editor scene into a fresh (cleared) SceneWriter.
+/// Build the full scene graph into a fresh (cleared) SceneWriter.
+///
+/// Both document spaces are always present in the strip. The `slide_offset`
+/// determines which space is visible (0.0 = text, fb_width = image).
+/// The title bar always reflects `active_space`.
 #[allow(clippy::too_many_arguments)]
 pub fn build_full_scene(
     w: &mut scene::SceneWriter<'_>,
@@ -29,13 +73,19 @@ pub fn build_full_scene(
     sel_end: u32,
     title_label: &[u8],
     clock_text: &[u8],
-    scroll_y: i32,
+    scroll_y: scene::Mpt,
+    cursor_opacity: u8,
+    mouse_x: u32,
+    mouse_y: u32,
+    pointer_opacity: u8,
+    slide_offset: scene::Mpt,
+    active_space: u8,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
     let cpl = chars_per_line(cfg);
 
-    // Layout document text into visual lines (monospace line-breaking).
+    // Text layout (always computed — text document is always in the scene).
     let all_runs = layout_mono_lines(
         doc_text,
         cpl as usize,
@@ -43,18 +93,12 @@ pub fn build_full_scene(
         scene_text_color,
         cfg.font_size,
     );
-    // Apply scroll: filter to visible viewport.
     let content_y = cfg.title_bar_h + cfg.shadow_depth;
-    let content_h = cfg.fb_height.saturating_sub(content_y) as i32;
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, content_h);
-    // Scroll offset in points for cursor/selection positioning.
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
-    // Compute cursor line/col for positioning.
+    let content_h_u32 = cfg.fb_height.saturating_sub(content_y);
+    let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, content_h_u32 as i32);
+    let scroll_pt = scroll_y >> 10;
     let cursor_byte = cursor_pos as usize;
     let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_byte, cpl as usize);
-
-    // Compute selection rectangles.
     let (sel_lo, sel_hi) = if sel_start <= sel_end {
         (sel_start as usize, sel_end as usize)
     } else {
@@ -64,13 +108,15 @@ pub fn build_full_scene(
 
     w.clear();
 
-    // Push shaped glyph arrays for title and clock.
-    let title_glyphs = shape_text(cfg.font_data, title_label, cfg.font_size, cfg.upem, cfg.axes);
+    // ── Push data ────────────────────────────────────────────────────
+
+    // Chrome glyphs.
+    let title_glyphs = shape_chrome_text(cfg, title_label);
     let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
-    let clock_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
+    let clock_glyphs = shape_chrome_text(cfg, clock_text);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
-    // Push visible line glyph data.
+    // Document text glyphs.
     let line_glyph_refs = shape_visible_runs(
         w,
         &visible_runs,
@@ -81,32 +127,30 @@ pub fn build_full_scene(
         cfg.axes,
     );
 
-    // Allocate well-known nodes in order (sequential IDs).
-    let _root = w.alloc_node().unwrap(); // 0
-    let _title_bar = w.alloc_node().unwrap(); // 1
-    let _title_text = w.alloc_node().unwrap(); // 2
-    let _clock_text = w.alloc_node().unwrap(); // 3
-    let _shadow = w.alloc_node().unwrap(); // 4
-    let _content = w.alloc_node().unwrap(); // 5
-    let _doc_text = w.alloc_node().unwrap(); // 6
-    let _cursor_node = w.alloc_node().unwrap(); // 7
+    // ── Allocate well-known nodes (sequential IDs 0..12) ─────────────
+
+    for _ in 0..WELL_KNOWN_COUNT {
+        w.alloc_node().unwrap();
+    }
+
+    // ── Chrome (title bar, shadow) ───────────────────────────────────
 
     {
+        // Root: background desk color, content first, title bar overlaid on top.
         let n = w.node_mut(N_ROOT);
-
-        n.first_child = N_TITLE_BAR;
-        n.width = cfg.fb_width as u16;
-        n.height = cfg.fb_height as u16;
+        n.first_child = N_CONTENT;
+        n.width = scene::upt(cfg.fb_width);
+        n.height = scene::upt(cfg.fb_height);
         n.background = dc(cfg.bg_color);
         n.flags = NodeFlags::VISIBLE;
     }
     {
+        // Title bar: paints AFTER content (higher z-order) so it overlays
+        // document shadows that extend into the title bar region.
         let n = w.node_mut(N_TITLE_BAR);
-
-        n.first_child = N_TITLE_TEXT;
-        n.next_sibling = N_SHADOW;
-        n.width = cfg.fb_width as u16;
-        n.height = cfg.title_bar_h as u16;
+        n.first_child = N_TITLE_ICON;
+        n.width = scene::upt(cfg.fb_width);
+        n.height = scene::upt(cfg.title_bar_h);
         n.background = dc(cfg.chrome_bg);
         n.border = Border {
             color: dc(cfg.chrome_border),
@@ -114,98 +158,140 @@ pub fn build_full_scene(
             _pad: [0; 3],
         };
         n.flags = NodeFlags::VISIBLE;
-        // Real blurred shadow below the title bar.
-        n.shadow_color = Color::rgba(0, 0, 0, 60);
-        n.shadow_offset_x = 0;
-        n.shadow_offset_y = cfg.shadow_depth as i16;
-        n.shadow_blur_radius = (cfg.shadow_depth as u8).min(8);
-        n.shadow_spread = 0;
     }
 
     let text_y_offset = (cfg.title_bar_h.saturating_sub(cfg.line_height)) / 2;
 
+    // Title bar icon.
+    let icon_size_pt = cfg.line_height * 3 / 4;
+    let icon_size_px = icon_size_pt * 2;
+    let icon_paths = if active_space != 0 {
+        icons::PHOTO
+    } else {
+        icons::FILE_TEXT
+    };
+    let icon_pixels =
+        icons::rasterize_icon(icon_paths, icon_size_px, dc(cfg.chrome_title_color), 1.5);
+    let icon_data_ref = w.push_data(&icon_pixels);
+    let icon_hash = fnv1a(&icon_pixels);
+
+    let icon_x: i32 = 10;
+    let icon_y = (cfg.title_bar_h.saturating_sub(icon_size_pt)) / 2;
+    let title_text_x = icon_x + icon_size_pt as i32 + 6;
+
+    {
+        let n = w.node_mut(N_TITLE_ICON);
+        n.next_sibling = N_TITLE_TEXT;
+        n.x = scene::pt(icon_x);
+        n.y = scene::pt(icon_y as i32);
+        n.width = scene::upt(icon_size_pt);
+        n.height = scene::upt(icon_size_pt);
+        n.content = Content::InlineImage {
+            data: icon_data_ref,
+            src_width: icon_size_px as u16,
+            src_height: icon_size_px as u16,
+        };
+        n.content_hash = icon_hash;
+        n.flags = NodeFlags::VISIBLE;
+    }
     {
         let n = w.node_mut(N_TITLE_TEXT);
-
         n.next_sibling = N_CLOCK_TEXT;
-        n.x = 12;
-        n.y = text_y_offset as i32;
-        n.width = (cfg.fb_width / 2) as u16;
-        n.height = cfg.line_height as u16;
+        n.x = scene::pt(title_text_x);
+        n.y = scene::pt(text_y_offset as i32);
+        n.width = scene::upt(cfg.fb_width / 2);
+        n.height = scene::upt(cfg.line_height);
         n.content = Content::Glyphs {
             color: dc(cfg.chrome_title_color),
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(title_label);
         n.flags = NodeFlags::VISIBLE;
     }
 
     let clock_x = (cfg.fb_width - 12 - 80) as i32;
-
     {
         let n = w.node_mut(N_CLOCK_TEXT);
-
-        n.x = clock_x;
-        n.y = text_y_offset as i32;
-        n.width = 80;
-        n.height = cfg.line_height as u16;
+        n.x = scene::pt(clock_x);
+        n.y = scene::pt(text_y_offset as i32);
+        n.width = scene::upt(80);
+        n.height = scene::upt(cfg.line_height);
         n.content = Content::Glyphs {
             color: dc(cfg.chrome_clock_color),
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(clock_text);
         n.flags = NodeFlags::VISIBLE;
     }
-    {
-        // N_SHADOW is kept as a structural placeholder for
-        // well-known node index stability. The real shadow is
-        // now rendered by the title bar's shadow fields.
-        let n = w.node_mut(N_SHADOW);
+    // N_SHADOW: unused (document shadows are on N_PAGE / N_DOC_IMAGE directly).
 
-        n.next_sibling = N_CONTENT;
-        n.y = cfg.title_bar_h as i32;
-        n.width = cfg.fb_width as u16;
-        n.height = 0;
-        n.background = Color::TRANSPARENT;
-        n.flags = NodeFlags::VISIBLE;
-    }
-
-    let content_y = cfg.title_bar_h + cfg.shadow_depth;
-    let content_h_u32 = cfg.fb_height.saturating_sub(content_y);
+    // ── Content viewport + document strip ────────────────────────────
 
     {
+        // Full-height content area — allows document shadows to extend
+        // into the title bar region (title bar overlays on top).
         let n = w.node_mut(N_CONTENT);
-
-        n.first_child = N_DOC_TEXT;
-        n.next_sibling = NULL;
-        n.y = content_y as i32;
-        n.width = cfg.fb_width as u16;
-        n.height = content_h_u32 as u16;
+        n.first_child = N_STRIP;
+        n.next_sibling = N_TITLE_BAR;
+        n.width = scene::upt(cfg.fb_width);
+        n.height = scene::upt(cfg.fb_height);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     }
     {
-        let n = w.node_mut(N_DOC_TEXT);
+        // N_STRIP: horizontal strip of document spaces, offset below title bar.
+        // content_transform.tx slides between spaces.
+        let n = w.node_mut(N_STRIP);
+        n.first_child = N_PAGE;
+        n.y = scene::pt(content_y as i32);
+        n.width = scene::upt(cfg.fb_width * 2); // 2 spaces
+        n.height = scene::upt(content_h_u32);
+        n.content_transform =
+            scene::AffineTransform::translate(-scene::mpt_to_f32(slide_offset), 0.0);
+        n.flags = NodeFlags::VISIBLE;
+    }
 
-        n.x = cfg.text_inset_x as i32;
-        n.y = 8;
-        n.width = doc_width as u16;
-        n.height = content_h_u32 as u16;
-        n.content_transform = scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
-        // N_DOC_TEXT is now a pure container -- per-line Glyphs
-        // child nodes hold the actual text content.
+    // ── Space 0: text document page ──────────────────────────────────
+
+    let page_x = ((cfg.fb_width - cfg.page_width) / 2) as i32;
+    let page_y = ((content_h_u32 - cfg.page_height) / 2) as i32;
+    let page_padding = cfg.text_inset_x;
+    let text_area_h = cfg.page_height.saturating_sub(2 * page_padding);
+
+    {
+        let n = w.node_mut(N_PAGE);
+        n.first_child = N_DOC_TEXT;
+        n.next_sibling = N_DOC_IMAGE;
+        n.x = scene::pt(page_x);
+        n.y = scene::pt(page_y);
+        n.width = scene::upt(cfg.page_width);
+        n.height = scene::upt(cfg.page_height);
+        n.background = dc(cfg.page_bg);
+        n.shadow_color = DOCUMENT_SHADOW_COLOR;
+        n.shadow_offset_x = DOCUMENT_SHADOW_OFFSET_X;
+        n.shadow_offset_y = DOCUMENT_SHADOW_OFFSET_Y;
+        n.shadow_blur_radius = DOCUMENT_SHADOW_BLUR_RADIUS;
+        n.shadow_spread = DOCUMENT_SHADOW_SPREAD;
+        n.flags = NodeFlags::VISIBLE;
+    }
+    {
+        let n = w.node_mut(N_DOC_TEXT);
+        n.x = scene::pt(page_padding as i32);
+        n.y = scene::pt(page_padding as i32);
+        n.width = scene::upt(doc_width);
+        n.height = scene::upt(text_area_h);
+        n.content_transform = scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
         n.content = Content::None;
         n.content_hash = fnv1a(doc_text);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     }
 
-    // Allocate per-line Glyphs child nodes under N_DOC_TEXT.
-    // Ordering: line nodes first, then N_CURSOR, then selection rects.
+    // Per-line Glyphs child nodes.
     let prev_line_node = allocate_line_nodes(
         w,
         &line_glyph_refs,
@@ -222,25 +308,23 @@ pub fn build_full_scene(
         w.node_mut(prev_line_node).next_sibling = N_CURSOR;
     }
 
-    // Cursor: positioned rectangle child of doc text node.
-    // Document-relative: renderer applies content_transform from N_DOC_TEXT.
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
-
+    // Cursor.
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
     {
         let n = w.node_mut(N_CURSOR);
-
         n.x = cursor_x;
         n.y = cursor_y;
-        n.width = 2;
-        n.height = cfg.line_height as u16;
+        n.width = scene::upt(2);
+        n.height = scene::upt(cfg.line_height);
         n.background = dc(cfg.cursor_color);
+        n.opacity = cursor_opacity;
         n.content = Content::None;
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
     }
 
-    // Selection highlight rectangles (dynamically allocated, scroll-adjusted).
+    // Selection.
     if has_selection {
         allocate_selection_rects(
             w,
@@ -248,100 +332,88 @@ pub fn build_full_scene(
             sel_lo,
             sel_hi,
             cpl as usize,
-            cfg.char_width,
+            cfg.char_width_fx,
             cfg.line_height,
             dc(cfg.sel_color),
-            content_h_u32,
+            text_area_h,
             scroll_pt,
         );
     }
 
-    // ── Test content: Image + Path ─────────────────────────────
-    // These exercise Content::Image and Content::Path in the GPU
-    // driver. Positioned in the bottom-right of the content area.
+    // ── Space 1: image document (Content Region) ──────────────────────
 
-    // Test image: 32x32 BGRA gradient.
-    let test_img = generate_test_image();
-    let img_ref = w.push_data(&test_img);
-    if let Some(img_id) = w.alloc_node() {
-        let n = w.node_mut(img_id);
-        n.x = (cfg.fb_width as i32).saturating_sub(160);
-        n.y = 8;
-        n.width = 64; // Display at 2x for visibility.
-        n.height = 64;
-        n.content = Content::Image {
-            data: img_ref,
-            src_width: 32,
-            src_height: 32,
-        };
-        n.flags = NodeFlags::VISIBLE;
-
-        // Link as last child of N_CONTENT (after cursor/selection).
-        // Walk to find last child.
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = img_id;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
+    // Image display size: actual decoded dimensions, scaled to fit the content area
+    // with padding while preserving aspect ratio.
+    let (img_display_w, img_display_h) = {
+        let s = crate::state();
+        if s.image_width > 0 && s.image_height > 0 {
+            let max_w = cfg.fb_width.saturating_sub(48); // padding
+            let max_h = content_h_u32.saturating_sub(48);
+            let src_w = s.image_width as u32;
+            let src_h = s.image_height as u32;
+            // Scale to fit: min(max_w/src_w, max_h/src_h), capped at 1.0 (don't upscale).
+            // Use integer arithmetic: scale_num/scale_den.
+            let scale_w_num = max_w;
+            let scale_w_den = src_w;
+            let scale_h_num = max_h;
+            let scale_h_den = src_h;
+            // Compare scale_w and scale_h: scale_w < scale_h iff w_num*h_den < h_num*w_den.
+            let (s_num, s_den) = if (scale_w_num as u64) * (scale_h_den as u64)
+                < (scale_h_num as u64) * (scale_w_den as u64)
+            {
+                (scale_w_num, scale_w_den)
+            } else {
+                (scale_h_num, scale_h_den)
+            };
+            // Don't upscale beyond native size.
+            if s_num >= s_den {
+                (src_w, src_h)
+            } else {
+                (
+                    (src_w * s_num / s_den).max(1),
+                    (src_h * s_num / s_den).max(1),
+                )
             }
-            w.node_mut(last).next_sibling = img_id;
+        } else {
+            (128, 128) // fallback if no image decoded
         }
+    };
+    // Position in strip: viewport_width + centered within second space.
+    let img_x = cfg.fb_width as i32 + ((cfg.fb_width as i32 - img_display_w as i32) / 2).max(0);
+    let img_y = ((content_h_u32 as i32 - img_display_h as i32) / 2).max(0);
+    {
+        let s = crate::state();
+        let n = w.node_mut(N_DOC_IMAGE);
+        n.x = scene::pt(img_x);
+        n.y = scene::pt(img_y);
+        n.width = scene::upt(img_display_w);
+        n.height = scene::upt(img_display_h);
+        if s.image_content_id != 0 {
+            n.content = Content::Image {
+                content_id: s.image_content_id,
+                src_width: s.image_width,
+                src_height: s.image_height,
+            };
+            n.content_hash = s.image_content_id;
+        } else {
+            n.content = Content::None;
+            n.content_hash = 0;
+        }
+        n.shadow_color = DOCUMENT_SHADOW_COLOR;
+        n.shadow_offset_x = DOCUMENT_SHADOW_OFFSET_X;
+        n.shadow_offset_y = DOCUMENT_SHADOW_OFFSET_Y;
+        n.shadow_blur_radius = DOCUMENT_SHADOW_BLUR_RADIUS;
+        n.shadow_spread = DOCUMENT_SHADOW_SPREAD;
+        n.flags = NodeFlags::VISIBLE;
+        n.next_sibling = NULL;
     }
 
-    // Test path 1: 5-pointed star (red).
-    let star_cmds = generate_test_star(60.0);
-    let star_ref = w.push_path_commands(&star_cmds);
-    if let Some(star_id) = w.alloc_node() {
-        let n = w.node_mut(star_id);
-        n.x = (cfg.fb_width as i32).saturating_sub(90);
-        n.y = 8;
-        n.width = 60;
-        n.height = 60;
-        n.content = Content::Path {
-            color: Color::rgba(255, 80, 80, 255),
-            fill_rule: FillRule::Winding,
-            contours: star_ref,
-        };
-        n.flags = NodeFlags::VISIBLE;
+    // ── Pointer cursor (top-level, highest z-order) ──────────────────
+    // Sibling chain: N_CONTENT → N_TITLE_BAR → N_POINTER
+    // (content set above; title bar links to pointer here)
 
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = star_id;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
-            }
-            w.node_mut(last).next_sibling = star_id;
-        }
-    }
-
-    // Test path 2: Rounded rectangle (blue, tests CubicTo).
-    let rrect_cmds = generate_test_rounded_rect(80.0, 40.0, 8.0);
-    let rrect_ref = w.push_path_commands(&rrect_cmds);
-    if let Some(rr_id) = w.alloc_node() {
-        let n = w.node_mut(rr_id);
-        n.x = (cfg.fb_width as i32).saturating_sub(160);
-        n.y = 78;
-        n.width = 80;
-        n.height = 40;
-        n.content = Content::Path {
-            color: Color::rgba(80, 140, 255, 255),
-            fill_rule: FillRule::Winding,
-            contours: rrect_ref,
-        };
-        n.flags = NodeFlags::VISIBLE;
-
-        let mut last = w.node(N_CONTENT).first_child;
-        if last == NULL {
-            w.node_mut(N_CONTENT).first_child = rr_id;
-        } else {
-            while w.node(last).next_sibling != NULL {
-                last = w.node(last).next_sibling;
-            }
-            w.node_mut(last).next_sibling = rr_id;
-        }
-    }
+    w.node_mut(N_TITLE_BAR).next_sibling = N_POINTER;
+    setup_cursor(w, mouse_x, mouse_y, pointer_opacity);
 
     w.set_root(N_ROOT);
 }
@@ -351,7 +423,7 @@ pub fn build_full_scene(
 pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clock_text: &[u8]) {
     let clock_node = w.node(N_CLOCK_TEXT);
     if let Content::Glyphs { color, .. } = clock_node.content {
-        let new_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
+        let new_glyphs = shape_chrome_text(cfg, clock_text);
         let new_ref = w.push_shaped_glyphs(&new_glyphs);
         let new_count = new_glyphs.len() as u16;
 
@@ -361,7 +433,7 @@ pub fn build_clock_update(w: &mut scene::SceneWriter<'_>, cfg: &SceneConfig, clo
             glyphs: new_ref,
             glyph_count: new_count,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(clock_text);
         w.mark_dirty(N_CLOCK_TEXT);
@@ -377,20 +449,22 @@ pub fn build_cursor_update(
     doc_text: &[u8],
     chars_per_line: u32,
     clock_text: Option<&[u8]>,
+    cursor_opacity: u8,
 ) {
     let (cursor_line, cursor_col) =
         byte_to_line_col(doc_text, cursor_pos as usize, chars_per_line as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
 
     let n = w.node_mut(N_CURSOR);
     n.x = cursor_x;
     n.y = cursor_y;
+    n.opacity = cursor_opacity;
 
     w.mark_dirty(N_CURSOR);
 
     if let Some(ct) = clock_text {
-        update_clock_inline(w, ct, cfg.font_data, cfg.font_size, cfg.upem, cfg.axes);
+        update_clock_inline(w, ct, cfg);
     }
 }
 
@@ -406,6 +480,7 @@ pub fn build_selection_update(
     doc_text: &[u8],
     content_h: u32,
     scroll_pt: i32,
+    cursor_opacity: u8,
 ) {
     let doc_width = doc_width(cfg);
     let cpl = chars_per_line(cfg);
@@ -416,25 +491,24 @@ pub fn build_selection_update(
     // Count per-line Glyphs children under N_DOC_TEXT (stop at
     // N_CURSOR). These must be preserved — only selection rects
     // (allocated after cursor) are truncated.
-    let mut line_count: u16 = 0;
-    let mut child = w.node(N_DOC_TEXT).first_child;
-    while child != NULL && child != N_CURSOR {
-        line_count += 1;
-        child = w.node(child).next_sibling;
-    }
+    let first = w.node(N_DOC_TEXT).first_child;
+    let line_count = w.children_until(first, N_CURSOR).count() as u16;
 
     // Truncate selection rects only, keeping well-known + line nodes.
     w.set_node_count(WELL_KNOWN_COUNT + line_count);
 
-    let (cursor_line, cursor_col) =
-        byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+    // N_DOC_TEXT is the sole child of N_CONTENT — no siblings.
+    w.node_mut(N_DOC_TEXT).next_sibling = NULL;
+
+    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
 
     {
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_x;
         n.y = cursor_y;
+        n.opacity = cursor_opacity;
         n.next_sibling = NULL;
     }
     w.mark_dirty(N_CURSOR);
@@ -452,7 +526,7 @@ pub fn build_selection_update(
             sel_lo,
             sel_hi,
             cpl as usize,
-            cfg.char_width,
+            cfg.char_width_fx,
             cfg.line_height,
             dc(cfg.sel_color),
             content_h,
@@ -473,30 +547,77 @@ pub fn build_document_content(
     sel_end: u32,
     title_label: &[u8],
     clock_text: &[u8],
-    scroll_y: i32,
+    scroll_y: scene::Mpt,
     mark_clock_changed: bool,
+    cursor_opacity: u8,
 ) {
     let scene_text_color = dc(cfg.text_color);
     let doc_width = doc_width(cfg);
     let cpl = chars_per_line(cfg);
 
-    let content_y = cfg.title_bar_h + cfg.shadow_depth;
-    let content_h = cfg.fb_height.saturating_sub(content_y);
-    let scroll_lines = if scroll_y > 0 { scroll_y as u32 } else { 0 };
-    let scroll_pt = scroll_lines as i32 * cfg.line_height as i32;
+    let page_padding = cfg.text_inset_x;
+    let text_area_h = cfg.page_height.saturating_sub(2 * page_padding);
+    let scroll_pt = scroll_y >> 10;
 
     // Remove old dynamic nodes (line nodes + selection rects).
+    // set_node_count automatically clears dangling first_child pointers
+    // on surviving nodes that referenced the now-dead dynamic nodes.
     w.set_node_count(WELL_KNOWN_COUNT);
 
     // ── Data buffer compaction ──────────────────────────────
+    // Note: reset_data invalidates all DataRef values (clip_path, content).
+    // Surviving nodes with stale DataRefs will produce empty data lookups
+    // (the reader returns &[] for out-of-bounds refs). This is safe but
+    // means clip paths on demo nodes won't render after compaction — they
+    // are re-pushed in build_full_scene on the next full rebuild.
     w.reset_data();
 
-    // Re-push title glyph data.
-    let title_glyphs = shape_text(cfg.font_data, title_label, cfg.font_size, cfg.upem, cfg.axes);
+    // Re-push pointer cursor image data (invalidated by reset_data).
+    {
+        let cursor_px = CURSOR_SIZE_PT * 2;
+        let cursor_pixels = icons::rasterize_cursor(cursor_px);
+        let cursor_ref = w.push_data(&cursor_pixels);
+        let cursor_hash = fnv1a(&cursor_pixels);
+        let n = w.node_mut(N_POINTER);
+        n.content = Content::InlineImage {
+            data: cursor_ref,
+            src_width: cursor_px as u16,
+            src_height: cursor_px as u16,
+        };
+        n.content_hash = cursor_hash;
+    }
+
+    // Re-push title icon pixel data (invalidated by reset_data).
+    {
+        let icon_size_pt = cfg.line_height * 3 / 4;
+        let icon_size_px = icon_size_pt * 2;
+        let icon_pixels = icons::rasterize_icon(
+            icons::FILE_TEXT,
+            icon_size_px,
+            dc(cfg.chrome_title_color),
+            1.5,
+        );
+        let icon_data_ref = w.push_data(&icon_pixels);
+        let icon_hash = fnv1a(&icon_pixels);
+        let n = w.node_mut(N_TITLE_ICON);
+        n.content = Content::InlineImage {
+            data: icon_data_ref,
+            src_width: icon_size_px as u16,
+            src_height: icon_size_px as u16,
+        };
+        n.content_hash = icon_hash;
+    }
+
+    // Content::Image nodes reference the Content Region (not the scene data buffer),
+    // so no re-push is needed for space 1 after reset_data. The content_id reference
+    // is stable across data buffer compaction.
+
+    // Re-push title glyph data (shaped with chrome font).
+    let title_glyphs = shape_chrome_text(cfg, title_label);
     let title_glyph_ref = w.push_shaped_glyphs(&title_glyphs);
 
-    // Re-push clock glyph data.
-    let clock_glyphs = shape_text(cfg.font_data, clock_text, cfg.font_size, cfg.upem, cfg.axes);
+    // Re-push clock glyph data (shaped with chrome font).
+    let clock_glyphs = shape_chrome_text(cfg, clock_text);
     let clock_glyph_ref = w.push_shaped_glyphs(&clock_glyphs);
 
     // Re-layout visible document text lines.
@@ -507,8 +628,7 @@ pub fn build_document_content(
         scene_text_color,
         cfg.font_size,
     );
-    let viewport_height_pt = content_h as i32;
-    let visible_runs = scroll_runs(all_runs, scroll_lines, cfg.line_height, viewport_height_pt);
+    let visible_runs = scroll_runs(all_runs, scroll_y, cfg.line_height, text_area_h as i32);
 
     // Push visible line glyph data.
     let line_glyph_refs = shape_visible_runs(
@@ -529,7 +649,7 @@ pub fn build_document_content(
             glyphs: title_glyph_ref,
             glyph_count: title_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(title_label);
     }
@@ -542,7 +662,7 @@ pub fn build_document_content(
             glyphs: clock_glyph_ref,
             glyph_count: clock_glyphs.len() as u16,
             font_size: cfg.font_size,
-            axis_hash: 0,
+            axis_hash: FONT_SANS,
         };
         n.content_hash = fnv1a(clock_text);
     }
@@ -551,17 +671,10 @@ pub fn build_document_content(
     }
 
     // Re-create per-line Glyphs children under N_DOC_TEXT.
-    // Reset both first_child AND next_sibling. The initial
-    // build_editor_scene links test content (Image, Path) as
-    // siblings of N_DOC_TEXT under N_CONTENT. acquire_copy()
-    // preserves that stale next_sibling pointer. After
-    // truncation, the same node index gets reused for a line
-    // node — the walker would visit it twice (once as child of
-    // N_DOC_TEXT, once as sibling) with different parent Y
-    // offsets, causing ghost duplicates.
+    // N_DOC_TEXT is the sole child of N_PAGE — no siblings.
     w.node_mut(N_DOC_TEXT).next_sibling = NULL;
     w.node_mut(N_DOC_TEXT).content_transform =
-        scene::AffineTransform::translate(0.0, -(scroll_pt as f32));
+        scene::AffineTransform::translate(0.0, -scene::mpt_to_f32(scroll_y));
     w.node_mut(N_DOC_TEXT).content = Content::None;
     w.node_mut(N_DOC_TEXT).content_hash = fnv1a(doc_text);
 
@@ -584,15 +697,15 @@ pub fn build_document_content(
     w.mark_dirty(N_DOC_TEXT);
 
     // Update cursor position (document-relative).
-    let (cursor_line, cursor_col) =
-        byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
-    let cursor_x = (cursor_col as u32 * cfg.char_width) as i32;
-    let cursor_y = (cursor_line as i32 * cfg.line_height as i32) as i32;
+    let (cursor_line, cursor_col) = byte_to_line_col(doc_text, cursor_pos as usize, cpl as usize);
+    let cursor_x = ((cursor_col as i64 * cfg.char_width_fx as i64) >> 6) as scene::Mpt;
+    let cursor_y = scene::pt(cursor_line as i32 * cfg.line_height as i32);
 
     {
         let n = w.node_mut(N_CURSOR);
         n.x = cursor_x;
         n.y = cursor_y;
+        n.opacity = cursor_opacity;
         n.next_sibling = NULL;
     }
     w.mark_dirty(N_CURSOR);
@@ -611,10 +724,10 @@ pub fn build_document_content(
             sel_lo,
             sel_hi,
             cpl as usize,
-            cfg.char_width,
+            cfg.char_width_fx,
             cfg.line_height,
             dc(cfg.sel_color),
-            content_h,
+            text_area_h,
             scroll_pt,
         );
     }

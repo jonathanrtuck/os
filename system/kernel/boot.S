@@ -24,9 +24,11 @@
 //   No bugs found.
 // ==========================================================================
 
-// Physical memory layout (QEMU virt, 256MB RAM).
+// Physical memory layout (QEMU virt).
+// boot.S maps the maximum 256 MB for identity mapping. The actual RAM size
+// is read from the DTB by Rust code (paging::set_ram_end) after boot.
 .equ RAM_START,     0x40000000
-.equ RAM_END,       0x50000000         // RAM_START + 256MB
+.equ RAM_END,       0x50000000         // RAM_START + 256MB (max for identity map)
 .equ BLOCK_2MB,     0x00200000
 // Descriptor bits.
 .equ DESC_VALID,    (1 << 0)

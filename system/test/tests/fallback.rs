@@ -9,10 +9,8 @@ mod fallback;
 
 use fallback::{ContentType, FallbackChain};
 
-const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
-const NUNITO_SANS_VARIABLE: &[u8] = include_bytes!("../../share/nunito-sans-variable.ttf");
-const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf");
-const SOURCE_CODE_PRO_VARIABLE: &[u8] = include_bytes!("../../share/source-code-pro-variable.ttf");
+const INTER: &[u8] = include_bytes!("../../share/inter.ttf");
+const JETBRAINS_MONO: &[u8] = include_bytes!("../../share/jetbrains-mono.ttf");
 
 // ---------------------------------------------------------------------------
 // VAL-FALLBACK-001: Primary font glyph resolution
@@ -23,7 +21,7 @@ fn fallback_primary_font_used_for_ascii() {
     // When the primary font contains a glyph for a codepoint, the fallback
     // mechanism is not invoked. ASCII text shaped with a fallback chain should
     // produce the same glyph IDs as shaping with the primary font alone.
-    let chain = FallbackChain::new(&[NUNITO_SANS_VARIABLE, SOURCE_CODE_PRO_VARIABLE]);
+    let chain = FallbackChain::new(&[INTER, JETBRAINS_MONO]);
     let result = chain.shape("Hello", &[]);
 
     // All glyphs should have font_index == 0 (primary font).
@@ -36,7 +34,7 @@ fn fallback_primary_font_used_for_ascii() {
     }
 
     // Should produce the same glyph IDs as shaping with primary font alone.
-    let primary_only = fonts::shape(NUNITO_SANS_VARIABLE, "Hello", &[]);
+    let primary_only = fonts::shape(INTER, "Hello", &[]);
     assert_eq!(result.len(), primary_only.len());
     for (fb, primary) in result.iter().zip(primary_only.iter()) {
         assert_eq!(
@@ -50,7 +48,7 @@ fn fallback_primary_font_used_for_ascii() {
 fn fallback_not_triggered_for_common_latin() {
     // Extended Latin characters that exist in both fonts should still come
     // from the primary font.
-    let chain = FallbackChain::new(&[NUNITO_SANS_VARIABLE, SOURCE_CODE_PRO_VARIABLE]);
+    let chain = FallbackChain::new(&[INTER, JETBRAINS_MONO]);
     let result = chain.shape("abc 123", &[]);
 
     for sg in &result {
@@ -76,8 +74,8 @@ fn fallback_missing_glyph_uses_secondary() {
     // codepoint exists among the candidates, verify at minimum that the
     // fallback mechanism returns .notdef with proper chain exhaustion.
 
-    let primary_only = FallbackChain::new(&[SOURCE_CODE_PRO_VARIABLE]);
-    let chain = FallbackChain::new(&[SOURCE_CODE_PRO_VARIABLE, NUNITO_SANS_VARIABLE]);
+    let primary_only = FallbackChain::new(&[JETBRAINS_MONO]);
+    let chain = FallbackChain::new(&[JETBRAINS_MONO, INTER]);
 
     // Candidate codepoints that proportional fonts sometimes cover but
     // monospace fonts often lack: arrows, math symbols, box drawings, misc.
@@ -126,11 +124,11 @@ fn fallback_missing_glyph_uses_secondary() {
 
 #[test]
 fn fallback_returns_valid_glyph_from_secondary_when_primary_lacks() {
-    // Same test as above but with the font order reversed: Nunito Sans as
-    // primary, Source Code Pro as fallback. Verifies fallback is symmetric.
+    // Same test as above but with the font order reversed: Inter as
+    // primary, JetBrains Mono as fallback. Verifies fallback is symmetric.
 
-    let primary_only = FallbackChain::new(&[NUNITO_SANS_VARIABLE]);
-    let chain = FallbackChain::new(&[NUNITO_SANS_VARIABLE, SOURCE_CODE_PRO_VARIABLE]);
+    let primary_only = FallbackChain::new(&[INTER]);
+    let chain = FallbackChain::new(&[INTER, JETBRAINS_MONO]);
 
     // Candidate codepoints that the primary (proportional) may lack.
     let candidates = [
@@ -176,12 +174,12 @@ fn fallback_returns_valid_glyph_from_secondary_when_primary_lacks() {
 
 #[test]
 fn fallback_code_content_type_selects_monospace_primary() {
-    // Code content type should use monospace (Source Code Pro) as primary
-    // and proportional (Nunito Sans) as fallback.
+    // Code content type should use monospace (JetBrains Mono) as primary
+    // and proportional (Inter) as fallback.
     let chain = FallbackChain::for_content_type(
         ContentType::Code,
-        SOURCE_CODE_PRO_VARIABLE,
-        NUNITO_SANS_VARIABLE,
+        JETBRAINS_MONO,
+        INTER,
     );
 
     // The primary font should be the monospace font.
@@ -201,12 +199,12 @@ fn fallback_code_content_type_selects_monospace_primary() {
 
 #[test]
 fn fallback_prose_content_type_selects_proportional_primary() {
-    // Prose content type should use proportional (Nunito Sans) as primary
-    // and monospace (Source Code Pro) as fallback.
+    // Prose content type should use proportional (Inter) as primary
+    // and monospace (JetBrains Mono) as fallback.
     let chain = FallbackChain::for_content_type(
         ContentType::Prose,
-        SOURCE_CODE_PRO_VARIABLE,
-        NUNITO_SANS_VARIABLE,
+        JETBRAINS_MONO,
+        INTER,
     );
 
     // The primary font should be the proportional font.
@@ -225,13 +223,13 @@ fn fallback_content_type_code_vs_prose_differ() {
     // Code and prose content types should produce different primary fonts.
     let code_chain = FallbackChain::for_content_type(
         ContentType::Code,
-        SOURCE_CODE_PRO_VARIABLE,
-        NUNITO_SANS_VARIABLE,
+        JETBRAINS_MONO,
+        INTER,
     );
     let prose_chain = FallbackChain::for_content_type(
         ContentType::Prose,
-        SOURCE_CODE_PRO_VARIABLE,
-        NUNITO_SANS_VARIABLE,
+        JETBRAINS_MONO,
+        INTER,
     );
 
     let code_result = code_chain.shape("Hello", &[]);
@@ -254,7 +252,7 @@ fn fallback_content_type_code_vs_prose_differ() {
 fn fallback_chain_exhaustion_returns_notdef() {
     // When no font in the chain has a glyph for a codepoint, .notdef
     // (glyph_id 0) is returned. Use a codepoint unlikely to be in either font.
-    let chain = FallbackChain::new(&[SOURCE_CODE_PRO_VARIABLE, NUNITO_SANS_VARIABLE]);
+    let chain = FallbackChain::new(&[JETBRAINS_MONO, INTER]);
 
     // U+FFFD REPLACEMENT CHARACTER or a rare codepoint. Let's use a very
     // rare codepoint from a private use area that no standard font covers.
@@ -276,7 +274,7 @@ fn fallback_chain_exhaustion_returns_notdef() {
 fn fallback_subsequent_chars_after_exhaustion() {
     // After a chain exhaustion (.notdef), subsequent characters should still
     // be shaped correctly. The pipeline does not abort.
-    let chain = FallbackChain::new(&[SOURCE_CODE_PRO_VARIABLE, NUNITO_SANS_VARIABLE]);
+    let chain = FallbackChain::new(&[JETBRAINS_MONO, INTER]);
 
     // String with an unmappable codepoint followed by regular ASCII.
     let text = "\u{10FFFD}Hello";
@@ -316,8 +314,8 @@ fn fallback_cache_key_includes_font_identifier() {
     let mut cache = LruGlyphCache::new(64);
 
     // Create two glyphs with the same glyph_id but from different fonts.
-    // In a fallback scenario, glyph_id 65 from font A (Nunito Sans) might
-    // look completely different from glyph_id 65 from font B (Source Code Pro).
+    // In a fallback scenario, glyph_id 65 from font A (Inter) might
+    // look completely different from glyph_id 65 from font B (JetBrains Mono).
     let glyph_font_a = LruCachedGlyph {
         width: 10,
         height: 12,
@@ -401,14 +399,14 @@ fn fallback_empty_chain_returns_empty() {
 
 #[test]
 fn fallback_single_font_chain_works() {
-    let chain = FallbackChain::new(&[NUNITO_SANS_VARIABLE]);
+    let chain = FallbackChain::new(&[INTER]);
     let result = chain.shape("Hello", &[]);
     assert!(result.len() >= 5, "single-font chain should shape normally");
 }
 
 #[test]
 fn fallback_empty_text_returns_empty() {
-    let chain = FallbackChain::new(&[NUNITO_SANS_VARIABLE, SOURCE_CODE_PRO_VARIABLE]);
+    let chain = FallbackChain::new(&[INTER, JETBRAINS_MONO]);
     let result = chain.shape("", &[]);
     assert!(result.is_empty(), "empty text should produce no glyphs");
 }
@@ -416,7 +414,7 @@ fn fallback_empty_text_returns_empty() {
 #[test]
 fn fallback_shape_char_returns_notdef_for_unknown() {
     // shape_char should return .notdef for a codepoint not in any font.
-    let chain = FallbackChain::new(&[SOURCE_CODE_PRO_VARIABLE, NUNITO_SANS_VARIABLE]);
+    let chain = FallbackChain::new(&[JETBRAINS_MONO, INTER]);
     let (glyph, font_idx) = chain.shape_char('\u{10FFFD}');
     // Either .notdef from some font, or the last font in chain.
     // The font_index should be valid (within chain bounds or indicate exhaustion).

@@ -699,3 +699,109 @@ fn device_with_empty_regs_not_emitted() {
     let dt = device_tree::parse(&blob).expect("empty reg should parse");
     assert_eq!(dt.device_count(), 0);
 }
+
+// --- Tests for memory_region() (DTB /memory node parsing) ---
+
+/// A memory node with device_type = "memory" and reg should be captured.
+#[test]
+fn memory_region_from_device_type() {
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node("");
+    builder.begin_node("memory@40000000");
+    builder.prop_str("device_type", "memory");
+    builder.prop_reg("reg", &[(0x4000_0000, 0x1000_0000)]);
+    builder.end_node();
+    builder.end_node();
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("should parse");
+
+    // Memory node has no `compatible`, so device_count is 0.
+    assert_eq!(dt.device_count(), 0);
+
+    let (base, size) = dt.memory_region().expect("should find memory region");
+    assert_eq!(base, 0x4000_0000);
+    assert_eq!(size, 0x1000_0000);
+}
+
+/// memory_region returns None when no memory node is present.
+#[test]
+fn memory_region_none_without_memory_node() {
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node("");
+    builder.begin_node("uart@9000000");
+    builder.prop_str("compatible", "arm,pl011");
+    builder.prop_reg("reg", &[(0x0900_0000, 0x1000)]);
+    builder.end_node();
+    builder.end_node();
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("should parse");
+
+    assert!(dt.memory_region().is_none());
+}
+
+/// A node with device_type != "memory" should not be captured as memory.
+#[test]
+fn memory_region_ignores_non_memory_device_type() {
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node("");
+    builder.begin_node("cpu@0");
+    builder.prop_str("device_type", "cpu");
+    builder.prop_reg("reg", &[(0, 0)]);
+    builder.end_node();
+    builder.end_node();
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("should parse");
+
+    assert!(dt.memory_region().is_none());
+}
+
+/// A memory node without reg should not produce a memory region.
+#[test]
+fn memory_region_none_without_reg() {
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node("");
+    builder.begin_node("memory@40000000");
+    builder.prop_str("device_type", "memory");
+    // No reg property.
+    builder.end_node();
+    builder.end_node();
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("should parse");
+
+    assert!(dt.memory_region().is_none());
+}
+
+/// Memory node alongside normal devices: both should be captured.
+#[test]
+fn memory_region_coexists_with_devices() {
+    let mut builder = FdtBuilder::new();
+
+    builder.begin_node("");
+    builder.begin_node("memory@40000000");
+    builder.prop_str("device_type", "memory");
+    builder.prop_reg("reg", &[(0x4000_0000, 0x2000_0000)]); // 512 MiB
+    builder.end_node();
+    builder.begin_node("uart@9000000");
+    builder.prop_str("compatible", "arm,pl011");
+    builder.prop_reg("reg", &[(0x0900_0000, 0x1000)]);
+    builder.end_node();
+    builder.end_node();
+
+    let blob = builder.finish();
+    let dt = device_tree::parse(&blob).expect("should parse");
+
+    assert_eq!(dt.device_count(), 1); // Only the UART is a "device"
+    assert!(dt.find_first("arm,pl011").is_some());
+
+    let (base, size) = dt.memory_region().expect("should find memory");
+    assert_eq!(base, 0x4000_0000);
+    assert_eq!(size, 0x2000_0000);
+}

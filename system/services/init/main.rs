@@ -57,11 +57,11 @@ use protocol::compose::{
     MSG_RTC_CONFIG,
 };
 use protocol::{
-    core_config::{CoreConfig, MSG_CORE_CONFIG},
+    core_config::{CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE},
     device::{DeviceConfig, MSG_DEVICE_CONFIG},
     editor::{EditorConfig, MSG_EDITOR_CONFIG},
     fs::{MSG_FS_READ_REQUEST, MSG_FS_READ_RESPONSE},
-    gpu::{DisplayInfoMsg, GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
+    gpu::{GpuConfig, MSG_DISPLAY_INFO, MSG_GPU_CONFIG, MSG_GPU_READY},
 };
 
 /// Bytes per pixel (BGRA8888).
@@ -72,6 +72,7 @@ const VIRTIO_DEVICE_CONSOLE: u32 = 3;
 const VIRTIO_DEVICE_GPU: u32 = 16;
 const VIRTIO_DEVICE_INPUT: u32 = 18;
 const VIRTIO_DEVICE_9P: u32 = 9;
+const VIRTIO_DEVICE_METAL: u32 = 22;
 /// Virtio MMIO register offsets for feature probing.
 const MMIO_DEVICE_FEATURES: usize = 0x010;
 const MMIO_DEVICE_FEATURES_SEL: usize = 0x014;
@@ -103,7 +104,7 @@ fn init_channel(channel_index: usize) -> ipc::Channel {
 fn print_u32(n: u32) {
     sys::print_u32(n);
 }
-fn start_process(handle: u8, name: &[u8]) {
+fn start_process(handle: sys::ProcessHandle, name: &[u8]) {
     if sys::process_start(handle).is_err() {
         sys::print(b"init: process_start failed for ");
         sys::print(name);
@@ -163,16 +164,17 @@ fn probe_virgl(gpu_pa: u64) -> bool {
 /// Returns (core_proc_handle, editor_proc_handle) for monitoring.
 fn setup_render_pipeline(
     name: &[u8], // e.g. b"virgl" or b"cpu-render"
-    gpu_proc: u8,
-    gpu_ch_handle: u8,
+    gpu_proc: sys::ProcessHandle,
+    gpu_ch_handle: sys::ChannelHandle,
     gpu_channel_idx: usize,
     gpu_pa: u64,
     gpu_irq: u32,
-    input_devices: &[(u8, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
-    font_buf: Option<(u64, u32, u32, u32, u32)>, // (pa, mono_len, prop_len, png_offset, png_len)
-    rtc_pa: u64,                             // PL031 RTC physical address (0 = not found)
+    input_devices: &[(sys::ProcessHandle, usize, u64, u32)], // slice of (proc, ch_idx, pa, irq)
+    content_region: Option<(u64, u32)>, // (content_pa, content_size) — Content Region
+    file_store: Option<(u64, u32, u32)>, // (file_store_pa, png_offset, png_len) — File Store
+    rtc_pa: u64,                        // PL031 RTC physical address (0 = not found)
     next_channel: &mut usize,
-) -> (u8, u8) {
+) -> (sys::ProcessHandle, sys::ProcessHandle) {
     sys::print(b"     setting up ");
     sys::print(name);
     sys::print(b" pipeline\n");
@@ -210,16 +212,39 @@ fn setup_render_pipeline(
 
     sys::print(b"     document buffer: 4 KiB shared\n");
 
-    // Unpack font buffer info.
-    let (font_pa_val, mono_font_len, prop_font_len, png_offset, png_len) =
-        if let Some((pa, mono, prop, png_off, png_l)) = font_buf {
-            (pa, mono, prop, png_off, png_l)
-        } else {
-            (0u64, 0u32, 0u32, 0u32, 0u32)
-        };
-    let font_total_len = mono_font_len + prop_font_len + png_len;
-    let font_pages = if font_total_len > 0 {
-        ((font_total_len as u64) + 4095) / 4096
+    // Pointer state register (1 page). Shared with input drivers (write),
+    // core (read-only), and render service (read-only for cursor plane).
+    // Allocated here so it can be shared with the render service in Phase 3
+    // (memory_share requires the target process to be unstarted).
+    let mut input_state_pa: u64 = 0;
+    let input_state_va = sys::dma_alloc(0, &mut input_state_pa).unwrap_or_else(|_| {
+        sys::print(b"init: dma_alloc (input state) failed\n");
+        sys::exit();
+    });
+
+    // SAFETY: input_state_va is a valid 1-page DMA region; zeroing 4096 bytes is within bounds.
+    unsafe { core::ptr::write_bytes(input_state_va as *mut u8, 0, 4096) };
+
+    sys::print(b"     pointer state register: 4 KiB shared\n");
+
+    // Unpack Content Region and File Store info.
+    let (content_pa_val, content_size_val) = if let Some((pa, size)) = content_region {
+        (pa, size)
+    } else {
+        (0u64, 0u32)
+    };
+    let content_pages = if content_size_val > 0 {
+        (content_size_val as u64 + 4095) / 4096
+    } else {
+        0
+    };
+    let (file_store_pa_val, png_offset, png_len) = if let Some((pa, off, len)) = file_store {
+        (pa, off, len)
+    } else {
+        (0u64, 0u32, 0u32)
+    };
+    let file_store_pages = if png_len > 0 {
+        ((png_offset as u64 + png_len as u64) + 4095) / 4096
     } else {
         0
     };
@@ -250,18 +275,26 @@ fn setup_render_pipeline(
             sys::exit();
         });
 
-    // Share font data with render service (for glyph atlas/rasterization).
-    let render_font_va = if font_pages > 0 {
-        sys::memory_share(gpu_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (render font) failed\n");
+    // Share Content Region with render service (read-only, for fonts + decoded images).
+    let render_content_va = if content_pages > 0 {
+        sys::memory_share(gpu_proc, content_pa_val, content_pages, true).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (render content) failed\n");
             sys::exit();
         }) as u64
     } else {
         0u64
     };
 
+    // Share pointer state register with render service (read-only).
+    // Enables cursor plane position updates without full scene walks.
+    let render_input_state_va = sys::memory_share(gpu_proc, input_state_pa, 1, true)
+        .unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (render input state) failed\n");
+            sys::exit();
+        });
+
     // Send scene update channel endpoint B to render service (handle 1).
-    sys::handle_send(gpu_proc, cv_b).unwrap_or_else(|_| {
+    sys::handle_send(gpu_proc, cv_b.0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-render B) failed\n");
         sys::exit();
     });
@@ -297,7 +330,7 @@ fn setup_render_pipeline(
         let mut retries = 0u32;
 
         loop {
-            match sys::wait(&[gpu_ch_handle], BOOT_TIMEOUT_NS) {
+            match sys::wait(&[gpu_ch_handle.0], BOOT_TIMEOUT_NS) {
                 Ok(_) => {
                     if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_DISPLAY_INFO {
                         display_ok = true;
@@ -324,10 +357,23 @@ fn setup_render_pipeline(
         }
     }
 
-    // SAFETY: DisplayInfoMsg fits within 60-byte payload; msg_type was verified as MSG_DISPLAY_INFO above.
-    let display_info: DisplayInfoMsg = unsafe { resp_msg.payload_as() };
+    let display_info = if let Some(protocol::gpu::Message::DisplayInfo(d)) =
+        protocol::gpu::decode(resp_msg.msg_type, &resp_msg.payload)
+    {
+        d
+    } else {
+        sys::print(b"init: bad display info payload\n");
+        loop {
+            sys::yield_now();
+        }
+    };
     let fb_width = display_info.width;
     let fb_height = display_info.height;
+    let frame_rate: u16 = if display_info.refresh_rate > 0 {
+        display_info.refresh_rate as u16
+    } else {
+        60
+    };
 
     // Compute scale factor.
     let scale_factor: f32 = if fb_width >= 2048 { 2.0 } else { 1.0 };
@@ -381,7 +427,7 @@ fn setup_render_pipeline(
         let mut retries = 0u32;
 
         loop {
-            match sys::wait(&[gpu_ch_handle], BOOT_TIMEOUT_NS) {
+            match sys::wait(&[gpu_ch_handle.0], BOOT_TIMEOUT_NS) {
                 Ok(_) => {
                     if gpu_ch.try_recv(&mut resp_msg) && resp_msg.msg_type == MSG_GPU_READY {
                         gpu_ready = true;
@@ -413,16 +459,16 @@ fn setup_render_pipeline(
     // -----------------------------------------------------------------------
     let render_config = CompositorConfig {
         scene_va: render_scene_va as u64,
-        mono_font_va: render_font_va,
+        content_va: render_content_va,
         fb_width,
         fb_height,
-        mono_font_len,
-        prop_font_len,
+        content_size: content_size_val,
         scale_factor,
-        frame_rate: 60,
+        frame_rate,
         font_size: 18,
         screen_dpi: 96,
         _pad: 0,
+        pointer_state_va: render_input_state_va as u64,
     };
     // SAFETY: CompositorConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_COMPOSITOR_CONFIG, &render_config) };
@@ -458,40 +504,65 @@ fn setup_render_pipeline(
             sys::print(b"init: memory_share (core scene) failed\n");
             sys::exit();
         });
-    // Share font data with core (read-only).
-    let core_font_va = if font_pages > 0 {
-        sys::memory_share(core_proc, font_pa_val, font_pages, true).unwrap_or_else(|_| {
-            sys::print(b"init: memory_share (core font) failed\n");
+    // Share Content Region with core (read-write — core writes decoded images).
+    let core_content_va = if content_pages > 0 {
+        sys::memory_share(core_proc, content_pa_val, content_pages, false).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (core content) failed\n");
             sys::exit();
         }) as u64
     } else {
         0u64
     };
+    // Share File Store with core (read-only — raw PNG bytes for decoding).
+    let core_file_store_va = if file_store_pages > 0 {
+        sys::memory_share(core_proc, file_store_pa_val, file_store_pages, true).unwrap_or_else(
+            |_| {
+                sys::print(b"init: memory_share (core file store) failed\n");
+                sys::exit();
+            },
+        ) as u64
+    } else {
+        0u64
+    };
+    // Share pointer state register with core (read-only).
+    let core_input_state_va =
+        sys::memory_share(core_proc, input_state_pa, 1, true).unwrap_or_else(|_| {
+            sys::print(b"init: memory_share (core input state) failed\n");
+            sys::exit();
+        });
+
     // Send core config.
     let core_ch = init_channel(core_channel_idx);
     let core_config = CoreConfig {
         doc_va: core_doc_va as u64,
         scene_va: core_scene_va as u64,
-        mono_font_va: core_font_va,
+        content_va: core_content_va,
+        input_state_va: core_input_state_va as u64,
         fb_width: logical_w,
         fb_height: logical_h,
         doc_capacity: DOC_BUF_CAPACITY,
-        mono_font_len,
-        prop_font_len,
-        _pad: 0,
+        content_size: content_size_val,
     };
     // SAFETY: CoreConfig fits within 60-byte payload; msg_type matches the payload type.
     let msg = unsafe { ipc::Message::from_payload(MSG_CORE_CONFIG, &core_config) };
-
     core_ch.send(&msg);
 
-    // Send image config to core (for has_image detection).
+    // Send frame rate as a separate message.
+    let fr_msg = unsafe {
+        ipc::Message::from_payload(
+            MSG_FRAME_RATE,
+            &FrameRateMsg {
+                frame_rate: frame_rate as u32,
+            },
+        )
+    };
+    core_ch.send(&fr_msg);
+
+    // Send image config to core (PNG location in the File Store).
     if png_len > 0 {
-        let image_va = core_font_va + png_offset as u64;
         let img_config = ImageConfig {
-            image_va,
-            image_len: png_len,
-            _pad: 0,
+            file_store_offset: png_offset,
+            file_store_length: png_len,
         };
         // SAFETY: ImageConfig fits within 60-byte payload; msg_type matches the payload type.
         let img_msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_CONFIG, &img_config) };
@@ -533,12 +604,12 @@ fn setup_render_pipeline(
 
         *next_channel += 1;
 
-        sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
+        sys::handle_send(input_proc_handle, ic_a.0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core A) failed\n");
             sys::exit();
         });
         // Send to core (handle 1 in core).
-        sys::handle_send(core_proc, ic_b).unwrap_or_else(|_| {
+        sys::handle_send(core_proc, ic_b.0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core B) failed\n");
             sys::exit();
         });
@@ -554,12 +625,27 @@ fn setup_render_pipeline(
 
         input_ch.send(&msg);
 
+        // Share pointer state register with input driver (read-write).
+        let driver_input_state_va = sys::memory_share(input_proc_handle, input_state_pa, 1, false)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (input state to driver) failed\n");
+                sys::exit();
+            });
+        let state_config = protocol::input::PointerStateConfig {
+            state_va: driver_input_state_va as u64,
+        };
+        // SAFETY: PointerStateConfig fits within 60-byte payload.
+        let state_msg = unsafe {
+            ipc::Message::from_payload(protocol::input::MSG_POINTER_STATE_CONFIG, &state_config)
+        };
+        input_ch.send(&state_msg);
+
         sys::print(b"     input device 0 channel created\n");
     }
 
     // Core → render service scene update channel.
     // Endpoint A → core (handle 2 = COMPOSITOR_HANDLE in core).
-    sys::handle_send(core_proc, cv_a).unwrap_or_else(|_| {
+    sys::handle_send(core_proc, cv_a.0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-render A) failed\n");
         sys::exit();
     });
@@ -604,17 +690,81 @@ fn setup_render_pipeline(
     *next_channel += 1;
 
     // Endpoint A → core (handle 3 = EDITOR_HANDLE in core).
-    sys::handle_send(core_proc, ce_a).unwrap_or_else(|_| {
+    sys::handle_send(core_proc, ce_a.0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-editor A) failed\n");
         sys::exit();
     });
     // Endpoint B → editor (handle 1 in editor's table).
-    sys::handle_send(editor_proc, ce_b).unwrap_or_else(|_| {
+    sys::handle_send(editor_proc, ce_b.0).unwrap_or_else(|_| {
         sys::print(b"init: handle_send (core-editor B) failed\n");
         sys::exit();
     });
 
-    // Additional input device channels → core handle 4+.
+    // -----------------------------------------------------------------------
+    // Phase 9b: Core ↔ Decoder channel (handle 4 in core, handle 1 in decoder).
+    // -----------------------------------------------------------------------
+    let decoder_proc = if content_pages > 0 && file_store_pages > 0 {
+        sys::print(b"     spawning png-decode\n");
+        match spawn_with_channel(PNG_DECODE_ELF, next_channel) {
+            Some((dec_proc, _dec_ch, dec_ch_idx)) => {
+                // Share File Store (read-only) and Content Region (read-write).
+                let dec_fs_va =
+                    sys::memory_share(dec_proc, file_store_pa_val, file_store_pages, true)
+                        .unwrap_or_else(|_| {
+                            sys::print(b"init: memory_share (decoder file store) failed\n");
+                            sys::exit();
+                        });
+                let dec_content_va =
+                    sys::memory_share(dec_proc, content_pa_val, content_pages, false)
+                        .unwrap_or_else(|_| {
+                            sys::print(b"init: memory_share (decoder content) failed\n");
+                            sys::exit();
+                        });
+
+                // Send DecoderConfig on the init↔decoder channel.
+                let dec_ch = init_channel(dec_ch_idx);
+                let dec_config = protocol::decode::DecoderConfig {
+                    file_store_va: dec_fs_va as u64,
+                    file_store_size: (file_store_pages as u32) * 4096,
+                    content_va: dec_content_va as u64,
+                    content_size: content_size_val,
+                };
+                let dec_msg = unsafe {
+                    ipc::Message::from_payload(protocol::decode::MSG_DECODER_CONFIG, &dec_config)
+                };
+                dec_ch.send(&dec_msg);
+
+                // Core ↔ decoder channel.
+                sys::print(b"     creating core\xE2\x86\x94decoder channel\n");
+                let (dc_a, dc_b) = sys::channel_create().unwrap_or_else(|_| {
+                    sys::print(b"init: channel_create (core-decoder) failed\n");
+                    sys::exit();
+                });
+                *next_channel += 1;
+
+                // Endpoint A → core (handle 4 = DECODER_HANDLE in core).
+                sys::handle_send(core_proc, dc_a.0).unwrap_or_else(|_| {
+                    sys::print(b"init: handle_send (core-decoder A) failed\n");
+                    sys::exit();
+                });
+                // Endpoint B → decoder (handle 1 in decoder's table).
+                sys::handle_send(dec_proc, dc_b.0).unwrap_or_else(|_| {
+                    sys::print(b"init: handle_send (core-decoder B) failed\n");
+                    sys::exit();
+                });
+
+                Some(dec_proc)
+            }
+            None => {
+                sys::print(b"init: failed to spawn png-decode\n");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Additional input device channels → core handle 5+.
     for i in 1..input_devices.len() {
         let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[i];
 
@@ -627,11 +777,11 @@ fn setup_render_pipeline(
 
         *next_channel += 1;
 
-        sys::handle_send(input_proc_handle, ic_a).unwrap_or_else(|_| {
+        sys::handle_send(input_proc_handle, ic_a.0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core A) failed\n");
             sys::exit();
         });
-        sys::handle_send(core_proc, ic_b).unwrap_or_else(|_| {
+        sys::handle_send(core_proc, ic_b.0).unwrap_or_else(|_| {
             sys::print(b"init: handle_send (input-core B) failed\n");
             sys::exit();
         });
@@ -646,13 +796,33 @@ fn setup_render_pipeline(
         let msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &input_config) };
 
         input_ch.send(&msg);
+
+        // Share pointer state register with additional input driver.
+        let drv_state_va = sys::memory_share(input_proc_handle, input_state_pa, 1, false)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (input state to driver) failed\n");
+                sys::exit();
+            });
+        let sc = protocol::input::PointerStateConfig {
+            state_va: drv_state_va as u64,
+        };
+        let sm =
+            unsafe { ipc::Message::from_payload(protocol::input::MSG_POINTER_STATE_CONFIG, &sc) };
+        input_ch.send(&sm);
     }
 
     // -----------------------------------------------------------------------
     // Phase 10: Start processes.
-    // Input drivers first, then editor, then core.
+    // Input drivers first, then decoder, then editor, then core.
     // Render service is already running (started in Phase 4).
+    // Decoder must start before core (core sends decode request at boot).
     // -----------------------------------------------------------------------
+    if let Some(dec_proc) = decoder_proc {
+        sys::print(b"     starting png-decode\n");
+        start_process(dec_proc, b"png-decode");
+        sys::yield_now();
+    }
+
     for &(input_proc_handle, _, _, _) in input_devices {
         sys::print(b"     starting input driver\n");
 
@@ -684,7 +854,10 @@ fn setup_render_pipeline(
 /// Returns (process_handle, init_channel_handle, channel_index) on success.
 /// The child receives endpoint B at CHANNEL_SHM_BASE in its address space.
 /// Init retains endpoint A at channel_shm_va(channel_index).
-fn spawn_with_channel(elf: &[u8], next_channel: &mut usize) -> Option<(u8, u8, usize)> {
+fn spawn_with_channel(
+    elf: &[u8],
+    next_channel: &mut usize,
+) -> Option<(sys::ProcessHandle, sys::ChannelHandle, usize)> {
     let proc_handle = match sys::process_create(elf.as_ptr(), elf.len()) {
         Ok(h) => h,
         Err(_) => {
@@ -700,7 +873,7 @@ fn spawn_with_channel(elf: &[u8], next_channel: &mut usize) -> Option<(u8, u8, u
         }
     };
 
-    if let Err(_) = sys::handle_send(proc_handle, ch_b) {
+    if let Err(_) = sys::handle_send(proc_handle, ch_b.0) {
         sys::print(b"       spawn: handle_send FAILED\n");
 
         return None;
@@ -746,12 +919,13 @@ pub extern "C" fn _start() -> ! {
     // Track channel allocation (0 = kernel, 1+ = ours).
     let mut next_channel: usize = 1;
     // Saved device state for Phase 2 (display pipeline).
-    let mut gpu: Option<(u8, u8, usize, u64, u32, bool)> = None; // (proc, ch, ch_idx, pa, irq, virgl)
-                                                                 // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
-    let mut input_devices: [(u8, usize, u64, u32); MAX_INPUT_DEVICES] =
-        [(0, 0, 0, 0); MAX_INPUT_DEVICES];
+    // Render type: 0 = cpu-render, 1 = virgil-render, 2 = metal-render.
+    let mut gpu: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32, u8)> = None; // (proc, ch, ch_idx, pa, irq, render_type)
+                                                                                               // Multiple input devices (keyboard + tablet). Each entry: (proc, ch_idx, pa, irq).
+    let mut input_devices: [(sys::ProcessHandle, usize, u64, u32); MAX_INPUT_DEVICES] =
+        [(sys::ProcessHandle(0), 0, 0, 0); MAX_INPUT_DEVICES];
     let mut input_count: usize = 0;
-    let mut p9: Option<(u8, u8, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
+    let mut p9: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
     let mut rtc_pa: u64 = 0; // PL031 RTC physical address (0 = not found)
                              // Phase 1: Spawn a driver for each device in the manifest.
     let actual = if device_count > 8 { 8 } else { device_count };
@@ -812,6 +986,7 @@ pub extern "C" fn _start() -> ! {
                     CPU_RENDER_ELF
                 }
             }
+            VIRTIO_DEVICE_METAL => METAL_RENDER_ELF,
             VIRTIO_DEVICE_INPUT => VIRTIO_INPUT_ELF,
             VIRTIO_DEVICE_9P => VIRTIO_9P_ELF,
             _ => {
@@ -859,7 +1034,12 @@ pub extern "C" fn _start() -> ! {
         match dev_id {
             VIRTIO_DEVICE_GPU => {
                 // Defer GPU startup — needs framebuffer and cross-process channels.
-                gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq, use_virgl));
+                let rtype: u8 = if use_virgl { 1 } else { 0 };
+                gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq, rtype));
+            }
+            VIRTIO_DEVICE_METAL => {
+                // Defer Metal GPU startup — same pipeline as virtio-gpu.
+                gpu = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq, 2));
             }
             VIRTIO_DEVICE_INPUT => {
                 // Defer input startup — needs cross-process channel to compositor.
@@ -902,207 +1082,335 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Phase 1.5: Read font files from host via 9p driver (must complete before compositor).
-    // Loads monospace + proportional fonts and PNG image.
-    // All stored in a single shared buffer: mono | prop | PNG.
-    // Tuple: (font_pa, mono_len, prop_len, png_offset, png_len)
-    let font_buf: Option<(u64, u32, u32, u32, u32)> =
-        if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
-            sys::print(b"     loading fonts from host filesystem\n");
+    // Two memory regions:
+    //   Content Region (4 MiB): header + registry + font data (shared with core + render)
+    //   File Store (1 MiB): raw file bytes (shared with core only, NOT render)
+    let content_region_info: Option<(u64, u32)>; // (content_pa, content_size)
+    let file_store_info: Option<(u64, u32, u32)>; // (file_store_pa, png_offset, png_len)
 
-            // Allocate font buffer (4 MiB = order 10 = 1024 pages).
-            // Holds Recursive variable font (~2.3 MiB) and PNG image.
-            let font_order: u32 = 10;
-            let font_page_count: u64 = 1u64 << font_order;
-            let mut font_pa: u64 = 0;
-            let _font_va = sys::dma_alloc(font_order, &mut font_pa).unwrap_or_else(|_| {
-                sys::print(b"init: dma_alloc (font buffer) failed\n");
+    if let Some((p9_proc, p9_ch, p9_ch_idx, p9_pa, p9_irq)) = p9 {
+        sys::print(b"     loading fonts from host filesystem\n");
+
+        // Allocate Content Region (4 MiB = order 10 = 1024 pages).
+        // Holds: header + registry + font TTF data + space for decoded images.
+        let content_order: u32 = 10;
+        let content_page_count: u64 = 1u64 << content_order;
+        let mut content_pa: u64 = 0;
+        let content_va = sys::dma_alloc(content_order, &mut content_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (content region) failed\n");
+            sys::exit();
+        });
+        let content_capacity: u32 = (content_page_count as u32) * 4096; // 4 MiB
+
+        // SAFETY: content_va..+content_capacity is the DMA region just allocated; zeroing is within bounds.
+        unsafe { core::ptr::write_bytes(content_va as *mut u8, 0, content_capacity as usize) };
+
+        // Allocate File Store (1 MiB = order 8 = 256 pages).
+        // Holds raw PNG bytes (core reads for decoding).
+        let fs_order: u32 = 8;
+        let fs_page_count: u64 = 1u64 << fs_order;
+        let mut fs_pa: u64 = 0;
+        let fs_va = sys::dma_alloc(fs_order, &mut fs_pa).unwrap_or_else(|_| {
+            sys::print(b"init: dma_alloc (file store) failed\n");
+            sys::exit();
+        });
+        let fs_capacity: u32 = (fs_page_count as u32) * 4096; // 1 MiB
+
+        // SAFETY: fs_va..+fs_capacity is the DMA region just allocated; zeroing is within bounds.
+        unsafe { core::ptr::write_bytes(fs_va as *mut u8, 0, fs_capacity as usize) };
+
+        // Share Content Region with 9p driver (read-write, for writing font data).
+        let p9_content_va = sys::memory_share(p9_proc, content_pa, content_page_count, false)
+            .unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (9p content) failed\n");
                 sys::exit();
             });
-            let font_capacity: u32 = (font_page_count as u32) * 4096; // 4 MiB
 
-            // SAFETY: font_zeroed_va..+font_capacity is the DMA region just allocated above; zeroing is within bounds.
-            let font_zeroed_va = _font_va;
-            unsafe { core::ptr::write_bytes(font_zeroed_va as *mut u8, 0, font_capacity as usize) };
+        // Share File Store with 9p driver (read-write, for writing PNG data).
+        let p9_fs_va =
+            sys::memory_share(p9_proc, fs_pa, fs_page_count, false).unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (9p file store) failed\n");
+                sys::exit();
+            });
 
-            // Share font buffer with 9p driver (read-write).
-            let p9_font_va = sys::memory_share(p9_proc, font_pa, font_page_count, false)
-                .unwrap_or_else(|_| {
-                    sys::print(b"init: memory_share (9p font) failed\n");
-                    sys::exit();
-                });
-            // Send device config via IPC.
-            let p9_ch_obj = init_channel(p9_ch_idx);
-            let dev_config = DeviceConfig {
-                mmio_pa: p9_pa,
-                irq: p9_irq,
-                _pad: 0,
-            };
-            // SAFETY: same as DeviceConfig from_payload above.
-            let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
+        // Send device config via IPC.
+        let p9_ch_obj = init_channel(p9_ch_idx);
+        let dev_config = DeviceConfig {
+            mmio_pa: p9_pa,
+            irq: p9_irq,
+            _pad: 0,
+        };
+        // SAFETY: same as DeviceConfig from_payload above.
+        let cfg_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
 
-            p9_ch_obj.send(&cfg_msg);
+        p9_ch_obj.send(&cfg_msg);
 
-            // Start 9p driver.
-            sys::print(b"     starting 9p driver\n");
+        // Start 9p driver.
+        sys::print(b"     starting 9p driver\n");
 
-            start_process(p9_proc, b"9p");
+        start_process(p9_proc, b"9p");
 
-            // Helper: send a file read request and wait for the response.
-            // Returns the number of bytes read, or 0 on failure.
-            let read_font_file = |ch_obj: &ipc::Channel,
-                                  ch_handle: u8,
-                                  target_va: u64,
-                                  capacity: u32,
-                                  filename: &[u8]|
-             -> u32 {
-                let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
+        // Helper: send a file read request and wait for the response.
+        // Returns the number of bytes read, or 0 on failure.
+        let read_file = |ch_obj: &ipc::Channel,
+                         ch_handle: sys::ChannelHandle,
+                         target_va: u64,
+                         capacity: u32,
+                         filename: &[u8]|
+         -> u32 {
+            let mut req_msg = ipc::Message::new(MSG_FS_READ_REQUEST);
 
-                // SAFETY: payload is 60 bytes; writes at offsets 0..8 (u64), 8..12 (u32), 12..16 (u32),
-                // 16..60 (filename) stay within bounds. Unaligned writes used because payload is [u8].
-                // copy_nonoverlapping: src (filename) and dst (payload+16) do not overlap; len asserted <= 44.
-                unsafe {
-                    let p = req_msg.payload.as_mut_ptr();
+            // SAFETY: payload is 60 bytes; writes at offsets 0..8 (u64), 8..12 (u32), 12..16 (u32),
+            // 16..60 (filename) stay within bounds. Unaligned writes used because payload is [u8].
+            // copy_nonoverlapping: src (filename) and dst (payload+16) do not overlap; len asserted <= 44.
+            unsafe {
+                let p = req_msg.payload.as_mut_ptr();
 
-                    core::ptr::write_unaligned(p as *mut u64, target_va);
-                    core::ptr::write_unaligned(p.add(8) as *mut u32, capacity);
-                    core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
+                core::ptr::write_unaligned(p as *mut u64, target_va);
+                core::ptr::write_unaligned(p.add(8) as *mut u32, capacity);
+                core::ptr::write_unaligned(p.add(12) as *mut u32, 0); // _pad
 
-                    // Zero-fill filename area first.
-                    core::ptr::write_bytes(p.add(16), 0, 44);
-                    assert!(filename.len() <= 44, "filename too long for IPC payload");
-                    core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
-                }
+                // Zero-fill filename area first.
+                core::ptr::write_bytes(p.add(16), 0, 44);
+                assert!(filename.len() <= 44, "filename too long for IPC payload");
+                core::ptr::copy_nonoverlapping(filename.as_ptr(), p.add(16), filename.len());
+            }
 
-                ch_obj.send(&req_msg);
+            ch_obj.send(&req_msg);
 
-                let _ = sys::channel_signal(ch_handle);
-                let mut resp_msg = ipc::Message::new(0);
-                let mut got_response = false;
+            let _ = sys::channel_signal(ch_handle);
+            let mut resp_msg = ipc::Message::new(0);
+            let mut got_response = false;
 
-                {
-                    let mut retries = 0u32;
+            {
+                let mut retries = 0u32;
 
-                    loop {
-                        match sys::wait(&[ch_handle], FONT_READ_TIMEOUT_NS) {
-                            Ok(_) => {
-                                if ch_obj.try_recv(&mut resp_msg)
-                                    && resp_msg.msg_type == MSG_FS_READ_RESPONSE
-                                {
-                                    got_response = true;
-                                    break;
-                                }
+                loop {
+                    match sys::wait(&[ch_handle.0], FONT_READ_TIMEOUT_NS) {
+                        Ok(_) => {
+                            if ch_obj.try_recv(&mut resp_msg)
+                                && resp_msg.msg_type == MSG_FS_READ_RESPONSE
+                            {
+                                got_response = true;
+                                break;
                             }
-                            Err(sys::SyscallError::WouldBlock) => {
-                                retries += 1;
-                                sys::print(b"init: timeout waiting for font read (retry)\n");
-                                if retries >= 3 {
-                                    sys::print(
-                                        b"init: font read timed out, using bitmap fallback\n",
-                                    );
-                                    break;
-                                }
-                            }
-                            _ => break,
                         }
+                        Err(sys::SyscallError::WouldBlock) => {
+                            retries += 1;
+                            sys::print(b"init: timeout waiting for font read (retry)\n");
+                            if retries >= 3 {
+                                sys::print(b"init: font read timed out, using bitmap fallback\n");
+                                break;
+                            }
+                        }
+                        _ => break,
                     }
                 }
+            }
 
-                if !got_response {
-                    return 0;
-                }
+            if !got_response {
+                return 0;
+            }
 
-                // SAFETY: payload is 60 bytes; reads at offsets 0..4 (len) and 4..8 (status) are in bounds.
-                // Unaligned reads used because payload is [u8]. msg_type verified as MSG_FS_READ_RESPONSE.
-                let (len, status) = unsafe {
-                    let p = resp_msg.payload.as_ptr();
-                    let len = core::ptr::read_unaligned(p as *const u32);
-                    let status = core::ptr::read_unaligned(p.add(4) as *const u32);
+            // SAFETY: payload is 60 bytes; reads at offsets 0..4 (len) and 4..8 (status) are in bounds.
+            // Unaligned reads used because payload is [u8]. msg_type verified as MSG_FS_READ_RESPONSE.
+            let (len, status) = unsafe {
+                let p = resp_msg.payload.as_ptr();
+                let len = core::ptr::read_unaligned(p as *const u32);
+                let status = core::ptr::read_unaligned(p.add(4) as *const u32);
 
-                    (len, status)
-                };
-
-                if status == 0 && len > 0 {
-                    len
-                } else {
-                    0
-                }
+                (len, status)
             };
 
-            // Load Recursive Variable — one font for both mono and proportional.
-            // Content type drives axis values (MONO=1 for code, MONO=0 for prose).
-            sys::print(b"     loading recursive-variable.ttf\n");
-
-            let mono_len = read_font_file(
-                &p9_ch_obj,
-                p9_ch,
-                p9_font_va as u64,
-                font_capacity,
-                b"recursive-variable.ttf",
-            );
-
-            if mono_len > 0 {
-                let mut buf = [0u8; 48];
-                let prefix = b"     mono font loaded: ";
-
-                buf[..prefix.len()].copy_from_slice(prefix);
-
-                let mut pos = prefix.len();
-
-                pos += sys::format_u32(mono_len, &mut buf[pos..]);
-
-                let suffix = b" bytes\n";
-
-                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-
-                pos += suffix.len();
-
-                sys::print(&buf[..pos]);
+            if status == 0 && len > 0 {
+                len
             } else {
-                sys::print(b"     mono font read failed\n");
+                0
             }
-
-            // Recursive Variable serves both mono and proportional via axis values.
-            // No separate prop font needed — compositor uses MONO=0 on same data.
-            let prop_len: u32 = 0;
-
-            // Load PNG image (test.png) right after the proportional font.
-            sys::print(b"     loading test.png\n");
-
-            let png_offset = mono_len + prop_len;
-            let png_capacity = font_capacity - png_offset;
-            let png_target_va = p9_font_va as u64 + png_offset as u64;
-            let png_len =
-                read_font_file(&p9_ch_obj, p9_ch, png_target_va, png_capacity, b"test.png");
-
-            if png_len > 0 {
-                let mut buf = [0u8; 40];
-                let prefix = b"     png loaded: ";
-
-                buf[..prefix.len()].copy_from_slice(prefix);
-
-                let mut pos = prefix.len();
-
-                pos += sys::format_u32(png_len, &mut buf[pos..]);
-
-                let suffix = b" bytes\n";
-
-                buf[pos..pos + suffix.len()].copy_from_slice(suffix);
-
-                pos += suffix.len();
-
-                sys::print(&buf[..pos]);
-            } else {
-                sys::print(b"     png read failed\n");
-            }
-
-            if mono_len > 0 {
-                Some((font_pa, mono_len, prop_len, png_offset, png_len))
-            } else {
-                None
-            }
-        } else {
-            None
         };
+
+        // Data area starts after the Content Region header.
+        let data_start = protocol::content::CONTENT_HEADER_SIZE as u32;
+        let mut data_cursor = data_start;
+        let mut entry_count: u32 = 0;
+
+        // Load fonts into Content Region data area (after CONTENT_HEADER_SIZE).
+        // The 9p driver writes directly into the Content Region at the specified VA.
+        // Font target VA = 9p's mapping of Content Region + data_cursor offset.
+
+        // Load JetBrains Mono (monospace editor font).
+        sys::print(b"     loading jetbrains-mono.ttf\n");
+
+        let mono_target_va = p9_content_va as u64 + data_cursor as u64;
+        let mono_capacity = content_capacity - data_cursor;
+        let mono_len = read_file(
+            &p9_ch_obj,
+            p9_ch,
+            mono_target_va,
+            mono_capacity,
+            b"jetbrains-mono.ttf",
+        );
+
+        if mono_len > 0 {
+            sys::print(b"     mono font loaded: ");
+            let mut buf = [0u8; 16];
+            let n = sys::format_u32(mono_len, &mut buf);
+            sys::print(&buf[..n]);
+            sys::print(b" bytes\n");
+
+            // Write registry entry for mono font at init's VA of the Content Region.
+            // SAFETY: content_va is a valid DMA allocation; header fits within CONTENT_HEADER_SIZE.
+            let header =
+                unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
+            header.entries[entry_count as usize] = protocol::content::ContentEntry {
+                content_id: protocol::content::CONTENT_ID_FONT_MONO,
+                offset: data_cursor,
+                length: mono_len,
+                class: protocol::content::ContentClass::Font as u8,
+                _pad: [0; 3],
+                width: 0,
+                height: 0,
+                generation: 0,
+            };
+            entry_count += 1;
+            data_cursor += mono_len;
+        } else {
+            sys::print(b"     mono font read failed\n");
+        }
+
+        // Load Inter (sans-serif chrome font).
+        sys::print(b"     loading inter.ttf\n");
+
+        let sans_target_va = p9_content_va as u64 + data_cursor as u64;
+        let sans_capacity = content_capacity - data_cursor;
+        let sans_len = read_file(
+            &p9_ch_obj,
+            p9_ch,
+            sans_target_va,
+            sans_capacity,
+            b"inter.ttf",
+        );
+
+        if sans_len > 0 {
+            sys::print(b"     sans font loaded: ");
+            let mut buf = [0u8; 16];
+            let n = sys::format_u32(sans_len, &mut buf);
+            sys::print(&buf[..n]);
+            sys::print(b" bytes\n");
+
+            // SAFETY: content_va is a valid DMA allocation; header is within bounds.
+            let header =
+                unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
+            header.entries[entry_count as usize] = protocol::content::ContentEntry {
+                content_id: protocol::content::CONTENT_ID_FONT_SANS,
+                offset: data_cursor,
+                length: sans_len,
+                class: protocol::content::ContentClass::Font as u8,
+                _pad: [0; 3],
+                width: 0,
+                height: 0,
+                generation: 0,
+            };
+            entry_count += 1;
+            data_cursor += sans_len;
+        } else {
+            sys::print(b"     sans font read failed\n");
+        }
+
+        // Load Source Serif 4 (serif body font).
+        sys::print(b"     loading source-serif-4.ttf\n");
+
+        let serif_target_va = p9_content_va as u64 + data_cursor as u64;
+        let serif_capacity = content_capacity - data_cursor;
+        let serif_len = read_file(
+            &p9_ch_obj,
+            p9_ch,
+            serif_target_va,
+            serif_capacity,
+            b"source-serif-4.ttf",
+        );
+
+        if serif_len > 0 {
+            sys::print(b"     serif font loaded: ");
+            let mut buf = [0u8; 16];
+            let n = sys::format_u32(serif_len, &mut buf);
+            sys::print(&buf[..n]);
+            sys::print(b" bytes\n");
+
+            // SAFETY: content_va is a valid DMA allocation; header is within bounds.
+            let header =
+                unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
+            header.entries[entry_count as usize] = protocol::content::ContentEntry {
+                content_id: protocol::content::CONTENT_ID_FONT_SERIF,
+                offset: data_cursor,
+                length: serif_len,
+                class: protocol::content::ContentClass::Font as u8,
+                _pad: [0; 3],
+                width: 0,
+                height: 0,
+                generation: 0,
+            };
+            entry_count += 1;
+            data_cursor += serif_len;
+        } else {
+            sys::print(b"     serif font read failed\n");
+        }
+
+        // Write Content Region header.
+        // SAFETY: content_va is a valid DMA allocation; header struct fits within CONTENT_HEADER_SIZE.
+        let header = unsafe { &mut *(content_va as *mut protocol::content::ContentRegionHeader) };
+        header.magic = protocol::content::CONTENT_REGION_MAGIC;
+        header.version = protocol::content::CONTENT_REGION_VERSION;
+        header.entry_count = entry_count;
+        header.max_entries = protocol::content::MAX_CONTENT_ENTRIES as u32;
+        header.data_offset = data_start;
+        header.next_alloc = data_cursor;
+
+        sys::print(b"     content region header written\n");
+
+        // Load PNG into File Store (separate from Content Region).
+        sys::print(b"     loading test.png\n");
+
+        let png_offset_in_fs: u32 = 0;
+        let png_target_va = p9_fs_va as u64;
+        let png_len = read_file(&p9_ch_obj, p9_ch, png_target_va, fs_capacity, b"test.png");
+
+        if png_len > 0 {
+            let mut buf = [0u8; 40];
+            let prefix = b"     png loaded: ";
+
+            buf[..prefix.len()].copy_from_slice(prefix);
+
+            let mut pos = prefix.len();
+
+            pos += sys::format_u32(png_len, &mut buf[pos..]);
+
+            let suffix = b" bytes\n";
+
+            buf[pos..pos + suffix.len()].copy_from_slice(suffix);
+
+            pos += suffix.len();
+
+            sys::print(&buf[..pos]);
+        } else {
+            sys::print(b"     png read failed\n");
+        }
+
+        if mono_len > 0 {
+            content_region_info = Some((content_pa, content_capacity));
+        } else {
+            content_region_info = None;
+        }
+
+        if png_len > 0 {
+            file_store_info = Some((fs_pa, png_offset_in_fs, png_len));
+        } else {
+            file_store_info = None;
+        }
+    } else {
+        content_region_info = None;
+        file_store_info = None;
+    };
 
     // Phase 2: Display pipeline — select based on virgl probe result.
     // Collect all child process handles for monitoring.
@@ -1110,8 +1418,12 @@ pub extern "C" fn _start() -> ! {
     let mut child_names: [&[u8]; 8] = [b""; 8];
     let mut child_count: usize = 0;
 
-    if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq, has_virgl)) = gpu {
-        let render_name: &[u8] = if has_virgl { b"virgl" } else { b"cpu-render" };
+    if let Some((gpu_proc, gpu_ch_handle, gpu_channel_idx, gpu_pa, gpu_irq, render_type)) = gpu {
+        let render_name: &[u8] = match render_type {
+            2 => b"metal",
+            1 => b"virgl",
+            _ => b"cpu-render",
+        };
         let (core_proc, editor_proc) = setup_render_pipeline(
             render_name,
             gpu_proc,
@@ -1120,30 +1432,31 @@ pub extern "C" fn _start() -> ! {
             gpu_pa,
             gpu_irq,
             &input_devices[..input_count],
-            font_buf,
+            content_region_info,
+            file_store_info,
             rtc_pa,
             &mut next_channel,
         );
 
         // Register render service.
-        child_handles[child_count] = gpu_proc;
+        child_handles[child_count] = gpu_proc.0;
         child_names[child_count] = render_name;
         child_count += 1;
 
         // Register core.
-        child_handles[child_count] = core_proc;
+        child_handles[child_count] = core_proc.0;
         child_names[child_count] = b"core";
         child_count += 1;
 
         // Register editor.
-        child_handles[child_count] = editor_proc;
+        child_handles[child_count] = editor_proc.0;
         child_names[child_count] = b"editor";
         child_count += 1;
 
         // Register input drivers.
         for i in 0..input_count {
             if child_count < child_handles.len() {
-                child_handles[child_count] = input_devices[i].0;
+                child_handles[child_count] = input_devices[i].0 .0;
                 child_names[child_count] = b"input";
                 child_count += 1;
             }
@@ -1152,7 +1465,7 @@ pub extern "C" fn _start() -> ! {
         // Register 9p driver (if spawned).
         if let Some((p9_proc, _, _, _, _)) = p9 {
             if child_count < child_handles.len() {
-                child_handles[child_count] = p9_proc;
+                child_handles[child_count] = p9_proc.0;
                 child_names[child_count] = b"9p";
                 child_count += 1;
             }
@@ -1169,7 +1482,7 @@ pub extern "C" fn _start() -> ! {
         match sys::process_create(FUZZ_ELF.as_ptr(), FUZZ_ELF.len()) {
             Ok(proc_h) => {
                 start_process(proc_h, b"fuzz");
-                let _ = sys::wait(&[proc_h], u64::MAX);
+                let _ = sys::wait(&[proc_h.0], u64::MAX);
             }
             Err(_) => {
                 sys::print(b"     fuzz test spawn failed\n");
@@ -1179,7 +1492,7 @@ pub extern "C" fn _start() -> ! {
         match sys::process_create(STRESS_ELF.as_ptr(), STRESS_ELF.len()) {
             Ok(proc_h) => {
                 start_process(proc_h, b"stress");
-                let _ = sys::wait(&[proc_h], u64::MAX);
+                let _ = sys::wait(&[proc_h.0], u64::MAX);
             }
             Err(_) => {
                 sys::print(b"     stress test spawn failed\n");

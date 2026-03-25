@@ -17,8 +17,11 @@ use crate::{
     wire::{
         box_zeroed, ctrl_header, ctrl_header_ctx, CtrlHeader, DmaBuf, ResourceFlush, Submit3dHeader,
     },
-    ATLAS_RESOURCE_ID, HANDLE_BLEND, HANDLE_BLEND_NO_COLOR, HANDLE_DSA, HANDLE_DSA_STENCIL_TEST,
-    HANDLE_DSA_STENCIL_WRITE, HANDLE_FS, HANDLE_FS_GLYPH, HANDLE_FS_IMAGE, HANDLE_RASTERIZER,
+    ATLAS_RESOURCE_ID, BLUR_CAPTURE_RESOURCE_ID, BLUR_INTERMEDIATE_RESOURCE_ID, HANDLE_BLEND,
+    HANDLE_BLEND_NO_COLOR, HANDLE_BLUR_CAPTURE_SURFACE, HANDLE_BLUR_CAPTURE_VIEW,
+    HANDLE_BLUR_INTERMEDIATE_SURFACE, HANDLE_BLUR_INTERMEDIATE_VIEW, HANDLE_DSA,
+    HANDLE_DSA_CLIP_TEST, HANDLE_DSA_STENCIL_TEST, HANDLE_DSA_STENCIL_WRITE, HANDLE_FS,
+    HANDLE_FS_BLUR_H, HANDLE_FS_BLUR_V, HANDLE_FS_GLYPH, HANDLE_FS_IMAGE, HANDLE_RASTERIZER,
     HANDLE_SAMPLER, HANDLE_SAMPLER_VIEW, HANDLE_SAMPLER_VIEW_IMG, HANDLE_STENCIL_SURFACE,
     HANDLE_SURFACE, HANDLE_VE, HANDLE_VE_TEXTURED, HANDLE_VS, HANDLE_VS_TEXTURED, IMG_RESOURCE_ID,
     RT_RESOURCE_ID, STENCIL_RESOURCE_ID, VB_RESOURCE_ID, VIRGL_CTX_ID, VIRTQ_CONTROL,
@@ -29,7 +32,7 @@ use crate::{
 pub(crate) fn submit_3d(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     cmdbuf: &virgl::CommandBuffer,
 ) -> bool {
     let data = cmdbuf.as_dwords();
@@ -96,7 +99,7 @@ pub(crate) fn submit_3d(
 pub(crate) fn setup_pipeline(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     width: u32,
     height: u32,
 ) -> bool {
@@ -181,6 +184,7 @@ pub(crate) fn setup_pipeline(
     cmdbuf.clear();
     cmdbuf.cmd_create_dsa_stencil_write(HANDLE_DSA_STENCIL_WRITE);
     cmdbuf.cmd_create_dsa_stencil_test(HANDLE_DSA_STENCIL_TEST);
+    cmdbuf.cmd_create_dsa_clip_test(HANDLE_DSA_CLIP_TEST);
     cmdbuf.cmd_create_blend_no_color(HANDLE_BLEND_NO_COLOR);
     cmdbuf.cmd_create_surface(
         HANDLE_STENCIL_SURFACE,
@@ -200,6 +204,51 @@ pub(crate) fn setup_pipeline(
         let _ = submit_3d(device, vq, irq_handle, &cmdbuf);
     }
 
+    // ── Blur pipeline setup (separate submission — shaders are large) ────
+    //
+    // Two 9-tap Gaussian blur fragment shaders (~400 DWORDs each) and four
+    // pipeline objects (two surfaces + two sampler views). Placed in their
+    // own SUBMIT_3D to avoid overflowing the main pipeline command buffer.
+    cmdbuf.clear();
+    cmdbuf.cmd_create_shader_text(
+        HANDLE_FS_BLUR_H,
+        PIPE_SHADER_FRAGMENT,
+        crate::shaders::BLUR_H_FS,
+    );
+    cmdbuf.cmd_create_shader_text(
+        HANDLE_FS_BLUR_V,
+        PIPE_SHADER_FRAGMENT,
+        crate::shaders::BLUR_V_FS,
+    );
+    cmdbuf.cmd_create_surface(
+        HANDLE_BLUR_CAPTURE_SURFACE,
+        BLUR_CAPTURE_RESOURCE_ID,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+    );
+    cmdbuf.cmd_create_sampler_view(
+        HANDLE_BLUR_CAPTURE_VIEW,
+        BLUR_CAPTURE_RESOURCE_ID,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+    );
+    cmdbuf.cmd_create_surface(
+        HANDLE_BLUR_INTERMEDIATE_SURFACE,
+        BLUR_INTERMEDIATE_RESOURCE_ID,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+    );
+    cmdbuf.cmd_create_sampler_view(
+        HANDLE_BLUR_INTERMEDIATE_VIEW,
+        BLUR_INTERMEDIATE_RESOURCE_ID,
+        VIRGL_FORMAT_B8G8R8A8_UNORM,
+    );
+    if cmdbuf.overflowed() {
+        sys::print(b"virgil-render: blur pipeline command buffer overflowed!\n");
+        // Blur is non-fatal — continue without it.
+    } else if submit_3d(device, vq, irq_handle, &cmdbuf) {
+        sys::print(b"     blur pipeline ready\n");
+    } else {
+        sys::print(b"     blur pipeline FAILED\n");
+    }
+
     stencil_ok
 }
 
@@ -208,7 +257,7 @@ pub(crate) fn setup_pipeline(
 pub(crate) fn clear_screen(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     width: u32,
     height: u32,
 ) {

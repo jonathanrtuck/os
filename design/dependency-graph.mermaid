@@ -1,0 +1,122 @@
+%% Compile-time Dependency Graph (layered DAG)
+%% Edges point downward: consumer → dependency
+%% No cycles allowed. Libraries shared across branches are the
+%% only cross-branch connections.
+
+graph TD
+    subgraph "Layer 4 — Orchestrator"
+        INIT[init]
+    end
+
+    subgraph "Layer 3 — Services"
+        CORE[core]
+        METAL[metal-render]
+        CPU[cpu-render]
+        VIRGL[virgil-render]
+        V_INPUT[virtio-input]
+        V_9P[virtio-9p]
+        V_BLK[virtio-blk]
+        V_CON[virtio-console]
+        EDITOR[text-editor]
+    end
+
+    subgraph "Layer 2 — Domain Libraries"
+        RENDER[render]
+        DRAWING[drawing]
+        FONTS[fonts]
+        SCENE[scene]
+        LAYOUT[layout]
+        ANIMATION[animation]
+    end
+
+    subgraph "Layer 1 — Infrastructure Libraries"
+        IPC[ipc]
+        VIRTIO[virtio]
+        PROTOCOL[protocol]
+    end
+
+    subgraph "Layer 0 — Foundation"
+        SYS[sys]
+    end
+
+    %% Layer 4 → Layer 3 (init embeds all ELFs)
+    INIT --> SCENE
+    INIT --> IPC
+    INIT --> PROTOCOL
+    INIT --> SYS
+
+    %% Layer 3 → Layer 2
+    CORE --> SCENE
+    CORE --> FONTS
+    CORE --> DRAWING
+    CORE --> LAYOUT
+    CORE --> ANIMATION
+
+    METAL --> SCENE
+    METAL --> FONTS
+    METAL --> DRAWING
+    METAL --> RENDER
+
+    CPU --> SCENE
+    CPU --> FONTS
+    CPU --> DRAWING
+    CPU --> RENDER
+
+    VIRGL --> SCENE
+    VIRGL --> FONTS
+    VIRGL --> DRAWING
+    VIRGL --> RENDER
+
+    %% Layer 3 → Layer 1
+    CORE --> IPC
+    CORE --> PROTOCOL
+    METAL --> VIRTIO
+    METAL --> PROTOCOL
+    CPU --> VIRTIO
+    CPU --> PROTOCOL
+    VIRGL --> VIRTIO
+    VIRGL --> PROTOCOL
+    V_INPUT --> VIRTIO
+    V_INPUT --> PROTOCOL
+    V_9P --> VIRTIO
+    V_9P --> PROTOCOL
+    V_BLK --> VIRTIO
+    V_BLK --> PROTOCOL
+    V_CON --> VIRTIO
+    V_CON --> PROTOCOL
+    EDITOR --> PROTOCOL
+
+    %% Layer 3 → Layer 0
+    CORE --> SYS
+    METAL --> SYS
+    CPU --> SYS
+    VIRGL --> SYS
+    V_INPUT --> SYS
+    V_9P --> SYS
+    V_BLK --> SYS
+    V_CON --> SYS
+    EDITOR --> SYS
+    EDITOR --> IPC
+
+    %% Layer 2 → Layer 2 (intra-layer)
+    RENDER --> SCENE
+    RENDER --> FONTS
+    RENDER --> DRAWING
+    RENDER --> PROTOCOL
+    DRAWING --> FONTS
+    DRAWING --> PROTOCOL
+
+    %% Layer 1 → Layer 0
+    IPC --> SYS
+    VIRTIO --> SYS
+
+    %% Layer 2 → Layer 0
+    SCENE --> SYS
+    LAYOUT --> SYS
+    ANIMATION --> SYS
+
+    %% Style: highlight the shared-across-branches libraries
+    style SCENE fill:#2a4858,stroke:#4a8898
+    style FONTS fill:#2a4858,stroke:#4a8898
+    style PROTOCOL fill:#2a4858,stroke:#4a8898
+    style SYS fill:#2a4858,stroke:#4a8898

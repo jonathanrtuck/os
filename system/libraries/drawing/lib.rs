@@ -35,6 +35,7 @@ include!("neon.rs");
 mod blend;
 mod blit;
 mod blur;
+pub mod box_blur;
 mod coverage;
 mod fill;
 mod gradient;
@@ -46,6 +47,7 @@ pub use blur::{
     blur_surface, blur_surface_scalar, compute_kernel, BlurStrategy, CpuBlur, ReadSurface,
     MAX_CPU_BLUR_RADIUS, MAX_KERNEL_DIAMETER,
 };
+pub use box_blur::{box_blur_3pass, box_blur_pad, box_blur_widths};
 pub use gradient::{fill_radial_gradient_noise, fill_radial_gradient_rows, Xorshift32};
 
 // === Core types =============================================================
@@ -252,6 +254,20 @@ pub(crate) fn abs(x: i32) -> i32 {
         -x
     } else {
         x
+    }
+}
+
+/// Round a float to the nearest integer (round-half-away-from-zero).
+///
+/// Manual implementation for `no_std` where `f32::round()` is not available
+/// without the `core_maths` feature. Used throughout the rendering pipeline
+/// for scaling point coordinates to physical pixels.
+#[inline]
+pub fn round_f32(x: f32) -> i32 {
+    if x >= 0.0 {
+        (x + 0.5) as i32
+    } else {
+        (x - 0.5) as i32
     }
 }
 

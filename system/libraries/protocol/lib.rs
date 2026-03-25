@@ -16,6 +16,7 @@
 //! - `editor`      — init -> text editor (editor config)
 //! - `fs`          — init <-> 9p driver (filesystem requests)
 //! - `present`     — core -> render service (scene update signal)
+//! - `decode`      — core <-> decoder services (generic decode protocol)
 //!
 //! # Conventions
 //!
@@ -25,6 +26,20 @@
 //! - `DirtyRect` is defined here; the drawing library re-exports it.
 
 #![no_std]
+
+/// IPC payload size in bytes. Must match `ipc::PAYLOAD_SIZE`.
+const PAYLOAD_SIZE: usize = 60;
+
+/// Decode a `#[repr(C)]` payload from raw bytes.
+///
+/// # Safety
+///
+/// `T` must be `#[repr(C)]` and `size_of::<T>() <= PAYLOAD_SIZE`. Both are
+/// enforced by const assertions on every payload struct in this crate.
+#[inline]
+unsafe fn decode_payload<T: Copy>(payload: &[u8; PAYLOAD_SIZE]) -> T {
+    unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const T) }
+}
 
 /// Base virtual address where channel shared memory pages are mapped.
 /// The kernel's channel is at page 0. Channels created by init start
@@ -85,8 +100,8 @@ impl DirtyRect {
         DirtyRect {
             x: x0,
             y: y0,
-            w: (x1 - x0 as u32) as u16,
-            h: (y1 - y0 as u32) as u16,
+            w: (x1 - x0 as u32).min(u16::MAX as u32) as u16,
+            h: (y1 - y0 as u32).min(u16::MAX as u32) as u16,
         }
     }
 
@@ -112,6 +127,22 @@ pub mod device {
         pub _pad: u32,
     }
     const _: () = assert!(core::mem::size_of::<DeviceConfig>() <= 60);
+
+    /// Typed message for the device protocol boundary.
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        DeviceConfig(DeviceConfig),
+    }
+
+    /// Decode a device protocol message. Returns `None` for unknown msg_type.
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_DEVICE_CONFIG => Some(Message::DeviceConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── gpu: init <-> GPU driver ────────────────────────────────────────
@@ -143,8 +174,30 @@ pub mod gpu {
     pub struct DisplayInfoMsg {
         pub width: u32,
         pub height: u32,
+        /// Display refresh rate in Hz. 0 = unknown (default to 60).
+        pub refresh_rate: u32,
     }
     const _: () = assert!(core::mem::size_of::<DisplayInfoMsg>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        GpuConfig(GpuConfig),
+        DisplayInfo(DisplayInfoMsg),
+        GpuReady,
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_GPU_CONFIG => Some(Message::GpuConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_DISPLAY_INFO => Some(Message::DisplayInfo(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_GPU_READY => Some(Message::GpuReady),
+            _ => None,
+        }
+    }
 }
 
 // ── input: input driver -> core ─────────────────────────────────────
@@ -153,6 +206,15 @@ pub mod input {
     pub const MSG_KEY_EVENT: u32 = 10;
     pub const MSG_POINTER_ABS: u32 = 11;
     pub const MSG_POINTER_BUTTON: u32 = 12;
+    /// Config message: VA of the shared PointerState register.
+    pub const MSG_POINTER_STATE_CONFIG: u32 = 13;
+
+    /// Modifier key bitmask flags, packed into `KeyEvent.modifiers`.
+    pub const MOD_SHIFT: u8 = 1 << 0;
+    pub const MOD_CTRL: u8 = 1 << 1;
+    pub const MOD_ALT: u8 = 1 << 2;
+    pub const MOD_SUPER: u8 = 1 << 3;
+    pub const MOD_CAPS_LOCK: u8 = 1 << 4;
 
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
@@ -160,6 +222,9 @@ pub mod input {
         pub keycode: u16,
         pub pressed: u8,
         pub ascii: u8,
+        /// Active modifier keys at the time of this event.
+        pub modifiers: u8,
+        pub _pad: u8,
     }
 
     #[repr(C)]
@@ -176,9 +241,69 @@ pub mod input {
         pub pressed: u8,
         pub _pad: [u8; 2],
     }
+
+    /// Config message payload: VA of the shared pointer state register.
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct PointerStateConfig {
+        pub state_va: u64,
+    }
+
+    /// Shared pointer state register. Lives in init-allocated shared memory.
+    ///
+    /// The input driver atomically writes `pointer_xy` (packed `(x << 32) | y`)
+    /// using a store-release. Core atomically reads it with a load-acquire.
+    /// Single atomic u64 — no torn reads, no generation counter needed.
+    ///
+    /// Coordinates are absolute [0, 32767] from the virtio tablet device.
+    #[repr(C)]
+    pub struct PointerState {
+        /// Packed pointer position: `(x << 32) | y`.
+        /// Accessed via AtomicU64 semantics (store-release / load-acquire).
+        pub pointer_xy: u64,
+    }
+
+    impl PointerState {
+        pub const fn pack(x: u32, y: u32) -> u64 {
+            ((x as u64) << 32) | (y as u64)
+        }
+        pub const fn unpack_x(packed: u64) -> u32 {
+            (packed >> 32) as u32
+        }
+        pub const fn unpack_y(packed: u64) -> u32 {
+            packed as u32
+        }
+    }
+
     const _: () = assert!(core::mem::size_of::<KeyEvent>() <= 60);
     const _: () = assert!(core::mem::size_of::<PointerAbs>() <= 60);
     const _: () = assert!(core::mem::size_of::<PointerButton>() <= 60);
+    const _: () = assert!(core::mem::size_of::<PointerStateConfig>() <= 60);
+    const _: () = assert!(core::mem::size_of::<PointerState>() == 8);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        KeyEvent(KeyEvent),
+        PointerAbs(PointerAbs),
+        PointerButton(PointerButton),
+        PointerStateConfig(PointerStateConfig),
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_KEY_EVENT => Some(Message::KeyEvent(unsafe { crate::decode_payload(payload) })),
+            MSG_POINTER_ABS => Some(Message::PointerAbs(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_POINTER_BUTTON => Some(Message::PointerButton(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_POINTER_STATE_CONFIG => Some(Message::PointerStateConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── edit: core <-> text editor ──────────────────────────────────────
@@ -228,6 +353,40 @@ pub mod edit {
     const _: () = assert!(core::mem::size_of::<WriteDeleteRange>() <= 60);
     const _: () = assert!(core::mem::size_of::<CursorMove>() <= 60);
     const _: () = assert!(core::mem::size_of::<SelectionUpdate>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        WriteInsert(WriteInsert),
+        WriteDelete(WriteDelete),
+        WriteDeleteRange(WriteDeleteRange),
+        CursorMove(CursorMove),
+        SelectionUpdate(SelectionUpdate),
+        SetCursor(CursorMove),
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_WRITE_INSERT => Some(Message::WriteInsert(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_WRITE_DELETE => Some(Message::WriteDelete(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_WRITE_DELETE_RANGE => Some(Message::WriteDeleteRange(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_CURSOR_MOVE => Some(Message::CursorMove(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_SELECTION_UPDATE => Some(Message::SelectionUpdate(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_SET_CURSOR => Some(Message::SetCursor(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── core: init -> core (OS service) ─────────────────────────────────
@@ -244,22 +403,59 @@ pub mod core_config {
     ///
     /// `fb_width` / `fb_height` are dimensions in points (physical / scale).
     /// The core lays out in point coordinates; the render service scales to pixels.
+    /// `content_va` is the Content Region base (read-write). Core reads font
+    /// data via the registry and writes decoded image pixels.
+    /// `content_size` is the total Content Region size in bytes.
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CoreConfig {
         pub doc_va: u64,
         pub scene_va: u64,
-        pub mono_font_va: u64,
+        pub content_va: u64,
+        /// VA of the shared PointerState register (input driver → core).
+        /// 0 if no input device is present.
+        pub input_state_va: u64,
         pub fb_width: u32,
         pub fb_height: u32,
         pub doc_capacity: u32,
-        pub mono_font_len: u32,
-        pub prop_font_len: u32,
-        pub _pad: u32,
+        pub content_size: u32,
     }
 
-    // Guard: must fit within the 60-byte IPC payload.
+    // Guard: must fit within the 60-byte IPC payload (48 bytes used).
     const _: () = assert!(core::mem::size_of::<CoreConfig>() <= 60);
+
+    /// Display refresh rate, sent as a separate message after CoreConfig.
+    /// Separate because CoreConfig is at 56 bytes and u64 fields force
+    /// 8-byte struct alignment — adding even 2 bytes would pad to 64.
+    pub const MSG_FRAME_RATE: u32 = 52;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct FrameRateMsg {
+        /// Display refresh rate in Hz. 0 = use default (60 Hz).
+        pub frame_rate: u32,
+    }
+    const _: () = assert!(core::mem::size_of::<FrameRateMsg>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        CoreConfig(CoreConfig),
+        FrameRate(FrameRateMsg),
+        SceneUpdated,
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_CORE_CONFIG => Some(Message::CoreConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_FRAME_RATE => Some(Message::FrameRate(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_SCENE_UPDATED => Some(Message::SceneUpdated),
+            _ => None,
+        }
+    }
 }
 
 // ── compose: init -> render service ─────────────────────────────────
@@ -285,6 +481,10 @@ pub mod compose {
     /// `font_size` is the font size in points (e.g. 18).
     /// `screen_dpi` is the display DPI (e.g. 96).
     /// `frame_rate` is the target frames per second (e.g. 60).
+    /// `content_va` is the base VA of the Content Region shared memory
+    /// (header + data area). Render services find fonts and decoded
+    /// image pixels via the registry in the Content Region header.
+    /// `content_size` is the total Content Region size in bytes.
     ///
     /// Framebuffer VAs are not included — both render services self-allocate
     /// framebuffers via `dma_alloc`.
@@ -292,16 +492,19 @@ pub mod compose {
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct CompositorConfig {
         pub scene_va: u64,
-        pub mono_font_va: u64,
+        pub content_va: u64,
         pub fb_width: u32,
         pub fb_height: u32,
-        pub mono_font_len: u32,
-        pub prop_font_len: u32,
+        pub content_size: u32,
         pub scale_factor: f32,
         pub frame_rate: u16,
         pub font_size: u16,
         pub screen_dpi: u16,
         pub _pad: u16,
+        /// Pointer state register VA (atomic u64, read-only). Metal-render
+        /// reads cursor position directly from here for cursor plane commands,
+        /// independent of the scene graph.
+        pub pointer_state_va: u64,
     }
 
     // Guard: must fit within the 60-byte IPC payload.
@@ -310,9 +513,10 @@ pub mod compose {
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct ImageConfig {
-        pub image_va: u64,
-        pub image_len: u32,
-        pub _pad: u32,
+        /// Byte offset of the encoded image within the File Store.
+        pub file_store_offset: u32,
+        /// Byte length of the encoded image in the File Store.
+        pub file_store_length: u32,
     }
     const _: () = assert!(core::mem::size_of::<ImageConfig>() <= 60);
 
@@ -322,6 +526,28 @@ pub mod compose {
         pub mmio_pa: u64,
     }
     const _: () = assert!(core::mem::size_of::<RtcConfig>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        CompositorConfig(CompositorConfig),
+        ImageConfig(ImageConfig),
+        RtcConfig(RtcConfig),
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_COMPOSITOR_CONFIG => Some(Message::CompositorConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_IMAGE_CONFIG => Some(Message::ImageConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            MSG_RTC_CONFIG => Some(Message::RtcConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── editor: init -> text editor ─────────────────────────────────────
@@ -337,6 +563,20 @@ pub mod editor {
         pub _pad: u32,
     }
     const _: () = assert!(core::mem::size_of::<EditorConfig>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        EditorConfig(EditorConfig),
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_EDITOR_CONFIG => Some(Message::EditorConfig(unsafe {
+                crate::decode_payload(payload)
+            })),
+            _ => None,
+        }
+    }
 }
 
 // ── present: render service internal (legacy, unused) ──────────────
@@ -392,3 +632,17 @@ pub mod fs {
 // ── virgl: Virgl3D protocol constants and command encoding ───────────
 
 pub mod virgl;
+
+// ── metal: Metal-over-virtio command protocol ───────────────────────
+
+pub mod metal;
+
+// ── content: Content Region shared memory layout ────────────────────
+
+/// Content Region shared memory layout (font data, decoded images).
+pub mod content;
+
+// ── decode: generic decoder service protocol ────────────────────────
+
+/// Decode protocol for content decoder services (PNG, JPEG, etc.).
+pub mod decode;

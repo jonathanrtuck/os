@@ -143,9 +143,14 @@ impl AffineTransform {
             && self.ty == 0.0
     }
 
+    /// Pure translation from millipoint coordinates.
+    pub fn translate_mpt(x: crate::node::Mpt, y: crate::node::Mpt) -> Self {
+        Self::translate(crate::node::mpt_to_f32(x), crate::node::mpt_to_f32(y))
+    }
+
     /// Returns true if this is a pure integer translation (no rotation/scale/skew).
     /// Note: for |tx| or |ty| > 2^31, the f32→i32 cast saturates, which may
-    /// produce incorrect results. Not reachable in practice (scene coords are i16).
+    /// produce incorrect results. Not reachable in practice (scene coords are millipoints, i32 range).
     pub fn is_integer_translation(&self) -> bool {
         self.a == 1.0
             && self.b == 0.0

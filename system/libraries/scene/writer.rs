@@ -5,10 +5,42 @@ use crate::{
         Node, NodeId, SceneHeader, DATA_BUFFER_SIZE, DATA_OFFSET, DIRTY_BITMAP_WORDS, MAX_NODES,
         NODES_OFFSET, NULL, SCENE_SIZE,
     },
-    primitives::{DataRef, ShapedGlyph},
+    primitives::{Content, DataRef, ShapedGlyph},
 };
 
 const NODE_SIZE: usize = core::mem::size_of::<Node>();
+
+// ── Sibling chain iterator ──────────────────────────────────────────
+
+/// Iterator over the sibling chain starting from a given node.
+/// Yields `NodeId`s until `NULL` is reached or `stop_before` is encountered.
+/// Use via `SceneWriter::children_until()` or `SceneWriter::siblings()`.
+pub struct ChildIter<'a> {
+    buf: &'a [u8],
+    current: NodeId,
+    stop_before: NodeId,
+}
+
+impl<'a> Iterator for ChildIter<'a> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<NodeId> {
+        if self.current == NULL || self.current == self.stop_before {
+            return None;
+        }
+        let id = self.current;
+        // Read next_sibling from the node at `id`.
+        // SAFETY: the buffer and node layout are the same as SceneWriter::node().
+        let offset = NODES_OFFSET + (id as usize) * NODE_SIZE;
+        if offset + NODE_SIZE > self.buf.len() {
+            self.current = NULL;
+            return None; // Bounds safety
+        }
+        let node = unsafe { &*(self.buf.as_ptr().add(offset) as *const Node) };
+        self.current = node.next_sibling;
+        Some(id)
+    }
+}
 
 /// Builds and mutates a scene graph in a flat byte buffer conforming
 /// to the shared memory layout (Header + Node array + Data buffer).
@@ -179,14 +211,28 @@ impl<'a> SceneWriter<'a> {
     pub fn node_count(&self) -> u16 {
         self.header().node_count
     }
-    /// Set the node count directly.
+    /// Truncate the node array to `count` nodes.
     ///
-    /// Used to truncate the node array (e.g., removing dynamic selection
-    /// rect nodes by resetting count to the well-known node count).
+    /// Nodes with IDs >= `count` are logically freed. Any surviving node
+    /// (ID < `count`) whose `first_child` points to a now-dead node gets
+    /// its `first_child` cleared to NULL. This prevents the tree walker
+    /// from following dangling pointers into reallocated memory.
+    ///
     /// The caller must ensure `count` does not exceed the previously
     /// allocated high-water mark within the current buffer.
     pub fn set_node_count(&mut self, count: u16) {
+        let old_count = self.header().node_count;
         self.header_mut().node_count = count;
+
+        // Clean up dangling first_child pointers in surviving nodes.
+        if count < old_count {
+            for id in 0..count {
+                let n = self.node_mut(id);
+                if n.first_child >= count {
+                    n.first_child = NULL;
+                }
+            }
+        }
     }
     /// Get a mutable reference to a node by ID.
     pub fn node_mut(&mut self, id: NodeId) -> &mut Node {
@@ -295,7 +341,27 @@ impl<'a> SceneWriter<'a> {
         (self.header().data_used as usize) + bytes <= DATA_BUFFER_SIZE
     }
     /// Reset the data buffer usage counter (bump allocator rewind).
+    ///
+    /// Also clears `Content` on surviving nodes whose content references
+    /// the data buffer (`Content::Glyphs`, `Content::Path`). Setting them
+    /// to `Content::None` forces callers to explicitly re-push all content
+    /// after a reset. Missed re-pushes render as empty (visible error)
+    /// instead of stale data (silent error). `clip_path` DataRefs are
+    /// similarly cleared.
     pub fn reset_data(&mut self) {
+        let count = self.header().node_count;
+        for id in 0..count {
+            let n = self.node_mut(id);
+            match n.content {
+                Content::Glyphs { .. } | Content::Path { .. } => {
+                    n.content = Content::None;
+                }
+                _ => {}
+            }
+            if !n.clip_path.is_empty() {
+                n.clip_path = DataRef::EMPTY;
+            }
+        }
         self.header_mut().data_used = 0;
     }
     pub fn root(&self) -> NodeId {
@@ -326,5 +392,22 @@ impl<'a> SceneWriter<'a> {
         self.buf[start..end].copy_from_slice(bytes);
 
         true
+    }
+
+    /// Iterate over the sibling chain starting from `start`, stopping before
+    /// `stop_before` (or `NULL`). Does not include `stop_before` itself.
+    ///
+    /// Example: `for node_id in w.children_until(first_child, N_CURSOR) { ... }`
+    pub fn children_until(&self, start: NodeId, stop_before: NodeId) -> ChildIter<'_> {
+        ChildIter {
+            buf: self.buf,
+            current: start,
+            stop_before,
+        }
+    }
+
+    /// Iterate all siblings from `start` until `NULL`.
+    pub fn siblings(&self, start: NodeId) -> ChildIter<'_> {
+        self.children_until(start, NULL)
     }
 }

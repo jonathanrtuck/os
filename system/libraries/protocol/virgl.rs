@@ -409,6 +409,32 @@ impl CommandBuffer {
         self.push(0); // S3: alpha
     }
 
+    /// Create a DSA state for clip-path stencil test.
+    ///
+    /// Passes where stencil != 0, but KEEPS the stencil value on pass
+    /// (unlike `cmd_create_dsa_stencil_test` which zeros it). This allows
+    /// multiple clipped draws to all test against the same stencil mask.
+    /// The caller must clear the stencil buffer explicitly after all
+    /// clipped content is drawn.
+    pub fn cmd_create_dsa_clip_test(&mut self, handle: u32) {
+        self.push(virgl_cmd0(VIRGL_CCMD_CREATE_OBJECT, VIRGL_OBJECT_DSA, 5));
+        self.push(handle);
+        // S0: depth DISABLED — stencil test only.
+        self.push(0);
+        // S1: stencil[0] (front) — pass if != 0, KEEP stencil on pass
+        let face = Self::stencil_face(
+            PIPE_FUNC_NOTEQUAL,
+            PIPE_STENCIL_OP_KEEP, // stencil fail
+            PIPE_STENCIL_OP_KEEP, // stencil pass (KEEP, not ZERO)
+            PIPE_STENCIL_OP_KEEP, // depth fail
+            0xFF,
+            0xFF,
+        );
+        self.push(face); // S1: front
+        self.push(face); // S2: back (same)
+        self.push(0); // S3: alpha
+    }
+
     /// Create a blend state with color writes disabled (for stencil-only pass).
     pub fn cmd_create_blend_no_color(&mut self, handle: u32) {
         // Payload = handle(1) + S0(1) + S1/logicop(1) + RT0-RT7(8) = 11.
@@ -696,5 +722,61 @@ impl CommandBuffer {
         for &dw in data {
             self.push(dw);
         }
+    }
+
+    /// VIRGL_CCMD_BLIT — GPU-side resource copy (no CPU round-trip).
+    ///
+    /// Copies a rectangular region from `src_res` (at `sx,sy` with size `w×h`)
+    /// to `dst_res` (at `dx,dy`). Both resources must be attached to the virgl
+    /// context. Uses NEAREST filter for pixel-exact copies.
+    ///
+    /// Payload layout (21 dwords, indices 1–21 per virgl_protocol.h):
+    ///   [1]  mask      — PIPE_MASK_RGBA (0x0F)
+    ///   [2]  filter    — PIPE_TEX_FILTER_NEAREST (0)
+    ///   [3]  scissor_enable / alpha_blend / render_condition_enable — all 0
+    ///   [4]  dst_res_handle
+    ///   [5]  dst_level (0)
+    ///   [6]  dst_format (VIRGL_FORMAT_B8G8R8A8_UNORM)
+    ///   [7..12] dst box: x, y, z, w, h, d
+    ///   [13] src_res_handle
+    ///   [14] src_level (0)
+    ///   [15] src_format (VIRGL_FORMAT_B8G8R8A8_UNORM)
+    ///   [16..21] src box: x, y, z, w, h, d
+    #[allow(clippy::too_many_arguments)]
+    pub fn cmd_blit_region(
+        &mut self,
+        dst_res: u32,
+        dst_x: u32,
+        dst_y: u32,
+        src_res: u32,
+        src_x: u32,
+        src_y: u32,
+        w: u32,
+        h: u32,
+    ) {
+        self.push(virgl_cmd0(VIRGL_CCMD_BLIT, 0, 21));
+        self.push(PIPE_MASK_RGBA); // [1] mask
+        self.push(0); // [2] filter = NEAREST
+        self.push(0); // [3] scissor_enable=0, alpha_blend=0, render_condition_enable=0
+                      // Dst box:
+        self.push(dst_res); // [4] dst_res_handle
+        self.push(0); // [5] dst_level
+        self.push(VIRGL_FORMAT_B8G8R8A8_UNORM); // [6] dst_format
+        self.push(dst_x); // [7] dst.x
+        self.push(dst_y); // [8] dst.y
+        self.push(0); // [9] dst.z
+        self.push(w); // [10] dst.w
+        self.push(h); // [11] dst.h
+        self.push(1); // [12] dst.d
+                      // Src box:
+        self.push(src_res); // [13] src_res_handle
+        self.push(0); // [14] src_level
+        self.push(VIRGL_FORMAT_B8G8R8A8_UNORM); // [15] src_format
+        self.push(src_x); // [16] src.x
+        self.push(src_y); // [17] src.y
+        self.push(0); // [18] src.z
+        self.push(w); // [19] src.w
+        self.push(h); // [20] src.h
+        self.push(1); // [21] src.d
     }
 }

@@ -25,77 +25,187 @@
 #![no_main]
 
 extern crate alloc;
+extern crate animation;
+extern crate drawing;
 extern crate fonts;
+extern crate layout as layout_lib;
+extern crate render;
 extern crate scene;
 
+#[path = "blink.rs"]
+mod blink;
+#[path = "documents.rs"]
+mod documents;
 #[path = "fallback.rs"]
 mod fallback;
+#[path = "icons.rs"]
+mod icons;
+#[path = "input.rs"]
+mod input_handling;
 #[path = "layout/mod.rs"]
 mod layout;
 #[path = "scene_state.rs"]
 mod scene_state;
-#[path = "test_gen.rs"]
-mod test_gen;
 #[path = "typography.rs"]
 mod typography;
 
 use protocol::{
-    compose::{ImageConfig, RtcConfig, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG},
-    core_config::{CoreConfig, MSG_CORE_CONFIG, MSG_SCENE_UPDATED},
+    compose::{self, ImageConfig, RtcConfig, MSG_IMAGE_CONFIG, MSG_RTC_CONFIG},
+    core_config::{
+        self, CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE, MSG_SCENE_UPDATED,
+    },
     edit::{
-        CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert, MSG_CURSOR_MOVE,
-        MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE, MSG_WRITE_DELETE_RANGE,
-        MSG_WRITE_INSERT,
+        self, CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
+        MSG_CURSOR_MOVE, MSG_SELECTION_UPDATE, MSG_SET_CURSOR, MSG_WRITE_DELETE,
+        MSG_WRITE_DELETE_RANGE, MSG_WRITE_INSERT,
     },
-    input::{
-        KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
-    },
+    input::{self, KeyEvent, PointerButton, MSG_KEY_EVENT, MSG_POINTER_BUTTON},
 };
 
-const COMPOSITOR_HANDLE: u8 = 2;
-const DOC_HEADER_SIZE: usize = 64;
-const EDITOR_HANDLE: u8 = 3;
+/// Clamp a float to [min, max]. Manual implementation for `no_std`.
+#[inline]
+fn clamp_f32(x: f32, min: f32, max: f32) -> f32 {
+    if x < min {
+        min
+    } else if x > max {
+        max
+    } else {
+        x
+    }
+}
+
+/// Round a float to the nearest integer (round-half-away-from-zero).
+/// Delegates to the canonical implementation in `drawing`.
+#[inline]
+fn round_f32(x: f32) -> i32 {
+    drawing::round_f32(x)
+}
+
+const COMPOSITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(2);
+const DECODER_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
+pub(crate) const DOC_HEADER_SIZE: usize = 64;
+const EDITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(3);
 const FONT_SIZE: u32 = 18;
-const INPUT_HANDLE: u8 = 1;
-const INPUT2_HANDLE: u8 = 4;
-const KEY_LEFTCTRL: u16 = 29;
+const INPUT_HANDLE: sys::ChannelHandle = sys::ChannelHandle(1);
+const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(5);
+// Keycodes (Linux evdev).
+const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
-const SHADOW_DEPTH: u32 = 12;
+const KEY_A: u16 = 30;
+const KEY_LEFTCTRL: u16 = 29;
+const KEY_UP: u16 = 103;
+const KEY_DOWN: u16 = 108;
+const KEY_LEFT: u16 = 105;
+const KEY_RIGHT: u16 = 106;
+const KEY_HOME: u16 = 102;
+const KEY_END: u16 = 107;
+const KEY_PAGEUP: u16 = 104;
+const KEY_PAGEDOWN: u16 = 109;
+const KEY_DELETE: u16 = 111;
+const SHADOW_DEPTH: u32 = 0;
 const TEXT_INSET_BOTTOM: u32 = 8;
 const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_X: u32 = 12;
 const TITLE_BAR_H: u32 = 36;
 
-struct CoreState {
-    boot_counter: u64,
-    char_w: u32,
-    counter_freq: u64,
-    cursor_pos: usize,
-    doc_buf: *mut u8,
-    doc_capacity: usize,
-    doc_len: usize,
-    font_data_ptr: *const u8,
-    font_data_len: usize,
-    font_upem: u16,
-    image_mode: bool,
-    line_h: u32,
-    mouse_x: u32,
-    mouse_y: u32,
-    rtc_mmio_va: usize,
-    saved_editor_scroll: u32,
-    scroll_offset: u32,
-    sel_end: usize,
-    sel_start: usize,
-    timer_active: bool,
-    timer_handle: u8,
+pub(crate) struct CoreState {
+    pub(crate) blink_phase: blink::BlinkPhase,
+    pub(crate) blink_phase_start_ms: u64,
+    pub(crate) boot_counter: u64,
+    /// Character advance in 16.16 fixed-point points.
+    /// Single source of truth — same precision as scene ShapedGlyph advances.
+    pub(crate) char_w_fx: i32,
+    pub(crate) counter_freq: u64,
+    pub(crate) cursor_blink_id: Option<animation::AnimationId>,
+    pub(crate) cursor_opacity: u8,
+    pub(crate) cursor_pos: usize,
+    pub(crate) doc_buf: *mut u8,
+    pub(crate) doc_capacity: usize,
+    pub(crate) doc_len: usize,
+    pub(crate) font_data_ptr: *const u8,
+    pub(crate) font_data_len: usize,
+    pub(crate) font_upem: u16,
+    pub(crate) sans_font_data_ptr: *const u8,
+    pub(crate) sans_font_data_len: usize,
+    pub(crate) sans_font_upem: u16,
+    /// Content Region base VA and size (for PNG decode output).
+    pub(crate) content_va: usize,
+    pub(crate) content_size: usize,
+    /// Free-list allocator for the Content Region data area.
+    pub(crate) content_alloc: protocol::content::ContentAllocator,
+    /// Current scene graph generation (cached for content entry stamping).
+    pub(crate) scene_generation: u32,
+    /// Decoded image in the Content Region (set after PNG decode).
+    pub(crate) image_content_id: u32,
+    pub(crate) image_width: u16,
+    pub(crate) image_height: u16,
+    /// Which document space receives input (0=text, 1=image).
+    pub(crate) active_space: u8,
+    /// True when the slide spring is animating between spaces.
+    pub(crate) slide_animating: bool,
+    /// True on the first frame of a slide animation (clamp dt to frame interval).
+    pub(crate) slide_first_frame: bool,
+    /// Current slide offset in millipoints (0 = space 0, fb_width*MPT = space 1).
+    pub(crate) slide_offset: scene::Mpt,
+    /// Spring physics for slide animation.
+    pub(crate) slide_spring: animation::Spring,
+    /// Target slide offset in millipoints.
+    pub(crate) slide_target: scene::Mpt,
+    pub(crate) line_h: u32,
+    pub(crate) mouse_x: u32,
+    pub(crate) mouse_y: u32,
+    /// Animation ID for the pointer fade-out (255→0, 300ms EaseOut).
+    pub(crate) pointer_fade_id: Option<animation::AnimationId>,
+    /// Timestamp (ms) of the last pointer movement event.
+    pub(crate) pointer_last_event_ms: u64,
+    /// Current pointer cursor opacity (0 = hidden, 255 = fully visible).
+    pub(crate) pointer_opacity: u8,
+    /// True when the pointer cursor is currently shown (recently moved).
+    pub(crate) pointer_visible: bool,
+    /// VA of the shared PointerState register (input driver writes, core reads).
+    pub(crate) input_state_va: usize,
+    /// Last-seen packed pointer_xy value (for change detection).
+    pub(crate) last_pointer_xy: u64,
+    pub(crate) rtc_mmio_va: usize,
+    pub(crate) scroll_animating: bool,
+    pub(crate) scroll_offset: scene::Mpt,
+    pub(crate) scroll_spring: animation::Spring,
+    pub(crate) scroll_target: scene::Mpt,
+    pub(crate) sel_end: usize,
+    /// Selection anchor: the fixed end of a selection range. When
+    /// `has_selection` is true, the visible range is
+    /// `[min(anchor, cursor_pos), max(anchor, cursor_pos))`.
+    pub(crate) anchor: usize,
+    /// True when a selection is active.
+    pub(crate) has_selection: bool,
+    /// Sticky goal column for Up/Down navigation. Preserved across
+    /// consecutive vertical moves, cleared on any horizontal move.
+    pub(crate) goal_column: Option<usize>,
+    /// Click state for double/triple-click detection.
+    pub(crate) last_click_ms: u64,
+    pub(crate) last_click_x: u32,
+    pub(crate) last_click_y: u32,
+    pub(crate) click_count: u8,
+    /// Animation ID for the selection highlight fade-in (0→255).
+    pub(crate) selection_fade_id: Option<animation::AnimationId>,
+    /// Current selection highlight opacity (animated on selection change).
+    pub(crate) selection_opacity: u8,
+    pub(crate) sel_start: usize,
+    pub(crate) timeline: animation::Timeline,
+    pub(crate) timer_active: bool,
+    pub(crate) timer_handle: sys::TimerHandle,
 }
 
 impl CoreState {
     const fn new() -> Self {
         Self {
+            blink_phase: blink::BlinkPhase::VisibleHold,
+            blink_phase_start_ms: 0,
             boot_counter: 0,
-            char_w: 8,
+            char_w_fx: 8 * 65536,
             counter_freq: 0,
+            cursor_blink_id: None,
+            cursor_opacity: 255,
             cursor_pos: 0,
             doc_buf: core::ptr::null_mut(),
             doc_capacity: 0,
@@ -103,17 +213,54 @@ impl CoreState {
             font_data_ptr: core::ptr::null(),
             font_data_len: 0,
             font_upem: 1000,
-            image_mode: false,
+            sans_font_data_ptr: core::ptr::null(),
+            sans_font_data_len: 0,
+            sans_font_upem: 1000,
+            content_va: 0,
+            content_size: 0,
+            content_alloc: protocol::content::ContentAllocator::empty(),
+            scene_generation: 0,
+            image_content_id: 0,
+            image_width: 0,
+            image_height: 0,
+            active_space: 0,
+            slide_animating: false,
+            slide_first_frame: false,
+            slide_offset: 0,
+            slide_spring: {
+                let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
+                s.set_settle_threshold(0.5);
+                s
+            },
+            slide_target: 0,
             line_h: 20,
             mouse_x: 0,
             mouse_y: 0,
+            pointer_fade_id: None,
+            pointer_last_event_ms: 0,
+            pointer_opacity: 0,
+            pointer_visible: false,
+            input_state_va: 0,
+            last_pointer_xy: 0,
             rtc_mmio_va: 0,
-            saved_editor_scroll: 0,
+            scroll_animating: false,
             scroll_offset: 0,
+            scroll_spring: animation::Spring::snappy(0.0),
+            scroll_target: 0,
             sel_end: 0,
+            anchor: 0,
+            has_selection: false,
+            goal_column: None,
+            last_click_ms: 0,
+            last_click_x: 0,
+            last_click_y: 0,
+            click_count: 0,
+            selection_fade_id: None,
+            selection_opacity: 255,
             sel_start: 0,
+            timeline: animation::Timeline::new(),
             timer_active: false,
-            timer_handle: 0,
+            timer_handle: sys::TimerHandle(0),
         }
     }
 }
@@ -123,20 +270,12 @@ struct SyncState(core::cell::UnsafeCell<CoreState>);
 unsafe impl Sync for SyncState {}
 static STATE: SyncState = SyncState(core::cell::UnsafeCell::new(CoreState::new()));
 
-fn state() -> &'static mut CoreState {
+pub(crate) fn state() -> &'static mut CoreState {
     // SAFETY: Single-threaded userspace process. No concurrent access.
     unsafe { &mut *STATE.0.get() }
 }
 
-struct KeyAction {
-    changed: bool,
-    text_changed: bool,
-    selection_changed: bool,
-    context_switched: bool,
-    consumed: bool,
-}
-
-/// Access the font data slice from shared memory.
+/// Access the mono font data slice from shared memory.
 fn font_data() -> &'static [u8] {
     let s = state();
     if s.font_data_ptr.is_null() || s.font_data_len == 0 {
@@ -146,6 +285,19 @@ fn font_data() -> &'static [u8] {
         unsafe { core::slice::from_raw_parts(s.font_data_ptr, s.font_data_len) }
     }
 }
+
+/// Access the sans font data slice (Inter) from shared memory.
+fn sans_font_data() -> &'static [u8] {
+    let s = state();
+    if s.sans_font_data_ptr.is_null() || s.sans_font_data_len == 0 {
+        // Fallback to mono when sans font not available.
+        font_data()
+    } else {
+        // SAFETY: sans_font_data_ptr points to sans_font_data_len bytes of shared memory.
+        unsafe { core::slice::from_raw_parts(s.sans_font_data_ptr, s.sans_font_data_len) }
+    }
+}
+
 fn clock_seconds() -> u64 {
     let s = state();
     let rtc_va = s.rtc_mmio_va;
@@ -173,18 +325,26 @@ fn clock_seconds() -> u64 {
 /// mapping (byte offset to/from pixel coordinates), and scroll management.
 /// Pure computation — no allocations, no side effects.
 struct TextLayout {
-    char_width: u32,
+    /// Character advance in 16.16 fixed-point points.
+    /// This is the single source of truth for character width — derived
+    /// from the same formula as scene graph ShapedGlyph advances.
+    char_width_fx: i32,
     line_height: u32,
     max_width: u32,
 }
 
 impl TextLayout {
     fn cols(&self) -> usize {
-        if self.char_width == 0 {
+        if self.char_width_fx == 0 {
             return 0;
         }
+        // chars_per_line = floor(max_width / char_width) using 16.16 math.
+        ((self.max_width as i64 * 65536) / self.char_width_fx as i64) as usize
+    }
 
-        (self.max_width / self.char_width) as usize
+    /// Character advance as f32 points (for APIs that need it).
+    fn char_width_pt(&self) -> f32 {
+        self.char_width_fx as f32 / 65536.0
     }
 
     /// Return the visual line number (0-based) for a given byte offset.
@@ -203,28 +363,30 @@ impl TextLayout {
         line as u32
     }
 
-    /// Compute the scroll offset needed to keep the cursor visible.
+    /// Compute the scroll offset (in pixels) needed to keep the cursor visible.
     fn scroll_for_cursor(
         &self,
         text: &[u8],
         cursor_offset: usize,
-        current_scroll: u32,
+        current_scroll: f32,
         viewport_lines: u32,
-    ) -> u32 {
-        if viewport_lines == 0 {
-            return 0;
+    ) -> f32 {
+        if viewport_lines == 0 || self.line_height == 0 {
+            return 0.0;
         }
 
         let cursor_line = self.byte_to_visual_line(text, cursor_offset);
+        let cursor_pt = cursor_line as f32 * self.line_height as f32;
+        let viewport_pt = viewport_lines as f32 * self.line_height as f32;
 
-        if cursor_line < current_scroll {
-            return cursor_line;
+        if cursor_pt < current_scroll {
+            return cursor_pt;
         }
 
-        let last_visible = current_scroll + viewport_lines - 1;
+        let last_visible_top = current_scroll + viewport_pt - self.line_height as f32;
 
-        if cursor_line > last_visible {
-            return cursor_line - (viewport_lines - 1);
+        if cursor_pt > last_visible_top {
+            return cursor_pt - viewport_pt + self.line_height as f32;
         }
 
         current_scroll
@@ -239,8 +401,13 @@ impl TextLayout {
         }
 
         let target_row = y / self.line_height;
-        let half_char = self.char_width / 2;
-        let target_col = (x + half_char) / self.char_width;
+        // Use fractional char width for click-to-column mapping.
+        let cw_pt = self.char_width_pt();
+        let target_col = if cw_pt > 0.0 {
+            ((x as f32 + cw_pt * 0.5) / cw_pt) as u32
+        } else {
+            0
+        };
         let mut col = 0usize;
         let mut row = 0u32;
 
@@ -275,12 +442,12 @@ impl TextLayout {
     }
 }
 
-fn content_text_layout(content_w: u32) -> TextLayout {
+fn content_text_layout(page_w: u32, page_pad: u32) -> TextLayout {
     let s = state();
     TextLayout {
-        char_width: s.char_w,
+        char_width_fx: s.char_w_fx,
         line_height: s.line_h,
-        max_width: content_w.saturating_sub(2 * TEXT_INSET_X),
+        max_width: page_w.saturating_sub(2 * page_pad),
     }
 }
 fn create_clock_timer() -> bool {
@@ -316,183 +483,6 @@ fn create_clock_timer() -> bool {
         }
     }
 }
-fn doc_content() -> &'static [u8] {
-    let s = state();
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    // doc_len is always <= doc_capacity - DOC_HEADER_SIZE (maintained by
-    // doc_insert/doc_delete/doc_delete_range). doc_buf is set once during
-    // init and never null after that point.
-    unsafe {
-        debug_assert!(!s.doc_buf.is_null());
-        debug_assert!(s.doc_len <= s.doc_capacity);
-        core::slice::from_raw_parts(s.doc_buf.add(DOC_HEADER_SIZE), s.doc_len)
-    }
-}
-fn doc_delete(pos: usize) -> bool {
-    let s = state();
-    if s.doc_len == 0 || pos >= s.doc_len {
-        return false;
-    }
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    unsafe {
-        let base = s.doc_buf.add(DOC_HEADER_SIZE);
-        if pos + 1 < s.doc_len {
-            core::ptr::copy(base.add(pos + 1), base.add(pos), s.doc_len - pos - 1);
-        }
-    }
-    s.doc_len -= 1;
-    doc_write_header();
-    true
-}
-fn doc_delete_range(start: usize, end: usize) -> bool {
-    let s = state();
-    if start >= end || start >= s.doc_len || end > s.doc_len {
-        return false;
-    }
-    let del_count = end - start;
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    unsafe {
-        let base = s.doc_buf.add(DOC_HEADER_SIZE);
-        if end < s.doc_len {
-            core::ptr::copy(base.add(end), base.add(start), s.doc_len - end);
-        }
-    }
-    s.doc_len -= del_count;
-    doc_write_header();
-    true
-}
-fn doc_insert(pos: usize, byte: u8) -> bool {
-    let s = state();
-    if s.doc_len >= s.doc_capacity || pos > s.doc_len {
-        return false;
-    }
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    unsafe {
-        let base = s.doc_buf.add(DOC_HEADER_SIZE);
-        if pos < s.doc_len {
-            core::ptr::copy(base.add(pos), base.add(pos + 1), s.doc_len - pos);
-        }
-        *base.add(pos) = byte;
-    }
-    s.doc_len += 1;
-    doc_write_header();
-    true
-}
-fn doc_write_header() {
-    let s = state();
-    // SAFETY: doc_buf points to doc_capacity bytes of shared memory.
-    unsafe {
-        core::ptr::write_volatile(s.doc_buf as *mut u64, s.doc_len as u64);
-        core::ptr::write_volatile(s.doc_buf.add(8) as *mut u64, s.cursor_pos as u64);
-    }
-}
-fn format_time_hms(total_seconds: u64, buf: &mut [u8; 8]) {
-    let hours = ((total_seconds / 3600) % 24) as u8;
-    let minutes = ((total_seconds / 60) % 60) as u8;
-    let seconds = (total_seconds % 60) as u8;
-
-    buf[0] = b'0' + hours / 10;
-    buf[1] = b'0' + hours % 10;
-    buf[2] = b':';
-    buf[3] = b'0' + minutes / 10;
-    buf[4] = b'0' + minutes % 10;
-    buf[5] = b':';
-    buf[6] = b'0' + seconds / 10;
-    buf[7] = b'0' + seconds % 10;
-}
-fn process_key_event(
-    key: &KeyEvent,
-    ctrl_pressed: &mut bool,
-    has_image: bool,
-    editor_ch: &ipc::Channel,
-    msg: &ipc::Message,
-) -> KeyAction {
-    if key.keycode == KEY_LEFTCTRL {
-        *ctrl_pressed = key.pressed == 1;
-
-        return KeyAction {
-            changed: false,
-            text_changed: false,
-            selection_changed: false,
-            context_switched: false,
-            consumed: true,
-        };
-    }
-    if key.keycode == KEY_TAB && key.pressed == 1 && *ctrl_pressed {
-        if has_image {
-            let s = state();
-            let was_image = s.image_mode;
-
-            if !was_image {
-                s.saved_editor_scroll = s.scroll_offset;
-            }
-
-            s.image_mode = !was_image;
-
-            if was_image {
-                s.scroll_offset = s.saved_editor_scroll;
-            }
-
-            return KeyAction {
-                changed: true,
-                text_changed: true,
-                selection_changed: false,
-                context_switched: true,
-                consumed: true,
-            };
-        }
-        return KeyAction {
-            changed: false,
-            text_changed: false,
-            selection_changed: false,
-            context_switched: false,
-            consumed: true,
-        };
-    }
-
-    if !state().image_mode {
-        // TODO: Construct a core→editor message instead of forwarding the
-        // raw input driver message. Fragile if input format changes (review 6.10).
-        editor_ch.send(msg);
-
-        let _ = sys::channel_signal(EDITOR_HANDLE);
-    }
-
-    KeyAction {
-        changed: false,
-        text_changed: false,
-        selection_changed: false,
-        context_switched: false,
-        consumed: false,
-    }
-}
-fn update_scroll_offset(content_w: u32, content_h: u32) {
-    let vp_lines = viewport_lines(content_h);
-
-    if vp_lines == 0 {
-        return;
-    }
-
-    let layout = content_text_layout(content_w);
-    let text = doc_content();
-    let s = state();
-    let cursor = s.cursor_pos;
-    let current = s.scroll_offset;
-    let new_scroll = layout.scroll_for_cursor(text, cursor, current, vp_lines);
-
-    state().scroll_offset = new_scroll;
-}
-fn viewport_lines(content_h: u32) -> u32 {
-    let line_h = state().line_h;
-
-    if line_h == 0 {
-        return 0;
-    }
-
-    let usable = content_h.saturating_sub(TEXT_INSET_TOP + TEXT_INSET_BOTTOM);
-
-    usable / line_h
-}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -516,10 +506,32 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    // SAFETY: msg.msg_type is MSG_CORE_CONFIG; sender (init) guarantees payload is a valid CoreConfig.
-    let config: CoreConfig = unsafe { msg.payload_as() };
+    let Some(core_config::Message::CoreConfig(config)) =
+        core_config::decode(msg.msg_type, &msg.payload)
+    else {
+        sys::print(b"core: bad config payload\n");
+        sys::exit();
+    };
     let fb_width = config.fb_width;
     let fb_height = config.fb_height;
+
+    // Read frame rate from separate message (CoreConfig is full at 56 bytes).
+    // Init sends FrameRateMsg immediately after CoreConfig on the same channel.
+    let _ = sys::wait(&[0], 100_000_000); // 100ms timeout on init channel
+    let frame_rate: u64 = if let Some(core_config::Message::FrameRate(fr)) = init_ch
+        .try_recv(&mut msg)
+        .then(|| core_config::decode(msg.msg_type, &msg.payload))
+        .flatten()
+    {
+        if fr.frame_rate > 0 {
+            fr.frame_rate as u64
+        } else {
+            60
+        }
+    } else {
+        60
+    };
+    let frame_interval_ns: u64 = 1_000_000_000 / frame_rate;
 
     if config.doc_va == 0 || config.scene_va == 0 {
         sys::print(b"core: bad config\n");
@@ -531,88 +543,209 @@ pub extern "C" fn _start() -> ! {
         s.doc_buf = config.doc_va as *mut u8;
         s.doc_capacity = config.doc_capacity as usize;
         s.doc_len = 0;
+        s.input_state_va = config.input_state_va as usize;
     }
-    doc_write_header();
+    documents::doc_write_header();
 
-    // Parse font to get metrics (char_width, line_height).
-    // Core only needs metrics for layout, not the full glyph cache.
-    if config.mono_font_va != 0 && config.mono_font_len > 0 {
-        // SAFETY: mono_font_va..+mono_font_len is within the font shared memory region mapped
-        // by init; alignment is 1 (u8 slice). Guarded by the non-null/non-zero checks above.
-        let font_data = unsafe {
-            core::slice::from_raw_parts(
-                config.mono_font_va as *const u8,
-                config.mono_font_len as usize,
-            )
-        };
-        // Store font data pointer and length for shaping calls.
+    // Parse fonts from Content Region via registry lookup.
+    // Core needs metrics for layout and font data pointers for shaping.
+    if config.content_va != 0 && config.content_size > 0 {
+        // SAFETY: content_va..+content_size is mapped read-write by init. Header is repr(C).
+        let header =
+            unsafe { &*(config.content_va as *const protocol::content::ContentRegionHeader) };
+
+        // Store Content Region info and initialize the free-list allocator.
+        // Init bump-allocated fonts into [CONTENT_HEADER_SIZE, next_alloc).
+        // The allocator manages [next_alloc, content_size) for core's use.
         {
             let s = state();
-            s.font_data_ptr = config.mono_font_va as *const u8;
-            s.font_data_len = config.mono_font_len as usize;
+            s.content_va = config.content_va as usize;
+            s.content_size = config.content_size as usize;
+            s.content_alloc = protocol::content::ContentAllocator::new(
+                header.next_alloc,
+                config.content_size as u32,
+            );
         }
-        if let Some(fm) = fonts::rasterize::font_metrics(font_data) {
-            let upem = fm.units_per_em;
-            state().font_upem = upem;
-            let asc = fm.ascent as i32;
-            let desc = fm.descent as i32;
-            let gap = fm.line_gap as i32;
-            let size = FONT_SIZE;
-            let ascent_pt = ((asc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
-            let descent_pt = ((-desc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
-            let gap_pt = if gap > 0 {
-                (gap * size as i32 / upem as i32) as u32
-            } else {
-                0
-            };
-            let line_h = ascent_pt + descent_pt + gap_pt;
-            // For monospace: use axis-adjusted advance of space glyph (MONO=1).
-            let space_gid = fonts::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
-            let mono_axes = [fonts::rasterize::AxisValue {
-                tag: *b"MONO",
-                value: 1.0,
-            }];
-            let char_w = fonts::rasterize::glyph_advance_with_axes(
-                font_data,
-                space_gid,
-                size as u16,
-                &mono_axes,
-            )
-            .unwrap_or_else(|| {
-                let (advance_fu, _) =
-                    fonts::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
-                (advance_fu as u32 * size + upem as u32 / 2) / upem as u32
-            });
 
+        // Mono font.
+        if let Some(entry) =
+            protocol::content::find_entry(header, protocol::content::CONTENT_ID_FONT_MONO)
+        {
+            let font_ptr = (config.content_va as usize + entry.offset as usize) as *const u8;
+            // SAFETY: entry bounds validated by init; content_va region is mapped.
+            let font_data = unsafe { core::slice::from_raw_parts(font_ptr, entry.length as usize) };
             {
                 let s = state();
-                s.char_w = if char_w > 0 { char_w } else { 8 };
-                s.line_h = if line_h > 0 { line_h } else { 20 };
+                s.font_data_ptr = font_ptr;
+                s.font_data_len = entry.length as usize;
             }
+            if let Some(fm) = fonts::rasterize::font_metrics(font_data) {
+                let upem = fm.units_per_em;
+                state().font_upem = upem;
+                let asc = fm.ascent as i32;
+                let desc = fm.descent as i32;
+                let gap = fm.line_gap as i32;
+                let size = FONT_SIZE;
+                let ascent_pt = ((asc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
+                let descent_pt = ((-desc * size as i32 + upem as i32 - 1) / upem as i32) as u32;
+                let gap_pt = if gap > 0 {
+                    (gap * size as i32 / upem as i32) as u32
+                } else {
+                    0
+                };
+                let line_h = ascent_pt + descent_pt + gap_pt;
+                let space_gid = fonts::rasterize::glyph_id_for_char(font_data, ' ').unwrap_or(0);
+                let (advance_fu, _) =
+                    fonts::rasterize::glyph_h_metrics(font_data, space_gid).unwrap_or((0, 0));
+                let char_w_fx = (advance_fu as i64 * size as i64 * 65536 / upem as i64) as i32;
 
-            sys::print(b"     font metrics loaded\n");
-        } else {
-            sys::print(b"     warning: font parse failed, using defaults\n");
+                {
+                    let s = state();
+                    s.char_w_fx = if char_w_fx > 0 { char_w_fx } else { 8 * 65536 };
+                    s.line_h = if line_h > 0 { line_h } else { 20 };
+                }
+
+                sys::print(b"     font metrics loaded\n");
+            } else {
+                sys::print(b"     warning: font parse failed, using defaults\n");
+            }
+        }
+
+        // Sans font (Inter) for chrome text.
+        if let Some(entry) =
+            protocol::content::find_entry(header, protocol::content::CONTENT_ID_FONT_SANS)
+        {
+            let sans_ptr = (config.content_va as usize + entry.offset as usize) as *const u8;
+            // SAFETY: entry bounds validated by init; content_va region is mapped.
+            let sans_data = unsafe { core::slice::from_raw_parts(sans_ptr, entry.length as usize) };
+            if let Some(fm) = fonts::rasterize::font_metrics(sans_data) {
+                let s = state();
+                s.sans_font_data_ptr = sans_ptr;
+                s.sans_font_data_len = entry.length as usize;
+                s.sans_font_upem = fm.units_per_em;
+                sys::print(b"     sans font (Inter) loaded\n");
+            } else {
+                sys::print(b"     warning: sans font parse failed\n");
+            }
         }
     }
 
-    // Check for image data (used for Ctrl+Tab image viewer mode detection).
+    // Check for image data — decode via the decoder service (IPC).
     let mut has_image = false;
 
-    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_IMAGE_CONFIG {
-        // SAFETY: msg.msg_type is MSG_IMAGE_CONFIG; sender (init) guarantees payload is a valid ImageConfig.
-        let img_config: ImageConfig = unsafe { msg.payload_as() };
+    if let Some(compose::Message::ImageConfig(img_config)) = init_ch
+        .try_recv(&mut msg)
+        .then(|| compose::decode(msg.msg_type, &msg.payload))
+        .flatten()
+    {
+        if img_config.file_store_length > 0 {
+            // Decoder channel (handle 4, set up by init).
+            // Side 0: core is endpoint A (same convention as compositor/editor).
+            let decoder_ch = unsafe {
+                ipc::Channel::from_base(
+                    protocol::channel_shm_va(DECODER_HANDLE.0 as usize),
+                    ipc::PAGE_SIZE,
+                    0,
+                )
+            };
 
-        if img_config.image_va != 0 && img_config.image_len > 0 {
+            // Helper: send a decode request and block for the response.
+            let send_and_recv = |ch: &ipc::Channel,
+                                 req: &protocol::decode::DecodeRequest,
+                                 msg: &mut ipc::Message|
+             -> Option<protocol::decode::DecodeResponse> {
+                // SAFETY: DecodeRequest is repr(C) and fits in 60-byte payload.
+                let req_msg = unsafe {
+                    ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, req)
+                };
+                ch.send(&req_msg);
+                let _ = sys::channel_signal(DECODER_HANDLE);
+                if !ch.recv_blocking(DECODER_HANDLE.0, msg) {
+                    return None;
+                }
+                if let Some(protocol::decode::Message::Response(r)) =
+                    protocol::decode::decode(msg.msg_type, &msg.payload)
+                {
+                    Some(r)
+                } else {
+                    None
+                }
+            };
+
+            // Step 1: Header-only query to get image dimensions.
+            let hdr_req = protocol::decode::DecodeRequest {
+                file_offset: img_config.file_store_offset,
+                file_length: img_config.file_store_length,
+                content_offset: 0,
+                max_output: 0,
+                request_id: 1,
+                flags: protocol::decode::DECODE_FLAG_HEADER_ONLY,
+            };
+            if let Some(hdr_resp) = send_and_recv(&decoder_ch, &hdr_req, &mut msg) {
+                if hdr_resp.status == protocol::decode::DecodeStatus::HeaderOk as u8
+                    && hdr_resp.width > 0
+                    && hdr_resp.height > 0
+                {
+                    // Step 2: Allocate Content Region space (BGRA pixels only).
+                    // Decompression scratch is heap-allocated by the decoder service.
+                    let pixel_bytes = hdr_resp.width as u32 * hdr_resp.height as u32 * 4;
+                    let s = state();
+                    if let Some(alloc_offset) = s.content_alloc.allocate(pixel_bytes) {
+                        // Step 3: Full decode request.
+                        let dec_req = protocol::decode::DecodeRequest {
+                            file_offset: img_config.file_store_offset,
+                            file_length: img_config.file_store_length,
+                            content_offset: alloc_offset,
+                            max_output: pixel_bytes,
+                            request_id: 2,
+                            flags: 0,
+                        };
+                        if let Some(dec_resp) = send_and_recv(&decoder_ch, &dec_req, &mut msg) {
+                            if dec_resp.status == protocol::decode::DecodeStatus::Ok as u8 {
+                                // Step 4: Write Content Region registry entry.
+                                // SAFETY: content_va is mapped read-write.
+                                let header = unsafe {
+                                    &mut *(s.content_va
+                                        as *mut protocol::content::ContentRegionHeader)
+                                };
+                                let entry_idx = header.entry_count as usize;
+                                if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
+                                    let content_id = protocol::content::CONTENT_ID_DYNAMIC_START;
+                                    header.entries[entry_idx] = protocol::content::ContentEntry {
+                                        content_id,
+                                        offset: alloc_offset,
+                                        length: dec_resp.bytes_written,
+                                        class: protocol::content::ContentClass::Pixels as u8,
+                                        _pad: [0; 3],
+                                        width: dec_resp.width as u16,
+                                        height: dec_resp.height as u16,
+                                        generation: s.scene_generation,
+                                    };
+                                    header.entry_count += 1;
+                                    s.image_content_id = content_id;
+                                    s.image_width = dec_resp.width as u16;
+                                    s.image_height = dec_resp.height as u16;
+                                    sys::print(b"     PNG decoded into Content Region\n");
+                                }
+                            } else {
+                                // Decode failed — return allocation.
+                                s.content_alloc.free(alloc_offset, pixel_bytes);
+                                sys::print(b"     PNG decode failed\n");
+                            }
+                        }
+                    }
+                }
+            }
             has_image = true;
         }
     }
 
     // Check for RTC config.
-    if init_ch.try_recv(&mut msg) && msg.msg_type == MSG_RTC_CONFIG {
-        // SAFETY: msg.msg_type is MSG_RTC_CONFIG; sender (init) guarantees payload is a valid RtcConfig.
-        let rtc_config: RtcConfig = unsafe { msg.payload_as() };
-
+    if let Some(compose::Message::RtcConfig(rtc_config)) = init_ch
+        .try_recv(&mut msg)
+        .then(|| compose::decode(msg.msg_type, &msg.payload))
+        .flatten()
+    {
         if rtc_config.mmio_pa != 0 {
             match sys::device_map(rtc_config.mmio_pa, 4096) {
                 Ok(va) => {
@@ -635,7 +768,7 @@ pub extern "C" fn _start() -> ! {
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(2), ipc::PAGE_SIZE, 0) };
     let editor_ch =
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(3), ipc::PAGE_SIZE, 0) };
-    let has_input2 = match sys::wait(&[INPUT2_HANDLE], 0) {
+    let has_input2 = match sys::wait(&[INPUT2_HANDLE.0], 0) {
         Ok(_) => true,
         Err(sys::SyscallError::WouldBlock) => true,
         _ => false,
@@ -643,7 +776,7 @@ pub extern "C" fn _start() -> ! {
     let input2_ch = if has_input2 {
         sys::print(b"     tablet input channel detected\n");
         // SAFETY: same invariant as channel_shm_va(1..3) from_base above.
-        Some(unsafe { ipc::Channel::from_base(protocol::channel_shm_va(4), ipc::PAGE_SIZE, 1) })
+        Some(unsafe { ipc::Channel::from_base(protocol::channel_shm_va(5), ipc::PAGE_SIZE, 1) })
     } else {
         None
     };
@@ -660,13 +793,16 @@ pub extern "C" fn _start() -> ! {
     // Build initial scene.
     let mut time_buf = [0u8; 8];
 
-    format_time_hms(clock_seconds(), &mut time_buf);
+    documents::format_time_hms(clock_seconds(), &mut time_buf);
 
-    // Axis values for monospace shaping (MONO=1).
-    let mono_shape_axes = [fonts::rasterize::AxisValue {
-        tag: *b"MONO",
-        value: 1.0,
-    }];
+    // Compute page dimensions (A4 proportions, centered in content area).
+    let content_y = TITLE_BAR_H + SHADOW_DEPTH;
+    let content_h = fb_height.saturating_sub(content_y);
+    let page_margin_v: u32 = 16;
+    let page_height = content_h.saturating_sub(2 * page_margin_v);
+    // A4 ratio: width = height × 210/297.
+    let page_width = (page_height as u64 * 210 / 297) as u32;
+    let page_padding: u32 = 24;
 
     let scene_cfg = {
         let s = state();
@@ -675,8 +811,7 @@ pub extern "C" fn _start() -> ! {
             fb_height,
             title_bar_h: TITLE_BAR_H,
             shadow_depth: SHADOW_DEPTH,
-            text_inset_x: TEXT_INSET_X,
-            text_inset_top: TEXT_INSET_TOP,
+            text_inset_x: page_padding,
             chrome_bg: drawing::CHROME_BG,
             chrome_border: drawing::CHROME_BORDER,
             chrome_title_color: drawing::CHROME_TITLE,
@@ -685,12 +820,17 @@ pub extern "C" fn _start() -> ! {
             text_color: drawing::TEXT_PRIMARY,
             cursor_color: drawing::TEXT_CURSOR,
             sel_color: drawing::TEXT_SELECTION,
+            page_bg: drawing::PAGE_BG,
+            page_width,
+            page_height,
             font_size: FONT_SIZE as u16,
-            char_width: s.char_w,
+            char_width_fx: s.char_w_fx,
             line_height: s.line_h,
             font_data: font_data(),
             upem: s.font_upem,
-            axes: &mono_shape_axes,
+            axes: &[],
+            sans_font_data: sans_font_data(),
+            sans_upem: s.sans_font_upem,
         }
     };
 
@@ -698,12 +838,18 @@ pub extern "C" fn _start() -> ! {
         let s = state();
         scene.build_editor_scene(
             &scene_cfg,
-            doc_content(),
+            documents::doc_content(),
             s.cursor_pos as u32,
             s.sel_start as u32,
             s.sel_end as u32,
             b"Text",
             &time_buf,
+            0,
+            s.cursor_opacity,
+            s.mouse_x,
+            s.mouse_y,
+            s.pointer_opacity,
+            0,
             0,
         );
     }
@@ -718,36 +864,97 @@ pub extern "C" fn _start() -> ! {
     create_clock_timer();
 
     // Track line count for incremental scene updates.
-    let mut prev_line_count = scene_state::count_lines(doc_content());
+    let mut prev_line_count = scene_state::count_lines(documents::doc_content());
 
     sys::print(b"     entering event loop\n");
 
-    let mut ctrl_pressed = false;
+    // ctrl_pressed removed — modifier state now in KeyEvent.modifiers.
+
+    let mut prev_ms: u64 = {
+        let s = state();
+        let freq = s.counter_freq;
+        if freq > 0 {
+            sys::counter() * 1000 / freq
+        } else {
+            0
+        }
+    };
 
     loop {
         let timer_active = state().timer_active;
         let timer_handle = state().timer_handle;
+        // Compute wait timeout from active animations and blink phase.
+        //
+        // Scroll animation: 16ms (60fps) while active.
+        // Blink fade (FadeOut/FadeIn): 16ms for smooth opacity changes.
+        // Blink holds (VisibleHold/HiddenHold): sleep until next phase transition.
+        let now_ms = {
+            let s = state();
+            let freq = s.counter_freq;
+            if freq > 0 {
+                sys::counter() * 1000 / freq
+            } else {
+                0
+            }
+        };
+        // ── Animation timeout ─────────────────────────────────────
+        // Single question: is anything visually animating?
+        // If yes, wake at display refresh rate for smooth frames.
+        // If no, sleep until the next timer event or IPC wake.
+        let any_animating =
+            state().scroll_animating || state().slide_animating || state().timeline.any_active();
+
+        let timeout_ns: u64 = if any_animating {
+            frame_interval_ns
+        } else {
+            let s = state();
+            let elapsed = now_ms.saturating_sub(s.blink_phase_start_ms);
+            let remaining_ms = match s.blink_phase {
+                blink::BlinkPhase::VisibleHold => blink::BLINK_VISIBLE_MS.saturating_sub(elapsed),
+                blink::BlinkPhase::FadeOut => blink::BLINK_FADE_OUT_MS.saturating_sub(elapsed),
+                blink::BlinkPhase::HiddenHold => blink::BLINK_HIDDEN_MS.saturating_sub(elapsed),
+                blink::BlinkPhase::FadeIn => blink::BLINK_FADE_IN_MS.saturating_sub(elapsed),
+            };
+            if remaining_ms == 0 {
+                1_000_000 // 1ms — transition imminent
+            } else {
+                remaining_ms.saturating_mul(1_000_000)
+            }
+        };
         let _ = match (timer_active, has_input2) {
             (true, true) => sys::wait(
-                &[INPUT_HANDLE, EDITOR_HANDLE, timer_handle, INPUT2_HANDLE],
-                u64::MAX,
+                &[
+                    INPUT_HANDLE.0,
+                    EDITOR_HANDLE.0,
+                    timer_handle.0,
+                    INPUT2_HANDLE.0,
+                ],
+                timeout_ns,
             ),
-            (true, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, timer_handle], u64::MAX),
-            (false, true) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE, INPUT2_HANDLE], u64::MAX),
-            (false, false) => sys::wait(&[INPUT_HANDLE, EDITOR_HANDLE], u64::MAX),
+            (true, false) => sys::wait(
+                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, timer_handle.0],
+                timeout_ns,
+            ),
+            (false, true) => sys::wait(
+                &[INPUT_HANDLE.0, EDITOR_HANDLE.0, INPUT2_HANDLE.0],
+                timeout_ns,
+            ),
+            (false, false) => sys::wait(&[INPUT_HANDLE.0, EDITOR_HANDLE.0], timeout_ns),
         };
         let mut changed = false;
         let mut text_changed = false;
         let mut selection_changed = false;
         let mut context_switched = false;
         let mut timer_fired = false;
+        let mut had_user_input = false;
+        let mut pointer_position_changed = false;
 
         // Check timer.
         if timer_active {
-            if let Ok(_) = sys::wait(&[timer_handle], 0) {
+            if let Ok(_) = sys::wait(&[timer_handle.0], 0) {
                 timer_fired = true;
 
-                let _ = sys::handle_close(timer_handle);
+                let _ = sys::handle_close(timer_handle.0);
 
                 create_clock_timer();
             }
@@ -755,12 +962,16 @@ pub extern "C" fn _start() -> ! {
 
         // Process input events.
         while input_ch.try_recv(&mut msg) {
-            if msg.msg_type == MSG_KEY_EVENT {
-                // SAFETY: msg.msg_type is MSG_KEY_EVENT; sender (input driver) guarantees
-                // payload is a valid KeyEvent.
-                let key: KeyEvent = unsafe { msg.payload_as() };
-                let action =
-                    process_key_event(&key, &mut ctrl_pressed, has_image, &editor_ch, &msg);
+            if let Some(input::Message::KeyEvent(key)) = input::decode(msg.msg_type, &msg.payload) {
+                let action = input_handling::process_key_event(
+                    &key,
+                    has_image,
+                    &editor_ch,
+                    fb_width,
+                    page_width,
+                    page_height,
+                    page_padding,
+                );
 
                 if action.changed {
                     changed = true;
@@ -774,6 +985,7 @@ pub extern "C" fn _start() -> ! {
                 if action.context_switched {
                     context_switched = true;
                 }
+                had_user_input = true;
             }
         }
 
@@ -782,10 +994,20 @@ pub extern "C" fn _start() -> ! {
             while ch2.try_recv(&mut msg) {
                 match msg.msg_type {
                     MSG_KEY_EVENT => {
-                        // SAFETY: same invariant as MSG_KEY_EVENT payload_as above.
-                        let key: KeyEvent = unsafe { msg.payload_as() };
-                        let action =
-                            process_key_event(&key, &mut ctrl_pressed, has_image, &editor_ch, &msg);
+                        let Some(input::Message::KeyEvent(key)) =
+                            input::decode(msg.msg_type, &msg.payload)
+                        else {
+                            continue;
+                        };
+                        let action = input_handling::process_key_event(
+                            &key,
+                            has_image,
+                            &editor_ch,
+                            fb_width,
+                            page_width,
+                            page_height,
+                            page_padding,
+                        );
 
                         if action.changed {
                             changed = true;
@@ -799,65 +1021,112 @@ pub extern "C" fn _start() -> ! {
                         if action.context_switched {
                             context_switched = true;
                         }
-                    }
-                    MSG_POINTER_ABS => {
-                        // SAFETY: msg.msg_type is MSG_POINTER_ABS; sender guarantees
-                        // payload is a valid PointerAbs.
-                        let ptr: PointerAbs = unsafe { msg.payload_as() };
-                        let s = state();
-                        s.mouse_x = scale_pointer_coord(ptr.x, fb_width);
-                        s.mouse_y = scale_pointer_coord(ptr.y, fb_height);
-
-                        changed = true;
+                        had_user_input = true;
                     }
                     MSG_POINTER_BUTTON => {
-                        // SAFETY: msg.msg_type is MSG_POINTER_BUTTON; sender guarantees
-                        // payload is a valid PointerButton.
-                        let btn: PointerButton = unsafe { msg.payload_as() };
-                        // TODO: Handle right-click, middle-click, and button
-                        // release events (review 6.9). Currently only left-press.
+                        let Some(input::Message::PointerButton(btn)) =
+                            input::decode(msg.msg_type, &msg.payload)
+                        else {
+                            continue;
+                        };
                         if btn.button == 0 && btn.pressed == 1 {
                             let s = state();
                             let click_x = s.mouse_x;
                             let click_y = s.mouse_y;
 
-                            if click_y >= TITLE_BAR_H && !s.image_mode {
-                                let text_origin_x = TEXT_INSET_X;
-                                let text_origin_y = TEXT_INSET_TOP;
+                            if click_y >= TITLE_BAR_H && s.active_space == 0 {
+                                // Text origin = page position + padding.
+                                let page_x = (fb_width - page_width) / 2;
+                                let page_y_abs =
+                                    content_y + (content_h.saturating_sub(page_height)) / 2;
+                                let text_origin_x = page_x + page_padding;
+                                let text_origin_y = page_y_abs + page_padding;
                                 let rel_x = click_x.saturating_sub(text_origin_x);
                                 let rel_y = click_y.saturating_sub(text_origin_y);
-                                let scroll = s.scroll_offset;
-                                let line_h = s.line_h;
-                                let adjusted_y = rel_y + scroll * line_h;
-                                let layout = content_text_layout(content_w);
-                                let text = doc_content();
-                                let byte_pos = layout.xy_to_byte(text, rel_x, adjusted_y);
+                                let adjusted_y =
+                                    rel_y + (s.scroll_offset / scene::MPT_PER_PT) as u32;
+                                let layout_info = content_text_layout(page_width, page_padding);
+                                let text = documents::doc_content();
+                                let byte_pos = layout_info.xy_to_byte(text, rel_x, adjusted_y);
+
+                                // Double/triple-click detection.
+                                // 400ms window, within 4pt of previous click.
+                                let dx = if click_x > s.last_click_x {
+                                    click_x - s.last_click_x
+                                } else {
+                                    s.last_click_x - click_x
+                                };
+                                let dy = if click_y > s.last_click_y {
+                                    click_y - s.last_click_y
+                                } else {
+                                    s.last_click_y - click_y
+                                };
+                                let dt = now_ms.saturating_sub(s.last_click_ms);
+                                let same_spot = dx <= 4 && dy <= 4 && dt <= 400;
+
+                                let click_count = if same_spot {
+                                    // Cycle: 1 → 2 → 3 → 1 → ...
+                                    (s.click_count % 3) + 1
+                                } else {
+                                    1
+                                };
 
                                 {
                                     let s = state();
-                                    s.cursor_pos = byte_pos;
-                                    s.sel_start = 0;
-                                    s.sel_end = 0;
+                                    s.last_click_ms = now_ms;
+                                    s.last_click_x = click_x;
+                                    s.last_click_y = click_y;
+                                    s.click_count = click_count;
                                 }
 
-                                doc_write_header();
+                                let cols = layout_info.cols();
 
-                                let cm = CursorMove {
-                                    position: byte_pos as u32,
-                                };
-                                // SAFETY: CursorMove is a plain data struct with no padding UB;
-                                // from_payload copies it into the message's 60-byte payload region.
-                                let cm_msg =
-                                    unsafe { ipc::Message::from_payload(MSG_SET_CURSOR, &cm) };
+                                match click_count {
+                                    2 => {
+                                        // Double-click: select word at click position.
+                                        let lo =
+                                            input_handling::word_boundary_backward(text, byte_pos);
+                                        let hi =
+                                            input_handling::word_boundary_forward(text, byte_pos);
+                                        let s = state();
+                                        s.anchor = lo;
+                                        s.cursor_pos = hi;
+                                        s.has_selection = hi > lo;
+                                        input_handling::update_selection_from_anchor();
+                                    }
+                                    3 => {
+                                        // Triple-click: select entire visual line.
+                                        let lo =
+                                            input_handling::visual_line_start(text, byte_pos, cols);
+                                        let mut hi =
+                                            input_handling::visual_line_end(text, byte_pos, cols);
+                                        // Include the newline if present.
+                                        if hi < text.len() && text[hi] == b'\n' {
+                                            hi += 1;
+                                        }
+                                        let s = state();
+                                        s.anchor = lo;
+                                        s.cursor_pos = hi;
+                                        s.has_selection = hi > lo;
+                                        input_handling::update_selection_from_anchor();
+                                    }
+                                    _ => {
+                                        // Single click: position cursor, clear selection.
+                                        let s = state();
+                                        s.cursor_pos = byte_pos;
+                                        input_handling::clear_selection();
+                                    }
+                                }
 
-                                editor_ch.send(&cm_msg);
+                                state().goal_column = None;
+                                documents::doc_write_header();
+                                input_handling::sync_cursor_to_editor(&editor_ch);
 
                                 let _ = sys::channel_signal(EDITOR_HANDLE);
 
                                 changed = true;
-                                // Click moves cursor, clears selection.
-                                // Treat as cursor-move + selection clear.
                                 selection_changed = true;
+                                had_user_input = true;
                             }
                         }
                     }
@@ -866,16 +1135,62 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
+        // ── Read pointer state register ─────────────────────────────
+        //
+        // The input driver writes pointer position to a shared memory
+        // register (atomic u64). We read it once after draining all event
+        // rings. This replaces MSG_POINTER_ABS — no ring overflow possible.
+        // ── Read pointer state register ─────────────────────────────
+        //
+        // The input driver writes pointer position to a shared memory
+        // register (atomic u64). We read it once after draining all event
+        // rings. This replaces MSG_POINTER_ABS — no ring overflow possible.
+        {
+            let s = state();
+            // SAFETY: input_state_va points to a PointerState page mapped
+            // by init. Atomic load-acquire for cross-core visibility.
+            let packed = unsafe {
+                let atom = &*(s.input_state_va as *const core::sync::atomic::AtomicU64);
+                atom.load(core::sync::atomic::Ordering::Acquire)
+            };
+            if packed != s.last_pointer_xy && packed != 0 {
+                s.last_pointer_xy = packed;
+                let x = protocol::input::PointerState::unpack_x(packed);
+                let y = protocol::input::PointerState::unpack_y(packed);
+                s.mouse_x = scale_pointer_coord(x, fb_width);
+                s.mouse_y = scale_pointer_coord(y, fb_height);
+
+                // Cancel any pending fade-out and restore full opacity.
+                if let Some(id) = s.pointer_fade_id {
+                    s.timeline.cancel(id);
+                    s.pointer_fade_id = None;
+                }
+                s.pointer_visible = true;
+                // Only trigger scene publish when opacity actually changes
+                // (pointer was fading/hidden). Position-only changes are
+                // handled by the render service reading the shared register.
+                if s.pointer_opacity != 255 {
+                    s.pointer_opacity = 255;
+                    changed = true;
+                }
+                s.pointer_last_event_ms = now_ms;
+
+                pointer_position_changed = true;
+            }
+        }
+
         // Process editor write requests.
         while editor_ch.try_recv(&mut msg) {
             match msg.msg_type {
                 MSG_WRITE_INSERT => {
-                    // SAFETY: msg.msg_type is MSG_WRITE_INSERT; sender (editor) guarantees
-                    // payload is a valid WriteInsert.
-                    let insert: WriteInsert = unsafe { msg.payload_as() };
+                    let Some(edit::Message::WriteInsert(insert)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let pos = insert.position as usize;
 
-                    if doc_insert(pos, insert.byte) {
+                    if documents::doc_insert(pos, insert.byte) {
                         state().cursor_pos = pos + 1;
 
                         changed = true;
@@ -883,11 +1198,14 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 MSG_WRITE_DELETE => {
-                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
-                    let del: WriteDelete = unsafe { msg.payload_as() };
+                    let Some(edit::Message::WriteDelete(del)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let pos = del.position as usize;
 
-                    if doc_delete(pos) {
+                    if documents::doc_delete(pos) {
                         state().cursor_pos = pos;
 
                         changed = true;
@@ -895,22 +1213,28 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
                 MSG_CURSOR_MOVE => {
-                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
-                    let cm: CursorMove = unsafe { msg.payload_as() };
+                    let Some(edit::Message::CursorMove(cm)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let pos = cm.position as usize;
 
                     if pos <= state().doc_len {
                         state().cursor_pos = pos;
 
-                        doc_write_header();
+                        documents::doc_write_header();
 
                         changed = true;
                         // Cursor-only move: no text change.
                     }
                 }
                 MSG_SELECTION_UPDATE => {
-                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
-                    let su: SelectionUpdate = unsafe { msg.payload_as() };
+                    let Some(edit::Message::SelectionUpdate(su)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let s = state();
                     s.sel_start = su.sel_start as usize;
                     s.sel_end = su.sel_end as usize;
@@ -919,12 +1243,15 @@ pub extern "C" fn _start() -> ! {
                     selection_changed = true;
                 }
                 MSG_WRITE_DELETE_RANGE => {
-                    // SAFETY: same invariant as MSG_WRITE_INSERT payload_as above.
-                    let dr: WriteDeleteRange = unsafe { msg.payload_as() };
+                    let Some(edit::Message::WriteDeleteRange(dr)) =
+                        edit::decode(msg.msg_type, &msg.payload)
+                    else {
+                        continue;
+                    };
                     let start = dr.start as usize;
                     let end = dr.end as usize;
 
-                    if doc_delete_range(start, end) {
+                    if documents::doc_delete_range(start, end) {
                         state().cursor_pos = start;
 
                         changed = true;
@@ -936,22 +1263,205 @@ pub extern "C" fn _start() -> ! {
         }
 
         // Update scroll offset for cursor/text changes.
-        let mut scroll_changed = false;
+        // Track whether the scroll position actually changed — the scene
+        // dispatch needs to know so it does a full rebuild (visible lines
+        // differ) instead of an incremental single-line update.
+        let scroll_before = state().scroll_offset;
+        if (changed || text_changed) && state().active_space == 0 {
+            input_handling::update_scroll_offset(page_width, page_height, page_padding);
+        }
+        let scroll_after = state().scroll_offset;
+        let scroll_diff = if scroll_before > scroll_after {
+            scroll_before - scroll_after
+        } else {
+            scroll_after - scroll_before
+        };
+        let scroll_moved = scroll_diff > scene::MPT_PER_PT / 2;
 
-        if (changed || text_changed) && !state().image_mode {
+        // ── Cursor blink ─────────────────────────────────────────────
+        //
+        // Reset blink to fully visible on any user input (keystroke or
+        // click). Then advance the blink state machine — may produce a
+        // scene update even when no events arrived (phase transition or
+        // fade frame).
+        let now_ms = {
+            let s = state();
+            let freq = s.counter_freq;
+            if freq > 0 {
+                sys::counter() * 1000 / freq
+            } else {
+                0
+            }
+        };
+        // Actual frame delta for spring physics. Zero when multiple events
+        // arrive in the same millisecond (spring tick is a no-op at dt=0).
+        // Capped at 50ms to prevent spiral-of-death from long stalls.
+        let frame_dt = {
+            let elapsed = now_ms.saturating_sub(prev_ms);
+            (elapsed.min(50) as f32) / 1000.0
+        };
+        prev_ms = now_ms;
+
+        if had_user_input {
+            blink::reset_blink(state(), now_ms);
+        }
+        state().timeline.tick(now_ms);
+        let blink_changed = blink::advance_blink(state(), now_ms);
+        if blink_changed {
+            changed = true;
+        }
+
+        // ── Animation tick ───────────────────────────────────────────
+        //
+        // Advance the scroll spring toward its target. This must happen
+        // after event processing (which may update the target) and before
+        // scene dispatch (which reads scroll_offset).
+        let mut scroll_changed = scroll_moved;
+        let mut slide_changed = false;
+        if scroll_moved && !text_changed {
+            text_changed = true;
+        }
+
+        if state().scroll_animating {
             let old_scroll = state().scroll_offset;
+            let s = state();
+            s.scroll_spring.tick(frame_dt);
+            s.scroll_offset = scene::f32_to_mpt(s.scroll_spring.value());
 
-            update_scroll_offset(content_w, content_h);
+            if s.scroll_spring.settled() {
+                // Snap to exact target (nearest whole-point-aligned Mpt)
+                // to avoid persistent sub-pixel jitter.
+                s.scroll_offset = scene::mpt_round_pt(s.scroll_target);
+                s.scroll_animating = false;
+            }
 
-            // If scroll changed, we need a full document content update
-            // (visible lines changed) regardless of whether text changed.
             let new_scroll = state().scroll_offset;
-
-            if old_scroll != new_scroll {
+            let diff = if old_scroll > new_scroll {
+                old_scroll - new_scroll
+            } else {
+                new_scroll - old_scroll
+            };
+            if diff > scene::MPT_PER_PT / 2 {
                 scroll_changed = true;
 
                 if !text_changed {
                     text_changed = true;
+                }
+            }
+            changed = true; // trigger scene update
+        }
+
+        // ── Selection fade animation ────────────────────────────────
+        //
+        // When the selection changes, start a fade-in animation from
+        // opacity 0→255 over 100ms. The animation value is applied to
+        // selection nodes after each scene build.
+        if selection_changed {
+            let s = state();
+            // Cancel any previous selection fade in progress.
+            if let Some(old_id) = s.selection_fade_id {
+                s.timeline.cancel(old_id);
+            }
+            s.selection_fade_id = s
+                .timeline
+                .start(0.0, 255.0, 100, animation::Easing::EaseOut, now_ms)
+                .ok();
+            s.selection_opacity = 0;
+        }
+        // Tick the selection fade (if active).
+        {
+            let s = state();
+            if let Some(id) = s.selection_fade_id {
+                if s.timeline.is_active(id) {
+                    let new_val = s.timeline.value(id) as u8;
+                    if new_val != s.selection_opacity {
+                        s.selection_opacity = new_val;
+                        changed = true;
+                    }
+                } else {
+                    s.selection_opacity = 255;
+                    s.selection_fade_id = None;
+                }
+            }
+        }
+
+        // ── Document switch slide animation ─────────────────────────
+        //
+        // Ctrl+Tab sets slide_target to the next space. The spring
+        // animates slide_offset toward the target. We update N_STRIP's
+        // content_transform each frame via apply_slide.
+        //
+        // The slide does NOT set `changed` — it uses its own publish
+        // path (apply_slide) and compositor signal. Setting `changed`
+        // would trigger an unnecessary update_cursor dispatch.
+        if state().slide_animating {
+            let s = state();
+            // On the first frame, frame_dt includes idle sleep time
+            // (up to 50ms) — advancing the spring by that much causes
+            // a visible first-frame jump. Clamp to one frame interval
+            // for smooth onset; subsequent frames use wall-clock dt.
+            let dt = if s.slide_first_frame {
+                s.slide_first_frame = false;
+                (frame_interval_ns as f32) / 1_000_000_000.0
+            } else {
+                frame_dt
+            };
+            s.slide_spring.tick(dt);
+            let new_offset = scene::f32_to_mpt(s.slide_spring.value());
+            if new_offset != s.slide_offset {
+                s.slide_offset = new_offset;
+                slide_changed = true;
+            }
+            if s.slide_spring.settled() {
+                s.slide_offset = s.slide_target; // both Mpt, exact match
+                s.slide_animating = false;
+                slide_changed = true;
+            }
+        }
+
+        // ── Pointer auto-hide ─────────────────────────────────────
+        //
+        // After 3 s of inactivity, start a 300 ms EaseOut fade-out.
+        // When the fade completes, mark the pointer hidden (opacity 0).
+        // On any pointer move, the handler above cancels the fade and
+        // restores full opacity immediately.
+        {
+            const POINTER_HIDE_MS: u64 = 3000;
+            const POINTER_FADE_MS: u32 = 300;
+
+            let s = state();
+
+            // Start fade-out after 3 s of inactivity.
+            if s.pointer_visible && s.pointer_fade_id.is_none() && s.pointer_opacity == 255 {
+                let idle_ms = now_ms.saturating_sub(s.pointer_last_event_ms);
+                if idle_ms >= POINTER_HIDE_MS {
+                    s.pointer_fade_id = s
+                        .timeline
+                        .start(
+                            255.0,
+                            0.0,
+                            POINTER_FADE_MS,
+                            animation::Easing::EaseOut,
+                            now_ms,
+                        )
+                        .ok();
+                }
+            }
+
+            // Tick pointer fade animation.
+            if let Some(id) = s.pointer_fade_id {
+                if s.timeline.is_active(id) {
+                    let new_opacity = s.timeline.value(id) as u8;
+                    if new_opacity != s.pointer_opacity {
+                        s.pointer_opacity = new_opacity;
+                        changed = true;
+                    }
+                } else {
+                    // Fade complete — pointer is now hidden.
+                    s.pointer_opacity = 0;
+                    s.pointer_visible = false;
+                    s.pointer_fade_id = None;
+                    changed = true;
                 }
             }
         }
@@ -973,39 +1483,51 @@ pub extern "C" fn _start() -> ! {
         // copy/swap cycle — no full rebuild needed. The clock is just
         // another node to mark_dirty alongside the document nodes.
 
-        let needs_scene_update = changed || text_changed || selection_changed || timer_fired;
+        let needs_scene_update =
+            changed || text_changed || selection_changed || timer_fired || slide_changed;
 
         if needs_scene_update {
             // Prepare clock text if timer fired (needed by any path).
             if timer_fired {
-                format_time_hms(clock_seconds(), &mut time_buf);
+                documents::format_time_hms(clock_seconds(), &mut time_buf);
             }
 
             // Only context_switched requires a full rebuild. Timer+input
             // coincidence is handled incrementally by each targeted method.
             if context_switched {
                 if !timer_fired {
-                    format_time_hms(clock_seconds(), &mut time_buf);
+                    documents::format_time_hms(clock_seconds(), &mut time_buf);
                 }
 
                 let s = state();
+                let title: &[u8] = if s.active_space != 0 {
+                    b"Image"
+                } else {
+                    b"Text"
+                };
                 scene.build_editor_scene(
                     &scene_cfg,
-                    doc_content(),
+                    documents::doc_content(),
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
-                    b"Text",
+                    title,
                     &time_buf,
-                    s.scroll_offset as i32,
+                    s.scroll_offset,
+                    s.cursor_opacity,
+                    s.mouse_x,
+                    s.mouse_y,
+                    s.pointer_opacity,
+                    s.slide_offset,
+                    s.active_space,
                 );
             } else if text_changed {
                 // Document content changed (insert/delete/scroll).
                 if !timer_fired {
-                    format_time_hms(clock_seconds(), &mut time_buf);
+                    documents::format_time_hms(clock_seconds(), &mut time_buf);
                 }
 
-                let doc = doc_content();
+                let doc = documents::doc_content();
                 let new_line_count = scene_state::count_lines(doc);
 
                 if scroll_changed {
@@ -1021,25 +1543,27 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count {
                     // Same line count — incremental single-line update.
                     // Only reshapes the changed line, pushes new glyph data
                     // at the bump pointer, and updates cursor/selection.
                     let s = state();
-                    let changed_line = scene_state::byte_to_line_col(
-                        doc,
-                        s.cursor_pos,
-                        if s.char_w > 0 {
-                            ((scene_cfg.fb_width.saturating_sub(2 * TEXT_INSET_X)) / s.char_w)
-                                .max(1) as usize
-                        } else {
-                            80
-                        },
-                    )
-                    .0;
+                    let cpl = if s.char_w_fx > 0 {
+                        ((scene_cfg
+                            .page_width
+                            .saturating_sub(2 * scene_cfg.text_inset_x)
+                            as i64
+                            * 65536)
+                            / s.char_w_fx as i64)
+                            .max(1) as usize
+                    } else {
+                        80
+                    };
+                    let changed_line = scene_state::byte_to_line_col(doc, s.cursor_pos, cpl).0;
                     scene.update_document_incremental(
                         &scene_cfg,
                         doc,
@@ -1049,8 +1573,9 @@ pub extern "C" fn _start() -> ! {
                         changed_line,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else if new_line_count == prev_line_count + 1 {
                     // Single line inserted (Enter key) — incremental insert.
@@ -1063,8 +1588,9 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else if new_line_count + 1 == prev_line_count {
                     // Single line deleted (Backspace at BOL) — incremental delete.
@@ -1077,8 +1603,9 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 } else {
                     // Multi-line change (paste, delete selection spanning lines) —
@@ -1092,8 +1619,9 @@ pub extern "C" fn _start() -> ! {
                         s.sel_end as u32,
                         b"Text",
                         &time_buf,
-                        s.scroll_offset as i32,
+                        s.scroll_offset,
                         timer_fired,
+                        s.cursor_opacity,
                     );
                 }
 
@@ -1106,18 +1634,20 @@ pub extern "C" fn _start() -> ! {
                 // Clock text is updated only by update_document_content
                 // (timer-driven) to prevent data buffer leak.
                 let s = state();
-                let content_y = TITLE_BAR_H + SHADOW_DEPTH;
-                let sel_content_h = fb_height.saturating_sub(content_y);
-                let scroll_pt = s.scroll_offset as i32 * s.line_h as i32;
+                let sel_text_h = scene_cfg
+                    .page_height
+                    .saturating_sub(2 * scene_cfg.text_inset_x);
+                let scroll_pt = s.scroll_offset / scene::MPT_PER_PT;
 
                 scene.update_selection(
                     &scene_cfg,
                     s.cursor_pos as u32,
                     s.sel_start as u32,
                     s.sel_end as u32,
-                    doc_content(),
-                    sel_content_h,
+                    documents::doc_content(),
+                    sel_text_h,
                     scroll_pt,
+                    s.cursor_opacity,
                 );
             } else if changed {
                 // Cursor moved without text or selection change
@@ -1125,9 +1655,11 @@ pub extern "C" fn _start() -> ! {
                 // that doesn't trigger scroll change).
                 // When timer_fired, also updates clock in-place.
                 let s = state();
-                let doc_width = fb_width.saturating_sub(2 * TEXT_INSET_X);
-                let chars_per_line = if s.char_w > 0 {
-                    (doc_width / s.char_w).max(1)
+                let dw = scene_cfg
+                    .page_width
+                    .saturating_sub(2 * scene_cfg.text_inset_x);
+                let chars_per_line = if s.char_w_fx > 0 {
+                    ((dw as i64 * 65536) / s.char_w_fx as i64).max(1) as u32
                 } else {
                     80
                 };
@@ -1135,19 +1667,58 @@ pub extern "C" fn _start() -> ! {
                 scene.update_cursor(
                     &scene_cfg,
                     s.cursor_pos as u32,
-                    doc_content(),
+                    documents::doc_content(),
                     chars_per_line,
                     if timer_fired { Some(&time_buf) } else { None },
+                    s.cursor_opacity,
                 );
             } else if timer_fired {
                 // Timer only — just update the clock text.
                 scene.update_clock(&scene_cfg, &time_buf);
             }
 
-            // Signal compositor.
-            compositor_ch.send(&scene_msg);
+            // Apply post-build opacity (selection fade-in).
+            {
+                let s = state();
+                scene.apply_opacity(255, s.selection_opacity);
+            }
 
+            // Apply slide offset if it changed this frame.
+            if slide_changed {
+                scene.apply_slide(state().slide_offset);
+            }
+
+            // Apply pointer cursor opacity to the scene graph. Position
+            // is read directly from the shared register by the render
+            // service, so we only need to publish when something else in
+            // the scene already changed (opacity, visibility, image).
+            if needs_scene_update {
+                let s = state();
+                scene.apply_pointer(s.mouse_x, s.mouse_y, s.pointer_opacity);
+            }
+        }
+
+        // Signal compositor for scene changes AND pointer-only moves.
+        // For pointer-only moves (no scene publish), the render service
+        // wakes up, sees no generation change, reads the pointer state
+        // register, and sends a cursor-only frame (no full scene walk).
+        if needs_scene_update || pointer_position_changed {
+            compositor_ch.send(&scene_msg);
             let _ = sys::channel_signal(COMPOSITOR_HANDLE);
+        }
+
+        // Update cached scene generation and sweep deferred frees.
+        // Only runs when entries are pending reclamation (common case: 0).
+        if needs_scene_update {
+            let s = state();
+            s.scene_generation = scene.generation();
+            if s.content_alloc.pending_count() > 0 && s.content_va != 0 {
+                let reader_gen = scene.reader_done_gen();
+                // SAFETY: content_va is mapped read-write; header is repr(C).
+                let header =
+                    unsafe { &mut *(s.content_va as *mut protocol::content::ContentRegionHeader) };
+                s.content_alloc.sweep(reader_gen, header);
+            }
         }
     }
 }

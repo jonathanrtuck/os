@@ -247,21 +247,27 @@ impl<'a> TripleWriter<'a> {
         let ptr = self.buf.as_mut_ptr();
 
         // Increment global generation.
-        let gen = triple_read_ctrl(ptr, CTRL_GENERATION).wrapping_add(1);
+        let generation = triple_read_ctrl(ptr, CTRL_GENERATION).wrapping_add(1);
 
         // Write generation into the acquired buffer's header.
-        write_generation(ptr, buf_offset(self.acquired), gen);
+        write_generation(ptr, buf_offset(self.acquired), generation);
 
         // Update control region: generation first, then publish latest_buf
         // with a release fence so all scene data + generation are visible
         // before the reader sees the new latest_buf pointer.
-        triple_write_ctrl(ptr, CTRL_GENERATION, gen);
+        triple_write_ctrl(ptr, CTRL_GENERATION, generation);
         triple_write_ctrl_release(ptr, CTRL_LATEST_BUF, self.acquired);
     }
 
     /// Read the current global generation counter.
     pub fn generation(&self) -> u32 {
         triple_read_ctrl(self.buf.as_ptr() as *mut u8, CTRL_GENERATION)
+    }
+
+    /// Generation the reader last finished reading. Entries removed from
+    /// the scene at generation N are safe to free once `reader_done_gen() >= N`.
+    pub fn reader_done_gen(&self) -> u32 {
+        triple_read_ctrl(self.buf.as_ptr() as *mut u8, CTRL_READER_DONE_GEN)
     }
 
     /// Get a read-only view of the latest published buffer's nodes.
@@ -556,9 +562,9 @@ impl TripleReader {
     /// back to the free pool so the writer can acquire it.
     ///
     /// Note: `Drop` handles cleanup automatically if this is not called.
-    pub fn finish_read(&self, gen: u32) {
+    pub fn finish_read(&self, generation: u32) {
         // Write reader_done_gen with release fence so writer sees it.
-        triple_write_ctrl_release(self.buf, CTRL_READER_DONE_GEN, gen);
+        triple_write_ctrl_release(self.buf, CTRL_READER_DONE_GEN, generation);
         // Release reader_buf — buffer is now free for the writer.
         triple_write_ctrl(self.buf, CTRL_READER_BUF, NO_READER);
     }

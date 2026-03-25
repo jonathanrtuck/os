@@ -6,13 +6,14 @@ use scene::{Content, Node, NodeFlags, NodeId, DIRTY_BITMAP_WORDS, NULL};
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-/// Create a visible node at the given position and size.
-fn visible_node(x: i32, y: i32, w: u16, h: u16) -> Node {
+/// Create a visible node at the given position and size (in whole points).
+/// Converts to millipoints for the scene graph.
+fn visible_node(x: i32, y: i32, w: u32, h: u32) -> Node {
     let mut n = Node::EMPTY;
-    n.x = x;
-    n.y = y;
-    n.width = w;
-    n.height = h;
+    n.x = scene::pt(x);
+    n.y = scene::pt(y);
+    n.width = scene::upt(w);
+    n.height = scene::upt(h);
     n.flags = NodeFlags::VISIBLE;
     n
 }
@@ -25,7 +26,7 @@ fn invisible_node() -> Node {
 }
 
 /// Create a container node (has children) at the given position.
-fn container_node(x: i32, y: i32, w: u16, h: u16, first_child: NodeId) -> Node {
+fn container_node(x: i32, y: i32, w: u32, h: u32, first_child: NodeId) -> Node {
     let mut n = visible_node(x, y, w, h);
     n.first_child = first_child;
     n
@@ -111,8 +112,8 @@ fn dirty_rect_from_moved_node() {
 
     state.update_from_frame(&nodes, 2);
 
-    // Frame 2: child moved down 20px to (50, 120, 200, 30).
-    nodes[1].y = 120;
+    // Frame 2: child moved down 20pt to (50, 120, 200, 30).
+    nodes[1].y = scene::pt(120);
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 1);
 
@@ -283,12 +284,17 @@ fn update_from_frame_populates_prev_state() {
     );
 
     // Check prev_bounds for node 1 (child of root at (0,0) with content_transform ty=-10).
-    // abs_bounds: child at (50, 100), parent adds (0, 0 + (-10)) = (50, 90).
+    // abs_bounds: child at (50, 100), parent adds (0, 0 + mpt(-10)) = (50, 90) in points.
+    // In millipoints: (50*1024, 90*1024, 200*1024, 30*1024).
     let (bx, by, bw, bh) = state.prev_bounds[1];
-    assert_eq!(bx, 50);
-    assert_eq!(by, 90, "should account for parent content_transform");
-    assert_eq!(bw, 200);
-    assert_eq!(bh, 30);
+    assert_eq!(bx, scene::pt(50));
+    assert_eq!(
+        by,
+        scene::pt(90),
+        "should account for parent content_transform"
+    );
+    assert_eq!(bw, scene::upt(200));
+    assert_eq!(bh, scene::upt(30));
 
     // Check content_transform and content_hash.
     assert_eq!(
@@ -457,7 +463,7 @@ fn node_fully_off_screen_produces_no_rect() {
     state.update_from_frame(&nodes, 2);
 
     // Frame 2: node still off-screen, just moved further right.
-    nodes[1].x = 950;
+    nodes[1].x = scene::pt(950);
     let mut dirty = [0u64; DIRTY_BITMAP_WORDS];
     set_dirty_bit(&mut dirty, 1);
 
@@ -476,9 +482,22 @@ use render::incremental::{blit_shift_vertical, compute_scroll_blit};
 
 #[test]
 fn scroll_blit_params_vertical_down() {
-    // Container at (10, 20, 400, 300) in point coords, scale=1.0.
+    // Container at (10, 20, 400, 300) in millipoints (scene coords), scale=1.0.
     // Scroll delta: (0, -50) point = content moves up (scroll down).
-    let params = compute_scroll_blit(0, 0.0, -50.0, (10, 20, 400, 300), 1.0, 800, 600);
+    let params = compute_scroll_blit(
+        0,
+        0.0,
+        -50.0,
+        (
+            scene::pt(10),
+            scene::pt(20),
+            scene::upt(400),
+            scene::upt(300),
+        ),
+        1.0,
+        800,
+        600,
+    );
     let p = params.expect("should produce blit params");
     assert_eq!(p.cx, 10);
     assert_eq!(p.cy, 20);
@@ -494,9 +513,22 @@ fn scroll_blit_params_vertical_down() {
 
 #[test]
 fn scroll_blit_params_vertical_up() {
-    // Container at (10, 20, 400, 300), scale=1.0.
+    // Container at (10, 20, 400, 300) in millipoints, scale=1.0.
     // Scroll delta: (0, 50) point = content moves down (scroll up).
-    let params = compute_scroll_blit(0, 0.0, 50.0, (10, 20, 400, 300), 1.0, 800, 600);
+    let params = compute_scroll_blit(
+        0,
+        0.0,
+        50.0,
+        (
+            scene::pt(10),
+            scene::pt(20),
+            scene::upt(400),
+            scene::upt(300),
+        ),
+        1.0,
+        800,
+        600,
+    );
     let p = params.expect("should produce blit params");
     assert_eq!(p.dy_px, 50);
     // Exposed strip at top: (10, 20, 400, 50)
@@ -508,10 +540,23 @@ fn scroll_blit_params_vertical_up() {
 
 #[test]
 fn scroll_blit_params_with_scale() {
-    // Container at (10, 20, 400, 300) point, scale=2.0.
+    // Container at (10, 20, 400, 300) millipoints, scale=2.0.
     // Physical container: (20, 40, 800, 600).
     // Scroll delta: (0, -25) point = -50 physical.
-    let params = compute_scroll_blit(0, 0.0, -25.0, (10, 20, 400, 300), 2.0, 1600, 1200);
+    let params = compute_scroll_blit(
+        0,
+        0.0,
+        -25.0,
+        (
+            scene::pt(10),
+            scene::pt(20),
+            scene::upt(400),
+            scene::upt(300),
+        ),
+        2.0,
+        1600,
+        1200,
+    );
     let p = params.expect("should produce blit params");
     assert_eq!(p.cx, 20);
     assert_eq!(p.cy, 40);
@@ -528,14 +573,30 @@ fn scroll_blit_params_with_scale() {
 #[test]
 fn scroll_blit_params_horizontal_returns_none() {
     // Horizontal scroll: dx != 0 — not supported, should return None.
-    let params = compute_scroll_blit(0, 10.0, -50.0, (0, 0, 800, 600), 1.0, 800, 600);
+    let params = compute_scroll_blit(
+        0,
+        10.0,
+        -50.0,
+        (0, 0, scene::upt(800), scene::upt(600)),
+        1.0,
+        800,
+        600,
+    );
     assert!(params.is_none(), "horizontal scroll should return None");
 }
 
 #[test]
 fn scroll_blit_params_subpixel_returns_none() {
     // Subpixel scroll: after rounding, dy_px = 0.
-    let params = compute_scroll_blit(0, 0.0, 0.3, (0, 0, 800, 600), 1.0, 800, 600);
+    let params = compute_scroll_blit(
+        0,
+        0.0,
+        0.3,
+        (0, 0, scene::upt(800), scene::upt(600)),
+        1.0,
+        800,
+        600,
+    );
     assert!(
         params.is_none(),
         "subpixel scroll should return None (dy rounds to 0)"
@@ -545,7 +606,15 @@ fn scroll_blit_params_subpixel_returns_none() {
 #[test]
 fn scroll_blit_params_exceeds_height_returns_none() {
     // Scroll amount >= container height: nothing to shift.
-    let params = compute_scroll_blit(0, 0.0, -300.0, (0, 0, 800, 300), 1.0, 800, 600);
+    let params = compute_scroll_blit(
+        0,
+        0.0,
+        -300.0,
+        (0, 0, scene::upt(800), scene::upt(300)),
+        1.0,
+        800,
+        600,
+    );
     assert!(
         params.is_none(),
         "scroll >= container height should return None"
@@ -646,9 +715,22 @@ fn blit_shift_vertical_partial_width() {
 #[test]
 fn compute_scroll_blit_clamps_to_framebuffer() {
     // Container extends beyond framebuffer bottom.
-    // Container at (0, 500, 800, 200) point, fb is 800x600, scale=1.
-    // Container bottom is at 700, but fb only goes to 600.
-    let params = compute_scroll_blit(0, 0.0, -50.0, (0, 500, 800, 200), 1.0, 800, 600);
+    // Container at (0, 500, 800, 200) millipoints, fb is 800x600, scale=1.
+    // Container bottom is at 700pt, but fb only goes to 600.
+    let params = compute_scroll_blit(
+        0,
+        0.0,
+        -50.0,
+        (
+            scene::pt(0),
+            scene::pt(500),
+            scene::upt(800),
+            scene::upt(200),
+        ),
+        1.0,
+        800,
+        600,
+    );
     let p = params.expect("should produce blit params");
     // Container should be clipped to fb: ch = 600 - 500 = 100.
     assert_eq!(p.ch, 100);
@@ -881,7 +963,7 @@ fn make_surface(buf: &mut [u8], w: u32, h: u32) -> Surface {
 }
 
 /// Build a scene with an image node for cache testing.
-/// Returns (nodes, data_buf) where node 1 has Content::Image.
+/// Returns (nodes, data_buf) where node 1 has Content::InlineImage.
 fn build_image_scene() -> (Vec<Node>, Vec<u8>) {
     // 10x10 solid red BGRA image.
     let mut img_data = vec![0u8; 10 * 10 * 4];
@@ -893,21 +975,21 @@ fn build_image_scene() -> (Vec<Node>, Vec<u8>) {
     }
 
     let mut nodes = vec![Node::EMPTY; 2];
-    // Root
-    nodes[0].x = 0;
-    nodes[0].y = 0;
-    nodes[0].width = 50;
-    nodes[0].height = 50;
+    // Root (millipoint coordinates)
+    nodes[0].x = scene::pt(0);
+    nodes[0].y = scene::pt(0);
+    nodes[0].width = scene::upt(50);
+    nodes[0].height = scene::upt(50);
     nodes[0].flags = NodeFlags::VISIBLE;
     nodes[0].first_child = 1;
 
-    // Image child
-    nodes[1].x = 5;
-    nodes[1].y = 5;
-    nodes[1].width = 10;
-    nodes[1].height = 10;
+    // Image child (millipoint coordinates)
+    nodes[1].x = scene::pt(5);
+    nodes[1].y = scene::pt(5);
+    nodes[1].width = scene::upt(10);
+    nodes[1].height = scene::upt(10);
     nodes[1].flags = NodeFlags::VISIBLE;
-    nodes[1].content = Content::Image {
+    nodes[1].content = Content::InlineImage {
         data: scene::DataRef {
             offset: 0,
             length: (10 * 10 * 4) as u32,
@@ -933,11 +1015,13 @@ fn cache_populated_on_first_render() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
     let mut buf = vec![0u8; 50 * 50 * 4];
     let mut fb = make_surface(&mut buf, 50, 50);
+    let mut clip_cache = render::ClipMaskCache::new();
 
     scene_render::render_scene_clipped_full(
         &mut fb,
@@ -947,9 +1031,10 @@ fn cache_populated_on_first_render() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
-    // Node 1 has Content::Image — should be cached.
+    // Node 1 has Content::InlineImage — should be cached.
     assert!(
         cache.get(1, 0xDEAD).is_some(),
         "image node should be cached after render"
@@ -974,12 +1059,14 @@ fn cache_hit_produces_identical_pixels() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
     // First render (cache miss — populates cache).
     let mut buf1 = vec![0u8; 50 * 50 * 4];
     let mut fb1 = make_surface(&mut buf1, 50, 50);
+    let mut clip_cache = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
         &mut fb1,
         &graph,
@@ -988,6 +1075,7 @@ fn cache_hit_produces_identical_pixels() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
     // Second render (cache hit — should produce identical output).
@@ -1001,6 +1089,7 @@ fn cache_hit_produces_identical_pixels() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
     assert_eq!(buf1, buf2, "cache hit should produce identical pixels");
@@ -1019,12 +1108,14 @@ fn cache_miss_on_hash_change() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
     // First render — populates cache with hash 0xDEAD.
     let mut buf = vec![0u8; 50 * 50 * 4];
     let mut fb = make_surface(&mut buf, 50, 50);
+    let mut clip_cache = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
         &mut fb,
         &graph,
@@ -1033,6 +1124,7 @@ fn cache_miss_on_hash_change() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
     assert!(cache.get(1, 0xDEAD).is_some());
 
@@ -1041,6 +1133,7 @@ fn cache_miss_on_hash_change() {
     let graph2 = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let mut buf2 = vec![0u8; 50 * 50 * 4];
     let mut fb2 = make_surface(&mut buf2, 50, 50);
@@ -1052,6 +1145,7 @@ fn cache_miss_on_hash_change() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
     // Old hash should miss, new hash should hit.
@@ -1078,6 +1172,7 @@ fn none_cache_renders_without_caching() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
@@ -1085,8 +1180,16 @@ fn none_cache_renders_without_caching() {
     let mut fb = make_surface(&mut buf, 50, 50);
 
     // Pass None for cache — should render normally.
+    let mut clip_cache = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
-        &mut fb, &graph, &ctx, &dirty, &mut pool, &mut lru, None,
+        &mut fb,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool,
+        &mut lru,
+        None,
+        &mut clip_cache,
     );
 
     // Verify the image pixel at (5, 5) is red.
@@ -1122,11 +1225,13 @@ fn cache_not_used_for_content_none() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &[],
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
     let mut buf = vec![0u8; 50 * 50 * 4];
     let mut fb = make_surface(&mut buf, 50, 50);
+    let mut clip_cache = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
         &mut fb,
         &graph,
@@ -1135,6 +1240,7 @@ fn cache_not_used_for_content_none() {
         &mut pool,
         &mut lru,
         Some(&mut cache),
+        &mut clip_cache,
     );
 
     assert_eq!(
@@ -1155,6 +1261,7 @@ fn render_with_and_without_cache_pixel_identical() {
     let graph = scene_render::SceneGraph {
         nodes: &nodes,
         data: &data,
+        content_region: &[],
     };
     let dirty = protocol::DirtyRect::new(0, 0, 50, 50);
 
@@ -1163,8 +1270,16 @@ fn render_with_and_without_cache_pixel_identical() {
     let mut lru1 = render::LruRasterizer::new_test(16);
     let mut buf_no_cache = vec![0u8; 50 * 50 * 4];
     let mut fb1 = make_surface(&mut buf_no_cache, 50, 50);
+    let mut clip_cache1 = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
-        &mut fb1, &graph, &ctx, &dirty, &mut pool1, &mut lru1, None,
+        &mut fb1,
+        &graph,
+        &ctx,
+        &dirty,
+        &mut pool1,
+        &mut lru1,
+        None,
+        &mut clip_cache1,
     );
 
     // With cache (first render = cache miss, renders to offscreen then blits).
@@ -1173,6 +1288,7 @@ fn render_with_and_without_cache_pixel_identical() {
     let mut cache = NodeCache::new();
     let mut buf_with_cache = vec![0u8; 50 * 50 * 4];
     let mut fb2 = make_surface(&mut buf_with_cache, 50, 50);
+    let mut clip_cache2 = render::ClipMaskCache::new();
     scene_render::render_scene_clipped_full(
         &mut fb2,
         &graph,
@@ -1181,6 +1297,7 @@ fn render_with_and_without_cache_pixel_identical() {
         &mut pool2,
         &mut lru2,
         Some(&mut cache),
+        &mut clip_cache2,
     );
 
     assert_eq!(

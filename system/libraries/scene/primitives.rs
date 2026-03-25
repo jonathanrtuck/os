@@ -89,6 +89,17 @@ pub struct DataRef {
     pub length: u32,
 }
 
+impl DataRef {
+    pub const EMPTY: Self = Self {
+        offset: 0,
+        length: 0,
+    };
+
+    pub const fn is_empty(&self) -> bool {
+        self.length == 0
+    }
+}
+
 // ── Content hashing ─────────────────────────────────────────────────
 
 const FNV1A_OFFSET: u32 = 0x811c_9dc5;
@@ -110,23 +121,32 @@ pub fn fnv1a(data: &[u8]) -> u32 {
 ///
 /// Written by the OS service (via fonts library), stored in the scene
 /// graph data buffer, and read by the compositor for rasterization.
-/// All advance/offset values are in scaled pixel units (not font units).
+///
+/// `x_advance`, `x_offset`, and `y_offset` are in **16.16 fixed-point
+/// points** (top 16 bits = integer points, bottom 16 bits = fractional).
+/// This preserves sub-point precision from the shaping engine through to
+/// the renderer, enabling subpixel glyph positioning for even letter
+/// spacing. Range: ±32767 points. Precision: 1/65536 point.
+///
+/// To convert to floating-point points: `value as f32 / 65536.0`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(C)]
 pub struct ShapedGlyph {
     /// Glyph ID in the font (0 = .notdef).
     pub glyph_id: u16,
-    /// Horizontal advance width in scaled units.
-    pub x_advance: i16,
-    /// Horizontal offset from default position.
-    pub x_offset: i16,
-    /// Vertical offset from default position.
-    pub y_offset: i16,
+    /// Padding for alignment (glyph_id is u16, next field is i32).
+    pub _pad: u16,
+    /// Horizontal advance width in 16.16 fixed-point points.
+    pub x_advance: i32,
+    /// Horizontal offset from default position in 16.16 fixed-point points.
+    pub x_offset: i32,
+    /// Vertical offset from default position in 16.16 fixed-point points.
+    pub y_offset: i32,
 }
 
-// Compile-time size assertion: ShapedGlyph must be exactly 8 bytes
-// (4 × u16/i16 fields, #[repr(C)], no padding needed).
-const _: () = assert!(core::mem::size_of::<ShapedGlyph>() == 8);
+// Compile-time size assertion: ShapedGlyph is 16 bytes
+// (u16 + u16 pad + 3 × i32, #[repr(C)]).
+const _: () = assert!(core::mem::size_of::<ShapedGlyph>() == 16);
 
 // ── Fill rule ───────────────────────────────────────────────────────
 
@@ -186,6 +206,18 @@ pub fn path_close(buf: &mut Vec<u8>) {
     buf.extend_from_slice(&PATH_CLOSE.to_le_bytes());
 }
 
+// ── Font identity constants ─────────────────────────────────────────
+
+/// Font identity constants for `Content::Glyphs`.
+///
+/// Used by core to specify which font was used for shaping, and by
+/// render backends to select the correct glyph cache/atlas. Stored in
+/// the `axis_hash` field of `Content::Glyphs` (the field name is
+/// historical — the wire format is unchanged).
+pub const FONT_MONO: u32 = 0;
+pub const FONT_SANS: u32 = 1;
+pub const FONT_SERIF: u32 = 2;
+
 // ── Content variant ─────────────────────────────────────────────────
 
 /// What a node draws (beyond its container decoration).
@@ -201,22 +233,41 @@ pub enum Content {
     /// Solid rectangle fills (cursor, selection) use this with
     /// `node.background` set to the desired color.
     None,
-    /// A pixel buffer reference.
-    Image {
+    /// A pixel buffer stored in the scene graph's inline data buffer.
+    /// Used for small, per-frame content (icons, cursor) that is
+    /// regenerated each frame or on content change.
+    InlineImage {
         /// Reference to pixel data in the data buffer.
         data: DataRef,
         /// Source image dimensions.
         src_width: u16,
         src_height: u16,
     },
-    /// Filled cubic Bezier contours. The render backend rasterizes them
-    /// with scanline coverage (same engine as glyph outlines). Vector
-    /// content scales cleanly at any display density.
+    /// Decoded pixel data stored in the Content Region (persistent shared
+    /// memory). The compositor resolves `content_id` via the Content Region
+    /// registry to find the pixel data offset and length.
+    Image {
+        /// Content Region entry ID. The compositor looks this up in the
+        /// ContentRegionHeader to find the pixel data.
+        content_id: u32,
+        /// Source image width in pixels.
+        src_width: u16,
+        /// Source image height in pixels.
+        src_height: u16,
+    },
+    /// Cubic Bezier contours, filled or stroked. The render backend
+    /// rasterizes them with scanline coverage (same engine as glyph
+    /// outlines). Vector content scales cleanly at any display density.
     Path {
-        /// Fill color.
+        /// Fill or stroke color.
         color: Color,
-        /// Winding or even-odd fill rule.
+        /// Winding or even-odd fill rule (applies to fill; ignored for stroke).
         fill_rule: FillRule,
+        /// Stroke width in 8.8 fixed-point points (0 = filled, not stroked).
+        /// Example: 2.0 pt = `0x0200`, 1.5 pt = `0x0180`.
+        /// When non-zero, the render backend expands strokes to filled
+        /// geometry before rasterization (round joins and caps).
+        stroke_width: u16,
         /// Reference to serialized path commands in the data buffer
         /// (MoveTo, LineTo, CubicTo, Close). 4-byte aligned.
         contours: DataRef,
@@ -232,10 +283,16 @@ pub enum Content {
         glyphs: DataRef,
         /// Number of glyphs in this run.
         glyph_count: u16,
-        /// Font size in pixels (selects the glyph cache).
+        /// Font size in points (e.g., 18). Render backends scale to device
+        /// pixels by multiplying by scale_factor. Used as glyph cache key.
         font_size: u16,
         /// Hash of variable font axis values used for rasterization
         /// (0 = default). Used as glyph cache key.
         axis_hash: u32,
     },
 }
+
+// Compile-time size assertion: Content must remain exactly 24 bytes.
+// Largest payload: Glyphs = Color(4) + DataRef(8) + u16 + u16 + u32 = 20 bytes.
+// Image payload: u32 + u16 + u16 = 8 bytes (well within budget).
+const _: () = assert!(core::mem::size_of::<Content>() == 24);

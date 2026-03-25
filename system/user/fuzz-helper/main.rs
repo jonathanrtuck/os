@@ -18,7 +18,7 @@ const SHARED_MEMORY_BASE: usize = 0xC000_0000;
 extern "C" fn blocking_thread(_: u64) -> ! {
     // Block on a timer that won't fire for a very long time.
     if let Ok(h) = sys::timer_create(999_999_999_999) {
-        let _ = sys::wait(&[h], u64::MAX);
+        let _ = sys::wait(&[h.0], u64::MAX);
     }
     sys::exit();
 }
@@ -53,7 +53,7 @@ pub extern "C" fn _start() -> ! {
             sys::print(b"H:01\n");
             // Create a timer to block on (we may not have any handle at slot 0).
             if let Ok(h) = sys::timer_create(999_999_999_999) {
-                let _ = sys::wait(&[h], u64::MAX);
+                let _ = sys::wait(&[h.0], u64::MAX);
             }
             sys::exit();
         }
@@ -85,8 +85,8 @@ pub extern "C" fn _start() -> ! {
             loop {
                 if let Ok((a, b)) = sys::channel_create() {
                     let _ = sys::channel_signal(a);
-                    let _ = sys::handle_close(a);
-                    let _ = sys::handle_close(b);
+                    let _ = sys::handle_close(a.0);
+                    let _ = sys::handle_close(b.0);
                 }
                 sys::yield_now();
             }
@@ -94,7 +94,7 @@ pub extern "C" fn _start() -> ! {
         0x06 => {
             // Signal channel handle 0 (received via handle_send) then exit.
             sys::print(b"H:06\n");
-            let _ = sys::channel_signal(0);
+            let _ = sys::channel_signal(sys::ChannelHandle(0));
             sys::exit();
         }
         _ => {

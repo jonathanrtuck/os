@@ -10,7 +10,7 @@
 //!   → MSG_POINTER_BUTTON
 //! - EV_ABS (type 3): absolute pointer coordinates from virtio-tablet
 //!   ABS_X (code 0x00) and ABS_Y (code 0x01) in [0, 32767]
-//!   → MSG_POINTER_ABS
+//!   → shared PointerState register (atomic u64, no IPC ring)
 //!
 //! # virtio-input protocol
 //!
@@ -36,9 +36,10 @@
 #![no_main]
 
 use protocol::{
-    device::{DeviceConfig, MSG_DEVICE_CONFIG},
+    device::MSG_DEVICE_CONFIG,
     input::{
-        KeyEvent, PointerAbs, PointerButton, MSG_KEY_EVENT, MSG_POINTER_ABS, MSG_POINTER_BUTTON,
+        KeyEvent, PointerButton, MOD_ALT, MOD_CAPS_LOCK, MOD_CTRL, MOD_SHIFT, MOD_SUPER,
+        MSG_KEY_EVENT, MSG_POINTER_BUTTON,
     },
 };
 
@@ -52,6 +53,17 @@ const ABS_Y: u16 = 0x01;
 /// Mouse button codes (Linux input.h). These arrive as EV_KEY events.
 const BTN_LEFT: u16 = 0x110;
 const BTN_RIGHT: u16 = 0x111;
+/// Modifier keycodes (Linux evdev).
+const KEY_LSHIFT: u16 = 42;
+const KEY_RSHIFT: u16 = 54;
+const KEY_LCTRL: u16 = 29;
+const KEY_RCTRL: u16 = 97;
+const KEY_LALT: u16 = 56;
+const KEY_RALT: u16 = 100;
+const KEY_LMETA: u16 = 125;
+const KEY_RMETA: u16 = 126;
+const KEY_CAPSLOCK: u16 = 58;
+
 /// Size of a virtio_input_event struct (8 bytes).
 const EVENT_SIZE: u32 = 8;
 /// Event virtqueue index.
@@ -70,13 +82,12 @@ struct VirtioInputEvent {
 fn channel_shm_va(idx: usize) -> usize {
     protocol::channel_shm_va(idx)
 }
-/// Translate a Linux evdev keycode to ASCII.
+/// Translate a Linux evdev keycode to ASCII, applying shift if held.
 ///
-/// Returns 0 for unmapped keys. Only covers the basic US keyboard layout
-/// (lowercase letters, digits, punctuation, space, enter, backspace, tab).
-fn keycode_to_ascii(code: u16) -> u8 {
-    // Index = Linux keycode, value = ASCII character (0 = unmapped).
-    // Covers keycodes 0–57 (KEY_RESERVED through KEY_SPACE).
+/// Returns 0 for unmapped keys. Covers the US keyboard layout
+/// (letters, digits, punctuation, space, enter, backspace, tab).
+fn keycode_to_ascii(code: u16, shifted: bool) -> u8 {
+    // Unshifted: index = Linux keycode, value = ASCII character (0 = unmapped).
     static MAP: [u8; 58] = [
         0, 0, // 0: reserved, 1: ESC
         b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', // 2–11
@@ -98,10 +109,54 @@ fn keycode_to_ascii(code: u16) -> u8 {
         b' ', // 57: space
     ];
 
-    if (code as usize) < MAP.len() {
-        MAP[code as usize]
+    // Shifted: same indices, uppercase letters and shifted punctuation.
+    static SHIFT_MAP: [u8; 58] = [
+        0, 0, // 0: reserved, 1: ESC
+        b'!', b'@', b'#', b'$', b'%', b'^', b'&', b'*', b'(', b')', // 2–11
+        b'_', b'+',  // 12–13
+        0x08,  // 14: backspace (unchanged)
+        b'\t', // 15: tab (unchanged)
+        b'Q', b'W', b'E', b'R', b'T', b'Y', b'U', b'I', b'O', b'P', // 16–25
+        b'{', b'}',  // 26–27
+        b'\n', // 28: enter (unchanged)
+        0,     // 29: left ctrl
+        b'A', b'S', b'D', b'F', b'G', b'H', b'J', b'K', b'L', // 30–38
+        b':', b'"', // 39–40
+        b'~', // 41: grave → tilde
+        0,    // 42: left shift
+        b'|', // 43: backslash → pipe
+        b'Z', b'X', b'C', b'V', b'B', b'N', b'M', // 44–50
+        b'<', b'>', b'?', // 51–53
+        0, 0, 0,    // 54: rshift, 55: kp*, 56: lalt
+        b' ', // 57: space (unchanged)
+    ];
+
+    let idx = code as usize;
+    if idx >= MAP.len() {
+        return 0;
+    }
+
+    let base = MAP[idx];
+    if base == 0 {
+        return 0;
+    }
+
+    if shifted {
+        SHIFT_MAP[idx]
     } else {
-        0
+        base
+    }
+}
+
+/// Update modifier bitmask for a key press/release event.
+/// Returns the modifier bit if the keycode is a modifier key, 0 otherwise.
+fn modifier_bit(code: u16) -> u8 {
+    match code {
+        KEY_LSHIFT | KEY_RSHIFT => MOD_SHIFT,
+        KEY_LCTRL | KEY_RCTRL => MOD_CTRL,
+        KEY_LALT | KEY_RALT => MOD_ALT,
+        KEY_LMETA | KEY_RMETA => MOD_SUPER,
+        _ => 0,
     }
 }
 
@@ -117,8 +172,14 @@ pub extern "C" fn _start() -> ! {
         sys::exit();
     }
 
-    // SAFETY: msg.msg_type is MSG_DEVICE_CONFIG; sender (init) guarantees payload is valid DeviceConfig.
-    let config: DeviceConfig = unsafe { msg.payload_as() };
+    let config = if let Some(protocol::device::Message::DeviceConfig(c)) =
+        protocol::device::decode(msg.msg_type, &msg.payload)
+    {
+        c
+    } else {
+        sys::print(b"virtio-input: bad device config\n");
+        sys::exit();
+    };
     // Map MMIO region (sub-page offset for virtio-mmio slots).
     let page_offset = config.mmio_pa & 0xFFF;
     let page_pa = config.mmio_pa & !0xFFF;
@@ -134,10 +195,11 @@ pub extern "C" fn _start() -> ! {
     }
 
     // IRQ handle goes into slot 2 (after init channel=0, compositor channel=1).
-    let irq_handle = sys::interrupt_register(config.irq).unwrap_or_else(|_| {
-        sys::print(b"virtio-input: interrupt_register failed\n");
-        sys::exit();
-    });
+    let irq_handle: sys::InterruptHandle =
+        sys::interrupt_register(config.irq).unwrap_or_else(|_| {
+            sys::print(b"virtio-input: interrupt_register failed\n");
+            sys::exit();
+        });
     // Setup event virtqueue.
     let queue_size = core::cmp::min(
         device.queue_max_size(VIRTQ_EVENT),
@@ -192,19 +254,37 @@ pub extern "C" fn _start() -> ! {
     // SAFETY: same as above — channel SHM region mapped by kernel at page-aligned boundaries.
     let comp_ch = unsafe { ipc::Channel::from_base(channel_shm_va(1), ipc::PAGE_SIZE, 0) };
 
+    // Receive pointer state register VA from init (optional — 0 if not present).
+    let pointer_state_va: usize = if init_ch.try_recv(&mut msg)
+        && msg.msg_type == protocol::input::MSG_POINTER_STATE_CONFIG
+    {
+        if let Some(protocol::input::Message::PointerStateConfig(cfg)) =
+            protocol::input::decode(msg.msg_type, &msg.payload)
+        {
+            cfg.state_va as usize
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+
     sys::print(b"  \xE2\x8C\xA8\xEF\xB8\x8F  virtio-input ready\n");
 
     // Track absolute pointer state. EV_ABS events for X and Y arrive as
-    // separate events before an EV_SYN. We accumulate them and send a
-    // single MSG_POINTER_ABS when either axis updates.
+    // separate events before an EV_SYN. We accumulate them and write to
+    // the shared state register (atomic u64, init-allocated).
     let mut pointer_x: u32 = 0;
     let mut pointer_y: u32 = 0;
+
+    // Modifier key state (packed bitmask).
+    let mut modifiers: u8 = 0;
 
     // -----------------------------------------------------------------------
     // Event loop: wait for IRQ → read events → forward to compositor
     // -----------------------------------------------------------------------
     loop {
-        let _ = sys::wait(&[irq_handle], u64::MAX);
+        let _ = sys::wait(&[irq_handle.0], u64::MAX);
 
         device.ack_interrupt();
 
@@ -226,6 +306,8 @@ pub extern "C" fn _start() -> ! {
                 unsafe { core::ptr::read_volatile(buf_va as *const VirtioInputEvent) };
 
             if event.event_type == EV_KEY && event.value <= 1 {
+                let pressed = event.value == 1;
+
                 // Check if this is a mouse button event.
                 if event.code == BTN_LEFT || event.code == BTN_RIGHT {
                     let button = if event.code == BTN_LEFT { 0u8 } else { 1u8 };
@@ -241,14 +323,48 @@ pub extern "C" fn _start() -> ! {
                         sys::print(b"virtio-input: ring full, event dropped\n");
                     }
 
-                    let _ = sys::channel_signal(1);
+                    let _ = sys::channel_signal(sys::ChannelHandle(1));
                 } else {
-                    // Regular keyboard key press/release.
-                    let ascii = keycode_to_ascii(event.code);
+                    // Update modifier state.
+                    let mod_bit = modifier_bit(event.code);
+                    if mod_bit != 0 {
+                        if pressed {
+                            modifiers |= mod_bit;
+                        } else {
+                            modifiers &= !mod_bit;
+                        }
+                    }
+                    // Caps Lock: macOS sends press when capsLock flag turns ON,
+                    // release when it turns OFF. Map directly to modifier state
+                    // (set on press, clear on release) rather than toggling.
+                    if event.code == KEY_CAPSLOCK {
+                        if pressed {
+                            modifiers |= MOD_CAPS_LOCK;
+                        } else {
+                            modifiers &= !MOD_CAPS_LOCK;
+                        }
+                    }
+
+                    // Compute ASCII with shift/caps applied.
+                    // Letters are affected by both Shift and Caps Lock (XOR behavior).
+                    // Punctuation is affected by Shift only.
+                    let shift_held = modifiers & MOD_SHIFT != 0;
+                    let caps_on = modifiers & MOD_CAPS_LOCK != 0;
+                    let base_ascii = keycode_to_ascii(event.code, false);
+                    let is_letter = base_ascii.is_ascii_lowercase();
+                    let effective_shift = if is_letter {
+                        shift_held ^ caps_on // XOR: shift+caps = lowercase
+                    } else {
+                        shift_held
+                    };
+                    let ascii = keycode_to_ascii(event.code, effective_shift);
+
                     let key_event = KeyEvent {
                         keycode: event.code,
                         pressed: event.value as u8,
                         ascii,
+                        modifiers,
+                        _pad: 0,
                     };
                     // SAFETY: KeyEvent fits within 60-byte IPC payload.
                     let msg = unsafe { ipc::Message::from_payload(MSG_KEY_EVENT, &key_event) };
@@ -257,7 +373,7 @@ pub extern "C" fn _start() -> ! {
                         sys::print(b"virtio-input: ring full, event dropped\n");
                     }
 
-                    let _ = sys::channel_signal(1);
+                    let _ = sys::channel_signal(sys::ChannelHandle(1));
                 }
             } else if event.event_type == EV_ABS {
                 // Absolute pointer axis event from virtio-tablet.
@@ -285,21 +401,18 @@ pub extern "C" fn _start() -> ! {
             repost_count += 1;
         }
 
-        // Send accumulated pointer position after processing all events
-        // in this IRQ batch (avoids sending redundant intermediate positions).
+        // Write accumulated pointer position to shared state register.
+        // Atomic u64 store — no ring, no overflow, always latest.
         if pointer_moved {
-            let ptr_abs = PointerAbs {
-                x: pointer_x,
-                y: pointer_y,
-            };
-            // SAFETY: PointerAbs fits within 60-byte IPC payload.
-            let msg = unsafe { ipc::Message::from_payload(MSG_POINTER_ABS, &ptr_abs) };
-
-            if !comp_ch.send(&msg) {
-                sys::print(b"virtio-input: ring full, event dropped\n");
+            let packed = protocol::input::PointerState::pack(pointer_x, pointer_y);
+            // SAFETY: pointer_state_va points to a shared PointerState page
+            // mapped by init. Atomic store-release for cross-core visibility.
+            unsafe {
+                let atom = &*(pointer_state_va as *const core::sync::atomic::AtomicU64);
+                atom.store(packed, core::sync::atomic::Ordering::Release);
             }
-
-            let _ = sys::channel_signal(1);
+            // Signal core to wake and read the new state.
+            let _ = sys::channel_signal(sys::ChannelHandle(1));
         }
 
         // Batch-notify after reposting all consumed buffers.

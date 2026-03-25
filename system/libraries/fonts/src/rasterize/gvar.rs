@@ -8,12 +8,11 @@
 use read_fonts::{FontRef, TableProvider};
 
 use super::{
+    embolden::{compute_dilation, embolden_outline},
     metrics::{font_axes, AxisValue, GlyphMetrics, RasterBuffer},
     outline::{extract_outline, GlyphOutline, GlyphPoint, MAX_CONTOURS, MAX_GLYPH_POINTS},
     scale::{scale_fu, scale_fu_ceil, scale_fu_floor},
-    scanline::{
-        flatten_outline_from_scratch, rasterize_segments, RasterScratch, STEM_DARKENING_LUT,
-    },
+    scanline::{flatten_outline_from_scratch, rasterize_segments, RasterScratch},
 };
 
 // ---------------------------------------------------------------------------
@@ -570,14 +569,22 @@ pub fn rasterize_with_axes(
     buffer: &mut RasterBuffer,
     scratch: &mut RasterScratch,
     axis_values: &[AxisValue],
+    scale_factor: u16,
 ) -> Option<GlyphMetrics> {
     if axis_values.is_empty() {
-        return super::scanline::rasterize(font_data, glyph_id, size_px, buffer, scratch);
+        return super::scanline::rasterize(
+            font_data,
+            glyph_id,
+            size_px,
+            buffer,
+            scratch,
+            scale_factor,
+        );
     }
 
     let size_px_u32 = size_px as u32;
 
-    let (advance_fu, lsb_fu, upem) =
+    let (advance_fu, _lsb_fu, upem) =
         match extract_outline_with_axes(font_data, glyph_id, axis_values, &mut scratch.outline) {
             Some(v) => v,
             None => {
@@ -621,6 +628,12 @@ pub fn rasterize_with_axes(
             }
         };
 
+    // Apply outline dilation for stem darkening (macOS Core Text formula).
+    let (dil_x, dil_y) = compute_dilation(size_px, upem, scale_factor);
+    if dil_x != 0 || dil_y != 0 {
+        embolden_outline(&mut scratch.outline, dil_x, dil_y);
+    }
+
     // The rest is identical to rasterize() -- use the outline from scratch.
     let x_min_fu = scratch.outline.x_min;
     let y_min_fu = scratch.outline.y_min;
@@ -632,7 +645,6 @@ pub fn rasterize_with_axes(
     let y_min_px = scale_fu_floor(y_min_fu as i32, size_px_u32, upem);
     let x_max_px = scale_fu_ceil(x_max_fu as i32, size_px_u32, upem) + 1;
     let y_max_px = scale_fu_ceil(y_max_fu as i32, size_px_u32, upem) + 1;
-    let _ = y_min_px;
     if x_max_px < x_min_px || y_max_px < y_min_px {
         return None;
     }
@@ -654,7 +666,7 @@ pub fn rasterize_with_axes(
         return None;
     }
 
-    // Grayscale anti-aliasing: rasterize at 1x width with vertical oversampling.
+    // Analytic area coverage: exact signed-area trapezoid computation.
     // Output is 1 byte per pixel (grayscale coverage).
     let out_total = (bmp_w * bmp_h) as usize;
 
@@ -672,11 +684,6 @@ pub fn rasterize_with_axes(
     // Rasterize at native width (no horizontal oversampling)
     rasterize_segments(scratch, &mut buffer.data[..out_total], bmp_w, bmp_h);
 
-    // Stem darkening (applied per grayscale byte).
-    for i in 0..out_total {
-        buffer.data[i] = STEM_DARKENING_LUT[buffer.data[i] as usize];
-    }
-
     let advance = scale_fu(advance_fu as i32, size_px_u32, upem) as u32;
     // bearing_x = x_min_px: the bitmap starts at the leftmost pixel of the
     // gvar-adjusted outline. This is correct for both default and varied
@@ -691,87 +698,4 @@ pub fn rasterize_with_axes(
         bearing_y,
         advance,
     })
-}
-
-/// Get the axis-adjusted horizontal advance for a glyph.
-///
-/// Applies gvar deltas for the given axis values and returns the advance
-/// width in pixels. Useful for computing char_width without rasterizing.
-/// Returns None if the glyph ID is invalid or the font cannot be parsed.
-pub fn glyph_advance_with_axes(
-    font_data: &[u8],
-    glyph_id: u16,
-    size_px: u16,
-    axis_values: &[AxisValue],
-) -> Option<u32> {
-    let font = FontRef::new(font_data).ok()?;
-    let head = font.head().ok()?;
-    let upem = head.units_per_em();
-    let hmtx = font.hmtx().ok()?;
-    let hhea = font.hhea().ok()?;
-    let num_h_metrics = hhea.number_of_h_metrics();
-
-    let base_advance = if (glyph_id as u16) < num_h_metrics {
-        hmtx.h_metrics().get(glyph_id as usize)?.advance.get()
-    } else {
-        hmtx.h_metrics()
-            .get(num_h_metrics as usize - 1)?
-            .advance
-            .get()
-    };
-
-    if axis_values.is_empty() {
-        return Some(scale_fu(base_advance as i32, size_px as u32, upem) as u32);
-    }
-
-    // Apply gvar phantom point deltas to get axis-adjusted advance.
-    // Heap-allocate outline (~6 KiB) to avoid stack overflow on 16 KiB stacks.
-    let mut outline: alloc::boxed::Box<GlyphOutline> = unsafe {
-        let layout = alloc::alloc::Layout::new::<GlyphOutline>();
-        let ptr = alloc::alloc::alloc_zeroed(layout) as *mut GlyphOutline;
-        if ptr.is_null() {
-            return Some(scale_fu(base_advance as i32, size_px as u32, upem) as u32);
-        }
-        // SAFETY: alloc_zeroed returns valid, zero-initialized memory.
-        // GlyphOutline::zeroed() is all-zeros, matching the allocation.
-        alloc::boxed::Box::from_raw(ptr)
-    };
-    match extract_outline_with_axes(font_data, glyph_id, axis_values, &mut outline) {
-        Some((adj_advance, _, adj_upem)) => {
-            Some(scale_fu(adj_advance as i32, size_px as u32, adj_upem) as u32)
-        }
-        None => {
-            // No outline (space-like glyph) -- apply advance delta from phantom points.
-            let coords = build_normalized_coords(font_data, axis_values);
-            if coords.is_empty() || coords.iter().all(|c| c.to_f32().abs() < f32::EPSILON) {
-                return Some(scale_fu(base_advance as i32, size_px as u32, upem) as u32);
-            }
-            // Try to get gvar deltas for phantom points even without an outline.
-            let gvar = font.gvar().ok()?;
-            let gid = read_fonts::types::GlyphId::new(glyph_id as u32);
-            let var_data = gvar.glyph_variation_data(gid).ok()??;
-            let loca = font.loca(None).ok()?;
-            let glyf = font.glyf().ok()?;
-            // Count points in the glyph (0 for space).
-            let num_pts = match loca.get_glyf(gid, &glyf) {
-                Ok(Some(read_fonts::tables::glyf::Glyph::Simple(s))) => s.num_points(),
-                _ => 0,
-            };
-            let mut dx_origin = 0i32;
-            let mut dx_advance = 0i32;
-            for (tuple, scalar) in var_data.active_tuples_at(&coords) {
-                let scalar_bits = scalar.to_bits() as i64;
-                for td in tuple.deltas() {
-                    let ix = td.position as usize;
-                    if ix == num_pts {
-                        dx_origin += ((td.x_delta as i64 * scalar_bits + 0x8000) >> 16) as i32;
-                    } else if ix == num_pts + 1 {
-                        dx_advance += ((td.x_delta as i64 * scalar_bits + 0x8000) >> 16) as i32;
-                    }
-                }
-            }
-            let adj = base_advance as i32 + dx_advance - dx_origin;
-            Some(scale_fu(adj.max(0), size_px as u32, upem) as u32)
-        }
-    }
 }

@@ -4,6 +4,28 @@ A living document capturing the high-level architecture, beliefs, and decisions 
 
 ---
 
+## The Core Idea
+
+Current operating systems are app-based: **OS → App → Document.** The OS manages apps, and documents live inside apps. To edit a text file, you open a text editor, then open the file within it.
+
+A document-centric OS flips this: **OS → Document → Tool.** The OS manages files directly. Documents exist independently of any app. To edit a text file, you open the file, then attach an editor to it.
+
+This mirrors the physical desktop analogy. A paper on your desk exists independently of the pen you use to write on it. You can look at (view) a document without owning an editor. But if you want to change it, you need a tool.
+
+**A document is a file. A file has a mimetype. That's the whole model.** The OS can natively view all common mimetypes. Editing requires installing an editor that supports that mimetype. Editors are tools you bring to documents, not containers that hold them.
+
+### Mimetype Evolution
+
+Documents aren't locked into a format at creation time. If you start with a plain text file and use an image tool to add an image, the OS prompts you to confirm changing the mimetype to a richer format. The document evolves based on what you do with it, rather than requiring you to decide upfront what kind of document you're making.
+
+### The Economics of Open Formats
+
+Open formats are essential — the OS must champion them, or app lock-in returns through proprietary formats. But open formats don't kill the editor market. They change what editors compete on: quality of editing experience rather than file format captivity.
+
+Precedents that validate this: PDF is an open standard that every OS can render, but Adobe still sells Acrobat because the editing tools are powerful. PNG/JPG are open — people still pay for Photoshop because the editing is worth it. Source code is plain text — people still pay for JetBrains IDEs based on editor quality. Smaller, specialized editor developers benefit from this model — a niche audio editor competes on audio editing quality, not on being bundled into a larger suite.
+
+---
+
 ## Guiding Beliefs
 
 1. **The OS exists to help you work with your data, not to host apps.** Documents and content are first-class citizens. Applications are tools you attach to content, not containers you put content inside.
@@ -50,11 +72,13 @@ The traditional distinction (simple = one file, compound = many) becomes an inte
 
 The OS uses exactly two spatial units:
 
-**Point (pt)** — 1/72 inch. The resolution-independent coordinate unit used everywhere above the render boundary: node positions, node sizes, font sizes, layout constants, shadow offsets. One unit for both spatial layout and typography. Integer points give near-pixel-level control at typical desktop DPIs (96–220 DPI → 1–3 physical pixels per point).
+**Point (pt)** — 1/72 inch. The resolution-independent coordinate unit used everywhere above the render boundary: node positions, node sizes, font sizes, layout constants, shadow offsets. One unit for both spatial layout and typography. Internally represented as 1/1024 pt ("millipoints"): `Mpt = i32` (signed positions/offsets), `Umpt = u32` (unsigned dimensions). Precision: ~0.001 pt (sub-pixel at any density). Range: ±2,097,151 pt (±2,489 A4 pages). Conversion: bit shift `>> 10`.
 
 **Pixel (px)** — one physical display element. Used only by the render backends and drawing library — the final stage where points are converted to hardware coordinates.
 
 The scale factor (`physical_dpi / 72`) bridges them. It is derived from display hardware (EDID), user preference, or a sensible default (96 DPI → scale ≈ 1.33). The render library applies the scale during the scene tree walk. Core and the scene graph never know about pixels or DPI.
+
+Spring physics and affine transforms stay in f32 — springs because the math (sin, exp) is natural in float, transforms because they compose via matrix multiplication and go straight to the GPU. Conversion happens at API boundaries: `Spring::value()` returns `Mpt`; render services convert `Mpt → f32` pixels for GPU submission.
 
 ### Open terminology questions
 
@@ -388,25 +412,17 @@ Each translator is a leaf node — complex inside (parsing docx is genuinely har
 
 ## Open Questions (To Be Resolved)
 
-### Technical Stack
-
-The beliefs and content model above should guide these choices, but they haven't been made yet:
-
-- Kernel architecture (microkernel vs. monolithic)
-- POSIX compatibility (full, partial, or clean break)
-- Binary format and ABI
-- Implementation language(s)
-- Display server / compositor
-- IPC mechanism (especially important given the editor protocol)
-
 ### Interaction Model
 
 The GUI's look, feel, and navigation are not yet defined:
 
-- Windowed, fullscreen-per-workspace, tiling, or something else?
+- Windowed, fullscreen-per-workspace, tiling, or something else? (Leaning: one-document-at-a-time, non-windowed)
 - How does the user navigate between open documents?
 - What does "launching" something look like in a system with no app launcher?
 - How do tags and queries surface in the GUI?
+- How does compound document editing work when editors bind to content types but only one editor is active per document?
+
+The shell is a blue-layer tool (untrusted EL0 process, pluggable). System gestures live in the OS service (not pluggable); navigation UI lives in the shell (pluggable). The exact boundary between them is an open question. See Decision #17 in the decision register.
 
 ---
 
@@ -455,3 +471,5 @@ All content is modeled internally as files (local or mounted from remote service
 - **Xerox Star** (1981) — genuinely document-centric desktop. Users started with documents, not apps.
 - **Plan 9** (Bell Labs) — everything-is-a-file philosophy taken to its logical conclusion. Radical simplicity at the systems level.
 - **BeOS / BFS** — rich queryable metadata built into the filesystem, enabling attribute-based file discovery rather than path-based navigation.
+
+Previous document-centric attempts (OpenDoc, Xerox Star) likely failed not because the idea was wrong, but because: they tried to be universal, forcing every computing task into the document metaphor; 1990s component architectures weren't up to the technical challenge; and economic incentives of major OS vendors were aligned with app-centric models.

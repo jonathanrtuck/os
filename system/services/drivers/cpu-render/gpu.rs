@@ -150,7 +150,7 @@ fn ctrl_header(cmd_type: u32) -> CtrlHeader {
 fn gpu_command(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     cmd_pa: u64,
     cmd_len: u32,
     resp_pa: u64,
@@ -159,7 +159,7 @@ fn gpu_command(
 ) -> u32 {
     vq.push_chain(&[(cmd_pa, cmd_len, false), (resp_pa, resp_len, true)]);
     device.notify(VIRTQ_CONTROL);
-    let _ = sys::wait(&[irq_handle], u64::MAX);
+    let _ = sys::wait(&[irq_handle.0], u64::MAX);
     device.ack_interrupt();
     vq.pop_used();
     let _ = sys::interrupt_ack(irq_handle);
@@ -177,7 +177,10 @@ fn print_u32(n: u32) {
 /// IRQ, and set up the control virtqueue.
 ///
 /// Returns `(device, virtqueue, irq_handle)`.
-pub fn init_device(mmio_pa: u64, irq: u32) -> (virtio::Device, virtio::Virtqueue, u8) {
+pub fn init_device(
+    mmio_pa: u64,
+    irq: u32,
+) -> (virtio::Device, virtio::Virtqueue, sys::InterruptHandle) {
     let page_offset = mmio_pa & 0xFFF;
     let page_pa = mmio_pa & !0xFFF;
     let page_va = sys::device_map(page_pa, 0x1000).unwrap_or_else(|_| {
@@ -224,7 +227,7 @@ pub fn init_device(mmio_pa: u64, irq: u32) -> (virtio::Device, virtio::Virtqueue
 pub fn get_display_info(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
 ) -> (u32, u32) {
     let cmd = DmaBuf::alloc(0);
     // SAFETY: cmd.va is a valid DMA page, CtrlHeader fits at offset 0.
@@ -261,7 +264,7 @@ pub fn get_display_info(
 pub fn resource_create_2d(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     resource_id: u32,
     width: u32,
     height: u32,
@@ -300,7 +303,7 @@ pub fn resource_create_2d(
 pub fn attach_backing_sg(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     resource_id: u32,
     pa_table: &[u64],
     chunk_bytes: u32,
@@ -365,7 +368,7 @@ pub fn attach_backing_sg(
 pub fn set_scanout(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     scanout_id: u32,
     resource_id: u32,
     width: u32,
@@ -409,7 +412,7 @@ pub fn set_scanout(
 pub fn transfer_to_host_reuse(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     cmd: &DmaBuf,
     resource_id: u32,
     rect_x: u32,
@@ -458,7 +461,7 @@ pub fn transfer_to_host_reuse(
 pub fn resource_flush_reuse(
     device: &virtio::Device,
     vq: &mut virtio::Virtqueue,
-    irq_handle: u8,
+    irq_handle: sys::InterruptHandle,
     cmd: &DmaBuf,
     resource_id: u32,
     rect_x: u32,

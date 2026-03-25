@@ -38,6 +38,8 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("core", "CORE_ELF"),
     ("cpu-render", "CPU_RENDER_ELF"),
     ("virgil-render", "VIRGIL_RENDER_ELF"),
+    ("metal-render", "METAL_RENDER_ELF"),
+    ("png-decode", "PNG_DECODE_ELF"),
     ("text-editor", "TEXT_EDITOR_ELF"),
     ("stress", "STRESS_ELF"),
     ("fuzz", "FUZZ_ELF"),
@@ -64,6 +66,8 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
         true,
         true,
     ),
+    ("metal-render", "services/drivers/metal-render", true, true),
+    ("png-decode", "services/decoders/png", false, false),
     ("text-editor", "user/text-editor", false, false),
     ("stress", "user/stress", false, false),
     ("fuzz-helper", "user/fuzz-helper", false, false),
@@ -86,6 +90,16 @@ fn main() {
 
     rustc_rlib(&rustc, &protocol_src, &protocol_rlib, "protocol", &[]);
 
+    let animation_src = manifest_dir.join("libraries/animation/lib.rs");
+    let animation_rlib = out_dir.join("libanimation.rlib");
+
+    rustc_rlib(&rustc, &animation_src, &animation_rlib, "animation", &[]);
+
+    let layout_src = manifest_dir.join("libraries/layout/lib.rs");
+    let layout_rlib = out_dir.join("liblayout.rlib");
+
+    rustc_rlib(&rustc, &layout_src, &layout_rlib, "layout", &[]);
+
     let virtio_src = manifest_dir.join("libraries/virtio/lib.rs");
     let virtio_rlib = out_dir.join("libvirtio.rlib");
 
@@ -105,7 +119,7 @@ fn main() {
     let ipc_src = manifest_dir.join("libraries/ipc/lib.rs");
     let ipc_rlib = out_dir.join("libipc.rlib");
 
-    rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[]);
+    rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[("sys", &sys_rlib)]);
 
     // Step 1b: Build Cargo-managed libraries (libraries with external deps).
     // These use `cargo build` to resolve dependency graphs, then we link the
@@ -161,8 +175,16 @@ fn main() {
             externs.push(("scene", scene_rlib.clone()));
             externs.push(("fonts", fonts_output.rlib.clone()));
         }
-        if name == "cpu-render" || name == "virgil-render" {
+        if name == "cpu-render"
+            || name == "virgil-render"
+            || name == "metal-render"
+            || name == "core"
+        {
             externs.push(("render", render_rlib.clone()));
+        }
+        if name == "core" {
+            externs.push(("animation", animation_rlib.clone()));
+            externs.push(("layout", layout_rlib.clone()));
         }
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
@@ -267,6 +289,8 @@ fn main() {
     }
     println!("cargo:rerun-if-changed={}", ipc_src.display());
     println!("cargo:rerun-if-changed={}", protocol_src.display());
+    println!("cargo:rerun-if-changed={}", animation_src.display());
+    println!("cargo:rerun-if-changed={}", layout_src.display());
     println!("cargo:rerun-if-changed={}", scene_src.display());
     println!("cargo:rerun-if-changed={}", render_src.display());
     for render_mod in &[

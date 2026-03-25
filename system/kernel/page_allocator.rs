@@ -22,8 +22,9 @@ use super::{
 
 /// Maximum order: log2(RAM pages) so the allocator can coalesce up to the
 /// full physical memory range. With 256 MiB RAM: 65536 pages = 2^16 → order 16.
-/// Derived from RAM geometry, not from any single allocation's needs.
-const RAM_PAGES: usize = (paging::RAM_SIZE / paging::PAGE_SIZE) as usize;
+/// Uses RAM_SIZE_MAX (compile-time upper bound) for array sizing. The actual
+/// RAM size from the DTB may be smaller; init() sets region_end accordingly.
+const RAM_PAGES: usize = (paging::RAM_SIZE_MAX / paging::PAGE_SIZE) as usize;
 const MAX_ORDER: usize = RAM_PAGES.ilog2() as usize;
 const PAGE_SIZE: usize = paging::PAGE_SIZE as usize;
 
@@ -179,9 +180,11 @@ pub fn free_frames(pa: Pa, order: usize) {
     assert!(order <= MAX_ORDER, "order exceeds MAX_ORDER");
 
     // Validate PA before writing to it — a corrupted PA would cause a data abort.
+    // Uses runtime ram_end() (from DTB) instead of the compile-time upper bound.
     // Gated on not(test) because host tests use heap addresses, not real RAM.
     #[cfg(not(test))]
-    if pa.0 & 0xFFF != 0 || pa.0 < paging::RAM_START as usize || pa.0 >= paging::RAM_END as usize {
+    if pa.0 & 0xFFF != 0 || pa.0 < paging::RAM_START as usize || pa.0 >= paging::ram_end() as usize
+    {
         serial::panic_puts("free_frames: bad PA 0x");
         serial::panic_put_hex(pa.0 as u64);
         serial::panic_puts("\n");

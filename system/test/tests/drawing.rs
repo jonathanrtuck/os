@@ -116,23 +116,25 @@ impl TextLayout {
         &self,
         text: &[u8],
         cursor_offset: usize,
-        current_scroll: u32,
+        current_scroll: f32,
         viewport_lines: u32,
-    ) -> u32 {
-        if viewport_lines == 0 {
-            return 0;
+    ) -> f32 {
+        if viewport_lines == 0 || self.line_height == 0 {
+            return 0.0;
         }
 
         let cursor_line = self.byte_to_visual_line(text, cursor_offset);
+        let cursor_px = cursor_line as f32 * self.line_height as f32;
+        let viewport_px = viewport_lines as f32 * self.line_height as f32;
 
-        if cursor_line < current_scroll {
-            return cursor_line;
+        if cursor_px < current_scroll {
+            return cursor_px;
         }
 
-        let last_visible = current_scroll + viewport_lines - 1;
+        let last_visible_top = current_scroll + viewport_px - self.line_height as f32;
 
-        if cursor_line > last_visible {
-            return cursor_line - (viewport_lines - 1);
+        if cursor_px > last_visible_top {
+            return cursor_px - viewport_px + self.line_height as f32;
         }
 
         current_scroll
@@ -1645,8 +1647,8 @@ fn blit_blend_mixed_alpha_pixels() {
     assert_eq!(dst.get_pixel(5, 3), Some(Color::rgb(0, 0, 255)));
 }
 
-const NUNITO_SANS: &[u8] = include_bytes!("../../share/nunito-sans.ttf");
-const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf");
+const INTER: &[u8] = include_bytes!("../../share/inter.ttf");
+const JETBRAINS_MONO: &[u8] = include_bytes!("../../share/jetbrains-mono.ttf");
 
 // ---------------------------------------------------------------------------
 // Rasterizer — glyph-ID-based rasterization (read-fonts outline extraction)
@@ -1656,7 +1658,7 @@ const SOURCE_CODE_PRO: &[u8] = include_bytes!("../../share/source-code-pro.ttf")
 fn rasterize_valid_glyph_produces_coverage() {
     // VAL-RASTER-001: rasterize(font, glyph_id=valid, 18px) returns Some(metrics)
     // with width > 0, height > 0, coverage sum > 0.
-    let glyph_id = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
+    let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A').unwrap();
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -1666,7 +1668,7 @@ fn rasterize_valid_glyph_produces_coverage() {
     };
 
     let metrics =
-        fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch);
+        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 18, &mut raster, &mut scratch, 1);
     assert!(
         metrics.is_some(),
         "valid glyph should produce Some(metrics)"
@@ -1691,7 +1693,7 @@ fn rasterize_notdef_glyph_produces_valid_coverage() {
         height: 128,
     };
 
-    let metrics = fonts::rasterize::rasterize(SOURCE_CODE_PRO, 0, 18, &mut raster, &mut scratch);
+    let metrics = fonts::rasterize::rasterize(JETBRAINS_MONO, 0, 18, &mut raster, &mut scratch, 1);
     // .notdef may have an outline (rectangle) or may be empty.
     // Either way, it should not panic and should return Some.
     assert!(metrics.is_some(), ".notdef (glyph_id=0) should return Some");
@@ -1709,7 +1711,7 @@ fn rasterize_invalid_glyph_returns_none() {
     };
 
     let metrics =
-        fonts::rasterize::rasterize(SOURCE_CODE_PRO, u16::MAX, 18, &mut raster, &mut scratch);
+        fonts::rasterize::rasterize(JETBRAINS_MONO, u16::MAX, 18, &mut raster, &mut scratch, 1);
     assert!(
         metrics.is_none(),
         "glyph_id=u16::MAX should return None (no panic)"
@@ -1719,7 +1721,7 @@ fn rasterize_invalid_glyph_returns_none() {
 #[test]
 fn rasterize_a_glyph_reasonable_dimensions() {
     // VAL-RASTER-002: 'A' at 18px produces bounding box ~5-20px wide, ~10-25px tall.
-    let glyph_id = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A').unwrap();
+    let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A').unwrap();
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -1728,7 +1730,7 @@ fn rasterize_a_glyph_reasonable_dimensions() {
         height: 128,
     };
 
-    let m = fonts::rasterize::rasterize(SOURCE_CODE_PRO, glyph_id, 18, &mut raster, &mut scratch)
+    let m = fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 18, &mut raster, &mut scratch, 1)
         .unwrap();
     assert!(
         m.width >= 5 && m.width <= 20,
@@ -1753,8 +1755,8 @@ fn rasterize_a_glyph_reasonable_dimensions() {
 
 #[test]
 fn rasterize_proportional_font_valid() {
-    // VAL-RASTER-002: Nunito Sans glyph rasterizes correctly via read-fonts.
-    let glyph_id = fonts::rasterize::glyph_id_for_char(NUNITO_SANS, 'W').unwrap();
+    // VAL-RASTER-002: Inter glyph rasterizes correctly via read-fonts.
+    let glyph_id = fonts::rasterize::glyph_id_for_char(INTER, 'W').unwrap();
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -1763,8 +1765,7 @@ fn rasterize_proportional_font_valid() {
         height: 128,
     };
 
-    let m =
-        fonts::rasterize::rasterize(NUNITO_SANS, glyph_id, 18, &mut raster, &mut scratch).unwrap();
+    let m = fonts::rasterize::rasterize(INTER, glyph_id, 18, &mut raster, &mut scratch, 1).unwrap();
     assert!(
         m.width > 0,
         "proportional font glyph should have non-zero width"
@@ -2271,19 +2272,8 @@ fn gamma_draw_coverage_uses_gamma_correction() {
 }
 
 // ---------------------------------------------------------------------------
-// Vertical oversampling tests (grayscale anti-aliasing)
+// Analytic coverage tests (grayscale anti-aliasing)
 // ---------------------------------------------------------------------------
-
-use fonts::rasterize::OVERSAMPLE_Y;
-
-#[test]
-fn oversample_y_is_at_least_4() {
-    assert!(
-        OVERSAMPLE_Y >= 4,
-        "OVERSAMPLE_Y should be >= 4, got {}",
-        OVERSAMPLE_Y,
-    );
-}
 
 #[test]
 fn grayscale_rasterize_produces_intermediate_coverage() {
@@ -2299,11 +2289,12 @@ fn grayscale_rasterize_produces_intermediate_coverage() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k').unwrap(),
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'k').unwrap(),
         24 as u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
@@ -2332,11 +2323,12 @@ fn grayscale_diagonal_has_smooth_transitions() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'x').unwrap(),
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'x').unwrap(),
         24 as u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     let w = metrics.width;
@@ -2371,11 +2363,12 @@ fn grayscale_curve_has_smooth_edges() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'o').unwrap(),
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'o').unwrap(),
         24 as u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     let w = metrics.width;
@@ -2392,8 +2385,8 @@ fn grayscale_curve_has_smooth_edges() {
     }
     let distinct_levels = levels.iter().filter(|&&v| v).count();
 
-    // With OVERSAMPLE_Y=8 vertical oversampling, we expect
-    // more than 4 distinct levels at minimum.
+    // The analytic area coverage rasterizer produces many distinct
+    // coverage levels — we expect at least 4 for curved glyphs.
     assert!(
         distinct_levels >= 4,
         "'o' should have at least 4 distinct non-zero coverage levels, got {}",
@@ -2415,12 +2408,12 @@ fn grayscale_all_printable_ascii_still_rasterize() {
             width: 128,
             height: 128,
         };
-        let gid = match fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, ch) {
+        let gid = match fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, ch) {
             Some(id) => id,
             None => continue,
         };
         let metrics =
-            fonts::rasterize::rasterize(SOURCE_CODE_PRO, gid, 24, &mut raster, &mut scratch);
+            fonts::rasterize::rasterize(JETBRAINS_MONO, gid, 24, &mut raster, &mut scratch, 1);
         assert!(
             metrics.is_some(),
             "grayscale: should rasterize '{}' (0x{:02x}) at 24px",
@@ -2436,11 +2429,11 @@ fn grayscale_glyph_cache_populated() {
 
     let mut cache = heap_glyph_cache();
 
-    cache.populate(SOURCE_CODE_PRO, 16);
+    cache.populate(JETBRAINS_MONO, 16);
 
     // Check a few glyphs are cached with valid dimensions.
     // Look up the real font glyph ID for 'A' and 'k' via cmap.
-    let gid_a = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'A')
+    let gid_a = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A')
         .expect("font should have glyph for 'A'");
     let (g_a, cov_a) = cache.get(gid_a).unwrap();
     assert!(
@@ -2455,7 +2448,7 @@ fn grayscale_glyph_cache_populated() {
         "'A' coverage should be 1 byte per pixel (grayscale)"
     );
 
-    let gid_k = fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'k')
+    let gid_k = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'k')
         .expect("font should have glyph for 'k'");
     let (g_k, cov_k) = cache.get(gid_k).unwrap();
     assert!(g_k.width > 0 && g_k.height > 0);
@@ -2485,11 +2478,12 @@ fn grayscale_rasterizer_output_is_1_byte_per_pixel() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'H').unwrap(),
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'H').unwrap(),
         24 as u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     assert!(metrics.width > 0 && metrics.height > 0);
@@ -2511,9 +2505,11 @@ fn grayscale_monospace_cache_has_1_byte_per_pixel() {
     // Cache produces 1-byte-per-pixel grayscale coverage.
 
     let mut cache = heap_glyph_cache();
-    cache.populate(SOURCE_CODE_PRO, 16);
+    cache.populate(JETBRAINS_MONO, 16);
 
-    let (g, cov) = cache.get(b'A' as u16).unwrap();
+    let gid_a = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A')
+        .expect("font should have glyph for 'A'");
+    let (g, cov) = cache.get(gid_a).unwrap();
     assert_eq!(
         cov.len(),
         (g.width * g.height) as usize,
@@ -2532,9 +2528,11 @@ fn grayscale_proportional_cache_has_1_byte_per_pixel() {
     // The proportional cache should produce 1-byte-per-pixel data.
 
     let mut cache = heap_glyph_cache();
-    cache.populate(SOURCE_CODE_PRO, 16);
+    cache.populate(JETBRAINS_MONO, 16);
 
-    let (g, cov) = cache.get(b'A' as u16).unwrap();
+    let gid_a = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'A')
+        .expect("font should have glyph for 'A'");
+    let (g, cov) = cache.get(gid_a).unwrap();
     assert_eq!(
         cov.len(),
         (g.width * g.height) as usize,
@@ -2573,74 +2571,14 @@ fn grayscale_draw_coverage_uniform_rgb() {
 }
 
 // ---------------------------------------------------------------------------
-// Stem darkening — non-linear coverage boost for thin strokes
+// Stem darkening — outline dilation (replaced old coverage LUT approach)
 // ---------------------------------------------------------------------------
 
-use fonts::cache::{STEM_DARKENING_BOOST, STEM_DARKENING_LUT};
-
 #[test]
-fn stem_darkening_lut_zero_stays_zero() {
-    // Zero coverage must remain zero after darkening (no phantom pixels).
-    assert_eq!(
-        STEM_DARKENING_LUT[0], 0,
-        "zero coverage should stay 0 after darkening"
-    );
-}
-
-#[test]
-fn stem_darkening_lut_full_stays_full() {
-    // Full coverage (255) must remain 255 after darkening.
-    assert_eq!(
-        STEM_DARKENING_LUT[255], 255,
-        "full coverage (255) should stay 255 after darkening"
-    );
-}
-
-#[test]
-fn stem_darkening_lut_boost_mid_range() {
-    // Coverage values in the 30-200 range should be strictly higher after darkening.
-    for cov in 30u8..=200u8 {
-        let darkened = STEM_DARKENING_LUT[cov as usize];
-        assert!(
-            darkened > cov,
-            "coverage {} should be strictly boosted, got {}",
-            cov,
-            darkened,
-        );
-    }
-}
-
-#[test]
-fn stem_darkening_lut_monotonic() {
-    // The LUT must be monotonically non-decreasing: higher input → ≥ higher output.
-    for i in 1..256 {
-        assert!(
-            STEM_DARKENING_LUT[i] >= STEM_DARKENING_LUT[i - 1],
-            "LUT not monotonic at {}: {} < {}",
-            i,
-            STEM_DARKENING_LUT[i],
-            STEM_DARKENING_LUT[i - 1],
-        );
-    }
-}
-
-#[test]
-fn stem_darkening_boost_is_tunable() {
-    // The boost constant should be in a reasonable range (40-120).
-    assert!(
-        STEM_DARKENING_BOOST >= 40 && STEM_DARKENING_BOOST <= 120,
-        "STEM_DARKENING_BOOST should be 40-120, got {}",
-        STEM_DARKENING_BOOST,
-    );
-}
-
-#[test]
-fn stem_darkening_applied_to_rasterized_glyph() {
-    // Rasterize a thin-stroke glyph ('l') and verify that intermediate
-    // coverage values are boosted compared to the raw formula.
-    // Since darkening is applied in the rasterizer, we verify the output
-    // has higher coverage values than raw (undarkened) values would produce.
-
+fn stem_darkening_rasterized_glyph_has_coverage() {
+    // Rasterize a thin-stroke glyph ('l') and verify it produces meaningful
+    // coverage values. The outline dilation (macOS formula) should ensure
+    // thin stems have sufficient pixel coverage.
     let mut scratch = fonts::rasterize::RasterScratch::zeroed();
     let mut buf = [0u8; 128 * 128];
     let mut raster = fonts::rasterize::RasterBuffer {
@@ -2650,48 +2588,54 @@ fn stem_darkening_applied_to_rasterized_glyph() {
     };
 
     let metrics = fonts::rasterize::rasterize(
-        SOURCE_CODE_PRO,
-        fonts::rasterize::glyph_id_for_char(SOURCE_CODE_PRO, 'l').unwrap(),
-        16 as u16,
+        JETBRAINS_MONO,
+        fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'l').unwrap(),
+        16_u16,
         &mut raster,
         &mut scratch,
+        1,
     )
     .unwrap();
     let w = metrics.width;
     let h = metrics.height;
-    let total = (w * h) as usize; // 1 byte per pixel (grayscale)
+    let total = (w * h) as usize;
     let coverage = &buf[..total];
 
-    // Count coverage values that are in the boosted range (30-200).
-    // After darkening, any raw value in 30-200 should now be higher.
-    // We verify indirectly: the glyph should have coverage values in
-    // the STEM_DARKENING_LUT[30]..=254 range (values that can only exist
-    // if darkening was applied to raw values in 30..200).
-    let boosted_threshold = STEM_DARKENING_LUT[30];
-    let has_boosted = coverage.iter().any(|&c| c >= boosted_threshold && c < 255);
+    // The glyph should have pixels with full or near-full coverage (stem interior)
+    // and pixels with partial coverage (anti-aliased edges).
+    let has_full = coverage.iter().any(|&c| c >= 240);
+    let has_partial = coverage.iter().any(|&c| c > 0 && c < 200);
     assert!(
-        has_boosted,
-        "'l' at 16px should have boosted coverage values (>= {})",
-        boosted_threshold,
+        has_full,
+        "'l' at 16px should have near-full coverage pixels"
+    );
+    assert!(
+        has_partial,
+        "'l' at 16px should have partial coverage pixels (AA edges)"
     );
 }
 
 #[test]
-fn stem_darkening_lut_matches_formula() {
-    // The LUT is applied per grayscale byte.
-    // Verify the formula: darkened = cov + BOOST * (255 - cov) / 255.
-    // Special case: LUT[0] = 0 (no phantom pixels).
-    let boost = STEM_DARKENING_BOOST as u32;
-    assert_eq!(STEM_DARKENING_LUT[0], 0, "LUT[0] must be 0");
-    for cov in 1u32..=255 {
-        let expected = cov + boost * (255 - cov) / 255;
-        let expected = if expected > 255 { 255 } else { expected };
-        assert_eq!(
-            STEM_DARKENING_LUT[cov as usize], expected as u8,
-            "LUT[{}] should be {}, got {}",
-            cov, expected, STEM_DARKENING_LUT[cov as usize],
-        );
-    }
+fn stem_darkening_dilation_increases_glyph_width() {
+    // The outline dilation should make glyphs slightly wider than without.
+    // Rasterize at a size where dilation is active (< ~20px where cap isn't hit).
+    let mut scratch = fonts::rasterize::RasterScratch::zeroed();
+    let mut buf = [0u8; 128 * 128];
+    let mut raster = fonts::rasterize::RasterBuffer {
+        data: &mut buf,
+        width: 128,
+        height: 128,
+    };
+
+    let glyph_id = fonts::rasterize::glyph_id_for_char(JETBRAINS_MONO, 'I').unwrap();
+
+    let metrics =
+        fonts::rasterize::rasterize(JETBRAINS_MONO, glyph_id, 14_u16, &mut raster, &mut scratch, 1)
+            .unwrap();
+
+    // The glyph should have non-zero dimensions.
+    assert!(metrics.width > 0, "glyph should have width");
+    assert!(metrics.height > 0, "glyph should have height");
 }
 
 // ---------------------------------------------------------------------------
@@ -2746,6 +2690,19 @@ fn dirty_rect_union_all_empty() {
     let u = protocol::DirtyRect::union_all(&[]);
     assert_eq!(u.w, 0);
     assert_eq!(u.h, 0);
+}
+
+#[test]
+fn dirty_rect_union_saturates_on_large_extent() {
+    // Two rects whose union would exceed u16::MAX width if unclamped.
+    let a = protocol::DirtyRect::new(0, 0, 60000, 60000);
+    let b = protocol::DirtyRect::new(10000, 10000, 60000, 60000);
+    let u = a.union(b);
+    assert_eq!(u.x, 0);
+    assert_eq!(u.y, 0);
+    // 10000 + 60000 = 70000 > 65535 → clamped to u16::MAX
+    assert_eq!(u.w, u16::MAX);
+    assert_eq!(u.h, u16::MAX);
 }
 
 #[test]
@@ -4642,10 +4599,10 @@ fn total_visual_lines_wrap() {
 #[test]
 fn scroll_for_cursor_no_scroll_needed() {
     let layout = make_layout(200);
-    // 3-line viewport, cursor on line 0, scroll=0 → no change
-    assert_eq!(layout.scroll_for_cursor(b"hello", 0, 0, 3), 0);
+    // 3-line viewport, cursor on line 0, scroll=0px → no change
+    assert_eq!(layout.scroll_for_cursor(b"hello", 0, 0.0, 3), 0.0);
     // cursor on line 2 (viewport 0..2), still visible
-    assert_eq!(layout.scroll_for_cursor(b"a\nb\nc", 4, 0, 3), 0);
+    assert_eq!(layout.scroll_for_cursor(b"a\nb\nc", 4, 0.0, 3), 0.0);
 }
 
 /// scroll_for_cursor scrolls down when cursor goes below viewport.
@@ -4654,9 +4611,9 @@ fn scroll_for_cursor_scroll_down() {
     let layout = make_layout(200);
     // 2-line viewport, cursor on line 2 (past visible range [0,1])
     let text = b"a\nb\nc";
-    // cursor at byte 4 = "c" = line 2. viewport lines = 2. current scroll = 0.
-    // Need scroll = 1 so viewport shows lines [1,2].
-    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 2), 1);
+    // cursor at byte 4 = "c" = line 2. viewport lines = 2. current scroll = 0px.
+    // Need scroll = 20px (line 1 * 20) so viewport shows lines [1,2].
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0.0, 2), 20.0);
 }
 
 /// scroll_for_cursor scrolls up when cursor goes above viewport.
@@ -4664,9 +4621,9 @@ fn scroll_for_cursor_scroll_down() {
 fn scroll_for_cursor_scroll_up() {
     let layout = make_layout(200);
     let text = b"a\nb\nc";
-    // cursor at byte 0 = line 0. scroll = 2, viewport lines = 2 → shows lines [2,3].
-    // Need scroll = 0 to see line 0.
-    assert_eq!(layout.scroll_for_cursor(text, 0, 2, 2), 0);
+    // cursor at byte 0 = line 0. scroll = 40px (line 2*20), viewport lines = 2.
+    // Need scroll = 0px to see line 0.
+    assert_eq!(layout.scroll_for_cursor(text, 0, 40.0, 2), 0.0);
 }
 
 /// scroll_for_cursor handles Home key (cursor at 0, scroll was large).
@@ -4674,8 +4631,8 @@ fn scroll_for_cursor_scroll_up() {
 fn scroll_for_cursor_home_key() {
     let layout = make_layout(200);
     let text = b"line1\nline2\nline3\nline4\nline5";
-    // Cursor at byte 0 = line 0, scroll = 4, viewport = 3
-    assert_eq!(layout.scroll_for_cursor(text, 0, 4, 3), 0);
+    // Cursor at byte 0 = line 0, scroll = 80px (line 4*20), viewport = 3
+    assert_eq!(layout.scroll_for_cursor(text, 0, 80.0, 3), 0.0);
 }
 
 /// scroll_for_cursor handles End key (cursor at end, scroll was 0).
@@ -4683,16 +4640,16 @@ fn scroll_for_cursor_home_key() {
 fn scroll_for_cursor_end_key() {
     let layout = make_layout(200);
     let text = b"l1\nl2\nl3\nl4\nl5";
-    // End of text is on line 4. viewport = 3 lines. scroll = 0.
-    // Need scroll = 2 so viewport shows [2,3,4].
-    assert_eq!(layout.scroll_for_cursor(text, text.len(), 0, 3), 2);
+    // End of text is on line 4. viewport = 3 lines. scroll = 0px.
+    // Need scroll = 40px (line 2*20) so viewport shows [2,3,4].
+    assert_eq!(layout.scroll_for_cursor(text, text.len(), 0.0, 3), 40.0);
 }
 
 /// scroll_for_cursor with viewport_lines=0 always returns 0.
 #[test]
 fn scroll_for_cursor_zero_viewport() {
     let layout = make_layout(200);
-    assert_eq!(layout.scroll_for_cursor(b"a\nb\nc", 4, 5, 0), 0);
+    assert_eq!(layout.scroll_for_cursor(b"a\nb\nc", 4, 100.0, 0), 0.0);
 }
 
 /// scroll_for_cursor: cursor on the last visible line does not scroll.
@@ -4700,8 +4657,8 @@ fn scroll_for_cursor_zero_viewport() {
 fn scroll_for_cursor_cursor_on_last_visible() {
     let layout = make_layout(200);
     let text = b"a\nb\nc\nd\ne";
-    // Viewport=3, scroll=1 → visible lines [1,2,3]. Cursor on line 3 (byte 6='d').
-    assert_eq!(layout.scroll_for_cursor(text, 6, 1, 3), 1);
+    // Viewport=3, scroll=20px (line 1*20) → visible lines [1,2,3]. Cursor on line 3 (byte 6='d').
+    assert_eq!(layout.scroll_for_cursor(text, 6, 20.0, 3), 20.0);
 }
 
 /// scroll_for_cursor: cursor just below viewport triggers minimal scroll.
@@ -4709,9 +4666,9 @@ fn scroll_for_cursor_cursor_on_last_visible() {
 fn scroll_for_cursor_one_past_bottom() {
     let layout = make_layout(200);
     let text = b"a\nb\nc\nd\ne";
-    // Viewport=2, scroll=0 → visible lines [0,1]. Cursor on line 2 (byte 4='c').
-    // Should scroll to 1 so viewport shows [1,2].
-    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 2), 1);
+    // Viewport=2, scroll=0px → visible lines [0,1]. Cursor on line 2 (byte 4='c').
+    // Should scroll to 20px (line 1*20) so viewport shows [1,2].
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0.0, 2), 20.0);
 }
 
 /// scroll_for_cursor: single-line viewport scrolls to the cursor line exactly.
@@ -4719,10 +4676,10 @@ fn scroll_for_cursor_one_past_bottom() {
 fn scroll_for_cursor_single_line_viewport() {
     let layout = make_layout(200);
     let text = b"a\nb\nc";
-    // Viewport=1, cursor on line 2 → scroll=2.
-    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 1), 2);
-    // Viewport=1, cursor on line 0, scroll was 2 → scroll=0.
-    assert_eq!(layout.scroll_for_cursor(text, 0, 2, 1), 0);
+    // Viewport=1, cursor on line 2 → scroll=40px (line 2*20).
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0.0, 1), 40.0);
+    // Viewport=1, cursor on line 0, scroll was 40px → scroll=0px.
+    assert_eq!(layout.scroll_for_cursor(text, 0, 40.0, 1), 0.0);
 }
 
 /// scroll_for_cursor: cursor already visible with large viewport returns unchanged scroll.
@@ -4730,8 +4687,8 @@ fn scroll_for_cursor_single_line_viewport() {
 fn scroll_for_cursor_large_viewport() {
     let layout = make_layout(200);
     let text = b"a\nb\nc";
-    // Viewport=100 lines, everything fits. scroll=0 should remain.
-    assert_eq!(layout.scroll_for_cursor(text, 4, 0, 100), 0);
+    // Viewport=100 lines, everything fits. scroll=0px should remain.
+    assert_eq!(layout.scroll_for_cursor(text, 4, 0.0, 100), 0.0);
 }
 
 /// draw_tt_sel_scroll: selection byte range survives scrolling.
@@ -4788,10 +4745,10 @@ fn scroll_clips_lines_above_and_below() {
 /// just a number that can be stored and restored per content mode.
 #[test]
 fn scroll_offset_preserved_across_context_switch() {
-    // Scroll offset is a u32 (or usize). Switching from editor to image
+    // Scroll offset is an f32 (pixel space). Switching from editor to image
     // and back should restore the same value.
-    let editor_scroll: u32 = 7;
-    let image_scroll: u32 = 0; // images don't scroll (yet)
+    let editor_scroll: f32 = 140.0; // 7 lines * 20px
+    let image_scroll: f32 = 0.0; // images don't scroll (yet)
 
     // Simulate context switch: save editor scroll, load image scroll.
     let saved_editor_scroll = editor_scroll;
@@ -4799,7 +4756,7 @@ fn scroll_offset_preserved_across_context_switch() {
 
     // Switch back: restore editor scroll.
     let restored = saved_editor_scroll;
-    assert_eq!(restored, 7);
+    assert_eq!(restored, 140.0);
 }
 
 // composite_surfaces_rect — partial framebuffer compositing
@@ -5580,11 +5537,11 @@ fn click_to_position_with_scroll_offset() {
     };
     // 3 lines: "aaa\nbbb\nccc"
     let text = b"aaa\nbbb\nccc";
-    // Simulate scroll_offset = 1 (first visible line is "bbb").
+    // Simulate scroll_offset = 24.0px (1 line * 24px line_height).
     // A click at y=0 in the viewport maps to visual line 1 in the document.
-    let scroll_offset: u32 = 1;
+    let scroll_offset: f32 = 24.0;
     let click_y: u32 = 0; // top of viewport
-    let adjusted_y = click_y + scroll_offset * layout.line_height;
+    let adjusted_y = click_y + scroll_offset.round() as u32;
     let result = layout.xy_to_byte(text, 0, adjusted_y);
     // Visual line 1 starts at byte 4 ('b').
     assert_eq!(result, 4);

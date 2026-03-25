@@ -9,8 +9,8 @@ use fonts::cache::GlyphCache;
 use scene::{Content, Node, ShapedGlyph};
 
 use super::{
-    coords::scale_coord,
-    path_raster::{render_path, scene_to_draw_color},
+    coords::round_f32,
+    path_raster::{render_path, render_path_data, scene_to_draw_color},
     RenderCtx, SceneGraph,
 };
 use crate::LruRasterizer;
@@ -31,18 +31,44 @@ pub(super) fn render_content(
     nh: i32,
     lru: Option<&mut LruRasterizer>,
 ) {
-    let cache = ctx.mono_cache;
     let scale = ctx.scale;
     match node.content {
         Content::None => {}
         Content::Path {
             color,
             fill_rule,
+            stroke_width,
             contours,
         } => {
-            render_path(
-                fb, graph, scale, contours, color, fill_rule, draw_x, draw_y, nw, nh,
-            );
+            if stroke_width > 0 {
+                // Expand stroked path to filled geometry, then rasterize.
+                let data =
+                    if (contours.offset as usize + contours.length as usize) <= graph.data.len() {
+                        &graph.data[contours.offset as usize..][..contours.length as usize]
+                    } else {
+                        return;
+                    };
+                // Decode 8.8 fixed-point stroke width to f32 points.
+                let sw_pt = stroke_width as f32 / 256.0;
+                let expanded = scene::stroke::expand_stroke(data, sw_pt);
+                if !expanded.is_empty() {
+                    render_path_data(
+                        fb,
+                        &expanded,
+                        scale,
+                        color,
+                        scene::FillRule::Winding,
+                        draw_x,
+                        draw_y,
+                        nw,
+                        nh,
+                    );
+                }
+            } else {
+                render_path(
+                    fb, graph, scale, contours, color, fill_rule, draw_x, draw_y, nw, nh,
+                );
+            }
         }
         Content::Glyphs {
             color,
@@ -51,6 +77,13 @@ pub(super) fn render_content(
             font_size,
             axis_hash,
         } => {
+            // Select glyph cache by font identity (scene::FONT_MONO = 0,
+            // scene::FONT_SANS = 1). Non-mono fonts use the prop_cache.
+            let cache = if axis_hash != scene::FONT_MONO {
+                ctx.prop_cache
+            } else {
+                ctx.mono_cache
+            };
             render_glyphs(
                 fb,
                 graph,
@@ -67,13 +100,22 @@ pub(super) fn render_content(
                 lru,
             );
         }
-        Content::Image {
+        Content::InlineImage {
             data,
             src_width,
             src_height,
         } => {
             render_image(
                 fb, graph, data, src_width, src_height, draw_x, draw_y, nw, nh,
+            );
+        }
+        Content::Image {
+            content_id,
+            src_width,
+            src_height,
+        } => {
+            render_content_region_image(
+                fb, graph, content_id, src_width, src_height, draw_x, draw_y, nw, nh,
             );
         }
     }
@@ -94,8 +136,8 @@ fn render_glyphs(
     glyph_count: u16,
     draw_x: i32,
     draw_y: i32,
-    _font_size: u16,
-    _axis_hash: u32,
+    font_size: u16,
+    axis_hash: u32,
     font_size_px: u16,
     mut lru: Option<&mut LruRasterizer>,
 ) {
@@ -115,18 +157,23 @@ fn render_glyphs(
     };
     let glyph_color = scene_to_draw_color(color);
 
-    let mut cx = draw_x;
+    // Accumulate pen position in f32 pixel space to preserve fractional
+    // advances. Snap to integer pixels only for actual drawing. This
+    // matches the GPU backends and prevents inter-glyph drift.
+    let mut pen_x = draw_x as f32;
 
     // Use the node's font_size from Content::Glyphs if non-zero,
     // otherwise fall back to the backend's physical font size.
-    let lru_font_size = if _font_size > 0 {
-        _font_size
+    let lru_font_size = if font_size > 0 {
+        font_size
     } else {
         font_size_px
     };
-    let lru_axis_hash = _axis_hash;
+    let lru_axis_hash = axis_hash;
 
     for sg in shaped_glyphs {
+        let cx = round_f32(pen_x);
+
         // Fast path: fixed ASCII cache.
         if let Some((glyph, coverage)) = cache.get(sg.glyph_id) {
             let px = cx + glyph.bearing_x;
@@ -154,7 +201,9 @@ fn render_glyphs(
             }
         }
 
-        cx += scale_coord(sg.x_advance as i32, scale);
+        // x_advance is 16.16 fixed-point points. Convert to f32 points,
+        // then scale to pixels. Accumulate in float to avoid drift.
+        pen_x += sg.x_advance as f32 / 65536.0 * scale;
     }
 }
 
@@ -180,6 +229,82 @@ fn render_image(
     // use bilinear resampling for smooth scaling instead of nearest-
     // neighbor. This produces blended gray for downscaled checker-
     // boards instead of aliased black/white.
+    let phys_nw = nw.max(0) as u32;
+    let phys_nh = nh.max(0) as u32;
+    if phys_nw > 0 && phys_nh > 0 && (src_width as u32 != phys_nw || src_height as u32 != phys_nh) {
+        let inv_a = src_width as f32 / phys_nw as f32;
+        let inv_d = src_height as f32 / phys_nh as f32;
+        let inv_tx = (inv_a - 1.0) * 0.5;
+        let inv_ty = (inv_d - 1.0) * 0.5;
+
+        fb.blit_transformed_bilinear(
+            pixels,
+            src_width as u32,
+            src_height as u32,
+            src_stride,
+            draw_x,
+            draw_y,
+            phys_nw,
+            phys_nh,
+            inv_a,
+            0.0,
+            0.0,
+            inv_d,
+            inv_tx,
+            inv_ty,
+            255,
+        );
+    } else {
+        fb.blit_blend(
+            pixels,
+            src_width as u32,
+            src_height as u32,
+            src_stride,
+            draw_x as u32,
+            draw_y as u32,
+        );
+    }
+}
+
+/// Render an image from the Content Region (decoded BGRA pixels).
+///
+/// Looks up the content_id in the Content Region registry to find
+/// the pixel data offset and length, then renders identically to
+/// `render_image` but sourcing data from `graph.content_region`.
+fn render_content_region_image(
+    fb: &mut Surface,
+    graph: &SceneGraph,
+    content_id: u32,
+    src_width: u16,
+    src_height: u16,
+    draw_x: i32,
+    draw_y: i32,
+    nw: i32,
+    nh: i32,
+) {
+    if graph.content_region.is_empty() || content_id == 0 {
+        return;
+    }
+    if graph.content_region.len() < core::mem::size_of::<protocol::content::ContentRegionHeader>() {
+        return;
+    }
+    // SAFETY: content_region starts at the Content Region base, which is aligned
+    // by page allocation. ContentRegionHeader is repr(C) and fits within the region.
+    let header = unsafe {
+        &*(graph.content_region.as_ptr() as *const protocol::content::ContentRegionHeader)
+    };
+    let entry = match protocol::content::find_entry(header, content_id) {
+        Some(e) => e,
+        None => return,
+    };
+    let start = entry.offset as usize;
+    let end = start + entry.length as usize;
+    if end > graph.content_region.len() {
+        return;
+    }
+    let pixels = &graph.content_region[start..end];
+    let src_stride = src_width as u32 * 4;
+
     let phys_nw = nw.max(0) as u32;
     let phys_nh = nh.max(0) as u32;
     if phys_nw > 0 && phys_nh > 0 && (src_width as u32 != phys_nw || src_height as u32 != phys_nh) {

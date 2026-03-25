@@ -3,6 +3,10 @@
 version = 4
 
 [[package]]
+name = "animation"
+version = "0.1.0"
+
+[[package]]
 name = "bitflags"
 version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -73,6 +77,10 @@ dependencies = [
 
 [[package]]
 name = "ipc"
+version = "0.1.0"
+
+[[package]]
+name = "layout"
 version = "0.1.0"
 
 [[package]]
@@ -149,9 +157,11 @@ dependencies = [
 name = "test"
 version = "0.1.0"
 dependencies = [
+ "animation",
  "drawing",
  "fonts",
  "ipc",
+ "layout",
  "protocol",
  "render",
  "scene",
