@@ -21,9 +21,9 @@
 //   SVC handler: ESR_EL1 EC field extracted correctly (>> 26, cmp 0x15).
 //   x10 spill/restore around check prevents register corruption. ✓
 //   Fatal handler: Emergency stack switch with per-core calculation
-//   ((core_id+1) * 4096). Diagnostic state (SP, LR, TPIDR) captured
+//   ((core_id+1) * 16384). Diagnostic state (SP, LR, TPIDR) captured
 //   before stack switch. ✓
-//   exc_stacks: .bss.exc_stacks section, .align 12 (4 KiB), 8 cores. ✓
+//   exc_stacks: .bss.exc_stacks section, .align 14 (16 KiB), 8 cores. ✓
 //   Context offsets: compile-time assertions in context.rs enforce match. ✓
 //   No bugs found.
 // ==========================================================================
@@ -47,7 +47,7 @@
 // --------------------------------------------------------------------------
 // UART helpers (PL011 at kernel VA = phys + KERNEL_VA_OFFSET)
 // --------------------------------------------------------------------------
-.equ UART0_BASE_VA, 0xFFFF000009000000
+.equ UART0_BASE_VA, 0xFFFFFFF009000000  // 0xFFFF_FFF0_0900_0000
 .equ UART0_DR,   0x00
 .equ UART0_FR,   0x18
 .equ UART0_TXFF, (1 << 5)
@@ -192,11 +192,11 @@ exc_fatal:
   mov x7, x30            // LR at fault point (who called address 0?)
   mrs x8, tpidr_el1      // current thread Context pointer
 
-  // Switch to per-core emergency stack (4 KiB each, in .bss).
+  // Switch to per-core emergency stack (16 KiB each, in .bss).
   mrs x4, mpidr_el1
   and x4, x4, #0xFF      // core_id
   add x4, x4, #1         // (core_id + 1) → stack top
-  lsl x4, x4, #12        // × 4096
+  lsl x4, x4, #14        // × 16384
   ldr x5, =__exc_stacks
   add sp, x5, x4
 
@@ -404,7 +404,7 @@ handler_returned_null:
   mrs x4, mpidr_el1
   and x4, x4, #0xFF
   add x4, x4, #1
-  lsl x4, x4, #12
+  lsl x4, x4, #14
   ldr x5, =__exc_stacks
   add sp, x5, x4
 
@@ -436,14 +436,14 @@ handler_returned_null:
 .ltorg
 
 // --------------------------------------------------------------------------
-// Per-core emergency exception stacks (4 KiB × MAX_CORES).
+// Per-core emergency exception stacks (16 KiB × MAX_CORES).
 //
 // Used by exc_fatal so the EL1 fault handler works even when the original
 // SP points into a guard page (kernel stack overflow).
 // Must match per_core::MAX_CORES.
 // --------------------------------------------------------------------------
 .section .bss.exc_stacks
-.align 12
+.align 14
 .global __exc_stacks
 __exc_stacks:
-  .space 4096 * 8
+  .space 16384 * 8

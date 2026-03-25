@@ -298,7 +298,7 @@ impl Virtqueue {
         let used_offset = (avail_offset + avail_bytes + 3) & !3;
         let used_bytes = 6 + size as usize * core::mem::size_of::<UsedElem>();
         let total = used_offset + used_bytes;
-        let pages_needed = (total + 4095) / 4096;
+        let pages_needed = (total + 16383) / 16384;
 
         pages_needed.next_power_of_two().trailing_zeros() as u32
     }

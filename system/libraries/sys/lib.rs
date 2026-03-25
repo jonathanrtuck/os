@@ -54,7 +54,7 @@ mod nr {
 }
 
 const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = 16384;
 
 struct FreeBlock {
     size: usize,
@@ -671,7 +671,7 @@ pub fn interrupt_register(irq: u32) -> SyscallResult<InterruptHandle> {
 /// Allocate anonymous heap memory (demand-paged, zero-filled on first touch).
 ///
 /// Returns the user VA of the start of the allocated region. The region is
-/// `page_count * 4096` bytes. Pages are not physically allocated until touched.
+/// `page_count * PAGE_SIZE` bytes. Pages are not physically allocated until touched.
 pub fn memory_alloc(page_count: u64) -> SyscallResult<usize> {
     let raw = unsafe { syscall1(nr::MEMORY_ALLOC, page_count) as i64 };
 

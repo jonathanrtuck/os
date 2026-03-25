@@ -33,24 +33,24 @@
 //! 0x0A00_0000  Virtio MMIO (32 slots, 0x200 stride)
 //! 0x4000_0000  RAM_START ─── kernel image (.text/.rodata/.data/.bss)
 //!              __kernel_end ─ heap (16 MiB, linked-list + slab allocator)
-//!              heap_end ───── page frame pool (buddy allocator, 4 KiB – 8 MiB)
+//!              heap_end ───── page frame pool (buddy allocator, 16 KiB – 8 MiB)
 //!              ram_end ────── from DTB /memory node (fallback: 0x5000_0000 = 256 MiB)
 //! ```
 //!
 //! ## Virtual — TTBR1 (kernel, shared by all threads)
 //!
 //! ```text
-//! 0xFFFF_0000_4000_0000   VA = PA + 0xFFFF_0000_0000_0000
+//! 0xFFFF_FFF0_4000_0000   VA = PA + 0xFFFF_FFF0_0000_0000
 //!                         W^X enforced: .text RX, .rodata RO, .data/.bss RW
-//!                         Refined from 2 MiB blocks → 4 KiB L3 pages at boot
+//!                         Refined from 32 MiB blocks → 16 KiB L3 pages at boot
 //! ```
 //!
 //! ## Virtual — TTBR0 (per-process, swapped on context switch)
 //!
 //! ```text
 //! 0x0000_0000_0040_0000   User code (ELF segments, demand-paged via VMAs)
-//! 0x0000_0000_4000_0000   Channel shared memory (one 4 KiB page per channel)
-//! 0x0000_0000_7FFF_0000   User stack (16 pages = 64 KiB, guard page below)
+//! 0x0000_0000_4000_0000   Channel shared memory (one 16 KiB page per channel)
+//! 0x0000_0000_7FFF_0000   User stack (4 pages = 64 KiB, guard page below)
 //! 0x0000_0000_8000_0000   USER_STACK_TOP
 //! ```
 //!
@@ -355,28 +355,16 @@ fn pvpanic_signal() {
 /// transitioned to upper VA via TTBR1.
 fn reclaim_boot_ttbr0() {
     extern "C" {
-        static boot_tt0_l0: u8;
-        static boot_tt0_l1: u8;
-        static boot_tt0_l2_0: u8;
-        static boot_tt0_l2_1: u8;
+        static boot_tt0_l2: u8;
     }
 
-    // SAFETY: boot_tt0_l0..l2_1 are page-aligned .bss symbols defined in
-    // boot.S. Taking their addresses yields valid kernel VAs for the boot
-    // identity-map page tables that are no longer needed after all cores
-    // have transitioned to upper VA via TTBR1.
-    let pages = unsafe {
-        [
-            &boot_tt0_l0 as *const u8 as usize,
-            &boot_tt0_l1 as *const u8 as usize,
-            &boot_tt0_l2_0 as *const u8 as usize,
-            &boot_tt0_l2_1 as *const u8 as usize,
-        ]
-    };
+    // SAFETY: boot_tt0_l2 is a 16K-aligned .bss symbol defined in boot.S.
+    // Taking its address yields the kernel VA of the TTBR0 L2 root table
+    // used for identity mapping during boot. No longer needed after all
+    // cores have transitioned to upper VA via TTBR1.
+    let va = unsafe { &boot_tt0_l2 as *const u8 as usize };
 
-    for &va in &pages {
-        page_allocator::free_frame(memory::virt_to_phys(va));
-    }
+    page_allocator::free_frame(memory::virt_to_phys(va));
 }
 /// Request VM shutdown via PSCI SYSTEM_OFF.
 ///
@@ -425,7 +413,7 @@ fn validate_context_before_eret(ctx: *const Context) {
     let sp = unsafe { core::ptr::addr_of!((*ctx).sp).read() };
     let mode = spsr & 0xF; // M[3:0]
     let is_el1 = mode == 0x4 || mode == 0x5; // EL1t or EL1h
-    let is_kernel_va = elr >= 0xFFFF_0000_0000_0000;
+    let is_kernel_va = elr >= memory::KERNEL_VA_OFFSET as u64;
 
     // EL1 return with user-range ELR: the eret would try to fetch instructions
     // from a lower-half VA at EL1, using TTBR0 (which may be empty for idle
@@ -464,7 +452,7 @@ fn validate_context_before_eret(ctx: *const Context) {
         panic!("corrupt context: EL0 eret to kernel VA");
     }
     // EL1 return with invalid kernel SP: stack corruption.
-    if is_el1 && (sp < 0xFFFF_0000_0000_0000 || sp == 0) {
+    if is_el1 && (sp < memory::KERNEL_VA_OFFSET as u64 || sp == 0) {
         serial::panic_puts("\n🛑 eret validation: EL1 return with bad SP\n  sp=0x");
         serial::panic_put_hex(sp);
         serial::panic_puts(" elr=0x");
@@ -594,7 +582,7 @@ pub extern "C" fn kernel_fault_handler(
     // Read the thread's saved Context from TPIDR to check if the crash
     // came from restoring a zeroed context (eret path) or from kernel code
     // (ret/blr to null — TPIDR context would have valid elr).
-    if tpidr >= 0xFFFF_0000_0000_0000 {
+    if tpidr >= memory::KERNEL_VA_OFFSET as u64 {
         // SAFETY: TPIDR_EL1 is validated above as a kernel VA (>= 0xFFFF...).
         // It points to a Thread's Context struct. Reading at documented
         // offsets (matching context.rs compile-time assertions) for diagnostics.
@@ -621,7 +609,8 @@ pub extern "C" fn kernel_fault_handler(
     }
 
     // Walk the stack for return addresses (best-effort backtrace).
-    if (0xFFFF_0000_0000_0000..0xFFFF_0000_5000_0000).contains(&sp) {
+    let kva = memory::KERNEL_VA_OFFSET as u64;
+    if (kva..kva + 0x1000_0000).contains(&sp) {
         serial::panic_puts("\n  stack:");
 
         let sp_ptr = sp as *const u64;
@@ -631,7 +620,7 @@ pub extern "C" fn kernel_fault_handler(
             // to 8 words (64 bytes) for best-effort backtrace diagnostics.
             let val = unsafe { core::ptr::read_volatile(sp_ptr.add(i as usize)) };
 
-            if i < 4 || (0xFFFF_0000_4000_0000..0xFFFF_0000_5000_0000).contains(&val) {
+            if i < 4 || (kva + paging::RAM_START..kva + paging::RAM_END_MAX).contains(&val) {
                 serial::panic_puts(" [");
                 serial::panic_put_hex(i * 8);
                 serial::panic_puts("]=0x");

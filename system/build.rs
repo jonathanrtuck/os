@@ -344,7 +344,9 @@ fn rustc_bin(
         .arg("--crate-type=bin")
         .args(["-C", "panic=abort"])
         .args(["-C", "opt-level=s"])
-        .arg(format!("-Clink-arg=-T{}", link_ld.display()));
+        .arg(format!("-Clink-arg=-T{}", link_ld.display()))
+        .arg("-Clink-arg=-zmax-page-size=16384")
+        .arg("-Clink-arg=-zcommon-page-size=16384");
 
     // Add search path so rustc can resolve transitive rlib dependencies.
     if let Some(first) = externs.first() {

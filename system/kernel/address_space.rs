@@ -11,9 +11,9 @@
 
 //! Per-process address space (TTBR0 page tables + ASID).
 //!
-//! Each user thread owns an `AddressSpace` with its own L0 table and ASID.
-//! `map_page()` walks/creates the 4-level page table (L0→L3) using frames
-//! from the page frame allocator.
+//! Each user thread owns an `AddressSpace` with its own L2 root table and ASID.
+//! `map_page()` walks/creates the 2-level page table (L2→L3) using frames
+//! from the page frame allocator. 16 KiB granule, T0SZ=28 (64 GiB VA).
 
 use alloc::vec::Vec;
 
@@ -86,7 +86,7 @@ pub(crate) struct HeapAllocation {
 // ---------------------------------------------------------------------------
 
 pub struct AddressSpace {
-    l0_pa: Pa,
+    root_pa: Pa,
     asid: Asid,
     owned_frames: Vec<Pa>,
     pub(crate) vmas: VmaList,
@@ -119,14 +119,14 @@ pub struct AddressSpace {
 impl AddressSpace {
     // --- Constructor ---
 
-    /// Create a new empty address space with its own L0 table and ASID.
+    /// Create a new empty address space with its own L2 root table and ASID.
     ///
-    /// Returns `None` if the L0 page table cannot be allocated (OOM).
+    /// Returns `None` if the L2 page table cannot be allocated (OOM).
     pub fn new(asid: Asid) -> Option<Self> {
-        let l0_pa = page_allocator::alloc_frame()?;
+        let root_pa = page_allocator::alloc_frame()?;
 
         Some(Self {
-            l0_pa,
+            root_pa,
             asid,
             owned_frames: Vec::new(),
             vmas: VmaList::new(),
@@ -151,9 +151,9 @@ impl AddressSpace {
         self.asid.0
     }
 
-    /// TTBR0 value: physical address of L0 table | (ASID << 48).
+    /// TTBR0 value: physical address of L2 root table | (ASID << 48).
     pub fn ttbr0_value(&self) -> u64 {
-        self.l0_pa.as_u64() | ((self.asid.0 as u64) << 48)
+        self.root_pa.as_u64() | ((self.asid.0 as u64) << 48)
     }
 
     // --- Public mapping methods ---
@@ -481,7 +481,7 @@ impl AddressSpace {
         }
     }
 
-    /// Free all resources: DMA buffers, owned user pages, page table frames, and the L0 table.
+    /// Free all resources: DMA buffers, owned user pages, page table frames, and the L2 root table.
     ///
     /// # Precondition
     ///
@@ -505,88 +505,44 @@ impl AddressSpace {
             page_allocator::free_frame(pa);
         }
 
-        // Walk page table structure and free table frames (L1, L2, L3 tables).
-        // SAFETY: l0_pa was allocated by page_allocator::alloc_frame in new().
-        // phys_to_virt produces a valid kernel VA. Each table is 4096 bytes
-        // (512 entries * 8 bytes), and indices 0..512 stay within bounds.
+        // Walk 2-level page table (L2 → L3) and free L3 table frames.
+        // SAFETY: root_pa was allocated by page_allocator::alloc_frame in new().
+        // phys_to_virt produces a valid kernel VA. Each table is 16384 bytes
+        // (2048 entries * 8 bytes), and indices 0..2048 stay within bounds.
         // Entries with DESC_VALID set contain physical addresses of tables
         // we allocated, so the derived pointers are valid.
-        let l0_va = memory::phys_to_virt(self.l0_pa) as *const u64;
+        let l2_va = memory::phys_to_virt(self.root_pa) as *const u64;
 
-        for i0 in 0..512usize {
-            // SAFETY: See block comment above — l0_va valid, i0 in 0..512.
-            let e0 = unsafe { *l0_va.add(i0) };
+        for i2 in 0..2048usize {
+            // SAFETY: See block comment above — l2_va valid, i2 in 0..2048.
+            let e2 = unsafe { *l2_va.add(i2) };
 
-            if e0 & DESC_VALID == 0 {
+            if e2 & DESC_VALID == 0 {
                 continue;
             }
 
-            let l1_pa = Pa((e0 & PA_MASK) as usize);
-            let l1_va = memory::phys_to_virt(l1_pa) as *const u64;
+            let l3_pa = Pa((e2 & PA_MASK) as usize);
 
-            for i1 in 0..512usize {
-                // SAFETY: l1_va derived from valid L0 entry, i1 in 0..512.
-                let e1 = unsafe { *l1_va.add(i1) };
-
-                if e1 & DESC_VALID == 0 {
-                    continue;
-                }
-
-                let l2_pa = Pa((e1 & PA_MASK) as usize);
-                let l2_va = memory::phys_to_virt(l2_pa) as *const u64;
-
-                for i2 in 0..512usize {
-                    // SAFETY: l2_va derived from valid L1 entry, i2 in 0..512.
-                    let e2 = unsafe { *l2_va.add(i2) };
-
-                    if e2 & DESC_VALID == 0 {
-                        continue;
-                    }
-
-                    let l3_pa = Pa((e2 & PA_MASK) as usize);
-
-                    page_allocator::free_frame(l3_pa);
-                }
-
-                page_allocator::free_frame(l2_pa);
-            }
-
-            page_allocator::free_frame(l1_pa);
+            page_allocator::free_frame(l3_pa);
         }
 
-        page_allocator::free_frame(self.l0_pa);
+        page_allocator::free_frame(self.root_pa);
 
         self.freed = true;
     }
 
     // --- Private helpers ---
 
-    fn l0_idx(va: u64) -> usize {
-        ((va >> 39) & 0x1FF) as usize
-    }
-
-    fn l1_idx(va: u64) -> usize {
-        ((va >> 30) & 0x1FF) as usize
-    }
-
     fn l2_idx(va: u64) -> usize {
-        ((va >> 21) & 0x1FF) as usize
+        ((va >> 25) & 0x7FF) as usize
     }
 
     fn l3_idx(va: u64) -> usize {
-        ((va >> 12) & 0x1FF) as usize
+        ((va >> 14) & 0x7FF) as usize
     }
 
     fn map_inner(&mut self, va: u64, pa: u64, attrs: &PageAttrs) -> bool {
-        let l0_va = memory::phys_to_virt(self.l0_pa) as *mut u64;
-        let l1_va = match walk_or_create(l0_va, Self::l0_idx(va)) {
-            Some(v) => v,
-            None => return false,
-        };
-        let l2_va = match walk_or_create(l1_va, Self::l1_idx(va)) {
-            Some(v) => v,
-            None => return false,
-        };
+        let l2_va = memory::phys_to_virt(self.root_pa) as *mut u64;
         let l3_va = match walk_or_create(l2_va, Self::l2_idx(va)) {
             Some(v) => v,
             None => return false,
@@ -594,7 +550,7 @@ impl AddressSpace {
         let l3_idx = Self::l3_idx(va);
 
         // SAFETY: l3_va points to a valid L3 page table (allocated by
-        // walk_or_create). l3_idx is 0..511 (derived from VA bit extraction).
+        // walk_or_create). l3_idx is 0..2047 (derived from VA bit extraction).
         unsafe {
             let entry = l3_va.add(l3_idx);
             let old = core::ptr::read_volatile(entry);
@@ -624,25 +580,11 @@ impl AddressSpace {
     /// Does NOT invalidate TLB — caller must do a bulk invalidate after
     /// unmapping all pages in a region.
     fn read_and_unmap_page(&self, va: u64) -> Option<Pa> {
-        let l0_va = memory::phys_to_virt(self.l0_pa) as *const u64;
+        let l2_va = memory::phys_to_virt(self.root_pa) as *const u64;
 
-        // SAFETY: Same page table walk as unmap_page_inner. We read L0-L2
-        // entries and read+write-volatile the L3 entry.
+        // SAFETY: 2-level page table walk. We read the L2 entry and
+        // read+write-volatile the L3 entry.
         unsafe {
-            let e0 = *l0_va.add(Self::l0_idx(va));
-
-            if e0 & DESC_VALID == 0 {
-                return None;
-            }
-
-            let l1_va = memory::phys_to_virt(Pa((e0 & PA_MASK) as usize)) as *const u64;
-            let e1 = *l1_va.add(Self::l1_idx(va));
-
-            if e1 & DESC_VALID == 0 {
-                return None;
-            }
-
-            let l2_va = memory::phys_to_virt(Pa((e1 & PA_MASK) as usize)) as *const u64;
             let e2 = *l2_va.add(Self::l2_idx(va));
 
             if e2 & DESC_VALID == 0 {
@@ -668,26 +610,12 @@ impl AddressSpace {
     /// Clear a single L3 page table entry (write 0). Does not invalidate TLB —
     /// caller is responsible for a bulk invalidate after unmapping all pages.
     fn unmap_page_inner(&self, va: u64) {
-        let l0_va = memory::phys_to_virt(self.l0_pa) as *const u64;
+        let l2_va = memory::phys_to_virt(self.root_pa) as *const u64;
 
         // SAFETY: Page table pointers are valid kernel-mapped memory allocated
-        // by walk_or_create during the original map. We only read L0-L2 entries
-        // and write-volatile the L3 entry to zero (invalidate).
+        // by walk_or_create during the original map. We read the L2 entry and
+        // write-volatile the L3 entry to zero (invalidate).
         unsafe {
-            let e0 = *l0_va.add(Self::l0_idx(va));
-
-            if e0 & DESC_VALID == 0 {
-                return;
-            }
-
-            let l1_va = memory::phys_to_virt(Pa((e0 & PA_MASK) as usize)) as *const u64;
-            let e1 = *l1_va.add(Self::l1_idx(va));
-
-            if e1 & DESC_VALID == 0 {
-                return;
-            }
-
-            let l2_va = memory::phys_to_virt(Pa((e1 & PA_MASK) as usize)) as *const u64;
             let e2 = *l2_va.add(Self::l2_idx(va));
 
             if e2 & DESC_VALID == 0 {
@@ -726,14 +654,14 @@ impl Drop for AddressSpace {
 /// Walk a table entry; if invalid, allocate a new table and install it.
 /// Returns the VA of the next-level table, or `None` on OOM.
 fn walk_or_create(table_va: *mut u64, idx: usize) -> Option<*mut u64> {
-    // SAFETY: `table_va` points to a valid page table (either the L0 table
-    // allocated in `AddressSpace::new` or a table allocated by a previous
-    // `walk_or_create` call). `idx` is 0..511 (derived from VA bit extraction
-    // in the caller), so `table_va.add(idx)` stays within the 4096-byte table.
+    // SAFETY: `table_va` points to a valid page table (either the L2 root
+    // allocated in `AddressSpace::new` or an L3 table allocated by a previous
+    // `walk_or_create` call). `idx` is 0..2047 (derived from VA bit extraction
+    // in the caller), so `table_va.add(idx)` stays within the 16384-byte table.
     // We use read_volatile/write_volatile because these are hardware page table
     // entries that the MMU may read concurrently (if this address space is
     // active in TTBR0). The new table frame is zeroed by alloc_frame, so all
-    // 512 entries start as invalid (DESC_VALID clear).
+    // 2048 entries start as invalid (DESC_VALID clear).
     unsafe {
         let entry = table_va.add(idx);
         let val = core::ptr::read_volatile(entry);

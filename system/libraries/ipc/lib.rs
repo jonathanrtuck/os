@@ -60,8 +60,8 @@ const SLOT_SIZE: usize = 64;
 /// Byte offset of the tail counter within the page (consumer writes).
 const TAIL_OFFSET: usize = 64;
 
-/// Page size (4 KiB). Both the kernel and this library agree on this.
-pub const PAGE_SIZE: usize = 4096;
+/// Page size (16 KiB). Both the kernel and this library agree on this.
+pub const PAGE_SIZE: usize = 16384;
 /// Maximum payload size within a message (64 - 4 byte type tag).
 pub const PAYLOAD_SIZE: usize = 60;
 /// Number of message slots per ring buffer page.

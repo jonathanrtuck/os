@@ -50,7 +50,7 @@ pub const CHANNEL_SHM_BASE: usize = 0x4000_0000;
 /// Each channel occupies 2 consecutive pages (one per direction).
 #[inline]
 pub fn channel_shm_va(idx: usize) -> usize {
-    CHANNEL_SHM_BASE + idx * 2 * 4096
+    CHANNEL_SHM_BASE + idx * 2 * 16384
 }
 
 /// A rectangular region of pixels that has been modified.

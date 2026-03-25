@@ -2,11 +2,12 @@
 // boot.S — Early boot trampoline (.text.boot, runs at physical VA).
 //
 // Handles: core parking, BSS zero, EL2→EL1 drop, FP enable, builds
-// coarse 2MB-block page tables for TTBR0 (identity) and TTBR1 (kernel),
-// enables MMU, transitions to upper VA, jumps to kernel_main.
+// coarse 32MB-block L2 page tables for TTBR0 (identity) and TTBR1
+// (kernel), enables MMU, transitions to upper VA, jumps to kernel_main.
 //
-// After kernel_main starts (at upper VA via TTBR1), Rust code refines
-// TTBR1 with 4KB pages for W^X enforcement.
+// 16 KiB granule, T0SZ=28/T1SZ=28 (36-bit VA = 64 GiB per half).
+// 2-level page tables: L2 root (2048 entries) + L3 (2048 entries).
+// Boot uses L2 block entries only — Rust refines to L3 for W^X.
 //
 // AUDIT: 2026-03-11 — Comprehensive review of AArch64 correctness.
 //   EL2→EL1 transition: HCR_EL2.RW, cnthctl, cntvoff, cptr_el2, spsr/elr
@@ -14,7 +15,7 @@
 //   Barrier ordering: DSB SY before TLBI, DSB ISH + ISB after TLBI, DSB
 //   ISH + ISB after SCTLR_EL1 write. Both primary and secondary paths. ✓
 //   Register clobbers: build_boot_tables saves x29/x30, uses x20-x21
-//   (callee-saved) for return values, fill_tables documents x13-x17 as
+//   (callee-saved) for return values. fill_table documents x13-x18 as
 //   clobbers. All consistent. ✓
 //   Page table descriptors: Device = ATTRIDX1|PXN|UXN|AF, RAM =
 //   ATTRIDX0|SH_INNER|AF|UXN. Block format correct for L2. ✓
@@ -29,45 +30,34 @@
 // is read from the DTB by Rust code (paging::set_ram_end) after boot.
 .equ RAM_START,     0x40000000
 .equ RAM_END,       0x50000000         // RAM_START + 256MB (max for identity map)
-.equ BLOCK_2MB,     0x00200000
+.equ BLOCK_32MB,    0x02000000
 // Descriptor bits.
 .equ DESC_VALID,    (1 << 0)
 .equ DESC_TABLE,    (1 << 1)
-.equ DESC_BLOCK,    (0 << 1)           // L1/L2 block
+.equ DESC_BLOCK,    (0 << 1)           // L2 block
 .equ AF,            (1 << 10)
 .equ SH_INNER,      (3 << 8)
 .equ ATTRIDX0,      (0 << 2)            // normal memory
 .equ ATTRIDX1,      (1 << 2)            // device memory
 .equ PXN,           (1 << 53)
 .equ UXN_LO,        0                  // UXN bit 54 — set via movk below
-// KERNEL_VA_OFFSET = 0xFFFF_0000_0000_0000
-.equ KVA_OFFSET_HI, 0xFFFF0000         // upper 16 bits in [31:16] position
 
-// VA → PA: clear bits [63:48] (kernel VA offset). Used during early boot
-// when we need physical addresses from linker symbols (which are upper VA).
+// VA → PA: clear bits [63:36] (kernel VA offset = 0xFFFF_FFF0_0000_0000).
+// Used during early boot when we need physical addresses from linker symbols.
 .macro va_to_pa reg
-  and \reg, \reg, #0x0000FFFFFFFFFFFF
+  and \reg, \reg, #0x0000000FFFFFFFFF
 .endm
 
 // --------------------------------------------------------------------------
 // Page table storage (in .bss, zeroed by BSS init).
-// 4KB-aligned, 6 tables = 24KB.
+// 16KB-aligned, 2 L2 root tables = 32KB.
 // --------------------------------------------------------------------------
 .section .bss
-.align 12
-.global boot_tt0_l0
-.global boot_tt0_l1
-.global boot_tt0_l2_0
-.global boot_tt0_l2_1
-.global boot_tt1_l2_1
-boot_tt0_l0:    .space 4096    // TTBR0 L0
-boot_tt0_l1:    .space 4096    // TTBR0 L1
-boot_tt0_l2_0:  .space 4096    // TTBR0 L2 for 0..1GB (devices)
-boot_tt0_l2_1:  .space 4096    // TTBR0 L2 for 1..2GB (RAM)
-boot_tt1_l0:    .space 4096    // TTBR1 L0
-boot_tt1_l1:    .space 4096    // TTBR1 L1
-boot_tt1_l2_0:  .space 4096    // TTBR1 L2 for 0..1GB (devices)
-boot_tt1_l2_1:  .space 4096    // TTBR1 L2 for 1..2GB (RAM)
+.align 14
+.global boot_tt0_l2
+.global boot_tt1_l2
+boot_tt0_l2:  .space 16384    // TTBR0 L2 root (2048 entries x 8 = 16 KiB)
+boot_tt1_l2:  .space 16384    // TTBR1 L2 root
 
 // --------------------------------------------------------------------------
 // Boot entry (.text.boot — physical VMA)
@@ -155,14 +145,14 @@ el1_start:
   isb
 
   // ------------------------------------------------------------------
-  // Build page tables (all 2MB blocks, coarse).
+  // Build page tables (32MB blocks, coarse). 2-level: L2 root only.
   // TTBR0: identity map (PA == VA). TTBR1: kernel map (VA = PA + offset,
-  // but page table indices are identical since offset only affects [63:48]).
+  // but page table indices are identical since offset only affects [63:36]).
   // ------------------------------------------------------------------
   bl build_boot_tables
 
-  // x0 = TTBR0 L0 PA, x1 = TTBR1 L0 PA (returned by build_boot_tables).
-  mov x20, x1                  // save TTBR1 L0 PA
+  // x0 = TTBR0 L2 PA, x1 = TTBR1 L2 PA (returned by build_boot_tables).
+  mov x20, x1                  // save TTBR1 L2 PA
 
   // ------------------------------------------------------------------
   // Configure and enable MMU with both TTBR0 and TTBR1.
@@ -175,21 +165,20 @@ el1_start:
   orr x1, x1, x2
   msr mair_el1, x1
 
-  // TCR_EL1: TTBR0 + TTBR1 both enabled.
-  //   T0SZ=16, TG0=4k, SH0=inner, ORGN0=WBWA, IRGN0=WBWA
-  //   T1SZ=16, TG1=4k, SH1=inner, ORGN1=WBWA, IRGN1=WBWA
-  //   EPD1=0 (TTBR1 walks enabled)
-  //   IPS=40-bit PA
-  mov x1, #16                  // T0SZ = 16
-  orr x1, x1, #(0b11 << 12)   // SH0  = inner shareable
-  orr x1, x1, #(0b01 << 10)   // ORGN0 = WBWA
+  // TCR_EL1: 16K granule, T0SZ=28, T1SZ=28 (36-bit VA = 64 GiB per half).
+  //   2-level page tables: L2 + L3 only.
+  //   TTBR0 + TTBR1 both enabled, EPD1=0 (bit 23 clear — default).
+  //   IPS=40-bit PA.
+  mov x1, #28                  // T0SZ = 28
   orr x1, x1, #(0b01 << 8)    // IRGN0 = WBWA
-  // EPD1 = 0 (bit 23 clear — default)
-  orr x1, x1, #(16 << 16)     // T1SZ = 16
+  orr x1, x1, #(0b01 << 10)   // ORGN0 = WBWA
+  orr x1, x1, #(0b11 << 12)   // SH0  = inner shareable
+  orr x1, x1, #(0b10 << 14)   // TG0  = 16KB
+  orr x1, x1, #(28 << 16)     // T1SZ = 28
   orr x1, x1, #(0b01 << 24)   // IRGN1 = WBWA
   orr x1, x1, #(0b01 << 26)   // ORGN1 = WBWA
   orr x1, x1, #(0b11 << 28)   // SH1  = inner shareable
-  orr x1, x1, #(0b10 << 30)   // TG1  = 4KB
+  orr x1, x1, #(0b01 << 30)   // TG1  = 16KB
   mov x2, #(0b010)             // IPS = 40-bit
   lsl x2, x2, #32
   orr x1, x1, x2
@@ -260,28 +249,29 @@ secondary_entry:
   msr mair_el1, x1
 
   // TCR_EL1 — same as core 0.
-  mov x1, #16
-  orr x1, x1, #(0b11 << 12)
-  orr x1, x1, #(0b01 << 10)
+  mov x1, #28
   orr x1, x1, #(0b01 << 8)
-  orr x1, x1, #(16 << 16)
+  orr x1, x1, #(0b01 << 10)
+  orr x1, x1, #(0b11 << 12)
+  orr x1, x1, #(0b10 << 14)
+  orr x1, x1, #(28 << 16)
   orr x1, x1, #(0b01 << 24)
   orr x1, x1, #(0b01 << 26)
   orr x1, x1, #(0b11 << 28)
-  orr x1, x1, #(0b10 << 30)
+  orr x1, x1, #(0b01 << 30)
   mov x2, #(0b010)
   lsl x2, x2, #32
   orr x1, x1, x2
   msr tcr_el1, x1
 
-  // TTBR0: empty (no user mappings). Use boot_tt0_l0 as a zeroed L0 table.
+  // TTBR0: empty (no user mappings). Use boot_tt0_l2 as a zeroed L2 table.
   // (We only need TTBR1 for kernel VA; TTBR0 must be valid but can be empty.)
-  ldr x0, =boot_tt0_l0
+  ldr x0, =boot_tt0_l2
   va_to_pa x0
   msr ttbr0_el1, x0
 
   // TTBR1: shared kernel page tables (same as core 0).
-  ldr x0, =boot_tt1_l0
+  ldr x0, =boot_tt1_l2
   va_to_pa x0
   msr ttbr1_el1, x0
 
@@ -387,113 +377,67 @@ early_exc:
 // --------------------------------------------------------------------------
 // build_boot_tables
 //
-// Builds TTBR0 (identity) and TTBR1 (kernel) page tables using 2MB blocks.
-// Returns: x0 = TTBR0 L0 PA, x1 = TTBR1 L0 PA.
+// Builds TTBR0 (identity) and TTBR1 (kernel) L2 root tables using 32MB
+// block entries. Returns: x0 = TTBR0 L2 PA, x1 = TTBR1 L2 PA.
 //
-// Both table sets have identical structure (same indices, same PAs) because
-// the kernel VA offset only affects bits [63:48], not the index bits.
+// Both tables have identical structure (same indices, same PAs) because
+// the kernel VA offset only affects bits [63:36], not the index bits [35:0].
 //
 // Register usage:
-//   x9  = current L0 PA
-//   x10 = current L1 PA
-//   x11 = current L2_0 PA (devices)
-//   x12 = current L2_1 PA (RAM)
-//   x13 = loop counter
-//   x14 = current PA
-//   x15 = descriptor value
-//   x20 = saved TTBR0 L0 PA
-//   x21 = saved TTBR1 L0 PA
+//   x9  = current L2 PA
+//   x13-x18 = clobbers (used by fill_table)
+//   x20 = saved TTBR0 L2 PA
+//   x21 = saved TTBR1 L2 PA
 // --------------------------------------------------------------------------
 
 build_boot_tables:
   stp x29, x30, [sp, #-16]!
 
-  // --- Build TTBR0 tables (identity map) ---
-  ldr x9,  =boot_tt0_l0
-  ldr x10, =boot_tt0_l1
-  ldr x11, =boot_tt0_l2_0
-  ldr x12, =boot_tt0_l2_1
-
-  // These are upper VA symbols; convert to PA.
-  // PA = VA - 0xFFFF_0000_0000_0000
-  // Since the offset only sets bits [63:48], clearing those bits gives PA.
+  // --- Build TTBR0 table (identity map) ---
+  ldr x9,  =boot_tt0_l2
   va_to_pa x9
-  va_to_pa x10
-  va_to_pa x11
-  va_to_pa x12
+  mov x20, x9                  // save TTBR0 L2 PA
+  bl fill_table
 
-  mov x20, x9                  // save TTBR0 L0 PA
-  bl fill_tables
-
-  // --- Build TTBR1 tables (kernel map) ---
-  ldr x9,  =boot_tt1_l0
-  ldr x10, =boot_tt1_l1
-  ldr x11, =boot_tt1_l2_0
-  ldr x12, =boot_tt1_l2_1
-
+  // --- Build TTBR1 table (kernel map) ---
+  ldr x9,  =boot_tt1_l2
   va_to_pa x9
-  va_to_pa x10
-  va_to_pa x11
-  va_to_pa x12
+  mov x21, x9                  // save TTBR1 L2 PA
+  bl fill_table
 
-  mov x21, x9                  // save TTBR1 L0 PA
-  bl fill_tables
-
-  mov x0, x20                  // TTBR0 L0 PA
-  mov x1, x21                  // TTBR1 L0 PA
+  mov x0, x20                  // TTBR0 L2 PA
+  mov x1, x21                  // TTBR1 L2 PA
 
   ldp x29, x30, [sp], #16
   ret
 
 // --------------------------------------------------------------------------
-// fill_tables — populate one set of L0/L1/L2 tables.
-// Input: x9=L0, x10=L1, x11=L2_0, x12=L2_1 (all PA).
-// Clobbers: x13–x17.
+// fill_table — populate one L2 root table with 32MB block entries.
+// Input: x9 = L2 table PA.
+// Clobbers: x13–x18.
 // --------------------------------------------------------------------------
 
-fill_tables:
-  // L0[0] → L1
-  mov x15, x10
-  orr x15, x15, #(DESC_VALID | DESC_TABLE)
-  str x15, [x9]
-
-  // L1[0] → L2_0 (0..1GB, devices)
-  mov x15, x11
-  orr x15, x15, #(DESC_VALID | DESC_TABLE)
-  str x15, [x10]
-
-  // L1[1] → L2_1 (1..2GB, RAM)
-  mov x15, x12
-  orr x15, x15, #(DESC_VALID | DESC_TABLE)
-  str x15, [x10, #8]
-
-  // --- Device blocks in L2_0 ---
-  // Device attrs: VALID | ATTRIDX1 | AF | PXN | UXN
+fill_table:
+  // --- Device blocks ---
+  // Device attrs: VALID | BLOCK | ATTRIDX1 | AF | PXN | UXN
   // Low bits: 0x405 (VALID=1 | ATTRIDX1=4 | AF=0x400)
-  // High bits: PXN=bit53, UXN=bit54 → bits [55:52] = 0x60 → word at [63:32] = 0x00600000
+  // High bits: PXN=bit53, UXN=bit54 → 0x0060 at [63:48]
   mov x16, #0x405
   movk x16, #0x0060, lsl #48  // PXN | UXN in upper halfword
 
-  // GIC: 0x0800_0000, L2 index = 0x0800_0000 >> 21 = 64
+  // L2[4]: 0x0800_0000..0x0A00_0000 (GIC + UART). Index = 0x08000000 >> 25 = 4.
   mov x14, #0x08000000
   orr x15, x14, x16
-  str x15, [x11, #(64 * 8)]
+  str x15, [x9, #(4 * 8)]
 
-  // UART: 0x0900_0000, L2 index = 0x0900_0000 >> 21 = 72
-  mov x14, #0x09000000
-  orr x15, x14, x16
-  str x15, [x11, #(72 * 8)]
-
-  // Virtio MMIO: 0x0A00_0000, L2 index = 0x0A00_0000 >> 21 = 80
+  // L2[5]: 0x0A00_0000..0x0C00_0000 (Virtio MMIO). Index = 0x0A000000 >> 25 = 5.
   mov x14, #0x0A000000
   orr x15, x14, x16
-  str x15, [x11, #(80 * 8)]
+  str x15, [x9, #(5 * 8)]
 
-  // --- RAM blocks in L2_1 ---
-  // RAM: 0x4000_0000..0x5000_0000 (128 * 2MB blocks). L2_1[0..127].
-  // Descriptor: PA | VALID | ATTRIDX0(=0) | AF | SH_INNER | PXN | UXN
-  // Pre-compute attribute bits in x16 (PA-independent).
-  // RAM attrs: VALID | ATTRIDX0(=0) | AF | SH_INNER | UXN
+  // --- RAM blocks ---
+  // RAM: 0x4000_0000..0x5000_0000 (8 x 32MB blocks). L2 indices 32..39.
+  // RAM attrs: VALID | BLOCK | ATTRIDX0(=0) | AF | SH_INNER | UXN
   // No PXN — kernel code must be executable during identity-mapped boot.
   // UXN only (bit 54) prevents EL0 execution.
   // Low: 0x701 (VALID=1 | SH_INNER=0x300 | AF=0x400)
@@ -501,18 +445,20 @@ fill_tables:
   mov x16, #0x701
   movk x16, #0x0040, lsl #48
 
-  mov x13, #0                 // loop index
-  mov x14, RAM_START           // current PA
+  mov x13, #0                  // loop index
+  mov x14, RAM_START           // current PA (0x40000000)
   ldr x17, =RAM_END
+  mov x3, BLOCK_32MB           // 32 MiB step (too large for add immediate)
 .Lram_loop:
   cmp x14, x17
   b.ge .Lram_done
 
   orr x15, x14, x16           // PA | attrs
-  str x15, [x12, x13, lsl #3]
+  add x18, x13, #32           // L2 index = loop_index + 32
+  str x15, [x9, x18, lsl #3]  // L2[index] = descriptor
 
   add x13, x13, #1
-  add x14, x14, BLOCK_2MB
+  add x14, x14, x3            // advance PA by 32 MiB
   b .Lram_loop
 .Lram_done:
 

@@ -1,22 +1,22 @@
 /*
  * AUDIT: 2026-03-11 — Linker script review.
  *   Section alignment: .text.boot at PHYS_BASE, upper-VA sections start
- *   after ALIGN(4096) + KERNEL_VA_OFFSET. .rodata and .data each start
- *   on 4 KiB boundaries (enabling distinct W^X permissions). .bss.exc_stacks
- *   is page-aligned (ALIGN(4096)). __kernel_end is page-aligned. ✓
+ *   after ALIGN(16384) + KERNEL_VA_OFFSET. .rodata and .data each start
+ *   on 16 KiB boundaries (enabling distinct W^X permissions). .bss.exc_stacks
+ *   is page-aligned (ALIGN(16384)). __kernel_end is page-aligned. ✓
  *   KEEP directives: KEEP(*(.text.boot)) preserves the entry point. Other
  *   sections are referenced by code and do not need KEEP. ✓
  *   No section overlap: location counter advances monotonically. AT()
  *   directives correctly subtract KERNEL_VA_OFFSET for LMA. ✓
  *   Physical companions: __bss_start_phys, __bss_end_phys, __stack_top_phys
  *   correctly computed as VA - KERNEL_VA_OFFSET. ✓
- *   Stack sizes: primary 64 KiB, secondary 7×16 KiB, emergency 8×4 KiB. ✓
+ *   Stack sizes: primary 64 KiB, secondary 7×16 KiB, emergency 8×16 KiB. ✓
  *   No bugs found.
  */
 
 ENTRY(_start)
 
-KERNEL_VA_OFFSET = 0xFFFF000000000000; /* must match memory::KERNEL_VA_OFFSET */
+KERNEL_VA_OFFSET = 0xFFFFFFF000000000; /* 0xFFFF_FFF0_0000_0000 — must match memory::KERNEL_VA_OFFSET */
 PHYS_BASE        = 0x40080000;
 
 SECTIONS
@@ -37,7 +37,7 @@ SECTIONS
    * Everything below runs at upper VA (TTBR1).
    * VMA = PA + KERNEL_VA_OFFSET.  LMA = PA (via AT()).
    */
-  . = ALIGN(4096) + KERNEL_VA_OFFSET;
+  . = ALIGN(16384) + KERNEL_VA_OFFSET;
 
   /* --- Executable, read-only (RX) --- */
   __text_start = .;
@@ -47,7 +47,7 @@ SECTIONS
   __text_end = .;
 
   /* --- Read-only, no execute (RO) --- */
-  . = ALIGN(4096);
+  . = ALIGN(16384);
   __rodata_start = .;
   .rodata : AT(ADDR(.rodata) - KERNEL_VA_OFFSET) {
     *(.rodata .rodata.*)
@@ -55,7 +55,7 @@ SECTIONS
   __rodata_end = .;
 
   /* --- Read-write, no execute (RW) --- */
-  . = ALIGN(4096);
+  . = ALIGN(16384);
   __data_start = .;
   .data : AT(ADDR(.data) - KERNEL_VA_OFFSET) {
     *(.data .data.*)
@@ -81,9 +81,9 @@ SECTIONS
     __secondary_stacks_end = .;
   }
 
-  /* Per-core emergency exception stacks (4 KiB × MAX_CORES, page-aligned).
+  /* Per-core emergency exception stacks (16 KiB × MAX_CORES, page-aligned).
    * Used by exc_fatal when the original SP is corrupted (guard page hit). */
-  .bss.exc_stacks (NOLOAD) : AT(ADDR(.bss.exc_stacks) - KERNEL_VA_OFFSET) ALIGN(4096) {
+  .bss.exc_stacks (NOLOAD) : AT(ADDR(.bss.exc_stacks) - KERNEL_VA_OFFSET) ALIGN(16384) {
     *(.bss.exc_stacks)
   }
 
@@ -92,6 +92,6 @@ SECTIONS
   __bss_end_phys    = __bss_end    - KERNEL_VA_OFFSET;
   __stack_top_phys  = __stack_top  - KERNEL_VA_OFFSET;
 
-  . = ALIGN(4096);
+  . = ALIGN(16384);
   __kernel_end = .;
 }
