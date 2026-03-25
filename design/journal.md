@@ -19,6 +19,7 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 Env var plumbing: `build.rs` does `std::env::set_var("SYSTEM_CONFIG", path)` for manual rustc invocations + `cargo:rustc-env=SYSTEM_CONFIG=...` for the kernel crate. Library and test crate `build.rs` files emit `cargo:rustc-env` for the Cargo dependency path.
 
 Lessons learned during implementation:
+
 - `//!` inner doc comments fail in `include!`'d files (not at module top) — use `//` instead
 - `#[allow(dead_code)]` on `include!()` is silently ignored — wrap in `mod { #![allow(dead_code)] include!(...) }` instead
 
