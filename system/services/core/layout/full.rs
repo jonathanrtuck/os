@@ -17,6 +17,12 @@ use super::{
 };
 use crate::icons;
 
+const DOCUMENT_SHADOW_BLUR_RADIUS: u8 = 64;
+const DOCUMENT_SHADOW_COLOR: Color = Color::rgba(0, 0, 0, 255);
+const DOCUMENT_SHADOW_OFFSET_X: i16 = 0;
+const DOCUMENT_SHADOW_OFFSET_Y: i16 = 0;
+const DOCUMENT_SHADOW_SPREAD: i8 = 36;
+
 // ── Pointer cursor constants ─────────────────────────────────────────
 
 /// Pointer cursor display size in points.
@@ -130,17 +136,19 @@ pub fn build_full_scene(
     // ── Chrome (title bar, shadow) ───────────────────────────────────
 
     {
+        // Root: background desk color, content first, title bar overlaid on top.
         let n = w.node_mut(N_ROOT);
-        n.first_child = N_TITLE_BAR;
+        n.first_child = N_CONTENT;
         n.width = scene::upt(cfg.fb_width);
         n.height = scene::upt(cfg.fb_height);
         n.background = dc(cfg.bg_color);
         n.flags = NodeFlags::VISIBLE;
     }
     {
+        // Title bar: paints AFTER content (higher z-order) so it overlays
+        // document shadows that extend into the title bar region.
         let n = w.node_mut(N_TITLE_BAR);
         n.first_child = N_TITLE_ICON;
-        n.next_sibling = N_SHADOW;
         n.width = scene::upt(cfg.fb_width);
         n.height = scene::upt(cfg.title_bar_h);
         n.background = dc(cfg.chrome_bg);
@@ -221,32 +229,26 @@ pub fn build_full_scene(
         n.content_hash = fnv1a(clock_text);
         n.flags = NodeFlags::VISIBLE;
     }
-    {
-        let n = w.node_mut(N_SHADOW);
-        n.next_sibling = N_CONTENT;
-        n.y = scene::pt(cfg.title_bar_h as i32);
-        n.width = scene::upt(cfg.fb_width);
-        n.height = 0;
-        n.background = Color::TRANSPARENT;
-        n.flags = NodeFlags::VISIBLE;
-    }
+    // N_SHADOW: unused (document shadows are on N_PAGE / N_DOC_IMAGE directly).
 
     // ── Content viewport + document strip ────────────────────────────
 
     {
+        // Full-height content area — allows document shadows to extend
+        // into the title bar region (title bar overlays on top).
         let n = w.node_mut(N_CONTENT);
         n.first_child = N_STRIP;
-        n.next_sibling = NULL;
-        n.y = scene::pt(content_y as i32);
+        n.next_sibling = N_TITLE_BAR;
         n.width = scene::upt(cfg.fb_width);
-        n.height = scene::upt(content_h_u32);
+        n.height = scene::upt(cfg.fb_height);
         n.flags = NodeFlags::VISIBLE | NodeFlags::CLIPS_CHILDREN;
     }
     {
-        // N_STRIP: horizontal strip of document spaces.
+        // N_STRIP: horizontal strip of document spaces, offset below title bar.
         // content_transform.tx slides between spaces.
         let n = w.node_mut(N_STRIP);
         n.first_child = N_PAGE;
+        n.y = scene::pt(content_y as i32);
         n.width = scene::upt(cfg.fb_width * 2); // 2 spaces
         n.height = scene::upt(content_h_u32);
         n.content_transform =
@@ -270,6 +272,11 @@ pub fn build_full_scene(
         n.width = scene::upt(cfg.page_width);
         n.height = scene::upt(cfg.page_height);
         n.background = dc(cfg.page_bg);
+        n.shadow_color = DOCUMENT_SHADOW_COLOR;
+        n.shadow_offset_x = DOCUMENT_SHADOW_OFFSET_X;
+        n.shadow_offset_y = DOCUMENT_SHADOW_OFFSET_Y;
+        n.shadow_blur_radius = DOCUMENT_SHADOW_BLUR_RADIUS;
+        n.shadow_spread = DOCUMENT_SHADOW_SPREAD;
         n.flags = NodeFlags::VISIBLE;
     }
     {
@@ -392,13 +399,20 @@ pub fn build_full_scene(
             n.content = Content::None;
             n.content_hash = 0;
         }
+        n.shadow_color = DOCUMENT_SHADOW_COLOR;
+        n.shadow_offset_x = DOCUMENT_SHADOW_OFFSET_X;
+        n.shadow_offset_y = DOCUMENT_SHADOW_OFFSET_Y;
+        n.shadow_blur_radius = DOCUMENT_SHADOW_BLUR_RADIUS;
+        n.shadow_spread = DOCUMENT_SHADOW_SPREAD;
         n.flags = NodeFlags::VISIBLE;
         n.next_sibling = NULL;
     }
 
     // ── Pointer cursor (top-level, highest z-order) ──────────────────
+    // Sibling chain: N_CONTENT → N_TITLE_BAR → N_POINTER
+    // (content set above; title bar links to pointer here)
 
-    w.node_mut(N_CONTENT).next_sibling = N_POINTER;
+    w.node_mut(N_TITLE_BAR).next_sibling = N_POINTER;
     setup_cursor(w, mouse_x, mouse_y, pointer_opacity);
 
     w.set_root(N_ROOT);

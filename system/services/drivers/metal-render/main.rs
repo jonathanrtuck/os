@@ -338,7 +338,46 @@ fragment float4 fragment_shadow(
         alpha = 0.5 * (1.0 - erf_approx(dist * inv_s2));
     }
 
-    return float4(color_lin, params.color_a * alpha);
+    // 4x4 Bayer ordered dither to break 8-bit sRGB alpha banding.
+    //
+    // Standard dither (+/-0.5/255) assumes the dither is applied at the
+    // quantization point. Here we dither alpha BEFORE compositing + sRGB
+    // encoding, so the amplitude must compensate for the nonlinear transform.
+    //
+    // Shadow composites as: final_linear = (1 - a) * bg_linear
+    // The sRGB quantization step at the composited level determines the
+    // needed alpha dither amplitude: step_linear / bg_linear.
+    //
+    // For bg = sRGB(32) over the dark gradient, this is 5-13x larger than
+    // naive +/-0.5/255. We compute the exact correction per-fragment from
+    // the expected composited output level.
+    //
+    // Bayer matrix via bit-interleave of (x,y) -- optimal threshold matrix.
+    int x = int(in.position.x) & 3;
+    int y = int(in.position.y) & 3;
+    int x0 = x & 1, x1 = (x >> 1) & 1;
+    int y0 = y & 1, y1 = (y >> 1) & 1;
+    int b = ((x0 ^ y0) << 3) | (y0 << 2) | ((x1 ^ y1) << 1) | y1;
+    float threshold = (float(b) + 0.5) / 16.0 - 0.5; // [-0.5, +0.5)
+
+    // Estimate composited output level (shadow = black over desk bg).
+    float a = params.color_a * alpha;
+    float bg_lin = 0.014444; // srgb_to_linear(32/255) -- desk bg #202020
+    float out_lin = (1.0 - a) * bg_lin;
+
+    // sRGB derivative: ds/dL. Determines quantization step in linear space.
+    // Linear segment: 12.92. Power segment: 0.4396 * L^(-7/12).
+    float srgb_deriv = out_lin <= 0.0031308
+        ? 12.92
+        : 0.4396 * pow(out_lin, -0.58333);
+    float step_lin = 1.0 / (255.0 * srgb_deriv);
+
+    // Convert sRGB step to alpha-space dither amplitude.
+    float dither_amp = step_lin / max(bg_lin, 1e-6);
+    float dither = threshold * dither_amp;
+    float final_alpha = clamp(a + dither, 0.0, 1.0);
+
+    return float4(color_lin, final_alpha);
 }
 
 // srgb_to_linear / linear_to_srgb are defined above (before fragment shaders)

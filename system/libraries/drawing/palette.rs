@@ -9,12 +9,12 @@
 // floats directly. Chrome is minimal — white text on transparent black.
 // --------------------------------------------------------------------------
 
-/// Pure black desk (root background).
-pub const BG_BASE: Color = Color::rgb(0, 0, 0);
+/// Dark desk (root background).
+pub const BG_BASE: Color = Color::rgb(0x20, 0x20, 0x20);
 /// Background gradient center (unused — kept for API compatibility).
-pub const BG_CENTER: Color = Color::rgb(0, 0, 0);
+pub const BG_CENTER: Color = Color::rgb(0x20, 0x20, 0x20);
 /// Content area background (same as BG_BASE — the "desk" behind documents).
-pub const BG_CONTENT: Color = Color::rgb(0, 0, 0);
+pub const BG_CONTENT: Color = Color::rgb(0x20, 0x20, 0x20);
 /// Title bar background — fully transparent (blank slate).
 pub const CHROME_BG: Color = Color::TRANSPARENT;
 /// Chrome separator line — fully transparent (blank slate).
