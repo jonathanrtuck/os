@@ -583,7 +583,7 @@ fn sys_handle_send(target_handle_nr: u64, source_handle_nr: u64) -> Result<u64, 
                 }
             };
 
-            if let Err(_) = target.handles.insert(source_obj, source_rights) {
+            if target.handles.insert(source_obj, source_rights).is_err() {
                 // Handle insert failed — unmap both pages.
                 target.address_space.unmap_channel_page(va_a);
                 target.address_space.unmap_channel_page(va_b);

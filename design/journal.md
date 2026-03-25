@@ -4,6 +4,34 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Codebase QoL Backlog (2026-03-25)
+
+**Status: BACKLOG** — not blocking; revisit when touching adjacent code.
+
+Findings from a structural audit at 115K lines / 211 .rs files / 2,236 tests.
+
+### 1. metal-render/main.rs — 3,499-line monolith
+
+Largest non-test file. virgil-render was already split into 12 files for the same complexity reasons. Split when next modifying this service (not needed for v0.4 filesystem work).
+
+### 2. Test subsetting
+
+69 test files in flat `test/tests/` directory. No way to run just kernel tests or just rendering tests without grep-filtering. As the filesystem adds more tests, being able to run subsets would save iteration time. Options: naming prefix convention + shell aliases, or `#[cfg_attr]` test groups.
+
+### 3. sys/lib.rs — growing monolith (904 lines)
+
+Syscall wrappers, GlobalAlloc, spinlocks, timers, atomics all in one file. Every userspace program depends on this. Split by responsibility (syscalls, allocator, sync primitives) when the filesystem service adds new syscall wrappers.
+
+### Not worth acting on
+
+- **Build system** (560 lines) — clean, focused, no change needed.
+- **Protocol library** — well-split by transport, scales cleanly.
+- **Service boilerplate duplication** — intentional for isolation.
+- **animation/lib.rs** (1,514 lines) — small enough, stable.
+- **Slab size classes** — no evidence of kernel objects >2K needing them.
+
+---
+
 ## PAGE_SIZE Single Source of Truth (2026-03-25)
 
 **Status: DONE** — implemented.

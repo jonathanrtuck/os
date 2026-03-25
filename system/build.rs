@@ -5,7 +5,7 @@
 //! # Build order
 //!
 //! 1. Shared libraries: sys, virtio, drawing (rlibs)
-//! 1b. Cargo-managed libraries: fonts (with harfrust dependency tree)
+//!    1b. Cargo-managed libraries: fonts (with harfrust dependency tree)
 //! 2. All user/driver/compositor programs (ELFs)
 //! 3. Generate `init_embedded.rs` with `include_bytes!` for ELFs init needs
 //! 4. Compile init last (depends on all other ELFs via init_embedded.rs)

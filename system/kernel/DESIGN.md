@@ -22,7 +22,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 **Goal:** Isolate kernel and user address spaces using hardware support.
 
-**Approach:** ARMv8 split TTBR — `TTBR1_EL1` maps the kernel (upper VA, `0xFFFF_...`), `TTBR0_EL1` maps user processes (lower VA, `0x0000_...`). Kernel VA = PA + `0xFFFF_0000_0000_0000` (simple offset). User VA layout: code at 4 MiB, channel shared memory at 1 GiB, stack at 2 GiB.
+**Approach:** ARMv8 split TTBR — `TTBR1_EL1` maps the kernel (upper VA, `0xFFFF_...`), `TTBR0_EL1` maps user processes (lower VA, `0x0000_...`). Kernel VA = PA + `0xFFFF_FFF0_0000_0000` (T1SZ=28, 64 GiB kernel VA range). User VA layout: code at 4 MiB, channel shared memory at 1 GiB, stack at 2 GiB.
 
 **Alternatives considered:**
 
@@ -52,7 +52,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 **Goal:** Fine-grained page permissions for both kernel and user code.
 
-**Approach:** Boot starts with 2 MiB blocks. `memory::init()` refines the kernel's block into 4 KiB L3 pages with per-section permissions: `.text` RX, `.rodata` RO, `.data`/`.bss` RW. User pages are always 4 KiB with per-page W^X (enforced by `segment_attrs`: X wins over W if both set).
+**Approach:** Boot starts with 2 MiB blocks (L2 entries). `memory::init()` refines the kernel's block into 16 KiB L3 pages with per-section permissions: `.text` RX, `.rodata` RO, `.data`/`.bss` RW. User pages are always 16 KiB with per-page W^X (enforced by `segment_attrs`: X wins over W if both set). 2-level page tables (L2+L3) with T0SZ/T1SZ=28 (64 GiB VA per half).
 
 **Why W^X:** Any page that is both writable and executable is an injection vector. W^X is the minimum viable security invariant for page permissions. ARM provides the bits (`PXN`, `UXN`, `AP_RO`) — using them costs nothing.
 
@@ -66,7 +66,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 1. **Slab caches** for common sizes (64–2048 bytes, O(1) alloc/free).
 2. **Linked-list allocator** for variable sizes (first-fit, address-sorted free list, coalescing on free).
-3. **Buddy allocator** for page frames (contiguous 2^n, 4 KiB – 4 MiB).
+3. **Buddy allocator** for page frames (contiguous 2^n, 16 KiB – 4 MiB).
 
 `GlobalAlloc` routes by size: ≤2 KiB → slab, else → linked-list. Page frames are requested separately via `page_alloc::alloc_frame()`.
 
@@ -206,7 +206,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 **Approach:**
 
 - Slab cache = pool of pre-allocated objects of one size. Alloc = pop free list O(1). Free = push free list O(1). No fragmentation within a cache.
-- Each cache owns one or more 4 KiB pages ("slabs"), divided into N objects of the cache's size with embedded free list.
+- Each cache owns one or more 16 KiB pages ("slabs"), divided into N objects of the cache's size with embedded free list.
 - Caches for: `Thread` (~700 bytes), `HandleTable` entries, channel structs.
 - `GlobalAlloc` routes by size to slab cache, falls back to general allocator.
 
@@ -218,13 +218,13 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 ## 2.2 Buddy Allocator
 
-**Current:** Free-list page frame allocator. One 4 KiB frame at a time. No contiguous multi-page allocation.
+**Current:** Free-list page frame allocator. One 16 KiB frame at a time. No contiguous multi-page allocation.
 
 **Target:** Buddy system for contiguous 2^n page allocation. Single-page alloc stays O(1). Automatic coalescing.
 
 **Approach:**
 
-- Free lists per order: 0 = 4 KiB, 1 = 8 KiB, ..., max order 10 = 4 MiB.
+- Free lists per order: 0 = 16 KiB, 1 = 32 KiB, ..., MAX_ORDER = ilog2(RAM_PAGES).
 - Alloc order-n: pop from order-n list, or split order-(n+1) block.
 - Free order-n: check buddy (`buddy_pa = block_pa XOR (PAGE_SIZE << order)`). If buddy free, merge and recurse upward. Otherwise add to order-n list.
 - Replace `page_allocator.rs`. New API: `alloc_frames(order) -> Option<usize>`, `free_frames(pa, order)`. Single page = `alloc_frames(0)`.
@@ -279,7 +279,7 @@ The finished code's module-level docs are the authoritative reference for _what_
 
 ## 4.1 Demand Paging
 
-**Current:** All pages eagerly allocated/mapped at process creation. Stacks fully allocated (4 pages = 16 KiB). ELF segments copied before process runs.
+**Current:** All pages eagerly allocated/mapped at process creation. Stacks fully allocated (4 pages = 64 KiB). ELF segments copied before process runs.
 
 **Target:** Lazy allocation (map on fault). Foundation for memory-mapped I/O.
 
@@ -513,7 +513,7 @@ The OS service adjusts contexts dynamically as document state changes. The kerne
 - **Device discovery:** Parse DTB (device tree blob) at boot to enumerate devices. **Done** (§8.6). DTB parser discovers ~40 devices; GIC and virtio-mmio addresses initialized from DTB data.
 - **MMIO mapping:** `device_map(pa, size)` syscall (#16) maps a device's MMIO region into the calling process's address space with Device-nGnRE memory attributes (MAIR index 1). Returns the user VA. VA is bump-allocated from a dedicated region (`DEVICE_MMIO_BASE` at 512 MiB, up to `DEVICE_MMIO_END` at 1 GiB). Validates that the PA is outside RAM (device space only). Zero overhead for register access — the driver reads/writes device memory directly.
 - **Interrupt forwarding:** `interrupt_register(irq)` syscall (#14) enables the IRQ in the GIC and returns a waitable handle (`HandleObject::Interrupt`). When the IRQ fires, the kernel's IRQ handler masks it at the GIC distributor, marks the handle pending, and wakes the driver thread. `interrupt_ack(handle)` syscall (#15) clears pending and re-enables the IRQ. One context switch per interrupt.
-- **DMA buffers:** `dma_alloc(order, pa_out_ptr)` syscall (#17) allocates 2^order contiguous pages from the buddy allocator, maps them into the caller's DMA VA region (`DMA_BUFFER_BASE` at 256 MiB, up to `DMA_BUFFER_END` at 512 MiB), writes the PA to a user-provided pointer, and returns the user VA. `dma_free(va, order)` syscall (#18) unmaps and frees. Per-process DMA allocation tracking; all DMA buffers freed on process exit. Order 0–4 (4 KiB – 64 KiB).
+- **DMA buffers:** `dma_alloc(order, pa_out_ptr)` syscall (#17) allocates 2^order contiguous pages from the buddy allocator, maps them into the caller's DMA VA region (`DMA_BUFFER_BASE` at 256 MiB, up to `DMA_BUFFER_END` at 512 MiB), writes the PA to a user-provided pointer, and returns the user VA. `dma_free(va, order)` syscall (#18) unmaps and frees. Per-process DMA allocation tracking; all DMA buffers freed on process exit. Order 0–4 (16 KiB – 256 KiB).
 
 **Edge-triggered semantics:** Interrupt handles differ from timer handles (which are level-triggered/permanent). Each `pending` flag is set on IRQ fire and consumed by `interrupt_ack`. Missing an ack just means pending stays true on the next `wait` check.
 
@@ -637,7 +637,7 @@ Phase 8 (COW mechanics) ← blocked on filesystem design
 | 17  | dma_alloc | x0=order, x1=pa_out_ptr | user VA |
 | 18  | dma_free  | x0=user_va, x1=order    | 0       |
 
-`dma_alloc` allocates 2^order contiguous pages (order 0–4, 4 KiB – 64 KiB), maps into the caller's address space with normal memory attributes, writes the PA to the user-provided pointer (for programming device DMA registers). Returns the user VA. `dma_free` unmaps and frees.
+`dma_alloc` allocates 2^order contiguous pages (order 0–4, 16 KiB – 256 KiB), maps into the caller's address space with normal memory attributes, writes the PA to the user-provided pointer (for programming device DMA registers). Returns the user VA. `dma_free` unmaps and frees.
 
 **VA region:** `DMA_BUFFER_BASE` (256 MiB) to `DMA_BUFFER_END` (512 MiB). Bump-allocated per process.
 
@@ -1337,6 +1337,8 @@ if i + 1 < bufs.len() {
 **Problem:** `paging.rs:7` (canonical, `u64`), `page_allocator.rs:18` (imports and casts), `slab.rs:17` (hardcodes `4096` independently). If page size changes, `slab.rs` is silently missed.
 
 **Fix:** `slab.rs`: `use super::paging; const PAGE_SIZE: usize = paging::PAGE_SIZE as usize;`.
+
+**Resolution:** Superseded by `system_config.rs` SSOT (2026-03-25). All crates now `include!(env!("SYSTEM_CONFIG"))` — PAGE_SIZE is defined once, consumed everywhere via build.rs env var plumbing.
 
 ---
 

@@ -69,7 +69,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 Notification for both: `channel_signal` syscall wakes the consumer from `sys::wait()`. The signal means "something changed" — the consumer checks both event rings and state registers.
 
-**Memory model for userspace:** Stack (16 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` in `sys` library (linked-list first-fit with coalescing, grows via `memory_alloc`). Programs opt in with `extern crate alloc;` to get `Vec`/`String`/`Box`.
+**Memory model for userspace:** Stack (64 KiB) + static BSS + DMA buffers + shared memory from init + demand-paged heap via `memory_alloc`/`memory_free` syscalls. Heap region: 16–256 MiB VA, 32 MiB physical budget per process. Userspace `GlobalAlloc` in `sys` library (linked-list first-fit with coalescing, grows via `memory_alloc`). Programs opt in with `extern crate alloc;` to get `Vec`/`String`/`Box`.
 
 ---
 
@@ -207,7 +207,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **Goal:** Lock-free SPSC ring buffer on shared memory pages. The structured message transport for all inter-process communication.
 
-**Ring buffer page layout (one direction, one 4 KiB page):**
+**Ring buffer page layout (one direction, one 16 KiB page):**
 
 ```text
 ┌─────────────────────────────────────────────────────────┐
@@ -221,11 +221,11 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 │   [68..71] _reserved                                    │
 │   [72..127] _padding (cache line isolation)             │
 ├─────────────────────────────────────────────────────────┤
-│ Bytes 128–4095: 62 message slots × 64 bytes             │
-│   slot[0]:  bytes 128–191                               │
-│   slot[1]:  bytes 192–255                               │
+│ Bytes 128–16383: 254 message slots × 64 bytes           │
+│   slot[0]:    bytes 128–191                             │
+│   slot[1]:    bytes 192–255                             │
 │   ...                                                   │
-│   slot[61]: bytes 4032–4095                             │
+│   slot[253]:  bytes 16320–16383                         │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -607,8 +607,8 @@ Init probes GPU, calls `setup_render_pipeline()`, starts all processes, then idl
 **Decisions made (2026-03-10):**
 
 - **One mechanism** — ring buffers for everything, including configuration (first message pattern, no separate config struct path). Prior art: Singularity contracts (config = opening protocol sequence).
-- **Separate pages per direction** — each channel allocates two 4 KiB pages, one per direction. Each page is a textbook SPSC queue. Prior art: io_uring (separate SQ/CQ regions), LMAX Disruptor.
-- **Fixed 64-byte messages** — one AArch64 cache line. 4-byte type tag + 60-byte payload. 62 slots per ring (4 KiB page − 128-byte header). Prior art: io_uring (64-byte SQE).
+- **Separate pages per direction** — each channel allocates two 16 KiB pages, one per direction. Each page is a textbook SPSC queue. Prior art: io_uring (separate SQ/CQ regions), LMAX Disruptor.
+- **Fixed 64-byte messages** — one AArch64 cache line. 4-byte type tag + 60-byte payload. 254 slots per ring (16 KiB page − 128-byte header). Prior art: io_uring (64-byte SQE).
 - **Split architecture** — shared `ipc` library for ring buffer mechanics, per-protocol payload definitions elsewhere.
 
 **Pressure point:** Messages >60 bytes. If genuinely needed, use shared memory + ring buffer reference. Documented tension, not pre-built escape hatch.

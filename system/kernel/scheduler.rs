@@ -491,8 +491,7 @@ fn schedule_inner(s: &mut State, _ctx: *mut Context, core: usize) -> *const Cont
     let sched_deadline = s.cores[core]
         .current
         .as_ref()
-        .map(|t| scheduler_deadline_ticks(t, &s.scheduling_contexts, now))
-        .flatten();
+        .and_then(|t| scheduler_deadline_ticks(t, &s.scheduling_contexts, now));
     timer::reprogram_next_deadline(sched_deadline);
 
     debug_assert!(
