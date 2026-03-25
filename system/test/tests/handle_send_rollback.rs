@@ -43,9 +43,14 @@ use handle::*;
 
 // --- Simulated address space with channel SHM bump allocator ---
 
-const PAGE_SIZE: u64 = 16384;
-const CHANNEL_SHM_BASE: u64 = 0x4000_0000;
-const CHANNEL_SHM_END: u64 = 0x8000_0000;
+mod system_config {
+    #![allow(dead_code)]
+    include!(env!("SYSTEM_CONFIG"));
+}
+
+const PAGE_SIZE: u64 = system_config::PAGE_SIZE;
+const CHANNEL_SHM_BASE: u64 = system_config::CHANNEL_SHM_BASE;
+const CHANNEL_SHM_END: u64 = system_config::USER_STACK_TOP; // SHM ends where stack region begins
 
 /// Models the per-process address space's channel SHM mapping behavior.
 /// Tracks which VAs have mapped pages (simulating page table entries).

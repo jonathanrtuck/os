@@ -44,13 +44,18 @@ unsafe fn decode_payload<T: Copy>(payload: &[u8; PAYLOAD_SIZE]) -> T {
 /// Base virtual address where channel shared memory pages are mapped.
 /// The kernel's channel is at page 0. Channels created by init start
 /// at subsequent 2-page pairs. Must match `kernel/paging.rs`.
-pub const CHANNEL_SHM_BASE: usize = 0x4000_0000;
+mod system_config {
+    #![allow(dead_code)]
+    include!(env!("SYSTEM_CONFIG"));
+}
+
+pub const CHANNEL_SHM_BASE: usize = system_config::CHANNEL_SHM_BASE as usize;
 
 /// Compute the base VA of channel N's shared pages.
 /// Each channel occupies 2 consecutive pages (one per direction).
 #[inline]
 pub fn channel_shm_va(idx: usize) -> usize {
-    CHANNEL_SHM_BASE + idx * 2 * 16384
+    CHANNEL_SHM_BASE + idx * 2 * system_config::PAGE_SIZE as usize
 }
 
 /// A rectangular region of pixels that has been modified.

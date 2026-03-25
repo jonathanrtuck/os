@@ -12,7 +12,9 @@
 // --- Stubs (same as buddy.rs) ---
 
 mod paging {
-    pub const PAGE_SIZE: u64 = 16384;
+    #![allow(dead_code)]
+    include!(env!("SYSTEM_CONFIG"));
+
     pub const RAM_SIZE_MAX: u64 = 256 * 1024 * 1024;
 
     pub fn ram_end() -> u64 {

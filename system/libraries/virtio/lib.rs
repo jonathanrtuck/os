@@ -19,6 +19,11 @@
 
 #![no_std]
 
+mod system_config {
+    #![allow(dead_code)]
+    include!(env!("SYSTEM_CONFIG"));
+}
+
 const REG_MAGIC: usize = 0x000;
 const REG_VERSION: usize = 0x004;
 const REG_DEVICE_ID: usize = 0x008;
@@ -298,7 +303,8 @@ impl Virtqueue {
         let used_offset = (avail_offset + avail_bytes + 3) & !3;
         let used_bytes = 6 + size as usize * core::mem::size_of::<UsedElem>();
         let total = used_offset + used_bytes;
-        let pages_needed = (total + 16383) / 16384;
+        let pages_needed =
+            (total + system_config::PAGE_SIZE as usize - 1) / system_config::PAGE_SIZE as usize;
 
         pages_needed.next_power_of_two().trailing_zeros() as u32
     }

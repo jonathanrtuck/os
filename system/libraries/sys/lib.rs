@@ -54,7 +54,12 @@ mod nr {
 }
 
 const MIN_BLOCK: usize = core::mem::size_of::<FreeBlock>();
-const PAGE_SIZE: usize = 16384;
+mod system_config {
+    #![allow(dead_code)]
+    include!(env!("SYSTEM_CONFIG"));
+}
+
+const PAGE_SIZE: usize = system_config::PAGE_SIZE as usize;
 
 struct FreeBlock {
     size: usize,

@@ -26,7 +26,7 @@ use super::{
 const BLOCK_32MB: u64 = 32 * 1024 * 1024;
 
 pub const HEAP_SIZE: usize = 16 * 1024 * 1024;
-pub const KERNEL_VA_OFFSET: usize = 0xFFFF_FFF0_0000_0000; // must match link.ld KERNEL_VA_OFFSET
+pub const KERNEL_VA_OFFSET: usize = super::paging::KERNEL_VA_OFFSET as usize;
 
 extern "C" {
     static __text_start: u8;

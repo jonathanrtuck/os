@@ -16,8 +16,8 @@ use core::alloc::{GlobalAlloc, Layout};
 // --- Stubs ---
 
 mod paging {
-    #[allow(dead_code)]
-    pub const PAGE_SIZE: u64 = 16384;
+    #![allow(dead_code)]
+    include!(env!("SYSTEM_CONFIG"));
 
     pub const fn align_up(addr: usize, align: usize) -> usize {
         (addr + align - 1) & !(align - 1)

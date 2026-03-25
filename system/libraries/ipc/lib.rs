@@ -60,8 +60,13 @@ const SLOT_SIZE: usize = 64;
 /// Byte offset of the tail counter within the page (consumer writes).
 const TAIL_OFFSET: usize = 64;
 
-/// Page size (16 KiB). Both the kernel and this library agree on this.
-pub const PAGE_SIZE: usize = 16384;
+mod system_config {
+    #![allow(dead_code)]
+    include!(env!("SYSTEM_CONFIG"));
+}
+
+/// Page size (from system_config.rs SSOT).
+pub const PAGE_SIZE: usize = system_config::PAGE_SIZE as usize;
 /// Maximum payload size within a message (64 - 4 byte type tag).
 pub const PAYLOAD_SIZE: usize = 60;
 /// Number of message slots per ring buffer page.

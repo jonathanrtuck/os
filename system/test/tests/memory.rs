@@ -5,23 +5,17 @@
 //! sequencing, and address translation. Cannot import kernel code directly
 //! (different target), so duplicates pure logic into test models.
 
-// --- Paging constants (from kernel/paging.rs) ---
+// Paging constants and helpers (via SSOT system_config.rs -> paging.rs).
+#[path = "../../kernel/paging.rs"]
+#[allow(dead_code)]
+mod paging;
 
-const PAGE_SIZE: u64 = 16384;
-const DESC_VALID: u64 = 1 << 0;
-const DESC_TABLE: u64 = 1 << 1;
-const DESC_PAGE: u64 = 0b11;
-const AF: u64 = 1 << 10;
-const AP_RO: u64 = 1 << 7;
-const ATTRIDX0: u64 = 0 << 2;
-const PXN: u64 = 1 << 53;
-const SH_INNER: u64 = 0b11 << 8;
-const UXN: u64 = 1 << 54;
-const PA_MASK: u64 = 0x0000_FFFF_FFFF_C000;
+use paging::{
+    AF, AP_RO, ATTRIDX0, DESC_PAGE, DESC_TABLE, DESC_VALID, PAGE_SIZE, PA_MASK, PXN, SH_INNER, UXN,
+};
 
-// --- Memory constants (from kernel/memory.rs) ---
-
-const KERNEL_VA_OFFSET: usize = 0xFFFF_FFF0_0000_0000;
+// KERNEL_VA_OFFSET is u64 in system_config.rs; this test uses usize for pointer math.
+const KERNEL_VA_OFFSET: usize = paging::KERNEL_VA_OFFSET as usize;
 
 // --- Model: virt_to_phys / phys_to_virt ---
 

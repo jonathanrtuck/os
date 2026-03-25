@@ -20,6 +20,13 @@ use std::{
     process::Command,
 };
 
+/// System-wide constants (SSOT). Included as a module so build.rs can use
+/// the values for linker script generation and linker flags.
+mod system_config {
+    #![allow(dead_code)]
+    include!("system_config.rs");
+}
+
 /// Output of building a Cargo-managed library for the bare-metal target.
 #[allow(dead_code)]
 struct CargoLibOutput {
@@ -78,7 +85,40 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let rustc = env::var("RUSTC").unwrap();
-    let link_ld = manifest_dir.join("libraries/link.ld");
+
+    let config_path = manifest_dir.join("system_config.rs");
+    let config_path_str = config_path.to_str().unwrap();
+
+    // Every child rustc process inherits this, so include!(env!("SYSTEM_CONFIG"))
+    // resolves in all userspace libraries and programs.
+    std::env::set_var("SYSTEM_CONFIG", config_path_str);
+
+    // --- Generate linker scripts from templates ---
+    generate_linker_script(
+        &manifest_dir.join("kernel/link.ld.in"),
+        &out_dir.join("kernel.ld"),
+    );
+    generate_linker_script(
+        &manifest_dir.join("libraries/link.ld.in"),
+        &out_dir.join("userspace.ld"),
+    );
+
+    // Tell Cargo to pass the kernel linker script and SYSTEM_CONFIG env var.
+    println!("cargo:rustc-link-arg=-T{}/kernel.ld", out_dir.display());
+    println!("cargo:rustc-env=SYSTEM_CONFIG={config_path_str}");
+
+    // Rebuild when the config or templates change.
+    println!("cargo:rerun-if-changed={config_path_str}");
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("kernel/link.ld.in").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        manifest_dir.join("libraries/link.ld.in").display()
+    );
+
+    let link_ld = out_dir.join("userspace.ld");
     // Step 1: Compile shared libraries.
     let sys_src = manifest_dir.join("libraries/sys/lib.rs");
     let sys_rlib = out_dir.join("libsys.rlib");
@@ -265,7 +305,6 @@ fn main() {
         &[],
     );
     println!("cargo:rerun-if-changed={}", init_src.display());
-    println!("cargo:rerun-if-changed={}", link_ld.display());
     println!("cargo:rerun-if-changed={}", sys_src.display());
     println!("cargo:rerun-if-changed={}", virtio_src.display());
     println!("cargo:rerun-if-changed={}", drawing_src.display());
@@ -345,8 +384,14 @@ fn rustc_bin(
         .args(["-C", "panic=abort"])
         .args(["-C", "opt-level=s"])
         .arg(format!("-Clink-arg=-T{}", link_ld.display()))
-        .arg("-Clink-arg=-zmax-page-size=16384")
-        .arg("-Clink-arg=-zcommon-page-size=16384");
+        .arg(format!(
+            "-Clink-arg=-zmax-page-size={}",
+            system_config::PAGE_SIZE
+        ))
+        .arg(format!(
+            "-Clink-arg=-zcommon-page-size={}",
+            system_config::PAGE_SIZE
+        ));
 
     // Add search path so rustc can resolve transitive rlib dependencies.
     if let Some(first) = externs.first() {
@@ -487,4 +532,29 @@ fn cargo_lib(crate_dir: &Path) -> CargoLibOutput {
     assert!(rlib.exists(), "rlib not found at {}", rlib.display());
 
     CargoLibOutput { rlib, deps_dir }
+}
+
+/// Generate a linker script from a template by substituting @PLACEHOLDER@ tokens
+/// with values from system_config.rs.
+fn generate_linker_script(template_path: &Path, output_path: &Path) {
+    let template = std::fs::read_to_string(template_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", template_path.display()));
+
+    let result = template
+        .replace("@PAGE_SIZE@", &system_config::PAGE_SIZE.to_string())
+        .replace(
+            "@PAGE_SIZE_HEX@",
+            &format!("0x{:X}", system_config::PAGE_SIZE),
+        )
+        .replace(
+            "@USER_CODE_BASE_HEX@",
+            &format!("0x{:X}", system_config::USER_CODE_BASE),
+        )
+        .replace(
+            "@KERNEL_VA_OFFSET_HEX@",
+            &format!("0x{:016X}", system_config::KERNEL_VA_OFFSET),
+        );
+
+    std::fs::write(output_path, result)
+        .unwrap_or_else(|e| panic!("failed to write {}: {e}", output_path.display()));
 }

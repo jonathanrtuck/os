@@ -9,7 +9,15 @@
 //! kernel's TTBR1 refinement (memory.rs) and per-process TTBR0 tables
 //! (address_space.rs).
 
-pub const PAGE_SIZE: u64 = 16384;
+// System-wide constants (SSOT: system_config.rs).
+// Provides: PAGE_SIZE, PAGE_SHIFT, RAM_START, KERNEL_VA_OFFSET,
+// USER_CODE_BASE, CHANNEL_SHM_BASE, USER_STACK_TOP, USER_STACK_PAGES,
+// SHARED_MEMORY_BASE.
+mod system_config {
+    #![allow(dead_code)]
+    include!(env!("SYSTEM_CONFIG"));
+}
+pub use system_config::*;
 
 // Descriptor type bits.
 pub const DESC_VALID: u64 = 1 << 0;
@@ -27,10 +35,6 @@ pub const PA_MASK: u64 = 0x0000_FFFF_FFFF_C000;
 pub const PXN: u64 = 1 << 53; // Privileged execute-never
 pub const SH_INNER: u64 = 0b11 << 8; // Inner shareable
 pub const UXN: u64 = 1 << 54; // Unprivileged execute-never
-
-// Physical memory layout (QEMU virt).
-// boot.S has its own `.equ` copies — keep in sync (see boot.S lines 28-29).
-pub const RAM_START: u64 = 0x4000_0000;
 
 /// Compile-time maximum RAM size. Used for array sizing and upper-bound
 /// calculations that must be const. The actual RAM size is read from the
@@ -55,14 +59,7 @@ pub fn ram_end() -> u64 {
     ACTUAL_RAM_END.load(core::sync::atomic::Ordering::Acquire)
 }
 
-// User virtual address layout.
-// All user VA constants in one place for visibility.
-#[allow(dead_code)]
-pub const USER_CODE_BASE: u64 = 0x0000_0000_0040_0000; // 4 MiB (matches link.ld)
-pub const CHANNEL_SHM_BASE: u64 = 0x0000_0000_4000_0000; // 1 GiB
 pub const CHANNEL_SHM_END: u64 = USER_STACK_VA; // up to stack region
-pub const USER_STACK_TOP: u64 = 0x0000_0000_8000_0000; // 2 GiB
-pub const USER_STACK_PAGES: u64 = 4; // 64 KiB
 pub const USER_STACK_VA: u64 = USER_STACK_TOP - USER_STACK_PAGES * PAGE_SIZE;
 
 // Heap region: anonymous memory for userspace allocators.
@@ -75,9 +72,24 @@ pub const DMA_BUFFER_BASE: u64 = 0x0000_0000_1000_0000; // 256 MiB
 pub const DMA_BUFFER_END: u64 = 0x0000_0000_2000_0000; // 512 MiB (abuts device MMIO)
 pub const DEVICE_MMIO_BASE: u64 = 0x0000_0000_2000_0000; // 512 MiB
 pub const DEVICE_MMIO_END: u64 = 0x0000_0000_4000_0000; // Up to channel SHM
-pub const SHARED_MEMORY_BASE: u64 = 0x0000_0000_C000_0000; // 3 GiB
 pub const SHARED_MEMORY_END: u64 = 0x0000_0001_0000_0000; // 4 GiB
 pub const USER_VA_END: u64 = 0x0000_0010_0000_0000; // T0SZ=28 (64 GiB)
+
+// boot.S has manual .equ copies of these values. These assertions catch drift
+// immediately at compile time if someone edits system_config.rs without
+// updating boot.S (or vice versa).
+const _: () = assert!(
+    PAGE_SIZE == 16384,
+    "boot.S .space 16384 and .align 14 assume 16 KiB pages"
+);
+const _: () = assert!(
+    PAGE_SHIFT == 14,
+    "boot.S .align 14 assumes PAGE_SHIFT == 14"
+);
+const _: () = assert!(
+    RAM_START == 0x4000_0000,
+    "boot.S .equ RAM_START assumes 0x40000000"
+);
 
 /// Align `addr` up to the next multiple of `align` (must be a power of two).
 ///

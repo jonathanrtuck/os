@@ -22,7 +22,8 @@ mod page_allocator {
 }
 
 mod paging {
-    pub const PAGE_SIZE: u64 = 16384;
+    #![allow(dead_code)]
+    include!(env!("SYSTEM_CONFIG"));
 }
 
 mod sync {
