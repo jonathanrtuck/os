@@ -73,9 +73,9 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Current state (2026-03-24):** v0.3 Phase 4 (Visual Polish) IN PROGRESS. 2,153 tests pass.
+**Current state (2026-03-25):** v0.3 Phase 4 (Visual Polish) IN PROGRESS. 2,189 tests pass.
 
-**Content Pipeline Architecture (2026-03-24):** IMPLEMENTED. Three memory regions: File Store (1 MiB, core-private raw bytes), Content Region (4 MiB, shared decoded content with registry), Scene Graph (per-frame visual primitives). Init allocates both, loads fonts into Content Region + PNG into File Store. Core decodes PNG via `drawing::png`, writes decoded BGRA pixels into Content Region, creates `Content::Image` node with content_id. Render services find fonts and images via `protocol::content` registry lookup. Compositor never sees encoded files. See `design/journal.md` "Content Pipeline Architecture" entry for design rationale.
+**Content Pipeline Architecture (2026-03-25):** IMPLEMENTED. Three memory regions: File Store (1 MiB, shared with decoder services), Content Region (4 MiB, shared decoded content with registry + free-list allocator + generation-based GC), Scene Graph (per-frame visual primitives). Init allocates both, loads fonts into Content Region + PNG into File Store. Core sends decode requests to sandboxed decoder services via generic IPC protocol (`protocol/decode.rs`). Decoder services read File Store (RO), write decoded BGRA pixels into Content Region (RW). Core manages Content Region registry and allocator. Render services find fonts and images via `protocol::content` registry lookup. Compositor never sees encoded files. Generic decoder harness (`services/decoders/harness.rs`) handles all IPC plumbing; format-specific code is just header + decode functions. See `design/journal.md` "Image Decoding as a Service Interface" entry.
 
 **Phase 4 progress so far:**
 
@@ -91,8 +91,10 @@ Read these before making any design suggestions:
 - **Content pipeline (2026-03-24):** PNG decoder in `libraries/drawing/png.rs`. Content Region types in `protocol/content.rs`. `ContentRegionHeader` with 64-entry registry. `Content::InlineImage` (per-frame scene data) vs `Content::Image` (Content Region persistent data via content_id). All 3 render services use registry-based font lookup. File Store (core-only) holds raw file bytes; Content Region (shared) holds fonts + decoded pixels. `test_gen.rs` deleted.
 - **Dark desk + document shadows (2026-03-24):** Desktop background #202020 (was pure black). Drop shadows on page and image documents (blur=64pt, spread=36pt, black). Scene tree restructured: `N_CONTENT → N_TITLE_BAR → N_POINTER` z-order so shadows extend into title bar region. `N_CONTENT` full-height, `N_STRIP` offset below title bar.
 - **Float16 rendering pipeline (2026-03-24):** All rendering now in RGBA16Float. MSAA resolves to float16 `TEX_RESOLVE`, then single `fragment_dither` pass blits to 8-bit sRGB drawable with 4×4 Bayer ordered dither at the quantization boundary. Protocol `create_render_pipeline` extended with mandatory `pixel_format` field (hypervisor updated). Eliminates shadow banding and provides correct dithering for all future visual effects. See journal.
+- **Content Region allocator + GC (2026-03-25):** `ContentAllocator` in `protocol/content.rs` — free-list with first-fit, coalescing, 16-byte alignment. Generation-based deferred reclamation (`defer_free` + `sweep`) leveraging triple-buffer generation counter. `remove_entry()` for registry cleanup. 36 tests.
+- **Decoder service restructuring (2026-03-25):** PNG decoder factored from in-process library call to sandboxed IPC service. Generic decode protocol (`protocol/decode.rs`): `DecodeRequest`/`DecodeResponse`, header-only flag, format-agnostic. Generic decoder harness (`services/decoders/harness.rs`): config, IPC loop, bounds checks, responses. PNG-specific code: just `header()` + `decode()` functions in `services/decoders/png/png.rs`. `drawing/png.rs` deleted. Core sends IPC requests; decoder writes pixels to shared memory. `ipc::Channel::recv_blocking()` helper for spurious-wakeup-safe synchronous RPC.
 - **Deferred:** AA transition softness tuning, italic rendering (in journal).
-- **Next:** Declare v0.3 complete or continue polish.
+- **Next:** Declare v0.3 complete or continue polish. JPEG decoder would validate the generic protocol with a second format.
 
 **Completed phases (see git log for details):**
 
@@ -129,7 +131,7 @@ Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Re
 - v0.6: Video / animated media
 - Later: BiDi / complex scripts, multi-display
 
-**System code:** `system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `prototype/files/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
+**System code:** `system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `prototype/files/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
 
 ## Design Discussion Rules
 

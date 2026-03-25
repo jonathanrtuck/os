@@ -82,11 +82,12 @@ fn round_f32(x: f32) -> i32 {
 }
 
 const COMPOSITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(2);
+const DECODER_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
 pub(crate) const DOC_HEADER_SIZE: usize = 64;
 const EDITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(3);
 const FONT_SIZE: u32 = 18;
 const INPUT_HANDLE: sys::ChannelHandle = sys::ChannelHandle(1);
-const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
+const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(5);
 // Keycodes (Linux evdev).
 const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
@@ -130,6 +131,10 @@ pub(crate) struct CoreState {
     /// Content Region base VA and size (for PNG decode output).
     pub(crate) content_va: usize,
     pub(crate) content_size: usize,
+    /// Free-list allocator for the Content Region data area.
+    pub(crate) content_alloc: protocol::content::ContentAllocator,
+    /// Current scene graph generation (cached for content entry stamping).
+    pub(crate) scene_generation: u32,
     /// Decoded image in the Content Region (set after PNG decode).
     pub(crate) image_content_id: u32,
     pub(crate) image_width: u16,
@@ -213,6 +218,8 @@ impl CoreState {
             sans_font_upem: 1000,
             content_va: 0,
             content_size: 0,
+            content_alloc: protocol::content::ContentAllocator::empty(),
+            scene_generation: 0,
             image_content_id: 0,
             image_width: 0,
             image_height: 0,
@@ -547,11 +554,17 @@ pub extern "C" fn _start() -> ! {
         let header =
             unsafe { &*(config.content_va as *const protocol::content::ContentRegionHeader) };
 
-        // Store Content Region info for PNG decode later.
+        // Store Content Region info and initialize the free-list allocator.
+        // Init bump-allocated fonts into [CONTENT_HEADER_SIZE, next_alloc).
+        // The allocator manages [next_alloc, content_size) for core's use.
         {
             let s = state();
             s.content_va = config.content_va as usize;
             s.content_size = config.content_size as usize;
+            s.content_alloc = protocol::content::ContentAllocator::new(
+                header.next_alloc,
+                config.content_size as u32,
+            );
         }
 
         // Mono font.
@@ -617,7 +630,7 @@ pub extern "C" fn _start() -> ! {
         }
     }
 
-    // Check for image data and decode PNG into Content Region.
+    // Check for image data — decode via the decoder service (IPC).
     let mut has_image = false;
 
     if let Some(compose::Message::ImageConfig(img_config)) = init_ch
@@ -625,51 +638,104 @@ pub extern "C" fn _start() -> ! {
         .then(|| compose::decode(msg.msg_type, &msg.payload))
         .flatten()
     {
-        if img_config.image_va != 0 && img_config.image_len > 0 {
-            // SAFETY: image_va..+image_len is within the File Store mapped by init.
-            let png_data = unsafe {
-                core::slice::from_raw_parts(
-                    img_config.image_va as *const u8,
-                    img_config.image_len as usize,
+        if img_config.file_store_length > 0 {
+            // Decoder channel (handle 4, set up by init).
+            // Side 0: core is endpoint A (same convention as compositor/editor).
+            let decoder_ch = unsafe {
+                ipc::Channel::from_base(
+                    protocol::channel_shm_va(DECODER_HANDLE.0 as usize),
+                    ipc::PAGE_SIZE,
+                    0,
                 )
             };
-            if let Ok(hdr) = drawing::png::png_header(png_data) {
-                let pixel_bytes = hdr.width as usize * hdr.height as usize * 4;
-                let s = state();
-                if s.content_va != 0 && s.content_size > 0 {
-                    // SAFETY: content_va is mapped read-write; header is repr(C).
-                    let header = unsafe {
-                        &mut *(s.content_va as *mut protocol::content::ContentRegionHeader)
+
+            // Helper: send a decode request and block for the response.
+            let send_and_recv =
+                |ch: &ipc::Channel,
+                 req: &protocol::decode::DecodeRequest,
+                 msg: &mut ipc::Message|
+                 -> Option<protocol::decode::DecodeResponse> {
+                    // SAFETY: DecodeRequest is repr(C) and fits in 60-byte payload.
+                    let req_msg = unsafe {
+                        ipc::Message::from_payload(protocol::decode::MSG_DECODE_REQUEST, req)
                     };
-                    let alloc_offset = header.next_alloc as usize;
-                    if alloc_offset + pixel_bytes <= s.content_size {
-                        // SAFETY: output slice is within the Content Region allocation.
-                        let output = unsafe {
-                            core::slice::from_raw_parts_mut(
-                                (s.content_va + alloc_offset) as *mut u8,
-                                pixel_bytes,
-                            )
+                    ch.send(&req_msg);
+                    let _ = sys::channel_signal(DECODER_HANDLE);
+                    if !ch.recv_blocking(DECODER_HANDLE.0, msg) {
+                        return None;
+                    }
+                    if let Some(protocol::decode::Message::Response(r)) =
+                        protocol::decode::decode(msg.msg_type, &msg.payload)
+                    {
+                        Some(r)
+                    } else {
+                        None
+                    }
+                };
+
+            // Step 1: Header-only query to get image dimensions.
+            let hdr_req = protocol::decode::DecodeRequest {
+                file_offset: img_config.file_store_offset,
+                file_length: img_config.file_store_length,
+                content_offset: 0,
+                max_output: 0,
+                request_id: 1,
+                flags: protocol::decode::DECODE_FLAG_HEADER_ONLY,
+            };
+            if let Some(hdr_resp) = send_and_recv(&decoder_ch, &hdr_req, &mut msg) {
+                if hdr_resp.status == protocol::decode::DecodeStatus::HeaderOk as u8
+                    && hdr_resp.width > 0
+                    && hdr_resp.height > 0
+                {
+                    // Step 2: Allocate Content Region space.
+                    let pixel_bytes = hdr_resp.width as u32 * hdr_resp.height as u32 * 4;
+                    let s = state();
+                    if let Some(alloc_offset) = s.content_alloc.allocate(pixel_bytes) {
+                        // Step 3: Full decode request.
+                        let dec_req = protocol::decode::DecodeRequest {
+                            file_offset: img_config.file_store_offset,
+                            file_length: img_config.file_store_length,
+                            content_offset: alloc_offset,
+                            max_output: pixel_bytes,
+                            request_id: 2,
+                            flags: 0,
                         };
-                        if drawing::png::png_decode(png_data, output).is_ok() {
-                            let entry_idx = header.entry_count as usize;
-                            if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
-                                let content_id = protocol::content::CONTENT_ID_DYNAMIC_START;
-                                header.entries[entry_idx] = protocol::content::ContentEntry {
-                                    content_id,
-                                    offset: alloc_offset as u32,
-                                    length: pixel_bytes as u32,
-                                    class: protocol::content::ContentClass::Pixels as u8,
-                                    _pad: [0; 3],
-                                    width: hdr.width as u16,
-                                    height: hdr.height as u16,
-                                    generation: 0,
+                        if let Some(dec_resp) =
+                            send_and_recv(&decoder_ch, &dec_req, &mut msg)
+                        {
+                            if dec_resp.status == protocol::decode::DecodeStatus::Ok as u8 {
+                                // Step 4: Write Content Region registry entry.
+                                // SAFETY: content_va is mapped read-write.
+                                let header = unsafe {
+                                    &mut *(s.content_va
+                                        as *mut protocol::content::ContentRegionHeader)
                                 };
-                                header.entry_count += 1;
-                                header.next_alloc = (alloc_offset + pixel_bytes) as u32;
-                                s.image_content_id = content_id;
-                                s.image_width = hdr.width as u16;
-                                s.image_height = hdr.height as u16;
-                                sys::print(b"     PNG decoded into Content Region\n");
+                                let entry_idx = header.entry_count as usize;
+                                if entry_idx < protocol::content::MAX_CONTENT_ENTRIES {
+                                    let content_id =
+                                        protocol::content::CONTENT_ID_DYNAMIC_START;
+                                    header.entries[entry_idx] =
+                                        protocol::content::ContentEntry {
+                                            content_id,
+                                            offset: alloc_offset,
+                                            length: dec_resp.bytes_written,
+                                            class: protocol::content::ContentClass::Pixels
+                                                as u8,
+                                            _pad: [0; 3],
+                                            width: dec_resp.width as u16,
+                                            height: dec_resp.height as u16,
+                                            generation: s.scene_generation,
+                                        };
+                                    header.entry_count += 1;
+                                    s.image_content_id = content_id;
+                                    s.image_width = dec_resp.width as u16;
+                                    s.image_height = dec_resp.height as u16;
+                                    sys::print(b"     PNG decoded into Content Region\n");
+                                }
+                            } else {
+                                // Decode failed — return space.
+                                s.content_alloc.free(alloc_offset, pixel_bytes);
+                                sys::print(b"     PNG decode failed\n");
                             }
                         }
                     }
@@ -715,7 +781,7 @@ pub extern "C" fn _start() -> ! {
     let input2_ch = if has_input2 {
         sys::print(b"     tablet input channel detected\n");
         // SAFETY: same invariant as channel_shm_va(1..3) from_base above.
-        Some(unsafe { ipc::Channel::from_base(protocol::channel_shm_va(4), ipc::PAGE_SIZE, 1) })
+        Some(unsafe { ipc::Channel::from_base(protocol::channel_shm_va(5), ipc::PAGE_SIZE, 1) })
     } else {
         None
     };
@@ -1644,6 +1710,21 @@ pub extern "C" fn _start() -> ! {
         if needs_scene_update || pointer_position_changed {
             compositor_ch.send(&scene_msg);
             let _ = sys::channel_signal(COMPOSITOR_HANDLE);
+        }
+
+        // Update cached scene generation and sweep deferred frees.
+        // Only runs when entries are pending reclamation (common case: 0).
+        if needs_scene_update {
+            let s = state();
+            s.scene_generation = scene.generation();
+            if s.content_alloc.pending_count() > 0 && s.content_va != 0 {
+                let reader_gen = scene.reader_done_gen();
+                // SAFETY: content_va is mapped read-write; header is repr(C).
+                let header = unsafe {
+                    &mut *(s.content_va as *mut protocol::content::ContentRegionHeader)
+                };
+                s.content_alloc.sweep(reader_gen, header);
+            }
         }
     }
 }

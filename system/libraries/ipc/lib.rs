@@ -44,6 +44,9 @@
 
 #![no_std]
 
+#[cfg(target_os = "none")]
+extern crate sys;
+
 use core::sync::atomic::{AtomicU32, Ordering};
 
 /// Byte offset of the first message slot.
@@ -148,6 +151,27 @@ impl Channel {
     /// Try to receive a message. Returns `true` if a message was read.
     pub fn try_recv(&self, out: &mut Message) -> bool {
         self.recv.try_recv(out)
+    }
+
+    /// Block until a message arrives on this channel.
+    ///
+    /// Loops `sys::wait` + `try_recv` to handle spurious wakeups correctly.
+    /// `handle` is the handle index passed to `sys::wait` (must correspond
+    /// to this channel). Returns `true` on success, `false` on syscall error.
+    ///
+    /// This is the correct way to do synchronous RPC over IPC. Never use
+    /// a single `wait` + `try_recv` — signals are level-triggered booleans,
+    /// not message counters, and can arrive before the wait call.
+    #[cfg(target_os = "none")]
+    pub fn recv_blocking(&self, handle: u8, out: &mut Message) -> bool {
+        loop {
+            if self.try_recv(out) {
+                return true;
+            }
+            if sys::wait(&[handle], u64::MAX).is_err() {
+                return false;
+            }
+        }
     }
 }
 

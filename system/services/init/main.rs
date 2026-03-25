@@ -560,11 +560,9 @@ fn setup_render_pipeline(
 
     // Send image config to core (PNG location in the File Store).
     if png_len > 0 {
-        let image_va = core_file_store_va + png_offset as u64;
         let img_config = ImageConfig {
-            image_va,
-            image_len: png_len,
-            _pad: 0,
+            file_store_offset: png_offset,
+            file_store_length: png_len,
         };
         // SAFETY: ImageConfig fits within 60-byte payload; msg_type matches the payload type.
         let img_msg = unsafe { ipc::Message::from_payload(MSG_IMAGE_CONFIG, &img_config) };
@@ -702,7 +700,71 @@ fn setup_render_pipeline(
         sys::exit();
     });
 
-    // Additional input device channels → core handle 4+.
+    // -----------------------------------------------------------------------
+    // Phase 9b: Core ↔ Decoder channel (handle 4 in core, handle 1 in decoder).
+    // -----------------------------------------------------------------------
+    let decoder_proc = if content_pages > 0 && file_store_pages > 0 {
+        sys::print(b"     spawning png-decode\n");
+        match spawn_with_channel(PNG_DECODE_ELF, next_channel) {
+            Some((dec_proc, _dec_ch, dec_ch_idx)) => {
+                // Share File Store (read-only) and Content Region (read-write).
+                let dec_fs_va =
+                    sys::memory_share(dec_proc, file_store_pa_val, file_store_pages, true)
+                        .unwrap_or_else(|_| {
+                            sys::print(b"init: memory_share (decoder file store) failed\n");
+                            sys::exit();
+                        });
+                let dec_content_va =
+                    sys::memory_share(dec_proc, content_pa_val, content_pages, false)
+                        .unwrap_or_else(|_| {
+                            sys::print(b"init: memory_share (decoder content) failed\n");
+                            sys::exit();
+                        });
+
+                // Send DecoderConfig on the init↔decoder channel.
+                let dec_ch = init_channel(dec_ch_idx);
+                let dec_config = protocol::decode::DecoderConfig {
+                    file_store_va: dec_fs_va as u64,
+                    file_store_size: (file_store_pages as u32) * 4096,
+                    content_va: dec_content_va as u64,
+                    content_size: content_size_val,
+                };
+                let dec_msg = unsafe {
+                    ipc::Message::from_payload(protocol::decode::MSG_DECODER_CONFIG, &dec_config)
+                };
+                dec_ch.send(&dec_msg);
+
+                // Core ↔ decoder channel.
+                sys::print(b"     creating core\xE2\x86\x94decoder channel\n");
+                let (dc_a, dc_b) = sys::channel_create().unwrap_or_else(|_| {
+                    sys::print(b"init: channel_create (core-decoder) failed\n");
+                    sys::exit();
+                });
+                *next_channel += 1;
+
+                // Endpoint A → core (handle 4 = DECODER_HANDLE in core).
+                sys::handle_send(core_proc, dc_a.0).unwrap_or_else(|_| {
+                    sys::print(b"init: handle_send (core-decoder A) failed\n");
+                    sys::exit();
+                });
+                // Endpoint B → decoder (handle 1 in decoder's table).
+                sys::handle_send(dec_proc, dc_b.0).unwrap_or_else(|_| {
+                    sys::print(b"init: handle_send (core-decoder B) failed\n");
+                    sys::exit();
+                });
+
+                Some(dec_proc)
+            }
+            None => {
+                sys::print(b"init: failed to spawn png-decode\n");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Additional input device channels → core handle 5+.
     for i in 1..input_devices.len() {
         let (input_proc_handle, input_ch_idx, input_pa, input_irq) = input_devices[i];
 
@@ -751,9 +813,16 @@ fn setup_render_pipeline(
 
     // -----------------------------------------------------------------------
     // Phase 10: Start processes.
-    // Input drivers first, then editor, then core.
+    // Input drivers first, then decoder, then editor, then core.
     // Render service is already running (started in Phase 4).
+    // Decoder must start before core (core sends decode request at boot).
     // -----------------------------------------------------------------------
+    if let Some(dec_proc) = decoder_proc {
+        sys::print(b"     starting png-decode\n");
+        start_process(dec_proc, b"png-decode");
+        sys::yield_now();
+    }
+
     for &(input_proc_handle, _, _, _) in input_devices {
         sys::print(b"     starting input driver\n");
 

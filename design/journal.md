@@ -4,6 +4,105 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Image Decoding as a Service Interface (2026-03-24)
+
+**Status:** IMPLEMENTED (2026-03-25) — PNG decoder factored into sandboxed service
+
+### The question
+
+The PNG decoder (`libraries/drawing/png.rs`) is an in-process library call from core. To support JPEG, BMP, WebP, GIF, and future formats: do we hand-write every decoder, use no_std libraries, or design an extension point?
+
+### Why hand-writing every decoder doesn't scale
+
+PNG (subset: 8-bit RGB/RGBA only) is ~700 lines. A baseline JPEG decoder is ~800. These are the easy formats. WebP lossy needs a VP8 decoder (~5,000+ lines). AVIF needs AV1 (tens of thousands). TIFF is tag soup with dozens of compression modes. Hand-writing works for 2-3 formats; it collapses after that.
+
+### Why no_std libraries are a poor fit
+
+The Rust `image-rs` and `zune-image` ecosystems exist but assume `alloc` — they allocate and return owned buffers. Our decode contract is "write BGRA pixels into this caller-provided shared memory region." Adapting library crates to that model means either forking their buffer management (losing the library benefit) or building an allocator shim (fragile coupling). The `no_alloc` constraint is the real blocker.
+
+### The answer: decoders are sandboxed services
+
+ALL image decoders become out-of-process services, including PNG and JPEG. This is an evolution from the Content Pipeline entry (below) which proposed "in-process library for simple formats, out-of-process service for complex ones like video." The new position: **no in-process special cases.** Reasons:
+
+1. **Uniform interface.** One IPC protocol for all decode operations. No conditional "is this format simple enough for in-process?" dispatch.
+2. **Security.** Image parsers are historically the #1 attack surface in document-handling systems (CVE databases are full of PNG/JPEG/TIFF parser exploits). Moving them out of core means a malformed file crashes a decoder service, not the OS service. Core shows a placeholder.
+3. **Scalability.** Hand-write PNG and JPEG as built-in decoder services (we own the core experience). Define the IPC protocol so third parties can contribute decoders for additional formats. The interface is the design; implementations are leaf nodes.
+4. **Allocator freedom.** Each decoder service has its own heap (via `sys` library's GlobalAlloc). This means decoder implementations CAN use `alloc` — `Vec`, `String`, dynamic buffers — without contaminating core's memory model. Library crates that require `alloc` become viable inside a decoder service.
+
+### IPC protocol sketch
+
+**Decode request** (core → decoder, event ring):
+
+- File Store offset + length (where the raw encoded bytes live)
+- Content Region output offset + max length (where to write decoded BGRA pixels)
+- Request ID (for matching response)
+
+**Decode response** (decoder → core, event ring):
+
+- Request ID
+- Status (success / unsupported format / corrupt data / buffer too small)
+- Width, height (decoded image dimensions)
+- Actual byte length written to Content Region
+
+**Header-only query** (for layout without full decode):
+
+- Same request, flag for "header only — report dimensions, don't decode"
+- Response carries width + height, zero bytes written
+
+### Memory region access changes
+
+Current: File Store is core-private (core-write, no other readers).
+New: File Store becomes core-write, decoder-read. Decoder services get **read-only** mappings of the File Store. This is the same trust model as Content Region (core-write, render-read). Render services still never see File Store.
+
+```text
+File Store ────→ Decoder service (read-only) ────→ Content Region
+  (raw bytes)    (sandboxed, per-format)            (decoded BGRA)
+                       ↑                                  ↓
+                  IPC request                       IPC response
+                  from core                          to core
+                       ↑                                  ↓
+                     Core ─────────────────────────→ Scene Graph
+                     (layout, content semantics)     (content_id ref)
+```
+
+### Performance: not a concern
+
+The IPC boundary carries only control messages (~64 bytes). The bulk data (raw file bytes, decoded pixels) lives in shared memory regions that the decoder reads/writes directly. Zero copies across the IPC boundary. The IPC round-trip adds ~5-10 microseconds of scheduling overhead; a JPEG decode of a 1080p image takes 5-50 milliseconds of compute. The overhead is <0.1%.
+
+This is the same pattern that makes the scene graph IPC viable: shared memory for data, event rings for coordination.
+
+### Migration path
+
+1. ~~**Define the decode protocol**~~ **Done (2026-03-25).** `protocol/decode.rs` — `DecodeRequest`, `DecodeResponse`, `DecoderConfig`, `DecodeStatus`, header-only flag. Format-agnostic: same types for all decoders.
+2. ~~**Factor PNG decoder into a service.**~~ **Done (2026-03-25).** `services/decoders/png/main.rs` — sandboxed process that calls `drawing::png`. Gets File Store (RO) + Content Region (RW) from init. Core sends requests via IPC, decoder writes pixels directly to shared memory. Zero copies across IPC boundary.
+3. ~~**Update core**~~ **Done (2026-03-25).** Core sends header-only query (get dimensions), allocates Content Region space, sends full decode request, writes registry entry from response. Loop-wait pattern handles spurious wakeups. `drawing::png` dependency still linked (used by host tests via drawing library).
+4. **Build JPEG decoder** as a second decode service (`services/decoders/jpeg/`), validating the protocol works for a second format.
+5. ~~**Update init**~~ **Done (2026-03-25).** Init spawns `png-decode`, shares File Store (RO) + Content Region (RW), creates core↔decoder channel (handle 4 in core, handle 1 in decoder). Decoder starts before core (core sends request at boot).
+
+### Implementation notes (2026-03-25)
+
+- **Channel handle layout in core:** 0=init, 1=input, 2=compositor, 3=editor, 4=decoder, 5=tablet. Decoder inserted before variable-count input devices.
+- **ImageConfig changed:** `file_store_offset`/`file_store_length` (u32) replaced `image_va`/`image_len` (u64). Core no longer needs File Store VA.
+- **Spurious wakeup handling:** `sys::wait` can return from stale signals. Core uses a loop-wait pattern: `loop { wait; if try_recv → break }`. Same pattern used in all long-lived services.
+- **Service location:** `services/decoders/` (not `services/drivers/`) — decoders are content services, not hardware abstractions. JPEG, WebP, etc. will be siblings of `png/`.
+
+### Deferred
+
+- Decoder service discovery / registration (how does core know which decoder handles which mimetype? Static table in init? Dynamic registration?)
+- Multiplexed vs per-format services (one service per mimetype, or one service that loads format plugins?)
+- Streaming decode for progressive JPEG / interlaced PNG (partial results before full file is decoded)
+- Decode priority (visible images first, offscreen deferred)
+- Whether the `drawing::png` library module should be deleted or kept for host-side tests
+
+### Relationship to existing design
+
+- **Content Pipeline Architecture (below):** This entry evolves the "in-process library for simple formats" to "all decoders are services." The three memory regions, scene graph content types, and Content Region design are unchanged.
+- **Decision #5 (file understanding):** Mimetype is the dispatch key. Core looks up mimetype → decoder service mapping. No format sniffing in the decoder protocol.
+- **Decision #13 (compound documents):** Translators that convert external formats to native compound docs are a superset of image decoders. The decoder protocol could be the foundation for the translator service interface.
+- **Architecture principle:** "Does it require understanding what content IS? → OS service." Decoders understand content formats. They are services, not library utilities baked into core.
+
+---
+
 ## Float16 Rendering Pipeline + Ordered Dithering (2026-03-24)
 
 **Status: IMPLEMENTED**
@@ -159,7 +258,7 @@ File bytes  ──[decode]──→  Decoded content  ──[layout]──→  S
 | Layout | Content semantics (text wraps, images have dimensions, parts have relationships) | Content types   |
 | Render | Visual primitives (rectangles, pixel blits, glyph outlines, Bézier paths)        | Geometry, color |
 
-Decoders are leaf nodes — complex inside, simple interface. Called by core (in-process library for simple formats, out-of-process service for complex ones like video). The interface is stable; implementations are swappable.
+Decoders are leaf nodes — complex inside, simple interface. The interface is stable; implementations are swappable. **Updated 2026-03-24:** All decoders are now out-of-process services, including simple formats like PNG — see "Image Decoding as a Service Interface" above.
 
 ### Three memory regions
 
@@ -230,8 +329,8 @@ Core needs image dimensions for layout without full decoding. Every image format
 
 ### Deferred
 
-- Content Region allocator implementation (free-list with coalescing)
-- Generation-based GC for stale entries
+- ~~Content Region allocator implementation (free-list with coalescing)~~ **Done (2026-03-25).** `ContentAllocator` in `protocol/content.rs`. Free-list with first-fit, sorted-by-offset, automatic coalescing. 16-byte alignment. Init bump-allocates fonts; core initializes free-list from remaining space. `remove_entry()` companion for registry removal. 27 tests.
+- ~~Generation-based GC for stale entries~~ **Done (2026-03-25).** Deferred reclamation via `defer_free()` + `sweep()` on `ContentAllocator`. Core retires content_id at death_gen; sweep frees when `reader_done_gen >= death_gen`. Leverages triple-buffer generation counter (already existed). `TripleWriter::reader_done_gen()` exposed. `SceneState` generation accessors. Entry creation stamped with current scene generation. Sweep runs in event loop after scene publish (only when pending > 0). 9 additional tests. Same pattern as RCU — grace period is the triple-buffer generation gap.
 - Stream content type and frame ring layout (v0.6)
 - Whether InlineImage can be eliminated entirely (all persistent pixels in Content Region)
 - Content Region growth/resize strategy (if fixed size proves insufficient)

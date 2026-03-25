@@ -1,6 +1,6 @@
 //! PNG decoder tests.
 
-#[path = "../../libraries/drawing/png.rs"]
+#[path = "../../services/decoders/png/png.rs"]
 mod png;
 use png::{png_decode, png_header, PngError};
 

@@ -40,6 +40,17 @@ impl SceneState {
         TripleWriter::from_existing(self.buf)
     }
 
+    /// Current scene graph generation (incremented on each publish).
+    pub fn generation(&mut self) -> u32 {
+        self.triple().generation()
+    }
+
+    /// Generation the compositor last finished reading. Entries removed
+    /// from the scene at generation N are safe to free once this returns ≥ N.
+    pub fn reader_done_gen(&mut self) -> u32 {
+        self.triple().reader_done_gen()
+    }
+
     /// Build the full scene tree with both document spaces in the strip.
     ///
     /// Both documents are always present. `slide_offset` determines which

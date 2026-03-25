@@ -264,6 +264,12 @@ impl<'a> TripleWriter<'a> {
         triple_read_ctrl(self.buf.as_ptr() as *mut u8, CTRL_GENERATION)
     }
 
+    /// Generation the reader last finished reading. Entries removed from
+    /// the scene at generation N are safe to free once `reader_done_gen() >= N`.
+    pub fn reader_done_gen(&self) -> u32 {
+        triple_read_ctrl(self.buf.as_ptr() as *mut u8, CTRL_READER_DONE_GEN)
+    }
+
     /// Get a read-only view of the latest published buffer's nodes.
     pub fn latest_nodes(&self) -> &[Node] {
         let latest = triple_read_ctrl(self.buf.as_ptr() as *mut u8, CTRL_LATEST_BUF);

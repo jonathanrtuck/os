@@ -65,7 +65,7 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 
 - **Event rings** (discrete events where order and count matter): Kernel creates channels (two shared memory pages per channel + signal). Each page is a SPSC ring buffer of 64-byte messages (one direction). The `ipc` library provides lock-free ring buffer mechanics; the `protocol` library defines message types and payload structs for all 9 protocol boundaries. Used for key presses, button clicks, config messages.
 - **State registers** (continuous state where only the latest value matters): Init-allocated shared memory pages with atomic reads/writes. The producer overwrites the latest value (store-release); the consumer reads it once per frame (load-acquire). Zero queue, zero overflow. Used for pointer position (input driver → core). Same init-orchestrated shared memory pattern as the scene graph (core → render).
-- **Content Region** (persistent decoded content): Init-allocated 4 MiB shared memory region with a `ContentRegionHeader` registry (64 entries, bump allocator). Contains font TTF data and decoded image pixels. Init writes font entries at boot; core writes decoded image entries at runtime. Render services read-only — find fonts and image data via `protocol::content::find_entry()`. Compositor never sees raw encoded files (File Store is a separate 1 MiB core-only region for raw bytes like PNG). Write-once entry semantics for lock-free concurrent reads.
+- **Content Region** (persistent decoded content): Init-allocated 4 MiB shared memory region with a `ContentRegionHeader` registry (64 entries). Contains font TTF data and decoded image pixels. Init writes font entries at boot; decoder services write decoded pixels via IPC-directed shared memory writes; core manages the registry and free-list allocator (`ContentAllocator` with first-fit, coalescing, generation-based deferred GC). Render services read-only. Compositor never sees raw encoded files (File Store is a separate 1 MiB region shared with decoder services). Write-once entry semantics for lock-free concurrent reads.
 
 Notification for both: `channel_signal` syscall wakes the consumer from `sys::wait()`. The signal means "something changed" — the consumer checks both event rings and state registers.
 
@@ -122,7 +122,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 **Goal:** Pure drawing primitives for pixel buffers. No allocations, no syscalls, no hardware — fully testable on the host.
 
-**Status:** ~1100 lines (lib.rs + gamma_tables.rs + palette.rs). Surface abstraction, color with alpha, blending, blitting, PNG decoder, gamma-correct sRGB blending, monochrome palette.
+**Status:** ~1100 lines (lib.rs + gamma_tables.rs + palette.rs). Surface abstraction, color with alpha, blending, blitting, gamma-correct sRGB blending, monochrome palette. PNG decoder moved to `services/decoders/png/` (sandboxed service).
 
 **What's foundational:**
 
@@ -131,7 +131,7 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 - Porter-Duff source-over blending with gamma-correct sRGB (blend in linear space via lookup tables).
 - `blit_blend` — the core compositing operation (per-pixel alpha, clips to bounds).
 - `draw_coverage` — composites a coverage map onto a surface with color modulation. The bridge between rasterizer output and the compositing pipeline.
-- PNG decoder (DEFLATE, all filter types) — decodes PNG images from byte slices.
+- ~~PNG decoder~~ — moved to `services/decoders/png/` as a sandboxed decoder service (2026-03-25).
 - `Palette` — monochrome palette system for consistent UI theming.
 - All operations clip silently (no panics). Safe to call with any coordinates.
 

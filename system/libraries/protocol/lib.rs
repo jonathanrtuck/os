@@ -16,6 +16,7 @@
 //! - `editor`      — init -> text editor (editor config)
 //! - `fs`          — init <-> 9p driver (filesystem requests)
 //! - `present`     — core -> render service (scene update signal)
+//! - `decode`      — core <-> decoder services (generic decode protocol)
 //!
 //! # Conventions
 //!
@@ -512,9 +513,10 @@ pub mod compose {
     #[repr(C)]
     #[derive(Clone, Copy, Debug, PartialEq)]
     pub struct ImageConfig {
-        pub image_va: u64,
-        pub image_len: u32,
-        pub _pad: u32,
+        /// Byte offset of the encoded image within the File Store.
+        pub file_store_offset: u32,
+        /// Byte length of the encoded image in the File Store.
+        pub file_store_length: u32,
     }
     const _: () = assert!(core::mem::size_of::<ImageConfig>() <= 60);
 
@@ -639,3 +641,8 @@ pub mod metal;
 
 /// Content Region shared memory layout (font data, decoded images).
 pub mod content;
+
+// ── decode: generic decoder service protocol ────────────────────────
+
+/// Decode protocol for content decoder services (PNG, JPEG, etc.).
+pub mod decode;

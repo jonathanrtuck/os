@@ -39,6 +39,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
     ("cpu-render", "CPU_RENDER_ELF"),
     ("virgil-render", "VIRGIL_RENDER_ELF"),
     ("metal-render", "METAL_RENDER_ELF"),
+    ("png-decode", "PNG_DECODE_ELF"),
     ("text-editor", "TEXT_EDITOR_ELF"),
     ("stress", "STRESS_ELF"),
     ("fuzz", "FUZZ_ELF"),
@@ -66,6 +67,7 @@ const PROGRAMS: &[(&str, &str, bool, bool)] = &[
         true,
     ),
     ("metal-render", "services/drivers/metal-render", true, true),
+    ("png-decode", "services/decoders/png", false, false),
     ("text-editor", "user/text-editor", false, false),
     ("stress", "user/stress", false, false),
     ("fuzz-helper", "user/fuzz-helper", false, false),
@@ -117,7 +119,7 @@ fn main() {
     let ipc_src = manifest_dir.join("libraries/ipc/lib.rs");
     let ipc_rlib = out_dir.join("libipc.rlib");
 
-    rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[]);
+    rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[("sys", &sys_rlib)]);
 
     // Step 1b: Build Cargo-managed libraries (libraries with external deps).
     // These use `cargo build` to resolve dependency graphs, then we link the

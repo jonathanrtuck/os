@@ -13,10 +13,17 @@ Platform services that run as userspace processes. Each is a `#![no_std]` ELF bi
 | `drivers/virtio-console/` | Console driver (placeholder)                                                     | Scaffolding |
 | `drivers/virtio-input/`   | Keyboard + tablet driver: reads evdev events, forwards to core via IPC           | Scaffolding |
 | `drivers/virtio-9p/`      | Host filesystem passthrough: 9P2000.L protocol, loads fonts/images/icons         | Scaffolding |
+| `decoders/png/`           | PNG decoder service: sandboxed, uses generic decoder harness                     | Scaffolding |
+
+## Service Categories
+
+- **`drivers/`** — Hardware abstraction (GPU, block, input, filesystem, console)
+- **`decoders/`** — Content transformation (PNG, future: JPEG, WebP). Each decoder is a sandboxed process behind the generic decode protocol (`protocol/decode.rs`). Format-specific code only; all IPC plumbing lives in `decoders/harness.rs`.
 
 ## Conventions
 
 - Services communicate via IPC channels (kernel-managed shared memory)
 - Init is the only process the kernel spawns; it spawns everything else
 - Each driver receives its MMIO base address and IRQ via an IPC config message from init
+- Decoder services receive File Store (RO) + Content Region (RW) mappings from init
 - "Scaffolding" means the architecture is right but the implementation will be rewritten
