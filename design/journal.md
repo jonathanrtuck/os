@@ -4,37 +4,43 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
-## sRGB-Correct Shadow Dithering (2026-03-24)
+## Float16 Rendering Pipeline + Ordered Dithering (2026-03-24)
 
-**Status: IMPLEMENTED** in metal-render `fragment_shadow`.
+**Status: IMPLEMENTED**
 
 ### The problem
 
-Document drop shadows over a #202020 desk background showed visible banding — discrete concentric bands instead of a smooth gradient. The analytical Gaussian shader (`erf` integrals) produces float-precision alpha, but the `bgra8Unorm_srgb` render target quantizes to 8-bit.
+Document drop shadows over a #202020 desk background showed visible banding — discrete concentric bands instead of a smooth gradient. The analytical Gaussian shader (`erf` integrals) produces float-precision alpha, but the 8-bit render target quantizes to 256 levels.
 
-### Why naive dithering fails
+### Why per-shader dithering is wrong
 
-Standard ordered dithering adds +/-0.5/255 to the value being quantized. But our dither is applied to the shadow **alpha** (pre-compositing), not to the final 8-bit sRGB pixel (post-compositing). Two nonlinear transforms sit between:
+The naive fix is to add dither in each shader that produces gradients (shadow, rounded-rect, etc.). This fails because:
 
-1. **Alpha compositing:** `final_linear = (1 - alpha) * bg_linear`. A change in alpha of 0.5/255 produces a change of `0.5/255 * 0.01444 = 0.0000283` in the composited linear value.
-2. **sRGB encoding:** In the dark range near sRGB(32), the quantization step size in linear space is `1/(255 * srgb_deriv) ~ 0.00030-0.00075`.
+1. **Dither must be at the quantization boundary.** The quantization happens after compositing + sRGB encoding, not in individual shader outputs. Dithering alpha pre-compositing requires compensating for two nonlinear transforms (blending + sRGB gamma), making the amplitude background-dependent.
+2. **It doesn't compose.** Every new visual effect that produces smooth gradients needs its own dither hack with its own amplitude correction.
 
-The dither needs to shift the final pixel by +/-0.5 sRGB steps. Working backward: `alpha_dither = srgb_step_linear / (2 * bg_linear)`. For #202020, this is 5-13x larger than naive +/-0.5/255.
+### The fix: float16 intermediate
 
-### The fix
+Following production renderer practice (Filament, Unreal), the entire rendering pipeline now operates in RGBA16Float:
 
-Per-fragment adaptive dither amplitude in the shadow shader:
+1. **TEX_MSAA** changed from `bgra8Unorm_srgb` to `rgba16Float` (4x MSAA).
+2. **TEX_RESOLVE** (new): MSAA resolves to this float16 non-MSAA texture.
+3. **`fragment_dither`** (new): single fullscreen pass reads TEX_RESOLVE, applies 4x4 Bayer ordered dither in sRGB space (+/-0.5 LSB — the standard amplitude), outputs to the 8-bit sRGB drawable.
 
-1. **4x4 Bayer matrix** via bit-interleave formula: `((x0^y0)<<3 | y0<<2 | (x1^y1)<<1 | y1)`. The optimal threshold matrix (minimizes max spatial frequency).
-2. **Estimate composited output:** `out_lin = (1 - alpha) * bg_lin` where `bg_lin = srgb_to_linear(32/255)`.
-3. **sRGB derivative at output level:** linear segment (12.92) or power segment (`0.4396 * L^(-7/12)`).
-4. **Scale threshold:** `amplitude = step_linear / bg_linear`.
+All MSAA render pipelines now specify `PIXEL_FORMAT_RGBA16F` via a new `pixel_format` field in the `create_render_pipeline` protocol command (previously hardcoded to `bgra8Unorm_srgb` in the hypervisor). The dither pipeline and blur overlay use `PIXEL_FORMAT_BGRA8_SRGB` for the drawable.
 
-Verified numerically: longest band 34px -> 14px, average band 7.4px -> 2.1px.
+### Why this is correct
 
-### Proper long-term fix
+- **Dither at the quantization boundary.** The Bayer threshold is added in sRGB space, exactly where 8-bit quantization occurs. Standard +/-0.5/255 amplitude works without any background-dependent correction.
+- **Composes universally.** Every visual effect (shadows, rounded rects, transparency, future gradients) gets correct dithering from the single pass.
+- **Higher blending precision.** Alpha compositing accumulates in float16 instead of 8-bit, eliminating per-layer rounding error.
+- **4x4 Bayer matrix** via bit-interleave: `((x0^y0)<<3 | y0<<2 | (x1^y1)<<1 | y1)`. Optimal threshold matrix — minimizes max spatial frequency of quantization error.
 
-Production renderers (Filament, Unreal) dither at the quantization boundary: render to float16 intermediate, then dither during final blit to 8-bit sRGB. This is architecturally correct because the dither is applied where the quantization happens. The current per-alpha approach is a good approximation that works because the shadow is always over the desk (known background).
+### Protocol change
+
+`create_render_pipeline` payload: 16 bytes -> 17 bytes. New `pixel_format: u8` field at offset 16. Mandatory — hypervisor rejects undersized payloads with a diagnostic message. No backward-compatibility fallback (kill the old way).
+
+Verified numerically: longest band 34px -> 12px, average band 7.4px -> 1.9px.
 
 ---
 
@@ -50,7 +56,7 @@ Document drop shadows extend beyond the document bounds (blur + spread). The con
 
 Restructured the scene tree sibling chain from:
 
-```
+```text
 N_ROOT → N_TITLE_BAR → N_SHADOW → N_CONTENT → N_POINTER
          (low z)                    (high z)
 ```
@@ -63,6 +69,7 @@ N_ROOT → N_CONTENT → N_TITLE_BAR → N_POINTER
 ```
 
 Changes:
+
 - `N_CONTENT`: y=0, height=fb_height (full screen, was clipped below title bar)
 - `N_STRIP`: y=content_y (offset to position documents below title bar)
 - `N_TITLE_BAR`: paints AFTER content (higher z-order), overlays shadows

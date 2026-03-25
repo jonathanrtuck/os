@@ -205,6 +205,9 @@ impl CommandBuffer {
     }
 
     /// Create a render pipeline state.
+    ///
+    /// `pixel_format`: color attachment format (e.g. `PIXEL_FORMAT_BGRA8_SRGB`
+    /// or `PIXEL_FORMAT_RGBA16F`). Defaults to BGRA8_SRGB if 0.
     pub fn create_render_pipeline(
         &mut self,
         handle: u32,
@@ -214,8 +217,9 @@ impl CommandBuffer {
         color_write_mask: u8,
         has_stencil: bool,
         sample_count: u8,
+        pixel_format: u8,
     ) {
-        self.push_header(CMD_CREATE_RENDER_PIPELINE, 16);
+        self.push_header(CMD_CREATE_RENDER_PIPELINE, 17);
         self.push_u32(handle);
         self.push_u32(vertex_fn);
         self.push_u32(fragment_fn);
@@ -223,6 +227,7 @@ impl CommandBuffer {
         self.push_u8(color_write_mask);
         self.push_u8(has_stencil as u8);
         self.push_u8(sample_count);
+        self.push_u8(pixel_format);
     }
 
     /// Create a compute pipeline state.

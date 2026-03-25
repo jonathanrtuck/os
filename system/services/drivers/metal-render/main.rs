@@ -63,6 +63,7 @@ const FN_COPY_SRGB_TO_LINEAR: u32 = 17;
 const FN_COPY_LINEAR_TO_SRGB: u32 = 18;
 const FN_FRAGMENT_ROUNDED_RECT: u32 = 19;
 const FN_FRAGMENT_SHADOW: u32 = 35;
+const FN_FRAGMENT_DITHER: u32 = 37;
 
 const PIPE_SOLID: u32 = 20;
 const PIPE_TEXTURED: u32 = 21;
@@ -71,6 +72,7 @@ const PIPE_STENCIL_WRITE: u32 = 23;
 const PIPE_SOLID_NO_MSAA: u32 = 24;
 const PIPE_ROUNDED_RECT: u32 = 25;
 const PIPE_SHADOW: u32 = 36;
+const PIPE_DITHER: u32 = 38;
 const CPIPE_BLUR_H: u32 = 26;
 const CPIPE_BLUR_V: u32 = 27;
 const CPIPE_SRGB_TO_LINEAR: u32 = 28;
@@ -97,6 +99,8 @@ const TEX_ATLAS: u32 = 52;
 const TEX_BLUR_A: u32 = 53;
 const TEX_BLUR_B: u32 = 54;
 const TEX_IMAGE: u32 = 55;
+/// Float16 resolve target — MSAA resolves here, then dither pass blits to drawable.
+const TEX_RESOLVE: u32 = 56;
 
 /// Maximum image texture dimension. All per-frame images are packed into
 /// sub-rectangles of this single atlas texture via `ImageAtlas`.
@@ -338,21 +342,28 @@ fragment float4 fragment_shadow(
         alpha = 0.5 * (1.0 - erf_approx(dist * inv_s2));
     }
 
-    // 4x4 Bayer ordered dither to break 8-bit sRGB alpha banding.
-    //
-    // Standard dither (+/-0.5/255) assumes the dither is applied at the
-    // quantization point. Here we dither alpha BEFORE compositing + sRGB
-    // encoding, so the amplitude must compensate for the nonlinear transform.
-    //
-    // Shadow composites as: final_linear = (1 - a) * bg_linear
-    // The sRGB quantization step at the composited level determines the
-    // needed alpha dither amplitude: step_linear / bg_linear.
-    //
-    // For bg = sRGB(32) over the dark gradient, this is 5-13x larger than
-    // naive +/-0.5/255. We compute the exact correction per-fragment from
-    // the expected composited output level.
-    //
-    // Bayer matrix via bit-interleave of (x,y) -- optimal threshold matrix.
+    return float4(color_lin, params.color_a * alpha);
+}
+
+// -- Fullscreen dither pass ------------------------------------------------
+// Reads the float16 resolved framebuffer, applies 4x4 Bayer ordered dither
+// in sRGB space (at the quantization boundary), and outputs to the 8-bit
+// sRGB drawable. This is the architecturally correct place for dithering:
+// all rendering happens in float16 with full precision, and quantization
+// noise is added once, uniformly, at the final blit.
+
+fragment float4 fragment_dither(
+    VertexOut in [[stage_in]],
+    texture2d<float> src [[texture(0)]],
+    sampler s [[sampler(0)]]
+) {
+    float4 linear = src.sample(s, in.texCoord);
+
+    // Convert to sRGB (the domain where 8-bit quantization occurs).
+    float3 srgb = linear_to_srgb(linear.rgb);
+
+    // 4x4 Bayer matrix via bit-interleave -- optimal threshold matrix
+    // (minimizes max spatial frequency of quantization error).
     int x = int(in.position.x) & 3;
     int y = int(in.position.y) & 3;
     int x0 = x & 1, x1 = (x >> 1) & 1;
@@ -360,24 +371,11 @@ fragment float4 fragment_shadow(
     int b = ((x0 ^ y0) << 3) | (y0 << 2) | ((x1 ^ y1) << 1) | y1;
     float threshold = (float(b) + 0.5) / 16.0 - 0.5; // [-0.5, +0.5)
 
-    // Estimate composited output level (shadow = black over desk bg).
-    float a = params.color_a * alpha;
-    float bg_lin = 0.014444; // srgb_to_linear(32/255) -- desk bg #202020
-    float out_lin = (1.0 - a) * bg_lin;
+    // +/-0.5 LSB in sRGB space -- standard ordered dither amplitude.
+    srgb += threshold / 255.0;
 
-    // sRGB derivative: ds/dL. Determines quantization step in linear space.
-    // Linear segment: 12.92. Power segment: 0.4396 * L^(-7/12).
-    float srgb_deriv = out_lin <= 0.0031308
-        ? 12.92
-        : 0.4396 * pow(out_lin, -0.58333);
-    float step_lin = 1.0 / (255.0 * srgb_deriv);
-
-    // Convert sRGB step to alpha-space dither amplitude.
-    float dither_amp = step_lin / max(bg_lin, 1e-6);
-    float dither = threshold * dither_amp;
-    float final_alpha = clamp(a + dither, 0.0, 1.0);
-
-    return float4(color_lin, final_alpha);
+    // Convert back to linear for the sRGB render target (hardware re-encodes).
+    return float4(srgb_to_linear(srgb), linear.a);
 }
 
 // srgb_to_linear / linear_to_srgb are defined above (before fragment shaders)
@@ -937,20 +935,27 @@ pub extern "C" fn _start() -> ! {
         b"fragment_rounded_rect",
     );
     cmdbuf.get_function(FN_FRAGMENT_SHADOW, LIB_SHADERS, b"fragment_shadow");
+    cmdbuf.get_function(FN_FRAGMENT_DITHER, LIB_SHADERS, b"fragment_dither");
     send_setup(&device, &mut setup_vq, irq_handle, &setup_dma, &cmdbuf);
     sys::print(b"     functions loaded\n");
 
     // Create render pipelines.
     cmdbuf.clear();
+    // MSAA pipelines render to RGBA16F for full precision. The dither pass
+    // blits from float16 to the 8-bit sRGB drawable with ordered dithering.
+    let f16 = metal::PIXEL_FORMAT_RGBA16F;
+    let srgb8 = metal::PIXEL_FORMAT_BGRA8_SRGB;
+
     // Solid fill pipeline (with blending, MSAA, stencil-compatible).
     cmdbuf.create_render_pipeline(
         PIPE_SOLID,
         FN_VERTEX_MAIN,
         FN_FRAGMENT_SOLID,
-        true, // blend enabled
-        0x0F, // write all RGBA
-        true, // stencil format (needed for clip path testing)
+        true,
+        0x0F,
+        true,
         SAMPLE_COUNT,
+        f16,
     );
     // Textured pipeline (with blending, MSAA, stencil-compatible).
     cmdbuf.create_render_pipeline(
@@ -961,6 +966,7 @@ pub extern "C" fn _start() -> ! {
         0x0F,
         true,
         SAMPLE_COUNT,
+        f16,
     );
     // Glyph pipeline (with blending, MSAA, stencil-compatible).
     cmdbuf.create_render_pipeline(
@@ -971,16 +977,18 @@ pub extern "C" fn _start() -> ! {
         0x0F,
         true,
         SAMPLE_COUNT,
+        f16,
     );
     // Stencil write pipeline (no color output, has stencil, MSAA).
     cmdbuf.create_render_pipeline(
         PIPE_STENCIL_WRITE,
         FN_VERTEX_STENCIL,
-        FN_FRAGMENT_SOLID, // not actually used (color write mask = 0)
+        FN_FRAGMENT_SOLID,
         false,
-        0x00, // no color writes
-        true, // has stencil
+        0x00,
+        true,
         SAMPLE_COUNT,
+        f16,
     );
     // Non-MSAA solid pipeline (for blur overlay on drawable).
     cmdbuf.create_render_pipeline(
@@ -990,7 +998,8 @@ pub extern "C" fn _start() -> ! {
         true,
         0x0F,
         false,
-        1, // sample_count = 1 (no MSAA)
+        1,
+        srgb8,
     );
     // Rounded rect pipeline (SDF fragment shader, with blending, MSAA, stencil).
     cmdbuf.create_render_pipeline(
@@ -1001,6 +1010,7 @@ pub extern "C" fn _start() -> ! {
         0x0F,
         true,
         SAMPLE_COUNT,
+        f16,
     );
     // Analytical shadow pipeline (Gaussian erf, with blending, MSAA, stencil).
     cmdbuf.create_render_pipeline(
@@ -1011,6 +1021,19 @@ pub extern "C" fn _start() -> ! {
         0x0F,
         true,
         SAMPLE_COUNT,
+        f16,
+    );
+    // Dither pass: reads float16 resolved texture, applies 4x4 Bayer dither
+    // in sRGB space, outputs to 8-bit sRGB drawable. No blending needed.
+    cmdbuf.create_render_pipeline(
+        PIPE_DITHER,
+        FN_VERTEX_MAIN,
+        FN_FRAGMENT_DITHER,
+        false,
+        0x0F,
+        false,
+        1,
+        srgb8,
     );
     // Compute pipelines for blur + color space conversion.
     cmdbuf.create_compute_pipeline(CPIPE_BLUR_H, FN_BLUR_H);
@@ -1083,13 +1106,22 @@ pub extern "C" fn _start() -> ! {
 
     // Create textures.
     cmdbuf.clear();
-    // MSAA render target (sRGB: hardware blender operates in linear space).
+    // MSAA render target (RGBA16F: full precision, dither pass handles quantization).
     cmdbuf.create_texture(
         TEX_MSAA,
         width as u16,
         height as u16,
-        metal::PIXEL_FORMAT_BGRA8_SRGB,
+        metal::PIXEL_FORMAT_RGBA16F,
         SAMPLE_COUNT,
+        metal::USAGE_RENDER_TARGET | metal::USAGE_SHADER_READ,
+    );
+    // Float16 resolve target — MSAA resolves here, dither pass reads it.
+    cmdbuf.create_texture(
+        TEX_RESOLVE,
+        width as u16,
+        height as u16,
+        metal::PIXEL_FORMAT_RGBA16F,
+        1,
         metal::USAGE_RENDER_TARGET | metal::USAGE_SHADER_READ,
     );
     // Stencil texture (for clip paths).
@@ -1565,18 +1597,17 @@ pub extern "C" fn _start() -> ! {
         glyph_vertex_buf.clear();
         let mut blurs: Vec<BlurReq> = Vec::new();
 
-        // Begin render pass: MSAA target, resolve to drawable, with stencil.
-        // Clear color in linear space (sRGB render target converts on store).
-        // BG_BASE ≈ rgb(16,16,16) → linear ≈ 0.005.
+        // Begin render pass: MSAA float16 target, resolve to float16 TEX_RESOLVE.
+        // Clear color in linear space; BG_BASE = sRGB(32) = linear ~0.0144.
         cmdbuf.begin_render_pass(
             TEX_MSAA,
-            DRAWABLE_HANDLE,
+            TEX_RESOLVE,
             TEX_STENCIL,
             metal::LOAD_CLEAR,
             metal::STORE_MSAA_RESOLVE,
-            0.005,
-            0.005,
-            0.005,
+            0.0144,
+            0.0144,
+            0.0144,
             1.0,
         );
         cmdbuf.set_render_pipeline(PIPE_SOLID);
@@ -1626,6 +1657,42 @@ pub extern "C" fn _start() -> ! {
             flush_vertices_raw(&mut cmdbuf, &mut glyph_vertex_buf);
         }
 
+        cmdbuf.end_render_pass();
+
+        // ── Dither pass: float16 → 8-bit sRGB drawable ─────────────────
+        // Fullscreen quad reads TEX_RESOLVE (linear float16), applies 4x4
+        // Bayer ordered dither in sRGB space, outputs to the 8-bit sRGB
+        // drawable. This is the single point of 8-bit quantization.
+        cmdbuf.begin_render_pass(
+            DRAWABLE_HANDLE,
+            0,
+            0,
+            metal::LOAD_DONT_CARE,
+            metal::STORE_STORE,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+        );
+        cmdbuf.set_render_pipeline(PIPE_DITHER);
+        cmdbuf.set_fragment_texture(TEX_RESOLVE, 0);
+        cmdbuf.set_fragment_sampler(SAMPLER_NEAREST, 0);
+        // Fullscreen quad: x=0, y=0, w=viewport, h=viewport in points.
+        emit_quad(
+            &mut vertex_buf,
+            0.0,
+            0.0,
+            vw / scale,
+            vh / scale,
+            vw,
+            vh,
+            scale,
+            1.0,
+            1.0,
+            1.0,
+            1.0,
+        );
+        flush_solid_vertices(&mut cmdbuf, &mut vertex_buf);
         cmdbuf.end_render_pass();
 
         // ── Backdrop blur processing ────────────────────────────────────
