@@ -55,7 +55,7 @@ Lessons learned during implementation:
 
 ## Filesystem Design — Layer Map and Key Decisions (2026-03-25)
 
-**Status: IN PROGRESS** — layer map established, several tentative decisions, deep design remaining on snapshot engine, block allocator, and on-disk format.
+**Status: IN PROGRESS** — layer map established, all layers designed, ready for host prototype.
 
 ### Context
 
@@ -219,28 +219,198 @@ No existing filesystem matches the requirements (flat namespace + per-file high-
 
 Kernel change before filesystem work. Foundation must be correct before building on top. See dedicated section below.
 
-### Open questions for next filesystem session
+### Decision: Block allocator — sorted free-extent list, COW-persisted (2026-03-25)
 
-**Layer 2 (Block Allocator):**
+**Research:** Evaluated bitmap (ext4), dual B+tree (XFS), free space tree (Btrfs), space maps (ZFS), bucket/segment (F2FS, Bcachefs), per-CPU tree (NOVA), LSM tree (Fxfs). See `design/research/cow-filesystems.md`.
 
-- Bitmap vs. extent tree vs. space maps?
-- Fragmentation management under COW churn
-- Allocator metadata persistence (turtles all the way down)
+**Decision:** In-memory sorted free-extent list (`Vec<(start_block: u32, count: u32)>` sorted by start), persisted as a single COW block pointed to by the superblock ring entry.
 
-**On-disk format details:**
+**Why:** At this scale (4 GiB disk = 262,144 blocks), even worst-case fragmentation produces a free list that fits in one 16 KiB block. Space maps (ZFS) solve a problem we don't have (high-frequency allocator metadata I/O across petabyte pools). Bitmaps fight COW (fixed-location in-place updates). This design has no turtles problem — the free list block is allocated from the previous generation's free list.
 
-- Inode layout (fields, extent list capacity, inline data threshold)
-- Superblock ring size and layout
-- Snapshot metadata storage (per-file snapshot list, global snapshot ID counter)
-- Transaction commit protocol (what exactly is the atomic commit point?)
-- `Files` trait update for multi-file snapshots
+**Allocation:** First-fit scan. O(n) where n = number of free extents (typically a few hundred). Free = insert + coalesce adjacent entries. Locality bias: prefer blocks near the file's existing extents when possible.
 
-**Stress testing plan:**
+**Crash recovery fallback:** Walk all inodes + snapshot extent lists → build set of used blocks → invert. O(total blocks) but only needed if the persisted free list is corrupted (like NOVA's approach).
 
-- Simulated editing workload (rapid snapshots, random writes, concurrent files)
-- Snapshot accumulation + pruning under load
-- Fragmentation measurement after sustained COW churn
-- Crash recovery verification (kill mid-transaction, verify consistency)
+### Decision: On-disk inode — one 16 KiB block with inline data (2026-03-25)
+
+**Research:** Evaluated ext4 (256 B fixed), Btrfs (160 B + separate extent items), ZFS dnodes (512 B–16 KiB variable + bonus buffer), RedoxFS (one-block node), NOVA (128 B + per-inode log), Bcachefs (btree entries), CVFS, F2FS inline data. See `design/research/cow-filesystems.md`.
+
+**Decision:** RedoxFS-style one-block inode. Each inode occupies one 16 KiB block, partitioned into three regions:
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│  HEADER (64 bytes)                                          │
+│  file_id: u64, size: u64, created: u64, modified: u64       │
+│  flags: u32, extent_count: u16, snapshot_count: u16         │
+│  indirect_block: u32, snapshot_list_block: u32, reserved    │
+├─────────────────────────────────────────────────────────────┤
+│  EXTENT LIST (up to 16 entries × 12 bytes = 192 bytes)      │
+│  Per extent: start_block (u32) + count (u16) +              │
+│              birth_txg (u48, 6 bytes)                        │
+├─────────────────────────────────────────────────────────────┤
+│  SNAPSHOT LIST (inline up to ~8 records)                     │
+│  Per snapshot: snapshot_id (u32) + saved extent list pointer │
+│  Overflows to linked snapshot blocks via snapshot_list_block │
+├─────────────────────────────────────────────────────────────┤
+│  INLINE DATA (remaining ~15.5 KiB)                          │
+│  When flags.inline_data set: file content stored here       │
+│  Otherwise: unused (zero-filled)                            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Why one-block inodes:** Most document files are small (manifests, text, configs < 15 KiB). Inline data means these files are one block on disk — one read gets metadata + content + extent list + snapshot history. Zero indirection. For larger files: 16 extents × 16 KiB blocks = 256 KiB directly addressable; `indirect_block` handles overflow for rare large files.
+
+**Field sizing:** u32 block addresses → 64 TiB addressable (sufficient for personal OS — if not, widen later behind the same inode interface). u16 extent count → 1 GiB contiguous run. u48 birth_txg → 281 trillion transactions.
+
+### Decision: Superblock ring — 16 entries at disk start (2026-03-25)
+
+**Research:** Evaluated ext4 (primary + sparse backups + journal), ZFS uberblock ring (128 × 4 labels = 512 copies), Btrfs (3 mirrors at fixed offsets), RedoxFS header ring (256 entries), F2FS dual checkpoint, LMDB shadow paging (ping-pong). See `design/research/cow-filesystems.md`.
+
+**Decision:** 16-entry ring. Block 0 = disk header (magic, version, geometry). Blocks 1–16 = superblock ring entries. Block 17+ = data/metadata.
+
+Each ring entry (one 16 KiB block):
+
+```text
+magic: u64
+txg: u64                    // monotonic transaction counter
+timestamp: u64              // nanos since epoch
+root_inode_table: u32       // block of inode table root
+root_free_list: u32         // block of persisted free-extent list
+root_snapshot_index: u32    // block of global snapshot→file mapping
+total_blocks: u32
+used_blocks: u32
+next_file_id: u64           // monotonic FileId counter
+checksum: u32 (CRC32)
+```
+
+**Why 16:** The ring's job is crash safety, not undo. Per-file snapshots handle undo. 16 entries survive 16 consecutive torn commits — beyond that, the disk is physically failing. ZFS uses 128 because it commits every 5–30 seconds and wants hours of rollback; we have explicit snapshots for that. 16 × 16 KiB = 256 KiB overhead.
+
+**Mount:** Scan all 16 entries, pick highest `txg` with valid CRC32.
+
+### Decision: Transaction commit protocol — two-flush with 2-generation deferred reuse (2026-03-25)
+
+**Research:** Evaluated ZFS (three-flush txg commit with 3-generation deferral), Btrfs (COW convergence + superblock write, relies on flush/barrier), RedoxFS (header ring, no explicit flush — latent bug), WAFL (NVRAM-backed), LMDB (ping-pong meta pages). Also researched virtio-blk guarantees, NVMe atomicity, macOS fsync vs F_FULLFSYNC. See `design/research/cow-filesystems.md`.
+
+**Decision:**
+
+```text
+Transaction commit sequence:
+1. Write all new data blocks (COW'd file content)
+2. Write all new metadata blocks (COW'd inodes, free list, snapshot records)
+3. FLUSH (virtio-blk VIRTIO_BLK_T_FLUSH)
+4. Write superblock ring entry at txg % 16
+5. FLUSH
+6. Blocks freed in txg N-2 now become reusable
+```
+
+**Deferred block reuse (2-generation):** Freed blocks aren't added to the free list until 2 commits later. Even if flush is incomplete or writes are reordered, the previous transaction's blocks survive through one full additional commit cycle. This is structural immunity to write reordering — crash consistency is a property of the data structure, not of the device behaving correctly. (ZFS uses 3-generation deferral for similar reasons.)
+
+**Checksums:** CRC32 on every superblock ring entry and every inode block. Torn writes are detected and the previous valid state is used.
+
+**Critical implementation note:** virtio-blk supports FLUSH (`VIRTIO_BLK_F_FLUSH` feature bit, `VIRTIO_BLK_T_FLUSH` command type). The current virtio-blk driver reads sector 0 only — needs flush support added. On the hypervisor side, the virtio-blk backend's FLUSH handler MUST use `fcntl(F_FULLFSYNC)`, not `fsync()`, because macOS `fsync()` does NOT flush the disk's volatile write cache (Apple documents this explicitly). A 16 KiB write is NOT guaranteed atomic on any of our target devices.
+
+**Core integration:** Core calls `Files::commit()` at `endOperation` boundaries. Between `beginOperation` and `endOperation`, writes accumulate (COW'd blocks not yet committed). This batches compound document edits into one atomic transaction.
+
+### Decision: Snapshot metadata — per-file chain with multi-file grouping (2026-03-25)
+
+**Research:** Evaluated ZFS DSL (dataset-level, birth-time + dead lists), Btrfs (snapshot = new tree root, refcount COW), WAFL (root inode duplication + bit-plane block map), Bcachefs (key-level snapshot IDs), NILFS2 (continuous log-structured checkpoints). See `design/research/cow-filesystems.md`.
+
+**Decision:** Per-file snapshot chains. Each snapshot record stores a saved copy of the file's extent list at the time of creation.
+
+```text
+SnapshotRecord {
+    snapshot_id: u32,        // global monotonic ID (from superblock)
+    txg_at_creation: u48,    // birth-time for freeing logic
+    extent_count: u16,
+    extents: [Extent],       // copy of the file's extent list at snapshot time
+    prev_record_block: u32,  // linked list for overflow
+}
+```
+
+**Inline vs overflow:** ≤8 snapshots stored in the inode's snapshot region. >8 overflows to linked blocks via `snapshot_list_block` pointer.
+
+**Multi-file atomic snapshots:** A global snapshot index maps `SnapshotId → Vec<(FileId, snapshot_record_block)>`. This is how `restore(SnapshotId)` knows which files to revert. The index itself is a COW object pointed to by the superblock.
+
+**Deletion (Model D birth-time logic):** Walk the snapshot's extent list. For each extent, if `birth_txg > previous_snapshot_txg`, the blocks can be freed (no older snapshot references them). Otherwise, they belong to an older snapshot. This is ZFS's birth-time insight scaled down from tree-level to extent-list-level — viable because document files have compact extent lists (1–16 entries).
+
+### Decision: Files trait — explicit commit, multi-file snapshots (2026-03-25)
+
+**Decision:** The filesystem service exposes this interface to core via IPC:
+
+```rust
+trait Files {
+    // Lifecycle
+    fn create(&mut self) -> FileId;
+    fn delete(&mut self, file: FileId) -> Result<(), FsError>;
+
+    // Data access
+    fn read(&self, file: FileId, offset: u64, buf: &mut [u8]) -> Result<usize, FsError>;
+    fn write(&mut self, file: FileId, offset: u64, data: &[u8]) -> Result<(), FsError>;
+    fn truncate(&mut self, file: FileId, len: u64) -> Result<(), FsError>;
+    fn size(&self, file: FileId) -> Result<u64, FsError>;
+
+    // Snapshots (the undo substrate)
+    fn snapshot(&mut self, files: &[FileId]) -> Result<SnapshotId, FsError>;
+    fn restore(&mut self, snapshot: SnapshotId) -> Result<(), FsError>;
+    fn delete_snapshot(&mut self, snapshot: SnapshotId) -> Result<(), FsError>;
+    fn list_snapshots(&self, file: FileId) -> Result<Vec<SnapshotId>, FsError>;
+
+    // Metadata (filesystem-level only — mimetype etc. is core's concern)
+    fn metadata(&self, file: FileId) -> Result<FileMetadata, FsError>;
+
+    // Transaction boundary
+    fn commit(&mut self) -> Result<(), FsError>;
+}
+```
+
+**`commit()` is explicit** because core controls transaction boundaries (at `endOperation`). Between begin/end, writes accumulate in memory. Crash mid-operation loses uncommitted writes — correct, because the operation wasn't complete.
+
+**`snapshot(&[FileId])`** because documents are 1-to-many files. Undo must revert all files atomically. The filesystem doesn't know about documents — it just groups files under one SnapshotId.
+
+**`restore(SnapshotId)`** takes only the snapshot ID because the snapshot already records which files it covers (via the global snapshot index). Core doesn't re-specify.
+
+### Stress testing plan (2026-03-25)
+
+**Research:** Evaluated xfstests/fsstress (60+ weighted random ops), ZFS ztest (kill-and-recover with 70% kill rate), CrashMonkey/ACE (OSDI '18, exhaustive crash state exploration), dm-log-writes, SQLite's VFS-based crash simulation (590:1 test-to-code ratio), proptest-state-machine (Rust model-based testing), sled's uncertainty model, deterministic simulation testing (Antithesis/FoundationDB). See `design/research/cow-filesystems.md`.
+
+**Five-layer strategy:**
+
+1. **Property-based unit tests (proptest):** Block allocator (alloc/free sequences, coalescing, no double-free). Extent list operations. Inode serialization round-trips. Birth_txg monotonicity.
+
+2. **Model-based state machine tests (proptest-state-machine):** Reference model = `HashMap<FileId, Vec<u8>>` + snapshot history. Random sequences of 50–200 operations. After every op: reads match reference, block accounting is consistent. Automatic shrinking finds minimal failing sequences.
+
+3. **Crash consistency tests (CrashMonkey + SQLite inspired):** Logging `BlockDevice` wrapper records every write with flush epoch. Replay all prefixes (crash at every write boundary). After each simulated crash: verify superblock validity, block allocation consistency, data is pre-op OR post-op (never hybrid). Uncertainty model: reference accepts either old or new state after crash.
+
+4. **Snapshot regression:** Deletion ordering matrix (oldest-first, newest-first, random, every-other). Space reclamation accounting. Thousands of rapid snapshots. Multi-file atomic snapshot + crash + verify.
+
+5. **Sustained stress (ztest-inspired):** Weighted random ops, minutes to hours. Kill-and-recover cycles. Fragmentation metrics: extent count per file, free extent histogram, largest contiguous free region, sequential read I/O count.
+
+**Implementation order:** Layers 1–2 during host prototype build. Layer 3 immediately after (tests commit protocol). Layers 4–5 once basic FS works end-to-end. The `BlockDevice` trait is the testing seam — design it with fault injection in mind from day one (SQLite's VFS lesson).
+
+### Build order (2026-03-25)
+
+Host prototype first (regular Rust binary on macOS, file-backed block device). Fast compile, full test tooling, proptest, no kernel boot cycles. Everything above `BlockDevice` trait is the same code in both environments.
+
+**Phase A: Host Prototype (Rust, std, macOS)**
+
+| Step | What                                                           | Key deliverable                                   | Test focus                                                             |
+| ---- | -------------------------------------------------------------- | ------------------------------------------------- | ---------------------------------------------------------------------- |
+| A1   | `BlockDevice` trait + `FileBlockDevice` + `LoggingBlockDevice` | Testing seam, fault injection wrapper             | Unit: read/write/flush round-trip                                      |
+| A2   | Superblock ring + disk header                                  | Format, mount, commit, torn write recovery        | Proptest: random crash points via LoggingBlockDevice                   |
+| A3   | Block allocator (free-extent list)                             | Alloc, free, coalesce, persist as COW block       | Proptest: random alloc/free, no leaks, no double-free                  |
+| A4   | Inode + inline data                                            | Create, read, write inline, serialize/deserialize | Round-trip, inline threshold, extent list ops                          |
+| A5   | COW write path + commit protocol                               | Two-flush commit, 2-generation deferred reuse     | Write + commit + read-back, old blocks survive 2 gens                  |
+| A6   | Snapshots (Model D)                                            | Create, restore, delete (birth-time), multi-file  | State machine tests (proptest-state-machine), deletion ordering matrix |
+| A7   | `Files` trait integration                                      | Full API wired together                           | Crash consistency suite, sustained stress (ztest-style)                |
+
+**Phase B: Bare-Metal Integration**
+
+| Step | What                             | Key deliverable                                                                   |
+| ---- | -------------------------------- | --------------------------------------------------------------------------------- |
+| B1   | virtio-blk driver: write + flush | Extend existing driver (currently read-only)                                      |
+| B2   | Hypervisor: virtio-blk backend   | File-backed block device, FLUSH → `fcntl(F_FULLFSYNC)`                            |
+| B3   | Filesystem service               | Port host prototype to bare-metal userspace service, `VirtioBlockDevice` impl     |
+| B4   | Core integration                 | Core calls `Files` via IPC, `commit()` at `endOperation`, snapshot/restore → undo |
 
 ---
 
