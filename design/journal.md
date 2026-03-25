@@ -4,6 +4,46 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## PAGE_SIZE Single Source of Truth (2026-03-25)
+
+**Status: OPEN** — identified during 16K page migration, deferred to follow-up.
+
+### Problem
+
+PAGE_SIZE is hardcoded in 6 independent locations:
+- `kernel/paging.rs` (the canonical source)
+- `libraries/ipc/lib.rs`
+- `libraries/sys/lib.rs`
+- `libraries/protocol/lib.rs` (inline `* 4096` in `channel_shm_va`)
+- `libraries/virtio/lib.rs` (inline `+ 4095) / 4096`)
+- `libraries/link.ld` (ALIGN directives)
+
+The kernel and userspace compile as separate targets (`aarch64-unknown-none` via `build.rs`), so they can't share Rust constants. The linker script can't reference Rust at all.
+
+During the 16K migration, two of these (ipc, protocol) caused silent IPC failures — the channel library looked for the second shared page at `base + 4096` instead of `base + 16384`. No crash, just wrong memory. The ELF segment overlap (libraries/link.ld still using 4K alignment) caused permission faults that took significant debugging.
+
+### Proposed fix: build.rs generation
+
+`build.rs` already orchestrates all compilation. Add:
+
+1. **One source file** — `system/page_config.toml` (or just a constant in `build.rs`):
+   ```toml
+   page_size = 16384
+   ```
+
+2. **build.rs reads it and generates**:
+   - `libraries/link.ld` from a template (`link.ld.in` with `@PAGE_SIZE@` placeholders)
+   - A `generated_constants.rs` file that userspace libraries include (via `include!` or `env!`)
+   - Kernel's `paging.rs` could also use `env!("PAGE_SIZE")` from build.rs, or stay as the canonical Rust constant with a `const_assert!` against the generated value
+
+3. **Compile-time assertion** in the test crate: verify kernel's PAGE_SIZE matches the generated userspace value. Catches drift immediately if someone edits one without the other.
+
+### Why not now
+
+The migration works. The hardcoded values are consistent. This is a prevention-over-debugging improvement — worth doing before the next value change, but not blocking.
+
+---
+
 ## Filesystem Design — Layer Map and Key Decisions (2026-03-25)
 
 **Status: IN PROGRESS** — layer map established, several tentative decisions, deep design remaining on snapshot engine, block allocator, and on-disk format.
