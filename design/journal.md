@@ -11,6 +11,7 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 ### Problem
 
 PAGE_SIZE is hardcoded in 6 independent locations:
+
 - `kernel/paging.rs` (the canonical source)
 - `libraries/ipc/lib.rs`
 - `libraries/sys/lib.rs`
@@ -27,6 +28,7 @@ During the 16K migration, two of these (ipc, protocol) caused silent IPC failure
 `build.rs` already orchestrates all compilation. Add:
 
 1. **One source file** — `system/page_config.toml` (or just a constant in `build.rs`):
+
    ```toml
    page_size = 16384
    ```
@@ -188,6 +190,7 @@ Four models evaluated: ZFS-style (birth-time + dead lists), Btrfs-style (refcoun
 - **Multi-file** = save N extent lists in one transaction.
 
 **Why D over A/B/C:**
+
 - vs ZFS (A): Same birth-time insight but without dead list complexity. Extent lists are small enough to walk directly (ZFS needs dead lists because trees can be huge).
 - vs Btrfs (B): Avoids unpredictable cascading refcount decrements on delete. High-frequency snapshots would stress Btrfs's weakness.
 - vs Bcachefs (C): Avoids full B-tree walk on snapshot deletion and "trickiest" space accounting.
@@ -199,6 +202,7 @@ Four models evaluated: ZFS-style (birth-time + dead lists), Btrfs-style (refcoun
 ### Decision: Build from scratch, informed by prior art (DECIDED)
 
 No existing filesystem matches the requirements (flat namespace + per-file high-frequency snapshots + Rust no_std + pure COW). Evaluated RedoxFS, ZFS, Btrfs, Bcachefs, littlefs — none close enough to adapt. Building from scratch with:
+
 - ZFS's birth-time insight for snapshot deletion
 - RedoxFS's Rust COW transaction model as reference
 - Superblock ring for crash safety (from ZFS/RedoxFS)
@@ -243,7 +247,7 @@ Kernel change before filesystem work. Foundation must be correct before building
 
 **ARM64 target configuration:**
 
-```
+```text
 16K granule, T0SZ=28, T1SZ=28:
   L2: bits [35:25] → 11 bits → 2048 entries → 16 KiB table
   L3: bits [24:14] → 11 bits → 2048 entries → 16 KiB table
@@ -251,6 +255,7 @@ Kernel change before filesystem work. Foundation must be correct before building
 ```
 
 TCR_EL1 changes:
+
 - TG0: current `00` (4K) → `10` (16K). Field is bits [15:14].
 - TG1: current `10` (4K) → `01` (16K). Field is bits [31:30].
 - T0SZ: current `16` → `28`. Reduces user VA from 256 TiB to 64 GiB.
@@ -258,20 +263,20 @@ TCR_EL1 changes:
 
 **Files to change:**
 
-| File | Changes |
-|---|---|
-| `paging.rs` | `PAGE_SIZE = 16384`. `PA_MASK` adjust (bits [13:0] now offset). VA layout: review all constants (all within 4 GiB, fine for 64 GiB VA). `USER_STACK_PAGES` may need adjustment (fewer pages for same stack size since each page is 4× larger). |
-| `boot.S` | TCR_EL1: TG0, TG1, T0SZ, T1SZ. Boot tables: `.space 16384` (×6 or fewer — only need L2+L3 with 2-level walk). Boot mapping setup: populate 2-level tables. `.align 12` → `.align 14` for 16K alignment. |
-| `address_space.rs` | Drop `l0_idx`/`l1_idx`. Keep `l2_idx`/`l3_idx` with new shifts: `l2_idx = (va >> 25) & 0x7FF`, `l3_idx = (va >> 14) & 0x7FF`. `map_inner`: 2-level walk. `free_all`: 2-level walk. Root table is L2. Loops: `0..512` → `0..2048`. |
-| `memory.rs` | Kernel boot mapping: alignment to 16K. Section protection boundaries. |
-| `page_allocator.rs` | `RAM_PAGES` shrinks 4× (16384 pages → 4096 pages for 256 MiB). `MAX_ORDER` adjusts. Buddy XOR uses new PAGE_SIZE. |
-| `slab.rs` | 4× more objects per slab page. Consider adding 4096/8192 size classes. |
-| `link.ld` | `ALIGN(4096)` → `ALIGN(16384)`. Stack `.space` sizes. Section alignment. |
-| `exception.S` | Emergency stacks: `4096 * 8` → `16384 * 8` (one 16K page per core). Stack offset arithmetic: `lsl x4, x4, #12` → `lsl x4, x4, #14`. |
-| `process.rs` | ELF segment loading: page alignment. Stack page count (fewer pages, same total size). |
-| `thread.rs` | Kernel thread stack allocation: adjust page count. |
-| `syscall.rs` | `MAX_WRITE_LEN` review. Page alignment masks. `memory_share` checks. |
-| `test/tests/*.rs` | All PAGE_SIZE-dependent tests. TLBI instruction operands if using page-granule invalidation. |
+| File                | Changes                                                                                                                                                                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `paging.rs`         | `PAGE_SIZE = 16384`. `PA_MASK` adjust (bits [13:0] now offset). VA layout: review all constants (all within 4 GiB, fine for 64 GiB VA). `USER_STACK_PAGES` may need adjustment (fewer pages for same stack size since each page is 4× larger). |
+| `boot.S`            | TCR_EL1: TG0, TG1, T0SZ, T1SZ. Boot tables: `.space 16384` (×6 or fewer — only need L2+L3 with 2-level walk). Boot mapping setup: populate 2-level tables. `.align 12` → `.align 14` for 16K alignment.                                        |
+| `address_space.rs`  | Drop `l0_idx`/`l1_idx`. Keep `l2_idx`/`l3_idx` with new shifts: `l2_idx = (va >> 25) & 0x7FF`, `l3_idx = (va >> 14) & 0x7FF`. `map_inner`: 2-level walk. `free_all`: 2-level walk. Root table is L2. Loops: `0..512` → `0..2048`.              |
+| `memory.rs`         | Kernel boot mapping: alignment to 16K. Section protection boundaries.                                                                                                                                                                          |
+| `page_allocator.rs` | `RAM_PAGES` shrinks 4× (16384 pages → 4096 pages for 256 MiB). `MAX_ORDER` adjusts. Buddy XOR uses new PAGE_SIZE.                                                                                                                              |
+| `slab.rs`           | 4× more objects per slab page. Consider adding 4096/8192 size classes.                                                                                                                                                                         |
+| `link.ld`           | `ALIGN(4096)` → `ALIGN(16384)`. Stack `.space` sizes. Section alignment.                                                                                                                                                                       |
+| `exception.S`       | Emergency stacks: `4096 * 8` → `16384 * 8` (one 16K page per core). Stack offset arithmetic: `lsl x4, x4, #12` → `lsl x4, x4, #14`.                                                                                                            |
+| `process.rs`        | ELF segment loading: page alignment. Stack page count (fewer pages, same total size).                                                                                                                                                          |
+| `thread.rs`         | Kernel thread stack allocation: adjust page count.                                                                                                                                                                                             |
+| `syscall.rs`        | `MAX_WRITE_LEN` review. Page alignment masks. `memory_share` checks.                                                                                                                                                                           |
+| `test/tests/*.rs`   | All PAGE_SIZE-dependent tests. TLBI instruction operands if using page-granule invalidation.                                                                                                                                                   |
 
 **Verification:** All ~2,236 tests must pass. Boot QEMU + hypervisor. Visual test (screenshot) to confirm display pipeline still works end-to-end.
 
