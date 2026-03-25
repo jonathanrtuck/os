@@ -705,72 +705,78 @@ fn range_readable_zero_length_always_valid() {
 
 #[test]
 fn range_readable_single_byte_checks_one_page() {
+    let p = PAGE_SIZE;
     let mut checked = Vec::new();
-    let result = is_range_valid(0x1000, 1, |page| {
+    let result = is_range_valid(p, 1, |page| {
         checked.push(page);
         true
     });
 
     assert!(result);
-    assert_eq!(checked, vec![0x1000]);
+    assert_eq!(checked, vec![p]);
 }
 
 #[test]
 fn range_readable_spanning_two_pages() {
+    let p = PAGE_SIZE;
     let mut checked = Vec::new();
-    let result = is_range_valid(0x1FFF, 2, |page| {
+    let result = is_range_valid(2 * p - 1, 2, |page| {
         checked.push(page);
         true
     });
 
     assert!(result);
-    // 0x1FFF is in page 0x1000, 0x2000 is in page 0x2000.
-    assert_eq!(checked, vec![0x1000, 0x2000]);
+    // (2p-1) is in page p, byte 2p is in page 2p.
+    assert_eq!(checked, vec![p, 2 * p]);
 }
 
 #[test]
 fn range_readable_exactly_one_page() {
+    let p = PAGE_SIZE;
     let mut checked = Vec::new();
-    let result = is_range_valid(0x1000, PAGE_SIZE, |page| {
+    let result = is_range_valid(p, p, |page| {
         checked.push(page);
         true
     });
 
     assert!(result);
-    // Entire range is within page 0x1000.
-    assert_eq!(checked, vec![0x1000]);
+    // Entire range is within page p.
+    assert_eq!(checked, vec![p]);
 }
 
 #[test]
 fn range_readable_fails_on_second_page() {
-    let result = is_range_valid(0x1FFF, 2, |page| page != 0x2000);
+    let p = PAGE_SIZE;
+    let result = is_range_valid(2 * p - 1, 2, |page| page != 2 * p);
 
     assert!(!result, "should fail when second page is inaccessible");
 }
 
 #[test]
 fn range_readable_multiple_pages() {
+    let p = PAGE_SIZE;
     let mut checked = Vec::new();
-    let result = is_range_valid(0x1000, 3 * PAGE_SIZE, |page| {
+    let result = is_range_valid(p, 3 * p, |page| {
         checked.push(page);
         true
     });
 
     assert!(result);
-    assert_eq!(checked, vec![0x1000, 0x2000, 0x3000]);
+    assert_eq!(checked, vec![p, 2 * p, 3 * p]);
 }
 
 #[test]
 fn range_readable_unaligned_start_covers_correct_pages() {
+    let p = PAGE_SIZE;
     let mut checked = Vec::new();
-    let result = is_range_valid(0x1500, 0x1000, |page| {
+    // Start at p + 0x500 (within page p), range extends into page 2p.
+    let result = is_range_valid(p + 0x500, p, |page| {
         checked.push(page);
         true
     });
 
     assert!(result);
-    // 0x1500..0x2500 spans pages 0x1000 and 0x2000.
-    assert_eq!(checked, vec![0x1000, 0x2000]);
+    assert_eq!(checked, vec![p, 2 * p]);
 }
 
 // ==========================================================================

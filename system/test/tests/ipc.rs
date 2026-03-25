@@ -428,9 +428,9 @@ fn channel_config_as_first_message() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn slot_count_is_62() {
-    // Verify the constant matches the design (4096 - 128 header) / 64.
-    assert_eq!(SLOT_COUNT, 62);
+fn slot_count_is_254() {
+    // Verify the constant matches the design (16384 - 128 header) / 64.
+    assert_eq!(SLOT_COUNT, 254);
 }
 
 #[test]

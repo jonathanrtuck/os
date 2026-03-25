@@ -21,7 +21,7 @@ mod page_allocator {
 }
 
 mod paging {
-    pub const PAGE_SIZE: u64 = 4096;
+    pub const PAGE_SIZE: u64 = 16384;
 }
 
 mod sync {

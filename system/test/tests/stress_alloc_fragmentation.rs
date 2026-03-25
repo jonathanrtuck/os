@@ -26,7 +26,7 @@ use core::alloc::{GlobalAlloc, Layout};
 
 mod paging {
     #[allow(dead_code)]
-    pub const PAGE_SIZE: u64 = 4096;
+    pub const PAGE_SIZE: u64 = 16384;
     pub const RAM_SIZE_MAX: u64 = 256 * 1024 * 1024;
 
     pub fn ram_end() -> u64 {
@@ -124,7 +124,7 @@ mod page_allocator;
 #[path = "../../kernel/slab.rs"]
 mod slab;
 
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = 16384;
 const MIN_BLOCK: usize = 16; // size_of::<FreeBlock>() on 64-bit
 
 // ============================================================
@@ -465,12 +465,12 @@ fn stress_alloc_slab_and_mixed() {
     // Size classes: 64, 128, 256, 512, 1024, 2048 bytes.
     // Objects per 4 KiB page: 64, 32, 16, 8, 4, 2.
     let size_classes: [(usize, usize); 6] = [
-        (64, 64),
-        (128, 32),
-        (256, 16),
-        (512, 8),
-        (1024, 4),
-        (2048, 2),
+        (64, PAGE_SIZE / 64),
+        (128, PAGE_SIZE / 128),
+        (256, PAGE_SIZE / 256),
+        (512, PAGE_SIZE / 512),
+        (1024, PAGE_SIZE / 1024),
+        (2048, PAGE_SIZE / 2048),
     ];
 
     let mut all_ptrs: Vec<Vec<*mut u8>> = Vec::new();

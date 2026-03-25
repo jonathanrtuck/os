@@ -1372,49 +1372,55 @@ fn is_range_valid(start: u64, len: u64, check_page: impl Fn(u64) -> bool) -> boo
 
 #[test]
 fn adversarial_partially_mapped_first_page_unmapped() {
-    // Buffer starts on an unmapped page.
-    let result = is_range_valid(0x1000, 0x2000, |page| page != 0x1000);
+    // Buffer starts on an unmapped page (16K-aligned addresses).
+    let p = PAGE_SIZE; // 16 KiB
+    let result = is_range_valid(p, 2 * p, |page| page != p);
     assert!(!result);
 }
 
 #[test]
 fn adversarial_partially_mapped_second_page_unmapped() {
     // First page mapped, second unmapped.
-    let result = is_range_valid(0x1000, 0x2000, |page| page != 0x2000);
+    let p = PAGE_SIZE;
+    let result = is_range_valid(p, 2 * p, |page| page != 2 * p);
     assert!(!result);
 }
 
 #[test]
 fn adversarial_partially_mapped_last_page_unmapped() {
     // All pages mapped except the last.
-    let result = is_range_valid(0x1000, 4 * PAGE_SIZE, |page| page != 0x4000);
+    let p = PAGE_SIZE;
+    let result = is_range_valid(p, 4 * p, |page| page != 4 * p);
     assert!(!result);
 }
 
 #[test]
 fn adversarial_partially_mapped_middle_page_unmapped() {
-    // Pages 0x1000, 0x2000, 0x3000 mapped; 0x2000 unmapped.
-    let result = is_range_valid(0x1000, 3 * PAGE_SIZE, |page| page != 0x2000);
+    // Pages p, 2p, 3p mapped; 2p unmapped.
+    let p = PAGE_SIZE;
+    let result = is_range_valid(p, 3 * p, |page| page != 2 * p);
     assert!(!result);
 }
 
 #[test]
 fn adversarial_partially_mapped_all_mapped() {
-    let result = is_range_valid(0x1000, 3 * PAGE_SIZE, |_| true);
+    let p = PAGE_SIZE;
+    let result = is_range_valid(p, 3 * p, |_| true);
     assert!(result);
 }
 
 #[test]
 fn adversarial_partially_mapped_cross_page_boundary() {
     // Buffer spans a page boundary, second page unmapped.
-    let result = is_range_valid(0x1FFE, 4, |page| page == 0x1000);
-    assert!(!result); // page 0x2000 is not mapped
+    let p = PAGE_SIZE;
+    let result = is_range_valid(p - 2, 4, |page| page == 0);
+    assert!(!result); // second page (at p) is not matched
 }
 
 #[test]
 fn adversarial_partially_mapped_single_byte_unmapped() {
     // Single byte on an unmapped page.
-    let result = is_range_valid(0x5000, 1, |_| false);
+    let result = is_range_valid(5 * PAGE_SIZE, 1, |_| false);
     assert!(!result);
 }
 

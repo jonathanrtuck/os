@@ -43,7 +43,7 @@ use handle::*;
 
 // --- Simulated address space with channel SHM bump allocator ---
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = 16384;
 const CHANNEL_SHM_BASE: u64 = 0x4000_0000;
 const CHANNEL_SHM_END: u64 = 0x8000_0000;
 

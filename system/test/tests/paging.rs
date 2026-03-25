@@ -97,8 +97,8 @@ fn set_ram_end_updates_runtime_value() {
 }
 
 #[test]
-fn page_size_is_4k() {
-    assert_eq!(PAGE_SIZE, 4096);
+fn page_size_is_16k() {
+    assert_eq!(PAGE_SIZE, 16384);
 }
 
 #[test]
@@ -109,11 +109,11 @@ fn desc_page_is_valid_and_table() {
 }
 
 #[test]
-fn pa_mask_preserves_4k_aligned_bits() {
-    // PA_MASK should zero out the lower 12 bits and upper control bits.
-    assert_eq!(PA_MASK & 0xFFF, 0, "lower 12 bits must be zero");
+fn pa_mask_preserves_16k_aligned_bits() {
+    // PA_MASK should zero out the lower 14 bits and upper control bits.
+    assert_eq!(PA_MASK & 0x3FFF, 0, "lower 14 bits must be zero");
     // Bit 47 should be the highest PA bit in the mask.
-    assert_eq!(PA_MASK, 0x0000_FFFF_FFFF_F000);
+    assert_eq!(PA_MASK, 0x0000_FFFF_FFFF_C000);
 }
 
 #[test]
@@ -140,8 +140,8 @@ fn user_va_regions_do_not_overlap() {
 
 #[test]
 fn user_stack_size_is_64k() {
-    assert_eq!(USER_STACK_PAGES, 16);
-    assert_eq!(USER_STACK_VA, USER_STACK_TOP - 16 * PAGE_SIZE);
+    assert_eq!(USER_STACK_PAGES, 4);
+    assert_eq!(USER_STACK_VA, USER_STACK_TOP - 4 * PAGE_SIZE);
 }
 
 #[test]

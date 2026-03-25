@@ -9,7 +9,7 @@
 // --- Stubs (same as buddy.rs) ---
 
 mod paging {
-    pub const PAGE_SIZE: u64 = 4096;
+    pub const PAGE_SIZE: u64 = 16384;
     pub const RAM_SIZE_MAX: u64 = 256 * 1024 * 1024;
 
     pub fn ram_end() -> u64 {
@@ -89,7 +89,7 @@ mod page_allocator;
 
 use memory::Pa;
 
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = 16384;
 
 fn alloc_region(pages: usize) -> (*mut u8, std::alloc::Layout) {
     let size = pages * PAGE_SIZE;

@@ -19,7 +19,7 @@
 
 mod paging {
     #[allow(dead_code)]
-    pub const PAGE_SIZE: u64 = 4096;
+    pub const PAGE_SIZE: u64 = 16384;
     pub const RAM_SIZE_MAX: u64 = 256 * 1024 * 1024;
 
     pub fn ram_end() -> u64 {
@@ -106,7 +106,7 @@ mod sync {
 #[path = "../../kernel/page_allocator.rs"]
 mod page_allocator;
 
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = 16384;
 
 // ============================================================
 // Seeded PRNG (xorshift64) — deterministic, no external deps.

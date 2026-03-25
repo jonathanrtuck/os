@@ -5,7 +5,7 @@
 //! and `checked_vma_end` in the kernel. Tests duplicate the pure arithmetic
 //! to verify correctness against adversarial ELF segment values.
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = 16384;
 
 /// Mirrors `checked_page_count` from process.rs.
 fn checked_page_count(mem_size: u64) -> Option<u64> {
@@ -24,8 +24,7 @@ fn checked_vma_end(base_va: u64, page_count: u64) -> Option<u64> {
 #[test]
 fn page_count_overflow_max_mem_size() {
     // An adversarial ELF segment with mem_size = u64::MAX.
-    // The old unchecked calculation would wrap: (u64::MAX + 4095) → 4094,
-    // then 4094 / 4096 = 0. The fixed version detects the overflow.
+    // The old unchecked calculation would wrap. The fixed version detects the overflow.
     assert!(
         checked_page_count(u64::MAX).is_none(),
         "must reject mem_size = u64::MAX (addition overflow)"
@@ -46,7 +45,7 @@ fn page_count_overflow_near_max() {
 #[test]
 fn page_count_no_overflow_max_safe() {
     // Largest mem_size that does NOT overflow: u64::MAX - PAGE_SIZE + 1.
-    // (u64::MAX - 4095 + 4095) = u64::MAX, / 4096 = 4503599627370495.
+    // (u64::MAX - (PAGE_SIZE-1) + (PAGE_SIZE-1)) = u64::MAX.
     let mem_size = u64::MAX - PAGE_SIZE + 1;
     let result = checked_page_count(mem_size);
 
@@ -56,7 +55,8 @@ fn page_count_no_overflow_max_safe() {
 
 #[test]
 fn page_count_no_overflow_normal_segment() {
-    assert_eq!(checked_page_count(1024 * 1024), Some(256));
+    // 1 MiB / 16 KiB = 64 pages
+    assert_eq!(checked_page_count(1024 * 1024), Some(1024 * 1024 / PAGE_SIZE));
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn vma_end_overflow_addition() {
     let base_va = u64::MAX - PAGE_SIZE + 1;
     let page_count = 1;
 
-    // base_va + 4096 overflows
+    // base_va + PAGE_SIZE overflows
     assert!(
         checked_vma_end(base_va, page_count).is_none(),
         "must reject VMA end that overflows addition"
@@ -102,7 +102,10 @@ fn vma_end_overflow_addition() {
 
 #[test]
 fn vma_end_no_overflow_normal() {
-    assert_eq!(checked_vma_end(0x400000, 256), Some(0x400000 + 256 * 4096));
+    assert_eq!(
+        checked_vma_end(0x400000, 256),
+        Some(0x400000 + 256 * PAGE_SIZE)
+    );
 }
 
 #[test]

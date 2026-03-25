@@ -714,7 +714,7 @@ fn timer_rapid_near_wrap_point() {
 //    (milestone 2: process-lifecycle audit)
 // ============================================================
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = 16384;
 
 fn checked_page_count(mem_size: u64) -> Option<u64> {
     mem_size.checked_add(PAGE_SIZE - 1).map(|n| n / PAGE_SIZE)

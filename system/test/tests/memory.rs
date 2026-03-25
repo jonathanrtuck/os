@@ -7,7 +7,7 @@
 
 // --- Paging constants (from kernel/paging.rs) ---
 
-const PAGE_SIZE: u64 = 4096;
+const PAGE_SIZE: u64 = 16384;
 const DESC_VALID: u64 = 1 << 0;
 const DESC_TABLE: u64 = 1 << 1;
 const DESC_PAGE: u64 = 0b11;
@@ -17,11 +17,11 @@ const ATTRIDX0: u64 = 0 << 2;
 const PXN: u64 = 1 << 53;
 const SH_INNER: u64 = 0b11 << 8;
 const UXN: u64 = 1 << 54;
-const PA_MASK: u64 = 0x0000_FFFF_FFFF_F000;
+const PA_MASK: u64 = 0x0000_FFFF_FFFF_C000;
 
 // --- Memory constants (from kernel/memory.rs) ---
 
-const KERNEL_VA_OFFSET: usize = 0xFFFF_0000_0000_0000;
+const KERNEL_VA_OFFSET: usize = 0xFFFF_FFF0_0000_0000;
 
 // --- Model: virt_to_phys / phys_to_virt ---
 
@@ -55,13 +55,13 @@ fn compute_wx_attrs(
 // --- Model: L3 entry construction (from init()) ---
 
 fn build_l3_entry(pa: u64, attrs: u64) -> u64 {
-    (pa & 0x0000_FFFF_FFFF_F000) | DESC_PAGE | attrs
+    (pa & PA_MASK) | DESC_PAGE | attrs
 }
 
 // --- Model: block attribute extraction (from try_set_kernel_guard_page) ---
 
 fn extract_block_attrs(l2_entry: u64) -> u64 {
-    l2_entry & !(0x0000_FFFF_FFE0_0003u64)
+    l2_entry & !(0x0000_FFFF_FE00_0003u64)
 }
 
 fn build_replicated_l3_entry(block_pa: u64, page_index: u64, block_attrs: u64) -> u64 {
@@ -86,7 +86,7 @@ fn neighbor_index(l3_idx: usize) -> usize {
 #[test]
 fn virt_to_phys_kernel_va() {
     // Standard kernel VA → PA translation.
-    let va = 0xFFFF_0000_4008_0000usize; // kernel VA for PA 0x4008_0000
+    let va = 0xFFFF_FFF0_4008_0000usize; // kernel VA for PA 0x4008_0000
     let pa = virt_to_phys(va);
     assert_eq!(pa, 0x4008_0000);
 }
@@ -96,7 +96,7 @@ fn phys_to_virt_ram_address() {
     // PA in RAM → kernel VA.
     let pa = 0x4008_0000usize;
     let va = phys_to_virt(pa);
-    assert_eq!(va, 0xFFFF_0000_4008_0000);
+    assert_eq!(va, 0xFFFF_FFF0_4008_0000);
 }
 
 #[test]
@@ -129,10 +129,10 @@ fn virt_to_phys_base_offset() {
 
 #[test]
 fn wx_text_section_is_rx() {
-    let text_start = 0xFFFF_0000_4008_0000u64;
-    let text_end = 0xFFFF_0000_4009_0000u64;
-    let rodata_start = 0xFFFF_0000_4009_0000u64;
-    let rodata_end = 0xFFFF_0000_400A_0000u64;
+    let text_start = 0xFFFF_FFF0_4008_0000u64;
+    let text_end = 0xFFFF_FFF0_400C_0000u64;
+    let rodata_start = 0xFFFF_FFF0_400C_0000u64;
+    let rodata_end = 0xFFFF_FFF0_4010_0000u64;
 
     let attrs = compute_wx_attrs(text_start, text_start, text_end, rodata_start, rodata_end);
 
@@ -148,10 +148,10 @@ fn wx_text_section_is_rx() {
 
 #[test]
 fn wx_rodata_section_is_ro_nx() {
-    let text_start = 0xFFFF_0000_4008_0000u64;
-    let text_end = 0xFFFF_0000_4009_0000u64;
-    let rodata_start = 0xFFFF_0000_4009_0000u64;
-    let rodata_end = 0xFFFF_0000_400A_0000u64;
+    let text_start = 0xFFFF_FFF0_4008_0000u64;
+    let text_end = 0xFFFF_FFF0_400C_0000u64;
+    let rodata_start = 0xFFFF_FFF0_400C_0000u64;
+    let rodata_end = 0xFFFF_FFF0_4010_0000u64;
 
     let attrs = compute_wx_attrs(rodata_start, text_start, text_end, rodata_start, rodata_end);
 
@@ -163,13 +163,13 @@ fn wx_rodata_section_is_ro_nx() {
 
 #[test]
 fn wx_data_section_is_rw_nx() {
-    let text_start = 0xFFFF_0000_4008_0000u64;
-    let text_end = 0xFFFF_0000_4009_0000u64;
-    let rodata_start = 0xFFFF_0000_4009_0000u64;
-    let rodata_end = 0xFFFF_0000_400A_0000u64;
+    let text_start = 0xFFFF_FFF0_4008_0000u64;
+    let text_end = 0xFFFF_FFF0_400C_0000u64;
+    let rodata_start = 0xFFFF_FFF0_400C_0000u64;
+    let rodata_end = 0xFFFF_FFF0_4010_0000u64;
 
-    // Data region (below .text)
-    let data_va = 0xFFFF_0000_4007_F000u64;
+    // Data region (below .text, 16K-aligned)
+    let data_va = 0xFFFF_FFF0_4004_0000u64;
     let attrs = compute_wx_attrs(data_va, text_start, text_end, rodata_start, rodata_end);
 
     // Data: writable (no AP_RO), no execute
@@ -181,14 +181,14 @@ fn wx_data_section_is_rw_nx() {
 #[test]
 fn wx_no_page_is_both_writable_and_executable() {
     // W^X invariant: no page should have both W and X permissions.
-    let text_start = 0xFFFF_0000_4008_0000u64;
-    let text_end = 0xFFFF_0000_4009_0000u64;
-    let rodata_start = 0xFFFF_0000_4009_0000u64;
-    let rodata_end = 0xFFFF_0000_400A_0000u64;
+    let text_start = 0xFFFF_FFF0_4008_0000u64;
+    let text_end = 0xFFFF_FFF0_400C_0000u64;
+    let rodata_start = 0xFFFF_FFF0_400C_0000u64;
+    let rodata_end = 0xFFFF_FFF0_4010_0000u64;
 
-    // Check all pages in a 2MB block
-    let block_base = 0xFFFF_0000_4000_0000u64;
-    for i in 0..512u64 {
+    // Check all pages in a 32MB block
+    let block_base = 0xFFFF_FFF0_4000_0000u64;
+    for i in 0..2048u64 {
         let va = block_base + i * PAGE_SIZE;
         let attrs = compute_wx_attrs(va, text_start, text_end, rodata_start, rodata_end);
 
@@ -212,10 +212,10 @@ fn wx_no_page_is_both_writable_and_executable() {
 #[test]
 fn wx_text_end_aligned_up_excludes_boundary() {
     // text_end is align_up'd — the page at text_end is NOT part of .text.
-    let text_start = 0xFFFF_0000_4008_0000u64;
-    let text_end = 0xFFFF_0000_4009_0000u64; // already aligned
-    let rodata_start = 0xFFFF_0000_4009_0000u64;
-    let rodata_end = 0xFFFF_0000_400A_0000u64;
+    let text_start = 0xFFFF_FFF0_4008_0000u64;
+    let text_end = 0xFFFF_FFF0_400C_0000u64; // already aligned
+    let rodata_start = 0xFFFF_FFF0_400C_0000u64;
+    let rodata_end = 0xFFFF_FFF0_4010_0000u64;
 
     // Page at text_end should be .rodata, not .text
     let at_text_end = compute_wx_attrs(text_end, text_start, text_end, rodata_start, rodata_end);
@@ -245,7 +245,7 @@ fn l3_entry_has_page_descriptor_bits() {
 
 #[test]
 fn l3_entry_pa_preserved() {
-    let pa = 0x4008_F000u64; // page-aligned PA
+    let pa = 0x4008_C000u64; // 16K-page-aligned PA
     let attrs = ATTRIDX0 | AF | SH_INNER;
     let entry = build_l3_entry(pa, attrs);
 
@@ -263,7 +263,7 @@ fn l3_entry_pa_strips_low_bits() {
     let extracted_pa = entry & PA_MASK;
     assert_eq!(
         extracted_pa, 0x4008_0000,
-        "low 12 bits of PA must be masked"
+        "low 14 bits of PA must be masked"
     );
 }
 
@@ -288,17 +288,17 @@ fn l3_entry_attrs_preserved() {
 #[test]
 fn block_attrs_strips_pa_and_type() {
     // Construct a synthetic L2 block descriptor:
-    // PA = 0x4020_0000 (2MB-aligned), type = 0b01 (block), attrs = AF | SH_INNER | ATTRIDX0
-    let block_pa = 0x4020_0000u64;
+    // PA = 0x4200_0000 (32MB-aligned), type = 0b01 (block), attrs = AF | SH_INNER | ATTRIDX0
+    let block_pa = 0x4200_0000u64;
     let block_type = 0b01u64;
     let attrs = AF | SH_INNER | ATTRIDX0;
     let l2_entry = block_pa | block_type | attrs;
 
     let extracted = extract_block_attrs(l2_entry);
 
-    // Must not contain PA bits [47:21]
+    // Must not contain PA bits [47:25]
     assert_eq!(
-        extracted & 0x0000_FFFF_FFE0_0000,
+        extracted & 0x0000_FFFF_FE00_0000,
         0,
         "PA bits must be stripped"
     );
@@ -311,7 +311,7 @@ fn block_attrs_strips_pa_and_type() {
 #[test]
 fn block_attrs_preserves_upper_bits() {
     // Upper bits (PXN, UXN) should be preserved.
-    let l2_entry = 0x4020_0000u64 | 0b01 | PXN | UXN | AF | SH_INNER;
+    let l2_entry = 0x4200_0000u64 | 0b01 | PXN | UXN | AF | SH_INNER;
     let extracted = extract_block_attrs(l2_entry);
 
     assert!(extracted & PXN != 0, "PXN must survive extraction");
@@ -320,10 +320,10 @@ fn block_attrs_preserves_upper_bits() {
 
 #[test]
 fn replicated_l3_entry_has_correct_pa() {
-    let block_pa = 0x4020_0000u64;
+    let block_pa = 0x4200_0000u64;
     let block_attrs = AF | SH_INNER | ATTRIDX0;
 
-    for i in 0..512u64 {
+    for i in 0..2048u64 {
         let entry = build_replicated_l3_entry(block_pa, i, block_attrs);
         let expected_pa = block_pa + i * PAGE_SIZE;
         let actual_pa = entry & PA_MASK;
@@ -337,10 +337,10 @@ fn replicated_l3_entry_has_correct_pa() {
 
 #[test]
 fn replicated_l3_entries_are_valid_pages() {
-    let block_pa = 0x4020_0000u64;
+    let block_pa = 0x4200_0000u64;
     let block_attrs = AF | SH_INNER | ATTRIDX0;
 
-    for i in 0..512u64 {
+    for i in 0..2048u64 {
         let entry = build_replicated_l3_entry(block_pa, i, block_attrs);
         assert_eq!(
             entry & 0b11,
@@ -353,7 +353,7 @@ fn replicated_l3_entries_are_valid_pages() {
 
 #[test]
 fn replicated_l3_entries_preserve_block_attrs() {
-    let block_pa = 0x4020_0000u64;
+    let block_pa = 0x4200_0000u64;
     let block_attrs = AF | SH_INNER | PXN | UXN;
 
     let entry = build_replicated_l3_entry(block_pa, 42, block_attrs);
@@ -378,14 +378,14 @@ fn neighbor_of_zero_is_one() {
 fn neighbor_of_nonzero_is_predecessor() {
     assert_eq!(neighbor_index(1), 0);
     assert_eq!(neighbor_index(255), 254);
-    assert_eq!(neighbor_index(511), 510);
+    assert_eq!(neighbor_index(2047), 2046);
 }
 
 #[test]
 fn neighbor_always_in_bounds() {
-    for i in 0..512 {
+    for i in 0..2048 {
         let n = neighbor_index(i);
-        assert!(n < 512, "neighbor of {} must be < 512, got {}", i, n);
+        assert!(n < 2048, "neighbor of {} must be < 2048, got {}", i, n);
     }
 }
 
@@ -398,7 +398,7 @@ fn neighbor_always_in_bounds() {
 #[test]
 fn break_before_make_sequence_model() {
     // Model: L2 entry starts as a valid block descriptor
-    let mut l2_entry: u64 = 0x4020_0000 | 0b01; // block descriptor
+    let mut l2_entry: u64 = 0x4200_0000 | 0b01; // block descriptor
     assert!(l2_entry & DESC_VALID != 0, "initial entry must be valid");
 
     // Step 1: Break — write invalid entry
@@ -463,35 +463,35 @@ fn l2_table_descriptor_format() {
 
 #[test]
 fn l2_index_extraction() {
-    // L2 index = bits [29:21] of PA
-    let pa = 0x4020_0000u64; // 2MB aligned, L2 index 1 within GiB 1
-    let l2_idx = ((pa >> 21) & 0x1FF) as usize;
-    assert_eq!(l2_idx, 1);
+    // L2 index = bits [35:25] of PA (16K granule, 2-level walk)
+    let pa = 0x4200_0000u64; // 32MB aligned, L2 index 33
+    let l2_idx = ((pa >> 25) & 0x7FF) as usize;
+    assert_eq!(l2_idx, 33);
 
-    let pa2 = 0x4000_0000u64; // first 2MB block in GiB 1
-    let l2_idx2 = ((pa2 >> 21) & 0x1FF) as usize;
-    assert_eq!(l2_idx2, 0);
+    let pa2 = 0x4000_0000u64; // RAM start, L2 index 32
+    let l2_idx2 = ((pa2 >> 25) & 0x7FF) as usize;
+    assert_eq!(l2_idx2, 32);
 }
 
 #[test]
 fn l3_index_extraction() {
-    // L3 index = bits [20:12] of PA
-    let pa = 0x4020_3000u64; // page 3 within the 2MB block
-    let l3_idx = ((pa >> 12) & 0x1FF) as usize;
+    // L3 index = bits [24:14] of PA (16K granule)
+    let pa = 0x4200_C000u64; // page 3 within a 32MB block
+    let l3_idx = ((pa >> 14) & 0x7FF) as usize;
     assert_eq!(l3_idx, 3);
 
-    let pa2 = 0x4021_FF000u64; // page 511
-    let l3_idx2 = ((pa2 >> 12) & 0x1FF) as usize;
-    assert_eq!(l3_idx2, 511);
+    let pa2 = 0x41FF_C000u64; // page 2047 within block starting at 0x4000_0000
+    let l3_idx2 = ((pa2 >> 14) & 0x7FF) as usize;
+    assert_eq!(l3_idx2, 2047);
 }
 
 #[test]
-fn l2_l3_indices_cover_2mb_block() {
-    // All 512 pages in a 2MB block map to L3 indices 0..511
-    let block_pa = 0x4020_0000u64;
-    for i in 0..512u64 {
+fn l2_l3_indices_cover_32mb_block() {
+    // All 2048 pages in a 32MB block map to L3 indices 0..2047
+    let block_pa = 0x4200_0000u64;
+    for i in 0..2048u64 {
         let page_pa = block_pa + i * PAGE_SIZE;
-        let l3_idx = ((page_pa >> 12) & 0x1FF) as usize;
+        let l3_idx = ((page_pa >> 14) & 0x7FF) as usize;
         assert_eq!(l3_idx, i as usize, "page {} must map to L3 index {}", i, i);
     }
 }
@@ -502,17 +502,17 @@ fn l2_l3_indices_cover_2mb_block() {
 
 #[test]
 fn kernel_va_offset_is_canonical_upper() {
-    // KERNEL_VA_OFFSET puts addresses in the upper canonical half (bits 63:48 all 1s).
+    // KERNEL_VA_OFFSET puts addresses in the upper canonical half.
     let va = phys_to_virt(0x4000_0000);
     assert!(
-        va >= 0xFFFF_0000_0000_0000,
-        "kernel VA must be in upper half"
+        va >= 0xFFFF_FFF0_0000_0000,
+        "kernel VA must be in TTBR1 range"
     );
 }
 
 #[test]
 fn kernel_va_offset_matches_expected() {
-    assert_eq!(KERNEL_VA_OFFSET, 0xFFFF_0000_0000_0000);
+    assert_eq!(KERNEL_VA_OFFSET, 0xFFFF_FFF0_0000_0000);
 }
 
 // ===========================================
@@ -522,7 +522,7 @@ fn kernel_va_offset_matches_expected() {
 #[test]
 fn block_descriptor_detection() {
     // L2 block descriptor: bits [1:0] = 0b01
-    let block_entry = 0x4020_0000u64 | 0b01 | AF | SH_INNER;
+    let block_entry = 0x4200_0000u64 | 0b01 | AF | SH_INNER;
     assert_eq!(block_entry & 0b11, 0b01, "block descriptor bits");
 
     // L2 table descriptor: bits [1:0] = 0b11
@@ -540,9 +540,9 @@ fn block_descriptor_detection() {
 
 #[test]
 fn block_attr_mask_covers_all_attribute_bits() {
-    // The mask 0x0000_FFFF_FFE0_0003 covers PA[47:21] and type[1:0].
-    // Its complement covers attributes[63:48] and attributes[20:2].
-    let mask = 0x0000_FFFF_FFE0_0003u64;
+    // The mask 0x0000_FFFF_FE00_0003 covers PA[47:25] and type[1:0].
+    // Its complement covers attributes[63:48] and attributes[24:2].
+    let mask = 0x0000_FFFF_FE00_0003u64;
     let attr_bits = !mask;
 
     // Must include upper attribute bits (PXN at 53, UXN at 54)
@@ -566,7 +566,7 @@ fn block_attr_mask_covers_all_attribute_bits() {
 
     // Must NOT include PA bits
     assert_eq!(
-        attr_bits & 0x0000_FFFF_FFE0_0000,
+        attr_bits & 0x0000_FFFF_FE00_0000,
         0,
         "must not include PA bits"
     );

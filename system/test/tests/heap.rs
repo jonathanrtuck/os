@@ -10,7 +10,7 @@ use core::alloc::{GlobalAlloc, Layout};
 
 mod paging {
     #[allow(dead_code)]
-    pub const PAGE_SIZE: u64 = 4096;
+    pub const PAGE_SIZE: u64 = 16384;
 
     pub const fn align_up(addr: usize, align: usize) -> usize {
         (addr + align - 1) & !(align - 1)
@@ -83,7 +83,7 @@ mod sync {
 #[path = "../../kernel/heap.rs"]
 mod heap;
 
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = 16384;
 const MIN_BLOCK: usize = 16; // size_of::<FreeBlock>() on 64-bit
 
 /// Allocate a page-aligned region for use as a test heap.

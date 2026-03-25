@@ -17,7 +17,7 @@ use core::alloc::{GlobalAlloc, Layout};
 
 mod paging {
     #[allow(dead_code)]
-    pub const PAGE_SIZE: u64 = 4096;
+    pub const PAGE_SIZE: u64 = 16384;
 
     pub const fn align_up(addr: usize, align: usize) -> usize {
         (addr + align - 1) & !(align - 1)
@@ -110,7 +110,7 @@ mod sync {
 #[path = "../../kernel/heap.rs"]
 mod heap;
 
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = 16384;
 
 fn alloc_region(size: usize) -> (*mut u8, std::alloc::Layout) {
     let layout = std::alloc::Layout::from_size_align(size, PAGE_SIZE).unwrap();

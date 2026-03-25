@@ -15,7 +15,7 @@
 // --- Stubs ---
 
 mod paging {
-    pub const PAGE_SIZE: u64 = 4096;
+    pub const PAGE_SIZE: u64 = 16384;
     pub const RAM_SIZE_MAX: u64 = 256 * 1024 * 1024;
 
     pub fn ram_end() -> u64 {
@@ -97,7 +97,7 @@ mod sync {
 #[path = "../../kernel/page_allocator.rs"]
 mod page_allocator;
 
-const PAGE_SIZE: usize = 4096;
+const PAGE_SIZE: usize = 16384;
 
 /// Allocate a page-aligned memory region from the host heap.
 fn alloc_region(pages: usize) -> (*mut u8, std::alloc::Layout) {
@@ -305,14 +305,14 @@ fn pa_validation_on_free() {
     const RAM_END: usize = RAM_START + 0x1000_0000; // 256 MiB
 
     fn is_valid_pa(pa: usize) -> bool {
-        pa & 0xFFF == 0 && pa >= RAM_START && pa < RAM_END
+        pa & 0x3FFF == 0 && pa >= RAM_START && pa < RAM_END
     }
 
     // --- Misaligned PAs (should be rejected) ---
     assert!(!is_valid_pa(RAM_START + 1), "off-by-1 is misaligned");
     assert!(!is_valid_pa(RAM_START + 0x800), "half-page is misaligned");
     assert!(
-        !is_valid_pa(RAM_START + 0xFFF),
+        !is_valid_pa(RAM_START + 0x3FFF),
         "one-below-page is misaligned"
     );
     assert!(!is_valid_pa(0x4000_0001), "1 byte into RAM, misaligned");
@@ -337,8 +337,8 @@ fn pa_validation_on_free() {
     assert!(is_valid_pa(RAM_START + 0x0100_0000), "middle of RAM");
 
     // --- Boundary: RAM_START must be page-aligned ---
-    assert_eq!(RAM_START & 0xFFF, 0, "RAM_START must be page-aligned");
-    assert_eq!(RAM_END & 0xFFF, 0, "RAM_END must be page-aligned");
+    assert_eq!(RAM_START & 0x3FFF, 0, "RAM_START must be page-aligned");
+    assert_eq!(RAM_END & 0x3FFF, 0, "RAM_END must be page-aligned");
 }
 
 // Standalone test for the buddy_pa XOR property (algorithm verification).
