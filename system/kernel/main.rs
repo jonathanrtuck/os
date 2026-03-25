@@ -610,6 +610,7 @@ pub extern "C" fn kernel_fault_handler(
 
     // Walk the stack for return addresses (best-effort backtrace).
     let kva = memory::KERNEL_VA_OFFSET as u64;
+
     if (kva..kva + 0x1000_0000).contains(&sp) {
         serial::panic_puts("\n  stack:");
 
