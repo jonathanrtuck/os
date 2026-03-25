@@ -35,6 +35,16 @@ After fix: consistent **8-9ms per frame** across all 64 frames of the animation.
 1. **First-frame dt clamp** (`slide_first_frame` flag): Spring ticks with nominal frame interval on the animation-start frame instead of accumulated idle time (up to 50ms). Prevents ~35% first-frame jump.
 2. **Slide-only dispatch path**: Slide animation no longer sets `changed=true`, avoiding unnecessary `update_cursor` dispatch on every animation frame. Uses `slide_changed` in `needs_scene_update` for its own dedicated publish path (1 scene buffer copy instead of 3).
 
+### Future: per-service scheduling budgets
+
+Current fix (budget=period) is effectively unlimited — fine with 4 cores and ~5 threads. When contention becomes real, the architecture naturally supports **static allocation with dynamic binding**:
+
+- Init creates named scheduling contexts at boot (e.g., "idle" 1ms/500ms, "animation" 8.5ms/8.3ms, "render" 8.5ms/8.3ms).
+- Services use `scheduling_context_borrow`/`return` (syscalls already exist) to switch between contexts based on current workload. Core borrows "animation" on Ctrl+Tab, returns on settle.
+- Budgets are static (init decides at spawn). Binding is dynamic (services switch at runtime). No negotiation protocol needed.
+
+**Open questions for that future:** shared vs separate budgets for core+render during animation; borrow reference counting when multiple animations overlap; defensive timeout if a borrow is never returned; whether the complexity is ever justified given EEVDF fairness without budgets.
+
 ---
 
 ## Content Pipeline Architecture (2026-03-24)
