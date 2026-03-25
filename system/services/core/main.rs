@@ -138,6 +138,8 @@ pub(crate) struct CoreState {
     pub(crate) active_space: u8,
     /// True when the slide spring is animating between spaces.
     pub(crate) slide_animating: bool,
+    /// True on the first frame of a slide animation (clamp dt to frame interval).
+    pub(crate) slide_first_frame: bool,
     /// Current slide offset in millipoints (0 = space 0, fb_width*MPT = space 1).
     pub(crate) slide_offset: scene::Mpt,
     /// Spring physics for slide animation.
@@ -216,6 +218,7 @@ impl CoreState {
             image_height: 0,
             active_space: 0,
             slide_animating: false,
+            slide_first_frame: false,
             slide_offset: 0,
             slide_spring: {
                 let mut s = animation::Spring::new(0.0, 600.0, 49.0, 1.0);
@@ -1326,20 +1329,32 @@ pub extern "C" fn _start() -> ! {
         // Ctrl+Tab sets slide_target to the next space. The spring
         // animates slide_offset toward the target. We update N_STRIP's
         // content_transform each frame via apply_slide.
+        //
+        // The slide does NOT set `changed` — it uses its own publish
+        // path (apply_slide) and compositor signal. Setting `changed`
+        // would trigger an unnecessary update_cursor dispatch.
         if state().slide_animating {
             let s = state();
-            s.slide_spring.tick(frame_dt);
+            // On the first frame, frame_dt includes idle sleep time
+            // (up to 50ms) — advancing the spring by that much causes
+            // a visible first-frame jump. Clamp to one frame interval
+            // for smooth onset; subsequent frames use wall-clock dt.
+            let dt = if s.slide_first_frame {
+                s.slide_first_frame = false;
+                (frame_interval_ns as f32) / 1_000_000_000.0
+            } else {
+                frame_dt
+            };
+            s.slide_spring.tick(dt);
             let new_offset = scene::f32_to_mpt(s.slide_spring.value());
             if new_offset != s.slide_offset {
                 s.slide_offset = new_offset;
                 slide_changed = true;
-                changed = true;
             }
             if s.slide_spring.settled() {
                 s.slide_offset = s.slide_target; // both Mpt, exact match
                 s.slide_animating = false;
                 slide_changed = true;
-                changed = true;
             }
         }
 
@@ -1407,7 +1422,8 @@ pub extern "C" fn _start() -> ! {
         // copy/swap cycle — no full rebuild needed. The clock is just
         // another node to mark_dirty alongside the document nodes.
 
-        let needs_scene_update = changed || text_changed || selection_changed || timer_fired;
+        let needs_scene_update =
+            changed || text_changed || selection_changed || timer_fired || slide_changed;
 
         if needs_scene_update {
             // Prepare clock text if timer fired (needed by any path).

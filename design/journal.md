@@ -4,6 +4,39 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Scheduling budget starvation — 120 Hz animation ran at ~20 Hz (2026-03-24)
+
+**Status: FIXED**
+
+### Symptom
+
+Slide animation (Ctrl+Tab) appeared to run at ~5-10 FPS instead of 120 FPS. Core's main loop requests `sys::wait(handles, 8_333_333)` (8.3ms for 120 Hz). Actual wait times alternated between **~8.9ms** (correct) and **~41ms** (5× late), giving ~20 Hz effective update rate.
+
+### Root cause
+
+All user threads shared a single default scheduling context: **10ms budget per 50ms period** (20% of one core). The core service consumed ~8.3ms per frame — nearly the entire 10ms shared budget. After one animation frame, the budget was exhausted. The kernel's `reprogram_next_deadline` programmed CNTV_TVAL for the scheduler's replenishment deadline (~41ms remaining in the 50ms period) instead of the sys::wait timeout (8.3ms). The core thread waited ~41ms for replenishment before running again.
+
+Kernel instrumentation confirmed: TVAL values on "slow" frames were ~1,000,000 ticks (41ms at 24 MHz) — matching the scheduler replenishment period, not the wait timeout.
+
+### Fix
+
+`kernel/scheduler.rs`: Changed `DEFAULT_BUDGET_NS` from 10ms to 50ms (= period). With budget=period, the budget is effectively unlimited. EEVDF still provides fairness via virtual time. Per-service budgets can be implemented later via the existing `scheduling_context_create`/`scheduling_context_bind` syscalls.
+
+After fix: consistent **8-9ms per frame** across all 64 frames of the animation. No alternating pattern.
+
+### Also fixed: hypervisor IMASK re-arm detection
+
+`~/Sites/hypervisor/Sources/VCPU.swift`: Changed vtimer re-arm detection from ISTATUS-based to CNTV_CVAL-based. The old check (`ISTATUS==0`) missed re-arms where the new timer fired before the hypervisor checked — a fast timer sets ISTATUS=1, making the hypervisor think the guest hadn't re-armed. The new check compares CNTV_CVAL against the value captured at mask time; any change means the guest wrote a new deadline.
+
+### Also fixed: core animation improvements
+
+`services/core/main.rs`:
+
+1. **First-frame dt clamp** (`slide_first_frame` flag): Spring ticks with nominal frame interval on the animation-start frame instead of accumulated idle time (up to 50ms). Prevents ~35% first-frame jump.
+2. **Slide-only dispatch path**: Slide animation no longer sets `changed=true`, avoiding unnecessary `update_cursor` dispatch on every animation frame. Uses `slide_changed` in `needs_scene_update` for its own dedicated publish path (1 scene buffer copy instead of 3).
+
+---
+
 ## Content Pipeline Architecture (2026-03-24)
 
 **Status:** IMPLEMENTED (2026-03-24). Content Region + File Store + PNG decode + registry-based font lookup.

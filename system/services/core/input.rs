@@ -178,6 +178,7 @@ pub(crate) fn process_key_event(
             s.slide_target = scene::f32_to_mpt(target_pt);
             s.slide_spring.set_target(target_pt);
             s.slide_animating = true;
+            s.slide_first_frame = true;
             return KeyAction {
                 changed: true,
                 text_changed: false,
