@@ -79,7 +79,7 @@ Read these before making any design suggestions:
 
 **Phase 4 progress so far:**
 
-- **Blank slate + three-font stack:** Pure black/white palette. JetBrains Mono (mono), Inter (sans), Source Serif 4 (serif) loaded via 9p. On-demand glyph atlas in metal-render (fixes ligature drops).
+- **Blank slate + three-font stack:** Dark desk (#202020) / white page palette. JetBrains Mono (mono), Inter (sans), Source Serif 4 (serif) loaded via 9p. On-demand glyph atlas in metal-render (fixes ligature drops).
 - **Font rendering quality sprint (5 changes to match macOS Core Text):** (1) Outline dilation via symmetric miter-join (macOS formula, Pathfinder coefficients × 1.3 boost). (2) Analytic area coverage rasterizer (exact signed-area trapezoids, not quantized). (3) Device-pixel rasterization (atlas at `font_size_pt × scale_factor`). (4) Subpixel glyph positioning (ShapedGlyph widened 8→16 bytes, 16.16 fixed-point advances). (5) Single `char_w_fx` source of truth (eliminates cursor drift from truncation).
 - **Icon pipeline (2026-03-23):** SVG path parser, stroke expansion engine, arc-to-cubic conversion, build-time SVG→path compilation. Tabler file-text/photo icons in title bar. Pointer cursor redesigned to Tabler proportions.
 - **Page surface + document strip (2026-03-23):** White A4-proportioned page centered on dark desk. Dark text/cursor. Horizontal strip of N document spaces with spring-based slide transition (Ctrl+Tab). Both documents always in scene — no teardown/rebuild on switch.
@@ -89,6 +89,7 @@ Read these before making any design suggestions:
 - **Headless visual testing (2026-03-23):** Hypervisor background mode (`--events` uses `.accessory` activation policy — no focus stealing, no Dock icon). `move x y` event script command. `system/test/imgdiff.py` for numerical screenshot verification (page edges, colored regions, pixel diffs).
 - **Millipoint coordinates (2026-03-23):** 1/1024 pt fixed-point coordinate unit (Mpt/Umpt). Unified animation tick at actual display refresh rate (120 Hz ProMotion). See journal.
 - **Content pipeline (2026-03-24):** PNG decoder in `libraries/drawing/png.rs`. Content Region types in `protocol/content.rs`. `ContentRegionHeader` with 64-entry registry. `Content::InlineImage` (per-frame scene data) vs `Content::Image` (Content Region persistent data via content_id). All 3 render services use registry-based font lookup. File Store (core-only) holds raw file bytes; Content Region (shared) holds fonts + decoded pixels. `test_gen.rs` deleted.
+- **Dark desk + document shadows (2026-03-24):** Desktop background #202020 (was pure black). Drop shadows on page and image documents (blur=64pt, spread=36pt, black). Scene tree restructured: `N_CONTENT → N_TITLE_BAR → N_POINTER` z-order so shadows extend into title bar region. `N_CONTENT` full-height, `N_STRIP` offset below title bar. sRGB-correct 4×4 Bayer dithering in metal-render shadow shader — amplitude scaled per-fragment by sRGB derivative at composited output level (naive ±0.5/255 was 5–13× too small for dark range). See journal.
 - **Deferred:** AA transition softness tuning, italic rendering (in journal).
 - **Next:** Declare v0.3 complete or continue polish.
 
