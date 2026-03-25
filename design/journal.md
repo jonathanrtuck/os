@@ -4,6 +4,247 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Filesystem Design — Layer Map and Key Decisions (2026-03-25)
+
+**Status: IN PROGRESS** — layer map established, several tentative decisions, deep design remaining on snapshot engine, block allocator, and on-disk format.
+
+### Context
+
+v0.3 is complete (2,236 tests). v0.4 focuses on the filesystem — the load-bearing piece beneath undo, clipboard, metadata queries, and the full document lifecycle. This entry records the design space exploration.
+
+### The filesystem stack
+
+Seven layers between raw disk blocks and the `Files` trait that the OS service calls:
+
+```text
+┌──────────────────────────────────────────────┐
+│  Layer 6: FILES API                          │  The Files trait (already designed)
+│  Translates semantic ops → filesystem ops    │
+├──────────────────────────────────────────────┤
+│  Layer 5: SNAPSHOT ENGINE                    │  Per-file + multi-file snapshots
+│  Create, restore, delete, prune              │
+├──────────────────────────────────────────────┤
+│  Layer 4: NAMESPACE                          │  FileId → inode (flat, no directories)
+├──────────────────────────────────────────────┤
+│  Layer 3: INODE / METADATA                   │  Size, timestamps, block pointers
+│  No mimetype (that's core's metadata DB)     │
+├──────────────────────────────────────────────┤
+│  Layer 2: BLOCK ALLOCATOR                    │  Free-space tracking, COW allocation
+├──────────────────────────────────────────────┤
+│  Layer 1: TRANSACTION / JOURNAL              │  Crash consistency via pure COW
+├──────────────────────────────────────────────┤
+│  Layer 0: BLOCK I/O                          │  virtio-blk (hypervisor only)
+└──────────────────────────────────────────────┘
+```
+
+### Decision: No mmap (TENTATIVE)
+
+The original design assumed kernel-mediated memory mapping of files (mmap). After analysis, **explicit reads via IPC** is the better fit for this architecture:
+
+**Why not mmap:**
+
+- Requires a kernel pager — massive complexity (page fault handling, page cache, FS↔kernel coupling, eviction policy). One of the most complex parts of a monolithic kernel.
+- Sole-writer architecture already means editors send write operations through core via IPC. mmap only helps the read path.
+- Documents are bounded in size (text: <1 MiB, images decoded: <50 MiB). Demand paging shines for huge files (databases); for documents, load whole.
+- Video/audio need explicit streaming regardless — mmap doesn't solve it. The scene graph's `Content::Stream` (frame ring in Content Region) is the streaming design.
+- The current architecture already does this: core loads file bytes into shared memory, services get read-only mappings. Extending a proven pattern, not building a new one.
+
+**What this means:**
+
+- The kernel stays simple — no file-aware page fault handling, no page cache
+- The filesystem service is fully decoupled from the kernel (pure userspace)
+- Core calls `Files::read()` / `Files::write()` / `Files::snapshot()` over IPC
+- Core loads file content into Content Region shared memory; editors read from there
+- Upper bound on "load whole" is hundreds of MiB — covers all document types in scope
+- For large media (video): explicit streaming via Content Region frame ring
+
+### Decision: Flat namespace (TENTATIVE)
+
+No directories. FileId(u64) → inode. No path resolution, no directory tree, no rename mechanics.
+
+**Why:** The design (Decision #7) says "users navigate by query, not path." Paths are metadata, not the organizing principle. The `Files` trait already uses FileId, not paths. Directories exist in traditional FSes because paths WERE the organizing principle. We've rejected that. A flat namespace is the honest implementation.
+
+**Implications:**
+
+- Enumeration requires the metadata query system (no `ls /dir/`)
+- Compound documents reference parts by FileId (works naturally)
+- Debugging requires tooling (query the metadata DB, not browse the raw disk)
+- No natural access control grouping (fine — single-user OS)
+- Allocation locality for related files (compound doc parts) handled by allocator policy
+
+### Decision: Mimetype not in filesystem (TENTATIVE)
+
+The filesystem stores bytes, manages blocks, handles snapshots. It does not understand content types. Mimetype belongs in core's metadata layer.
+
+**The argument:** Mimetype describes how bytes should be interpreted — that's content understanding, which the architecture places in core (OS service), not in the storage layer. The filesystem is to mimetype as the compositor is to PNG: wrong layer.
+
+**How it works:**
+
+- At ingest, core determines mimetype from original filename extension + magic bytes + explicit declaration
+- Core stores mimetype in the metadata DB (alongside original filename, user tags, relationships)
+- The metadata DB lives ON the filesystem, getting COW/snapshot protection for free
+- If metadata DB is lost, core reconstructs from content detection (degraded but functional)
+- Mimetype is cached in the metadata DB (not re-derived on every access)
+
+**The inode contains only:** FileId, size, timestamps (created/modified), block pointers. That's it.
+
+**Type hierarchy:** One primary mimetype per file. The type hierarchy (e.g., `text/markdown` degrades to `text/plain`) is a system property in core's type registry, not per-file metadata. The filesystem doesn't participate in type dispatch.
+
+### Decision: Filesystem is a userspace service (TENTATIVE)
+
+Not in-kernel (complex code stays out of TCB per microkernel philosophy). Not part of core (core understands documents, not blocks). A separate userspace service that core communicates with via IPC.
+
+```text
+Core (documents) ──IPC──→ FS service (blocks, inodes, snapshots) ──virtio──→ disk
+```
+
+Performance argument for in-kernel is weak: the hot path in the no-mmap model is shared memory reads (memory speed), not filesystem operations. FS operations (open, snapshot, writeback) are infrequent and tolerate IPC overhead.
+
+### Decision: 16 KiB kernel page size (LEANING)
+
+Current: 4 KiB (boot.S TG0/TG1). Should be 16 KiB to match Apple Silicon:
+
+- macOS/iOS use 16 KiB pages
+- Apple memory controller optimized for 16 KiB
+- 4× TLB coverage per entry
+- Matches the host hardware the hypervisor runs on
+
+**Impact:** Kernel change — boot.S TCR, all page table code, stack sizes, slab allocator, buddy allocator. Worth doing before building the filesystem.
+
+**Independent of block size** in the no-mmap model — page size is kernel memory management, block size is filesystem on-disk format.
+
+### Decision: Block size (LEANING toward 16 KiB + inline data)
+
+Without mmap, block size is purely a filesystem on-disk concern. Options considered:
+
+- Fixed 4 KiB: low waste, high metadata overhead
+- Fixed 16 KiB: aligned with page size, higher waste on small files
+- Variable (ZFS-style): optimal but complex
+- **16 KiB + inline data:** Small files (<~1 KiB) stored directly in the inode. Everything else uses 16 KiB blocks. Simple, aligned, minimal waste for document workloads.
+
+### Decision: Pure COW for crash consistency (LEANING)
+
+Never overwrite a block in place. Write new data to new location, atomically update root pointer. Crash consistency is a structural property, not an additional mechanism. Natural fit: old blocks ARE the undo history. A superblock ring (multiple root pointers) provides extra crash safety for near-zero cost.
+
+### Observation: Documents ≠ Files (1-to-many)
+
+Per Decision #14, ALL documents (even simple ones) are manifests referencing content files. A plain text document = manifest file + content file. The filesystem sees files; core understands the document→manifest→content relationship.
+
+This surfaces the **multi-file snapshot** question: an edit to a compound document may touch multiple files (content + manifest). Undo must restore all of them atomically. The current `Files::snapshot(FileId)` takes one file — needs to be extended to `snapshot(files: &[FileId]) -> SnapshotId` (or equivalent) so the filesystem can atomically snapshot multiple files as a group. The `Files` trait update is deferred to when we design Layer 5 in detail.
+
+### Decision: Snapshot engine — Model D, birth-time + flat extent lists (TENTATIVE)
+
+Four models evaluated: ZFS-style (birth-time + dead lists), Btrfs-style (refcount COW B-trees), Bcachefs-style (key-level versioning), and a hybrid. Model D selected:
+
+**Model D: Birth-time + flat per-file extent lists.** Observation: files are documents — small enough that their extent lists are compact (1–16 entries). No B-tree per file needed.
+
+- Each inode stores an extent list: `[(start_block, count, birth_txg), ...]`
+- Small files: inline data in the inode (no extents needed)
+- Medium files: extent list in the inode directly (up to 8–16 extents)
+- Large files: extent list overflows to a separate block (indirect)
+- **Snapshot** = save the current extent list. Extent lists are small → cheap copy.
+- **Restore** = swap current extent list with snapshot's.
+- **Delete** = walk snapshot's extent list. If extent's `birth_txg > previous_snapshot_txg`, free those blocks. Otherwise, referenced by older snapshot.
+- **Multi-file** = save N extent lists in one transaction.
+
+**Why D over A/B/C:**
+- vs ZFS (A): Same birth-time insight but without dead list complexity. Extent lists are small enough to walk directly (ZFS needs dead lists because trees can be huge).
+- vs Btrfs (B): Avoids unpredictable cascading refcount decrements on delete. High-frequency snapshots would stress Btrfs's weakness.
+- vs Bcachefs (C): Avoids full B-tree walk on snapshot deletion and "trickiest" space accounting.
+
+**Risk:** Novel combination — no existing FS does exactly this. Needs stress testing before committing. Plan: prototype on host, stress test with simulated editing workloads (thousands of snapshots, random writes, aggressive pruning).
+
+**Pruning policy:** Core's concern, not filesystem's. FS provides create/delete/list. Core decides when to prune (likely: keep last N for undo + logarithmic thinning for cross-session history).
+
+### Decision: Build from scratch, informed by prior art (DECIDED)
+
+No existing filesystem matches the requirements (flat namespace + per-file high-frequency snapshots + Rust no_std + pure COW). Evaluated RedoxFS, ZFS, Btrfs, Bcachefs, littlefs — none close enough to adapt. Building from scratch with:
+- ZFS's birth-time insight for snapshot deletion
+- RedoxFS's Rust COW transaction model as reference
+- Superblock ring for crash safety (from ZFS/RedoxFS)
+- Host-side prototype first (file as block device), then port to bare-metal (virtio-blk)
+
+### Decision: 16 KiB page migration — DO FIRST (DECIDED)
+
+Kernel change before filesystem work. Foundation must be correct before building on top. See dedicated section below.
+
+### Open questions for next filesystem session
+
+**Layer 2 (Block Allocator):**
+
+- Bitmap vs. extent tree vs. space maps?
+- Fragmentation management under COW churn
+- Allocator metadata persistence (turtles all the way down)
+
+**On-disk format details:**
+
+- Inode layout (fields, extent list capacity, inline data threshold)
+- Superblock ring size and layout
+- Snapshot metadata storage (per-file snapshot list, global snapshot ID counter)
+- Transaction commit protocol (what exactly is the atomic commit point?)
+- `Files` trait update for multi-file snapshots
+
+**Stress testing plan:**
+
+- Simulated editing workload (rapid snapshots, random writes, concurrent files)
+- Snapshot accumulation + pruning under load
+- Fragmentation measurement after sustained COW churn
+- Crash recovery verification (kill mid-transaction, verify consistency)
+
+---
+
+### 16 KiB Page Migration Specification
+
+**Goal:** Change kernel page granule from 4 KiB to 16 KiB to match Apple Silicon hardware.
+
+**Why:** macOS/iOS use 16K. Apple memory controller optimized for 16K. 4× TLB coverage per entry. The hypervisor runs on Apple Silicon — match the host.
+
+**Key insight: 2-level page tables instead of 4.** With 16K granule and T0SZ=28 (36-bit VA = 64 GiB), only L2+L3 are needed. Current userspace layout tops out at 4 GiB. 64 GiB is massive headroom.
+
+**ARM64 target configuration:**
+
+```
+16K granule, T0SZ=28, T1SZ=28:
+  L2: bits [35:25] → 11 bits → 2048 entries → 16 KiB table
+  L3: bits [24:14] → 11 bits → 2048 entries → 16 KiB table
+  Offset: bits [13:0] → 14 bits → 16 KiB page
+```
+
+TCR_EL1 changes:
+- TG0: current `00` (4K) → `10` (16K). Field is bits [15:14].
+- TG1: current `10` (4K) → `01` (16K). Field is bits [31:30].
+- T0SZ: current `16` → `28`. Reduces user VA from 256 TiB to 64 GiB.
+- T1SZ: current `16` → `28`. Reduces kernel VA from 256 TiB to 64 GiB.
+
+**Files to change:**
+
+| File | Changes |
+|---|---|
+| `paging.rs` | `PAGE_SIZE = 16384`. `PA_MASK` adjust (bits [13:0] now offset). VA layout: review all constants (all within 4 GiB, fine for 64 GiB VA). `USER_STACK_PAGES` may need adjustment (fewer pages for same stack size since each page is 4× larger). |
+| `boot.S` | TCR_EL1: TG0, TG1, T0SZ, T1SZ. Boot tables: `.space 16384` (×6 or fewer — only need L2+L3 with 2-level walk). Boot mapping setup: populate 2-level tables. `.align 12` → `.align 14` for 16K alignment. |
+| `address_space.rs` | Drop `l0_idx`/`l1_idx`. Keep `l2_idx`/`l3_idx` with new shifts: `l2_idx = (va >> 25) & 0x7FF`, `l3_idx = (va >> 14) & 0x7FF`. `map_inner`: 2-level walk. `free_all`: 2-level walk. Root table is L2. Loops: `0..512` → `0..2048`. |
+| `memory.rs` | Kernel boot mapping: alignment to 16K. Section protection boundaries. |
+| `page_allocator.rs` | `RAM_PAGES` shrinks 4× (16384 pages → 4096 pages for 256 MiB). `MAX_ORDER` adjusts. Buddy XOR uses new PAGE_SIZE. |
+| `slab.rs` | 4× more objects per slab page. Consider adding 4096/8192 size classes. |
+| `link.ld` | `ALIGN(4096)` → `ALIGN(16384)`. Stack `.space` sizes. Section alignment. |
+| `exception.S` | Emergency stacks: `4096 * 8` → `16384 * 8` (one 16K page per core). Stack offset arithmetic: `lsl x4, x4, #12` → `lsl x4, x4, #14`. |
+| `process.rs` | ELF segment loading: page alignment. Stack page count (fewer pages, same total size). |
+| `thread.rs` | Kernel thread stack allocation: adjust page count. |
+| `syscall.rs` | `MAX_WRITE_LEN` review. Page alignment masks. `memory_share` checks. |
+| `test/tests/*.rs` | All PAGE_SIZE-dependent tests. TLBI instruction operands if using page-granule invalidation. |
+
+**Verification:** All ~2,236 tests must pass. Boot QEMU + hypervisor. Visual test (screenshot) to confirm display pipeline still works end-to-end.
+
+### Relationship to existing decisions
+
+- **Decision #12 (Undo):** Undo = restore to previous snapshot. Multi-file snapshots needed for compound documents. Sequential undo walks operation log backward.
+- **Decision #14 (Compound documents):** All documents are manifests. COW atomicity via sole-writer + multi-file snapshots.
+- **Decision #16 (Tech foundation):** This journal entry progresses the remaining sub-decision (COW on-disk design). Layer map + tentative decisions narrow the design space.
+- **Decision #7 (File organization):** Flat namespace + metadata DB aligns perfectly. The metadata DB is core's concern, built on top of the flat file store.
+- **Decision #5 (File understanding):** Mimetype moves from filesystem to core's metadata DB. Still OS-managed (core manages it), just not filesystem-stored.
+
+---
+
 ## Image Decoding as a Service Interface (2026-03-24)
 
 **Status:** IMPLEMENTED (2026-03-25) — PNG decoder factored into sandboxed service

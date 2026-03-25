@@ -73,7 +73,7 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Current state (2026-03-25):** v0.3 COMPLETE. 2,236 tests pass.
+**Current state (2026-03-25):** v0.3 COMPLETE. 2,236 tests pass. v0.4 filesystem design IN PROGRESS.
 
 **Content Pipeline Architecture (2026-03-25):** IMPLEMENTED. Three memory regions: File Store (1 MiB, shared with decoder services), Content Region (4 MiB, shared decoded content with registry + free-list allocator + generation-based GC), Scene Graph (per-frame visual primitives). Init allocates both, loads fonts into Content Region + PNG into File Store. Core sends decode requests to sandboxed decoder services via generic IPC protocol (`protocol/decode.rs`). Decoder services read File Store (RO), write decoded BGRA pixels into Content Region (RW). Core manages Content Region registry and allocator. Render services find fonts and images via `protocol::content` registry lookup. Compositor never sees encoded files. Generic decoder harness (`services/decoders/harness.rs`) handles all IPC plumbing; format-specific code is just header + decode functions. See `design/journal.md` "Image Decoding as a Service Interface" entry.
 
@@ -124,9 +124,13 @@ Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Re
 - Decision #14: Mimetype of whole document, manifest format, FS organization of manifests + content files
 - Decision #16: COW on-disk design (deferred via prototype-on-host), snapshot scope (punted)
 
+**v0.4 Filesystem Design (2026-03-25, IN PROGRESS):** See `design/journal.md` "Filesystem Design — Layer Map and Key Decisions" for full details. Seven-layer stack mapped. Tentative decisions: no mmap (core loads files via IPC, editors read shared memory), flat namespace (FileId → inode, no directories), mimetype not in filesystem (core's metadata DB), filesystem as userspace service, 16 KiB kernel pages, 16 KiB blocks + inline data, pure COW crash consistency. Snapshot engine: Model D (birth-time + flat per-file extent lists — novel, needs stress testing). Build from scratch, informed by prior art (ZFS birth-time, RedoxFS Rust COW). Multi-file `snapshot(&[FileId])` needed for compound document atomicity. Open: block allocator, on-disk format details, stress test plan.
+
+**16 KiB page migration (2026-03-25): DONE.** Kernel page granule changed from 4K to 16K. 2-level page tables (L2+L3, T0SZ/T1SZ=28, 64 GiB VA). KERNEL_VA_OFFSET changed to 0xFFFF_FFF0_0000_0000 (T1SZ=28 consequence). Boot tables: 2 L2 roots with 32 MiB block entries. Address space: simplified 4-level→2-level walk. Userspace: 16K section alignment in link.ld, PAGE_SIZE updated in ipc/sys/protocol/virtio libraries. Key bug found and fixed: ELF segments sharing 16K pages caused permission conflicts (last-segment-wins overwrote RX with RO). All 2,236 tests pass.
+
 **Future milestones:**
 
-- v0.4: Undo/redo (needs COW filesystem), system clipboard
+- v0.4: Filesystem + undo/redo, system clipboard
 - v0.5: Rich inline text / multi-style runs
 - v0.6: Video / animated media, JPEG decoder (requires mimetype routing from filesystem layer)
 - Later: BiDi / complex scripts, multi-display
