@@ -73,11 +73,11 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Current state (2026-03-25):** v0.3 Phase 4 (Visual Polish) IN PROGRESS. 2,236 tests pass.
+**Current state (2026-03-25):** v0.3 COMPLETE. 2,236 tests pass.
 
 **Content Pipeline Architecture (2026-03-25):** IMPLEMENTED. Three memory regions: File Store (1 MiB, shared with decoder services), Content Region (4 MiB, shared decoded content with registry + free-list allocator + generation-based GC), Scene Graph (per-frame visual primitives). Init allocates both, loads fonts into Content Region + PNG into File Store. Core sends decode requests to sandboxed decoder services via generic IPC protocol (`protocol/decode.rs`). Decoder services read File Store (RO), write decoded BGRA pixels into Content Region (RW). Core manages Content Region registry and allocator. Render services find fonts and images via `protocol::content` registry lookup. Compositor never sees encoded files. Generic decoder harness (`services/decoders/harness.rs`) handles all IPC plumbing; format-specific code is just header + decode functions. See `design/journal.md` "Image Decoding as a Service Interface" entry.
 
-**Phase 4 progress so far:**
+**Phase 4 (Visual Polish, 2026-03-23–25):**
 
 - **Blank slate + three-font stack:** Dark desk (#202020) / white page palette. JetBrains Mono (mono), Inter (sans), Source Serif 4 (serif) loaded via 9p. On-demand glyph atlas in metal-render (fixes ligature drops).
 - **Font rendering quality sprint (5 changes to match macOS Core Text):** (1) Outline dilation via symmetric miter-join (macOS formula, Pathfinder coefficients × 1.3 boost). (2) Analytic area coverage rasterizer (exact signed-area trapezoids, not quantized). (3) Device-pixel rasterization (atlas at `font_size_pt × scale_factor`). (4) Subpixel glyph positioning (ShapedGlyph widened 8→16 bytes, 16.16 fixed-point advances). (5) Single `char_w_fx` source of truth (eliminates cursor drift from truncation).
@@ -94,8 +94,7 @@ Read these before making any design suggestions:
 - **Content Region allocator + GC (2026-03-25):** `ContentAllocator` in `protocol/content.rs` — free-list with first-fit, coalescing, 16-byte alignment. Generation-based deferred reclamation (`defer_free` + `sweep`) leveraging triple-buffer generation counter. `remove_entry()` for registry cleanup. 36 tests.
 - **Decoder service restructuring (2026-03-25):** PNG decoder factored from in-process library call to sandboxed IPC service. Generic decode protocol (`protocol/decode.rs`): `DecodeRequest`/`DecodeResponse`, header-only flag, format-agnostic. Generic decoder harness (`services/decoders/harness.rs`): config, IPC loop, bounds checks, responses. PNG-specific code: just `header()` + `decode()` functions in `services/decoders/png/png.rs`. `drawing/png.rs` deleted. Core sends IPC requests; decoder writes pixels to shared memory. `ipc::Channel::recv_blocking()` helper for spurious-wakeup-safe synchronous RPC.
 - **PNG decoder hardening (2026-03-25):** CRC32 validation on every chunk (compile-time 256-entry lookup table, IEEE 802.3 polynomial). `CrcMismatch` error variant. Chunk-walking `BitReader` replaces fixed 64-entry IDAT offset arrays — unlimited IDAT chunks with O(1) memory. 162/162 PngSuite conformance (all color types, bit depths, filters, interlacing, palettes, transparency). ASID test isolation bug fixed (real `std::sync::Mutex` stub + `SERIAL` lock + per-test `reset()`). Bad `tbwn0g16` reference regenerated (was bKGD-composited + wrong PIL endianness). 68 PNG tests, 7 ASID tests, 2,236 total.
-- **Deferred:** AA transition softness tuning, italic rendering (in journal).
-- **Next:** Declare v0.3 complete or continue polish. JPEG decoder would validate the generic protocol with a second format.
+- **Deferred to future milestones:** AA transition softness tuning, italic rendering (in journal). JPEG decoder blocked on mimetype-based decoder routing (requires filesystem/metadata layer).
 
 **Completed phases (see git log for details):**
 
@@ -125,11 +124,11 @@ Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Re
 - Decision #14: Mimetype of whole document, manifest format, FS organization of manifests + content files
 - Decision #16: COW on-disk design (deferred via prototype-on-host), snapshot scope (punted)
 
-**Future milestones (from v0.3 spec, now deleted):**
+**Future milestones:**
 
 - v0.4: Undo/redo (needs COW filesystem), system clipboard
 - v0.5: Rich inline text / multi-style runs
-- v0.6: Video / animated media
+- v0.6: Video / animated media, JPEG decoder (requires mimetype routing from filesystem layer)
 - Later: BiDi / complex scripts, multi-display
 
 **System code:** `system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `prototype/files/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
@@ -156,7 +155,7 @@ Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Re
 
 ### Testing requirements
 
-- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,153 tests).
+- `cargo test -- --test-threads=1` in `system/test/` MUST pass (all ~2,236 tests).
 - Any change touching syscall handlers, scheduling, IPC (channel/timer/interrupt/futex), or thread lifecycle MUST be stress tested:
   ```sh
   # Boot QEMU with full display pipeline and send sustained input for 60+ seconds
