@@ -4,6 +4,36 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ---
 
+## Filesystem Bare-Metal Integration — Phase B Complete (2026-03-26)
+
+**Status: COMPLETE** — All 4 steps (B1–B4) implemented. COW filesystem running as a bare-metal userspace service, persisting document edits to disk.
+
+### What was built
+
+| Step | What                                                                                                                                                                                        |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| B1   | virtio-blk driver rewrite: `BlkDevice` struct with `read_block`/`write_block`/`flush`, `VIRTIO_BLK_F_FLUSH` feature negotiation, self-test (read/write/verify cycle)                       |
+| B2   | Hypervisor file-backed virtio-blk backend: `VirtioBlock.swift`, `--drive` flag, `F_FULLFSYNC` on flush for crash consistency on macOS                                                       |
+| B3   | Filesystem service port to bare-metal: `no_std` fs library at `system/libraries/fs/`, `VirtioBlockDevice` with `RefCell` for interior mutability, filesystem service at `system/services/filesystem/` |
+| B4   | Core integration via IPC: `protocol::blkfs` boundary, core sends `MSG_FS_COMMIT` at operation boundaries (after draining pending editor messages), doc buffer shared read-only with filesystem service |
+
+### Design decisions that emerged
+
+- **`VirtioBlockDevice` uses `RefCell` for interior mutability.** `BlockDevice::read_block` takes `&self` (callers shouldn't need `&mut` to read), but virtio I/O mutates internal queue state. `RefCell` provides runtime borrow checking without requiring `&mut` throughout the call chain.
+- **`HashMap` → `BTreeMap` for `no_std` port.** The host prototype used `HashMap`; the bare-metal port uses `BTreeMap` (available in `alloc`, no hasher dependency).
+- **Filesystem service deferred startup in init.** `memory_share` requires the target process to be created but not yet started. Init creates the filesystem process, shares the doc buffer read-only, then starts it. This is Phase 10 in init's boot sequence.
+- **Core sends `MSG_FS_COMMIT` at operation boundaries.** After draining all pending editor messages (insertions, deletions), core signals the filesystem service to snapshot. The filesystem reads the doc buffer from shared memory and writes + commits to disk.
+- **Doc buffer shared read-only between core and filesystem.** No data copying — the filesystem service reads the same shared memory page that core writes to. Core is the sole writer; both filesystem and editor are read-only consumers.
+
+### What remains
+
+- **Mount-on-reboot:** Filesystem formats on first boot but does not yet mount and restore content on subsequent boots.
+- **Undo/redo via snapshots:** COW snapshot infrastructure exists in the fs library but is not yet wired to undo/redo in core.
+- **Multi-document persistence:** Currently persists a single document buffer. Multi-document support requires FileId management in core.
+- **Timestamps:** Inode timestamps not yet populated with real time values.
+
+---
+
 ## Filesystem Host Prototype — Phase A Complete (2026-03-25)
 
 **Status: COMPLETE** — 4,312 lines of Rust, 133 tests, zero warnings. All 7 steps (A1–A7) implemented.
@@ -41,14 +71,9 @@ All tentative decisions from the design session survived implementation without 
 - **Snapshot store as linked blocks.** Serialized blob across a chain of blocks with next-pointers. Grows as snapshot data accumulates. One block suffices for typical use.
 - **Deferred free timing:** blocks freed at txg D reusable when `D <= current_txg - 1` at commit start. Verified: 2-generation gap between free and reuse.
 
-### What's next: Phase B (bare-metal integration)
+### What's next: Phase B — COMPLETE
 
-| Step | What                                                            |
-| ---- | --------------------------------------------------------------- |
-| B1   | virtio-blk driver: add write + flush (currently read-only)      |
-| B2   | Hypervisor: file-backed virtio-blk backend with `F_FULLFSYNC`   |
-| B3   | Filesystem service: port host prototype to bare-metal userspace |
-| B4   | Core integration: `Files` via IPC, `commit()` at `endOperation` |
+Phase B (bare-metal integration) is complete. See "Filesystem Bare-Metal Integration — Phase B Complete (2026-03-26)" above.
 
 ### Deferred to stress testing (build plan layer 3+)
 

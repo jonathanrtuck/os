@@ -12,6 +12,14 @@ KERNEL="${1:?usage: run.sh <kernel-binary>}"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
+DISK_IMG="${SCRIPT_DIR}/test.img"
+
+# Create test disk if it doesn't exist (shared by hypervisor and QEMU paths).
+if [ ! -f "$DISK_IMG" ]; then
+    dd if=/dev/zero of="$DISK_IMG" bs=1M count=1 2>/dev/null
+    echo -n "HELLO VIRTIO BLK" | dd of="$DISK_IMG" bs=1 count=16 conv=notrunc 2>/dev/null
+fi
+
 # Default: native hypervisor with Metal GPU passthrough.
 # Set QEMU=1 to use QEMU instead.
 if [ "${QEMU:-0}" != "1" ]; then
@@ -22,10 +30,9 @@ if [ "${QEMU:-0}" != "1" ]; then
         echo "       or set QEMU=1 to use QEMU instead" >&2
         exit 1
     fi
-    exec "$HYPERVISOR" "$KERNEL" --share "${SCRIPT_DIR}/share"
+    exec "$HYPERVISOR" "$KERNEL" --share "${SCRIPT_DIR}/share" --drive "$DISK_IMG"
 fi
 DTB_FILE="${SCRIPT_DIR}/virt.dtb"
-DISK_IMG="${SCRIPT_DIR}/test.img"
 
 # Detect host display resolution (physical pixels) for Retina rendering.
 # Falls back to 1280x800 if detection fails.
@@ -38,12 +45,6 @@ SCREEN_H="${SCREEN_H:-800}"
 
 # Kill any lingering QEMU that holds our disk image lock.
 pkill -f "qemu-system-aarch64.*${DISK_IMG}" 2>/dev/null && sleep 0.2
-
-# Create test disk if it doesn't exist.
-if [ ! -f "$DISK_IMG" ]; then
-    dd if=/dev/zero of="$DISK_IMG" bs=1M count=1 2>/dev/null
-    echo -n "HELLO VIRTIO BLK" | dd of="$DISK_IMG" bs=1 count=16 conv=notrunc 2>/dev/null
-fi
 
 # Virgl (GPU-accelerated) mode: VIRGL=1 uses a custom QEMU build with
 # virtio-gpu-gl-device backed by virglrenderer + ANGLE (OpenGL ES via Metal).

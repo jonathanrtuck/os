@@ -41,10 +41,12 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │          core→render    └──────────────────────────────┘  │
 │          (scene graph,                                    │
 │           shared mem)          ┌──────────────────┐       │
-│                                │     Drivers      │       │
+│                                │  Drivers +       │       │
+│                                │  Services        │       │
 │                                │ (virtio-blk/     │       │
 │                                │  input/9p/       │       │
-│                                │  console)        │       │
+│                                │  console/        │       │
+│                                │  filesystem)     │       │
 │                                └──────────────────┘       │
 ├───────────────────────────────────────────────────────────┤
 │  Libraries                                                │
@@ -54,6 +56,9 @@ This is Decision #4 applied to implementation: simple connective tissue, complex
 │  ┌─────┐ ┌──────────┐ ┌────────┐ ┌───────────┐ ┌────────┐ │
 │  │ ipc │ │ protocol │ │ render │ │ animation │ │ layout │ │
 │  └─────┘ └──────────┘ └────────┘ └───────────┘ └────────┘ │
+│  ┌────┐                                                    │
+│  │ fs │                                                    │
+│  └────┘                                                    │
 ├───────────────────────────────────────────────────────────┤
 │  Kernel (28 syscalls, see kernel/DESIGN.md)               │  🟢 production
 └───────────────────────────────────────────────────────────┘
@@ -349,6 +354,28 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ---
 
+### 1.9 Filesystem Library (`libraries/fs/`) 🟢
+
+**Goal:** COW filesystem implementation. `no_std` port of the host prototype (`prototype/files/`). Provides the full stack from raw blocks to the `Files` trait.
+
+**Status:** `BlockDevice` trait, superblock ring (16-slot with CRC32), sorted free-extent allocator with coalescing, inodes (16 KiB blocks, inline data, extent lists with birth_txg), COW write path with two-flush commit protocol, per-file and multi-file snapshots, `Files` trait with `FileId`/`SnapshotId` newtypes.
+
+**What's foundational:**
+
+- **`BlockDevice` trait.** Abstract block I/O — implemented by `VirtioBlockDevice` (bare-metal) and `FileBlockDevice`/`MemoryBlockDevice` (host tests).
+- **Pure COW crash consistency.** Two-flush commit protocol: write all data blocks, flush, write superblock, flush. No journal needed.
+- **Flat namespace.** `FileId` → inode block. No directories.
+- **`Files` trait.** Object-safe (`dyn Files`) with explicit `commit()`. Full lifecycle: create, read, write, delete, snapshot, restore.
+
+**What's scaffolding:**
+
+- **`BTreeMap` for inode table and allocator.** `HashMap` from the host prototype replaced with `BTreeMap` for `no_std` compatibility.
+- **COW-entire-file** for extent-based writes. O(file_size) per write. Acceptable for document workloads. Per-block COW is a future optimization.
+
+**No restrictions imposed.** `no_std` library with `alloc` dependency. No syscalls, no I/O — callers provide a `BlockDevice` implementation.
+
+---
+
 ## 2. Platform Services
 
 ### 2.1 Init / Proto-OS-Service (`services/init/`) 🟡
@@ -444,19 +471,44 @@ Notification for both: `channel_signal` syscall wakes the consumer from `sys::wa
 
 ### 2.4 Virtio Block Driver (`services/drivers/virtio-blk/`) 🟢
 
-**Goal:** Read sectors from a virtual block device.
+**Goal:** Full block device I/O over virtio-blk transport.
 
-**Status:** 211 lines. Reads sector 0, prints first 16 bytes. Interrupt-driven.
+**Status:** `BlkDevice` struct with `read_block`, `write_block`, and `flush` methods. Negotiates `VIRTIO_BLK_F_FLUSH` feature for persistent writes. Self-test on init (write → read-back → verify cycle). Interrupt-driven.
 
 **What's foundational:**
 
 - 3-descriptor chain pattern (header → data → status). Correct virtio-blk protocol.
 - Same interrupt-driven pattern as GPU driver (wait → ack).
+- `BlkDevice` struct encapsulates device state (MMIO base, virtqueue, DMA buffers).
+- Feature negotiation: `VIRTIO_BLK_F_FLUSH` enables cache flush commands for crash consistency.
+- Self-test validates read/write correctness at driver startup.
+
+**Note:** Init now spawns the filesystem service (not the standalone blk driver) for `device_id=2`. The standalone driver remains for direct block I/O testing.
+
+---
+
+### 2.4b Filesystem Service (`services/filesystem/`) 🟢
+
+**Goal:** COW filesystem over virtio-blk, persists document edits to disk.
+
+**Status:** Owns the virtio-blk device. Formats the disk on first boot, mounts the filesystem, and runs an IPC commit loop with core. Uses the `fs` library (`system/libraries/fs/`) — a `no_std` port of the host prototype.
+
+**What's foundational:**
+
+- **`VirtioBlockDevice`** implements the `BlockDevice` trait over virtio transport. Uses `RefCell` for interior mutability (`read_block` takes `&self` but virtio I/O mutates internal queue state).
+- **IPC commit loop:** Receives `MSG_FS_COMMIT` from core, reads the doc buffer from shared memory (read-only mapping), writes content to the filesystem via the `Files` trait, and commits (two-flush protocol for crash consistency).
+- **Init orchestration (Phase 10):** Init creates the filesystem process, shares the doc buffer read-only via `memory_share` (requires unstarted process), creates a core↔filesystem channel, then starts it.
 
 **What's scaffolding:**
 
-- Reads one sector and exits. No block device abstraction (read/write at arbitrary LBAs).
-- No filesystem uses it yet.
+- Single-document persistence. Only one FileId managed.
+- Formats on every boot (no mount-on-reboot yet).
+
+**What's missing:**
+
+- **Mount-on-reboot:** Read back persisted content on subsequent boots.
+- **Undo/redo:** Snapshot infrastructure exists in the fs library but is not wired to core.
+- **Multi-document support:** Requires FileId management in core.
 
 ---
 
@@ -563,13 +615,16 @@ These are the things that limit what can be built above the kernel today, ordere
 
 ---
 
-### 3.2 No Filesystem
+### 3.2 ~~No Filesystem~~ Partially Resolved
 
-**The problem:** All binaries and data are embedded in init via `include_bytes!`. No way to load resources at runtime. Changing anything requires a full rebuild.
+**Partially resolved:** COW filesystem service running (`services/filesystem/`). Document edits are persisted to disk via virtio-blk with two-flush crash consistency. The `fs` library (`libraries/fs/`) provides the full filesystem stack: superblock ring, free-extent allocator, inodes, snapshots, and the `Files` trait. Core sends `MSG_FS_COMMIT` at operation boundaries; filesystem reads the doc buffer from shared memory and commits.
 
-**Why it matters:** Font files, configuration, documents — everything the OS is designed around — can't be loaded. This doesn't block library-level work (embed data as `include_bytes!`), but blocks any system-level feature that involves opening files.
+**Still missing:**
 
-**Blocked on:** Decision #16 (COW filesystem on-disk design). Filesystem is a userspace service; kernel provides COW/VM mechanics. On-disk format not yet designed.
+- **Mount-on-reboot:** Filesystem formats on first boot but does not yet restore content on subsequent boots.
+- **Undo/redo via snapshots:** COW snapshot infrastructure exists but is not wired to undo/redo in core.
+- **Multi-document persistence:** Currently single-document only.
+- **Binaries and fonts** are still embedded via `include_bytes!` / loaded via 9p. Filesystem is only used for document persistence.
 
 ---
 
@@ -741,5 +796,5 @@ Ordered by what unblocks the most, building the happy path first:
 7. ~~**Editor process separation**~~ — **Done.** Text editor process (`user/text-editor/`) receives input events from core, sends write requests back. Core is sole writer to document state. Demonstrates Decision #9 (editors as read-only consumers). Four processes in the display pipeline: render service, input driver, text editor, core.
 8. ~~**Read-only document mapping**~~ — **Done.** Text editor has a hardware-enforced read-only shared memory mapping of the document buffer. Reads content for cursor positioning and context-aware editing. All writes go through IPC to core (sole writer).
 9. **Text layout** — connective tissue between fonts, drawing, and the rendering pipeline. This is an _interface_ question (gets the design treatment), not just an implementation. How does text flow? How does the editor specify what to render? Must be simple to reason about. Currently monospace-only layout helpers live in core's `scene_state.rs`.
-10. **Filesystem service** (§3.2) — blocked on Decision #16. Files interface designed (12 operations), macOS prototype validated at `prototype/files/` with 21 passing tests. **Partially unblocked:** virtio-9p driver (§2.6) provides runtime file loading from host filesystem during prototyping. Font loading working end-to-end.
+10. ~~**Filesystem service**~~ (§3.2) — **Partially resolved.** COW filesystem service running (`services/filesystem/`), persists document edits via two-flush commit. `fs` library (`libraries/fs/`) ported from host prototype. Still missing: mount-on-reboot, undo via snapshots, multi-document support. 9p driver still used for font/image loading.
 11. ~~**Wait timeout**~~ — **Done.** For finite timeouts (0 < timeout < u64::MAX), `sys_wait` creates an internal timer, adds it to the wait set with a sentinel index. If the timer fires first, returns `WouldBlock`. Timer cleanup: immediate on non-blocked paths; deferred to next `wait` call for the blocked→woken path (stored on thread struct).

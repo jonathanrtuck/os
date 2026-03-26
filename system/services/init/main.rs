@@ -173,6 +173,7 @@ fn setup_render_pipeline(
     content_region: Option<(u64, u32)>, // (content_pa, content_size) — Content Region
     file_store: Option<(u64, u32, u32)>, // (file_store_pa, png_offset, png_len) — File Store
     rtc_pa: u64,                        // PL031 RTC physical address (0 = not found)
+    fs_info: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)>, // filesystem service
     next_channel: &mut usize,
 ) -> (sys::ProcessHandle, sys::ProcessHandle) {
     sys::print(b"     setting up ");
@@ -812,14 +813,77 @@ fn setup_render_pipeline(
     }
 
     // -----------------------------------------------------------------------
-    // Phase 10: Start processes.
-    // Input drivers first, then decoder, then editor, then core.
+    // Phase 10: Core ↔ Filesystem channel.
+    //
+    // Core handle layout addition:
+    //   handle 5 = core ↔ filesystem service
+    //   handle 6+ = additional input devices (shifted from 5+)
+    // -----------------------------------------------------------------------
+    if let Some((fs_proc, _fs_ch, fs_ch_idx, fs_pa, fs_irq)) = fs_info {
+        sys::print(b"     creating core\xE2\x86\x94filesystem channel\n");
+
+        // Share document buffer with filesystem service (read-only).
+        let fs_doc_va =
+            sys::memory_share(fs_proc, doc_pa, DOC_BUF_PAGES, true).unwrap_or_else(|_| {
+                sys::print(b"init: memory_share (fs doc) failed\n");
+                sys::exit();
+            });
+
+        // Send device config to filesystem service (init channel).
+        let fs_ch_obj = init_channel(fs_ch_idx);
+        let dev_config = DeviceConfig {
+            mmio_pa: fs_pa,
+            irq: fs_irq,
+            _pad: 0,
+        };
+        let dev_msg = unsafe { ipc::Message::from_payload(MSG_DEVICE_CONFIG, &dev_config) };
+        fs_ch_obj.send(&dev_msg);
+
+        // Send filesystem config (doc buffer VA).
+        let fs_config = protocol::blkfs::FsConfig {
+            doc_va: fs_doc_va as u64,
+            doc_capacity: DOC_BUF_CAPACITY,
+            _pad: 0,
+        };
+        let fs_cfg_msg =
+            unsafe { ipc::Message::from_payload(protocol::blkfs::MSG_FS_CONFIG, &fs_config) };
+        fs_ch_obj.send(&fs_cfg_msg);
+
+        // Create core ↔ filesystem channel.
+        let (cf_a, cf_b) = sys::channel_create().unwrap_or_else(|_| {
+            sys::print(b"init: channel_create (core-fs) failed\n");
+            sys::exit();
+        });
+        *next_channel += 1;
+
+        // Endpoint A → core (handle 5 = FS_HANDLE in core).
+        sys::handle_send(core_proc, cf_a.0).unwrap_or_else(|_| {
+            sys::print(b"init: handle_send (core-fs A) failed\n");
+            sys::exit();
+        });
+        // Endpoint B → filesystem service (handle 1 in fs's table).
+        sys::handle_send(fs_proc, cf_b.0).unwrap_or_else(|_| {
+            sys::print(b"init: handle_send (core-fs B) failed\n");
+            sys::exit();
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 11: Start processes.
+    // Input drivers first, then decoder, then filesystem, then editor, then core.
     // Render service is already running (started in Phase 4).
     // Decoder must start before core (core sends decode request at boot).
+    // Filesystem must start before core (core may send commit at boot).
     // -----------------------------------------------------------------------
     if let Some(dec_proc) = decoder_proc {
         sys::print(b"     starting png-decode\n");
         start_process(dec_proc, b"png-decode");
+        sys::yield_now();
+    }
+
+    if let Some((fs_proc, _, _, _, _)) = fs_info {
+        sys::print(b"     starting filesystem\n");
+        start_process(fs_proc, b"filesystem");
         sys::yield_now();
     }
 
@@ -926,6 +990,7 @@ pub extern "C" fn _start() -> ! {
         [(sys::ProcessHandle(0), 0, 0, 0); MAX_INPUT_DEVICES];
     let mut input_count: usize = 0;
     let mut p9: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)> = None; // (proc, ch, ch_idx, pa, irq)
+    let mut fs_dev: Option<(sys::ProcessHandle, sys::ChannelHandle, usize, u64, u32)> = None; // filesystem service
     let mut rtc_pa: u64 = 0; // PL031 RTC physical address (0 = not found)
                              // Phase 1: Spawn a driver for each device in the manifest.
     let actual = if device_count > 8 { 8 } else { device_count };
@@ -977,7 +1042,7 @@ pub extern "C" fn _start() -> ! {
         };
 
         let elf: &[u8] = match dev_id {
-            VIRTIO_DEVICE_BLK => VIRTIO_BLK_ELF,
+            VIRTIO_DEVICE_BLK => FILESYSTEM_ELF,
             VIRTIO_DEVICE_CONSOLE => VIRTIO_CONSOLE_ELF,
             VIRTIO_DEVICE_GPU => {
                 if use_virgl {
@@ -1054,8 +1119,12 @@ pub extern "C" fn _start() -> ! {
                 // Defer 9p startup — font read must complete before compositor.
                 p9 = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq));
             }
+            VIRTIO_DEVICE_BLK => {
+                // Defer filesystem startup — needs doc buffer sharing before start.
+                fs_dev = Some((proc_h, ch_h, channel_idx, dev_pa, dev_irq));
+            }
             _ => {
-                // Start simple drivers (blk, console) immediately.
+                // Start simple drivers (console) immediately.
                 let ch = init_channel(channel_idx);
                 let config = DeviceConfig {
                     mmio_pa: dev_pa,
@@ -1068,15 +1137,8 @@ pub extern "C" fn _start() -> ! {
                 ch.send(&msg);
 
                 start_process(proc_h, b"driver");
-                let name = match dev_id {
-                    VIRTIO_DEVICE_BLK => "blk",
-                    VIRTIO_DEVICE_CONSOLE => "console",
-                    _ => "?",
-                };
 
-                sys::print(b"     spawned driver: ");
-                sys::print(name.as_bytes());
-                sys::print(b"\n");
+                sys::print(b"     spawned driver: console\n");
             }
         }
     }
@@ -1435,6 +1497,7 @@ pub extern "C" fn _start() -> ! {
             content_region_info,
             file_store_info,
             rtc_pa,
+            fs_dev,
             &mut next_channel,
         );
 

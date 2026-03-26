@@ -634,6 +634,47 @@ pub mod fs {
     pub const MSG_FS_READ_RESPONSE: u32 = 41;
 }
 
+// ── blkfs: core <-> filesystem service ───────────────────────────────
+
+pub mod blkfs {
+    /// Config message: init → filesystem service.
+    /// Provides the shared document buffer VA for read-only access.
+    pub const MSG_FS_CONFIG: u32 = 70;
+    /// Commit request: core → filesystem service.
+    /// Filesystem reads doc content from shared buffer, writes to file, commits.
+    pub const MSG_FS_COMMIT: u32 = 71;
+    /// Ready signal: filesystem → core (via init channel, not direct).
+    /// Sent after format/mount is complete and a document file is created.
+    pub const MSG_FS_READY: u32 = 72;
+
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct FsConfig {
+        /// VA of the shared document buffer (read-only for filesystem).
+        pub doc_va: u64,
+        /// Document buffer capacity in bytes (content area, excluding header).
+        pub doc_capacity: u32,
+        pub _pad: u32,
+    }
+    const _: () = assert!(core::mem::size_of::<FsConfig>() <= 60);
+
+    #[derive(Clone, Copy, Debug)]
+    pub enum Message {
+        FsConfig(FsConfig),
+        FsCommit,
+        FsReady,
+    }
+
+    pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
+        match msg_type {
+            MSG_FS_CONFIG => Some(Message::FsConfig(unsafe { crate::decode_payload(payload) })),
+            MSG_FS_COMMIT => Some(Message::FsCommit),
+            MSG_FS_READY => Some(Message::FsReady),
+            _ => None,
+        }
+    }
+}
+
 // ── virgl: Virgl3D protocol constants and command encoding ───────────
 
 pub mod virgl;

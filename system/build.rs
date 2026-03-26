@@ -38,6 +38,7 @@ struct CargoLibOutput {
 
 /// ELFs that init embeds (must be a subset of PROGRAMS names).
 const INIT_EMBEDDED: &[(&str, &str)] = &[
+    ("filesystem", "FILESYSTEM_ELF"),
     ("virtio-blk", "VIRTIO_BLK_ELF"),
     ("virtio-console", "VIRTIO_CONSOLE_ELF"),
     ("virtio-input", "VIRTIO_INPUT_ELF"),
@@ -56,6 +57,7 @@ const INIT_EMBEDDED: &[(&str, &str)] = &[
 /// ORDER MATTERS: fuzz-helper must be before fuzz (fuzz embeds it).
 const PROGRAMS: &[(&str, &str, bool, bool)] = &[
     ("echo", "user/echo", false, false),
+    ("filesystem", "services/filesystem", true, false),
     ("virtio-blk", "services/drivers/virtio-blk", true, false),
     (
         "virtio-console",
@@ -161,6 +163,11 @@ fn main() {
 
     rustc_rlib(&rustc, &ipc_src, &ipc_rlib, "ipc", &[("sys", &sys_rlib)]);
 
+    let fs_src = manifest_dir.join("libraries/fs/lib.rs");
+    let fs_rlib = out_dir.join("libfs.rlib");
+
+    rustc_rlib(&rustc, &fs_src, &fs_rlib, "fs", &[]);
+
     // Step 1b: Build Cargo-managed libraries (libraries with external deps).
     // These use `cargo build` to resolve dependency graphs, then we link the
     // resulting rlibs alongside hand-compiled libraries.
@@ -225,6 +232,9 @@ fn main() {
         if name == "core" {
             externs.push(("animation", animation_rlib.clone()));
             externs.push(("layout", layout_rlib.clone()));
+        }
+        if name == "filesystem" {
+            externs.push(("fs", fs_rlib.clone()));
         }
 
         // Fuzz embeds fuzz-helper (generate embedded RS, same pattern as init).
@@ -327,6 +337,21 @@ fn main() {
         );
     }
     println!("cargo:rerun-if-changed={}", ipc_src.display());
+    println!("cargo:rerun-if-changed={}", fs_src.display());
+    for fs_mod in &[
+        "block.rs",
+        "crc32.rs",
+        "alloc_mod.rs",
+        "superblock.rs",
+        "inode.rs",
+        "snapshot.rs",
+        "filesystem.rs",
+    ] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            manifest_dir.join("libraries/fs").join(fs_mod).display()
+        );
+    }
     println!("cargo:rerun-if-changed={}", protocol_src.display());
     println!("cargo:rerun-if-changed={}", animation_src.display());
     println!("cargo:rerun-if-changed={}", layout_src.display());

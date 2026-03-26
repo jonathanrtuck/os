@@ -9,10 +9,11 @@ Platform services that run as userspace processes. Each is a `#![no_std]` ELF bi
 | `drivers/metal-render/`   | Metal render service: native Metal GPU via hypervisor (default, 4x MSAA)         | Scaffolding |
 | `drivers/cpu-render/`     | CPU render service: CpuBackend + virtio-gpu 2D present (QEMU fallback)           | Scaffolding |
 | `drivers/virgil-render/`  | GPU render service: Gallium3D via virglrenderer (virgl-capable QEMU)             | Scaffolding |
-| `drivers/virtio-blk/`     | Block device driver (reads sector 0 as proof of life)                            | Scaffolding |
+| `drivers/virtio-blk/`     | Block device driver: read/write/flush with VIRTIO_BLK_F_FLUSH negotiation (self-test, standalone) | Scaffolding |
 | `drivers/virtio-console/` | Console driver (placeholder)                                                     | Scaffolding |
 | `drivers/virtio-input/`   | Keyboard + tablet driver: reads evdev events, forwards to core via IPC           | Scaffolding |
 | `drivers/virtio-9p/`      | Host filesystem passthrough: 9P2000.L protocol, loads fonts/images/icons         | Scaffolding |
+| `filesystem/`             | COW filesystem service: owns virtio-blk device, format/mount, IPC commit loop with core | Scaffolding |
 | `decoders/png/`           | PNG decoder service: sandboxed, uses generic decoder harness                     | Scaffolding |
 
 ## Service Categories

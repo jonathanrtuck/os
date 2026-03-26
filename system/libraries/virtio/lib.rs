@@ -166,22 +166,25 @@ impl Device {
     }
     /// Perform feature negotiation. Accepts no device-specific features.
     pub fn negotiate(&self) -> bool {
+        self.negotiate_features(0).0
+    }
+    /// Perform feature negotiation, requesting specific device features.
+    ///
+    /// Returns `(success, accepted)` where `accepted` is the intersection of
+    /// `requested` and the device-offered features. Drivers check `accepted`
+    /// to determine which optional features are available.
+    pub fn negotiate_features(&self, requested: u64) -> (bool, u64) {
         self.reset();
         self.write(REG_STATUS, STATUS_ACKNOWLEDGE);
 
         let status = STATUS_ACKNOWLEDGE | STATUS_DRIVER;
 
         self.write(REG_STATUS, status);
-        // Read device features (word 0 only).
-        self.write(REG_DEVICE_FEATURES_SEL, 0);
 
-        let _features = self.read(REG_DEVICE_FEATURES);
+        let offered = self.read_device_features();
+        let accepted = offered & requested;
 
-        // Accept no features.
-        self.write(REG_DRIVER_FEATURES_SEL, 0);
-        self.write(REG_DRIVER_FEATURES, 0);
-        self.write(REG_DRIVER_FEATURES_SEL, 1);
-        self.write(REG_DRIVER_FEATURES, 0);
+        self.write_driver_features(accepted);
 
         let status = status | STATUS_FEATURES_OK;
 
@@ -190,10 +193,10 @@ impl Device {
         if self.read(REG_STATUS) & STATUS_FEATURES_OK == 0 {
             self.write(REG_STATUS, STATUS_FAILED);
 
-            return false;
+            return (false, 0);
         }
 
-        true
+        (true, accepted)
     }
     /// Notify the device that virtqueue `index` has new buffers.
     ///

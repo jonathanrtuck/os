@@ -86,8 +86,9 @@ const DECODER_HANDLE: sys::ChannelHandle = sys::ChannelHandle(4);
 pub(crate) const DOC_HEADER_SIZE: usize = 64;
 const EDITOR_HANDLE: sys::ChannelHandle = sys::ChannelHandle(3);
 const FONT_SIZE: u32 = 18;
+const FS_HANDLE: sys::ChannelHandle = sys::ChannelHandle(5);
 const INPUT_HANDLE: sys::ChannelHandle = sys::ChannelHandle(1);
-const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(5);
+const INPUT2_HANDLE: sys::ChannelHandle = sys::ChannelHandle(6);
 // Keycodes (Linux evdev).
 const KEY_BACKSPACE: u16 = 14;
 const KEY_TAB: u16 = 15;
@@ -768,6 +769,13 @@ pub extern "C" fn _start() -> ! {
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(2), ipc::PAGE_SIZE, 0) };
     let editor_ch =
         unsafe { ipc::Channel::from_base(protocol::channel_shm_va(3), ipc::PAGE_SIZE, 0) };
+    let fs_ch = unsafe {
+        ipc::Channel::from_base(
+            protocol::channel_shm_va(FS_HANDLE.0 as usize),
+            ipc::PAGE_SIZE,
+            0,
+        )
+    };
     let has_input2 = match sys::wait(&[INPUT2_HANDLE.0], 0) {
         Ok(_) => true,
         Err(sys::SyscallError::WouldBlock) => true,
@@ -1260,6 +1268,16 @@ pub extern "C" fn _start() -> ! {
                 }
                 _ => {}
             }
+        }
+
+        // Persist to filesystem after text changes (operation boundary).
+        // All pending editor messages have been drained — this is the natural
+        // batch point. The filesystem service reads the doc buffer directly
+        // from shared memory and writes + commits to disk.
+        if text_changed {
+            let commit_msg = ipc::Message::new(protocol::blkfs::MSG_FS_COMMIT);
+            fs_ch.send(&commit_msg);
+            let _ = sys::channel_signal(FS_HANDLE);
         }
 
         // Update scroll offset for cursor/text changes.

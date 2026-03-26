@@ -14,6 +14,7 @@ Shared `#![no_std]` libraries used by userspace services and programs.
 | `layout/`    | Unified text layout engine: one function for mono + proportional via `FontMetrics` trait               | Foundational |
 | `render/`    | Render backend (CpuBackend, scene tree walk, incremental rendering, damage, frame scheduler)           | Foundational |
 | `scene/`     | Scene graph types, triple-buffered shared memory layout, writer/reader APIs for core ↔ render services | Foundational |
+| `fs/`        | COW filesystem: BlockDevice trait, superblock ring, free-extent allocator, inodes, snapshots, two-flush commit | Foundational |
 | `link.ld`    | Linker script for all userspace ELF binaries (code at 4 MiB, stack at 2 GiB)                           | Foundational |
 
 ## Conventions
