@@ -649,6 +649,14 @@ pub extern "C" fn _start() -> ! {
                     }
                 }
 
+                MSG_DOC_DELETE_SNAPSHOT => {
+                    if let Some(Message::DocDeleteSnapshot(d)) = decode(msg.msg_type, &msg.payload)
+                    {
+                        // Fire-and-forget: best-effort cleanup, no response.
+                        let _ = store.delete_snapshot(fs::SnapshotId(d.snapshot_id));
+                    }
+                }
+
                 _ => {}
             }
         }

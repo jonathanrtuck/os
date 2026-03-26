@@ -16,8 +16,8 @@ use alloc::{
     vec,
     vec::Vec,
 };
-use fs::{FileId, Files, FsError, SnapshotId};
 
+use fs::{FileId, Files, FsError, SnapshotId};
 use serialize::{decode_catalog, encode_catalog};
 
 /// Magic number for the catalog binary format ("CATL").
@@ -208,9 +208,7 @@ impl Store {
             .catalog
             .get_mut(&file.0)
             .ok_or(StoreError::NotFound(file))?;
-        entry
-            .attributes
-            .insert(key.to_string(), value.to_string());
+        entry.attributes.insert(key.to_string(), value.to_string());
         Ok(())
     }
 
@@ -266,6 +264,11 @@ impl Store {
         self.fs.restore(snapshot)?;
         self.reload_catalog()?;
         Ok(())
+    }
+
+    /// Delete a snapshot, freeing its blocks.
+    pub fn delete_snapshot(&mut self, snapshot: SnapshotId) -> Result<(), StoreError> {
+        self.fs.delete_snapshot(snapshot).map_err(StoreError::Fs)
     }
 
     /// Commit: write catalog to disk, then commit the filesystem.

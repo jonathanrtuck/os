@@ -34,6 +34,8 @@ pub const MSG_DOC_CREATE_RESULT: u32 = 91;
 pub const MSG_DOC_SNAPSHOT_RESULT: u32 = 92;
 /// Restore result: document service → core.
 pub const MSG_DOC_RESTORE_RESULT: u32 = 93;
+/// Delete snapshot request: core → document service (fire-and-forget).
+pub const MSG_DOC_DELETE_SNAPSHOT: u32 = 94;
 
 // ── Payload structs ──────────────────────────────────────────────────
 
@@ -177,6 +179,15 @@ pub struct DocRestoreResult {
 }
 const _: () = assert!(core::mem::size_of::<DocRestoreResult>() <= 60);
 
+/// Delete snapshot request payload (core → document service).
+/// Fire-and-forget — no response message.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DocDeleteSnapshot {
+    pub snapshot_id: u64,
+}
+const _: () = assert!(core::mem::size_of::<DocDeleteSnapshot>() <= 60);
+
 // ── Decode ───────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, Debug)]
@@ -195,6 +206,7 @@ pub enum Message {
     DocBootDone,
     DocCreate(DocCreate),
     DocCreateResult(DocCreateResult),
+    DocDeleteSnapshot(DocDeleteSnapshot),
 }
 
 pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Message> {
@@ -231,6 +243,9 @@ pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Mess
             crate::decode_payload(payload)
         })),
         MSG_DOC_RESTORE_RESULT => Some(Message::DocRestoreResult(unsafe {
+            crate::decode_payload(payload)
+        })),
+        MSG_DOC_DELETE_SNAPSHOT => Some(Message::DocDeleteSnapshot(unsafe {
             crate::decode_payload(payload)
         })),
         _ => None,

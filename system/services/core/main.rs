@@ -55,11 +55,11 @@ use protocol::{
         self, CoreConfig, FrameRateMsg, MSG_CORE_CONFIG, MSG_FRAME_RATE, MSG_SCENE_UPDATED,
     },
     document::{
-        DocCommit, DocCreate, DocCreateResult, DocQuery, DocQueryResult, DocRead, DocReadDone,
-        DocRestore, DocSnapshot, DocSnapshotResult, MSG_DOC_COMMIT, MSG_DOC_CREATE,
-        MSG_DOC_CREATE_RESULT, MSG_DOC_QUERY, MSG_DOC_QUERY_RESULT, MSG_DOC_READ,
-        MSG_DOC_READ_DONE, MSG_DOC_RESTORE, MSG_DOC_RESTORE_RESULT, MSG_DOC_SNAPSHOT,
-        MSG_DOC_SNAPSHOT_RESULT,
+        DocCommit, DocCreate, DocCreateResult, DocDeleteSnapshot, DocQuery, DocQueryResult,
+        DocRead, DocReadDone, DocRestore, DocSnapshot, DocSnapshotResult, MSG_DOC_COMMIT,
+        MSG_DOC_CREATE, MSG_DOC_CREATE_RESULT, MSG_DOC_DELETE_SNAPSHOT, MSG_DOC_QUERY,
+        MSG_DOC_QUERY_RESULT, MSG_DOC_READ, MSG_DOC_READ_DONE, MSG_DOC_RESTORE,
+        MSG_DOC_RESTORE_RESULT, MSG_DOC_SNAPSHOT, MSG_DOC_SNAPSHOT_RESULT,
     },
     edit::{
         self, CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
@@ -147,12 +147,21 @@ impl UndoState {
     }
 
     /// Push a new snapshot after an edit. Truncates any redo history.
-    fn push(&mut self, snap_id: u64) {
-        // Discard everything after current position (redo history).
+    /// Returns the number of discarded snapshot IDs written to `discarded`.
+    fn push(&mut self, snap_id: u64, discarded: &mut [u64; MAX_UNDO]) -> usize {
+        let mut n = 0;
+
+        // Collect redo history being truncated.
+        for i in (self.position + 1)..self.count {
+            discarded[n] = self.snapshots[i];
+            n += 1;
+        }
         self.count = self.position + 1;
 
         if self.count >= MAX_UNDO {
-            // Array full — shift left to drop oldest snapshot.
+            // Array full — oldest snapshot evicted.
+            discarded[n] = self.snapshots[0];
+            n += 1;
             let dst = &mut self.snapshots;
             for i in 0..MAX_UNDO - 1 {
                 dst[i] = dst[i + 1];
@@ -164,6 +173,7 @@ impl UndoState {
         self.snapshots[self.count] = snap_id;
         self.count += 1;
         self.position = self.count - 1;
+        n
     }
 
     /// Undo: return the snapshot ID to restore, or None if at oldest.
@@ -1568,7 +1578,20 @@ pub extern "C" fn _start() -> ! {
                     protocol::document::decode(reply.msg_type, &reply.payload)
                 {
                     if result.status == 0 {
-                        undo_state.push(result.snapshot_id);
+                        let mut discarded = [0u64; MAX_UNDO];
+                        let n = undo_state.push(result.snapshot_id, &mut discarded);
+                        // Delete orphaned snapshots (fire-and-forget).
+                        for &snap in &discarded[..n] {
+                            let del = DocDeleteSnapshot { snapshot_id: snap };
+                            // SAFETY: DocDeleteSnapshot is repr(C), fits in 60 bytes.
+                            let del_msg = unsafe {
+                                ipc::Message::from_payload(MSG_DOC_DELETE_SNAPSHOT, &del)
+                            };
+                            fs_ch.send(&del_msg);
+                        }
+                        if n > 0 {
+                            let _ = sys::channel_signal(FS_HANDLE);
+                        }
                     }
                 }
             }
