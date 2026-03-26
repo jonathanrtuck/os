@@ -6,7 +6,7 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ## v0.4 Document Store Design (2026-03-26)
 
-**Status: IN PROGRESS** — Architecture designed, implementation not started.
+**Status: Phases C-F COMPLETE, Phase G (undo/redo) remaining.**
 
 ### Sprint scope
 
