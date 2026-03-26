@@ -19,6 +19,7 @@ extern crate alloc;
 
 use alloc::boxed::Box;
 use core::cell::RefCell;
+
 use protocol::document::*;
 
 mod system_config {
@@ -91,10 +92,8 @@ impl IoState {
         unsafe { *buf_ptr.add(status_offset) = 0xFF };
 
         if data_bytes == 0 {
-            self.vq.push_chain(&[
-                (header_pa, 16, false),
-                (status_pa, 1, true),
-            ]);
+            self.vq
+                .push_chain(&[(header_pa, 16, false), (status_pa, 1, true)]);
         } else {
             let data_pa = self.buf_pa + DATA_OFFSET as u64;
             let data_writable = req_type == VIRTIO_BLK_T_IN;
@@ -149,11 +148,7 @@ impl fs::BlockDevice for VirtioBlockDevice {
 
         // SAFETY: data area has space for fs::BLOCK_SIZE bytes.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                data.as_ptr(),
-                io.data_ptr(),
-                fs::BLOCK_SIZE as usize,
-            );
+            core::ptr::copy_nonoverlapping(data.as_ptr(), io.data_ptr(), fs::BLOCK_SIZE as usize);
         }
 
         let status = io.submit(VIRTIO_BLK_T_OUT, sector, fs::BLOCK_SIZE);
@@ -245,7 +240,13 @@ pub extern "C" fn _start() -> ! {
     unsafe { core::ptr::write_bytes(vq_va as *mut u8, 0, vq_pages * PAGE_SIZE) };
 
     let vq = virtio::Virtqueue::new(queue_size, vq_va, vq_pa);
-    device.setup_queue(VIRTQ_REQUEST, queue_size, vq.desc_pa(), vq.avail_pa(), vq.used_pa());
+    device.setup_queue(
+        VIRTQ_REQUEST,
+        queue_size,
+        vq.desc_pa(),
+        vq.avail_pa(),
+        vq.used_pa(),
+    );
     device.driver_ok();
 
     let mut buf_pa: u64 = 0;
@@ -354,41 +355,29 @@ pub extern "C" fn _start() -> ! {
             while ch.try_recv(&mut msg) {
                 match msg.msg_type {
                     MSG_DOC_QUERY => {
-                        if let Some(Message::DocQuery(q)) =
-                            decode(msg.msg_type, &msg.payload)
-                        {
-                            let query_str = core::str::from_utf8(
-                                &q.data[..q.data_len as usize],
-                            )
-                            .unwrap_or("");
+                        if let Some(Message::DocQuery(q)) = decode(msg.msg_type, &msg.payload) {
+                            let query_str =
+                                core::str::from_utf8(&q.data[..q.data_len as usize]).unwrap_or("");
 
                             let query = match q.query_type {
-                                0 => store::Query::MediaType(
-                                    alloc::string::String::from(query_str),
-                                ),
-                                1 => store::Query::Type(
-                                    alloc::string::String::from(query_str),
-                                ),
+                                0 => {
+                                    store::Query::MediaType(alloc::string::String::from(query_str))
+                                }
+                                1 => store::Query::Type(alloc::string::String::from(query_str)),
                                 2 => {
                                     // Attribute query: data is "key\0value".
                                     if let Some(sep) = query_str.find('\0') {
                                         store::Query::Attribute {
-                                            key: alloc::string::String::from(
-                                                &query_str[..sep],
-                                            ),
+                                            key: alloc::string::String::from(&query_str[..sep]),
                                             value: alloc::string::String::from(
                                                 &query_str[sep + 1..],
                                             ),
                                         }
                                     } else {
-                                        store::Query::MediaType(
-                                            alloc::string::String::from(""),
-                                        )
+                                        store::Query::MediaType(alloc::string::String::from(""))
                                     }
                                 }
-                                _ => store::Query::MediaType(
-                                    alloc::string::String::from(""),
-                                ),
+                                _ => store::Query::MediaType(alloc::string::String::from("")),
                             };
 
                             let results = store.query(&query);
@@ -404,10 +393,7 @@ pub extern "C" fn _start() -> ! {
                             }
 
                             let reply = unsafe {
-                                ipc::Message::from_payload(
-                                    MSG_DOC_QUERY_RESULT,
-                                    &result,
-                                )
+                                ipc::Message::from_payload(MSG_DOC_QUERY_RESULT, &result)
                             };
                             ch.send(&reply);
                             let _ = sys::channel_signal(sys::ChannelHandle(0));
@@ -415,9 +401,7 @@ pub extern "C" fn _start() -> ! {
                     }
 
                     MSG_DOC_READ => {
-                        if let Some(Message::DocRead(r)) =
-                            decode(msg.msg_type, &msg.payload)
-                        {
+                        if let Some(Message::DocRead(r)) = decode(msg.msg_type, &msg.payload) {
                             let file_id = fs::FileId(r.file_id);
                             let target = r.target_va as usize;
                             let capacity = r.capacity as usize;
@@ -431,10 +415,7 @@ pub extern "C" fn _start() -> ! {
                             // SAFETY: target_va points to Content Region shared
                             // memory mapped by init before starting this process.
                             let buf = unsafe {
-                                core::slice::from_raw_parts_mut(
-                                    target as *mut u8,
-                                    capacity,
-                                )
+                                core::slice::from_raw_parts_mut(target as *mut u8, capacity)
                             };
 
                             match store.read(file_id, 0, buf) {
@@ -447,12 +428,8 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
 
-                            let reply = unsafe {
-                                ipc::Message::from_payload(
-                                    MSG_DOC_READ_DONE,
-                                    &done,
-                                )
-                            };
+                            let reply =
+                                unsafe { ipc::Message::from_payload(MSG_DOC_READ_DONE, &done) };
                             ch.send(&reply);
                             let _ = sys::channel_signal(sys::ChannelHandle(0));
                         }
@@ -478,9 +455,8 @@ pub extern "C" fn _start() -> ! {
     // ── Phase 5: IPC loop ────────────────────────────────────────────
 
     // Core channel: handle 1 (sent by init via handle_send).
-    let core_ch = unsafe {
-        ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1)
-    };
+    let core_ch =
+        unsafe { ipc::Channel::from_base(protocol::channel_shm_va(1), ipc::PAGE_SIZE, 1) };
 
     loop {
         let _ = sys::wait(&[1], u64::MAX);
@@ -493,9 +469,8 @@ pub extern "C" fn _start() -> ! {
                         // Read document content from shared buffer.
                         // Header: [0..8) = content_len (u64), [8..16) = cursor_pos,
                         //          [16..64) = reserved, [64..) = content
-                        let content_len = unsafe {
-                            core::ptr::read_volatile(doc_va as *const u64) as usize
-                        };
+                        let content_len =
+                            unsafe { core::ptr::read_volatile(doc_va as *const u64) as usize };
 
                         let actual_len = if content_len > doc_capacity {
                             doc_capacity
@@ -517,10 +492,8 @@ pub extern "C" fn _start() -> ! {
 
                 MSG_DOC_QUERY => {
                     if let Some(Message::DocQuery(q)) = decode(msg.msg_type, &msg.payload) {
-                        let query_str = core::str::from_utf8(
-                            &q.data[..q.data_len as usize],
-                        )
-                        .unwrap_or("");
+                        let query_str =
+                            core::str::from_utf8(&q.data[..q.data_len as usize]).unwrap_or("");
 
                         let query = match q.query_type {
                             0 => store::Query::MediaType(alloc::string::String::from(query_str)),
@@ -550,9 +523,8 @@ pub extern "C" fn _start() -> ! {
                             result.file_ids[i] = fid.0;
                         }
 
-                        let reply = unsafe {
-                            ipc::Message::from_payload(MSG_DOC_QUERY_RESULT, &result)
-                        };
+                        let reply =
+                            unsafe { ipc::Message::from_payload(MSG_DOC_QUERY_RESULT, &result) };
                         core_ch.send(&reply);
                         let _ = sys::channel_signal(sys::ChannelHandle(1));
                     }
@@ -577,9 +549,8 @@ pub extern "C" fn _start() -> ! {
 
                         // SAFETY: target_va points to shared memory mapped by init,
                         // or doc_va+64 points to the doc buffer content area.
-                        let buf = unsafe {
-                            core::slice::from_raw_parts_mut(target as *mut u8, capacity)
-                        };
+                        let buf =
+                            unsafe { core::slice::from_raw_parts_mut(target as *mut u8, capacity) };
 
                         match store.read(file_id, 0, buf) {
                             Ok(n) => {
@@ -591,9 +562,7 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
-                        let reply = unsafe {
-                            ipc::Message::from_payload(MSG_DOC_READ_DONE, &done)
-                        };
+                        let reply = unsafe { ipc::Message::from_payload(MSG_DOC_READ_DONE, &done) };
                         core_ch.send(&reply);
                         let _ = sys::channel_signal(sys::ChannelHandle(1));
                     }
@@ -623,9 +592,8 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
-                        let reply = unsafe {
-                            ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &result)
-                        };
+                        let reply =
+                            unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT_RESULT, &result) };
                         core_ch.send(&reply);
                         let _ = sys::channel_signal(sys::ChannelHandle(1));
                     }
@@ -633,10 +601,7 @@ pub extern "C" fn _start() -> ! {
 
                 MSG_DOC_RESTORE => {
                     if let Some(Message::DocRestore(r)) = decode(msg.msg_type, &msg.payload) {
-                        let mut result = DocRestoreResult {
-                            status: 1,
-                            _pad: 0,
-                        };
+                        let mut result = DocRestoreResult { status: 1, _pad: 0 };
 
                         match store.restore(fs::SnapshotId(r.snapshot_id)) {
                             Ok(()) => {
@@ -647,9 +612,8 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
-                        let reply = unsafe {
-                            ipc::Message::from_payload(MSG_DOC_RESTORE, &result)
-                        };
+                        let reply =
+                            unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE_RESULT, &result) };
                         core_ch.send(&reply);
                         let _ = sys::channel_signal(sys::ChannelHandle(1));
                     }
@@ -658,8 +622,8 @@ pub extern "C" fn _start() -> ! {
                 MSG_DOC_CREATE => {
                     if let Some(Message::DocCreate(c)) = decode(msg.msg_type, &msg.payload) {
                         let mt_len = (c.media_type_len as usize).min(c.media_type.len());
-                        let media_type =
-                            core::str::from_utf8(&c.media_type[..mt_len]).unwrap_or("application/octet-stream");
+                        let media_type = core::str::from_utf8(&c.media_type[..mt_len])
+                            .unwrap_or("application/octet-stream");
 
                         let mut result = DocCreateResult {
                             file_id: 0,
@@ -678,9 +642,8 @@ pub extern "C" fn _start() -> ! {
                             }
                         }
 
-                        let reply = unsafe {
-                            ipc::Message::from_payload(MSG_DOC_CREATE_RESULT, &result)
-                        };
+                        let reply =
+                            unsafe { ipc::Message::from_payload(MSG_DOC_CREATE_RESULT, &result) };
                         core_ch.send(&reply);
                         let _ = sys::channel_signal(sys::ChannelHandle(1));
                     }

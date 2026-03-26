@@ -615,16 +615,9 @@ These are the things that limit what can be built above the kernel today, ordere
 
 ---
 
-### 3.2 ~~No Filesystem~~ Partially Resolved
+### 3.2 ~~No Filesystem~~ ✅ Resolved
 
-**Partially resolved:** COW filesystem service running (`services/filesystem/`). Document edits are persisted to disk via virtio-blk with two-flush crash consistency. The `fs` library (`libraries/fs/`) provides the full filesystem stack: superblock ring, free-extent allocator, inodes, snapshots, and the `Files` trait. Core sends `MSG_FS_COMMIT` at operation boundaries; filesystem reads the doc buffer from shared memory and commits.
-
-**Still missing:**
-
-- **Mount-on-reboot:** Filesystem formats on first boot but does not yet restore content on subsequent boots.
-- **Undo/redo via snapshots:** COW snapshot infrastructure exists but is not wired to undo/redo in core.
-- **Multi-document persistence:** Currently single-document only.
-- **Binaries and fonts** are still embedded via `include_bytes!` / loaded via 9p. Filesystem is only used for document persistence.
+**Resolved:** Document service (`services/document/`) replaces the filesystem service. Two-library architecture: `fs` library (generic COW filesystem with `BlockDevice` trait, superblock ring, free-extent allocator, inodes, snapshots, `Files` trait) + `store` library (metadata layer with catalog, media types, queryable attributes, wraps `Box<dyn Files>`). Factory disk image builder (`tools/mkdisk/`) pre-populates fonts at build time. Boot loads fonts from native filesystem. Multi-document persistence (text + image). Undo/redo via COW snapshots: `UndoState` in core (64-entry ring), Cmd+Z/Cmd+Shift+Z handlers, synchronous restore + content reload. Protocol: `protocol::document` (13 message types including snapshot/restore).
 
 ---
 

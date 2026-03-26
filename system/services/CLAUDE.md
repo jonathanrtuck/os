@@ -13,7 +13,8 @@ Platform services that run as userspace processes. Each is a `#![no_std]` ELF bi
 | `drivers/virtio-console/` | Console driver (placeholder)                                                                      | Scaffolding |
 | `drivers/virtio-input/`   | Keyboard + tablet driver: reads evdev events, forwards to core via IPC                            | Scaffolding |
 | `drivers/virtio-9p/`      | Host filesystem passthrough: 9P2000.L protocol, loads fonts/images/icons                          | Scaffolding |
-| `filesystem/`             | COW filesystem service: owns virtio-blk device, format/mount, IPC commit loop with core           | Scaffolding |
+| `document/`               | Document service: metadata-aware store over virtio-blk, commit/snapshot/restore/query IPC         | Scaffolding |
+| `filesystem/`             | (Replaced by `document/`) Legacy COW filesystem service                                           | Replaced    |
 | `decoders/png/`           | PNG decoder service: sandboxed, uses generic decoder harness                                      | Scaffolding |
 
 ## Service Categories

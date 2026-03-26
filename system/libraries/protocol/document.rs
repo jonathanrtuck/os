@@ -30,6 +30,10 @@ pub const MSG_DOC_BOOT_DONE: u32 = 89;
 pub const MSG_DOC_CREATE: u32 = 90;
 /// Create document result: document service → core.
 pub const MSG_DOC_CREATE_RESULT: u32 = 91;
+/// Snapshot result: document service → core.
+pub const MSG_DOC_SNAPSHOT_RESULT: u32 = 92;
+/// Restore result: document service → core.
+pub const MSG_DOC_RESTORE_RESULT: u32 = 93;
 
 // ── Payload structs ──────────────────────────────────────────────────
 
@@ -202,9 +206,7 @@ pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Mess
         MSG_DOC_COMMIT => Some(Message::DocCommit(unsafe {
             crate::decode_payload(payload)
         })),
-        MSG_DOC_QUERY => Some(Message::DocQuery(unsafe {
-            crate::decode_payload(payload)
-        })),
+        MSG_DOC_QUERY => Some(Message::DocQuery(unsafe { crate::decode_payload(payload) })),
         MSG_DOC_QUERY_RESULT => Some(Message::DocQueryResult(unsafe {
             crate::decode_payload(payload)
         })),
@@ -223,6 +225,12 @@ pub fn decode(msg_type: u32, payload: &[u8; crate::PAYLOAD_SIZE]) -> Option<Mess
             crate::decode_payload(payload)
         })),
         MSG_DOC_CREATE_RESULT => Some(Message::DocCreateResult(unsafe {
+            crate::decode_payload(payload)
+        })),
+        MSG_DOC_SNAPSHOT_RESULT => Some(Message::DocSnapshotResult(unsafe {
+            crate::decode_payload(payload)
+        })),
+        MSG_DOC_RESTORE_RESULT => Some(Message::DocRestoreResult(unsafe {
             crate::decode_payload(payload)
         })),
         _ => None,

@@ -14,10 +14,32 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 DISK_IMG="${SCRIPT_DIR}/disk.img"
 
-# Build factory disk image if it doesn't exist.
+# Rebuild factory disk image if missing or if format sources changed.
+# The disk embeds the catalog format from libraries/store and libraries/fs —
+# if those change, the old image becomes incompatible (boot succeeds but
+# catalog queries return nothing → "font not found" → blank display).
+MKDISK_BIN="${SCRIPT_DIR}/../tools/mkdisk/target/release/mkdisk"
+STALE=0
 if [ ! -f "$DISK_IMG" ]; then
-    MKDISK="$(cd "${SCRIPT_DIR}/../tools/mkdisk" && cargo build --release --message-format=short 2>&1 | tail -1)"
-    MKDISK_BIN="${SCRIPT_DIR}/../tools/mkdisk/target/release/mkdisk"
+    STALE=1
+elif [ -f "$DISK_IMG" ]; then
+    # Check if any format-defining source file is newer than disk.img.
+    for src_dir in \
+        "${SCRIPT_DIR}/../tools/mkdisk" \
+        "${SCRIPT_DIR}/libraries/store" \
+        "${SCRIPT_DIR}/libraries/fs" \
+        "${SCRIPT_DIR}/share"; do
+        if [ -d "$src_dir" ] && [ -n "$(find "$src_dir" -newer "$DISK_IMG" -type f 2>/dev/null | head -1)" ]; then
+            echo "disk.img: stale (changed: $src_dir)" >&2
+            STALE=1
+            break
+        fi
+    done
+fi
+if [ "$STALE" = "1" ]; then
+    rm -f "$DISK_IMG"
+    cd "${SCRIPT_DIR}/../tools/mkdisk" && cargo build --release --message-format=short 2>&1 | tail -1
+    cd "$SCRIPT_DIR"
     if [ ! -x "$MKDISK_BIN" ]; then
         echo "error: failed to build mkdisk" >&2
         exit 1

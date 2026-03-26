@@ -73,7 +73,7 @@ Read these before making any design suggestions:
 
 ## Where We Left Off
 
-**Current state (2026-03-26):** v0.4 filesystem Phase B COMPLETE. All 4 steps done (B1: virtio-blk write+flush, B2: hypervisor file-backed backend, B3: no_std fs library + filesystem service, B4: core integration via IPC). Filesystem service running, persists document edits to disk via COW two-flush commit. Remaining: mount-on-reboot, undo/redo via snapshots, multi-document persistence.
+**Current state (2026-03-26):** v0.4 Document Store COMPLETE (all phases A–G). Every document has identity (FileId), media type, queryable metadata, and version history (COW snapshots). Document service replaces filesystem service. Undo/redo (Cmd+Z / Cmd+Shift+Z) wired to COW snapshots — 64-entry undo ring, character-level granularity. 2,257 tests pass.
 
 **Content Pipeline Architecture (2026-03-25):** IMPLEMENTED. Three memory regions: File Store (1 MiB, shared with decoder services), Content Region (4 MiB, shared decoded content with registry + free-list allocator + generation-based GC), Scene Graph (per-frame visual primitives). Init allocates both, loads fonts into Content Region + PNG into File Store. Core sends decode requests to sandboxed decoder services via generic IPC protocol (`protocol/decode.rs`). Decoder services read File Store (RO), write decoded BGRA pixels into Content Region (RW). Core manages Content Region registry and allocator. Render services find fonts and images via `protocol::content` registry lookup. Compositor never sees encoded files. Generic decoder harness (`services/decoders/harness.rs`) handles all IPC plumbing; format-specific code is just header + decode functions. See `design/journal.md` "Image Decoding as a Service Interface" entry.
 
@@ -114,7 +114,7 @@ Core (shaping, layout, scene building) → Scene Graph (shared memory) → Rende
 
 Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Region via content_id), `Path`, `Glyphs`. Three render services: `metal-render` (default), `cpu-render`, `virgil-render`.
 
-**IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. **Content Region** (4 MiB shared memory with registry) for persistent decoded content (font TTF data, decoded image pixels) — init allocates, core writes, render services read. **Filesystem IPC** (`protocol::blkfs`): core sends `MSG_FS_COMMIT` to filesystem service at operation boundaries; filesystem reads doc buffer from shared memory (read-only mapping). See `system/DESIGN.md` §0 for full details.
+**IPC:** Two mechanisms, matched to data semantics. Event rings (64-byte SPSC messages over shared memory) for discrete events where order/count matter (keys, clicks, config). State registers (atomic shared memory) for continuous data where only the latest value matters (pointer position). Both signaled via `channel_signal` syscall. **Content Region** (4 MiB shared memory with registry) for persistent decoded content (font TTF data, decoded image pixels) — init allocates, core writes, render services read. **Document IPC** (`protocol::document`): 13 message types. Core sends `MSG_DOC_COMMIT` at operation boundaries; document service reads doc buffer from shared memory. `MSG_DOC_SNAPSHOT`/`MSG_DOC_RESTORE` for undo/redo. `MSG_DOC_QUERY` for media-type/attribute queries. See `system/DESIGN.md` §0 for full details.
 
 **Crash reporting:** Kernel panic → diagnostic output via UART → `pvpanic_signal()` (MMIO write to 0x0902_0000) → hypervisor captures vCPU registers + serial log → crash report at `/tmp/hypervisor-crash-<ts>.log` → `exit(1)`. Fallback: `system_off()` (PSCI SYSTEM_OFF). pvpanic device discovered from DTB at boot, address stored in `PVPANIC_ADDR` AtomicUsize.
 
@@ -124,18 +124,17 @@ Content types: `None`, `InlineImage` (per-frame scene data), `Image` (Content Re
 - Decision #14: Mimetype of whole document, manifest format, FS organization of manifests + content files
 - Decision #16: COW on-disk design (deferred via prototype-on-host), snapshot scope (punted)
 
-**v0.4 Filesystem (2026-03-25–26):** Phase A (host prototype) and Phase B (bare-metal integration) COMPLETE. Seven-layer stack: `BlockDevice` trait → superblock ring → free-extent allocator → inodes → COW write path → snapshots → `Files` trait. Flat namespace (FileId → inode), 16 KiB blocks + inline data, pure COW crash consistency (two-flush commit protocol). Filesystem runs as a userspace service (`services/filesystem/`), owns virtio-blk device, receives `MSG_FS_COMMIT` from core at operation boundaries. `protocol::blkfs` defines the IPC boundary. Remaining: mount-on-reboot, undo/redo via snapshots, multi-document persistence, stress testing.
+**v0.4 Document Store (2026-03-25–26): ALL PHASES COMPLETE (A–G).** Seven-layer fs stack: `BlockDevice` trait → superblock ring → free-extent allocator → inodes → COW write path → snapshots → `Files` trait. Store library adds metadata layer: catalog (media types, attributes), queries, wraps `Box<dyn Files>`. Document service (`services/document/`) replaces filesystem service — thin IPC translator over store library. Factory disk image builder (`tools/mkdisk/`) pre-populates fonts. Boot loads fonts from native filesystem (no 9p dependency). Multi-document persistence (text + image spaces). Undo/redo via COW snapshots: `UndoState` in core, Cmd+Z/Cmd+Shift+Z, 64-entry ring, character-level granularity. Protocol: `protocol::document` (13 message types). IPC: `MSG_DOC_COMMIT` at operation boundaries, `MSG_DOC_SNAPSHOT`/`MSG_DOC_RESTORE` for undo.
 
 **16 KiB page migration (2026-03-25): DONE.** Kernel page granule changed from 4K to 16K. 2-level page tables (L2+L3, T0SZ/T1SZ=28, 64 GiB VA). KERNEL_VA_OFFSET changed to 0xFFFF_FFF0_0000_0000 (T1SZ=28 consequence). Boot tables: 2 L2 roots with 32 MiB block entries. Address space: simplified 4-level→2-level walk. Userspace: 16K section alignment in link.ld, PAGE_SIZE updated in ipc/sys/protocol/virtio libraries. Key bug found and fixed: ELF segments sharing 16K pages caused permission conflicts (last-segment-wins overwrote RX with RO). All 2,236 tests pass.
 
 **Future milestones:**
 
-- v0.4: Filesystem + undo/redo, system clipboard
-- v0.5: Rich inline text / multi-style runs
+- v0.5: Rich inline text / multi-style runs, system clipboard
 - v0.6: Video / animated media, JPEG decoder (requires mimetype routing from filesystem layer)
 - Later: BiDi / complex scripts, multi-display
 
-**System code:** `system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,filesystem,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,fs}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `prototype/files/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
+**System code:** `system/kernel/` (33 .rs + 2 .S), `system/services/{init,core,document,drivers/{cpu-render,virgil-render,metal-render,virtio-blk,virtio-console,virtio-input,virtio-9p},decoders/{png}}/`, `system/libraries/{sys,virtio,drawing,fonts,animation,layout,scene,ipc,protocol,render,fs,store}/`, `system/user/{echo,text-editor,stress,fuzz,fuzz-helper}/`, `system/test/`, `tools/mkdisk/`. 28 syscalls. 4 SMP cores, EEVDF scheduler.
 
 ## Design Discussion Rules
 

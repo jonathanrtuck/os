@@ -42,7 +42,7 @@ Precedents that validate this: PDF is an open standard that every OS can render,
 
 7. **Built to learn from, not to ship.** This is a personal project — an exploration of what's possible and what breaks. Decisions should favor clarity and interestingness over market viability.
 
-8. **Everything is a file — but the user doesn't need to know that.** Internally, the OS models all content as files: local documents, email messages, calendar events, chat streams, network connections. This is an architectural principle, not a UX principle. The interface presents domain-appropriate abstractions (documents, conversations, meetings), not files and paths.
+8. **All persistent content with a media type is a file.** The litmus test: does it have a media type and does it persist? If yes, it belongs in the filesystem. If no (scene graph, IPC channels, process state), it doesn't. This keeps the filesystem meaningful as the persistent content store without forcing runtime state through it for philosophical purity. The user doesn't interact with files directly — the interface presents domain-appropriate abstractions (documents, conversations, meetings), not files and paths.
 
 9. **File paths are metadata, not the organizing principle.** A file's path is just another attribute — like its creation date or size. Available when useful, but not how users find or organize their work.
 
@@ -198,6 +198,51 @@ Standard mimetypes serve as the interoperability boundary between this OS and th
 
 ---
 
+## Persistence Architecture
+
+### Two-Library Design
+
+The persistence layer is two separate libraries with a clean boundary:
+
+```text
+Core ──[IPC]──→ Document Service ──→ store library ──→ fs library ──→ disk
+                 (services/document/)   (libraries/store/)  (libraries/fs/)
+```
+
+The **fs library** is generic infrastructure — a COW filesystem useful to anyone building anything. `BlockDevice` trait, inodes, free-extent allocator, superblock ring, snapshots, two-flush crash consistency. No document or media type concepts. Reusable outside this OS.
+
+The **store library** adds document-centric semantics specific to this OS: a catalog (media types, queryable attributes), the `Query` API, and snapshot-aware versioning. It wraps `Box<dyn Files>` (trait object, not generic) so it never sees `BlockDevice` or `Filesystem<D>` — the generic parameter is fully contained in the fs library and the document service.
+
+Each can be swapped independently. The `Files` trait and `Store` API are the stability boundaries.
+
+### Catalog
+
+A single catalog file stored in the filesystem holds metadata for all documents. The catalog is "just a file" — the fs library doesn't know it's special. Discovery: the store calls `set_root(catalog_id)` during init; on reopen, `root()` returns the catalog in O(1).
+
+The catalog stores only what the filesystem doesn't already know: media type (mandatory at creation) and user/system attributes (key-value pairs). Size, created, modified come from the fs library's `FileMetadata` — no duplication.
+
+### Target Scale (Permanent Design)
+
+This is a personal document-centric OS. It does not have apps, package managers, `.git` directories, or file trees. It has documents — things with media types that humans create or consume.
+
+| Scale      | Inode table       | Catalog memory | Expected use                               |
+| ---------- | ----------------- | -------------- | ------------------------------------------ |
+| 1K files   | 12 KB, 1 block    | ~128 KB        | Early use                                  |
+| 10K files  | 120 KB, 8 blocks  | ~1.3 MB        | Moderate (documents, some photos, music)   |
+| 100K files | 1.2 MB, 75 blocks | ~12.8 MB       | Heavy (prolific photographer + everything) |
+
+100K is the realistic ceiling for a personal OS without an app ecosystem. The in-memory BTreeMap catalog and linked-block inode table are the permanent architecture for this scale, not interim solutions. The `Files` trait is the stability boundary — if someone adapted this for a million-file use case, they would replace internals behind that interface.
+
+### Atomic Multi-File Writes
+
+`commit()` is the transaction boundary. All writes between commits land atomically or not at all (two-flush protocol: crash before second flush → old superblock wins → old state). Compound document creation — writing multiple content files plus updating the catalog — is atomic without any additional machinery. This property is inherited from the COW filesystem design.
+
+### Services as Translation Layers
+
+The document service is a thin IPC wrapper — it translates IPC messages into store API calls. All document logic lives in the store library, which is shared with the factory image builder (a host tool that creates pre-populated disk images using the same code paths). Core never touches the filesystem, the block device, or the catalog. The IPC boundary is the translation boundary.
+
+---
+
 ## Viewing and Editing
 
 ### Viewer-First Design
@@ -272,9 +317,11 @@ The OS is logistics — it doesn't understand what operations mean, it just trac
 
 ## Undo, History, and (Future) Collaboration
 
-### Sequential Undo (Base Case)
+### Sequential Undo (Base Case) — Implemented
 
-Every edit operation is recorded in an ordered log. Undo and redo walk this log backward and forward. Because edits are immediately durable on a COW filesystem, each operation boundary is a snapshot. Undo = restore the file to the previous snapshot. This works for all content types with zero additional machinery.
+Every edit operation boundary creates a COW snapshot. Core maintains an `UndoState` ring (64 entries) of snapshot IDs. Undo (Cmd+Z) restores the previous snapshot; redo (Cmd+Shift+Z) restores the next. The restore is synchronous: core sends `MSG_DOC_RESTORE` to the document service, waits for confirmation, then reloads the document content via `MSG_DOC_READ`. Editing after undo truncates the redo history.
+
+Currently, each keystroke is a separate operation boundary (character-level undo). Coalescing rapid edits into larger undo steps (e.g., by time proximity) is a future enhancement — the snapshot infrastructure supports it without changes.
 
 Undo is global — the OS undoes the most recent operation regardless of which editor produced it. The originating editor does not need to be active.
 

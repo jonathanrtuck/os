@@ -6,17 +6,17 @@ A research notebook for the OS design project. Tracks open threads, discussion b
 
 ## v0.4 Document Store Design (2026-03-26)
 
-**Status: Phases C-F COMPLETE, Phase G (undo/redo) remaining.**
+**Status: ALL PHASES COMPLETE (A–G).** v0.4 is done.
 
 ### Sprint scope
 
 v0.4 completes "The Document Store" — after this sprint, every piece of persistent content in the OS has identity (FileId), type (media type), metadata (queryable), and history (snapshots). Five work items, foundation-up:
 
-1. **Phase C:** Metadata in fs library + store library + mount-on-reboot (~2 days)
-2. **Phase D:** Factory disk image builder + richer IPC protocol (~2 days)
-3. **Phase E:** Replace 9p boot path — fonts from native fs (~1 day)
-4. **Phase F:** Multi-document persistence in core (~1.5 days)
-5. **Phase G:** Undo/redo via snapshots wired to core (~1.5 days)
+1. **Phase C:** Metadata in fs library + store library + mount-on-reboot ✓
+2. **Phase D:** Factory disk image builder + richer IPC protocol ✓
+3. **Phase E:** Replace 9p boot path — fonts from native fs ✓
+4. **Phase F:** Multi-document persistence in core ✓
+5. **Phase G:** Undo/redo via COW snapshots wired to core ✓
 
 ### Two-library architecture
 
@@ -107,9 +107,9 @@ This framing clarifies: "leaf node" is relative to your system boundary. The ren
 
 This also explains why the IPC protocol for v0.4 stays minimal scaffolding: core's architecture hasn't been deliberately designed yet. Investing in a rich document-management IPC protocol now would design core by accident, encoding premature UX assumptions in plumbing.
 
-### Full spec
+### Design extracted to permanent docs
 
-See `design/v04-document-store.md` for the complete design spec covering all phases (C–G), the two-library architecture, catalog schema, store API, query model, factory image builder, and boot sequence changes.
+The durable content from the v0.4 sprint spec has been extracted into `design/foundations.md` (§Persistence Architecture — two-library design, catalog, scale analysis, atomic writes, services as translation layers) and `design/decisions.md` (#16 Tech Foundation — COW filesystem and document store settled sub-decisions).
 
 ---
 
@@ -134,12 +134,11 @@ See `design/v04-document-store.md` for the complete design spec covering all pha
 - **Core sends `MSG_FS_COMMIT` at operation boundaries.** After draining all pending editor messages (insertions, deletions), core signals the filesystem service to snapshot. The filesystem reads the doc buffer from shared memory and writes + commits to disk.
 - **Doc buffer shared read-only between core and filesystem.** No data copying — the filesystem service reads the same shared memory page that core writes to. Core is the sole writer; both filesystem and editor are read-only consumers.
 
-### What remains
+### What remains (deferred to future milestones)
 
-- **Mount-on-reboot:** Filesystem formats on first boot but does not yet mount and restore content on subsequent boots.
-- **Undo/redo via snapshots:** COW snapshot infrastructure exists in the fs library but is not yet wired to undo/redo in core.
-- **Multi-document persistence:** Currently persists a single document buffer. Multi-document support requires FileId management in core.
 - **Timestamps:** Inode timestamps not yet populated with real time values.
+- **Snapshot cleanup:** Orphaned snapshots (from truncated redo history) are not deleted from disk.
+- **Operation coalescing:** Undo is currently per-keystroke. Coalescing rapid edits into single undo steps is a future enhancement.
 
 ---
 
@@ -815,7 +814,7 @@ N_ROOT → N_TITLE_BAR → N_SHADOW → N_CONTENT → N_POINTER
 
 to:
 
-```
+```text
 N_ROOT → N_CONTENT → N_TITLE_BAR → N_POINTER
          (low z)     (high z)
 ```

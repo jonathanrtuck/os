@@ -56,8 +56,10 @@ use protocol::{
     },
     document::{
         DocCommit, DocCreate, DocCreateResult, DocQuery, DocQueryResult, DocRead, DocReadDone,
-        MSG_DOC_COMMIT, MSG_DOC_CREATE, MSG_DOC_CREATE_RESULT, MSG_DOC_QUERY,
-        MSG_DOC_QUERY_RESULT, MSG_DOC_READ, MSG_DOC_READ_DONE,
+        DocRestore, DocSnapshot, DocSnapshotResult, MSG_DOC_COMMIT, MSG_DOC_CREATE,
+        MSG_DOC_CREATE_RESULT, MSG_DOC_QUERY, MSG_DOC_QUERY_RESULT, MSG_DOC_READ,
+        MSG_DOC_READ_DONE, MSG_DOC_RESTORE, MSG_DOC_RESTORE_RESULT, MSG_DOC_SNAPSHOT,
+        MSG_DOC_SNAPSHOT_RESULT,
     },
     edit::{
         self, CursorMove, SelectionUpdate, WriteDelete, WriteDeleteRange, WriteInsert,
@@ -108,11 +110,82 @@ const KEY_END: u16 = 107;
 const KEY_PAGEUP: u16 = 104;
 const KEY_PAGEDOWN: u16 = 109;
 const KEY_DELETE: u16 = 111;
+const KEY_Z: u16 = 44;
+const MAX_UNDO: usize = 64;
 const SHADOW_DEPTH: u32 = 0;
 const TEXT_INSET_BOTTOM: u32 = 8;
 const TEXT_INSET_TOP: u32 = TITLE_BAR_H + SHADOW_DEPTH + 8;
 const TEXT_INSET_X: u32 = 12;
 const TITLE_BAR_H: u32 = 36;
+
+/// Undo/redo state: fixed-size ring of COW snapshot IDs.
+///
+/// `snapshots[0..count]` are valid snapshot IDs in chronological order.
+/// `position` is the index of the snapshot matching the current document state.
+/// Undo decrements position and restores; redo increments and restores.
+/// Editing after undo truncates redo history, then pushes a new snapshot.
+struct UndoState {
+    snapshots: [u64; MAX_UNDO],
+    count: usize,
+    position: usize,
+}
+
+impl UndoState {
+    const fn new() -> Self {
+        Self {
+            snapshots: [0; MAX_UNDO],
+            count: 0,
+            position: 0,
+        }
+    }
+
+    /// Record the initial document state (called once at boot).
+    fn set_initial(&mut self, snap_id: u64) {
+        self.snapshots[0] = snap_id;
+        self.count = 1;
+        self.position = 0;
+    }
+
+    /// Push a new snapshot after an edit. Truncates any redo history.
+    fn push(&mut self, snap_id: u64) {
+        // Discard everything after current position (redo history).
+        self.count = self.position + 1;
+
+        if self.count >= MAX_UNDO {
+            // Array full — shift left to drop oldest snapshot.
+            let dst = &mut self.snapshots;
+            for i in 0..MAX_UNDO - 1 {
+                dst[i] = dst[i + 1];
+            }
+            self.count -= 1;
+            self.position -= 1;
+        }
+
+        self.snapshots[self.count] = snap_id;
+        self.count += 1;
+        self.position = self.count - 1;
+    }
+
+    /// Undo: return the snapshot ID to restore, or None if at oldest.
+    fn undo(&mut self) -> Option<u64> {
+        if self.position > 0 {
+            self.position -= 1;
+            Some(self.snapshots[self.position])
+        } else {
+            None
+        }
+    }
+
+    /// Redo: return the snapshot ID to restore, or None if at newest.
+    fn redo(&mut self) -> Option<u64> {
+        if self.count > 0 && self.position < self.count - 1 {
+            self.position += 1;
+            Some(self.snapshots[self.position])
+        } else {
+            None
+        }
+    }
+}
 
 pub(crate) struct CoreState {
     pub(crate) blink_phase: blink::BlinkPhase,
@@ -802,8 +875,7 @@ pub extern "C" fn _start() -> ! {
         };
         query_payload.data[..media.len()].copy_from_slice(media);
         // SAFETY: DocQuery is repr(C) and fits in 60-byte payload.
-        let query_msg =
-            unsafe { ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload) };
+        let query_msg = unsafe { ipc::Message::from_payload(MSG_DOC_QUERY, &query_payload) };
         fs_ch.send(&query_msg);
         let _ = sys::channel_signal(FS_HANDLE);
 
@@ -840,14 +912,11 @@ pub extern "C" fn _start() -> ! {
                 _pad: 0,
             };
             // SAFETY: DocRead is repr(C) and fits in 60-byte payload.
-            let read_msg =
-                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
+            let read_msg = unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
             fs_ch.send(&read_msg);
             let _ = sys::channel_signal(FS_HANDLE);
 
-            if fs_ch.recv_blocking(fs_handle, &mut reply)
-                && reply.msg_type == MSG_DOC_READ_DONE
-            {
+            if fs_ch.recv_blocking(fs_handle, &mut reply) && reply.msg_type == MSG_DOC_READ_DONE {
                 if let Some(protocol::document::Message::DocReadDone(done)) =
                     protocol::document::decode(reply.msg_type, &reply.payload)
                 {
@@ -876,13 +945,11 @@ pub extern "C" fn _start() -> ! {
             };
             create_payload.media_type[..media.len()].copy_from_slice(media);
             // SAFETY: DocCreate is repr(C) and fits in 60-byte payload.
-            let create_msg =
-                unsafe { ipc::Message::from_payload(MSG_DOC_CREATE, &create_payload) };
+            let create_msg = unsafe { ipc::Message::from_payload(MSG_DOC_CREATE, &create_payload) };
             fs_ch.send(&create_msg);
             let _ = sys::channel_signal(FS_HANDLE);
 
-            if fs_ch.recv_blocking(fs_handle, &mut reply)
-                && reply.msg_type == MSG_DOC_CREATE_RESULT
+            if fs_ch.recv_blocking(fs_handle, &mut reply) && reply.msg_type == MSG_DOC_CREATE_RESULT
             {
                 if let Some(protocol::document::Message::DocCreateResult(result)) =
                     protocol::document::decode(reply.msg_type, &reply.payload)
@@ -893,6 +960,36 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         sys::print(b"     warning: document create failed\n");
                     }
+                }
+            }
+        }
+    }
+
+    // ── Take initial undo snapshot ─────────────────────────────────────
+    //
+    // Snapshot the document's current state so Cmd+Z can revert to it.
+    // This is the "position 0" baseline for the undo stack.
+    let mut undo_state = UndoState::new();
+    if state().doc_file_id != 0 {
+        let snap_payload = DocSnapshot {
+            file_count: 1,
+            _pad: 0,
+            file_ids: [state().doc_file_id, 0, 0, 0, 0, 0],
+        };
+        // SAFETY: DocSnapshot is repr(C) and fits in 60-byte payload.
+        let snap_msg = unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
+        fs_ch.send(&snap_msg);
+        let _ = sys::channel_signal(FS_HANDLE);
+
+        let mut reply = ipc::Message::new(0);
+        if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply) && reply.msg_type == MSG_DOC_SNAPSHOT_RESULT
+        {
+            if let Some(protocol::document::Message::DocSnapshotResult(result)) =
+                protocol::document::decode(reply.msg_type, &reply.payload)
+            {
+                if result.status == 0 {
+                    undo_state.set_initial(result.snapshot_id);
+                    sys::print(b"     initial undo snapshot taken\n");
                 }
             }
         }
@@ -1084,6 +1181,8 @@ pub extern "C" fn _start() -> ! {
         let mut timer_fired = false;
         let mut had_user_input = false;
         let mut pointer_position_changed = false;
+        let mut undo_requested = false;
+        let mut redo_requested = false;
 
         // Check timer.
         if timer_active {
@@ -1099,6 +1198,20 @@ pub extern "C" fn _start() -> ! {
         // Process input events.
         while input_ch.try_recv(&mut msg) {
             if let Some(input::Message::KeyEvent(key)) = input::decode(msg.msg_type, &msg.payload) {
+                // Intercept Cmd+Z / Cmd+Shift+Z for undo/redo.
+                if key.pressed == 1
+                    && key.keycode == KEY_Z
+                    && key.modifiers & protocol::input::MOD_SUPER != 0
+                {
+                    if key.modifiers & protocol::input::MOD_SHIFT != 0 {
+                        redo_requested = true;
+                    } else {
+                        undo_requested = true;
+                    }
+                    had_user_input = true;
+                    continue;
+                }
+
                 let action = input_handling::process_key_event(
                     &key,
                     has_image,
@@ -1135,6 +1248,21 @@ pub extern "C" fn _start() -> ! {
                         else {
                             continue;
                         };
+
+                        // Intercept Cmd+Z / Cmd+Shift+Z for undo/redo.
+                        if key.pressed == 1
+                            && key.keycode == KEY_Z
+                            && key.modifiers & protocol::input::MOD_SUPER != 0
+                        {
+                            if key.modifiers & protocol::input::MOD_SHIFT != 0 {
+                                redo_requested = true;
+                            } else {
+                                undo_requested = true;
+                            }
+                            had_user_input = true;
+                            continue;
+                        }
+
                         let action = input_handling::process_key_event(
                             &key,
                             has_image,
@@ -1398,19 +1526,170 @@ pub extern "C" fn _start() -> ! {
             }
         }
 
-        // Persist to document store after text changes (operation boundary).
-        // All pending editor messages have been drained — this is the natural
-        // batch point. The document service reads the doc buffer directly
-        // from shared memory and writes + commits to disk.
+        // ── Persist + snapshot / undo / redo ────────────────────────────
+        //
+        // Operation boundary: all editor messages drained. Three mutually
+        // exclusive paths:
+        //
+        // 1. text_changed (editing) → commit to disk, then snapshot for undo.
+        // 2. undo_requested → restore previous snapshot, reload content.
+        // 3. redo_requested → restore next snapshot, reload content.
+        //
+        // Editing and undo/redo can't happen in the same frame (different
+        // key events), so the branches are exclusive.
         if text_changed {
-            let commit_payload = DocCommit {
-                file_id: state().doc_file_id,
-            };
+            let file_id = state().doc_file_id;
+
+            // Commit current content to disk.
+            let commit_payload = DocCommit { file_id };
             // SAFETY: DocCommit is repr(C) and fits in 60-byte payload.
-            let commit_msg =
-                unsafe { ipc::Message::from_payload(MSG_DOC_COMMIT, &commit_payload) };
+            let commit_msg = unsafe { ipc::Message::from_payload(MSG_DOC_COMMIT, &commit_payload) };
             fs_ch.send(&commit_msg);
+
+            // Snapshot for undo history (same IPC batch — document service
+            // processes commit first, then snapshot, both in one wake cycle).
+            let snap_payload = DocSnapshot {
+                file_count: 1,
+                _pad: 0,
+                file_ids: [file_id, 0, 0, 0, 0, 0],
+            };
+            // SAFETY: DocSnapshot is repr(C) and fits in 60-byte payload.
+            let snap_msg = unsafe { ipc::Message::from_payload(MSG_DOC_SNAPSHOT, &snap_payload) };
+            fs_ch.send(&snap_msg);
             let _ = sys::channel_signal(FS_HANDLE);
+
+            // Block for snapshot result (synchronous RPC — COW snapshot is
+            // O(1), so this is bounded by IPC round-trip latency).
+            let mut reply = ipc::Message::new(0);
+            if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
+                && reply.msg_type == MSG_DOC_SNAPSHOT_RESULT
+            {
+                if let Some(protocol::document::Message::DocSnapshotResult(result)) =
+                    protocol::document::decode(reply.msg_type, &reply.payload)
+                {
+                    if result.status == 0 {
+                        undo_state.push(result.snapshot_id);
+                    }
+                }
+            }
+        } else if undo_requested {
+            if let Some(snap_id) = undo_state.undo() {
+                // Restore the snapshot.
+                let restore_payload = DocRestore {
+                    snapshot_id: snap_id,
+                };
+                // SAFETY: DocRestore is repr(C) and fits in 60-byte payload.
+                let restore_msg =
+                    unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE, &restore_payload) };
+                fs_ch.send(&restore_msg);
+                let _ = sys::channel_signal(FS_HANDLE);
+
+                let mut reply = ipc::Message::new(0);
+                if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
+                    && reply.msg_type == MSG_DOC_RESTORE_RESULT
+                {
+                    if let Some(protocol::document::Message::DocRestoreResult(result)) =
+                        protocol::document::decode(reply.msg_type, &reply.payload)
+                    {
+                        if result.status == 0 {
+                            // Reload document content from the restored snapshot.
+                            let s = state();
+                            let read_payload = DocRead {
+                                file_id: s.doc_file_id,
+                                target_va: 0,
+                                capacity: s.doc_capacity as u32,
+                                _pad: 0,
+                            };
+                            // SAFETY: DocRead is repr(C) and fits in 60-byte payload.
+                            let read_msg =
+                                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
+                            fs_ch.send(&read_msg);
+                            let _ = sys::channel_signal(FS_HANDLE);
+
+                            if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
+                                && reply.msg_type == MSG_DOC_READ_DONE
+                            {
+                                if let Some(protocol::document::Message::DocReadDone(done)) =
+                                    protocol::document::decode(reply.msg_type, &reply.payload)
+                                {
+                                    if done.status == 0 {
+                                        let s = state();
+                                        s.doc_len = done.len as usize;
+                                        // Clamp cursor to new content length.
+                                        if s.cursor_pos > s.doc_len {
+                                            s.cursor_pos = s.doc_len;
+                                        }
+                                        input_handling::clear_selection();
+                                        documents::doc_write_header();
+                                        input_handling::sync_cursor_to_editor(&editor_ch);
+                                        let _ = sys::channel_signal(EDITOR_HANDLE);
+                                        text_changed = true;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if redo_requested {
+            if let Some(snap_id) = undo_state.redo() {
+                // Restore the snapshot (same pattern as undo).
+                let restore_payload = DocRestore {
+                    snapshot_id: snap_id,
+                };
+                // SAFETY: DocRestore is repr(C) and fits in 60-byte payload.
+                let restore_msg =
+                    unsafe { ipc::Message::from_payload(MSG_DOC_RESTORE, &restore_payload) };
+                fs_ch.send(&restore_msg);
+                let _ = sys::channel_signal(FS_HANDLE);
+
+                let mut reply = ipc::Message::new(0);
+                if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
+                    && reply.msg_type == MSG_DOC_RESTORE_RESULT
+                {
+                    if let Some(protocol::document::Message::DocRestoreResult(result)) =
+                        protocol::document::decode(reply.msg_type, &reply.payload)
+                    {
+                        if result.status == 0 {
+                            let s = state();
+                            let read_payload = DocRead {
+                                file_id: s.doc_file_id,
+                                target_va: 0,
+                                capacity: s.doc_capacity as u32,
+                                _pad: 0,
+                            };
+                            // SAFETY: DocRead is repr(C) and fits in 60-byte payload.
+                            let read_msg =
+                                unsafe { ipc::Message::from_payload(MSG_DOC_READ, &read_payload) };
+                            fs_ch.send(&read_msg);
+                            let _ = sys::channel_signal(FS_HANDLE);
+
+                            if fs_ch.recv_blocking(FS_HANDLE.0, &mut reply)
+                                && reply.msg_type == MSG_DOC_READ_DONE
+                            {
+                                if let Some(protocol::document::Message::DocReadDone(done)) =
+                                    protocol::document::decode(reply.msg_type, &reply.payload)
+                                {
+                                    if done.status == 0 {
+                                        let s = state();
+                                        s.doc_len = done.len as usize;
+                                        if s.cursor_pos > s.doc_len {
+                                            s.cursor_pos = s.doc_len;
+                                        }
+                                        input_handling::clear_selection();
+                                        documents::doc_write_header();
+                                        input_handling::sync_cursor_to_editor(&editor_ch);
+                                        let _ = sys::channel_signal(EDITOR_HANDLE);
+                                        text_changed = true;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Update scroll offset for cursor/text changes.

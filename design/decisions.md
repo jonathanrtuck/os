@@ -10,26 +10,26 @@ This document tracks every design decision — settled, tentative, and abandoned
 
 Which decisions are stable enough to write code against? This guides when to code vs. when to keep designing.
 
-| Decision               | Status    | Readiness            | Notes                                                                                                                                                                                      |
-| ---------------------- | --------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                                                                                                                                  |
-| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                                                                                                                     |
-| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                                                                                                                     |
-| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                                                                                                                               |
-| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                                                                                                                       |
-| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).                                                                                                        |
-| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.                                                                                                          |
-| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                                                                                                                   |
-| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. Editor separation demo running (commit 827bcc8): text-editor sends write requests via IPC, compositor is sole writer.                                              |
-| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                                                                                                            |
-| #11 Rendering Tech     | Settled   | **Behind interface** | Architecture firm (web engine as substrate, adaptation layer). Engine choice deferred to prototype.                                                                                        |
-| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                                                                                                                   |
-| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                                                                                                       |
-| #14 Compound Documents | Settled   | **Behind interface** | Uniform manifest model + three-axis relationships (spatial/temporal/logical). Rendering depends on §11. Open sub-questions remain.                                                         |
-| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                                                                                                     |
-| #16 Tech Foundation    | Partial   | **Partially safe**   | Most sub-decisions settled (incl. driver model, filesystem placement). Files interface designed + macOS prototype validated (`prototype/files/`, 21 tests). Remaining: COW on-disk design. |
-| #17 Interaction Model  | Exploring | **Not safe**         | Shell placement leaning (blue-layer, pluggable). Compound editing model unresolved. Nothing settled yet.                                                                                   |
-| #18 Iconography        | Settled   | **Safe**             | Vector path icons, runtime stroke rendering, build-time SVG conversion. Mimetype → icon mapping with fallback.                                                                             |
+| Decision               | Status    | Readiness            | Notes                                                                                                                                         |
+| ---------------------- | --------- | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| #1 Audience & Goals    | Settled   | N/A                  | Meta-decision, not directly implementable                                                                                                     |
+| #2 Data Model          | Settled   | **Safe**             | The axiom. Everything flows from this.                                                                                                        |
+| #3 Compatibility       | Settled   | **Safe**             | No POSIX. Standard interfaces only. Clear constraints.                                                                                        |
+| #4 Complexity          | Settled   | N/A                  | Design principle, not directly implementable                                                                                                  |
+| #5 File Understanding  | Settled   | **Behind interface** | Mimetype registry concept is firm. Storage mechanism depends on §16.                                                                          |
+| #6 View vs Edit        | Settled   | **Behind interface** | Concept is firm. Concrete API depends on §11 (rendering) and §16 (tech foundation).                                                           |
+| #7 File Organization   | Settled   | **Behind interface** | Query model is firm. Can prototype the API shape. Storage backend depends on §16.                                                             |
+| #8 Editor Model        | Settled   | **Behind interface** | Architecture is firm. Plugin API depends on §11 and §16.                                                                                      |
+| #9 Edit Protocol       | Settled   | **Behind interface** | Protocol shape is firm. Editor separation demo running (commit 827bcc8): text-editor sends write requests via IPC, compositor is sole writer. |
+| #10 View State         | Unsettled | **Not safe**         | Leaning toward opaque blobs, but not committed.                                                                                               |
+| #11 Rendering Tech     | Settled   | **Behind interface** | Architecture firm (web engine as substrate, adaptation layer). Engine choice deferred to prototype.                                           |
+| #12 Undo & History     | Settled   | **Behind interface** | Depends on COW filesystem choice (§16). Concept is firm.                                                                                      |
+| #13 Collaboration      | Settled   | **Not safe**         | "Design for, build later." Nothing to implement yet.                                                                                          |
+| #14 Compound Documents | Settled   | **Behind interface** | Uniform manifest model + three-axis relationships (spatial/temporal/logical). Rendering depends on §11. Open sub-questions remain.            |
+| #15 Layout Engine      | Unsettled | **Not safe**         | Depends on §11 (rendering technology).                                                                                                        |
+| #16 Tech Foundation    | Settled   | **Safe**             | All sub-decisions settled. COW filesystem + document store implemented (v0.4). Remaining open: snapshot pruning, page cache placement.        |
+| #17 Interaction Model  | Exploring | **Not safe**         | Shell placement leaning (blue-layer, pluggable). Compound editing model unresolved. Nothing settled yet.                                      |
+| #18 Iconography        | Settled   | **Safe**             | Vector path icons, runtime stroke rendering, build-time SVG conversion. Mimetype → icon mapping with fallback.                                |
 
 **Readiness key:**
 
@@ -498,9 +498,13 @@ This decision is being resolved incrementally through a bare-metal research spik
 
 **Microkernel convergence.** The kernel is a microkernel — not by ideology, but by convergence. Each sub-decision independently pushed complexity outward: drivers to userspace (fault isolation + unsafe minimization), filesystem to userspace (complex code outside TCB, hot path in kernel VM), rendering to the OS service (not in-kernel), editors to separate processes (untrusted). What remains in the kernel is exactly the microkernel set: address spaces, threads, IPC, scheduling, interrupt forwarding, and handle-based access control. The kernel's role is multiplexing hardware resources behind handles and providing a single event-driven wait mechanism. Everything semantic (content types, document state, filesystem layout, driver protocols) lives in userspace. The kernel doesn't understand what any resource is _for_ — it just manages access to it.
 
-### Open sub-decisions
+### Settled sub-decisions (v0.4)
 
-**Filesystem COW design.** Research complete (see `design/research/cow-filesystems.md`). Placement decided (userspace service). Files interface designed (2026-03-11) — 12 operations, files addressed by opaque IDs, no paths/permissions/locking/links. On-disk format deferred via prototype-on-host strategy: implement the Files interface against macOS during prototyping (regular files + file copies for snapshots + mmap), build the real COW filesystem later once the interface is proven. Key requirements for eventual real implementation: birth time in block pointers (non-negotiable for efficient snapshots), per-document snapshot scoping, efficient pruning (ZFS-style dead lists). Compound document atomicity resolved by sole-writer architecture (OS service sequences writes, no multi-file FS transactions needed). Open sub-questions: snapshot naming/addressing, pruning policy, page cache placement (kernel-managed vs. filesystem-managed), snapshot scope (per-document vs global vs time-correlated — punted, doesn't block interface).
+**Filesystem COW design — IMPLEMENTED.** Seven-layer stack: `BlockDevice` trait → superblock ring → free-extent allocator → inodes → COW write path → snapshots → `Files` trait. Flat namespace (FileId → inode), 16 KiB blocks + inline data, linked-block inode table (removes file count limit), pure COW crash consistency (two-flush commit protocol). Runs as a userspace service (`services/document/`) over virtio-blk.
+
+**Document store — IMPLEMENTED.** Two-library architecture: `fs` library (generic COW filesystem) + `store` library (metadata layer wrapping `Box<dyn Files>`). Catalog with media types and queryable attributes. Factory disk image builder (`tools/mkdisk/`). IPC protocol: `protocol::document` (13 message types). Boot loads fonts from native filesystem (no 9p dependency). Undo/redo via COW snapshots wired to core's operation boundaries.
+
+**Remaining open sub-questions:** snapshot pruning policy, page cache placement (kernel-managed vs. filesystem-managed), snapshot scope (per-document vs global vs time-correlated).
 
 ### Considered and rejected
 
